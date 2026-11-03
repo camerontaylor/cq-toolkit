@@ -27,9 +27,10 @@
 // place (a fast-forward no-op for byte-identical files) instead of recreating
 // it from the base and failing the push non-fast-forward. The checkout is
 // restored to its original branch in a `finally`.
+import { tmpdir } from 'node:os';
 import { messageOf } from '../../shared/messageOf.js';
 import { execFile } from 'node:child_process';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, resolve as pathResolve } from 'node:path';
 import type { BaselinePrEffects } from '../../ops/ratchet/proposeBaselineUpdate.js';
 
@@ -193,7 +194,7 @@ export function makeSubprocessBaselinePrEffects(repoRoot: string, base: string):
       '--limit',
       '100',
       '--json',
-      'number,url,baseRefName',
+      'number,url,baseRefName,headRefName',
     ]);
     const parsed: unknown = JSON.parse(out);
     if (!Array.isArray(parsed)) return null;
@@ -201,8 +202,18 @@ export function makeSubprocessBaselinePrEffects(repoRoot: string, base: string):
     // several open PRs against DIFFERENT bases, so the base request is
     // filtered locally too (belt) on top of the server-side `--base` (braces).
     const matching = parsed.find((candidate) => {
-      const pr = candidate as { number?: unknown; url?: unknown; baseRefName?: unknown };
-      return typeof pr.number === 'number' && typeof pr.url === 'string' && pr.baseRefName === base;
+      const pr = candidate as {
+        number?: unknown;
+        url?: unknown;
+        baseRefName?: unknown;
+        headRefName?: unknown;
+      };
+      return (
+        typeof pr.number === 'number' &&
+        typeof pr.url === 'string' &&
+        pr.baseRefName === base &&
+        pr.headRefName === head
+      );
     }) as { number: number; url: string } | undefined;
     return matching === undefined ? null : { number: matching.number, url: matching.url };
   };
@@ -312,5 +323,18 @@ export function makeSubprocessBaselinePrEffects(repoRoot: string, base: string):
     return { created: true, number: identity.number, url: identity.url };
   };
 
-  return { findOpenPrByHead, commitAndUpsertPr };
+  const closeOpenPrByHead: BaselinePrEffects['closeOpenPrByHead'] = async (head, comment) => {
+    const pr = await findOpenPrByHead(head);
+    if (pr === null) return;
+    const dir = await mkdtemp(join(tmpdir(), 'cq-ratchet-close-'));
+    try {
+      const bodyFile = join(dir, 'comment.md');
+      await writeFile(bodyFile, comment, 'utf8');
+      await runGh(repoRoot, ['pr', 'comment', String(pr.number), '--body-file', bodyFile]);
+      await runGh(repoRoot, ['pr', 'close', String(pr.number)]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  };
+  return { findOpenPrByHead, commitAndUpsertPr, closeOpenPrByHead };
 }

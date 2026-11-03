@@ -10,6 +10,7 @@ describe('proposeBaselineUpdate', () => {
   test('a findOpenPrByHead rejection is a failed verdict — no throw crosses the op seam', async () => {
     await seedBaseline(TARGET, METRIC, 10);
     const effects: BaselinePrEffects = {
+      async closeOpenPrByHead() {},
       findOpenPrByHead: () => Promise.reject(new Error('gh api exploded')),
       commitAndUpsertPr: () => Promise.reject(new Error('unreachable')),
     };
@@ -26,6 +27,7 @@ describe('proposeBaselineUpdate', () => {
   test('a commitAndUpsertPr rejection is indeterminate — the commit may or may not have landed', async () => {
     await seedBaseline(TARGET, METRIC, 10);
     const effects: BaselinePrEffects = {
+      async closeOpenPrByHead() {},
       findOpenPrByHead: () => Promise.resolve(null),
       commitAndUpsertPr: () => Promise.reject('network dropped'), // non-Error rejection
     };

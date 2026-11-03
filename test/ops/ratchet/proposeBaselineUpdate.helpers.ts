@@ -119,6 +119,9 @@ export function makeFakeEffects(): BaselinePrEffects & {
     prs,
     findCalls: () => finds,
     upsertCalls: () => upserts,
+    async closeOpenPrByHead(head) {
+      prs.delete(head);
+    },
     async findOpenPrByHead(head) {
       finds += 1;
       const pr = prs.get(head);
@@ -132,7 +135,9 @@ export function makeFakeEffects(): BaselinePrEffects & {
         existing.title = input.title;
         existing.body = input.body;
         existing.commitMessage = input.commitMessage;
-        existing.files = input.files;
+        existing.files = [
+          ...new Map([...existing.files, ...input.files].map((file) => [file.path, file])).values(),
+        ];
         return { created: false, number: existing.number, url: existing.url };
       }
       counter += 1;

@@ -1,7 +1,10 @@
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 // Idempotency (header pins 2 and 2b): the 12-hex head digest over the
 // sorted pairs, re-run updates of the same open PR, duplicate
 // (target, metric) last-wins collapse, and the upsert result's
 // authoritative PR identity.
+import { baselineRelPath, parseBaseline } from '../../../src/ops/ratchet/format.js';
 import { createHash } from 'node:crypto';
 import { match } from '../../helpers/matchers.js';
 import { describe, expect, test } from 'vitest';
@@ -11,6 +14,8 @@ import {
   CAPTURED_AT,
   makeFakeEffects,
   METRIC,
+  REL,
+  ws,
   proposeInput,
   seedBaseline,
   TARGET,
@@ -118,6 +123,7 @@ describe('proposeBaselineUpdate', () => {
   test('the UPSERT result carries the authoritative PR identity (a found PR can close between find and upsert)', async () => {
     await seedBaseline(TARGET, METRIC, 10);
     const effects: BaselinePrEffects = {
+      async closeOpenPrByHead() {},
       async findOpenPrByHead() {
         // Stale view: PR 7 was open at find time…
         return { number: 7, url: 'https://github.com/acme/repo/pull/7' };
@@ -159,6 +165,7 @@ describe('proposeBaselineUpdate', () => {
   test('an upsert result lacking an identity falls back to the found PR', async () => {
     await seedBaseline(TARGET, METRIC, 10);
     const effects: BaselinePrEffects = {
+      async closeOpenPrByHead() {},
       async findOpenPrByHead() {
         return { number: 7, url: 'https://github.com/acme/repo/pull/7' };
       },
@@ -229,4 +236,73 @@ describe('proposeBaselineUpdate', () => {
     const headC = runC.status === 'ok' && runC.value.head;
     expect(headC).not.toBe(headA);
   });
+});
+
+test('a later non-tightening reading withdraws only the exact proposal head', async () => {
+  await seedBaseline(TARGET, METRIC, 10);
+  const effects = makeFakeEffects();
+  const op = createProposeBaselineUpdate(effects);
+  const first = await op(
+    proposeInput({ improvements: [{ target: TARGET, metric: METRIC, value: 8 }] }),
+  );
+  expect(first.status).toBe('ok');
+  if (first.status !== 'ok' || first.value.head === null) return;
+  const existing = effects.prs.get(first.value.head);
+  if (existing === undefined) throw new Error('proposal missing');
+  effects.prs.set('unrelated-head', { ...existing, head: 'unrelated-head' });
+  const rerun = await op(
+    proposeInput({ improvements: [{ target: TARGET, metric: METRIC, value: 11 }] }),
+  );
+  expect(rerun.status).toBe('ok');
+  expect(effects.prs.has(first.value.head)).toBe(false);
+  expect(effects.prs.has('unrelated-head')).toBe(true);
+});
+
+test('withdrawal failure is contained as indeterminate', async () => {
+  await seedBaseline(TARGET, METRIC, 10);
+  const effects = makeFakeEffects();
+  effects.closeOpenPrByHead = async () => {
+    throw new Error('close failed');
+  };
+  const result = await createProposeBaselineUpdate(effects)(
+    proposeInput({ improvements: [{ target: TARGET, metric: METRIC, value: 11 }] }),
+  );
+  expect(result.status).toBe('indeterminate');
+});
+
+test('mixed metric batches update and withdraw the same proposal as the tightening subset changes', async () => {
+  await seedBaseline('coverage', 'coverage', 90, 'higher-is-better');
+  await seedBaseline(TARGET, METRIC, 10);
+  const effects = makeFakeEffects();
+  const op = createProposeBaselineUpdate(effects);
+  const readings = (coverage: number, typecheck: number) =>
+    proposeInput({
+      improvements: [
+        { target: 'coverage', metric: 'coverage', value: coverage },
+        { target: TARGET, metric: METRIC, value: typecheck },
+      ],
+    });
+  const coveragePath = baselineRelPath('coverage', 'coverage');
+  const coverageBase = await readFile(join(ws, coveragePath), 'utf8');
+  const first = await op(readings(91, 10));
+  expect(first.status).toBe('ok');
+  if (first.status !== 'ok' || first.value.head === null) throw new Error('proposal missing');
+  expect(first.value.applied.map((entry) => entry.metric)).toEqual(['coverage']);
+  expect(
+    parseBaseline(
+      effects.prs.get(first.value.head)!.files.find((file) => file.path === coveragePath)!.content,
+    ).value,
+  ).toBe(91);
+  const second = await op(readings(90, 9));
+  expect(second).toMatchObject({
+    status: 'ok',
+    value: { proposal: 'updated', head: first.value.head },
+  });
+  expect(effects.prs.size).toBe(1);
+  const updated = effects.prs.get(first.value.head)!;
+  expect(updated.files.find((file) => file.path === coveragePath)?.content).toBe(coverageBase);
+  expect(parseBaseline(updated.files.find((file) => file.path === REL)!.content).value).toBe(9);
+  const last = await op(readings(90, 10));
+  expect(last).toMatchObject({ status: 'ok', value: { proposal: 'none' } });
+  expect(effects.prs.has(first.value.head)).toBe(false);
 });
