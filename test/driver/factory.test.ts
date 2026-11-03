@@ -9,7 +9,7 @@
 // retention (fresh record reaped whatever the verdict; a sessionRef-resumed
 // record never), and the plan-data knobs (lanes config, factory sessionsDir,
 // request.harness, config.pricing) reaching the constructed lane.
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, rm } from 'node:fs/promises';
 import { realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, relative } from 'node:path';
@@ -20,6 +20,7 @@ import { DispatchError, errorClassOf } from '../../src/driver/errors.js';
 import { createDriverFactory } from '../../src/driver/factory.js';
 import type { DriverFactoryConfig } from '../../src/driver/factory.js';
 import type { OpInvocation } from '../../src/driver/types.js';
+import * as harnessSurface from '../../src/harness/surface.js';
 import { defaultHarnessConfig } from '../../src/harness/config.js';
 import { SessionStore } from '../../src/harness/session.js';
 
@@ -319,6 +320,40 @@ describe('driver factory — wrapping', () => {
     expect(ok.stopReason).toBe('complete');
     expect(ok.model).toBe('construction-model');
   });
+
+  test.each([
+    ['keep', false, 1],
+    ['reap-on-settle', false, 0],
+    ['reap-on-settle', true, 1],
+  ] as const)(
+    '%s (resumed=%s) leaves %i record(s) after a pre-dispatch rejection',
+    async (retention, resume, count) => {
+      stubKey();
+      const dir = await scratch();
+      const store = new SessionStore(join(dir, 'sessions'));
+      const prior = resume ? await store.create(await mkdtemp(join(dir, 'ws-'))) : undefined;
+      vi.spyOn(harnessSurface, 'buildManifest').mockRejectedValue(
+        new DispatchError('config', 'manifest setup failed'),
+      );
+      const driver = createDriverFactory(subprocessConfig(dir, [])).resolve({
+        role: 'fixer',
+        modelSpec: { provider: 'construction', model: 'construction-model' },
+        sessionRetention: retention,
+      }).driver;
+      const error = await driver
+        .run({
+          ...invocation(),
+          ...(prior !== undefined ? { sessionRef: prior.sessionId } : {}),
+        })
+        .catch((err: unknown) => err);
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toBe('manifest setup failed');
+      expect(errorClassOf(error)).toBe('config');
+      expect(
+        (await readdir(join(dir, 'sessions'))).filter((name) => name.endsWith('.jsonl')),
+      ).toHaveLength(count);
+    },
+  );
 
   test('reap-on-settle deletes the FRESH record after a completed run', async () => {
     stubKey();

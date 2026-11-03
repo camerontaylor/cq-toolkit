@@ -40,3 +40,17 @@ export function errorClassOf(err: unknown): DispatchErrorClass | undefined {
   }
   return undefined;
 }
+
+/** A rejected run that created a session before dispatch; retention stays in the factory. */
+export class SessionBoundError extends Error {
+  readonly sessionId: string;
+  readonly dispatchClass?: DispatchErrorClass;
+
+  constructor(cause: unknown, sessionId: string) {
+    super(cause instanceof Error ? cause.message : String(cause), { cause });
+    this.name = 'SessionBoundError';
+    this.sessionId = sessionId;
+    const dispatchClass = errorClassOf(cause);
+    if (dispatchClass !== undefined) this.dispatchClass = dispatchClass;
+  }
+}
