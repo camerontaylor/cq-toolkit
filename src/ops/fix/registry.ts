@@ -3,6 +3,7 @@ import type { OpRegistryEntry } from '../../kernel/types.js';
 import { PlanSweepSelectorSchema } from '../sweep/registry.js';
 import type { FixRunInput } from './runFix.js';
 // Shared validation protocol companions: './validate.js', './escalation.js',
+// './attemptRecord.js' (ADR-0008 T12 sanitizer and attempt normalizer; not a registered op),
 // './report.js' (fix-run report accounting helpers over the run's results),
 // './measurement.js' (ADR-0008 T34 run metric helper; not a registered op —
 // pure functions over the fix-run report, referenced here to keep the
