@@ -99,6 +99,12 @@ test:narrow result="pass" exit=0 files=7 projects="pure,process" tests="179/179"
 test:narrow result="pass" exit=0 files=7 projects="pure,process,integration" tests="198/198" failed=0 skipped=0 wait="0.0s" duration="15.2s" nice=5 load="2.3" uptime="536506s" source="explicit" ran="test/cli/registry-props.test.ts,test/cli/registry.test.ts,test/driver/process-inventory.test.ts,test/e2e/review/review-address.e2e.test.ts,test/ops/review/address-local.test.ts,test/ops/review/address-pr-git.test.ts,test/ops/review/registry.test.ts"
 ```
 
+> Path note: the `ran=` selections recorded in this transcript, above and later
+> in the file, name `test/ops/review/run.test.ts`. That file has since been
+> split into `test/ops/review/run.*.test.ts` modules, so the recorded name is
+> historical provenance, not a currently selectable file. Every capture is left
+> exactly as recorded.
+
 ### Late producer identity and publication recovery repairs (#448, #449)
 
 A full review of an uncommitted repair cannot prove the restored original HEAD
