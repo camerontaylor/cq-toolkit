@@ -30,6 +30,7 @@ import { makeSubprocessDevEffects } from '../dev/effects.js';
 import {
   FindingsRecordSchema,
   isComplete,
+  legacyEvidenceText,
   merge,
   openBlocking,
   type Finding,
@@ -98,6 +99,7 @@ import {
 import type {
   AvailabilityRecord,
   CompositionStartedJournalEvent,
+  FindingDispositionJournalEvent,
   ReportV2,
   KernelRunLinkedJournalEvent,
   ProvenanceRecord,
@@ -1809,18 +1811,21 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                     head: state.head,
                     dirtySha256: state.dirtySha256,
                     completion: { kind: 'terminal' },
-                    findings: record.findings.map((finding) => ({
-                      id: finding.id,
-                      severity: finding.severity,
-                      ...(finding.file !== undefined ? { fileName: finding.file } : {}),
-                      ...(finding.line !== undefined ? { line: finding.line } : {}),
-                      ...(finding.rule !== undefined ? { rule: finding.rule } : {}),
-                      ...(finding.evidence !== undefined ? { evidence: finding.evidence } : {}),
-                      ...(finding.evidenceV1 !== undefined
-                        ? { evidenceV1: finding.evidenceV1 }
-                        : {}),
-                      excerpt: finding.text,
-                    })),
+                    findings: record.findings.map((finding) => {
+                      const evidence = legacyEvidenceText(finding);
+                      return {
+                        id: finding.id,
+                        severity: finding.severity,
+                        ...(finding.file !== undefined ? { fileName: finding.file } : {}),
+                        ...(finding.line !== undefined ? { line: finding.line } : {}),
+                        ...(finding.rule !== undefined ? { rule: finding.rule } : {}),
+                        ...(evidence === undefined ? {} : { evidence }),
+                        ...(finding.evidenceV1 !== undefined
+                          ? { evidenceV1: finding.evidenceV1 }
+                          : {}),
+                        excerpt: finding.text,
+                      };
+                    }),
                     logPath: report.reportPath,
                     untracked: state.untracked,
                     at: effects.nowIso(),
@@ -1845,8 +1850,134 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                 noteAdmission(state.head);
               });
             };
-            const recordDisposition = async (root: string, finding: Finding) => {
+            const DEFERRED_REVIEW_TRIGGER =
+              'review.address: retained and re-presented at next re-review';
+            /**
+             * Legacy one-string evidence adapts to a one-element array (the
+             * v2 shape); absent or whitespace-only evidence stays null
+             * (unknown), never `[]`.
+             */
+            const dispositionEvidence = (finding: Finding): string[] | null => {
+              const retained = finding.evidence;
+              if (
+                retained === undefined ||
+                (typeof retained === 'string' && retained.trim() === '')
+              )
+                return null;
+              return Array.isArray(retained) ? retained : [retained];
+            };
+            /**
+             * ADR-0008 T19 boundary: a deliberate terminal adjudication from
+             * the worker always carries its observed evidence array
+             * (deferred/rejected evidence is required nonempty), and a fixed
+             * adjudication carries its commit. The worker's OPERATIONAL
+             * failure path returns the same `deferred` status with no
+             * evidence array; promoting it into a durable disposition is
+             * exactly the infrastructure-failure-as-deferral defect T19
+             * removes. A caller that injects its own disposition authority is
+             * explicit about the adjudication and keeps the record.
+             */
+            const isDeliberateDisposition = (fix: AddressFix): boolean =>
+              fix.finding.status === 'fixed' ||
+              Array.isArray(fix.evidence) ||
+              deps.disposition !== undefined;
+            /**
+             * ADR-0008 T19: one `finding-disposition` per DURABLE terminal
+             * adjudication. Only a successful recordDisposition reaches this
+             * call, so an infrastructure failure (whose finding stays open)
+             * never becomes a deferral. An append failure marks the
+             * observation surface indeterminate; it never rewrites the
+             * finding, the durable disposition or the verdict.
+             */
+            const emitFindingDisposition = async (
+              finding: Finding,
+              observedHead: string,
+            ): Promise<void> => {
+              if (observation === undefined) return;
+              if (finding.status === 'open') return;
+              if (finding.reason === undefined || finding.reason.trim() === '') {
+                observationFailure(
+                  `finding-disposition ${finding.id}: no reason recorded; incomplete disposition withheld`,
+                );
+                return;
+              }
+              const evidence = dispositionEvidence(finding);
+              const at = new Date().toISOString();
+              const availability: Record<string, AvailabilityRecord> = {
+                '/fingerprint/spanContentHash': {
+                  state: 'unavailable',
+                  reason:
+                    'address dispatch does not extract the pinned span; a null hash cannot prove equality',
+                  source: null,
+                },
+                '/acceptedRisk': {
+                  state: 'not-collected',
+                  reason: 'the adjudicator recorded no accepted risk (null is unknown, never none)',
+                  source: null,
+                },
+              };
+              if (evidence === null)
+                availability['/evidence'] = {
+                  state: 'not-collected',
+                  reason: 'no evidence was recorded; absence is unknown, never an empty proof',
+                  source: null,
+                };
+              if (finding.status !== 'deferred')
+                availability['/reviewTrigger'] = {
+                  state: 'n-a',
+                  reason: 'the disposition is not deferred, so no re-review trigger applies',
+                  source: null,
+                };
+              const event: FindingDispositionJournalEvent = {
+                type: 'finding-disposition',
+                runId: observation.compositionRunId,
+                at,
+                unitId: null,
+                jobId: null,
+                taskId: null,
+                attempt: null,
+                payload: {
+                  // F1 identity from what the review finding proves: the
+                  // source is the check, rule/path are recorded values, and
+                  // span content is UNAVAILABLE (null cannot match) until the
+                  // F1 adapter extracts it. Never a guessed identity.
+                  fingerprint: {
+                    version: 1,
+                    checkId: finding.source,
+                    rule: finding.rule ?? null,
+                    path: finding.file ?? '',
+                    spanContentHash: null,
+                  },
+                  status: finding.status,
+                  reason: finding.reason,
+                  owner: 'review.address',
+                  evidence: evidence ?? [],
+                  reviewTrigger: finding.status === 'deferred' ? DEFERRED_REVIEW_TRIGGER : null,
+                  observedHead,
+                  observedAt: at,
+                  acceptedRisk: null,
+                  availability,
+                },
+              };
               try {
+                await observation.writer?.append(sanitizeObservation(event));
+              } catch (error) {
+                observationFailure(error);
+              }
+            };
+            type DispositionRecorded = 'recorded' | 'withheld' | 'failed';
+            const recordDisposition = async (
+              root: string,
+              fix: AddressFix,
+            ): Promise<DispositionRecorded> => {
+              const finding = fix.finding;
+              try {
+                // A disposition exists only for a deliberate terminal
+                // adjudication: an open finding is an unfinished attempt and a
+                // failure-path `deferred` is an operational failure, never a
+                // deferral.
+                if (finding.status === 'open' || !isDeliberateDisposition(fix)) return 'withheld';
+                const evidence = dispositionEvidence(finding);
                 return await withBookkeepingAccess(root, async () => {
                   const recorded = deps.disposition
                     ? await deps.disposition(root, finding)
@@ -1862,18 +1993,17 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                         // attempt otherwise. Never manufactured, never
                         // dropped; an absent, empty or whitespace-only value
                         // records no evidence entries (never ['']).
-                        evidence: finding.evidence?.trim() ? [finding.evidence] : [],
+                        evidence: evidence ?? [],
                         ...(finding.status === 'deferred'
                           ? {
-                              reviewTrigger:
-                                'review.address: retained and re-presented at next re-review',
+                              reviewTrigger: DEFERRED_REVIEW_TRIGGER,
                             }
                           : {}),
                       });
                   if (recorded.status !== 'ok') {
                     bookkeepingFailed = true;
                     report.reasons.push(`disposition ${finding.id}: ${issue(recorded)}`);
-                    return false;
+                    return 'failed';
                   }
                   if (!deps.disposition) {
                     const branch = await branchName(root);
@@ -1882,12 +2012,13 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                     );
                   }
                   dispositions.set(identity(finding), finding);
-                  return true;
+                  await emitFindingDisposition(finding, fix.observedHead);
+                  return 'recorded';
                 });
               } catch (error) {
                 bookkeepingFailed = true;
                 report.reasons.push(`disposition ${finding.id}: ${String(error)}`);
-                return false;
+                return 'failed';
               }
             };
             const noteRound = (round: number, record: FindingsRecord, run?: RunReport) => {
@@ -2055,7 +2186,8 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                   }
                   const fix = row.result.value as AddressFix;
                   if (fix.finding.status === 'open') continue;
-                  if (!(await recordDisposition(root, fix.finding))) fix.finding.status = 'open';
+                  if ((await recordDisposition(root, fix)) !== 'recorded')
+                    fix.finding.status = 'open';
                 }
                 noteRound(round, record, run);
               }
@@ -2325,11 +2457,16 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                       remember(fix);
                       return { status: 'needs-human', reason: fix.reason };
                     }
-                    const dispositionRecorded = await recordDisposition(root, fix.finding);
-                    if (!dispositionRecorded) fix.finding.status = 'open';
+                    const disposition = await recordDisposition(root, fix);
+                    if (disposition !== 'recorded') fix.finding.status = 'open';
                     remember(fix);
                     fixesById.set(finding.id, fix);
-                    if (!dispositionRecorded)
+                    if (disposition === 'withheld')
+                      return {
+                        status: 'needs-human',
+                        reason: `${NO_OUTCOME_REASON}: ${fix.reason}`,
+                      };
+                    if (disposition === 'failed')
                       return {
                         status: 'needs-human',
                         reason: `${NO_OUTCOME_REASON}: disposition persistence failed`,

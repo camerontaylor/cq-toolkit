@@ -55,7 +55,9 @@ test('cancelled edit reports an ordinary local branch and finding pointer withou
     const retained = report.failed[0]!;
     expect(retained.gate).toBe('budget');
     expect(f.repo.git('show', `${retained.branch}:src/a.ts`)).toBe('CANCELLED PARTIAL\n');
-    expect(JSON.parse(report.findings[0]!.evidence!)).toEqual(retained);
+    const evidence = report.findings[0]!.evidence;
+    if (typeof evidence !== 'string') throw new Error('expected legacy evidence text');
+    expect(JSON.parse(evidence)).toEqual(retained);
     expect(
       (JSON.parse(await readFile(report.reportPath, 'utf8')) as ReviewAddressReport).failed,
     ).toEqual(report.failed);

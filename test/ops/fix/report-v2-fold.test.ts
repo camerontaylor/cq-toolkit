@@ -174,11 +174,13 @@ describe('report v2 fold (T36)', () => {
     expect(report.acceptances).toEqual([]);
     expect(report.availability['/acceptances']?.state).toBe('unavailable');
     expect(report.availability['/acceptances']?.reason).toContain('T20');
+    // T19 wires the address disposition producer, so a torn stream is partial
+    // evidence here rather than the old "not wired" unavailable.
+    expect(report.availability['/dispositions']?.state).toBe('partial');
     expect(report.metric.fixesPerRun).toEqual({ numerator: null, denominator: null });
     for (const path of [
       '/tasks',
       '/gates',
-      '/dispositions',
       '/reviews',
       '/approvals',
       '/writeDecisions',
