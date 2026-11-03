@@ -175,6 +175,7 @@
 // verdict also POPULATES WorkerResult.error (bounded + secret-redacted,
 // issue #208). Only PRE-DISPATCH validation throws.
 import { randomUUID } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { defaultSessionsDir } from '../sessions-dir.js';
@@ -1004,7 +1005,8 @@ export function nativeTranscriptPath(
 ): string | undefined {
   if (workspace === undefined || workspace === '') return undefined;
   const key = workspace.replace(/[^A-Za-z0-9]/g, '-');
-  return join(homedir(), '.claude', 'projects', key, `${nativeSessionId}.jsonl`);
+  const candidate = join(homedir(), '.claude', 'projects', key, `${nativeSessionId}.jsonl`);
+  return existsSync(candidate) ? candidate : undefined;
 }
 
 /** ISO-8601 timestamp for session messages. */

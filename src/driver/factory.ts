@@ -391,29 +391,30 @@ function constructLane(lane: LaneId, request: DriverRequest, config: DriverFacto
 export function withReapOnSettle(driver: Driver, sessionsDir: string): Driver {
   return {
     async run(invocation, options): Promise<WorkerResult> {
-      let sessionId: string | undefined;
-      try {
-        const result = await driver.run(invocation, options);
-        sessionId = result.sessionId;
-        return result;
-      } catch (error) {
-        if (
-          typeof error === 'object' &&
-          error !== null &&
-          'sessionId' in error &&
-          typeof error.sessionId === 'string'
-        )
-          sessionId = error.sessionId;
-        throw error;
-      } finally {
-        if (invocation.sessionRef === undefined && sessionId !== undefined) {
-          try {
-            await new SessionStore(sessionsDir).remove(sessionId);
-          } catch {
-            // deliberately swallowed — the verdict or original error outranks cleanup
-          }
+      const reapFresh = async (sessionId: unknown): Promise<boolean> => {
+        if (invocation.sessionRef !== undefined || typeof sessionId !== 'string') return false;
+        try {
+          await new SessionStore(sessionsDir).remove(sessionId);
+          return true;
+        } catch {
+          // Cleanup must not replace the verdict or original rejection.
+          return false;
         }
+      };
+      let result: WorkerResult;
+      try {
+        result = await driver.run(invocation, options);
+      } catch (error) {
+        if (typeof error === 'object' && error !== null && 'sessionId' in error) {
+          await reapFresh(error.sessionId);
+        }
+        throw error;
       }
+      if (await reapFresh(result.sessionId)) {
+        const { sessionId: _reapedSessionId, ...retained } = result;
+        return retained;
+      }
+      return result;
     },
   };
 }

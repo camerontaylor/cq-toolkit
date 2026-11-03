@@ -11,7 +11,8 @@
 //        forces reap-on-settle in the factory resolve.
 //   1.7  SessionMessage usage + toolCalls optional fidelity fields.
 import { afterEach, describe, expect, test, vi } from 'vitest';
-import { homedir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { nativeTranscriptPath } from '../../src/driver/claude-code/cli.js';
 import { DEFAULT_CHILD_ENV_ALLOWLIST, buildChildEnv } from '../../src/shared/proc.js';
@@ -192,17 +193,33 @@ describe('1.3 job-finished correlation fields', () => {
       { driver: 'unknown', sessionId: 's1' },
     ]);
     expect(
-      sessionsOfResult({ status: 'ok', value: { sessionId: 's2', nativeSessionId: 'n2' } }),
-    ).toEqual([{ driver: 'unknown', sessionId: 's2', nativeSessionId: 'n2' }]);
+      sessionsOfResult({
+        status: 'ok',
+        value: { sessionId: 's2', nativeSessionId: 'n2', nativeSessionPath: '/native/n2.jsonl' },
+      }),
+    ).toEqual([
+      { driver: 'unknown', sessionId: 's2', nativeSessionId: 'n2', path: '/native/n2.jsonl' },
+    ]);
     expect(sessionsOfResult({ status: 'ok', value: { nope: true } })).toBeUndefined();
     expect(sessionsOfResult({ status: 'failed', error: 'x' })).toBeUndefined();
   });
 });
 
 describe('1.5 native session id + transcript path', () => {
-  test('nativeTranscriptPath encodes the workspace like Claude Code', () => {
-    const p = nativeTranscriptPath('abc-123', '/tmp/demo');
-    expect(p).toBe(join(homedir(), '.claude', 'projects', '-tmp-demo', 'abc-123.jsonl'));
+  test('nativeTranscriptPath reports only a verified encoded transcript', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cq-native-path-'));
+    try {
+      vi.stubEnv('HOME', root);
+      vi.stubEnv('USERPROFILE', root);
+      const path = join(homedir(), '.claude', 'projects', '-tmp-demo', 'abc-123.jsonl');
+      expect(nativeTranscriptPath('abc-123', '/tmp/demo')).toBeUndefined();
+      await mkdir(join(homedir(), '.claude', 'projects', '-tmp-demo'), { recursive: true });
+      await writeFile(path, '');
+      expect(nativeTranscriptPath('abc-123', '/tmp/demo')).toBe(path);
+    } finally {
+      vi.unstubAllEnvs();
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   test('no workspace → no path (never a guessed key)', () => {
@@ -228,7 +245,7 @@ describe('1.7 SessionMessage fidelity fields', () => {
     const parsed = SessionMessageSchema.safeParse({
       role: 'assistant',
       content: 'done',
-      usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0 },
+      usage: { input: 10, output: 5, cacheRead: 20, cacheWrite: 0 },
       toolCalls: '[{"name":"read"}]',
       at: '2026-10-24T00:00:00.000Z',
     });

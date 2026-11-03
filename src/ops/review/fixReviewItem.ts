@@ -52,7 +52,7 @@
 // error), and the governed signal rides RunOptions (§2.1). The invocation's
 // modelSpec is the FACTORY-NORMALISED spec — a deprecated provider alias
 // never reaches a lane or a journal. Session records a workspace-bound run
-// creates are KEPT by default (sessionRetention 'keep' — session-log
+// creates follow the deployment's retention policy (normally 'keep' — session-log
 // preservation plan item 1.2 flipped `retainSessions` to default-true on
 // 2026-10-24, superseding round-3 item 14); a caller with a retention
 // policy opts out explicitly with `retainSessions: false`. The run JOURNAL
@@ -681,7 +681,7 @@ export function makeFixReviewItem(deps: {
   drivers: DriverFactory;
   /**
    * Keep the fresh session record a workspace-bound run created. Default
-   * TRUE (session-log preservation, plan item 1.2 / feature R2): the
+   * follows the factory deployment policy when absent (normally keep): the
    * session file is evidence and the default location is now durable
    * (item 1.1), so the store keeps it. Reaping is an explicit opt-out —
    * `retainSessions: false` maps to DriverRequest sessionRetention
@@ -710,7 +710,13 @@ export function makeFixReviewItem(deps: {
         role: 'fixer',
         modelSpec: input.driver,
         harness,
-        sessionRetention: deps.retainSessions === false ? 'reap-on-settle' : 'keep',
+        ...(deps.retainSessions !== undefined
+          ? {
+              sessionRetention: deps.retainSessions
+                ? ('keep' as const)
+                : ('reap-on-settle' as const),
+            }
+          : {}),
       });
     } catch (err) {
       // A THROWN resolve() with the governor's signal already aborted is

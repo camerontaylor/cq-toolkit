@@ -857,6 +857,20 @@ describe('ai-sdk driver specifics (mock model)', () => {
       expect(result.structuredOutput).toEqual({ fixed: true, notes: 'ok' });
       expect(result.steps).toBe(3);
       expect(toolCounts.map((count) => count > 0)).toEqual([true, true, false]);
+      const record = await new SessionStore(join(scratchDir, 'sessions')).load(
+        result.sessionId as string,
+      );
+      const steps = record?.messages.filter(
+        (message) => message.role === 'assistant' && message.usage !== undefined,
+      );
+      expect(steps).toHaveLength(3);
+      expect(steps?.map((message) => message.usage)).toEqual([
+        { input: 100, output: 12, cacheRead: 15, cacheWrite: 5 },
+        { input: 100, output: 12, cacheRead: 15, cacheWrite: 5 },
+        { input: 100, output: 12, cacheRead: 15, cacheWrite: 5 },
+      ]);
+      expect(steps?.slice(0, 2).every((message) => message.toolCalls?.includes('read'))).toBe(true);
+      expect(steps?.[2]?.toolCalls).toBeUndefined();
     } finally {
       await rm(scratchDir, { recursive: true, force: true });
     }

@@ -1018,13 +1018,6 @@ export class AiSdkDriver implements Driver {
     /** Seam v3: provider usage was actually observed on at least one step. */
     let usageEvidence = false;
     let completedSteps = 0;
-    // Session-log fidelity (item 1.7): the FINAL completed step, so the
-    // persisted assistant turn can carry its own usage and requested tool
-    // calls. Undefined when no step completed (an immediate abort) — the
-    // message then persists without the fidelity fields, exactly as before.
-    let lastStep:
-      | { usage: LanguageModelUsage; toolCalls: readonly unknown[] | undefined }
-      | undefined;
     try {
       let result: Awaited<ReturnType<typeof generateText>>;
       try {
@@ -1089,10 +1082,13 @@ export class AiSdkDriver implements Driver {
             if (hasReportedUsage(step.usage)) usageEvidence = true;
             stepUsage = addUsage(stepUsage, usageFromSdk(step.usage));
             responseMessages.push(...normalizeToolErrors(step.response.messages));
-            lastStep = {
-              usage: step.usage,
-              toolCalls: step.toolCalls as readonly unknown[] | undefined,
-            };
+            await store.appendMessage(record.sessionId, {
+              role: 'assistant',
+              content: step.text,
+              usage: usageFromSdk(step.usage),
+              ...(step.toolCalls.length > 0 ? { toolCalls: JSON.stringify(step.toolCalls) } : {}),
+              at: nowIso(),
+            });
           },
           ...(abortSignal !== undefined ? { abortSignal } : {}),
           // Transport (ADR-0002 §2.3): the SDK's structured output over the
@@ -1218,23 +1214,15 @@ export class AiSdkDriver implements Driver {
         }
       }
 
-      // Assistant turn persisted in OUR vocabulary before the verdict —
-      // now with the step's OWN usage (item 1.7: the store answers "what
-      // did this turn spend" without the journal) and the step's requested
-      // tool calls (the role-'tool' lines that follow are the results).
-      await store.appendMessage(record.sessionId, {
-        role: 'assistant',
-        content: text !== '' ? text : JSON.stringify(structuredOutput ?? ''),
-        ...(lastStep !== undefined
-          ? {
-              usage: usageFromSdk(lastStep.usage),
-              ...(lastStep.toolCalls !== undefined && lastStep.toolCalls.length > 0
-                ? { toolCalls: JSON.stringify(lastStep.toolCalls) }
-                : {}),
-            }
-          : {}),
-        at: nowIso(),
-      });
+      // Completed steps already persisted their own assistant turns. Retain
+      // the settle-time fallback only when the SDK emitted no step callback.
+      if (completedSteps === 0) {
+        await store.appendMessage(record.sessionId, {
+          role: 'assistant',
+          content: text !== '' ? text : JSON.stringify(structuredOutput ?? ''),
+          at: nowIso(),
+        });
+      }
 
       const stopReason = stopReasonOf({
         finishReason,
