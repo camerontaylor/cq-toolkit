@@ -453,6 +453,11 @@ class QueueTransportTests(unittest.TestCase):
         item.pop("reused_from")
         item["receipt_id"] = receipts.write_receipt(self.tmp.name, doc)
         self.assertEqual(self.inventory_call(states=["no-current-code"])["entries"][0]["state"], "no-current-code")
+        doc["outcome"] = "unsupported"
+        item["receipt_id"] = receipts.write_receipt(self.tmp.name, doc)
+        unsupported = self.inventory_call(states=["unsupported"])["entries"][0]
+        self.assertEqual(unsupported["state"], "unsupported")
+        self.assertIsNone(unsupported["reason"])
         self.assertEqual(self.inventory_call(states=["pending", "blocked"])["entries"], [])
 
     def test_inventory_real_wrapper_refuses_incomplete_dry_run_and_corruption(self):
@@ -1283,6 +1288,8 @@ class QueueTransportTests(unittest.TestCase):
                 self.q['items'][0].update(receipt_id=rid, capture=copy.deepcopy(capture),
                                           reused_from='original-item')
                 status = self.call('status')
+                self.assertEqual(status['state'], outcome)
+                self.assertIsNone(status['reason'])
                 self.assertFalse(status['reviewed'])
                 self.assertFalse(status['fixed'])
                 manifest = self.call('report', receiptId=rid, cursor=None)['page']
@@ -1291,6 +1298,8 @@ class QueueTransportTests(unittest.TestCase):
                 result = self.call('ack', receiptId=rid,
                                    **{k: manifest[k] for k in ('sha256', 'chunks', 'bytes')})
                 self.assertTrue(result['consumed'])
+                self.assertEqual(result['state'], outcome)
+                self.assertIsNone(result['reason'])
                 self.assertFalse(result['reviewed'])
                 self.assertEqual(result['receiptSource']['pr'], 99)
                 self.q['items'][0]['capture']['tree'] = 'e' * 40

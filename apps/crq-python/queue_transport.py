@@ -308,7 +308,7 @@ def _inventory(req, runner, q, principal, receipt_root, *, project_fixed=False):
                             row["remediation"] = receipts.remediation_summary(item)
                             if not row["consumed"]:
                                 row["state"] = "fixed"
-                elif doc.get("outcome") in {"no-current-code", "partial-scope"}:
+                elif doc.get("outcome") in {"no-current-code", "partial-scope", "unsupported"}:
                     row["state"] = doc["outcome"]
                 else:
                     row.update(state="blocked", reason={"source": "vendor", "category": "vendor-rate-limited", "code": "rate_limit"}
@@ -358,7 +358,7 @@ def decode(raw):
                 or not 1 <= request["limit"] <= 10
                 or request["cursor"] is not None and not isinstance(request["cursor"], str)
                 or request["states"] is not None and (type(request["states"]) is not list
-                    or any(state not in {"pending", "reviewed", "reused", "no-current-code", "partial-scope", "consumed", "fixed", "blocked", "missing"}
+                    or any(state not in {"pending", "reviewed", "reused", "no-current-code", "partial-scope", "unsupported", "consumed", "fixed", "blocked", "missing"}
                            for state in request["states"]))):
             raise ValueError("invalid inventory pagination/filter")
         if request["states"] is not None:
@@ -787,7 +787,7 @@ def handle(raw, runner, *, principal, policy, verify_source, receipt_root):
             classification = document.get("classification")
             result["reviewed"] = counted is True and isinstance(classification, dict) and classification.get("counted") is True and classification.get("outcome") == "completed" and outcome in {"terminal-clean", "terminal-with-findings", "partial-scope"}
             result["state"] = ("reused" if item.get("reused_from") else outcome) if result["reviewed"] else {
-                "no-current-code": "no-current-code", "partial-scope": "partial-scope"}.get(outcome, "blocked")
+                "no-current-code": "no-current-code", "partial-scope": "partial-scope", "unsupported": "unsupported"}.get(outcome, "blocked")
             result["fixed"] = project_fixed and receipts.remediation_fixed(item, document, receipt_id)
             if result["fixed"]:
                 result["remediation"] = receipts.remediation_summary(item)
