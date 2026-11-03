@@ -144,9 +144,7 @@ export const DevDispositionInputSchema: z.ZodType<DevDispositionInput> = z
     why: z
       .string()
       .regex(/\S/, 'why must name the fix, the false-positive mechanism, or the tracking issue'),
-    owner: z
-      .string()
-      .regex(/\S/, 'owner must name who made the adjudication'),
+    owner: z.string().regex(/\S/, 'owner must name who made the adjudication'),
     evidence: z.array(z.string().min(1)),
     reviewTrigger: z
       .string()

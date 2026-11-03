@@ -1424,8 +1424,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                         // path/line JSON for rejected/deferred, the failed
                         // attempt otherwise. Never manufactured, never
                         // dropped; empty stays empty.
-                        evidence:
-                          finding.evidence === undefined ? [] : [finding.evidence],
+                        evidence: finding.evidence === undefined ? [] : [finding.evidence],
                         ...(finding.status === 'deferred'
                           ? {
                               reviewTrigger:
