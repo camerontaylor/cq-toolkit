@@ -3,6 +3,7 @@ import { unlink } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { relative, resolve } from 'node:path';
 import type { Driver, ModelSpec, Usage, WorkerResult } from '../../driver/types.js';
+import { errorClassOf } from '../../driver/errors.js';
 import { currentJobContext } from '../../kernel/governor.js';
 import { correlationInvocation } from '../../driver/correlationInvocation.js';
 import type { OpResult } from '../../kernel/types.js';
@@ -20,7 +21,13 @@ import {
   normalizeFailurePaths,
   type FixTask,
 } from './tasks.js';
-import { fixerBudgetBreach, startFixerDeadline } from './internal/fixerBudget.js';
+import {
+  fixerBudgetBreach,
+  startFixerDeadline,
+  type FixerDeadline,
+} from './internal/fixerBudget.js';
+import { finishAttempt, type FinishAttemptStop } from '../fix/attemptRecord.js';
+import type { AttemptFinishedJournalEvent } from '../../kernel/types.js';
 import type { SweepUnitBindings, SweepUnitReport, UnitProbe } from './unit.js';
 import type { WorkUnit } from './planSweep.js';
 import { SWEEP_DIFF_FLAGS } from '../../shared/gitDiffFlags.js';
@@ -165,8 +172,47 @@ async function runTaskLoopInner(
   let lastSha: string | undefined;
   let budgetStopped = false;
   let indeterminate: string | undefined;
+  // ADR-0008 T13: observation failures are EVIDENCE, never a verdict. An
+  // attempt event that fails to build (finishAttempt's strict payload schema,
+  // or the writer's validation) never reaches the writer, so the writer's own
+  // failure surface cannot record it; this field carries it for runFix to fold
+  // into `observation.status`. It never gates publication or changes the unit
+  // verdict.
+  const observationFailures: string[] = [];
   let spentTokens = 0;
+  // ADR-0008 T13: inner attempt ordinal — one per worker invocation, distinct
+  // from the kernel job retry ordinal (LadderContextInfo.attempt).
+  let attemptOrdinal = 0;
   const unitStart = Date.now();
+  // ADR-0008 T13 emitter: one attempt-finished event per worker invocation,
+  // written through the T30 runtime observation writer in the invocation's
+  // finally (spawn failure, cancellation and budget exhaustion all finish
+  // exactly once). Observation failures NEVER change the run verdict: an I/O
+  // write failure fail-stops the writer and is read back from `failure` by
+  // closeObservation, while a build/validation failure — which never reaches
+  // the writer — is recorded on the report's `observationFailures`. Neither
+  // ever breaks the loop or marks the unit indeterminate.
+  const emitAttempt = async (build: () => AttemptFinishedJournalEvent): Promise<void> => {
+    const writer = bindings.observationWriter;
+    if (writer === undefined) return;
+    let event: AttemptFinishedJournalEvent;
+    try {
+      event = build();
+    } catch (error) {
+      observationFailures.push(`attempt observation failed: ${String(error)}`);
+      return;
+    }
+    try {
+      await writer.append(event);
+    } catch (error) {
+      // The writer fail-stops on an I/O write failure and exposes it through
+      // `failure` (closeObservation folds it into observation.status). A
+      // writer-side validation/identity refusal does not mark the writer, so
+      // record that one here rather than losing it.
+      if (writer.failure === null)
+        observationFailures.push(`attempt observation failed: ${String(error)}`);
+    }
+  };
   const git = async (args: string[]) => {
     const result = await bindings.git(['-C', worktree.path, ...args]);
     if (result.code !== 0) throw new Error(`git ${args[0]}: ${result.stderr.trim()}`);
@@ -328,126 +374,346 @@ async function runTaskLoopInner(
           text: string,
           contents?: Array<{ text: string; path: string }>,
         ): Promise<WorkerResult> => {
-          try {
-            if (bindings.cancelled?.()) throw new Error('enclosing job cancelled');
-            if (bindings.scanPrompt === undefined)
-              throw new Error('worker upload scanner is required');
-            await bindings.scanPrompt(text, contents);
-          } catch {
-            row.outcome = 'escalated-to-human';
-            throw new Error('worker upload refused: missing, failed or positive denylist scan');
-          }
-          if (bindings.cancelled?.()) {
-            row.outcome = 'escalated-to-human';
-            throw new Error('enclosing job cancelled');
-          }
-          const start = Date.now();
-          const remainingWall = Math.min(
-            bindings.budget.wallClockMs ?? 1_200_000,
-            (config.wallMs ?? 3_600_000) - (start - unitStart),
-            bindings.taskRunBudget?.remainingWallMs() ?? Infinity,
-          );
-          const remainingTokens = Math.min(
-            bindings.budget.maxTokens === undefined
-              ? Infinity
-              : bindings.budget.maxTokens - spentTokens,
-            bindings.taskRunBudget?.remainingTokens() ?? Infinity,
-          );
-          if (remainingWall <= 0 || remainingTokens <= 0) {
-            budgetStopped = true;
-            throw new Error('token or wall budget exhausted');
-          }
-          const deadline = startFixerDeadline(currentJobContext()?.signal, remainingWall);
-          const attempt: TaskAttempt = {
-            tier,
-            attempt: decision.attempt,
-            invocation,
-            model: resolved.modelSpec,
-            wallMs: 0,
-            reason: invocation === 'edit' ? decision.reason : 'related-check feedback',
+          // ADR-0008 T13: every invocation ends at exactly one attempt-finished
+          // boundary. `stop` carries the observed stop variant; the fallback is
+          // an unclassified infrastructure stop, never an invented completion.
+          const ordinal = ++attemptOrdinal;
+          let stopSet = false;
+          let stop: FinishAttemptStop = {
+            stopCode: 'unclassified',
+            stopReason: 'attempt ended without an observed stop',
           };
-          row.attempts.push(attempt);
+          const setStop = (next: FinishAttemptStop): void => {
+            stop = next;
+            stopSet = true;
+          };
+          let usage: typeof first.usage | undefined;
+          let servedModel: string | undefined;
+          let thrown: unknown;
+          let driverThrew = false;
+          let allowedTokens: number | null = null;
+          let allowedWall: number | null = null;
+          let boundWallMs: number | null = null;
+          let deadline: FixerDeadline | undefined;
+          let attempt: TaskAttempt | undefined;
+          const start = Date.now();
+          const cancelStop = (): FinishAttemptStop => ({
+            stopCode: 'cancelled',
+            stopReason: 'enclosing job cancelled',
+          });
           try {
-            const worker = await resolved.driver.run(
-              {
-                prompt: text,
-                modelSpec: resolved.modelSpec,
-                workspace: { path: worktree.path },
-                budget: {
-                  ...bindings.budget,
-                  ...(Number.isFinite(remainingTokens) ? { maxTokens: remainingTokens } : {}),
-                  wallClockMs: remainingWall,
-                },
-                toolPolicy: {
-                  allow:
-                    bindings.toolPolicy?.mode === 'none'
-                      ? []
-                      : (bindings.toolPolicy?.allow ?? ['read', 'edit', 'bash'])
-                          .map((tool) => (tool === 'run' ? 'bash' : tool))
-                          .filter(
-                            (tool) =>
-                              ['read', 'edit', 'bash'].includes(tool) &&
-                              (tool !== 'bash' || bindings.taskWorker !== undefined),
-                          ),
-                  mode: bindings.toolPolicy?.mode === 'none' ? 'none' : 'allowlist',
-                },
-                sandboxPolicy: bindings.sandboxPolicy ?? { level: 'workspace-write' },
-                // Session-log correlation (items 1.3–1.5): forward the
-                // runner's minted work identity so the lane stamps the
-                // child's CQ_* env. Absent outside a governed dispatch —
-                // unchanged behavior there.
-                ...correlationInvocation(currentJobContext()?.info?.correlation),
-                outputSchema: {
-                  name: 'fix.task/v1',
-                  schema: {
-                    type: 'object',
-                    additionalProperties: false,
-                    properties: {
-                      outcome: { enum: ['broken-test', 'code-bug', 'todo'] },
-                      summary: { type: 'string' },
-                      confidence: { type: 'number', minimum: 0, maximum: 1 },
-                    },
-                    required: ['outcome', 'summary', 'confidence'],
-                  },
-                },
-              },
-              { signal: deadline.signal },
-            );
-            attempt.usage = worker.usage;
-            if (worker.costUSD !== undefined) attempt.costUSD = worker.costUSD;
-            if (worker.costBasis !== undefined) attempt.costBasis = worker.costBasis;
-            bindings.taskRunBudget?.reportResult(worker);
-            spentTokens +=
-              worker.usage.input +
-              worker.usage.output +
-              worker.usage.cacheRead +
-              worker.usage.cacheWrite +
-              (worker.usage.reasoning ?? 0);
-            attempt.stopReason = worker.stopReason;
-            currentJobContext()?.reportResult(worker);
+            try {
+              if (bindings.cancelled?.()) {
+                setStop(cancelStop());
+                throw new Error('enclosing job cancelled');
+              }
+              if (bindings.scanPrompt === undefined) {
+                setStop({
+                  stopCode: 'human-deferred',
+                  stopReason: 'worker upload scanner is required',
+                });
+                throw new Error('worker upload scanner is required');
+              }
+              await bindings.scanPrompt(text, contents);
+            } catch {
+              if (!stopSet) {
+                setStop({
+                  stopCode: 'human-deferred',
+                  stopReason: 'worker upload refused: missing, failed or positive denylist scan',
+                });
+              }
+              row.outcome = 'escalated-to-human';
+              throw new Error('worker upload refused: missing, failed or positive denylist scan');
+            }
             if (bindings.cancelled?.()) {
+              setStop(cancelStop());
               row.outcome = 'escalated-to-human';
               throw new Error('enclosing job cancelled');
             }
-            if (
-              deadline.expired() ||
-              (bindings.taskRunBudget?.remainingTokens() ?? Infinity) <= 0 ||
-              (bindings.taskRunBudget?.remainingWallMs() ?? Infinity) <= 0 ||
-              (bindings.budget.maxTokens !== undefined &&
-                spentTokens >= bindings.budget.maxTokens) ||
-              fixerBudgetBreach(bindings.budget, worker) !== undefined ||
-              worker.stopReason === 'budget' ||
-              currentJobContext()?.signal.aborted
-            ) {
+            const remainingWall = Math.min(
+              bindings.budget.wallClockMs ?? 1_200_000,
+              (config.wallMs ?? 3_600_000) - (start - unitStart),
+              bindings.taskRunBudget?.remainingWallMs() ?? Infinity,
+            );
+            const remainingTokens = Math.min(
+              bindings.budget.maxTokens === undefined
+                ? Infinity
+                : bindings.budget.maxTokens - spentTokens,
+              bindings.taskRunBudget?.remainingTokens() ?? Infinity,
+            );
+            if (remainingWall <= 0 || remainingTokens <= 0) {
               budgetStopped = true;
+              // The tripped budget cap is named, never a bare boolean.
+              setStop({
+                budgetExpired: true,
+                budgetStopCode: remainingWall <= 0 ? 'wall-cap' : 'token-cap',
+                stopReason: 'token or wall budget exhausted',
+              });
               throw new Error('token or wall budget exhausted');
             }
-            if (worker.stopReason !== 'complete')
-              throw new Error(`worker stopped: ${worker.stopReason}`);
-            return worker;
+            allowedWall = Number.isFinite(remainingWall) ? remainingWall : null;
+            allowedTokens = Number.isFinite(remainingTokens) ? remainingTokens : null;
+            boundWallMs = remainingWall;
+            deadline = startFixerDeadline(currentJobContext()?.signal, remainingWall);
+            attempt = {
+              tier,
+              attempt: decision.attempt,
+              invocation,
+              model: resolved.modelSpec,
+              wallMs: 0,
+              reason: invocation === 'edit' ? decision.reason : 'related-check feedback',
+            };
+            row.attempts.push(attempt);
+            let worker: Awaited<ReturnType<typeof resolved.driver.run>>;
+            try {
+              worker = await resolved.driver.run(
+                {
+                  prompt: text,
+                  modelSpec: resolved.modelSpec,
+                  workspace: { path: worktree.path },
+                  budget: {
+                    ...bindings.budget,
+                    ...(Number.isFinite(remainingTokens) ? { maxTokens: remainingTokens } : {}),
+                    wallClockMs: remainingWall,
+                  },
+                  toolPolicy: {
+                    allow:
+                      bindings.toolPolicy?.mode === 'none'
+                        ? []
+                        : (bindings.toolPolicy?.allow ?? ['read', 'edit', 'bash'])
+                            .map((tool) => (tool === 'run' ? 'bash' : tool))
+                            .filter(
+                              (tool) =>
+                                ['read', 'edit', 'bash'].includes(tool) &&
+                                (tool !== 'bash' || bindings.taskWorker !== undefined),
+                            ),
+                    mode: bindings.toolPolicy?.mode === 'none' ? 'none' : 'allowlist',
+                  },
+                  sandboxPolicy: bindings.sandboxPolicy ?? { level: 'workspace-write' },
+                  // Session-log correlation (items 1.3–1.5): forward the
+                  // runner's minted work identity so the lane stamps the
+                  // child's CQ_* env. Absent outside a governed dispatch —
+                  // unchanged behavior there.
+                  ...correlationInvocation(currentJobContext()?.info?.correlation),
+                  outputSchema: {
+                    name: 'fix.task/v1',
+                    schema: {
+                      type: 'object',
+                      additionalProperties: false,
+                      properties: {
+                        outcome: { enum: ['broken-test', 'code-bug', 'todo'] },
+                        summary: { type: 'string' },
+                        confidence: { type: 'number', minimum: 0, maximum: 1 },
+                      },
+                      required: ['outcome', 'summary', 'confidence'],
+                    },
+                  },
+                },
+                { signal: deadline.signal },
+              );
+            } catch (driverError) {
+              // Only a driver-call rejection is a driver-sourced cause; loop
+              // throws must not be misattributed to the driver.
+              driverThrew = true;
+              throw driverError;
+            }
+            try {
+              attempt.usage = worker.usage;
+              usage = worker.usage;
+              servedModel = worker.model;
+              if (worker.costUSD !== undefined) attempt.costUSD = worker.costUSD;
+              if (worker.costBasis !== undefined) attempt.costBasis = worker.costBasis;
+              bindings.taskRunBudget?.reportResult(worker);
+              spentTokens +=
+                worker.usage.input +
+                worker.usage.output +
+                worker.usage.cacheRead +
+                worker.usage.cacheWrite +
+                (worker.usage.reasoning ?? 0);
+              attempt.stopReason = worker.stopReason;
+              currentJobContext()?.reportResult(worker);
+              if (bindings.cancelled?.()) {
+                setStop(cancelStop());
+                row.outcome = 'escalated-to-human';
+                throw new Error('enclosing job cancelled');
+              }
+              const breach = fixerBudgetBreach(bindings.budget, worker);
+              const budgetCause = deadline.expired()
+                ? {
+                    code: 'wall-cap' as const,
+                    reason: 'sweep fixer wallClockMs deadline expired',
+                  }
+                : (bindings.taskRunBudget?.remainingWallMs() ?? Infinity) <= 0
+                  ? {
+                      code: 'wall-cap' as const,
+                      reason: 'task-run wall budget exhausted',
+                    }
+                  : breach !== undefined
+                    ? { code: 'token-cap' as const, reason: breach }
+                    : (bindings.taskRunBudget?.remainingTokens() ?? Infinity) <= 0
+                      ? {
+                          code: 'token-cap' as const,
+                          reason: 'task-run token budget exhausted',
+                        }
+                      : bindings.budget.maxTokens !== undefined &&
+                          spentTokens >= bindings.budget.maxTokens
+                        ? {
+                            code: 'token-cap' as const,
+                            reason: `spent ${String(spentTokens)} tokens reached maxTokens ${String(bindings.budget.maxTokens)}`,
+                          }
+                        : worker.stopReason === 'budget'
+                          ? // The driver reported a budget stop without naming a
+                            // cap: never guess. stopCode 'budget' is not in the
+                            // fixed table, so finishAttempt records it as the
+                            // sanitized raw code with class unclassified
+                            // (infrastructure, certainty unknown).
+                            {
+                              code: 'budget' as const,
+                              reason: 'worker reported a budget stop',
+                            }
+                          : null;
+              if (budgetCause !== null || currentJobContext()?.signal.aborted) {
+                budgetStopped = true;
+                // A budget breach while the attempt is otherwise complete is
+                // the budget variant, never a generic failure. A worker-reported
+                // budget stop without a named cap keeps the raw code 'budget':
+                // the cap is never guessed; finishAttempt's unknown branch then
+                // records it as infrastructure/unclassified with certainty
+                // unknown and the sanitized raw code preserved.
+                if (budgetCause === null) setStop(cancelStop());
+                else if (budgetCause.code === 'budget')
+                  setStop({ stopCode: 'budget', stopReason: budgetCause.reason });
+                else
+                  setStop({
+                    budgetExpired: true,
+                    budgetStopCode: budgetCause.code,
+                    stopReason: budgetCause.reason,
+                  });
+                throw new Error('token or wall budget exhausted');
+              }
+              if (worker.stopReason !== 'complete') {
+                setStop({
+                  stopCode: worker.stopReason,
+                  stopReason: `worker stopped: ${worker.stopReason}`,
+                });
+                throw new Error(`worker stopped: ${worker.stopReason}`);
+              }
+              setStop({ completed: true });
+              return worker;
+            } finally {
+              // wallMs is measured and set BEFORE the attempt-finished append;
+              // it is never an invented zero.
+              if (attempt !== undefined) attempt.wallMs = Date.now() - start;
+              deadline.dispose();
+            }
+          } catch (error) {
+            thrown ??= error;
+            // Classify throws with no observed stop before the boundary: a
+            // fired wallClockMs deadline is the budget variant with the cap
+            // named; a cancelled or governed-aborted job is the cancel stop.
+            // budgetStopped is set so escalation stops scheduling attempts.
+            if (!stopSet) {
+              if (deadline?.expired() === true) {
+                budgetStopped = true;
+                setStop({
+                  budgetExpired: true,
+                  budgetStopCode: 'wall-cap',
+                  stopReason: 'sweep fixer wallClockMs deadline expired',
+                });
+              } else if (bindings.cancelled?.() || currentJobContext()?.signal.aborted) {
+                setStop(cancelStop());
+              }
+            }
+            throw error;
           } finally {
-            attempt.wallMs = Date.now() - start;
-            deadline.dispose();
+            deadline?.dispose();
+            const wallMs = attempt?.wallMs ?? Date.now() - start;
+            const tokens =
+              usage === undefined
+                ? null
+                : usage.input +
+                  usage.output +
+                  usage.cacheRead +
+                  usage.cacheWrite +
+                  (usage.reasoning ?? 0);
+            await emitAttempt(() => ({
+              type: 'attempt-finished',
+              runId:
+                bindings.observationRunId ?? bindings.observationWriter?.compositionRunId ?? '',
+              at: new Date().toISOString(),
+              // Production identity is `<package>/<fixer>` (runFix, registry,
+              // unit.ts); the fallback matches it rather than inventing a
+              // second order for unwired callers.
+              unitId: bindings.observationUnitId ?? `${unit.package}/${unit.fixer}`,
+              jobId: currentJobContext()?.info.jobKey ?? null,
+              taskId: task.id,
+              attempt: ordinal,
+              payload: finishAttempt({
+                ...stop,
+                // The prose message of a driver throw stays in stopReason;
+                // error.code keeps the stable code, never the prose.
+                ...(driverThrew && thrown instanceof Error
+                  ? { stopReason: `${stop.stopReason as string}; ${thrown.message}` }
+                  : {}),
+                tier,
+                invocation: `${bindings.runPrefix}:${task.id}:${String(ordinal)}:${invocation}`,
+                model: resolved.modelSpec,
+                provider: resolved.modelSpec.provider,
+                requestedModel: resolved.modelSpec.model,
+                ...(servedModel === undefined ? {} : { servedModel }),
+                tokens,
+                usageChannels:
+                  usage === undefined
+                    ? {}
+                    : {
+                        input: usage.input,
+                        output: usage.output,
+                        cacheRead: usage.cacheRead,
+                        cacheWrite: usage.cacheWrite,
+                        reasoning: usage.reasoning ?? null,
+                      },
+                requests: usage === undefined ? null : 1,
+                wallMs,
+                ...(driverThrew && thrown !== undefined
+                  ? {
+                      error: {
+                        type: thrown instanceof Error ? thrown.name : null,
+                        // A stable code when the error carries one; the prose
+                        // message stays in stopReason, never in code.
+                        code:
+                          typeof (thrown as { code?: unknown } | null)?.code === 'string'
+                            ? (thrown as { code: string }).code
+                            : // A pre-dispatch DispatchError carries its class as
+                              // structured data; it is the stable code when the
+                              // error has no `code` of its own.
+                              (errorClassOf(thrown) ?? null),
+                        providerFinishReason: null,
+                        source: 'driver',
+                        certainty: 'observed' as const,
+                      },
+                    }
+                  : {}),
+                timeout:
+                  deadline === undefined || !deadline.expired()
+                    ? null
+                    : {
+                        scope: 'attempt' as const,
+                        boundMs: boundWallMs ?? 0,
+                        source: 'sweep fixer wallClockMs deadline',
+                      },
+                budget: {
+                  allowed: { tokens: allowedTokens, wallMs: allowedWall },
+                  spent: { tokens, wallMs },
+                  remaining: {
+                    tokens:
+                      allowedTokens === null || tokens === null
+                        ? null
+                        : Math.max(0, allowedTokens - tokens),
+                    wallMs: allowedWall === null ? null : Math.max(0, allowedWall - wallMs),
+                  },
+                },
+              }),
+            }));
           }
         };
         const first = await invoke('edit', prompt, priorFailedFeedback?.contents);
@@ -767,6 +1033,7 @@ async function runTaskLoopInner(
       pushed,
       tasks: reports,
       budgetStopped,
+      ...(observationFailures.length === 0 ? {} : { observationFailures }),
       ...(indeterminate === undefined ? {} : { indeterminate }),
     },
   };

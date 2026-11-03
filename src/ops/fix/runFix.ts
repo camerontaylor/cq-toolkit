@@ -851,6 +851,14 @@ export function makeFixRun(deps: FixRunDeps = {}) {
           const unit = plan.jobs.find((job) => job.id === row.jobId)
             ?.input as SweepUnitDispatchInput;
           const evidence = collected.get(`${unit.package}\0${unit.fixer}`);
+          const reported =
+            evidence ??
+            (row.result.status === 'ok' ? (row.result.value as SweepUnitReport) : undefined);
+          // ADR-0008 T13: an attempt-observation failure recorded by the
+          // unit never changes that unit's verdict; it makes the COMPOSITION
+          // observation indeterminate, next to every writer-side failure.
+          if (reported !== undefined)
+            for (const failure of reported.observationFailures ?? []) observationFailure(failure);
           return {
             jobId: row.jobId,
             result: row.result as OpResult<SweepUnitReport>,
