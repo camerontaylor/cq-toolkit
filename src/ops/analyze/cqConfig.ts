@@ -7,6 +7,9 @@ import { CheckRunnerInputObject } from '../gates/registry.js';
 export const CQ_CONFIG_FILE = 'cq.json';
 export const CQ_CONFIG_SCHEMA_VERSION = 2;
 
+/** Runaway wall guard shared by review.run and review.address. */
+export const DEFAULT_REVIEW_WALL_MS = 6 * 60 * 60 * 1000;
+
 const PositiveInteger = z.number().int().positive();
 const NonNegativeInteger = z.number().int().nonnegative();
 const SeveritySchema = z.enum(['critical', 'major', 'minor', 'trivial', 'info', 'none']);

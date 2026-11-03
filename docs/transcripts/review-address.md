@@ -747,3 +747,12 @@ This intentionally changes the persisted greenfield report format:
 consumers of the former optional `rounds[].run` must iterate `rounds[].runs`.
 `dev.cycle` renders its attempt log from the run-wide `attempts` array and
 does not consume per-round runs.
+
+`review.address` and `review.run` use a six-hour default wall guard when no
+run wall is configured. An explicit run/input wall remains authoritative,
+including final review dispatch, completion and publication. Address fixing
+uses at most the first three quarters of that wall, leaving the last quarter
+for final re-review and its bounded transient retry. No new fix batch or round
+starts after that fixing allowance is spent; final review receives only the
+remaining run wall. A slow worker or review that exhausts the run wall still
+blocks with budget attribution. No time calibration is used.
