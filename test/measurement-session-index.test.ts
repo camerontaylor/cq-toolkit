@@ -138,12 +138,14 @@ describe('M6c nominal evidence', () => {
     expect(row.agentId).toBe('agent-1');
     expect(row.model).toEqual({ model: 'glm-5.3', provider: 'zai' });
     expect(row.attempts).toBe(1);
-    expect(row.tokens).toEqual({ knownSubtotal: 100, complete: true });
-    expect(row.wallMs).toEqual({ knownSubtotal: 500, complete: true });
+    expect(row.tokens).toBe(100);
+    expect(row.wallMs).toBe(500);
+    // A complete non-null aggregate carries availability state 'known'.
+    expect(row.availability['/tokens']).toMatchObject({ state: 'known' });
+    expect(row.availability['/wallMs']).toMatchObject({ state: 'known' });
     expect(row.stopReasons).toEqual([{ stopCode: 'completed', class: 'terminal' }]);
-    // Known fields carry no availability entries: availability accompanies
-    // unknown values only.
-    expect(Object.keys(row.availability)).toEqual([]);
+    // Availability entries exist only where state must be stated.
+    expect(Object.keys(row.availability).sort()).toEqual(['/tokens', '/wallMs']);
     // The artifact validates against its own strict schema.
     expect(() => SessionIndexSchema.parse(index)).not.toThrow();
   });
@@ -206,13 +208,13 @@ describe('M6c missing evidence', () => {
       stream: stream([first, second]),
     });
     const row = index.sessions[0]!;
-    expect(row.tokens).toEqual({ knownSubtotal: 100, complete: false });
-    expect(row.wallMs).toEqual({ knownSubtotal: 1200, complete: true });
+    expect(row.tokens).toBe(100);
+    expect(row.wallMs).toBe(1200);
     expect(row.availability['/tokens']).toMatchObject({ state: 'partial' });
-    expect(row.availability['/wallMs']).toBeUndefined();
+    expect(row.availability['/wallMs']).toMatchObject({ state: 'known' });
   });
 
-  it('no attempts at all: zero attempts is known-zero, model unknown not-collected', () => {
+  it('no attempts at all: aggregates n-a, model not-collected, no zero-shaped values', () => {
     const index = buildSessionIndex({ correlation: correlation(), stream: stream([]) });
     const row = index.sessions[0]!;
     expect(row.attempts).toBe(0);
@@ -220,8 +222,8 @@ describe('M6c missing evidence', () => {
     expect(row.wallMs).toBeNull();
     expect(row.model).toBeNull();
     expect(row.availability['/model']).toMatchObject({ state: 'not-collected' });
-    expect(row.availability['/tokens']).toMatchObject({ state: 'not-collected' });
-    expect(row.availability['/wallMs']).toMatchObject({ state: 'not-collected' });
+    expect(row.availability['/tokens']).toMatchObject({ state: 'n-a' });
+    expect(row.availability['/wallMs']).toMatchObject({ state: 'n-a' });
   });
 
   it('missing or malformed correlation is rejected, not silently folded', () => {
@@ -264,10 +266,10 @@ describe('M6c failure evidence', () => {
     });
     const row = index.sessions[0]!;
     expect(row.stopReasons).toEqual([{ stopCode: 'dns', class: 'infrastructure' }]);
-    // Unknown usage stays unknown even on a failed attempt: knownSubtotal
-    // zero is explicit partial, never silently claimed complete.
-    expect(row.tokens).toEqual({ knownSubtotal: 0, complete: false });
-    expect(row.availability['/tokens']).toMatchObject({ state: 'partial' });
+    // Unknown usage stays unknown even on a failed attempt: null with
+    // not-collected, never a zero-shaped guess.
+    expect(row.tokens).toBeNull();
+    expect(row.availability['/tokens']).toMatchObject({ state: 'not-collected' });
   });
 
   it('moved branch does not relabel commit: rows keep observed branch per commitSha', () => {
@@ -366,8 +368,8 @@ describe('M6c join integrity (review iterations)', () => {
       stream: stream([first, second]),
     });
     const row = index.sessions[0]!;
-    expect(row.tokens).toEqual({ knownSubtotal: 100, complete: false });
-    expect(row.wallMs).toEqual({ knownSubtotal: 500, complete: false });
+    expect(row.tokens).toBe(100);
+    expect(row.wallMs).toBe(500);
     expect(row.availability['/tokens']).toMatchObject({ state: 'partial' });
     expect(row.availability['/wallMs']).toMatchObject({ state: 'partial' });
   });
@@ -402,14 +404,14 @@ describe('M6c join integrity (review iterations)', () => {
       stream: stream([attemptEvent()], { complete: false }),
     });
     const row = index.sessions[0]!;
-    expect(row.availability['/']).toMatchObject({ state: 'partial' });
-    expect(row.availability['/']!.reason).toContain('incomplete');
+    expect(row.availability['']).toMatchObject({ state: 'partial' });
+    expect(row.availability['']!.reason).toContain('incomplete');
     // A complete stream carries no root availability entry.
     const full = buildSessionIndex({
       correlation: correlation(),
       stream: stream([attemptEvent()]),
     });
-    expect(full.sessions[0]!.availability['/']).toBeUndefined();
+    expect(full.sessions[0]!.availability['']).toBeUndefined();
   });
 
   it('workId mismatch between correlation and stream is refused, never joined', () => {
@@ -427,5 +429,76 @@ describe('M6c join integrity (review iterations)', () => {
     expect(() => buildSessionIndex({ correlation: correlation(), stream: mismatched })).toThrow(
       /does not match correlation/,
     );
+  });
+});
+
+describe('M6c availability discipline (review r2)', () => {
+  it('all-unknown attempts: null with not-collected, never a zero-shaped partial claim', () => {
+    const base = attemptEvent();
+    const noUsage = {
+      ...base,
+      payload: { ...base.payload, tokens: null, wallMs: null },
+    };
+    const index = buildSessionIndex({
+      correlation: correlation(),
+      stream: stream([noUsage]),
+    });
+    const row = index.sessions[0]!;
+    expect(row.tokens).toBeNull();
+    expect(row.wallMs).toBeNull();
+    expect(row.availability['/tokens']).toMatchObject({ state: 'not-collected' });
+    expect(row.availability['/wallMs']).toMatchObject({ state: 'not-collected' });
+    expect(row.availability['/tokens']!.reason).not.toContain('some attempts carried');
+  });
+
+  it('genuine observed zero over fully-known attempts is known-zero, not partial', () => {
+    const base = attemptEvent();
+    const zero = {
+      ...base,
+      payload: { ...base.payload, tokens: 0, wallMs: 0 },
+    };
+    const index = buildSessionIndex({ correlation: correlation(), stream: stream([zero]) });
+    const row = index.sessions[0]!;
+    expect(row.tokens).toBe(0);
+    expect(row.wallMs).toBe(0);
+    expect(row.availability['/tokens']).toMatchObject({ state: 'known-zero' });
+    expect(row.availability['/wallMs']).toMatchObject({ state: 'known-zero' });
+  });
+
+  it('a complete aggregate cannot coexist with a torn-stream partial root marker', () => {
+    // complete:false with fully-known attempts: the aggregate values are
+    // known, but the ROOT pointer still carries partial — the incompleteness
+    // is stated once at the root, never contradictorily on the field.
+    const index = buildSessionIndex({
+      correlation: correlation(),
+      stream: stream([attemptEvent()], { complete: false }),
+    });
+    const row = index.sessions[0]!;
+    expect(row.tokens).toBe(100);
+    expect(row.availability['/tokens']).toMatchObject({ state: 'known' });
+    expect(row.availability['']).toMatchObject({ state: 'partial' });
+  });
+
+  it('availability keys must be valid JSON Pointers; the root is the empty string', () => {
+    const index = buildSessionIndex({
+      correlation: correlation(),
+      stream: stream([attemptEvent()]),
+    });
+    const forged = {
+      indexVersion: 1 as const,
+      sessions: [
+        JSON.parse(JSON.stringify(index.sessions[0])) as {
+          availability: Record<string, unknown>;
+        },
+      ],
+    };
+    // A non-pointer key (no leading slash, not empty) must be rejected.
+    const row = forged.sessions[0]!;
+    row.availability['tokens'] = { state: 'known', reason: 'x', source: null };
+    expect(() => SessionIndexSchema.parse(forged)).toThrow();
+    // The empty string IS valid (root).
+    delete row.availability['tokens'];
+    row.availability[''] = { state: 'partial', reason: 'x', source: null };
+    expect(() => SessionIndexSchema.parse(forged)).not.toThrow();
   });
 });

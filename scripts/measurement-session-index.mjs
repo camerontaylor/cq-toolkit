@@ -44,22 +44,8 @@ export const SessionIndexRowSchema = z
     agentId: z.string().nullable(),
     model: z.object({ model: z.string(), provider: z.string() }).strict().nullable(),
     attempts: z.number().int().nonnegative(),
-    tokens: z
-      .object({
-        /** Known subtotal across attempts with known counts; null with none. */
-        knownSubtotal: z.number().int().nonnegative().nullable(),
-        /** True when every contributing attempt carried a known count. */
-        complete: z.boolean(),
-      })
-      .strict()
-      .nullable(),
-    wallMs: z
-      .object({
-        knownSubtotal: z.number().nonnegative().nullable(),
-        complete: z.boolean(),
-      })
-      .strict()
-      .nullable(),
+    tokens: z.number().int().nonnegative().nullable(),
+    wallMs: z.number().nonnegative().nullable(),
     stopReasons: z.array(
       z
         .object({
@@ -69,7 +55,10 @@ export const SessionIndexRowSchema = z
         .strict(),
     ),
     availability: z.record(
-      z.string(),
+      // Valid JSON Pointer relative to the row: the empty string (root)
+      // or a leading-slash pointer — same discipline as the kernel
+      // AvailabilityMapSchema.
+      z.string().regex(/^$|^\//),
       z
         .object({
           state: z.enum(['known-zero', 'not-collected', 'unavailable', 'partial', 'n-a', 'known']),
@@ -173,24 +162,42 @@ export function buildSessionIndex(input) {
   // Closure commit: the correlation record's observed SHA only — never
   // inferred from branches or transcript content.
   const commitSha = correlation.record.commitSha;
-  // Partial aggregates keep the known subtotal (ADR-0008 availability row:
-  // "partial preserves known subtotal without claiming completeness").
-  const knownTokens = attempts.filter((a) => a.payload.tokens !== null);
-  const tokens =
-    attempts.length === 0
-      ? null
-      : {
-          knownSubtotal: knownTokens.reduce((sum, a) => sum + a.payload.tokens, 0),
-          complete: knownTokens.length === attempts.length,
-        };
-  const knownWall = attempts.filter((a) => a.payload.wallMs !== null);
-  const wallMs =
-    attempts.length === 0
-      ? null
-      : {
-          knownSubtotal: knownWall.reduce((sum, a) => sum + a.payload.wallMs, 0),
-          complete: knownWall.length === attempts.length,
-        };
+  // Aggregate subtotals in ADR-0008 vocabulary: a plain numeric value with
+  // an availability record at the field's pointer. Partial keeps the known
+  // subtotal without claiming completeness; unknown stays null (never zero);
+  // a genuinely observed zero over fully-known attempts is known-zero.
+  function aggregateOf(field) {
+    const known = attempts.filter((a) => a.payload[field] !== null);
+    if (attempts.length === 0)
+      return { value: null, state: 'n-a', reason: 'no attempts were recorded for this work' };
+    if (known.length === 0) {
+      return {
+        value: null,
+        state: 'not-collected',
+        reason: `no attempt carried a ${field === 'tokens' ? 'token' : 'wall-time'} count`,
+      };
+    }
+    const subtotal = known.reduce((sum, a) => sum + a.payload[field], 0);
+    if (known.length === attempts.length) {
+      return {
+        value: subtotal,
+        state: subtotal === 0 ? 'known-zero' : 'known',
+        reason:
+          subtotal === 0
+            ? `every attempt carried a known ${field === 'tokens' ? 'token' : 'wall-time'} count and the observed sum is zero`
+            : `every attempt carried a known ${field === 'tokens' ? 'token' : 'wall-time'} count`,
+      };
+    }
+    return {
+      value: subtotal,
+      state: 'partial',
+      reason:
+        `some attempts carried a known ${field === 'tokens' ? 'token' : 'wall-time'} count; ` +
+        'the value preserves the known subtotal without claiming a complete sum',
+    };
+  }
+  const tokens = aggregateOf('tokens');
+  const wallMs = aggregateOf('wallMs');
 
   const availabilityEntries = {};
   if (correlation.record.sessionId === null) {
@@ -237,35 +244,18 @@ export function buildSessionIndex(input) {
       : null;
 
   if (!streamComplete) {
-    availabilityEntries['/'] = availability(
+    // JSON Pointer root for the containing row is the empty string.
+    availabilityEntries[''] = availability(
       'partial',
       'the observation stream is incomplete (torn final line or crash before close); ' +
         'this row folds partial evidence only',
     );
   }
-  if (tokens === null) {
-    availabilityEntries['/tokens'] = availability(
-      'not-collected',
-      'no attempts were recorded; no token evidence exists',
-    );
-  } else if (!tokens.complete) {
-    availabilityEntries['/tokens'] = availability(
-      'partial',
-      'some attempts carried known token counts; knownSubtotal preserves them without ' +
-        'claiming a complete sum',
-    );
+  if (tokens.state !== null) {
+    availabilityEntries['/tokens'] = availability(tokens.state, tokens.reason);
   }
-  if (wallMs === null) {
-    availabilityEntries['/wallMs'] = availability(
-      'not-collected',
-      'no attempts were recorded; no wall-time evidence exists',
-    );
-  } else if (!wallMs.complete) {
-    availabilityEntries['/wallMs'] = availability(
-      'partial',
-      'some attempts carried known wall times; knownSubtotal preserves them without ' +
-        'claiming a complete sum',
-    );
+  if (wallMs.state !== null) {
+    availabilityEntries['/wallMs'] = availability(wallMs.state, wallMs.reason);
   }
   if (provenanceRepo === null) {
     availabilityEntries['/repo'] = availability(
@@ -273,6 +263,9 @@ export function buildSessionIndex(input) {
       'no archive-safe remote digest was observed in the composition header provenance',
     );
   }
+  // A known-positive observation carries availability state 'known' only
+  // where the field is nullable and its completeness must be stated; a
+  // complete non-null repo/session/commit needs no entry.
 
   const row = {
     repo: provenanceRepo,
@@ -285,8 +278,8 @@ export function buildSessionIndex(input) {
     agentId: correlation.record.agentId,
     model: models.length === 1 ? models[0] : null,
     attempts: attempts.length,
-    tokens,
-    wallMs,
+    tokens: tokens.value,
+    wallMs: wallMs.value,
     stopReasons: stopReasonsOf(attempts),
     availability: availabilityEntries,
   };

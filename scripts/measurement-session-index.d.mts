@@ -8,11 +8,6 @@ export interface AvailabilityEntry {
   source: string | null;
 }
 
-export interface KnownTotal {
-  knownSubtotal: number | null;
-  complete: boolean;
-}
-
 export interface SessionIndexRow {
   /** Archive-safe opaque remote digest; null when no remote exists. */
   repo: string | null;
@@ -25,8 +20,8 @@ export interface SessionIndexRow {
   agentId: string | null;
   model: { model: string; provider: string } | null;
   attempts: number;
-  tokens: KnownTotal | null;
-  wallMs: KnownTotal | null;
+  tokens: number | null;
+  wallMs: number | null;
   stopReasons: Array<{
     stopCode: string;
     class: 'retriable' | 'terminal' | 'infrastructure' | 'budget' | 'human';
