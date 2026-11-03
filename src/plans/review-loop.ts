@@ -1527,10 +1527,9 @@ async function runOwnedReviewLoop(
     // truth after its own publication attempt.
     for (const row of fixReport.jobs) {
       if (row.result.status === 'ok' && (row.result.value as FixReviewItemResult).changed) {
-        // The engine-exit clause is truthful only for a --push run: without
-        // push, publication never happens at engine exit, so the row must not
-        // dangle that possibility (see #469 above — publishOnExit is a --push
-        // composition behavior).
+        // Keep the publish-on branch caller-neutral: a direct caller may
+        // have no exit publisher. Explicitly disabling publication retains
+        // the publication-off clause (see #469 above).
         reasons.push(
           `item ${sources.get(row.jobId)?.itemId ?? row.jobId}: publish-withheld-mixed-worktree — a sibling fix row failed; the loop pushed nothing and withheld this item's reply and resolve${
             opts.publish === false

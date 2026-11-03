@@ -499,8 +499,8 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
         // --push was requested, yet no exit publication ever ran: finish's
         // guard above skips publishOnExit when the parent cancelled (and the
         // publication's own early-returns never witness a push), so this dead
-        // run can never publish. The loop's stale "publication may still
-        // happen at engine exit" claim would stand forever — replace it with
+        // run can never publish. The loop's caller-neutral publication tail
+        // would otherwise stand — replace it with
         // the engine's terminal truth: the row's own premise is that the loop
         // pushed nothing, so with no engine push either, the verified commit
         // stays local.
