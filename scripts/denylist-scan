@@ -367,7 +367,7 @@ function parsePatterns(text) {
 function loadPatterns() {
   let text;
   try {
-    text = fs.readFileSync(PATTERNS_PATH, 'utf8');
+    text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(fs.readFileSync(PATTERNS_PATH));
   } catch (e) {
     throw new ConfigError(`cannot read ${PATTERNS_PATH}: ${e.message}`);
   }

@@ -153,3 +153,31 @@ describe('parseDenylistPatterns parity with scripts/denylist-scan', () => {
     expect(compared).toBeGreaterThan(50);
   });
 });
+
+describe('authoritative policy decoding', () => {
+  const load = new Function(
+    'fs',
+    'PATTERNS_PATH',
+    [
+      slice('class ConfigError', '// Known gitleaks invocation failure'),
+      slice(
+        'function loadPatterns',
+        '// ---------------------------------------------------------------------------',
+      ),
+      'function parsePatterns(text) { return text; }',
+      'return loadPatterns();',
+    ].join('\n'),
+  ) as (fs: { readFileSync: () => Uint8Array }, path: string) => unknown;
+
+  test('preserves valid UTF-8 including a BOM for parser validation', () => {
+    expect(
+      load({ readFileSync: () => new TextEncoder().encode('\ufeffrules:') }, 'patterns.yml'),
+    ).toBe('\ufeffrules:');
+  });
+
+  test('rejects malformed UTF-8 before parsing the policy', () => {
+    expect(() => load({ readFileSync: () => new Uint8Array([0xff]) }, 'patterns.yml')).toThrow(
+      'cannot read patterns.yml',
+    );
+  });
+});
