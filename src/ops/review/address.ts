@@ -138,6 +138,16 @@ export interface ReviewAddressReport {
   /** Report context only: review advisories never enter `findings` or dispatch. */
   advisories?: string[];
   openBlocking: Finding[];
+  /**
+   * ADR-0008 baseline seam: the INITIAL open-blocker population, captured at
+   * first admission and before any fix. `openBlocking` is recomputed after
+   * fixes (and replaced by each successful re-review), so it can only shrink;
+   * substituting it for the measurement baseline would inflate
+   * fixes-per-run. Round 1's admissions populate this list, which is never
+   * reassigned on a re-review. Absent when the invocation refused before
+   * admitting any findings — unknown, never an empty baseline.
+   */
+  initialOpenBlocking?: string[];
   fixes: AddressFix[];
   closureVerifications?: Array<{
     finding: string;
@@ -1753,6 +1763,31 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
             const noteAdmission = (head: string) => {
               report.admissionHead ??= head;
             };
+            /**
+             * ADR-0008 baseline seam: capture the initial open-blocker
+             * population at admission, before any fix. Round 1's admissions are
+             * the initial population; a later round only sees findings that
+             * appeared after fixes ran, so it never extends or replaces this
+             * list. The first admission initializes the field and later
+             * round-1 admissions (the PR path admits one finding per dispatch
+             * item) extend it in first-seen order, deduplicated — each item is
+             * admitted before its own fix, so no id is read from post-fix
+             * state. Nothing else writes this field: `openBlocking` is
+             * recomputed after fixes and `rounds[].record` is replaced by a
+             * re-review, so neither may feed the measurement baseline.
+             */
+            const noteInitialOpenBlocking = (
+              round: number,
+              record: Pick<FindingsRecord, 'findings'>,
+            ) => {
+              if (round !== 1) return;
+              const ids = openBlocking(record, policy.review.blockingSeverities).map(
+                (finding) => finding.id,
+              );
+              report.initialOpenBlocking = [
+                ...new Set([...(report.initialOpenBlocking ?? []), ...ids]),
+              ];
+            };
             const admitCleanRecord = async (root: string, record: FindingsRecord) => {
               const effects = makeSubprocessDevEffects(root);
               const read = await readWorkState(effects, {
@@ -2428,6 +2463,9 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                         sources: [{ kind: 'pr-threads', status: 'terminal' }],
                         findings: [finding],
                       };
+                      // Before this item's fix, and before admitRecord can
+                      // refuse: the finding was dispatched as an open blocker.
+                      noteInitialOpenBlocking(round, record);
                       await admitRecord(root, record);
                       report.verifiedHead ??= record.head;
                       dispatchedRecord ??= record;
@@ -2744,6 +2782,12 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                   { ...threads, findings: report.findings },
                   policy.review.blockingSeverities,
                 );
+                // A round-1 run that dispatched no item never admitted one;
+                // the thread population is then the initial population. A run
+                // that did dispatch already captured it at admission, and this
+                // cannot shrink or replace that list.
+                if (report.initialOpenBlocking === undefined && round === 1)
+                  noteInitialOpenBlocking(round, { findings: report.findings });
                 if (stop()) return await finish('needs-human', stop());
                 const priorFindings = priorRoundFindings(previous, [
                   ...threads.findings,
@@ -2844,6 +2888,9 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
               report.findings = previous.findings;
               noteAdvisories(previous);
               report.openBlocking = openBlocking(previous, policy.review.blockingSeverities);
+              // Before any dispatch: round 1's admitted record is the initial
+              // open-blocker population. Later rounds are ignored by the guard.
+              noteInitialOpenBlocking(round, previous);
               if (!(await hasRequiredSources(root, previous)))
                 return await finish('needs-human', 'review source incomplete');
               if (stop()) return await finish('needs-human', stop());

@@ -2,7 +2,12 @@ import { describe, expect, it } from 'vitest';
 import type { AddressFix } from '../../../src/ops/review/addressWorker.js';
 import type { Finding } from '../../../src/ops/review/findings.js';
 import type { ValidationVerdict } from '../../../src/ops/fix/validate.js';
-import { measureRun, reviewClosuresOf } from '../../../src/ops/fix/measurement.js';
+import {
+  measureRun,
+  reviewClosuresOf,
+  reviewPlannedUnitsOf,
+} from '../../../src/ops/fix/measurement.js';
+import { fixture, finding as workerFinding } from './addressWorker.helpers.js';
 
 // Fake/local fixtures only: no repositories, providers or credentials.
 const pass: ValidationVerdict = { verdict: 'pass', gates: [] };
@@ -35,6 +40,10 @@ const messages = new Map<string, string>([
   ],
   ['wrongLink', linked('finding-9')],
   ['unlinked', 'fix(review): repair the related cluster\n\nplain body, no trailers'],
+  // The review commit writer collapses embedded newlines in a caller-supplied
+  // finding id to one space, and the trailer reader trims its value.
+  ['newlineLink', linked('finding one')],
+  ['paddedLink', 'fix(review): Address finding-1\n\nCq-Task:   finding-1  '],
 ]);
 const messageOf = (sha: string): string | undefined => messages.get(sha);
 
@@ -113,6 +122,74 @@ describe('reviewClosuresOf', () => {
     ]);
     expect(metric.availability['/metric/fixesPerRun/numerator']?.state).toBe('known');
     expect(metric.availability['/metric/fixesPerRun/denominator']?.state).toBe('known');
+  });
+
+  it('T35 real worker result', async () => {
+    // One fixture built by the real fake-driver makeAddressWorker: the gate
+    // array and the Cq-Task trailer are the producer's own, not hand-built.
+    const f = await fixture();
+    try {
+      const fix = await f.engine.fix(workerFinding(), 1);
+      expect(fix.finding.status).toBe('fixed');
+      expect(fix.commit).toBeDefined();
+      const sha = fix.commit!;
+      const message = f.repo.git('show', '-s', '--format=%B', sha);
+      const read = (id: string): string | undefined => (id === sha ? message : undefined);
+      const { closures, unknownTrailerShas } = reviewClosuresOf([fix], read);
+      expect(unknownTrailerShas).toEqual([]);
+      expect(closures.map((closure) => closure.commitSha)).toEqual([sha]);
+      expect(closures[0]?.taskIds).toEqual(['src/a.ts']);
+      expect(closures[0]?.verificationEvidence).toEqual(['validation:pass']);
+      expect(closures[0]?.todo).toBe(false);
+      const metric = measureRun(
+        [fix],
+        ['src/a.ts'],
+        new Map([['src/a.ts', { completed: true, count: 1 } as const]]),
+        read,
+      );
+      expect(metric.fixesPerRun).toEqual({ numerator: 1, denominator: 1 });
+    } finally {
+      await f.cleanup();
+    }
+  });
+
+  it('T35 link normalization matches the review commit writer', () => {
+    // The worker writes finding.id.replace(/[\r\n]+/g, ' ') and the trailer
+    // reader trims the value; the closure link must be compared in that same
+    // form, or a caller-supplied id can never link to its own commit.
+    const newline = reviewClosuresOf(
+      [reviewFix({ finding: finding('finding\none'), commit: 'newlineLink' })],
+      messageOf,
+    );
+    expect(newline.closures).toHaveLength(1);
+    expect(newline.closures[0]?.taskIds).toEqual(['finding one']);
+    const padded = reviewClosuresOf(
+      [reviewFix({ finding: finding('  finding-1  '), commit: 'paddedLink' })],
+      messageOf,
+    );
+    expect(padded.closures).toHaveLength(1);
+    expect(padded.closures[0]?.taskIds).toEqual(['finding-1']);
+  });
+
+  it('T35 initial open blockers stay in the baseline after a fix', () => {
+    // A fixed blocker leaves openBlocking (and the re-review record), but the
+    // initial population is the denominator's authority: the ratio must not
+    // inflate because the blocker was repaired.
+    const report = {
+      initialOpenBlocking: ['finding-1', 'finding-2'],
+      openBlocking: [] as Finding[],
+    };
+    const planned = reviewPlannedUnitsOf(report);
+    expect(planned).toEqual(['finding-1', 'finding-2']);
+    const probes = new Map(
+      (planned ?? []).map((id) => [id, { completed: true, count: 1 }] as const),
+    );
+    const metric = measureRun([reviewFix({})], planned ?? [], probes, messageOf);
+    expect(metric.fixesPerRun).toEqual({ numerator: 1, denominator: 2 });
+    expect(metric.baselineFailures.map((row) => row.unitId)).toEqual(['finding-1', 'finding-2']);
+    // A report without the capture is unknown, never the recomputed population.
+    const recomputed = { openBlocking: [finding('finding-1')] };
+    expect(reviewPlannedUnitsOf(recomputed)).toBeNull();
   });
 
   it('T35 unknown evidence', () => {

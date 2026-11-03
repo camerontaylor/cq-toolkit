@@ -5,6 +5,7 @@ import type {
   MetricRecord,
 } from '../../kernel/types.js';
 import type { AddressFix } from '../review/addressWorker.js';
+import type { Finding } from '../review/findings.js';
 import type { FixTaskReport } from '../sweep/taskLoop.js';
 import type { ValidationVerdict } from './validate.js';
 
@@ -93,27 +94,35 @@ function fixCandidateOf(task: FixTaskReport): ClosureCandidate {
  * Review projection of the worker's validation. `AddressFix.validation` holds
  * one verdict PER check adapter, while the shared predicate needs the unit's
  * single verdict. An empty array is "no validation recorded" (undefined),
- * never a synthesized pass. Merged gate records retain every check's evidence;
- * the worst verdict wins (needs-human > fail > pass) and a regression flag is
- * preserved.
+ * never a synthesized pass. Merged gate records retain every check's evidence,
+ * and a regression flag is preserved. The predicate consumes one bit — every
+ * per-check row passed — so no worst-verdict precedence is applied: any
+ * non-pass row refuses the closure under its own verdict.
  */
 function reviewValidationOf(rows: readonly ValidationVerdict[]): ValidationVerdict | undefined {
   if (rows.length === 0) return undefined;
-  const verdict = rows.some((row) => row.verdict === 'needs-human')
-    ? 'needs-human'
-    : rows.some((row) => row.verdict === 'fail')
-      ? 'fail'
-      : 'pass';
+  const firstRefusal = rows.find((row) => row.verdict !== 'pass');
   return {
-    verdict,
+    verdict: firstRefusal?.verdict ?? 'pass',
     gates: rows.flatMap((row) => row.gates),
     ...(rows.some((row) => row.regression === true) ? { regression: true as const } : {}),
   };
 }
 
+/**
+ * The finding id as the review commit writer actually emits it: embedded
+ * newlines collapse to a single space before the shared trailer writer, and
+ * the trailer reader trims the value. Comparing the raw caller-supplied id
+ * would let a newline or edge whitespace make a commit fail to link to the
+ * finding it itself names.
+ */
+function reviewLinkIdOf(findingId: string): string | null {
+  return findingId.replace(/[\r\n]+/g, ' ').trim() || null;
+}
+
 function reviewCandidateOf(fix: AddressFix): ClosureCandidate {
   return {
-    linkId: fix.finding.id || null,
+    linkId: reviewLinkIdOf(fix.finding.id),
     fixed: fix.finding.status === 'fixed',
     // Only a disposition that produced a commit names one; absence stays
     // absent rather than becoming an empty-string commit placeholder.
@@ -189,6 +198,27 @@ export function reviewClosuresOf(
   readCommitMessage: (sha: string) => string | undefined,
 ): { closures: ClosureRecord[]; unknownTrailerShas: string[] } {
   return closuresOf(fixes.map(reviewCandidateOf), readCommitMessage);
+}
+
+/**
+ * Review-run baseline planned units (ADR-0008 T35): the initial open-blocker
+ * population the report captured at first admission, before any fix. The
+ * post-fix `openBlocking` recomputation is NOT a substitute — a fixed blocker
+ * drops out of it, so substituting it would shrink the denominator and inflate
+ * fixes-per-run. A report with no capture returns null (unknown), never an
+ * inferred population.
+ */
+export function reviewPlannedUnitsOf(report: {
+  initialOpenBlocking?: readonly string[];
+  /**
+   * Admitted only so a caller holding a ReviewAddressReport needs no cast; it
+   * is never read. This is the whole point of the seam: the recomputed
+   * post-fix population is not the baseline.
+   */
+  openBlocking?: readonly Finding[];
+}): string[] | null {
+  const initial = report.initialOpenBlocking;
+  return initial === undefined ? null : [...initial];
 }
 
 /**
