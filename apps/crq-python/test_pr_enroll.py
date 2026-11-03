@@ -224,7 +224,7 @@ class PrTest(unittest.TestCase):
 
     def tick(self):
         """A real tick with only the vendor/process boundary faked; returns the
-        detached-review spawns and the secret_scan mock for assertions."""
+        detached-review spawns, secret_scan mock and tick log for assertions."""
         real_popen = subprocess.Popen
 
         def fake_child(argv, **kw):
@@ -243,10 +243,10 @@ class PrTest(unittest.TestCase):
             scan = stack.enter_context(mock.patch.object(
                 crq, "secret_scan", return_value=(True, {"denylist_hits": [], "gitleaks_hits": []})))
             child = stack.enter_context(mock.patch.object(crq.subprocess, "Popen", side_effect=fake_child))
-            crq.with_lock(crq.tick, dry=False, only=None)
+            log = crq.with_lock(crq.tick, dry=False, only=None)
             spawns = sum(call.args[0][0] == sys.executable and "_review" in call.args[0]
                          for call in child.call_args_list)
-        return spawns, scan
+        return spawns, scan, log
 
     # ------------------------------------------------------------- tests
 
@@ -386,8 +386,10 @@ class PrTest(unittest.TestCase):
         crq.save_queue(self.q)
         with self.fake_gh(), \
              mock.patch.object(crq.finding_issues, "file_issue", return_value=filed) as file_issue:
-            self.tick()
+            _, _, log = self.tick()
             item = crq.load_queue()["items"][0]
+        self.assertEqual([message for message in log if message.startswith("findings issue")],
+                         ["findings issue #3 (created)"])
         self.assertEqual(item["issue"], filed)
         self.assertFalse(item["issue_pending"])
         file_issue.assert_called_once()
@@ -512,7 +514,7 @@ class PrTest(unittest.TestCase):
     def test_tick_enrolls_and_launches_a_foreign_open_review(self):
         h1 = self.foreign_commit("pr work", {"a.txt": "a\n"})
         with self.fake_gh(opened=[self.pr_row(5, h1)], view=self.pr_view(5, h1)):
-            spawns, scan = self.tick()
+            spawns, scan, _ = self.tick()
         self.assertEqual(spawns, 1)
         self.q = crq.load_queue()
         item = next(i for i in self.q["items"] if i["id"] == "infra-pr5")
