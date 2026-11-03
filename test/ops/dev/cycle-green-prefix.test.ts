@@ -79,6 +79,7 @@ async function scriptedCheck(
 }
 
 interface Scenario {
+  laterUncommittedRed?: boolean;
   /** Green verdict per chain commit, oldest first; the LAST entry is T (always red). */
   greens: boolean[];
   /** The address leg's structured stop; undefined = a clean (ok) address leg. */
@@ -171,6 +172,29 @@ async function run(scenario: Scenario) {
       if (scenario.finalCheckStatus !== undefined) return { status: scenario.finalCheckStatus };
       if (scenario.finalRecordPassed === true) {
         await scriptedCheck(author, true, 'k002-final');
+        if (scenario.laterUncommittedRed === true) {
+          const read = await readWorkState(author, { target: 'main' });
+          if (!read.ok) throw new Error(read.reason);
+          appendCheck(
+            author,
+            read.state.branch,
+            checkRecord({
+              head: read.state.head,
+              base: read.state.base,
+              dirtySha256: read.state.dirtySha256,
+              scope: 'uncommitted',
+              passed: false,
+              gates: [
+                {
+                  name: 'format:check',
+                  status: 'fail',
+                  durationMs: 0,
+                  evidence: 'limited-scope failure',
+                },
+              ],
+            }),
+          );
+        }
         return { status: 'failed', error: 'dev.check: the final gate failed' };
       }
       return scriptedCheck(author, false, 'k002-final');
@@ -448,6 +472,17 @@ describe('dev.cycle red final gates: newest green verified-fix commit (#536)', (
     expectAuthorUntouched(r);
     // The published branch stays (it is on the forge now); the worktree is gone.
     expect(repo.git('rev-parse', `refs/heads/${r.pub}`).trim()).toBe(G);
+  });
+
+  test('a later uncommitted red check cannot replace full-scope green evidence', async () => {
+    const r = await run({
+      greens: [true, false],
+      finalRecordPassed: true,
+      laterUncommittedRed: true,
+    });
+    expect(r.result.status).toBe('failed');
+    expect(r.probeRoots).toEqual([]);
+    expect(r.opens).toEqual([]);
   });
 
   test('every candidate red: the red result verbatim plus per-probe attribution, nothing published', async () => {

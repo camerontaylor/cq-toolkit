@@ -39,6 +39,9 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
       },
       "minItems": 1,
       "type": "array"
+    },
+    "uncommitted": {
+      "type": "boolean"
     }
   },
   "required": [

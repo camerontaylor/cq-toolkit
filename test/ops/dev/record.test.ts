@@ -455,6 +455,21 @@ describe('assembleReadiness', () => {
     }
   });
 
+  test('uncommitted checks cannot replace full check evidence', () => {
+    expect(assemble([cycleRecord(), checkRecord({ scope: 'uncommitted' })]).ready).toBe(false);
+    expect(
+      assemble([cycleRecord(), checkRecord(), checkRecord({ scope: 'uncommitted', passed: false })])
+        .ready,
+    ).toBe(true);
+    expect(
+      assemble([
+        cycleRecord(),
+        checkRecord({ passed: false }),
+        checkRecord({ scope: 'uncommitted' }),
+      ]).ready,
+    ).toBe(false);
+  });
+
   test('an uncommitted-scope terminal cycle never satisfies readiness', () => {
     const result = assemble([cycleRecord({ scope: 'uncommitted' }), checkRecord()]);
     expect(result.ready).toBe(false);

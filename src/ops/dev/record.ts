@@ -247,6 +247,8 @@ export interface DevLoadStamp {
 /** One dev.check run: the gates that ran over the diff and their verdicts. */
 export interface DevCheckRecord {
   kind: 'check';
+  /** Missing on legacy records means full scope. */
+  scope?: 'full' | 'uncommitted';
   /** `k<NNN>-<head8>` — the NNN is the 1-based check count in this ledger when written. */
   checkId: string;
   /** The intended PR target the identity was pinned against. */
@@ -417,6 +419,7 @@ const DevLoadStampSchema = z
 const DevCheckRecordSchema = z
   .object({
     kind: z.literal('check'),
+    scope: z.enum(['full', 'uncommitted']).exactOptional(),
     checkId: z.string().min(1),
     target: z.string().min(1),
     base: z.string().min(1),
@@ -1229,11 +1232,11 @@ export function assembleReadiness(
     }
   }
 
-  // The LATEST check record, WHATEVER its verdict: a green run followed by
+  // The LATEST full-scope check record, WHATEVER its verdict: a green run followed by
   // a red run at the same identity is not ready — filtering to passed runs
   // would read a stale green past a fresh red verdict.
   const allChecks = ledger.records.filter(
-    (record): record is DevCheckRecord => record.kind === 'check',
+    (record): record is DevCheckRecord => record.kind === 'check' && record.scope !== 'uncommitted',
   );
   const check = allChecks[allChecks.length - 1];
   if (check === undefined) {

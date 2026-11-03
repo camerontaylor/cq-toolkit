@@ -56,6 +56,8 @@ export interface DevCheckInput {
   target?: string;
   /** Explicit `a..b` commit range replacing the default merge-base pin; `b` must be HEAD. */
   range?: string;
+  /** Select only staged/unstaged changes; cannot establish full readiness. */
+  uncommitted?: boolean;
   /**
    * Opt the automated test:narrow gate INTO the integration suite
    * (`--include-integration`), for both the --base and --range forms. The
@@ -321,6 +323,15 @@ export function makeDevCheck(
   scanSecrets?: DiffSecretScanner,
 ): Op<DevCheckInput, DevCheckReport> {
   return guardDevOp('dev.check', DevCheckInputSchema, async (input) => {
+    if (
+      input.uncommitted === true &&
+      (input.range !== undefined || input.testFiles !== undefined)
+    ) {
+      return {
+        status: 'failed',
+        error: 'dev.check: uncommitted cannot be combined with range or testFiles',
+      };
+    }
     const fault = input.range === undefined ? null : rangeFault(input.range);
     if (fault !== null) return { status: 'failed', error: `dev.check: ${fault}` };
     // A named selection REPLACES the `--base`/`--range` selection entirely,
@@ -492,7 +503,7 @@ export function makeDevCheck(
               ? input.testFiles
               : input.range !== undefined
                 ? ['--range', `${state.base}..${state.head}`]
-                : ['--base', state.base]),
+                : ['--base', input.uncommitted === true ? state.head : state.base]),
           ],
           TEST_NARROW_TIMEOUT_MS,
         ),
@@ -506,7 +517,7 @@ export function makeDevCheck(
         '--name-status',
         '-z',
         '--no-renames',
-        state.base,
+        input.uncommitted === true ? state.head : state.base,
       ]);
       const trigger =
         nameStatus.exitCode === 0
@@ -539,6 +550,7 @@ export function makeDevCheck(
       ['diff-check:staged', ['diff', '--check', '--cached']],
       ['diff-check:unstaged', ['diff', '--check']],
     ] as const) {
+      if (input.uncommitted === true && name === 'diff-check:committed') continue;
       gates.push(await runGate(effects, name, 'git', args, GIT_GATE_TIMEOUT_MS));
     }
 
@@ -553,6 +565,7 @@ export function makeDevCheck(
         const checkCount = ledger.records.filter((entry) => entry.kind === 'check').length;
         const entry: DevCheckRecord = {
           kind: 'check',
+          scope: input.uncommitted === true ? 'uncommitted' : 'full',
           checkId: `k${String(checkCount + 1).padStart(3, '0')}-${state.head.slice(0, 8)}`,
           target,
           base: state.base,
