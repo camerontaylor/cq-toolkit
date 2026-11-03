@@ -1082,14 +1082,50 @@ export class AiSdkDriver implements Driver {
             if (hasReportedUsage(step.usage)) usageEvidence = true;
             stepUsage = addUsage(stepUsage, usageFromSdk(step.usage));
             responseMessages.push(...normalizeToolErrors(step.response.messages));
+            // Session evidence is diagnostic output too: never bypass the
+            // scanner with tool inputs that the failure record has redacted.
+            let calls: readonly unknown[] = step.toolCalls;
+            let content = step.text;
+            if (uploadRefused) {
+              content = '[redacted: upload scan refused]';
+              calls = [];
+            } else if (this.beforeRequest !== undefined && step.toolCalls.length > 0) {
+              try {
+                const contents: Array<{ text: string }> = [];
+                const collect = (value: unknown): void => {
+                  if (typeof value === 'string') contents.push({ text: value });
+                  else if (value !== null && typeof value === 'object')
+                    for (const [key, child] of Object.entries(value)) {
+                      contents.push({ text: key });
+                      collect(child);
+                    }
+                };
+                collect({ text: step.text, toolCalls: step.toolCalls });
+                await this.beforeRequest(
+                  JSON.stringify({ text: step.text, toolCalls: step.toolCalls }),
+                  contents,
+                  { kind: 'tool-output' },
+                );
+              } catch {
+                content = '[redacted: diagnostic scan refused]';
+                calls = [];
+              }
+            } else if (step.toolCalls.length > 0) {
+              // Keep only names from the trusted selected surface. Neither
+              // provider-supplied ids nor argument values are safe unscanned.
+              calls = step.toolCalls.map((call) => ({
+                toolName: selected.some((tool) => tool.name === call.toolName)
+                  ? call.toolName
+                  : '[unavailable]',
+                input: '[values omitted: no scanner]',
+              }));
+              content = JSON.stringify(calls);
+            }
             await store.appendMessage(record.sessionId, {
               role: 'assistant',
-              content:
-                step.text !== ''
-                  ? step.text
-                  : JSON.stringify(step.toolCalls.length > 0 ? step.toolCalls : ''),
+              content: content !== '' ? content : JSON.stringify(calls.length > 0 ? calls : ''),
               usage: usageFromSdk(step.usage),
-              ...(step.toolCalls.length > 0 ? { toolCalls: JSON.stringify(step.toolCalls) } : {}),
+              ...(calls.length > 0 ? { toolCalls: JSON.stringify(calls) } : {}),
               at: nowIso(),
             });
           },
