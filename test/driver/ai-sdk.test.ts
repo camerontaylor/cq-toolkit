@@ -1161,6 +1161,55 @@ describe('ai-sdk driver specifics (mock model)', () => {
     }
   });
 
+  test('prompted schema final step retains tools and repairs invalid output (Refs #505)', async () => {
+    const requests: Array<{
+      prompt: unknown;
+      tools?: readonly unknown[];
+      responseFormat?: unknown;
+    }> = [];
+    const mock = new MockLanguageModelV4({
+      modelId: 'deepseek-v4.1-flash',
+      doGenerate: async (options) => {
+        requests.push(options);
+        if (requests.length === 1) return toolCallResult('read', { path: 'absent.txt' });
+        return textResult(requests.length === 2 ? '{"fixed":"yes"}' : '{"fixed":true}');
+      },
+    });
+    const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-prompted-final-'));
+    try {
+      const driver = new AiSdkDriver({
+        providers: { 'opencode-go': () => mock },
+        sessionsDir: join(scratchDir, 'sessions'),
+      });
+      const result = await driver.run(
+        invocation({
+          modelSpec: { provider: 'opencode-go', model: 'deepseek-v4.1-flash' },
+          budget: { maxSteps: 2 },
+          toolPolicy: { allow: ['read'], mode: 'allowlist' },
+          outputSchema: toOutputSchema(
+            'test/prompted-final/v1',
+            z.object({ fixed: z.boolean() }).strict(),
+          ),
+        }),
+      );
+      expect(result.stopReason).toBe('complete');
+      expect(result.structuredOutput).toEqual({ fixed: true });
+      expect(result.steps).toBe(3);
+      expect(requests).toHaveLength(3);
+      expect(requests.every((request) => request.responseFormat === undefined)).toBe(true);
+      expect(JSON.stringify(requests[1]!.prompt)).toContain('This is your final step');
+      expect(JSON.stringify(requests[1]!.prompt)).toContain('JSON Schema');
+      expect(requests.map((request) => request.tools)).toEqual(Array(3).fill(requests[0]!.tools));
+      expect(requests[0]!.tools!.length).toBeGreaterThan(0);
+      const main = generateTextArgsFromEnd(1);
+      const repair = generateTextArgsFromEnd(0);
+      expect(repair.system).toEqual(main.system);
+      expect(JSON.stringify(repair.tools)).toEqual(JSON.stringify(main.tools));
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
   test('prompted-schema providers never send response_format: the schema rides the prompt and the reply text is validated (dogfood C, 2026-10-25)', async () => {
     const formats: unknown[] = [];
     const contracts: boolean[] = [];
