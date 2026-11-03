@@ -15,6 +15,7 @@ import test_author_quota_tick as tick_fixtures
 
 crq = fixtures.crq
 REFRESH = crq.refresh_slot_deadline
+PR_INFO = crq.pr_info
 AT = dt.datetime(2026, 10, 28, 1, 1, tzinfo=dt.timezone.utc)
 
 
@@ -78,7 +79,7 @@ class ConcurrencyTest(unittest.TestCase):
             return item['id']
         for name, value in [('launch', launch),
                             ('plan_open', lambda *args: self.plan),
-                            ('pr_info', lambda pr: {'state': 'OPEN'}),
+                            ('pr_info', lambda pr, repo=None: {'state': 'OPEN'}),
                             ('quiet_reason', lambda *args, **kwargs: None)]:
             patch = mock.patch.object(crq, name, value)
             patch.start()
@@ -99,6 +100,17 @@ class ConcurrencyTest(unittest.TestCase):
         crq.tick()
         self.assertEqual(self.started, ['prioritized', 'normal', 'promotion'])
         self.assertEqual(len(crq.inflight(self.q)), 3)
+
+    def test_primary_multi_start_uses_real_repo_scoped_pr_lookup(self):
+        self.items()
+        with mock.patch.object(crq, 'pr_info', wraps=PR_INFO), \
+             mock.patch.object(crq, 'gh_json', return_value={'state': 'OPEN'}) as gh:
+            crq.tick()
+        self.assertEqual(self.started, ['prioritized', 'normal', 'promotion'])
+        self.assertEqual(len(crq.inflight(self.q)), 3)
+        self.assertEqual([call.args[0][2] for call in gh.call_args_list], ['1', '0', '2'])
+        self.assertTrue(all(call.args[0][3:5] == ['--repo', crq.REPO]
+                            for call in gh.call_args_list))
 
     def test_ceiling_inflight_and_zero_vendor_slots(self):
         for remaining, ceiling, inflight, expected in [(10, 2, 10, 2), (10, 10, 1, 1), (0, 10, 10, 0)]:
