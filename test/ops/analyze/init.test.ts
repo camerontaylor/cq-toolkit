@@ -190,6 +190,39 @@ describe('analyze.init migration', () => {
     expect(readdirSync(dir)).toEqual(['cq.json']);
   });
 
+  test('migrates a custom config path without touching cq.json', async () => {
+    const text = JSON.stringify({
+      schemaVersion: 1,
+      checks: [{ adapter: 'tsc-lines', command: { command: 'tsc', args: [] } }],
+    });
+    const dir = project({ 'custom.json': text, 'cq.json': 'keep' });
+    const result = await init({ dir, migrate: true, configPath: 'custom.json' });
+    expect(result.status).toBe('ok');
+    expect(JSON.parse(readFileSync(join(dir, 'custom.json'), 'utf8')).schemaVersion).toBe(2);
+    expect(readFileSync(join(dir, 'cq.json'), 'utf8')).toBe('keep');
+  });
+
+  test('an unreadable stale scratch directory does not block migration', async () => {
+    const dir = project({
+      'cq.json': JSON.stringify({
+        schemaVersion: 1,
+        checks: [{ adapter: 'tsc-lines', command: { command: 'tsc', args: [] } }],
+      }),
+    });
+    const scratch = join(dir, '.cq-config-migrate-ABC123');
+    const locked = join(scratch, 'locked');
+    mkdirSync(locked, { recursive: true });
+    writeFileSync(join(locked, 'partial'), 'partial');
+    const old = new Date(Date.now() - 48 * 60 * 60 * 1000);
+    utimesSync(scratch, old, old);
+    chmodSync(locked, 0);
+    try {
+      expect((await init({ dir, migrate: true })).status).toBe('ok');
+    } finally {
+      chmodSync(locked, 0o700);
+    }
+  });
+
   test('--migrate on v2 is a no-op preserving bytes, timestamps and optional policy', async () => {
     const config = {
       schemaVersion: 2,
@@ -218,25 +251,21 @@ describe('analyze.init migration', () => {
         checks: [{ adapter: 'tsc-lines', command: { command: 'custom-tsc', args: [] } }],
       });
       const dir = project({ 'cq.json': text });
-      const result = await init(
-        AnalyzeInitInputSchema.parse({
-          dir,
-          migrate: true,
-          force: false,
-          packages: [{ name: 'fixture', path: '.' }],
-          roles: { worker: { provider: 'fixture', model: 'fixture' } },
-          budgets: { run: { maxTokens: 1234 } },
-          review: { rounds: 2 },
-          escalation: { workerAttempts: 3 },
-        }),
-      );
-      expect(result.status).toBe('failed');
-      if (result.status === 'failed') {
-        expect(result.error).toContain('usage error: --migrate');
-        expect(result.error).toContain(
+      const parsed = AnalyzeInitInputSchema.safeParse({
+        dir,
+        migrate: true,
+        force: false,
+        packages: [{ name: 'fixture', path: '.' }],
+        roles: { worker: { provider: 'fixture', model: 'fixture' } },
+        budgets: { run: { maxTokens: 1234 } },
+        review: { rounds: 2 },
+        escalation: { workerAttempts: 3 },
+      });
+      expect(parsed.success).toBe(false);
+      if (!parsed.success)
+        expect(parsed.error.message).toContain(
           'policy options: budgets, escalation, packages, review, roles',
         );
-      }
       expect(readFileSync(join(dir, 'cq.json'), 'utf8')).toBe(text);
       expect(readdirSync(dir)).toEqual(['cq.json']);
     },

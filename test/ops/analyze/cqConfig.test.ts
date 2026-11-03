@@ -72,8 +72,10 @@ describe('cq.json v2', () => {
     const result = parseCqConfig(
       JSON.stringify({ ...minimal, schemaVersion: 1 }),
       "project's folder",
+      "config's file.json",
     );
     expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toContain("--configPath='config'\\''s file.json'");
     if (!result.ok) expect(result.reason).toContain("--dir='project'\\''s folder'");
   });
 

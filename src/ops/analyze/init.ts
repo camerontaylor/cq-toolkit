@@ -46,6 +46,8 @@ export interface AnalyzeInitInput extends Partial<Omit<CqConfig, 'schemaVersion'
   dir: string;
   /** Overwrite an existing `cq.json`. Default false (refuse). */
   force?: boolean;
+  /** Config path relative to dir, or absolute. Default cq.json. */
+  configPath?: string;
   /** Rewrite an existing v1 file to v2, preserving all checks. */
   migrate?: boolean;
 }
@@ -128,7 +130,7 @@ export function detectChecks(dir: string): { checks: CheckRunnerInput[]; detecte
 /** Build the `analyze.init` op (file-system backed; no injected seams needed). */
 export function makeAnalyzeInit(): Op<AnalyzeInitInput, AnalyzeInitReport> {
   return async (input) => {
-    const { dir: _dir, force: _force, migrate: _migrate, ...options } = input;
+    const { dir: _dir, force: _force, migrate: _migrate, configPath: _configPath, ...options } = input;
     const policyKeys = Object.keys(options).sort();
     if (input.migrate === true && policyKeys.length > 0) {
       return {
@@ -145,7 +147,7 @@ export function makeAnalyzeInit(): Op<AnalyzeInitInput, AnalyzeInitReport> {
     if (!isDir) {
       return { status: 'failed', error: `analyze.init: directory does not exist: '${input.dir}'` };
     }
-    const configPath = resolve(input.dir, CQ_CONFIG_FILE);
+    const configPath = resolve(input.dir, input.configPath ?? CQ_CONFIG_FILE);
     let existing: ReturnType<typeof lstatSync> | undefined;
     try {
       existing = lstatSync(configPath);
@@ -175,8 +177,13 @@ export function makeAnalyzeInit(): Op<AnalyzeInitInput, AnalyzeInitReport> {
           if (!entry.isDirectory() || !/^\.cq-config-migrate-[A-Za-z0-9]{6}$/.test(entry.name))
             continue;
           const scratch = join(input.dir, entry.name);
-          if (Date.now() - lstatSync(scratch).mtimeMs > 24 * 60 * 60 * 1000) {
-            rmSync(scratch, { recursive: true, force: true });
+          try {
+            if (Date.now() - lstatSync(scratch).mtimeMs > 24 * 60 * 60 * 1000) {
+              rmSync(scratch, { recursive: true, force: true });
+            }
+          } catch {
+            // Cleanup is best-effort: concurrent removal or permissions must
+            // not prevent migration of the actual configuration.
           }
         }
         const migrated = migrateCqConfig(readFileSync(configPath, 'utf8'));

@@ -135,7 +135,7 @@ export function resolveChecks(
       error: `analyze.run: no checks configured — could not read '${configPath}' (${messageOf(err)}); run \`cq analyze.init --dir='${dir.replace(/'/g, "'\\''")}'\` to write one, or pass checks explicitly`,
     };
   }
-  const parsed = parseCqConfig(text, dir);
+  const parsed = parseCqConfig(text, dir, input.configPath);
   if (!parsed.ok) {
     return {
       ok: false,
