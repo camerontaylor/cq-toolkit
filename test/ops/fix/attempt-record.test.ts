@@ -141,6 +141,24 @@ describe('sanitizeObservation', () => {
     },
   );
 
+  it.each([
+    ["https://a/?q=xhttps://b/y'SEC", 'https://a/'],
+    ['Error: 12:34\nfoo@bar', 'Error: 12:34\nbar'],
+    ['src/ab:cd\nx@y', 'src/ab:cd\ny'],
+    ['us\ner:SEC@host', '\nhost'],
+    ['user\n:SEC@host', '\nhost'],
+    ['https://h/x\nuser@host', 'https://h/x\nhost'],
+  ])('pins accepted sanitizer edge case: %s', (input, expected) => {
+    expect(sanitizeObservation(input)).toEqual(expected);
+  });
+
+  it.each([
+    String.raw`{"url":"https://h/x?q=\"SEC38\""}`,
+    String.raw`{"url":"https://a/?q=xhttps://b/y\"SEC38\""}`,
+  ])('does not resume at an escaped query quote: %s', (input) => {
+    expect(sanitizeObservation(input)).not.toContain('SEC38');
+  });
+
   it('requires post-strip redaction for a newly exposed URL secret', () => {
     process.env.ZZ_HOOK_URL = 'https://hooks.example/svc/p';
     try {

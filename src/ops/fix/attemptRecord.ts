@@ -118,7 +118,13 @@ function stripCredentialText(text: string): string {
       const limit = schemes[k + 1]?.start ?? run.length;
       if (droppingQuery) {
         let close = scheme.start;
-        while (close < limit && (terminator === '' || run[close] !== terminator)) close++;
+        while (
+          close < limit &&
+          (terminator === '' ||
+            run[close] !== terminator ||
+            (terminator === '"' && run[close - 1] === '\\'))
+        )
+          close++;
         if (close < limit) {
           chunks.push(freeText(run.slice(close, limit)));
           droppingQuery = false;
@@ -138,14 +144,22 @@ function stripCredentialText(text: string): string {
       let tailEnd = end;
       if (end < token.length) {
         tailEnd++;
-        while (tailEnd < token.length && (terminator === '' || token[tailEnd] !== terminator))
+        while (
+          tailEnd < token.length &&
+          (terminator === '' ||
+            token[tailEnd] !== terminator ||
+            (terminator === '"' && token[tailEnd - 1] === '\\'))
+        )
           tailEnd++;
       }
       const at = token.lastIndexOf('@', end - 1);
       const authority = token.slice(0, authorityEnd);
       const hostPort = /^(\[[^\]]*\]|[^:@]+):\d+$/.test(authority);
       const incomplete =
-        at < 0 && !hostPort && ((i < text.length && authority.includes(':')) || newlineCredential);
+        at < 0 &&
+        !hostPort &&
+        ((i < text.length && authority.includes(':')) ||
+          (newlineCredential && authorityEnd === token.length));
       chunks.push(run.slice(scheme.start, scheme.authority));
       chunks.push(incomplete ? '' : token.slice(at >= 0 ? at + 1 : 0, end));
       chunks.push(freeText(token.slice(tailEnd)));
@@ -162,7 +176,11 @@ function stripCredentialText(text: string): string {
         (!run.includes('/') &&
           parts.length >= 2 &&
           parts.every((part) => part.length >= 2 && !/^\d+$/.test(part)));
-      const splitCredential = newlineCredential && credentialShape;
+      const nextRun = text.slice(nextStart, next);
+      const nextAt = nextRun.indexOf('@');
+      const splitUsername =
+        /^[a-z][a-z0-9_-]*$/i.test(run) && nextAt >= 0 && nextRun.slice(0, nextAt).includes(':');
+      const splitCredential = newlineCredential && (credentialShape || splitUsername);
       chunks.push(splitCredential ? '' : freeText(run));
     }
   }
