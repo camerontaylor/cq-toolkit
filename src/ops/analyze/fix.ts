@@ -671,7 +671,8 @@ export function makeAnalyzeFix(deps: AnalyzeFixDeps): Op<AnalyzeFixInput, Analyz
         if (input.apply === true && input.previewDigest === undefined) {
           return {
             status: 'needs-human',
-            reason: 'analyze.fix: an agent proposal is applied only after review — no project file was written; preview first, then re-run with --previewDigest=sha256:<reviewed digest> --apply',
+            reason:
+              'analyze.fix: an agent proposal is applied only after review — no project file was written; preview first, then re-run with --previewDigest=sha256:<reviewed digest> --apply',
           };
         }
         const proposal = await agentPreview(deps, dir, out, exempt, selected, input);
@@ -776,12 +777,22 @@ export function makeAnalyzeFix(deps: AnalyzeFixDeps): Op<AnalyzeFixInput, Analyz
     const sidecarSha = selected?.sidecarSha256;
     const confirmFor = (subject: ApprovalSubject): boolean => {
       confirmAsked = true;
+      let sidecarMatches = selected === undefined;
+      if (selected !== undefined) {
+        try {
+          sidecarMatches =
+            realpathSync(selected.sidecarPath) === selected.realSidecar &&
+            sidecarDigest(selected.realSidecar) === sidecarSha;
+        } catch {
+          sidecarMatches = false;
+        }
+      }
       confirmMatched =
         subject.op === expected.op &&
         subject.workspace === expected.workspace &&
         subject.inputDigest === expected.inputDigest &&
         sameTargets(subject.targets, expected.targets) &&
-        (selected === undefined || sidecarDigest(selected.realSidecar) === sidecarSha);
+        sidecarMatches;
       return confirmMatched;
     };
     const authority = (deps.attended ?? makeAttendedApprovalAuthority)({

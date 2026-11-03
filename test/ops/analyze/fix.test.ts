@@ -303,6 +303,29 @@ describe('analyze.fix — cluster + rule', () => {
     expect(source(dir)).toBe(BAD);
   });
 
+  test('a sidecar symlink retargeted during the before-check is not confirmed', async () => {
+    const { dir, clusterId, sidecarPath } = await fixture();
+    const alias = join(dir, '.cq/analysis/selected.json');
+    const replacement = join(dir, '.cq/analysis/replacement.json');
+    writeFileSync(replacement, `${readFileSync(sidecarPath, 'utf8')}\n`);
+    symlinkSync(sidecarPath, alias);
+    const run = scriptedRunner({
+      onTsc: () => {
+        rmSync(alias);
+        symlinkSync(replacement, alias);
+      },
+    });
+    const result = await makeAnalyzeFix({ run })({
+      dir,
+      clusterId,
+      sidecarPath: alias,
+      rule: RULE,
+      apply: true,
+    });
+    expect(result.status).toBe('needs-human');
+    expect(source(dir)).toBe(BAD);
+  });
+
   test('a target edited after analysis → failed stale sidecar with the analyze.run hint', async () => {
     const { dir, clusterId } = await fixture();
     writeFileSync(join(dir, 'src', 'index.ts'), `${BAD}// edited\n`);
