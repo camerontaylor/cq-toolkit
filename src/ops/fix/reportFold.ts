@@ -1,74 +1,29 @@
-// Report v2 observation fold — ADR-0008 T36.
-//
-// Relationship to the kernel primitive: `src/kernel/observation.ts` also
-// exports a `foldObservations`. That one is the IDENTITY/JOIN primitive: it
-// validates each stream and resolves every `kernel-run-linked` event against
-// the kernel v3 descriptors (resolved or unknown with a reason). THIS
-// `foldObservations` is the report-v2 fold built ON that primitive: it
-// preserves the kernel result unchanged, adds the report-level completeness
-// state (a torn stream is `partial`, never silently complete), groups the
-// shared `attempt-finished` kind generically (no producer-specific branch, so
-// T14 address attempts fold with no change when they land), records the
-// producer gaps as explicit unknown availability (T04 descriptors, T14
-// address attempts), and sanitizes the returned surface before any consumer
-// persists it. Do not confuse the two names: only this module owns report
-// semantics; it never re-implements the join.
-//
-// The fold is READ-ONLY and verdict-neutral: it copies inputs, mutates
-// nothing, and cannot change a run outcome. It never invents a value: empty
-// evidence is `unavailable`, a zero count is only ever a measured zero, and
-// every unresolved link keeps its kernel-primitive reason.
+// ADR-0008 T36: read-only, verdict-neutral ReportV2 assembly.
 import type {
   AvailabilityRecord,
-  AttemptFinishedJournalEvent,
+  CompositionStartedJournalEvent,
   ObservationStream,
+  ReportV2,
 } from '../../kernel/types.js';
+import { ReportV2Schema } from '../../kernel/schema.js';
 import {
   foldObservations as foldKernelLinks,
-  type FoldedObservation,
   type KernelRunDescriptor,
-  type ObservationPersistence,
   type ObservationWriter,
 } from '../../kernel/observation.js';
 import { sanitizeObservation } from './attemptRecord.js';
 
-/** Inputs the consumers (makeFixRun, makeReviewAddress) hand the fold. */
 export interface ReportFoldInput {
-  /** Observation streams in fold order (per-stream file order preserved). */
   streams: readonly ObservationStream[];
-  /** Kernel v3 descriptors links resolve against; absent descriptors stay unknown. */
   kernelRuns?: readonly KernelRunDescriptor[];
-  /** The composition writer's declared persistence — never inferred durable. */
-  persistence: ObservationPersistence;
+  producer: 'fix' | 'address';
 }
+const unavailable = (reason: string): AvailabilityRecord => ({
+  state: 'unavailable',
+  reason,
+  source: null,
+});
 
-/** Report-v2 observation evidence folded from one composition. */
-export interface ReportObservationFold {
-  reportVersion: 2;
-  /** `complete` only when a stream exists and every folded stream is whole. */
-  state: 'complete' | 'partial' | 'unavailable';
-  persistence: ObservationPersistence;
-  /** Kernel-primitive result, unchanged: links stay resolved/unknown with reasons. */
-  streams: FoldedObservation[];
-  /**
-   * Every `attempt-finished` row, grouped generically across producers in
-   * fold order (stream order, then file order). Absent means none was
-   * observed; it is never a fabricated zero.
-   */
-  attempts: AttemptFinishedJournalEvent[];
-  /** The descriptors the join ran against (`[]` until T04 lands). */
-  kernelRuns: KernelRunDescriptor[];
-  /** Availability keyed by JSON Pointer relative to this fold. */
-  availability: Record<string, AvailabilityRecord>;
-}
-
-/**
- * The writer's in-memory stream snapshot for the fold. The identity is the
- * WRITER's (a test seam writer may declare a distinct one), and the stream is
- * complete only when no observation failure occurred AND its header actually
- * landed: header-first is the stream schema, so an accepted prefix without
- * the header is torn evidence.
- */
 export function observationStreamOf(
   writer: ObservationWriter,
   failureFree: boolean,
@@ -82,73 +37,142 @@ export function observationStreamOf(
   };
 }
 
-/**
- * Fold composition streams plus linked kernel streams into report v2
- * observation evidence (ADR-0008 T36). Partial completion stays partial.
- */
-export function foldObservations(input: ReportFoldInput): ReportObservationFold {
+export function foldObservations(input: ReportFoldInput): ReportV2 {
+  const identities = new Set<string>();
+  for (const stream of input.streams) {
+    const key = `${stream.workId}\0${stream.compositionRunId}`;
+    if (identities.has(key)) throw new Error('duplicate composition observation stream');
+    identities.add(key);
+  }
   const folded = foldKernelLinks(input.streams, input.kernelRuns ?? []);
+  const header = folded[0]?.stream.events[0];
+  if (header?.type !== 'composition-started') throw new Error('no composition header landed');
+  const partial = folded.some(({ stream }) => !stream.complete);
   const attempts = folded.flatMap(({ stream }) =>
-    stream.events.filter(
-      (event): event is AttemptFinishedJournalEvent => event.type === 'attempt-finished',
-    ),
+    stream.events.filter((event) => event.type === 'attempt-finished'),
   );
-  const state: ReportObservationFold['state'] =
-    folded.length === 0
-      ? 'unavailable'
-      : folded.some(({ stream }) => !stream.complete)
-        ? 'partial'
-        : 'complete';
-  const kernelRuns = [...(input.kernelRuns ?? [])];
-  const availability: Record<string, AvailabilityRecord> = {
+  const availability: ReportV2['availability'] = {
     '': {
-      state: state === 'complete' ? 'known' : state,
-      reason:
-        state === 'unavailable'
-          ? 'no composition observation stream was available'
-          : state === 'partial'
-            ? 'one or more observation streams are torn or indeterminate; partial evidence only'
-            : 'every folded observation stream is whole',
+      state: partial ? 'partial' : 'known',
+      reason: partial
+        ? 'torn observation stream; partial evidence only'
+        : 'all observation streams are whole',
       source: null,
     },
-    '/kernelRuns':
-      kernelRuns.length === 0
-        ? {
-            state: 'unavailable',
-            reason:
-              'no kernel v3 run descriptor was available: the v3 run-started header ' +
-              'writer (T04) has not landed, so every kernel-run link is unknown',
-            source: null,
-          }
-        : {
-            state: 'known',
-            reason:
-              'kernel-run links resolve against the supplied v3 descriptors; ' +
-              'an unresolved link carries its own reason',
-            source: null,
-          },
-    '/attempts':
-      attempts.length > 0
-        ? {
-            state: 'known',
-            reason: 'attempt-finished events were observed in the folded streams',
-            source: null,
-          }
-        : {
-            state: 'not-collected',
-            reason:
-              'no attempt-finished event was observed in the folded streams; ' +
-              'address attempts (T14) have not landed',
-            source: null,
-          },
+    '/attempts': {
+      state: partial
+        ? 'partial'
+        : attempts.length
+          ? 'known'
+          : input.producer === 'address'
+            ? 'unavailable'
+            : 'known-zero',
+      reason:
+        input.producer === 'address' && !attempts.length
+          ? 'address attempts (T14) have not landed'
+          : 'measured attempt-finished events in the composition stream',
+      source: null,
+    },
   };
-  return sanitizeObservation({
-    reportVersion: 2 as const,
-    state,
-    persistence: input.persistence,
-    streams: folded,
-    attempts,
-    kernelRuns,
-    availability,
-  });
+  const unknownLinks = folded
+    .flatMap((row) => row.kernelRunLinks)
+    .filter((link) => link.state === 'unknown');
+  availability['/provenance'] =
+    unknownLinks.length || !input.kernelRuns?.length
+      ? unavailable(
+          'T04 kernel v3 descriptors unavailable; ' +
+            unknownLinks.map((link) => link.reason).join('; '),
+        )
+      : {
+          state: 'known',
+          reason: 'composition header and resolved kernel descriptors',
+          source: null,
+        };
+  for (const field of [
+    'tasks',
+    'gates',
+    'dispositions',
+    'reviews',
+    'approvals',
+    'writeDecisions',
+    'metric',
+    'metric/fixesPerRun/numerator',
+    'metric/fixesPerRun/denominator',
+  ]) {
+    availability[`/${field}`] = unavailable('producer not yet wired to the composition report');
+  }
+  availability['/acceptances'] = unavailable(
+    'T20 acceptance importer deferred; empty evidence is not all-clear',
+  );
+  return ReportV2Schema.parse(
+    sanitizeObservation({
+      reportVersion: 2,
+      provenance: header.payload.provenance,
+      correlation: header.payload.correlation,
+      tasks: [],
+      attempts,
+      gates: [],
+      dispositions: [],
+      acceptances: [],
+      reviews: [],
+      approvals: [],
+      writeDecisions: [],
+      metric: {
+        fixesPerRun: { numerator: null, denominator: null },
+        verifiedCommits: [],
+        closures: [],
+        baselineFailures: [],
+      },
+      availability,
+    }),
+  );
+}
+
+/** Report boundary: corrupt evidence cannot change the operational verdict.
+ * A declared header may supply attribution after append failure, never evidence rows.
+ */
+export function assembleReportV2(
+  input: Omit<ReportFoldInput, 'streams'> & {
+    writer?: ObservationWriter | undefined;
+    streams?: readonly ObservationStream[];
+    failureFree: boolean;
+    header?: CompositionStartedJournalEvent | undefined;
+  },
+): { reportV2?: ReportV2; availability: AvailabilityRecord } {
+  try {
+    const stream =
+      input.writer === undefined ? undefined : observationStreamOf(input.writer, input.failureFree);
+    if (input.streams === undefined && stream?.events[0]?.type !== 'composition-started')
+      throw new Error('no composition header landed');
+    const reportV2 = foldObservations({
+      ...input,
+      streams: input.streams ?? (stream === undefined ? [] : [stream]),
+    });
+    return { reportV2, availability: reportV2.availability['']! };
+  } catch (error) {
+    const availability = unavailable(`ReportV2 assembly unavailable: ${String(error)}`);
+    if (input.header === undefined) return sanitizeObservation({ availability });
+    try {
+      const reportV2 = foldObservations({
+        producer: input.producer,
+        streams: [
+          {
+            workId: input.header.payload.correlation.workId,
+            compositionRunId: input.header.runId,
+            events: [input.header],
+            complete: false,
+          },
+        ],
+      });
+      reportV2.attempts = [];
+      reportV2.availability[''] = availability;
+      reportV2.availability['/attempts'] = availability;
+      return {
+        reportV2: ReportV2Schema.parse(sanitizeObservation(reportV2)),
+        availability: sanitizeObservation(availability),
+      };
+    } catch {
+      return { availability: sanitizeObservation(availability) };
+    }
+  }
 }

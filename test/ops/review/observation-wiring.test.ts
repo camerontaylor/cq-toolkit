@@ -1,3 +1,4 @@
+import { ReportV2Schema } from '../../../src/kernel/schema.js';
 // ADR-0008 T31 — address composition observation writer wiring
 // (measurement slice M0-address-writer).
 //
@@ -236,6 +237,7 @@ describe('T31 round-trip through the address composition', () => {
       expect(result.status, JSON.stringify(result)).toBe('ok');
       const report = reportOf(result);
       expect(report?.observation).toBeDefined();
+      expect(ReportV2Schema.safeParse(report?.reportV2).success).toBe(true);
       // The REAL runtime deps received the writer.
       expect(f.boundDeps.length).toBeGreaterThan(0);
       const writers = new Set(
@@ -586,7 +588,7 @@ describe('T31 unknown evidence: unreturned runs stay unlinked', () => {
 // ---- T31 failure boundary -------------------------------------------------
 
 describe('T31 failure boundary', () => {
-  test.each(['header', 'link', 'close'] as const)(
+  test.each(['header', 'link', 'close', 'fold'] as const)(
     '%s writer failure preserves the run verdict and reports an indeterminate, sanitized surface',
     async (boundary) => {
       const f = await fixture();
@@ -596,6 +598,10 @@ describe('T31 failure boundary', () => {
       });
       const append = writer.append.bind(writer);
       const originalClose = writer.close.bind(writer);
+      if (boundary === 'fold') {
+        const events = writer.events.bind(writer);
+        vi.spyOn(writer, 'events').mockImplementation(() => [...events(), ...events()]);
+      }
       // P3-8: the composition adopts the writer's own compositionRunId/workId,
       // so the injected events pass through unchanged — no test-side rewrite.
       const appendSpy = vi.spyOn(writer, 'append').mockImplementation(async (event) => {
@@ -622,8 +628,12 @@ describe('T31 failure boundary', () => {
         // its own outcome (ok on the fixture's clean fix cycle).
         expect(result.status).toBe('ok');
         const report = reportOf(result);
-        expect(report?.observation?.status).toBe('indeterminate');
-        expect(report?.observation?.failure).not.toContain('tok');
+        expect(ReportV2Schema.safeParse(report?.reportV2).success).toBe(true);
+        expect(report?.reportV2?.availability['']?.state).toBe(
+          boundary === 'header' || boundary === 'fold' ? 'unavailable' : 'partial',
+        );
+        if (boundary !== 'fold') expect(report?.observation?.status).toBe('indeterminate');
+        if (boundary !== 'fold') expect(report?.observation?.failure).not.toContain('tok');
         // The injected writer closed exactly once, inside finish().
         expect(closeSpy).toHaveBeenCalledTimes(1);
         expect(appendSpy).toHaveBeenCalled();

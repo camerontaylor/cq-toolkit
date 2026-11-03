@@ -17,8 +17,10 @@ import {
   type KernelRunDescriptor,
   type ObservationWriter,
 } from '../../kernel/observation.js';
-import { foldObservations, observationStreamOf, type ReportObservationFold } from './reportFold.js';
+import { assembleReportV2 } from './reportFold.js';
 import type {
+  AvailabilityRecord,
+  ReportV2,
   CompositionStartedJournalEvent,
   CorrelationRecord,
   KernelRunLinkedJournalEvent,
@@ -103,6 +105,7 @@ export interface FixRunReport {
    * open; absent on pre-dispatch refusals.
    */
   observation?: FixRunObservation;
+  reportV2?: ReportV2;
   run?: RunReport;
   assembly?: RunReport;
   escalation?: Omit<EscalationState, 'events'> & {
@@ -131,8 +134,8 @@ export interface FixRunObservation {
   workId: string;
   failure: string | null;
   kernelRuns: KernelRunDescriptor[];
-  /** ADR-0008 T36: report-v2 fold of this composition stream and its links. */
-  fold: ReportObservationFold;
+  /** Availability of ReportV2 assembly; observational failures never change the verdict. */
+  availability?: AvailabilityRecord;
 }
 
 async function scanPrBodyForUpload(scanner: DiffSecretScanner, body: string): Promise<void> {
@@ -342,7 +345,12 @@ export function makeFixRun(deps: FixRunDeps = {}) {
     // writer API is memory-only and the report declares persistence
     // unavailable — it never claims durability.
     const compositionRunId = randomUUID();
-    let observation: (FixRunObservation & { writer?: ObservationWriter }) | undefined;
+    let observation:
+      | (FixRunObservation & {
+          writer?: ObservationWriter;
+          header?: CompositionStartedJournalEvent;
+        })
+      | undefined;
     let observationClosed = false;
     const observationFailure = (error: unknown) => {
       if (observation) {
@@ -493,21 +501,22 @@ export function makeFixRun(deps: FixRunDeps = {}) {
       await closeObservation();
       if (observation !== undefined) {
         const writer = observation.writer;
+        const assembled = assembleReportV2({
+          writer,
+          header: observation.header,
+          failureFree: observation.status !== 'indeterminate',
+          kernelRuns: observation.kernelRuns,
+          producer: 'fix',
+        });
+        if (assembled.reportV2) report.reportV2 = assembled.reportV2;
         report.observation = {
+          availability: assembled.availability,
           persistence: observation.persistence,
           status: observation.status,
           compositionRunId,
           workId: observation.workId,
           failure: observation.failure,
           kernelRuns: [...observation.kernelRuns],
-          fold: foldObservations({
-            streams:
-              writer === undefined
-                ? []
-                : [observationStreamOf(writer, observation.status !== 'indeterminate')],
-            kernelRuns: observation.kernelRuns,
-            persistence: observation.persistence,
-          }),
         };
       }
       // Deliberate: the entire report is persisted, beyond the sanitized observation header.
@@ -713,9 +722,6 @@ export function makeFixRun(deps: FixRunDeps = {}) {
         workId: correlation.workId,
         failure: null,
         kernelRuns: [],
-        // Placeholder until the report is built; the final fold reads the
-        // closed writer's accepted events and the resolved descriptors.
-        fold: foldObservations({ streams: [], persistence: writer?.persistence ?? 'unavailable' }),
       };
       if (openFailure !== undefined) observationFailure(openFailure);
       const header: CompositionStartedJournalEvent = {
@@ -728,6 +734,7 @@ export function makeFixRun(deps: FixRunDeps = {}) {
         attempt: null,
         payload: { journalVersion: 3, provenance, correlation },
       };
+      observation.header = header;
       if (writer !== undefined) {
         try {
           await writer.append(header);
