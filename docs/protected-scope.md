@@ -183,7 +183,7 @@ privileged executor therefore fails CI until someone classifies it.
 the judging entry points and fails when a file is unprotected. The entry
 points include the ratchet engine that `loadEngine` imports, parsed from the
 script. It also pins which `trust/dist/...` calls the workflows contain.
-`test/ops/gates/policyDiff.test.ts` fails if a protected entry matches no
+`test/ops/gates/policyDiff.own-policy-list.test.ts` fails if a protected entry matches no
 tracked file. A pending entry, one whose tree has not landed yet, must be
 named in that test, and none is pending today.
 

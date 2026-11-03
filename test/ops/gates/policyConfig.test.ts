@@ -123,7 +123,8 @@ describe('resolveProtectedPathsConfig', () => {
 });
 
 // Owner ruling D-P: the trust-ref revision window (pure half; the policy list
-// schema and the trust-ref-only read are covered in policyDiff.test.ts).
+// schema and the trust-ref-only read are covered in
+// test/ops/gates/policyDiff.revision-window.test.ts).
 describe('applyRevisionWindow', () => {
   const window: RevisionWindow = {
     posture: 'diff-check',

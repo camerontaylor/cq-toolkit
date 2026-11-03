@@ -1,8 +1,9 @@
 // Residual R1 — cq-policy's in-process PR-level policy check
-// (src/selfhost/policy-diff.ts). The op itself is policyDiff.test.ts's; this
-// file pins the carrier: the op's own schema over strict argv, the posture
-// taken from the env exactly as the registry importer takes it, and the
-// output contract cq-policy's judge step validates.
+// (src/selfhost/policy-diff.ts). The op itself is the policyDiff gate suite's
+// (test/ops/gates/policyDiff.*.test.ts); this file pins the carrier: the op's
+// own schema over strict argv, the posture taken from the env exactly as the
+// registry importer takes it, and the output contract cq-policy's judge step
+// validates.
 import { describe, expect, test } from 'vitest';
 import type { OpResult } from '../../src/kernel/types.js';
 import type { ProtectedPathsConfig } from '../../src/ops/gates/policyConfig.js';

@@ -734,6 +734,6 @@ gh api "repos/camerontaylor/cq-toolkit/commits/70de728/check-runs?filter=latest&
 ```bash
 # who enforces the reconciled lists
 rg -n "static,denylist,ratchet" policy/templates/instances.json .github/workflows/merge-queue-gate.yml
-rg -n 'requiredChecks' policy/protected-paths.json src/ops/gates/policyDiff.ts test/ops/gates/policyDiff.test.ts
+rg -n 'requiredChecks' policy/protected-paths.json src/ops/gates/policyDiff.ts 'test/ops/gates/policyDiff.*.test.ts'
 rg -n 'verifiedWorkflows|checkVerifiedRun' .github/workflows/gate.yml src/selfhost/promote-gate.ts
 ```
