@@ -1,5 +1,5 @@
 import { lstatSync, readlinkSync, realpathSync } from 'node:fs';
-import { basename, dirname, isAbsolute, relative, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, relative, resolve, parse, sep } from 'node:path';
 import { fnv1a32Hex } from '../gates/fingerprint.js';
 import type { AdapterName, CheckCommand, CheckFailure, FailureSet } from '../gates/checkRunner.js';
 
@@ -120,7 +120,16 @@ function canonicalPath(path: string, symlinkDepth = 0): string {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     try {
       if (lstatSync(path).isSymbolicLink()) {
-        return canonicalPath(resolve(dirname(path), readlinkSync(path)), symlinkDepth + 1);
+        const target = readlinkSync(path);
+        let current = isAbsolute(target) ? parse(target).root : dirname(path);
+        for (const component of target.split(sep)) {
+          if (component === '' || component === '.') continue;
+          current =
+            component === '..'
+              ? dirname(current)
+              : canonicalPath(resolve(current, component), symlinkDepth + 1);
+        }
+        return current;
       }
     } catch (linkError) {
       if ((linkError as NodeJS.ErrnoException).code !== 'ENOENT') throw linkError;
