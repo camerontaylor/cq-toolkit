@@ -13,7 +13,7 @@ META = {"repo": REPO, "item_id": "push-infra-aaaaaaaaaa-bbbbbbbbbb",
         "receipt_id": "c" * 64}
 COUNTS = {"critical": 1, "major": 1, "minor": 1}
 MD = "### Findings\n\n- something\n"
-TITLE = finding_issues.title(BASE, HEAD, COUNTS)
+TITLE = finding_issues.title(BASE, HEAD, COUNTS, META["item_id"])
 SEARCH_ARGV = ["gh", "issue", "list", "--repo", REPO, "--state", "all", "--limit", "20",
                "--json", "number,title,url", "--search", f'in:title "{TITLE}"']
 CREATE_ARGV = ["gh", "issue", "create", "--repo", REPO, "--title", TITLE, "--body-file", "-"]
@@ -53,7 +53,13 @@ class EnabledTests(unittest.TestCase):
 
 class TitleTests(unittest.TestCase):
     def test_exact_format_with_blocking(self):
-        self.assertEqual(TITLE, f"crq: {BASE[:10]}..{HEAD[:10]} — 3 findings (2 blocking)")
+        self.assertEqual(TITLE, f"crq: {BASE[:10]}..{HEAD[:10]} — 3 findings (2 blocking) "
+                                f"[{META['item_id']}]")
+
+    def test_item_identity_distinguishes_split_parts(self):
+        parent = finding_issues.title(BASE, HEAD, COUNTS, "push-infra-aaaaaaaaaa-bbbbbbbbbb")
+        part = finding_issues.title(BASE, HEAD, COUNTS, "push-infra-aaaaaaaaaa-bbbbbbbbbb-p2")
+        self.assertNotEqual(parent, part)
 
     def test_zero_blocking(self):
         self.assertEqual(finding_issues.title(BASE, HEAD, {"minor": 2}),
@@ -137,6 +143,12 @@ class FileIssueTests(unittest.TestCase):
                                       severity_counts=COUNTS, findings_md=MD, gh=fake)
         self.assertIn("GraphQL: Could not resolve to an Issue", str(caught.exception))
         self.assertEqual(len(fake.calls), 1)
+
+    def test_gh_spawn_failure_is_a_runtime_error(self):
+        fake = FakeGh(OSError("no gh binary"))
+        with self.assertRaises(RuntimeError):
+            finding_issues.file_issue(CFG, base=BASE, head=HEAD, meta=META,
+                                      severity_counts=COUNTS, findings_md=MD, gh=fake)
 
     def test_create_without_url_raises(self):
         fake = FakeGh(ok("[]\n"), ok("nothing here\n"))

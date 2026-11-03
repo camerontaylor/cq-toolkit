@@ -28,10 +28,15 @@ def enabled(repo_cfg: Dict[str, Any]) -> bool:
     return repo_cfg.get("findings", DEFAULT_FINDINGS) == "issue"
 
 
-def title(base: str, head: str, severity_counts: Dict[str, int]) -> str:
-    """Fixed issue title: total findings and the blocking (critical+major) count."""
+def title(base: str, head: str, severity_counts: Dict[str, int], item_id: str = "") -> str:
+    """Fixed issue title: review identity, total findings, blocking count.
+
+    `item_id` distinguishes split parts of one range (same base/head, same
+    counts) so an exact-title search never reuses another part's issue."""
     blocking = severity_counts.get("critical", 0) + severity_counts.get("major", 0)
-    return f"crq: {base[:10]}..{head[:10]} — {sum(severity_counts.values())} findings ({blocking} blocking)"
+    suffix = f" [{item_id}]" if item_id else ""
+    return (f"crq: {base[:10]}..{head[:10]} — {sum(severity_counts.values())} findings "
+            f"({blocking} blocking){suffix}")
 
 
 def body(meta: Dict[str, Any], findings_md: str) -> str:
@@ -56,6 +61,10 @@ def _invoke(gh: Gh, argv: List[str], *, input_text: Optional[str] = None) -> Any
         p = gh(argv, input_text=input_text)
     except subprocess.TimeoutExpired as e:
         raise RuntimeError(f"{' '.join(argv[:4])} … timed out after {GH_TIMEOUT}s: {e}") from e
+    except OSError as e:
+        # A gh that cannot start (missing binary, spawn failure) is a delivery
+        # failure like any other: RuntimeError is the one contract callers catch.
+        raise RuntimeError(f"{' '.join(argv[:4])} … could not start: {e}") from e
     if getattr(p, "returncode", 0) != 0:
         stderr = (getattr(p, "stderr", "") or "").strip()[:300]
         raise RuntimeError(f"{' '.join(argv[:4])} … exit {p.returncode}: {stderr}")
@@ -92,7 +101,7 @@ def file_issue(repo_cfg: Dict[str, Any], *, base: str, head: str, meta: Dict[str
         return {"issue_url": None, "issue_number": None, "created": False}
     gh = _gh if gh is None else gh
     repo = repo_cfg["repo"]
-    wanted = title(base, head, severity_counts)
+    wanted = title(base, head, severity_counts, meta.get("item_id", ""))
     existing = _existing(gh, repo, wanted)
     if existing:
         return {"issue_url": existing["url"], "issue_number": existing["number"], "created": False}

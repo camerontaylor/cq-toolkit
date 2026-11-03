@@ -2978,12 +2978,6 @@ def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = Fal
             msg = harvest_review(q, item, dry)
             if msg:
                 log.append(msg)
-        if not dry and item.get("kind") == push_current.KIND and item.get("issue_pending"):
-            # Findings-issue delivery retry: the review is terminal; only the
-            # issue upload can still be outstanding (docs/multi-repo.md).
-            msg = _deliver_push_findings(q, item)
-            if msg:
-                log.append(msg)
         if item["state"] == "addressing":
             if not dry:
                 item["state"] = "repair_failed"
@@ -2995,6 +2989,14 @@ def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = Fal
                 key = "repair_error" if item["kind"] == review_receipt.KIND else "last_error"
                 item[key] = "repair harvest failed: " + str(exc)[:300]
     if not dry:
+        # Findings-issue retries (the review is terminal; only the issue upload
+        # can still be outstanding) run after the harvest pass and are capped,
+        # so a hung gh call never delays harvesting later items (docs/multi-repo.md).
+        for pending in [i for i in live_items(q) if i.get("kind") == push_current.KIND
+                        and i.get("issue_pending")][:2]:
+            msg = _deliver_push_findings(q, pending)
+            if msg:
+                log.append(msg)
         repair_tick.backfill(sys.modules[__name__], q)
         repair_tick.archive_legacy(sys.modules[__name__], q)
         with forge_window(budget):
