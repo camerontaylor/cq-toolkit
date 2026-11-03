@@ -79,3 +79,11 @@ describe('price map — WB-1 eval-matrix entries', () => {
     }
   });
 });
+
+test('additive reasoning is priced once at the output rate', () => {
+  const model = { provider: 'deepseek', model: 'deepseek-flash' };
+  const usage = { input: 0, output: 1_000_000, cacheRead: 0, cacheWrite: 0 };
+  expect(computeCostUSD(model, usage)).toBeCloseTo(0.6, 12);
+  expect(computeCostUSD(model, { ...usage, reasoning: 2_000_000 })).toBeCloseTo(1.8, 12);
+  expect(computeCostUSD(model, { ...usage, reasoning: 0 })).toBeCloseTo(0.6, 12);
+});
