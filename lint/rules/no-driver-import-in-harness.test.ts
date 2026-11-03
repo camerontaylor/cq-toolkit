@@ -68,6 +68,19 @@ ruleTester.run('no-driver-import-in-harness', rule, {
     },
   ],
   invalid: [
+    ...[
+      "import type { T } from '../index.js';",
+      "export * from '../index';",
+      "await import('../shared/../index.ts');",
+      "const root = require('../index.js');",
+      "type T = import('../index.js').T;",
+      "import root = require('../index.js');",
+    ].map((code) => ({ ...tools(code), errors: [{ messageId: 'rootBarrelImport' }] })),
+    {
+      code: "import type { T } from '../../index.js';",
+      filename: 'src/harness/mcp/startup.ts',
+      errors: [{ messageId: 'rootBarrelImport' }],
+    },
     // The edge migration 1.1 kills, in every import form.
     driverImport("import { buildChildEnv } from '../driver/subprocess/process.js';"),
     driverImport("import type { SpawnOptions } from '../driver/subprocess/process.js';"),

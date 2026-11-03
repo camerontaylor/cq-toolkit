@@ -102,6 +102,10 @@ function checkSource(context, sourceNode, reportNode) {
   if (!isRelativeSpecifier(source)) return;
   for (const importer of repoRelativeCandidates(context.filename)) {
     const resolved = path.posix.normalize(path.posix.join(path.posix.dirname(importer), source));
+    if (resolved.replace(/\.(?:d\.[cm]?ts|[cm]?[jt]s)$/, '') === 'src/index') {
+      context.report({ node: reportNode, messageId: 'rootBarrelImport' });
+      return;
+    }
     if (isInside(resolved, DRIVER_DIR) && !isContractsSeam(resolved)) {
       context.report({
         node: reportNode,
@@ -122,6 +126,8 @@ export default {
     },
     schema: [],
     messages: {
+      rootBarrelImport:
+        'Harness code must not import the root barrel; import the specific shared or contracts module instead.',
       driverImport:
         "Harness code must not import the driver tree: '{{source}}' resolves to '{{resolved}}' (migration 1.1 boundary — import from src/shared/** or the src/driver/types.ts contracts seam instead).",
       computedSource:
