@@ -76,16 +76,15 @@ import { defaultClassifyPrConfig } from './classify.config.js';
 import { parseIndependentReview } from '../../shared/independent-review.js';
 
 /**
- * The frozen I2 vocabulary — the ONLY five things that can be said about a
+ * The frozen I2 vocabulary — the ONLY four things that can be said about a
  * candidate PR. `never`: not now and not by this pipeline (drafts);
  * `conflicting`: the branch cannot merge as it stands (dirty merge state);
  * `awaiting`: the PR is fine but not ready — the table is waiting on data,
- * a first look, or quiet time; `has-issues`: a human owes the PR work
- * (review objections); `eligible`: the I2 acceptance
+ * a first look, or quiet time; `eligible`: the I2 acceptance
  * condition holds — dispatch may offer the merge. Changing the vocabulary
  * is a recorded deviation.
  */
-export type PrMergeVerdict = 'never' | 'conflicting' | 'awaiting' | 'has-issues' | 'eligible';
+export type PrMergeVerdict = 'never' | 'conflicting' | 'awaiting' | 'eligible';
 
 /** The decision table's output: the verdict, WHY (stable snake_case, one
  * value per table row — safe to log, group, and assert on), and the
@@ -101,7 +100,6 @@ export interface PrClassification {
     | 'merge_state_blocked'
     | 'review_data_truncated'
     | 'last_commit_unknown'
-    | 'unresolved_external_threads'
     | 'merge_objection_outstanding'
     | 'no_acceptable_review'
     | 'explicit_all_clear'

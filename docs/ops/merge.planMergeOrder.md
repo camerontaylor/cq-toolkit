@@ -47,7 +47,6 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
                       "merge_state_blocked",
                       "review_data_truncated",
                       "last_commit_unknown",
-                      "unresolved_external_threads",
                       "merge_objection_outstanding",
                       "no_acceptable_review",
                       "explicit_all_clear",
@@ -66,7 +65,6 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
                       "never",
                       "conflicting",
                       "awaiting",
-                      "has-issues",
                       "eligible"
                     ],
                     "type": "string"

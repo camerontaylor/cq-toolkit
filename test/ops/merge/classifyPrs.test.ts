@@ -9,7 +9,7 @@
 //      last commit → eligible, settle window elapsed/pending →
 //      eligible/awaiting.
 //   2. PRECEDENCE — the rows are an order, not a menu: draft beats
-//      everything, conflicting beats truncated, truncated beats has-issues,
+//      everything, conflicting beats truncated, truncated retains advisory thread count,
 //      open threads do not replace review evidence.
 //   3. THE SETTLE BOUNDARY — exactly at the window is eligible, one ms
 //      short is awaiting, and the flip comes from the INJECTED nowMs (same
@@ -329,7 +329,7 @@ describe('classifyPr — precedence (first match wins)', () => {
     expect(result.reason).toBe('merge_conflicts');
   });
 
-  test('truncated beats has-issues (the count still surfaces)', () => {
+  test('truncated retains advisory thread count (the count still surfaces)', () => {
     const result = classifyPr(candidate({ truncated: true, threads: [thread()] }), SETTLED_MS);
     expect(result.verdict).toBe('awaiting');
     expect(result.reason).toBe('review_data_truncated');
@@ -342,7 +342,7 @@ describe('classifyPr — precedence (first match wins)', () => {
     expect(result.reason).toBe('no_acceptable_review');
   });
 
-  test('unknown last commit beats has-issues (row 4 fails closed ahead of row 5)', () => {
+  test('unknown last commit retains advisory thread count', () => {
     const result = classifyPr(candidate({ lastCommitAt: null, threads: [thread()] }), SETTLED_MS);
     expect(result.verdict).toBe('awaiting');
     expect(result.reason).toBe('last_commit_unknown');

@@ -9,6 +9,8 @@ Links default to the
 
 ## Unreleased
 
+- Retire the unreachable `has-issues` merge verdict and unused external-thread reason (#756).
+
 Changes since the `v1.0.1` source milestone. The next release is `0.2.0`,
 the first npm publication. It waits on the remaining prepublication
 hardening, implementation of the accepted ADRs, review debt and the G2 adversarial evidence; the release cut adds

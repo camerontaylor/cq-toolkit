@@ -190,7 +190,7 @@ export const ClassifyPrsInputSchema: z.ZodType<ClassifyPrsInput> = z
  * unions in classifyPrs.ts (first match wins; the words are the contract). */
 export const PrClassificationSchema: z.ZodType<PrClassification> = z
   .object({
-    verdict: z.enum(['never', 'conflicting', 'awaiting', 'has-issues', 'eligible']),
+    verdict: z.enum(['never', 'conflicting', 'awaiting', 'eligible']),
     reason: z.enum([
       'is_draft',
       'merge_conflicts',
@@ -198,7 +198,6 @@ export const PrClassificationSchema: z.ZodType<PrClassification> = z
       'merge_state_blocked',
       'review_data_truncated',
       'last_commit_unknown',
-      'unresolved_external_threads',
       'merge_objection_outstanding',
       'no_acceptable_review',
       'explicit_all_clear',
