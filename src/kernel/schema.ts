@@ -1262,15 +1262,20 @@ export const ObservationStreamSchema: z.ZodType<ObservationStream> = z
       if (event.runId !== stream.compositionRunId) {
         ctx.addIssue({
           code: 'custom',
-          message: `event.runId '${event.runId}' does not match this stream's ` +
+          message:
+            `event.runId '${event.runId}' does not match this stream's ` +
             `compositionRunId '${stream.compositionRunId}'`,
           path: ['events', i],
         });
       }
-      if (event.type === 'composition-started' && event.payload.correlation.workId !== stream.workId) {
+      if (
+        event.type === 'composition-started' &&
+        event.payload.correlation.workId !== stream.workId
+      ) {
         ctx.addIssue({
           code: 'custom',
-          message: `header correlation.workId '${event.payload.correlation.workId}' does not ` +
+          message:
+            `header correlation.workId '${event.payload.correlation.workId}' does not ` +
             `match this stream's workId '${stream.workId}'`,
           path: ['events', i],
         });

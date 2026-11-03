@@ -180,10 +180,7 @@ describe('T29 round-trip', () => {
       await writeStream(dir, [header(), linked()], CR_ID, WORK_ID);
       await writeStream(
         dir,
-        [
-          header({ runId: 'cr-second' }),
-          linked('plan-x--k--b', 2, { runId: 'cr-second' }),
-        ],
+        [header({ runId: 'cr-second' }), linked('plan-x--k--b', 2, { runId: 'cr-second' })],
         'cr-second',
         WORK_ID,
       );
@@ -219,10 +216,7 @@ describe('T29 round-trip', () => {
       const before = await readFile(join(dir, `${KERNEL_RUN}.ndjson`), 'utf8');
       await writeStream(
         dir,
-        [
-          header({ runId: 'cr-after-kernel' }),
-          linked(KERNEL_RUN, 1, { runId: 'cr-after-kernel' }),
-        ],
+        [header({ runId: 'cr-after-kernel' }), linked(KERNEL_RUN, 1, { runId: 'cr-after-kernel' })],
         'cr-after-kernel',
       );
       const after = await readFile(join(dir, `${KERNEL_RUN}.ndjson`), 'utf8');
@@ -347,9 +341,7 @@ describe('T29 unknown evidence', () => {
         workId: WORK_ID,
         compositionRunId: CR_ID,
       });
-      await expect(writer.append(foreign)).rejects.toThrow(
-        /does not match this stream's workId/,
-      );
+      await expect(writer.append(foreign)).rejects.toThrow(/does not match this stream's workId/);
       // Out-of-band write simulates a stream the writer never validated.
       const streamDir = join(dir3, 'observations', WORK_ID);
       await mkdir(streamDir, { recursive: true });
@@ -367,9 +359,9 @@ describe('T29 unknown evidence', () => {
         workId: WORK_ID,
         compositionRunId: 'cr-bad-first',
       });
-      await expect(
-        badFirst.append(linked('plan-x', 1, { runId: 'cr-bad-first' })),
-      ).rejects.toThrow(/must open with its composition-started header/);
+      await expect(badFirst.append(linked('plan-x', 1, { runId: 'cr-bad-first' }))).rejects.toThrow(
+        /must open with its composition-started header/,
+      );
       await badFirst.close();
       const dupHeader = openObservationWriter({
         journalDir: dir4,
