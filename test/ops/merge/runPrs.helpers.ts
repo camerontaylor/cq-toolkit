@@ -67,7 +67,7 @@ export const NOW_MS = LAST_COMMIT_MS + REVIEW_ACCEPT_SETTLE_MS;
 const AFTER_COMMIT = '2026-01-01T00:00:00.500Z';
 
 /** An acceptable review that is NOT an all-clear: non-author, APPROVED,
- * postdates the last commit (the classifyPrs.test.ts fixture body — known
+ * postdates the last commit (the classifyPrs.helpers.ts fixture body — known
  * not to match the shipped all-clear pattern). */
 export const approved = (pr: number): ReviewSummary => ({
   id: `PRR_${String(pr)}`,
