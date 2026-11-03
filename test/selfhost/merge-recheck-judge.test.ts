@@ -104,7 +104,7 @@ describe('judgeAtHead', () => {
         ],
       }),
     );
-    const policy = trustPolicyFromConfig({ allowSameAccountAgentReview: true });
+    const policy = trustPolicyFromConfig({});
     const result = judgeAtHead(snapshot, SHA_B, policy);
     const repeated = judgeAtHead(snapshot, SHA_B, policy);
     if (!result.accepted || !repeated.accepted)

@@ -95,10 +95,6 @@ import {
   type RecheckResult,
   type TrustPolicy,
 } from './merge-recheck.js';
-import {
-  ALLOW_SAME_ACCOUNT_AGENT_REVIEW_ENV,
-  parseSameAccountReviewFlag,
-} from '../shared/independent-review.js';
 
 /** Production self-host policy: conflict resolution is always withheld. */
 export const SELFHOST_DISABLES_CONFLICT_RESOLUTION = true;
@@ -167,8 +163,6 @@ export interface SelfMergePrsCfg {
   trustPolicy?: TrustPolicy;
   /** Resolved reviewer trust policy for the shipped merge classifier. */
   classifyConfig?: ClassifyPrConfig;
-  /** Explicit opt-in for independent-agent markers under the PR author's login. */
-  allowSameAccountAgentReview?: boolean;
   /**
    * The A12c ADVISORY escape for the governed merge run (r1 M4), defaulting
    * OFF at the kernel's Governance surface and EXPLICIT here: the shipped
@@ -289,13 +283,10 @@ export function buildRunInput(
     journalRoot?: string;
     disableConflictResolution?: boolean;
     classifyConfig?: ClassifyPrConfig;
-    allowSameAccountAgentReview?: boolean;
   },
   nowMs: number,
 ): RunMergePrsInput {
   const classifyConfig = cfg.classifyConfig;
-  const allowSameAccountAgentReview =
-    cfg.allowSameAccountAgentReview ?? classifyConfig?.allowSameAccountAgentReview;
   return {
     baseBranch: cfg.baseBranch ?? SelfhostDefaults.baseBranch,
     repoRoot: cfg.repoRoot,
@@ -307,7 +298,7 @@ export function buildRunInput(
       : { modelSpec: resolveSelfhostDriver(nowMs) }),
     sessionsDir: join(cfg.journalRoot ?? defaultJournalRoot(cfg.repoRoot), 'sessions'),
     nowMs,
-    ...(classifyConfig === undefined && allowSameAccountAgentReview === undefined
+    ...(classifyConfig === undefined
       ? {}
       : {
           config: {
@@ -329,7 +320,6 @@ export function buildRunInput(
             ...(classifyConfig?.acceptReviewStates === undefined
               ? {}
               : { acceptReviewStates: classifyConfig.acceptReviewStates }),
-            ...(allowSameAccountAgentReview === undefined ? {} : { allowSameAccountAgentReview }),
           },
         }),
   };
@@ -403,14 +393,8 @@ export async function runSelfMergePrs(
   // below is taken ONCE.
   const clock = deps.nowMs ?? ((): number => Date.now());
   const nowMs = clock();
-  const allowSameAccountAgentReview =
-    cfg.allowSameAccountAgentReview ??
-    cfg.classifyConfig?.allowSameAccountAgentReview ??
-    cfg.trustPolicy?.allowSameAccountAgentReview ??
-    false;
   const classifyConfig: ClassifyPrConfig = {
     ...(cfg.classifyConfig ?? defaultClassifyPrConfig),
-    allowSameAccountAgentReview,
   };
   // The ONE clock reading rides into the fetch too: the closed-ancestor
   // sweep's freshness window is judged from the same instant the
@@ -462,11 +446,7 @@ export async function runSelfMergePrs(
       .filter((candidate) => candidate.state === 'open')
       .map((candidate) => candidate.pr),
   );
-  const input = buildRunInput(
-    fetched.candidates,
-    { ...cfg, classifyConfig, allowSameAccountAgentReview },
-    nowMs,
-  );
+  const input = buildRunInput(fetched.candidates, { ...cfg, classifyConfig }, nowMs);
   // The governed run (ADR-0003 §2), mirroring src/cli/run-plan.ts: the caps
   // ride BOTH the RunOptions (the kernel's advisory surface) and the governor
   // construction; the wall clock arms the ladder through Limits (#137) —
@@ -496,11 +476,6 @@ export async function runSelfMergePrs(
   const basePolicy = cfg.trustPolicy ?? CONSERVATIVE_TRUST_POLICY;
   const policy: TrustPolicy = {
     ...basePolicy,
-    allowSameAccountAgentReview:
-      cfg.allowSameAccountAgentReview ??
-      cfg.classifyConfig?.allowSameAccountAgentReview ??
-      basePolicy.allowSameAccountAgentReview ??
-      false,
     ...(automationIdentity.login === undefined
       ? {}
       : {
@@ -603,10 +578,6 @@ async function main(): Promise<void> {
       ...(parsed.maxUsd !== undefined ? { maxUsd: parsed.maxUsd } : {}),
       ...(parsed.journalRoot !== undefined ? { journalRoot: parsed.journalRoot } : {}),
       ...(parsed.dryRun ? { dryRun: true } : {}),
-      allowSameAccountAgentReview: parseSameAccountReviewFlag(
-        process.env[ALLOW_SAME_ACCOUNT_AGENT_REVIEW_ENV],
-        ALLOW_SAME_ACCOUNT_AGENT_REVIEW_ENV,
-      ),
       disableConflictResolution: SELFHOST_DISABLES_CONFLICT_RESOLUTION,
     },
   );

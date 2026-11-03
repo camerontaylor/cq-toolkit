@@ -1,8 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import {
-  parseIndependentReview,
-  parseSameAccountReviewFlag,
-} from '../../src/shared/independent-review.js';
+import { parseIndependentReview } from '../../src/shared/independent-review.js';
 
 const marker = (over: Record<string, unknown> = {}): string =>
   `<!-- cq-agent-review: ${JSON.stringify({
@@ -55,17 +52,4 @@ describe('parseIndependentReview', () => {
       expect(parseIndependentReview(body)).toEqual({ kind: 'absent' });
     },
   );
-});
-
-describe('parseSameAccountReviewFlag', () => {
-  test('defaults blank to false and accepts only exact true or false', () => {
-    expect(parseSameAccountReviewFlag(undefined, 'FLAG')).toBe(false);
-    expect(parseSameAccountReviewFlag('  ', 'FLAG')).toBe(false);
-    expect(parseSameAccountReviewFlag('true', 'FLAG')).toBe(true);
-    expect(parseSameAccountReviewFlag('false', 'FLAG')).toBe(false);
-    expect(() => parseSameAccountReviewFlag('TRUE', 'FLAG')).toThrow(
-      'FLAG: expected true or false',
-    );
-    expect(() => parseSameAccountReviewFlag('yes', 'FLAG')).toThrow('FLAG: expected true or false');
-  });
 });

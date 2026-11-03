@@ -49,8 +49,7 @@ Self-merge configuration includes `vars.CQ_MERGE_TRUSTED_BOTS`, `vars.CQ_MERGE_A
 `vars.CQ_MERGE_TRUSTED_ASSOCIATIONS` and the posture
 `vars.CQ_MERGE_PROTECTED_PATHS` (blank = the conservative default). Human review comments containing the exact head SHA and `PASS` count for
 shared-account agents without an opt-in; Bot authors and `[bot]` logins are
-excluded. The legacy `CQ_MERGE_ALLOW_SAME_ACCOUNT_AGENT_REVIEW` setting is
-retained for configuration compatibility and no longer controls matching.
+excluded.
 
 **Advisory posture (development).** `vars.CQ_MERGE_PROTECTED_PATHS=advisory`
 is this repository's development posture (2026-10-20; see
