@@ -171,7 +171,12 @@ function resolvedCommand(dir: string, check: CheckRunnerInput): CheckRunnerInput
 /** A failure's file, re-expressed relative to `dir` (POSIX separators) when it lies inside it. */
 function normalizeFile(dir: string, cwd: string, file: string | null): string | null {
   if (file === null) return null;
-  const absolute = resolve(cwd, file);
+  let absolute = resolve(cwd, file);
+  try {
+    absolute = realpathSync(absolute);
+  } catch {
+    // Missing files still carry useful lexical diagnostic locations.
+  }
   const rel = relative(dir, absolute);
   if (rel === '' || rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) return absolute;
   return rel.split(sep).join('/');

@@ -283,3 +283,8 @@ of those files only; it runs no static gate, so run `pnpm run check:static` for
 dependents. Build, smoke and denylist remain separate gates.
 See [local static policy](lint/README.md) for pins, compiler fallback evidence,
 rule decisions and compatibility changes.
+
+For `analyze.run` and `analyze.fix`, use a dedicated report directory for
+`--out` (default `.cq/analysis`). Its entire subtree is exempt from the
+attended clean-tree check; pointing it at tracked source directories widens
+that exemption and writes report artifacts alongside source files.

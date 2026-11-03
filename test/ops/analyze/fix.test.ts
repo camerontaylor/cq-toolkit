@@ -303,6 +303,29 @@ describe('analyze.fix — cluster + rule', () => {
     expect(source(dir)).toBe(BAD);
   });
 
+  test('a sidecar symlink retargeted during the before-check is not confirmed', async () => {
+    const { dir, clusterId, sidecarPath } = await fixture();
+    const alias = join(dir, '.cq/analysis/selected.json');
+    const replacement = join(dir, '.cq/analysis/replacement.json');
+    writeFileSync(replacement, readFileSync(sidecarPath));
+    symlinkSync(sidecarPath, alias);
+    const run = scriptedRunner({
+      onTsc: () => {
+        rmSync(alias);
+        symlinkSync(replacement, alias);
+      },
+    });
+    const result = await makeAnalyzeFix({ run })({
+      dir,
+      clusterId,
+      sidecarPath: alias,
+      rule: RULE,
+      apply: true,
+    });
+    expect(result.status).toBe('needs-human');
+    expect(source(dir)).toBe(BAD);
+  });
+
   test('a target edited after analysis → failed stale sidecar with the analyze.run hint', async () => {
     const { dir, clusterId } = await fixture();
     writeFileSync(join(dir, 'src', 'index.ts'), `${BAD}// edited\n`);
@@ -455,8 +478,10 @@ describe('analyze.fix — agent proposal', () => {
     expect(readFileSync(preview.value.preview.proposalPath, 'utf8')).toBe(PATCH);
     expect(source(dir)).toBe(BAD);
     // ONE step (model + apply, no digest): a fresh, unseen proposal — refused.
+    const beforeOneStep = invocations.length;
     const oneStep = await fix({ dir, clusterId, model: MODEL, apply: true });
     expect(oneStep.status).toBe('needs-human');
+    expect(invocations.length).toBe(beforeOneStep);
     if (oneStep.status === 'needs-human')
       expect(oneStep.reason).toContain('--previewDigest=sha256:');
     expect(source(dir)).toBe(BAD);
@@ -542,7 +567,6 @@ describe('analyze.fix — agent proposal', () => {
       dir,
       clusterId,
       model: MODEL,
-      apply: true,
     });
     expect(result.status === 'ok' && result.value.preview.kind).toBe('agent-summary');
     expect(result.status === 'ok' && result.value.mode).toBe('preview');
@@ -566,7 +590,6 @@ describe('analyze.fix — agent proposal', () => {
       dir,
       clusterId,
       model: MODEL,
-      apply: true,
     });
     expect(refused.status).toBe('failed');
     if (refused.status === 'failed') expect(refused.error).toContain('escapes');
@@ -590,6 +613,12 @@ describe('analyze.fix — agent proposal', () => {
 });
 
 describe('patchTargets', () => {
+  test('refuses malformed hunk headers', () => {
+    expect(patchTargets('--- a/x.ts\n+++ b/x.ts\n@@ malformed\n-a\n+b')).toEqual({
+      ok: false,
+      reason: 'malformed hunk header',
+    });
+  });
   test('parses git and plain unified headers', () => {
     expect(patchTargets(PATCH)).toEqual({ ok: true, targets: ['src/index.ts'] });
     expect(patchTargets('--- a/x.ts\t2020\n+++ b/x.ts\t2020\n@@ -1 +1 @@\n-a\n+b\n')).toEqual({

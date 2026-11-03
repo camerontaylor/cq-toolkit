@@ -207,6 +207,7 @@ export interface AnalyzeFixDeps {
 /** One selected cluster from a sidecar. */
 interface SelectedCluster {
   sidecarPath: string;
+  realSidecar: string;
   sidecarSha256: string;
   sidecar: AnalysisSidecar;
   cluster: Cluster;
@@ -336,6 +337,7 @@ function selectCluster(
     ok: true,
     selected: {
       sidecarPath,
+      realSidecar,
       sidecarSha256: createHash('sha256').update(text, 'utf8').digest('hex'),
       sidecar,
       cluster,
@@ -439,6 +441,7 @@ export function patchTargets(
       newLeft = hunk[2] === undefined ? 1 : Number(hunk[2]);
       continue;
     }
+    if (line.startsWith('@@')) return { ok: false, reason: 'malformed hunk header' };
     let candidate: string | null | undefined;
     if (line.startsWith('diff --git ')) {
       const match = /^diff --git a\/(\S+) b\/(\S+)$/.exec(line);
@@ -665,6 +668,13 @@ export function makeAnalyzeFix(deps: AnalyzeFixDeps): Op<AnalyzeFixInput, Analyz
           }),
         };
       } else if (input.model !== undefined || input.previewDigest !== undefined) {
+        if (input.apply === true && input.previewDigest === undefined) {
+          return {
+            status: 'needs-human',
+            reason:
+              'analyze.fix: an agent proposal is applied only after review — no project file was written; preview first, then re-run with --previewDigest=sha256:<reviewed digest> --apply',
+          };
+        }
         const proposal = await agentPreview(deps, dir, out, exempt, selected, input);
         if (proposal.status !== 'ok') return proposal;
         preview = proposal.value;
@@ -716,7 +726,7 @@ export function makeAnalyzeFix(deps: AnalyzeFixDeps): Op<AnalyzeFixInput, Analyz
     ) {
       return {
         status: 'needs-human',
-        reason: `analyze.fix: an agent proposal is applied only after review — nothing was written; the proposal is stored at '${preview.proposalPath}'; review it, then re-run with --previewDigest=${preview.digest} --apply`,
+        reason: `analyze.fix: an agent proposal is applied only after review — no project file was written; the proposal is stored at '${preview.proposalPath}'; review it, then re-run with --previewDigest=${preview.digest} --apply`,
       };
     }
 
@@ -767,12 +777,22 @@ export function makeAnalyzeFix(deps: AnalyzeFixDeps): Op<AnalyzeFixInput, Analyz
     const sidecarSha = selected?.sidecarSha256;
     const confirmFor = (subject: ApprovalSubject): boolean => {
       confirmAsked = true;
+      let sidecarMatches = selected === undefined;
+      if (selected !== undefined) {
+        try {
+          sidecarMatches =
+            realpathSync(selected.sidecarPath) === selected.realSidecar &&
+            sidecarDigest(selected.realSidecar) === sidecarSha;
+        } catch {
+          sidecarMatches = false;
+        }
+      }
       confirmMatched =
         subject.op === expected.op &&
         subject.workspace === expected.workspace &&
         subject.inputDigest === expected.inputDigest &&
         sameTargets(subject.targets, expected.targets) &&
-        (selected === undefined || sidecarDigest(selected.sidecarPath) === sidecarSha);
+        sidecarMatches;
       return confirmMatched;
     };
     const authority = (deps.attended ?? makeAttendedApprovalAuthority)({
