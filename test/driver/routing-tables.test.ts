@@ -23,18 +23,30 @@ describe('routing table — the shipped default keeps the documented anthropic-c
     if (entry === undefined) throw new Error(`missing endpoint: ${provider}`);
     // The key env is the provider's documented credential variable, and the
     // base URL default matches the provider's anthropic-compat endpoint.
-    const documented: Record<string, { baseUrlDefault: string; keyEnv: string }> = {
-      zai: { baseUrlDefault: 'https://api.z.ai/api/anthropic', keyEnv: 'ZAI_API_KEY' },
+    const documented: Record<
+      string,
+      { baseUrlDefault: string; keyEnv: string; baseUrlEnv: string }
+    > = {
+      zai: {
+        baseUrlDefault: 'https://api.z.ai/api/anthropic',
+        keyEnv: 'ZAI_API_KEY',
+        baseUrlEnv: 'ZAI_ANTHROPIC_BASE_URL',
+      },
       deepseek: {
         baseUrlDefault: 'https://api.deepseek.com/anthropic',
         keyEnv: 'DEEPSEEK_API_KEY',
+        baseUrlEnv: 'DEEPSEEK_ANTHROPIC_BASE_URL',
       },
-      anthropic: { baseUrlDefault: 'https://api.anthropic.com', keyEnv: 'ANTHROPIC_API_KEY' },
+      anthropic: {
+        baseUrlDefault: 'https://api.anthropic.com',
+        keyEnv: 'ANTHROPIC_API_KEY',
+        baseUrlEnv: 'ANTHROPIC_BASE_URL',
+      },
     };
     expect(entry.baseUrlDefault).toBe(documented[provider]?.baseUrlDefault);
     expect(entry.keyEnv).toBe(documented[provider]?.keyEnv);
     // The base URL override env var is per-provider and never a credential.
-    expect(entry.baseUrlEnv).toMatch(/_ANTHROPIC_BASE_URL$|^ANTHROPIC_BASE_URL$/);
+    expect(entry.baseUrlEnv).toBe(documented[provider]?.baseUrlEnv);
     // The model allowlist is retired: the shipped default carries no rows.
     expect(entry.models).toBeUndefined();
   });
