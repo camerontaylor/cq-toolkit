@@ -117,4 +117,21 @@ describe('review.address round-1 baseline', () => {
       await w.cleanup();
     }
   });
+  test('a non-blocking PR population seeds no round-1 baseline', async () => {
+    // Every PR thread is severity 'major', so with critical-only blocking the
+    // planned population contains no blockers. The pre-dispatch seed must apply
+    // the same severity filter as admission and the post-fetch merge; it may
+    // not record the raw plan ids.
+    const w = await world(false, { blockingSeverities: ['critical'] });
+    try {
+      const result = await w.run();
+      const report = reportOf(result);
+      // The thread was planned and fixed anyway (dispatch does not filter on
+      // severity), so a non-empty baseline here would be the raw plan ids.
+      expect(report.fixes.map((fix) => fix.finding.id)).toEqual(['T1']);
+      expect(report.initialOpenBlocking).toEqual([]);
+    } finally {
+      await w.cleanup();
+    }
+  });
 });

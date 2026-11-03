@@ -1778,6 +1778,9 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
              * population, not just the ids dispatched so far. Every capture
              * only GAINS ids, deduplicated, in first-seen order, and a later
              * round is ignored, so the list is never reassigned or shrunk.
+             * An early exit taken before the post-fetch merge saves only the
+             * planned population, which can omit threads that were excluded
+             * from planning (blocked).
              * Round-1 sources: the pre-dispatch seed, each PR dispatch item
              * before `admitRecord` can refuse (a dispatched item that is then
              * refused stays counted), and the full open-thread population
@@ -2594,7 +2597,17 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                   // post-fetch merge (an admission or closure refusal, a
                   // truncated fetch, a moved branch, a throwing fetch) still
                   // reports the whole round-1 population.
-                  onItemsPlanned: (ids) => noteInitialOpenIds(round, ids),
+                  onItemsPlanned: (ids) =>
+                    noteInitialOpenBlocking(round, {
+                      // Minimal PR-thread shape; only id/severity/status feed the filter.
+                      findings: ids.map((id) => ({
+                        id,
+                        source: 'pr-threads',
+                        severity: 'major',
+                        text: '',
+                        status: 'open' as const,
+                      })),
+                    }),
                   onFixRunSettled: (run) => {
                     // Retain the settled run before later Git/forge work can throw.
                     // An initial refusal has no admitted work to record; a refused

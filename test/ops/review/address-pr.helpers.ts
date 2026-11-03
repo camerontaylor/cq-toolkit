@@ -9,6 +9,7 @@ import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { makeReviewAddress } from '../../../src/ops/review/address.js';
+import type { CqSeverity } from '../../../src/ops/analyze/cqConfig.js';
 import type { GhFn, GhResult } from '../../../src/adapters/forge-github/gh.js';
 import type { DriverFactory } from '../../../src/driver/factory.js';
 import { makeAddressWorker } from '../../../src/ops/review/addressWorker.js';
@@ -60,6 +61,8 @@ export async function world(
     afterFix?: (id: string) => void;
     /** Engine dispatch concurrency (default: the policy's own setting). */
     concurrency?: number;
+    /** Blocking severities for the round's planned population (default: the policy's own). */
+    blockingSeverities?: readonly CqSeverity[];
   } = {},
 ) {
   // The failer knob only has a defined thread order inside the default
@@ -477,6 +480,9 @@ export async function world(
       review: {
         rounds: options.rounds ?? 1,
         reviewers: ['agent'],
+        ...(options.blockingSeverities
+          ? { blockingSeverities: [...options.blockingSeverities] }
+          : {}),
         ...(options.refuseAdmissionAt || options.concurrency !== undefined
           ? { addressConcurrency: options.concurrency ?? 1 }
           : {}),
