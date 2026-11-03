@@ -3723,7 +3723,8 @@ class PushFindingsDeliveryTests(unittest.TestCase):
                                  "base": "a" * 40, "head": "b" * 40},
                      "receipt_id": "r" * 64, "issue_pending": True,
                      "issue_request": {"run_id": "run-1", "severity_counts": {"major": 1},
-                                       "findings_md": str(self.findings)}}
+                                       "findings_md": str(self.findings),
+                                       "base": "a" * 40, "head": "b" * 40}}
 
     def deliver(self):
         with mock.patch.object(crq, "REPOS", self.repos):
