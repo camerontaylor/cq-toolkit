@@ -46,27 +46,37 @@ describe('selectAffected', () => {
   });
 
   it('recognizes test files by the vitest include globs, .mjs tests included', () => {
-    expect(isTest('test/api-report.test.mjs')).toBe(true);
+    expect(isTest('test/api-report.cli.test.mjs')).toBe(true);
     expect(isTest('test/kernel/b.test.ts')).toBe(true);
     expect(isTest('lint/rules/x.test.ts')).toBe(true);
     expect(isTest('lint/rules/x.test.mjs')).toBe(false); // lint/** includes .ts only
     expect(isTest('test/helpers/git-env.ts')).toBe(false);
-    const withMjs = [...allTests, 'test/api-report.test.mjs'];
+    const withMjs = [...allTests, 'test/api-report.cli.test.mjs'];
     expect(
-      selectAffected({ changed: ['test/api-report.test.mjs'], allTests: withMjs, related: [] }),
-    ).toEqual({ files: ['test/api-report.test.mjs'], fallback: false, reason: 'mapped' });
+      selectAffected({
+        changed: ['test/api-report.cli.test.mjs'],
+        allTests: withMjs,
+        related: [],
+      }),
+    ).toEqual({ files: ['test/api-report.cli.test.mjs'], fallback: false, reason: 'mapped' });
     expect(
       selectAffected({
         changed: ['src/kernel/x.ts'],
         allTests: withMjs,
-        related: ['test/api-report.test.mjs'],
+        related: ['test/api-report.cli.test.mjs'],
       }).files,
-    ).toEqual(['test/api-report.test.mjs']);
+    ).toEqual(['test/api-report.cli.test.mjs']);
   });
 
   it('maps sources that suites read or spawn by path, with no import edge', () => {
     const suites = [
-      'test/api-report.test.mjs',
+      'test/api-report.cli.test.mjs',
+      'test/api-report.declaration-graph.test.mjs',
+      'test/api-report.declaration-resolution.test.mjs',
+      'test/api-report.exports-map.test.mjs',
+      'test/api-report.package-imports.test.mjs',
+      'test/api-report.package-scope.test.mjs',
+      'test/api-report.safety.test.mjs',
       'test/cli/driver-alias-notice.test.ts',
       'test/driver/harness-parity.invalid-input.test.ts',
       'test/driver/harness-parity.level1-calltool-result.test.ts',
@@ -126,7 +136,13 @@ describe('selectAffected', () => {
     ]);
     // The generic scripts/ row adds every test/workflows suite as well.
     expect(pick('scripts/api-report.mjs')).toEqual([
-      'test/api-report.test.mjs',
+      'test/api-report.cli.test.mjs',
+      'test/api-report.declaration-graph.test.mjs',
+      'test/api-report.declaration-resolution.test.mjs',
+      'test/api-report.exports-map.test.mjs',
+      'test/api-report.package-imports.test.mjs',
+      'test/api-report.package-scope.test.mjs',
+      'test/api-report.safety.test.mjs',
       'test/ops/gates/policyDiff.test.ts',
       'test/workflows/default-ref-guards.test.ts',
     ]);
@@ -283,7 +299,7 @@ describe('selectAffected', () => {
   });
 
   it('falls back when a scripts/ module was deleted: its importers are unknown too', () => {
-    // e.g. scripts/api-report.mjs, imported by test/api-report.test.mjs,
+    // e.g. scripts/api-report.mjs, imported by test/api-report.cli.test.mjs,
     // which the generic scripts/ row would not select.
     const result = selectAffected({
       changed: ['scripts/api-report.mjs'],

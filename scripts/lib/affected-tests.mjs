@@ -67,7 +67,7 @@ export const NON_IMPORT_MAP = [
     [/^test\/driver\/claude-code\/cli\.test\.ts$/],
   ],
   [/^src\/(driver|harness|sandbox)\//, [/^test\/cli\/driver-alias-notice\.test\.ts$/]],
-  [/^scripts\/api-report\.mjs$/, [/^test\/api-report\.test\.mjs$/]],
+  [/^scripts\/api-report\.mjs$/, [/^test\/api-report\.[\w-]+\.test\.mjs$/]],
   [
     /^policy\/templates\//,
     [

@@ -31,7 +31,10 @@ against the packed tarball.
 Direct tooling tests can be run without the repository's full test suite:
 
 ```sh
-pnpm test:narrow test/api-report.test.mjs
+pnpm test:narrow test/api-report.cli.test.mjs test/api-report.declaration-graph.test.mjs \
+  test/api-report.declaration-resolution.test.mjs test/api-report.exports-map.test.mjs \
+  test/api-report.package-imports.test.mjs test/api-report.package-scope.test.mjs \
+  test/api-report.safety.test.mjs
 ```
 
 Wildcard (`*`) export targets and array targets are rejected explicitly rather
