@@ -311,6 +311,8 @@ export const SweepUnitDispatchInputSchema: z.ZodType<SweepUnitDispatchInput> = z
           'tsc-lines',
           'oxfmt-check',
           'oxlint-json',
+          'ruff-json',
+          'knip-json',
           'test-narrow',
         ]),
         cwd: z

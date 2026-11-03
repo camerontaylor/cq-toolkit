@@ -21,6 +21,8 @@ import { messageOf } from '../../shared/messageOf.js';
 import { eslintJsonAdapter } from './adapters/eslint.js';
 import { tscLinesAdapter } from './adapters/tsc.js';
 import { oxfmtCheckAdapter } from './adapters/oxfmt.js';
+import { ruffJsonAdapter } from './adapters/ruff.js';
+import { knipJsonAdapter } from './adapters/knip.js';
 import { oxlintJsonAdapter } from './adapters/oxlint.js';
 import { testNarrowAdapter } from './adapters/testNarrow.js';
 import { vitestJsonAdapter } from './adapters/vitest.js';
@@ -123,6 +125,8 @@ export type AdapterName =
   | 'eslint-json'
   | 'tsc-lines'
   | 'oxfmt-check'
+  | 'ruff-json'
+  | 'knip-json'
   | 'oxlint-json'
   | 'test-narrow';
 
@@ -152,6 +156,10 @@ export function adapterByName(name: AdapterName): CheckAdapter {
       return eslintJsonAdapter;
     case 'tsc-lines':
       return tscLinesAdapter;
+    case 'ruff-json':
+      return ruffJsonAdapter;
+    case 'knip-json':
+      return knipJsonAdapter;
     case 'oxlint-json':
       return oxlintJsonAdapter;
     case 'test-narrow':

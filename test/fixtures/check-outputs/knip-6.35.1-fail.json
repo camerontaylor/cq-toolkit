@@ -1,0 +1,35 @@
+{
+  "issues": [
+    {
+      "file": "src/unused.ts",
+      "files": [
+        {
+          "name": "src/unused.ts"
+        }
+      ],
+      "exports": [
+        {
+          "name": "unused",
+          "line": 3,
+          "col": 14,
+          "pos": 42
+        }
+      ],
+      "dependencies": [],
+      "duplicates": [
+        [
+          {
+            "name": "shared",
+            "line": 5,
+            "col": 1
+          },
+          {
+            "name": "alias",
+            "line": 6,
+            "col": 1
+          }
+        ]
+      ]
+    }
+  ]
+}

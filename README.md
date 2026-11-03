@@ -288,3 +288,10 @@ For `analyze.run` and `analyze.fix`, use a dedicated report directory for
 `--out` (default `.cq/analysis`). Its entire subtree is exempt from the
 attended clean-tree check; pointing it at tracked source directories widens
 that exemption and writes report artifacts alongside source files.
+
+Check configurations also accept `ruff-json` (`ruff check --output-format json .`)
+and `knip-json` (`knip --reporter json`, Knip 6). Both adapters require exit 0
+with an empty report or exit 1 with findings; malformed output, operational exits,
+and contradictory exit/report combinations are indeterminate. Knip's JSON reporter
+does not retain issue severity, so findings are errors and warning-only reports
+behind exit 0 are indeterminate. Avoid `--exit-zero` and mutating fix flags.
