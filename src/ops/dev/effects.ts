@@ -69,12 +69,12 @@ export interface DevEffects {
    * acquired sections still release their lock before settling.
    */
   withHostLock<T>(fn: () => T | Promise<T>, signal?: AbortSignal): Promise<T>;
+  /** Hash a retained raw log; absent/unreadable artifacts reject. */
+  reviewLogSha256?(path: string): Promise<string>;
   /**
    * Save one review's raw log OUTSIDE the repository; resolves with the
    * absolute log path recorded in the cycle.
    */
-  /** Hash a retained raw log; absent/unreadable artifacts reject. */
-  reviewLogSha256?(path: string): Promise<string>;
   writeReviewLog(branch: string, cycleStamp: string, content: string): Promise<string>;
   /**
    * Read one repo-relative worktree file's content for the secret scan.

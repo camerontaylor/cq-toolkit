@@ -156,9 +156,9 @@ export interface DevCycleRecord {
   vendorFailure?: VendorFailureProvenance;
   /** Retained engine proof for a fresh agent cycle; legacy cycles remain readable. */
   agentCoverage?: ReviewCoverageV2;
-  /** Where the raw stream log was saved — OUTSIDE the repository (protocol §3). */
   /** Optional for historic ledgers; new logs bind their exact bytes. */
   logSha256?: string;
+  /** Where the raw stream log was saved — OUTSIDE the repository (protocol §3). */
   logPath: string;
   /** Untracked non-ignored files present at cycle time (outside the review scope). */
   untracked: string[];

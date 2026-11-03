@@ -1239,6 +1239,48 @@ describe('dev.review cycle', () => {
     "reviewer completed 'review_completed' with an AFFIRMATIVE no-fresh/skipped notice " +
     '("No fresh detailed file review was performed in this run.") — a fresh detailed review never ran';
 
+  test.each([false, true])('fresh cycles survive hash failure=%s', async (fails) => {
+    const effects = repoEffects(repo, reviewer(ran(0)));
+    effects.reviewLogSha256 = async () => {
+      if (fails) throw new Error('log temporarily unreadable');
+      return 'a'.repeat(64);
+    };
+    const result = await cycleReview(effects, stubScanner())({ repoRoot: repo.root });
+    expect(result.status).toBe('ok');
+    const cycle = effects
+      .openLedger('feature/x')
+      .load()
+      .records.find((r) => r.kind === 'cycle');
+    expect(cycle?.completion.kind).toBe('terminal');
+    expect(cycle?.logSha256).toBe(fails ? undefined : 'a'.repeat(64));
+  });
+
+  test('legacy cycles without a digest still validate readability before reuse', async () => {
+    await seed(repo);
+    const effects = repoEffects(repo);
+    await effects.openLedger('feature/x').mutate((ledger) => ({
+      ledger: {
+        ...ledger,
+        records: ledger.records.map((record) => {
+          if (record.kind !== 'cycle') return record;
+          const { logSha256: _digest, ...legacy } = record;
+          return legacy;
+        }),
+      },
+      value: undefined,
+    }));
+    let reads = 0;
+    effects.reviewLogSha256 = async () => {
+      reads += 1;
+      return 'a'.repeat(64);
+    };
+    const result = await cycleReview(effects, stubScanner())({ repoRoot: repo.root });
+    expect(result.status).toBe('ok');
+    expect(reads).toBe(1);
+    expect(reviewerCalls(effects)).toHaveLength(0);
+    if (result.status === 'ok') expect(result.value.reuse?.basis).toBe('exact-terminal');
+  });
+
   test('current scan policy refuses reuse of a previously allowed cycle', async () => {
     await seed(repo);
     const effects = repoEffects(repo);

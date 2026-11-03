@@ -858,9 +858,16 @@ function makeReviewCycle(
 
     // The reviewer quota is ALREADY spent, so a store fault still reports
     // the verdict and the log path rather than burying the paid cycle.
+    // Integrity metadata is best effort for a newly paid cycle: a failed
+    // re-read must never prevent recording its completion and findings.
+    let logSha256: string | undefined;
+    try {
+      logSha256 = await effects.reviewLogSha256?.(span.logPath);
+    } catch {
+      // The retained artifact will be checked again before any later reuse.
+    }
     let record: DevCycleRecord;
     try {
-      const logSha256 = await effects.reviewLogSha256?.(span.logPath);
       record = await effects.openLedger(state.branch).mutate((ledger) => {
         const cycleCount = ledger.records.filter((entry) => entry.kind === 'cycle').length;
         const cycleId = `c${String(cycleCount + 1).padStart(3, '0')}-${state.head.slice(0, 8)}`;
