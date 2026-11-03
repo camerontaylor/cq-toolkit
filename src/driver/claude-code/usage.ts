@@ -121,6 +121,7 @@ export interface MeasuredUsage {
   channel: 'modelUsage' | 'result' | 'assistant';
   /** The model ids seen, modelUsage channel only (per-model aggregates). */
   models?: string[];
+  perModel?: Record<string, Usage>;
   /**
    * modelUsage channel only: true when the aggregate fold DIVERGES from the
    * flat main-loop usage on the same frame (subagent spend actually added
@@ -165,7 +166,7 @@ export function modelUsageEntryFromWire(raw: unknown): Usage | undefined {
  * else the flat main-loop `usage`, else undefined (no measurement on the
  * frame). The `models` list is the provenance record of which model ids
  * contributed; per-model USD attribution stays the estimator's business
- * over the served id (the fold is deliberately token-only).
+ * over each contributing model id (the fold itself is token-only).
  */
 export function measureResultUsage(
   result: Record<string, unknown> | undefined,
@@ -175,11 +176,15 @@ export function measureResultUsage(
   if (modelUsage !== undefined) {
     const models = Object.keys(modelUsage).sort();
     const total = zeroUsage();
-    let shaped = false;
+    let shaped = models.length > 0;
+    const entries: Record<string, Usage> = {};
     for (const id of models) {
       const perModel = modelUsageEntryFromWire(modelUsage[id]);
-      if (perModel === undefined) continue;
-      shaped = true;
+      if (perModel === undefined) {
+        shaped = false;
+        break;
+      }
+      Object.defineProperty(entries, id, { value: perModel, enumerable: true });
       total.input += perModel.input;
       total.output += perModel.output;
       total.cacheRead += perModel.cacheRead;
@@ -197,6 +202,7 @@ export function measureResultUsage(
         usage: total,
         channel: 'modelUsage',
         models,
+        perModel: entries,
         includesSpendBeyondFlatUsage: diverges,
       };
     }
@@ -302,4 +308,28 @@ export function computeDerivedCost(
     perMillion(usage.cacheRead, rates.cacheRead) +
     perMillion(usage.cacheWrite, rates.cacheWrite)
   );
+}
+
+/** Per-model derived pricing; unknown ids use the served rate and are observable. */
+export function modelUsageCost(
+  pricing: ((modelSpec: ModelSpec) => PerMillionRates | undefined) | undefined,
+  served: ModelSpec,
+  measured: MeasuredUsage,
+): { costUSD?: number; fallbackModels: string[] } {
+  if (measured.perModel === undefined) {
+    const costUSD = computeDerivedCost(pricing, served, measured.usage);
+    return { ...(costUSD === undefined ? {} : { costUSD }), fallbackModels: [] };
+  }
+  let total = 0;
+  const fallbackModels: string[] = [];
+  for (const [model, usage] of Object.entries(measured.perModel)) {
+    let cost = computeDerivedCost(pricing, { ...served, model }, usage);
+    if (cost === undefined) {
+      fallbackModels.push(model);
+      cost = computeDerivedCost(pricing, served, usage);
+    }
+    if (cost === undefined) return { fallbackModels };
+    total += cost;
+  }
+  return { costUSD: total, fallbackModels };
 }

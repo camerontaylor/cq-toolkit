@@ -218,7 +218,7 @@ import type {
 import type { PerMillionRates } from '../pricing/index.js';
 import {
   addUsage,
-  computeDerivedCost,
+  modelUsageCost,
   costField,
   measureResultUsage,
   usageFromWire,
@@ -732,6 +732,22 @@ export class ClaudeCodeCliTransport implements Driver {
 
     // --- Usage accounting (usage.ts: the ONE fold) + its provenance.
     recordUsageProvenance(observation, resumeCliSessionId !== undefined);
+    const pricingMeasurement = measureResultUsage(observation.result);
+    if (pricingMeasurement !== undefined) {
+      const pricing = modelUsageCost(
+        this.pricingOverride,
+        { ...modelSpec, model: observation.servedModel ?? modelSpec.model },
+        pricingMeasurement,
+      );
+      if (pricing.fallbackModels.length > 0)
+        observation.narration.push(
+          JSON.stringify({
+            cq: 'pricing-fallback',
+            models: pricing.fallbackModels,
+            rate: 'served-model',
+          }),
+        );
+    }
 
     // --- Structured output (ADR-0002 §2.3, S3): the ONE shared judge over
     // the SAME document that was sent (refusal-voided — verdict.ts). A miss
@@ -922,7 +938,12 @@ export class ClaudeCodeCliTransport implements Driver {
     const cost = !usageMeasured
       ? {}
       : costField(
-          (spec, fold) => computeDerivedCost(this.pricingOverride, spec, fold),
+          (spec, fold) =>
+            modelUsageCost(
+              this.pricingOverride,
+              spec,
+              measuredFrame ?? { usage: fold, channel: 'assistant' },
+            ).costUSD,
           pricedModel,
           usage,
         );

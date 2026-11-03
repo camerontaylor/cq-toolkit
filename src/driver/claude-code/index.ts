@@ -1,3 +1,4 @@
+import { DispatchError } from '../errors.js';
 // The Claude Code lane — Phase 1.9 (D-E′ option A: ONE cq-owned lane for
 // the Claude Code substrate, merging the former `driver/subprocess` and
 // `driver/claude-agent` lanes). CLI PRIMARY, Agent SDK OPTIONAL: the
@@ -136,7 +137,8 @@ export class ClaudeCodeDriver implements Driver {
     // 'cli' is the default; an unknown transport value is a loud
     // construction error (a typo'd config must never silently pick a path).
     if (options.transport !== undefined && options.transport !== 'cli') {
-      throw new Error(
+      throw new DispatchError(
+        'config',
         `claude-code driver: transport must be 'cli' or 'sdk', got ${JSON.stringify(options.transport)}`,
       );
     }

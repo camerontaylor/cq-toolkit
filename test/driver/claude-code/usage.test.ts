@@ -24,6 +24,7 @@ import { describe, expect, test } from 'vitest';
 import { ClaudeCodeDriver } from '../../../src/driver/claude-code/index.js';
 import {
   measureResultUsage,
+  modelUsageCost,
   usageFromWire,
   zeroUsage,
 } from '../../../src/driver/claude-code/usage.js';
@@ -338,4 +339,36 @@ describe('driver-level accounting — provenance and resume semantics', () => {
       expect(verdict).not.toHaveProperty('costBasis');
     });
   });
+});
+
+test('mixed-model pricing uses each rate and flags served-rate fallback', () => {
+  const measured = measureResultUsage({
+    modelUsage: {
+      'claude-sonnet-4-5': { inputTokens: 1_000_000 },
+      'claude-haiku-4-5': { inputTokens: 1_000_000 },
+      unknown: { inputTokens: 1_000_000 },
+    },
+  })!;
+  const cost = modelUsageCost(
+    undefined,
+    { provider: 'anthropic', model: 'claude-sonnet-4-5' },
+    measured,
+  );
+  expect(cost.costUSD).toBe(7);
+  expect(cost.fallbackModels).toEqual(['unknown']);
+});
+
+test('partially shaped modelUsage falls back to flat usage', () => {
+  expect(
+    measureResultUsage({
+      modelUsage: { good: { inputTokens: 999 }, bad: {} },
+      usage: { input_tokens: 10, output_tokens: 2 },
+    }),
+  ).toEqual({ channel: 'result', usage: { input: 10, output: 2, cacheRead: 0, cacheWrite: 0 } });
+});
+
+test('invalid transport is a pre-dispatch config error', () => {
+  expect(() => new ClaudeCodeDriver({ transport: 'typo' as 'cli' })).toThrow(
+    expect.objectContaining({ dispatchClass: 'config' }),
+  );
 });
