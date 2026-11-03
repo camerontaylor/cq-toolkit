@@ -310,12 +310,18 @@ def fetch(*, clone: Optional[Path] = None, refspec: Optional[str] = None) -> Non
 
 def make_worktree(name: str, commit: str, *, clone: Optional[Path] = None) -> Tuple[Path, str]:
     """Worktree on a local-only branch `crq/<name>` (never pushed). The owning
-    repository is the primary clone unless a non-primary repo's clone is given."""
+    repository is the primary clone unless a non-primary repo's clone is given.
+
+    Review checkouts never smudge LFS content (owner decision, #347): reviewed
+    diffs then show pointer text instead of opaque binary blobs, and a repo
+    with a broken/unavailable LFS or smudge filter still checks out."""
     path = WT_ROOT / f"{WT_PREFIX}{name}"
     branch = f"crq/{name}"
     remove_worktree(path, branch, clone=clone)
+    env = dict(os.environ, GIT_LFS_SKIP_SMUDGE="1")
     try:
-        git("worktree", "add", "--quiet", "-B", branch, str(path), commit, cwd=clone)
+        git("-c", "filter.lfs.smudge=", "-c", "filter.lfs.process=",
+            "worktree", "add", "--quiet", "-B", branch, str(path), commit, cwd=clone, env=env)
     except RuntimeError:
         remove_worktree(path, branch, clone=clone)
         raise
@@ -1853,12 +1859,19 @@ def launch(q: Dict[str, Any], item: Dict[str, Any], plan: Dict[str, Any]) -> str
     try:
         wt, wbranch = make_worktree(f"wt-{run_id}", plan["head"], clone=repo_clone)
     except RuntimeError as exc:
-        if item["kind"] != author_quota.AUTHOR_KIND:
-            raise
-        # An admitted author head the clone cannot check out (e.g. a runner-configured
-        # required smudge filter) stays ungranted and waits for its lease deadline, which
-        # authorizes the agent fallback, instead of failing every tick.
-        raise author_quota.AuthorRefused("author head cannot be checked out") from exc
+        if item["kind"] == author_quota.AUTHOR_KIND:
+            # An admitted author head the clone cannot check out (e.g. a runner-configured
+            # required smudge filter) stays ungranted and waits for its lease deadline, which
+            # authorizes the agent fallback, instead of failing every tick.
+            raise author_quota.AuthorRefused("author head cannot be checked out") from exc
+        # Every other kind refuses cleanly instead of crashing the tick: a
+        # reviewed repository's failing smudge/LFS filter (or any checkout
+        # failure) blocks that item for owner disposition (#347).
+        item["state"] = "blocked"
+        item["last_error"] = f"review worktree checkout failed: {exc}"[:300]
+        event("blocked", item=item["id"], reason=item["last_error"])
+        save_queue(q)
+        return run_id
     cli_cmd = ["coderabbit", "review", "--agent", "--deep"]
     if item["kind"] in (author_quota.AUTHOR_KIND, review_receipt.KIND, push_current.KIND) or plan.get("range_policy"):
         # Author/current/full-range cycles review the COMMITTED base..head (the original manual cycle 1
