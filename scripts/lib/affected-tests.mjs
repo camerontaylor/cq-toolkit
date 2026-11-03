@@ -108,7 +108,7 @@ export const NON_IMPORT_MAP = [
       /^test\/ops\/gates\/(?:workflowScan|protectedPaths(?:\.[\w-]+)?)\.test\.ts$/,
       /^test\/ops\/gates\/policyDiff(\..+)?\.test\.ts$/,
       /^test\/ops\/ratchet\/definitions\.test\.ts$/,
-      /^test\/scripts\/(github-settings|adversarial-suite)\.test\.ts$/,
+      /^test\/scripts\/(github-settings(\..+)?|adversarial-suite)\.test\.ts$/,
       /^test\/adversarial\/a14-privileged-workflow\.test\.ts$/,
     ],
   ],
