@@ -258,8 +258,8 @@ attestation every valid record is `dormant`. C3 is done only when ALL of:
   R2's required list replaces `ratchet` with the verdict-App `cq/ratchet` (plus `cq/policy`,
   `cq/acceptance`, `from-source`, `pack-audit`). Applying R2 without dropping the classic
   `ratchet` context would trip D11's "removed required check" rule. C2's order: drop the
-  classic contexts as R2 lands. `test/ops/gates/protectedPaths.test.ts` pins the mapping so
-  the two lists cannot drift apart silently again. **Amended 2026-10-16** (owner, minimal
+  classic contexts as R2 lands. `test/ops/gates/protectedPaths.privilegedList.test.ts` pins
+  the mapping so the two lists cannot drift apart silently again. **Amended 2026-10-16** (owner, minimal
   merge-time set, [`protected-scope.md`](protected-scope.md)): R2 now requires only
   `cq/policy`, `cq/acceptance` and `denylist`; `cq/ratchet` and the CI jobs are enforced on
   the queue tip by the gate, so the test asserts each `requiredChecks` entry is enforced

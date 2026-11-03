@@ -6,8 +6,8 @@
 // src/kernel/**, src/registry/** and their static imports, none of it
 // protected), and the count it printed feeds the `cq/ratchet` verdict the
 // promotion gate requires without recomputing it. Only this module's import
-// closure runs now, and test/ops/gates/protectedPaths.test.ts holds all of
-// it to policy/protected-paths.json.
+// closure runs now, and test/ops/gates/protectedPaths.closure.test.ts holds
+// all of it to policy/protected-paths.json.
 //
 // INPUT: the CLI op's own flags (`ratchet.recomputeTypecheck`), strict.
 // OUTPUT: the same OpResult the CLI printed, as one JSON line, so the compute

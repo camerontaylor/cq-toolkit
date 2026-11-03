@@ -6,7 +6,7 @@
 // src/registry/** and their static imports, none of it protected), so it
 // could forge the advisory `cq/policy` verdict. Only
 // this module's import closure runs now, and
-// test/ops/gates/protectedPaths.test.ts holds all of it to
+// test/ops/gates/protectedPaths.closure.test.ts holds all of it to
 // policy/protected-paths.json.
 //
 // POSTURE: resolved from the project env exactly as the `gates.policyDiff`

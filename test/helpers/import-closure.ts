@@ -1,7 +1,7 @@
 /**
  * The module-loading edges of one TypeScript source, FAIL CLOSED: the scan
- * behind test/ops/gates/protectedPaths.test.ts, which holds every file a
- * trusted job executes to policy/protected-paths.json (residual R1,
+ * behind test/ops/gates/protectedPaths.closure.test.ts, which holds every
+ * file a trusted job executes to policy/protected-paths.json (residual R1,
  * docs/protected-scope.md).
  *
  * Method: Node's own type stripper erases the type-only imports (they never

@@ -76,18 +76,18 @@ describe('selectAffected', () => {
       'test/harness/mcp-bin.test.ts',
       'test/kernel/driver-hygiene.test.ts',
       'test/ops/gates/policyDiff.test.ts',
-      'test/ops/gates/protectedPaths.test.ts',
+      'test/ops/gates/protectedPaths.closure.test.ts',
       'test/workflows/default-ref-guards.test.ts',
     ];
     const pick = (changed: string) =>
       selectAffected({ changed: [changed], allTests: suites, related: [] }).files;
     // The protected closure crosses directories: any source may join it.
     expect(pick('src/shared/independent-review.ts')).toEqual([
-      'test/ops/gates/protectedPaths.test.ts',
+      'test/ops/gates/protectedPaths.closure.test.ts',
     ]);
     expect(pick('src/kernel/types.ts')).toEqual([
       'test/kernel/driver-hygiene.test.ts',
-      'test/ops/gates/protectedPaths.test.ts',
+      'test/ops/gates/protectedPaths.closure.test.ts',
     ]);
     expect(pick('src/kernel/governor.ts')).toEqual([
       'test/driver/harness-parity.invalid-input.test.ts',
@@ -95,21 +95,21 @@ describe('selectAffected', () => {
       'test/driver/harness-parity.run-env.test.ts',
       'test/harness/mcp-bin.test.ts',
       'test/kernel/driver-hygiene.test.ts',
-      'test/ops/gates/protectedPaths.test.ts',
+      'test/ops/gates/protectedPaths.closure.test.ts',
     ]);
     expect(pick('src/kernel/runner.ts')).toEqual([
       'test/driver/claude-code/cli.test.ts',
       'test/kernel/driver-hygiene.test.ts',
-      'test/ops/gates/protectedPaths.test.ts',
+      'test/ops/gates/protectedPaths.closure.test.ts',
     ]);
     // i1's generated fixture imports the real driver factory by path.
     expect(pick('src/sandbox/x.ts')).toEqual([
       'test/cli/driver-alias-notice.test.ts',
-      'test/ops/gates/protectedPaths.test.ts',
+      'test/ops/gates/protectedPaths.closure.test.ts',
     ]);
     expect(pick('src/ops/merge/classifyPrs.ts')).toEqual([
       'test/driver/served-model-sites.test.ts',
-      'test/ops/gates/protectedPaths.test.ts',
+      'test/ops/gates/protectedPaths.closure.test.ts',
     ]);
     expect(pick('src/harness/mcp/server.ts')).toEqual([
       'test/cli/driver-alias-notice.test.ts',
@@ -118,11 +118,11 @@ describe('selectAffected', () => {
       'test/driver/harness-parity.level1-calltool-result.test.ts',
       'test/driver/harness-parity.run-env.test.ts',
       'test/harness/mcp-bin.test.ts',
-      'test/ops/gates/protectedPaths.test.ts',
+      'test/ops/gates/protectedPaths.closure.test.ts',
     ]);
     expect(pick('src/cli/main.ts')).toEqual([
       'test/driver/claude-code/cli.test.ts',
-      'test/ops/gates/protectedPaths.test.ts',
+      'test/ops/gates/protectedPaths.closure.test.ts',
     ]);
     // The generic scripts/ row adds every test/workflows suite as well.
     expect(pick('scripts/api-report.mjs')).toEqual([
@@ -229,22 +229,22 @@ describe('selectAffected', () => {
       'lint/rules/r.test.ts',
       'test/scripts/knip.test.ts',
       'test/scripts/oxlint-boundaries.test.ts',
-      'test/ops/gates/protectedPaths.test.ts',
+      'test/ops/gates/protectedPaths.closure.test.ts',
     ];
     const pick = (path: string) => selectAffected({ changed: [path], allTests: pool, related: [] });
     expect(pick('knip.json').files).toEqual([
-      'test/ops/gates/protectedPaths.test.ts',
+      'test/ops/gates/protectedPaths.closure.test.ts',
       'test/scripts/knip.test.ts',
     ]);
     for (const path of ['.oxlintrc.json', 'lint/plugin.mjs']) {
       expect(pick(path).files).toEqual([
         'lint/rules/r.test.ts',
-        'test/ops/gates/protectedPaths.test.ts',
+        'test/ops/gates/protectedPaths.closure.test.ts',
         'test/scripts/oxlint-boundaries.test.ts',
       ]);
     }
     expect(pick('.github/workflows/ci.yml')).toMatchObject({
-      files: ['test/ops/gates/protectedPaths.test.ts', 'test/workflows/d.test.ts'],
+      files: ['test/ops/gates/protectedPaths.closure.test.ts', 'test/workflows/d.test.ts'],
       fallback: false,
     });
   });
@@ -252,7 +252,7 @@ describe('selectAffected', () => {
   it('maps workflow and composite-action edits to every suite that reads them', () => {
     const readers = [
       'test/ops/gates/policyDiff.test.ts',
-      'test/ops/gates/protectedPaths.test.ts',
+      'test/ops/gates/protectedPaths.closure.test.ts',
       'test/ops/gates/workflowScan.test.ts',
       'test/ops/ratchet/definitions.test.ts',
       'test/scripts/github-settings.test.ts',
@@ -344,7 +344,7 @@ it('maps gate adapters to their shared owner suite despite layout differences', 
   expect(
     selectRelatedTests(
       ['src/ops/gates/adapters/testNarrow.ts'],
-      ['test/ops/gates/adapters.test.ts', 'test/ops/gates/protectedPaths.test.ts'],
+      ['test/ops/gates/adapters.test.ts', 'test/ops/gates/protectedPaths.closure.test.ts'],
     ).files,
   ).toContain('test/ops/gates/adapters.test.ts');
 });
