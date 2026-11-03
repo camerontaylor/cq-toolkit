@@ -13,7 +13,7 @@ not literal test constants.
 
 ## Composed terminal agent evidence
 
-Named fixture in `test/ops/dev/review.test.ts`:
+Named fixture in `test/ops/dev/reviewCycleAgentEngine.test.ts`:
 `configured agent composes the scripted engine, shared lock and terminal author evidence`.
 
 ```text
