@@ -162,6 +162,28 @@ describe('sanitizeObservation', () => {
     expect(sanitizeObservation(input)).not.toContain('SEC38');
   });
 
+  it.each(['connecting', 'Cloning into repo'])(
+    'preserves prose before a newline URL: %s',
+    (prose) => {
+      expect(sanitizeObservation(`${prose}\nhttps://u:p@h/x`)).toEqual(`${prose}\nhttps://h/x`);
+    },
+  );
+
+  it.each([
+    String.raw`'https://h/x?q=\'SEC65\''`,
+    String.raw`'https://a/?q=xhttps://b/y\'SEC65\''`,
+  ])('skips escaped single query quotes: %s', (input) => {
+    expect(sanitizeObservation(input)).not.toContain('SEC65');
+  });
+
+  it.each([
+    [String.raw`{"url":"https://h/x?q=a\\","tok":"x"}`, '{"url":"https://h/x","tok":"x"}'],
+    [String.raw`{"url":"https://a/?q=xhttps://b/y\\","tok":"x"}`, '{"url":"https://a/","tok":"x"}'],
+    [String.raw`'https://h/x?q=a\\',next`, "'https://h/x',next"],
+  ])('resumes after an even backslash run: %s', (input, expected) => {
+    expect(sanitizeObservation(input)).toEqual(expected);
+  });
+
   it('requires post-strip redaction for a newly exposed URL secret', () => {
     process.env.ZZ_HOOK_URL = 'https://hooks.example/svc/p';
     try {
