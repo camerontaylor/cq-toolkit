@@ -27,8 +27,8 @@
 // Parsing is kept small and exported pure ({@link parsePrList},
 // {@link selectPrMatch}, {@link parseCreatedPr}, {@link checksOfRollup},
 // {@link reviewStateOfDecision}, {@link metaOf}, {@link bodyOf}) —
-// fixture-tested in test/ops/pr/registry.test.ts against captured gh JSON
-// shapes.
+// fixture-tested in the test/ops/pr/registry.*.test.ts split files against
+// captured gh JSON shapes.
 import { execFile } from 'node:child_process';
 import { isAbsolute, resolve as pathResolve } from 'node:path';
 import type {
