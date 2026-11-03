@@ -14,6 +14,7 @@ const linked = (taskId: string, extra = ''): string =>
 const goodMessage = linked('unit-a/task-1');
 const goodLinked2Message = linked('unit-a/task-2');
 const crlfMessage = 'fix: crlf repair\r\n\r\nCq-Task: unit-a/task-1\r\nCQ-TODO: TRUE';
+const good3Message = linked('unit-a/task-3');
 const wrongTaskMessage = linked('unit-b/task-9');
 const unlinkedMessage = 'fix: repair the related cluster\n\nplain body, no trailers';
 const todoUpperMessage = linked('unit-a/task-1', 'CQ-TODO: TRUE');
@@ -25,6 +26,7 @@ const messages = new Map<string, string>([
   ['good', goodMessage],
   ['good2', goodLinked2Message],
   ['crlf', crlfMessage],
+  ['good3', good3Message],
   ['wrongTask', wrongTaskMessage],
   ['unlinked', unlinkedMessage],
   ['todoUpper', todoUpperMessage],
@@ -69,11 +71,15 @@ describe('verifiedClosuresOf', () => {
   it('T34 round-trip', () => {
     const tasks: FixTaskReport[] = [
       fixedTask({}),
-      // Same commit closes a second task: the SHA counts once. Both messages
-      // carry the matching Cq-Task trailer.
+      // A distinct linked commit for the second task: each verified SHA counts.
       fixedTask({
         task: { id: 'unit-a/task-2', files: ['src/b.ts'], failures: [] },
         commits: ['good2'],
+      }),
+      // Duplicate SHA on one task: the same commit recorded twice counts once.
+      fixedTask({
+        task: { id: 'unit-a/task-3', files: [], failures: [] },
+        commits: ['good3', 'good3'],
       }),
       // Todo trailer: closure recorded with todo true, excluded from the numerator.
       fixedTask({ commits: ['todoUpper'] }),
@@ -83,18 +89,24 @@ describe('verifiedClosuresOf', () => {
       fixedTask({ validation: { verdict: 'needs-human', gates: [] } }),
     ];
     const { closures, unknownTrailerShas } = verifiedClosuresOf(tasks, messageOf);
-    expect(closures.map((closure) => closure.commitSha)).toEqual(['good', 'good2', 'todoUpper']);
+    expect(closures.map((closure) => closure.commitSha)).toEqual([
+      'good',
+      'good2',
+      'good3',
+      'good3',
+      'todoUpper',
+    ]);
     expect(closures[0]?.todo).toBe(false);
     expect(closures[0]?.taskIds).toEqual(['unit-a/task-1']);
     expect(closures[0]?.verificationEvidence).toEqual(['validation:pass']);
-    expect(closures[2]?.todo).toBe(true);
+    expect(closures[4]?.todo).toBe(true);
     expect(unknownTrailerShas).toEqual([]);
 
     const plannedUnits = ['unit-a'];
     const probes = new Map([['unit-a', { completed: true, count: 4 }]]);
     const metric = measureRun(tasks, plannedUnits, probes, messageOf);
-    expect(metric.fixesPerRun).toEqual({ numerator: 2, denominator: 4 });
-    expect(metric.verifiedCommits).toEqual(['good', 'good2']);
+    expect(metric.fixesPerRun).toEqual({ numerator: 3, denominator: 4 });
+    expect(metric.verifiedCommits).toEqual(['good', 'good2', 'good3']);
     expect(metric.baselineFailures).toEqual([
       { unitId: 'unit-a', probeHead: null, completed: true, count: 4, unknownReason: null },
     ]);
