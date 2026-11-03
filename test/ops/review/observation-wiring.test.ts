@@ -627,6 +627,14 @@ describe('T31 failure boundary', () => {
         // The injected writer closed exactly once, inside finish().
         expect(closeSpy).toHaveBeenCalledTimes(1);
         expect(appendSpy).toHaveBeenCalled();
+        if (boundary === 'header') {
+          // P3-2: the header append failed, so the streaming writer was never
+          // published. Exactly one append (the header itself) may be observed,
+          // no kernel-run link may follow, and no bound worker may receive the
+          // writer - the surface only streams once the header has landed.
+          expect(appendSpy).toHaveBeenCalledTimes(1);
+          expect(f.boundDeps.every((deps) => deps.observationWriter === undefined)).toBe(true);
+        }
         const persisted = JSON.parse(
           await readFile(report!.reportPath, 'utf8'),
         ) as ReviewAddressReport & { observation?: { writer?: unknown } };
