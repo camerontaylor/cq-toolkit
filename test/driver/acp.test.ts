@@ -2959,3 +2959,13 @@ describe('acp driver seam v2 §2.3 (S3): invocation outputSchema + output-invali
     });
   });
 });
+
+test('injected ACP pricing includes additive reasoning at the output rate', () => {
+  const driver = new AcpDriver({ pricing: () => ({ input: 1, output: 2 }) });
+  expect(
+    driver['costUSDOf'](
+      { provider: 'mock', model: 'mock' },
+      { input: 0, output: 1_000_000, reasoning: 2_000_000, cacheRead: 0, cacheWrite: 0 },
+    ),
+  ).toBe(6);
+});

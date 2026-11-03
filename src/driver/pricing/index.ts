@@ -10,7 +10,7 @@
 //     ModelSpec.model (the exact id string). Unknown model → `undefined` —
 //     the map never fabricates a price.
 //   - computeCostUSD: `undefined` when the model is unknown to the map;
-//     otherwise Σ(tokens / 1e6 × rate) over input, output, and — when the
+//     otherwise Σ(tokens / 1e6 × rate) over input, output, additive reasoning, and — when the
 //     table carries the rate — cacheRead/cacheWrite. A missing per-field
 //     RATE is a zero-priced term (the provider charges nothing for that
 //     direction, e.g. DeepSeek cache writes); a missing MODEL is the only
@@ -51,6 +51,7 @@ export function computeCostUSD(modelSpec: ModelSpec, usage: Usage): number | und
   return (
     perMillion(usage.input, rates.input) +
     perMillion(usage.output, rates.output) +
+    perMillion(usage.reasoning ?? 0, rates.output) +
     perMillion(usage.cacheRead, rates.cacheRead) +
     perMillion(usage.cacheWrite, rates.cacheWrite)
   );

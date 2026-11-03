@@ -73,6 +73,10 @@ tokens actually consumed, computed through the vendored models.dev table
 It is an api-equivalent proxy — what the same tokens would have cost on the
 vendor's API.
 
+Additive `Usage.reasoning` tokens are priced at the model's output rate,
+so they bind `maxUsd` as well as `maxTokens`. Drivers that already include
+reasoning in `output` must leave `reasoning` absent to avoid double counting.
+
 It is NOT what the owner is billed. On a coding-plan subscription the
 marginal cost of a run is approximately zero; the true constraint there is
 a rate limit, not a bill. The caps DD-9 ships are SAFETY bounds — a
