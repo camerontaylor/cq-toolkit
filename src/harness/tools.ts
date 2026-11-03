@@ -2961,7 +2961,7 @@ export function buildTools(
         if (!parsed.success) return invalidInput('bash', parsed.error);
         const { command } = parsed.data;
         const timeout = parsed.data.timeout ?? parsed.data.timeoutMs;
-        const requestedCwd = parsed.data.workdir ?? parsed.data.cwd ?? '.';
+        const requestedCwd = parsed.data.workdir ?? parsed.data.cwd ?? runCfg.defaultCwd ?? '.';
         const lexicalCwd = resolveInside(requestedCwd);
         if (lexicalCwd === undefined)
           return deny(

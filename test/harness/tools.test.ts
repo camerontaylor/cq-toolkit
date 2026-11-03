@@ -1217,3 +1217,22 @@ describe('F1 config migration', () => {
     ).toThrow(/mutually exclusive/);
   });
 });
+
+
+test('bash defaults to the configured nested cwd and still enforces containment and exact commands', async () => {
+  await withScratch(async scratchDir => {
+    await mkdir(join(scratchDir, 'nested'));
+    await writeFile(join(scratchDir, 'marker'), 'root');
+    await writeFile(join(scratchDir, 'nested', 'marker'), 'nested');
+    const config = runConfig(['re:^pwd$']);
+    const command = 'pwd';
+    const tools = buildTools({ ...config, tools: { ...config.tools, bash: { ...config.tools.bash, defaultCwd: 'nested' } } }, scratchDir);
+    const bash = tools.find(tool => tool.name === 'bash');
+    const result = await bash?.execute({ command });
+    expect(result?.ok).toBe(true);
+    if (result?.ok) expect(result.output.trim()).toBe(join(scratchDir, 'nested'));
+    expect((await bash?.execute({ command: 'echo other' }))?.ok).toBe(false);
+    const escaped = buildTools({ ...config, tools: { ...config.tools, bash: { ...config.tools.bash, defaultCwd: '../outside' } } }, scratchDir).find(tool => tool.name === 'bash');
+    expect((await escaped?.execute({ command }))?.ok).toBe(false);
+  });
+});

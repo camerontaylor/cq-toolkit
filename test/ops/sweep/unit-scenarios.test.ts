@@ -2,7 +2,7 @@
 // and fleet claims remain in the real runSweepPlan contracts because those
 // decisions live in the e2e composition helper rather than production.
 import { createEscalationState, nextEscalation } from '../../../src/ops/fix/escalation.js';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test, vi } from 'vitest';
@@ -1784,4 +1784,45 @@ test('M5b4 failure evidence', async () => {
   } finally {
     await rm(world.root, { recursive: true, force: true });
   }
+});
+
+
+test('verified local task commits retain scanned authorization for publication retries', async () => {
+  const world = await makeWorld([{ failing: true }, { failing: false }]);
+  const runStateDir = join(world.root, 'state');
+  const driver: Driver = { run: async () => ({
+    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, denials: [], stopReason: 'complete',
+    structuredOutput: { outcome: 'code-bug', summary: 'repair source', confidence: 0.9 },
+  }) };
+  try {
+    const local = bindingsOf(world, { taskLoop: {}, runStateDir, driver });
+    delete local.pushBranch;
+    const result = await makeSweepUnitOp(local)(UNIT);
+    expect(result.status).toBe('ok');
+    if (result.status !== 'ok') return;
+    const sha = result.value.tasks?.[0]?.commits[0];
+    expect(sha).toBeDefined();
+    const record = JSON.parse(await readFile(join(runStateDir, 'scanned', 'fix', 'alpha.json'), 'utf8'));
+    expect(record.sha).toBe(sha);
+    expect(world.pushCalls).toEqual([]);
+    const original = world.gitFactory();
+    const retry = await runUnit(world, { taskLoop: {}, runStateDir, deriveTasks: () => [],
+      git: async args => args.includes('rev-list') ? { code: 0, stdout: '1', stderr: '' } : original(args),
+    });
+    expect(retry.status).toBe('ok');
+    expect(world.pushCalls).toHaveLength(1);
+  } finally { await rm(world.root, { recursive: true, force: true }); }
+});
+
+test.each(['todo', 'code-bug'] as const)('verified %s commits identify todo evidence precisely', async outcome => {
+  const world = await makeWorld([{ failing: true }, { failing: false }]);
+  try {
+    await runUnit(world, { taskLoop: {}, driver: { run: async () => ({
+      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, denials: [], stopReason: 'complete',
+      structuredOutput: { outcome, summary: 'repair source', confidence: 0.9 },
+    }) } });
+    const message = world.gitCalls.find(args => args.includes('commit'))?.at(-1) ?? '';
+    expect(message).toContain('Cq-Task:');
+    expect(message.includes('Cq-Todo: true')).toBe(outcome === 'todo');
+  } finally { await rm(world.root, { recursive: true, force: true }); }
 });

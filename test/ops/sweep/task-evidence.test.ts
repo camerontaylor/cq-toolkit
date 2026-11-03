@@ -800,3 +800,17 @@ test('M5b4 failure evidence', async () => {
     }
   }
 });
+
+
+test('retry prompt projection excludes large baselines without mutating durable evidence', () => {
+  const final = { tool: 'vitest', exitCode: 1, failures: [{ file: 'other.test.ts', line: null, column: null, ruleId: null, message: 'LARGE_BASELINE'.repeat(1000), severity: 'error' as const }] };
+  const round = { tier: 'worker' as const, attempt: 1, reason: 'regression', failedAttempt: { branch: 'failed', sha: 'a'.repeat(40) }, validation: { verdict: 'fail' as const, regression: true as const, gates: [{ gate: 'broader' as const, verdict: 'fail' as const, wallMs: 1, detail: 'new failure' }], final } };
+  const before = JSON.stringify(round);
+  const projection = promptRound(round);
+  expect(JSON.stringify(projection)).not.toContain('LARGE_BASELINE');
+  expect(projection).toMatchObject({ reason: 'regression', failedAttempt: round.failedAttempt, validation: { regression: true, verdict: 'fail', gates: round.validation.gates } });
+  expect(JSON.stringify(round)).toBe(before);
+  expect(promptRound(undefined)).toBeNull();
+});
+
+import { promptRound } from '../../../src/ops/sweep/taskLoop.js';

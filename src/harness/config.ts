@@ -66,6 +66,8 @@ export const BashToolConfigSchema = z
   .object({
     enabled: z.boolean(),
     commandPatterns: z.array(z.string()),
+    /** Workspace-relative default for calls that omit workdir/cwd. */
+    defaultCwd: z.string().min(1).optional(),
     timeoutMs: z.number().int().positive().optional(),
     maxOutputChars: z.number().int().positive().optional(),
   })

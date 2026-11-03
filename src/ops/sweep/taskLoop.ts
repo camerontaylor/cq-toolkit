@@ -67,6 +67,22 @@ export interface FixTaskReport {
     outcome?: 'unfixed' | 'escalated-to-human';
   }>;
 }
+/** Prompt-only projection; durable rounds retain complete failure evidence. */
+export function promptRound(round: NonNullable<FixTaskReport['rounds']>[number] | undefined) {
+  if (round === undefined) return null;
+  const { validation, ...context } = round;
+  return {
+    ...context,
+    ...(validation === undefined ? {} : {
+      validation: {
+        verdict: validation.verdict,
+        gates: validation.gates,
+        ...(validation.regression ? { regression: true } : {}),
+      },
+    }),
+  };
+}
+
 export type FailedAttemptGate =
   | 'related'
   | 'broader'
@@ -322,7 +338,7 @@ async function runTaskLoopInner(
         if (decision.tier === 'rescue' && priorRound?.failedAttempt !== undefined) {
           priorFailedFeedback = await failedAttemptFeedback(git, priorRound.failedAttempt);
         }
-        const prompt = `${bindings.prompt(unit, worktree)}\nTier: ${decision.tier}; attempt: ${decision.attempt}; reason: ${decision.reason}\nPrevious attempt: ${JSON.stringify(priorRound ?? null)}${priorFailedFeedback === undefined ? '' : `\nPrior failed-attempt patch (engine-owned feedback; do not repeat rejected changes):\n${priorFailedFeedback.patch}`}\nTask: ${JSON.stringify(task)}\nRelated argv: ${JSON.stringify([related.command, ...related.args])}\nDo not stage or commit. Return outcome (broken-test, code-bug, todo), summary and confidence (0 to 1) as structured output.`;
+        const prompt = `${bindings.prompt(unit, worktree)}\nTier: ${decision.tier}; attempt: ${decision.attempt}; reason: ${decision.reason}\nPrevious attempt: ${JSON.stringify(promptRound(priorRound))}${priorFailedFeedback === undefined ? '' : `\nPrior failed-attempt patch (engine-owned feedback; do not repeat rejected changes):\n${priorFailedFeedback.patch}`}\nTask: ${JSON.stringify(task)}\nRelated argv: ${JSON.stringify([related.command, ...related.args])}\nDo not stage or commit. Return outcome (broken-test, code-bug, todo), summary and confidence (0 to 1) as structured output.`;
         const invoke = async (
           invocation: TaskAttempt['invocation'],
           text: string,
@@ -556,6 +572,7 @@ async function runTaskLoopInner(
               'Cq-Unit',
               `${bindings.segments?.kind ?? unit.fixer}/${bindings.segments?.slug ?? unit.package}`,
             ],
+            ...(output.outcome === 'todo' ? [['Cq-Todo', 'true'] as const] : []),
             ['Cq-Task', task.id],
             ['Cq-Attempt', String(decision.attempt)],
             ['Cq-Tier', tier],

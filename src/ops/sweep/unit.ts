@@ -641,6 +641,8 @@ export function makeSweepUnitOp(bindings: SweepUnitBindings): Op<WorkUnit, Sweep
         verify: async (sha, parent) => {
           const fault = await verifyScannedTip(bindings, unit, worktree.path, sha, parent);
           if (fault !== null) throw new Error(typeof fault === 'string' ? fault : fault.message);
+          const recordFault = await recordScannedCommitSha(bindings, segments, sha);
+          if (recordFault !== null) throw new Error(recordFault);
         },
         pendingPublish: async () => {
           const counted = await bindings.git([
@@ -1882,6 +1884,7 @@ export function bindingsFromDispatch(
                   ...defaultHarnessConfig.tools,
                   bash: {
                     ...defaultHarnessConfig.tools.bash,
+                    defaultCwd: checkCwd,
                     commandPatterns: [
                       're:^' +
                         [related.command, ...related.args]
