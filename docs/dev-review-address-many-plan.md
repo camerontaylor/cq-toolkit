@@ -9,10 +9,11 @@ baseline is `0a45e5c2951206b317858f07d349aed9732c7198`, targeting
 `main`.
 
 The module is `src/ops/review/internal/addressManyPlan.ts`, imported only by
-`test/ops/review/addressManyPlan.test.ts`. It is not an op: it is absent from
-the review family registry, the CLI grammar, `review/index.ts`, the package
-exports and the generated op docs, and it establishes no new shared producer
-witness.
+the `test/ops/review/addressManyPlan.*.test.ts` split (selection, admission,
+admissionStop, coverage, attribution and outcomes). It is not an op: it is
+absent from the review family registry, the CLI grammar, `review/index.ts`,
+the package exports and the generated op docs, and it establishes no new
+shared producer witness.
 
 ## Selection
 
@@ -116,9 +117,10 @@ self-contradictory is a refusal: a roll-up over a subset could otherwise report
 
 ## Fixtures
 
-`test/ops/review/addressManyPlan.test.ts` is scripted and offline: no git, no
-child process, no forge, no queue and no provider. It covers owner/viewer/
-allowlisted-bot selection with original spelling, an allowlisted login carried
+The `test/ops/review/addressManyPlan.*.test.ts` split is scripted and offline:
+no git, no child process, no forge, no queue and no provider. It covers
+owner/viewer/allowlisted-bot selection with original spelling, an allowlisted
+login carried
 by a `User` or `Organization` and a non-allowlisted `Bot` (all excluded), an
 empty allowlist, closed,
 merged, draft and deleted-head exclusions, incomplete listing, repo mismatch,
