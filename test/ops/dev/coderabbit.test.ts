@@ -40,6 +40,26 @@ describe('coderabbitReviewArgv', () => {
 });
 
 describe('parseReviewerStream', () => {
+  test.each([1, 42])('retains finding identity at line %s', (line) => {
+    const parsed = parseReviewerStream(
+      JSON.stringify({
+        type: 'finding',
+        severity: 'major',
+        fileName: 'src/a.ts',
+        line,
+        rule: 'identity',
+      }),
+    );
+    expect(parsed.findings[0]).toMatchObject({ fileName: 'src/a.ts', line, rule: 'identity' });
+  });
+  test.each([0, -1, 1.5, '1', null])('ignores invalid optional finding line %s', (line) => {
+    const parsed = parseReviewerStream(
+      JSON.stringify({ type: 'finding', severity: 'major', line, rule: 1 }),
+    );
+    expect(parsed.findings[0]).not.toHaveProperty('line');
+    expect(parsed.findings[0]).not.toHaveProperty('rule');
+  });
+
   test('a full cycle: status beats, findings, and a terminal complete', () => {
     const stdout = [
       JSON.stringify({ type: 'review_context', sha: 'abc' }),

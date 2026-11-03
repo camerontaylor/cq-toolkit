@@ -83,6 +83,55 @@ function scriptedDrivers(
 }
 
 describe('review.run', () => {
+  it('deduplicates agent and CodeRabbit producer findings by file, line and rule', async () => {
+    const repo = await makeTestRepo();
+    try {
+      await configureAgentRepo(repo);
+      const identity = { file: 'src/a.ts', line: 1, rule: 'shared-rule' };
+      const effects = repoEffects(repo, (command) =>
+        command === 'coderabbit'
+          ? {
+              exitCode: 0,
+              stdout: [
+                JSON.stringify({
+                  type: 'finding',
+                  fileName: identity.file,
+                  line: identity.line,
+                  rule: identity.rule,
+                  severity: 'major',
+                  comment: 'vendor wording',
+                }),
+                JSON.stringify({ type: 'complete', status: 'review_completed' }),
+              ].join('\n'),
+              stderr: '',
+              timedOut: false,
+            }
+          : undefined,
+      );
+      const result = await makeReviewRun({
+        drivers: scriptedDrivers(undefined, 0, () => [
+          { ...identity, severity: 'high', text: 'agent wording' },
+        ]),
+        effectsFactory: () => effects,
+        scannerFactory: () => async (components) =>
+          components.map(({ component }) => ({ component, hits: [] })),
+      })({ repoRoot: repo.root, reviewers: ['coderabbit', 'agent'] });
+      expect(result.status).toBe('ok');
+      if (result.status !== 'ok') throw new Error(result.status);
+      expect(result.value.findings).toHaveLength(1);
+      expect(result.value.findings[0]).toMatchObject(identity);
+      expect(result.value.findings[0]?.source.split(',').sort()).toEqual(['agent', 'coderabbit']);
+      const folder = join(repo.root, '.cq', 'review', 'feature%2Fx');
+      const [recordFile] = await readdir(folder);
+      const persisted = JSON.parse(await readFile(join(folder, recordFile ?? ''), 'utf8')) as {
+        findings: unknown[];
+      };
+      expect(persisted.findings).toEqual(result.value.findings);
+    } finally {
+      await repo.cleanup();
+    }
+  });
+
   it('forwards opt-in area execution through the public op', async () => {
     const repo = await makeTestRepo();
     try {
