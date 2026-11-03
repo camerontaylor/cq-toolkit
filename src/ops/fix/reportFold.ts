@@ -178,3 +178,174 @@ export function assembleReportV2(
     }
   }
 }
+
+/**
+ * ADR-0008 T37: the explicit, LOSSY pre-v2 view that legacy fix/address
+ * report consumers read. This is the only synthesis of the old scalar; a
+ * ReportV2 never carries it and no other module derives it from v2 evidence.
+ * Display-only: it never replays evidence and is never replay, approval or
+ * acceptance input. `lossy: true` keeps it distinguishable from a report v2
+ * payload on disk, and the projection carries no evidence rows.
+ */
+export interface LegacyReportProjection {
+  /** Always true: this is the lossy legacy view, never a ReportV2. */
+  lossy: true;
+  /**
+   * The pre-v2 scalar: distinct verified commit SHAs. `null` means the
+   * evidence is absent, partial or inconsistent; never a zero or a guess.
+   */
+  fixesPerRun: number | null;
+  /** T28 availability for the scalar, so unknown and measured zero stay distinct. */
+  availability: AvailabilityRecord;
+}
+
+/**
+ * The legacy carrier's own rows, read only when the report has no
+ * `reportV2` (a normal legacy run, not an error). These are the v2 inputs a
+ * legacy report already holds; the projection never invents rows.
+ */
+export type LegacyProjectionEvidence =
+  | { producer: 'fix'; tasks: readonly { outcome: string; commits: readonly string[] }[] }
+  | { producer: 'address'; fixes: readonly { commit?: string | undefined }[] };
+
+export interface LegacyProjectionSource {
+  /** The v2 report carried by the report, when the run assembled one. */
+  reportV2?: ReportV2 | undefined;
+  /** Legacy rows, consulted only when `reportV2` is absent. */
+  evidence?: LegacyProjectionEvidence | undefined;
+}
+
+const legacyUnavailable = (reason: string): AvailabilityRecord => ({
+  state: 'unavailable',
+  reason,
+  source: null,
+});
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  value !== null && typeof value === 'object';
+
+/** The legacy scalar over legacy rows, mirroring the pre-v2 producers' rule. */
+function legacyEvidenceCount(evidence: LegacyProjectionEvidence): number {
+  const commits = new Set<string>();
+  if (evidence.producer === 'fix') {
+    if (!Array.isArray(evidence.tasks)) throw new Error('fix task rows are absent');
+    for (const raw of evidence.tasks as readonly unknown[]) {
+      if (!isRecord(raw)) throw new Error('malformed fix task row');
+      const outcome = raw.outcome;
+      const rowCommits = raw.commits;
+      if (typeof outcome !== 'string' || !Array.isArray(rowCommits))
+        throw new Error('malformed fix task row');
+      if (outcome !== 'fixed') continue;
+      for (const sha of rowCommits as readonly unknown[]) {
+        if (typeof sha !== 'string') throw new Error('malformed fix commit');
+        commits.add(sha);
+      }
+    }
+    return commits.size;
+  }
+  if (!Array.isArray(evidence.fixes)) throw new Error('address fix rows are absent');
+  for (const raw of evidence.fixes as readonly unknown[]) {
+    if (!isRecord(raw)) throw new Error('malformed address fix row');
+    const commit = raw.commit;
+    if (commit === undefined) continue;
+    if (typeof commit !== 'string') throw new Error('malformed address fix commit');
+    commits.add(commit);
+  }
+  return commits.size;
+}
+
+function projectFromEvidence(evidence: LegacyProjectionEvidence): LegacyReportProjection {
+  const count = legacyEvidenceCount(evidence);
+  return {
+    lossy: true,
+    fixesPerRun: count,
+    availability: {
+      state: count === 0 ? 'known-zero' : 'known',
+      reason: 'projected from legacy carrier rows; explicitly lossy',
+      source: null,
+    },
+  };
+}
+
+function projectFromReportV2(reportV2: ReportV2): LegacyReportProjection {
+  const parsed = ReportV2Schema.safeParse(reportV2);
+  if (!parsed.success) {
+    const issue = parsed.error.issues[0];
+    return {
+      lossy: true,
+      fixesPerRun: null,
+      availability: legacyUnavailable(
+        `report v2 evidence is not schema-valid: ${issue?.message ?? 'unknown issue'}`,
+      ),
+    };
+  }
+  const report = parsed.data;
+  const numerator = report.metric.fixesPerRun.numerator;
+  if (numerator === null) {
+    const recorded = report.availability['/metric/fixesPerRun/numerator'];
+    return {
+      lossy: true,
+      fixesPerRun: null,
+      availability: recorded ?? {
+        state: 'not-collected',
+        reason: 'report v2 metric numerator is unknown without an availability record',
+        source: null,
+      },
+    };
+  }
+  // The numerator is the deduplicated verified-commit count; a disagreement
+  // makes the evidence untrustworthy, so the scalar is withheld rather than
+  // guessed. This is a count, never the numerator/denominator ratio.
+  if (numerator !== report.metric.verifiedCommits.length) {
+    return {
+      lossy: true,
+      fixesPerRun: null,
+      availability: legacyUnavailable(
+        'report v2 metric numerator disagrees with its verified commit projection',
+      ),
+    };
+  }
+  return {
+    lossy: true,
+    fixesPerRun: numerator,
+    availability: {
+      state: numerator === 0 ? 'known-zero' : 'known',
+      reason: 'projected from report v2 verified commits; explicitly lossy',
+      source: null,
+    },
+  };
+}
+
+/**
+ * Project a report (its v2 payload or, when absent, its own legacy rows) to
+ * the lossy pre-v2 view. Never throws, never mutates its input, never emits
+ * evidence rows and never changes a verdict. Without any evidence the old
+ * scalar is `null`/not-collected, exactly as absence, not zero.
+ */
+export function legacyReportProjection(
+  source: LegacyProjectionSource = {},
+): LegacyReportProjection {
+  try {
+    const projection: LegacyReportProjection =
+      source.reportV2 !== undefined
+        ? projectFromReportV2(source.reportV2)
+        : source.evidence !== undefined
+          ? projectFromEvidence(source.evidence)
+          : {
+              lossy: true,
+              fixesPerRun: null,
+              availability: {
+                state: 'not-collected',
+                reason: 'no report v2 and no legacy evidence to project',
+                source: null,
+              },
+            };
+    return sanitizeObservation(projection);
+  } catch (error) {
+    return sanitizeObservation({
+      lossy: true,
+      fixesPerRun: null,
+      availability: legacyUnavailable(`legacy projection unavailable: ${String(error)}`),
+    });
+  }
+}
