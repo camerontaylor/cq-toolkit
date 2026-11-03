@@ -251,3 +251,8 @@ as counter-evidence, so the finding remained open. This demonstrates actual
 model editing and closure gating, not semantic proof that the fix is wrong.
 The current assembler still cannot produce resolved closure without attested
 dependency completeness.
+
+Issue #724 follow-up: the helper now distinguishes a replacement declaration
+whose same-line quoted defect was removed. Surviving quoted spans and declarations
+in cited dependencies still refuse closure. This historical transcript is unchanged;
+its missing dependency-completeness attestation would still keep closure unresolved.

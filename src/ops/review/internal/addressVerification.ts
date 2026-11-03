@@ -427,6 +427,7 @@ export function verifyClosureEvidence(
 
   let deletionOnly = false;
   let removedLines: readonly string[] = [];
+  let addedLines: readonly string[] = [];
   const coherent = (): VerificationCheck => {
     const shape = parsePatchShape(packet.patch, packet.before, packet.after);
     if (typeof shape === 'string')
@@ -453,6 +454,7 @@ export function verifyClosureEvidence(
       };
     deletionOnly = shape.deletionOnly;
     removedLines = shape.removedLines;
+    addedLines = shape.addedLines;
     return {
       check: 'patch-coherent',
       outcome: 'pass',
@@ -494,7 +496,15 @@ export function verifyClosureEvidence(
     }
     for (const symbol of symbols) {
       const redeclared = DECLARATION_SURVIVAL(symbol);
-      if (redeclared.test(packet.after))
+      // A declaration can survive while its cited defective expression changes.
+      // Require a replacement declaration and a quoted trigger on that same
+      // removed line; the span checks above still reject surviving triggers.
+      const modifiedDeclaration =
+        addedLines.some((line) => DECLARATION_LINE.exec(line)?.[1] === symbol) &&
+        removedLines
+          .filter((line) => DECLARATION_LINE.exec(line)?.[1] === symbol)
+          .every((line) => spans.some((span) => line.includes(span)));
+      if (redeclared.test(packet.after) && !modifiedDeclaration)
         return {
           check: 'trigger-removed',
           outcome: 'fail',
