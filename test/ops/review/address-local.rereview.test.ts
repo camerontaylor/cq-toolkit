@@ -4,8 +4,9 @@
 // re-review recovery.
 import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { describe, expect, test } from 'vitest';
-import { makeReviewAddress } from '../../../src/ops/review/address.js';
+import { describe, expect, test, vi } from 'vitest';
+import { makeAddressWorker } from '../../../src/ops/review/addressWorker.js';
+import { makeReviewAddress, type ReviewAddressReport } from '../../../src/ops/review/address.js';
 import type { DriverFactory } from '../../../src/driver/factory.js';
 import { fixture, useGitleaksPath } from './address-local.helpers.js';
 
@@ -169,4 +170,53 @@ describe('review.address blocked re-review (#509)', () => {
       await f.cleanup();
     }
   });
+});
+
+describe('final re-review wall guard (#533)', () => {
+  test.each([0, 16_000, 60_000])(
+    'attributes final review after fixing uses %i ms',
+    async (elapsed) => {
+      const realNow = Date.now.bind(Date);
+      let offset = 0;
+      const f = await fixture('fix');
+      if (elapsed === 16_000)
+        f.record.findings.push({ ...f.record.findings[0]!, id: 'reserved-batch' });
+      let fixes = 0;
+      const started = realNow();
+      const clock = vi.spyOn(Date, 'now').mockImplementation(() => started + offset);
+      try {
+        const op = makeReviewAddress({
+          drivers: f.drivers,
+          initialRecord: f.record,
+          workerFactory: (deps) => {
+            const worker = makeAddressWorker(deps);
+            return {
+              ...worker,
+              fix: async (finding, round) => {
+                fixes += 1;
+                const result = await worker.fix(finding, round);
+                offset = elapsed;
+                return result;
+              },
+            };
+          },
+        });
+        const result = await op({
+          repoRoot: f.repo.root,
+          source: 'local',
+          journalDir: f.journalDir,
+        });
+        expect(result.status, JSON.stringify(result)).toBe(
+          elapsed >= 20_000 ? 'needs-human' : 'ok',
+        );
+        expect(fixes).toBe(1);
+        expect(f.reviewRequests.count).toBe(elapsed >= 20_000 ? 0 : 1);
+        if (elapsed >= 20_000)
+          expect((result as { report?: ReviewAddressReport }).report?.stop).toBe('budget');
+      } finally {
+        clock.mockRestore();
+        await f.cleanup();
+      }
+    },
+  );
 });

@@ -748,11 +748,11 @@ consumers of the former optional `rounds[].run` must iterate `rounds[].runs`.
 `dev.cycle` renders its attempt log from the run-wide `attempts` array and
 does not consume per-round runs.
 
-`review.address` uses a six-hour default wall guard when no run wall is
-configured. Fix dispatch still respects an explicit run/input wall. The
-final re-review, including its one transient retry, uses a separate six-hour
-runaway guard, even after the fixing wall is spent. `review.run` also defaults
-to six hours; an explicitly configured run wall still caps each review. Cancellation, token and
-integrity stops still bind. A spent fixing wall does not invalidate a
-completed re-review.
-No time calibration or re-review reserve is used.
+`review.address` and `review.run` use a six-hour default wall guard when no
+run wall is configured. An explicit run/input wall remains authoritative,
+including final review dispatch, completion and publication. Address fixing
+uses at most the first three quarters of that wall, leaving the last quarter
+for final re-review and its bounded transient retry. No new fix batch or round
+starts after that fixing allowance is spent; final review receives only the
+remaining run wall. A slow worker or review that exhausts the run wall still
+blocks with budget attribution. No time calibration is used.

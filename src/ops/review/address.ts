@@ -608,17 +608,14 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
         report.usage.cacheWrite -
         (report.usage.reasoning ?? 0);
       const remainingWallMs = () => cap - (Date.now() - start);
-      let reviewDeadline: number | undefined;
-      const beginReview = () => {
-        reviewDeadline = Date.now() + reviewWallMs;
-      };
+      // A fixed share keeps final verification inside the same authoritative wall.
+      const reviewReserveMs = Math.ceil(cap / 4);
+      const remainingFixWallMs = () => remainingWallMs() - reviewReserveMs;
+      const fixWallStop = 'fix dispatch stopped to preserve final re-review wall';
       const stop = () => {
         if (parent?.aborted) return 'parent cancelled';
         if (bookkeepingTampered) return 'engine bookkeeping changed; worker tree is dirty';
-        if (
-          remainingTokens() <= 0 ||
-          (reviewDeadline === undefined ? remainingWallMs() : reviewDeadline - Date.now()) <= 0
-        ) {
+        if (remainingTokens() <= 0 || remainingWallMs() <= 0) {
           budgetSpent = true;
           return 'token or wall budget exhausted';
         }
@@ -979,7 +976,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
               const second = await reviewOnce({
                 ...request,
                 maxTokens: Math.max(1, remainingTokens()),
-                wallMs: reviewWallMs,
+                wallMs: Math.max(1, remainingWallMs()),
               });
               // A budget, cancellation or bookkeeping stop observed after the
               // retry outranks it: never mark a draft over a stopped run.
@@ -1088,7 +1085,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                     return { paths, unknown };
                   }),
                 remainingTokens,
-                remainingWallMs,
+                remainingWallMs: remainingFixWallMs,
                 account,
                 ...(parent ? { parentSignal: parent } : {}),
               };
@@ -1566,7 +1563,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                 ),
                 policy.review.addressConcurrency,
               )) {
-                if (stop()) return;
+                if (stop() || remainingFixWallMs() <= 0) return;
                 const jobs = batch.map((finding, index) => ({
                   id: `finding-${index}`,
                   op: 'review.fixItem',
@@ -1609,7 +1606,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                   {
                     governor: createGovernor({
                       maxTokens: Math.max(1, remainingTokens()),
-                      perJobWallClockMs: Math.min(policy.budgets.unit.wallMs, remainingWallMs()),
+                      perJobWallClockMs: Math.min(policy.budgets.unit.wallMs, remainingFixWallMs()),
                     }),
                     ...(parent ? { signal: parent } : {}),
                     allowAdvisory: true,
@@ -1825,9 +1822,10 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
               };
             }
             for (let round = 1; round <= policy.review.rounds; round++) {
-              reviewDeadline = undefined;
               const stopped = stop();
               if (stopped) return await finish('needs-human', stopped);
+              if (round > 1 && remainingFixWallMs() <= 0)
+                return await finish('needs-human', fixWallStop);
               if (prMetadata) {
                 const meta = prMetadata;
                 const fixesById = new Map<string, AddressFix>();
@@ -1856,6 +1854,8 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                       text: discussionText(item.item.body, item.item.comments),
                       status: 'open',
                     };
+                    if (remainingFixWallMs() <= 0)
+                      return { status: 'needs-human', reason: fixWallStop };
                     const bound = bindWorker(root);
                     const admit = async (head: string) => {
                       if ((await branchName(root)) !== item.worktree.branch)
@@ -2166,7 +2166,6 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                   { ...threads, findings: report.findings },
                   policy.review.blockingSeverities,
                 );
-                beginReview();
                 if (stop()) return await finish('needs-human', stop());
                 const priorFindings = priorRoundFindings(previous, [
                   ...threads.findings,
@@ -2181,7 +2180,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                       ? { base: await reviewedBasePinned() }
                       : {}),
                   maxTokens: Math.max(1, remainingTokens()),
-                  wallMs: reviewWallMs,
+                  wallMs: Math.max(1, remainingWallMs()),
                   reviewers: ['agent'],
                   ...(priorFindings.length > 0 ? { priorFindings } : {}),
                 });
@@ -2279,7 +2278,6 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
               }
               const unresolved = await dispatchFindings(root, previous, round);
               await publishOnExit();
-              beginReview();
               if (stop()) return await finish('needs-human', stop());
               if (unresolved) return await finish('needs-human', unresolved);
               const priorFindings = priorRoundFindings(previous);
@@ -2288,7 +2286,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                 target: input.target ?? 'main',
                 ...(reviewedBase ? { base: reviewedBase } : {}),
                 maxTokens: Math.max(1, remainingTokens()),
-                wallMs: reviewWallMs,
+                wallMs: Math.max(1, remainingWallMs()),
                 ...(priorFindings.length > 0 ? { priorFindings } : {}),
               });
               const refreshedRecord =
