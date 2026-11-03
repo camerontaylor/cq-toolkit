@@ -149,6 +149,9 @@ def rank4_gate(c, queue, item, dry=False):
     return True
 
 
+MISSING_EVIDENCE = "missing retained evidence; reconcile before dispatch"
+
+
 def select(c, queue, log, dry, only):
     if (queue.get("backfill_halted") or queue.get("backfill_publication_error")
             or (c.STATE / "backfill/publication-failure.json").exists()):
@@ -165,14 +168,25 @@ def select(c, queue, log, dry, only):
     if not pending:
         return None, False
     # Coverage costs minutes of CPU on a large queue. Every gate refusal is
-    # item-independent, so ask the gate first and skip coverage when it says no.
+    # item-independent, so ask the gate first; a refusal skips coverage unless
+    # the ledger head or the job set changed since the last full pass, which
+    # still marks newly covered jobs done.
+    refused, before = None, pending[0].get("wait_reason")
     if not rank4_gate(c, queue, pending[0], dry=True):
-        for item in pending:
-            item["wait_reason"] = pending[0]["wait_reason"]
-        return None, True
+        refused = pending[0].get("wait_reason") or "rank4-gate-refused"
+    pending[0]["wait_reason"] = before  # the pass below assigns each job's reason
+    if before is None:
+        del pending[0]["wait_reason"]
     repo, store, outbox, publisher = services(c, config)
     # New publication may remove eligibility without moving the job's T.
     head, events = publisher.fetch()
+    reconciled = ledger.digest({"head": head, "jobs": sorted(j["id"] for j in items)})
+    last = queue.get("backfill_coverage_reconciled")
+    if refused and isinstance(last, dict) and last.get("digest") == reconciled:
+        for item in pending:
+            if item.get("wait_reason") != MISSING_EVIDENCE:
+                item["wait_reason"] = refused
+        return None, bool(last.get("available"))
     # Within one runner process, coverage for an unchanged ledger head is reused,
     # so an admission loop calling select again does not repeat it.
     cache = getattr(c, "_backfill_coverage_cache", None)
@@ -191,13 +205,12 @@ def select(c, queue, log, dry, only):
     items.sort(key=lambda j: (j["dispatch_tier_importance"], j.get("retry", False), j["subject_kind"],
                              j.get("row") or 0 if j["subject_kind"] == "A" else -j["score"], j["subject_id"]))
     available = False
-    refused = None
     for item in items:
         if not jobs.eligible(queue, item, c.iso()):
             continue
         covered, _, gaps = coverage_for(item["target"])
         if gaps:
-            item["wait_reason"] = "missing retained evidence; reconcile before dispatch"
+            item["wait_reason"] = MISSING_EVIDENCE
             continue
         desired = ledger.scope(item["scope"])
         if all(lines <= covered.get(name, set()) for (name, _), lines in desired.items()):
@@ -234,6 +247,7 @@ def select(c, queue, log, dry, only):
                 item.update(state="launch-unknown", vendor_state="unknown")
             c.save_queue(queue)
             raise
+    queue["backfill_coverage_reconciled"] = {"digest": reconciled, "available": available}
     return None, available
 
 
