@@ -19,7 +19,7 @@
 //      not mask the run's own terminal result, and the writer's failure
 //      surface carries the first write error.
 // Fake/local inputs only: no provider, no network, no credentials.
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
@@ -421,6 +421,55 @@ describe('T30 failure boundary', () => {
       expect(report.observation?.status).toBe('indeterminate');
       expect(report.observation?.failure).not.toContain('tok');
       expect(report.observation?.kernelRuns).toEqual([]);
+    } finally {
+      await rm(f.root, { recursive: true, force: true });
+      roots = roots.filter((root) => root !== f.root);
+    }
+  });
+
+  test('a failed writer open leaves the verdict unchanged and observation indeterminate', async () => {
+    const f = await fixture();
+    // A regular file where the observations/ directory belongs makes the
+    // stream open refuse (ENOTDIR) before any writer exists.
+    const journalDir = join(f.root, 'journal');
+    await mkdir(journalDir, { recursive: true });
+    await writeFile(join(journalDir, 'observations'), 'not a directory');
+    try {
+      const result = await makeFixRun({
+        drivers: fixingDrivers(),
+        registry: { get: stubSweepRegistries(fixedUnitReport()) },
+      })({ ...input(f), journalDir });
+      const report = reportOf(result);
+      // The open is observation, never verdict: the run keeps its own result
+      // and the observation carries the failure as indeterminate evidence.
+      expect(result.status, JSON.stringify(report)).toBe('ok');
+      expect(report.observation?.status).toBe('indeterminate');
+      // No stream exists, so the run never claims durability.
+      expect(report.observation?.persistence).toBe('unavailable');
+      expect(report.observation?.failure).not.toBeNull();
+      expect(report.observation?.failure).toContain('observations');
+    } finally {
+      await rm(f.root, { recursive: true, force: true });
+      roots = roots.filter((root) => root !== f.root);
+    }
+  });
+
+  test('a failed writer open records a sanitized failure', async () => {
+    const f = await fixture();
+    const observationModule = await import('../../../src/kernel/observation.js');
+    vi.spyOn(observationModule, 'openObservationWriter').mockRejectedValueOnce(
+      new Error('https://u:tok@h/x?k=v'),
+    );
+    try {
+      const result = await makeFixRun({
+        drivers: fixingDrivers(),
+        registry: { get: stubSweepRegistries(fixedUnitReport()) },
+      })(input(f));
+      const report = reportOf(result);
+      expect(result.status, JSON.stringify(report)).toBe('ok');
+      expect(report.observation?.status).toBe('indeterminate');
+      expect(report.observation?.failure).not.toBeNull();
+      expect(report.observation?.failure).not.toContain('tok');
     } finally {
       await rm(f.root, { recursive: true, force: true });
       roots = roots.filter((root) => root !== f.root);
