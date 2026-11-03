@@ -19,7 +19,7 @@
 //   5. The legacy ratchet.yml's target/metric pairs are exactly the trust
 //      manifest's (baselines/ratchets.json), and its guard runs in ref mode.
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -460,4 +460,53 @@ describe('legacy ratchet.yml agrees with the trust manifest', () => {
       expect(body).not.toMatch(/git diff/);
     },
   );
+});
+
+describe('trusted recompute lockfile guard', () => {
+  it.each([false, true])('skips only when the PR changes the lockfile (%s)', (changed) => {
+    const root = mkdtempSync(join(tmpdir(), 'recompute-lockfile-'));
+    const git = (...args: string[]) => {
+      const result = spawnSync('git', ['-C', join(root, 'trust'), ...args], { encoding: 'utf8' });
+      expect(result.status, result.stderr).toBe(0);
+      return result.stdout.trim();
+    };
+    try {
+      spawnSync('git', ['init', join(root, 'trust')]);
+      git('config', 'user.email', 'test@example.invalid');
+      git('config', 'user.name', 'Test');
+      writeFileSync(join(root, 'trust/pnpm-lock.yaml'), 'base');
+      git('add', '.');
+      git('commit', '-m', 'base');
+      git('update-ref', 'refs/cq-transfer/base', 'HEAD');
+      writeFileSync(join(root, changed ? 'trust/pnpm-lock.yaml' : 'trust/README.md'), 'head');
+      git('add', '.');
+      git('commit', '-m', 'head');
+      const workflow = template('cq-verify.yml');
+      const guard = workflow
+        .slice(
+          workflow.indexOf('          # Lockfile guard:'),
+          workflow.indexOf('          # End lockfile guard.'),
+        )
+        .replace(/^ {10}/gm, '');
+      const output = join(root, 'output');
+      writeFileSync(output, '');
+      const result = spawnSync('bash', ['-eu', '-c', guard + '\necho recompute'], {
+        cwd: root,
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          KIND: 'pr',
+          SUBJECT: git('rev-parse', 'HEAD'),
+          GITHUB_OUTPUT: output,
+        },
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout.includes('recompute')).toBe(!changed);
+      expect(readFileSync(output, 'utf8').includes('trusted typecheck recompute skipped')).toBe(
+        changed,
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });
