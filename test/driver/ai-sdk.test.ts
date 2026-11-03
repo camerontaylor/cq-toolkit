@@ -825,6 +825,37 @@ describe('ai-sdk driver specifics (mock model)', () => {
     }
   });
 
+  test.each([undefined, false, true])('late reviewer countdown is opt-in (%s)', async (enabled) => {
+    const hints: Array<number | undefined> = [];
+    const mock = new MockLanguageModelV4({
+      modelId: 'mock-1',
+      doGenerate: async (options) => {
+        const text = JSON.stringify(options.prompt);
+        expect(text).not.toContain('1 tool steps left');
+        hints.push(Number(/(\d+) tool steps? left/.exec(text)?.[1]) || undefined);
+        return text.includes('This is your final step')
+          ? textResult('{"fixed":true}')
+          : toolCallResult('read', { path: 'absent.txt' });
+      },
+    });
+    const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-countdown-'));
+    try {
+      const driver = new AiSdkDriver({ providers: { mock: () => mock }, sessionsDir: scratchDir });
+      const result = await driver.run(
+        invocation({
+          budget: { maxSteps: 5 },
+          toolPolicy: { allow: ['read'], mode: 'allowlist' },
+          outputSchema: toOutputSchema('test/countdown/v1', z.object({ fixed: z.boolean() })),
+        }),
+        enabled === undefined ? {} : { reviewerStepCountdown: enabled },
+      );
+      expect(result.stopReason).toBe('complete');
+      expect(hints).toEqual(enabled ? [undefined, 3, 2, 1, undefined] : Array(5).fill(undefined));
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
   test('a small maxSteps budget is honoured: the last step is invited to answer instead of calling tools', async () => {
     const toolCounts: number[] = [];
     let resuming = false;

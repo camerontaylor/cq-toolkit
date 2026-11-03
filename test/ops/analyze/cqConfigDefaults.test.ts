@@ -34,7 +34,7 @@ describe('cq.json effective policy', () => {
       addressConcurrency: 2,
       searchTools: true,
       bulk: { concurrency: 3 },
-      session: { maxInputChars: 60_000, maxSteps: 15, concurrency: 4 },
+      session: { stepCountdown: false, maxInputChars: 60_000, maxSteps: 15, concurrency: 4 },
       size: {
         small: { maxChangedLines: 200, maxFiles: 5 },
         medium: { maxChangedLines: 800, maxFiles: 20 },
@@ -100,7 +100,7 @@ describe('cq.json effective policy', () => {
       searchTools: false,
       denylistPatternsFile: 'patterns.yml',
       bulk: { query: 'is:open', concurrency: 8 },
-      session: { maxInputChars: 90_000, maxSteps: 30, concurrency: 4 },
+      session: { stepCountdown: false, maxInputChars: 90_000, maxSteps: 30, concurrency: 4 },
       size: {
         small: { maxChangedLines: 50, maxFiles: 7 },
         medium: { maxChangedLines: 900, maxFiles: 40 },
@@ -173,4 +173,11 @@ test('bounded test adapter defaults to the tests kind', () => {
     ],
   };
   expect(resolveCqConfigDefaults(config, flags).checks[0]!.kind).toBe('tests');
+});
+
+test('reviewer countdown opts in through configuration', () => {
+  expect(
+    resolveCqConfigDefaults({ ...minimal, review: { session: { stepCountdown: true } } }, flags)
+      .review.session.stepCountdown,
+  ).toBe(true);
 });

@@ -122,6 +122,7 @@ export async function runReviewSession(
     severityMap: { high: string; medium: string; low?: string };
     maxTokens: number;
     maxSteps: number;
+    stepCountdown?: boolean;
     maxPromptChars: number;
     signal: AbortSignal;
     scanSecrets: DiffSecretScanner;
@@ -261,7 +262,12 @@ export async function runReviewSession(
         // the correlation value (ADR-0002 one-directional rule).
         ...correlationInvocation(currentJobContext()?.info?.correlation),
       },
-      { signal },
+      {
+        signal,
+        ...(input.stepCountdown === undefined
+          ? {}
+          : { reviewerStepCountdown: input.stepCountdown }),
+      },
     );
   // Settled spend still belongs to the governor after cancellation. The outer
   // run may already have returned a snapshot; do not mutate its local report or

@@ -71,6 +71,8 @@ export function resolveCqConfigDefaults(config: CqConfig, flags: CqConfigFlags) 
         concurrency: f.review?.bulk?.concurrency ?? c.review?.bulk?.concurrency ?? 3,
       },
       session: {
+        stepCountdown:
+          f.review?.session?.stepCountdown ?? c.review?.session?.stepCountdown ?? false,
         maxInputChars:
           f.review?.session?.maxInputChars ??
           c.review?.session?.maxInputChars ??

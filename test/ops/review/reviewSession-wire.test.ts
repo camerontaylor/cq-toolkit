@@ -11,7 +11,7 @@ import {
   type AiSdkDriverOptions,
 } from '../../../src/driver/ai-sdk/index.js';
 import type { DriverFactory } from '../../../src/driver/factory.js';
-import type { WorkerResult } from '../../../src/driver/types.js';
+import type { RunOptions, WorkerResult } from '../../../src/driver/types.js';
 import type { DiffSecretScanner, ScanComponentInput } from '../../../src/ops/dev/denylist.js';
 import { runAgentReviewer } from '../../../src/ops/review/agentReviewer.js';
 import { createReviewPlan } from '../../../src/ops/review/internal/reviewPlan.js';
@@ -766,3 +766,41 @@ describe('agent rate-limit refusal states the wait and cause (#578)', () => {
     ]);
   });
 });
+
+it.each([undefined, true])(
+  'review session forwards countdown opt-in (%s)',
+  async (stepCountdown) => {
+    const root = await scratch();
+    const optionsSeen: Array<RunOptions | undefined> = [];
+    const model = new MockLanguageModelV4({
+      modelId: 'mock-1',
+      doGenerate: async () => textResult('{"findings":[]}'),
+    });
+    const underlying = wireFactory(root, model, []);
+    const factory: DriverFactory = {
+      resolve(request) {
+        const resolved = underlying.resolve(request);
+        return {
+          ...resolved,
+          driver: {
+            run: async (invocation, options) => {
+              optionsSeen.push(options);
+              return resolved.driver.run(invocation, options);
+            },
+          },
+        };
+      },
+    };
+    const result = await runReviewSession(factory, {
+      ...runInput(root, planFor(), evidenceFor()),
+      scanSecrets: recordingScanner([]),
+      onUsage: () => {},
+      ...(stepCountdown === undefined ? {} : { stepCountdown }),
+    });
+    expect(result.status).toBe('ok');
+    expect(optionsSeen).toHaveLength(1);
+    if (stepCountdown === undefined)
+      expect(optionsSeen[0]).not.toHaveProperty('reviewerStepCountdown');
+    else expect(optionsSeen[0]).toHaveProperty('reviewerStepCountdown', true);
+  },
+);
