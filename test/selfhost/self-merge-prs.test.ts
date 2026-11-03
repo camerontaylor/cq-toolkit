@@ -398,7 +398,8 @@ describe('runSelfMergePrs — real run', () => {
     // the governed runner refuses to fabricate a stoppedEarly claim over it
     // (I9 both directions; the kernel's 'a trip that gated NOTHING stays
     // silent' rule). The annotated early-stop form is pinned where gated
-    // rows exist: test/kernel/runner-governed.test.ts.
+    // rows exist: test/kernel/runner-governed.*.test.ts (the runner-governed
+    // split).
     expect(result.report.stoppedEarly).toBe(false);
     expect(result.report.earlyStopReason).toBeUndefined();
   });
