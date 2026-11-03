@@ -196,11 +196,12 @@ async function claudeAgentPollEvidence(verdict, scratchDir) {
   // sweepLingeringWorkers (the authoritative, every-exit-path sweep).
   const evidence = { transcriptCountAtSettle: undefined, transcriptCountAfterPoll: undefined };
   try {
-    const record = await new SessionStore(join(scratchDir, 'agent-sessions')).load(
-      verdict.sessionId,
-    );
+    const sessionsDir = join(scratchDir, 'agent-sessions');
+    const record = await new SessionStore(sessionsDir).load(verdict.sessionId);
     const workspace = record.workspace;
-    const agentSessionId = (await readFile(join(workspace, CLI_SESSION_FILE), 'utf8')).trim();
+    const agentSessionId = (
+      await readFile(join(sessionsDir, `${verdict.sessionId}${CLI_SESSION_FILE}`), 'utf8')
+    ).trim();
     const sdk = await import('@anthropic-ai/claude-agent-sdk');
     const count = async () => {
       try {
