@@ -119,7 +119,7 @@ describe('dev.review with a tree', () => {
           [
             '-B',
             '-c',
-            'from test_author_snapshot import wire_fixture_main; wire_fixture_main()',
+            'from test_author_snapshot_fixtures import wire_fixture_main; wire_fixture_main()',
             server,
             state,
           ],
