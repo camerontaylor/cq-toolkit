@@ -73,6 +73,26 @@ def reusable_current(document, capture):
         return False
 
 
+def reusable_noncounted_terminal(document, capture):
+    """Equivalent terminal scope evidence, granting no review credit.
+
+    Producer emits classification=None when no review was dispatched.
+    Integrity and repository/request authorization remain the caller's job.
+    """
+    try:
+        retained = current_equivalence(document["capture"])
+        cls = document.get("classification")
+        return (document.get("version") == VERSION
+                and current_equivalence(capture) == retained
+                and document["capture"].get("equivalence") == retained
+                and document.get("outcome") in {"no-current-code", "unsupported"}
+                and document.get("counted") is False
+                and (cls is None or isinstance(cls, dict) and cls.get("counted") is False)
+                and document.get("independent_acceptance") is False)
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
 def enroll(q, *, repo, pr, merge_sha, request_id, at, target_selector="promoted-main"):
     """Bind a request id permanently; equal provenance shares one pending item.
 
