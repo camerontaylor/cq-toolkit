@@ -12,3 +12,10 @@ See [merge policy](promotion-policy.md).
 
 The GitHub CodeRabbit App can review opened PRs; `.coderabbit.yaml` configures
 its feedback. CLI review remains optional.
+
+Optional CLI reuse validates that a retained raw log is readable and matches
+its recorded digest, when present. Historic records without a digest remain
+readable but have unverified integrity. New cycles record a digest when
+available; a failed hash read keeps the cycle and its findings without
+integrity metadata. Reuse rescans current content under current scanner policy
+before selecting a retained cycle; scanner policy is not frozen in its identity.
