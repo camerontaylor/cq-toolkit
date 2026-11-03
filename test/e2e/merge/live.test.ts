@@ -1,7 +1,9 @@
 // Split provenance: test/e2e/merge/live.test.ts was split by subject; the
 // drill's fixture surface (constants, typed exec/json helpers, candidate
-// builder, scripted agent) now lives in live.helpers.ts and this file keeps
-// the gated describe and the single sequenced drill test, unchanged.
+// builder, scripted agent) and its local non-assertion steps (clone-bound git
+// helpers, PR creation, the branch seeder, head observation, the convergence
+// predicate and the first-parent rev-list reader) live in live.helpers.ts, and
+// this file keeps the gated describe and the single sequenced drill test.
 // live — the F5 LIVE integration drill (ws-f acceptance check, scope item
 // "Integration (dispatch-gated scratch repo)"): a 3-PR stack with one
 // seeded conflict lands via merge commits only, and the branch history
@@ -150,12 +152,17 @@ import {
   failOutcome,
   ghApiObject,
   log,
+  makeAllThreeMerged,
+  makeBranchSeeder,
   makeCandidateFetcher,
+  makeCloneTools,
+  makeHeadObserver,
+  makePrCreator,
+  makeRevList,
   reportSummary,
-  seedWith,
   sleep,
 } from './live.helpers.js';
-import type { DrillPr, ExecOutcome } from './live.helpers.js';
+import type { DrillPr } from './live.helpers.js';
 
 // ---------------------------------------------------------------------------
 // The drill
@@ -244,18 +251,7 @@ import type { DrillPr, ExecOutcome } from './live.helpers.js';
           cloneDir,
         ]);
         if (cloned.code !== 0) throw failOutcome('git clone (scratch)', cloned);
-        const gitInClone = async (args: readonly string[]): Promise<ExecOutcome> =>
-          exec('git', ['-C', cloneDir, ...args]);
-        const gitOk = async (what: string, args: readonly string[]): Promise<string> => {
-          const outcome = await gitInClone(args);
-          if (outcome.code !== 0) throw failOutcome(what, outcome);
-          return outcome.stdout.trim();
-        };
-        const revParse = async (ref: string): Promise<string> =>
-          gitOk(`rev-parse ${ref}`, ['rev-parse', ref]);
-        const writeInClone = async (relPath: string, content: string): Promise<void> => {
-          await writeFile(join(cloneDir, relPath), content, 'utf8');
-        };
+        const { gitInClone, gitOk, revParse, writeInClone } = makeCloneTools(cloneDir);
         for (const [key, value] of [
           ['user.email', 'f5-live-drill@example.invalid'],
           ['user.name', 'F5 Live Drill'],
@@ -284,49 +280,8 @@ import type { DrillPr, ExecOutcome } from './live.helpers.js';
         log(`step 2 seeded main at ${initialMainSha}`);
 
         // --- STEP 3: STACK + SEED CONFLICT -------------------------------------
-        const createPr = async (base: string, head: string, title: string): Promise<number> => {
-          const outcome = await exec('gh', [
-            'pr',
-            'create',
-            '--repo',
-            repo,
-            '--base',
-            base,
-            '--head',
-            head,
-            '--title',
-            title,
-            '--body',
-            'F5 live drill scratch PR — the scratch repo is left in place for the owner to delete.',
-          ]);
-          if (outcome.code !== 0) throw failOutcome(`gh pr create ${head} -> ${base}`, outcome);
-          const url =
-            outcome.stdout
-              .split('\n')
-              .map((line) => line.trim())
-              .findLast((line) => line.includes('/pull/')) ?? '';
-          const match = /\/pull\/(\d+)$/.exec(url);
-          if (match === null)
-            throw new Error(`gh pr create printed no pull URL: ${outcome.stdout}`);
-          return Number(match[1]);
-        };
-        const commitBranchSeed = async (
-          branch: string,
-          from: string,
-          firstLine: string,
-          message: string,
-        ): Promise<string> => {
-          const checkout = await gitInClone(['checkout', '-b', branch, from]);
-          if (checkout.code !== 0) throw failOutcome(`git checkout -b ${branch} ${from}`, checkout);
-          await writeInClone('seed.txt', seedWith(firstLine));
-          const add = await gitInClone(['add', 'seed.txt']);
-          if (add.code !== 0) throw failOutcome(`git add (seed.txt on ${branch})`, add);
-          const commit = await gitInClone(['commit', '-m', message]);
-          if (commit.code !== 0) throw failOutcome(`git commit (${branch})`, commit);
-          const push = await gitInClone(['push', 'origin', branch]);
-          if (push.code !== 0) throw failOutcome(`git push origin ${branch}`, push);
-          return revParse(branch);
-        };
+        const createPr = makePrCreator(repo);
+        const commitBranchSeed = makeBranchSeeder(cloneDir);
 
         const shaA = await commitBranchSeed(
           BRANCH_A,
@@ -396,15 +351,7 @@ import type { DrillPr, ExecOutcome } from './live.helpers.js';
 
         // --- STEPS 4+5: CANDIDATE BUILDER + THE SCRIPTED CONFLICT AGENT --------
         // Every head sha ever observed per branch — the no-force evidence (7c).
-        const observedHeads = new Map<string, Set<string>>();
-        const observeHead = (branch: string, sha: string): void => {
-          let seen = observedHeads.get(branch);
-          if (seen === undefined) {
-            seen = new Set<string>();
-            observedHeads.set(branch, seen);
-          }
-          seen.add(sha);
-        };
+        const { observedHeads, observeHead } = makeHeadObserver();
         for (const [branch, sha] of [
           [BRANCH_A, shaA],
           [BRANCH_B, shaB],
@@ -450,16 +397,7 @@ import type { DrillPr, ExecOutcome } from './live.helpers.js';
         log('step 5 scripted conflict agent bound through the driver factory (fake f5fake route)');
 
         // --- STEP 6: RUN THE PLAN TO CONVERGENCE --------------------------------
-        const allThreeMerged = async (): Promise<boolean> => {
-          for (const drillPr of drillPrs) {
-            const pull = await ghApiObject(`repos/${repo}/pulls/${String(drillPr.number)}`);
-            observeHead(drillPr.headBranch, asString(asRecord(pull['head'])['sha']));
-            // REST has no 'MERGED' state: merged:true + state:'closed' is its
-            // spelling of GraphQL's MERGED.
-            if (!(pull['merged'] === true && asString(pull['state']) === 'closed')) return false;
-          }
-          return true;
-        };
+        const allThreeMerged = makeAllThreeMerged(repo, drillPrs, observeHead);
 
         const collectedRetargeted = new Set<number>();
         let runs = 0;
@@ -555,17 +493,7 @@ import type { DrillPr, ExecOutcome } from './live.helpers.js';
         // parents. A squash, rebase, or fast-forward landing would put a
         // non-merge commit on this chain.
         const drillRange = [`^${initialMainSha}`, 'origin/main'];
-        const revList = async (extra: readonly string[]): Promise<string[]> =>
-          (
-            await gitOk(`rev-list ${extra.join(' ')}`, [
-              'rev-list',
-              '--first-parent',
-              ...extra,
-              ...drillRange,
-            ])
-          )
-            .split('\n')
-            .filter((line) => line !== '');
+        const revList = makeRevList(gitOk, drillRange);
         const allDrillCommits = await revList([]);
         const mergeCommits = await revList(['--merges']);
         const nonMergeCommits = await revList(['--no-merges']);
