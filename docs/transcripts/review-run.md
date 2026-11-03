@@ -27,7 +27,7 @@ available while the incomplete configured reviewer set remains a human stop.
 
 ## Large-diff hermetic request seam (#438)
 
-`test/ops/review/agentReviewer-partitions.test.ts` uses the real `AiSdkDriver`
+`test/ops/review/agentReviewer-partitions.wire.test.ts` uses the real `AiSdkDriver`
 with `ai/test` mock models, real temporary session persistence and the actual
 pre-request upload gate. It first submits the original 474,651-character
 (527,381 UTF-8-byte) component in one invocation. The unchanged harness refuses
