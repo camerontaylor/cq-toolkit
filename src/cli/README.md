@@ -40,14 +40,14 @@ THE I1 CLI CONTRACT (landed):
   catch (exit 1; the transient plan-lock refusal is `thrown` with exit 3).
 - Exit codes {0 clean, 1 thrown/definitive failure, 2 arg/usage error,
   3 needs-human/budget-exhausted} — derived in src/cli/exit.ts, mechanically
-  from the frozen taxonomy; 2 is never derived from a taxonomy value.
-  `--fail-on-verdict` (opt-in, bare only; only the exact own-property value `"fail"` counts) additionally maps an `ok` result
-  whose value is an object with `verdict: 'fail'` — for run-plan and plan
+  from the frozen taxonomy; 2 is reserved for CLI input errors.
+  `--fail-on-verdict` (opt-in, bare only; the own-property values `"fail"` and `"regression"` count) additionally maps an `ok` result
+  whose value is an object with `verdict: 'fail'` or `verdict: 'regression'` — for run-plan and plan
   subcommands, any ok row with such a value — to 1; every other result maps
   unchanged and stdout is identical with or without the flag (so
   `cq ratchet.checkRatchet … --json --fail-on-verdict` is a one-line CI gate).
 - Flags are a thin JSON-flag mapping onto the op's input schema (values
-  JSON-parsed when they parse): ops take EXACT schema keys; run-plan takes
+  parsed against each field type: string fields preserve raw text, numeric fields accept JSON numbers such as `1.0`, `0.10` and `-0`, and other fields use JSON when possible): ops take EXACT schema keys; run-plan takes
   kebab-case aliases (--ops-root, --journal-dir, --max-usd, --max-tokens,
   --stop-on-error, --opt-in — the governance opt-ins, comma-separated keys
   from the kernel's GovernanceOptIn union; an opt-in alone constructs the
