@@ -10,7 +10,11 @@ import { generateScratchRepo } from '../../fixtures/scratch-repo/generate.js';
 import { makeGitleaksFixture } from '../../helpers/gitleaks-fixture.js';
 import { scrubbedGitEnv } from '../../helpers/git-env.js';
 
-vi.setConfig({ testTimeout: 30_000 });
+// Each of these e2e tests spawns the production CLI against real git, so the
+// per-test budget is wall-clock, not assertion time. The pre-split single file
+// ran one worker at 30 s; the split files can run in parallel workers, so keep
+// generous headroom instead of letting runner load surface as timeouts.
+vi.setConfig({ testTimeout: 60_000 });
 
 export let gitleaks: Awaited<ReturnType<typeof makeGitleaksFixture>>;
 beforeEach(async () => {
