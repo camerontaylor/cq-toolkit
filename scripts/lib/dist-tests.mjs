@@ -10,7 +10,7 @@ const INDIRECT_DIST_TESTS = new Set([
   'test/scripts/static-conformance.test.ts',
   'test/scripts/tooling-commands.test.ts',
   'test/scripts/ratchet-propose.test.ts',
-  'test/ops/review/address.test.ts',
+  'test/ops/review/address.composition.test.ts',
   // measurement-session-index.test.ts loads ../dist/kernel/schema.js only
   // through the .mjs module it imports (scripts/measurement-session-index.mjs),
   // so the content check cannot see it — an explicit indirect entry.

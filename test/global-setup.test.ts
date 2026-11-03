@@ -70,7 +70,7 @@ it('recognizes reviewed indirect dist consumers via relative and absolute paths'
     'test/scripts/static-conformance.test.ts',
     'test/scripts/tooling-commands.test.ts',
     'test/scripts/ratchet-propose.test.ts',
-    'test/ops/review/address.test.ts',
+    'test/ops/review/address.composition.test.ts',
     'test/measurement-session-index.test.ts',
   ]) {
     expect(needsDist([file], root)).toBe(true);
