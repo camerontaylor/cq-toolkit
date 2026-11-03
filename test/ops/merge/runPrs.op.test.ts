@@ -60,7 +60,8 @@ describe('runMergePrs', () => {
   });
 
   test('makeRunMergePrsOp threads drivers + harnessConfig and dispatches identically (the harness rides the DriverRequest)', async () => {
-    // Mirror of resolveConflict.test.ts's factory-resolution test. With a
+    // Mirror of resolveConflict.factory-resolution.test.ts's
+    // factory-resolution test. With a
     // FAKE factory injected the harnessConfig is observable only as data
     // on the captured DriverRequest (the live proof of a config's effect
     // is F5's scripted-agent path through a factory bound to the fixture
