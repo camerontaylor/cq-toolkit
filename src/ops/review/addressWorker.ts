@@ -17,6 +17,7 @@ import { relative, resolve, isAbsolute } from 'node:path';
 import { z } from 'zod';
 import type { DriverFactory } from '../../driver/factory.js';
 import type { ModelSpec, Usage, WorkerResult } from '../../driver/types.js';
+import type { ObservationWriter } from '../../kernel/observation.js';
 import { toOutputSchema } from '../../driver/common/structured.js';
 import { defaultHarnessConfig } from '../../harness/config.js';
 import { correlationInvocation } from '../../driver/correlationInvocation.js';
@@ -145,6 +146,20 @@ export interface AddressWorkerDeps {
   parentSignal?: AbortSignal;
   /** Private engine association; structurally supplied values never authenticate. */
   terminalBinding?: object;
+  /**
+   * ADR-0008 T31: the composition observation writer, injected through the
+   * RUNTIME deps only — never serialized into any dispatch input. Attempt
+   * events (T14) and write observations (T18) append through it; a write
+   * failure never changes this worker's verdict.
+   */
+  observationWriter?: ObservationWriter;
+  /** The composition stream's runId: every observation event carries it. */
+  observationRunId?: string;
+  /**
+   * The planned dispatch unit identity for this worker's observations, or
+   * null on run-scoped events — never a fabricated kernel jobId.
+   */
+  observationUnitId?: string | null;
 }
 
 /** Only engine observations may stop retries or invalidate the shared worker tree. */

@@ -89,6 +89,15 @@ import {
   normalizeUsageObservation,
   type KnownUsageSummary,
 } from '../../shared/knownUsage.js';
+import {
+  openObservationWriter,
+  readKernelRunDescriptors,
+  type KernelRunDescriptor,
+  type ObservationWriter,
+} from '../../kernel/observation.js';
+import type { KernelRunLinkedJournalEvent, ProvenanceRecord } from '../../kernel/types.js';
+import { repoIdFromRemote, sanitizeObservation } from '../fix/attemptRecord.js';
+import { resolveCorrelation } from '../fix/correlation.js';
 
 export interface ReviewAddressInput {
   repoRoot: string;
@@ -172,6 +181,32 @@ export interface ReviewAddressReport {
   admissionHead?: string;
   /** Durable author debt remains explicit; address success is not vendor completion. */
   deferredVendorDebt?: DeferredVendorDebt;
+  /**
+   * ADR-0008 T31: the composition observation surface. Present whenever the
+   * composition declared one: a durable stream once ownership is held, or the
+   * explicit no-stream surface (unavailable/indeterminate plus a reason) when
+   * the run never held ownership, the base was unwitnessable, or the journal
+   * was unusable. It never claims durable observation without an open stream,
+   * and never carries the writer.
+   */
+  observation?: ReviewAddressObservation;
+}
+
+/** The composition observation surface makeReviewAddress exposes to its report. */
+export interface ReviewAddressObservation {
+  persistence: ObservationWriter['persistence'];
+  status: 'durable' | 'unavailable' | 'indeterminate';
+  compositionRunId: string;
+  workId: string;
+  /**
+   * The engine-witnessed composition base: the local HEAD, or the
+   * caller-asserted PR head this composition's checkout starts from. null
+   * means UNAVAILABLE — no base could be witnessed (never an inferred value,
+   * and never the coordination checkout's HEAD on a `pr:N` source).
+   */
+  baseSha: string | null;
+  failure: string | null;
+  kernelRuns: KernelRunDescriptor[];
 }
 export type ReviewAddressResult = OpResult<ReviewAddressReport> & {
   report?: ReviewAddressReport;
@@ -196,6 +231,55 @@ export interface ReviewAddressDeps {
   resolveDeferredVendorContext?: (
     request: DeferredVendorContextRequest,
   ) => Promise<DeferredVendorContext | undefined>;
+  /**
+   * ADR-0008 T31 test seam: a writer the composition adopts INSTEAD of
+   * opening its own (memory-only fixtures). Production callers omit this.
+   * Runtime-only: never serialized into any dispatch input.
+   */
+  observationWriter?: ObservationWriter;
+}
+
+/**
+ * ADR-0008 T31 header metadata helpers for the composition stream.
+ *
+ * Provenance is captured engine-side with sanitized text (the raw remote
+ * never persists — repoId is the hashed digest or null/unavailable when no
+ * remote exists, never a failure). Correlation is allocated by the merged
+ * T05 {@link resolveCorrelation} (validated UUID workId; unknown null).
+ */
+async function captureAddressProvenance(
+  runPrefix: string,
+  startedAt: string,
+  baseSha: string,
+  configJsonText: string,
+  gitText: (args: string[]) => Promise<string>,
+): Promise<{ provenance: ProvenanceRecord }> {
+  const [remote, packageText] = await Promise.all([
+    // The composition's git transport answers this like every other read; a
+    // missing remote is repoId null/unavailable (ADR-0008), never a failure.
+    gitText(['config', '--get', 'remote.origin.url']).catch(() => ''),
+    // The emitting package version: the toolkit's own package.json.
+    readFile(new URL('../../../package.json', import.meta.url), 'utf8'),
+  ]);
+  const version =
+    process.env.CQ_PRODUCER_VERSION ??
+    (JSON.parse(packageText) as { version?: string }).version ??
+    'unavailable';
+  const provenance: ProvenanceRecord = {
+    cqVersion: version,
+    producerVersion: version,
+    repoId: repoIdFromRemote(remote).repoId,
+    // Hash canonical effective cq.json CONTENT, never formatting or location.
+    cqJsonHash: `sha256:${createHash('sha256').update(configJsonText, 'utf8').digest('hex')}`,
+    baseSha,
+    runPrefix,
+    startedAt,
+    endedAt: null,
+    journalLink: 'unavailable',
+    reportLink: 'unavailable',
+    witnesses: { base: baseSha, admitted: null, execution: null, reviewed: null, accepted: null },
+  };
+  return sanitizeObservation({ provenance });
 }
 
 /** Deterministic file-disjoint waves. Missing scope is handled explicitly, never fanned out. */
@@ -294,6 +378,73 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
     // through account(); the snapshot is stamped onto every finish() exit.
     const usageLedger = createKnownUsageLedger();
     let dispatchSequence = 0;
+    // ADR-0008 T31: the composition owns ONE observation stream for the whole
+    // invocation — every round and every runPlan call — opened before the
+    // first dispatch and closed in finish() BEFORE the report persists. The
+    // writer (deps.observationWriter) or its failure never changes the
+    // verdict; a write failure only marks the surface indeterminate.
+    // An injected writer owns the identity it was opened with (ADR-0008 T31):
+    // adopting it must not allocate a second, divergent composition run id.
+    const injectedWriter = deps.observationWriter;
+    const compositionRunId = injectedWriter?.compositionRunId ?? randomUUID();
+    // `writer` is the streaming surface: link appends and the worker handoff
+    // only ever use it once the composition header has ACTUALLY landed.
+    // `closeWriter` is the lifecycle handle: every writer the composition
+    // opened or adopted is closed exactly once, header or no header.
+    let observation:
+      | (ReviewAddressObservation & {
+          writer?: ObservationWriter;
+          closeWriter?: ObservationWriter;
+        })
+      | undefined;
+    let observationClosed = false;
+    // Links recorded by a settled PR fix run are appended asynchronously (the
+    // loop does not await that callback). Keep every pending link so finish()
+    // can drain them BEFORE the stream closes: a link must never race close(),
+    // and a rejected link is an observation failure, never a silent swallow.
+    const pendingLinks = new Set<Promise<void>>();
+    const trackLink = (link: Promise<void>) => {
+      pendingLinks.add(link);
+      // `link` is always caught before it is tracked, so this chain cannot
+      // reject; the trailing catch keeps the cleanup promise handled.
+      void link.finally(() => pendingLinks.delete(link)).catch(() => undefined);
+    };
+    const observationFailure = (error: unknown) => {
+      if (observation) {
+        observation.status = 'indeterminate';
+        observation.failure ??= sanitizeObservation(String(error));
+      }
+    };
+    const closeObservation = async () => {
+      if (!observation || observationClosed) return;
+      observationClosed = true;
+      const writer = observation.closeWriter;
+      if (writer === undefined) return;
+      try {
+        await writer.close();
+      } catch (error) {
+        observationFailure(error);
+      }
+      if (writer.failure !== null) observationFailure(writer.failure);
+    };
+    /**
+     * The report DTO for the observation surface — never the writer instance.
+     * Shared by finish() and by the pre-ownership refusal paths, so a run that
+     * never held ownership reports the same explicit no-stream shape instead
+     * of silently omitting it.
+     */
+    const observationSurface = (): ReviewAddressObservation | undefined =>
+      observation === undefined
+        ? undefined
+        : {
+            persistence: observation.persistence,
+            status: observation.status,
+            compositionRunId: observation.compositionRunId,
+            workId: observation.workId,
+            baseSha: observation.baseSha,
+            failure: observation.failure,
+            kernelRuns: [...observation.kernelRuns],
+          };
     const bookkeeping = new Map<string, string>();
     let bookkeepingTampered = false;
     let bookkeepingRevision = 0;
@@ -549,6 +700,18 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
       if (worker) report.escalation = worker.escalation();
       const preconditions = worker?.preconditions?.();
       if (preconditions?.length) report.preconditions = [...preconditions];
+      // ADR-0008 T31: drain every link a settled run recorded, THEN close the
+      // stream BEFORE persisting the report, so the persisted artifact never
+      // disagrees with the stream's final state (each tracked link is already
+      // caught, so this await never rejects).
+      await Promise.all([...pendingLinks]);
+      await closeObservation();
+      const observedSurface = observationSurface();
+      if (observedSurface !== undefined) report.observation = observedSurface;
+      // ADR-0008 T31: sanitize the WHOLE persisted artifact at the same
+      // boundary T30 uses (runFix), not just the observation surface — every
+      // string that reaches disk passes the same redaction/cap discipline.
+      Object.assign(report, sanitizeObservation(report));
       try {
         if (parent?.aborted) return finish('needs-human', 'parent cancelled');
         if (addressLease) await addressLease.assertOwned();
@@ -576,12 +739,18 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
       if (parent?.aborted) return await finish('needs-human', 'parent cancelled');
       if (input.source !== 'local' && !/^pr:[1-9]\d*$/.test(input.source))
         return await finish('failed', 'source must be local or pr:<positive number>');
+      // ADR-0008 T31 / P3-6: provenance hashes the cq.json FILE TEXT exactly
+      // as T30's captureProvenance does, so both compositions record the same
+      // hash for the same file. An injected config is still the policy
+      // authority; the file, when present, stays the provenance content.
+      const readCqJsonText = () => readFile(resolve(input.repoRoot, 'cq.json'), 'utf8');
+      const configText =
+        deps.config === undefined
+          ? await readCqJsonText()
+          : await readCqJsonText().catch(() => undefined);
       let config = deps.config;
       if (!config) {
-        const parsed = parseCqConfig(
-          await readFile(resolve(input.repoRoot, 'cq.json'), 'utf8'),
-          input.repoRoot,
-        );
+        const parsed = parseCqConfig(configText!, input.repoRoot);
         if (!parsed.ok) return await finish('needs-human', parsed.reason);
         config = parsed.config;
       }
@@ -652,6 +821,185 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
         }
       };
       const rawDrivers = deps.drivers ?? createDriverFactory();
+      const rawGit =
+        deps.git ??
+        makeGhRunner({ bin: 'git', cwd: input.repoRoot, timeoutMs: Math.min(cap, 60_000) });
+      // ADR-0008 T31: resolve the header metadata once, then open the
+      // composition stream — ONE stream for all rounds and plans. The
+      // engine-captured base witness must agree with witnesses.base; when no
+      // base can be witnessed, the surface records null/unavailable and the
+      // run proceeds — an observation PRE-FLIGHT failure never fails the run
+      // and never records an inferred value.
+      //
+      // local: the composition's own HEAD, read from the repository it runs.
+      // pr:N: the caller-asserted PR head is this composition's checkout base;
+      // it is recorded ONLY when git confirms that exact commit exists. The
+      // coordination checkout's HEAD is NEVER read as a PR base — it is a
+      // different repository state and the run's checkout does not start there.
+      const resolveBaseWitness = async (): Promise<string | null> => {
+        const candidate = input.source === 'local' ? 'HEAD' : input.expectedHead;
+        if (candidate === undefined) return null;
+        // A PR base is the caller-asserted head OID, never an arbitrary rev:
+        // anything that is not a commit id is unavailable, not a probe target.
+        if (input.source !== 'local' && !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(candidate))
+          return null;
+        try {
+          const probe = await rawGit(
+            input.source === 'local'
+              ? ['-C', input.repoRoot, 'rev-parse', candidate]
+              : ['-C', input.repoRoot, 'rev-parse', '--verify', `${candidate}^{commit}`],
+          );
+          const head = probe.stdout.trim();
+          return probe.code === 0 && /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(head) ? head : null;
+        } catch {
+          return null;
+        }
+      };
+      const baseSha = await resolveBaseWitness();
+      const correlationRecord = {
+        ...resolveCorrelation({ branch: input.source }),
+        // ADR-0008 T31: an injected writer owns the identity it was opened
+        // with; the correlation record joins its streams on that same workId.
+        ...(injectedWriter === undefined ? {} : { workId: injectedWriter.workId }),
+      };
+      const sanitizedProvenance =
+        baseSha === null
+          ? null
+          : (
+              await captureAddressProvenance(
+                input.source,
+                new Date(start).toISOString(),
+                baseSha,
+                configText ?? JSON.stringify(config),
+                async (args) => {
+                  const probe = await rawGit(['-C', input.repoRoot, ...args]);
+                  return probe.stdout.trim();
+                },
+              )
+            ).provenance;
+      // ADR-0008 T31: DECLARE the observation surface here, but open nothing
+      // yet. Opening the writer creates the journal directory (mkdir -p) and
+      // the composition header append is journal IO; a run refused before it
+      // holds ownership (admission/active-guard refusal) or one that fails in
+      // the lifetime catch owns no journal, so it must perform none of that.
+      // Until the owned path opens the stream the surface reports honestly:
+      // no stream, indeterminate, with the reason.
+      const surface: ReviewAddressObservation & {
+        writer?: ObservationWriter;
+        closeWriter?: ObservationWriter;
+      } = {
+        persistence: 'unavailable',
+        status: 'indeterminate',
+        compositionRunId,
+        workId: correlationRecord.workId,
+        baseSha,
+        failure:
+          baseSha === null
+            ? 'observation: base witness unavailable'
+            : 'observation: ownership not held',
+        kernelRuns: [],
+      };
+      observation = surface;
+      // Called ONLY from the owned path, after the ownership entry created the
+      // journal directory. A null base has no schema-valid header, so no
+      // stream opens (an injected writer is retained for CLOSE only: no link
+      // append, no worker handoff — nothing may precede a header); otherwise
+      // the writer opens and the header is its first event. An OPEN failure
+      // is an observation failure, never a verdict: it is recorded on the
+      // surface, which stays indeterminate, and the run continues with no
+      // writer. P2-1 is preserved: a fresh journal dir (ENOENT at
+      // pre-flight) is usable because the ownership entry creates it first.
+      const openCompositionObservation = async () => {
+        if (baseSha === null) {
+          if (injectedWriter !== undefined) surface.closeWriter = injectedWriter;
+          return;
+        }
+        // Ownership is held from here on, so the pre-ownership reason is
+        // stale: the open (or header append) below records its own reason.
+        surface.failure = null;
+        let writer: ObservationWriter;
+        try {
+          writer =
+            injectedWriter ??
+            (await openObservationWriter({
+              ...(input.journalDir === undefined ? {} : { journalDir }),
+              workId: correlationRecord.workId,
+              compositionRunId,
+            }));
+        } catch (error) {
+          // EACCES/ENOSPC/EEXIST from the exclusive create is observed, not
+          // owned: the surface stays indeterminate with the sanitized reason
+          // and the run continues WITHOUT a writer. This must never reach the
+          // owned catch, which would turn the run into needs-human/failed.
+          observationFailure(error);
+          return;
+        }
+        // Close is a lifecycle duty independent of the header landing.
+        surface.closeWriter = writer;
+        surface.persistence = writer.persistence;
+        surface.status = writer.persistence;
+        if (sanitizedProvenance === null) return;
+        try {
+          await writer.append({
+            type: 'composition-started',
+            runId: compositionRunId,
+            at: new Date().toISOString(),
+            unitId: null,
+            jobId: null,
+            taskId: null,
+            attempt: null,
+            payload: {
+              journalVersion: 3,
+              provenance: sanitizedProvenance,
+              correlation: correlationRecord,
+            },
+          });
+        } catch (error) {
+          observationFailure(error);
+          return;
+        }
+        // Only a stream whose header ACTUALLY landed may receive link appends
+        // or be handed to the worker: an event before the header would make
+        // the on-disk stream unreadable, and a worker append would land one.
+        surface.writer = writer;
+      };
+      // ADR-0008: link every RETURNED kernel run explicitly, after the
+      // runPlan result — including partial results when present. Never a
+      // guessed link: unreturned kernel runs stay unlinked/unknown. The
+      // descriptor list feeds the T29 foldObservations join surface.
+      const linkKernelRun = async (
+        run: RunReport,
+        planId: string,
+        round: number,
+        runJournalDir: string,
+      ) => {
+        // A descriptor read failure is an observation failure, never a
+        // round-aborting throw: the run's own verdict stands, and the link is
+        // recorded without the descriptor list (P2-4).
+        let descriptors: KernelRunDescriptor[] = [];
+        if (input.journalDir !== undefined)
+          try {
+            descriptors = await readKernelRunDescriptors(runJournalDir, [run.runId]);
+          } catch (error) {
+            observationFailure(error);
+          }
+        observation?.kernelRuns.push(...descriptors);
+        const event: KernelRunLinkedJournalEvent = {
+          type: 'kernel-run-linked',
+          runId: compositionRunId,
+          at: new Date().toISOString(),
+          unitId: null,
+          jobId: null,
+          taskId: null,
+          attempt: null,
+          payload: { kernelRunId: run.runId, planId, round },
+        };
+        try {
+          await observation?.writer?.append(event);
+        } catch (error) {
+          observationFailure(error);
+        }
+      };
       const drivers: DriverFactory = {
         resolve(request) {
           const resolved = rawDrivers.resolve(request);
@@ -741,9 +1089,6 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
           return rawReviewImplementation(input);
         });
       };
-      const rawGit =
-        deps.git ??
-        makeGhRunner({ bin: 'git', cwd: input.repoRoot, timeoutMs: Math.min(cap, 60_000) });
       // The ownership helper alone uses rawGit for read-only bootstrap.
       // Every operational command, including injected runners, needs an owner.
       const git: GhFn = async (args) => {
@@ -788,13 +1133,23 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
           } catch {
             // Error formatting cannot reenter effectful finalization.
           }
+          // A run that never entered the owned action holds no ownership and
+          // performed no journal IO. Report the observation surface honestly
+          // (no stream, indeterminate, with its reason) instead of omitting
+          // it, so a future change cannot start writing before ownership
+          // without a visible report-shape change.
+          const unheld = entered ? undefined : observationSurface();
+          const reportOfRefusal = <T extends object>(observed: T) =>
+            unheld === undefined || 'observation' in observed
+              ? observed
+              : { ...observed, observation: unheld };
           if (!entered && isAddressOwnershipAdmissionRefusal(cause)) {
             const { stop: _stop, ...observed } = report;
             return {
               status: 'needs-human' as const,
               reason: detail,
               report: {
-                ...observed,
+                ...reportOfRefusal(observed),
                 reasons: observed.reasons.includes(detail)
                   ? [...observed.reasons]
                   : [...observed.reasons, detail],
@@ -807,7 +1162,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
             status: 'failed' as const,
             error,
             report: {
-              ...observed,
+              ...reportOfRefusal(observed),
               reasons: observed.reasons.includes(error)
                 ? [...observed.reasons]
                 : [...observed.reasons, error],
@@ -824,6 +1179,10 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
           try {
             await lease.assertOwned();
             await mkdir(journalDir, { recursive: true });
+            // ADR-0008 T31: ownership is held and the journal directory exists
+            // (created above, or already present) — only NOW may the
+            // observation writer open and the header append.
+            await openCompositionObservation();
             const bookkeepingKey = async (root: string, path: string) =>
               resolve(await realpath(root), path);
             const untrackedAllowed = async (root: string, path: string) => {
@@ -1087,6 +1446,15 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                 remainingTokens,
                 remainingWallMs: remainingFixWallMs,
                 account,
+                // ADR-0008 T31: runtime deps only — the writer is NEVER
+                // serialized into any dispatch input/plan JSON.
+                ...(surface.writer === undefined
+                  ? {}
+                  : {
+                      observationWriter: surface.writer,
+                      observationRunId: compositionRunId,
+                    }),
+                observationUnitId: null,
                 ...(parent ? { parentSignal: parent } : {}),
               };
               const implementation = deps.workerFactory
@@ -1613,6 +1981,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                     allowAdvisoryProvenance: 'product',
                   },
                 );
+                await linkKernelRun(run, plan.id, round, resolve(journalDir, `round-${round}`));
                 if (parent?.aborted) {
                   noteRound(round, record, run);
                   return;
@@ -1977,6 +2346,18 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                     // An initial refusal has no admitted work to record; a refused
                     // sibling must not erase the history of earlier admitted work.
                     if (!dispatchedRecord || dispatchedFindings.length === 0) return;
+                    // ADR-0008 T31: keep the link promise. It is drained by
+                    // finish() before the stream closes, and a rejection is an
+                    // observation failure — never a swallowed error behind a
+                    // report that still claims durable evidence.
+                    trackLink(
+                      linkKernelRun(
+                        run,
+                        `review-address-pr-${meta.pr}`,
+                        round,
+                        resolve(journalDir, `pr-round-${round}`),
+                      ).catch((error) => observationFailure(error)),
+                    );
                     noteRound(
                       round,
                       {

@@ -889,6 +889,40 @@ test('non-directory report ancestor refuses after entry without report persisten
   }
 });
 
+test('journal dir under a regular file (<file>/sub) keeps the base lifetime refusal', async () => {
+  const f = await fixture([]);
+  try {
+    // P2-2: lstat of `<file>/sub` fails with ENOTDIR before any ownership
+    // step. That must NOT surface as a writer/report failure or abort the
+    // round: any lstat error means "not usable", so the ownership path keeps
+    // its own terminal refusal and the same base failure text.
+    const journalFile = join(f.input.journalDir, 'file');
+    await writeFile(journalFile, 'not a directory');
+    const journalDir = join(journalFile, 'sub');
+    const result = await makeReviewAddress(f.deps)({ ...f.input, journalDir });
+    expect(result.status).toBe('failed');
+    const error = result.status === 'failed' ? result.error : '';
+    expect(error.startsWith('address lifetime finalization failed; durability unconfirmed: ')).toBe(
+      true,
+    );
+    expect(error).toContain('ENOTDIR');
+    expect(error).not.toContain('report write failed');
+    const report = reportOf(result);
+    expect(report.stop).toBeUndefined();
+    expect(f.calls).toEqual([]);
+    expect(report.rounds).toEqual([]);
+    expect(report.findings).toEqual([]);
+    expect(report.reasons).toEqual([error]);
+    // No stream was opened against an unusable journal dir.
+    expect(report.observation).toBeUndefined();
+    expect(report.reportPath).toBe(join(journalDir, 'review-address-report.json'));
+    expect(await readFile(journalFile, 'utf8')).toBe('not a directory');
+    await expect(readFile(report.reportPath, 'utf8')).rejects.toMatchObject({ code: 'ENOTDIR' });
+  } finally {
+    await f.cleanup();
+  }
+});
+
 test.each(['matching', 'uncommitted', 'different-base', 'missing'] as const)(
   'clean record needs immutable full review scope: %s',
   async (mode) => {
