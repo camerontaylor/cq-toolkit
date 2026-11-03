@@ -231,8 +231,8 @@ export interface SweepUnitBindings {
   /**
    * ADR-0008 T30: the composition observation writer, injected at RUNTIME by
    * makeRegistry/makeFixRun — never serialized into plan JSON and never a
-   * dispatch-input field. Reserved for T13 to consume when its attempt-finished
-   * emitter lands; no attempt events are emitted by the task loop at this head.
+   * dispatch-input field. Present, runTaskLoopInner emits `attempt-finished`
+   * at every inner attempt boundary; absent, behavior is unchanged.
    */
   observationWriter?: ObservationWriter;
   /**
