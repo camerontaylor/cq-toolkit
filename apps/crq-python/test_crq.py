@@ -2801,6 +2801,64 @@ class OversizedIntervalPartitionTest(unittest.TestCase):
         self.assertGreaterEqual(
             crq.rolling_discovery_interval(self.q, {"enabled": True, "after": self.AFTER})["after"], mark)
 
+    def test_span_hint_lapses_under_a_real_clock(self):
+        # P3-1: the frozen upper bound was now()-1s at selection time; the
+        # scan itself advances the clock, so a completion check against a
+        # fresh now() never fires. A frozen test clock hides this; here the
+        # clock stands one minute past the bound the interval was selected
+        # with, and the hint must still lapse (one tick of slack).
+        self.outage([])
+        mark = "2026-10-02T23:00:00Z"
+        self.q.update(merged_watermark=mark, merged_discovery={
+            "after": mark, "before": self.BEFORE, "complete": False, "span": 600})
+        crq.save_queue(self.q)
+        with mock.patch.object(crq, "now", return_value=crq.parse_iso("2026-10-03T00:01:01Z")), \
+                mock.patch.object(crq, "gh_json", side_effect=self.forge):
+            log = crq.discover_merged(self.q, crq.ForgeBudget(),
+                                      interval={"after": mark, "before": self.BEFORE}, recent=True)
+        self.assertIn("complete=True", log[0])
+        md = crq.load_queue()["merged_discovery"]
+        self.assertTrue(md["complete"])
+        self.assertNotIn("span", md)
+        self.assertEqual(md["before"], self.BEFORE)
+
+    def test_span_hint_is_kept_while_the_drain_is_behind(self):
+        # Far from the rolling upper bound, the slack must not lapse the
+        # width hint: recovery continues at twice the completed width.
+        self.outage([])
+        mark = "2026-10-02T12:00:00Z"
+        before = "2026-10-02T12:10:00Z"
+        self.q.update(merged_watermark=mark, merged_discovery={
+            "after": mark, "before": before, "complete": False, "span": 600})
+        crq.save_queue(self.q)
+        with mock.patch.object(crq, "gh_json", side_effect=self.forge):
+            log = crq.discover_merged(self.q, crq.ForgeBudget(),
+                                      interval={"after": mark, "before": before}, recent=True)
+        self.assertIn("complete=True", log[0])
+        self.assertEqual(crq.load_queue()["merged_discovery"]["span"], 1200)
+
+    def test_in_flight_attempt_keeps_the_partition_reason(self):
+        # P3-2: a resumed attempt drops the superseded refusal's error text
+        # but keeps the partition reason on the durable state, so status
+        # reports the drain honestly mid-attempt (and across crashes).
+        self.outage([3600 * k + 7 for k in range(45)])
+        self.assertIn("partitioned", self.tick()[0])
+        part = crq.load_queue()["merged_discovery"]
+        with mock.patch.object(crq, "reconcile_merged",
+                               side_effect=ValueError("fixture crash mid-attempt")):
+            with self.assertRaises(ValueError):
+                self.tick()
+        md = crq.load_queue()["merged_discovery"]
+        self.assertEqual((md["after"], md["before"]), (part["after"], part["before"]))
+        self.assertFalse(md["complete"])
+        self.assertEqual(md["reason"], "inventory-cap-partitioned")
+        self.assertNotIn("error", md)
+        import status_summary
+        natural = status_summary.merged_current(crq.load_queue(), crq.STATE / "receipts")["natural_discovery"]
+        self.assertEqual((natural["complete"], natural["reason"]), (False, "inventory-cap-partitioned"))
+        self.assertNotIn("span", natural)
+        self.drive()  # the drain still completes from this state
+
     def test_partition_bounds(self):
         t = "2026-10-01T00:{:02d}:{:02d}Z".format
         # Halves above the watermark, keeping the overlap below it.

@@ -1544,6 +1544,10 @@ def _span(record):
 
 
 MAX_SPAN = 400 * 86400
+# One tick cadence (*:0/12) of slack when deciding an interval reached the
+# rolling upper bound: the bound was frozen as now()-1s at selection, and the
+# scan itself advances the clock before the completion check runs.
+SPAN_LAPSE_SLACK = 12 * 60
 
 
 def discover_merged(q, budget, *, interval, recent=False):
@@ -1561,8 +1565,15 @@ def discover_merged(q, budget, *, interval, recent=False):
     active = q.get("merged_discovery") or {}
     same = (active.get("after"), active.get("before")) == (after, before)
     if not same or "error" in active or "reason" in active:
+        carried = _span(active)
         q["merged_discovery"] = {"after": after, "before": before,
-                                 "complete": same and active.get("complete") is True, **_span(active)}
+                                 "complete": same and active.get("complete") is True, **carried}
+        if "span" in carried and not q["merged_discovery"]["complete"]:
+            # Still draining a partitioned interval. Keep the partition
+            # reason on the attempt (the superseded refusal's error text is
+            # dropped above), so status stays honest mid-part and on the
+            # first tick of each next part.
+            q["merged_discovery"]["reason"] = "inventory-cap-partitioned"
         _save_discovery_queue(q, "bounds-save")
     try:
         with forge_window(budget):
@@ -1574,7 +1585,11 @@ def discover_merged(q, budget, *, interval, recent=False):
             # overlap lapses only once the normal five minutes have passed it.
             if hints.get("span"):
                 hints["span"] = min(hints["span"] * 2, MAX_SPAN)
-            if before >= iso(now() - dt.timedelta(seconds=1)):
+            if before >= iso(now() - dt.timedelta(seconds=1 + SPAN_LAPSE_SLACK)):
+                # Reached the rolling upper bound again: recovery ends. The
+                # slack covers the scan's own duration under a real clock; if
+                # it ever lapsed a hint a few minutes early, the next full
+                # interval merely re-partitions, fail-closed.
                 hints.pop("span", None)
             if hints.get("overlap_from", "") <= iso(parse_iso(before) - dt.timedelta(minutes=5)):
                 hints.pop("overlap_from", None)

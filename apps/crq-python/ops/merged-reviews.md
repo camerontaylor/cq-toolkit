@@ -270,16 +270,30 @@ then splits it in the same tick, with no extra forge reads:
 1. The frozen interval is durably narrowed. It is cut halfway between the
    watermark (or its lower bound) and its upper bound. `merged_discovery`
    records `complete: false`, `reason: inventory-cap-partitioned` and the
-   error, so status and client health report the outage honestly.
+   error, so status and client health report the outage honestly. Every later
+   attempt inside the drain keeps that reason (a fresh attempt drops the
+   superseded refusal's error text but carries the reason on), including the
+   first tick of each next part.
 2. Later ticks resume that shorter interval under the usual budget, four-page
    limit and tick lock. On completion, enrollment is saved first, then the
    watermark advances to that part's upper bound. The frontier only moves
-   through contiguous, independently complete parts.
+   through contiguous, independently complete parts. The completing tick
+   records `complete: true` for that part's bounds — required so the next
+   tick selects the next part instead of replaying this one — but client
+   health does not count it: while the width hint is set,
+   `discoveryComplete` stays `false` and the incomplete streak keeps
+   growing, so the advisory issue spans the whole drain once instead of
+   flapping open and closed per part.
 3. The next interval keeps the five-minute overlap, and enrollment
    deduplicates the re-read sources. It is capped at twice the width that last
    completed, and halved again on a further refusal, until it reaches the
-   rolling upper bound. The width and an `overlap_from` marker live in
-   `merged_discovery`, outside status.
+   rolling upper bound. The width hint is dropped there, which ends recovery:
+   the frozen upper bound was the rolling bound at selection, and the scan
+   itself advances the clock, so the comparison allows one tick of slack. An
+   early lapse at most re-partitions the few remaining minutes, fail-closed.
+   The width and an `overlap_from` marker live in `merged_discovery`, outside
+   status. Each part re-reads the closed list from the top, so total recovery
+   cost grows faster than the outage; the per-tick budget bounds it.
 4. If more than 5,000 merges fall inside one five-minute overlap, that part
    starts at the watermark instead (`overlap_from`), until normal overlap
    clears it. One second holding more than 5,000 merges still refuses.

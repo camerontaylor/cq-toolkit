@@ -108,9 +108,23 @@ def advisory(c, q, health, budget, log):
                       issue_ticks=health["incomplete_ticks"])
 
 
+def _partitioned(active):
+    """True while inventory-cap recovery still carries a width hint: a part
+    that completed is one step of the drain, not the end of discovery (the
+    watermark is still behind the rolling upper bound)."""
+    span = active.get("span")
+    return type(span) is int and span > 0
+
+
 def record(c, q, *, discovery_enabled):
     health = q.setdefault("client_health", {})
-    complete = (q.get("merged_discovery") or {}).get("complete") if discovery_enabled else health.get("complete")
+    active = q.get("merged_discovery") or {}
+    complete = active.get("complete") if discovery_enabled else health.get("complete")
+    if discovery_enabled and complete is True and _partitioned(active):
+        # Health keeps reporting incomplete until the final, un-narrowed
+        # interval completes, so the streak and the advisory issue span the
+        # whole drain once instead of flapping per completed part.
+        complete = False
     streak = health.get("incomplete_ticks", 0)
     if discovery_enabled and complete is False:
         streak = min(1000000, streak + 1)
