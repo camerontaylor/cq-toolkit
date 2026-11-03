@@ -1120,9 +1120,7 @@ export class AiSdkDriver implements Driver {
                 input: '[values omitted: no scanner]',
               }));
               content =
-                step.text !== ''
-                  ? `${step.text}\n${JSON.stringify(calls)}`
-                  : JSON.stringify(calls);
+                step.text !== '' ? `${step.text}\n${JSON.stringify(calls)}` : JSON.stringify(calls);
             }
             await store.appendMessage(record.sessionId, {
               role: 'assistant',

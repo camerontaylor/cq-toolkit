@@ -589,7 +589,6 @@ into result-derived journal session links as `sessions[].path`.
 SDK transcripts keep each completed step's usage and requested tool calls;
 the final answer is not appended a second time.
 
-
 Tool-call step evidence is diagnostic output: a configured scanner checks
 the complete step and decoded nested strings and keys before persistence.
 A refusal replaces the assistant record with a redaction marker and omits

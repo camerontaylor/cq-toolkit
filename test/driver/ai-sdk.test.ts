@@ -1006,7 +1006,10 @@ describe('ai-sdk driver specifics (mock model)', () => {
             modelSpec: { provider: 'zai', model: 'mock-1' },
             toolPolicy: { mode: 'none', allow: [] },
             budget: budgetStop ? { maxTokens: 1 } : {},
-            outputSchema: toOutputSchema('test/miss-transcript/v1', z.object({ answer: z.string() })),
+            outputSchema: toOutputSchema(
+              'test/miss-transcript/v1',
+              z.object({ answer: z.string() }),
+            ),
           }),
         );
         expect(result.stopReason).toBe(budgetStop ? 'budget' : 'complete');

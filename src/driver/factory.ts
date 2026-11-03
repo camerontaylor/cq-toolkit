@@ -386,7 +386,8 @@ function constructLane(lane: LaneId, request: DriverRequest, config: DriverFacto
  * Rejected runs expose their own created session id; cleanup never scans a
  * shared directory or guesses ownership. Cleanup is
  * best-effort: a reap failure is swallowed, the verdict outranks it (the
- * same posture as the lanes' persistence).
+ * same posture as the lanes' persistence). A resolved result loses its
+ * sessionId only after successful cleanup; a failed cleanup retains the link.
  */
 export function withReapOnSettle(driver: Driver, sessionsDir: string): Driver {
   return {
