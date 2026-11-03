@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { ReviewCoverageSchema } from './internal/reviewPartitions.js';
 import { isCoverageV2Complete } from './internal/reviewCoverageV2.js';
 import { FindingFingerprintSchema } from '../../kernel/schema.js';
+import type { AvailabilityRecord } from '../../kernel/types.js';
 
 /**
  * Side-aware location of an exact quoted range in one tree of the reviewed
@@ -217,6 +218,97 @@ export type FindingsRecord = z.infer<typeof FindingsRecordSchema>;
  */
 export function legacyEvidenceText(finding: Pick<Finding, 'evidence'>): string | undefined {
   return Array.isArray(finding.evidence) ? JSON.stringify(finding.evidence) : finding.evidence;
+}
+
+/**
+ * ADR-0008 findings-record dual-read adapter (T19): the ONE place a finding's
+ * stored disposition is adapted to its v2 read shape, for every reader.
+ *
+ * - a legacy v1 evidence string becomes a one-element array (never a JSON
+ *   re-encode that a reader would have to parse);
+ * - absent or whitespace-only evidence is null, never [] (unknown is not an
+ *   empty proof);
+ * - missing `fingerprint` and the new provenance fields are null, with an
+ *   availability entry explaining the absence. Nothing is fabricated and no
+ *   legacy identity is guessed.
+ *
+ * Producers write v2 directly; only readers adapt. The availability pointers
+ * are relative to a disposition payload, so a producer that derives its own
+ * values (address builds the fingerprint and observed head itself) keeps its
+ * own producer-specific availability.
+ */
+export interface FindingDispositionView {
+  status: Finding['status'];
+  reason: string | null;
+  evidence: string[] | null;
+  fingerprint: Finding['fingerprint'] | null;
+  owner: string | null;
+  reviewTrigger: string | null;
+  observedHead: string | null;
+  observedAt: string | null;
+  acceptedRisk: string | null;
+  availability: Record<string, AvailabilityRecord>;
+}
+
+export function findingDispositionView(finding: Finding): FindingDispositionView {
+  const retained = finding.evidence;
+  const evidence =
+    retained === undefined || (typeof retained === 'string' && retained.trim() === '')
+      ? null
+      : Array.isArray(retained)
+        ? retained
+        : [retained];
+  const availability: Record<string, AvailabilityRecord> = {};
+  const unknown = (
+    pointer: string,
+    reason: string,
+    state: AvailabilityRecord['state'] = 'unavailable',
+  ) => {
+    availability[pointer] = { state, reason, source: null };
+  };
+  if (evidence === null)
+    unknown(
+      '/evidence',
+      'no evidence was recorded; absence is unknown, never an empty proof',
+      'not-collected',
+    );
+  if (finding.fingerprint === undefined)
+    unknown('/fingerprint', 'no F1 identity recorded; a legacy identity is never guessed');
+  if (finding.owner === undefined)
+    unknown('/owner', 'no owner recorded; the adjudicating authority is unknown');
+  if (finding.observedHead === undefined)
+    unknown('/observedHead', 'no observed head recorded; the disposition is tied to no head');
+  if (finding.observedAt === undefined)
+    unknown('/observedAt', 'no observed-at timestamp recorded; the adjudication time is unknown');
+  if (finding.acceptedRisk === undefined)
+    unknown(
+      '/acceptedRisk',
+      'the adjudicator recorded no accepted risk (null is unknown, never none)',
+      'not-collected',
+    );
+  if (finding.status !== 'deferred')
+    unknown(
+      '/reviewTrigger',
+      'the disposition is not deferred, so no re-review trigger applies',
+      'n-a',
+    );
+  else if (finding.reviewTrigger === undefined || finding.reviewTrigger === null)
+    unknown(
+      '/reviewTrigger',
+      'a deferred disposition recorded no re-review trigger; re-review timing is unknown',
+    );
+  return {
+    status: finding.status,
+    reason: finding.reason ?? null,
+    evidence,
+    fingerprint: finding.fingerprint ?? null,
+    owner: finding.owner ?? null,
+    reviewTrigger: finding.reviewTrigger ?? null,
+    observedHead: finding.observedHead ?? null,
+    observedAt: finding.observedAt ?? null,
+    acceptedRisk: finding.acceptedRisk ?? null,
+    availability,
+  };
 }
 
 function key(finding: Finding): string {

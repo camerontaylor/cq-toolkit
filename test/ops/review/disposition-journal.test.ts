@@ -20,6 +20,7 @@ import { expect, test } from 'vitest';
 import { makeReviewAddress, type ReviewAddressReport } from '../../../src/ops/review/address.js';
 import {
   FindingsRecordSchema,
+  findingDispositionView,
   openBlocking,
   type Finding,
   type FindingsRecord,
@@ -189,6 +190,44 @@ test('T19 unknown evidence', async () => {
   };
   expect(FindingsRecordSchema.parse(withoutEvidenceV1).findings[0]?.evidence).toBeUndefined();
 
+  // ADR-0008 line 214: the ONE dual-read adapter view. A legacy string becomes
+  // a one-element array, absent (or whitespace-only) evidence is null, and
+  // missing v2 provenance is null WITH availability rather than fabricated.
+  expect(
+    findingDispositionView(
+      v1Finding({
+        status: 'rejected',
+        reason: 'false positive',
+        evidence: '{"path":"src/a.ts","line":1}',
+      }),
+    ).evidence,
+  ).toEqual(['{"path":"src/a.ts","line":1}']);
+  expect(
+    findingDispositionView(v1Finding({ status: 'fixed', reason: 'addressed', evidence: '  ' }))
+      .evidence,
+  ).toBeNull();
+  const unknownView = findingDispositionView(v1Finding({ status: 'fixed', reason: 'addressed' }));
+  expect(unknownView.evidence).toBeNull();
+  expect(unknownView.fingerprint).toBeNull();
+  expect(unknownView.owner).toBeNull();
+  expect(unknownView.observedHead).toBeNull();
+  expect(unknownView.observedAt).toBeNull();
+  expect(unknownView.acceptedRisk).toBeNull();
+  expect(unknownView.reviewTrigger).toBeNull();
+  expect(unknownView.availability['/evidence']).toMatchObject({
+    state: 'not-collected',
+    source: null,
+  });
+  for (const pointer of ['/fingerprint', '/owner', '/observedHead', '/observedAt'])
+    expect(unknownView.availability[pointer]).toMatchObject({ state: 'unavailable', source: null });
+  expect(unknownView.availability['/reviewTrigger']?.state).toBe('n-a');
+  // A deferred disposition without a trigger is unknown, not "no re-review".
+  expect(
+    findingDispositionView(v1Finding({ status: 'deferred', reason: 'tracked later' })).availability[
+      '/reviewTrigger'
+    ]?.state,
+  ).toBe('unavailable');
+
   // A legacy deferred finding has no trigger: unknown, never invented, and
   // the blocker stays open.
   const deferred = v1Finding({
@@ -277,7 +316,7 @@ test('T19 unknown evidence', async () => {
     expect(payloads[0]!.reviewTrigger).toBe(
       'review.address: retained and re-presented at next re-review',
     );
-    expect(payloads[0]!.evidence).toHaveLength(1);
+    expect(payloads[0]!.evidence).toEqual(['src/a.ts:1']);
   } finally {
     await f.cleanup();
   }
@@ -332,6 +371,51 @@ test('T19 failure boundary', async () => {
     expect(attempts.every((attempt) => attempt.class === 'infrastructure')).toBe(true);
   } finally {
     await f.cleanup();
+  }
+
+  // The same infrastructure failure with an INJECTED disposition authority:
+  // the callback adjudicates nothing, so the failure must still stay out of
+  // the disposition record. Only `failure` on the fix decides that; an
+  // injected dep never promotes an operational failure into a deferral.
+  const h = await fixture();
+  try {
+    let dispositionCalls = 0;
+    const failing: DriverFactory = {
+      resolve: (request) => {
+        const resolved = h.drivers.resolve(request);
+        return {
+          ...resolved,
+          driver: {
+            ...resolved.driver,
+            run: async (invocation) => {
+              if (invocation.outputSchema?.name?.startsWith('review.address.'))
+                return {
+                  stopReason: 'error' as const,
+                  error: 'Cannot connect to API: getaddrinfo EAI_AGAIN api.example.invalid',
+                  usage: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 },
+                  denials: [],
+                };
+              return resolved.driver.run(invocation);
+            },
+          },
+        };
+      },
+    };
+    const result = await makeReviewAddress({
+      drivers: failing,
+      initialRecord: h.record,
+      disposition: async () => {
+        dispositionCalls += 1;
+        return { status: 'ok' as const, value: undefined };
+      },
+    })({ repoRoot: h.repo.root, source: 'local', journalDir: h.journalDir });
+    expect(result.status).not.toBe('ok');
+    expect(dispositionCalls).toBe(0);
+    expect(reportOf(result)!.findings.map((finding) => finding.status)).toEqual(['open']);
+    const events = (await readObservations(h.journalDir))[0]!.events;
+    expect(events.some((event) => event.type === 'finding-disposition')).toBe(false);
+  } finally {
+    await h.cleanup();
   }
 
   // A failed observation append never rewrites the durable disposition or the

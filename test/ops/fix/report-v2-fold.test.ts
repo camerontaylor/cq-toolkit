@@ -201,7 +201,17 @@ describe('report v2 fold (T36)', () => {
     });
     expect(torn.attempts).toHaveLength(1);
     expect(torn.availability['/attempts']?.state).toBe('partial');
+    // T36 semantics are unchanged: a fix composition has NO disposition
+    // producer, so a torn stream stays unavailable rather than becoming
+    // "partial" evidence for a producer that does not exist.
+    expect(torn.availability['/dispositions']).toMatchObject({
+      state: 'unavailable',
+      reason: 'the fix composition has no finding-disposition producer yet',
+    });
     const complete = [stream([header()])];
+    expect(
+      foldObservations({ streams: complete, producer: 'fix' }).availability['/dispositions'],
+    ).toMatchObject({ state: 'unavailable' });
     expect(
       foldObservations({ streams: complete, producer: 'fix' }).availability['/attempts']?.state,
     ).toBe('known-zero');

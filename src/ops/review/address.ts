@@ -29,6 +29,7 @@ import { makeDevDisposition } from '../dev/disposition.js';
 import { makeSubprocessDevEffects } from '../dev/effects.js';
 import {
   FindingsRecordSchema,
+  findingDispositionView,
   isComplete,
   legacyEvidenceText,
   merge,
@@ -1853,34 +1854,30 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
             const DEFERRED_REVIEW_TRIGGER =
               'review.address: retained and re-presented at next re-review';
             /**
-             * Legacy one-string evidence adapts to a one-element array (the
-             * v2 shape); absent or whitespace-only evidence stays null
-             * (unknown), never `[]`.
-             */
-            const dispositionEvidence = (finding: Finding): string[] | null => {
-              const retained = finding.evidence;
-              if (
-                retained === undefined ||
-                (typeof retained === 'string' && retained.trim() === '')
-              )
-                return null;
-              return Array.isArray(retained) ? retained : [retained];
-            };
-            /**
-             * ADR-0008 T19 boundary: a deliberate terminal adjudication from
-             * the worker always carries its observed evidence array
-             * (deferred/rejected evidence is required nonempty), and a fixed
-             * adjudication carries its commit. The worker's OPERATIONAL
-             * failure path returns the same `deferred` status with no
-             * evidence array; promoting it into a durable disposition is
-             * exactly the infrastructure-failure-as-deferral defect T19
-             * removes. A caller that injects its own disposition authority is
-             * explicit about the adjudication and keeps the record.
+             * ADR-0008 T19 boundary: `isDeliberateDisposition` admits only a
+             * real terminal adjudication. The worker's OPERATIONAL failure
+             * path reuses `status: 'deferred'` for an unresolved finding but
+             * marks itself with `failure` — that is never a deferral, and it
+             * stays out of the disposition record even when a caller injects
+             * its own disposition authority (a thrown worker, a timeout or a
+             * driver error adjudicates nothing). The converse holds too: a
+             * custom worker's deliberate `rejected`/`deferred` is recorded
+             * even when it omits the optional evidence array. No injected dep
+             * and no evidence shape may widen or narrow this predicate.
              */
             const isDeliberateDisposition = (fix: AddressFix): boolean =>
-              fix.finding.status === 'fixed' ||
-              Array.isArray(fix.evidence) ||
-              deps.disposition !== undefined;
+              fix.finding.status !== 'open' && fix.failure === undefined;
+            /**
+             * ADR-0008 T19: a new disposition records the worker's observed
+             * points as one `path:line` entry each (never a single JSON blob,
+             * which a reader would have to re-parse). A fixed disposition has
+             * no evidence array; the finding's commit SHA is adapted by the
+             * shared dual-read view.
+             */
+            const dispositionEvidenceFor = (fix: AddressFix): string[] | null =>
+              fix.evidence === undefined
+                ? findingDispositionView(fix.finding).evidence
+                : fix.evidence.map((entry) => `${entry.path}:${entry.line}`);
             /**
              * ADR-0008 T19: one `finding-disposition` per DURABLE terminal
              * adjudication. Only a successful recordDisposition reaches this
@@ -1892,6 +1889,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
             const emitFindingDisposition = async (
               finding: Finding,
               observedHead: string,
+              evidence: string[] | null,
             ): Promise<void> => {
               if (observation === undefined) return;
               if (finding.status === 'open') return;
@@ -1901,7 +1899,6 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                 );
                 return;
               }
-              const evidence = dispositionEvidence(finding);
               const at = new Date().toISOString();
               const availability: Record<string, AvailabilityRecord> = {
                 '/fingerprint/spanContentHash': {
@@ -1977,7 +1974,10 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                 // failure-path `deferred` is an operational failure, never a
                 // deferral.
                 if (finding.status === 'open' || !isDeliberateDisposition(fix)) return 'withheld';
-                const evidence = dispositionEvidence(finding);
+                // The worker's observed evidence (path:line per point) or, for a
+                // fixed disposition, the adapted finding evidence (the commit
+                // SHA). One value feeds both the ledger and the journal event.
+                const evidence = dispositionEvidenceFor(fix);
                 return await withBookkeepingAccess(root, async () => {
                   const recorded = deps.disposition
                     ? await deps.disposition(root, finding)
@@ -1987,12 +1987,10 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                         action: finding.status as 'fixed' | 'rejected' | 'deferred',
                         why: finding.reason ?? 'engine validated fix',
                         owner: 'review.address',
-                        // The finding's own evidence, verbatim: the commit SHA
-                        // for a fixed disposition (addressWorker), the
-                        // path/line JSON for rejected/deferred, the failed
-                        // attempt otherwise. Never manufactured, never
-                        // dropped; an absent, empty or whitespace-only value
-                        // records no evidence entries (never ['']).
+                        // The worker's own evidence: the commit SHA for a fixed
+                        // disposition, `path:line` per observed point for
+                        // rejected/deferred. Never manufactured, never dropped;
+                        // an absent value records no evidence entries.
                         evidence: evidence ?? [],
                         ...(finding.status === 'deferred'
                           ? {
@@ -2012,7 +2010,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                     );
                   }
                   dispositions.set(identity(finding), finding);
-                  await emitFindingDisposition(finding, fix.observedHead);
+                  await emitFindingDisposition(finding, fix.observedHead, evidence);
                   return 'recorded';
                 });
               } catch (error) {

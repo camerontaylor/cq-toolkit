@@ -117,6 +117,14 @@ export interface AddressFix {
   commit?: string;
   evidence?: Array<{ path: string; line: number }>;
   reason: string;
+  /**
+   * ADR-0008 T19: present ONLY on the operational failure path (failed()).
+   * That path reuses the `deferred` status because the finding is unresolved,
+   * but it is not an adjudication: the composition must never promote it into
+   * a durable disposition. A deliberate `deferred` returned by a worker has
+   * no `failure`, even when it omits the optional evidence array.
+   */
+  failure?: { reason: string };
   validation: ValidationVerdict[];
   failedAttempts?: AddressFailedAttempt[];
 }
@@ -1190,6 +1198,9 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
           },
           observedHead,
           reason,
+          // The ONLY producer of this discriminator: an operational failure is
+          // never a deliberate deferral (ADR-0008 T19).
+          failure: { reason },
           validation: validations,
           failedAttempts: history,
         });

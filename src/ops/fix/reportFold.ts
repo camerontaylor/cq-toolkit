@@ -110,21 +110,29 @@ export function foldObservations(input: ReportFoldInput): ReportV2 {
   ]) {
     availability[`/${field}`] = unavailable('producer not yet wired to the composition report');
   }
-  availability['/dispositions'] = partial
-    ? { state: 'partial', reason: 'torn observation stream; partial evidence only', source: null }
-    : dispositions.length > 0
-      ? {
-          state: 'known',
-          reason: 'measured finding-disposition events in the composition stream',
-          source: null,
-        }
-      : input.producer === 'address'
+  // The producer check comes FIRST: T36 semantics are unchanged, so a fix
+  // composition has no finding-disposition producer at all, and a torn stream
+  // or header fallback must not re-label that absence as partial evidence.
+  availability['/dispositions'] =
+    input.producer !== 'address'
+      ? unavailable('the fix composition has no finding-disposition producer yet')
+      : partial
         ? {
-            state: 'known-zero',
-            reason: 'the complete address stream recorded no terminal disposition',
+            state: 'partial',
+            reason: 'torn observation stream; partial evidence only',
             source: null,
           }
-        : unavailable('the fix composition has no finding-disposition producer yet');
+        : dispositions.length > 0
+          ? {
+              state: 'known',
+              reason: 'measured finding-disposition events in the composition stream',
+              source: null,
+            }
+          : {
+              state: 'known-zero',
+              reason: 'the complete address stream recorded no terminal disposition',
+              source: null,
+            };
   availability['/acceptances'] = unavailable(
     'T20 acceptance importer deferred; empty evidence is not all-clear',
   );
