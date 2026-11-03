@@ -53,6 +53,54 @@ describe('sanitizeObservation', () => {
     }
   });
 
+  it.each(['=aaaa', '=a@', '=a:b@', ';aaaa', 'a=b&', 'a'])(
+    'bounds adversarial run %s',
+    (pattern) => {
+      const input = pattern.repeat(Math.ceil(200_000 / pattern.length));
+      const start = Date.now();
+      sanitizeObservation(input);
+      expect(Date.now() - start).toBeLessThan(5000);
+    },
+  );
+
+  it.each([
+    ['https://h/p?fields=id,name&access_token=X', 'https://h/p'],
+    ['https://h/p?q=x;sig=X', 'https://h/p'],
+    ['https://h/p?q=[x]&token=X', 'https://h/p'],
+    ['https://[::1]/p?token=X', 'https://[::1]/p'],
+    ...[';', ',', "'", '(', '{', '<'].map((c) => [
+      `https://u:prefix${c}secret@host/p`,
+      'https://host/p',
+    ]),
+    ['fatal:user:tok@host', 'host'],
+    [':u:p@host', 'host'],
+    ['1https://u:p@host/p', 'host/p'],
+    ['u:p@@host', 'host'],
+    ['tok@[::1]:o/r', '[::1]:o/r'],
+    ['https://user:p\nassword@host/p', 'https://\nhost/p'],
+  ])('closes leak %s', (input, expected) => {
+    expect(sanitizeObservation(input)).toEqual(expected);
+  });
+
+  it('requires post-strip redaction for a newly exposed URL secret', () => {
+    process.env.ZZ_HOOK_URL = 'https://hooks.example/svc/p';
+    try {
+      expect(sanitizeObservation('https://u:p@hooks.example/svc/p')).toEqual('[redacted]');
+    } finally {
+      delete process.env.ZZ_HOOK_URL;
+    }
+  });
+
+  it('strips credentials spanning the output cap before truncation', () => {
+    const input = 'https://u:' + 'p'.repeat(MAX_SANITIZED_CHARS) + '@host/p';
+    expect(sanitizeObservation(input)).toEqual('https://host/p');
+  });
+
+  it('never cuts a surrogate pair at the cap', () => {
+    const out = sanitizeObservation('a'.repeat(MAX_SANITIZED_CHARS - 1) + '😀tail');
+    expect(out).toEqual('a'.repeat(MAX_SANITIZED_CHARS - 1) + ' …[truncated 6 chars]');
+  });
+
   it('passes numbers, booleans and null through structurally', () => {
     expect(sanitizeObservation({ a: 1, b: [true, null], c: { d: 2 } })).toEqual({
       a: 1,
@@ -226,6 +274,12 @@ describe('repoIdFromRemote (canonical host/path)', () => {
     expect(ids[0]?.repoId).not.toContain('camerontaylor');
   });
 
+  it('normalizes repeated internal path separators', () => {
+    expect(repoIdFromRemote('https://github.com/o//r')).toEqual(
+      repoIdFromRemote('https://github.com/o/r'),
+    );
+  });
+
   it('no remote vs unparseable remote are distinguished', () => {
     expect(repoIdFromRemote(null)).toEqual({ repoId: null, reason: 'no-remote' });
     expect(repoIdFromRemote(undefined)).toEqual({ repoId: null, reason: 'no-remote' });
@@ -255,6 +309,15 @@ describe('finishAttempt', () => {
     expect(record.stopCode).toEqual('unclassified');
     expect(record.class).toEqual('infrastructure');
     expect(record.error?.code).toEqual('write-denied');
+  });
+
+  it('fails closed for runtime completed plus bare write-denied', () => {
+    const input = { ...base, completed: true, stopCode: 'write-denied' } as unknown as Parameters<
+      typeof finishAttempt
+    >[0];
+    const record = finishAttempt(input);
+    expect(record.class).toEqual('infrastructure');
+    expect(record.stopCode).toEqual('unclassified');
   });
 
   it('T12 round-trip: sanitized full payload parses against the strict schema', () => {

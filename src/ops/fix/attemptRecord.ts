@@ -6,8 +6,8 @@
 // its stripped host form; a `*_PASSWORD` containing `@` or `:` leaks its
 // tail), so the pre-pass removes whole known secret values first and the
 // post-pass catches any value the stripping mangled. Each sanitized string is
-// capped at MAX_SANITIZED_CHARS so a hostile input cannot run the regex
-// pipeline unboundedly; the overflow is marked, never silently dropped. The
+// capped at MAX_SANITIZED_CHARS AFTER sanitizing; the credential scanner is
+// linear even on uncapped input. Overflow is marked, never silently dropped. The
 // archive repoId is a digest of the canonical credential-free `host/path`
 // form, never the hostname/path itself. No journal writes here — writers land
 // in T30/T31.
@@ -62,57 +62,75 @@ export const MAX_SANITIZED_CHARS = 64 * 1024;
  * closed. Credential leakage is worse than a mangled spec string.
  */
 function stripCredentialText(text: string): string {
-  // Stage 1 — schemed URL tokens. The token runs to whitespace, or a quote,
-  // bracket, semicolon or comma delimiter, so prose `?`/`#` (questions,
-  // issue references, markdown headings) and a second URL in the same string
-  // are never touched. The lookbehind anchors the scheme so a run of `://`
-  // inside a longer token cannot restart the match — without it the scan is
-  // quadratic on adversarial input. Inside the token the cut is at the LAST
-  // `@` (base64 `=`/`/` and `@`-bearing secrets appear inside userinfo, so
-  // this fails closed), then any `?`/`#` suffix is dropped.
-  let out = '';
-  let last = 0;
-  for (const m of text.matchAll(/(?<![a-z0-9+.-])[a-z][a-z0-9+.-]*:\/\/[^\s'"()[\]{}<>,;]*/gi)) {
-    const token = m[0];
-    const schemeM = /^[a-z][a-z0-9+.-]*:\/\//i.exec(token);
-    const scheme = schemeM === null ? '' : schemeM[0];
-    let replacement: string;
-    const at = token.lastIndexOf('@');
-    if (at === -1) {
-      const rest = token.slice(scheme.length);
-      const headM = /^[^/?#]*/.exec(rest);
-      const headEnd = headM === null ? rest.length : headM[0].length;
-      const tail = rest.slice(headEnd);
-      const q = /[?#]/.exec(tail);
-      replacement = q === null ? token : scheme + rest.slice(0, headEnd + q.index);
-    } else {
-      let rest = token.slice(at + 1);
-      const q = /[?#]/.exec(rest);
-      if (q !== null) rest = rest.slice(0, q.index);
-      replacement = scheme + rest;
+  // Each whitespace-delimited run is visited a constant number of times.
+  // URL authorities deliberately include punctuation and quotes: these may be
+  // password bytes. Query/fragment tails end only at whitespace, quotes or >.
+  // Scheme-less queries are not stripped (prose ? and # must survive).
+  const chunks: string[] = [];
+  let i = 0;
+  while (i < text.length) {
+    if (/\s/.test(text[i] ?? '')) {
+      chunks.push(text[i] ?? '');
+      i++;
+      continue;
     }
-    out += text.slice(last, m.index) + replacement;
-    last = m.index + token.length;
+    const start = i;
+    while (i < text.length && !/\s/.test(text[i] ?? '')) i++;
+    const run = text.slice(start, i);
+    const marker = run.indexOf('://');
+    let schemeStart = marker;
+    while (schemeStart > 0 && /[a-z0-9+.-]/i.test(run[schemeStart - 1] ?? '')) {
+      schemeStart--;
+    }
+    if (marker >= 0 && /[a-z]/i.test(run[schemeStart] ?? '')) {
+      const authorityStart = marker + 3;
+      let authorityEnd = authorityStart;
+      while (authorityEnd < run.length && !'/?#'.includes(run[authorityEnd] ?? '')) {
+        authorityEnd++;
+      }
+      let end = authorityEnd;
+      while (end < run.length && !'?#'.includes(run[end] ?? '')) end++;
+      let tailEnd = end;
+      if (end < run.length) {
+        tailEnd++;
+        while (tailEnd < run.length && !'\'">'.includes(run[tailEnd] ?? '')) tailEnd++;
+      }
+      // Malformed credentials containing / are also failed closed: the last
+      // @ before the query cannot leave a password prefix in a path.
+      const at = run.lastIndexOf('@', end - 1);
+      const authority = run.slice(authorityStart, authorityEnd);
+      const incomplete = i < text.length && at < authorityStart && authority.includes(':');
+      chunks.push(
+        run.slice(0, authorityStart) +
+          (incomplete ? '' : run.slice(at >= authorityStart ? at + 1 : authorityStart, end)) +
+          (run[tailEnd] ?? ''),
+      );
+      // Fail closed for adjacent text after the closing quote in this run.
+    } else {
+      // Maximal runs, never retry a match at each possible credential start.
+      // Preserve an opening boundary, then cut everything through the last @.
+      const at = run.lastIndexOf('@');
+      const host = run[at + 1] ?? '';
+      if (at >= 0 && /[a-z0-9_[.-]/i.test(host)) {
+        let prefix = 0;
+        while (prefix < at && '\'"([{=,;'.includes(run[prefix] ?? '')) prefix++;
+        chunks.push(run.slice(0, prefix) + run.slice(at + 1));
+      } else {
+        chunks.push(run);
+      }
+    }
   }
-  out += text.slice(last);
-  // Stage 2 — SCP and free-text credential prefixes: `[user][:secret]@host`,
-  // including `x-access-token:ghp_x@github.com:`, `user:p@ss@host:` (the
-  // repeated `user:secret@` groups strip greedily to the last `@` in the run)
-  // and `user:token@host` with no trailing colon. The leading boundary
-  // character is preserved. A scheme URL never matches here: the character
-  // before its userinfo is `:`, not a boundary.
-  out = out.replace(
-    /(^|[\s'"([{=,;])(?:[^\s@'"()[\]{},:]+(?::[^\s@'"()[\]{},:]*)?@)+([\w.-]+(?::\d+)?)/g,
-    (_match, boundary: string, host: string) => boundary + host,
-  );
-  return out;
+  return chunks.join('');
 }
 
 /** Cap a sanitized string, marking (not hiding) the overflow size. */
 function capSanitized(text: string): string {
   if (text.length <= MAX_SANITIZED_CHARS) return text;
-  const overflow = text.length - MAX_SANITIZED_CHARS;
-  return `${text.slice(0, MAX_SANITIZED_CHARS)} …[truncated ${overflow} chars]`;
+  let end = MAX_SANITIZED_CHARS;
+  const code = text.charCodeAt(end - 1);
+  if (code >= 0xd800 && code <= 0xdbff) end--;
+  const overflow = text.length - end;
+  return `${text.slice(0, end)} …[truncated ${overflow} chars]`;
 }
 
 /**
@@ -315,7 +333,11 @@ export function finishAttempt(input: FinishAttemptInput): AttemptFinishedPayload
   } else if ('writeDenied' in input && input.writeDenied !== undefined) {
     stopCode = 'write-denied';
     stopClass = input.writeDenied === 'fail' ? 'terminal' : 'human';
-  } else if ('completed' in input && input.completed === true) {
+  } else if (
+    'completed' in input &&
+    input.completed === true &&
+    (input.stopCode === undefined || STOP_CODE_CLASS.get(input.stopCode) === 'terminal')
+  ) {
     stopCode = input.stopCode ?? 'completed';
     stopClass = STOP_CODE_CLASS.get(stopCode) ?? 'terminal';
   } else {
