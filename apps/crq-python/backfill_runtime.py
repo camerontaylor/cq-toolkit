@@ -208,9 +208,11 @@ def select(c, queue, log, dry, only):
     items.sort(key=lambda j: (j["dispatch_tier_importance"], j.get("retry", False), j["subject_kind"],
                              j.get("row") or 0 if j["subject_kind"] == "A" else -j["score"], j["subject_id"]))
     available = False
+    seen = []  # eligible ids this pass left pending, for the reconciliation record
     for item in items:
         if not jobs.eligible(queue, item, c.iso()):
             continue
+        seen.append(item)
         covered, _, gaps = coverage_for(item["target"])
         if gaps:
             item["wait_reason"] = MISSING_EVIDENCE
@@ -218,6 +220,7 @@ def select(c, queue, log, dry, only):
         desired = ledger.scope(item["scope"])
         if all(lines <= covered.get(name, set()) for (name, _), lines in desired.items()):
             item.update(state="done", coverage_satisfied_by=head)
+            seen.pop()
             continue
         available = True
         if refused:
@@ -251,9 +254,8 @@ def select(c, queue, log, dry, only):
             c.save_queue(queue)
             raise
     if not only:  # a selective start covers one job, not the natural pass
-        # Keyed on the post-pass eligible set: jobs just marked done drop out of it.
-        after = [j for j in items if jobs.eligible(queue, j, c.iso())]
-        queue["backfill_coverage_reconciled"] = {"digest": reconciliation(after), "available": available}
+        # Keyed on the jobs this pass saw eligible and left pending (done ones drop out).
+        queue["backfill_coverage_reconciled"] = {"digest": reconciliation(seen), "available": available}
     return None, available
 
 
