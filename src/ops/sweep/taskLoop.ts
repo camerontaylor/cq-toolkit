@@ -541,16 +541,27 @@ async function runTaskLoopInner(
                             reason: `spent ${String(spentTokens)} tokens reached maxTokens ${String(bindings.budget.maxTokens)}`,
                           }
                         : worker.stopReason === 'budget'
-                          ? {
-                              code: 'token-cap' as const,
+                          ? // The driver reported a budget stop without naming a
+                            // cap: never guess. stopCode 'budget' is not in the
+                            // fixed table, so finishAttempt records it as the
+                            // sanitized raw code with class unclassified
+                            // (infrastructure, certainty unknown).
+                            {
+                              code: 'budget' as const,
                               reason: 'worker reported a budget stop',
                             }
                           : null;
               if (budgetCause !== null || currentJobContext()?.signal.aborted) {
                 budgetStopped = true;
                 // A budget breach while the attempt is otherwise complete is
-                // the budget variant, never a generic failure.
+                // the budget variant, never a generic failure. A worker-reported
+                // budget stop without a named cap keeps the raw code 'budget':
+                // the cap is never guessed; finishAttempt's unknown branch then
+                // records it as infrastructure/unclassified with certainty
+                // unknown and the sanitized raw code preserved.
                 if (budgetCause === null) setStop(cancelStop());
+                else if (budgetCause.code === 'budget')
+                  setStop({ stopCode: 'budget', stopReason: budgetCause.reason });
                 else
                   setStop({
                     budgetExpired: true,
@@ -615,6 +626,11 @@ async function runTaskLoopInner(
               attempt: ordinal,
               payload: finishAttempt({
                 ...stop,
+                // The prose message of a driver throw stays in stopReason;
+                // error.code keeps the stable code, never the prose.
+                ...(driverThrew && thrown instanceof Error
+                  ? { stopReason: `${stop.stopReason as string}; ${thrown.message}` }
+                  : {}),
                 tier,
                 invocation: `${bindings.runPrefix}:${task.id}:${String(ordinal)}:${invocation}`,
                 model: resolved.modelSpec,
@@ -638,7 +654,12 @@ async function runTaskLoopInner(
                   ? {
                       error: {
                         type: thrown instanceof Error ? thrown.name : null,
-                        code: thrown instanceof Error ? thrown.message : String(thrown),
+                        // A stable code when the error carries one; the prose
+                        // message stays in stopReason, never in code.
+                        code:
+                          typeof (thrown as { code?: unknown } | null)?.code === 'string'
+                            ? (thrown as { code: string }).code
+                            : null,
                         providerFinishReason: null,
                         source: 'driver',
                         certainty: 'observed' as const,

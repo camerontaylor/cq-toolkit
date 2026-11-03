@@ -292,7 +292,10 @@ describe('T13 attempt-journal', () => {
       if (event === undefined) throw new Error('no spawn event');
       expect(event.payload.class).toBe('infrastructure');
       expect(event.payload.stopCode).toBe('unclassified');
-      expect(event.payload.error?.code).toContain('ECONNREFUSED');
+      // The prose message survives in stopReason; error.code falls back to
+      // the raw stopCode ('unclassified') when the error carries no code.
+      expect(event.payload.stopReason).toContain('ECONNREFUSED');
+      expect(event.payload.error?.code).toBe('unclassified');
       expect(event.payload.tokens).toBeNull();
     } finally {
       await rm(spawnWriter.root, { recursive: true, force: true });
