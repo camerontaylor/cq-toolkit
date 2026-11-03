@@ -406,6 +406,8 @@ export const VerifyReviewOutcomeOpInputSchema = z
   })
   .strict();
 
+const ReviewBaseRevision = z.string().regex(/^[0-9a-fA-F]{7,64}$/);
+
 export const ReviewRunInputSchema: z.ZodType<ReviewRunInput> = z
   .object({
     areas: z.boolean().exactOptional(),
@@ -419,10 +421,7 @@ export const ReviewRunInputSchema: z.ZodType<ReviewRunInput> = z
     uncommitted: z.boolean().exactOptional(),
     prepareEvidence: z.boolean().exactOptional(),
     target: z.string().min(1).exactOptional(),
-    base: z
-      .string()
-      .regex(/^[0-9a-fA-F]{7,64}$/)
-      .exactOptional(),
+    base: ReviewBaseRevision.exactOptional(),
   })
   .strict();
 
@@ -546,7 +545,7 @@ export const ReviewAddressInputSchema: z.ZodType<ReviewAddressInput> = z
       .exactOptional(),
     record: z.string().min(1).exactOptional(),
     target: z.string().min(1).exactOptional(),
-    base: z.string().min(1).exactOptional(),
+    base: ReviewBaseRevision.exactOptional(),
     maxTokens: z.number().int().positive().exactOptional(),
     wallMs: z.number().int().positive().exactOptional(),
     rounds: z.number().int().positive().exactOptional(),
@@ -635,9 +634,15 @@ export const registry: OpRegistryEntry[] = [
   {
     name: 'review.address',
     inputSchema: ReviewAddressInputSchema,
-    importer: async () => {
+    importer: async (wiring) => {
       const { makeReviewAddress } = await import('./address.js');
-      return makeReviewAddress() as Op<unknown, unknown>;
+      return makeReviewAddress({
+        drivers: createDriverFactory(
+          wiring?.onDeprecatedAlias !== undefined
+            ? { onDeprecatedAlias: wiring.onDeprecatedAlias }
+            : {},
+        ),
+      }) as Op<unknown, unknown>;
     },
   },
   {

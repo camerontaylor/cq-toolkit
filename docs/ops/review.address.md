@@ -17,7 +17,7 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
   "additionalProperties": false,
   "properties": {
     "base": {
-      "minLength": 1,
+      "pattern": "^[0-9a-fA-F]{7,64}$",
       "type": "string"
     },
     "concurrency": {
