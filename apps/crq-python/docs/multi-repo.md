@@ -113,6 +113,19 @@ source range generalized:
   pre-upload secret scan (denylist + gitleaks over the projection diff) and
   classification are reused verbatim; the denylist remains cq-toolkit's
   `policy/denylist/patterns.yml` (single source of truth) for every repo.
+- Scan classes are per-repo. The target repos' subject matter IS the fleet
+  (a survey found 78–195 files per repo legitimately matching the
+  legacy-hostname and personal-path publish classes), so cq-toolkit's
+  *publish* classes (legacy hostnames, client names, personal paths, agent
+  memory, package names, agent scratch paths and the gateway-config
+  vocabulary) would block nearly every foreign review without protecting
+  anything. Non-primary repos scan with the **universal secret-shape
+  classes** — token/SSH plumbing, gateway route-key material, key-material
+  environment files and inline secret assignments — plus gitleaks
+  defaults; the primary
+  repo keeps every class. A repo config may add publish classes back via
+  `scan_extra_classes`; an id missing from the parsed file fails the scan
+  (fail closed), never a silent unfiltered upload.
 - `rank()`: items whose `repo` differs from the primary use the repo's
   `rank_tier` (before kind-specific ranks, after optional-cycle rank 5), so
   cq-toolkit ordinary work stays first and new repos sit between it and

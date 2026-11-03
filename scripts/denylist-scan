@@ -1424,7 +1424,7 @@ function selfTestParserGuards(rules) {
       '  - id: guard-probe',
       "    description: 'parser guard fixture rule'",
       "    regex: '(?i)guard[_-]secret'",
-      "    sample: 'guard_secret=not-a-real-value'",
+      "    sample: 'guard_secret=fixture'",
       // Quoted like the accept-cases below: an unquoted shape containing
       // ": " or " #" would trip parseScalar's reserved-characters guard
       // instead of the Windows guard under test.
@@ -1449,7 +1449,7 @@ function selfTestParserGuards(rules) {
       '  - id: guard-probe',
       "    description: 'parser guard fixture rule'",
       "    regex: '(?i)guard[_-]secret'",
-      "    sample: 'guard_secret=not-a-real-value'",
+      "    sample: 'guard_secret=fixture'",
       `    probe_path: '${probe}'`,
       'clean_probes:',
       "  - 'clean/probes/none.txt'",
@@ -1482,7 +1482,7 @@ function selfTestParserGuards(rules) {
       '  - id: guard-probe',
       "    description: 'parser guard fixture rule'",
       "    regex: '(?i)guard[_-]secret'",
-      "    sample: 'guard_secret=not-a-real-value'",
+      "    sample: 'guard_secret=fixture'",
       `    probe_path: '${probe}'`,
       'clean_probes:',
       "  - 'clean/probes/none.txt'",
