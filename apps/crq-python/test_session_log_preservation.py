@@ -149,6 +149,32 @@ class CodexStreamTest(unittest.TestCase):
                                       Path(tmp), job_dir)
             self.assertEqual(result['stop'], 'rate-limit')
 
+    def test_retry_preserves_log_and_thread_links(self):
+        config = {'repair': {'codex_budget_launcher': 'launcher',
+                             'codex_budget_launcher_verified': True,
+                             'budget': {'max_tokens': 100, 'wall_clock_min': 1}}}
+        real_stream = codex._stream_codex
+        threads = iter(['first', 'second'])
+
+        def stream(argv, cwd, env, timeout, log_path):
+            event = json.dumps({'type': 'thread.started', 'thread_id': next(threads)})
+            script = "import sys; print(sys.argv[1]); print('rate limit'); sys.exit(1)"
+            return real_stream([sys.executable, '-c', script, event], cwd, env, timeout, log_path)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            with mock.patch.object(codex, '_stream_codex', stream):
+                for _ in range(2):
+                    result = codex.invoke(config, {'model': 'm'}, {}, directory, directory)
+                    self.assertEqual(result['stop'], 'rate-limit')
+            log = (directory / 'driver.log').read_text()
+            self.assertIn('first', log)
+            self.assertIn('second', log)
+            self.assertEqual(log.count('# invocation'), 2)
+            session = json.loads((directory / 'session.json').read_text())
+            self.assertEqual(session['threadIds'], ['first', 'second'])
+            self.assertEqual(session['threadId'], 'second')
+
     def test_thread_id_from_stream(self):
         lines = [json.dumps({'type': 'thread.started', 'thread_id': 'th-9'}) + '\n',
                  json.dumps({'type': 'item.completed', 'item': {}}) + '\n']
