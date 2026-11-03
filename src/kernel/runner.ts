@@ -1080,9 +1080,10 @@ async function runPlanUnderLease(
     // that crashed before any finish fall back to the current launcher's
     // CQ_* identity or Paseo agent. This is a finish-based pin, not a
     // run-start anchor. Never mutate process.env — see inboundParentWorkId.
-    const priorFinish = replay.values().next().value;
-    const parentWorkId =
-      priorFinish?.parentWorkId ?? inboundParentWorkId(process.env);
+    const recordedParent = [...replay.values()].find(
+      (finish) => finish.parentWorkId !== undefined,
+    )?.parentWorkId;
+    const parentWorkId = recordedParent ?? inboundParentWorkId(process.env);
 
     // Under a governed SIGNAL stop the never-dispatched rows are cancelled,
     // not failed. This is a PREDICATE, not a run-start snapshot: the trip

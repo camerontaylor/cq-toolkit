@@ -127,13 +127,15 @@ describe('governed journal v2 + resume', () => {
     async (legacy) => {
       const seen: Array<{ jobId: string; parent: string | undefined }> = [];
       let fail = true;
+      let allowThird = false;
       const probe = async (raw: unknown): Promise<OpResult<unknown>> => {
         const jobId = (raw as { jobId: string }).jobId;
         seen.push({ jobId, parent: currentJobContext()?.info.correlation?.parentWorkId });
-        if (jobId === 'j2' && fail) return { status: 'failed', error: 'retry on resume' };
+        if ((jobId === 'j2' && fail) || (jobId === 'j3' && !allowThird))
+          return { status: 'failed', error: 'retry on resume' };
         return { status: 'ok', value: {} };
       };
-      const plan = independentPlan('plan-parent-retry', 2, 'probe');
+      const plan = independentPlan('plan-parent-retry', 3, 'probe');
       const run = (resume: boolean) =>
         runPlan(
           plan,
@@ -147,18 +149,25 @@ describe('governed journal v2 + resume', () => {
       await run(false);
       fail = false;
       vi.stubEnv('CQ_WORK_ID', 'changed-parent');
+      await run(true);
+      allowThird = true;
+      vi.stubEnv('CQ_WORK_ID', 'third-parent');
       const resumed = await run(true);
       expect(seen).toEqual([
         { jobId: 'j1', parent: legacy ? undefined : 'original-parent' },
         { jobId: 'j2', parent: legacy ? undefined : 'original-parent' },
+        { jobId: 'j3', parent: legacy ? undefined : 'original-parent' },
         { jobId: 'j2', parent: legacy ? 'changed-parent' : 'original-parent' },
+        { jobId: 'j3', parent: legacy ? 'changed-parent' : 'original-parent' },
+        { jobId: 'j3', parent: legacy ? 'changed-parent' : 'original-parent' },
       ]);
       expect(jobFinishes(await openRunLog(dir).read(resumed.runId))).toMatchObject([
         { jobId: 'j1', ...(legacy ? {} : { parentWorkId: 'original-parent' }) },
         { jobId: 'j2', parentWorkId: legacy ? 'changed-parent' : 'original-parent' },
+        { jobId: 'j3', parentWorkId: legacy ? 'changed-parent' : 'original-parent' },
       ]);
     },
-    journalEnclosure(2),
+    journalEnclosure(3),
   );
 
   test(
