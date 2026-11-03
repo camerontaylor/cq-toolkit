@@ -194,6 +194,76 @@ describe('report v2 legacy projection (T37)', () => {
     expect(addressProjection.fixesPerRun).toBe(1);
   });
 
+  test('T37 carrier rows outrank report v2', () => {
+    // A real legacy run carries both: the assembled reportV2 has a null
+    // numerator today, and once M0-metric lands its numerator measures a
+    // different quantity (validation pass, Cq-Task trailer, not todo). The
+    // carrier rows carry the pre-v2 rule, so they always win.
+    const rows: LegacyProjectionEvidence = {
+      producer: 'fix',
+      tasks: [
+        { outcome: 'fixed', commits: [COMMIT_ONE] },
+        { outcome: 'fixed', commits: [COMMIT_TWO] },
+        { outcome: 'fixed', commits: ['3'.repeat(40)] },
+      ],
+    };
+    const carrierCount = new Set(
+      rows.tasks.filter((task) => task.outcome === 'fixed').flatMap((task) => task.commits),
+    ).size;
+    const both = legacyReportProjection({
+      reportV2: measuredReport(2, [COMMIT_ONE, COMMIT_TWO]),
+      evidence: rows,
+    });
+    expect(carrierCount).toBe(3);
+    expect(both.fixesPerRun).toBe(carrierCount);
+    expect(both.fixesPerRun).toBe(3);
+    expect(both.availability.state).toBe('known');
+    expect(both.availability.reason).toContain('legacy carrier rows');
+    expect(both.availability.reason).not.toContain('fallback');
+
+    // Only a carrier without rows reads the v2 payload, and its availability
+    // says so: the fallback is the v2 verified commit count, not the old rule.
+    const fallback = legacyReportProjection({
+      reportV2: measuredReport(2, [COMMIT_ONE, COMMIT_TWO]),
+    });
+    expect(fallback.fixesPerRun).toBe(2);
+    expect(fallback.availability.reason).toContain('fallback');
+    expect(fallback.availability.reason).toContain('report v2 verified commits');
+
+    // Rows win even when they count zero: an empty carrier is a known zero,
+    // never a reason to consult the v2 numerator.
+    const emptyRows = legacyReportProjection({
+      reportV2: measuredReport(2, [COMMIT_ONE, COMMIT_TWO]),
+      evidence: { producer: 'address', fixes: [{ commit: '' }] },
+    });
+    expect(emptyRows.fixesPerRun).toBe(0);
+    expect(emptyRows.availability.state).toBe('known-zero');
+  });
+
+  test('T37 address truthiness matches the writer', () => {
+    // The pre-v2 address writer counts `fix.commit ? [fix.commit] : []`, so
+    // falsy commits are skipped: never counted and never an availability.
+    const rows = {
+      producer: 'address',
+      fixes: [
+        { commit: COMMIT_ONE },
+        { commit: '' },
+        { commit: null },
+        { commit: undefined },
+        { commit: COMMIT_ONE },
+      ],
+    } as unknown as LegacyProjectionEvidence;
+    const projection = legacyReportProjection({ evidence: rows });
+    expect(projection.fixesPerRun).toBe(1);
+    expect(projection.availability.state).toBe('known');
+
+    const allFalsy = legacyReportProjection({
+      evidence: { producer: 'address', fixes: [{ commit: '' }, { commit: '' }] },
+    });
+    expect(allFalsy.fixesPerRun).toBe(0);
+    expect(allFalsy.availability.state).toBe('known-zero');
+  });
+
   test('T37 unknown evidence', () => {
     // No reportV2 and no rows is a normal absence, not an error and not zero.
     const absent = legacyReportProjection({});
