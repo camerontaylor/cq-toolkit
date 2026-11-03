@@ -28,7 +28,7 @@ import type { Classification } from '../../../src/ops/review/classifyThreads.js'
 import type { PlanBatchConfig } from '../../../src/ops/review/planReviewBatch.js';
 
 // ---------------------------------------------------------------------------
-// Fixtures (ClassifiedItem style, mirroring classifyThreads.test.ts)
+// Fixtures (ClassifiedItem style, mirroring classifyThreads.decisionTable.test.ts)
 // ---------------------------------------------------------------------------
 
 let nextId = 0;
