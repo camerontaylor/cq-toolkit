@@ -205,6 +205,7 @@ test('offline install supplies a dependency needed by the isolated check', async
     const installed = await makeFixRun({ drivers: scripted() })({
       ...input(f),
       runPrefix: 'cq/with-install',
+      journalDir: join(f.root, 'journal-with-install'),
       install: {
         command: process.execPath,
         args: [
