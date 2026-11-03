@@ -3,7 +3,7 @@
 // threads over the gh seam, CRASH-SAFELY.
 //
 // The dispatch contract (each clause is load-bearing and pinned in
-// test/ops/review/replyAndResolve.test.ts):
+// test/ops/review/replyAndResolve.*.test.ts):
 //   a. PUSH-BEFORE-POST ORDERING (with dispatch replay — not atomicity):
 //      when opts.push is configured it runs FIRST and must exit 0 before
 //      ANY post is attempted — replies reference the pushed head, so a
