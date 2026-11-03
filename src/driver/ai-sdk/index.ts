@@ -1064,7 +1064,7 @@ export class AiSdkDriver implements Driver {
                 options?.reviewerStepCountdown !== true ||
                 message.role !== 'user' ||
                 typeof message.content !== 'string' ||
-                !/^[1-3] tool steps left\. Finish your checks and prepare the final answer\.$/.test(
+                !/^[1-3] tool steps? left\. Finish your checks and prepare the final answer\.$/.test(
                   message.content,
                 ),
             );
@@ -1081,7 +1081,7 @@ export class AiSdkDriver implements Driver {
                   ...typedMessages,
                   {
                     role: 'user' as const,
-                    content: `${toolStepsLeft} tool steps left. Finish your checks and prepare the final answer.`,
+                    content: `${toolStepsLeft} tool step${toolStepsLeft === 1 ? '' : 's'} left. Finish your checks and prepare the final answer.`,
                   },
                 ],
               };

@@ -831,7 +831,8 @@ describe('ai-sdk driver specifics (mock model)', () => {
       modelId: 'mock-1',
       doGenerate: async (options) => {
         const text = JSON.stringify(options.prompt);
-        hints.push(Number(/(\d+) tool steps left/.exec(text)?.[1]) || undefined);
+        expect(text).not.toContain('1 tool steps left');
+        hints.push(Number(/(\d+) tool steps? left/.exec(text)?.[1]) || undefined);
         return text.includes('This is your final step')
           ? textResult('{"fixed":true}')
           : toolCallResult('read', { path: 'absent.txt' });

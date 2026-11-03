@@ -196,6 +196,11 @@ still matches its ledger disposition. New reviewer feedback reopens the finding.
 
 ## Bounded agent review
 
+Reviewer sessions can opt into a late tool-step countdown with
+`review.session.stepCountdown: true` in `cq.json`. It defaults to false.
+The ai-sdk driver appends “N tool steps left” only on the final three tool
+steps; the final answer step retains its existing schema instruction.
+
 `review.run` and `dev.review` send the whole change, bounded commit-message intent,
 file list and change-kind instructions to one read-only reviewer session when it
 fits `review.session.maxInputChars` (default 60,000 characters). The reviewer can
