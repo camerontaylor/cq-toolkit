@@ -51,20 +51,27 @@ def _read(state, target):
     return value
 
 
-def _extends(snapshot, events):
+def _extends(snapshot, events, digests=None):
     """The snapshot's events are a prefix of this ledger sequence."""
     count = snapshot["events"]
-    return 0 <= count <= len(events) and snapshot.get("prefix") == _prefix_digest(events, count)
+    if not 0 <= count <= len(events):
+        return False
+    if digests is None:
+        return snapshot.get("prefix") == _prefix_digest(events, count)
+    if count not in digests:
+        digests[count] = _prefix_digest(events, count)
+    return snapshot.get("prefix") == digests[count]
 
 
-def load(state, target, events):
+def load(state, target, events, digests=None):
     """Return (covered, gaps) valid for this ledger sequence, or None when stale.
 
     Cheap and Git-free: safe under tick.lock. A snapshot over a prefix remains
-    exact when no appended event is a creditable review.
+    exact when no appended event is a creditable review. Pass one `digests` dict
+    for every target checked against the same events to hash each prefix once.
     """
     snapshot = _read(state, target)
-    if snapshot is None or not _extends(snapshot, events):
+    if snapshot is None or not _extends(snapshot, events, digests):
         return None
     if any(ledger.creditable(value) for value in events[snapshot["events"]:]):
         return None
@@ -96,7 +103,7 @@ def refresh(state, repo, store, events, targets, keep=()):
     {target: "current"|"extended"|"full"|"invalid-target"}.
     """
     ledger.validate_sequence(events)
-    repo.immutable_cache = {}  # this invocation only; keys are immutable object IDs
+    repo.begin_invocation()  # immutable-object cache; earlier gaps are retried
     outcome = {}
     for target in sorted(set(targets)):
         try:
@@ -155,11 +162,16 @@ def run(c, *, published_head=None):
     if not config:
         return "disabled"
     marker = c.STATE / REQUEST
-    requested = marker.read_bytes() if marker.exists() else None
-    if requested is None and published_head is None:
+    if not marker.exists() and published_head is None:
         return "idle"
     import backfill_publisher
     with ledger.locked(c.STATE / LOCK):
+        try:  # read under the refresher lock; a concurrent run may consume it
+            requested = marker.read_bytes()
+        except FileNotFoundError:
+            requested = None
+        if requested is None and published_head is None:
+            return "idle"
         # A read-only snapshot of the queue: targets only, never saved here. The
         # request's own targets are added: the queue read here (without
         # tick.lock) may predate the save that enqueued them.
@@ -181,4 +193,9 @@ def run(c, *, published_head=None):
         if requested is not None and marker.exists() and marker.read_bytes() == requested:
             marker.unlink()
             ledger.fsync_dir(marker.parent)
+    if any(value in ("extended", "full") for value in outcome.values()):
+        # Wake the next one-minute slot instead of its quota-paced deadline, as
+        # a harvest does: jobs that waited on this refresh may now admit.
+        import usage_slots
+        usage_slots.write_next(c.STATE / "next-review-at", ledger.timestamp(c.iso()))
     return {"head": head, "targets": outcome}

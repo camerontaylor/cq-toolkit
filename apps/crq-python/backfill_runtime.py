@@ -196,9 +196,13 @@ def select(c, queue, log, dry, only):
     # work per target. Read the off-lock snapshot; a stale one leaves its jobs
     # waiting and asks the refresher (crq-publisher) for an update.
     snapshots, stale = {}, set()  # stale: targets to request (missing/stale snapshot, or gaps)
+    digests = {}  # prefix digests shared by every target's snapshot check this pass
+    def request_stale():
+        if stale and not dry:
+            coverage.request(c.STATE, head, stale)
     def coverage_for(target):
         if target not in snapshots:
-            snapshots[target] = coverage.load(c.STATE, target, events)
+            snapshots[target] = coverage.load(c.STATE, target, events, digests)
             if snapshots[target] is None:
                 stale.add(target)
         return snapshots[target]
@@ -254,6 +258,7 @@ def select(c, queue, log, dry, only):
                 run_bound = True
                 state_event(c, queue, item, c.iso(), "vendor identity bound")
                 c.save_queue(queue)
+                request_stale()  # targets seen stale before this launch still need a refresh
                 return run_id, True
             if not item.get("run"):
                 jobs.cancel_before_vendor(queue, item)
@@ -264,8 +269,7 @@ def select(c, queue, log, dry, only):
             c.save_queue(queue)
             raise
     if stale:
-        if not dry:
-            coverage.request(c.STATE, head, stale)
+        request_stale()
     elif not only:  # a selective start covers one job, not the natural pass
         # Keyed on the jobs this pass saw eligible and left pending (done ones drop out).
         # A pass with stale or gap snapshots records nothing, so the next pass

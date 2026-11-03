@@ -1,4 +1,5 @@
 """Persisted off-lock coverage snapshots: incremental folds and staleness."""
+import collections
 from pathlib import Path
 import tempfile
 import unittest
@@ -19,6 +20,9 @@ class FakeRepo:
     def __init__(self, fail=()):
         self.folded, self.fail = [], set(fail)
         self.immutable_cache = None
+
+    def begin_invocation(self):
+        self.immutable_cache = {}
 
     def fold(self, target, reviews, artifacts, covered, evidence, gaps):
         for value in reviews:
@@ -120,6 +124,33 @@ class CoverageSnapshotTest(unittest.TestCase):
                            {"kind": "open", "state": "pending", "target": "c" * 40}]}
         self.assertEqual(coverage.live_targets(queue), {T1})
         self.assertEqual(coverage.pending_targets(queue), set())
+
+    def test_one_prefix_digest_is_shared_by_every_target_in_a_pass(self):
+        events = [event("r1", True), event("s1")]
+        coverage.refresh(self.state, FakeRepo(), None, events, {T1, T2})
+        digests = {}
+        with mock.patch.object(coverage, "_prefix_digest", wraps=coverage._prefix_digest) as digest:
+            for target in (T1, T2):
+                self.assertIsNotNone(coverage.load(self.state, target, events, digests))
+        self.assertEqual(digest.call_count, 1)
+
+
+class VerificationOutcomeCacheTest(unittest.TestCase):
+    def test_failed_restore_is_reused_across_targets_and_retried_next_invocation(self):
+        import backfill_accounting as accounting
+        repo = accounting.Repository(tempfile.gettempdir())
+        review = {"id": "r1", "event_type": "review", "payload": {"artifacts": [{"location": "x"}], "target": T1}}
+        artifacts = mock.Mock(verify=mock.Mock(side_effect=OSError("artifact volume unreadable")))
+        with mock.patch.object(accounting.ledger, "creditable", return_value=True):
+            repo.begin_invocation()
+            for target in (T1, T2):
+                gaps = []
+                repo.fold(target, [review], artifacts, collections.defaultdict(set), collections.defaultdict(list), gaps)
+                self.assertEqual(gaps, [{"review": "r1", "reason": "artifact volume unreadable"}])
+            self.assertEqual(artifacts.verify.call_count, 1)
+            repo.begin_invocation()  # the next refresher run retries the gap
+            repo.fold(T1, [review], artifacts, collections.defaultdict(set), collections.defaultdict(list), [])
+        self.assertEqual(artifacts.verify.call_count, 2)
 
 
 if __name__ == "__main__":

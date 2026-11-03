@@ -305,6 +305,23 @@ class RuntimeTest(unittest.TestCase):
                 self.assertEqual(runtime.select(self.c, self.q, [], False, None), ("vendor-1", True))
         self.c.launch.assert_called_once()
 
+    def test_launch_still_requests_targets_seen_stale_earlier_in_the_pass(self):
+        stale = copy.deepcopy(self.item); stale["id"] += "-stale"; stale["target"] = "c" * 40
+        stale["score"] = self.item["score"] + 1  # higher score sorts before the launchable job
+        self.q["items"] = [stale, self.item]
+        self.q["backfill_usage"] = {"successful": True, "remaining": 5, "observed_at": AT, "reflected_reservations": []}
+        load = self.snapshots()
+        load.side_effect = lambda state, target, events, digests=None: None if target == "c" * 40 else ({}, [])
+        _, store, outbox, _ = runtime.services(self.c, self.config)
+        publisher = SimpleNamespace(fetch=mock.Mock(return_value=("head", [])))
+        self.c.launch = mock.Mock(side_effect=lambda q, item, plan: item.update(state="reviewing") or "vendor-1")
+        with mock.patch.object(runtime, "services", return_value=(None, store, outbox, publisher)), \
+             mock.patch.object(jobs, "eligible", side_effect=lambda q, item, at: item["state"] == "pending"):
+            self.assertEqual(runtime.select(self.c, self.q, [], False, None), ("vendor-1", True))
+        self.assertEqual(stale["wait_reason"], runtime.COVERAGE_PENDING)
+        request = ledger.loads((self.state / runtime.coverage.REQUEST).read_bytes())
+        self.assertEqual(request["targets"], ["c" * 40])
+
     def test_refresher_adds_requested_targets_and_keeps_a_request_written_meanwhile(self):
         import backfill_coverage
         self.c.load_queue = lambda: {"items": []}  # the unlocked read predates the enqueue
@@ -312,14 +329,19 @@ class RuntimeTest(unittest.TestCase):
         marker = self.state / backfill_coverage.REQUEST
         def refresh(state, repo, store, events, targets, keep=()):
             self.assertEqual(targets, {self.t})
+            self.assertEqual(set(keep), set())  # no live job: nothing protected from pruning
             backfill_coverage.request(self.state, "newer", [self.t])  # a pass during the refresh
             return {self.t: "full"}
         with mock.patch.object(backfill_coverage, "refresh", side_effect=refresh):
             self.assertEqual(backfill_coverage.run(self.c)["targets"], {self.t: "full"})
         self.assertEqual(ledger.loads(marker.read_bytes())["head"], "newer")
+        # A changed snapshot wakes the next one-minute slot, as a harvest does.
+        self.assertEqual((self.state / "next-review-at").read_text().strip(), AT)
+        (self.state / "next-review-at").unlink()
         with mock.patch.object(backfill_coverage, "refresh", return_value={self.t: "current"}):
             backfill_coverage.run(self.c)  # the next run consumes the surviving request
         self.assertFalse(marker.exists())
+        self.assertFalse((self.state / "next-review-at").exists())  # nothing changed: no wake
         self.assertEqual(backfill_coverage.run(self.c), "idle")
 
     def test_open_gate_dry_run_admits_without_reserving(self):

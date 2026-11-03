@@ -37,7 +37,13 @@ class Repository:
         self._cache_bytes = 0
         self._entry_cache = collections.OrderedDict()
         self._entry_bytes = 0
-        self._verified = {}  # review digest -> verified credit; immutable_cache invocations only
+        self._verified = {}  # review digest -> verified credit or failure; immutable_cache invocations only
+
+    def begin_invocation(self):
+        """Enable the immutable-object cache and forget earlier verification
+        outcomes, so a gap from a previous invocation is retried."""
+        self.immutable_cache = {}
+        self._verified = {}
 
     def git(self, *args, check=True, env=None, input=None):
         cacheable = (self.immutable_cache is not None and check and env is None and input is None
@@ -323,17 +329,7 @@ class Repository:
             if not ledger.creditable(value):
                 continue
             try:
-                # Restore and verification are target-independent: with the
-                # invocation cache on, do them once per review, not per target.
-                key = ledger.digest(value) if self.immutable_cache is not None else None
-                verified = self._verified.get(key) if key else None
-                if verified is None:
-                    for ref in value["payload"]["artifacts"]:
-                        artifacts.verify(ref)
-                    self.restore(value["payload"]["artifacts"], artifacts)
-                    verified = self.verify_review(value)
-                    if key:
-                        self._verified[key] = verified
+                verified = self._verify_once(value, artifacts)
                 for name, lines in verified.items():
                     mapped, inherited = (name, lines) if value["payload"]["target"] == target else self.carry(value["payload"]["target"], target, name, lines)
                     if inherited:
@@ -341,6 +337,29 @@ class Repository:
                         evidence[mapped].append(value["id"])
             except (OSError, ValueError, subprocess.SubprocessError) as exc:
                 gaps.append({"review": value["id"], "reason": str(exc)[:200]})
+
+    def _verify_once(self, value, artifacts):
+        """Restore and verify a review's evidence. Both are target-independent:
+        with the invocation cache on, the outcome (credit or failure) is reused
+        for every target instead of repeating bundle restore per target."""
+        key = ledger.digest(value) if self.immutable_cache is not None else None
+        if key in self._verified:
+            outcome = self._verified[key]
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
+        try:
+            for ref in value["payload"]["artifacts"]:
+                artifacts.verify(ref)
+            self.restore(value["payload"]["artifacts"], artifacts)
+            outcome = self.verify_review(value)
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            if key:
+                self._verified[key] = exc
+            raise
+        if key:
+            self._verified[key] = outcome
+        return outcome
 
     def churn(self, target, evaluated_at):
         at = ledger.timestamp(evaluated_at)

@@ -397,6 +397,12 @@ trigger, with no failure marker or halt. `backfill_publication_error` reports a 
 after verified remote reconciliation. Pending/live jobs retain ownership. The
 45-minute worker limit bounds each invocation without deleting pending evidence.
 
+Publication failures also retain `publication-failure.json`, which blocks new
+rank-4 admissions even when the queue lock is busy. Only successful validated
+queue reconciliation clears it. Operation-tagged inventory/request halts recover
+only after that operation succeeds; unrelated or unclassified legacy halts remain
+for operator reconciliation. A busy queue lock never reports publication reconciled.
+
 ### Backfill coverage snapshots
 
 Rank-4 selection (slot and tick, under `tick.lock`) never computes ledger coverage:
@@ -423,9 +429,7 @@ request rebuilds it.
 A cold refresh (new inventory target, or no snapshots after a deploy) delays
 the next publication run by its duration; measured on the queue host 2026-11-03 (7
 targets, 17 creditable reviews, load ~14) at 124 s for all targets, about 1.3 s
-when nothing changed.
-Publication failures also retain `publication-failure.json`, which blocks new
-rank-4 admissions even when the queue lock is busy. Only successful validated
-queue reconciliation clears it. Operation-tagged inventory/request halts recover
-only after that operation succeeds; unrelated or unclassified legacy halts remain
-for operator reconciliation. A busy queue lock never reports publication reconciled.
+when nothing changed. A refresh that changed any snapshot writes
+`next-review-at` = now, so the next slot re-evaluates instead of waiting for
+its quota-paced deadline. Permanent gaps are retried on each refresher run
+(about once a minute, off-lock; restored once per run, not per target).
