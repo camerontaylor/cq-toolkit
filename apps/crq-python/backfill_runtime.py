@@ -197,9 +197,16 @@ def select(c, queue, log, dry, only):
     # waiting and asks the refresher (crq-publisher) for an update.
     snapshots, stale = {}, set()  # stale: targets to request (missing/stale snapshot, or gaps)
     digests = {}  # prefix digests shared by every target's snapshot check this pass
-    def request_stale():
+    def request_stale(log_only=False):
         if stale and not dry:
-            coverage.request(c.STATE, head, stale)
+            try:
+                coverage.request(c.STATE, head, stale)
+            except OSError as exc:
+                if not log_only:
+                    raise
+                # After a bound launch, never fail the pass for a hint: the
+                # next pass re-requests these targets.
+                log.append("coverage refresh request not written: " + str(exc)[:150])
     def coverage_for(target):
         if target not in snapshots:
             snapshots[target] = coverage.load(c.STATE, target, events, digests)
@@ -258,7 +265,7 @@ def select(c, queue, log, dry, only):
                 run_bound = True
                 state_event(c, queue, item, c.iso(), "vendor identity bound")
                 c.save_queue(queue)
-                request_stale()  # targets seen stale before this launch still need a refresh
+                request_stale(log_only=True)  # targets seen stale before this launch still need a refresh
                 return run_id, True
             if not item.get("run"):
                 jobs.cancel_before_vendor(queue, item)

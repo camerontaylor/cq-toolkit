@@ -206,8 +206,8 @@ def run(c, *, published_head=None):
             except (ValueError, AttributeError, TypeError):
                 pass
         repo, store, _, _ = runtime.services(c, config)
-        # Read the ledger through the publisher's private clone, so the scheduler
-        # clone's validated-ledger checkpoint is only ever moved by the scheduler.
+        # Read the ledger through the publisher's private clone, so this
+        # once-a-minute worker does not move the scheduler clone's checkpoint.
         with ledger.locked(c.STATE / "backfill/publisher.lock"):
             _, _, _, reader = backfill_publisher.worker_services(c, config)
             head, events = reader.fetch()

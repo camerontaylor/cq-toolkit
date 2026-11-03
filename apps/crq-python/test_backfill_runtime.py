@@ -333,6 +333,15 @@ class RuntimeTest(unittest.TestCase):
         self.assertEqual(stale["wait_reason"], runtime.COVERAGE_PENDING)
         request = ledger.loads((self.state / runtime.coverage.REQUEST).read_bytes())
         self.assertEqual(request["targets"], ["c" * 40])
+        # A marker write failure after the bound launch is logged, never raised.
+        stale.update(state="pending"); self.item.update(state="pending"); self.item.pop("run", None)
+        log = []
+        with mock.patch.object(runtime, "services", return_value=(None, store, outbox, publisher)), \
+             mock.patch.object(jobs, "eligible", side_effect=lambda q, item, at: item["state"] == "pending"), \
+             mock.patch.object(jobs, "bind_run"), \
+             mock.patch.object(runtime.coverage, "request", side_effect=OSError("no space left")):
+            self.assertEqual(runtime.select(self.c, self.q, log, False, None), ("vendor-1", True))
+        self.assertIn("coverage refresh request not written: no space left", log)
 
     def test_refresher_adds_requested_targets_and_keeps_a_request_written_meanwhile(self):
         import backfill_coverage

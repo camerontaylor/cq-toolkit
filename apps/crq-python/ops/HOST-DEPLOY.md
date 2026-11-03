@@ -420,7 +420,8 @@ snapshots (`backfill_coverage.run`, under `state/backfill/coverage.lock`, not
 folds only the appended events into each pending target's snapshot, retries
 earlier gap reviews, recomputes in full only for a new target or a non-extending
 sequence, and deletes snapshots that no live job uses. Gap targets are requested
-again on every selection pass, so a transient gap retries within a minute. The
+again on every selection pass, so a transient gap retries after the next
+selection pass (at most one quota-paced tick, 12 min, when nothing is admissible). The
 refresher reads the ledger through the publisher's private clone under
 `publisher.lock`. Evidence is verified when a review is folded, not again per
 pass. Snapshots are derived state; deleting the directory is safe, and the next
@@ -436,5 +437,6 @@ deadline; a still-failing gap retry or a state-only head move does not. Refresh
 errors are isolated per target, and the worker still journals the publication
 result before exiting non-zero. `inventory_mode: "integrated"` still runs
 inventory coverage inside the tick and is outside this guarantee (#968); the queue host
-uses `timer`. Permanent gaps are retried on each refresher run
-(about once a minute, off-lock; restored once per run, not per target).
+uses `timer`. Permanent gaps are retried off-lock once per selection
+pass that requests them (restored once per refresh run, not per target), and a
+still-failing retry wakes nothing.
