@@ -385,6 +385,31 @@ describe('T30 failure boundary', () => {
     },
   );
 
+  test('a descriptor read failure preserves the verdict and marks observation indeterminate', async () => {
+    const f = await fixture();
+    try {
+      const observationModule = await import('../../../src/kernel/observation.js');
+      const read = vi
+        .spyOn(observationModule, 'readKernelRunDescriptors')
+        .mockRejectedValue(new Error('https://u:tok@h/x?k=v'));
+      const result = await makeFixRun({
+        drivers: fixingDrivers(),
+        registry: { get: stubSweepRegistries(fixedUnitReport()) },
+      })(input(f));
+      const report = reportOf(result);
+      // The read is observation, never verdict: its throw is indeterminate
+      // evidence and the run's own result is unchanged.
+      expect(read).toHaveBeenCalledTimes(1);
+      expect(result.status, JSON.stringify(report)).toBe('ok');
+      expect(report.observation?.status).toBe('indeterminate');
+      expect(report.observation?.failure).not.toContain('tok');
+      expect(report.observation?.kernelRuns).toEqual([]);
+    } finally {
+      await rm(f.root, { recursive: true, force: true });
+      roots = roots.filter((root) => root !== f.root);
+    }
+  });
+
   test('real sweep.unit receives observation bindings and closes before report persistence', async () => {
     const f = await fixture();
     const original = unitModule.bindingsFromDispatch;
