@@ -19,7 +19,7 @@
 //   3. DIRTY TREES ARE PRESERVED: the focused tamper run leaves beta's tree
 //      staged but uncommitted, and the REAL salvage (subprocess effects)
 //      classifies it `preserve`. The regression decision that withholds the
-//      commit is pinned in-process (test/ops/sweep/unit-scenarios.test.ts).
+//      commit is pinned in-process (test/ops/sweep/unit-scenarios.*.test.ts).
 //   4. EVIDENCE QUALITY: every journaled line parses through the frozen
 //      JournalEventSchema (openRunLog.read validates each line, not just a
 //      type-field sniff), and the salvage
