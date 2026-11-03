@@ -45,7 +45,7 @@ fake provider/forge transports. No vendor review or production queue mutation
 was performed. Exact command summaries and final head are recorded in the
 handoff receipt. Earlier runs include 47/47 across seven mechanism modules,
 34/34 across six modules, 16/16 across ledger/runtime/finding recovery, and
-80/80 across historical collection plus the unchanged existing `test_crq` suite (now the `test_crq_*` split modules).
+80/80 across historical collection plus the unchanged existing crq suite (now the `test_crq_*` split modules).
 Two earlier fixture setup failures (initial branch name and changed policy
 between captures) were corrected and rerun; they were not mechanism passes.
 
