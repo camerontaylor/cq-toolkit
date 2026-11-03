@@ -246,7 +246,11 @@ Ordering and guarantees:
    action, never an old-snapshot restore or an incompatible binary start.
 6. **Health** — `health` requires the runner's completion heartbeat to
    advance for TWO consecutive observations (strictly increasing UTC
-   timestamps; one slot seen twice is not two slots). `crq.py` assigns and
+   timestamps; one slot seen twice is not two slots). The first observation
+   polls every five seconds for up to `--first-tick-timeout-seconds` (default
+   1500: one 20-minute cadence plus five minutes of slack), so a just-switched
+   runner can finish its first tick. Timeout remains unhealthy. Subsequent
+   observations use `--interval-seconds`. `crq.py` assigns and
    saves `queue.last_tick` before status publication and replaces the
    completion heartbeat (`WATCHDOG_HOME/heartbeat.json`, resolved as
    `$XDG_STATE_HOME/crq` or `~/.local/state/crq`) only afterward, so

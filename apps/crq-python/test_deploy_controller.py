@@ -38,6 +38,40 @@ host = _load("crq_prepare_host", OPS / "prepare-host.py")
 _MISSING_ROOT = object()
 
 
+class FirstTickWaitTest(unittest.TestCase):
+    def run_wait(self, observations, timeout):
+        now = [0]
+        sleeps = []
+
+        def sleep(seconds):
+            sleeps.append(seconds)
+            now[0] += seconds
+
+        with mock.patch.object(dc, 'health_observation', side_effect=observations) as observe:
+            result = dc.wait_for_first_tick(object(), 'prior', timeout,
+                                            sleep=sleep, clock=lambda: now[0])
+        return result, sleeps, observe.call_count
+
+    def test_waits_for_first_completed_tick(self):
+        result, sleeps, calls = self.run_wait(
+            [{'advanced': False}, {'advanced': False}, {'advanced': True}], 12)
+        self.assertTrue(result['advanced'])
+        self.assertEqual(sleeps, [5, 5])
+        self.assertEqual(calls, 3)
+
+    def test_timeout_returns_last_unhealthy_observation(self):
+        result, sleeps, calls = self.run_wait([{'advanced': False}] * 3, 7)
+        self.assertFalse(result['advanced'])
+        self.assertEqual(sleeps, [5, 2])
+        self.assertEqual(calls, 3)
+
+    def test_zero_timeout_samples_once(self):
+        result, sleeps, calls = self.run_wait([{'advanced': False}], 0)
+        self.assertFalse(result['advanced'])
+        self.assertEqual(sleeps, [])
+        self.assertEqual(calls, 1)
+
+
 class ControllerFixture(unittest.TestCase):
     """A temporary deployment clone with a real helper, fake systemctl."""
 
@@ -1829,7 +1863,7 @@ class CliTests(ControllerFixture):
         (xdg / "crq/heartbeat.json").write_text(json.dumps(payload) + "\n")
         # An advancing queue save must not mask the stale completion slot.
         self.write_state("queue.json", {"last_tick": "2026-10-28T00:20:00Z"})
-        result = self.run_cli("health", env={"XDG_STATE_HOME": str(xdg)})
+        result = self.run_cli("health", "--first-tick-timeout-seconds", "0", env={"XDG_STATE_HOME": str(xdg)})
         self.assertEqual(result.returncode, 1)
         artifact = json.loads(result.stdout)
         self.assertEqual(artifact["operation"], "health")
