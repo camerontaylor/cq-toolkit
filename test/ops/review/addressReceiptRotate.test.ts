@@ -9,9 +9,9 @@
 // checkout still refuses.
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { join, relative } from 'node:path';
+import { realTmpDir } from '../../helpers/tmp-dir.js';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { makeReviewAddress } from '../../../src/ops/review/address.js';
 import { makeGhRunner, type GhFn, type GhResult } from '../../../src/adapters/forge-github/gh.js';
@@ -44,7 +44,7 @@ const namespace = createHash('sha256')
 
 test('an engine-verified fresh checkout rotates the stale receipt', async () => {
   const repo = await makeTestRepo();
-  const journal = await mkdtemp(join(tmpdir(), 'cq-address-rotate-'));
+  const journal = await realTmpDir('cq-address-rotate-');
   const role = { provider: 'scripted', model: 'worker' };
   try {
     await repo.write('src/a.ts', 'export const a = "BAD";\n');

@@ -6,6 +6,7 @@ import type { WorkerResult } from '../../../src/driver/types.js';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { realTmpDir } from '../../helpers/tmp-dir.js';
 import { describe, expect, test, vi, beforeEach, afterEach } from 'vitest';
 import { runLadder } from '../../../src/kernel/governor.js';
 import { correlationInvocation } from '../../../src/driver/correlationInvocation.js';
@@ -50,7 +51,7 @@ const config: CqConfig = {
 };
 async function fixture(findings: Finding[] = [finding('a')]) {
   const repo = await makeTestRepo();
-  const journalDir = await mkdtemp(join(tmpdir(), 'cq-address-composition-'));
+  const journalDir = await realTmpDir('cq-address-composition-');
   const record = (): FindingsRecord => ({
     schemaVersion: 1,
     branch: 'feature/x',
@@ -1236,7 +1237,7 @@ async function vendorAddressFixture() {
     `#!${process.execPath}\nconst args = process.argv.slice(2);\nif (args[0] === 'repo') process.stdout.write('owner/repo\\n');\nelse if (args[0] === 'api') process.stdout.write('author\\n');\nelse process.exit(1);\n`,
     { mode: 0o755 },
   );
-  const journalDir = await mkdtemp(join(tmpdir(), 'cq-address-vendor-'));
+  const journalDir = await realTmpDir('cq-address-vendor-');
   const record = (): FindingsRecord => ({
     schemaVersion: 1,
     branch,

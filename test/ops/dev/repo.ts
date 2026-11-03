@@ -4,9 +4,9 @@
 // tests then pin behaviour — what the ops record and refuse — rather than
 // the exact git argv they use.
 import { execFileSync } from 'node:child_process';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
+import { realTmpDir } from '../../helpers/tmp-dir.js';
 import type { CommandResult, DevEffects } from '../../../src/ops/dev/effects.js';
 import { DEV_LEDGER_VERSION, type DevRecord } from '../../../src/ops/dev/record.js';
 import { readWorkState, type WorkState } from '../../../src/ops/dev/internal/workState.js';
@@ -41,7 +41,7 @@ const GIT_ENV = {
 export async function makeTestRepo(
   options: { objectFormat?: 'sha1' | 'sha256' } = {},
 ): Promise<TestRepo> {
-  const dir = await mkdtemp(join(tmpdir(), 'cq-dev-repo-'));
+  const dir = await realTmpDir('cq-dev-repo-');
   const root = join(dir, 'work');
   const origin = join(dir, 'origin.git');
   await mkdir(root);

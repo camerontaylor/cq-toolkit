@@ -7,9 +7,9 @@
 // pending re-request is persisted alongside the publication receipts and
 // cleared only after a successful dispatch.
 import { createHash } from 'node:crypto';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { realTmpDir } from '../../helpers/tmp-dir.js';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { makeReviewAddress } from '../../../src/ops/review/address.js';
 import { makeGhRunner, type GhFn, type GhResult } from '../../../src/adapters/forge-github/gh.js';
@@ -40,7 +40,7 @@ const namespace = createHash('sha256')
 
 test('a failed re-request is recovered on the next invocation', async () => {
   const repo = await makeTestRepo();
-  const journal = await mkdtemp(join(tmpdir(), 'cq-address-rerequest-'));
+  const journal = await realTmpDir('cq-address-rerequest-');
   const role = { provider: 'scripted', model: 'worker' };
   try {
     await repo.write('src/a.ts', 'export const a = "BAD";\n');

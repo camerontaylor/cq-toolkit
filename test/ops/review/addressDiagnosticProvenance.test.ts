@@ -4,9 +4,9 @@
 // denylist rule keyed to the diagnostic's source file fires even though the
 // whole-request component is labeled `worker-request.json`. An unattributable
 // diagnostic refuses the upload instead of shipping unscanned protected text.
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { realTmpDir } from '../../helpers/tmp-dir.js';
 import { describe, expect, test } from 'vitest';
 import { makeAddressWorker, type AddressAttempt } from '../../../src/ops/review/addressWorker.js';
 import { resolveCqConfigDefaults } from '../../../src/ops/analyze/cqConfigDefaults.js';
@@ -51,7 +51,7 @@ async function fixture(options: {
   await repo.write('policy/denylist/patterns.yml', patterns);
   repo.commitAll('fixture');
   const initial = repo.git('rev-parse', 'HEAD').trim();
-  const journal = await mkdtemp(join(tmpdir(), 'cq-address-scan-'));
+  const journal = await realTmpDir('cq-address-scan-');
   const attempts: AddressAttempt[] = [];
   let calls = 0;
   const drivers: DriverFactory = {
