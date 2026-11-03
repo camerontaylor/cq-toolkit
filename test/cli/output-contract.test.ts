@@ -1,0 +1,140 @@
+// src/cli/output.ts contract (lossless parity pin + line-based narration) — split from test/cli/i1.test.ts (pure move). Suite header: op-subcommands.test.ts; helpers: ./i1-helpers.ts.
+import { mkdir, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { describe, expect, test } from 'vitest';
+import { narrate, type CliIo } from '../../src/cli/output.js';
+import { RunReportSchema } from '../../src/kernel/schema.js';
+import { capture, makeTmpOpsRoot, opsRoot, writePlanFile } from './i1-helpers.js';
+
+// Lossless PARITY PIN (r3 F3): src/cli/output.ts's assertJsonLossless and the
+// kernel runner's pre-journal walk (src/kernel/runner.ts) are deliberate
+// line-identical mirrors — the direct-dispatch gate and the plan-path gate
+// must keep REJECTING the same values, or the two dispatch paths disagree
+// about what may become an artifact/journal line. This suite holds them
+// together behaviorally: every corpus member must be rejected by BOTH layers
+// (corpus statuses verified against both walks before inclusion — e.g.
+// `Object.create(null)` carrying only a string member is ACCEPTED by both
+// (the documented null-prototype normalization) and is therefore excluded;
+// the null-proto member below carries a Map so both walks reject it).
+describe('lossless parity pin: the CLI walk and the kernel walk reject the same corpus', () => {
+  test('every lossy member: direct dispatch → exit 1 with empty stdout; run-plan → failed rows', async () => {
+    const corpus = [
+      { name: 'lossmap', expr: 'new Map()', pattern: "non-plain object of type 'Map'" },
+      { name: 'lossdate', expr: 'new Date(0)', pattern: "non-plain object of type 'Date'" },
+      { name: 'lossset', expr: 'new Set([1])', pattern: "non-plain object of type 'Set'" },
+      {
+        name: 'lossnullproto',
+        expr: 'Object.assign(Object.create(null), { m: new Map() })',
+        pattern: "non-plain object of type 'Map'",
+      },
+      // The hidden-key family (PR #31 review, Codex P1 + review-debt #76):
+      // the member walk sees only enumerable string-keyed values, so these
+      // shapes passed while JSON.stringify disagreed with the walk — a
+      // symbol key is DROPPED by stringify; a non-enumerable 'toJSON' is
+      // INVOKED by it (the journal/artifact would reconstruct the hook's
+      // output); any non-enumerable member is invisible data.
+      {
+        name: 'losssymbolkey',
+        expr: "{ x: 1, [Symbol('hidden')]: 2 }",
+        pattern: 'symbol-keyed own member',
+      },
+      {
+        name: 'losshiddentojson',
+        expr: "(() => { const o = { x: 1 }; Object.defineProperty(o, 'toJSON', { value: () => ({ x: 2 }), enumerable: false }); return o; })()",
+        pattern: "non-enumerable own 'toJSON'",
+      },
+      // The array-side family (PR #103 review, Codex P1): arrays carrying
+      // anything but indices and length diverge from stringify the same
+      // ways objects do.
+      {
+        name: 'lossarrtojson',
+        expr: "(() => { const a = [1]; Object.defineProperty(a, 'toJSON', { value: () => ({ x: 2 }), enumerable: false }); return a; })()",
+        pattern: "own 'toJSON' on an array",
+      },
+      {
+        name: 'lossarrextra',
+        expr: "(() => { const a = [1]; a.extra = 'gone'; return a; })()",
+        pattern: "non-index own member 'extra' on an array",
+      },
+      {
+        name: 'lossarrsymbol',
+        expr: "(() => { const a = [1]; a[Symbol('leak')] = 2; return a; })()",
+        pattern: 'symbol-keyed own member',
+      },
+      {
+        name: 'losshiddenmember',
+        expr: "(() => { const o = { x: 1 }; Object.defineProperty(o, 'hidden', { value: 3, enumerable: false }); return o; })()",
+        pattern: "non-enumerable own member 'hidden'",
+      },
+    ];
+    const tmp = await makeTmpOpsRoot('cq-i1-parity-');
+    await mkdir(join(tmp, 'parityfam'), { recursive: true });
+    await writeFile(
+      join(tmp, 'parityfam', 'registry.js'),
+      [
+        "import { z } from 'zod';",
+        'export const registry = [',
+        ...corpus.map(
+          (member) =>
+            `  { name: '${member.name}', inputSchema: z.object({}).strict(), importer: async () => async () => ({ status: 'ok', value: ${member.expr} }) },`,
+        ),
+        '];',
+        '',
+      ].join('\n'),
+    );
+
+    // (a) Direct dispatch — the CLI-side walk rejects every member BEFORE any
+    // stdout artifact: exit 1 (thrown class), stdout empty.
+    for (const member of corpus) {
+      const { code, out, err } = await capture([member.name], { opsRoot: tmp });
+      expect(code, member.name).toBe(1);
+      expect(out, member.name).toBe('');
+      expect(err, member.name).toMatch(new RegExp(`${member.name} returned an invalid result`));
+      expect(err, member.name).toMatch(new RegExp(member.pattern));
+    }
+
+    // (b) Plan path — the same ops through run-plan hit the kernel runner's
+    // pre-journal walk (the other copy): each job records an honest failed
+    // row instead of journaling a lossy result.
+    const plan = {
+      id: 'i1-parity',
+      jobs: corpus.map((member, index) => ({ id: `p${index}`, op: member.name, input: {} })),
+    };
+    const { planPath } = await writePlanFile(plan);
+    const { code, out } = await capture(['run-plan', `--plan=${planPath}`, `--ops-root=${tmp}`]);
+    expect(code).toBe(1); // failed rows map to 1
+    const report = RunReportSchema.parse(JSON.parse(out));
+    expect(report.jobs).toHaveLength(corpus.length);
+    expect(report.counts.failed).toBe(corpus.length);
+    for (let index = 0; index < corpus.length; index++) {
+      const row = report.jobs[index];
+      expect(row?.op, `job ${index}`).toBe(corpus[index]?.name);
+      expect(row?.result.status, `job ${index}`).toBe('failed');
+      const error = row?.result.status === 'failed' ? row.result.error : '';
+      // The runner's non-serializable-result marker naming the same walk
+      // defect the direct path named above.
+      expect(error, `job ${index}`).toMatch(/returned a non-serializable result/);
+      expect(error, `job ${index}`).toMatch(new RegExp(corpus[index]?.pattern ?? ''));
+    }
+  });
+});
+
+describe('line-based narration (embedded newlines flatten to the literal escape)', () => {
+  test('narrate: one call is exactly ONE `cq:` line, newlines flattened to literal \\n', () => {
+    const errChunks: string[] = [];
+    const io: CliIo = { stdout: () => {}, stderr: (chunk) => errChunks.push(chunk) };
+    narrate(io, 'line1\nline2');
+    // The two-character escape `\n` (backslash + n), not a real newline.
+    expect(errChunks.join('')).toBe('cq: line1\\nline2\n');
+  });
+
+  test('e2e: the boom two-line error text narrates as ONE stderr line', async () => {
+    const { err } = await capture(['boom'], { opsRoot });
+    const lines = err.split('\n');
+    expect(lines).toHaveLength(2); // exactly one content line + the trailing newline
+    expect(lines[1]).toBe('');
+    expect(lines[0]).toBe(
+      'cq: boom: failed — boom: deliberate fixture failure\\nsecond line of the failure',
+    );
+  });
+});

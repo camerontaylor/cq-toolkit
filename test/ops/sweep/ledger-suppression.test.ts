@@ -17,7 +17,7 @@
 //       needsHuman rows — routed to a human, never planned as auto-fix;
 //   (c) the registry schema REJECTS a selector-less input at the boundary —
 //       the CLI's generic missing-required-field path turns that into
-//       exit 2 with no op ever run (pinned at test/cli/i1.test.ts:196);
+//       exit 2 with no op ever run (pinned at test/cli/op-subcommands.test.ts);
 //   (d) the REAL makePlanSweep factory bound with the REAL makeLedgerQuery
 //       over the memory store reproduces the same semantics end-to-end.
 // Also pinned: gitMutex is NOT a registry op (library utility only).
@@ -121,7 +121,7 @@ describe('sweep registry surface', () => {
 
   test('(c) the registry schema REJECTS a selector-less input — the exit-2 boundary', () => {
     // Without `selector`, dispatch dies HERE as schema-invalid input; the
-    // CLI maps that to exit 2 with no op ever run (test/cli/i1.test.ts:196).
+    // CLI maps that to exit 2 with no op ever run (test/cli/op-subcommands.test.ts).
     const { selector: _omitted, ...selectorLess } = INPUT;
     const parsed = sweepEntry('sweep.planSweep').inputSchema.safeParse(selectorLess);
     expect(parsed.success).toBe(false);

@@ -704,7 +704,7 @@ describe('pathLedgerStore.save is an atomic publish (temp + rename, never a bare
 
   // Root bypasses directory permission bits, so the chmod-0000 precondition
   // cannot be produced under UID 0 — skip there (PR #95 review, Codex P2;
-  // same posture as the EACCES test in test/cli/i1.test.ts).
+  // same posture as the EACCES test in test/cli/machine-mode-pins.test.ts).
   test.skipIf(process.getuid?.() === 0)(
     'an unreadable target metadata PROPAGATES from the mode probe — never a silent 0600 replacement (non-ENOENT lstat faults)',
     async () => {

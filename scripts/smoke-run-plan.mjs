@@ -49,7 +49,7 @@
 //      stays safe). Failures-only narration: with both rows ok the stderr
 //      view is the counts summary alone — NO per-row lines. (`--json`
 //      suppressing narration entirely is pinned by the vitest conformance
-//      suite, test/cli/i1.test.ts — not here.)
+//      suite, test/cli/op-subcommands.test.ts — not here.)
 //   4. USAGE/MODEL OBSERVABILITY — each ok row's observable IS the served
 //      model id: the fixture reports the requested --model as served, so
 //      the row must pin 'smoke-1' (never the 'unreported' fallback). The
