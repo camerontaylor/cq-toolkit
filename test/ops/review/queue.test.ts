@@ -103,16 +103,16 @@ const pendingStatus = {
   reviewed: false,
   fixed: false,
 };
-function fixture(clean = false, fixed = false) {
+function fixture(clean = false, fixed = false, unicode = false) {
   const paths = [
     {
-      source_path: 'src/a.ts',
-      path: 'src/a.ts',
+      source_path: unicode ? 'src/é😀.ts' : 'src/a.ts',
+      path: unicode ? 'src/é😀.ts' : 'src/a.ts',
       resolution: 'same-path-current',
       disposition: 'included',
     },
   ];
-  // Sorted keys match Python canonical(paths); ASCII fixture here, Unicode covered below.
+  // Sorted keys match Python canonical(paths); ASCII fixture here; the Unicode receipt test pins Python escaping.
   const canonicalPaths = JSON.stringify([
     {
       disposition: 'included',
@@ -149,7 +149,9 @@ function fixture(clean = false, fixed = false) {
       target: 'c'.repeat(40),
       tree: 'd'.repeat(40),
       paths,
-      scope_digest: sha256(Buffer.from(canonicalPaths)),
+      scope_digest: unicode
+        ? 'b82aca57fb7b2cbd6034b6794e07367dca72ba8b17f4de681d6be7d1d4e1bd22'
+        : sha256(Buffer.from(canonicalPaths)),
       equivalence: 'e'.repeat(64),
       policy: 'affected-current-additions-v1',
       projection: 'current-affected-files/full-file-addition-projection',
@@ -259,6 +261,22 @@ describe('complete immutable queue result consumption', () => {
     expect(await readQueueEvidence(dir, f.receiptId)).toEqual(evidence);
     expect(f.acknowledgements()).toBe(2);
   });
+  test('Unicode receipt scope matches Python ensure_ascii canonical bytes', async () => {
+    // Generated independently with Python json.dumps(sort_keys=True,
+    // separators=(',', ':'), ensure_ascii=True), then hashlib.sha256.
+    const canonical =
+      '[{"disposition":"included","path":"src/\\u00e9\\ud83d\\ude00.ts","resolution":"same-path-current","source_path":"src/\\u00e9\\ud83d\\ude00.ts"}]';
+    const f = fixture(true, false, true);
+    expect(sha256(Buffer.from(canonical))).toBe(f.document.capture.scope_digest);
+    const dir = await directory();
+    await makeQueueClient(f.transport).report(ref, dir);
+    expect((await readQueueEvidence(dir, f.receiptId))?.document.capture.paths).toEqual(
+      f.document.capture.paths,
+    );
+    f.document.capture.paths[0]!.path = 'src/changed.ts';
+    expect(() => parseQueueReceipt(f.document)).toThrow('queue scope manifest digest mismatch');
+  });
+
   test('affected-current clean cannot become full-branch readiness or independent acceptance', async () => {
     const f = fixture(true);
     const evidence = await makeQueueClient(f.transport).report(ref, await directory());
