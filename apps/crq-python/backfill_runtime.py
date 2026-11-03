@@ -104,15 +104,40 @@ def usage_context(c, queue, usage, reserved):
                                "observed_at": c.iso(), "reflected_reservations": reflected}
 
 
+USAGE_REFRESH_AFTER_SECONDS = 60
+
+
+def usage_age(c, observation):
+    try:
+        return (ledger.timestamp(c.iso()) - ledger.timestamp(observation["observed_at"])).total_seconds()
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
 def rank4_gate(c, queue, item, dry=False):
+    ordinary_eligible = c.ordinary_review_eligible(queue)
+    observation = queue.get("backfill_usage")
+    refresh = getattr(c, "refresh_backfill_usage", None)
+    probed = usage_age(c, {"observed_at": queue.get("backfill_usage_probe_at")})
+    if not ordinary_eligible and refresh is not None and (
+            not observation or not observation.get("successful")
+            or (age := usage_age(c, observation)) is None or age > USAGE_REFRESH_AFTER_SECONDS) and (
+            probed is None or probed < 0 or probed > USAGE_REFRESH_AFTER_SECONDS):
+        # Ordinary selection, ledger fetch and coverage can take minutes after
+        # the tick's usage read; re-read rather than refusing spare quota. At
+        # most one attempt per minute, so a failing vendor probe (up to its
+        # timeout, under tick.lock) is not repeated per candidate.
+        queue["backfill_usage_probe_at"] = c.iso()
+        refresh(queue)
     observation = copy.deepcopy(queue.get("backfill_usage"))
-    if observation:
+    # An unreadable time or count is left for admission to refuse as invalid.
+    if observation and usage_age(c, observation) is not None and type(observation.get("remaining")) is int:
         # Within one observation, ordinary admissions also spend quota. Holds
         # already represented by backfill_reservations are subtracted by jobs.
         ordinary = len(queue.get("starts", [])) - queue.get("backfill_starts_at_observation", len(queue.get("starts", [])))
         ordinary -= sum(h.get("at") >= observation["observed_at"] for h in queue.get("backfill_reservations", {}).values())
         observation["remaining"] = max(0, observation["remaining"] - max(0, ordinary))
-    decision = jobs.admission(queue, item, c.iso(), observation, c.ordinary_review_eligible(queue), reserve=not dry)
+    decision = jobs.admission(queue, item, c.iso(), observation, ordinary_eligible, reserve=not dry)
     if decision["decision"] != "admit":
         item["wait_reason"] = decision["decision"]
         return False
@@ -151,6 +176,7 @@ def select(c, queue, log, dry, only):
     items.sort(key=lambda j: (j["dispatch_tier_importance"], j.get("retry", False), j["subject_kind"],
                              j.get("row") or 0 if j["subject_kind"] == "A" else -j["score"], j["subject_id"]))
     available = False
+    refused = None
     for item in items:
         if not jobs.eligible(queue, item, c.iso()):
             continue
@@ -163,7 +189,13 @@ def select(c, queue, log, dry, only):
             item.update(state="done", coverage_satisfied_by=head)
             continue
         available = True
+        if refused:
+            # Every admission refusal is item-independent: record it once in
+            # history, not once per pending job.
+            item["wait_reason"] = refused
+            continue
         if not rank4_gate(c, queue, item, dry):
+            refused = item.get("wait_reason") or "rank4-gate-refused"
             continue
         if dry:
             log.append("DRY-RUN would admit " + item["id"])
