@@ -163,7 +163,7 @@ export interface BaselinePrEffects {
    */
   findOpenPrByHead(head: string): Promise<{ number: number; url: string } | null>;
   /**
-   * Commit `files` (full file contents — renderBaseline bytes) on branch
+   * Commit `files` (tightenings plus base bytes restoring non-tightening judged metrics) on branch
    * `head` and create the PR against `base` — or update the existing open PR
    * for that head in place (created:false, same number).
    */
@@ -664,6 +664,7 @@ export function createProposeBaselineUpdate(
     }
     const judged = [...lastByKey.values()];
     const applied: AppliedEntry[] = [];
+    const restored: Array<{ target: string; metric: string; path: string; content: string }> = [];
 
     // P1 containment BEFORE any read (shared resolver): a baselines dir that
     // escapes the ws skips EVERY judged improvement with the resolver's
@@ -770,6 +771,9 @@ export function createProposeBaselineUpdate(
         // against a 94.2 file rounds to 94.2): absorbed is skipped — never
         // written at a stricter precision than the file speaks.
         if (tightens(baseline.value, proposalValue, baseline.direction) === false) {
+          // The same branch can carry a previous run's tightening for this
+          // metric. Write its committed base bytes back on an in-place update.
+          restored.push({ target: imp.target, metric: imp.metric, path: relPath, content: text });
           const rounding =
             proposalValue === imp.value
               ? ''
@@ -897,7 +901,9 @@ export function createProposeBaselineUpdate(
         title,
         body,
         commitMessage: COMMIT_MESSAGE,
-        files: applied.map((a) => ({ path: a.path, content: a.content })),
+        files: [...applied, ...restored]
+          .sort(byPair)
+          .map((entry) => ({ path: entry.path, content: entry.content })),
       });
       const appliedOut = applied.map(({ path, target, metric, oldValue, newValue }) => ({
         path,

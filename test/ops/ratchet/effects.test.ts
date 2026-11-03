@@ -15,10 +15,12 @@
 //      throws loudly, never falls back to an ambient GH_TOKEN/GITHUB_TOKEN,
 //      and never invokes gh.
 import { execFileSync } from 'node:child_process';
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, test } from 'vitest';
+import { createProposeBaselineUpdate } from '../../../src/ops/ratchet/proposeBaselineUpdate.js';
+import { baselineRelPath, parseBaseline, renderBaseline } from '../../../src/ops/ratchet/format.js';
 import { makeSubprocessBaselinePrEffects } from '../../../src/adapters/forge-github/ratchetEffects.js';
 
 const GIT_ENV: NodeJS.ProcessEnv = {
@@ -304,3 +306,66 @@ describe('makeSubprocessBaselinePrEffects', () => {
     }
   }, 60_000);
 });
+
+test('real reused proposal branch restores a previous-run tightening that is no longer applied', async () => {
+  const checkout = join(tmp, 'mixed-metric-checkout');
+  git(tmp, ['clone', '-q', bare, checkout]);
+  const coveragePath = baselineRelPath('coverage', 'coverage');
+  const typecheckPath = baselineRelPath('typecheck', 'typecheck-count');
+  const coverageBase = renderBaseline({
+    schemaVersion: 1,
+    target: 'coverage',
+    metric: 'coverage',
+    direction: 'higher-is-better',
+    value: 90,
+    capturedAt: '2026-11-03T00:00:00.000Z',
+  });
+  mkdirSync(join(checkout, 'baselines'), { recursive: true });
+  writeFileSync(join(checkout, coveragePath), coverageBase);
+  writeFileSync(
+    join(checkout, typecheckPath),
+    renderBaseline({
+      schemaVersion: 1,
+      target: 'typecheck',
+      metric: 'typecheck-count',
+      direction: 'lower-is-better',
+      value: 10,
+      capturedAt: '2026-11-03T00:00:00.000Z',
+    }),
+  );
+  git(checkout, ['add', 'baselines']);
+  git(checkout, [
+    '-c',
+    'user.email=t@test',
+    '-c',
+    'user.name=test',
+    'commit',
+    '-qm',
+    'seed mixed baselines',
+  ]);
+  git(checkout, ['push', '-q', 'origin', 'main']);
+  process.env.FAKE_GH_PR_LIST = '[]';
+  process.env.FAKE_GH_PR_CREATE = PR_URL;
+  const op = createProposeBaselineUpdate(makeSubprocessBaselinePrEffects(checkout, 'main'));
+  const input = (coverage: number, typecheck: number) => ({
+    ws: checkout,
+    base: 'main',
+    headPrefix: 'ratchet/mixed',
+    improvements: [
+      { target: 'coverage', metric: 'coverage', value: coverage },
+      { target: 'typecheck', metric: 'typecheck-count', value: typecheck },
+    ],
+  });
+  const first = await op(input(91, 10));
+  expect(first.status).toBe('ok');
+  if (first.status !== 'ok' || first.value.head === null) throw new Error('proposal missing');
+  const head = first.value.head;
+  expect(parseBaseline(git(bare, ['show', `${head}:${coveragePath}`])).value).toBe(91);
+  process.env.FAKE_GH_PR_LIST = JSON.stringify([
+    { number: 7, url: PR_URL, baseRefName: 'main', headRefName: head },
+  ]);
+  const second = await op(input(90, 9));
+  expect(second).toMatchObject({ status: 'ok', value: { proposal: 'updated', head } });
+  expect(git(bare, ['show', `${head}:${coveragePath}`])).toBe(coverageBase);
+  expect(parseBaseline(git(bare, ['show', `${head}:${typecheckPath}`])).value).toBe(9);
+}, 60_000);
