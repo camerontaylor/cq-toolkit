@@ -67,7 +67,7 @@ describe('selectAffected', () => {
   it('maps sources that suites read or spawn by path, with no import edge', () => {
     const suites = [
       'test/api-report.test.mjs',
-      'test/cli/i1.test.ts',
+      'test/cli/driver-alias-notice.test.ts',
       'test/driver/harness-parity.test.ts',
       'test/driver/served-model-sites.test.ts',
       'test/driver/claude-code/cli.test.ts',
@@ -100,7 +100,7 @@ describe('selectAffected', () => {
     ]);
     // i1's generated fixture imports the real driver factory by path.
     expect(pick('src/sandbox/x.ts')).toEqual([
-      'test/cli/i1.test.ts',
+      'test/cli/driver-alias-notice.test.ts',
       'test/ops/gates/protectedPaths.test.ts',
     ]);
     expect(pick('src/ops/merge/classifyPrs.ts')).toEqual([
@@ -108,7 +108,7 @@ describe('selectAffected', () => {
       'test/ops/gates/protectedPaths.test.ts',
     ]);
     expect(pick('src/harness/mcp/server.ts')).toEqual([
-      'test/cli/i1.test.ts',
+      'test/cli/driver-alias-notice.test.ts',
       'test/driver/claude-code/cli.test.ts',
       'test/driver/harness-parity.test.ts',
       'test/harness/mcp-bin.test.ts',
