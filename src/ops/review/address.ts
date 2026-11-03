@@ -462,8 +462,8 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
       if (marker !== undefined) report.stop = marker;
       // #469 + publication-range truth: settle the mixed-worktree withhold
       // rows with the engine's own publication truth. The loop wrote them
-      // BEFORE the exit publication ran ("the loop pushed nothing … may
-      // still happen at engine exit"); only the engine knows what its exit
+      // BEFORE the exit publication ran ("the loop pushed nothing" and
+      // caller-owned publication); only the engine knows what its exit
       // push actually did. A successful push already settled its range's
       // rows AT the push; only rows of the CURRENT outstanding range reach
       // here, and they take the most recent actual attempt's truth. Each
@@ -499,8 +499,8 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
         // --push was requested, yet no exit publication ever ran: finish's
         // guard above skips publishOnExit when the parent cancelled (and the
         // publication's own early-returns never witness a push), so this dead
-        // run can never publish. The loop's stale "publication may still
-        // happen at engine exit" claim would stand forever — replace it with
+        // run can never publish. The loop's caller-neutral publication tail
+        // would otherwise stand — replace it with
         // the engine's terminal truth: the row's own premise is that the loop
         // pushed nothing, so with no engine push either, the verified commit
         // stays local.
