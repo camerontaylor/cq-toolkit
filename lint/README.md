@@ -139,7 +139,7 @@ Two preservation exceptions apply to newly enabled rules only:
   The plan freezes this public compatibility adapter; its existing JSON shape,
   severity and field validation and its negative corpus remain unchanged.
   `Array.isArray` introduces the `any[]` that triggers these two rules.
-- `test/ops/gates/adapters.test.ts`: unsafe assignment remains off for its Vitest
+- `test/ops/gates/adapters.checkRunner.test.ts`: unsafe assignment remains off for its Vitest
   asymmetric matcher, preserving the frozen public-adapter test corpus.
 
 Other typed rules still apply to these files. There is no test-directory waiver.
