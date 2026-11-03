@@ -303,6 +303,8 @@ export interface JobFinishedJournalEvent {
   charged?: number;
   /** Session-log correlation (item 1.3): the work-unit id the runner minted for this attempt. */
   workId?: string;
+  /** Parent work identity recorded by the original attempt, when present. */
+  parentWorkId?: string;
   /** Session-log correlation (item 1.3): the role the job served (the op id by default). */
   role?: string;
   /** Session-log correlation (items 1.3/1.5): every driver session the job produced. */

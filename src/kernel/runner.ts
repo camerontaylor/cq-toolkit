@@ -1076,10 +1076,14 @@ async function runPlanUnderLease(
     // invocation without the runner mutating process.env (concurrent jobs
     // in a wave must not cross-stain each other's children).
     const correlationByJob = new Map<string, WorkCorrelation>();
-    // The parent every job's correlation names: the launcher's CQ_* identity,
-    // else the enclosing Paseo agent (`paseo:<PASEO_AGENT_ID>`). Read once,
-    // never written — see inboundParentWorkId.
-    const parentWorkId = inboundParentWorkId(process.env);
+    // Prefer a recorded finish's parent on resume; legacy journals and runs
+    // that crashed before any finish fall back to the current launcher's
+    // CQ_* identity or Paseo agent. This is a finish-based pin, not a
+    // run-start anchor. Never mutate process.env — see inboundParentWorkId.
+    const recordedParent = [...replay.values()].find(
+      (finish) => finish.parentWorkId !== undefined,
+    )?.parentWorkId;
+    const parentWorkId = recordedParent ?? inboundParentWorkId(process.env);
 
     // Under a governed SIGNAL stop the never-dispatched rows are cancelled,
     // not failed. This is a PREDICATE, not a run-start snapshot: the trip
@@ -1714,6 +1718,9 @@ async function runPlanUnderLease(
         inputsHash: job.inputsHash,
         result,
         ...(correlation !== undefined ? { workId: correlation.workId } : {}),
+        ...(correlation?.parentWorkId !== undefined
+          ? { parentWorkId: correlation.parentWorkId }
+          : {}),
         ...(correlation !== undefined ? { role: correlation.role } : {}),
         ...(jobSessions !== undefined ? { sessions: jobSessions } : {}),
         ...(jobUsage !== undefined ? { usage: jobUsage } : {}),
@@ -1782,6 +1789,7 @@ async function runPlanUnderLease(
               // finish keeps the prior attempt's work-to-session links, so
               // a resumed run's journal stays self-contained for them too.
               ...(prior.workId !== undefined ? { workId: prior.workId } : {}),
+              ...(prior.parentWorkId !== undefined ? { parentWorkId: prior.parentWorkId } : {}),
               ...(prior.role !== undefined ? { role: prior.role } : {}),
               ...(prior.sessions !== undefined ? { sessions: prior.sessions } : {}),
               ...(prior.usage !== undefined ? { usage: prior.usage } : {}),

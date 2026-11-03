@@ -32,6 +32,7 @@ describe('governed journal v2 + resume', () => {
   });
 
   afterEach(async () => {
+    vi.unstubAllEnvs();
     await settleFixtureWork();
     await rm(dir, { recursive: true, force: true });
   }, ACQUISITION_STEP_MS + 5_000);
@@ -74,6 +75,7 @@ describe('governed journal v2 + resume', () => {
   test(
     'job-finished links op-reported sessions + workId/role, and replay re-attestation keeps them (session-log 1.3/1.5)',
     async () => {
+      vi.stubEnv('CQ_WORK_ID', 'original-parent');
       const calls: string[] = [];
       const seenWorkIds: (string | undefined)[] = [];
       const linked = async (raw: unknown): Promise<OpResult<unknown>> => {
@@ -98,6 +100,7 @@ describe('governed journal v2 + resume', () => {
         jobId: 'j1',
         workId: `${report1.runId}:j1:1`,
         role: 'linked',
+        parentWorkId: 'original-parent',
         sessions: [{ driver: 'ai-sdk', sessionId: 'store-1', nativeSessionId: 'n-1' }],
       };
       expect(seenWorkIds).toEqual([`${report1.runId}:j1:1`]);
@@ -105,6 +108,7 @@ describe('governed journal v2 + resume', () => {
       expect(jobFinishes(events1)).toMatchObject([expectedLinks]);
       expect(jobFinishes(events1)[0]?.sessions).toHaveLength(1);
 
+      vi.stubEnv('CQ_WORK_ID', 'changed-parent');
       const report2 = await runPlan(
         plan,
         { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
@@ -116,6 +120,54 @@ describe('governed journal v2 + resume', () => {
       expect(jobFinishes(events2)).toMatchObject([expectedLinks]);
     },
     journalEnclosure(2),
+  );
+
+  test.each([false, true])(
+    'resume preserves recorded parents and falls back for legacy journals (legacy=%s)',
+    async (legacy) => {
+      const seen: Array<{ jobId: string; parent: string | undefined }> = [];
+      let fail = true;
+      let allowThird = false;
+      const probe = async (raw: unknown): Promise<OpResult<unknown>> => {
+        const jobId = (raw as { jobId: string }).jobId;
+        seen.push({ jobId, parent: currentJobContext()?.info.correlation?.parentWorkId });
+        if ((jobId === 'j2' && fail) || (jobId === 'j3' && !allowThird))
+          return { status: 'failed', error: 'retry on resume' };
+        return { status: 'ok', value: {} };
+      };
+      const plan = independentPlan('plan-parent-retry', 3, 'probe');
+      const run = (resume: boolean) =>
+        runPlan(
+          plan,
+          { concurrency: 1, stopOnError: false, journalDir: dir, resume },
+          viewWith(entry('probe', probe)),
+          { governor: createGovernor({ maxUsd: 5 }), allowAdvisory: true },
+        );
+      vi.stubEnv('CQ_WORK_ID', legacy ? '' : 'original-parent');
+      vi.stubEnv('CQ_PARENT_WORK_ID', '');
+      vi.stubEnv('PASEO_AGENT_ID', '');
+      await run(false);
+      fail = false;
+      vi.stubEnv('CQ_WORK_ID', 'changed-parent');
+      await run(true);
+      allowThird = true;
+      vi.stubEnv('CQ_WORK_ID', 'third-parent');
+      const resumed = await run(true);
+      expect(seen).toEqual([
+        { jobId: 'j1', parent: legacy ? undefined : 'original-parent' },
+        { jobId: 'j2', parent: legacy ? undefined : 'original-parent' },
+        { jobId: 'j3', parent: legacy ? undefined : 'original-parent' },
+        { jobId: 'j2', parent: legacy ? 'changed-parent' : 'original-parent' },
+        { jobId: 'j3', parent: legacy ? 'changed-parent' : 'original-parent' },
+        { jobId: 'j3', parent: legacy ? 'changed-parent' : 'original-parent' },
+      ]);
+      expect(jobFinishes(await openRunLog(dir).read(resumed.runId))).toMatchObject([
+        { jobId: 'j1', ...(legacy ? {} : { parentWorkId: 'original-parent' }) },
+        { jobId: 'j2', parentWorkId: legacy ? 'changed-parent' : 'original-parent' },
+        { jobId: 'j3', parentWorkId: legacy ? 'changed-parent' : 'original-parent' },
+      ]);
+    },
+    journalEnclosure(3),
   );
 
   test(
