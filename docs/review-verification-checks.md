@@ -9,7 +9,7 @@ configured lint scope. An unrecognized or incomplete lint report is indeterminat
 The test gate uses `scripts/check-related-tests.mjs`, which maps each explicit
 changed file to existing `test/<source-stem>*.test.ts` siblings, includes touched
 test files, and unions the existing reviewed `NON_IMPORT_MAP`, including the
-shared adapter owner suite `test/ops/gates/adapters.test.ts`. This deliberately
+shared adapter owner suites `test/ops/gates/adapters.*.test.ts`. This deliberately
 bounded mapping does not claim the complete import closure or full-suite coverage;
 the final dev.check and CI still cover broader impact. No mapping is a passing
 advisory stored in the FailureSet. Named selections have no file-count cap.

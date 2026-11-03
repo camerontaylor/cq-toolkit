@@ -7,6 +7,11 @@ production `review.run` re-review. No provider credentials or network are
 used. The fixture omits `review.denylistPatternsFile`, exercising portable
 default scanning. Each invocation starts a fresh repository.
 
+> Path note: these captures predate the gate-adapter split; the recorded `ran=`
+> selections name `test/ops/gates/adapters.test.ts`, which is now
+> `test/ops/gates/adapters.*.test.ts`. The recorded output is left exactly as
+> captured.
+
 ```sh
 pnpm test:narrow --include-integration test/e2e/review/review-address.e2e.test.ts test/cli/registry.test.ts
 ```

@@ -148,7 +148,7 @@
       }
     },
     {
-      "files": ["test/ops/gates/adapters.test.ts"],
+      "files": ["test/ops/gates/adapters.checkRunner.test.ts"],
       "rules": {
         "typescript/no-unsafe-assignment": "off"
       }
