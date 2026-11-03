@@ -13,6 +13,7 @@
     "scripts/lib/render-templates.d.mts",
     "scripts/lib/test-narrow.d.mts",
     "scripts/lib/related-tests.d.mts",
+    "scripts/measurement-session-index.d.mts",
     "test/fixtures/ratchet-lib-selfhost.mjs",
     "test/fixtures/cli-ops/fixture/*.js",
     "test/fixtures/cli-smoke-ops/smoke/*.js",
