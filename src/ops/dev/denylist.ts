@@ -1,5 +1,5 @@
 // Dev lane — the pre-review SECRET SCAN over the diff components
-// (docs/coderabbit-review.md §1: scan the base-to-HEAD patch, the staged
+// (scan the base-to-HEAD patch, the staged
 // patch, the unstaged patch, and the full content of any included untracked
 // files — added AND removed lines, because a credential deleted from the
 // worktree can still occur in an uploaded patch).

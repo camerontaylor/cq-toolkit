@@ -30,13 +30,9 @@ suite; they do not revisit this contract.
   `package.json` — even one TypeScript resolves transitively — or of a path that
   does not resolve is a finding the static gate can miss) — where dead code
   can actually appear — and skip it otherwise.
-- **Zero local full gates per PR.** No protocol step requires a local full
-  `pnpm run test` or full `pnpm run test:unit`. A clean review adds **zero runs
-  beyond the review protocol's own three fixed checkpoints** — before cycle 1,
-  after cycle-1 addressing, after cycle-2 addressing
-  (`docs/coderabbit-review.md` §5). Those three cheap deterministic gate sets
-  are the cadence itself, not review-triggered work, and completing a review
-  cycle is never a reason to run anything more.
+- **Zero local full gates per PR.** Run focused checks locally; CI owns the
+  full gates. CodeRabbit is advisory and adds no mandatory CLI cycle or
+  fixed review checkpoints. See [review guidance](coderabbit-review.md).
 - **The full suite is CI's job, and CI alone is the authority.** CI runs the
   whole suite on every push and pull request: the trigger surface is unfiltered
   (doctrine I4 — no path, branch or tag filter; the sole sanctioned skip is the

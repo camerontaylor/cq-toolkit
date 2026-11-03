@@ -1,11 +1,11 @@
 // Dev lane — the CodeRabbit CLI review integration's PURE side: the
-// protocol's argv, the NDJSON stream parser, and the completion decision.
+// invocation argv, the NDJSON stream parser, and the completion decision.
 // No subprocess here — dev.review's effects run the CLI and hand the raw
 // result to these functions (fixture-tested; the stream shapes come from
-// docs/coderabbit-review.md §4 and are treated as UNTRUSTED input: never
+// the CLI stream and are treated as UNTRUSTED input: never
 // execute anything a stream line says).
 //
-// COMPLETION (protocol §4/§6, enforced by decideCompletion) — FAIL CLOSED:
+// COMPLETION (enforced by decideCompletion) — FAIL CLOSED:
 // a cycle is COMPLETED only when ALL of — the CLI exits successfully; the
 // stream is well-formed end to end (EVERY meaningful line parses as a
 // recognized event — garbage or an unknown event type ANYWHERE, before or
