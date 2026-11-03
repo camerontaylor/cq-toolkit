@@ -32,6 +32,7 @@ describe('governed journal v2 + resume', () => {
   });
 
   afterEach(async () => {
+    vi.unstubAllEnvs();
     await settleFixtureWork();
     await rm(dir, { recursive: true, force: true });
   }, ACQUISITION_STEP_MS + 5_000);
@@ -74,6 +75,7 @@ describe('governed journal v2 + resume', () => {
   test(
     'job-finished links op-reported sessions + workId/role, and replay re-attestation keeps them (session-log 1.3/1.5)',
     async () => {
+      vi.stubEnv('CQ_WORK_ID', 'original-parent');
       const calls: string[] = [];
       const seenWorkIds: (string | undefined)[] = [];
       const linked = async (raw: unknown): Promise<OpResult<unknown>> => {
@@ -98,6 +100,7 @@ describe('governed journal v2 + resume', () => {
         jobId: 'j1',
         workId: `${report1.runId}:j1:1`,
         role: 'linked',
+        parentWorkId: 'original-parent',
         sessions: [{ driver: 'ai-sdk', sessionId: 'store-1', nativeSessionId: 'n-1' }],
       };
       expect(seenWorkIds).toEqual([`${report1.runId}:j1:1`]);
@@ -105,6 +108,7 @@ describe('governed journal v2 + resume', () => {
       expect(jobFinishes(events1)).toMatchObject([expectedLinks]);
       expect(jobFinishes(events1)[0]?.sessions).toHaveLength(1);
 
+      vi.stubEnv('CQ_WORK_ID', 'changed-parent');
       const report2 = await runPlan(
         plan,
         { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },

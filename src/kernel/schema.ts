@@ -498,6 +498,7 @@ export const JobFinishedJournalEventSchema = z
     // job produced: our store id, the harness-native id when one was
     // observed (item 1.5), and the store file's expected path.
     workId: z.string().min(1).exactOptional(),
+    parentWorkId: z.string().min(1).exactOptional(),
     role: z.string().min(1).exactOptional(),
     sessions: z
       .array(

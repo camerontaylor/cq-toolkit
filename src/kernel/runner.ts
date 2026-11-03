@@ -1079,7 +1079,9 @@ async function runPlanUnderLease(
     // The parent every job's correlation names: the launcher's CQ_* identity,
     // else the enclosing Paseo agent (`paseo:<PASEO_AGENT_ID>`). Read once,
     // never written — see inboundParentWorkId.
-    const parentWorkId = inboundParentWorkId(process.env);
+    const priorFinish = replay.values().next().value;
+    const parentWorkId =
+      priorFinish !== undefined ? priorFinish.parentWorkId : inboundParentWorkId(process.env);
 
     // Under a governed SIGNAL stop the never-dispatched rows are cancelled,
     // not failed. This is a PREDICATE, not a run-start snapshot: the trip
@@ -1714,6 +1716,9 @@ async function runPlanUnderLease(
         inputsHash: job.inputsHash,
         result,
         ...(correlation !== undefined ? { workId: correlation.workId } : {}),
+        ...(correlation?.parentWorkId !== undefined
+          ? { parentWorkId: correlation.parentWorkId }
+          : {}),
         ...(correlation !== undefined ? { role: correlation.role } : {}),
         ...(jobSessions !== undefined ? { sessions: jobSessions } : {}),
         ...(jobUsage !== undefined ? { usage: jobUsage } : {}),
@@ -1782,6 +1787,7 @@ async function runPlanUnderLease(
               // finish keeps the prior attempt's work-to-session links, so
               // a resumed run's journal stays self-contained for them too.
               ...(prior.workId !== undefined ? { workId: prior.workId } : {}),
+              ...(prior.parentWorkId !== undefined ? { parentWorkId: prior.parentWorkId } : {}),
               ...(prior.role !== undefined ? { role: prior.role } : {}),
               ...(prior.sessions !== undefined ? { sessions: prior.sessions } : {}),
               ...(prior.usage !== undefined ? { usage: prior.usage } : {}),
