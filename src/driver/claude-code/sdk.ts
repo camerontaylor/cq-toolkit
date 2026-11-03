@@ -138,9 +138,10 @@ import type {
 import type { PerMillionRates } from '../pricing/index.js';
 import {
   addUsage,
+  type MeasuredUsage,
+  prepareResultUsage,
   computeDerivedCost,
   costField,
-  measureResultUsage,
   usageFromWire,
   usageProvenanceMarker,
   resumedUsageSemanticsMarker,
@@ -620,7 +621,13 @@ export class ClaudeCodeSdkTransport implements Driver {
     mapPermissionDenials(observation);
 
     // --- Usage accounting (usage.ts: the ONE fold) + its provenance.
-    recordUsageProvenance(observation, resumeAgentSessionId !== undefined);
+    const accounting = prepareResultUsage(
+      observation.result,
+      this.pricingOverride,
+      { ...modelSpec, model: observation.servedModel ?? modelSpec.model },
+      observation.narration,
+    );
+    recordUsageProvenance(observation, resumeAgentSessionId !== undefined, accounting.measured);
 
     // --- Structured output (ADR-0002 §2.3, S3): the ONE shared judge
     // (refusal-voided — verdict.ts) over the SAME document that was sent. A
@@ -689,6 +696,7 @@ export class ClaudeCodeSdkTransport implements Driver {
       structured,
       structuredMiss,
       resultCause,
+      accounting,
     );
   }
 
@@ -744,8 +752,9 @@ export class ClaudeCodeSdkTransport implements Driver {
     structured: unknown,
     structuredMiss: string | undefined,
     resultCause: string | undefined,
+    accounting: ReturnType<typeof prepareResultUsage>,
   ): WorkerResult {
-    const measuredFrame = measureResultUsage(observation.result);
+    const measuredFrame = accounting.measured;
     const measured = measuredFrame !== undefined ? measuredFrame.usage : undefined;
     // Seam v3: presence from the two raw sources, never the normalized zero.
     const usageMeasured = measured !== undefined || observation.assistantUsage !== undefined;
@@ -813,7 +822,10 @@ export class ClaudeCodeSdkTransport implements Driver {
     const cost = !usageMeasured
       ? {}
       : costField(
-          (spec, fold) => computeDerivedCost(this.pricingOverride, spec, fold),
+          (spec, fold) =>
+            accounting.priced !== undefined
+              ? accounting.priced.costUSD
+              : computeDerivedCost(this.pricingOverride, spec, fold),
           pricedModel,
           usage,
         );
@@ -1078,8 +1090,11 @@ function asArray(value: unknown): unknown[] | undefined {
  * and — on a resumed session — the version-gated per-call/cumulative
  * boundary note.
  */
-function recordUsageProvenance(observation: SdkRunObservation, resumed: boolean): void {
-  const measured = measureResultUsage(observation.result);
+function recordUsageProvenance(
+  observation: SdkRunObservation,
+  resumed: boolean,
+  measured: MeasuredUsage | undefined,
+): void {
   const provenance =
     measured !== undefined
       ? usageProvenanceMarker(measured)

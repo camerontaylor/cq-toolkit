@@ -45,6 +45,7 @@
 //     refusal, the served-model observation + assertion;
 //   - the kernel's classifyDispatch/lane table/hard-advisory posture
 //     (src/kernel/lanes.ts — untouched; the lane id below is its key).
+import { DispatchError } from '../errors.js';
 import type { HarnessConfig } from '../../harness/config.js';
 import type { Driver, ModelSpec, OpInvocation, RunOptions, WorkerResult } from '../types.js';
 import type { PerMillionRates } from '../pricing/index.js';
@@ -136,7 +137,8 @@ export class ClaudeCodeDriver implements Driver {
     // 'cli' is the default; an unknown transport value is a loud
     // construction error (a typo'd config must never silently pick a path).
     if (options.transport !== undefined && options.transport !== 'cli') {
-      throw new Error(
+      throw new DispatchError(
+        'config',
         `claude-code driver: transport must be 'cli' or 'sdk', got ${JSON.stringify(options.transport)}`,
       );
     }
