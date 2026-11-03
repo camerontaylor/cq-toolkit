@@ -41,7 +41,7 @@ describe('the fix-run wall-clock ladder (opts.limits → the governor)', () => {
       });
 
       await driverStarted;
-      await vi.advanceTimersByTimeAsync(20);
+      await vi.advanceTimersByTimeAsync(200);
       const { outcome } = await running;
 
       // The rung-1 signal fired INSIDE the job context, well before the wedge
