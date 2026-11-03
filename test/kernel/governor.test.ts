@@ -36,7 +36,7 @@ import { match } from '../helpers/matchers.js';
 // RUNNER — `runPlan(plan, opts, view, { governor })`; the deleted
 // governRegistry/withBudgetStop/seedFromRunLog decorator seam has no tests
 // here anymore (the runner-owned honest stop/admission/ledger is pinned in
-// test/kernel/runner-governed.test.ts).
+// test/kernel/runner-governed.*.test.ts).
 //
 // Determinism: EVERY timer flows through the injected virtual Clock — no
 // real-time waits anywhere (a setImmediate pump yields event-loop turns for
