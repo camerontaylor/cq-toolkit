@@ -7,6 +7,11 @@ creditable review (state and finding events), so a snapshot stays valid
 without any Git work. Selection under tick.lock only reads snapshots; the
 off-lock refresher (run after ledger publication) is the only caller of the
 expensive accounting.
+
+Evidence is verified when a review is folded, not again on every selection
+pass: a snapshot keeps credit whose retained artifacts were verified at fold
+time. Bump VERSION whenever accounting semantics change, so existing snapshots
+read as stale and are recomputed.
 """
 import collections
 from pathlib import Path
@@ -39,6 +44,10 @@ def _read(state, target):
         return None
     if type(value.get("events")) is not int or not isinstance(value.get("covered"), dict) or not isinstance(value.get("gaps"), list):
         return None
+    try:
+        value["covered"] = {name: ledger.intervals(rows) for name, rows in value["covered"].items()}
+    except (TypeError, ValueError):
+        return None
     return value
 
 
@@ -59,11 +68,7 @@ def load(state, target, events):
         return None
     if any(ledger.creditable(value) for value in events[snapshot["events"]:]):
         return None
-    try:
-        covered = {name: ledger.intervals(rows) for name, rows in snapshot["covered"].items()}
-    except (TypeError, ValueError):
-        return None
-    return covered, list(snapshot["gaps"])
+    return snapshot["covered"], list(snapshot["gaps"])
 
 
 def request(state, head, targets):
@@ -81,19 +86,25 @@ def _ranges(lines):
     return result
 
 
-def refresh(state, repo, store, events, targets):
+def refresh(state, repo, store, events, targets, keep=()):
     """Bring each target's snapshot to this validated ledger sequence.
 
     Folds only the events appended since the snapshot, plus earlier reviews that
     left a gap (gaps can be transient, e.g. an unreadable artifact). A sequence
     that no longer extends the snapshot (it should not happen on an append-only
-    ledger) recomputes in full. Returns {target: "current"|"extended"|"full"}.
+    ledger) recomputes in full, as does an unreadable snapshot. Returns
+    {target: "current"|"extended"|"full"|"invalid-target"}.
     """
     ledger.validate_sequence(events)
     repo.immutable_cache = {}  # this invocation only; keys are immutable object IDs
     outcome = {}
     for target in sorted(set(targets)):
-        snapshot = _read(state, target)
+        try:
+            _snapshot_path(state, target)
+        except ledger.IntegrityError:
+            outcome[target] = "invalid-target"  # one bad target never blocks the rest
+            continue
+        snapshot = _read(state, target)  # unreadable/corrupt reads as None: full recompute
         if snapshot is not None and _extends(snapshot, events):
             start = snapshot["events"]
             retry = {gap.get("review") for gap in snapshot["gaps"] if isinstance(gap, dict)}
@@ -103,7 +114,7 @@ def refresh(state, repo, store, events, targets):
                     outcome[target] = "current"
                     continue
                 todo = []
-            covered = collections.defaultdict(set, {name: ledger.intervals(rows) for name, rows in snapshot["covered"].items()})
+            covered = collections.defaultdict(set, snapshot["covered"])
             outcome[target] = "extended"
         else:
             todo, covered = list(events), collections.defaultdict(set)
@@ -115,11 +126,12 @@ def refresh(state, repo, store, events, targets):
             "prefix": _prefix_digest(events, len(events)),
             "covered": {name: _ranges(lines) for name, lines in sorted(covered.items()) if lines},
             "gaps": gaps}))
-    # Snapshots for targets no pending job uses are dead weight; drop them.
-    directory = Path(state) / DIRECTORY
+    # Snapshots for targets no live job uses are dead weight; drop them. A job
+    # that is reviewing may return to pending, so its target's snapshot stays.
+    directory, keep = Path(state) / DIRECTORY, set(keep)
     if directory.is_dir():
         for path in directory.glob("*.json"):
-            if path.stem not in outcome:
+            if path.stem not in outcome and path.stem not in keep:
                 path.unlink(missing_ok=True)
     return outcome
 
@@ -127,6 +139,12 @@ def refresh(state, repo, store, events, targets):
 def pending_targets(queue):
     return {item["target"] for item in queue.get("items", [])
             if item.get("kind") == jobs.KIND and item.get("state") == "pending"}
+
+
+def live_targets(queue):
+    """Targets of every backfill job that may still need dispatch."""
+    return {item["target"] for item in queue.get("items", [])
+            if item.get("kind") == jobs.KIND and item.get("state") not in ("done", "quarantined")}
 
 
 def run(c, *, published_head=None):
@@ -140,12 +158,25 @@ def run(c, *, published_head=None):
     requested = marker.read_bytes() if marker.exists() else None
     if requested is None and published_head is None:
         return "idle"
+    import backfill_publisher
     with ledger.locked(c.STATE / LOCK):
-        # A read-only snapshot of the queue: targets only, never saved here.
-        targets = pending_targets(c.load_queue())
-        repo, store, _, publisher = runtime.services(c, config)
-        head, events = publisher.fetch()
-        outcome = refresh(c.STATE, repo, store, events, targets)
+        # A read-only snapshot of the queue: targets only, never saved here. The
+        # request's own targets are added: the queue read here (without
+        # tick.lock) may predate the save that enqueued them.
+        queue = c.load_queue()
+        targets = pending_targets(queue)
+        if requested is not None:
+            try:
+                targets |= set(ledger.loads(requested).get("targets") or [])
+            except (ValueError, AttributeError, TypeError):
+                pass
+        repo, store, _, _ = runtime.services(c, config)
+        # Read the ledger through the publisher's private clone, so the scheduler
+        # clone's validated-ledger checkpoint is only ever moved by the scheduler.
+        with ledger.locked(c.STATE / "backfill/publisher.lock"):
+            _, _, _, reader = backfill_publisher.worker_services(c, config)
+            head, events = reader.fetch()
+        outcome = refresh(c.STATE, repo, store, events, targets, keep=live_targets(queue))
         # A request written while we computed survives for the next run.
         if requested is not None and marker.exists() and marker.read_bytes() == requested:
             marker.unlink()

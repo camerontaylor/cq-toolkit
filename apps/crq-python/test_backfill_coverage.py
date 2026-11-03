@@ -97,8 +97,29 @@ class CoverageSnapshotTest(unittest.TestCase):
                                               "prefix": "x", "covered": {}, "gaps": []}))
         self.assertIsNone(coverage.load(self.state, T2, events))  # names another target
         self.assertIsNone(coverage.load(self.state, "../escape", events))  # read side: stale, never a path
-        with self.assertRaises(ledger.IntegrityError):
-            coverage.refresh(self.state, FakeRepo(), None, events, {"../escape"})
+
+    def test_corrupt_rows_recompute_and_a_bad_target_never_blocks_the_rest(self):
+        events = [event("r1", True)]
+        coverage.refresh(self.state, FakeRepo(), None, events, {T1})
+        path = self.state / coverage.DIRECTORY / (T1 + ".json")
+        value = ledger.loads(path.read_bytes()); value["covered"] = {"p": [[3, 1]]}
+        ledger.atomic(path, ledger.canonical(value))
+        self.assertIsNone(coverage.load(self.state, T1, events))
+        repo = FakeRepo()
+        self.assertEqual(coverage.refresh(self.state, repo, None, events, {"../escape", T1}),
+                         {"../escape": "invalid-target", T1: "full"})
+        self.assertEqual(coverage.load(self.state, T1, events), ({"p": {1}}, []))
+
+    def test_prune_keeps_snapshots_of_targets_with_live_jobs(self):
+        events = [event("r1", True)]
+        coverage.refresh(self.state, FakeRepo(), None, events, {T1, T2})
+        coverage.refresh(self.state, FakeRepo(), None, events, {T2}, keep={T1})
+        self.assertIsNotNone(coverage.load(self.state, T1, events))
+        queue = {"items": [{"kind": "backfill", "state": "reviewing", "target": T1},
+                           {"kind": "backfill", "state": "done", "target": T2},
+                           {"kind": "open", "state": "pending", "target": "c" * 40}]}
+        self.assertEqual(coverage.live_targets(queue), {T1})
+        self.assertEqual(coverage.pending_targets(queue), set())
 
 
 if __name__ == "__main__":

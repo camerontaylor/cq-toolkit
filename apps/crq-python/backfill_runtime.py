@@ -195,7 +195,7 @@ def select(c, queue, log, dry, only):
     # Coverage is never computed here, under tick.lock: it costs minutes of Git
     # work per target. Read the off-lock snapshot; a stale one leaves its jobs
     # waiting and asks the refresher (crq-publisher) for an update.
-    snapshots, stale = {}, set()
+    snapshots, stale = {}, set()  # stale: targets to request (missing/stale snapshot, or gaps)
     def coverage_for(target):
         if target not in snapshots:
             snapshots[target] = coverage.load(c.STATE, target, events)
@@ -222,7 +222,10 @@ def select(c, queue, log, dry, only):
             continue
         covered, gaps = coverage_for(item["target"])
         if gaps:
+            # Gaps can be transient (unreadable artifact): ask the refresher to
+            # retry them rather than waiting for an unrelated publication.
             item["wait_reason"] = MISSING_EVIDENCE
+            stale.add(item["target"])
             continue
         desired = ledger.scope(item["scope"])
         if all(lines <= covered.get(name, set()) for (name, _), lines in desired.items()):
@@ -261,10 +264,12 @@ def select(c, queue, log, dry, only):
             c.save_queue(queue)
             raise
     if stale:
-        coverage.request(c.STATE, head, stale)
+        if not dry:
+            coverage.request(c.STATE, head, stale)
     elif not only:  # a selective start covers one job, not the natural pass
         # Keyed on the jobs this pass saw eligible and left pending (done ones drop out).
-        # A pass with stale snapshots records nothing, so the next pass re-reads them.
+        # A pass with stale or gap snapshots records nothing, so the next pass
+        # re-reads them (a cheap file read) and re-requests the refresh.
         queue["backfill_coverage_reconciled"] = {"digest": reconciliation(seen), "available": available}
     return None, available
 

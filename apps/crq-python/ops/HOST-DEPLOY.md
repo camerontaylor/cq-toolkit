@@ -413,8 +413,17 @@ snapshots (`backfill_coverage.run`, under `state/backfill/coverage.lock`, not
 `tick.lock`) when a request marker exists or publication moved the ledger head. It
 folds only the appended events into each pending target's snapshot, retries
 earlier gap reviews, recomputes in full only for a new target or a non-extending
-sequence, and deletes snapshots that no pending job uses. Snapshots are derived
-state; deleting the directory is safe, and the next request rebuilds it.
+sequence, and deletes snapshots that no live job uses. Gap targets are requested
+again on every selection pass, so a transient gap retries within a minute. The
+refresher reads the ledger through the publisher's private clone under
+`publisher.lock`. Evidence is verified when a review is folded, not again per
+pass. Snapshots are derived state; deleting the directory is safe, and the next
+request rebuilds it.
+
+A cold refresh (new inventory target, or no snapshots after a deploy) delays
+the next publication run by its duration; measured on the queue host 2026-11-03 (7
+targets, 17 creditable reviews, load ~14) at 124 s for all targets, about 1.3 s
+when nothing changed.
 Publication failures also retain `publication-failure.json`, which blocks new
 rank-4 admissions even when the queue lock is busy. Only successful validated
 queue reconciliation clears it. Operation-tagged inventory/request halts recover
