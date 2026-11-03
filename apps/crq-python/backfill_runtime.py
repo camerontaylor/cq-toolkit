@@ -130,7 +130,8 @@ def rank4_gate(c, queue, item, dry=False):
         queue["backfill_usage_probe_at"] = c.iso()
         refresh(queue)
     observation = copy.deepcopy(queue.get("backfill_usage"))
-    if observation and usage_age(c, observation) is not None:  # unreadable time: admission refuses it
+    # An unreadable time or count is left for admission to refuse as invalid.
+    if observation and usage_age(c, observation) is not None and type(observation.get("remaining")) is int:
         # Within one observation, ordinary admissions also spend quota. Holds
         # already represented by backfill_reservations are subtracted by jobs.
         ordinary = len(queue.get("starts", [])) - queue.get("backfill_starts_at_observation", len(queue.get("starts", [])))

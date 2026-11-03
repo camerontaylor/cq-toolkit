@@ -147,9 +147,13 @@ class RuntimeTest(unittest.TestCase):
             self.q.pop("backfill_usage_probe_at", None)
             self.assertFalse(runtime.rank4_gate(self.c, self.q, other, dry=True))
             self.assertEqual(other["wait_reason"], "usage-stale-or-invalid")
-        del self.q["backfill_usage"]["observed_at"]
-        self.q.pop("backfill_usage_probe_at", None)
-        self.assertFalse(runtime.rank4_gate(self.c, self.q, other, dry=True))
+        for corrupt in ("observed_at", "remaining"):
+            self.q["backfill_usage"] = {"successful": True, "remaining": 8, "observed_at": AT, "reflected_reservations": []}
+            del self.q["backfill_usage"][corrupt]
+            self.q.pop("backfill_usage_probe_at", None)
+            other.pop("wait_reason", None)
+            self.assertFalse(runtime.rank4_gate(self.c, self.q, other, dry=True))
+            self.assertEqual(other["wait_reason"], "usage-stale-or-invalid")
 
     def test_unreadable_observation_time_reprobes(self):
         self.q["backfill_usage"] = {"successful": True, "remaining": 5, "observed_at": "garbage", "reflected_reservations": []}
