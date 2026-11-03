@@ -201,6 +201,8 @@ export interface WorkCorrelation {
  * idiom), not the invocation, so `OpInvocation` stays pure data.
  */
 export interface RunOptions {
+  /** Opt-in late tool-step hints; reviewer sessions only. Drivers may ignore. */
+  reviewerStepCountdown?: boolean;
   /**
    * Cooperative cancellation. `| undefined` so `{ signal: ctx?.signal }`
    * compiles under exactOptionalPropertyTypes.

@@ -1059,7 +1059,33 @@ export class AiSdkDriver implements Driver {
           // Pure step-number function — no scheduling primitive (I8).
           prepareStep: ({ stepNumber, messages }) => {
             toolStep = stepNumber;
-            const typedMessages = normalizeToolErrors(messages);
+            const typedMessages = normalizeToolErrors(messages).filter(
+              (message) =>
+                options?.reviewerStepCountdown !== true ||
+                message.role !== 'user' ||
+                typeof message.content !== 'string' ||
+                !/^[1-3] tool steps left\. Finish your checks and prepare the final answer\.$/.test(
+                  message.content,
+                ),
+            );
+            const toolStepsLeft = effectiveStepCap - 1 - stepNumber;
+            if (
+              options?.reviewerStepCountdown === true &&
+              selected.length > 0 &&
+              outputSchema !== undefined &&
+              toolStepsLeft > 0 &&
+              toolStepsLeft <= 3
+            ) {
+              return {
+                messages: [
+                  ...typedMessages,
+                  {
+                    role: 'user' as const,
+                    content: `${toolStepsLeft} tool steps left. Finish your checks and prepare the final answer.`,
+                  },
+                ],
+              };
+            }
             if (
               outputSchema === undefined ||
               selected.length === 0 ||

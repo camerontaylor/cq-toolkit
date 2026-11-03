@@ -133,6 +133,7 @@ export const CqConfigSchema = z
           .object({
             maxInputChars: PositiveInteger.exactOptional(),
             maxSteps: PositiveInteger.exactOptional(),
+            stepCountdown: z.boolean().exactOptional(),
             concurrency: PositiveInteger.exactOptional(),
           })
           .strict()

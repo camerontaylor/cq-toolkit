@@ -37,7 +37,12 @@ export interface AgentReviewerInput {
   intent?: string;
   fileList?: string;
   priorFindings?: readonly Finding[];
-  session?: { maxInputChars?: number; maxSteps?: number; concurrency?: number };
+  session?: {
+    maxInputChars?: number;
+    maxSteps?: number;
+    concurrency?: number;
+    stepCountdown?: boolean;
+  };
   /** Partition-fallback tool access; default fixed bounded read-only tools (#508). */
   partitionTools?: false | { steps?: number };
   size?: {
@@ -345,6 +350,9 @@ export async function runAgentReviewer(
             severityMap: input.severityMap,
             maxTokens: allowance,
             maxSteps: input.session?.maxSteps ?? REVIEW_SESSION_DEFAULTS.maxSteps,
+            ...(input.session?.stepCountdown === undefined
+              ? {}
+              : { stepCountdown: input.session.stepCountdown }),
             maxPromptChars: Math.max(
               20_000,
               input.session?.maxInputChars ?? REVIEW_SESSION_DEFAULTS.maxInputChars,
