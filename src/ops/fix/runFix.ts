@@ -339,7 +339,7 @@ export function makeFixRun(deps: FixRunDeps = {}) {
     // writer API is memory-only and the report declares persistence
     // unavailable — it never claims durability.
     const compositionRunId = randomUUID();
-    let observation: (FixRunObservation & { writer: ObservationWriter }) | undefined;
+    let observation: (FixRunObservation & { writer?: ObservationWriter }) | undefined;
     let observationClosed = false;
     const observationFailure = (error: unknown) => {
       if (observation) {
@@ -348,7 +348,7 @@ export function makeFixRun(deps: FixRunDeps = {}) {
       }
     };
     const closeObservation = async () => {
-      if (!observation || observationClosed) return;
+      if (!observation || observationClosed || observation.writer === undefined) return;
       observationClosed = true;
       try {
         await observation.writer.close();
@@ -677,22 +677,32 @@ export function makeFixRun(deps: FixRunDeps = {}) {
         config.base,
         configText,
       );
-      const writer =
-        deps.observationWriter ??
-        (await openObservationWriter({
-          ...(input.journalDir === undefined ? {} : { journalDir: resolve(input.journalDir) }),
-          workId: correlation.workId,
-          compositionRunId,
-        }));
+      // The open itself is observation, never verdict: a refused open
+      // (EACCES/ENOSPC/EEXIST, ...) leaves the run to proceed without a
+      // writer and makes the observation indeterminate.
+      let writer: ObservationWriter | undefined;
+      let openFailure: unknown;
+      try {
+        writer =
+          deps.observationWriter ??
+          (await openObservationWriter({
+            ...(input.journalDir === undefined ? {} : { journalDir: resolve(input.journalDir) }),
+            workId: correlation.workId,
+            compositionRunId,
+          }));
+      } catch (error) {
+        openFailure = error;
+      }
       observation = {
-        writer,
-        persistence: writer.persistence,
-        status: writer.persistence,
+        ...(writer === undefined ? {} : { writer }),
+        persistence: writer?.persistence ?? 'unavailable',
+        status: writer?.persistence ?? 'indeterminate',
         compositionRunId,
         workId: correlation.workId,
         failure: null,
         kernelRuns: [],
       };
+      if (openFailure !== undefined) observationFailure(openFailure);
       const header: CompositionStartedJournalEvent = {
         type: 'composition-started',
         runId: compositionRunId,
@@ -703,10 +713,12 @@ export function makeFixRun(deps: FixRunDeps = {}) {
         attempt: null,
         payload: { journalVersion: 3, provenance, correlation },
       };
-      try {
-        await writer.append(header);
-      } catch (error) {
-        observationFailure(error);
+      if (writer !== undefined) {
+        try {
+          await writer.append(header);
+        } catch (error) {
+          observationFailure(error);
+        }
       }
       const unitEntry: OpRegistryEntry = {
         name: 'sweep.unit',
@@ -720,7 +732,7 @@ export function makeFixRun(deps: FixRunDeps = {}) {
                 reason: 'enclosing job cancelled before unit dispatch',
               };
             const bindings = bindingsFromDispatch(unit, drivers);
-            bindings.observationWriter = writer;
+            if (writer !== undefined) bindings.observationWriter = writer;
             bindings.observationRunId = compositionRunId;
             bindings.observationUnitId = `${unit.package}/${unit.fixer}`;
             bindings.taskRunBudget = {
@@ -834,10 +846,12 @@ export function makeFixRun(deps: FixRunDeps = {}) {
           payload: { kernelRunId: report.run.runId, planId: plan.id, round: 1 },
         },
       ];
-      try {
-        await writer.append(kernelRunLinks[0] as KernelRunLinkedJournalEvent);
-      } catch (error) {
-        observationFailure(error);
+      if (writer !== undefined) {
+        try {
+          await writer.append(kernelRunLinks[0] as KernelRunLinkedJournalEvent);
+        } catch (error) {
+          observationFailure(error);
+        }
       }
       // Jobs the run cancelled (an enclosing cancel races dispatch): a job
       // with no journal row is one the runner never dispatched. The blocked
