@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { repoIdFromRemote, sanitizeObservation } from '../../../src/ops/fix/attemptRecord.js';
+import {
+  finishAttempt,
+  repoIdFromRemote,
+  sanitizeObservation,
+} from '../../../src/ops/fix/attemptRecord.js';
+import { AttemptFinishedPayloadSchema } from '../../../src/kernel/schema.js';
 
 // Fake/local fixtures only: no repositories, providers or credentials.
 const savedEnv: Record<string, string | undefined> = {};
@@ -52,5 +57,55 @@ describe('observation redaction (T12)', () => {
     expect(id).not.toContain('camerontaylor');
     expect(id).toEqual(repoIdFromRemote('ssh://github.com/camerontaylor/cq-toolkit.git'));
     expect(repoIdFromRemote(undefined)).toEqual(null);
+  });
+});
+
+describe('finishAttempt schema conformance (T12)', () => {
+  const base = {
+    tier: 'worker' as const,
+    invocation: 'edit',
+    model: { model: 'fake-model', provider: 'fake' },
+  };
+
+  it('completed payload parses strict', () => {
+    const record = finishAttempt({
+      ...base,
+      completed: true,
+      stopReason: 'task completed',
+      tokens: 15,
+      wallMs: 900,
+    });
+    expect(AttemptFinishedPayloadSchema.parse(record)).toEqual(record);
+  });
+
+  it('budget-expired payload parses strict with required budgetStopCode', () => {
+    const record = finishAttempt({
+      ...base,
+      budgetExpired: true,
+      budgetStopCode: 'token-cap',
+      budget: {
+        allowed: { tokens: 1000, wallMs: 60000 },
+        spent: { tokens: 1000, wallMs: 40000 },
+        remaining: { tokens: 0, wallMs: 20000 },
+      },
+    });
+    expect(record.stopCode).toEqual('token-cap');
+    expect(AttemptFinishedPayloadSchema.parse(record)).toEqual(record);
+  });
+
+  it('unclassified payload parses strict and preserves the raw code', () => {
+    const record = finishAttempt({ ...base, stopCode: 'mystery', stopReason: 'boom' });
+    expect(record.stopCode).toEqual('unclassified');
+    expect(record.error?.code).toEqual('mystery');
+    expect(AttemptFinishedPayloadSchema.parse(record)).toEqual(record);
+  });
+
+  it('minimal payload parses strict with availability for absent required fields', () => {
+    const record = finishAttempt({ ...base, stopCode: 'completed' });
+    expect(record.availability['/stopReason']).toMatchObject({ state: 'not-collected' });
+    expect(record.availability['/provider']).toMatchObject({ state: 'not-collected' });
+    expect(record.availability['/requestedModel']).toMatchObject({ state: 'not-collected' });
+    expect(record.availability['/budget']).toMatchObject({ state: 'not-collected' });
+    expect(AttemptFinishedPayloadSchema.parse(record)).toEqual(record);
   });
 });
