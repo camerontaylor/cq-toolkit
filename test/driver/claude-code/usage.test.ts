@@ -372,3 +372,70 @@ test('invalid transport is a pre-dispatch config error', () => {
     expect.objectContaining({ dispatchClass: 'config' }),
   );
 });
+
+test.each(['cli', 'sdk'] as const)(
+  '%s prices mixed-model usage and records served-rate fallback',
+  async (transport) => {
+    await withScratch(async (scratchDir) => {
+      const frames: JsonLineFrame[] = [
+        {
+          type: 'system',
+          subtype: 'init',
+          session_id: 'mixed-price',
+          model: 'conformance-1',
+          tools: [],
+          mcp_servers: [],
+        },
+        {
+          type: 'result',
+          subtype: 'success',
+          session_id: 'mixed-price',
+          result: 'ok',
+          usage: { input_tokens: 1_000_000 },
+          modelUsage: {
+            'conformance-1': { inputTokens: 1_000_000 },
+            cheap: { inputTokens: 1_000_000 },
+            unknown: { inputTokens: 1_000_000 },
+          },
+        },
+      ];
+      const driver = new ClaudeCodeDriver({
+        transport,
+        routingTable: endpointTable(),
+        sessionsDir: join(scratchDir, 'sessions'),
+        harnessConfig: { ...defaultHarnessConfig, workspaceRoot: join(scratchDir, 'workspaces') },
+        pricing: (model) =>
+          model.model === 'conformance-1'
+            ? { input: 3, output: 15 }
+            : model.model === 'cheap'
+              ? { input: 1, output: 5 }
+              : undefined,
+        spawn: fakeManagedSpawn(() => (_frame, peer) => {
+          for (const frame of frames) peer.send(frame);
+          peer.finish(0, null);
+        }),
+        sdkLoader: async () => ({
+          tool: () => ({}),
+          createSdkMcpServer: () => ({}),
+          query: async function* () {
+            yield* frames;
+          },
+        }),
+      });
+      const result = await driver.run(invocation());
+      expect(result.stopReason).toBe('complete');
+      expect(result.costUSD).toBe(7);
+      expect(result.costBasis).toBe('modeled');
+      const record = await new SessionStore(join(scratchDir, 'sessions')).load(result.sessionId!);
+      const markers = record!.messages
+        .filter((message) => message.role === 'tool')
+        .flatMap((message) => JSON.parse(String(message.content)) as string[])
+        .map((entry) => JSON.parse(entry) as Record<string, unknown>);
+      expect(markers).toContainEqual({
+        cq: 'pricing-fallback',
+        models: ['unknown'],
+        rate: 'served-model',
+      });
+    });
+  },
+);

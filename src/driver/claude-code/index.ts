@@ -1,4 +1,3 @@
-import { DispatchError } from '../errors.js';
 // The Claude Code lane — Phase 1.9 (D-E′ option A: ONE cq-owned lane for
 // the Claude Code substrate, merging the former `driver/subprocess` and
 // `driver/claude-agent` lanes). CLI PRIMARY, Agent SDK OPTIONAL: the
@@ -46,6 +45,7 @@ import { DispatchError } from '../errors.js';
 //     refusal, the served-model observation + assertion;
 //   - the kernel's classifyDispatch/lane table/hard-advisory posture
 //     (src/kernel/lanes.ts — untouched; the lane id below is its key).
+import { DispatchError } from '../errors.js';
 import type { HarnessConfig } from '../../harness/config.js';
 import type { Driver, ModelSpec, OpInvocation, RunOptions, WorkerResult } from '../types.js';
 import type { PerMillionRates } from '../pricing/index.js';

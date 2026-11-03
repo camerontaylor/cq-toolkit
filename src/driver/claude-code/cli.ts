@@ -218,9 +218,9 @@ import type {
 import type { PerMillionRates } from '../pricing/index.js';
 import {
   addUsage,
-  modelUsageCost,
+  prepareResultUsage,
+  computeDerivedCost,
   costField,
-  measureResultUsage,
   usageFromWire,
   usageProvenanceMarker,
   resumedUsageSemanticsMarker,
@@ -731,25 +731,13 @@ export class ClaudeCodeCliTransport implements Driver {
     }
 
     // --- Usage accounting (usage.ts: the ONE fold) + its provenance.
-    recordUsageProvenance(observation, resumeCliSessionId !== undefined);
-    const pricingMeasurement = measureResultUsage(observation.result);
-    const pricedUsage =
-      pricingMeasurement === undefined
-        ? undefined
-        : modelUsageCost(
-            this.pricingOverride,
-            { ...modelSpec, model: observation.servedModel ?? modelSpec.model },
-            pricingMeasurement,
-          );
-    if (pricedUsage !== undefined && pricedUsage.fallbackModels.length > 0) {
-      observation.narration.push(
-        JSON.stringify({
-          cq: 'pricing-fallback',
-          models: pricedUsage.fallbackModels,
-          rate: 'served-model',
-        }),
-      );
-    }
+    const accounting = prepareResultUsage(
+      observation.result,
+      this.pricingOverride,
+      { ...modelSpec, model: observation.servedModel ?? modelSpec.model },
+      observation.narration,
+    );
+    recordUsageProvenance(observation, resumeCliSessionId !== undefined, accounting.measured);
 
     // --- Structured output (ADR-0002 §2.3, S3): the ONE shared judge over
     // the SAME document that was sent (refusal-voided — verdict.ts). A miss
@@ -808,7 +796,7 @@ export class ClaudeCodeCliTransport implements Driver {
       structuredMiss,
       isCodexBinary(this.binary[0] ?? ''),
       workspace,
-      pricedUsage,
+      accounting,
     );
   }
 
@@ -865,9 +853,9 @@ export class ClaudeCodeCliTransport implements Driver {
     structuredMiss: string | undefined,
     codexBinary: boolean,
     workspacePath: string | undefined,
-    pricedUsage?: ReturnType<typeof modelUsageCost>,
+    accounting: ReturnType<typeof prepareResultUsage>,
   ): WorkerResult {
-    const measuredFrame = measureResultUsage(observation.result);
+    const measuredFrame = accounting.measured;
     const measured = measuredFrame !== undefined ? measuredFrame.usage : undefined;
     // Seam v3: measurement PRESENCE is decided here, from the two raw sources
     // (the result frame's shaped usage, else the assistant frames' shaped
@@ -943,13 +931,9 @@ export class ClaudeCodeCliTransport implements Driver {
       ? {}
       : costField(
           (spec, fold) =>
-            pricedUsage !== undefined
-              ? pricedUsage.costUSD
-              : modelUsageCost(
-                  this.pricingOverride,
-                  spec,
-                  measuredFrame ?? { usage: fold, channel: 'assistant' },
-                ).costUSD,
+            accounting.priced !== undefined
+              ? accounting.priced.costUSD
+              : computeDerivedCost(this.pricingOverride, spec, fold),
           pricedModel,
           usage,
         );
@@ -1234,8 +1218,11 @@ function newObservation(): RunObservation {
  * boundary note. Markers go to the narration, so they persist with the
  * session evidence.
  */
-function recordUsageProvenance(observation: RunObservation, resumed: boolean): void {
-  const measuredFrame: MeasuredUsage | undefined = measureResultUsage(observation.result);
+function recordUsageProvenance(
+  observation: RunObservation,
+  resumed: boolean,
+  measuredFrame: MeasuredUsage | undefined,
+): void {
   const provenance =
     measuredFrame !== undefined
       ? usageProvenanceMarker(measuredFrame)

@@ -14,7 +14,7 @@
 //      preferred accounting field and the only one that includes SUBAGENT
 //      spend (the flat `usage` is main-loop-only), so when it is present
 //      the fold takes its per-field SUM across models — TOKENS ONLY: cost
-//      stays derived from the folded tokens by the one estimator, never
+//      stays derived per contributing model by the one estimator, never
 //      from any vendor USD figure (the SDK's total_cost_usd is still not
 //      surfaced; DD-2 derived-only).
 //   2. the result frame's flat `usage` — the main-loop total (subagent
@@ -332,4 +332,25 @@ export function modelUsageCost(
     total += cost;
   }
   return { costUSD: total, fallbackModels };
+}
+
+/** Measure and price the settled result once, recording any applied rate fallback. */
+export function prepareResultUsage(
+  result: Record<string, unknown> | undefined,
+  pricing: ((modelSpec: ModelSpec) => PerMillionRates | undefined) | undefined,
+  served: ModelSpec,
+  narration: string[],
+): { measured: MeasuredUsage | undefined; priced: ReturnType<typeof modelUsageCost> | undefined } {
+  const measured = measureResultUsage(result);
+  const priced = measured === undefined ? undefined : modelUsageCost(pricing, served, measured);
+  if (priced !== undefined && priced.fallbackModels.length > 0) {
+    narration.push(
+      JSON.stringify({
+        cq: 'pricing-fallback',
+        models: priced.fallbackModels,
+        rate: 'served-model',
+      }),
+    );
+  }
+  return { measured, priced };
 }
