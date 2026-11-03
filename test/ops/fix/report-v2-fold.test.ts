@@ -162,8 +162,15 @@ describe('report v2 fold (T36)', () => {
     });
     expect(report.availability['']?.state).toBe('partial');
     expect(report.availability['/attempts']?.state).toBe('partial');
-    expect(report.availability['/provenance']?.reason).toContain('T04');
-    expect(report.availability['/provenance']?.reason).toContain(KERNEL_RUN);
+    const provenanceRecord = report.availability['/provenance'];
+    expect(provenanceRecord?.state).toBe('known');
+    expect(provenanceRecord?.reason).toContain('composition header');
+    expect(provenanceRecord?.source).toBeNull();
+    expect(report.availability['/provenance/journalLink']?.reason).toContain('T04');
+    expect(report.availability['/provenance/journalLink']?.reason).toContain(KERNEL_RUN);
+    for (const record of Object.values(report.availability)) {
+      expect(record.reason).not.toMatch(/[;,]\s*$/);
+    }
     expect(report.acceptances).toEqual([]);
     expect(report.availability['/acceptances']?.state).toBe('unavailable');
     expect(report.availability['/acceptances']?.reason).toContain('T20');

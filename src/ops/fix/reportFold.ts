@@ -77,17 +77,19 @@ export function foldObservations(input: ReportFoldInput): ReportV2 {
   const unknownLinks = folded
     .flatMap((row) => row.kernelRunLinks)
     .filter((link) => link.state === 'unknown');
-  availability['/provenance'] =
-    unknownLinks.length || !input.kernelRuns?.length
-      ? unavailable(
-          'T04 kernel v3 descriptors unavailable; ' +
-            unknownLinks.map((link) => link.reason).join('; '),
-        )
-      : {
-          state: 'known',
-          reason: 'composition header and resolved kernel descriptors',
-          source: null,
-        };
+  // The provenance record is fully known from the witnessed composition
+  // header; unresolved T04 kernel descriptors concern the journal link only.
+  availability['/provenance'] = {
+    state: 'known',
+    reason: 'witnessed composition header',
+    source: null,
+  };
+  if (unknownLinks.length) {
+    availability['/provenance/journalLink'] = unavailable(
+      'T04 kernel v3 descriptors unavailable: ' +
+        unknownLinks.map((link) => link.reason).join('; '),
+    );
+  }
   for (const field of [
     'tasks',
     'gates',
