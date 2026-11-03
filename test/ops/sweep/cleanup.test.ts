@@ -662,7 +662,7 @@ describe('sweep.cleanup stepwise completion, absent refs, in-lock association', 
 });
 
 // ---------------------------------------------------------------------------
-// 4. The mutex wrap (differential, the worktreeFor.test.ts pattern)
+// 4. The mutex wrap (differential, the worktreeFor.mutex.test.ts pattern)
 // ---------------------------------------------------------------------------
 
 describe('sweep.cleanup mutex wrap (UC row 32)', () => {
@@ -980,7 +980,7 @@ describe('sweep.cleanup boundary', () => {
 
 describe('subprocess cleanup effects (real git smoke)', () => {
   // Same auto-maintenance suppression and BOUNDED RETRY as the
-  // worktreeFor.test.ts real-git idiom: the assertions are never relaxed,
+  // worktreeFor.real-git.test.ts real-git idiom: the assertions are never relaxed,
   // a stalled spawn retries instead.
   const GIT_CALL_TIMEOUT_MS = 6_000;
   const GIT_CALL_ATTEMPTS = 4;

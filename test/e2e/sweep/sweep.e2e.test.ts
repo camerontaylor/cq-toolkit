@@ -307,7 +307,7 @@ function readInWorktree(repo: string, pkg: string, repoRelative: string): string
   return readFileSync(resolve(repo, 'worktrees', 'fix', pkg, repoRelative), 'utf8');
 }
 
-/** Bounded real git read for the assertions (the worktreeFor.test.ts idiom). */
+/** Bounded real git read for the assertions (the worktreeFor.real-git.test.ts idiom). */
 function gitOut(args: string[], cwd: string): Promise<string> {
   return new Promise((resolve_, reject) => {
     execFile(
