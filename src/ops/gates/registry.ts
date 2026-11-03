@@ -47,6 +47,8 @@ export const CheckRunnerInputObject = z
       'tsc-lines',
       'oxfmt-check',
       'oxlint-json',
+      'ruff-json',
+      'knip-json',
       'test-narrow',
     ]),
     // Strict: an unknown key inside command (a typo'd timeoutMS) must fail
