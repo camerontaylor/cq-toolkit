@@ -82,10 +82,13 @@ class JobsTest(unittest.TestCase):
             self.assertIn("one-slot-reserve", [r["decision"] for r in results])
 
     def test_stale_unknown_quota_ordinary_priority_and_shared_cap(self):
-        for observation in (None, {"successful": False}, {"successful": True, "remaining": 8, "observed_at": "2026-10-29T23:58:59Z"}):
+        for observation in (None, {"successful": False}, {"successful": True, "remaining": 8, "observed_at": "2026-10-29T23:49:59Z"}):
             q = {"items": []}; item = jobs.enqueue(q, partition(), AT)
             self.assertNotEqual(jobs.admission(q, item, AT, observation, False)["decision"], "admit")
         q = {"items": []}; item = jobs.enqueue(q, partition(), AT)
+        # A several-minute-old reading still admits; crq's own later starts are subtracted by callers.
+        minutes_old = {"successful": True, "remaining": 8, "observed_at": "2026-10-29T23:55:00Z"}
+        self.assertEqual(jobs.admission(q, item, AT, minutes_old, False, reserve=False)["decision"], "admit")
         observation = {"successful": True, "remaining": 8, "observed_at": AT}
         self.assertEqual(jobs.admission(q, item, AT, observation, True)["decision"], "ordinary-eligible")
         self.assertEqual(jobs.admission(q, item, AT, observation, False)["decision"], "admit")

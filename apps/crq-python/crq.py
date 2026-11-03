@@ -2662,6 +2662,17 @@ def collect_finished(q, log):
             log.append(msg)
 
 
+def refresh_backfill_usage(q):
+    """Re-read usage for the rank-4 gate; keep the older observation on failure."""
+    usage, reserved = read_slot_usage(q)
+    if usage is None:
+        return False
+    q["usage"] = usage
+    backfill_runtime.usage_context(sys.modules[__name__], q, usage, reserved)
+    q["backfill_starts_at_observation"] = len(q.get("starts", []))
+    return True
+
+
 def admit_available(q, usage, log, dry=False, only=None, ignore_quiet=False, reserved=(), capture_current=True):
     before_all = len(q.get("starts", []))
     has_coverage = False

@@ -205,6 +205,23 @@ class ConcurrencyTest(unittest.TestCase):
         _, held = crq.read_slot_usage(self.q)
         self.assertEqual(held, [])
 
+    def test_backfill_usage_refresh_rebinds_holds_and_keeps_older_reading_on_failure(self):
+        old = {'successful': True, 'remaining': 5, 'observed_at': crq.iso(AT - dt.timedelta(minutes=5)),
+               'reflected_reservations': []}
+        self.q['backfill_usage'] = dict(old)
+        self.q['starts'] = [crq.iso(AT)] * 2
+        self.q['items'] = [dict(id='held', kind='open', state='reviewing',
+                                run=dict(run_id='held', started_at=crq.iso(AT)))]
+        self.probe.return_value = None
+        self.assertFalse(crq.refresh_backfill_usage(self.q))
+        self.assertEqual(self.q['backfill_usage'], old)
+        self.probe.return_value = {'remaining': 4}
+        with mock.patch.object(crq, 'now', return_value=AT):
+            self.assertTrue(crq.refresh_backfill_usage(self.q))
+        self.assertEqual(self.q['backfill_usage']['remaining'], 3)  # the unobserved hold is subtracted
+        self.assertEqual(self.q['backfill_usage']['observed_at'], crq.iso(AT))
+        self.assertEqual(self.q['backfill_starts_at_observation'], 2)
+
     def test_old_progress_stays_reserved_when_usage_is_unavailable(self):
         self.items()
         run = dict(run_id='old-progress', started_at=crq.iso(AT - dt.timedelta(hours=2)))

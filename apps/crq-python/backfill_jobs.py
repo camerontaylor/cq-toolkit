@@ -101,6 +101,14 @@ def defer_terminal_quota(queue, item, at, retry_seconds):
     return deadline
 
 
+# Callers re-probe usage before the gate when an observation is older than a
+# minute (backfill_runtime.rank4_gate); this bound only applies when that probe
+# fails. Every crq start and hold made after the observation is subtracted
+# (rank4_gate, reflected_reservations), so an older reading stays conservative
+# for crq's own spending.
+USAGE_MAX_AGE_SECONDS = 600
+
+
 def admission(queue, item, at, observation, ordinary_eligible, *, reserve=True):
     """Caller holds tick.lock; persist reservation before any launch is attempted."""
     now = ledger.timestamp(at)
@@ -113,7 +121,7 @@ def admission(queue, item, at, observation, ordinary_eligible, *, reserve=True):
     else:
         age = (now - ledger.timestamp(observation["observed_at"])).total_seconds()
         remaining = observation.get("remaining")
-        if age < 0 or age > 60 or type(remaining) is not int or remaining < 0:
+        if age < 0 or age > USAGE_MAX_AGE_SECONDS or type(remaining) is not int or remaining < 0:
             reason = "usage-stale-or-invalid"
         else:
             reflected = set(observation.get("reflected_reservations", []))
