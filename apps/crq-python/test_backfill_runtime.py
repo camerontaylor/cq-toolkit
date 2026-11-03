@@ -138,6 +138,19 @@ class RuntimeTest(unittest.TestCase):
         self.assertEqual(self.item["wait_reason"], "ordinary-eligible")
         self.assertEqual(self.c.refresh_backfill_usage.call_count, 2)
 
+    def test_unreadable_observation_with_failed_reprobe_refuses_without_raising(self):
+        jobs.admission(self.q, self.item, AT, {"successful": True, "remaining": 8, "observed_at": AT}, False)
+        other = copy.deepcopy(self.item); other.update(id=self.item["id"] + "-other", state="pending")
+        self.c.refresh_backfill_usage = mock.Mock(return_value=False)
+        for observed_at in (None, "garbage"):
+            self.q["backfill_usage"] = {"successful": True, "remaining": 8, "observed_at": observed_at, "reflected_reservations": []}
+            self.q.pop("backfill_usage_probe_at", None)
+            self.assertFalse(runtime.rank4_gate(self.c, self.q, other, dry=True))
+            self.assertEqual(other["wait_reason"], "usage-stale-or-invalid")
+        del self.q["backfill_usage"]["observed_at"]
+        self.q.pop("backfill_usage_probe_at", None)
+        self.assertFalse(runtime.rank4_gate(self.c, self.q, other, dry=True))
+
     def test_unreadable_observation_time_reprobes(self):
         self.q["backfill_usage"] = {"successful": True, "remaining": 5, "observed_at": "garbage", "reflected_reservations": []}
         def refresh(q):
