@@ -4,6 +4,7 @@ import type { CheckAdapter, CheckFailure } from '../checkRunner.js';
 
 const Symbol = z.object({
   name: z.string().min(1),
+  namespace: z.string().exactOptional(),
   line: z.number().int().positive().exactOptional(),
   col: z.number().int().positive().exactOptional(),
 });
@@ -59,7 +60,7 @@ export const knipJsonAdapter: CheckAdapter = {
             failures.push({
               file: row.file,
               ruleId: category,
-              message: `${category}: ${symbol.name}`,
+              message: `${category}: ${symbol.namespace === undefined ? '' : `${symbol.namespace}.`}${symbol.name}`,
               severity: 'error',
               line: symbol.line ?? null,
               column: symbol.col ?? null,

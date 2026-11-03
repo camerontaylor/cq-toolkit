@@ -29,6 +29,14 @@
             "col": 1
           }
         ]
+      ],
+      "enumMembers": [
+        {
+          "namespace": "Status",
+          "name": "Unused",
+          "line": 10,
+          "col": 3
+        }
       ]
     }
   ]

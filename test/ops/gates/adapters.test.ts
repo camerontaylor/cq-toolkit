@@ -960,7 +960,7 @@ test('bounded reports preserve consistent skipped and todo totals', () => {
 describe('Ruff and Knip JSON adapters', () => {
   test.each([
     ['ruff-json', 'ruff-0.14.3-fail.json', 'ruff', 1],
-    ['knip-json', 'knip-6.35.1-fail.json', 'knip', 4],
+    ['knip-json', 'knip-6.35.1-fail.json', 'knip', 5],
   ] as const)('%s parses its versioned fixture', (name, filename, tool, count) => {
     const parsed = parseCheckOutput(adapterByName(name), {
       stdout: fixture(filename),
@@ -971,6 +971,17 @@ describe('Ruff and Knip JSON adapters', () => {
     if (parsed.verdict !== 'parsed') return;
     expect(parsed.set.tool).toBe(tool);
     expect(parsed.set.failures).toHaveLength(count);
+    if (tool === 'knip') {
+      expect(parsed.set.failures).toContainEqual({
+        file: 'src/unused.ts',
+        ruleId: 'enumMembers',
+        message: 'enumMembers: Status.Unused',
+        severity: 'error',
+        line: 10,
+        column: 3,
+      });
+      expect(parsed.set.failures.some((failure) => failure.message === 'exports: unused')).toBe(true);
+    }
     expect(parsed.set.failures[0]?.file).toBe(
       tool === 'ruff' ? '/project/input.py' : 'src/unused.ts',
     );
