@@ -1,8 +1,8 @@
 """Q7 deployment controller characterization: offline fixtures only.
 
 No live systemd, no network, no real deployment. The accepted helper is
-exercised against temporary detached git clones exactly as
-``test_host_config.py`` does; process liveness is faked; units are never
+exercised against temporary detached git clones exactly as the
+``test_host_config_*`` modules do; process liveness is faked; units are never
 started; the controller never signals a process.
 """
 import fcntl
