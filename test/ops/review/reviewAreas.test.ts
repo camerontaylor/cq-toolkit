@@ -1,6 +1,6 @@
+import { createHash } from 'node:crypto';
 import { createAreaReviewPlan } from '../../../src/ops/review/internal/areaReviewPlan.js';
 import { createReviewPlan } from '../../../src/ops/review/internal/reviewPlan.js';
-import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import type { ScanComponentInput } from '../../../src/ops/dev/denylist.js';
 import {
@@ -618,9 +618,17 @@ describe('area review runtime fallback', () => {
       tracked('docs/guide.md'),
     ];
     expect(plan({ components }).areas.some((area) => area.contractsTruncated)).toBe(true);
-    const input = { head: 'head', base: 'base', scope: 'full' as const, components };
+    const input = {
+      head: 'head',
+      base: 'base',
+      scope: 'full' as const,
+      components,
+      session: { maxInputChars: 1_000_000 },
+      size: { medium: { maxChangedLines: 10_000, maxFiles: 100 } },
+    };
     const normal = createReviewPlan(input);
     const result = createAreaReviewPlan(input);
+    expect(result.coverage.mode).not.toBe('partitioned');
     expect(result.sessions).toEqual(normal.sessions);
     expect(result.coverage).toEqual(normal.coverage);
     expect(result.advisories).toContain('area review fallback: contract descriptors truncated');
