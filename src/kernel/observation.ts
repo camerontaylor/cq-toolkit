@@ -25,7 +25,9 @@
 // stream INCOMPLETE: returned as partial evidence, never an invented
 // completion. `foldObservations` resolves each kernel-run-linked event
 // against the kernel v3 headers by workId and planId; unresolvable links
-// stay unknown, never guessed.
+// stay unknown, never guessed. Kernel-run-linked payloads carry the same
+// filesystem-safe id discipline as journal runIds (they become file names
+// at the descriptor read side).
 //
 // Residual: losing a datasync or a directory sync is not detected by any
 // test (a crash-simulation harness cannot observe it without mocking the
@@ -33,12 +35,8 @@
 import { mkdir, open, readFile, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
-import { syncDir } from './journal.js';
-import {
-  ObservationStreamSchema,
-  ObservationEventSchema,
-  RunStartedV3JournalEventSchema,
-} from './schema.js';
+import { assertSafeRunId, openRunLog, syncDir } from './journal.js';
+import { ObservationStreamSchema, ObservationEventSchema } from './schema.js';
 import type {
   KernelRunLinkedJournalEvent,
   ObservationEvent,
@@ -152,8 +150,9 @@ export async function openObservationWriter(
   const streamDir = journalDir === undefined ? null : join(journalDir, 'observations', workId);
   const streamPath = streamDir === null ? null : join(streamDir, `${compositionRunId}.ndjson`);
 
-  // Write chain: serial appends, in call order; a failed write does not
-  // poison the chain (later appends still attempt — and fail-stop below).
+  // Write chain: serial appends, in call order; a failed write fail-stops
+  // the writer (writeFailed is thrown by every later write before touching
+  // the file), but the chain itself never deadlocks.
   let tail: Promise<void> = Promise.resolve();
   let closed = false;
   let handle: Awaited<ReturnType<typeof open>> | null = null;
@@ -173,18 +172,21 @@ export async function openObservationWriter(
     // Exclusive create AT OPEN (P3 ruling): a second writer for the same
     // composition run is refused here, before any event exists.
     await mkdir(streamDir as string, { recursive: true });
-    try {
-      handle = await open(streamPath, 'wx');
-    } catch (err) {
-      writeFailed = err;
-      throw err;
-    }
+    handle = await open(streamPath, 'wx');
     // mkdir -p may have created observations/ and observations/<workId>:
     // make those directory entries durable too (the stream file's whole
-    // directory chain, matching openRunLog's per-creation fsync).
-    await syncDir(streamDir as string);
-    await syncDir(join(journalDir as string, 'observations'));
-    await syncDir(journalDir as string);
+    // directory chain, matching openRunLog's per-creation fsync). A refusal
+    // here (exotic mount) must not leak the open handle: the stream file
+    // exists but the caller sees the error, so close before rethrowing.
+    try {
+      await syncDir(streamDir as string);
+      await syncDir(join(journalDir as string, 'observations'));
+      await syncDir(journalDir as string);
+    } catch (err) {
+      await handle.close();
+      handle = null;
+      throw err;
+    }
   }
 
   const write = async (line: string): Promise<void> => {
@@ -246,10 +248,18 @@ export async function openObservationWriter(
         );
       }
       const line = `${JSON.stringify(parsed)}\n`;
-      accepted.push(parsed);
+      if (streamPath === null) {
+        // Memory-only: accepted[] is the ONLY copy, and nothing below can
+        // fail in this mode — record immediately.
+        accepted.push(parsed);
+      }
       const next = tail.then(() => write(line));
       tail = next.catch(() => undefined);
       await next;
+      // Durable mode: record the event only once its bytes (and the
+      // datasync) succeeded — events() never claims evidence that did not
+      // reach disk.
+      if (streamPath !== null) accepted.push(parsed);
     },
 
     async close(): Promise<void> {
@@ -321,35 +331,51 @@ function observationUuid(value: string): boolean {
   return uuidSchema.safeParse(value).success;
 }
 
-/** Kernel v3 run descriptors a fold resolves links against, read from kernel files. */
+/**
+ * Kernel v3 run descriptors a fold resolves links against, read STRICTLY
+ * through the kernel's own reader (openRunLog().read): a corrupt kernel
+ * file throws — corruption is never folded into descriptors — and each
+ * file's FIRST event must be its run-started header with the file's runId.
+ * A v1/v2-era (or missing) header yields no descriptor: those links stay
+ * unknown with a reason, never guessed.
+ */
 export async function readKernelRunDescriptors(
   journalDir: string,
   runIds: readonly string[],
 ): Promise<KernelRunDescriptor[]> {
   const descriptors: KernelRunDescriptor[] = [];
   for (const runId of runIds) {
-    const path = join(journalDir, `${runId}.ndjson`);
-    let raw: string;
+    // The id becomes a file name under journalDir: the journal's own grammar
+    // guards it (no separators, no traversal) before any read.
+    assertSafeRunId(runId);
+    const runLog = openRunLog(journalDir);
+    let events: Awaited<ReturnType<typeof runLog.read>>;
     try {
-      raw = await readFile(path, 'utf8');
+      events = await runLog.read(runId);
     } catch (err) {
       if (isEnoent(err)) continue; // unknown kernel run: links stay unknown
       throw err;
     }
-    for (const line of raw.split('\n')) {
-      if (!line.trim()) continue;
-      let data: unknown;
-      try {
-        data = JSON.parse(line);
-      } catch {
-        continue; // kernel journal corruption is the kernel reader's domain
-      }
-      const parsed = RunStartedV3JournalEventSchema.safeParse(data);
-      if (parsed.success) {
-        descriptors.push({ runId, planId: parsed.data.planId, header: parsed.data });
-        break; // one header per kernel run
-      }
+    if (events.length === 0) continue; // no evidence yet: unknown, not guessed
+    const first = events[0];
+    if (first?.type !== 'run-started') {
+      throw new Error(
+        `kernel run '${runId}' does not open with its run-started header — ` +
+          'corrupt or forged kernel stream, not evidence',
+      );
     }
+    if (first.runId !== runId) {
+      // Defense in depth: the kernel reader already refuses a line whose
+      // runId differs from the file's run.
+      throw new Error(
+        `kernel run file '${runId}.ndjson' carries header runId '${first.runId}' — ` +
+          'misattributed evidence, refused',
+      );
+    }
+    if (first.journalVersion !== 3) {
+      continue; // v1/v2-era run: no v3 header, so its links stay unknown
+    }
+    descriptors.push({ runId, planId: first.planId, header: first });
   }
   return descriptors;
 }

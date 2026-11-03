@@ -1215,7 +1215,13 @@ export const CompositionStartedJournalEventSchema: z.ZodType<CompositionStartedJ
 
 export const KernelRunLinkedPayloadSchema: z.ZodType<KernelRunLinkedPayload> = z
   .object({
-    kernelRunId: z.string().min(1),
+    // Filesystem-safe: a kernelRunId becomes `<runId>.ndjson` at the
+    // descriptor read side (readKernelRunDescriptors), so the journal's
+    // runId grammar applies here too — no separators, no traversal.
+    kernelRunId: z
+      .string()
+      .min(1)
+      .regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/),
     planId: z.string().min(1),
     round: NonnegativeSafeCountSchema,
   })
@@ -1352,12 +1358,13 @@ export const JournalEventV1V2Schema = z.discriminatedUnion('type', [
  * Observational events never alter reservations, sequence claims or job
  * statuses — see `deriveJobStatuses` and `foldOrderRuns`.
  *
- * T29 ruling: the observational carriers are accepted defensively in v3
- * KERNEL files by this reader — they have NO kernel producer (T29 puts them
- * only in composition streams via src/kernel/observation.ts), so a
- * composition carrier in a kernel file is operator-written evidence at
- * most. Tightening readEvents to refuse them is a separate ticket; the
- * coordinator's T02 open question is settled by this comment.
+ * T29 ruling: observational carriers have NO kernel producer (T29 puts them
+ * only in composition streams via src/kernel/observation.ts). This union
+ * ACCEPTS them defensively — a composition carrier written into a kernel
+ * file must be detected and refused by the kernel's per-file reader, not
+ * silently parsed here; readEvents' per-file version strictness and the
+ * T29 tests pin that refusal. The union stays wide so corruption surfaces
+ * as a loud, classified error at the file level.
  */
 export const JournalEventSchema: z.ZodType<JournalEvent> = z.union([
   JournalEventV1V2Schema,
