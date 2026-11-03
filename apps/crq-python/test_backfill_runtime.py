@@ -229,6 +229,27 @@ class RuntimeTest(unittest.TestCase):
         self.assertGreater(repo.coverage.call_count, calls)
         self.assertEqual(second["state"], "done")
 
+    def test_job_eligible_only_after_the_loop_passed_it_forces_a_full_pass(self):
+        first = copy.deepcopy(self.item); second = copy.deepcopy(self.item); second["id"] += "-mid"
+        self.q["items"] = [first, second]
+        self.q["backfill_usage"] = {"successful": True, "remaining": 1, "observed_at": AT, "reflected_reservations": []}
+        repo = SimpleNamespace(coverage=mock.Mock(return_value=({}, [], [])))
+        publisher = SimpleNamespace(fetch=mock.Mock(return_value=("head", [])))
+        checks = {"n": 0}
+        def eligible(q, item, at):
+            if item["id"] != second["id"]:
+                return True
+            checks["n"] += 1
+            return checks["n"] > 2  # ineligible for pending and the loop; its backoff expires afterwards
+        with mock.patch.object(runtime, "services", return_value=(repo, object(), object(), publisher)), \
+             mock.patch.object(jobs, "eligible", side_effect=eligible):
+            runtime.select(self.c, self.q, [], False, None)
+            self.c._backfill_coverage_cache = None
+            calls = repo.coverage.call_count
+            runtime.select(self.c, self.q, [], False, None)
+        self.assertGreater(repo.coverage.call_count, calls)  # not skipped: the eligible set changed
+        self.assertEqual(second["wait_reason"], "one-slot-reserve")
+
     def test_refusal_keeps_missing_evidence_reason(self):
         job = copy.deepcopy(self.item); self.q["items"] = [job]
         self.q["backfill_usage"] = {"successful": True, "remaining": 1, "observed_at": AT, "reflected_reservations": []}
