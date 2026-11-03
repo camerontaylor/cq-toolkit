@@ -331,7 +331,7 @@ describe('bounded per-fix related mapping', () => {
   const tests = [
     'test/ops/dev/check.test.ts',
     'test/ops/dev/check-affected.test.ts',
-    'test/ops/review/run.test.ts',
+    'test/ops/review/run.deadline.test.ts',
   ];
   it('maps source prefixes and touched tests, deduplicated', () => {
     expect(selectRelatedTests(['src/ops/dev/check.ts', tests[0]!], tests)).toEqual({
