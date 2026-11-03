@@ -578,6 +578,7 @@ function makeReviewCycle(
             state.head,
             scope,
             { ...(signal ? { signal } : {}), remainingWallMs: contextRemaining },
+            state.untracked,
           );
           if (!context.ok) throw new Error(context.reason);
           await refuseDrift('while the review context was read');
