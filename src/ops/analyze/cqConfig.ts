@@ -173,6 +173,7 @@ function schemaReason(error: z.ZodError): string {
 export function parseCqConfig(
   text: string,
   dir = '.',
+  configPath?: string,
 ): { ok: true; config: CqConfig } | { ok: false; reason: string; migrationRequired?: true } {
   let raw: unknown;
   try {
@@ -195,7 +196,7 @@ export function parseCqConfig(
     return {
       ok: false,
       migrationRequired: true,
-      reason: `cq.json schemaVersion 1 is unsupported; run \`cq analyze.init --migrate --dir='${dir.replace(/'/g, "'\\''")}'\` to upgrade to schemaVersion 2`,
+      reason: `cq.json schemaVersion 1 is unsupported; run \`cq analyze.init --migrate --dir='${dir.replace(/'/g, "'\\''")}'${configPath === undefined ? '' : ` --configPath='${configPath.replace(/'/g, "'\\''")}'`}\` to upgrade to schemaVersion 2`,
     };
   }
   const parsed = CqConfigSchema.safeParse(raw);

@@ -60,6 +60,10 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
       },
       "type": "object"
     },
+    "configPath": {
+      "minLength": 1,
+      "type": "string"
+    },
     "dir": {
       "minLength": 1,
       "type": "string"

@@ -380,9 +380,25 @@ export const AnalyzeInitInputSchema: z.ZodType<AnalyzeInitInput> = CqConfigSchem
   .extend({
     dir: z.string().min(1),
     force: z.boolean().exactOptional(),
+    configPath: z.string().min(1).exactOptional(),
     migrate: z.boolean().exactOptional(),
   })
-  .strict();
+  .strict()
+  .superRefine((input, ctx) => {
+    const {
+      dir: _dir,
+      force: _force,
+      migrate: _migrate,
+      configPath: _configPath,
+      ...policy
+    } = input;
+    if (input.migrate === true && Object.keys(policy).length > 0) {
+      ctx.addIssue({
+        code: 'custom',
+        message: `--migrate cannot be combined with policy options: ${Object.keys(policy).sort().join(', ')}`,
+      });
+    }
+  });
 
 /** Explicit op checks contain only the checkRunner dispatch fields. */
 const ChecksSchema: z.ZodType<CheckRunnerInput[]> = z.array(CheckRunnerInputSchema).min(1);
