@@ -37,7 +37,7 @@ function fixedTask(overrides: {
     outcome: overrides.outcome ?? 'fixed',
     branch: 'cq/fix/a',
     commits: overrides.commits ?? ['good'],
-    validation: overrides.validation ?? passing,
+    validation: 'validation' in overrides ? (overrides.validation as ValidationVerdict) : passing,
   };
 }
 
@@ -130,13 +130,22 @@ describe('verifiedClosuresOf', () => {
     expect(baseline[2]?.count).toBeNull();
     const bailedMetric = measureRun([fixedTask({})], ['unit-a', 'unit-b'], probes, messageOf);
     expect(bailedMetric.fixesPerRun.denominator).toBeNull();
-    expect(bailedMetric.availability['/metric/fixesPerRun/denominator']?.state).toBe('unavailable');
+    expect(bailedMetric.availability['/metric/fixesPerRun/denominator']?.state).toBe(
+      'not-collected',
+    );
     expect(bailedMetric.availability['/metric/baselineFailures/1/count']?.state).toBe(
-      'unavailable',
+      'not-collected',
     );
   });
 
   it('T34 failure boundary', () => {
+    // The validation-absent branch is its own case: a fixed task with no
+    // validation record contributes no closure at all, distinct from the
+    // failing and needs-human verdict rows used below.
+    expect(verifiedClosuresOf([fixedTask({ validation: undefined })], messageOf)).toEqual({
+      closures: [],
+      unknownTrailerShas: [],
+    });
     // Escalated outcome, missing validation, non-passing validation and an
     // unknown message each independently block the numerator, and the todo
     // exclusion applies per commit, not per task. Prose and subject TODO
@@ -153,7 +162,7 @@ describe('verifiedClosuresOf', () => {
     // The unknown-sha candidate makes the numerator genuinely unknown even
     // though 'good' itself is verified; the denominator is a known zero.
     expect(metric.fixesPerRun).toEqual({ numerator: null, denominator: 0 });
-    expect(metric.verifiedCommits).toEqual(['good', 'proseTodo']);
+    expect(metric.verifiedCommits).toEqual(['proseTodo', 'good']);
     expect(metric.closures.filter((c) => c.todo).map((c) => c.commitSha)).toEqual(['todoPadded']);
     expect(metric.availability['/metric/fixesPerRun/numerator']?.state).toBe('unavailable');
 

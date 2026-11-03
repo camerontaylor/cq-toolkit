@@ -15,8 +15,12 @@ const TODO_KEY = 'cq-todo';
  * scanned; the subject and prose are never treated as intent signals.
  */
 export function isTodoCommitMessage(message: string): boolean {
-  const trailerBlock = message.trimEnd().split('\n\n').pop() ?? '';
-  for (const line of trailerBlock.split('\n')) {
+  const trailerBlock =
+    message
+      .trimEnd()
+      .split(/\r?\n\r?\n/)
+      .pop() ?? '';
+  for (const line of trailerBlock.split(/\r?\n/)) {
     const separator = line.indexOf(':');
     if (separator === -1) continue;
     if (line.slice(0, separator).trim().toLowerCase() !== TODO_KEY) continue;
@@ -47,6 +51,10 @@ export function verifiedClosuresOf(
   for (const task of tasks) {
     if (task.outcome !== 'fixed' || task.validation?.verdict !== 'pass') continue;
     for (const commitSha of task.commits) {
+      // A validated fix must reference its task; the Cq-Task link is
+      // verified against the task's own id, never trusted blind.
+      if (!task.task.id) continue;
+      if (commitSha === '') continue;
       const message = readCommitMessage(commitSha);
       if (message === undefined) {
         if (!unknownTrailerShas.includes(commitSha)) unknownTrailerShas.push(commitSha);
@@ -128,7 +136,7 @@ export function measureRun(
     '/metric/fixesPerRun/denominator': denominatorKnown
       ? { state: 'known', reason: 'summed from completed unit baseline probes', source: null }
       : {
-          state: 'unavailable',
+          state: 'not-collected',
           reason: 'a planned unit has no completed baseline probe',
           source: null,
         },
@@ -136,7 +144,7 @@ export function measureRun(
   baselineFailures.forEach((row, i) => {
     if (row.count === null)
       availability[`/metric/baselineFailures/${i}/count`] = {
-        state: 'unavailable',
+        state: 'not-collected',
         reason: row.unknownReason ?? 'baseline count unknown',
         source: null,
       };
