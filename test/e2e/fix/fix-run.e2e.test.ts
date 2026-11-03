@@ -185,6 +185,61 @@ const input = (f: Awaited<ReturnType<typeof fixture>>) => ({
 const reportOf = (result: Awaited<ReturnType<ReturnType<typeof makeFixRun>>>) =>
   result.status === 'ok' ? result.value : (result.report as FixRunReport);
 
+test('offline install supplies a dependency needed by the isolated check', async () => {
+  const f = await fixture();
+  try {
+    const script = join(f.repo, 'scripts', 'tests.cjs');
+    await writeFile(
+      script,
+      "require('../installed-dependency.cjs');\n" + (await readFile(script, 'utf8')),
+    );
+    await writeFile(join(f.repo, '.gitignore'), 'worktrees/\ninstalled-dependency.cjs\n');
+    await git(f.repo, 'add', '-A');
+    await git(f.repo, 'commit', '-m', 'require offline installed dependency');
+    const missing = await makeFixRun({ drivers: scripted() })({
+      ...input(f),
+      runPrefix: 'cq/no-install',
+    });
+    expect(missing.status).not.toBe('ok');
+    expect(reportOf(missing).fixesPerRun).toBe(0);
+    const installed = await makeFixRun({ drivers: scripted() })({
+      ...input(f),
+      runPrefix: 'cq/with-install',
+      install: {
+        command: process.execPath,
+        args: [
+          '-e',
+          "require('node:fs').writeFileSync('installed-dependency.cjs', 'module.exports = true;')",
+        ],
+      },
+    });
+    expect(installed.status, JSON.stringify(installed)).toBe('ok');
+    expect(reportOf(installed).fixesPerRun).toBe(2);
+    const sourceDependency = join(f.repo, 'installed-dependency.cjs');
+    await expect(readFile(sourceDependency, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+  } finally {
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
+
+test.each(['v1.0', 'feature/unfetched'])(
+  'PR refusal identifies explicit unavailable base %s',
+  async (base) => {
+    const f = await fixture();
+    try {
+      const result = await makeFixRun({ drivers: scripted() })({ ...input(f), pr: true, base });
+      expect(result.status).toBe('needs-human');
+      if (result.status === 'needs-human') {
+        expect(result.reason).toContain(JSON.stringify(base));
+        expect(result.reason).toContain('branch on origin');
+        expect(result.reason).not.toContain('set base explicitly');
+      }
+    } finally {
+      await rm(f.root, { recursive: true, force: true });
+    }
+  },
+);
+
 test('spawned static CLI clusters real tsc diagnostics and commits each gated file-rule fix', async () => {
   const f = await fixture(1000, false);
   try {

@@ -589,7 +589,9 @@ export function makeFixRun(deps: FixRunDeps = {}) {
       if (input.pr && prBase === undefined)
         return await finish(
           'needs-human',
-          'PR publication requires a usable remote base branch; set base explicitly',
+          input.base === undefined || input.base === 'HEAD'
+            ? 'PR publication requires a usable remote base branch; set base explicitly'
+            : `PR publication requires base to name a branch on origin (got ${JSON.stringify(input.base)})`,
         );
       const config = {
         repoRoot,
