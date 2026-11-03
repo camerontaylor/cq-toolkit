@@ -161,10 +161,25 @@ def select(c, queue, log, dry, only):
     items = [j for j in queue["items"] if j.get("kind") == jobs.KIND and (not only or only == j["id"])]
     items.sort(key=lambda j: (j["tier_importance"], j.get("retry", False), j["subject_kind"],
                              j.get("row") or 0 if j["subject_kind"] == "A" else -j["score"], j["subject_id"]))
+    pending = [j for j in items if jobs.eligible(queue, j, c.iso())]
+    if not pending:
+        return None, False
+    # Coverage costs minutes of CPU on a large queue. Every gate refusal is
+    # item-independent, so ask the gate first and skip coverage when it says no.
+    if not rank4_gate(c, queue, pending[0], dry=True):
+        for item in pending:
+            item["wait_reason"] = pending[0]["wait_reason"]
+        return None, True
     repo, store, outbox, publisher = services(c, config)
     # New publication may remove eligibility without moving the job's T.
     head, events = publisher.fetch()
-    coverage_by_target = {}
+    # Within one runner process, coverage for an unchanged ledger head is reused,
+    # so an admission loop calling select again does not repeat it.
+    cache = getattr(c, "_backfill_coverage_cache", None)
+    if not cache or cache["head"] != head:
+        cache = {"head": head, "by_target": {}}
+        setattr(c, "_backfill_coverage_cache", cache)
+    coverage_by_target = cache["by_target"]
     def coverage_for(target):
         if target not in coverage_by_target:
             coverage_by_target[target] = repo.coverage(target, events, store)

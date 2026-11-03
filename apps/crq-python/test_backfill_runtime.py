@@ -176,6 +176,9 @@ class RuntimeTest(unittest.TestCase):
             self.assertEqual(runtime.select(self.c, self.q, [], False, None), (None, True))
         self.assertEqual(len(self.q["backfill_admissions"]), 1)
         self.assertEqual({job["wait_reason"] for job in items}, {"one-slot-reserve"})
+        # The refusal is known before the ledger fetch and the per-target coverage.
+        publisher.fetch.assert_not_called()
+        repo.coverage.assert_not_called()
 
     def test_select_reuses_coverage_only_within_one_ledger_snapshot(self):
         first = copy.deepcopy(self.item)
@@ -183,11 +186,14 @@ class RuntimeTest(unittest.TestCase):
         third = copy.deepcopy(self.item); third["id"] += "-third"; third["target"] = "c" * 40
         self.q["items"] = [first, second, third]
         repo = SimpleNamespace(coverage=mock.Mock(return_value=({}, [], [])))
-        publisher = SimpleNamespace(fetch=mock.Mock(side_effect=[("head1", ["first"]), ("head2", ["second"])]))
+        publisher = SimpleNamespace(fetch=mock.Mock(side_effect=[("head1", ["first"]), ("head1", ["first"]), ("head2", ["second"])]))
+        # The cheap pre-coverage gate passes; the post-coverage gate refuses.
         with mock.patch.object(runtime, "services", return_value=(repo, object(), object(), publisher)), \
              mock.patch.object(jobs, "eligible", return_value=True), \
-             mock.patch.object(runtime, "rank4_gate", return_value=False):
+             mock.patch.object(runtime, "rank4_gate", side_effect=lambda c, q, item, dry=False: dry):
             runtime.select(self.c, self.q, [], False, None)
+            self.assertEqual(repo.coverage.call_count, 2)
+            runtime.select(self.c, self.q, [], False, None)  # same head: an admission loop's next pass reuses it
             self.assertEqual(repo.coverage.call_count, 2)
             runtime.select(self.c, self.q, [], False, None)
         self.assertEqual(repo.coverage.call_count, 4)
