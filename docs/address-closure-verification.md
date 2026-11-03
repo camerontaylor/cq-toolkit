@@ -160,7 +160,7 @@ details are preserved. Diagnostic failure cannot establish closure.
 
 ## Testing
 
-`test/ops/review/addressVerification.test.ts` covers the mandated fixtures:
+`test/ops/review/addressVerification.*.test.ts` covers the mandated fixtures:
 omitted consumer/dependency attestation, deleted trigger surviving in after
 content, in a cited consumer and in a cited dependency, a valid fix
 resolving, deletion-only never closing, missing citable trigger, unpinned
