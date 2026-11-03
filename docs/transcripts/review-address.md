@@ -749,9 +749,10 @@ consumers of the former optional `rounds[].run` must iterate `rounds[].runs`.
 does not consume per-round runs.
 
 `review.address` uses a six-hour default wall guard when no run wall is
-configured. Fix dispatch still respects an explicit run/input wall. Each
-final re-review (and its one transient retry) is offered a separate six-hour
+configured. Fix dispatch still respects an explicit run/input wall. The
+final re-review, including its one transient retry, uses a separate six-hour
 runaway guard, even after the fixing wall is spent. `review.run` also defaults
 to six hours; an explicitly configured run wall still caps each review. Cancellation, token and
-integrity stops still bind; the report retains an exhausted fixing budget.
+integrity stops still bind. A spent fixing wall does not invalidate a
+completed re-review.
 No time calibration or re-review reserve is used.

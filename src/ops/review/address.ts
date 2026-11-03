@@ -608,10 +608,17 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
         report.usage.cacheWrite -
         (report.usage.reasoning ?? 0);
       const remainingWallMs = () => cap - (Date.now() - start);
-      const stop = (checkWall = true) => {
+      let reviewDeadline: number | undefined;
+      const beginReview = () => {
+        reviewDeadline = Date.now() + reviewWallMs;
+      };
+      const stop = () => {
         if (parent?.aborted) return 'parent cancelled';
         if (bookkeepingTampered) return 'engine bookkeeping changed; worker tree is dirty';
-        if (remainingTokens() <= 0 || (checkWall && remainingWallMs() <= 0)) {
+        if (
+          remainingTokens() <= 0 ||
+          (reviewDeadline === undefined ? remainingWallMs() : reviewDeadline - Date.now()) <= 0
+        ) {
           budgetSpent = true;
           return 'token or wall budget exhausted';
         }
@@ -965,7 +972,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
               if (
                 first.status !== 'needs-human' ||
                 first.report?.blockedTransient !== true ||
-                stop(false)
+                stop()
               )
                 return first;
               report.reasons.push('re-review blocked on a network/transient class; retrying once');
@@ -1818,6 +1825,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
               };
             }
             for (let round = 1; round <= policy.review.rounds; round++) {
+              reviewDeadline = undefined;
               const stopped = stop();
               if (stopped) return await finish('needs-human', stopped);
               if (prMetadata) {
@@ -2158,7 +2166,8 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                   { ...threads, findings: report.findings },
                   policy.review.blockingSeverities,
                 );
-                if (stop(false)) return await finish('needs-human', stop(false));
+                beginReview();
+                if (stop()) return await finish('needs-human', stop());
                 const priorFindings = priorRoundFindings(previous, [
                   ...threads.findings,
                   ...[...fixesById.values()].map((fix) => fix.finding),
@@ -2270,7 +2279,8 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
               }
               const unresolved = await dispatchFindings(root, previous, round);
               await publishOnExit();
-              if (stop(false)) return await finish('needs-human', stop(false));
+              beginReview();
+              if (stop()) return await finish('needs-human', stop());
               if (unresolved) return await finish('needs-human', unresolved);
               const priorFindings = priorRoundFindings(previous);
               const refreshed = await review({
