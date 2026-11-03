@@ -57,16 +57,22 @@ export const MAX_SANITIZED_CHARS = 64 * 1024;
  *
  * Deliberate over-matching: a bare `name@host` in free text (an email
  * address, or a package spec like `vitest@5.0.0` that happens to end in a
- * colon-terminated token) is also stripped, because a credential prefix is
+ * colon-terminated token, `@types/node@22`, `@scope/pkg@1.2.3`, or
+ * `image@sha256:…`) is also stripped, because a credential prefix is
  * indistinguishable from these without scheme context and the sanitizer fails
  * closed. Credential leakage is worse than a mangled spec string.
  */
 function stripCredentialText(text: string): string {
-  // Each whitespace-delimited run is visited a constant number of times.
-  // URL authorities deliberately include punctuation and quotes: these may be
-  // password bytes. Query/fragment tails end only at whitespace, quotes or >.
-  // Scheme-less queries are not stripped (prose ? and # must survive).
   const chunks: string[] = [];
+  // Free-text runs deliberately fail closed even for a dangling @ or an
+  // unusual host initial. Keep only opening boundary punctuation and the tail.
+  const freeText = (run: string): string => {
+    const at = run.lastIndexOf('@');
+    if (at < 0) return run;
+    let prefix = 0;
+    while (prefix < at && '\'"([{=,;'.includes(run[prefix] ?? '')) prefix++;
+    return run.slice(0, prefix) + run.slice(at + 1);
+  };
   let i = 0;
   while (i < text.length) {
     if (/\s/.test(text[i] ?? '')) {
@@ -77,49 +83,78 @@ function stripCredentialText(text: string): string {
     const start = i;
     while (i < text.length && !/\s/.test(text[i] ?? '')) i++;
     const run = text.slice(start, i);
-    const marker = run.indexOf('://');
-    let schemeStart = marker;
-    while (schemeStart > 0 && /[a-z0-9+.-]/i.test(run[schemeStart - 1] ?? '')) {
-      schemeStart--;
+    // Discover all schemes in one forward pass. Never search the remaining
+    // suffix again for each URL (many adjacent URLs must also stay linear).
+    const schemes: Array<{ start: number; authority: number }> = [];
+    let wordStart = 0;
+    for (let j = 0; j < run.length; j++) {
+      const ch = run[j] ?? '';
+      if (
+        ch === ':' &&
+        run[j + 1] === '/' &&
+        run[j + 2] === '/' &&
+        j > wordStart &&
+        /[a-z]/i.test(run[wordStart] ?? '')
+      ) {
+        schemes.push({ start: wordStart, authority: j + 3 });
+        j += 2;
+        wordStart = j + 1;
+      } else if (!/[a-z0-9+.-]/i.test(ch)) {
+        wordStart = j + 1;
+      }
     }
-    if (marker >= 0 && /[a-z]/i.test(run[schemeStart] ?? '')) {
-      const authorityStart = marker + 3;
-      let authorityEnd = authorityStart;
-      while (authorityEnd < run.length && !'/?#'.includes(run[authorityEnd] ?? '')) {
+    let cursor = 0;
+    let droppingQuery = false;
+    for (let k = 0; k < schemes.length; k++) {
+      const scheme = schemes[k];
+      if (scheme === undefined) continue;
+      const limit = schemes[k + 1]?.start ?? run.length;
+      if (droppingQuery) {
+        let close = scheme.start;
+        while (close < limit && !'\'">'.includes(run[close] ?? '')) close++;
+        if (close < limit) {
+          chunks.push(freeText(run.slice(close, limit)));
+          droppingQuery = false;
+        }
+        cursor = limit;
+        continue;
+      }
+      chunks.push(freeText(run.slice(cursor, scheme.start)));
+      const token = run.slice(scheme.authority, limit);
+      let authorityEnd = 0;
+      while (authorityEnd < token.length && !'/?#'.includes(token[authorityEnd] ?? ''))
         authorityEnd++;
-      }
       let end = authorityEnd;
-      while (end < run.length && !'?#'.includes(run[end] ?? '')) end++;
+      while (end < token.length && !'?#'.includes(token[end] ?? '')) end++;
       let tailEnd = end;
-      if (end < run.length) {
+      if (end < token.length) {
         tailEnd++;
-        while (tailEnd < run.length && !'\'">'.includes(run[tailEnd] ?? '')) tailEnd++;
+        while (tailEnd < token.length && !'\'">'.includes(token[tailEnd] ?? '')) tailEnd++;
       }
-      // Malformed credentials containing / are also failed closed: the last
-      // @ before the query cannot leave a password prefix in a path.
-      const at = run.lastIndexOf('@', end - 1);
-      const authority = run.slice(authorityStart, authorityEnd);
-      const incomplete = i < text.length && at < authorityStart && authority.includes(':');
-      chunks.push(
-        run.slice(0, authorityStart) +
-          (incomplete ? '' : run.slice(at >= authorityStart ? at + 1 : authorityStart, end)) +
-          (run[tailEnd] ?? ''),
-      );
-      // Fail closed for adjacent text after the closing quote in this run.
-    } else {
-      // Maximal runs, never retry a match at each possible credential start.
-      // Preserve an opening boundary, then cut everything through the last @.
-      const at = run.lastIndexOf('@');
-      const host = run[at + 1] ?? '';
-      if (at >= 0 && /[a-z0-9_[.-]/i.test(host)) {
-        let prefix = 0;
-        while (prefix < at && '\'"([{=,;'.includes(run[prefix] ?? '')) prefix++;
-        chunks.push(run.slice(0, prefix) + run.slice(at + 1));
-      } else {
-        chunks.push(run);
-      }
+      const at = token.lastIndexOf('@', end - 1);
+      const authority = token.slice(0, authorityEnd);
+      const hostPort = /^(\[[^\]]*\]|[^:@]+):\d+$/.test(authority);
+      const incomplete = i < text.length && at < 0 && authority.includes(':') && !hostPort;
+      chunks.push(run.slice(scheme.start, scheme.authority));
+      chunks.push(incomplete ? '' : token.slice(at >= 0 ? at + 1 : 0, end));
+      chunks.push(freeText(token.slice(tailEnd)));
+      droppingQuery = end < token.length && tailEnd === token.length;
+      cursor = limit;
+    }
+    if (schemes.length === 0) {
+      // A newline can split user:token before @. Drop the first half too.
+      let next = i;
+      while (next < text.length && /\s/.test(text[next] ?? '')) next++;
+      const nextStart = next;
+      while (next < text.length && !/\s/.test(text[next] ?? '')) next++;
+      const splitCredential =
+        text.slice(i, nextStart).includes('\n') &&
+        run.includes(':') &&
+        text.slice(nextStart, next).includes('@');
+      chunks.push(splitCredential ? '' : freeText(run));
     }
   }
+  // Scheme-less queries are not stripped: prose ? and # must survive.
   return chunks.join('');
 }
 

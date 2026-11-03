@@ -82,6 +82,46 @@ describe('sanitizeObservation', () => {
     expect(sanitizeObservation(input)).toEqual(expected);
   });
 
+  it.each([
+    ['{"auth":"user:tok@h","remote":"https://h/x"}', 'user:tok', 'https://h/x'],
+    ['user:tok@host,https://example.com/x', 'user:tok', 'https://example.com/x'],
+    ['token:SECRET@h;see=https://x.example/y', 'SECRET', 'https://x.example/y'],
+    ['pass=hunter2@https://h/x', 'hunter2', 'https://h/x'],
+  ])('sanitizes the prefix before a URL: %s', (input, secret, url) => {
+    const out = sanitizeObservation(input);
+    expect(out).not.toContain(secret);
+    expect(out).toContain(url);
+  });
+
+  it.each(['127.0.0.1:8080', 'localhost:3000', 'github.com:443', '[::1]:8080'])(
+    'preserves host:port followed by whitespace: %s',
+    (authority) => {
+      const input = `http://${authority} retrying`;
+      expect(sanitizeObservation(input)).toEqual(input);
+    },
+  );
+
+  it.each([
+    ['https://h/x?token=https://SECRET', 'https://h/x'],
+    ['u:p@ host', ' host'],
+    ['u:p@"host"', '"host"'],
+    ['password hunter2@ end', 'password  end'],
+    ['user:to\nken@host', '\nhost'],
+    ['(u:p@host)', '(host)'],
+    ['password hunter2@!x', 'password !x'],
+    ['https://h/x?q=1"user:tok@host', 'https://h/x"host'],
+    ['https://u:p@one/x?q=1"https://a:b@two/y?token=X', 'https://one/x"https://two/y'],
+  ])('fails closed on split and unusual credential shapes: %s', (input, expected) => {
+    expect(sanitizeObservation(input)).toEqual(expected);
+  });
+
+  it('bounds many adjacent URLs in a single run', () => {
+    const start = Date.now();
+    const out = sanitizeObservation('https://u:p@h/x?q=x"'.repeat(10_000));
+    expect(out).not.toContain('u:p');
+    expect(Date.now() - start).toBeLessThan(5000);
+  });
+
   it('requires post-strip redaction for a newly exposed URL secret', () => {
     process.env.ZZ_HOOK_URL = 'https://hooks.example/svc/p';
     try {
