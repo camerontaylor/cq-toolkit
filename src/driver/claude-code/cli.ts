@@ -199,7 +199,7 @@ import { SessionStore, tempWorkspace } from '../../harness/session.js';
 import type { SessionMessage, SessionRecord } from '../../harness/session.js';
 import { stripMetaSchema } from '../../shared/json-schema.js';
 import { boundedErrorText, describeError, redactSensitiveText } from '../error-text.js';
-import { DispatchError } from '../errors.js';
+import { SessionBoundError, DispatchError } from '../errors.js';
 import { assertStrictTokenBudgetSupported } from '../common/strict-budget.js';
 import { boundWorkspacePath, resumedRecordOrThrow } from '../common/workspace.js';
 import { compileOutputSchema, uncompilableSchemaVerdict } from '../common/structured.js';
@@ -386,6 +386,22 @@ export class ClaudeCodeCliTransport implements Driver {
 
   /** The frozen seam (v2): run one invocation to completion. */
   async run(opInvocation: OpInvocation, options?: RunOptions): Promise<WorkerResult> {
+    let sessionId: string | undefined;
+    try {
+      return await this.runWithSessionId(opInvocation, options, (id) => {
+        sessionId = id;
+      });
+    } catch (error) {
+      if (sessionId !== undefined) throw new SessionBoundError(error, sessionId);
+      throw error;
+    }
+  }
+
+  private async runWithSessionId(
+    opInvocation: OpInvocation,
+    options: RunOptions | undefined,
+    onSessionCreated: (sessionId: string) => void,
+  ): Promise<WorkerResult> {
     const { prompt, modelSpec, toolPolicy, sandboxPolicy, sessionRef, budget } = opInvocation;
 
     // --- Governed cancellation + strict-budget honesty, ENTRY checks (I8):
@@ -465,6 +481,7 @@ export class ClaudeCodeCliTransport implements Driver {
             boundWorkspace ?? (await tempWorkspace(this.harnessConfig.workspaceRoot)),
           )
         : await resumedRecordOrThrow(store, sessionRef, boundWorkspace, 'claude-code driver');
+    onSessionCreated(record.sessionId);
     const workspace = record.workspace;
 
     await store.appendMessage(record.sessionId, { role: 'user', content: prompt, at: nowIso() });

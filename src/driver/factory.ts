@@ -387,23 +387,37 @@ function constructLane(lane: LaneId, request: DriverRequest, config: DriverFacto
  * after creating its fresh record leaves that record behind — a rejection
  * carries no sessionId, and any non-run-specific ownership mechanism (a
  * directory-wide delta) would endanger concurrent runs sharing the dir.
- * Orphaned-record cleanup for rejected runs belongs to per-run session
- * scoping (W1.5 territory), not to a shared-dir heuristic here. Cleanup is
+ * Rejected runs expose their own created session id; cleanup never scans a
+ * shared directory or guesses ownership. Cleanup is
  * best-effort: a reap failure is swallowed, the verdict outranks it (the
  * same posture as the lanes' persistence).
  */
 export function withReapOnSettle(driver: Driver, sessionsDir: string): Driver {
   return {
     async run(invocation, options): Promise<WorkerResult> {
-      const result = await driver.run(invocation, options);
-      if (invocation.sessionRef === undefined && result.sessionId !== undefined) {
-        try {
-          await new SessionStore(sessionsDir).remove(result.sessionId);
-        } catch {
-          // deliberately swallowed — the verdict outranks the cleanup
+      let sessionId: string | undefined;
+      try {
+        const result = await driver.run(invocation, options);
+        sessionId = result.sessionId;
+        return result;
+      } catch (error) {
+        if (
+          typeof error === 'object' &&
+          error !== null &&
+          'sessionId' in error &&
+          typeof error.sessionId === 'string'
+        )
+          sessionId = error.sessionId;
+        throw error;
+      } finally {
+        if (invocation.sessionRef === undefined && sessionId !== undefined) {
+          try {
+            await new SessionStore(sessionsDir).remove(sessionId);
+          } catch {
+            // deliberately swallowed — the verdict or original error outranks cleanup
+          }
         }
       }
-      return result;
     },
   };
 }
