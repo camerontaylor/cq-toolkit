@@ -1,4 +1,5 @@
 """End-to-end offline scheduler, vendor artifact harvest and remote publication."""
+import collections
 import copy
 from pathlib import Path
 import subprocess
@@ -163,77 +164,90 @@ class RuntimeTest(unittest.TestCase):
         self.assertTrue(runtime.rank4_gate(self.c, self.q, self.item, dry=True))
         self.c.refresh_backfill_usage.assert_called_once_with(self.q)
 
+    def refresh_snapshots(self):
+        """What crq-publisher does off-lock before selection can admit."""
+        import backfill_coverage
+        self.c.load_queue = lambda: self.q
+        _, _, _, reader = runtime.services(self.c, self.config)
+        backfill_coverage.request(self.state, reader.fetch()[0], [self.t])
+        return backfill_coverage.run(self.c)
+
+    def snapshots(self, value=({}, [])):
+        """Patch the snapshot reader; selection never runs coverage itself."""
+        load = mock.Mock(return_value=value)
+        patcher = mock.patch.object(runtime.coverage, "load", load)
+        patcher.start(); self.addCleanup(patcher.stop)
+        return load
+
     def test_select_records_one_refusal_for_all_pending_jobs(self):
         items = []
         for n in range(4):
             job = copy.deepcopy(self.item); job["id"] += "-" + str(n); items.append(job)
         self.q["items"] = items
         self.q["backfill_usage"] = {"successful": True, "remaining": 1, "observed_at": AT, "reflected_reservations": []}
-        repo = SimpleNamespace(coverage=mock.Mock(return_value=({}, [], [])))
+        load = self.snapshots()
         publisher = SimpleNamespace(fetch=mock.Mock(return_value=("head", [])))
-        with mock.patch.object(runtime, "services", return_value=(repo, object(), object(), publisher)), \
+        with mock.patch.object(runtime, "services", return_value=(None, object(), object(), publisher)), \
              mock.patch.object(jobs, "eligible", return_value=True):
             self.assertEqual(runtime.select(self.c, self.q, [], False, None), (None, True))
         self.assertEqual(len(self.q["backfill_admissions"]), 1)
         self.assertEqual({job["wait_reason"] for job in items}, {"one-slot-reserve"})
-        self.assertEqual(repo.coverage.call_count, 1)  # first pass reconciles the one shared target
-        with mock.patch.object(runtime, "services", return_value=(repo, object(), object(), publisher)), \
+        self.assertEqual(load.call_count, 1)  # first pass reads the one shared target once
+        with mock.patch.object(runtime, "services", return_value=(None, object(), object(), publisher)), \
              mock.patch.object(jobs, "eligible", return_value=True):
             self.assertEqual(runtime.select(self.c, self.q, [], False, None), (None, True))
-        # Same head and job set: a refusal skips coverage entirely.
-        self.assertEqual(repo.coverage.call_count, 1)
+        # Same head and job set: a refusal skips the snapshot pass entirely.
+        self.assertEqual(load.call_count, 1)
         self.assertEqual(len(self.q["backfill_admissions"]), 2)
 
     def test_refusal_still_marks_jobs_done_when_ledger_head_or_jobs_change(self):
         job = copy.deepcopy(self.item); self.q["items"] = [job]
         self.q["backfill_usage"] = {"successful": True, "remaining": 1, "observed_at": AT, "reflected_reservations": []}
-        repo = SimpleNamespace(coverage=mock.Mock(return_value=({}, [], [])))
+        load = self.snapshots()
         publisher = SimpleNamespace(fetch=mock.Mock(return_value=("head1", [])))
-        with mock.patch.object(runtime, "services", return_value=(repo, object(), object(), publisher)), \
+        with mock.patch.object(runtime, "services", return_value=(None, object(), object(), publisher)), \
              mock.patch.object(jobs, "eligible", side_effect=lambda q, item, at: item["state"] == "pending"):
             runtime.select(self.c, self.q, [], False, None)
             self.assertEqual(job["state"], "pending")
             full = {r["path"]: ledger.intervals(r["intervals"]) for r in job["scope"]}
-            repo.coverage.return_value = (full, [], [])
+            load.return_value = (full, [])
             publisher.fetch.return_value = ("head2", [])  # publication covered the job
             self.assertEqual(runtime.select(self.c, self.q, [], False, None), (None, False))
             self.assertEqual(job["state"], "done")
             added = copy.deepcopy(self.item); added["id"] += "-added"; self.q["items"].append(added)
             runtime.select(self.c, self.q, [], False, None)  # a new job is reconciled under the same head
             self.assertEqual(added["state"], "done")
-            calls = repo.coverage.call_count
-            self.c._backfill_coverage_cache = None  # a later process: the shortcut, not the cache, skips coverage
+            calls = load.call_count
             # Nothing dispatchable remains: an unchanged refusal pass reports no candidate.
             self.assertEqual(runtime.select(self.c, self.q, [], False, None), (None, False))
-            self.assertEqual(repo.coverage.call_count, calls)
+            self.assertEqual(load.call_count, calls)
 
     def test_refusal_reconciles_when_a_job_becomes_eligible_and_ignores_selective_starts(self):
         first = copy.deepcopy(self.item); second = copy.deepcopy(self.item); second["id"] += "-later"
         self.q["items"] = [first, second]
         self.q["backfill_usage"] = {"successful": True, "remaining": 1, "observed_at": AT, "reflected_reservations": []}
-        repo = SimpleNamespace(coverage=mock.Mock(return_value=({}, [], [])))
+        load = self.snapshots()
         publisher = SimpleNamespace(fetch=mock.Mock(return_value=("head", [])))
         backoff = {second["id"]}
-        with mock.patch.object(runtime, "services", return_value=(repo, object(), object(), publisher)), \
+        with mock.patch.object(runtime, "services", return_value=(None, object(), object(), publisher)), \
              mock.patch.object(jobs, "eligible", side_effect=lambda q, item, at: item["state"] == "pending" and item["id"] not in backoff):
             runtime.select(self.c, self.q, [], False, None)
             recorded = self.q["backfill_coverage_reconciled"]
             runtime.select(self.c, self.q, [], False, first["id"])  # selective start: record untouched
             self.assertEqual(self.q["backfill_coverage_reconciled"], recorded)
-            calls = repo.coverage.call_count
+            calls = load.call_count
             backoff.clear()  # the backoff expired under the same head and job set
             full = {r["path"]: ledger.intervals(r["intervals"]) for r in second["scope"]}
-            repo.coverage.return_value = (full, [], [])
-            self.c._backfill_coverage_cache = None
+            load.return_value = (full, [])
             runtime.select(self.c, self.q, [], False, None)
-        self.assertGreater(repo.coverage.call_count, calls)
+        self.assertGreater(load.call_count, calls)
         self.assertEqual(second["state"], "done")
 
     def test_job_eligible_only_after_the_loop_passed_it_forces_a_full_pass(self):
         first = copy.deepcopy(self.item); second = copy.deepcopy(self.item); second["id"] += "-mid"
         self.q["items"] = [first, second]
         self.q["backfill_usage"] = {"successful": True, "remaining": 1, "observed_at": AT, "reflected_reservations": []}
-        repo = SimpleNamespace(coverage=mock.Mock(return_value=({}, [], [])))
+        load = self.snapshots()
         publisher = SimpleNamespace(fetch=mock.Mock(return_value=("head", [])))
         checks = {"n": 0}
         def eligible(q, item, at):
@@ -241,58 +255,190 @@ class RuntimeTest(unittest.TestCase):
                 return True
             checks["n"] += 1
             return checks["n"] > 2  # ineligible for pending and the loop; its backoff expires afterwards
-        with mock.patch.object(runtime, "services", return_value=(repo, object(), object(), publisher)), \
+        with mock.patch.object(runtime, "services", return_value=(None, object(), object(), publisher)), \
              mock.patch.object(jobs, "eligible", side_effect=eligible):
             runtime.select(self.c, self.q, [], False, None)
-            self.c._backfill_coverage_cache = None
-            calls = repo.coverage.call_count
+            calls = load.call_count
             runtime.select(self.c, self.q, [], False, None)
-        self.assertGreater(repo.coverage.call_count, calls)  # not skipped: the eligible set changed
+        self.assertGreater(load.call_count, calls)  # not skipped: the eligible set changed
         self.assertEqual(second["wait_reason"], "one-slot-reserve")
 
     def test_refusal_keeps_missing_evidence_reason(self):
         job = copy.deepcopy(self.item); self.q["items"] = [job]
         self.q["backfill_usage"] = {"successful": True, "remaining": 1, "observed_at": AT, "reflected_reservations": []}
-        repo = SimpleNamespace(coverage=mock.Mock(return_value=({}, [], ["gap"])))
+        load = self.snapshots(({}, ["gap"]))
         publisher = SimpleNamespace(fetch=mock.Mock(return_value=("head", [])))
-        with mock.patch.object(runtime, "services", return_value=(repo, object(), object(), publisher)), \
+        with mock.patch.object(runtime, "services", return_value=(None, object(), object(), publisher)), \
              mock.patch.object(jobs, "eligible", return_value=True):
             self.assertEqual(runtime.select(self.c, self.q, [], False, None), (None, False))
             self.assertEqual(runtime.select(self.c, self.q, [], False, None), (None, False))
         self.assertEqual(job["wait_reason"], runtime.MISSING_EVIDENCE)
-        self.assertEqual(repo.coverage.call_count, 1)
+        # A gap is retried off-lock: each pass re-reads the snapshot and re-requests.
+        self.assertEqual(load.call_count, 2)
+        self.assertNotIn("backfill_coverage_reconciled", self.q)
+        request = ledger.loads((self.state / runtime.coverage.REQUEST).read_bytes())
+        self.assertEqual(request["targets"], [self.t])
+
+    def test_transient_gap_is_requested_retried_off_lock_and_then_admits(self):
+        from test_backfill_coverage import FakeRepo, event
+        import backfill_coverage
+        self.q["items"] = [self.item]
+        self.q["backfill_usage"] = {"successful": True, "remaining": 5, "observed_at": AT, "reflected_reservations": []}
+        events = [event("r1", True)]
+        publisher = SimpleNamespace(fetch=mock.Mock(return_value=("head", events)))
+        self.c.launch = mock.Mock(return_value="vendor-1", side_effect=lambda q, item, plan: item.update(state="reviewing") or "vendor-1")
+        _, store, outbox, _ = runtime.services(self.c, self.config)  # admission spools a real state event
+        with mock.patch.object(backfill_coverage.ledger, "creditable", side_effect=lambda v: v.get("review", False)), \
+             mock.patch.object(backfill_coverage.ledger, "validate_sequence", return_value={}):
+            backfill_coverage.refresh(self.state, FakeRepo(fail={"r1"}), None, events, {self.t})
+            with mock.patch.object(runtime, "services", return_value=(None, store, outbox, publisher)), \
+                 mock.patch.object(jobs, "eligible", side_effect=lambda q, item, at: item["state"] == "pending"):
+                self.assertEqual(runtime.select(self.c, self.q, [], True, None), (None, False))  # dry run
+                self.assertFalse((self.state / backfill_coverage.REQUEST).exists())
+                self.assertEqual(runtime.select(self.c, self.q, [], False, None), (None, False))
+                self.assertEqual(self.item["wait_reason"], runtime.MISSING_EVIDENCE)
+                self.assertTrue((self.state / backfill_coverage.REQUEST).exists())
+                # The off-lock refresher retries only the gap review; it now succeeds.
+                repo = FakeRepo()
+                self.assertEqual(backfill_coverage.refresh(self.state, repo, None, events, {self.t}), {self.t: "extended"})
+                self.assertEqual(repo.folded, [(self.t, "r1")])
+                self.assertEqual(runtime.select(self.c, self.q, [], False, None), ("vendor-1", True))
+        self.c.launch.assert_called_once()
+
+    def test_publisher_journals_publication_when_the_refresh_fails(self):
+        import backfill_coverage
+        import backfill_publisher
+        with mock.patch.object(backfill_publisher, "run", return_value={"publication": "idle"}), \
+             mock.patch.object(backfill_coverage, "run", side_effect=OSError("snapshot volume full")):
+            result = backfill_publisher.main(self.c)
+        self.assertEqual(result, {"publication": "idle", "coverage": "failed: snapshot volume full"})
+        self.assertTrue(backfill_publisher.coverage_failed(result))
+        self.assertTrue(backfill_publisher.coverage_failed({"coverage": {"targets": {self.t: "error: boom"}}}))
+        self.assertFalse(backfill_publisher.coverage_failed({"coverage": {"targets": {self.t: "unchanged"}}}))
+        self.assertFalse(backfill_publisher.coverage_failed({"coverage": "idle"}))
+
+    def test_launch_still_requests_targets_seen_stale_earlier_in_the_pass(self):
+        stale = copy.deepcopy(self.item); stale["id"] += "-stale"; stale["target"] = "c" * 40
+        stale["score"] = self.item["score"] + 1  # higher score sorts before the launchable job
+        self.q["items"] = [stale, self.item]
+        self.q["backfill_usage"] = {"successful": True, "remaining": 5, "observed_at": AT, "reflected_reservations": []}
+        load = self.snapshots()
+        load.side_effect = lambda state, target, events, digests=None: None if target == "c" * 40 else ({}, [])
+        _, store, outbox, _ = runtime.services(self.c, self.config)
+        publisher = SimpleNamespace(fetch=mock.Mock(return_value=("head", [])))
+        self.c.launch = mock.Mock(side_effect=lambda q, item, plan: item.update(state="reviewing") or "vendor-1")
+        with mock.patch.object(runtime, "services", return_value=(None, store, outbox, publisher)), \
+             mock.patch.object(jobs, "eligible", side_effect=lambda q, item, at: item["state"] == "pending"):
+            self.assertEqual(runtime.select(self.c, self.q, [], False, None), ("vendor-1", True))
+        self.assertEqual(stale["wait_reason"], runtime.COVERAGE_PENDING)
+        request = ledger.loads((self.state / runtime.coverage.REQUEST).read_bytes())
+        self.assertEqual(request["targets"], ["c" * 40])
+        # A marker write failure after the bound launch is logged, never raised.
+        stale.update(state="pending"); self.item.update(state="pending"); self.item.pop("run", None)
+        log = []
+        with mock.patch.object(runtime, "services", return_value=(None, store, outbox, publisher)), \
+             mock.patch.object(jobs, "eligible", side_effect=lambda q, item, at: item["state"] == "pending"), \
+             mock.patch.object(jobs, "bind_run"), \
+             mock.patch.object(runtime.coverage, "request", side_effect=OSError("no space left")):
+            self.assertEqual(runtime.select(self.c, self.q, log, False, None), ("vendor-1", True))
+        self.assertIn("coverage refresh request not written: no space left", log)
+
+    def test_refresher_adds_requested_targets_and_keeps_a_request_written_meanwhile(self):
+        import backfill_coverage
+        self.c.load_queue = lambda: {"items": []}  # the unlocked read predates the enqueue
+        backfill_coverage.request(self.state, "head", [self.t])
+        marker = self.state / backfill_coverage.REQUEST
+        def refresh(state, repo, store, events, targets, keep=()):
+            self.assertEqual(targets, {self.t})
+            self.assertEqual(set(keep), set())  # no live job: nothing protected from pruning
+            backfill_coverage.request(self.state, "newer", [self.t])  # a pass during the refresh
+            return {self.t: "full"}
+        with mock.patch.object(backfill_coverage, "refresh", side_effect=refresh):
+            self.assertEqual(backfill_coverage.run(self.c)["targets"], {self.t: "full"})
+        self.assertEqual(ledger.loads(marker.read_bytes())["head"], "newer")
+        # A changed snapshot wakes the next one-minute slot, as a harvest does.
+        self.assertEqual((self.state / "next-review-at").read_text().strip(), AT)
+        (self.state / "next-review-at").unlink()
+        with mock.patch.object(backfill_coverage, "refresh", return_value={self.t: "unchanged"}):
+            backfill_coverage.run(self.c)  # the next run consumes the surviving request
+        self.assertFalse(marker.exists())
+        self.assertFalse((self.state / "next-review-at").exists())  # nothing changed: no wake
+        self.assertEqual(backfill_coverage.run(self.c), "idle")
 
     def test_open_gate_dry_run_admits_without_reserving(self):
         self.q["items"] = [self.item]
         self.q["backfill_usage"] = {"successful": True, "remaining": 5, "observed_at": AT, "reflected_reservations": []}
-        repo = SimpleNamespace(coverage=mock.Mock(return_value=({}, [], [])))
+        self.snapshots()
         publisher = SimpleNamespace(fetch=mock.Mock(return_value=("head", [])))
         log = []
-        with mock.patch.object(runtime, "services", return_value=(repo, object(), object(), publisher)), \
+        with mock.patch.object(runtime, "services", return_value=(None, object(), object(), publisher)), \
              mock.patch.object(jobs, "eligible", return_value=True):
             self.assertEqual(runtime.select(self.c, self.q, log, True, None), (None, True))
         self.assertEqual(log, ["DRY-RUN would admit " + self.item["id"]])
         self.assertEqual([row["decision"] for row in self.q["backfill_admissions"]], ["admit", "admit"])
         self.assertFalse(self.q.get("backfill_reservations"))
 
-    def test_select_reuses_coverage_only_within_one_ledger_snapshot(self):
+    def test_stale_snapshot_waits_requests_refresh_and_records_no_reconciliation(self):
         first = copy.deepcopy(self.item)
-        second = copy.deepcopy(self.item); second["id"] += "-second"
-        third = copy.deepcopy(self.item); third["id"] += "-third"; third["target"] = "c" * 40
-        self.q["items"] = [first, second, third]
-        repo = SimpleNamespace(coverage=mock.Mock(return_value=({}, [], [])))
-        publisher = SimpleNamespace(fetch=mock.Mock(side_effect=[("head1", ["first"]), ("head1", ["first"]), ("head2", ["second"])]))
-        # The cheap pre-coverage gate passes; the post-coverage gate refuses.
-        with mock.patch.object(runtime, "services", return_value=(repo, object(), object(), publisher)), \
-             mock.patch.object(jobs, "eligible", return_value=True), \
-             mock.patch.object(runtime, "rank4_gate", side_effect=lambda c, q, item, dry=False: dry):
-            runtime.select(self.c, self.q, [], False, None)
-            self.assertEqual(repo.coverage.call_count, 2)
-            runtime.select(self.c, self.q, [], False, None)  # same head: an admission loop's next pass reuses it
-            self.assertEqual(repo.coverage.call_count, 2)
-            runtime.select(self.c, self.q, [], False, None)
-        self.assertEqual(repo.coverage.call_count, 4)
-        self.assertEqual([call.args[1] for call in repo.coverage.call_args_list], [["first"], ["first"], ["second"], ["second"]])
+        other = copy.deepcopy(self.item); other["id"] += "-other"; other["target"] = "c" * 40
+        self.q["items"] = [first, other]
+        self.q["backfill_usage"] = {"successful": True, "remaining": 5, "observed_at": AT, "reflected_reservations": []}
+        self.snapshots(None)
+        self.c.launch = mock.Mock()
+        publisher = SimpleNamespace(fetch=mock.Mock(return_value=("head1", [])))
+        with mock.patch.object(runtime, "services", return_value=(None, object(), object(), publisher)), \
+             mock.patch.object(jobs, "eligible", return_value=True):
+            self.assertEqual(runtime.select(self.c, self.q, [], False, None), (None, False))
+        self.c.launch.assert_not_called()
+        self.assertEqual({first["wait_reason"], other["wait_reason"]}, {runtime.COVERAGE_PENDING})
+        self.assertNotIn("backfill_coverage_reconciled", self.q)
+        request = ledger.loads((self.state / runtime.coverage.REQUEST).read_bytes())
+        self.assertEqual(request, {"head": "head1", "targets": sorted({self.t, "c" * 40})})
+
+    def test_fresh_slot_passes_never_compute_coverage_under_lock_across_head_moves(self):
+        """Regression (crq-runner/20261103-5): every one-minute crq_slot process
+        recomputed backfill coverage under tick.lock whenever the ledger head
+        moved, overrunning its 10 min timeout and starving ticks."""
+        import backfill_coverage
+        import backfill_publisher
+        self.q["items"] = [self.item]
+        self.c.load_queue = lambda: self.q
+        self.c.with_lock = lambda fn, **kwargs: fn()
+        runtime.usage_context(self.c, self.q, {"remaining": 2}, [])
+        self.q["backfill_starts_at_observation"] = 0
+        def launch(queue, item, plan):
+            item.update(state="reviewing", run={"run_id": "vendor-1", "started_at": AT})
+            queue["starts"].append(AT)
+            return "vendor-1"
+        under_lock = mock.patch.multiple(runtime.accounting.Repository,
+                                         coverage=mock.Mock(side_effect=AssertionError("coverage under tick.lock")),
+                                         fold=mock.Mock(side_effect=AssertionError("coverage under tick.lock")))
+        def fresh():  # one crq_slot process: no state beyond the queue and disk
+            return SimpleNamespace(**{k: v for k, v in vars(self.c).items() if not k.startswith("_")}, launch=launch)
+        with under_lock:
+            self.assertEqual(runtime.select(fresh(), self.q, [], False, None), (None, False))
+        self.assertEqual(self.item["wait_reason"], runtime.COVERAGE_PENDING)
+        # Off-lock refresher (crq-publisher) answers the request with one full pass.
+        self.assertEqual(backfill_publisher.main(self.c)["coverage"]["targets"], {self.t: "full"})
+        self.assertFalse((self.state / backfill_coverage.REQUEST).exists())
+        (self.state / "next-review-at").unlink()  # the cold refresh woke the slot
+        # The ledger head moves (a state event is published); no review was appended.
+        def root_publish(base, head, bundle):
+            filename = self.root / "submission.bundle"
+            filename.write_bytes(bundle)
+            self.f.git("bundle", "unbundle", str(filename))
+            self.f.git("push", "origin", head + ":refs/heads/cq/review-ledger")
+        self.c.SPOOL.publish_ledger = root_publish
+        _, _, _, publisher = runtime.services(self.c, self.config)
+        before, _ = publisher.fetch()
+        runtime.state_event(self.c, self.q, self.item, AT, "fixture head move")
+        moved = backfill_publisher.main(self.c)
+        self.assertNotEqual(moved["ledger_head"], before)
+        self.assertEqual(moved["coverage"]["targets"], {self.t: "unchanged"})  # state event: no new credit
+        self.assertFalse((self.state / "next-review-at").exists())  # so no wake either
+        self.item.pop("wait_reason", None)
+        with under_lock:  # a second fresh process at the moved head admits from the snapshot
+            self.assertEqual(runtime.select(fresh(), self.q, [], False, None), ("vendor-1", True))
 
     def test_acknowledged_state_event_replay_preserves_identity_after_queue_cache_loss(self):
         runtime.state_event(self.c, self.q, self.item, AT, "created")
@@ -432,6 +578,7 @@ class RuntimeTest(unittest.TestCase):
             queue["starts"].append(AT)
             return "vendor-1"
         self.c.launch = launch
+        self.assertEqual(self.refresh_snapshots()["targets"], {self.t: "full"})
         started, available = runtime.select(self.c, self.q, [], False, None)
         self.assertEqual(started, "vendor-1"); self.assertTrue(available)
         # The real gate sequence: a non-reserving pre-coverage check, then one reservation.
@@ -470,6 +617,15 @@ class RuntimeTest(unittest.TestCase):
         covered, evidence, gaps = repo.coverage(self.t, records, store)
         self.assertEqual(covered, {"a": {1, 2}}); self.assertFalse(gaps)
         self.assertEqual(len(launches), 1)
+        # One refresh over several targets restores/verifies each review once.
+        later = self.f.commit({"b": b"unrelated\n"})
+        repo.immutable_cache = {}
+        with mock.patch.object(repo, "restore", wraps=repo.restore) as restore:
+            for target in (self.t, later):
+                folded = collections.defaultdict(set)
+                repo.fold(target, records, store, folded, collections.defaultdict(list), [])
+        self.assertEqual(restore.call_count, 1)
+        self.assertEqual(dict(folded), {"a": {1, 2}})  # carried to the later target
 
     def test_publication_error_after_bound_launch_remains_harvestable(self):
         runtime.usage_context(self.c, self.q, {"remaining": 2}, [])
@@ -481,6 +637,7 @@ class RuntimeTest(unittest.TestCase):
             queue["starts"].append(AT)
             return "vendor-1"
         self.c.launch = launch
+        self.refresh_snapshots()
         original_event = runtime.state_event
         def failing_event(c, queue, item, at, reason):
             if reason == "vendor identity bound":
@@ -506,6 +663,7 @@ class RuntimeTest(unittest.TestCase):
         runtime.usage_context(self.c, self.q, {"remaining": 2}, [])
         self.q["backfill_starts_at_observation"] = 0
         self.c.launch = mock.Mock(side_effect=OSError("launch outcome unknown"))
+        self.refresh_snapshots()
         with self.assertRaisesRegex(OSError, "launch outcome unknown"):
             runtime.select(self.c, self.q, [], False, None)
         self.assertEqual(self.item["state"], "launch-unknown")

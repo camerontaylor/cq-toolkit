@@ -219,8 +219,13 @@ def main():
     import crq
     try:
         if args.command == "publish":
-            from backfill_publisher import run
-            result = run(crq)
+            # The same worker entry as crq-publisher.service: publication, then
+            # the off-lock coverage snapshot refresh selection reads.
+            from backfill_publisher import coverage_failed, main as publish
+            result = publish(crq)
+            if coverage_failed(result):
+                print(json.dumps(result, sort_keys=True))
+                raise SystemExit(1)  # same as crq-publisher.service
         else:
             result = (inventory_unlocked(crq, args) if args.command == "inventory"
                       else crq.with_lock(execute, crq, args, lock_wait=30))
