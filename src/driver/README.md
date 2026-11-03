@@ -91,7 +91,8 @@ Constructor options:
   `run()` time over { anthropic, openai, zai, deepseek } with API keys read
   from the environment AT CALL TIME (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
   `ZAI_API_KEY`, `DEEPSEEK_API_KEY`); unknown provider or missing key
-  throws BEFORE dispatch. The `zai` handle defaults to the GLM Coding
+  throws BEFORE dispatch. DeepSeek is an optional local route; CI does not
+  provision its key. The `zai` handle defaults to the GLM Coding
   Plan's OpenAI-compatible endpoint
   (`https://api.z.ai/api/coding/paas/v4` — the plan-funded wire;
   `ZAI_BASE_URL` overrides, e.g. for the pay-as-you-go

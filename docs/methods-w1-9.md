@@ -9,6 +9,10 @@ posture key `CQ_MERGE_PROTECTED_PATHS` selects what needs a human. The `cq-overr
 is evaluated and logged in the run report, but it stays dormant until the ADR-0004 D-H.3 C3
 attestation is on the trust ref.
 
+Current development posture is `advisory`: non-lint policy findings are reported
+without blocking. Lint regressions still fail. The `human` and `diff-check`
+postures described below are historical; see [current policy](promotion-policy.md).
+
 ## Sources and composition
 
 - **Taxonomy (#220, W1.8).** `src/ops/gates/protectedPaths.ts` is the one protected-path list.

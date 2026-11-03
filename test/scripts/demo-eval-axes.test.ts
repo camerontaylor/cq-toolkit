@@ -65,17 +65,16 @@ function runDemo(args: string[], keys: Record<string, string> = {}): SpawnSyncRe
 const CELLS = [
   { lane: 'ai-sdk', provider: 'zai', model: 'ai-sdk/glm-5.3-flash' },
   { lane: 'ai-sdk', provider: 'deepseek', model: 'deepseek-chat' },
-  { lane: 'claude-agent', provider: 'zai', model: 'ai-sdk/glm-5.3-flash' },
-  { lane: 'subprocess', provider: 'zai', model: 'ai-sdk/glm-5.3-flash' },
+  { lane: 'claude-code', provider: 'zai', model: 'ai-sdk/glm-5.3-flash' },
 ];
 
 describe('eval-axes-select module: --only selection and the credential gate (pure, dist-free)', () => {
-  it('selectCells returns all 4 cells with no --only', () => {
+  it('selectCells returns all 3 cells with no --only', () => {
     expect(selectCells(CELLS, ['node', 'scripts/demo-eval-axes.mjs'])).toEqual(CELLS);
   });
 
   it('selectCells filters by substring', () => {
-    expect(selectCells(CELLS, ['node', 'x', '--only', 'ai-sdk/glm-5.3-flash'])).toHaveLength(3);
+    expect(selectCells(CELLS, ['node', 'x', '--only', 'ai-sdk/glm-5.3-flash'])).toHaveLength(2);
     expect(selectCells(CELLS, ['node', 'x', '--only', 'deepseek'])).toHaveLength(1);
   });
 

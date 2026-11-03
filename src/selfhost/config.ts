@@ -349,6 +349,13 @@ export function driverKeyEnv(driver: ModelSpec): string | undefined {
   }
 }
 
+/** Required route and credential variables; undefined means an unknown provider. */
+export function driverRequiredEnv(driver: ModelSpec): string[] | undefined {
+  const key = driverKeyEnv(driver);
+  if (key === undefined) return undefined;
+  return driver.provider === 'opencode-go' ? [key, 'OPENCODE_GO_BASE_URL'] : [key];
+}
+
 /**
  * The default journal root for a checkout: `<repoRoot>/.selfhost/journal` —
  * where the entry modules put per-run journals, dispatch logs, the worktree

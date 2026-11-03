@@ -442,3 +442,18 @@ describe('install-ripgrep action version validation', () => {
     }
   });
 });
+
+// The manual merge drill must parse even with an empty TEST_FILTER (#482).
+describe('live merge drill shell', () => {
+  it.each(['policy/templates/live-merge.yml', '.github/workflows/live-merge.yml'])(
+    '%s has a parseable drill script',
+    (file) => {
+      const text = readFileSync(join(ROOT, file), 'utf8');
+      const script = text.slice(text.indexOf('          if [ -n "${TEST_FILTER}"'));
+      expect(script).toContain('case "${TEST_FILTER}"');
+      const result = spawnSync('bash', ['-n'], { input: script, encoding: 'utf8' });
+      expect(result.stderr).toBe('');
+      expect(result.status).toBe(0);
+    },
+  );
+});

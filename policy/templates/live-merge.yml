@@ -10,7 +10,7 @@
 #
 # WHAT A DISPATCH DOES: builds a fresh 3-PR stack in a private scratch repo
 # (`cq-scratch-f5-p3f-<run>`) with one seeded conflict, resolves it through
-# the REAL SubprocessDriver via a scripted union agent, and asserts the
+# the REAL ClaudeCodeDriver via a scripted union agent, and asserts the
 # whole stack landed via merge commits only — no squash, no force. The
 # scratch repo is LEFT IN PLACE by design (the run token has no
 # delete_repo scope); docs/drills/2026-09-f5.md records past runs and the
@@ -120,7 +120,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ -n "${TEST_FILTER}" ]; then
-            case "${TEST_FILTER}" in *[!A-Za-z0-9_ .-]*) echo "TEST_FILTER contains disallowed characters" >&2; exit 2;; esac
+            case "${TEST_FILTER}" in *[!A-Za-z0-9_\ .-]*) echo "TEST_FILTER contains disallowed characters" >&2; exit 2;; esac
             pnpm exec vitest run test/e2e/merge/live.test.ts -t "${TEST_FILTER}"
           else
             pnpm exec vitest run test/e2e/merge/live.test.ts

@@ -3,7 +3,7 @@
 // moved the process-ladder and CLI-schema helpers to src/shared/{proc,
 // json-schema}.ts, the harness depends only on shared and contracts: it must
 // never reach into the driver tree again — while the REVERSE edge (driver →
-// harness, e.g. src/driver/subprocess/index.ts importing the harness surface)
+// harness, e.g. src/driver/claude-code/index.ts importing the harness surface)
 // stays legal. The scoping (src/harness/**) and the ERROR severity live in
 // .oxlintrc.json (the rule is registered under the "cq" plugin).
 //

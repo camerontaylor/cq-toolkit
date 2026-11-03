@@ -59,7 +59,8 @@ review loop refuses, `self-merge-prs` skips, `sync-merge-queue` refuses and
 Automation run note (T4.5): the scheduled `self-review-loop` and
 `self-merge-prs` runs currently exit red at their `GH_TOKEN` assert —
 `secrets.GH_TOKEN` is not configured on this repository (the configured
-secrets are `DEEPSEEK_API_KEY`, `PROMOTE_TOKEN`, `Z_AI_API_KEY`). The run log
+secrets were `DEEPSEEK_API_KEY`, `PROMOTE_TOKEN`, `Z_AI_API_KEY`;
+`DEEPSEEK_API_KEY` was subsequently deleted and is not needed by CI). The run log
 records the honest outcome (`GH_TOKEN not set`) rather than a silent stall,
 but a red run is not processing: no PR was classified, replied to, resolved,
 or merged by the automations. Every PR in the window was merged by the lane
@@ -176,7 +177,7 @@ Environments (each: custom branch policy, exactly `main`):
 | `cq-verdict` | `cq-policy` judge, `cq-verify` judge, `cq-accept` judge, `settings-drift`                                    | `CQ_VERDICT_APP_KEY` [`CQ_SETTINGS_TOKEN`]                                  |
 | `promote`    | `cq-gate` decide                                                                                             | `CQ_PROMOTER_APP_KEY` [`PROMOTE_TOKEN`]                                     |
 | `automation` | `self-merge-prs`, `self-review-loop` (privileged), `sync-merge-queue`, `init-merge-queue`, `ratchet-propose` | `CQ_AUTOMATION_APP_KEY`, `Z_AI_API_KEY` [`CQ_AUTOMATION_TOKEN`, `GH_TOKEN`] |
-| `drill`      | `live-review`, `live-merge`, `live-drivers`                                                                  | `Z_AI_API_KEY`, `DEEPSEEK_API_KEY`                                          |
+| `drill`      | `live-review`, `live-merge`, `live-drivers`                                                                  | `Z_AI_API_KEY`, `OPENCODE_GO_API_KEY`                                       |
 
 Only `drill` may have the owner as a required reviewer. The target state has
 no repository-level secrets. The `live-merge` and `live-review` drills remain disabled at C3; their App identity is deferred until after C3. Their PAT names are not allowed in `drill`.

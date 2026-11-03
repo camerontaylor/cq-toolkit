@@ -365,7 +365,7 @@ This section replaces ADR-0001's served-model rule.
 
 Every op that runs a driver maps throws and `error` verdicts this way. The table deliberately **preserves existing
 statuses** wherever behaviour was already defined. Class-aware retry is a runner policy (ADR-0003,
-[src/kernel/rescue.ts](../../src/kernel/rescue.ts)) fed by the structured class on `reservation-settled` (§2.7), not
+[src/kernel/rescue.ts](https://github.com/camerontaylor/cq-toolkit/blob/bf0682f7/src/kernel/rescue.ts)) fed by the structured class on `reservation-settled` (§2.7), not
 an op-status relabel.
 
 | Driver outcome                                                                                                                       | `OpResult.status` | Notes                                                                                                                                                                 |

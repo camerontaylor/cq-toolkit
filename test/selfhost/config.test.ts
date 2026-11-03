@@ -21,6 +21,7 @@
 import { describe, expect, test } from 'vitest';
 import {
   driverKeyEnv,
+  driverRequiredEnv,
   isSelfhostPeak,
   isSelfhostPeakHeadroom,
   parseSelfhostArgs,
@@ -140,6 +141,15 @@ describe('SelfhostPeak + the peak-aware driver resolution', () => {
     expect(resolveSelfhostDriver(at('2026-10-17T07:00:00Z'))).toEqual(SelfhostDefaults.driver);
     // The entry tests' fixture clock (Tue 2023-11-14T22:13:20Z) is off-peak.
     expect(resolveSelfhostDriver(1_700_000_000_000)).toEqual(SelfhostDefaults.driver);
+  });
+
+  test('driverRequiredEnv includes the Go route and refuses unknown providers', () => {
+    expect(driverRequiredEnv({ provider: 'opencode-go', model: 'x' })).toEqual([
+      'OPENCODE_GO_API_KEY',
+      'OPENCODE_GO_BASE_URL',
+    ]);
+    expect(driverRequiredEnv({ provider: 'zai', model: 'x' })).toEqual(['ZAI_API_KEY']);
+    expect(driverRequiredEnv({ provider: 'unknown', model: 'x' })).toBeUndefined();
   });
 
   test('driverKeyEnv: each provider handle maps to the env the ai-sdk lane reads', () => {

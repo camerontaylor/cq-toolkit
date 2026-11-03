@@ -2,7 +2,7 @@
 // gated e2e of the shipped review loop). Everything here is FIXTURE
 // machinery for test/e2e/review/live.test.ts: a scratch GitHub repo seeded
 // through the real `gh` CLI, the fake fixer agent the driver factory's
-// subprocess lane spawns as `node <script>` (ADR-0002 §2.5), and a
+// claude-code lane spawns as `node <script>` (ADR-0002 §2.5), and a
 // recording gh proxy for the run-2 zero-mutation assertion. Inert at
 // import: no I/O and no env reads at module scope — the live test only
 // calls into this module from inside its LIVE_GH-gated beforeAll.
@@ -33,7 +33,7 @@ export const REVIEWER_ROLE_SIMULATED = true;
 /** Host env var the fixture routing table names as the fake endpoint's key. */
 export const FIXTURE_KEY_ENV = 'E5_FIXTURE_FAKE_KEY';
 
-/** The routing endpoint the fake agent's SubprocessDriver resolves (provider handle). */
+/** The routing endpoint the fake agent's ClaudeCodeDriver resolves (provider handle). */
 export const FIXTURE_ENDPOINT = 'e5-fake-fixer';
 
 /** The model id on the fixture endpoint's allowlist (never served — no endpoint is contacted). */
@@ -446,7 +446,7 @@ export async function setupScratchRepo(opts: { runId: string }): Promise<LiveScr
 
 /**
  * Write the fake fixer agent (an executable node script) into `root` and
- * return its path. Spawned by the driver factory's subprocess lane as
+ * return its path. Spawned by the driver factory's claude-code lane as
  * `node <path>` with cwd = the PR worktree (the invocation's workspace
  * binding) and the fixer prompt on STDIN (buildArgs `-p` print mode — the
  * prompt rides stdin, not argv). It performs the fix IN ITS CWD: rewrites
@@ -516,7 +516,7 @@ emit('fixed', '${FAKE_SUMMARY}', [sha]);
 }
 
 /**
- * The fixture routing table for the fake agent's SubprocessDriver: routing
+ * The fixture routing table for the fake agent's ClaudeCodeDriver: routing
  * is pre-dispatch validation only here — the child is `node <script>`, no
  * endpoint is contacted, but routeFor must resolve and the route's key env
  * var ({@link FIXTURE_KEY_ENV}) must be set (the live test's beforeAll sets
