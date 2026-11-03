@@ -35,6 +35,7 @@ import finding_issues
 import deferred_refresh
 import merged_reconcile
 import push_current
+import pr_enroll
 import repo_registry
 import usage_slots
 import backfill_runtime
@@ -402,9 +403,10 @@ def denylist_rules(classes: Optional[frozenset] = None) -> List[Dict[str, str]]:
     return rules
 
 
-def secret_scan(base: str, head: str, out: Path, *, classes: Optional[frozenset] = None) -> Tuple[bool, Dict[str, Any]]:
+def secret_scan(base: str, head: str, out: Path, *, classes: Optional[frozenset] = None,
+                clone: Optional[Path] = None) -> Tuple[bool, Dict[str, Any]]:
     """Scan added AND removed lines of base..head. Never records matched content."""
-    diff = git("diff", "--no-color", "--no-ext-diff", "--unified=0", base, head)
+    diff = git("diff", "--no-color", "--no-ext-diff", "--unified=0", base, head, cwd=clone)
     return secret_scan_diff(diff, out, base=base, head=head, classes=classes)
 
 
@@ -617,8 +619,8 @@ def findings_md(ndjson: Path, meta: Dict[str, Any], cls: Dict[str, Any]) -> str:
 # ----------------------------------------------------------- PR info / activity
 
 
-def pr_info(pr: int) -> Dict[str, Any]:
-    return gh_json(["pr", "view", str(pr), "--repo", REPO, "--json",
+def pr_info(pr: int, repo: Optional[str] = None) -> Dict[str, Any]:
+    return gh_json(["pr", "view", str(pr), "--repo", repo or REPO, "--json",
                     "number,state,isDraft,headRefName,headRefOid,baseRefName,updatedAt,mergeCommit,mergedAt"])
 
 
@@ -755,7 +757,12 @@ def active_agents_for(pr: int, branch: str) -> Optional[List[str]]:
 
 
 def quiet_reason(item: Dict[str, Any], info: Dict[str, Any], ignore_age: bool = False) -> Optional[str]:
-    """Return why the PR head is not quiet enough to review (None = quiet)."""
+    """Return why the PR head is not quiet enough to review (None = quiet).
+
+    A foreign repo's head is read in that repo's own clone (docs/multi-repo.md);
+    the primary repo keeps today's clone."""
+    cfg = repo_registry.by_repo(REPOS, item_repo(item))
+    clone = Path(cfg["clone"]) if cfg else None
     branch = info["headRefName"]
     act = active_agents_for(item["pr"], branch)
     if act is None:
@@ -767,7 +774,7 @@ def quiet_reason(item: Dict[str, Any], info: Dict[str, Any], ignore_age: bool = 
     ours = (item.get("last_push") or {}).get("sha") == info["headRefOid"]
     if ours:
         return None  # head is our own addressing push and nobody else is running on it
-    ct = int(git("log", "-1", "--format=%ct", info["headRefOid"]))
+    ct = int(git("log", "-1", "--format=%ct", info["headRefOid"], cwd=clone))
     last = max(ct, parse_iso(info["updatedAt"]).timestamp())
     age = (time.time() - last) / 60
     if age < CONFIG["quiet_minutes"]:
@@ -1703,8 +1710,12 @@ def plan_open(item: Dict[str, Any], info: Dict[str, Any], dry: bool) -> Dict[str
     if info["isDraft"]:
         raise NotReady("PR is draft")
     head = info["headRefOid"]
-    target = f"origin/{info['baseRefName']}"
-    pin = git("merge-base", target, head)
+    # A foreign repo's item plans in that repo's clone against its configured
+    # default branch (docs/multi-repo.md); the primary repo keeps today's path.
+    cfg = repo_registry.by_repo(REPOS, item_repo(item))
+    clone = Path(cfg["clone"]) if cfg else None
+    target = f"origin/{cfg['default_branch']}" if cfg else f"origin/{info['baseRefName']}"
+    pin = git("merge-base", target, head, cwd=clone)
     notes = []
     for record in item.get("cycles", []):
         if (record.get("base") == pin and record.get("head") == head and
@@ -1726,12 +1737,12 @@ class NothingToReview(Exception):
     pass
 
 
-def ensure_commit(pr: int, sha: str) -> bool:
+def ensure_commit(pr: int, sha: str, *, clone: Optional[Path] = None) -> bool:
     """Merged/force-pushed heads may be gone from branch refs; fetch the PR ref."""
     def have() -> bool:
-        return run(["git", "cat-file", "-e", f"{sha}^{{commit}}"], cwd=CLONE, check=False).returncode == 0
+        return run(["git", "cat-file", "-e", f"{sha}^{{commit}}"], cwd=clone or CLONE, check=False).returncode == 0
     if not have():
-        git("fetch", "--quiet", "origin", f"+refs/pull/{pr}/head:refs/remotes/pr/{pr}", check=False)
+        git("fetch", "--quiet", "origin", f"+refs/pull/{pr}/head:refs/remotes/pr/{pr}", check=False, cwd=clone)
     return have()
 
 
@@ -1740,10 +1751,15 @@ def plan_delta(item: Dict[str, Any], info: Dict[str, Any], dry: bool) -> Dict[st
     if info["state"] not in ("OPEN", "MERGED"):
         raise NotReady(f"PR is {info['state']}")
     head = info["headRefOid"]
-    if not ensure_commit(item["pr"], head):
+    cfg = repo_registry.by_repo(REPOS, item_repo(item))
+    clone = Path(cfg["clone"]) if cfg else None
+    if not ensure_commit(item["pr"], head, clone=clone):
         raise NotReady("source head unavailable")
-    target = f"{info['mergeCommit']['oid']}^1" if info["state"] == "MERGED" else f"origin/{info['baseRefName']}"
-    pin = git("merge-base", target, head)
+    if info["state"] == "MERGED":
+        target = f"{info['mergeCommit']['oid']}^1"
+    else:
+        target = f"origin/{cfg['default_branch']}" if cfg else f"origin/{info['baseRefName']}"
+    pin = git("merge-base", target, head, cwd=clone)
     for record in item.get("cycles", []):
         if (record.get("base") == pin and record.get("head") == head and
                 record.get("range_policy") == "full-range-once-v1" and record.get("run_id")):
@@ -1833,13 +1849,24 @@ def launch(q: Dict[str, Any], item: Dict[str, Any], plan: Dict[str, Any]) -> str
         # Universal secret shapes plus this repo's configured extra classes;
         # the primary repo's publish classes stay out of foreign scans.
         scan_classes = UNIVERSAL_SCAN_CLASSES | set(cfg["scan_extra_classes"])
+    elif item["kind"] in ("open", "delta") and item_repo(item) != REPO:
+        # Foreign open/delta review (docs/multi-repo.md discovery pr): scan and
+        # worktree run in that repo's clone with the same universal secret-shape
+        # set as push items. These reviews scan the raw base..head range — not a
+        # projection — so the else branch below threads clone/classes instead.
+        cfg = repo_registry.by_repo(REPOS, item_repo(item))
+        if cfg is None:
+            raise RuntimeError(f"{item['kind']} item names an unconfigured repo: {item_repo(item)}")
+        repo_clone = Path(cfg["clone"])
+        scan_classes = UNIVERSAL_SCAN_CLASSES | set(cfg["scan_extra_classes"])
     if item["kind"] in (review_receipt.KIND, push_current.KIND):
         patch = git("diff", "--text", "--no-textconv", "--no-ext-diff", "--no-renames", "--no-color",
                     "--unified=0", plan["base"], plan["head"], cwd=repo_clone)
         ok, scan = secret_scan_diff(patch, rdir / "secret-scan.json", base=plan["base"], head=plan["head"],
                                     classes=scan_classes)
     else:
-        ok, scan = secret_scan(plan["base"], plan["head"], rdir / "secret-scan.json")
+        ok, scan = secret_scan(plan["base"], plan["head"], rdir / "secret-scan.json",
+                               classes=scan_classes, clone=repo_clone)
     if ok and item["kind"] == backfill_jobs.KIND:
         context = backfill_runtime.ledger.canonical(item.get("context", {})).decode()
         patch = "diff --git a/.crq-review-context.json b/.crq-review-context.json\n--- /dev/null\n+++ b/.crq-review-context.json\n@@ -0,0 +1 @@\n+" + context + "\n"
@@ -2160,12 +2187,15 @@ def refresh_slot_deadline(q, usage, remaining, gate, at=None):
 
 
 def _deliver_push_findings(q: Dict[str, Any], item: Dict[str, Any]) -> Optional[str]:
-    """File the findings issue for a counted push review; idempotent, retried.
+    """File the findings issue for a counted review; idempotent, retried.
 
     Called at harvest and again by later ticks while `issue_pending` holds.
-    The findings stay in the receipt regardless: a delivery failure records
-    `issue_error` and never revisits the review's terminal state
-    (docs/multi-repo.md findings delivery)."""
+    The range identity comes from `issue_request` (both call sites — the push
+    harvest and the foreign open/delta harvest — store base/head there), so the
+    helper works for open items that carry no push subject. The findings stay
+    in the receipt regardless: a delivery failure records `issue_error` and
+    never revisits the review's terminal state (docs/multi-repo.md findings
+    delivery)."""
     request = item.get("issue_request")
     if not request or item.get("issue") or not item.get("issue_pending"):
         return None
@@ -2178,12 +2208,17 @@ def _deliver_push_findings(q: Dict[str, Any], item: Dict[str, Any]) -> Optional[
     except OSError as exc:
         item["issue_error"] = f"findings markdown unavailable: {exc}"[:300]
         return None
+    subject = item.get("subject") or {}
+    base = request.get("base") or subject.get("base")
+    head = request.get("head") or subject.get("head")
+    if not base or not head:
+        # Debt persisted before the range fields existed: never crash the tick.
+        item["issue_error"] = "findings request lacks a review range"
+        return None
     meta = {"repo": item_repo(item), "item_id": item["id"], "run_id": request["run_id"],
-            "base": item["subject"]["base"], "head": item["subject"]["head"],
-            "receipt_id": item.get("receipt_id")}
+            "base": base, "head": head, "receipt_id": item.get("receipt_id")}
     try:
-        result = finding_issues.file_issue(cfg, base=item["subject"]["base"],
-                                           head=item["subject"]["head"], meta=meta,
+        result = finding_issues.file_issue(cfg, base=base, head=head, meta=meta,
                                            severity_counts=request["severity_counts"],
                                            findings_md=markdown)
     except RuntimeError as exc:
@@ -2290,7 +2325,8 @@ def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
                 # idempotent, retried by later ticks while unreported. Never
                 # blocks the counted review's terminal state.
                 item["issue_request"] = {"run_id": r["run_id"], "severity_counts": cls["severity_counts"],
-                                         "findings_md": str(rdir / "findings.md")}
+                                         "findings_md": str(rdir / "findings.md"),
+                                         "base": item["subject"]["base"], "head": item["subject"]["head"]}
                 item["issue_pending"] = True
         elif cls["outcome"] == "rate_limited":
             set_rate_cooldown(q, cls, rdir)
@@ -2337,7 +2373,12 @@ def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
     if item["kind"] == "coverage" and item.get("attempt_id"):
         item["vendor_state"] = "terminal"
         q.get("backfill_reservations", {}).get(item["attempt_id"], {})["terminal_at"] = iso()
-    remove_worktree(Path(meta["worktree"]), meta["wt_branch"])
+    # A foreign open/delta review's worktree branch lives in that repo's clone.
+    cleanup_clone = None
+    if item["kind"] in ("open", "delta") and item_repo(item) != REPO:
+        cfg = repo_registry.by_repo(REPOS, item_repo(item))
+        cleanup_clone = Path(cfg["clone"]) if cfg else None
+    remove_worktree(Path(meta["worktree"]), meta["wt_branch"], clone=cleanup_clone)
     attempt = {"run_id": r["run_id"], "outcome": cls["outcome"], "counted": cls["counted"], "at": iso(),
                "head": meta["head"], "base": meta["base"], "message": cls.get("message")}
     item.setdefault("attempts", []).append(attempt)
@@ -2360,6 +2401,18 @@ def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
             item["state"] = "done"
             return f"{item['id']}: completed ({cls['findings']} findings) [author: no repair/coverage credit]"
         item.setdefault("cycles", []).append(record)
+        if item["kind"] in ("open", "delta") and item_repo(item) != REPO:
+            # Foreign open/delta review (docs/multi-repo.md): the cycle is real
+            # evidence, but coverage credit and repair enqueue stay primary-only;
+            # findings are delivered as one issue in the repo instead.
+            if cls["findings"]:
+                # Debt only: the bounded post-harvest pass performs the upload.
+                item["issue_request"] = {"run_id": r["run_id"], "severity_counts": cls["severity_counts"],
+                                         "findings_md": str(rdir / "findings.md"),
+                                         "base": meta["base"], "head": meta["head"]}
+                item["issue_pending"] = True
+            item["state"] = "done"
+            return f"{item['id']}: completed ({cls['findings']} findings)"
         terminal_paths = []
         for line in (rdir / "review.ndjson").read_text().splitlines():
             try:
@@ -2505,7 +2558,8 @@ def sort_key(item: Dict[str, Any]) -> Tuple:
 
 def last_reviewed(q: Dict[str, Any], pr: int) -> Optional[Dict[str, Any]]:
     """Newest completed CLI review of the PR's own head (open cycles and deltas)."""
-    recs = [c for i in live_items(q) if i["pr"] == pr and i["kind"] in ("open", "delta") for c in i.get("cycles", [])]
+    recs = [c for i in live_items(q) if i["pr"] == pr and i["kind"] in ("open", "delta")
+            and item_repo(i) == REPO for c in i.get("cycles", [])]
     return max(recs, key=lambda c: c["completed_at"]) if recs else None
 
 
@@ -2556,7 +2610,8 @@ def enroll(q: Dict[str, Any], dry: bool) -> List[str]:
         n, head = p["number"], p["headRefOid"]
         if p["isDraft"] or not chains_to_target(p, by_head):
             continue
-        mine = [i for i in live_items(q) if i["pr"] == n and i["kind"] in ("open", "delta")]
+        mine = [i for i in live_items(q) if i["pr"] == n and i["kind"] in ("open", "delta")
+                and item_repo(i) == REPO]
         if not mine:
             stacked = "" if p["baseRefName"] in DISCOVERY_BRANCHES else f", stacked on {p['baseRefName']}"
             new_item(q, log, dry, id=f"pr{n}", pr=n, kind="open", tier=1, prior_cycles=0,
@@ -2740,7 +2795,7 @@ def start_one(q, log, dry, only, ignore_quiet, capture_current=True):
             elif item["kind"] == "merged":
                 plan = plan_merged(item, dry)
             else:
-                info = pr_info(item["pr"])
+                info = pr_info(item["pr"], item_repo(item))
                 post_merge = item["kind"] == "delta" and info["state"] == "MERGED"
                 if info["state"] != "OPEN" and not post_merge:
                     if not dry:
@@ -2995,7 +3050,9 @@ def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = Fal
         # no gh call delays harvesting. Rotation by last attempt keeps a failing
         # delivery from starving later ones.
         candidates = sorted(
-            (i for i in live_items(q) if i.get("kind") == push_current.KIND and i.get("issue_pending")),
+            (i for i in live_items(q) if i.get("issue_pending") and
+             (i.get("kind") == push_current.KIND or
+              (i.get("kind") in ("open", "delta") and item_repo(i) != REPO))),
             key=lambda i: i.get("issue_attempt_at") or "")
         for pending in candidates[:2]:
             pending["issue_attempt_at"] = iso()
@@ -3016,6 +3073,9 @@ def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = Fal
                      f"> {stale_min}m). Schedule runs may have reported 'succeeded' meanwhile. See {STATE / 'status.md'}.")
     q["last_tick"] = iso()
     log += enroll(q, dry)
+    # Open-PR enrollment per configured non-primary repo (docs/multi-repo.md
+    # discovery pr); a no-op unless some repo enables it.
+    log += pr_enroll.enroll(sys.modules[__name__], q, dry)
     pending_at_selection = any(i["state"] == "pending" for i in live_items(q))
     usage, reserved = read_slot_usage(q)
     has_coverage, global_gate, remaining = admit_available(q, usage, log, dry, only, ignore_quiet, reserved=reserved)
