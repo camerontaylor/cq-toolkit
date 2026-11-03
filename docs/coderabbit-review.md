@@ -19,3 +19,6 @@ readable but have unverified integrity. New cycles record a digest when
 available; a failed hash read keeps the cycle and its findings without
 integrity metadata. Reuse rescans current content under current scanner policy
 before selecting a retained cycle; scanner policy is not frozen in its identity.
+
+A missing or altered retained log, or content the current scanner now forbids,
+refuses reuse without vendor dispatch.
