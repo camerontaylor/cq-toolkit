@@ -363,7 +363,7 @@ describe('complete immutable queue result consumption', () => {
         'python3',
         [
           '-c',
-          'import sys; from test_queue_transport import bridge; sys.stdout.buffer.write(bridge(sys.argv[1], sys.stdin.buffer.read()))',
+          'import sys; from test_queue_transport_fixtures import bridge; sys.stdout.buffer.write(bridge(sys.argv[1], sys.stdin.buffer.read()))',
           root,
         ],
         { cwd: join(process.cwd(), 'apps/crq-python'), input: wire, maxBuffer: 8192 },
