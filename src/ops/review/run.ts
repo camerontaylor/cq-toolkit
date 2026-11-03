@@ -336,6 +336,7 @@ export function makeReviewRun(
       if (coderabbitConfigured && !deferredVendorDebt) {
         const result = await makeDevReview({
           effects,
+          configuredReviewers: policy.review.reviewers,
           ...(deadline.signal ? { signal: deadline.signal } : {}),
           remainingWallMs,
           ...(deps.sleep === undefined ? {} : { sleep: deps.sleep }),
