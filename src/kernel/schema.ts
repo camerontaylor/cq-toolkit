@@ -1201,6 +1201,14 @@ export const CompositionStartedJournalEventSchema: z.ZodType<CompositionStartedJ
     type: z.literal('composition-started'),
     runId: z.string(),
     at: z.iso.datetime({ precision: 3 }),
+    // Envelope for new event kinds is exactly
+    // {type,runId,at,unitId,jobId,taskId,attempt,payload} (ADR-0008): these
+    // are run-scoped here, so the scope fields are null (required, not
+    // absent). T04 owns filling the header handoff later.
+    unitId: z.string().min(1).nullable(),
+    jobId: z.string().min(1).nullable(),
+    taskId: z.string().min(1).nullable(),
+    attempt: z.number().int().min(1).nullable(),
     payload: CompositionStartedPayloadSchema,
   })
   .strict();
@@ -1209,7 +1217,7 @@ export const KernelRunLinkedPayloadSchema: z.ZodType<KernelRunLinkedPayload> = z
   .object({
     kernelRunId: z.string().min(1),
     planId: z.string().min(1),
-    round: z.number().int().positive(),
+    round: NonnegativeSafeCountSchema,
   })
   .strict();
 
@@ -1218,6 +1226,10 @@ export const KernelRunLinkedJournalEventSchema: z.ZodType<KernelRunLinkedJournal
     type: z.literal('kernel-run-linked'),
     runId: z.string(),
     at: z.iso.datetime({ precision: 3 }),
+    unitId: z.string().min(1).nullable(),
+    jobId: z.string().min(1).nullable(),
+    taskId: z.string().min(1).nullable(),
+    attempt: z.number().int().min(1).nullable(),
     payload: KernelRunLinkedPayloadSchema,
   })
   .strict();
@@ -1254,6 +1266,7 @@ export const ObservationStreamSchema: z.ZodType<ObservationStream> = z
   //   - the header's correlation.workId matches the stream's directory workId
   //     (a mismatch would misattribute the whole stream at the join);
   //   - every event's runId matches the stream's compositionRunId.
+  //   The workId must be a UUID: the schema's own z.uuid() guards it.
   .superRefine((stream, ctx) => {
     // Identity of the events ALREADY PRESENT is validated even in an
     // incomplete stream: partial evidence is still attributed evidence. Only
@@ -1338,6 +1351,13 @@ export const JournalEventV1V2Schema = z.discriminatedUnion('type', [
  * (absent → v1, 2 → v2, 3 → v3); unknown future versions fail explicitly.
  * Observational events never alter reservations, sequence claims or job
  * statuses — see `deriveJobStatuses` and `foldOrderRuns`.
+ *
+ * T29 ruling: the observational carriers are accepted defensively in v3
+ * KERNEL files by this reader — they have NO kernel producer (T29 puts them
+ * only in composition streams via src/kernel/observation.ts), so a
+ * composition carrier in a kernel file is operator-written evidence at
+ * most. Tightening readEvents to refuse them is a separate ticket; the
+ * coordinator's T02 open question is settled by this comment.
  */
 export const JournalEventSchema: z.ZodType<JournalEvent> = z.union([
   JournalEventV1V2Schema,

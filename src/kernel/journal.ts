@@ -930,7 +930,7 @@ function isEnoent(err: unknown): boolean {
  * power-loss residual (ADR-0003 §2.5); process-crash durability does not
  * depend on it.
  */
-async function syncDir(dir: string): Promise<void> {
+export async function syncDir(dir: string): Promise<void> {
   const SOFT_ERRORS = new Set(['EPERM', 'EACCES', 'EINVAL', 'ENOSYS']);
   let handle: Awaited<ReturnType<typeof open>>;
   try {

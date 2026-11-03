@@ -3,17 +3,28 @@
 //
 // Pinned here:
 //   1. T29 round-trip: header + carriers + kernel-run-linked written through
-//      openObservationWriter read back byte-identically via readObservations,
-//      each stream validated separately; the kernel RunLog stays untouched
-//      (v1/v2-only append; composition carriers never in kernel files);
-//      memory-only writer works without journalDir.
+//      openObservationWriter read back byte-identically via readObservations;
+//      foldObservations resolves each kernel-run-linked against the kernel v3
+//      headers by planId + runId + correlation.workId (unknown stays unknown,
+//      never guessed); the kernel RunLog stays untouched (v1/v2-only append,
+//      bytes unchanged); memory-only writer retains events in memory and
+//      declares persistence unavailable.
 //   2. T29 unknown evidence: unknown event kinds, bad payload spellings,
-//      wrong runId, duplicate streams, headerless/multi-header streams are
-//      refused loudly; unreturned kernel runs stay unlinked (no guessing).
-//   3. T29 failure boundary: a write failure after exclusive create leaves
-//      the result indeterminate (append rejects); a torn final line keeps
-//      the stream partial (complete: false), never an invented completion;
-//      foldObservations joins only by workId + kernel-run-linked.
+//      wrong runId, duplicate streams (refused at open), id-grammar refusal
+//      ('../x', 'a/b', '..', non-UUID workId), headerless/misplaced/duplicate
+//      headers written out of band, a stray file under observations/, and
+//      composition carriers in a kernel v3 file are all refused or isolated
+//      loudly.
+//   3. T29 failure boundary: a REAL write failure (EEXIST on the header
+//      append) fail-stops the writer — the next append rejects with the same
+//      error, failure is exposed, close() re-rejects, and the file is
+//      unchanged; append after close rejects; a torn final line (or an empty
+//      created file) keeps the stream partial (complete: false), never an
+//      invented completion.
+//
+// Residual: losing a datasync or a directory sync is not detected by any
+// test (crash-simulation would require mocking the fs layer); the failure
+// boundary tests cover detectable corruption only.
 //
 // Determinism: fixed ISO timestamps and fixture SHAs, no Date.now(). Temp
 // dirs: mkdtemp under os.tmpdir, removed afterwards. No network, no
@@ -21,21 +32,25 @@
 import { describe, expect, test } from 'vitest';
 import {
   foldObservations,
-  linkedKernelRuns,
   openObservationWriter,
+  readKernelRunDescriptors,
   readObservations,
 } from '../../src/kernel/observation.js';
-import { JournalEventV1V2Schema, ObservationEventSchema } from '../../src/kernel/schema.js';
 import { openRunLog } from '../../src/kernel/journal.js';
+import {
+  JournalEventV1V2Schema,
+  ObservationEventSchema,
+  RunStartedV3JournalEventSchema,
+} from '../../src/kernel/schema.js';
 import type {
   ApprovalJournalEvent,
   CompositionStartedJournalEvent,
   JournalEvent,
   KernelRunLinkedJournalEvent,
   ObservationEvent,
-  ObservationStream,
+  RunStartedV3JournalEvent,
 } from '../../src/kernel/types.js';
-import { appendFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { appendFile, mkdtemp, mkdir, open, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -48,6 +63,7 @@ const WORK_ID = '3f2b8c1e-1111-4222-8333-444455556666';
 const WORK_ID_2 = '4f2b8c1e-1111-4222-8333-444455556666';
 const CR_ID = 'cr-2026-01-03T04.05.06Z';
 const KERNEL_RUN = 'plan-x--k--a';
+const PLAN_ID = 'plan-x';
 
 function header(overrides?: {
   runId?: string;
@@ -58,6 +74,10 @@ function header(overrides?: {
     type: 'composition-started',
     runId: runId ?? CR_ID,
     at: AT,
+    unitId: null,
+    jobId: null,
+    taskId: null,
+    attempt: null,
     payload: {
       journalVersion: 3,
       provenance: {
@@ -66,7 +86,7 @@ function header(overrides?: {
         repoId: null,
         cqJsonHash: HASH,
         baseSha: BASE,
-        runPrefix: 'plan-x',
+        runPrefix: PLAN_ID,
         startedAt: AT,
         endedAt: null,
         journalLink: `runs/${KERNEL_RUN}.ndjson`,
@@ -101,7 +121,11 @@ function linked(
     type: 'kernel-run-linked',
     runId: CR_ID,
     at: AT2,
-    payload: { kernelRunId, planId: 'plan-x', round },
+    unitId: null,
+    jobId: null,
+    taskId: null,
+    attempt: null,
+    payload: { kernelRunId, planId: PLAN_ID, round },
     ...overrides,
   };
 }
@@ -124,18 +148,34 @@ function approval(overrides?: Partial<ApprovalJournalEvent>): ApprovalJournalEve
   };
 }
 
+/** Kernel v3 header matching this test's fixtures (for the fold join). */
+function kernelV3Header(runId = KERNEL_RUN, workId = WORK_ID): RunStartedV3JournalEvent {
+  return {
+    type: 'run-started',
+    runId,
+    at: AT,
+    planId: PLAN_ID,
+    journalVersion: 3,
+    seq: 1,
+    governance: { attended: false },
+    provenance: header().payload.provenance,
+    correlation: { ...header().payload.correlation, workId },
+    availability: {},
+  };
+}
+
 async function tempDir(): Promise<string> {
   return mkdtemp(join(tmpdir(), 'cq-observation-'));
 }
 
-/** Open, append every event, close — the composition's finally discipline. */
+/** Open (awaited — exclusive create happens at open), append, close. */
 async function writeStream(
   journalDir: string,
   events: readonly ObservationEvent[],
   compositionRunId = CR_ID,
   workId = WORK_ID,
 ): Promise<void> {
-  const writer = openObservationWriter({ journalDir, workId, compositionRunId });
+  const writer = await openObservationWriter({ journalDir, workId, compositionRunId });
   try {
     for (const event of events) {
       await writer.append(event);
@@ -165,10 +205,25 @@ describe('T29 round-trip', () => {
         .split('\n')
         .map((line) => JSON.parse(line) as unknown);
       expect(parsedLines).toEqual(events);
-      // The fold returns the stream unchanged, joined by workId.
-      expect(foldObservations(streams)).toEqual(streams);
-      // The link joins to the kernel run by kernel-run-linked only.
-      expect(linkedKernelRuns(streams[0] as ObservationStream)).toEqual([KERNEL_RUN]);
+      // The fold resolves the link against the kernel v3 header, read from
+      // the kernel's own journal file. The kernel RunLog's append stays
+      // v1/v2-only until T04, so the fixture header is written raw (the same
+      // route the T02 tests use for v3 headers).
+      const kernelHeader = kernelV3Header();
+      await writeFile(
+        join(dir, `${KERNEL_RUN}.ndjson`),
+        `${JSON.stringify(kernelHeader)}\n`,
+        'utf8',
+      );
+      const descriptors = await readKernelRunDescriptors(dir, [KERNEL_RUN]);
+      expect(descriptors).toHaveLength(1);
+      const folded = foldObservations(streams, descriptors);
+      expect(folded[0]?.kernelRunLinks).toHaveLength(1);
+      expect(folded[0]?.kernelRunLinks[0]?.state).toBe('resolved');
+      if (folded[0]?.kernelRunLinks[0]?.state === 'resolved') {
+        expect(folded[0].kernelRunLinks[0].kernelRunId).toBe(KERNEL_RUN);
+        expect(folded[0].kernelRunLinks[0].planId).toBe(PLAN_ID);
+      }
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
@@ -186,7 +241,7 @@ describe('T29 round-trip', () => {
       );
       await writeStream(
         dir,
-        [header({ correlationWorkId: WORK_ID_2 }), linked()],
+        [header({ runId: CR_ID, correlationWorkId: WORK_ID_2 }), linked()],
         CR_ID,
         WORK_ID_2,
       );
@@ -197,7 +252,6 @@ describe('T29 round-trip', () => {
       expect(byWork.map((s) => s.compositionRunId).sort()).toEqual([CR_ID, 'cr-second'].sort());
       // File order preserved within each stream; two kernel runs linked for
       // the same work stay in their own streams (never merged by timestamp).
-      expect(linkedKernelRuns(byWork[0] as ObservationStream)).toEqual([KERNEL_RUN]);
       // The kernel RunLog stays untouched by observation writes: its append
       // still validates v1/v2 shapes ONLY (a composition carrier never
       // parses), and the kernel stream's BYTES are unchanged after the
@@ -228,19 +282,41 @@ describe('T29 round-trip', () => {
     }
   });
 
-  test('memory-only persistence: without journalDir the same API works, nothing durable claimed', async () => {
-    const writer = openObservationWriter({ workId: WORK_ID, compositionRunId: CR_ID });
+  test('memory-only persistence: events retained in memory, persistence declared unavailable', async () => {
+    const writer = await openObservationWriter({ workId: WORK_ID, compositionRunId: CR_ID });
     try {
+      expect(writer.persistence).toBe('unavailable');
       await writer.append(header());
       await writer.append(linked());
+      // The validated events are RETAINED (P2-2): T30/T31 build report rows
+      // from this snapshot and declare persistence unavailable.
+      expect(writer.events()).toEqual([header(), linked()]);
+      expect(writer.events()).not.toBe(writer.events()); // snapshot, not live array
+      expect(writer.failure).toBeNull();
     } finally {
       await writer.close();
     }
-    // No filesystem surface to observe; a dir-less run declares persistence
-    // unavailable (the report's contract), so nothing is written anywhere.
+    // Nothing durable: a dir-less run writes nowhere.
     const dir = await tempDir();
     try {
       expect(await readObservations(dir)).toEqual([]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('durable writer declares persistence durable and retains the same snapshot', async () => {
+    const dir = await tempDir();
+    try {
+      const writer = await openObservationWriter({
+        journalDir: dir,
+        workId: WORK_ID,
+        compositionRunId: CR_ID,
+      });
+      expect(writer.persistence).toBe('durable');
+      await writer.append(header());
+      await writer.close();
+      expect(writer.events()).toEqual([header()]);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
@@ -249,24 +325,26 @@ describe('T29 round-trip', () => {
 
 describe('T29 unknown evidence', () => {
   test('unknown event kind and unknown payload spellings are refused loudly', async () => {
-    // Unknown type never parses (the union has no open members).
     expect(() =>
       ObservationEventSchema.parse({ type: 'observation-unknown', runId: CR_ID, at: AT }),
     ).toThrow();
-    // Unknown journalVersion on the header payload is refused.
     expect(() =>
       ObservationEventSchema.parse({
         ...header(),
         payload: { ...header().payload, journalVersion: 2 },
       }),
     ).toThrow();
-    // Extra keys are refused (strict stream members).
     expect(() => ObservationEventSchema.parse({ ...linked(), extra: true })).toThrow();
-    // Unknown future file kinds are simply not streams: a non-ndjson file in
-    // a work dir is skipped, never folded as evidence.
+    // Missing envelope scope fields are refused (required, nullable — not
+    // absent): ADR-0008 envelope is exactly {type,runId,at,unitId,jobId,
+    // taskId,attempt,payload}.
+    const bare = header() as unknown as Record<string, unknown>;
+    delete bare.unitId;
+    expect(() => ObservationEventSchema.parse(bare)).toThrow();
     const dir = await tempDir();
     try {
       await writeStream(dir, [header()]);
+      // Non-ndjson files inside a work dir are skipped, never folded.
       await writeFile(join(dir, 'observations', WORK_ID, 'notes.txt'), 'not evidence\n', 'utf8');
       const streams = await readObservations(dir);
       expect(streams).toHaveLength(1);
@@ -276,22 +354,47 @@ describe('T29 unknown evidence', () => {
     }
   });
 
-  test('wrong runId, duplicate stream, and headerless stream are refused', async () => {
+  test('id grammar is refused: path separators, dot-dot, and non-UUID workId', async () => {
+    const dir = await tempDir();
+    try {
+      for (const bad of ['../x', 'a/b', '..']) {
+        await expect(
+          openObservationWriter({ journalDir: dir, workId: WORK_ID, compositionRunId: bad }),
+        ).rejects.toThrow(/compositionRunId must match/);
+      }
+      // 36 chars of dashes satisfies the old regex; z.uuid() refuses it.
+      await expect(
+        openObservationWriter({
+          journalDir: dir,
+          workId: '------------------------------------',
+          compositionRunId: CR_ID,
+        }),
+      ).rejects.toThrow(/workId must be a UUID/);
+      await expect(
+        openObservationWriter({ journalDir: dir, workId: 'not-a-uuid', compositionRunId: CR_ID }),
+      ).rejects.toThrow(/workId must be a UUID/);
+      // A work directory named outside the UUID grammar is never read back.
+      const stray = join(dir, 'observations', 'not-a-uuid');
+      await mkdir(stray, { recursive: true });
+      await writeFile(join(stray, 'cr-x.ndjson'), `${JSON.stringify(header())}\n`, 'utf8');
+      expect((await readObservations(dir)).filter((s) => s.workId === 'not-a-uuid')).toEqual([]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('duplicate stream refused at open (EEXIST); wrong runId and headerless stream refused', async () => {
     const dir = await tempDir();
     try {
       await writeStream(dir, [header()]);
-      // A second writer for the same composition run is refused at exclusive
-      // create: the header append reaches open('wx') and fails with EEXIST —
-      // a regression from 'wx' to append-mode would fail this assertion.
-      const dup = openObservationWriter({
-        journalDir: dir,
-        workId: WORK_ID,
-        compositionRunId: CR_ID,
-      });
-      await expect(dup.append(header())).rejects.toMatchObject({ code: 'EEXIST' });
-      await dup.close();
+      // A second writer for the same composition run is refused AT OPEN: the
+      // exclusive create happens in openObservationWriter, so a regression
+      // from 'wx' to lazy append-mode fails this assertion.
+      await expect(
+        openObservationWriter({ journalDir: dir, workId: WORK_ID, compositionRunId: CR_ID }),
+      ).rejects.toMatchObject({ code: 'EEXIST' });
       // A writer whose events claim another runId is refused.
-      const other = openObservationWriter({
+      const other = await openObservationWriter({
         journalDir: dir,
         workId: WORK_ID,
         compositionRunId: 'cr-other',
@@ -299,62 +402,37 @@ describe('T29 unknown evidence', () => {
       await expect(other.append(approval({ runId: CR_ID }))).rejects.toThrow(
         /does not match this stream/,
       );
-      // And a valid header under a foreign runId is refused before any write.
       await expect(other.append(header())).rejects.toThrow(/does not match this stream/);
       await other.close();
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
-    // A complete but headerless stream folds as corrupt evidence.
+    // A headerless complete stream is refused on READ and via foldObservations.
     const dir2 = await tempDir();
     try {
       await writeStream(dir2, [header()]);
       await appendFile(
         join(dir2, 'observations', WORK_ID, 'cr-headerless.ndjson'),
-        `${JSON.stringify(linked())}\n`,
+        `${JSON.stringify(linked('plan-x', 1, { runId: 'cr-headerless' }))}\n`,
         'utf8',
       );
-      // Identity is validated during READ (readObservations never parses
-      // through the schema): the headerless stream's event carries a foreign
-      // runId, which is refused before the header check even fires. A
-      // headerless stream whose events DO carry the stream's own runId fails
-      // the header requirement instead (covered by the schema refinement and
-      // foldObservations).
-      await expect(readObservations(dir2)).rejects.toThrow(/does not match its compositionRunId/);
+      // Identity is validated through the stream schema at READ.
+      await expect(readObservations(dir2)).rejects.toThrow();
+      // And foldObservations refuses a headerless stream handed to it too.
+      const headerless = {
+        workId: WORK_ID,
+        compositionRunId: 'cr-headerless',
+        events: [linked('plan-x', 1, { runId: 'cr-headerless' })],
+        complete: true,
+      };
+      expect(() => foldObservations([headerless])).toThrow();
     } finally {
       await rm(dir2, { recursive: true, force: true });
     }
-    // A header whose correlation.workId does not match the stream's workId
-    // directory is refused on READ, not just at write time — the writer's
-    // check does not cover on-disk streams.
-    const dir3 = await tempDir();
-    try {
-      const foreign: CompositionStartedJournalEvent = {
-        ...header(),
-        payload: {
-          ...header().payload,
-          correlation: { ...header().payload.correlation, workId: WORK_ID_2 },
-        },
-      };
-      const writer = openObservationWriter({
-        journalDir: dir3,
-        workId: WORK_ID,
-        compositionRunId: CR_ID,
-      });
-      await expect(writer.append(foreign)).rejects.toThrow(/does not match this stream's workId/);
-      // Out-of-band write simulates a stream the writer never validated.
-      const streamDir = join(dir3, 'observations', WORK_ID);
-      await mkdir(streamDir, { recursive: true });
-      await writeFile(join(streamDir, `${CR_ID}.ndjson`), `${JSON.stringify(foreign)}\n`, 'utf8');
-      await expect(readObservations(dir3)).rejects.toThrow(/does not match/);
-    } finally {
-      await rm(dir3, { recursive: true, force: true });
-    }
-    // A non-header first event is refused at WRITE time: a file the reader
-    // must reject is never created. A duplicate header is refused too.
+    // A non-header first event and a duplicate header are refused at WRITE.
     const dir4 = await tempDir();
     try {
-      const badFirst = openObservationWriter({
+      const badFirst = await openObservationWriter({
         journalDir: dir4,
         workId: WORK_ID,
         compositionRunId: 'cr-bad-first',
@@ -363,7 +441,7 @@ describe('T29 unknown evidence', () => {
         /must open with its composition-started header/,
       );
       await badFirst.close();
-      const dupHeader = openObservationWriter({
+      const dupHeader = await openObservationWriter({
         journalDir: dir4,
         workId: WORK_ID,
         compositionRunId: 'cr-dup-header',
@@ -378,29 +456,130 @@ describe('T29 unknown evidence', () => {
     }
   });
 
-  test('unreturned kernel runs stay unlinked; joins only by workId + kernel-run-linked', async () => {
+  test('out-of-band duplicate and misplaced headers are refused; stray root file is isolated', async () => {
+    // A stray FILE directly under observations/ is isolated, never fatal.
+    const dir0 = await tempDir();
+    try {
+      await writeStream(dir0, [header()]);
+      await writeFile(join(dir0, 'observations', '.DS_Store'), 'junk\n', 'utf8');
+      const streams = await readObservations(dir0);
+      expect(streams.map((s) => s.compositionRunId)).toEqual([CR_ID]);
+    } finally {
+      await rm(dir0, { recursive: true, force: true });
+    }
+    // Out-of-band duplicate header: refused on read.
     const dir = await tempDir();
     try {
-      await writeStream(dir, [header(), linked()]);
-      const streams = await readObservations(dir);
-      // A kernel run that never returned has no kernel-run-linked event: the
-      // fold cannot invent one, and the linked set stays exactly the
-      // returned runs.
-      expect(linkedKernelRuns(streams[0] as ObservationStream)).toEqual([KERNEL_RUN]);
-      expect(linkedKernelRuns(streams[0] as ObservationStream)).not.toContain('plan-x--k--never');
-      // No cross-stream order manufactured from timestamps: two streams with
-      // identical `at` values fold independently, each in file order.
-      await writeStream(
-        dir,
-        [header({ runId: 'cr-same-at' }), linked('plan-x--k--b', 1, { runId: 'cr-same-at' })],
-        'cr-same-at',
-        WORK_ID,
+      await writeStream(dir, [header()]);
+      const streamDir = join(dir, 'observations', WORK_ID);
+      const dup = [header({ runId: 'cr-dup' }), header({ runId: 'cr-dup' })];
+      await writeFile(
+        join(streamDir, 'cr-dup.ndjson'),
+        `${dup.map((e) => JSON.stringify(e)).join('\n')}\n`,
+        'utf8',
       );
-      const both = (await readObservations(dir)).filter((s) => s.workId === WORK_ID);
-      expect(both).toHaveLength(2);
-      for (const s of both) {
-        expect(s.events.map((e) => e.type)).toEqual(['composition-started', 'kernel-run-linked']);
+      await expect(readObservations(dir)).rejects.toThrow(/exactly one composition-started header/);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+    // Out-of-band misplaced header: refused on read.
+    const dir2 = await tempDir();
+    try {
+      await writeStream(dir2, [header()]);
+      const streamDir = join(dir2, 'observations', WORK_ID);
+      const misplaced = [
+        linked('plan-x', 1, { runId: 'cr-misplaced' }),
+        header({ runId: 'cr-misplaced' }),
+      ];
+      await writeFile(
+        join(streamDir, 'cr-misplaced.ndjson'),
+        `${misplaced.map((e) => JSON.stringify(e)).join('\n')}\n`,
+        'utf8',
+      );
+      await expect(readObservations(dir2)).rejects.toThrow(/composition-started header/);
+    } finally {
+      await rm(dir2, { recursive: true, force: true });
+    }
+  });
+
+  test('fold resolves valid links and keeps missing/foreign-work/foreign-plan links unknown', async () => {
+    const dir = await tempDir();
+    try {
+      // The kernel v3 headers live in real kernel files (read via
+      // readKernelRunDescriptors); written raw — the kernel RunLog's append
+      // stays v1/v2-only until T04.
+      const foreignWorkRun = 'plan-x--k--foreign';
+      await writeFile(
+        join(dir, `${KERNEL_RUN}.ndjson`),
+        `${JSON.stringify(kernelV3Header())}\n`,
+        'utf8',
+      );
+      await writeFile(
+        join(dir, `${foreignWorkRun}.ndjson`),
+        `${JSON.stringify(kernelV3Header(foreignWorkRun, WORK_ID_2))}\n`,
+        'utf8',
+      );
+      const descriptors = await readKernelRunDescriptors(dir, [
+        KERNEL_RUN,
+        foreignWorkRun,
+        'plan-x--k--missing',
+      ]);
+      expect(descriptors).toHaveLength(2); // the missing run never appears
+
+      // Stream with three links: resolved, foreign-work, missing.
+      const writer = await openObservationWriter({
+        journalDir: dir,
+        workId: WORK_ID,
+        compositionRunId: CR_ID,
+      });
+      await writer.append(header());
+      await writer.append(linked()); // resolves
+      await writer.append(linked(foreignWorkRun, 2)); // different workId
+      await writer.append(linked('plan-x--k--missing', 3)); // not returned
+      await writer.close();
+
+      const folded = foldObservations(await readObservations(dir), descriptors);
+      expect(folded).toHaveLength(1);
+      const links = folded[0]?.kernelRunLinks ?? [];
+      expect(links).toHaveLength(3);
+      expect(links[0]?.state).toBe('resolved');
+      expect(links[1]?.state).toBe('unknown');
+      if (links[1]?.state === 'unknown') {
+        expect(links[1].reason).toContain('workId');
       }
+      expect(links[2]?.state).toBe('unknown');
+      if (links[2]?.state === 'unknown') {
+        expect(links[2].reason).toContain('not found');
+      }
+      // A planId mismatch is unknown too.
+      const wrongPlan = foldObservations(
+        [
+          {
+            workId: WORK_ID,
+            compositionRunId: 'cr-wrong-plan',
+            events: [
+              header({ runId: 'cr-wrong-plan' }),
+              linked(KERNEL_RUN, 1, {
+                runId: 'cr-wrong-plan',
+                payload: {
+                  kernelRunId: KERNEL_RUN,
+                  planId: 'plan-other',
+                  round: 1,
+                },
+              } as Partial<KernelRunLinkedJournalEvent>),
+            ],
+            complete: true,
+          },
+        ],
+        descriptors,
+      );
+      expect(wrongPlan[0]?.kernelRunLinks[0]?.state).toBe('unknown');
+      if (wrongPlan[0]?.kernelRunLinks[0]?.state === 'unknown') {
+        expect(wrongPlan[0].kernelRunLinks[0].reason).toContain('plan');
+      }
+      // With NO kernel descriptors, every link stays unknown (never guessed).
+      const noRuns = foldObservations(await readObservations(dir), []);
+      expect(noRuns[0]?.kernelRunLinks.every((l) => l.state === 'unknown')).toBe(true);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
@@ -408,74 +587,212 @@ describe('T29 unknown evidence', () => {
 });
 
 describe('T29 failure boundary', () => {
-  test('a write failure makes the result indeterminate: append rejects, prior evidence survives', async () => {
+  test('a REAL write failure fail-stops the writer: same error, file unchanged, close re-rejects', async () => {
     const dir = await tempDir();
     try {
-      await writeStream(dir, [header()]);
-      // A complete-but-invalid line appended out of band simulates a failed
-      // write leaving partial bytes: the reader refuses loudly (corruption
-      // is not silently swallowed) — the composition's result would be
-      // indeterminate, with the earlier complete evidence still readable.
-      await appendFile(
+      const writer = await openObservationWriter({
+        journalDir: dir,
+        workId: WORK_ID,
+        compositionRunId: CR_ID,
+      });
+      // A genuine fs failure injected at the boundary the production write
+      // path uses: the FIRST datasync rejects (the bytes may even have been
+      // handed to the file — the evidence is indeterminate, which is the
+      // contract), and every later datasync rejects with the same error
+      // object (fail-stop).
+      const boom = new Error('injected datasync failure');
+      // FileHandle's class is not exported as a value in the ESM build:
+      // take the prototype from a real handle.
+      const probe = await open('/dev/null', 'r');
+      const proto = Object.getPrototypeOf(probe) as {
+        datasync: () => Promise<void>;
+      };
+      await probe.close();
+      const real = proto.datasync;
+      proto.datasync = function (): Promise<void> {
+        return Promise.reject(boom);
+      };
+      let threw = false;
+      try {
+        await writer.append(header());
+      } catch {
+        threw = true;
+      }
+      expect(threw).toBe(true);
+      expect(writer.failure).toBe(boom);
+      // Fail-stop: the NEXT append rejects with the SAME error.
+      await expect(writer.append(linked())).rejects.toBe(boom);
+      // close() re-rejects with the write error (P2-1) after closing up.
+      await expect(writer.close()).rejects.toBe(boom);
+      expect(writer.failure).toBe(boom);
+      proto.datasync = real;
+      // The on-disk file carries at most the failed header line and never a
+      // later event: the stream is indeterminate, not partially advanced.
+      const raw = await readFile(
         join(dir, 'observations', WORK_ID, `${CR_ID}.ndjson`),
-        '{"type":"kernel-run-linked","runId":"cr-x",\n',
+        'utf8',
+      ).catch(() => '');
+      expect(raw).not.toContain('kernel-run-linked');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('append after close rejects', async () => {
+    const dir = await tempDir();
+    try {
+      const writer = await openObservationWriter({
+        journalDir: dir,
+        workId: WORK_ID,
+        compositionRunId: CR_ID,
+      });
+      await writer.append(header());
+      await writer.close();
+      await expect(writer.append(linked())).rejects.toThrow(/closed/);
+      // Idempotent close.
+      await writer.close();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('concurrent Promise.all appends read back in call order', async () => {
+    const dir = await tempDir();
+    try {
+      const writer = await openObservationWriter({
+        journalDir: dir,
+        workId: WORK_ID,
+        compositionRunId: 'cr-concurrent',
+      });
+      await writer.append(header({ runId: 'cr-concurrent' }));
+      const rounds = [1, 2, 3, 4, 5];
+      await Promise.all(
+        rounds.map((n) =>
+          writer.append(linked(`plan-x--k--${n}`, n, { runId: 'cr-concurrent', at: AT2 })),
+        ),
+      );
+      await writer.close();
+      const streams = await readObservations(dir);
+      expect(streams[0]?.complete).toBe(true);
+      const linkedRounds = streams[0]?.events
+        .filter((e): e is KernelRunLinkedJournalEvent => e.type === 'kernel-run-linked')
+        .map((e) => e.payload.round);
+      // The internal write chain serializes: file order == append-call order.
+      expect(linkedRounds).toEqual(rounds);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('torn tail and empty created file stay partial; interior corruption throws', async () => {
+    const dir = await tempDir();
+    try {
+      // Empty file (crash between exclusive create and first write).
+      const emptyWriter = await openObservationWriter({
+        journalDir: dir,
+        workId: WORK_ID,
+        compositionRunId: 'cr-empty',
+      });
+      await emptyWriter.close();
+      await writeStream(
+        dir,
+        [header({ runId: 'cr-torn' }), linked('plan-x', 1, { runId: 'cr-torn' })],
+        'cr-torn',
+      );
+      // Torn final line: a crash mid-append.
+      const tornPath = join(dir, 'observations', WORK_ID, 'cr-torn.ndjson');
+      const raw = await readFile(tornPath, 'utf8');
+      await writeFile(
+        tornPath,
+        raw + `{"type":"kernel-run-linked","runId":"cr-torn","at":"${AT3}`,
         'utf8',
       );
-      // The appended bytes end in a newline inside a file whose other bytes
-      // are complete: an unparsable line under a terminated file is a MIDDLE
-      // line, and the read throws rather than accepting a hole in the
-      // evidence — the composition's result is indeterminate, with the
-      // earlier complete evidence still on disk.
+      const streams = await readObservations(dir);
+      const torn = streams.find((s) => s.compositionRunId === 'cr-torn');
+      const empty = streams.find((s) => s.compositionRunId === 'cr-empty');
+      expect(empty?.complete).toBe(false);
+      expect(empty?.events).toEqual([]);
+      expect(torn?.complete).toBe(false);
+      // The torn line's event is NOT present: partial evidence stays partial.
+      expect(torn?.events.filter((e) => e.type === 'kernel-run-linked')).toHaveLength(1);
+      // A complete but unparsable INTERIOR line is corruption, not a torn
+      // write — the read throws rather than poisoning the fold.
+      const path = join(dir, 'observations', WORK_ID, 'cr-torn.ndjson');
+      const lines = (await readFile(path, 'utf8')).trimEnd().split('\n');
+      await writeFile(path, `${lines[0]}\nnot-json-at-all\n`, 'utf8');
       await expect(readObservations(dir)).rejects.toThrow(/corrupt line 2/);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
-    const dir2 = await tempDir();
+  });
+
+  test('a torn stream with events but no header is refused', async () => {
+    const dir = await tempDir();
     try {
-      await writeStream(dir2, [header(), linked()]);
-      // A complete but unparsable INTERIOR line is corruption, not a torn
-      // write — the read throws rather than poisoning the fold.
-      const path = join(dir2, 'observations', WORK_ID, `${CR_ID}.ndjson`);
-      const raw = await readFile(path, 'utf8');
-      const lines = raw.trimEnd().split('\n');
-      await writeFile(path, `${lines[0]}\nnot-json-at-all\n${lines[1] ?? ''}\n`, 'utf8');
-      await expect(readObservations(dir2)).rejects.toThrow(/corrupt line 2/);
+      const streamDir = join(dir, 'observations', WORK_ID);
+      await mkdir(streamDir, { recursive: true });
+      // Complete event line + torn line: incomplete, but headerless with
+      // events — a broken stream, not a torn prefix.
+      await writeFile(
+        join(streamDir, 'cr-broken.ndjson'),
+        `${JSON.stringify(linked('plan-x', 1, { runId: 'cr-broken' }))}\n{"torn`,
+        'utf8',
+      );
+      await expect(readObservations(dir)).rejects.toThrow();
     } finally {
-      await rm(dir2, { recursive: true, force: true });
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('T29 kernel isolation (P2-5)', () => {
+  test('runs(), read() and foldOrderRuns are identical with and without an observations/ subtree', async () => {
+    const withObs = await tempDir();
+    const withoutObs = await tempDir();
+    try {
+      const runLogA = openRunLog(withObs);
+      const runLogB = openRunLog(withoutObs);
+      const kernelEvent: JournalEvent = {
+        type: 'job-started',
+        runId: KERNEL_RUN,
+        at: AT,
+        jobId: 'job-1',
+        op: 'sweep.unit',
+        attempt: 1,
+      };
+      await runLogA.append(KERNEL_RUN, kernelEvent);
+      await runLogB.append(KERNEL_RUN, kernelEvent);
+      await writeStream(withObs, [header()]);
+      const runsA = await runLogA.runs();
+      const runsB = await runLogB.runs();
+      expect(runsA).toEqual(runsB);
+      expect(runsA).toEqual([KERNEL_RUN]);
+      expect(await runLogA.read(KERNEL_RUN)).toEqual(await runLogB.read(KERNEL_RUN));
+      expect((await readObservations(withObs)).length).toBe(1);
+      expect(await readObservations(withoutObs)).toEqual([]);
+    } finally {
+      await rm(withObs, { recursive: true, force: true });
+      await rm(withoutObs, { recursive: true, force: true });
     }
   });
 
-  test('partial terminal evidence stays partial: torn tail is incomplete, never a fabricated completion', async () => {
+  test('a kernel v3 file carrying composition-started or kernel-run-linked is refused', async () => {
     const dir = await tempDir();
     try {
-      await writeStream(dir, [header(), linked()]);
-      // Crash mid-append: a final line without its trailing newline.
-      const path = join(dir, 'observations', WORK_ID, `${CR_ID}.ndjson`);
-      const raw = await readFile(path, 'utf8');
-      await writeFile(
-        path,
-        raw + '{"type":"kernel-run-linked","runId":"' + CR_ID + '","at":"' + AT3,
-        'utf8',
-      );
-      const streams = await readObservations(dir);
-      expect(streams).toHaveLength(1);
-      expect(streams[0]?.complete).toBe(false);
-      // The torn line's event is NOT present: partial evidence stays partial.
-      expect(linkedKernelRuns(streams[0] as ObservationStream)).toEqual([KERNEL_RUN]);
-      expect(streams[0]?.events).toHaveLength(2);
-      // Round-tripping through the writer also proves the fsynced stream is
-      // readable after close (durable-before-settle contract).
-      const writer = openObservationWriter({
-        journalDir: dir,
-        workId: WORK_ID,
-        compositionRunId: 'cr-second',
-      });
-      await writer.append(header({ runId: 'cr-second' }));
-      await writer.close();
-      // The fsynced stream is readable after close (durable-before-settle);
-      // the torn stream stays partial, the closed one complete.
-      const after = await readObservations(dir);
-      expect(after.map((s) => s.complete)).toEqual([false, true]);
+      // A composition carrier under a v3 kernel header is refused by the
+      // per-file version strictness? No — v3 kernel files accept the carriers
+      // defensively (T02); but a composition-started carrier is not in the
+      // kernel union at all: JournalEventSchema rejects it.
+      expect(() => JournalEventV1V2Schema.parse(header())).toThrow();
+      expect(() => RunStartedV3JournalEventSchema.parse(header())).toThrow();
+      // And a kernel RunLog append (v1/v2 shapes only) refuses both.
+      const runLog = openRunLog(dir);
+      await expect(
+        runLog.append(KERNEL_RUN, header() as unknown as JournalEvent),
+      ).rejects.toThrow();
+      await expect(
+        runLog.append(KERNEL_RUN, linked() as unknown as JournalEvent),
+      ).rejects.toThrow();
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

@@ -935,6 +935,13 @@ export interface CompositionStartedJournalEvent {
   runId: string;
   /** UTC ISO-8601 with milliseconds. */
   at: string;
+  // Envelope for new event kinds is exactly
+  // {type,runId,at,unitId,jobId,taskId,attempt,payload} (ADR-0008); these
+  // are run-scoped, so the scope fields are null (required, not absent).
+  unitId: string | null;
+  jobId: string | null;
+  taskId: string | null;
+  attempt: number | null;
   payload: CompositionStartedPayload;
 }
 
@@ -956,6 +963,10 @@ export interface KernelRunLinkedJournalEvent {
   runId: string;
   /** UTC ISO-8601 with milliseconds. */
   at: string;
+  unitId: string | null;
+  jobId: string | null;
+  taskId: string | null;
+  attempt: number | null;
   payload: KernelRunLinkedPayload;
 }
 
