@@ -90,6 +90,13 @@ process.exitCode = failed ? 1 : 0;
   await git(repo, 'remote', 'add', 'origin', origin);
   return { root, repo, origin, journalDir: join(root, 'journal') };
 }
+/** PR publication requires an actual remote default branch, unlike local-only runs. */
+async function seedPrBase(f: Awaited<ReturnType<typeof fixture>>) {
+  await git(f.repo, 'push', 'origin', 'HEAD:refs/heads/main');
+  await git(f.repo, 'fetch', 'origin', 'main');
+  await git(f.repo, 'symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main');
+}
+
 function scripted(
   mode:
     | 'fix'
@@ -869,6 +876,7 @@ test.each([false, true])(
   'opt-in PR assembly uses only committed markers and records forge failure (%s)',
   async (fail) => {
     const f = await fixture();
+    await seedPrBase(f);
     const called: string[] = [];
     try {
       const result = await makeFixRun({
@@ -905,6 +913,7 @@ test.each([false, true])(
 
 test('PR body links pushed failed-attempt evidence in its Unfixed section', async () => {
   const f = await fixture();
+  await seedPrBase(f);
   let packageBody = '';
   try {
     await git(f.repo, 'remote', 'set-url', 'origin', 'https://github.com/example/scratch.git');
@@ -953,6 +962,7 @@ test.each(['denylist hit', 'scanner fault'] as const)(
   'PR body upload is refused on a %s while retaining local failed evidence',
   async (caseName) => {
     const f = await fixture();
+    await seedPrBase(f);
     const dispatched: string[] = [];
     let scannedBody = '';
     try {
@@ -1012,6 +1022,7 @@ test.each(['denylist hit', 'scanner fault'] as const)(
 
 test('PR summary Unfixed section reads final refined planned rows (issue 615 #1)', async () => {
   const f = await fixture();
+  await seedPrBase(f);
   let packageBody = '';
   try {
     // The failure that strands the unit leaves the run's planned rows empty
@@ -1050,6 +1061,7 @@ test('PR summary Unfixed section reads final refined planned rows (issue 615 #1)
 
 test('PR summary keeps an exhausted task when another unit retained the same task ID (#631)', async () => {
   const f = await fixture();
+  await seedPrBase(f);
   const bodies = new Map<string, string>();
   try {
     await writeFile(
@@ -1271,6 +1283,7 @@ test('mixed outcomes are fully accounted: fixed, failed-with-branch, branchless 
 
 test('PR summary carries branchless refined rows before finalization (issue 615 #1)', async () => {
   const f = await fixture(1000);
+  await seedPrBase(f);
   let packageBody = '';
   try {
     await writeFile(
