@@ -450,7 +450,7 @@ export function runDriverConformance(
       // mid-run fire still settles 'aborted' (b-iii's contract survives the
       // wrapper). The FACTORY's wrappers (reap-on-settle resolution and the
       // full resolve() stack) are proven signal-tight in
-      // test/driver/factory.test.ts (leg b-v's factory half).
+      // test/driver/factory.wrappers.test.ts (leg b-v's factory half).
       await withScratch(async (scratchDir) => {
         const midRun = withServedModelAssertion(
           makeDriver({ directive: { kind: 'block-until-abort' }, scratchDir }),

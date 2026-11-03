@@ -30,7 +30,7 @@
 //      conservative default), sessionRetention mapped from the op's
 //      retainSessions dep (true → 'keep', false/absent →
 //      'reap-on-settle'). The factory's own reap behaviour is tested in
-//      test/driver/factory.test.ts — only the REQUEST is pinned here.
+//      test/driver/factory.retention.test.ts — only the REQUEST is pinned here.
 //   9. Registry entry: name 'review.fixItem' (the family carries the six
 //      review-loop ops — enumerated in registry.test.ts); the inputSchema
 //      accepts a minimal valid input and rejects an unknown key, pr 0, and
