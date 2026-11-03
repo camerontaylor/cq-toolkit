@@ -3,7 +3,7 @@
 // generateScratchRepo into a fresh tmpdir per test, which git-inits, seeds
 // the two packages, and commits — the D1-family real-git idioms (auto-
 // maintenance suppression + bounded retries) copied from
-// test/ops/sweep/worktreeFor.test.ts.
+// test/ops/sweep/worktreeFor.real-git.test.ts.
 //
 // THE SEED (the D4 acceptance shape):
 //   - packages/alpha — a FAILING production module (sum(1, 1) is 2, it
@@ -115,7 +115,7 @@ const GIT_NO_AUTO_MAINTENANCE = ['-c', 'gc.auto=0', '-c', 'maintenance.auto=fals
 const GIT_CALL_TIMEOUT_MS = 6_000;
 const GIT_CALL_ATTEMPTS = 4;
 
-/** One bounded git call (the worktreeFor.test.ts real-git idiom). */
+/** One bounded git call (the worktreeFor.real-git.test.ts real-git idiom). */
 function run(args: string[], cwd: string): Promise<string> {
   return new Promise((resolve, reject) => {
     execFile(
