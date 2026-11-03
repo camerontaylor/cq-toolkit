@@ -326,7 +326,7 @@ describe('driver factory — wrapping', () => {
     ['reap-on-settle', false, 0],
     ['reap-on-settle', true, 1],
   ] as const)(
-    '%s preserves %s resumed record on pre-dispatch rejection',
+    '%s (resumed=%s) leaves %i record(s) after a pre-dispatch rejection',
     async (retention, resume, count) => {
       stubKey();
       const dir = await scratch();
