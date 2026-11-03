@@ -64,7 +64,8 @@ export const NON_IMPORT_MAP = [
   ],
   [
     /^src\/(cli\.ts$|cli\/|harness\/|kernel\/(journal|lanes|manifest|output|runner)\.ts$|plans\/registry\.ts$|registry\/)/,
-    [/^test\/driver\/claude-code\/cli\.test\.ts$/],
+    // The former single cli.test.ts was split (pure move) into the cli.*.test.ts suites.
+    [/^test\/driver\/claude-code\/cli\./],
   ],
   [/^src\/(driver|harness|sandbox)\//, [/^test\/cli\/driver-alias-notice\.test\.ts$/]],
   [/^scripts\/api-report\.mjs$/, [/^test\/api-report\.[\w-]+\.test\.mjs$/]],
