@@ -149,18 +149,20 @@ describe('selectAffected', () => {
   });
 
   it('maps workflow and template edits to the adversarial suites that scan them', () => {
-    const pool = [
-      ...allTests,
-      'test/adversarial/a14-privileged-workflow.test.ts',
-      'test/scripts/adversarial-suite.test.ts',
+    // A14 is split by subject; the whole family scans workflows and templates.
+    const family = [
+      'test/adversarial/a14-privileged-workflow.benign-edits.test.ts',
+      'test/adversarial/a14-privileged-workflow.classifier-postures.test.ts',
+      'test/adversarial/a14-privileged-workflow.d11-authorization.test.ts',
+      'test/adversarial/a14-privileged-workflow.exfil-trigger.test.ts',
+      'test/adversarial/a14-privileged-workflow.token-reachability.test.ts',
+      'test/adversarial/a14-privileged-workflow.workflow-inventory.test.ts',
     ];
+    const pool = [...allTests, ...family, 'test/scripts/adversarial-suite.test.ts'];
     const pick = (path: string) => selectAffected({ changed: [path], allTests: pool, related: [] });
     for (const path of ['.github/workflows/adversarial-suite.yml', 'policy/templates/gate.yml']) {
       expect(pick(path).files).toEqual(
-        expect.arrayContaining([
-          'test/adversarial/a14-privileged-workflow.test.ts',
-          'test/scripts/adversarial-suite.test.ts',
-        ]),
+        expect.arrayContaining([...family, 'test/scripts/adversarial-suite.test.ts']),
       );
     }
   });
