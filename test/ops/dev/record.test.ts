@@ -713,6 +713,52 @@ const REQUEST = {
 };
 
 describe('findReusableCycle', () => {
+  test.each([
+    { scope: 'uncommitted' as const },
+    { head: 'd'.repeat(40) },
+    { reviewer: 'agent:critic', head: 'd'.repeat(40) },
+  ])('refuses a later configured blocker across identity: %j', (identity) => {
+    expect(
+      findReusableCycle(
+        [
+          cycleRecord(),
+          cycleRecord({
+            cycleId: 'c002-aaaaaaaa',
+            ...identity,
+            completion: { kind: 'blocked', reason: NO_FRESH_REASON },
+          }),
+        ],
+        REQUEST,
+      ),
+    ).toBeNull();
+  });
+
+  test('different-head terminal cycles and unconfigured blockers do not prevent reuse', () => {
+    for (const later of [
+      cycleRecord({ cycleId: 'c002-aaaaaaaa', head: 'd'.repeat(40) }),
+      cycleRecord({
+        cycleId: 'c002-aaaaaaaa',
+        reviewer: 'other',
+        completion: { kind: 'blocked', reason: 'failed' },
+      }),
+    ]) {
+      expect(findReusableCycle([cycleRecord(), later], REQUEST)?.basis).toBe('exact-terminal');
+    }
+    expect(
+      findReusableCycle(
+        [
+          cycleRecord(),
+          cycleRecord({
+            cycleId: 'c002-aaaaaaaa',
+            reviewer: 'agent:critic',
+            completion: { kind: 'blocked', reason: 'failed' },
+          }),
+        ],
+        { ...REQUEST, configuredReviewers: ['coderabbit'] },
+      )?.basis,
+    ).toBe('exact-terminal');
+  });
+
   test('selects the exact terminal cycle at the identical identity', () => {
     const selection = findReusableCycle([cycleRecord()], REQUEST);
     expect(selection).not.toBeNull();

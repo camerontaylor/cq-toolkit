@@ -230,6 +230,7 @@ export type DevReviewInput = DevCycleInput | DevTransportInput;
 
 /** The injected surface of the `dev.review` op. */
 export interface DevReviewDeps {
+  configuredReviewers?: readonly string[];
   /** The subprocess effects (cycle action only). */
   effects: DevEffects;
   /** Composition-owned cancellation/deadline; cleanup and evidence writes remain enabled. */
@@ -321,6 +322,7 @@ export function makeDevReview(
     deps.signal,
     deps.remainingWallMs,
     deps.sleep,
+    deps.configuredReviewers,
   );
   return async (input) => {
     if (isAdmissionInput(input)) {
@@ -355,6 +357,7 @@ function makeReviewCycle(
   sleep: NonNullable<DevReviewDeps['sleep']> = async (ms, signal) => {
     await delay(ms, undefined, { signal });
   },
+  configuredReviewers?: readonly string[],
 ): Op<DevCycleInput, DevReviewReport> {
   return guardDevOp('dev.review', DevCycleInputSchema, async (input) => {
     const contextDeadlineAt = Date.now() + DEFAULT_REVIEWER_TIMEOUT_MS;
@@ -448,6 +451,7 @@ function makeReviewCycle(
           dirtySha256: state.dirtySha256,
           scope,
           reviewer,
+          ...(configuredReviewers === undefined ? {} : { configuredReviewers }),
         });
         if (selection === null) return;
         const resolvesCycleId =

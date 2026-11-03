@@ -541,6 +541,8 @@ const isAffirmativeNoFreshAttempt = (cycle: DevCycleRecord): boolean =>
 
 /** The exact match {@link findReusableCycle} looks for (record.ts reuse/readiness). */
 export interface ReuseSelectionInput {
+  /** Configured families; agent admits agent:<role> identities. */
+  configuredReviewers?: readonly string[];
   /** The intended PR target of the review request. */
   target: string;
   /** The pinned immutable base of the review request. */
@@ -587,7 +589,9 @@ export type ReuseSelection =
  *     later no-fresh attempt: it was never reviewed, so no reuse may be
  *     selected over it.
  *
- * Configuration (which reviewers count) is the readiness core's concern;
+ * Later configured blocked attempts at any scope/head refuse reuse, except
+ * same-identity affirmative no-fresh attempts resolved by the tail below.
+ * Configuration defaults match the readiness core;
  * the cycle op additionally re-checks its own scope emptiness before
  * selecting, so this function deliberately reads ONLY identity and
  * completion. `null` means: dispatch a fresh cycle.
@@ -611,6 +615,18 @@ export function findReusableCycle(
     .reverse()
     .find((cycle) => cycle.completion.kind === 'terminal' && cycle.vendorFailure === undefined);
   if (selected === undefined) return null;
+  const configured = new Set(input.configuredReviewers ?? ['coderabbit', 'agent']);
+  const laterBlocker = records
+    .slice(records.indexOf(selected) + 1)
+    .some(
+      (record) =>
+        record.kind === 'cycle' &&
+        (configured.has(record.reviewer) ||
+          (record.reviewer.startsWith('agent:') && configured.has('agent'))) &&
+        record.completion.kind === 'blocked' &&
+        !(sameIdentity(record) && isAffirmativeNoFreshAttempt(record)),
+    );
+  if (laterBlocker) return null;
   const tail = cycles.slice(cycles.lastIndexOf(selected) + 1);
   const latest = tail.at(-1);
   if (latest === undefined) return { cycle: selected, basis: 'exact-terminal' };

@@ -300,12 +300,15 @@ export const registry: OpRegistryEntry[] = [
               packageName,
             );
             let patternsFile: string | undefined;
+            let configuredReviewers: readonly string[] | undefined;
             if (configText !== null) {
               const parsed = cqConfig.parseCqConfig(configText, repoRoot);
               if (parsed.ok) {
-                patternsFile = cqDefaults.resolveCqConfigDefaults(parsed.config, {
+                const policy = cqDefaults.resolveCqConfigDefaults(parsed.config, {
                   packageName,
-                }).review.denylistPatternsFile;
+                }).review;
+                patternsFile = policy.denylistPatternsFile;
+                configuredReviewers = policy.reviewers;
               }
             }
             const drivers = driverFactory.createDriverFactory();
@@ -313,6 +316,7 @@ export const registry: OpRegistryEntry[] = [
               effects: dev,
               scanSecrets,
               ...(patternsFile === undefined ? {} : { patternsFile }),
+              ...(configuredReviewers === undefined ? {} : { configuredReviewers }),
               runAgentReviewer: agentReview.makeAgentReviewRunner({
                 repoRoot,
                 readFile,
