@@ -96,6 +96,7 @@ export async function collectBoundedReviewContext(
   head: string,
   scope: ReviewContextScope,
   deadline: { signal?: AbortSignal; remainingWallMs: () => number },
+  untracked: readonly string[] = [],
 ): Promise<{ ok: true; context: BoundedReviewContext } | ReviewContextFault> {
   // A finite, positive caller budget is mandatory; Infinity is not an
   // unlimited-budget sentinel. Validate each sample once and use that SAME
@@ -150,7 +151,15 @@ export async function collectBoundedReviewContext(
       ok: true,
       context: {
         intent: capBoundedContext(log.stdout, REVIEW_CONTEXT_INTENT_CAP),
-        fileList: capBoundedContext(numstat.stdout, REVIEW_CONTEXT_FILE_LIST_CAP),
+        fileList: capBoundedContext(
+          [
+            numstat.stdout.trimEnd(),
+            ...untracked.map((name) => '(untracked)\t' + JSON.stringify(name)),
+          ]
+            .filter(Boolean)
+            .join('\n'),
+          REVIEW_CONTEXT_FILE_LIST_CAP,
+        ),
         scope,
       },
     };

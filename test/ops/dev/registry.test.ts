@@ -2,12 +2,15 @@
 // carry: entry names, schema accept/reject (strict throughout, the reviewer
 // vocabulary, the base-sha pin), and the importer resolving to an op that
 // fails the library boundary BEFORE any effect (zero processes touched).
-import { describe, expect, test } from 'vitest';
+import { describe, expect, test, vi } from 'vitest';
 import { registry } from '../../../src/ops/dev/registry.js';
 import { mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { makeTestRepo } from './repo.js';
+import { makeTestRepo, repoEffects } from './repo.js';
+import * as effectModule from '../../../src/ops/dev/effects.js';
+import * as denylistModule from '../../../src/ops/dev/denylist.js';
+import * as planModule from '../../../src/ops/review/internal/reviewPlan.js';
 
 const ENTRY_NAMES = ['dev.check', 'dev.review', 'dev.disposition', 'dev.ready', 'dev.cycle'];
 
@@ -30,6 +33,53 @@ function minimalInput(name: string): Record<string, unknown> {
 }
 
 describe('dev family registry entries', () => {
+  test.each([false, true])(
+    'registry forwards bounded context only after a clean scan (flagged=%s)',
+    async (flagged) => {
+      const repo = await makeTestRepo();
+      try {
+        await repo.write(
+          'cq.json',
+          JSON.stringify({
+            schemaVersion: 2,
+            checks: [{ adapter: 'tsc-lines', command: { command: 'tsc', args: [] } }],
+            roles: { reviewer: { provider: 'mock', model: 'mock' } },
+            budgets: { run: { maxTokens: 5000, wallMs: 20000 } },
+          }),
+        );
+        repo.commitAll('CONTEXT_INTENT ' + 'x'.repeat(5000));
+        const filename = flagged ? 'forbidden-name.ts' : 'untracked.ts';
+        await repo.write(filename, 'export const newFile = true;');
+        vi.spyOn(effectModule, 'makeSubprocessDevEffects').mockReturnValue(repoEffects(repo));
+        vi.spyOn(denylistModule, 'makePortableReviewScanner').mockReturnValue(async (components) =>
+          components.map(({ component, path }) => ({
+            component,
+            hits: flagged && path === filename ? [{ ruleId: 'filename-rule', lines: [1] }] : [],
+          })),
+        );
+        const plan = vi.spyOn(planModule, 'createReviewPlan').mockImplementation(() => {
+          throw new Error('captured plan before provider dispatch');
+        });
+        const op = await entryByName('dev.review').importer();
+        await op({ repoRoot: repo.root, reviewer: 'agent:reviewer' });
+        if (flagged) {
+          expect(plan).not.toHaveBeenCalled();
+          return;
+        }
+        expect(plan).toHaveBeenCalledOnce();
+        const input = plan.mock.calls[0]![0];
+        expect(input.intent).toContain('CONTEXT_INTENT');
+        expect(input.intent).toContain('[truncated:');
+        expect(input.intent!.length).toBeLessThanOrEqual(4000);
+        expect(input.fileList).toContain('(untracked)\t"untracked.ts"');
+        expect(input.fileList!.length).toBeLessThanOrEqual(4000);
+      } finally {
+        vi.restoreAllMocks();
+        await repo.cleanup();
+      }
+    },
+  );
+
   test('fresh adopter dispatch scans without the toolkit denylist script or policy file', async () => {
     const repo = await makeTestRepo();
     const bin = await mkdtemp(join(tmpdir(), 'cq-adopter-bin-'));

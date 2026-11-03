@@ -63,6 +63,40 @@ describe('collectBoundedReviewContext (real git)', () => {
     await repo.cleanup();
   });
 
+  it.each([false, true])('includes untracked filenames in mixed=%s scopes', async (mixed) => {
+    if (mixed) {
+      await repo.write('tracked.ts', 'export const tracked = true;');
+      repo.commitAll('tracked context');
+    }
+    const result = await collectBoundedReviewContext(
+      repoEffects(repo),
+      repo.git('merge-base', 'origin/main', 'HEAD').trim(),
+      repo.git('rev-parse', 'HEAD').trim(),
+      'full',
+      DEADLINE,
+      ['new.ts'],
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.context.fileList).toContain('(untracked)\t"new.ts"');
+    if (mixed) expect(result.context.fileList).toContain('tracked.ts');
+  });
+
+  it('bounds untracked filename context with a visible marker', async () => {
+    const result = await collectBoundedReviewContext(
+      repoEffects(repo),
+      'HEAD',
+      repo.git('rev-parse', 'HEAD').trim(),
+      'uncommitted',
+      DEADLINE,
+      Array.from({ length: 1000 }, (_, i) => 'file-' + String(i)),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.context.fileList.length).toBeLessThanOrEqual(REVIEW_CONTEXT_FILE_LIST_CAP);
+    expect(result.context.fileList).toContain('[truncated:');
+  });
+
   it('collects the capped commit intent and numstat list for the committed scope', async () => {
     await repo.write('src/intent.ts', 'export const intent = 1;\n');
     repo.commitAll('feat: capture INTENT_MARKER\n\nexplains the change');
