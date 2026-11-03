@@ -31,6 +31,7 @@ import author_quota
 import queue_transport
 import author_lease
 import review_receipt
+import finding_issues
 import deferred_refresh
 import merged_reconcile
 import push_current
@@ -2158,6 +2159,48 @@ def refresh_slot_deadline(q, usage, remaining, gate, at=None):
     return deadline  # admission time, not the earlier result-collection hint
 
 
+def _deliver_push_findings(q: Dict[str, Any], item: Dict[str, Any]) -> Optional[str]:
+    """File the findings issue for a counted push review; idempotent, retried.
+
+    Called at harvest and again by later ticks while `issue_pending` holds.
+    The findings stay in the receipt regardless: a delivery failure records
+    `issue_error` and never revisits the review's terminal state
+    (docs/multi-repo.md findings delivery)."""
+    request = item.get("issue_request")
+    if not request or item.get("issue") or not item.get("issue_pending"):
+        return None
+    cfg = repo_registry.by_repo(REPOS, item_repo(item))
+    if cfg is None or not finding_issues.enabled(cfg):
+        item["issue_pending"] = False  # disabled or unconfigured: not debt
+        return None
+    try:
+        markdown = Path(request["findings_md"]).read_text(errors="replace")
+    except OSError as exc:
+        item["issue_error"] = f"findings markdown unavailable: {exc}"[:300]
+        return None
+    meta = {"repo": item_repo(item), "item_id": item["id"], "run_id": request["run_id"],
+            "base": item["subject"]["base"], "head": item["subject"]["head"],
+            "receipt_id": item.get("receipt_id")}
+    try:
+        result = finding_issues.file_issue(cfg, base=item["subject"]["base"],
+                                           head=item["subject"]["head"], meta=meta,
+                                           severity_counts=request["severity_counts"],
+                                           findings_md=markdown)
+    except RuntimeError as exc:
+        item["issue_error"] = str(exc)[:300]
+        return None
+    if not result.get("issue_number"):
+        item["issue_error"] = "findings mode disabled for repository"
+        item["issue_pending"] = False
+        return None
+    item["issue"] = result
+    item.pop("issue_error", None)
+    item["issue_pending"] = False
+    state = "created" if result.get("created") else "existing"
+    event("findings_delivered", item=item["id"], issue=result["issue_number"], state=state)
+    return f"findings issue #{result['issue_number']} ({state})"
+
+
 def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Optional[str]:
     r = item["run"]
     rdir = RUNS / r["run_id"]
@@ -2242,6 +2285,13 @@ def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
             item["failures"] = 0
             item["last_error"] = None
             item["state"] = "done"
+            if cls["findings"]:
+                # Findings delivery (docs/multi-repo.md): one issue in the repo,
+                # idempotent, retried by later ticks while unreported. Never
+                # blocks the counted review's terminal state.
+                item["issue_request"] = {"run_id": r["run_id"], "severity_counts": cls["severity_counts"],
+                                         "findings_md": str(rdir / "findings.md")}
+                item["issue_pending"] = True
         elif cls["outcome"] == "rate_limited":
             set_rate_cooldown(q, cls, rdir)
             item["last_error"] = f"rate limited ({cls.get('message')}); not counted"
@@ -2259,11 +2309,12 @@ def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
                 item["state"] = "pending"
                 item["not_before"] = iso(now() + dt.timedelta(
                     minutes=CONFIG["error_backoff_min"] * 2 ** (item["failures"] - 1)))
+        delivery = _deliver_push_findings(q, item)
         save_queue(q)
         push_cfg = repo_registry.by_repo(REPOS, item_repo(item))
         remove_worktree(Path(meta["worktree"]), meta["wt_branch"],
                         clone=Path(push_cfg["clone"]) if push_cfg else None)
-        return f"{item['id']}: {outcome}; receipt {item['receipt_id']}"
+        return f"{item['id']}: {outcome}; receipt {item['receipt_id']}" + (f"; {delivery}" if delivery else "")
     if item["kind"] == backfill_jobs.KIND:
         return backfill_runtime.harvest(sys.modules[__name__], q, item, rdir, meta, cls, exit_code,
                                         terminal_verified=(state == "harvest"))
@@ -2927,7 +2978,13 @@ def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = Fal
             msg = harvest_review(q, item, dry)
             if msg:
                 log.append(msg)
-        elif item["state"] == "addressing":
+        if not dry and item.get("kind") == push_current.KIND and item.get("issue_pending"):
+            # Findings-issue delivery retry: the review is terminal; only the
+            # issue upload can still be outstanding (docs/multi-repo.md).
+            msg = _deliver_push_findings(q, item)
+            if msg:
+                log.append(msg)
+        if item["state"] == "addressing":
             if not dry:
                 item["state"] = "repair_failed"
                 item["last_error"] = "legacy addressing retained for manual reconciliation; no new dispatch"
