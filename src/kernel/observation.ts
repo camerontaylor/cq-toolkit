@@ -110,7 +110,9 @@ export interface OpenObservationWriterOptions {
  * `journalDir` the stream file is created exclusively ('wx' semantics: an
  * existing file for the same workId/compositionRunId pair is a duplicate
  * composition run, refused rather than appended to); without one the writer
- * buffers in memory and persistence is declared unavailable. Appends are
+ * validates each event and then drops it — validated events are NOT retained
+ * (persistence is unavailable; the report declares it, never claims it).
+ * Appends are
  * serialized through an internal write chain so concurrent appends never
  * interleave and land in append-call order.
  */
