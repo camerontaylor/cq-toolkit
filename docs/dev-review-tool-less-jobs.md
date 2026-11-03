@@ -16,7 +16,7 @@ prompt determine whether a job can answer without a workspace read.
 The driver constructs tool definitions once for a session. Its forced final
 step changes the trailing instruction, and the one structured-output repair
 replays the definitions without executors. The final-step executor denies any
-tool call instead of running it. `test/driver/ai-sdk.test.ts` compares the
+tool call instead of running it. `test/driver/ai-sdk.structured-output.test.ts` compares the
 **complete serialized prepared function definitions**, tool choice and system
 text on every main, final and repair request for injected `opencode-go`, `zai`
 and `ai-sdk` models; the alias fixture checks the complete definitions for

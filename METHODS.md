@@ -39,11 +39,11 @@ CQ_SANDBOX support is implemented according to the accepted RS-13 matrix and the
   config), the live
   launcher-env case (an allowed `env` run: `PATH` and the passthrough present, the secret and
   every `CQ_*` knob absent), and the advisory-network cases.
-- `npx vitest run test/sandbox test/harness/tools.*.test.ts test/harness/surface.*.test.ts test/harness/mcp-bin.test.ts test/driver/ai-sdk.test.ts` — 6 files, 136 tests passed, 2 skipped.
+- `npx vitest run test/sandbox test/harness/tools.*.test.ts test/harness/surface.*.test.ts test/harness/mcp-bin.test.ts test/driver/ai-sdk.*.test.ts` — 6 files, 136 tests passed, 2 skipped.
 - `npm run check:static` and `npm run format:check` — passed; ratchet reports 0 errors against the 0-error baseline.
 - `test/sandbox/config.test.ts` covers blank-to-required resolution, per-call precedence, RS-13 auto order, uncertified backend refusal, cc-native scope, `CQ_RUN_TOOL`, and launcher env scrubbing.
 - `test/harness/mcp-bin.test.ts` additionally runs the real MCP subprocess: `CQ_RUN_ENV_PASSTHROUGH=FOO` reaches an allowed child even when `FOO` is absent from `manifest.envNames`, while provider secrets and `CQ_*` knobs do not.
 - `test/workflows/self-host-sandbox.test.ts` checks both the adoptable template and instantiated workflow: the unprivileged preparation job has no secret reference, uploads the trusted build, and the privileged job is gated to `github.ref == 'refs/heads/main'`, owns the token-bearing step, and has `contents: write` permission.
 - `AiSdkDriver` keeps the pre-W1.11 no-policy behavior when `sandboxConfig` is omitted and all policy names are absent; an expressed environment is resolved by the shared gate, and focused driver tests cover withheld, enabled, and unchanged surfaces.
-- `npx vitest run test/driver/ai-sdk.test.ts test/sandbox/config.test.ts test/workflows/self-host-sandbox.test.ts` — 3 files, 47 tests passed, 2 skipped.
+- `npx vitest run test/driver/ai-sdk.*.test.ts test/sandbox/config.test.ts test/workflows/self-host-sandbox.test.ts` — 3 files, 47 tests passed, 2 skipped.
 - `npx vitest run test/workflows/action-pins.test.ts test/workflows/self-host-concurrency.test.ts test/workflows/self-host-sandbox.test.ts` — 3 files, 30 tests passed.

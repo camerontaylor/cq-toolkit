@@ -1,6 +1,6 @@
 // The claude-code lane's CLI transport — Phase 1.9 (from T1.5 slice 2).
 //
-// Two layers, mirroring test/driver/ai-sdk.test.ts:
+// Two layers, mirroring test/driver/ai-sdk.conformance.test.ts:
 //   1. THE CONFORMANCE SUITE (test/driver/conformance.ts, verbatim) run
 //      against the real ClaudeCodeDriver spawning a FAKE agent CLI
 //      (test/fixtures/fake-agent-cli.mjs) through the driver's `spawn`
