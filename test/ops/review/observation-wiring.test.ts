@@ -230,6 +230,101 @@ const invoke = async (
 // ---- T31 round-trip -------------------------------------------------------
 
 describe('T31 round-trip through the address composition', () => {
+  test('detached fix in checks makes the closed observation indeterminate without moving the verdict', async () => {
+    const run = async (drainMs: number) => {
+      const f = await fixture();
+      const marker = join(f.journalDir, 'checking');
+      const release = join(f.journalDir, 'release');
+      const controller = new AbortController();
+      let fixing: Promise<unknown> | undefined;
+      let writer: ObservationWriter | undefined;
+      let appendCount = () => 0;
+      await f.repo.write(
+        'scripts/check.cjs',
+        `const fs = require('node:fs');
+        if (fs.readFileSync('src/a.ts', 'utf8').includes('GOOD')) {
+          fs.writeFileSync(${JSON.stringify(marker)}, 'entered');
+          const timer = setInterval(() => {
+            if (fs.existsSync(${JSON.stringify(release)})) clearInterval(timer);
+          }, 5);
+        }`,
+      );
+      f.repo.commitAll('hold candidate checks');
+      f.record.head = f.repo.git('rev-parse', 'HEAD').trim();
+      try {
+        const result = await makeReviewAddress({
+          drivers: f.drivers,
+          initialRecord: f.record,
+          review: f.review,
+          workerFactory: (deps) => {
+            writer = deps.observationWriter;
+            if (writer) {
+              const spy = vi.spyOn(writer, 'append');
+              appendCount = () => spy.mock.calls.length;
+            }
+            const engine = makeAddressWorker({
+              ...deps,
+              parentSignal: controller.signal,
+              observationDrainMs: drainMs,
+              scanner: async (components) => {
+                if (
+                  components.some((component) => component.text.includes('related-check feedback'))
+                )
+                  controller.abort();
+                return components.map((component) => ({
+                  component: component.component,
+                  hits: [],
+                }));
+              },
+            });
+            return {
+              ...engine,
+              fix: async (finding, round) => {
+                fixing ??= engine.fix(finding, round);
+                for (let i = 0; ; i++) {
+                  try {
+                    await readFile(marker);
+                    break;
+                  } catch {
+                    if (i > 1000) throw new Error('checks did not start');
+                    await new Promise((resolve) => setTimeout(resolve, 5));
+                  }
+                }
+                // Model the kill rung: return while the real fix body continues.
+                return {
+                  finding: { ...finding, status: 'deferred', reason: 'detached' },
+                  observedHead: f.record.head,
+                  reason: 'detached',
+                  validation: [],
+                  failedAttempts: [],
+                };
+              },
+            };
+          },
+        })({ repoRoot: f.repo.root, source: 'local', journalDir: f.journalDir });
+        const report = reportOf(result);
+        expect(report?.observation?.status).toBe('indeterminate');
+        expect(report?.observation?.failure).toContain(
+          'attempt observation still in flight at close:',
+        );
+        const callsAtClose = appendCount();
+        await writeFile(release, 'release');
+        await fixing;
+        expect(appendCount()).toBe(callsAtClose);
+        expect(writer?.failure).toBeNull();
+        return {
+          status: result.status,
+          findings: report?.findings.map((finding) => finding.status),
+        };
+      } finally {
+        await writeFile(release, 'release');
+        await fixing;
+        await f.cleanup();
+      }
+    };
+    expect(await run(20)).toEqual(await run(0));
+  });
+
   test('one stream across rounds and plans, runtime deps receive the writer, close before persistence', async () => {
     const f = await fixture();
     try {

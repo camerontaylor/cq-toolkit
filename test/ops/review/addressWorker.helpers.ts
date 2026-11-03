@@ -9,7 +9,8 @@ import {
 import { resolveCqConfigDefaults } from '../../../src/ops/analyze/cqConfigDefaults.js';
 import type { CqConfig } from '../../../src/ops/analyze/cqConfig.js';
 import type { DriverFactory } from '../../../src/driver/factory.js';
-import type { OpInvocation } from '../../../src/driver/types.js';
+import type { OpInvocation, Usage } from '../../../src/driver/types.js';
+import type { ObservationWriter } from '../../../src/kernel/observation.js';
 import type { DiffSecretScanner } from '../../../src/ops/dev/denylist.js';
 import { makeGhRunner, type GhFn } from '../../../src/adapters/forge-github/gh.js';
 import type { Finding } from '../../../src/ops/review/findings.js';
@@ -51,6 +52,10 @@ export async function fixture(
     gitHook?: (args: string[], run: GhFn) => ReturnType<GhFn>;
     runPrefix?: string;
     objectFormat?: 'sha256';
+    observationWriter?: ObservationWriter;
+    observationRunId?: string;
+    observationDrainMs?: number;
+    usage?: Usage;
   } = {},
 ) {
   const repo = await makeTestRepo(
@@ -159,7 +164,7 @@ export async function fixture(
           return {
             stopReason: calls === 1 ? (options.firstStopReason ?? 'complete') : 'complete',
             structuredOutput: output,
-            usage: { input: 2, output: 1, cacheRead: 0, cacheWrite: 0 },
+            usage: options.usage ?? { input: 2, output: 1, cacheRead: 0, cacheWrite: 0 },
             ...(options.costUSD === undefined ? {} : { costUSD: options.costUSD }),
             denials: [],
           };
@@ -201,6 +206,11 @@ export async function fixture(
       }),
     ...(options.parentSignal ? { parentSignal: options.parentSignal } : {}),
     ...(options.terminalBinding ? { terminalBinding: options.terminalBinding } : {}),
+    ...(options.observationWriter ? { observationWriter: options.observationWriter } : {}),
+    ...(options.observationRunId ? { observationRunId: options.observationRunId } : {}),
+    ...(options.observationDrainMs === undefined
+      ? {}
+      : { observationDrainMs: options.observationDrainMs }),
   };
   const engine = makeAddressWorker(engineDeps);
   return {

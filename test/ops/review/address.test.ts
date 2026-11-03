@@ -1697,4 +1697,87 @@ describe('M5b3 forward governed invocation correlation (review.address)', () => 
       await f.cleanup();
     }
   });
+
+  test('T14: a worker attempt-observation failure marks the surface indeterminate, never the verdict', async () => {
+    // ADR-0008 T14: the worker cannot hand a strict-schema refusal or a
+    // refused append to the writer, so it carries them on
+    // observationFailures(). The composition folds them into
+    // observation.status 'indeterminate'; the finding verdict is identical to
+    // the same world whose worker reports no observation failure.
+    const f = await fixture();
+    try {
+      const run = async (observationFailures?: () => readonly string[]) => {
+        const result = await makeReviewAddress({
+          ...f.deps,
+          workerFactory: () => ({
+            escalation: createEscalationState,
+            fix: async (item) => ({
+              finding: { ...item, status: 'deferred', reason: 'requires owner' },
+              reason: 'requires owner',
+              observedHead: f.record().head,
+              validation: [],
+            }),
+            ...(observationFailures ? { observationFailures } : {}),
+          }),
+        })({ repoRoot: f.repo.root, source: 'local', journalDir: f.input.journalDir });
+        // A deferred finding stays blocking (needs-human), which is the shared
+        // verdict of both worlds; the observation failure must not move it.
+        return { result, report: reportOf(result) };
+      };
+      const control = await run();
+      const observed = await run(() => ['attempt observation failed: disk full']);
+      expect(observed.result.status).toBe(control.result.status);
+      expect(observed.report.findings.map((row) => row.status)).toEqual(
+        control.report.findings.map((row) => row.status),
+      );
+      expect(control.report.observation?.status).toBe('durable');
+      expect(observed.report.observation?.status).toBe('indeterminate');
+      expect(observed.report.observation?.failure).toContain('attempt observation failed');
+    } finally {
+      await f.cleanup();
+    }
+  });
+
+  test('T14: the composition drains in-flight invocations before it closes, and folds after close', async () => {
+    // Open question (PR #1030): finish() can run while a fixer invocation is
+    // still in flight — runPlan's ladder DETACHES an op that ignored its kill
+    // rung — and that invocation appends its attempt event last. The
+    // composition therefore drains the worker BEFORE the fold and folds once
+    // more AFTER close, so a failure discovered while the writer drained is
+    // evidence on the persisted surface, never a silent loss.
+    const f = await fixture();
+    try {
+      const order: string[] = [];
+      let reads = 0;
+      const result = await makeReviewAddress({
+        ...f.deps,
+        workerFactory: () => ({
+          escalation: createEscalationState,
+          fix: async (item) => ({
+            finding: { ...item, status: 'deferred', reason: 'requires owner' },
+            reason: 'requires owner',
+            observedHead: f.record().head,
+            validation: [],
+          }),
+          settleObservations: async () => {
+            order.push('drain');
+          },
+          // The first fold sees nothing; the invocation's refusal lands only
+          // after the stream was closed. It must still reach the surface.
+          observationFailures: () => {
+            reads++;
+            order.push(`fold-${String(reads)}`);
+            return reads < 2 ? [] : ['attempt observation failed: append refused at close'];
+          },
+        }),
+      })({ repoRoot: f.repo.root, source: 'local', journalDir: f.input.journalDir });
+      const report = reportOf(result);
+      // The drain precedes both folds: no attempt append can race the close.
+      expect(order).toEqual(['drain', 'fold-1', 'fold-2']);
+      expect(report.observation?.status).toBe('indeterminate');
+      expect(report.observation?.failure).toContain('append refused at close');
+    } finally {
+      await f.cleanup();
+    }
+  });
 });
