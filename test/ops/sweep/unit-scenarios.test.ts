@@ -1,7 +1,7 @@
-import { isTodoCommitMessage } from '../../../src/ops/fix/measurement.js';
 // In-process sweep.unit decision coverage. Plan-level rescue, assembly, prep,
 // and fleet claims remain in the real runSweepPlan contracts because those
 // decisions live in the e2e composition helper rather than production.
+import { isTodoCommitMessage } from '../../../src/ops/fix/measurement.js';
 import { createEscalationState, nextEscalation } from '../../../src/ops/fix/escalation.js';
 import { mkdtemp, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -1820,6 +1820,20 @@ test('verified local task commits retain scanned authorization for publication r
         args.includes('rev-list') ? { code: 0, stdout: '1', stderr: '' } : original(args),
     });
     expect(retry.status).toBe('ok');
+    expect(world.pushCalls).toHaveLength(1);
+    const moved = await runUnit(world, {
+      taskLoop: {},
+      runStateDir,
+      deriveTasks: () => [],
+      git: async (args) => {
+        if (args.includes('rev-list')) return { code: 0, stdout: '2', stderr: '' };
+        if (args.includes('rev-parse') && args.at(-1) === 'HEAD')
+          return { code: 0, stdout: 'f'.repeat(40), stderr: '' };
+        return original(args);
+      },
+    });
+    expect(moved.status).toBe('ok');
+    if (moved.status === 'ok') expect(moved.value.indeterminate).toBeTruthy();
     expect(world.pushCalls).toHaveLength(1);
   } finally {
     await rm(world.root, { recursive: true, force: true });

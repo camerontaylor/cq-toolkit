@@ -5,7 +5,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { expect, test } from 'vitest';
-import { commitFailedAttempt } from '../../../src/ops/sweep/taskLoop.js';
+import { commitFailedAttempt, promptRound } from '../../../src/ops/sweep/taskLoop.js';
 
 const exec = promisify(execFile);
 
@@ -830,16 +830,22 @@ test('retry prompt projection excludes large baselines without mutating durable 
       final,
     },
   };
+  const baseline = { ...final, failures: [...final.failures] };
+  final.failures.push({
+    ...final.failures[0]!,
+    file: 'novel.test.ts',
+    message: 'NOVEL_DIAGNOSTIC' + 'x'.repeat(2000),
+  });
   const before = JSON.stringify(round);
-  const projection = promptRound(round);
+  const projection = promptRound(round, baseline);
   expect(JSON.stringify(projection)).not.toContain('LARGE_BASELINE');
+  expect(projection?.validation?.novelFailures[0]?.message).toHaveLength(1000);
+  expect(projection?.validation?.novelFailures[0]?.message).toContain('NOVEL_DIAGNOSTIC');
   expect(projection).toMatchObject({
     reason: 'regression',
     failedAttempt: round.failedAttempt,
     validation: { regression: true, verdict: 'fail', gates: round.validation.gates },
   });
   expect(JSON.stringify(round)).toBe(before);
-  expect(promptRound(undefined)).toBeNull();
+  expect(promptRound(undefined, baseline)).toBeNull();
 });
-
-import { promptRound } from '../../../src/ops/sweep/taskLoop.js';

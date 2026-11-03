@@ -25,6 +25,7 @@ import type { SweepUnitBindings, SweepUnitReport, UnitProbe } from './unit.js';
 import type { WorkUnit } from './planSweep.js';
 import { SWEEP_DIFF_FLAGS } from '../../shared/gitDiffFlags.js';
 import { formatCqTrailers } from '../../shared/cqTrailers.js';
+import { fingerprintPairs } from '../gates/fingerprint.js';
 import { hackDetector } from '../gates/hackDetector.js';
 
 export interface TaskLoopConfig {
@@ -68,9 +69,19 @@ export interface FixTaskReport {
   }>;
 }
 /** Prompt-only projection; durable rounds retain complete failure evidence. */
-export function promptRound(round: NonNullable<FixTaskReport['rounds']>[number] | undefined) {
+export function promptRound(
+  round: NonNullable<FixTaskReport['rounds']>[number] | undefined,
+  baseline: FailureSet,
+) {
   if (round === undefined) return null;
   const { validation, ...context } = round;
+  const baselineKeys = new Set(fingerprintPairs(baseline).map((pair) => pair.key));
+  const novel =
+    validation?.final === undefined
+      ? []
+      : fingerprintPairs(validation.final, undefined, baseline).filter(
+          (pair) => !baselineKeys.has(pair.key),
+        );
   return {
     ...context,
     ...(validation === undefined
@@ -79,6 +90,11 @@ export function promptRound(round: NonNullable<FixTaskReport['rounds']>[number] 
           validation: {
             verdict: validation.verdict,
             gates: validation.gates,
+            novelFailures: novel.slice(0, 10).map(({ failure }) => ({
+              ...failure,
+              message: failure.message.slice(0, 1000),
+            })),
+            omittedNovelFailures: Math.max(0, novel.length - 10),
             ...(validation.regression ? { regression: true } : {}),
           },
         }),
@@ -340,7 +356,7 @@ async function runTaskLoopInner(
         if (decision.tier === 'rescue' && priorRound?.failedAttempt !== undefined) {
           priorFailedFeedback = await failedAttemptFeedback(git, priorRound.failedAttempt);
         }
-        const prompt = `${bindings.prompt(unit, worktree)}\nTier: ${decision.tier}; attempt: ${decision.attempt}; reason: ${decision.reason}\nPrevious attempt: ${JSON.stringify(promptRound(priorRound))}${priorFailedFeedback === undefined ? '' : `\nPrior failed-attempt patch (engine-owned feedback; do not repeat rejected changes):\n${priorFailedFeedback.patch}`}\nTask: ${JSON.stringify(task)}\nRelated argv: ${JSON.stringify([related.command, ...related.args])}\nDo not stage or commit. Return outcome (broken-test, code-bug, todo), summary and confidence (0 to 1) as structured output.`;
+        const prompt = `${bindings.prompt(unit, worktree)}\nTier: ${decision.tier}; attempt: ${decision.attempt}; reason: ${decision.reason}\nPrevious attempt: ${JSON.stringify(promptRound(priorRound, accepted.failureSet))}${priorFailedFeedback === undefined ? '' : `\nPrior failed-attempt patch (engine-owned feedback; do not repeat rejected changes):\n${priorFailedFeedback.patch}`}\nTask: ${JSON.stringify(task)}\nRelated argv: ${JSON.stringify([related.command, ...related.args])}\nDo not stage or commit. Return outcome (broken-test, code-bug, todo), summary and confidence (0 to 1) as structured output.`;
         const invoke = async (
           invocation: TaskAttempt['invocation'],
           text: string,
