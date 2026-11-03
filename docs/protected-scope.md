@@ -189,46 +189,9 @@ named in that test, and none is pending today.
 
 ## The D-P revision window
 
-Retired 2026-10-20: `policy/protected-paths.json` no longer declares a
-window (the advisory posture above is set at the env layer, which a window
-never overrides). The mechanism stays in `policyConfig.ts` for adopters. As
-declared until then, `revisionWindow` in `policy/protected-paths.json`:
-
-| Field     | Value                                |
-| --------- | ------------------------------------ |
-| `posture` | `diff-check`, the only allowed value |
-| `opens`   | `2026-10-17T00:00:00Z` (inclusive)   |
-| `expires` | `2026-10-31T00:00:00Z` (exclusive)   |
-| `ruling`  | D-P (owner, 2026-10-16)              |
-
-- `policyDiff` reads it **from the trust ref only**, both in `cq-policy` and
-  in the gate's recompute. A PR cannot open a window for itself, and editing
-  the window is a change to `policy/protected-paths.json`, which is a
-  definition-set file. That is needs-human in every posture.
-- It only relaxes the **default** layer. An explicit `vars.CQ_MERGE_PROTECTED_PATHS`
-  or per-call opt-in wins.
-- Inside the window, a plain protected-path edit passes. Everything else
-  diff-check flags still needs the D11 record: privileged-job changes,
-  definition-set changes, loosened baselines, removed entries or checks,
-  trigger changes and new workflows.
-- A changed verified workflow that no longer names one of the trust ref's
-  `requiredJobs` is a `required-check` finding, which the window never
-  clears.
-- **Fail closed.** Before `opens` (`not open yet`), at or after `expires`
-  (`EXPIRED`), or with an unusable clock (`clock unusable`), the posture is
-  `human`, and the run report ends that line with `— posture human (fail closed)`.
-  An invalid window fails the policy check: a bad date, `expires` not after
-  `opens`, or a span over 31 days (`MAX_REVISION_WINDOW_DAYS`). Extending the
-  window takes a new protected edit.
-- **Promote before `expires`.** The gate judges `main..tip` when it
-  promotes. A protected edit merged into `merge-queue` inside the window but
-  not promoted by `expires` makes the whole batch needs-human, and until C3
-  that means owner break-glass. A promotion whose policy pass relied on the
-  window is judged again just before the push (`promote-gate` step 10c), so
-  a gate run that waits past `expires` refuses.
-
-This amends ADR-0002 Annex B §B.1 ("only the project env and the per-call
-opt-in") for this one shape. See [ADR index](adr/README.md#post-acceptance-notes) N23.
+Retired 2026-10-20; its unused implementation was removed under the owner
+ruling on #385 (2026-11-03). Posture comes from the project environment or
+explicit per-call configuration. Policy lists no longer accept `revisionWindow`.
 
 ## Required jobs as policy data
 

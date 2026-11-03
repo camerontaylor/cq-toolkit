@@ -30,6 +30,8 @@ describe('policyDiff: faults are failed, never a pass', SLOW, () => {
         files: { [POLICY_LIST_PATH]: JSON.stringify({ ...POLICY, protectedPaths: ['src/'] }) },
       },
       'no-policy-list': { files: { [POLICY_LIST_PATH]: null } },
+      'jobs-bad-key': { files: { [POLICY_LIST_PATH]: JSON.stringify({ ...POLICY, requiredJobs: { '../ci.yml': ['static'] } }) } },
+      'jobs-empty': { files: { [POLICY_LIST_PATH]: JSON.stringify({ ...POLICY, requiredJobs: { 'ci.yml': [] } }) } },
       'no-manifest': { files: { [MANIFEST_PATH]: null } },
     });
   }, HOOK_MS);
@@ -79,6 +81,15 @@ describe('policyDiff: faults are failed, never a pass', SLOW, () => {
       `policy list: ${POLICY_LIST_PATH} absent at the trust ref — project protectedPaths and requiredChecks are inactive`,
     );
     expect(result.status === 'ok' && result.value.requiredJobs).toEqual({});
+  });
+
+  test.each([
+    ['jobs-bad-key', /requiredJobs/],
+    ['jobs-empty', /requiredJobs\.ci\.yml/],
+  ])('invalid requiredJobs at the trust ref (%s) is failed', async (name, error) => {
+    const result = await call({ trustRef: c[name]! });
+    expect(result).toMatchObject({ status: 'failed' });
+    expect(result.status === 'failed' && result.error).toMatch(error);
   });
 
   test('a trust ref without the manifest is failed', async () => {
