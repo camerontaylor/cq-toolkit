@@ -75,7 +75,6 @@ check, lock or approval. ADR-0007 remains the task-ref identity rule.
 | W2.1 spend on every exit path                                                         | #393                                                                                       |
 | Packed-artifact smoke test (release gate)                                             | #394                                                                                       |
 | #376 follow-up: crq deploy controller                                                 | #395, parallel, owner deploy-trust sign-off                                                |
-| oxlint-json check adapter                                                             | #396; cq.json omits lint until Oxlint ships an eslint-format output                        |
 | #378 configurable checks + Ruff/Knip adapters                                         | #378; blocks `review` portability                                                          |
 | Phase 0.4 version alignment                                                           | Cheap; package.json 1.0.1 contradicts README                                               |
 | `policy/dev-protocol.json`, `docs/dev-protocol.md`                                    | Not privileged any more; fold into this page over time                                     |

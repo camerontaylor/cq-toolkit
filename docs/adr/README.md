@@ -98,7 +98,7 @@ not advertise it. The newest supported revision is `2025-11-25`
 `WINDOW_FRACTIONS` values such as `5h:0.2,weekly:0.5`. The values are decimal
 fractions. The resolver accepts a fraction from 0 to 1 as the value of a
 `CQ_PROVIDER_<ID>_WINDOW_FRACTIONS` entry; every other `map` key keeps the
-§B.3 grammar ([`src/config/resolve.ts`](../../src/config/resolve.ts)).
+§B.3 grammar ([`src/config/resolve.ts`](https://github.com/camerontaylor/cq-toolkit/blob/bf0682f7/src/config/resolve.ts)).
 
 ### N4 — Annex B Decision, §B.5 and §B.7: secrets are env-only
 
@@ -106,7 +106,7 @@ The Decision section says secrets come from the env layer only, but §B.5's
 CQ secret row allows an SDK typed option, and §B.7 types
 `secrets[...].layer` as `'env' | 'call'`. The implementation follows the
 env-only rule: secret provenance is recorded with `layer: 'env'`
-([`src/config/resolve.ts`](../../src/config/resolve.ts)), and
+([`src/config/resolve.ts`](https://github.com/camerontaylor/cq-toolkit/blob/bf0682f7/src/config/resolve.ts)), and
 `CQ_AUTOMATION_TOKEN` is read from the environment and nowhere else
 ([`src/ops/ratchet/effects.ts`](../../src/ops/ratchet/effects.ts), `ghEnv`).
 Read the CQ secret row as env-only and `layer` as `'env'`.
@@ -241,7 +241,7 @@ deliberately: the type is still `'budget' | 'signal'`
 ([`src/kernel/types.ts`](../../src/kernel/types.ts)), and the kernel's
 `GovernanceOptIn` union carries only the three ledger keys —
 `budget.breakLock` exists as a per-call string in the config registry
-([`src/config/registry.ts`](../../src/config/registry.ts), `CALL_ONLY_CONFIG`)
+([`src/config/registry.ts`](https://github.com/camerontaylor/cq-toolkit/blob/bf0682f7/src/config/registry.ts), `CALL_ONLY_CONFIG`)
 but not in the kernel union, so a foreign-host lock refusal cannot currently
 be broken by opt-in. Recorded as a descope so the accepted lines are not read
 as shipped behaviour.
@@ -260,7 +260,7 @@ shape
 
 ### N15 — Annex B §B.4, §B.6 and §B.9: the profile suffix and three CI-mapping rows
 
-Two alignments with [`src/config/registry.ts`](../../src/config/registry.ts);
+Two alignments with [`src/config/registry.ts`](https://github.com/camerontaylor/cq-toolkit/blob/bf0682f7/src/config/registry.ts);
 neither changes a decision.
 
 - **Profiles ship as `.profile`, not `.env`.** §B.4.1 and §B.9 say
@@ -390,7 +390,7 @@ resolution, journaling and passthrough. A URL value is not a secret because
 the credential-URL screen already covers the dangerous case by VALUE,
 independent of the name: a passthrough variable whose value is a URL
 carrying userinfo, a query or a fragment is refused (`credentialUrl` in
-[`src/config/resolve.ts`](../../src/config/resolve.ts), the screen §B.5
+[`src/config/resolve.ts`](https://github.com/camerontaylor/cq-toolkit/blob/bf0682f7/src/config/resolve.ts), the screen §B.5
 describes as `*_URL` names carrying userinfo), foreign base-URL values are
 validated credential-free (`validForeignBaseUrl`), and `DATABASE_URL` stays
 denied by name. So a credential-free `_URL` name no longer refuses its own

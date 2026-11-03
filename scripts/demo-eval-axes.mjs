@@ -1,17 +1,17 @@
 #!/usr/bin/env node
 // Eval-axes demo + DD-2 cross-lane USD normalization — T1.6 slice 4.
 //
-// Runs the SAME tiny deterministic fixture prompt on five LIVE cells and
+// Runs the SAME tiny deterministic fixture prompt on four LIVE cells and
 // prints one markdown table row per cell (usage + token-derived costUSD +
 // stopReason):
 //
 //   axis 1 — model × ai-sdk lane:   { zai/glm-4.6, deepseek/deepseek-flash }
-//   axis 2 — glm-4.6 × lane:        { ai-sdk, claude-agent, subprocess }
+//   axis 2 — glm-4.6 × lane:        { ai-sdk, claude-code }
 //   axis 3 — the acp lane:          { zai/glm-5.3-flash (the served id) }
 //
 // (the ai-sdk × glm cell belongs to the first two axes; the acp cell
-// COMPLETES the four-wide lane axis {ai-sdk, claude-agent, subprocess,
-// acp} — five unique runs). The glm × ai-sdk cell rides the GLM Coding
+// COMPLETES the three-wide lane axis {ai-sdk, claude-code,
+// acp} — four unique runs). The glm × ai-sdk cell rides the GLM Coding
 // Plan's OpenAI-COMPATIBLE endpoint — the ai-sdk driver's zai provider
 // defaults to it (owner-verified 2026-09-14: /api/paas/v4 is the
 // pay-as-you-go wire, unfunded by design; /api/coding/paas/v4 is the
@@ -50,6 +50,7 @@
 // ANTHROPIC_AUTH_TOKEN/ANTHROPIC_API_KEY injected from the ZAI key var);
 // the STALE host ANTHROPIC_API_KEY is neutralized (empty string) first.
 //
+// DeepSeek is optional: CI selects only ai-sdk/glm and needs no DeepSeek key.
 // SECRETS: key material is read from the environment and NEVER printed or
 // persisted — the login shell exports Z_AI_API_KEY (mapped onto the routes'
 // ZAI_API_KEY name in-process, silently) and DEEPSEEK_API_KEY. The costUSD
@@ -103,10 +104,10 @@ if ((process.env.ZCODE_BIN ?? '') === '' && process.platform === 'darwin') {
 // --- The fixture (identical across every cell) --------------------------------
 const PROMPT =
   'Reply with exactly this text and nothing else: The quick brown fox jumps over the lazy dog.';
-// The anthropic-compat lanes (claude-agent/subprocess) serve glm-4.6
+// The anthropic-compat lanes (claude-code) serve glm-4.6
 // truthfully, so their cells request glm-4.6 — MODEL_GLM stays the
 // truthfully-served id (PR #60 review, Codex P1 + CodeRabbit Major: a
-// shared constant at the served id put the subprocess cell on
+// shared constant at the served id put the claude-code cell on
 // glm-5.3-flash, which routeFor rejects off the Z.AI allowlist before
 // dispatch, and broke the intended glm-4.6 comparison lane).
 const MODEL_GLM = 'glm-4.6';
@@ -382,10 +383,9 @@ async function runCell({ lane, provider, model, expectedServed, budget }) {
 const cells = [
   { lane: 'ai-sdk', provider: 'zai', model: MODEL_GLM_AI_SDK },
   { lane: 'ai-sdk', provider: 'deepseek', model: MODEL_DEEPSEEK },
-  { lane: 'claude-agent', provider: 'zai', model: MODEL_GLM },
-  { lane: 'subprocess', provider: 'zai', model: MODEL_GLM },
+  { lane: 'claude-code', provider: 'zai', model: MODEL_GLM },
   {
-    // The four-wide lane axis completes here: the acp lane rides the SERVED
+    // The three-wide lane axis completes here: the acp lane rides the SERVED
     // id (conductor decision) with the probe-recorded wire encoding as the
     // expected served id, and its own token ceiling (ACP_BUDGET — the
     // harness's fixed scaffolding dwarfs the raw-chat 2k cap).

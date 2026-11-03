@@ -1280,9 +1280,6 @@ function selfTestWorkflowI4() {
   // has gone missing (rename or delete during a refactor) fails the leg by
   // name — this is what keeps the denylist.yml-presence requirement alive:
   // denylist.yml is the required file the list carries.
-  // merge-queue-gate.yml deliberately is NOT in the list (queue mechanics
-  // filter their triggers by design and get the sanity check only) — and since
-  // the C2 retirement it has no rendered workflow at all (adopter-only template).
   // Once per file: a file carrying several pairs is reported missing once.
   for (const workflow of new Set(REQUIRED_WORKFLOW_CHECKS.map((p) => p.workflow))) {
     if (!workflows.includes(workflow)) {

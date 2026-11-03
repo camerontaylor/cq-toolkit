@@ -105,7 +105,7 @@ describe.skipIf(!process.env.LIVE_GH)('live review loop e2e (opt-in: LIVE_GH=1)'
   let dispatchLogPath = '';
 
   beforeAll(async () => {
-    // The fixture route never contacts an endpoint, but the SubprocessDriver
+    // The fixture route never contacts an endpoint, but the ClaudeCodeDriver
     // resolves the route's key env var pre-dispatch; a DUMMY value satisfies
     // it (the child is `node <script>`, never an API client — not a secret).
     process.env[FIXTURE_KEY_ENV] = 'fixture-only-dummy-value-not-a-secret';
@@ -143,7 +143,7 @@ describe.skipIf(!process.env.LIVE_GH)('live review loop e2e (opt-in: LIVE_GH=1)'
     // The fix op dispatches through the governed runPlan seam exactly like
     // the CLI does (an OpRegistryEntry with the shipped input schema), but
     // the DRIVER seam is injected: a DriverFactory (ADR-0002 §2.5) whose
-    // fixer binding routes the fixture provider to the subprocess lane over
+    // fixer binding routes the fixture provider to the claude-code lane over
     // the fake agent (module doc). The invocation schema, the workspace
     // binding and the served-model assertion are the op's/factory's
     // business — the lane config carries only its transport knobs. The

@@ -65,7 +65,7 @@
 //                    path needs NO synthetic evidence (DIRTY is decided at
 //                    row 2 before any review row).
 //   5. THE AGENT   — a scripted POSIX-sh fake worker (chmod 0o755, path
-//                    passed as the SubprocessDriver binary): in the merge
+//                    passed as the ClaudeCodeDriver binary): in the merge
 //                    worktree the driver gives it (cwd = the prepared
 //                    worktree via the session workspace), it performs a
 //                    REAL union resolution of PR 2 — fetch f5-a, merge
@@ -356,8 +356,8 @@ const makeCandidateFetcher = (
 
 // ---------------------------------------------------------------------------
 // The scripted conflict agent (step 5) — driver-protocol events copied from
-// the stream-json fixtures the subprocess driver parses (system init +
-// result success carrying structured_output; see src/driver/subprocess and
+// the stream-json fixtures the claude-code driver parses (system init +
+// result success carrying structured_output; see src/driver/claude-code and
 // test/fixtures/fake-agent-cli.mjs for the shapes).
 // ---------------------------------------------------------------------------
 
@@ -714,7 +714,7 @@ const reportSummary = (report: ExecutionReport): string =>
         await mkdir(sessionsDir, { recursive: true, mode: 0o700 });
         // The DRIVER FACTORY binds the fixture's fake route (ADR-0002
         // §2.5): role 'conflict-resolver' + provider 'f5fake' → the
-        // subprocess lane over the scripted agent binary. The decision
+        // claude-code lane over the scripted agent binary. The decision
         // schema rides the invocation's outputSchema (the op renders it),
         // so the lane config carries only its transport knobs; the factory
         // owns the served-model assertion.

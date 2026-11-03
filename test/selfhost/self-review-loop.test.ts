@@ -1381,6 +1381,21 @@ describe('main — peak-aware driver credential (fail closed)', () => {
     ).rejects.toThrow('requires OPENCODE_GO_API_KEY');
   });
 
+  test('a PEAK run refuses a missing Go base URL even with its key present', async () => {
+    process.argv = ['node', 'self-review-loop.js', '--repo', REPO_PATH];
+    vi.stubEnv('OPENCODE_GO_API_KEY', 'present');
+    vi.stubEnv('OPENCODE_GO_BASE_URL', '');
+    await expect(
+      main({
+        ...baseDeps(
+          fakeGh([]),
+          fakeLoop([], async () => fakeOutcome(1)),
+        ),
+        nowMs: () => at('2026-10-12T07:00:00Z'),
+      }),
+    ).rejects.toThrow('requires OPENCODE_GO_BASE_URL');
+  });
+
   test('an OFF-PEAK run likewise refuses when ZAI_API_KEY is absent', async () => {
     process.argv = ['node', 'self-review-loop.js', '--repo', REPO_PATH];
     vi.stubEnv('ZAI_API_KEY', '');

@@ -30,6 +30,7 @@ on:
       - pnpm-lock.yaml
       - pnpm-workspace.yaml
       - 'src/driver/**'
+      - 'test/driver/**'
       - 'scripts/**'
       - .github/workflows/install-matrix.yml
   workflow_dispatch:

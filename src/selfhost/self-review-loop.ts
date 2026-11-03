@@ -94,6 +94,7 @@ import { listOpenPrs } from './candidates.js';
 import {
   defaultJournalRoot,
   driverKeyEnv,
+  driverRequiredEnv,
   parseSelfhostArgs,
   resolveSelfhostDriver,
   SelfhostDefaults,
@@ -922,10 +923,11 @@ export async function main(
     // GH_TOKEN).
     if (!parsed.dryRun) {
       const driver = resolveSelfhostDriver(startedAtMs);
-      const keyEnv = driverKeyEnv(driver);
-      if (keyEnv === undefined || (process.env[keyEnv] ?? '') === '') {
+      const required = driverRequiredEnv(driver);
+      const missing = required?.filter((name) => (process.env[name] ?? '').trim() === '');
+      if (missing === undefined || missing.length > 0) {
         throw new Error(
-          `selfhost-review-loop: the selected driver ${driver.provider}/${driver.model} requires ${keyEnv ?? 'a known provider key'} in the environment; refusing to start`,
+          `selfhost-review-loop: the selected driver ${driver.provider}/${driver.model} requires ${missing?.join(', ') ?? 'a known provider key'} in the environment; refusing to start`,
         );
       }
     }

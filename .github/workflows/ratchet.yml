@@ -31,7 +31,8 @@ jobs:
     # filter — I4 keeps the trigger surface intact.
     if: ${{ github.ref != 'refs/heads/cq-state' }}
     outputs:
-      drop: ${{ steps.typecheck.outcome == 'failure' || steps.coverage.outcome == 'failure' || steps.monotonic.outcome == 'failure' }}
+      suite_failed: ${{ steps.suite.outcome == 'failure' }}
+      drop: ${{ steps.suite.outcome == 'failure' || steps.typecheck.outcome == 'failure' || steps.coverage.outcome == 'failure' || steps.monotonic.outcome == 'failure' }}
     steps:
       - name: Check out the repo (full history — the guard needs the base diff)
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (immutable commit pin; repo policy)
@@ -71,17 +72,18 @@ jobs:
             --source='{"kind":"command","command":"node","args":["node_modules/typescript/bin/tsc","--noEmit","-p","tsconfig.json","--pretty","false"],"parse":"tsc-text"}')"
           printf '%s\n' "$out"
           printf '%s' "$out" | jq -e '.status == "ok" and .value.verdict == "pass"' >/dev/null
-      - name: 'Coverage ratchet (CLI: ratchet.checkRatchet)'
-        id: coverage
+      - name: Run coverage suite
+        id: suite
         continue-on-error: ${{ github.event_name == 'pull_request' && github.base_ref == 'main' }}
         run: |
-          # A stale summary is removed FIRST so a red/crashed suite can never
-          # leave yesterday's numbers behind as today's evidence. The `file`
-          # source reads the summary and `parse: "coverage-json"` rounds
-          # total.lines.pct to one decimal place (the shared granularity law —
-          # cross-runner float noise must never become a verdict).
+          # Remove stale evidence before measuring; a crashed suite cannot reuse it.
           rm -f coverage/coverage-summary.json
           pnpm exec vitest run --coverage
+      - name: 'Coverage ratchet (CLI: ratchet.checkRatchet)'
+        id: coverage
+        if: ${{ !cancelled() && steps.suite.outcome == 'success' }}
+        continue-on-error: ${{ github.event_name == 'pull_request' && github.base_ref == 'main' }}
+        run: |
           out="$(node dist/cli.js ratchet.checkRatchet \
             --ws=. \
             --target=coverage \
@@ -122,12 +124,17 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          SUITE_FAILED: ${{ needs.ratchet.outputs.suite_failed }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
           issue="$(gh issue list --state open --search 'ratchet in:title' --json number,title --jq '[.[] | select(.title == "ratchet")][0].number // empty')"
-          body="Ratchet measurement or baseline guard needs attention on PR #${PR_NUMBER}. Evidence: ${RUN_URL}"
+          if [ "$SUITE_FAILED" = "true" ]; then
+            body="Ratchet test execution failed on PR #${PR_NUMBER}; coverage was not measured. Inspect the run for any additional baseline diagnostics. Evidence: ${RUN_URL}"
+          else
+            body="Ratchet coverage/baseline drop or measurement failure on PR #${PR_NUMBER}. Evidence: ${RUN_URL}"
+          fi
           if [ -n "$issue" ]; then
             gh issue edit "$issue" --body "$body"
           else

@@ -7,6 +7,10 @@
 (`docs/dd-9-api-equivalent-budget.md`) — this doc is that distinction
 observed live.
 
+The lane names below record historical measurements. Phase 1.9a consolidated
+`claude-agent` and `subprocess` into `claude-code` (SDK and CLI transports);
+the current demo uses the CLI transport. The measured numbers remain historical.
+
 ## Method
 
 The SAME tiny deterministic fixture prompt ran on every lane (one run per
