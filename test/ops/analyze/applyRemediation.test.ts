@@ -171,8 +171,9 @@ const SIDECAR_PATH = '/ws/analysis-deadbeef.sidecar.json';
  * ledger and process-local locks, with the run's verified approvals
  * answering for every subject. The tests below are about the op's
  * remediation behavior GIVEN an approved subject; subject binding,
- * single-use and the state re-check are pinned directly in
- * approval.test.ts, and the DENIAL cases below deliberately use the
+ * single-use and the state re-check are pinned directly in the approval
+ * test split (test/ops/analyze/withApprovedMutation.test.ts and its
+ * subject siblings), and the DENIAL cases below deliberately use the
  * shipped deny-all default instead.
  */
 function approvedAuthority(readState?: ApprovalStateReader): {

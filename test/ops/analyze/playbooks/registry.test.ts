@@ -54,9 +54,9 @@ function dispatchEvidence(text: string): PlaybookDispatchUnverified {
  * `ApprovalAuthority` (the same code the op calls) with the run's verified
  * approvals answering for every subject, so these tests stay about the
  * dispatch FLOW. The approval boundary itself — deny-all refusal, single
- * use, the state re-check, O-5/O-6 — is pinned in
- * test/ops/analyze/approval.test.ts and, at the op level, in the two W4.3
- * describes at the end of this file.
+ * use, the state re-check, O-5/O-6 — is pinned in the approval test split
+ * (test/ops/analyze/withApprovedMutation.test.ts and its subject siblings)
+ * and, at the op level, in the two W4.3 describes at the end of this file.
  */
 function approvedAuthority(readState?: ApprovalStateReader): {
   authority: ApprovalAuthority;

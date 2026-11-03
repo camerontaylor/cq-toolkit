@@ -7,6 +7,10 @@
 // `git status` answer, so no repository is needed) and the run's VERIFIED
 // approvals (the kernel verifier's §4a/§4b output, which this patch
 // deliberately does not implement).
+import { execFileSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { InspectableNonceLedger } from '../../../src/adapters/store/nonceLedger.js';
 import type {
   ApprovalAuthority,
@@ -145,4 +149,54 @@ export function grantingAuthority(options: ApprovalFixtureOptions): ApprovalFixt
     readState: options.readState ?? fixedStateReader(state),
   });
   return { authority, ledger, locks, subjectOf };
+}
+
+export const OP = 'analyze.applyRemediation';
+export const WORKSPACE = '/ws';
+export const TARGETS = ['src/a.ts'] as const;
+
+export function subject(overrides: Partial<ApprovalSubject> = {}): ApprovalSubject {
+  return {
+    op: OP,
+    workspace: WORKSPACE,
+    targets: [...TARGETS],
+    inputDigest: 'sha256:test',
+    ...overrides,
+  };
+}
+
+/** A write spy: records the call and reports what the op would have done. */
+export function writeSpy(log: string[] = []): { calls: number; run: () => Promise<string> } {
+  const spy = {
+    calls: 0,
+    run: async (): Promise<string> => {
+      spy.calls += 1;
+      log.push('write');
+      return 'written';
+    },
+  };
+  return spy;
+}
+
+/** A temporary git repository with one commit, for the real-state TOCTOU proof. */
+export function realRepo(): string {
+  const dir = mkdtempSync(join(tmpdir(), 'cq-approval-repo-'));
+  git(dir, ['init', '-q']);
+  git(dir, ['config', 'user.email', 'approval@example.invalid']);
+  git(dir, ['config', 'user.name', 'approval test']);
+  mkdirSync(join(dir, 'src'), { recursive: true });
+  writeFileSync(join(dir, 'src/a.ts'), 'const x = 1;\n');
+  git(dir, ['add', '-A']);
+  git(dir, ['commit', '-q', '-m', 'the approved state']);
+  return realpathOf(dir);
+}
+
+/** macOS temp dirs are symlinked (/var → /private/var); the reader realpaths, so bind the real one. */
+export function realpathOf(dir: string): string {
+  return realpathSync(dir);
+}
+
+/** Run `git` in `cwd`, failing loudly: a silently-unset git would fake the proof. */
+export function git(cwd: string, args: string[]): void {
+  execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8', stdio: 'pipe' });
 }
