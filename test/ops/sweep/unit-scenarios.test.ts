@@ -1808,7 +1808,7 @@ test('verified local task commits retain scanned authorization for publication r
     expect(sha).toBeDefined();
     const record = JSON.parse(
       await readFile(join(runStateDir, 'scanned', 'fix', 'alpha.json'), 'utf8'),
-    );
+    ) as { sha: string };
     expect(record.sha).toBe(sha);
     expect(world.pushCalls).toEqual([]);
     const original = world.gitFactory();
