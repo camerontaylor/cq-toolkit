@@ -7,7 +7,10 @@ import type { FixRunInput } from './runFix.js';
 // './report.js' (fix-run report accounting helpers over the run's results),
 // './measurement.js' (ADR-0008 T34 run metric helper; not a registered op —
 // pure functions over the fix-run report, referenced here to keep the
-// family's registry coverage explicit).
+// family's registry coverage explicit), './correlation.js' (ADR-0008 T05
+// run-correlation helper; not a registered op — pure allocation/adoption
+// over the correlation record, referenced here to keep the family's
+// registry coverage explicit).
 export const FixRunInputSchema = z
   .object({
     repoRoot: z.string().min(1),
