@@ -67,7 +67,7 @@ acceptance. It does not run a check gate inside the fixture.
 
 Existing config/refusal coverage lives in
 `test/ops/dev/agentReview.test.ts`; lower-level containment coverage lives in
-`test/ops/dev/effects.test.ts` and `test/harness/search-tools.test.ts`.
+`test/ops/dev/effects.test.ts` and the `test/harness/search-tools.*.test.ts` files.
 The R7 additions in `test/ops/dev/reviewCycleAgentEngine.test.ts` compose config, dispatch,
 log/ledger identity and readiness, and explicitly require zero agent dispatch
 on safety refusal. `test/ops/dev/ready.test.ts` covers the mixed-reviewer
