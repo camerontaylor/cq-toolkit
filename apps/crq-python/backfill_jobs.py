@@ -120,7 +120,10 @@ def admission(queue, item, at, observation, ordinary_eligible, *, reserve=True):
     elif not observation or not observation.get("successful"):
         reason = "usage-unknown"
     else:
-        age = (now - ledger.timestamp(observation["observed_at"])).total_seconds()
+        try:
+            age = (now - ledger.timestamp(observation.get("observed_at"))).total_seconds()
+        except (TypeError, ValueError):
+            age = -1  # unreadable observation time: refuse as invalid, never raise
         remaining = observation.get("remaining")
         if age < 0 or age > USAGE_MAX_AGE_SECONDS or type(remaining) is not int or remaining < 0:
             reason = "usage-stale-or-invalid"
