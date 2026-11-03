@@ -21,7 +21,7 @@
 //   5. UNCLASSIFIED: classification null → needs-human, unclassified.
 //   6. NON-ELIGIBLE VERDICT: F1's verdict is the planner's gate too — the
 //      FULL acceptance decision carries to the stack level. Only
-//      `eligible` is ever ordered; never / conflicting / awaiting /
+//      `eligible` is ever ordered; never / conflicting /
 //      awaiting each → needs-human, not_eligible, absent from the
 //      order — and a non-eligible parent cascades its children like any
 //      withheld rung.
