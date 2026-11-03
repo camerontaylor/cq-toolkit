@@ -1,6 +1,5 @@
 /** The reserved marker used to record an independent agent review. */
 export const INDEPENDENT_REVIEW_MARKER = 'cq-agent-review';
-export const ALLOW_SAME_ACCOUNT_AGENT_REVIEW_ENV = 'CQ_MERGE_ALLOW_SAME_ACCOUNT_AGENT_REVIEW';
 
 export interface IndependentReviewAttestation {
   headSha: string;
@@ -33,12 +32,4 @@ export function parseIndependentReview(
       verdict: 'PASS',
     },
   };
-}
-
-/** Strict optional boolean env value; blank means false. */
-export function parseSameAccountReviewFlag(value: string | undefined, key: string): boolean {
-  const normalized = value?.trim() ?? '';
-  if (normalized === '' || normalized === 'false') return false;
-  if (normalized === 'true') return true;
-  throw new Error(`${key}: expected true or false`);
 }

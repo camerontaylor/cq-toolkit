@@ -213,8 +213,6 @@ export interface TrustPolicy {
   acceptStates: ReadonlySet<'APPROVED' | 'COMMENTED'>;
   /** Logins (automation identities) that never count, in either form. */
   excludedLogins: ReadonlySet<string>;
-  /** Whether a valid independent agent marker may attest under the PR author's login. */
-  allowSameAccountAgentReview?: boolean;
   /** The automation login is tracked separately so only the marker path can bypass it. */
   automationLogin?: string | null;
   /** Explicit exclusions remain final even when an agent marker is present. */
@@ -258,14 +256,11 @@ interface TrustPolicyConfig {
   excludedLogins?: readonly string[];
   /** Review states that count as acceptance; blank = APPROVED only. */
   acceptReviewStates?: readonly string[];
-  allowSameAccountAgentReview?: boolean;
 }
 
 /**
  * Map the D3 trust config onto a TrustPolicy — every mapping can only
- * NARROW ordinary trust relative to the blanks; the explicit
- * allowSameAccountAgentReview option adds only a valid structured agent
- * attestation by the PR author's account:
+ * NARROW ordinary trust relative to the blanks:
  *   - trustedBots: normalized to the bare lowercase name ('coderabbitai');
  *     an entry naming an excluded identity (structural, automation, or
  *     configured) is DROPPED;
@@ -315,7 +310,6 @@ export function trustPolicyFromConfig(cfg: TrustPolicyConfig): TrustPolicy {
     trustedBots,
     acceptStates,
     excludedLogins: excluded,
-    allowSameAccountAgentReview: cfg.allowSameAccountAgentReview === true,
     automationLogin: cfg.automationLogin?.toLowerCase() ?? null,
     explicitExcludedLogins: explicit,
   };
