@@ -12,6 +12,7 @@ import {
   type ObservationWriter,
 } from '../../kernel/observation.js';
 import { sanitizeObservation } from './attemptRecord.js';
+import { distinctFixedCommitCount } from './measurement.js';
 
 export interface ReportFoldInput {
   streams: readonly ObservationStream[];
@@ -176,5 +177,193 @@ export function assembleReportV2(
     } catch {
       return { availability: sanitizeObservation(availability) };
     }
+  }
+}
+
+/**
+ * ADR-0008 T37: the explicit, LOSSY pre-v2 view that legacy fix/address
+ * report consumers read. This is the only derivation from v2 evidence; the
+ * pre-v2 writers still compute the old scalar themselves (fixesPerRunOf and
+ * the address commit set) and no other module derives it from a ReportV2.
+ * Display-only: it never replays evidence and is never replay, approval or
+ * acceptance input. `lossy: true` keeps it distinguishable from a report v2
+ * payload on disk, and the projection carries no evidence rows.
+ */
+export interface LegacyReportProjection {
+  /** Always true: this is the lossy legacy view, never a ReportV2. */
+  lossy: true;
+  /**
+   * The pre-v2 scalar: distinct verified commit SHAs. `null` means the
+   * evidence is absent, partial or inconsistent; never a zero or a guess.
+   */
+  fixesPerRun: number | null;
+  /** T28 availability for the scalar, so unknown and measured zero stay distinct. */
+  availability: AvailabilityRecord;
+}
+
+/**
+ * The legacy carrier's own rows. These carry the pre-v2 rule exactly, so the
+ * projection prefers them whenever they are supplied; the projection never
+ * invents rows.
+ */
+export type LegacyProjectionEvidence =
+  | { producer: 'fix'; tasks: readonly { outcome: string; commits: readonly string[] }[] }
+  | { producer: 'address'; fixes: readonly { commit?: string | undefined }[] };
+
+export interface LegacyProjectionSource {
+  /**
+   * The v2 report carried by the report, when the run assembled one. A
+   * FALLBACK only: its numerator measures a different quantity (validation
+   * pass, Cq-Task trailer, not todo), so it is read only when no legacy rows
+   * are supplied.
+   */
+  reportV2?: ReportV2 | undefined;
+  /** The pre-v2 carrier rows; preferred whenever supplied. */
+  evidence?: LegacyProjectionEvidence | undefined;
+}
+
+const legacyUnavailable = (reason: string): AvailabilityRecord => ({
+  state: 'unavailable',
+  reason,
+  source: null,
+});
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  value !== null && typeof value === 'object';
+
+/**
+ * The legacy scalar over legacy rows, mirroring the pre-v2 producers' rule:
+ * `fixesPerRunOf` in runFix.ts (distinct commits on rows whose outcome is
+ * `fixed`) and the address writer's `new Set(fixes.flatMap((fix) =>
+ * (fix.commit ? [fix.commit] : []))).size`.
+ */
+function legacyEvidenceCount(evidence: LegacyProjectionEvidence): number {
+  const commits = new Set<string>();
+  if (evidence.producer === 'fix') {
+    if (!Array.isArray(evidence.tasks)) throw new Error('fix task rows are absent');
+    const fixedRows: { outcome: string; commits: readonly string[] }[] = [];
+    for (const raw of evidence.tasks as readonly unknown[]) {
+      if (!isRecord(raw)) throw new Error('malformed fix task row');
+      const outcome = raw.outcome;
+      const rowCommits = raw.commits;
+      if (typeof outcome !== 'string' || !Array.isArray(rowCommits))
+        throw new Error('malformed fix task row');
+      if (outcome !== 'fixed') continue;
+      for (const sha of rowCommits as readonly unknown[])
+        if (typeof sha !== 'string') throw new Error('malformed fix commit');
+      fixedRows.push({ outcome, commits: rowCommits as string[] });
+    }
+    return distinctFixedCommitCount(fixedRows);
+  }
+  if (!Array.isArray(evidence.fixes)) throw new Error('address fix rows are absent');
+  for (const raw of evidence.fixes as readonly unknown[]) {
+    if (!isRecord(raw)) throw new Error('malformed address fix row');
+    const commit = raw.commit;
+    // The pre-v2 address rule is truthiness, verbatim: `fix.commit ?
+    // [fix.commit] : []`. Falsy commits (undefined, null, empty string) are
+    // skipped, never counted and never made into an availability.
+    if (!commit) continue;
+    if (typeof commit !== 'string') throw new Error('malformed address fix commit');
+    commits.add(commit);
+  }
+  return commits.size;
+}
+
+function projectFromEvidence(evidence: LegacyProjectionEvidence): LegacyReportProjection {
+  const count = legacyEvidenceCount(evidence);
+  return {
+    lossy: true,
+    fixesPerRun: count,
+    availability: {
+      state: count === 0 ? 'known-zero' : 'known',
+      reason: 'projected from legacy carrier rows with the pre-v2 rule; explicitly lossy',
+      source: null,
+    },
+  };
+}
+
+function projectFromReportV2(reportV2: ReportV2): LegacyReportProjection {
+  const parsed = ReportV2Schema.safeParse(reportV2);
+  if (!parsed.success) {
+    const issue = parsed.error.issues[0];
+    return {
+      lossy: true,
+      fixesPerRun: null,
+      availability: legacyUnavailable(
+        `report v2 evidence is not schema-valid: ${issue?.message ?? 'unknown issue'}`,
+      ),
+    };
+  }
+  const report = parsed.data;
+  const numerator = report.metric.fixesPerRun.numerator;
+  if (numerator === null) {
+    const recorded = report.availability['/metric/fixesPerRun/numerator'];
+    return {
+      lossy: true,
+      fixesPerRun: null,
+      availability: recorded ?? {
+        state: 'not-collected',
+        reason: 'report v2 metric numerator is unknown without an availability record',
+        source: null,
+      },
+    };
+  }
+  // The numerator is the deduplicated verified-commit count; a disagreement
+  // makes the evidence untrustworthy, so the scalar is withheld rather than
+  // guessed. This is a count, never the numerator/denominator ratio.
+  if (numerator !== report.metric.verifiedCommits.length) {
+    return {
+      lossy: true,
+      fixesPerRun: null,
+      availability: legacyUnavailable(
+        'report v2 metric numerator disagrees with its verified commit projection',
+      ),
+    };
+  }
+  return {
+    lossy: true,
+    fixesPerRun: numerator,
+    availability: {
+      state: numerator === 0 ? 'known-zero' : 'known',
+      reason:
+        'fallback: projected from report v2 verified commits, not the pre-v2 carrier rows; explicitly lossy',
+      source: null,
+    },
+  };
+}
+
+/**
+ * Project a report to the lossy pre-v2 view. The legacy carrier rows win
+ * whenever they are supplied, because they carry the pre-v2 rule that legacy
+ * consumers expect; the v2 payload is only a fallback for a carrier that holds
+ * no rows. Never throws, never mutates its input, never emits evidence rows
+ * and never changes a verdict. Without any evidence the old scalar is
+ * `null`/not-collected, exactly as absence, not zero.
+ */
+export function legacyReportProjection(
+  source: LegacyProjectionSource = {},
+): LegacyReportProjection {
+  try {
+    const projection: LegacyReportProjection =
+      source.evidence !== undefined
+        ? projectFromEvidence(source.evidence)
+        : source.reportV2 !== undefined
+          ? projectFromReportV2(source.reportV2)
+          : {
+              lossy: true,
+              fixesPerRun: null,
+              availability: {
+                state: 'not-collected',
+                reason: 'no legacy evidence and no report v2 to project',
+                source: null,
+              },
+            };
+    return sanitizeObservation(projection);
+  } catch (error) {
+    return sanitizeObservation({
+      lossy: true,
+      fixesPerRun: null,
+      availability: legacyUnavailable(`legacy projection unavailable: ${String(error)}`),
+    });
   }
 }
