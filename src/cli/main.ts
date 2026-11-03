@@ -17,7 +17,9 @@
 // not the canonical decimal form of its Number ('1e000005', '01', '1.50'):
 // it stays the raw string so hex cluster ids round-trip (#386). A
 // positional (non-flag) token is a usage error; a duplicate flag is a
-// usage error (both exit 2).
+// usage error (both exit 2). Op dispatch then reparses against the field
+// schema: string fields preserve raw tokens, number fields accept all JSON
+// numbers; the canonical-decimal fallback applies to plans and unknown types.
 //
 // PLAN SUBCOMMANDS (T4.3): every name the plan registry discovers is ALSO a
 // subcommand, generated at dispatch time (src/cli/plans.ts) — never a
@@ -170,7 +172,10 @@ function isCanonicalDecimal(raw: string): boolean {
  * caller turns a non-empty array into a usage error. Duplicate flags throw
  * (the caller narrates + exits 2).
  */
-export function parseFlags(tokens: string[]): {
+export function parseFlags(
+  tokens: string[],
+  schema?: unknown,
+): {
   flags: Record<string, unknown>;
   unknown: string[];
 } {
@@ -200,7 +205,13 @@ export function parseFlags(tokens: string[]): {
       // #386: a number that the raw text does not denote canonically is kept
       // as the raw string — the token the user typed IS the id; Number()
       // would silently rewrite exponent/leading-zero forms.
-      flags[key] = typeof parsed === 'number' && !isCanonicalDecimal(rawValue) ? rawValue : parsed;
+      const type = flagType(schema, key);
+      flags[key] =
+        type === 'string' && typeof parsed !== 'string'
+          ? rawValue
+          : typeof parsed === 'number' && type !== 'number' && !isCanonicalDecimal(rawValue)
+            ? rawValue
+            : parsed;
     } catch {
       flags[key] = rawValue;
     }
@@ -319,8 +330,23 @@ function describeType(schema: unknown): string {
   }
 }
 
+/** Resolve field types through object wrappers and union alternatives. */
+function flagType(schema: unknown, key: string): string {
+  const shape = (schema as { shape?: Record<string, unknown> } | undefined)?.shape;
+  if (shape !== undefined) return describeType(shape[key]).replace(/\?$/, '');
+  const def = defOf(schema);
+  if (def?.innerType !== undefined) return flagType(def.innerType, key);
+  if (Array.isArray(def?.options)) {
+    const types = [...new Set(def.options.map((option: unknown) => flagType(option, key)))].filter(
+      (type) => type !== 'value',
+    );
+    if (types.length === 1) return types[0] ?? 'value';
+  }
+  return 'value';
+}
+
 const JSON_VALUES_NOTE =
-  'flag values are JSON-parsed when they parse as JSON, else kept as raw strings.';
+  'Op flags follow their schema types: strings preserve raw text; numbers accept JSON numbers (including 1.0 and -0). Other values are JSON-parsed when possible. Plan flags retain canonical-number parsing.';
 
 function renderGlobalHelp(names: string[]): string {
   return [
@@ -646,7 +672,7 @@ async function dispatchCli(
   // Strip the reserved mode flags — the op's schema sees only its own keys
   // (ops map flags by EXACT schema key; see the header for the run-plan
   // kebab-case exception).
-  const input: Record<string, unknown> = { ...parsed.flags };
+  const input: Record<string, unknown> = { ...parseFlags(argv.slice(1), entry.inputSchema).flags };
   delete input['json'];
   delete input['help'];
   delete input['h'];

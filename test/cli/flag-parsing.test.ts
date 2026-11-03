@@ -8,6 +8,7 @@
 // '0x10' and every non-finite text are kept as the token the user typed.
 // Hermetic: the echo fixture family (test/fixtures/cli-ops) over the real
 // dispatcher; no network, no provider, tmp dirs only.
+import { z } from 'zod';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, test } from 'vitest';
 import { parseFlags, runCli } from '../../src/cli/main.js';
@@ -127,5 +128,21 @@ describe('parseFlags mechanics unchanged', () => {
     const { code, err } = await capture(['echo', '--msg=a', '--msg=b']);
     expect(code).toBe(2);
     expect(err).toMatch(/duplicate flag --msg/);
+  });
+});
+
+describe('schema-aware op flags', () => {
+  const schema = z.object({ number: z.number().optional(), string: z.string() });
+  test.each(['1.0', '0.10', '-0', '1e3'])('%s is numeric for number fields', (raw) => {
+    expect(parseFlags([`--number=${raw}`], schema).flags['number']).toBe(JSON.parse(raw));
+  });
+  test.each(['1.0', '-0', '123', 'true', 'null', '1e000005'])(
+    '%s stays verbatim for strings',
+    (raw) => {
+      expect(parseFlags([`--string=${raw}`], schema).flags['string']).toBe(raw);
+    },
+  );
+  test('canonical numeric string reaches the op unchanged', async () => {
+    expect((await capture(['echo', '--msg=123'])).code).toBe(0);
   });
 });
