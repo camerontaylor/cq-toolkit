@@ -69,6 +69,8 @@ export interface DevEffects {
    * acquired sections still release their lock before settling.
    */
   withHostLock<T>(fn: () => T | Promise<T>, signal?: AbortSignal): Promise<T>;
+  /** Hash a retained raw log; absent/unreadable artifacts reject. */
+  reviewLogSha256?(path: string): Promise<string>;
   /**
    * Save one review's raw log OUTSIDE the repository; resolves with the
    * absolute log path recorded in the cycle.
@@ -238,6 +240,10 @@ export function makeSubprocessDevEffects(repoRoot: string): DevEffects {
       at: new Date().toISOString(),
     }),
     withHostLock: (fn, signal) => mutex.withLock(fn, signal),
+    reviewLogSha256: async (path) =>
+      createHash('sha256')
+        .update(await readFile(path))
+        .digest('hex'),
     writeReviewLog: async (branch, cycleStamp, content) => {
       // Owner-only dir and file: the log carries raw diff content.
       const dir = reviewLogDir();

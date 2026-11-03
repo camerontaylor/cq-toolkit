@@ -156,6 +156,8 @@ export interface DevCycleRecord {
   vendorFailure?: VendorFailureProvenance;
   /** Retained engine proof for a fresh agent cycle; legacy cycles remain readable. */
   agentCoverage?: ReviewCoverageV2;
+  /** Optional for historic ledgers; new logs bind their exact bytes. */
+  logSha256?: string;
   /** Where the raw stream log was saved — OUTSIDE the repository (protocol §3). */
   logPath: string;
   /** Untracked non-ignored files present at cycle time (outside the review scope). */
@@ -384,6 +386,10 @@ const DevCycleRecordSchema = z
     advisories: z.array(z.string().min(1)).exactOptional(),
     vendorFailure: VendorFailureProvenanceSchema.exactOptional(),
     agentCoverage: ReviewCoverageV2Schema.exactOptional(),
+    logSha256: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/)
+      .exactOptional(),
     logPath: z.string().min(1),
     untracked: z.array(z.string().min(1)),
     at: z.string().min(1),

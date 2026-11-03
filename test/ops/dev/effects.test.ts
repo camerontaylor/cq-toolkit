@@ -51,6 +51,17 @@ test('readWorktreeFile refuses symlinks, escapes and oversized files; reads the 
   expect((await effects.readWorktreeFile('../outside', 100)).ok).toBe(false);
 });
 
+test('retained log hashing detects changed bytes and rejects absent artifacts', async () => {
+  vi.stubEnv('TMPDIR', dir);
+  const effects = makeSubprocessDevEffects(dir);
+  const path = await effects.writeReviewLog('feature/x', 'digest', 'raw diff');
+  const original = await effects.reviewLogSha256!(path);
+  expect(original).toMatch(/^[0-9a-f]{64}$/);
+  await writeFile(path, 'changed diff');
+  expect(await effects.reviewLogSha256!(path)).not.toBe(original);
+  await expect(effects.reviewLogSha256!(path + '.absent')).rejects.toThrow();
+});
+
 test('the review log is private: 0600 in a 0700 dir; a permissive squatted dir is refused', async () => {
   vi.stubEnv('TMPDIR', dir);
   const effects = makeSubprocessDevEffects(dir);

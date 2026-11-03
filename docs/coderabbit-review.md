@@ -181,6 +181,19 @@ A significant scope change after reviews means a separate task boundary —
 do not expand the diff and keep stale review evidence. No valid unresolved
 critical/major finding may coexist with a ready claim.
 
+Reuse validates that the retained raw log can be read and, when recorded,
+matches its SHA-256 digest. Missing or altered artifacts refuse without
+vendor dispatch. Historic cycle records without a digest remain readable
+and reusable after an existence/readability check; their integrity is
+unverified. New cycles record a digest when available; a failed hash read
+keeps the paid cycle and its findings without integrity metadata.
+
+The scan contract is current-policy equivalence: every reuse request
+recollects and scans current content under the current scanner before
+selecting a retained cycle. Scanner policy is deliberately not frozen in
+the cycle identity. A newly forbidden payload refuses reuse even when its
+review identity matches an older terminal cycle.
+
 ## 6. Completion semantics and blockers
 
 A cycle counts ONLY per §4's definition. Anything else — CLI missing,
