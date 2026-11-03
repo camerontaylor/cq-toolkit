@@ -163,7 +163,6 @@ export interface SelfMergePrsCfg {
   trustPolicy?: TrustPolicy;
   /** Resolved reviewer trust policy for the shipped merge classifier. */
   classifyConfig?: ClassifyPrConfig;
-  /** Explicit opt-in for independent-agent markers under the PR author's login. */
   /**
    * The A12c ADVISORY escape for the governed merge run (r1 M4), defaulting
    * OFF at the kernel's Governance surface and EXPLICIT here: the shipped

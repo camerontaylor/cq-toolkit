@@ -25,13 +25,14 @@
 // mergeability row would be circular.
 //
 // TRUST (P7: built-in default → project env). The trust set comes from
-// three comma-list keys. A blank (absent, empty or whitespace-only) is the conservative default — no
-// bots, APPROVED only, OWNER/MEMBER/COLLABORATOR users. Values map through trustPolicyFromConfig, so config
-// ordinarily only NARROW the blanks; the explicit structured agent-review
-// option permits a valid same-account attestation. Structural identities stay
-// excluded even when listed as trusted bots. An unrecognised entry fails
-// LOUDLY (a throw naming the key): a typo must never silently narrow or
-// widen ordinary review trust. The PR author counts only through that opt-in.
+// three comma-list keys. Blank (absent, empty or whitespace-only) values
+// use the conservative default: no bots, APPROVED only, and
+// OWNER/MEMBER/COLLABORATOR users. Values map through trustPolicyFromConfig
+// to narrow ordinary review trust. An unrecognised entry fails loudly with
+// the key name; a typo must never silently narrow or widen that trust.
+// An exact-head SHA + PASS comment counts without an opt-in, including for
+// same-account agents. Bot authors and logins ending in [bot] are excluded.
+// The merging agent checks reviewer independence.
 //
 // NEVER THROWS (judgeAcceptance): every throw becomes verdict 'fail' with a
 // one-line, capped, log-safe reason. Report lines carry counts, actor keys
