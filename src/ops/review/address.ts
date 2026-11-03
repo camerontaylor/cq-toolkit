@@ -705,6 +705,11 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
       // disagrees with the stream's final state (each tracked link is already
       // caught, so this await never rejects).
       await Promise.all([...pendingLinks]);
+      // ADR-0008 T14: attempt observations the worker could not hand to the
+      // writer (a strict-schema refusal, or an append the writer refused
+      // without marking its own `failure`) are EVIDENCE only: they make the
+      // surface indeterminate and never change the run verdict.
+      for (const failure of worker?.observationFailures?.() ?? []) observationFailure(failure);
       await closeObservation();
       const observedSurface = observationSurface();
       if (observedSurface !== undefined) report.observation = observedSurface;
@@ -1475,6 +1480,9 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                   : {}),
                 ...(implementation.preconditions
                   ? { preconditions: () => implementation.preconditions!() }
+                  : {}),
+                ...(implementation.observationFailures
+                  ? { observationFailures: () => implementation.observationFailures!() }
                   : {}),
                 ...(implementation.withVerifiedHead
                   ? {

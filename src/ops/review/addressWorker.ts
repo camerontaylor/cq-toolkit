@@ -38,7 +38,10 @@ import {
   staticRelatedCheckCommand,
   relatedFilesRelativeToCheck,
 } from '../sweep/tasks.js';
-import { startFixerDeadline } from '../sweep/internal/fixerBudget.js';
+import { startFixerDeadline, type FixerDeadline } from '../sweep/internal/fixerBudget.js';
+import { finishAttempt, type FinishAttemptStop } from '../fix/attemptRecord.js';
+import type { AttemptFinishedJournalEvent } from '../../kernel/types.js';
+import { errorClassOf } from '../../driver/errors.js';
 import {
   composeScanners,
   makeGitleaksDefaultsScanner,
@@ -62,6 +65,13 @@ import {
 } from './internal/addressEvidence.js';
 import { formatCqTrailers } from '../../shared/cqTrailers.js';
 import type { FailedAttemptGate } from '../sweep/taskLoop.js';
+
+/**
+ * ADR-0008 T14: the review lane's fixer slot in the `<package>/<fixer>` unit
+ * identity (the production order runFix/registry use). The address worker is
+ * the fixer a review finding is dispatched to, so its slot is `address`.
+ */
+const ADDRESS_FIXER = 'address';
 
 const OutcomeSchema = z
   .object({
@@ -118,6 +128,13 @@ export interface AddressWorker {
   preconditions?(): readonly AddressPrecondition[];
   /** Capture and admit against a verified head without crossing an engine commit. */
   withVerifiedHead?<T>(action: (head: string) => Promise<T>): Promise<T>;
+  /**
+   * ADR-0008 T14: attempt observations that never reached the writer (a
+   * finishAttempt schema refusal, or an append the writer refused without a
+   * recorded `failure`). Evidence only: the composition folds them into
+   * observation.status 'indeterminate'; they never change a verdict.
+   */
+  observationFailures?(): readonly string[];
 }
 export interface AddressWorkerDeps {
   git: GhFn;
@@ -251,6 +268,50 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
   const runPrefix = deps.runPrefix ?? `cq-address/${randomUUID()}`;
   const failures = deps.failedAttempts ?? [];
   const ordinals = new Map<string, number>();
+  // ADR-0008 T14: the per-unit attempt ordinal carried on `attempt-finished`,
+  // keyed by the dispatched package (the envelope's unit identity) and run-wide
+  // across rounds. It is DISTINCT from the escalation job retry ordinal
+  // (`next.decision.attempt`, which stays on the AddressAttempt row) and from
+  // the failed-attempt pin ordinal (`dispatch.ordinal`); only fixer dispatches
+  // are counted here. A counter (rather than the AddressAttempt row count) is
+  // required because a dispatch refused before its row is pushed must not reuse
+  // the previous attempt's ordinal.
+  const attemptOrdinals = new Map<string, number>();
+  // ADR-0008 T14: observation failures that never reached the writer (a
+  // finishAttempt strict-schema refusal, or an append the writer refused
+  // without recording its own `failure`). Evidence only — never a verdict;
+  // observationFailures() hands them to the composition, which folds them
+  // into observation.status 'indeterminate'.
+  const observationFailures: string[] = [];
+  // ADR-0008 T14 emitter (mirrors T13): the event is BUILT inside the try so a
+  // schema refusal becomes evidence instead of escaping the invocation, and an
+  // append failure is read back from the writer's own `failure` unless the
+  // writer did not record one. Never throws, so it cannot mask a verdict.
+  const emitAttempt = async (build: () => AttemptFinishedJournalEvent): Promise<void> => {
+    const writer = deps.observationWriter;
+    if (writer === undefined) return;
+    let event: AttemptFinishedJournalEvent;
+    try {
+      event = build();
+    } catch (error) {
+      observationFailures.push(`attempt observation failed: ${String(error)}`);
+      return;
+    }
+    try {
+      await writer.append(event);
+    } catch (error) {
+      if (writer.failure === null)
+        observationFailures.push(`attempt observation failed: ${String(error)}`);
+    }
+  };
+  /** The dispatched package owning a repository-relative file (the unit identity). */
+  const packageOf = (file: string): string =>
+    [...policy.packages]
+      .sort((a, b) => b.path.length - a.path.length)
+      .find((pkg) => {
+        const path = relative(resolve(root, pkg.path), resolve(root, file));
+        return path !== '..' && !path.startsWith('../') && !isAbsolute(path);
+      })?.name ?? policy.packages[0]!.name;
   // Resolve identity only inside an awaited mutation. Unused or early-refused
   // workers must not leave rejected setup promises racing checkout cleanup.
   let mutex: Promise<ReturnType<typeof makeGitMutex>> | undefined;
@@ -424,122 +485,355 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
     sources: readonly { path: string; text: string }[] = [],
     diagnostics: readonly FailureSet[] = [],
   ) => {
-    stop();
-    if (remainingUnit(finding) <= 0) throw new AddressRefusal('unit wall budget exhausted');
-    if (prior)
-      prompt += `\nPrior failed-attempt patch (engine-owned feedback; do not repeat rejected changes):\n${prior.patch}`;
-    const attributed = diagnosticSources(diagnostics);
-    const unattributed = diagnosticMessages(diagnostics);
-    const scanSet = (extra: readonly { text: string; path?: string }[] = []): ScanContent[] => {
-      const set: ScanContent[] = [...extra, ...sources, ...attributed, ...(prior?.contents ?? [])];
-      if (unattributed.length)
-        set.push(...unattributed.map((message) => ({ text: message, diagnostic: true })));
-      return set;
+    // ADR-0008 T14: the attempt boundary is the FIXER dispatch. A reviewer
+    // closure verifies an attempt already recorded, and the payload's tier has
+    // no reviewer member: labelling it 'worker' would fabricate evidence, so a
+    // closure dispatch emits no attempt event.
+    const attemptTier = tier === 'reviewer' ? null : tier;
+    const unit = attemptTier === null ? '' : packageOf(finding.file!);
+    const ordinal = attemptTier === null ? 0 : (attemptOrdinals.get(unit) ?? 0) + 1;
+    if (attemptTier !== null) attemptOrdinals.set(unit, ordinal);
+    // Observed stop evidence for the finally-path event. Every throw route is
+    // classified BEFORE the boundary; an unobserved throw keeps the honest
+    // unknown default and finishAttempt records it as unclassified.
+    let stopSet = false;
+    let observedStop: FinishAttemptStop = {
+      stopCode: 'unclassified',
+      stopReason: 'attempt ended without an observed stop',
     };
-    await scan(prompt, scanSet());
-    stop();
-    let requestRefusal: AddressRefusal | undefined;
-    const resolved = deps.drivers.resolve({
-      role: tier === 'reviewer' ? 'reviewer' : 'fixer',
-      modelSpec: role,
-      beforeRequest: async (text, contents = []) => {
-        try {
-          stop();
-          await scan(text, scanSet(contents));
-          stop();
-        } catch (error) {
-          if (error instanceof AddressRefusal) requestRefusal = error;
-          throw error;
-        }
-      },
-      harness: {
-        ...defaultHarnessConfig,
-        tools: {
-          read: { ...defaultHarnessConfig.tools.read },
-          edit: {
-            ...defaultHarnessConfig.tools.edit,
-            enabled: editable,
-            pathPatterns: editable ? [finding.file!] : [],
-          },
-          write: { ...defaultHarnessConfig.tools.write, enabled: false, pathPatterns: [] },
-          bash: { ...defaultHarnessConfig.tools.bash, enabled: false, commandPatterns: [] },
-        },
-      },
+    const setStop = (next: FinishAttemptStop): void => {
+      observedStop = next;
+      stopSet = true;
+    };
+    const cancelStop = (): FinishAttemptStop => ({
+      stopCode: 'cancelled',
+      stopReason: 'enclosing job cancelled',
     });
-    const row: AddressAttempt = {
-      finding: finding.id,
-      tier,
-      attempt,
-      invocation,
-      reason: prompt.split('\n')[0]!,
-      model: resolved.modelSpec,
-      observedHead,
-      wallMs: 0,
+    // The cap this dispatch actually observed, named only when exhausted and
+    // in stop()'s own order (token first); a unit deadline is a wall bound.
+    const budgetCap = (): FinishAttemptStop | null => {
+      if (deps.remainingTokens() <= 0)
+        return {
+          budgetExpired: true,
+          budgetStopCode: 'token-cap',
+          stopReason: 'token budget exhausted',
+        };
+      if (deps.remainingWallMs() <= 0)
+        return {
+          budgetExpired: true,
+          budgetStopCode: 'wall-cap',
+          stopReason: 'run wall budget exhausted',
+        };
+      if (remainingUnit(finding) <= 0)
+        return {
+          budgetExpired: true,
+          budgetStopCode: 'wall-cap',
+          stopReason: 'unit wall budget exhausted',
+        };
+      return null;
     };
-    await onDispatch?.(row);
-    deps.attempts.push(row);
-    const start = Date.now();
-    const signals = [deps.parentSignal, currentJobContext()?.signal].filter(
-      (signal): signal is AbortSignal => signal !== undefined,
-    );
-    const deadline = startFixerDeadline(
-      signals.length ? AbortSignal.any(signals) : undefined,
-      Math.min(policy.budgets.step.wallMs, deps.remainingWallMs(), remainingUnit(finding)),
-    );
-    try {
-      const result = await resolved.driver.run(
-        {
-          prompt,
-          modelSpec: resolved.modelSpec,
-          workspace: { path: workspace },
-          toolPolicy: {
-            mode: 'allowlist',
-            allow: editable
-              ? ['read', 'edit']
-              : [
-                  'read',
-                  ...(tier === 'reviewer' && policy.review.searchTools ? ['grep', 'glob'] : []),
-                ],
-          },
-          sandboxPolicy: { level: editable ? 'workspace-write' : 'read-only' },
-          budget: {
-            maxTokens: deps.remainingTokens(),
-            wallClockMs: Math.min(
-              policy.budgets.step.wallMs,
-              deps.remainingWallMs(),
-              remainingUnit(finding),
-            ),
-          },
-          outputSchema:
-            invocation === 'closure'
-              ? toOutputSchema('review.address.closure/v1', ClosureSchema)
-              : toOutputSchema('review.address.outcome/v1', OutcomeSchema),
-          // Session-log correlation (M5b3): forward the governed job's minted
-          // work identity onto every worker invocation so the lane stamps the
-          // child's CQ_* env. The KERNEL reads the job context; the shared
-          // driver helper stays pure over the correlation value (ADR-0002
-          // one-directional rule). Absent outside a governed dispatch.
-          ...correlationInvocation(currentJobContext()?.info?.correlation),
-        },
-        { signal: deadline.signal },
-      );
-      deps.account(result);
-      row.usage = result.usage;
-      if (result.costUSD !== undefined) row.costUSD = result.costUSD;
-      if (requestRefusal) throw requestRefusal;
-      stop();
-      if (deadline.expired()) throw new AddressRefusal('step wall budget exhausted');
-      if (result.stopReason !== 'complete') {
-        if (result.stopReason === 'budget' || result.stopReason === 'aborted')
-          throw new AddressRefusal(`worker stopped: ${result.stopReason}`);
-        throw new Error(`worker stopped: ${result.stopReason}`);
+    // The engine's own admission gate with the observed stop recorded first,
+    // so a refusal never reaches the boundary anonymously.
+    const admitAttempt = (): void => {
+      const cap = budgetCap();
+      if (cap !== null) setStop(cap);
+      try {
+        stop();
+      } catch (error) {
+        if (!stopSet)
+          setStop({
+            stopCode: 'unclassified',
+            stopReason: error instanceof Error ? error.message : String(error),
+          });
+        throw error;
       }
-      return result.structuredOutput;
+    };
+    // A refused upload is an observed human deferral, exactly as T13 records it.
+    const scanned = async (action: () => Promise<void>): Promise<void> => {
+      try {
+        await action();
+      } catch (error) {
+        if (error instanceof AddressRefusal && !stopSet)
+          setStop({ stopCode: 'human-deferred', stopReason: error.message });
+        throw error;
+      }
+    };
+    const boundaryStart = Date.now();
+    let dispatchedModel: ModelSpec | null = null;
+    let deadline: FixerDeadline | undefined;
+    let allowedTokens: number | null = null;
+    let allowedWall: number | null = null;
+    let boundWallMs: number | null = null;
+    let usage: Usage | undefined;
+    let spentTokens: number | null = null;
+    let servedModel: string | null = null;
+    let thrown: unknown;
+    let driverThrew = false;
+    try {
+      admitAttempt();
+      if (remainingUnit(finding) <= 0) throw new AddressRefusal('unit wall budget exhausted');
+      if (prior)
+        prompt += `\nPrior failed-attempt patch (engine-owned feedback; do not repeat rejected changes):\n${prior.patch}`;
+      const attributed = diagnosticSources(diagnostics);
+      const unattributed = diagnosticMessages(diagnostics);
+      const scanSet = (extra: readonly { text: string; path?: string }[] = []): ScanContent[] => {
+        const set: ScanContent[] = [
+          ...extra,
+          ...sources,
+          ...attributed,
+          ...(prior?.contents ?? []),
+        ];
+        if (unattributed.length)
+          set.push(...unattributed.map((message) => ({ text: message, diagnostic: true })));
+        return set;
+      };
+      await scanned(() => scan(prompt, scanSet()));
+      admitAttempt();
+      let requestRefusal: AddressRefusal | undefined;
+      const resolved = deps.drivers.resolve({
+        role: tier === 'reviewer' ? 'reviewer' : 'fixer',
+        modelSpec: role,
+        beforeRequest: async (text, contents = []) => {
+          try {
+            admitAttempt();
+            await scanned(() => scan(text, scanSet(contents)));
+            admitAttempt();
+          } catch (error) {
+            if (error instanceof AddressRefusal) requestRefusal = error;
+            throw error;
+          }
+        },
+        harness: {
+          ...defaultHarnessConfig,
+          tools: {
+            read: { ...defaultHarnessConfig.tools.read },
+            edit: {
+              ...defaultHarnessConfig.tools.edit,
+              enabled: editable,
+              pathPatterns: editable ? [finding.file!] : [],
+            },
+            write: { ...defaultHarnessConfig.tools.write, enabled: false, pathPatterns: [] },
+            bash: { ...defaultHarnessConfig.tools.bash, enabled: false, commandPatterns: [] },
+          },
+        },
+      });
+      const row: AddressAttempt = {
+        finding: finding.id,
+        tier,
+        attempt,
+        invocation,
+        reason: prompt.split('\n')[0]!,
+        model: resolved.modelSpec,
+        observedHead,
+        wallMs: 0,
+      };
+      await onDispatch?.(row);
+      deps.attempts.push(row);
+      dispatchedModel = resolved.modelSpec;
+      const start = Date.now();
+      const signals = [deps.parentSignal, currentJobContext()?.signal].filter(
+        (signal): signal is AbortSignal => signal !== undefined,
+      );
+      // The caps this dispatch is actually bounded by, recorded as the observed
+      // budget evidence (never an invented cap): the same values the request
+      // carries and the deadline arms.
+      const maxTokens = deps.remainingTokens();
+      const wallClockMs = Math.min(
+        policy.budgets.step.wallMs,
+        deps.remainingWallMs(),
+        remainingUnit(finding),
+      );
+      allowedTokens = maxTokens;
+      allowedWall = wallClockMs;
+      boundWallMs = wallClockMs;
+      const attemptDeadline = startFixerDeadline(
+        signals.length ? AbortSignal.any(signals) : undefined,
+        wallClockMs,
+      );
+      deadline = attemptDeadline;
+      try {
+        let result: WorkerResult;
+        try {
+          result = await resolved.driver.run(
+            {
+              prompt,
+              modelSpec: resolved.modelSpec,
+              workspace: { path: workspace },
+              toolPolicy: {
+                mode: 'allowlist',
+                allow: editable
+                  ? ['read', 'edit']
+                  : [
+                      'read',
+                      ...(tier === 'reviewer' && policy.review.searchTools ? ['grep', 'glob'] : []),
+                    ],
+              },
+              sandboxPolicy: { level: editable ? 'workspace-write' : 'read-only' },
+              budget: { maxTokens, wallClockMs },
+              outputSchema:
+                invocation === 'closure'
+                  ? toOutputSchema('review.address.closure/v1', ClosureSchema)
+                  : toOutputSchema('review.address.outcome/v1', OutcomeSchema),
+              // Session-log correlation (M5b3): forward the governed job's minted
+              // work identity onto every worker invocation so the lane stamps the
+              // child's CQ_* env. The KERNEL reads the job context; the shared
+              // driver helper stays pure over the correlation value (ADR-0002
+              // one-directional rule). Absent outside a governed dispatch.
+              ...correlationInvocation(currentJobContext()?.info?.correlation),
+            },
+            { signal: attemptDeadline.signal },
+          );
+        } catch (driverError) {
+          // Only a driver-call rejection is a driver-sourced cause; a loop throw
+          // must not be misattributed to the driver.
+          driverThrew = true;
+          throw driverError;
+        }
+        deps.account(result);
+        row.usage = result.usage;
+        usage = result.usage;
+        spentTokens =
+          result.usage.input +
+          result.usage.output +
+          result.usage.cacheRead +
+          result.usage.cacheWrite +
+          (result.usage.reasoning ?? 0);
+        servedModel = result.model ?? null;
+        if (result.costUSD !== undefined) row.costUSD = result.costUSD;
+        if (requestRefusal) throw requestRefusal;
+        // A cap reached by an otherwise complete result is the budget variant
+        // with the cap named; a fired deadline is the wall cap.
+        const cap = budgetCap();
+        if (cap !== null) setStop(cap);
+        else if (attemptDeadline.expired())
+          setStop({
+            budgetExpired: true,
+            budgetStopCode: 'wall-cap',
+            stopReason: 'address fixer wallClockMs deadline expired',
+          });
+        stop();
+        if (attemptDeadline.expired()) throw new AddressRefusal('step wall budget exhausted');
+        if (result.stopReason !== 'complete') {
+          // A worker-reported budget stop without a named cap keeps the raw code:
+          // finishAttempt's unknown branch preserves it (never a guessed cap).
+          setStop({
+            stopCode: result.stopReason,
+            stopReason: `worker stopped: ${result.stopReason}`,
+          });
+          if (result.stopReason === 'budget' || result.stopReason === 'aborted')
+            throw new AddressRefusal(`worker stopped: ${result.stopReason}`);
+          throw new Error(`worker stopped: ${result.stopReason}`);
+        }
+        if (!stopSet) setStop({ completed: true });
+        return result.structuredOutput;
+      } catch (error) {
+        throw requestRefusal ?? error;
+      } finally {
+        row.wallMs = Date.now() - start;
+        attemptDeadline.dispose();
+      }
     } catch (error) {
-      throw requestRefusal ?? error;
+      thrown ??= error;
+      // Classify throws with no observed stop before the boundary: a fired
+      // wallClockMs deadline is the budget variant with the cap named; a
+      // cancelled or governed-aborted job is the cancel stop.
+      if (!stopSet) {
+        if (deadline?.expired() === true)
+          setStop({
+            budgetExpired: true,
+            budgetStopCode: 'wall-cap',
+            stopReason: 'address fixer wallClockMs deadline expired',
+          });
+        else if (deps.parentSignal?.aborted || currentJobContext()?.signal?.aborted)
+          setStop(cancelStop());
+      }
+      throw error;
     } finally {
-      row.wallMs = Date.now() - start;
-      deadline.dispose();
+      // ADR-0008 T14: exactly one attempt-finished event per fixer dispatch,
+      // whatever route reached this boundary (spawn failure, cancellation,
+      // budget exhaustion, a refusal before dispatch). Observation failures
+      // never change the outcome: emitAttempt swallows them into evidence.
+      if (attemptTier !== null) {
+        const wallMs = Date.now() - boundaryStart;
+        await emitAttempt(() => ({
+          type: 'attempt-finished',
+          runId: deps.observationRunId ?? deps.observationWriter?.compositionRunId ?? '',
+          at: new Date().toISOString(),
+          // Production identity is `<package>/<fixer>` (runFix, registry,
+          // unit.ts); the review lane's fixer slot is ADDRESS_FIXER, and the
+          // order is preserved rather than inventing a second one.
+          unitId: deps.observationUnitId ?? `${unit}/${ADDRESS_FIXER}`,
+          jobId: currentJobContext()?.info.jobKey ?? null,
+          taskId: finding.id,
+          attempt: ordinal,
+          payload: finishAttempt({
+            ...observedStop,
+            // The prose message of a driver throw stays in stopReason; error.code
+            // keeps the stable code, never the prose.
+            ...(driverThrew && thrown instanceof Error
+              ? { stopReason: `${observedStop.stopReason as string}; ${thrown.message}` }
+              : {}),
+            tier: attemptTier,
+            invocation: `${runPrefix}:${finding.id}:${String(ordinal)}:${invocation}`,
+            model: dispatchedModel,
+            ...(dispatchedModel === null
+              ? {}
+              : {
+                  provider: dispatchedModel.provider,
+                  requestedModel: dispatchedModel.model,
+                }),
+            servedModel,
+            tokens: spentTokens,
+            usageChannels:
+              usage === undefined
+                ? {}
+                : {
+                    input: usage.input,
+                    output: usage.output,
+                    cacheRead: usage.cacheRead,
+                    cacheWrite: usage.cacheWrite,
+                    reasoning: usage.reasoning ?? null,
+                  },
+            requests: usage === undefined ? null : 1,
+            wallMs,
+            ...(driverThrew && thrown !== undefined
+              ? {
+                  error: {
+                    type: thrown instanceof Error ? thrown.name : null,
+                    // A stable code when the error carries one; a pre-dispatch
+                    // DispatchError's class is the stable code when it does not.
+                    code:
+                      typeof (thrown as { code?: unknown } | null)?.code === 'string'
+                        ? (thrown as { code: string }).code
+                        : (errorClassOf(thrown) ?? null),
+                    providerFinishReason: null,
+                    source: 'driver',
+                    certainty: 'observed' as const,
+                  },
+                }
+              : {}),
+            timeout:
+              deadline === undefined || !deadline.expired()
+                ? null
+                : {
+                    scope: 'attempt' as const,
+                    boundMs: boundWallMs ?? 0,
+                    source: 'address fixer wallClockMs deadline',
+                  },
+            budget: {
+              allowed: { tokens: allowedTokens, wallMs: allowedWall },
+              spent: { tokens: spentTokens, wallMs },
+              remaining: {
+                tokens:
+                  allowedTokens === null || spentTokens === null
+                    ? null
+                    : Math.max(0, allowedTokens - spentTokens),
+                wallMs: allowedWall === null ? null : Math.max(0, allowedWall - wallMs),
+              },
+            },
+          }),
+        }));
+      }
     }
   };
   const runChecks = async (
@@ -788,6 +1082,7 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
     escalation: () => state,
     preconditionFailure: () => preconditionFailure,
     preconditions: () => preconditions,
+    observationFailures: () => observationFailures,
     async withVerifiedHead(action) {
       await initialize();
       return withMutation(async () => {
@@ -990,13 +1285,9 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
           stop();
           if (Date.now() - unitStart >= policy.budgets.unit.wallMs)
             return failed('unit wall budget exhausted');
-          const packageName =
-            [...policy.packages]
-              .sort((a, b) => b.path.length - a.path.length)
-              .find((pkg) => {
-                const path = relative(resolve(root, pkg.path), resolve(root, file));
-                return path !== '..' && !path.startsWith('../') && !isAbsolute(path);
-              })?.name ?? policy.packages[0]!.name;
+          // The dispatched package is the observation unit identity; one
+          // resolver so the observation envelope and the escalation agree.
+          const packageName = packageOf(file);
           const next = nextEscalation(state, policy.escalation, {
             package: packageName,
             task: finding.id,
