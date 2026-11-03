@@ -52,6 +52,31 @@ describe('T05 round-trip', () => {
     );
   });
 
+  it('rejects a restored record with an omitted work ID (incomplete resume record)', () => {
+    expect(() =>
+      resolveCorrelation({
+        branch: 'feat/demo',
+        restored: {
+          workId: '7c9e6679-7425-40de-944b-e07fc1f90ae7',
+          branch: 'feat/demo',
+        } as NonNullable<ResolveCorrelationInput['restored']>,
+      }),
+    ).toThrow(/incomplete resume record/);
+  });
+
+  it('rejects a null restored workId instead of silently allocating a new identity', () => {
+    expect(() =>
+      resolveCorrelation({
+        branch: 'feat/demo',
+        restored: {
+          workId: null,
+          parentWorkId: null,
+          branch: 'feat/demo',
+        } as unknown as NonNullable<ResolveCorrelationInput['restored']>,
+      }),
+    ).toThrow(/invalid correlation record/);
+  });
+
   it('re-nulls stale operational fields on restore (only work IDs survive)', () => {
     const stale = resolveCorrelation({
       branch: 'feat/demo',

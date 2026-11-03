@@ -54,11 +54,26 @@ export function resolveCorrelation(input: ResolveCorrelationInput): CorrelationR
         `this run's branch '${input.branch}'`,
     );
   }
+  // A restore must carry both work IDs explicitly: an omitted parentWorkId
+  // is an incomplete resume record, not a root — defaulting it to null here
+  // would silently drop the persisted parent link (root parent is an
+  // explicit null, which passes through untouched).
+  if (
+    restored !== undefined &&
+    (restored.workId === undefined || restored.parentWorkId === undefined)
+  ) {
+    throw new Error(
+      'correlation: restored record must carry an explicit workId and parentWorkId ' +
+        '(null for a root work) — an omitted work ID is an incomplete resume record',
+    );
+  }
   const correlation: CorrelationRecord = {
     // Only the work IDs survive a restore, verbatim; everything else is
-    // this run's fresh boundary state.
-    workId: restored?.workId ?? randomUUID(),
-    parentWorkId: restored?.parentWorkId ?? null,
+    // this run's fresh boundary state. A present restore's IDs are used
+    // AS-IS — a null/invalid restored ID must fail schema validation, never
+    // silently fall back to a freshly allocated identity.
+    workId: restored === undefined ? randomUUID() : restored.workId,
+    parentWorkId: restored === undefined ? null : restored.parentWorkId,
     branch: input.branch,
     commitSha: null,
     sessionId: null,
