@@ -90,6 +90,13 @@ process.exitCode = failed ? 1 : 0;
   await git(repo, 'remote', 'add', 'origin', origin);
   return { root, repo, origin, journalDir: join(root, 'journal') };
 }
+/** PR publication requires an actual remote default branch, unlike local-only runs. */
+async function seedPrBase(f: Awaited<ReturnType<typeof fixture>>) {
+  await git(f.repo, 'push', 'origin', 'HEAD:refs/heads/main');
+  await git(f.repo, 'fetch', 'origin', 'main');
+  await git(f.repo, 'symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main');
+}
+
 function scripted(
   mode:
     | 'fix'
@@ -177,6 +184,62 @@ const input = (f: Awaited<ReturnType<typeof fixture>>) => ({
 });
 const reportOf = (result: Awaited<ReturnType<ReturnType<typeof makeFixRun>>>) =>
   result.status === 'ok' ? result.value : (result.report as FixRunReport);
+
+test('offline install supplies a dependency needed by the isolated check', async () => {
+  const f = await fixture();
+  try {
+    const script = join(f.repo, 'scripts', 'tests.cjs');
+    await writeFile(
+      script,
+      "require('../installed-dependency.cjs');\n" + (await readFile(script, 'utf8')),
+    );
+    await writeFile(join(f.repo, '.gitignore'), 'worktrees/\ninstalled-dependency.cjs\n');
+    await git(f.repo, 'add', '-A');
+    await git(f.repo, 'commit', '-m', 'require offline installed dependency');
+    const missing = await makeFixRun({ drivers: scripted() })({
+      ...input(f),
+      runPrefix: 'cq/no-install',
+    });
+    expect(missing.status).not.toBe('ok');
+    expect(reportOf(missing).fixesPerRun).toBe(0);
+    const installed = await makeFixRun({ drivers: scripted() })({
+      ...input(f),
+      runPrefix: 'cq/with-install',
+      journalDir: join(f.root, 'journal-with-install'),
+      install: {
+        command: process.execPath,
+        args: [
+          '-e',
+          "require('node:fs').writeFileSync('installed-dependency.cjs', 'module.exports = true;')",
+        ],
+      },
+    });
+    expect(installed.status, JSON.stringify(installed)).toBe('ok');
+    expect(reportOf(installed).fixesPerRun).toBe(2);
+    const sourceDependency = join(f.repo, 'installed-dependency.cjs');
+    await expect(readFile(sourceDependency, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+  } finally {
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
+
+test.each(['v1.0', 'feature/unfetched'])(
+  'PR refusal identifies explicit unavailable base %s',
+  async (base) => {
+    const f = await fixture();
+    try {
+      const result = await makeFixRun({ drivers: scripted() })({ ...input(f), pr: true, base });
+      expect(result.status).toBe('needs-human');
+      if (result.status === 'needs-human') {
+        expect(result.reason).toContain(JSON.stringify(base));
+        expect(result.reason).toContain('branch on origin');
+        expect(result.reason).not.toContain('set base explicitly');
+      }
+    } finally {
+      await rm(f.root, { recursive: true, force: true });
+    }
+  },
+);
 
 test('spawned static CLI clusters real tsc diagnostics and commits each gated file-rule fix', async () => {
   const f = await fixture(1000, false);
@@ -869,6 +932,7 @@ test.each([false, true])(
   'opt-in PR assembly uses only committed markers and records forge failure (%s)',
   async (fail) => {
     const f = await fixture();
+    await seedPrBase(f);
     const called: string[] = [];
     try {
       const result = await makeFixRun({
@@ -905,6 +969,7 @@ test.each([false, true])(
 
 test('PR body links pushed failed-attempt evidence in its Unfixed section', async () => {
   const f = await fixture();
+  await seedPrBase(f);
   let packageBody = '';
   try {
     await git(f.repo, 'remote', 'set-url', 'origin', 'https://github.com/example/scratch.git');
@@ -953,6 +1018,7 @@ test.each(['denylist hit', 'scanner fault'] as const)(
   'PR body upload is refused on a %s while retaining local failed evidence',
   async (caseName) => {
     const f = await fixture();
+    await seedPrBase(f);
     const dispatched: string[] = [];
     let scannedBody = '';
     try {
@@ -1012,6 +1078,7 @@ test.each(['denylist hit', 'scanner fault'] as const)(
 
 test('PR summary Unfixed section reads final refined planned rows (issue 615 #1)', async () => {
   const f = await fixture();
+  await seedPrBase(f);
   let packageBody = '';
   try {
     // The failure that strands the unit leaves the run's planned rows empty
@@ -1050,6 +1117,7 @@ test('PR summary Unfixed section reads final refined planned rows (issue 615 #1)
 
 test('PR summary keeps an exhausted task when another unit retained the same task ID (#631)', async () => {
   const f = await fixture();
+  await seedPrBase(f);
   const bodies = new Map<string, string>();
   try {
     await writeFile(
@@ -1271,6 +1339,7 @@ test('mixed outcomes are fully accounted: fixed, failed-with-branch, branchless 
 
 test('PR summary carries branchless refined rows before finalization (issue 615 #1)', async () => {
   const f = await fixture(1000);
+  await seedPrBase(f);
   let packageBody = '';
   try {
     await writeFile(
