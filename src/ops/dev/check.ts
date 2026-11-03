@@ -329,7 +329,7 @@ export function makeDevCheck(
     ) {
       return {
         status: 'failed',
-        error: 'dev.check: uncommitted conflicts with range and testFiles',
+        error: 'dev.check: uncommitted cannot be combined with range or testFiles',
       };
     }
     const fault = input.range === undefined ? null : rangeFault(input.range);

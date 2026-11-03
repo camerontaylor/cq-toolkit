@@ -71,14 +71,20 @@ describe('dev.check', () => {
     expect(result.value.gates.map((gate) => gate.name)).toContain('diff-check:staged');
     expect(result.value.gates.map((gate) => gate.name)).toContain('diff-check:unstaged');
   });
-  test('uncommitted refuses competing selections', async () => {
-    const result = await makeDevCheck(effectsFor())({
-      repoRoot: repo.root,
-      uncommitted: true,
-      range: 'a..b',
-    });
-    expect(result.status).toBe('failed');
-  });
+  test.each([{ range: 'a..b' }, { testFiles: ['test/a.test.ts'] }])(
+    'uncommitted refuses competing selection %j',
+    async (selection) => {
+      const result = await makeDevCheck(effectsFor())({
+        repoRoot: repo.root,
+        uncommitted: true,
+        ...selection,
+      });
+      expect(result).toMatchObject({
+        status: 'failed',
+        error: 'dev.check: uncommitted cannot be combined with range or testFiles',
+      });
+    },
+  );
   test('runs repository cq.json checks and skips address-only checks for adopters', async () => {
     await repo.write('package.json', JSON.stringify({ name: 'fixture-adopter' }));
     await repo.write(

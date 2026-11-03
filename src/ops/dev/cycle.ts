@@ -774,7 +774,9 @@ function makeDevCycleCore(
       if (report.verifiedHead !== T || author.state.dirtySha256 !== CLEAN_TREE)
         return { kind: 'skip' };
       const authorRecords = deps.effects.openLedger(author.state.branch).load().records;
-      const lastCheck = authorRecords.findLast((record) => record.kind === 'check');
+      const lastCheck = authorRecords.findLast(
+        (record) => record.kind === 'check' && record.scope !== 'uncommitted',
+      );
       if (lastCheck?.kind !== 'check' || lastCheck.head !== T || lastCheck.passed)
         return { kind: 'skip' };
       const ledgerPath = devLedgerPath(input.repoRoot, author.state.branch);
