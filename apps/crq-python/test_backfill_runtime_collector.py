@@ -74,6 +74,25 @@ class RuntimeTest(RuntimeTestBase):
             self.assertEqual(self.cached_collection(target, response), newer)
             self.assertGreater(lineage.call_count, 0)
 
+    def test_cache_pointer_write_failure_does_not_block_inventory(self):
+        merge = self.f.commit({"new": b"unique\n"})
+        response = {"number": 7, "merged": True, "merge_commit_sha": merge}
+        filename = self.state / "required-cache/7.json"
+        original = ledger.atomic
+        def readonly_index(path, data):
+            if path == filename:
+                raise OSError("read-only cache index")
+            return original(path, data)
+        with mock.patch.object(ledger, "atomic", side_effect=readonly_index):
+            first = self.cached_collection(merge, response)
+            self.assertFalse(filename.exists())
+            with mock.patch.object(self.f.repo, "lineage", wraps=self.f.repo.lineage) as lineage:
+                self.assertEqual(self.cached_collection(merge, response), first)
+                self.assertGreater(lineage.call_count, 0)
+        with mock.patch.object(self.f.store, "put", side_effect=OSError("durable artifact failure")):
+            with self.assertRaisesRegex(OSError, "durable artifact failure"):
+                self.cached_collection(merge, response)
+
     def test_required_collector_rejects_ambiguous_rename_as_deletion(self):
         self.f.commit({"unrelated": b"before\n"})
         merge = self.f.commit({"old": b"same\n"})

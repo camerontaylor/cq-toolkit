@@ -514,7 +514,11 @@ def collect_required(repo, target, required, store, *, cache_dir=None):
                             "context": {"trust": "untrusted-data-only", "title": value.get("title", ""), "body": value.get("body") or ""}}
         if filename is not None:
             result = {"key": key, "paths": paths[str(pr)], "member": members[str(pr)]}
-            ledger.atomic(filename, ledger.canonical(store.put(ledger.canonical(result))))
+            reference = store.put(ledger.canonical(result))
+            try:
+                ledger.atomic(filename, ledger.canonical(reference))
+            except OSError:
+                pass  # Disposable index only; durable artifact failures propagate.
     return paths, members
 
 
