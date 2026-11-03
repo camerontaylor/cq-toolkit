@@ -26,7 +26,7 @@ export const NON_IMPORT_MAP = [
   // policyDiff requires every protected-path pattern to match a tracked file.
   [
     /^scripts\//,
-    [/^test\/scripts\//, /^test\/workflows\//, /^test\/ops\/gates\/policyDiff\.test\.ts$/],
+    [/^test\/scripts\//, /^test\/workflows\//, /^test\/ops\/gates\/policyDiff(\..+)?\.test\.ts$/],
   ],
   // The CLI smoke test runs `pnpm run build`, which executes this script by path.
   [/^scripts\/copy-prompt-assets\.mjs$/, [/^test\/cli\/plans\.smoke\.test\.ts$/]],
@@ -99,7 +99,8 @@ export const NON_IMPORT_MAP = [
     /^\.github\/(workflows|actions)\//,
     [
       /^test\/workflows\//,
-      /^test\/ops\/gates\/(workflowScan|policyDiff|protectedPaths)\.test\.ts$/,
+      /^test\/ops\/gates\/(workflowScan|protectedPaths)\.test\.ts$/,
+      /^test\/ops\/gates\/policyDiff(\..+)?\.test\.ts$/,
       /^test\/ops\/ratchet\/definitions\.test\.ts$/,
       /^test\/scripts\/(github-settings|adversarial-suite)\.test\.ts$/,
       /^test\/adversarial\/a14-privileged-workflow\.test\.ts$/,

@@ -230,7 +230,7 @@ alongside the acceptance check.
 
 ## Evidence
 
-- Hermetic op tests (`test/ops/gates/policyDiff.test.ts`) run in both postures. They cover
+- Hermetic op tests (`test/ops/gates/policyDiff.*.test.ts`) run in both postures. They cover
   every finding kind; the #224 composition, where a `.GIT` segment and a backslash path become
   `unsafe-path` and are never read; and the #221/W1.7 no-shell composition. In that test a
   repo configured with `diff.external`, a textconv driver selected by a head `.gitattributes`,
