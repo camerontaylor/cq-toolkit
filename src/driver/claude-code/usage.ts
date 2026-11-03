@@ -325,8 +325,8 @@ export function modelUsageCost(
   for (const [model, usage] of Object.entries(measured.perModel)) {
     let cost = computeDerivedCost(pricing, { ...served, model }, usage);
     if (cost === undefined) {
-      fallbackModels.push(model);
       cost = computeDerivedCost(pricing, served, usage);
+      if (cost !== undefined) fallbackModels.push(model);
     }
     if (cost === undefined) return { fallbackModels };
     total += cost;

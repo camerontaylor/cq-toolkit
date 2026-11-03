@@ -733,20 +733,22 @@ export class ClaudeCodeCliTransport implements Driver {
     // --- Usage accounting (usage.ts: the ONE fold) + its provenance.
     recordUsageProvenance(observation, resumeCliSessionId !== undefined);
     const pricingMeasurement = measureResultUsage(observation.result);
-    if (pricingMeasurement !== undefined) {
-      const pricing = modelUsageCost(
-        this.pricingOverride,
-        { ...modelSpec, model: observation.servedModel ?? modelSpec.model },
-        pricingMeasurement,
+    const pricedUsage =
+      pricingMeasurement === undefined
+        ? undefined
+        : modelUsageCost(
+            this.pricingOverride,
+            { ...modelSpec, model: observation.servedModel ?? modelSpec.model },
+            pricingMeasurement,
+          );
+    if (pricedUsage !== undefined && pricedUsage.fallbackModels.length > 0) {
+      observation.narration.push(
+        JSON.stringify({
+          cq: 'pricing-fallback',
+          models: pricedUsage.fallbackModels,
+          rate: 'served-model',
+        }),
       );
-      if (pricing.fallbackModels.length > 0)
-        observation.narration.push(
-          JSON.stringify({
-            cq: 'pricing-fallback',
-            models: pricing.fallbackModels,
-            rate: 'served-model',
-          }),
-        );
     }
 
     // --- Structured output (ADR-0002 §2.3, S3): the ONE shared judge over
@@ -806,6 +808,7 @@ export class ClaudeCodeCliTransport implements Driver {
       structuredMiss,
       isCodexBinary(this.binary[0] ?? ''),
       workspace,
+      pricedUsage,
     );
   }
 
@@ -862,6 +865,7 @@ export class ClaudeCodeCliTransport implements Driver {
     structuredMiss: string | undefined,
     codexBinary: boolean,
     workspacePath: string | undefined,
+    pricedUsage?: ReturnType<typeof modelUsageCost>,
   ): WorkerResult {
     const measuredFrame = measureResultUsage(observation.result);
     const measured = measuredFrame !== undefined ? measuredFrame.usage : undefined;
@@ -939,11 +943,13 @@ export class ClaudeCodeCliTransport implements Driver {
       ? {}
       : costField(
           (spec, fold) =>
-            modelUsageCost(
-              this.pricingOverride,
-              spec,
-              measuredFrame ?? { usage: fold, channel: 'assistant' },
-            ).costUSD,
+            pricedUsage !== undefined
+              ? pricedUsage.costUSD
+              : modelUsageCost(
+                  this.pricingOverride,
+                  spec,
+                  measuredFrame ?? { usage: fold, channel: 'assistant' },
+                ).costUSD,
           pricedModel,
           usage,
         );
