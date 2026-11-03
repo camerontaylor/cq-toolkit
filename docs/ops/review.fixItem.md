@@ -355,8 +355,24 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
             "finding": {
               "additionalProperties": false,
               "properties": {
+                "acceptedRisk": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
                 "evidence": {
-                  "type": "string"
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    }
+                  ]
                 },
                 "evidenceV1": {
                   "additionalProperties": false,
@@ -488,6 +504,52 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
                 "file": {
                   "type": "string"
                 },
+                "fingerprint": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "checkId": {
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "path": {
+                      "type": "string"
+                    },
+                    "rule": {
+                      "anyOf": [
+                        {
+                          "minLength": 1,
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "spanContentHash": {
+                      "anyOf": [
+                        {
+                          "pattern": "^sha256:[0-9a-f]{64}$",
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "version": {
+                      "const": 1,
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "version",
+                    "checkId",
+                    "rule",
+                    "path",
+                    "spanContentHash"
+                  ],
+                  "type": "object"
+                },
                 "id": {
                   "minLength": 1,
                   "type": "string"
@@ -497,8 +559,32 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
                   "maximum": 9007199254740991,
                   "type": "integer"
                 },
+                "observedAt": {
+                  "format": "date-time",
+                  "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}(?:Z))$",
+                  "type": "string"
+                },
+                "observedHead": {
+                  "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$",
+                  "type": "string"
+                },
+                "owner": {
+                  "minLength": 1,
+                  "type": "string"
+                },
                 "reason": {
                   "type": "string"
+                },
+                "reviewTrigger": {
+                  "anyOf": [
+                    {
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
                 },
                 "rule": {
                   "type": "string"
