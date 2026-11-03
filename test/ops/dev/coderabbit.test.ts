@@ -40,6 +40,38 @@ describe('coderabbitReviewArgv', () => {
 });
 
 describe('parseReviewerStream', () => {
+  // Sanitized field shape from the captured real CodeRabbit agent stream.
+  test.each([1, 42])('retains real startLine %s without inventing a rule', (line) => {
+    const parsed = parseReviewerStream(
+      JSON.stringify({
+        type: 'finding',
+        severity: 'major',
+        fileName: 'src/a.ts',
+        startLine: line,
+        endLine: line,
+        title: 'Fixture issue',
+        comment: 'Fixture issue details',
+        codegenInstructions: 'Inspect the fixture',
+        suggestions: [],
+      }),
+    );
+    expect(parsed.findings[0]).toMatchObject({ fileName: 'src/a.ts', line });
+    expect(parsed.findings[0]).not.toHaveProperty('rule');
+  });
+  test.each([0, -1, 1.5, '1', null])('ignores invalid optional finding line %s', (line) => {
+    const parsed = parseReviewerStream(
+      JSON.stringify({
+        type: 'finding',
+        severity: 'major',
+        startLine: line,
+        endLine: line,
+        title: 'Fixture issue',
+      }),
+    );
+    expect(parsed.findings[0]).not.toHaveProperty('line');
+    expect(parsed.findings[0]).not.toHaveProperty('rule');
+  });
+
   test('a full cycle: status beats, findings, and a terminal complete', () => {
     const stdout = [
       JSON.stringify({ type: 'review_context', sha: 'abc' }),

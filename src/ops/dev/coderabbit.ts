@@ -217,6 +217,10 @@ export function parseReviewerStream(stdout: string): ParsedReviewerStream {
         const finding: Omit<DevFinding, 'id'> = { severity };
         if (fileName !== undefined) finding.fileName = fileName;
         if (excerpt !== undefined) finding.excerpt = excerpt;
+        const line = event['startLine'];
+        if (typeof line === 'number' && Number.isSafeInteger(line) && line > 0) finding.line = line;
+        const rule = stringAt(event, 'rule');
+        if (rule !== undefined) finding.rule = rule;
         parsed.findings.push(finding);
         break;
       }

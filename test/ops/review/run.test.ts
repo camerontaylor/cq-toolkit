@@ -83,6 +83,62 @@ function scriptedDrivers(
 }
 
 describe('review.run', () => {
+  it('retains CodeRabbit lines and ID fallback without a vendor rule', async () => {
+    const repo = await makeTestRepo();
+    try {
+      await configureAgentRepo(repo);
+      const identity = { file: 'src/a.ts', line: 1, rule: 'shared-rule' };
+      const effects = repoEffects(repo, (command) =>
+        command === 'coderabbit'
+          ? {
+              exitCode: 0,
+              stdout: [
+                JSON.stringify({
+                  type: 'finding',
+                  fileName: identity.file,
+                  startLine: identity.line,
+                  endLine: identity.line,
+                  title: 'Fixture issue',
+                  codegenInstructions: 'Inspect the fixture',
+                  suggestions: [],
+                  severity: 'major',
+                  comment: 'vendor wording',
+                }),
+                JSON.stringify({ type: 'complete', status: 'review_completed' }),
+              ].join('\n'),
+              stderr: '',
+              timedOut: false,
+            }
+          : undefined,
+      );
+      const result = await makeReviewRun({
+        drivers: scriptedDrivers(undefined, 0, () => [
+          { ...identity, severity: 'high', text: 'agent wording' },
+        ]),
+        effectsFactory: () => effects,
+        scannerFactory: () => async (components) =>
+          components.map(({ component }) => ({ component, hits: [] })),
+      })({ repoRoot: repo.root, reviewers: ['coderabbit', 'agent'] });
+      expect(result.status).toBe('ok');
+      if (result.status !== 'ok') throw new Error(result.status);
+      expect(result.value.findings).toHaveLength(2);
+      const vendor = result.value.findings.find((finding) => finding.source === 'coderabbit');
+      const agent = result.value.findings.find((finding) => finding.source === 'agent');
+      expect(vendor).toMatchObject({ file: identity.file, line: identity.line });
+      expect(vendor).not.toHaveProperty('rule');
+      expect(agent).toMatchObject(identity);
+      expect(vendor?.id).not.toBe(agent?.id);
+      const folder = join(repo.root, '.cq', 'review', 'feature%2Fx');
+      const [recordFile] = await readdir(folder);
+      const persisted = JSON.parse(await readFile(join(folder, recordFile ?? ''), 'utf8')) as {
+        findings: unknown[];
+      };
+      expect(persisted.findings).toEqual(result.value.findings);
+    } finally {
+      await repo.cleanup();
+    }
+  });
+
   it('forwards opt-in area execution through the public op', async () => {
     const repo = await makeTestRepo();
     try {

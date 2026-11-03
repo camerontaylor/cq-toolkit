@@ -58,3 +58,13 @@ This demonstrates bounded, complete content coverage and honest failure behavior
 It does not execute live review, a reducer, global cross-file analysis or the
 whole slice acceptance workflow. Partitioning limits the context available to
 each reviewer call; complete coverage does not guarantee semantic completeness.
+
+## CodeRabbit location identity limitation (issue #425)
+
+Captured CodeRabbit agent findings supply `startLine` and `endLine`, but no rule
+identifier. Parsing retains a positive safe-integer `startLine` as the normalized
+line. No rule is inferred from the vendor title or prose. Without an explicit
+rule, findings keep their source ID identity, so equal file/line locations across
+agent and CodeRabbit findings do not establish deduplication. Changing that
+identity contract requires a separate owner decision; this is metadata retention,
+not proof that real cross-source deduplication is complete.
