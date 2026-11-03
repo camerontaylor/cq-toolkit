@@ -1,12 +1,10 @@
 // Type declarations for scripts/measurement-session-index.mjs so the
-// typechecked test suite can import the plain-JS offline tool.
-import type { ZodTypeAny, z } from 'zod';
+// typechecked test suite can import the plain-JS offline tool. Availability
+// vocabulary comes from the kernel (single source of truth — no drift).
+import type { z } from 'zod';
+import type { AvailabilityRecord, AvailabilityState } from '../src/kernel/types.js';
 
-export interface AvailabilityEntry {
-  state: 'known-zero' | 'not-collected' | 'unavailable' | 'partial' | 'n-a' | 'known';
-  reason: string;
-  source: string | null;
-}
+export type { AvailabilityRecord, AvailabilityState };
 
 export interface SessionIndexRow {
   /** Archive-safe opaque remote digest; null when no remote exists. */
@@ -26,7 +24,7 @@ export interface SessionIndexRow {
     stopCode: string;
     class: 'retriable' | 'terminal' | 'infrastructure' | 'budget' | 'human';
   }>;
-  availability: Record<string, AvailabilityEntry>;
+  availability: Record<string, AvailabilityRecord>;
 }
 
 export interface SessionIndex {

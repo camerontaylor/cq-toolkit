@@ -75,7 +75,60 @@ export const SessionIndexSchema = z
     indexVersion: z.literal(1),
     sessions: z.array(SessionIndexRowSchema),
   })
-  .strict();
+  .strict()
+  .superRefine((index, ctx) => {
+    // Null-implies-availability discipline (mirrors T28's checkMetric):
+    // a null nullable value MUST carry an availability entry at its
+    // pointer; a non-null value must NOT be marked not-collected or
+    // unavailable (a present value with an absence state contradicts
+    // itself), and never known/known-zero on a null.
+    // parentWorkId is excluded: its null is a structural value (root work),
+    // not missing evidence, and never carries an availability entry.
+    const nullableFields = [
+      'repo',
+      'sessionId',
+      'commitSha',
+      'agentId',
+      'model',
+      'tokens',
+      'wallMs',
+    ];
+    index.sessions.forEach((row, i) => {
+      for (const field of nullableFields) {
+        const pointer = `/${field}`;
+        const entry = row.availability[pointer];
+        if (row[field] === null && entry === undefined) {
+          ctx.addIssue({
+            code: 'custom',
+            message: `a null value at ${pointer} requires an availability entry`,
+            path: ['sessions', i, 'availability'],
+          });
+        }
+        if (row[field] !== null && entry !== undefined) {
+          if (
+            entry.state === 'not-collected' ||
+            entry.state === 'unavailable' ||
+            entry.state === 'n-a'
+          ) {
+            ctx.addIssue({
+              code: 'custom',
+              message: `a non-null value at ${pointer} cannot carry availability state '${entry.state}'`,
+              path: ['sessions', i, 'availability', pointer],
+            });
+          }
+        }
+        if (row[field] === null && entry !== undefined) {
+          if (entry.state === 'known' || entry.state === 'known-zero') {
+            ctx.addIssue({
+              code: 'custom',
+              message: `a null value at ${pointer} cannot carry availability state '${entry.state}'`,
+              path: ['sessions', i, 'availability', pointer],
+            });
+          }
+        }
+      }
+    });
+  });
 
 /**
  * Validate the correlation input against the strict ADR-0008 schema.
@@ -174,7 +227,7 @@ export function buildSessionIndex(input) {
       return {
         value: null,
         state: 'not-collected',
-        reason: `no attempt carried a ${field === 'tokens' ? 'token' : 'wall-time'} count`,
+        reason: `no attempt carried a ${field === 'tokens' ? 'token count' : 'wall-time duration'}`,
       };
     }
     const subtotal = known.reduce((sum, a) => sum + a.payload[field], 0);
@@ -184,15 +237,15 @@ export function buildSessionIndex(input) {
         state: subtotal === 0 ? 'known-zero' : 'known',
         reason:
           subtotal === 0
-            ? `every attempt carried a known ${field === 'tokens' ? 'token' : 'wall-time'} count and the observed sum is zero`
-            : `every attempt carried a known ${field === 'tokens' ? 'token' : 'wall-time'} count`,
+            ? `every attempt carried a known ${field === 'tokens' ? 'token count' : 'wall-time duration'} and the observed sum is zero`
+            : `every attempt carried a known ${field === 'tokens' ? 'token count' : 'wall-time duration'}`,
       };
     }
     return {
       value: subtotal,
       state: 'partial',
       reason:
-        `some attempts carried a known ${field === 'tokens' ? 'token' : 'wall-time'} count; ` +
+        `some attempts carried a known ${field === 'tokens' ? 'token count' : 'wall-time duration'}; ` +
         'the value preserves the known subtotal without claiming a complete sum',
     };
   }
@@ -235,11 +288,15 @@ export function buildSessionIndex(input) {
     );
   }
   // The repo join comes from the composition header provenance (the
-  // archive-safe opaque remote digest); the stream's composition-started
-  // header carries the provenance this run recorded.
+  // archive-safe opaque remote digest). Two null cases stay distinct:
+  // (a) header OBSERVED with repoId null — no remote exists
+  //     (ADR-0008:223 "null/unavailable when no remote exists") → unavailable;
+  // (b) header MISSING (torn stream lost the provenance) — never observed
+  //     (ADR-0008:102) → not-collected.
   const header = stream.events.find((event) => event.type === 'composition-started');
+  const provenanceObserved = header !== undefined;
   const provenanceRepo =
-    header && header.payload.provenance.repoId !== undefined
+    provenanceObserved && header.payload.provenance.repoId !== undefined
       ? header.payload.provenance.repoId
       : null;
 
@@ -251,22 +308,19 @@ export function buildSessionIndex(input) {
         'this row folds partial evidence only',
     );
   }
-  if (tokens.state !== null) {
-    availabilityEntries['/tokens'] = availability(tokens.state, tokens.reason);
-  }
-  if (wallMs.state !== null) {
-    availabilityEntries['/wallMs'] = availability(wallMs.state, wallMs.reason);
-  }
+  // Availability is written only where the state must be stated: unknown or
+  // partial aggregates always; fully-known sums carry 'known'/'known-zero'
+  // so a reader can distinguish a stated complete sum from an unstated one.
+  availabilityEntries['/tokens'] = availability(tokens.state, tokens.reason);
+  availabilityEntries['/wallMs'] = availability(wallMs.state, wallMs.reason);
   if (provenanceRepo === null) {
     availabilityEntries['/repo'] = availability(
-      'not-collected',
-      'no archive-safe remote digest was observed in the composition header provenance',
+      provenanceObserved ? 'unavailable' : 'not-collected',
+      provenanceObserved
+        ? 'the composition header was observed with repoId null: no remote exists for this repository'
+        : 'the composition header was never observed (stream torn before it); no provenance exists',
     );
   }
-  // A known-positive observation carries availability state 'known' only
-  // where the field is nullable and its completeness must be stated; a
-  // complete non-null repo/session/commit needs no entry.
-
   const row = {
     repo: provenanceRepo,
     sessionId: correlation.record.sessionId,

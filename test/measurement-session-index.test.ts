@@ -354,7 +354,21 @@ describe('M6c join integrity (review iterations)', () => {
       stream: noRepo,
     }).sessions[0]!;
     expect(rowNoRepo.repo).toBeNull();
-    expect(rowNoRepo.availability['/repo']).toMatchObject({ state: 'not-collected' });
+    // Header OBSERVED with repoId null: no remote exists → unavailable
+    // (ADR-0008:223), never not-collected — the provenance WAS observed.
+    expect(rowNoRepo.availability['/repo']).toMatchObject({ state: 'unavailable' });
+  });
+
+  it('a torn stream that lost its header leaves provenance not-collected', () => {
+    // Crash during the header write: an empty, incomplete prefix — the
+    // schema's only headerless shape. Provenance was never observed →
+    // not-collected (ADR-0008:102), distinct from observed-null.
+    const empty = stream([], { complete: false });
+    empty.events = [];
+    const row = buildSessionIndex({ correlation: correlation(), stream: empty }).sessions[0]!;
+    expect(row.repo).toBeNull();
+    expect(row.availability['/repo']).toMatchObject({ state: 'not-collected' });
+    expect(row.availability['/repo']!.reason).toContain('never observed');
   });
 
   it('partial aggregates preserve the known subtotal and mark partial, never drop it', () => {
@@ -500,5 +514,50 @@ describe('M6c availability discipline (review r2)', () => {
     delete row.availability['tokens'];
     row.availability[''] = { state: 'partial', reason: 'x', source: null };
     expect(() => SessionIndexSchema.parse(forged)).not.toThrow();
+  });
+});
+
+describe('M6c artifact cross-checks (review r3)', () => {
+  it('a null nullable value without its availability entry fails artifact parse', () => {
+    const index = buildSessionIndex({
+      correlation: correlation(),
+      stream: stream([attemptEvent()]),
+    });
+    const row = JSON.parse(JSON.stringify(index.sessions[0])) as {
+      repo: string | null;
+      commitSha: string | null;
+      availability: Record<string, unknown>;
+    };
+    row.commitSha = null;
+    delete row.availability['/commitSha'];
+    const forged = { indexVersion: 1 as const, sessions: [row] };
+    expect(() => SessionIndexSchema.parse(forged)).toThrow(/requires an availability entry/);
+    // Restoring the entry (with a legal null-state) parses again.
+    row.availability['/commitSha'] = { state: 'not-collected', reason: 'x', source: null };
+    expect(() => SessionIndexSchema.parse(forged)).not.toThrow();
+  });
+
+  it('a non-null value marked not-collected/unavailable/known-zero is contradictory', () => {
+    const index = buildSessionIndex({
+      correlation: correlation({ commitSha: 'a1b2c3d4e5f6a7b8a1b2c3d4e5f6a7b8a1b2c3d4' }),
+      stream: stream([attemptEvent()]),
+    });
+    const row = JSON.parse(JSON.stringify(index.sessions[0])) as {
+      commitSha: string | null;
+      availability: Record<string, unknown>;
+    };
+    row.availability['/commitSha'] = { state: 'not-collected', reason: 'x', source: null };
+    expect(() => SessionIndexSchema.parse({ indexVersion: 1, sessions: [row] })).toThrow(
+      /cannot carry availability state/,
+    );
+    row.availability['/commitSha'] = { state: 'unavailable', reason: 'x', source: null };
+    expect(() => SessionIndexSchema.parse({ indexVersion: 1, sessions: [row] })).toThrow(
+      /cannot carry availability state/,
+    );
+    row.commitSha = null;
+    row.availability['/commitSha'] = { state: 'known-zero', reason: 'x', source: null };
+    expect(() => SessionIndexSchema.parse({ indexVersion: 1, sessions: [row] })).toThrow(
+      /cannot carry availability state/,
+    );
   });
 });
