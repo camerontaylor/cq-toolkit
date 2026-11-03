@@ -46,7 +46,7 @@ import type { ComponentScan, DiffSecretScanner } from '../dev/denylist.js';
  * merge/rebase/close member. The fleet run report (runReport.ts) is a
  * merge-READINESS artifact; merging is the merge family's guarded business
  * (MergeEffects + safeArgs), never this seam's. The key-set pin in
- * test/ops/pr/runReport.test.ts fails the build the moment a merge-class
+ * test/ops/pr/runReport.tracker.test.ts fails the build the moment a merge-class
  * member is added.
  */
 export interface PrEffects {
