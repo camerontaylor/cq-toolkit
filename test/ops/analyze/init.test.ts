@@ -198,7 +198,10 @@ describe('analyze.init migration', () => {
     const dir = project({ 'custom.json': text, 'cq.json': 'keep' });
     const result = await init({ dir, migrate: true, configPath: 'custom.json' });
     expect(result.status).toBe('ok');
-    expect(JSON.parse(readFileSync(join(dir, 'custom.json'), 'utf8')).schemaVersion).toBe(2);
+    const migrated = JSON.parse(readFileSync(join(dir, 'custom.json'), 'utf8')) as {
+      schemaVersion: number;
+    };
+    expect(migrated.schemaVersion).toBe(2);
     expect(readFileSync(join(dir, 'cq.json'), 'utf8')).toBe('keep');
   });
 
