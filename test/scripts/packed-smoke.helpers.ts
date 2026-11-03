@@ -1,20 +1,8 @@
-import { spawnSync } from 'node:child_process';
-import {
-  chmodSync,
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  readdirSync,
-  realpathSync,
-  rmSync,
-  writeFileSync,
-} from 'node:fs';
-import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { afterEach, describe, expect, it } from 'vitest';
-
+// Split provenance: test/scripts/packed-smoke.test.ts was split by subject into
+// packed-smoke.{usage,install,bin-contracts,deadlines,isolation,integrity,happy-path}.test.ts
+// plus this shared fixtures module. Everything below the original header moved
+// unchanged; this header is the original file header, kept with the family.
+//
 // Packed-consumer smoke orchestration (#394, P4) — MOCKED/fixture tests only.
 // The REAL build → pack → install → smoke runs in CI
 // (.github/workflows/pack-audit.yml); these tests never build, never pack
@@ -30,6 +18,20 @@ import { afterEach, describe, expect, it } from 'vitest';
 //     against a stub bin, and the artifact/tarball identity summary;
 //   - broken artifacts (a missing required file, a refusing MCP bin, a cq
 //     bin that violates the usage contract) FAIL the run.
+import { spawnSync } from 'node:child_process';
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { expect } from 'vitest';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const SCRIPT = join(ROOT, 'scripts', 'packed-smoke.mjs');
@@ -37,16 +39,17 @@ const TMPDIR = realpathSync(tmpdir());
 
 const roots: string[] = [];
 /** Per-test scratch root; also the ISOLATED TMPDIR the child smoke uses. */
-function scratch(): string {
+export function scratch(): string {
   const dir = realpathSync(mkdtempSync(join(TMPDIR, 'cq-packed-smoke-test-')));
   roots.push(dir);
   return dir;
 }
-afterEach(() => {
+/** Remove every scratch root the current test created; call from `afterEach`. */
+export function cleanupScratch(): void {
   for (const dir of roots.splice(0)) rmSync(dir, { recursive: true, force: true });
-});
+}
 
-interface RunResult {
+export interface RunResult {
   status: number | null;
   stdout: string;
   stderr: string;
@@ -59,7 +62,7 @@ interface RunResult {
  * leftover check below is hermetic against concurrent runs and interrupted
  * leftovers in the shared system temp.
  */
-function runSmoke(
+export function runSmoke(
   args: string[],
   options: { fakeBinDir?: string; timeoutMs?: number; tempRoot?: string } = {},
 ): RunResult {
@@ -79,7 +82,7 @@ function runSmoke(
  * disk, run by the real node): the module receives the prefix and tarball
  * as argv and may populate the prefix or exit nonzero.
  */
-function installFakeNpm(
+export function installFakeNpm(
   binDir: string,
   behavior:
     | 'fail'
@@ -281,7 +284,7 @@ function silentMcpSourceAsJson(): string {
 }
 
 /** A fixture tarball (a real gzipped tar with a package/ root). */
-function makeTarball(dir: string): string {
+export function makeTarball(dir: string): string {
   const stage = join(dir, 'stage', 'package');
   mkdirSync(stage, { recursive: true });
   writeFileSync(
@@ -298,307 +301,7 @@ function makeTarball(dir: string): string {
  * Scoped to the test's OWN temp root (#608): never the shared system temp,
  * so a concurrent run or an interrupted leftover elsewhere cannot fail this
  * test when its own cleanup succeeded. */
-function expectNoLeftoverPrefixes(tempRoot: string): void {
+export function expectNoLeftoverPrefixes(tempRoot: string): void {
   const leftovers = readdirSync(tempRoot).filter((name) => name.startsWith('cq-packed-consumer-'));
   expect(leftovers).toEqual([]);
 }
-
-describe('packed-smoke usage surface', () => {
-  it('exits 2 on a missing flag, an unknown flag, a duplicate flag, a bad timeout, and a nonexistent tarball', () => {
-    const tarball = makeTarball(scratch());
-    for (const args of [
-      [],
-      [`--tarball=${tarball}`, '--bogus=1'],
-      [`--tarball=${tarball}`, '--out=/tmp/a', '--out=/tmp/b'],
-      [`--tarball=${tarball}`, '--timeout-ms=0'],
-      [`--tarball=${tarball}`, '--timeout-ms=nope'],
-      ['--tarball=/nonexistent/fixture.tgz'],
-    ]) {
-      const result = runSmoke(args);
-      expect(result.status, `args: ${args.join(' ')}`).toBe(2);
-      expect(result.stderr).toContain('packed-smoke:');
-    }
-  });
-
-  it('rejects positional arguments (named flags only)', () => {
-    const tarball = makeTarball(scratch());
-    const result = runSmoke([tarball]);
-    expect(result.status).toBe(2);
-  });
-});
-
-describe('packed-smoke failure paths', () => {
-  it('fails with the install leg named when npm install exits nonzero, and cleans up the prefix', () => {
-    const dir = scratch();
-    const tarball = makeTarball(dir);
-    const fake = installFakeNpm(join(dir, 'fake-bin'), 'fail');
-    const result = runSmoke([`--tarball=${tarball}`, '--timeout-ms=20000'], {
-      fakeBinDir: fake,
-      tempRoot: dir,
-    });
-    expect(result.status).toBe(1);
-    expect(result.stderr).toContain("leg 'install' failed");
-    expect(result.stderr).toContain('exited 3');
-    expectNoLeftoverPrefixes(dir);
-  });
-
-  it('fails when the installed tree is missing a required artifact, and names it', () => {
-    const dir = scratch();
-    const tarball = makeTarball(dir);
-    const fake = installFakeNpm(join(dir, 'fake-bin'), 'populate-strip-patterns');
-    const result = runSmoke([`--tarball=${tarball}`, '--timeout-ms=20000'], {
-      fakeBinDir: fake,
-      tempRoot: dir,
-    });
-    expect(result.status).toBe(1);
-    expect(result.stderr).toContain('required artifacts');
-    expect(result.stderr).toContain('policy/denylist/patterns.yml');
-    expectNoLeftoverPrefixes(dir);
-  });
-
-  it('fails with the mcp leg named when the installed MCP bin refuses startup (exit 78)', () => {
-    const dir = scratch();
-    const tarball = makeTarball(dir);
-    const fake = installFakeNpm(join(dir, 'fake-bin'), 'populate-refusing-mcp');
-    const result = runSmoke([`--tarball=${tarball}`, '--timeout-ms=20000'], {
-      fakeBinDir: fake,
-      tempRoot: dir,
-    });
-    expect(result.status).toBe(1);
-    expect(result.stderr).toContain("leg 'mcp-bin' failed");
-    expect(result.stderr).toContain('exited early');
-    expectNoLeftoverPrefixes(dir);
-  });
-
-  it('fails with the cli leg named when the installed cq bin violates the usage contract', () => {
-    const dir = scratch();
-    const tarball = makeTarball(dir);
-    const fake = installFakeNpm(join(dir, 'fake-bin'), 'populate-broken-cli');
-    const result = runSmoke([`--tarball=${tarball}`, '--timeout-ms=20000'], {
-      fakeBinDir: fake,
-      tempRoot: dir,
-    });
-    expect(result.status).toBe(1);
-    expect(result.stderr).toContain("leg 'cli-bin' failed");
-    expectNoLeftoverPrefixes(dir);
-  });
-
-  it('fails the sdk leg when the exports field does not map the root even though dist/index.js exists (P1)', () => {
-    const dir = scratch();
-    const tarball = makeTarball(dir);
-    const fake = installFakeNpm(join(dir, 'fake-bin'), 'populate-broken-exports');
-    const result = runSmoke([`--tarball=${tarball}`, '--timeout-ms=20000'], {
-      fakeBinDir: fake,
-      tempRoot: dir,
-    });
-    expect(result.status).toBe(1);
-    expect(result.stderr).toContain("leg 'sdk-import' failed");
-    expectNoLeftoverPrefixes(dir);
-  });
-
-  it('bounded-fails the mcp leg when the bin responds but never exits past EOF (P2)', () => {
-    const dir = scratch();
-    const tarball = makeTarball(dir);
-    const fake = installFakeNpm(join(dir, 'fake-bin'), 'populate-hung-mcp');
-    const result = runSmoke([`--tarball=${tarball}`, '--timeout-ms=3000'], {
-      fakeBinDir: fake,
-      tempRoot: dir,
-      timeoutMs: 60_000,
-    });
-    expect(result.status).toBe(1);
-    expect(result.stderr).toContain("leg 'mcp-bin' failed");
-    expect(result.stderr).toContain('leg deadline');
-    expectNoLeftoverPrefixes(dir);
-  });
-
-  it('reports a collecting-phase timeout as such, not as an unrelated early exit (#607)', () => {
-    const dir = scratch();
-    const tarball = makeTarball(dir);
-    const fake = installFakeNpm(join(dir, 'fake-bin'), 'populate-silent-mcp');
-    const result = runSmoke([`--tarball=${tarball}`, '--timeout-ms=3000'], {
-      fakeBinDir: fake,
-      tempRoot: dir,
-      timeoutMs: 60_000,
-    });
-    // The MCP bin consumes the requests but never answers: the deadline
-    // fires during the collecting phase and the failure must be named as a
-    // collecting-phase timeout, distinct from a pre-deadline early exit.
-    expect(result.status).toBe(1);
-    expect(result.stderr).toContain("leg 'mcp-bin' failed");
-    expect(result.stderr).toContain('collecting-phase timeout');
-    expect(result.stderr).not.toContain('exited early');
-    expectNoLeftoverPrefixes(dir);
-  });
-
-  it('fails the cq leg when the .bin/cq mapping is missing while its dist target exists (re-review P2)', () => {
-    const dir = scratch();
-    const tarball = makeTarball(dir);
-    const fake = installFakeNpm(join(dir, 'fake-bin'), 'populate-missing-bin-cq');
-    const result = runSmoke([`--tarball=${tarball}`, '--timeout-ms=20000'], {
-      fakeBinDir: fake,
-      tempRoot: dir,
-    });
-    expect(result.status).toBe(1);
-    expect(result.stderr).toContain("leg 'cli-bin' failed");
-    expect(result.stderr).toContain('bin mapping missing');
-    // This refusal carries no child tails at all; an omitted field must not
-    // interpolate the literal `undefined` into the failure text.
-    expect(result.stderr).not.toContain('undefined');
-    expectNoLeftoverPrefixes(dir);
-  });
-
-  it('fails the mcp leg when .bin/cq-harness-mcp is misrouted at another dist file (re-review P2)', () => {
-    const dir = scratch();
-    const tarball = makeTarball(dir);
-    const fake = installFakeNpm(join(dir, 'fake-bin'), 'populate-misrouted-bin-mcp');
-    const result = runSmoke([`--tarball=${tarball}`, '--timeout-ms=20000'], {
-      fakeBinDir: fake,
-      tempRoot: dir,
-    });
-    // The misrouted mapping runs dist/cli.js instead of the MCP bin: the
-    // child exits 2 with the usage artifact instead of serving JSON-RPC,
-    // so the mcp leg must fail with its early-exit verdict.
-    expect(result.status).toBe(1);
-    expect(result.stderr).toContain("leg 'mcp-bin' failed");
-    expect(result.stderr).toContain('exited early');
-    expect(result.stderr).not.toContain('undefined');
-    expectNoLeftoverPrefixes(dir);
-  });
-
-  it('pins the child smoke TMPDIR to the test root, isolated from the system temp (#608)', () => {
-    const dir = scratch();
-    const tarball = makeTarball(dir);
-    const fake = installFakeNpm(join(dir, 'fake-bin'), 'populate');
-    // Plant a foreign cq-packed-consumer-* leftover in the SHARED system
-    // temp, as an interrupted run would: this test's own cleanup verdict
-    // must stay independent of it. The leftover is its OWN mkdtemp result —
-    // a unique path nothing else owns — so cleanup removes only what this
-    // test created, never pre-existing content.
-    const sharedTmp = realpathSync(tmpdir());
-    const foreign = realpathSync(
-      mkdtempSync(join(sharedTmp, 'cq-packed-consumer-foreign-leftover-')),
-    );
-    try {
-      const out = join(dir, 'summary.json');
-      const result = runSmoke([`--tarball=${tarball}`, `--out=${out}`, '--timeout-ms=20000'], {
-        fakeBinDir: fake,
-        tempRoot: dir,
-      });
-      expect(result.status, result.stderr).toBe(0);
-      expect(existsSync(out)).toBe(true);
-      // The child's prefix was created INSIDE the test root, not the shared
-      // temp, and was cleaned up there.
-      expect(readdirSync(dir).some((name) => name.startsWith('cq-packed-consumer-'))).toBe(false);
-    } finally {
-      rmSync(foreign, { recursive: true, force: true });
-    }
-  });
-});
-
-describe('packed-smoke installed integrity provenance', () => {
-  function summaryFor(behavior: Parameters<typeof installFakeNpm>[1]): {
-    integrity: string | null;
-    status: number | null;
-    stderr: string;
-  } {
-    const dir = scratch();
-    const tarball = makeTarball(dir);
-    const fake = installFakeNpm(join(dir, 'fake-bin'), behavior);
-    const out = join(dir, 'summary.json');
-    const result = runSmoke([`--tarball=${tarball}`, `--out=${out}`, '--timeout-ms=20000'], {
-      fakeBinDir: fake,
-      tempRoot: dir,
-    });
-    expectNoLeftoverPrefixes(dir);
-    const summary = JSON.parse(readFileSync(out, 'utf8')) as {
-      installed: { integrity: string | null };
-    };
-    return { integrity: summary.installed.integrity, status: result.status, stderr: result.stderr };
-  }
-
-  it('reads integrity from the hidden npm lockfile entry for PKG_DIR', () => {
-    // Covered end-to-end above; pinned here as the provenance contract.
-    expect(summaryFor('populate')).toMatchObject({ integrity: 'sha512-fixture', status: 0 });
-  });
-
-  it('reports null when no install source records integrity', () => {
-    const summary = summaryFor('populate-no-integrity');
-    expect(summary).toMatchObject({ integrity: null, status: 0 });
-    expect(summary.stderr).not.toContain('undefined');
-  });
-
-  it('falls back to the package.json _integrity when the hidden lockfile is absent', () => {
-    expect(summaryFor('populate-package-integrity')).toMatchObject({
-      integrity: 'sha512-legacy',
-      status: 0,
-    });
-  });
-
-  it('ignores a malformed hidden lockfile instead of throwing', () => {
-    expect(summaryFor('populate-malformed-hidden-lock')).toMatchObject({
-      integrity: null,
-      status: 0,
-    });
-  });
-});
-
-describe('packed-smoke happy path over stubs', () => {
-  it('passes all legs against a stub-installed package and writes the summary with tarball identity', () => {
-    const dir = scratch();
-    const tarball = makeTarball(dir);
-    const fake = installFakeNpm(join(dir, 'fake-bin'), 'populate');
-    const out = join(dir, 'summary.json');
-    const result = runSmoke([`--tarball=${tarball}`, `--out=${out}`, '--timeout-ms=20000'], {
-      fakeBinDir: fake,
-      tempRoot: dir,
-    });
-    expect(result.status, result.stderr).toBe(0);
-    expect(existsSync(out)).toBe(true);
-    const summary = JSON.parse(readFileSync(out, 'utf8')) as {
-      ok: boolean;
-      tarball: { sha256: string; bytes: number; name: string };
-      installed: { name: string; version: string; integrity: string | null };
-      sdk: { seamVersion: string; harnessConfigTools: string[] };
-      cli: { exit: number; errorKind: string };
-      mcp: { serverName: string; tools: string[] };
-      requiredArtifactsMissing?: string[];
-    };
-    expect(summary.ok).toBe(true);
-    expect(summary.tarball.name).toBe('fixture.tgz');
-    expect(summary.tarball.sha256).toMatch(/^[0-9a-f]{64}$/);
-    expect(summary.tarball.bytes).toBeGreaterThan(0);
-    // The stub records integrity ONLY in the hidden npm lockfile, so this
-    // asserts the modern-install provenance path, not a package.json field.
-    expect(summary.installed).toEqual({
-      name: '@camerontaylor/cq-toolkit',
-      version: '9.9.9-fixture',
-      integrity: 'sha512-fixture',
-    });
-    // SDK leg: the fixture-only seam value proves the import resolved the
-    // INSTALLED package's dist, never this checkout's real dist.
-    expect(summary.sdk.seamVersion).toBe('fixture-seam');
-    expect(summary.sdk.harnessConfigTools).toContain('read');
-    // cq leg: the stub bin honored the usage contract.
-    expect(summary.cli).toEqual({ exit: 2, errorKind: 'usage' });
-    // MCP leg: a real stdio round trip happened against the stub bin.
-    expect(summary.mcp.serverName).toBe('cq-harness');
-    expect(summary.mcp.tools).toEqual(['read', 'edit', 'bash']);
-    expect(summary.requiredArtifactsMissing ?? []).toEqual([]);
-    expectNoLeftoverPrefixes(dir);
-  });
-
-  it('prints the summary to stdout when --out is omitted', () => {
-    const dir = scratch();
-    const tarball = makeTarball(dir);
-    const fake = installFakeNpm(join(dir, 'fake-bin'), 'populate');
-    const result = runSmoke([`--tarball=${tarball}`, '--timeout-ms=20000'], {
-      fakeBinDir: fake,
-      tempRoot: dir,
-    });
-    expect(result.status, result.stderr).toBe(0);
-    // The summary is a pretty-printed multi-line document; find its start.
-    const start = result.stdout.indexOf('{\n  "ok"');
-    const summary = JSON.parse(result.stdout.slice(start)) as { ok: boolean };
-    expect(summary.ok).toBe(true);
-  });
-});

@@ -23,7 +23,7 @@
 #      (exit 2 + one JSON error object) and a bounded `cq-harness-mcp`
 #      initialize → tools/list → EOF-0 round trip. scripts/packed-smoke.mjs
 #      owns the bounded orchestration, failure reporting, artifact scan and
-#      cleanup; test/scripts/packed-smoke.test.ts mocks/fixture-tests it
+#      cleanup; test/scripts/packed-smoke.*.test.ts mock/fixture-test it
 #      locally (the real install smoke runs HERE, never on a dev host).
 #
 # Trigger note (development posture, 2026-10-20): this workflow is not a
