@@ -2309,12 +2309,13 @@ def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
                 item["state"] = "pending"
                 item["not_before"] = iso(now() + dt.timedelta(
                     minutes=CONFIG["error_backoff_min"] * 2 ** (item["failures"] - 1)))
-        delivery = _deliver_push_findings(q, item)
+        # Delivery debt is persisted here, never uploaded inline: the bounded
+        # post-harvest pass in tick() runs it, so no gh call delays harvest.
         save_queue(q)
         push_cfg = repo_registry.by_repo(REPOS, item_repo(item))
         remove_worktree(Path(meta["worktree"]), meta["wt_branch"],
                         clone=Path(push_cfg["clone"]) if push_cfg else None)
-        return f"{item['id']}: {outcome}; receipt {item['receipt_id']}" + (f"; {delivery}" if delivery else "")
+        return f"{item['id']}: {outcome}; receipt {item['receipt_id']}"
     if item["kind"] == backfill_jobs.KIND:
         return backfill_runtime.harvest(sys.modules[__name__], q, item, rdir, meta, cls, exit_code,
                                         terminal_verified=(state == "harvest"))
@@ -2990,10 +2991,14 @@ def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = Fal
                 item[key] = "repair harvest failed: " + str(exc)[:300]
     if not dry:
         # Findings-issue retries (the review is terminal; only the issue upload
-        # can still be outstanding) run after the harvest pass and are capped,
-        # so a hung gh call never delays harvesting later items (docs/multi-repo.md).
-        for pending in [i for i in live_items(q) if i.get("kind") == push_current.KIND
-                        and i.get("issue_pending")][:2]:
+        # can still be outstanding) run after the harvest pass and are capped, so
+        # no gh call delays harvesting. Rotation by last attempt keeps a failing
+        # delivery from starving later ones.
+        candidates = sorted(
+            (i for i in live_items(q) if i.get("kind") == push_current.KIND and i.get("issue_pending")),
+            key=lambda i: i.get("issue_attempt_at") or "")
+        for pending in candidates[:2]:
+            pending["issue_attempt_at"] = iso()
             msg = _deliver_push_findings(q, pending)
             if msg:
                 log.append(msg)

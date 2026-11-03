@@ -718,6 +718,24 @@ class PushTest(unittest.TestCase):
         self.terminal_artifacts(item, [finding, COMPLETE])
         return item
 
+    def test_pending_delivery_retries_rotate_within_the_cap(self):
+        # A permanently failing delivery must not starve later ones: the cap
+        # picks the least recently attempted items, never the same head forever.
+        base_item = {"repo": FOREIGN, "kind": push_current.KIND, "pr": 0, "state": "done",
+                     "subject": {"type": "push-range", "repo": FOREIGN}, "issue_pending": True}
+        for item_id, stamp in (("push-infra-a0-b0", "2026-11-03T01:00:00Z"),
+                               ("push-infra-a1-b1", "2026-11-03T02:00:00Z")):
+            self.q["items"].append({**base_item, "id": item_id, "issue_attempt_at": stamp})
+        never = {**base_item, "id": "push-infra-c0-d0"}
+        self.q["items"].append(never)
+        crq.save_queue(self.q)
+        attempted = []
+        with mock.patch.object(crq, "_deliver_push_findings",
+                               side_effect=lambda q, i: attempted.append(i["id"])), \
+             self.fake_spawn():
+            self.tick()
+        self.assertEqual(attempted, [never["id"], "push-infra-a0-b0"])
+
     def test_counted_findings_file_a_repo_issue_after_the_receipt(self):
         finding = {"type": "finding", "severity": "major", "path": "b.txt",
                    "blob": "0" * 40, "intervals": [[1, 2]], "title": "t", "body": "b"}
