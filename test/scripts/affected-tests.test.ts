@@ -360,7 +360,10 @@ it('maps gate adapters to their shared owner suite despite layout differences', 
   expect(
     selectRelatedTests(
       ['src/ops/gates/adapters/testNarrow.ts'],
-      ['test/ops/gates/adapters.checkRunner.test.ts', 'test/ops/gates/protectedPaths.closure.test.ts'],
+      [
+        'test/ops/gates/adapters.checkRunner.test.ts',
+        'test/ops/gates/protectedPaths.closure.test.ts',
+      ],
     ).files,
   ).toContain('test/ops/gates/adapters.checkRunner.test.ts');
 });
