@@ -149,6 +149,35 @@ describe('the shipped patterns.yml corpus', () => {
       if (path !== undefined) expect(() => new RegExp(path)).not.toThrow();
     }
   });
+
+  test('inline secret assignments match any name case, not code-call values', () => {
+    const parsed = parseDenylistPatterns(text, 'policy/denylist/patterns.yml');
+    const rule = parsed.rules.find(
+      (candidate) => candidate.id === 'class:inline-secret-assignments',
+    );
+    expect(rule).toBeDefined();
+    const regex = new RegExp(rule!.regex);
+    // Built at runtime so this file never contains the literal it tests for.
+    const value = (length: number) => 'ghp_' + 'x'.repeat(length - 4);
+    for (const name of ['GITHUB', 'github']) {
+      expect(regex.test(name + '_TOKEN=' + value(20))).toBe(true);
+    }
+    expect(regex.test('TOKEN=' + 'abcdefghijkl' + '/mnop')).toBe(true); // slash inside a value
+    expect(regex.test('SECRET=' + 'aaaa' + '/' + 'bbbbbbbbbbbb')).toBe(true); // short pre-slash prefix
+    // A bare 12+ char token counts as key material (fail closed), like the
+    // overbroad *.env path class: quote or iterate non-secret values instead.
+    expect(regex.test('SECRET=' + 'get_' + 'password')).toBe(true);
+    for (const line of [
+      'GITHUB_TOKEN=' + value(11), // below the 12-char value floor
+      'secret_scan_diff=mock.Mock(return_value=(True, {}))',
+      'secret_scan_diff=unittest.mock.Mock(return_value=True)', // long call prefix
+      "it('kills a secret (ZZ_TOKEN=ss@host…)', () => {",
+      'token = spacedvalue123456',
+      'ANTHROPIC_AUTH_TOKEN="$MINIMAX"',
+    ]) {
+      expect(regex.test(line)).toBe(false);
+    }
+  });
 });
 
 describe('the component scan', () => {
@@ -164,11 +193,11 @@ describe('the component scan', () => {
   });
 
   test('a path rule fires only when the component path matches', () => {
-    expect(scanText('API_KEY=whatever\n', rules, 'prod.env').map((hit) => hit.ruleId)).toContain(
+    expect(scanText('API_KEY=x\n', rules, 'prod.env').map((hit) => hit.ruleId)).toContain(
       'class:env',
     );
-    expect(scanText('API_KEY=whatever\n', rules, 'notes.txt')).toEqual([]);
-    expect(scanText('API_KEY=whatever\n', rules, undefined)).toEqual([]);
+    expect(scanText('API_KEY=x\n', rules, 'notes.txt')).toEqual([]);
+    expect(scanText('API_KEY=x\n', rules, undefined)).toEqual([]);
   });
 
   test('an uncompilable rule regex or path throws naming the rule (never a silent skip)', () => {

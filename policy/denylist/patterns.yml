@@ -45,9 +45,13 @@ rules:
     regex: '/home/ctaylor\b|/home/app/webfront\b|\.pnpm-store\b|com\.webfront\.reap\b'
     sample: 'cwd=/home/ctaylor store=$HOME/repos/.pnpm-store'
   - id: class:portkey-config
-    description: portkey instance config and route/key material
-    regex: '\bportkey\b|\bpk-[A-Za-z0-9_-]{16,}\b'
-    sample: 'portkey route pk-live-abc123def456ghi789'
+    description: portkey instance config (publish class; vocabulary, not value)
+    regex: '\bportkey\b'
+    sample: 'portkey route tables for the gateway'
+  - id: class:route-key-material
+    description: gateway route key material (universal; the value shape itself)
+    regex: '\bpk-[A-Za-z0-9_-]{16,}'
+    sample: 'route key pk-abcdefghijklmno-'
   - id: class:agent-memory
     description: agent memory corpus paths
     regex: '\.om[cx]\b'
@@ -65,6 +69,10 @@ rules:
     regex: '.+'
     path: '(^|/)[^/]*\.env'
     sample: 'API_KEY=sk-1234567890abcdef'
+  - id: class:inline-secret-assignments
+    description: unquoted inline secret-valued assignments, any name case (universal; refs/quotes/URL schemes/call values excluded; any bare 12+ char token counts, like the overbroad .env path class)
+    regex: '\b[A-Za-z0-9_]*([Tt][Oo][Kk][Ee][Nn]|[Ss][Ee][Cc][Rr][Ee][Tt]|[Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd]|[Pp][Aa][Ss][Ss][Pp][Hh][Rr][Aa][Ss][Ee]|[Aa][Pp][Ii]_[Kk][Ee][Yy]|[Aa][Pp][Ii][Kk][Ee][Yy])[A-Za-z0-9_]*=[^\s{$"''(/:][^\s("'':]{11,}(?:[\s/]|$)'
+    sample: 'export GITHUB_TOKEN=ghp_0123456789abcdef'
   - id: class:agent-scratch-paths
     description: agent scratch dirs committed into the tree (runtime tooling state, never content)
     regex: '.+'
