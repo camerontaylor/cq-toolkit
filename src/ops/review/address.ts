@@ -597,7 +597,9 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
       if (budget) return await finish('needs-human', budget.reason);
       if (!policy.roles.worker || !policy.roles.reviewer)
         return await finish('needs-human', 'cq.json roles.worker and roles.reviewer are required');
-      const cap = Math.min(policy.budgets.run.wallMs, input.wallMs ?? Infinity);
+      // Wall is a runaway guard, not a calibrated allocation between fixing and review.
+      const reviewWallMs = 6 * 60 * 60 * 1000;
+      const cap = Math.min(config.budgets?.run?.wallMs ?? reviewWallMs, input.wallMs ?? Infinity);
       const remainingTokens = () =>
         policy.budgets.run.maxTokens! -
         report.usage.input -
@@ -606,10 +608,10 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
         report.usage.cacheWrite -
         (report.usage.reasoning ?? 0);
       const remainingWallMs = () => cap - (Date.now() - start);
-      const stop = () => {
+      const stop = (checkWall = true) => {
         if (parent?.aborted) return 'parent cancelled';
         if (bookkeepingTampered) return 'engine bookkeeping changed; worker tree is dirty';
-        if (remainingTokens() <= 0 || remainingWallMs() <= 0) {
+        if (remainingTokens() <= 0 || (checkWall && remainingWallMs() <= 0)) {
           budgetSpent = true;
           return 'token or wall budget exhausted';
         }
@@ -963,14 +965,14 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
               if (
                 first.status !== 'needs-human' ||
                 first.report?.blockedTransient !== true ||
-                stop()
+                stop(false)
               )
                 return first;
               report.reasons.push('re-review blocked on a network/transient class; retrying once');
               const second = await reviewOnce({
                 ...request,
                 maxTokens: Math.max(1, remainingTokens()),
-                wallMs: Math.max(1, remainingWallMs()),
+                wallMs: reviewWallMs,
               });
               // A budget, cancellation or bookkeeping stop observed after the
               // retry outranks it: never mark a draft over a stopped run.
@@ -2156,7 +2158,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                   { ...threads, findings: report.findings },
                   policy.review.blockingSeverities,
                 );
-                if (stop()) return await finish('needs-human', stop());
+                if (stop(false)) return await finish('needs-human', stop(false));
                 const priorFindings = priorRoundFindings(previous, [
                   ...threads.findings,
                   ...[...fixesById.values()].map((fix) => fix.finding),
@@ -2170,7 +2172,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                       ? { base: await reviewedBasePinned() }
                       : {}),
                   maxTokens: Math.max(1, remainingTokens()),
-                  wallMs: Math.max(1, remainingWallMs()),
+                  wallMs: reviewWallMs,
                   reviewers: ['agent'],
                   ...(priorFindings.length > 0 ? { priorFindings } : {}),
                 });
@@ -2268,7 +2270,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
               }
               const unresolved = await dispatchFindings(root, previous, round);
               await publishOnExit();
-              if (stop()) return await finish('needs-human', stop());
+              if (stop(false)) return await finish('needs-human', stop(false));
               if (unresolved) return await finish('needs-human', unresolved);
               const priorFindings = priorRoundFindings(previous);
               const refreshed = await review({
@@ -2276,7 +2278,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                 target: input.target ?? 'main',
                 ...(reviewedBase ? { base: reviewedBase } : {}),
                 maxTokens: Math.max(1, remainingTokens()),
-                wallMs: Math.max(1, remainingWallMs()),
+                wallMs: reviewWallMs,
                 ...(priorFindings.length > 0 ? { priorFindings } : {}),
               });
               const refreshedRecord =

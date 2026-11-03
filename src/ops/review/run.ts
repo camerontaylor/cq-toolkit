@@ -167,7 +167,10 @@ export function makeReviewRun(
       ...(input.maxTokens === undefined ? {} : { maxTokens: input.maxTokens }),
       ...(input.reviewers === undefined ? {} : { review: { reviewers: input.reviewers } }),
     });
-    const wallMs = Math.min(policy.budgets.run.wallMs, input.wallMs ?? Infinity);
+    const wallMs = Math.min(
+      parsedConfig.config.budgets?.run?.wallMs ?? 6 * 60 * 60 * 1000,
+      input.wallMs ?? Infinity,
+    );
     const parent = deps.parentSignal ?? currentJobContext()?.signal;
     const deadline = startFixerDeadline(parent, Math.max(0, wallMs - (Date.now() - started)));
     const remainingWallMs = () => wallMs - (Date.now() - started);
