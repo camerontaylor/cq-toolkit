@@ -9,11 +9,11 @@
 //      writes its composition-started header, links the RETURNED kernel run
 //      explicitly (kernel-run-linked), and closes the writer in finally —
 //      including on a failure path.
-//   3. Memory-only mode (no journalDir): the writer's persistence surface
+//   3. Memory-only mode (no journalDir): the report's persistence surface
 //      declares 'unavailable' and the report still carries the observed
-//      events through writer.events() — never a durability claim.
+//      unavailable status — never a durability claim.
 //   4. Sanitization: every persisted text field passes through
-//      sanitizeObservation via finishAttempt BEFORE the writer sees it, and
+//      sanitizeObservation BEFORE the writer sees it, and
 //      repoId is the hashed remote digest (never the raw remote).
 //   5. Failure boundary: a writer whose append fails after the header does
 //      not mask the run's own terminal result, and the writer's failure
@@ -22,12 +22,14 @@
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, test } from 'vitest';
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { z } from 'zod';
 import { openObservationWriter, readObservations } from '../../../src/kernel/observation.js';
 import type { Op, OpRegistryEntry } from '../../../src/kernel/types.js';
 import type { DriverFactory } from '../../../src/driver/factory.js';
 import { makeRegistry, registry } from '../../../src/ops/sweep/registry.js';
+import * as plannerModule from '../../../src/ops/sweep/planSweep.js';
+import * as unitModule from '../../../src/ops/sweep/unit.js';
 import type { SweepUnitReport } from '../../../src/ops/sweep/unit.js';
 import { makeFixRun, type FixRunReport } from '../../../src/ops/fix/runFix.js';
 import { generateScratchRepo } from '../../fixtures/scratch-repo/generate.js';
@@ -38,6 +40,7 @@ beforeEach(() => {
   roots = [];
 });
 afterEach(async () => {
+  vi.restoreAllMocks();
   await Promise.all(roots.map((root) => rm(root, { recursive: true, force: true })));
 });
 
@@ -234,6 +237,7 @@ describe('T30 round-trip through the fix composition', () => {
       // Exactly one explicit kernel-run link, after the header.
       const links = stream.events.filter((event) => event.type === 'kernel-run-linked');
       expect(links).toHaveLength(1);
+      expect(links[0]?.payload.kernelRunId).toBe(reportOf(result).run?.runId);
     } finally {
       await rm(f.root, { recursive: true, force: true });
       roots = roots.filter((root) => root !== f.root);
@@ -254,11 +258,8 @@ describe('T30 round-trip through the fix composition', () => {
       });
       const report = reportOf(result);
       expect(report.observation).toBeDefined();
-      expect(report.observation?.writer.persistence).toBe('unavailable');
-      // The in-memory stream still carries the header and the kernel link.
-      const kinds = report.observation?.writer.events().map((event) => event.type) ?? [];
-      expect(kinds[0]).toBe('composition-started');
-      expect(kinds).toContain('kernel-run-linked');
+      expect(report.observation?.persistence).toBe('unavailable');
+      expect(report.observation?.kernelRuns).toEqual([]);
       // No durability claim: no stream file was created anywhere.
       const streams = await readObservations(f.journalDir);
       expect(streams).toHaveLength(0);
@@ -289,9 +290,11 @@ describe('T30 unknown evidence: unreturned kernel runs stay unlinked', () => {
       const report = reportOf(result);
       // The stream still observed its boundaries — but the kernel-run link
       // names only the run the composition actually RETURNED.
-      const links =
-        report.observation?.writer.events().filter((event) => event.type === 'kernel-run-linked') ??
-        [];
+      const streams = await readObservations(f.journalDir);
+      const links = streams.flatMap((stream) =>
+        stream.events.filter((event) => event.type === 'kernel-run-linked'),
+      );
+      expect(links).toHaveLength(1);
       for (const link of links) {
         if (link.type !== 'kernel-run-linked') continue;
         // Never a guessed link: the linked id is the actual returned run's.
@@ -319,36 +322,127 @@ describe('T30 unknown evidence: unreturned kernel runs stay unlinked', () => {
 // ---- T30 failure boundary -------------------------------------------------
 
 describe('T30 failure boundary', () => {
-  test('a writer append failure after the header does not mask the run result', async () => {
-    const f = await fixture();
-    try {
-      // A real durable writer whose handle is closed underneath it: the
-      // first append after our own failure injection fails, the composition
-      // still returns its own terminal status, and the writer's failure
-      // surface carries the error (never masked as success).
+  test.each(['header', 'link', 'close'])(
+    '%s failure preserves unit evidence and persists indeterminate status',
+    async (boundary) => {
+      const f = await fixture();
       const writer = await openObservationWriter({
-        journalDir: f.journalDir,
         workId: '00000000-0000-4000-8000-000000000000',
-        compositionRunId: 'boundary-probe',
+        compositionRunId: 'fixture',
       });
-      const seen: { input?: unknown } = {};
+      const append = writer.append.bind(writer);
+      const originalClose = writer.close.bind(writer);
+      vi.spyOn(writer, 'append').mockImplementation(async (event) => {
+        if (boundary === 'header' && event.type === 'composition-started')
+          throw new Error('https://u:tok@h/x?k=v');
+        if (boundary === 'link' && event.type === 'kernel-run-linked') await originalClose();
+        // The injected writer has a distinct stream identity.
+        await append(
+          event.type === 'composition-started'
+            ? {
+                ...event,
+                runId: writer.compositionRunId,
+                payload: {
+                  ...event.payload,
+                  correlation: {
+                    ...event.payload.correlation,
+                    workId: '00000000-0000-4000-8000-000000000000',
+                  },
+                },
+              }
+            : { ...event, runId: writer.compositionRunId },
+        );
+      });
+      const close = vi.spyOn(writer, 'close').mockImplementation(async () => {
+        if (boundary === 'close') throw new Error('https://u:tok@h/x?k=v');
+      });
+      const unit = fixedUnitReport();
+      unit.tasks = [
+        {
+          task: { id: 'fixed-task', files: [], failures: [] },
+          attempts: [],
+          outcome: 'fixed',
+          branch: unit.prBranch,
+          commits: ['a'.repeat(40)],
+        },
+      ];
       const result = await makeFixRun({
-        drivers: fixingDrivers(),
-        registry: { get: stubSweepRegistries(fixedUnitReport(), seen) },
+        registry: { get: stubSweepRegistries(unit) },
         observationWriter: writer,
       })(input(f));
-      // The injected writer was opened for its own stream id, so the
-      // composition's first append (the header) is refused on the runId
-      // coupling: the writer NEVER adopts foreign evidence, the run's own
-      // terminal path keeps its failed result naming the refusal, and the
-      // writer itself is untouched (failure null — nothing was written).
-      expect(result.status).toBe('failed');
-      expect((result as { error?: string }).error).toContain('does not match');
-      expect(writer.failure).toBeNull();
-      expect(writer.events()).toHaveLength(0);
+      const report = reportOf(result);
+      expect(result.status, JSON.stringify(report)).toBe('ok');
+      expect(report.units).toHaveLength(1);
+      expect(report.tasks.length).toBeGreaterThan(0);
+      expect(close).toHaveBeenCalledTimes(1);
+      expect(report.observation?.status).toBe('indeterminate');
+      expect(report.observation?.failure).not.toContain('tok');
+      const persisted = JSON.parse(await readFile(report.reportPath, 'utf8')) as {
+        observation: FixRunReport['observation'] & { writer?: unknown };
+      };
+      expect(persisted.observation).toEqual(report.observation);
+      expect(persisted.observation.writer).toBeUndefined();
+    },
+  );
+
+  test('real sweep.unit receives observation bindings and closes before report persistence', async () => {
+    const f = await fixture();
+    const original = unitModule.bindingsFromDispatch;
+    const bindings: ReturnType<typeof original>[] = [];
+    vi.spyOn(unitModule, 'bindingsFromDispatch').mockImplementation((...args) => {
+      const value = original(...args);
+      bindings.push(value);
+      return value;
+    });
+    const writer = await openObservationWriter({
+      workId: '00000000-0000-4000-8000-000000000000',
+      compositionRunId: 'fixture',
+    });
+    vi.spyOn(writer, 'append').mockResolvedValue(undefined);
+    const close = vi.spyOn(writer, 'close');
+    const result = await makeFixRun({ drivers: fixingDrivers(), observationWriter: writer })(
+      input(f),
+    );
+    expect(bindings.length).toBeGreaterThan(0);
+    expect(bindings[0]?.observationWriter).toBe(writer);
+    expect(bindings[0]?.observationRunId).toBe(reportOf(result).observation?.compositionRunId);
+    expect(bindings[0]?.observationUnitId).toBe('scratch-repo/tests-1');
+    expect(close).toHaveBeenCalledTimes(1);
+  });
+
+  test('phase B refuses changed planner fan-out', async () => {
+    const f = await fixture();
+    const original = plannerModule.makePlanSweep;
+    let calls = 0;
+    vi.spyOn(plannerModule, 'makePlanSweep').mockImplementation((deps) => {
+      const planner = original(deps);
+      return async (raw) => {
+        const result = await planner(raw);
+        if (++calls > 1 && result.status === 'ok')
+          return { ...result, value: { ...result.value, units: [] } };
+        return result;
+      };
+    });
+    const result = await makeFixRun({ drivers: fixingDrivers() })(input(f));
+    expect(result.status).toBe('failed');
+    expect(JSON.stringify(reportOf(result).run)).toContain('planner fan-out changed');
+  });
+
+  test('header sanitizes producer version and correlation', async () => {
+    const f = await fixture();
+    vi.stubEnv('CQ_PRODUCER_VERSION', 'https://u:tok@h/x?k=v');
+    try {
+      const result = await makeFixRun({
+        registry: { get: stubSweepRegistries(fixedUnitReport()) },
+      })({ ...input(f), runPrefix: 'cq/https://u:secret@h/x?k=v' });
+      const streams = await readObservations(f.journalDir);
+      expect(streams).toHaveLength(1);
+      expect(JSON.stringify(streams[0]?.events[0])).not.toContain('tok');
+      expect(JSON.stringify(streams[0]?.events[0])).not.toContain('secret');
+      expect(JSON.stringify(reportOf(result))).not.toContain('tok');
+      expect(JSON.stringify(reportOf(result))).not.toContain('secret');
     } finally {
-      await rm(f.root, { recursive: true, force: true });
-      roots = roots.filter((root) => root !== f.root);
+      vi.unstubAllEnvs();
     }
   });
 

@@ -41,9 +41,9 @@ import {
   makeSubprocessSweepPlannerDeps,
   type PlanSweepReport,
 } from '../sweep/planSweep.js';
-import { SweepUnitDispatchInputSchema, makeRegistry } from '../sweep/registry.js';
+import { SweepUnitDispatchInputSchema } from '../sweep/registry.js';
 import { isScopedEslintTemplate } from '../sweep/tasks.js';
-import { repoIdFromRemote } from './attemptRecord.js';
+import { sanitizeObservation, repoIdFromRemote } from './attemptRecord.js';
 import {
   bindingsFromDispatch,
   makeSweepUnitOp,
@@ -124,13 +124,11 @@ export interface FixRunDeps {
 
 /** The composition observation surface makeFixRun exposes to its report. */
 export interface FixRunObservation {
-  /** The writer opened for the run's composition stream (may be memory-only). */
-  writer: ObservationWriter;
-  /** The provenance captured for the composition header. */
-  provenance: ProvenanceRecord;
-  /** The correlation allocated for the run. */
-  correlation: CorrelationRecord;
-  /** The kernel run descriptors of the runs this composition returned. */
+  persistence: ObservationWriter['persistence'];
+  status: 'durable' | 'unavailable' | 'indeterminate';
+  compositionRunId: string;
+  workId: string;
+  failure: string | null;
   kernelRuns: KernelRunDescriptor[];
 }
 
@@ -199,7 +197,7 @@ const UUID_PATTERN =
   /^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|0{8}-0{4}-0{4}-0{4}-0{12}|f{8}-f{4}-f{4}-f{4}-f{12})$/;
 
 /**
- * ADR-0008 T30: capture the composition header metadata. Any git probe
+ * T04 placeholder: capture sanitized composition metadata; T04 replaces and shrinks this. Any git probe
  * failure refuses: never a fabricated baseSha. repoId comes ONLY through
  * T12 {@link repoIdFromRemote} — the raw remote never persists.
  */
@@ -207,6 +205,8 @@ async function captureProvenance(
   repoRoot: string,
   runPrefix: string,
   startedAt: string,
+  base: string,
+  configText: string,
 ): Promise<{ provenance: ProvenanceRecord; correlation: CorrelationRecord }> {
   const execFileAsync = promisify(execFile);
   const git = async (args: string[]): Promise<string> => {
@@ -216,24 +216,27 @@ async function captureProvenance(
     });
     return stdout.trim();
   };
-  const [remote, baseSha, cqJson] = await Promise.all([
+  const [remote, baseSha, packageText] = await Promise.all([
     // No remote: repoId is null/unavailable (ADR-0008), never a failure.
     git(['config', '--get', 'remote.origin.url']).catch(() => null),
-    git(['rev-parse', '--verify', 'HEAD']),
-    readFile(resolve(repoRoot, 'cq.json'), 'utf8'),
+    git(['rev-parse', '--verify', `${base}^{commit}`]),
+    readFile(new URL('../../../package.json', import.meta.url), 'utf8'),
   ]);
-  const version = process.env.CQ_PRODUCER_VERSION ?? '0.2.0-dev';
+  const version =
+    process.env.CQ_PRODUCER_VERSION ??
+    (JSON.parse(packageText) as { version?: string }).version ??
+    'unavailable';
   const provenance: ProvenanceRecord = {
     cqVersion: version,
     producerVersion: version,
     repoId: repoIdFromRemote(remote).repoId,
-    cqJsonHash: `sha256:${createHash('sha256').update(cqJson, 'utf8').digest('hex')}`,
+    cqJsonHash: `sha256:${createHash('sha256').update(configText, 'utf8').digest('hex')}`,
     baseSha,
     runPrefix,
     startedAt,
     endedAt: null,
-    journalLink: 'observations/',
-    reportLink: 'observations/',
+    journalLink: 'unavailable',
+    reportLink: 'unavailable',
     witnesses: { base: baseSha, admitted: null, execution: null, reviewed: null, accepted: null },
   };
   // parentWorkId is a UUID per CorrelationRecordSchema: only a genuinely
@@ -248,7 +251,7 @@ async function captureProvenance(
     sessionId: null,
     agentId: null,
   };
-  return { provenance, correlation };
+  return sanitizeObservation({ provenance, correlation });
 }
 
 /** Two-phase sweep composition; no kernel policy or taxonomy changes. */
@@ -291,7 +294,24 @@ export function makeFixRun(deps: FixRunDeps = {}) {
     // writer API is memory-only and the report declares persistence
     // unavailable — it never claims durability.
     const compositionRunId = randomUUID();
-    let observation: FixRunObservation | undefined;
+    let observation: (FixRunObservation & { writer: ObservationWriter }) | undefined;
+    let observationClosed = false;
+    const observationFailure = (error: unknown) => {
+      if (observation) {
+        observation.status = 'indeterminate';
+        observation.failure ??= sanitizeObservation(String(error));
+      }
+    };
+    const closeObservation = async () => {
+      if (!observation || observationClosed) return;
+      observationClosed = true;
+      try {
+        await observation.writer.close();
+      } catch (error) {
+        observationFailure(error);
+      }
+      if (observation.writer.failure !== null) observationFailure(observation.writer.failure);
+    };
     let kernelRunLinks: KernelRunLinkedJournalEvent[] = [];
     const unstartedUnits: Array<{
       unit: SweepUnitDispatchInput;
@@ -422,12 +442,18 @@ export function makeFixRun(deps: FixRunDeps = {}) {
           rescuePool: rescueAllocation(escalation, escalationPolicy),
         };
       report.wallMs = Date.now() - start;
+      await closeObservation();
       if (observation !== undefined) {
         report.observation = {
-          ...observation,
+          persistence: observation.persistence,
+          status: observation.status,
+          compositionRunId,
+          workId: observation.workId,
+          failure: observation.failure,
           kernelRuns: [...observation.kernelRuns],
         };
       }
+      Object.assign(report, sanitizeObservation(report));
       try {
         await mkdir(dirname(report.reportPath), { recursive: true });
         await writeFile(report.reportPath, JSON.stringify(report, null, 2) + '\n');
@@ -588,11 +614,14 @@ export function makeFixRun(deps: FixRunDeps = {}) {
       });
       const drivers = deps.drivers ?? createDriverFactory();
       // Open the composition stream and capture the header metadata. A
-      // failure here is a needs-human, not a silent unobserved run.
+      // append or close failure marks observation indeterminate and preserves the run.
+      // Memory-only kernelRuns is [].
       const { provenance, correlation } = await captureProvenance(
         repoRoot,
         runPrefix,
         new Date(start).toISOString(),
+        config.base,
+        configText,
       );
       const writer =
         deps.observationWriter ??
@@ -603,8 +632,11 @@ export function makeFixRun(deps: FixRunDeps = {}) {
         }));
       observation = {
         writer,
-        provenance,
-        correlation,
+        persistence: writer.persistence,
+        status: writer.persistence,
+        compositionRunId,
+        workId: correlation.workId,
+        failure: null,
         kernelRuns: [],
       };
       const header: CompositionStartedJournalEvent = {
@@ -617,15 +649,11 @@ export function makeFixRun(deps: FixRunDeps = {}) {
         attempt: null,
         payload: { journalVersion: 3, provenance, correlation },
       };
-      await writer.append(header);
-      // Runtime registry with the writer injected OUTSIDE the serialized
-      // dispatch input: the sweep.unit entry's importer binds the writer
-      // into the resolved unit bindings per dispatch.
-      const observedRegistry = makeRegistry({
-        observationWriter: writer,
-        observationRunId: compositionRunId,
-      });
-      const observedEntries = new Map(observedRegistry.map((entry) => [entry.name, entry]));
+      try {
+        await writer.append(header);
+      } catch (error) {
+        observationFailure(error);
+      }
       const unitEntry: OpRegistryEntry = {
         name: 'sweep.unit',
         inputSchema: SweepUnitDispatchInputSchema,
@@ -638,6 +666,9 @@ export function makeFixRun(deps: FixRunDeps = {}) {
                 reason: 'enclosing job cancelled before unit dispatch',
               };
             const bindings = bindingsFromDispatch(unit, drivers);
+            bindings.observationWriter = writer;
+            bindings.observationRunId = compositionRunId;
+            bindings.observationUnitId = `${unit.package}/${unit.fixer}`;
             bindings.taskRunBudget = {
               remainingWallMs,
               remainingTokens: () => maxTokens - sharedTokens,
@@ -699,10 +730,7 @@ export function makeFixRun(deps: FixRunDeps = {}) {
       };
       const view: OpRegistryView = {
         get: (name) =>
-          (deps.registry?.get(name) ??
-            (name === 'sweep.unit'
-              ? unitEntry
-              : (observedEntries.get(name) ?? central.get(name)))) as
+          (deps.registry?.get(name) ?? (name === 'sweep.unit' ? unitEntry : central.get(name))) as
             | OpRegistryEntry<never, never>
             | undefined,
       };
@@ -746,7 +774,11 @@ export function makeFixRun(deps: FixRunDeps = {}) {
           payload: { kernelRunId: report.run.runId, planId: plan.id, round: 1 },
         },
       ];
-      await writer.append(kernelRunLinks[0] as KernelRunLinkedJournalEvent);
+      try {
+        await writer.append(kernelRunLinks[0] as KernelRunLinkedJournalEvent);
+      } catch (error) {
+        observationFailure(error);
+      }
       // Jobs the run cancelled (an enclosing cancel races dispatch): a job
       // with no journal row is one the runner never dispatched. The blocked
       // set feeds the cancelled path's unstarted rows below.
@@ -973,19 +1005,7 @@ export function makeFixRun(deps: FixRunDeps = {}) {
     } catch (error) {
       return await finish('failed', String(error));
     } finally {
-      // ADR-0008 T30: the composition owns the writer's lifetime and closes
-      // it in finally — including on an early finish. The writer's own
-      // close re-rejects with its first write error; catch it here so the
-      // run's own terminal result is not masked, and surface it as the
-      // stream's indeterminate evidence instead.
-      if (observation !== undefined) {
-        try {
-          await observation.writer.close();
-        } catch {
-          // The writer's failure surface (observation.writer.failure)
-          // already carries the error for the fold.
-        }
-      }
+      await closeObservation();
     }
   };
 }

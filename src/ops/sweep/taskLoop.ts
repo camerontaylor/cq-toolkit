@@ -10,7 +10,6 @@ import type { SweepWorkspace } from '../../adapters/git/worktreeFor.js';
 import type { CheckCommand, FailureSet } from '../gates/checkRunner.js';
 import { adapterByName, parseCheckOutput } from '../gates/checkRunner.js';
 import { validateFix, type ValidationVerdict } from '../fix/validate.js';
-import { finishAttempt } from '../fix/attemptRecord.js';
 import { classifyStagePaths, stagedPathsOf, type StagePathGateResult } from './stagePaths.js';
 import {
   tasksFromFailures,
@@ -447,50 +446,6 @@ async function runTaskLoopInner(
               throw new Error(`worker stopped: ${worker.stopReason}`);
             return worker;
           } finally {
-            // attempt-finished (ADR-0008, T13): the durable per-attempt
-            // carrier, emitted in finally on every inner attempt — including
-            // spawn and cancellation failures — so a crash before
-            // job-finished preserves completed evidence. finishAttempt may
-            // throw a ZodError on an invalid input; catch it here so the
-            // original attempt error is not masked. finishAttempt sanitizes
-            // every persisted text field before the writer sees the event.
-            try {
-              await bindings.observationWriter?.append({
-                type: 'attempt-finished',
-                runId: bindings.observationRunId ?? '',
-                at: new Date().toISOString(),
-                unitId: bindings.observationUnitId ?? unit.package,
-                jobId: null,
-                taskId: task.id,
-                attempt: Math.max(1, decision.attempt),
-                payload: finishAttempt({
-                  tier,
-                  invocation,
-                  model: resolved.modelSpec,
-                  provider: resolved.modelSpec.provider,
-                  requestedModel: resolved.modelSpec.model,
-                  tokens:
-                    attempt.usage === undefined
-                      ? null
-                      : attempt.usage.input +
-                        attempt.usage.output +
-                        attempt.usage.cacheRead +
-                        attempt.usage.cacheWrite,
-                  wallMs: attempt.wallMs,
-                  stopReason: attempt.stopReason ?? row.reason ?? '',
-                  stopCode:
-                    attempt.stopReason === 'complete'
-                      ? 'completed'
-                      : attempt.stopReason === 'budget'
-                        ? 'token-cap'
-                        : 'unclassified',
-                }),
-              });
-            } catch {
-              // Observation is never authoritative over the attempt's own
-              // classification (ADR-0008: the fold joins what landed; a
-              // refused append leaves the boundary explicitly incomplete).
-            }
             attempt.wallMs = Date.now() - start;
             deadline.dispose();
           }

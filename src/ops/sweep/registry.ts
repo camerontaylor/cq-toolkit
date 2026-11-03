@@ -497,7 +497,7 @@ function makeSweepUnitImporter(observation: SweepObservation) {
         if (observation !== undefined) {
           bindings.observationWriter = observation.writer;
           bindings.observationRunId = observation.runId;
-          bindings.observationUnitId = input.package;
+          bindings.observationUnitId = `${input.package}/${input.fixer}`;
         }
         const unitOp: Op<WorkUnit, SweepUnitReport> = m.makeSweepUnitOp(bindings);
         return await unitOp({
