@@ -23,6 +23,7 @@ import {
 import { renderReadinessSection } from '../../../src/ops/pr/open.js';
 import {
   assembleReadiness,
+  DEV_LEDGER_VERSION,
   findReusableCycle,
   parseDevLedger,
   serializeDevLedger,
@@ -137,7 +138,7 @@ async function fixture() {
     agentCoverage: coverage,
   });
   const ledger: DevLedgerFile = {
-    version: 2,
+    version: DEV_LEDGER_VERSION,
     branch: state.branch,
     records: [
       origin,
@@ -1074,7 +1075,7 @@ test('the authorized-predecessor pass stops nonfatally at the count backstop', a
   );
   const records = f.ledger.records.filter((entry) => entry.kind !== 'vendor-debt');
   f.effects.openLedger(f.state.branch).save({
-    version: 2,
+    version: DEV_LEDGER_VERSION,
     branch: f.state.branch,
     records: [
       ...records,

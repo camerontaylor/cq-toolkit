@@ -4,7 +4,7 @@ import { restoreDurableDisposition } from '../../review/internal/durableDisposit
 import { createHash } from 'node:crypto';
 import { consumeDeferredVendorReport } from './deferredSettlement.js';
 import { isDeepStrictEqual } from 'node:util';
-import type { DevCycleRecord, DevLedgerFile } from '../record.js';
+import { DEV_LEDGER_VERSION, type DevCycleRecord, type DevLedgerFile } from '../record.js';
 import { makeConfiguredQueueClient } from '../../review/queue.js';
 import type { DeferredQueueClient, QueueStatus } from '../../review/internal/queueProtocol.js';
 import {
@@ -347,6 +347,7 @@ async function appendDebt(
       throw new Error('deferred ledger changed while settling authorized ancestry');
     const next: DevLedgerFile = {
       ...latest,
+      version: DEV_LEDGER_VERSION,
       records: [...latest.records, { kind: 'vendor-debt' as const, debt, at: effects.nowIso() }],
     };
     return { ledger: next, value: next };
@@ -510,6 +511,7 @@ async function prepareWithLifetime(
       return {
         ledger: {
           ...latest,
+          version: DEV_LEDGER_VERSION,
           records: [
             ...latest.records,
             { kind: 'vendor-debt' as const, debt, at: effects.nowIso() },
@@ -930,6 +932,7 @@ export async function bindPublishedDeferredDebt(
           ? latest
           : {
               ...latest,
+              version: DEV_LEDGER_VERSION,
               records: [
                 ...latest.records,
                 { kind: 'vendor-debt' as const, debt: bound, at: effects.nowIso() },

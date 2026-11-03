@@ -4,7 +4,7 @@
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import { makeDevDisposition } from '../../../src/ops/dev/disposition.js';
 import { makeDevReady, readReadinessWithGaps } from '../../../src/ops/dev/ready.js';
-import type { DevRecord } from '../../../src/ops/dev/record.js';
+import { DEV_LEDGER_VERSION, type DevRecord } from '../../../src/ops/dev/record.js';
 import type { WorkState } from '../../../src/ops/dev/internal/workState.js';
 import type { DeferredQueueClient } from '../../../src/ops/review/internal/queueProtocol.js';
 import { cycleRecord, makeFakeEffects } from './fakes.js';
@@ -442,7 +442,7 @@ describe('dev.ready deferred lineage', () => {
       command === 'gh' ? (args[0] === 'api' ? 'author' : 'owner/repo') : undefined,
     );
     effects.openLedger(state.branch).save({
-      version: 2,
+      version: DEV_LEDGER_VERSION,
       branch: state.branch,
       records: [
         ...effects.openLedger(state.branch).load().records,
@@ -483,7 +483,7 @@ describe('dev.ready deferred lineage', () => {
       predecessor: ancestor.reference,
     };
     effects.openLedger(state.branch).save({
-      version: 2,
+      version: DEV_LEDGER_VERSION,
       branch: state.branch,
       records: [
         ...effects.openLedger(state.branch).load().records,

@@ -4,10 +4,15 @@
 // v2 fields as explicitly UNKNOWN (never fabricated), and the preserved
 // v1 target-proof refusal. Fake/local inputs only — parse/serialize are
 // pure, so nothing spawns and no network is touched.
-import { describe, expect, test } from 'vitest';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, describe, expect, test } from 'vitest';
 import {
   DEV_LEDGER_VERSION,
+  encodeBranchForFilename,
   parseDevLedger,
+  pathDevLedgerStore,
   serializeDevLedger,
 } from '../../../src/ops/dev/record.js';
 import type { DevDispositionRecord, DevLedgerFile } from '../../../src/ops/dev/record.js';
@@ -40,6 +45,10 @@ function ledger(version: number, records: DevLedgerFile['records']): DevLedgerFi
 }
 
 describe('T38: the dev-ledger v3 disposition format', () => {
+  const tmpDirs: string[] = [];
+  afterEach(async () => {
+    for (const dir of tmpDirs.splice(0)) await rm(dir, { recursive: true, force: true });
+  });
   test('T38 record round-trip: a v3 disposition serializes as version 3 and parses back verbatim', () => {
     const file = ledger(DEV_LEDGER_VERSION, [dispositionV3()]);
     const text = serializeDevLedger(file);
@@ -49,9 +58,33 @@ describe('T38: the dev-ledger v3 disposition format', () => {
 
   test('T38 record round-trip: a v2 ledger and its v2 disposition still parse (dual-read)', () => {
     const file = ledger(2, [dispositionRecord()]);
-    const text = serializeDevLedger(file);
-    expect(JSON.parse(text)).toHaveProperty('version', 2);
-    expect(parseDevLedger(text)).toEqual(file);
+    // Reads dual-read 2, but the WRITER is 3-only (new writes as 3).
+    expect(() => serializeDevLedger(file)).toThrow(/writes 3 only/);
+    expect(parseDevLedger(JSON.stringify(file))).toEqual(file);
+  });
+
+  test('T38 record round-trip: the store upgrades a v2 ledger to version 3 on any append (records unchanged)', async () => {
+    const record = dispositionV3();
+    const root = await mkdtemp(join(tmpdir(), 'cq-dev-disp-v3-'));
+    tmpDirs.push(root);
+    const store = pathDevLedgerStore(root, BRANCH);
+    store.save({ version: 2, branch: BRANCH, records: [record] });
+    // A save of an explicitly v2 file is a write: it lands as 3.
+    expect(store.load()).toEqual({ version: 3, branch: BRANCH, records: [record] });
+    // And a v2 ledger left on disk by an older writer is upgraded by the next
+    // mutate append (the spread sites in deferredLedger.ts inherit this via
+    // the same publish path).
+    await writeFile(
+      join(root, '.cq', 'dev', encodeBranchForFilename(BRANCH) + '.json'),
+      JSON.stringify({ version: 2, branch: BRANCH, records: [record] }),
+    );
+    await store.mutate((latest) => ({
+      ledger: { ...latest, records: [...latest.records, record] },
+      value: undefined,
+    }));
+    const loaded = store.load();
+    expect(loaded).toHaveProperty('version', 3);
+    expect(loaded.records).toHaveLength(2);
   });
 
   test('T38 record round-trip: a deferred v3 disposition requires a nonempty reviewTrigger', () => {
@@ -123,13 +156,13 @@ describe('T38: the dev-ledger v3 disposition format', () => {
     expect(parseDevLedger(serializeDevLedger(file))).toEqual(file);
   });
 
-  test('T38 record failure boundary: ledger versions 1 and 4 refuse to parse, and the writer rejects any other version', () => {
+  test('T38 record failure boundary: ledger versions 1 and 4 refuse to parse, and the writer writes 3 only', () => {
     expect(() => parseDevLedger(JSON.stringify(ledger(1, [])))).toThrow(
       /schema violation|dev-record/,
     );
     expect(() => parseDevLedger(JSON.stringify(ledger(4, [])))).toThrow(/schema violation/);
-    expect(() => serializeDevLedger(ledger(4, []))).toThrow(/understands 2 and 3/);
-    expect(() => serializeDevLedger(ledger(1, []))).toThrow(/understands 2 and 3/);
+    expect(() => serializeDevLedger(ledger(2, []))).toThrow(/writes 3 only/);
+    expect(() => serializeDevLedger(ledger(4, []))).toThrow(/writes 3 only/);
   });
 
   test('T38 record failure boundary: the v1 target-proof refusal is preserved (a v1 cycle shape cannot sneak into a v2/v3 ledger)', () => {

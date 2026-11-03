@@ -64,7 +64,8 @@ import { branchPathFault } from '../../shared/refname.js';
 export { branchPathFault };
 
 /**
- * The persisted record format version — the one serializeDevLedger writes.
+ * The persisted record format version — the ONE serializeDevLedger writes;
+ * every new append in the store upgrades the file to it.
  * v2 added `target` to cycle records: review evidence is bound to the
  * intended PR target it was recorded against (the check record's existing
  * rule), and a v1 ledger — whose cycles cannot prove their target — refuses
@@ -73,10 +74,9 @@ export { branchPathFault };
  * v3 (ADR-0008 T38) adds the disposition provenance fields: `owner`,
  * `evidence: string[]`, `reviewTrigger` (required nonempty for a
  * `deferred`), `fingerprint` (FindingFingerprint v1) and `acceptedRisk`.
- * parseDevLedger dual-reads 2 and 3: a v2 disposition parsed from a v3
- * ledger keeps its legacy fields ABSENT — unknown is never manufactured —
- * and a version-3 ledger refuses to carry a v2 disposition (old v2 records
- * are never upgraded in place). Versions 1 and anything newer throw.
+ * parseDevLedger dual-reads 2 and 3: a legacy v2 disposition keeps its new
+ * fields ABSENT — unknown is never manufactured — while a v3 disposition
+ * requires them all. Versions 1 and anything newer throw.
  */
 export const DEV_LEDGER_VERSION = 3;
 
@@ -319,9 +319,9 @@ export interface DevVendorDebtRecord {
   at: string;
 }
 
-/** The persisted dev-record file. Dual-read versions 2 and 3 (ADR-0008 T38). */
+/** The persisted dev-record file; parse dual-reads 2 and 3 (ADR-0008 T38). */
 export interface DevLedgerFile {
-  version: 2 | typeof DEV_LEDGER_VERSION;
+  version: 2 | 3;
   branch: string;
   records: DevRecord[];
 }
@@ -470,12 +470,6 @@ const DevDispositionRecordSchemaV3 = z
       (record.reviewTrigger !== null && record.reviewTrigger.length > 0),
     { message: 'a deferred disposition requires a nonempty reviewTrigger' },
   );
-
-/**
- * The disposition dual-read (ADR-0008 T38): a v2-shaped record and a v3-shaped
- * record both parse, as distinct arms of the record union. Legacy provenance
- * stays ABSENT on a parsed v2 record — unknown is never manufactured.
- */
 
 const DevReuseRecordSchema = z
   .object({
@@ -651,10 +645,10 @@ function recordIdOf(record: DevRecord): string | null {
  * strict entry for anything read back.
  */
 export function serializeDevLedger(file: DevLedgerFile): string {
-  if (file.version !== 2 && file.version !== DEV_LEDGER_VERSION) {
+  if (file.version !== DEV_LEDGER_VERSION) {
     throw new Error(
       `dev-record: cannot serialize ledger version ${String(file.version)} — ` +
-        'this writer understands 2 and 3 (ADR-0008 T38) only',
+        `this writer writes ${DEV_LEDGER_VERSION} only (reads still dual-read 2; ADR-0008 T38)`,
     );
   }
   const ids = new Set<string>();
@@ -794,7 +788,9 @@ export function pathDevLedgerStore(repoRoot: string, branch: string): DevLedgerS
     mkdirSync(dirname(targetAbs), { recursive: true });
     const realParent = realpathSync(dirname(targetAbs));
     containedOrThrow(join(realParent, branchFile), 'write');
-    publishAtomic(targetAbs, serializeDevLedger(file));
+    // New writes are version 3 (ADR-0008 T38): a v2 ledger read back is
+    // upgraded in place by any append — its records all dual-read.
+    publishAtomic(targetAbs, serializeDevLedger({ ...file, version: DEV_LEDGER_VERSION }));
   };
 
   const mutex = makeGitMutex({
