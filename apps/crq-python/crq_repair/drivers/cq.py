@@ -1,6 +1,7 @@
 """Source-verified cq CLI JSON flag adapter; never launches tests."""
 import json
 import os
+import time
 from pathlib import Path
 from crq_repair import command
 
@@ -43,7 +44,8 @@ def invoke(config, role, job, wt, directory):
     argv += ['--' + k + '=' + json.dumps(v) for k, v in payload.items()]
     p = command(argv, cwd=wt, env=env, timeout=config['repair']['budget']['wall_clock_min'] * 60)
     with Path(directory, 'driver.log').open('a') as log:
-        log.write('\n# invocation\n' + p.stdout + '\n' + p.stderr)
+        log.write('\n# invocation ' + time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()) + '\n'
+                  + p.stdout + '\n' + p.stderr)
     try:
         data = json.loads(p.stdout)
     except ValueError:
@@ -93,7 +95,9 @@ def judge(config, role, job, wt, directory):
     bridge = Path(__file__).parents[1] / 'judge-cq.mjs'
     p = command(['node', str(bridge), str(path)], cwd=wt,
                 timeout=config['repair']['budget']['wall_clock_min'] * 60)
-    (directory / 'driver.log').write_text(p.stdout + '\n' + p.stderr)
+    with (directory / 'driver.log').open('a') as log:
+        log.write('\n# invocation ' + time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()) + '\n'
+                  + p.stdout + '\n' + p.stderr)
     if p.returncode:
         return {'stop': 'error', 'verdict': 'unsure', 'reason': 'cq read-only judge failed'}
     return json.loads(p.stdout)

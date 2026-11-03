@@ -272,6 +272,24 @@ class CqSessionsDirTest(unittest.TestCase):
             self.assertEqual(result['stop'], 'ok')
             return json.loads((job_dir / 'session.json').read_text()), job_dir
 
+    def test_judge_retries_keep_both_invocation_logs(self):
+        cqd = _load('crq_cq_judge_driver', ROOT / 'crq_repair' / 'drivers' / 'cq.py')
+        config = {'repair': {'cq_bin': 'cq.js',
+                             'budget': {'max_tokens': 1, 'wall_clock_min': 1}}}
+        outputs = [mock.Mock(returncode=1, stdout='first-output', stderr='first-error'),
+                   mock.Mock(returncode=0, stdout='{"verdict":"valid"}', stderr='second-error')]
+        with tempfile.TemporaryDirectory() as tmp, \
+             mock.patch.object(cqd, 'command', side_effect=outputs), \
+             mock.patch.object(cqd.time, 'strftime', return_value='2026-11-03T00:00:00Z'):
+            directory = Path(tmp)
+            for _ in outputs:
+                cqd.judge(config, {'model': 'p/m'}, {}, directory, directory)
+            log = (directory / 'driver.log').read_text()
+            for output in outputs:
+                self.assertIn(output.stdout, log)
+                self.assertIn(output.stderr, log)
+            self.assertEqual(log.count('# invocation 2026-11-03T00:00:00Z'), 2)
+
     def test_written_store_is_advertised(self):
         session, job_dir = self._run(True)
         self.assertEqual(session['sessionId'], 's-1')  # derived from the store
