@@ -18,6 +18,7 @@ import {
   type ObservationWriter,
 } from '../../kernel/observation.js';
 import { assembleReportV2 } from './reportFold.js';
+import { distinctFixedCommitCount } from './measurement.js';
 import type {
   AvailabilityRecord,
   ReportV2,
@@ -194,8 +195,7 @@ export function githubCompareBaseUrl(remote: string, revision: string): string |
  * even when attempt evidence carries SHAs.
  */
 export function fixesPerRunOf(tasks: readonly FixTaskReport[]): number {
-  return new Set(tasks.filter((task) => task.outcome === 'fixed').flatMap((task) => task.commits))
-    .size;
+  return distinctFixedCommitCount(tasks);
 }
 
 /** CorrelationRecordSchema's UUID grammar for parentWorkId. */

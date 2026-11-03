@@ -52,6 +52,14 @@ export function isTodoCommitMessage(message: string): boolean {
   return false;
 }
 
+/** Pre-v2 rule: distinct commit SHAs on `fixed` rows; types-only, so cycle-free. */
+export function distinctFixedCommitCount(
+  tasks: readonly { outcome: string; commits: readonly string[] }[],
+): number {
+  return new Set(tasks.filter((task) => task.outcome === 'fixed').flatMap((task) => task.commits))
+    .size;
+}
+
 /**
  * Exact verified-fix predicate over one task's raw evidence (ADR-0008):
  * outcome `fixed`, validation present with passing verdict, the SHA in that

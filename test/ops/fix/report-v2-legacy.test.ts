@@ -7,6 +7,9 @@ import {
   legacyReportProjection,
   type LegacyProjectionEvidence,
 } from '../../../src/ops/fix/reportFold.js';
+import { distinctFixedCommitCount } from '../../../src/ops/fix/measurement.js';
+import { fixesPerRunOf } from '../../../src/ops/fix/runFix.js';
+import type { FixTaskReport } from '../../../src/ops/sweep/taskLoop.js';
 import type {
   AttemptFinishedJournalEvent,
   AvailabilityRecord,
@@ -23,6 +26,17 @@ const WORK_ID = '3f2b8c1e-1111-4222-8333-444455556666';
 const CR_ID = 'cr-2026-01-03T04.05.06Z';
 const COMMIT_ONE = '1'.repeat(40);
 const COMMIT_TWO = '2'.repeat(40);
+const COMMIT_THREE = '3'.repeat(40);
+const COMMIT_FOUR = '4'.repeat(40);
+
+/** A real FixTaskReport carrier row, shaped as the live writer emits it. */
+const fixTask = (outcome: FixTaskReport['outcome'], commits: string[]): FixTaskReport => ({
+  task: { id: `t-${outcome}-${commits.join()}`, files: [], failures: [] },
+  attempts: [],
+  outcome,
+  branch: 'cq/fix/legacy/x',
+  commits,
+});
 
 const provenance = {
   cqVersion: '0.2.0',
@@ -199,22 +213,23 @@ describe('report v2 legacy projection (T37)', () => {
     // numerator today, and once M0-metric lands its numerator measures a
     // different quantity (validation pass, Cq-Task trailer, not todo). The
     // carrier rows carry the pre-v2 rule, so they always win.
-    const rows: LegacyProjectionEvidence = {
-      producer: 'fix',
-      tasks: [
-        { outcome: 'fixed', commits: [COMMIT_ONE] },
-        { outcome: 'fixed', commits: [COMMIT_TWO] },
-        { outcome: 'fixed', commits: ['3'.repeat(40)] },
-      ],
-    };
-    const carrierCount = new Set(
-      rows.tasks.filter((task) => task.outcome === 'fixed').flatMap((task) => task.commits),
-    ).size;
+    const carrierTasks: FixTaskReport[] = [
+      fixTask('fixed', [COMMIT_ONE, COMMIT_ONE]),
+      fixTask('unfixed', [COMMIT_FOUR]),
+      fixTask('fixed', [COMMIT_TWO]),
+      fixTask('fixed', [COMMIT_THREE]),
+    ];
+    // The carrier count is the writer's own rule, not a copy of it: one
+    // duplicate fixed commit collapses, an unfixed row's commit never counts,
+    // and fixesPerRunOf and the projection must agree on both.
+    const carrierCount = distinctFixedCommitCount(carrierTasks);
+    expect(fixesPerRunOf(carrierTasks)).toBe(carrierCount);
+    expect(carrierCount).toBe(3);
+    const rows: LegacyProjectionEvidence = { producer: 'fix', tasks: carrierTasks };
     const both = legacyReportProjection({
       reportV2: measuredReport(2, [COMMIT_ONE, COMMIT_TWO]),
       evidence: rows,
     });
-    expect(carrierCount).toBe(3);
     expect(both.fixesPerRun).toBe(carrierCount);
     expect(both.fixesPerRun).toBe(3);
     expect(both.availability.state).toBe('known');

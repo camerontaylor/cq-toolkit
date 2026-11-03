@@ -12,6 +12,7 @@ import {
   type ObservationWriter,
 } from '../../kernel/observation.js';
 import { sanitizeObservation } from './attemptRecord.js';
+import { distinctFixedCommitCount } from './measurement.js';
 
 export interface ReportFoldInput {
   streams: readonly ObservationStream[];
@@ -240,6 +241,7 @@ function legacyEvidenceCount(evidence: LegacyProjectionEvidence): number {
   const commits = new Set<string>();
   if (evidence.producer === 'fix') {
     if (!Array.isArray(evidence.tasks)) throw new Error('fix task rows are absent');
+    const fixedRows: { outcome: string; commits: readonly string[] }[] = [];
     for (const raw of evidence.tasks as readonly unknown[]) {
       if (!isRecord(raw)) throw new Error('malformed fix task row');
       const outcome = raw.outcome;
@@ -247,12 +249,11 @@ function legacyEvidenceCount(evidence: LegacyProjectionEvidence): number {
       if (typeof outcome !== 'string' || !Array.isArray(rowCommits))
         throw new Error('malformed fix task row');
       if (outcome !== 'fixed') continue;
-      for (const sha of rowCommits as readonly unknown[]) {
+      for (const sha of rowCommits as readonly unknown[])
         if (typeof sha !== 'string') throw new Error('malformed fix commit');
-        commits.add(sha);
-      }
+      fixedRows.push({ outcome, commits: rowCommits as string[] });
     }
-    return commits.size;
+    return distinctFixedCommitCount(fixedRows);
   }
   if (!Array.isArray(evidence.fixes)) throw new Error('address fix rows are absent');
   for (const raw of evidence.fixes as readonly unknown[]) {
