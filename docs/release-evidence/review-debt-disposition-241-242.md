@@ -28,7 +28,7 @@ slot and file-ownership constraints in the last section describe the
 
 Fix as specified: `retryAfterMs: z.number().nonnegative().exactOptional()`
 (`src/driver/schema.ts:155`) plus a `failsParse` case beside the
-window-bounds test in `test/kernel/types.test.ts`.
+window-bounds test in `test/kernel/types.worker-result-wire.test.ts`.
 
 Producer sweep (read-only, this engagement, at `70de728` content): every
 first-party producer already emits nonnegative values —
@@ -52,7 +52,7 @@ to nonnegative in the same change if its owner agrees.
    explicit head-bound grant; B08 owns the slot now.
 2. **Seam-family file ownership** — `src/driver/schema.ts`,
    `src/driver/common/structured.ts`, `test/driver/*`,
-   `test/kernel/types.test.ts` are shared post-#238 surfaces; per the
+   `test/kernel/types.*.test.ts` are shared post-#238 surfaces; per the
    standing instruction there are **no shared-seam writes** in this
    engagement.
 3. **Independent non-author review** at the fixing head — author

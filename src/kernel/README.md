@@ -41,7 +41,7 @@ These types are the GLOBAL freeze point for the toolkit; the frozen surface
 is tagged `types-freeze-v1`. After the tag, any change to a frozen name,
 field, status value, or schema is a separate migration PR with its own
 review — never an edit folded into a later goal. Serializability is pinned
-by `test/kernel/types.test.ts`. Recorded fold-ins from a previous PR's
+by `test/kernel/types.*.test.ts`. Recorded fold-ins from a previous PR's
 accepted-at-merge record (for instance PR 7's `concurrency .min(1)` → T1.2)
 are the one exception in MECHANISM only: they are executed as
 mirror-tightenings with provenance comments, never as frozen-shape changes

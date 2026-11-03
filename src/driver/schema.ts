@@ -17,7 +17,7 @@
 // Every persisted-shape schema is `.strict()`: objects carrying extra keys
 // (for instance a key named for a vendor message type) FAIL parsing instead
 // of being silently stripped. This backs the vendor-vocabulary frozen claim
-// exercised in test/kernel/types.test.ts.
+// exercised in test/kernel/types.roundtrip.test.ts.
 import { z } from 'zod';
 import type {
   Budget,
