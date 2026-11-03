@@ -5,15 +5,7 @@ import { z } from 'zod';
 import type { DriverFactory } from '../../../src/driver/factory.js';
 import type { OpRegistryEntry } from '../../../src/kernel/types.js';
 import { makeFixRun } from '../../../src/ops/fix/runFix.js';
-import {
-  fixture,
-  git,
-  gitleaks,
-  input,
-  reportOf,
-  scripted,
-  seedPrBase,
-} from './fix-run-shared.js';
+import { fixture, git, gitleaks, input, reportOf, scripted, seedPrBase } from './fix-run-shared.js';
 
 test.each([false, true])(
   'opt-in PR assembly uses only committed markers and records forge failure (%s)',
