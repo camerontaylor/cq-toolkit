@@ -7,6 +7,23 @@ import type {
 import type { FixTaskReport } from '../sweep/taskLoop.js';
 
 const TODO_KEY = 'cq-todo';
+const TASK_KEY = 'cq-task';
+
+/** The commit trailer block's `Cq-Task` value, or null when absent. */
+function readLinkedTaskId(message: string): string | null {
+  const trailerBlock =
+    message
+      .trimEnd()
+      .split(/\r?\n\r?\n/)
+      .pop() ?? '';
+  for (const line of trailerBlock.split(/\r?\n/)) {
+    const separator = line.indexOf(':');
+    if (separator === -1) continue;
+    if (line.slice(0, separator).trim().toLowerCase() !== TASK_KEY) continue;
+    return line.slice(separator + 1).trim();
+  }
+  return null;
+}
 
 /**
  * True when the commit's trailer block carries a `Cq-Todo: true` trailer
@@ -60,6 +77,10 @@ export function verifiedClosuresOf(
         if (!unknownTrailerShas.includes(commitSha)) unknownTrailerShas.push(commitSha);
         continue;
       }
+      // The closure link is verified, not trusted: the commit's own Cq-Task
+      // trailer must name this task's id (ADR-0007 identity, ADR-0008 closure).
+      const linkedTaskId = readLinkedTaskId(message);
+      if (linkedTaskId !== task.task.id) continue;
       closures.push({
         commitSha,
         taskIds: [task.task.id],
@@ -133,13 +154,19 @@ export function measureRun(
               source: null,
             }
           : { state: 'known', reason: 'counted from run closure evidence', source: null },
-    '/metric/fixesPerRun/denominator': denominatorKnown
-      ? { state: 'known', reason: 'summed from completed unit baseline probes', source: null }
-      : {
+    '/metric/fixesPerRun/denominator': !denominatorKnown
+      ? {
           state: 'not-collected',
           reason: 'a planned unit has no completed baseline probe',
           source: null,
-        },
+        }
+      : baselineFailures.reduce((sum, row) => sum + (row.count ?? 0), 0) === 0
+        ? {
+            state: 'known-zero',
+            reason: 'every completed probe reported zero failures',
+            source: null,
+          }
+        : { state: 'known', reason: 'summed from completed unit baseline probes', source: null },
   };
   baselineFailures.forEach((row, i) => {
     if (row.count === null)

@@ -9,14 +9,24 @@ import {
 } from '../../../src/ops/fix/measurement.js';
 
 // Fake/local fixtures only: no repositories, providers or credentials.
-const goodMessage = 'fix: repair the related cluster\n\nplain body, no trailers';
-const todoUpperMessage = 'fix: staged repair\n\nCQ-TODO: TRUE';
-const todoPaddedMessage = 'fix: staged repair\n\nCq-Run: p\n  cq-todo :  True  ';
+const linked = (taskId: string, extra = ''): string =>
+  `fix: linked repair\n\nCq-Task: ${taskId}${extra ? `\n${extra}` : ''}`;
+const goodMessage = linked('unit-a/task-1');
+const goodLinked2Message = linked('unit-a/task-2');
+const crlfMessage = 'fix: crlf repair\r\n\r\nCq-Task: unit-a/task-1\r\nCQ-TODO: TRUE';
+const wrongTaskMessage = linked('unit-b/task-9');
+const unlinkedMessage = 'fix: repair the related cluster\n\nplain body, no trailers';
+const todoUpperMessage = linked('unit-a/task-1', 'CQ-TODO: TRUE');
+const todoPaddedMessage = `fix: staged repair\n\nCq-Task: unit-a/task-1\nCq-Run: p\n  cq-todo :  True  `;
 const subjectOnlyMessage = 'fix: TODO marker in subject must not count\n\nCq-Note: todo';
-const proseTodoMessage = 'fix: repairs a TODO marker\n\nCq-Todo: false\n\nFootnote: Cq-Todo: true';
-const todoFalseMessage = 'fix: trailer says false\n\nCq-Todo: false';
+const proseTodoMessage = `fix: repairs a TODO marker\n\nCq-Task: unit-a/task-1\nCq-Todo: false\n\nFootnote: Cq-Todo: true`;
+const todoFalseMessage = linked('unit-a/task-1', 'Cq-Todo: false');
 const messages = new Map<string, string>([
   ['good', goodMessage],
+  ['good2', goodLinked2Message],
+  ['crlf', crlfMessage],
+  ['wrongTask', wrongTaskMessage],
+  ['unlinked', unlinkedMessage],
   ['todoUpper', todoUpperMessage],
   ['todoPadded', todoPaddedMessage],
   ['proseTodo', proseTodoMessage],
@@ -59,8 +69,12 @@ describe('verifiedClosuresOf', () => {
   it('T34 round-trip', () => {
     const tasks: FixTaskReport[] = [
       fixedTask({}),
-      // Same commit closes a second task: the SHA counts once.
-      fixedTask({ task: { id: 'unit-a/task-2', files: ['src/b.ts'], failures: [] } }),
+      // Same commit closes a second task: the SHA counts once. Both messages
+      // carry the matching Cq-Task trailer.
+      fixedTask({
+        task: { id: 'unit-a/task-2', files: ['src/b.ts'], failures: [] },
+        commits: ['good2'],
+      }),
       // Todo trailer: closure recorded with todo true, excluded from the numerator.
       fixedTask({ commits: ['todoUpper'] }),
       // Unfixed, missing-validation and non-passing rows never contribute.
@@ -69,7 +83,7 @@ describe('verifiedClosuresOf', () => {
       fixedTask({ validation: { verdict: 'needs-human', gates: [] } }),
     ];
     const { closures, unknownTrailerShas } = verifiedClosuresOf(tasks, messageOf);
-    expect(closures.map((closure) => closure.commitSha)).toEqual(['good', 'good', 'todoUpper']);
+    expect(closures.map((closure) => closure.commitSha)).toEqual(['good', 'good2', 'todoUpper']);
     expect(closures[0]?.todo).toBe(false);
     expect(closures[0]?.taskIds).toEqual(['unit-a/task-1']);
     expect(closures[0]?.verificationEvidence).toEqual(['validation:pass']);
@@ -79,8 +93,8 @@ describe('verifiedClosuresOf', () => {
     const plannedUnits = ['unit-a'];
     const probes = new Map([['unit-a', { completed: true, count: 4 }]]);
     const metric = measureRun(tasks, plannedUnits, probes, messageOf);
-    expect(metric.fixesPerRun).toEqual({ numerator: 1, denominator: 4 });
-    expect(metric.verifiedCommits).toEqual(['good']);
+    expect(metric.fixesPerRun).toEqual({ numerator: 2, denominator: 4 });
+    expect(metric.verifiedCommits).toEqual(['good', 'good2']);
     expect(metric.baselineFailures).toEqual([
       { unitId: 'unit-a', probeHead: null, completed: true, count: 4, unknownReason: null },
     ]);
@@ -156,15 +170,26 @@ describe('verifiedClosuresOf', () => {
       fixedTask({ validation: { verdict: 'fail', gates: [] } }),
       fixedTask({ commits: ['unknown-sha'] }),
       fixedTask({ commits: ['proseTodo', 'todoPadded', 'good'] }),
+      // Mismatched and missing Cq-Task links block the closure entirely.
+      fixedTask({ task: { id: 'unit-a/task-x', files: [], failures: [] }, commits: ['wrongTask'] }),
+      fixedTask({ task: { id: 'unit-a/task-y', files: [], failures: [] }, commits: ['unlinked'] }),
+      // CRLF trailers parse: the Cq-Task link matches and the todo exclusion
+      // still applies through CRLF line endings.
+      fixedTask({ commits: ['crlf'] }),
     ];
     const probes = new Map([['unit-a', { completed: true, count: 0 }]]);
     const metric = measureRun(tasks, ['unit-a'], probes, messageOf);
     // The unknown-sha candidate makes the numerator genuinely unknown even
     // though 'good' itself is verified; the denominator is a known zero.
     expect(metric.fixesPerRun).toEqual({ numerator: null, denominator: 0 });
-    expect(metric.verifiedCommits).toEqual(['proseTodo', 'good']);
-    expect(metric.closures.filter((c) => c.todo).map((c) => c.commitSha)).toEqual(['todoPadded']);
+    expect(metric.verifiedCommits).toEqual(['good']);
+    expect(metric.closures.filter((c) => !c.todo).map((c) => c.commitSha)).toEqual(['good']);
+    expect(metric.closures.filter((c) => c.todo).map((c) => c.commitSha)).toEqual([
+      'todoPadded',
+      'crlf',
+    ]);
     expect(metric.availability['/metric/fixesPerRun/numerator']?.state).toBe('unavailable');
+    expect(metric.availability['/metric/fixesPerRun/denominator']?.state).toBe('known-zero');
 
     // Without the unknown-message candidate the numerator is known: one
     // verified commit; todo-padded and prose-todo commits excluded.
@@ -175,7 +200,7 @@ describe('verifiedClosuresOf', () => {
       fixedTask({ commits: ['proseTodo', 'todoPadded', 'good'] }),
     ];
     const knownMetric = measureRun(boundaryTasks, ['unit-a'], probes, messageOf);
-    expect(knownMetric.fixesPerRun).toEqual({ numerator: 2, denominator: 0 });
+    expect(knownMetric.fixesPerRun).toEqual({ numerator: 1, denominator: 0 });
     expect(knownMetric.availability['/metric/fixesPerRun/numerator']?.state).toBe('known');
   });
 });
