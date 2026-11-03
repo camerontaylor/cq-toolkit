@@ -1189,7 +1189,16 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
         let observedHead = '';
         const history: AddressFailedAttempt[] = [];
         const validations: ValidationVerdict[] = [];
-        const failed = (reason: string): AddressFix => ({
+        /**
+         * ADR-0008 T19 converse: a deliberate scope deferral is a terminal
+         * adjudication, not an operational failure. It shares failed()'s shape
+         * exactly but never carries the `failure` discriminator, so the
+         * composition records the disposition instead of withholding it.
+         * Only an unanchored finding reaches this: every human-tier escalation
+         * outcome (missing rescue role, per-package or per-run rescue
+         * exhaustion) is resource failure and stays on failed().
+         */
+        const deferredForHuman = (reason: string): AddressFix => ({
           finding: {
             ...finding,
             status: 'deferred',
@@ -1198,14 +1207,17 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
           },
           observedHead,
           reason,
-          // The ONLY producer of this discriminator: an operational failure is
-          // never a deliberate deferral (ADR-0008 T19).
-          failure: { reason },
           validation: validations,
           failedAttempts: history,
         });
+        const failed = (reason: string): AddressFix => ({
+          ...deferredForHuman(reason),
+          // The ONLY producer of this discriminator: an operational failure is
+          // never a deliberate deferral (ADR-0008 T19).
+          failure: { reason },
+        });
         let file = finding.file;
-        if (!file) return failed('unanchored finding needs human scope');
+        if (!file) return deferredForHuman('unanchored finding needs human scope');
         try {
           file = relative(await realpath(root), await safeFile(root, file));
           finding = { ...finding, file };
