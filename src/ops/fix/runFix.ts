@@ -5,12 +5,25 @@ import {
   rescueAllocation,
   type EscalationState,
 } from './escalation.js';
-import { randomUUID } from 'node:crypto';
+import type { z } from 'zod';
+import { createHash, randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { promisify } from 'node:util';
-import type { z } from 'zod';
+import {
+  openObservationWriter,
+  readKernelRunDescriptors,
+  type KernelRunDescriptor,
+  type ObservationWriter,
+} from '../../kernel/observation.js';
+import type {
+  CompositionStartedJournalEvent,
+  CorrelationRecord,
+  KernelRunLinkedJournalEvent,
+  ProvenanceRecord,
+} from '../../kernel/types.js';
+import { inboundParentWorkId } from '../../driver/correlation-env.js';
 import { createDriverFactory, type DriverFactory } from '../../driver/factory.js';
 import type { Usage } from '../../driver/types.js';
 import { createGovernor, currentJobContext } from '../../kernel/governor.js';
@@ -30,6 +43,7 @@ import {
 } from '../sweep/planSweep.js';
 import { SweepUnitDispatchInputSchema } from '../sweep/registry.js';
 import { isScopedEslintTemplate } from '../sweep/tasks.js';
+import { sanitizeObservation, repoIdFromRemote } from './attemptRecord.js';
 import {
   bindingsFromDispatch,
   makeSweepUnitOp,
@@ -81,6 +95,13 @@ export interface FixRunReport {
   fixesPerRun: number;
   usage: Usage;
   wallMs: number;
+  /**
+   * ADR-0008 T30: the composition observation surface — the writer (whose
+   * `persistence` declares 'durable' vs 'unavailable'), the header metadata
+   * and the resolved kernel-run descriptors. Present once the stream is
+   * open; absent on pre-dispatch refusals.
+   */
+  observation?: FixRunObservation;
   run?: RunReport;
   assembly?: RunReport;
   escalation?: Omit<EscalationState, 'events'> & {
@@ -94,6 +115,21 @@ export interface FixRunDeps {
   registry?: OpRegistryView;
   /** Test seam for the mandatory pre-upload scan of each complete PR body. */
   prBodyScanner?: DiffSecretScanner;
+  /**
+   * ADR-0008 T30 test seam: a writer the composition adopts INSTEAD of
+   * opening its own (memory-only fixtures). Production callers omit this.
+   */
+  observationWriter?: ObservationWriter;
+}
+
+/** The composition observation surface makeFixRun exposes to its report. */
+export interface FixRunObservation {
+  persistence: ObservationWriter['persistence'];
+  status: 'durable' | 'unavailable' | 'indeterminate';
+  compositionRunId: string;
+  workId: string;
+  failure: string | null;
+  kernelRuns: KernelRunDescriptor[];
 }
 
 async function scanPrBodyForUpload(scanner: DiffSecretScanner, body: string): Promise<void> {
@@ -156,6 +192,68 @@ export function fixesPerRunOf(tasks: readonly FixTaskReport[]): number {
     .size;
 }
 
+/** CorrelationRecordSchema's UUID grammar for parentWorkId. */
+const UUID_PATTERN =
+  /^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|0{8}-0{4}-0{4}-0{4}-0{12}|f{8}-f{4}-f{4}-f{4}-f{12})$/;
+
+/**
+ * T04 placeholder: capture sanitized composition metadata; T04 replaces and shrinks this. Any git probe
+ * failure refuses: never a fabricated baseSha. repoId comes ONLY through
+ * T12 {@link repoIdFromRemote} — the raw remote never persists.
+ */
+async function captureProvenance(
+  repoRoot: string,
+  runPrefix: string,
+  startedAt: string,
+  base: string,
+  configText: string,
+): Promise<{ provenance: ProvenanceRecord; correlation: CorrelationRecord }> {
+  const execFileAsync = promisify(execFile);
+  const git = async (args: string[]): Promise<string> => {
+    const { stdout } = await execFileAsync('git', ['-C', repoRoot, ...args], {
+      timeout: 5_000,
+      maxBuffer: 16 * 1024,
+    });
+    return stdout.trim();
+  };
+  const [remote, baseSha, packageText] = await Promise.all([
+    // No remote: repoId is null/unavailable (ADR-0008), never a failure.
+    git(['config', '--get', 'remote.origin.url']).catch(() => null),
+    git(['rev-parse', '--verify', `${base}^{commit}`]),
+    readFile(new URL('../../../package.json', import.meta.url), 'utf8'),
+  ]);
+  const version =
+    process.env.CQ_PRODUCER_VERSION ??
+    (JSON.parse(packageText) as { version?: string }).version ??
+    'unavailable';
+  const provenance: ProvenanceRecord = {
+    cqVersion: version,
+    producerVersion: version,
+    repoId: repoIdFromRemote(remote).repoId,
+    cqJsonHash: `sha256:${createHash('sha256').update(configText, 'utf8').digest('hex')}`,
+    baseSha,
+    runPrefix,
+    startedAt,
+    endedAt: null,
+    journalLink: 'unavailable',
+    reportLink: 'unavailable',
+    witnesses: { base: baseSha, admitted: null, execution: null, reviewed: null, accepted: null },
+  };
+  // parentWorkId is a UUID per CorrelationRecordSchema: only a genuinely
+  // UUID-shaped inbound id persists; the paseo:<id> link form (and any other
+  // non-UUID evidence) stays null rather than failing the header.
+  const inboundParent = inboundParentWorkId(process.env) ?? null;
+  const correlation: CorrelationRecord = {
+    workId: randomUUID(),
+    parentWorkId: inboundParent !== null && UUID_PATTERN.test(inboundParent) ? inboundParent : null,
+    branch: runPrefix,
+    commitSha: null,
+    sessionId: null,
+    agentId: null,
+  };
+  return sanitizeObservation({ provenance, correlation });
+}
+
 /** Two-phase sweep composition; no kernel policy or taxonomy changes. */
 export function makeFixRun(deps: FixRunDeps = {}) {
   return async (input: FixRunInput): Promise<FixRunResult> => {
@@ -190,6 +288,31 @@ export function makeFixRun(deps: FixRunDeps = {}) {
     };
     let escalation = createEscalationState();
     let escalationPolicy: Parameters<typeof rescueAllocation>[1] | undefined;
+    // ADR-0008 T30: the composition owns ONE observation stream for the whole
+    // run, opened before any unit dispatch and closed in the outer finally.
+    // Without a journalDir (or with the memory-only test writer) the same
+    // writer API is memory-only and the report declares persistence
+    // unavailable — it never claims durability.
+    const compositionRunId = randomUUID();
+    let observation: (FixRunObservation & { writer: ObservationWriter }) | undefined;
+    let observationClosed = false;
+    const observationFailure = (error: unknown) => {
+      if (observation) {
+        observation.status = 'indeterminate';
+        observation.failure ??= sanitizeObservation(String(error));
+      }
+    };
+    const closeObservation = async () => {
+      if (!observation || observationClosed) return;
+      observationClosed = true;
+      try {
+        await observation.writer.close();
+      } catch (error) {
+        observationFailure(error);
+      }
+      if (observation.writer.failure !== null) observationFailure(observation.writer.failure);
+    };
+    let kernelRunLinks: KernelRunLinkedJournalEvent[] = [];
     const unstartedUnits: Array<{
       unit: SweepUnitDispatchInput;
       segments: { kind: string; slug: string; branch: string };
@@ -319,6 +442,18 @@ export function makeFixRun(deps: FixRunDeps = {}) {
           rescuePool: rescueAllocation(escalation, escalationPolicy),
         };
       report.wallMs = Date.now() - start;
+      await closeObservation();
+      if (observation !== undefined) {
+        report.observation = {
+          persistence: observation.persistence,
+          status: observation.status,
+          compositionRunId,
+          workId: observation.workId,
+          failure: observation.failure,
+          kernelRuns: [...observation.kernelRuns],
+        };
+      }
+      Object.assign(report, sanitizeObservation(report));
       try {
         await mkdir(dirname(report.reportPath), { recursive: true });
         await writeFile(report.reportPath, JSON.stringify(report, null, 2) + '\n');
@@ -478,6 +613,47 @@ export function makeFixRun(deps: FixRunDeps = {}) {
         },
       });
       const drivers = deps.drivers ?? createDriverFactory();
+      // Open the composition stream and capture the header metadata. A
+      // append or close failure marks observation indeterminate and preserves the run.
+      // Memory-only kernelRuns is [].
+      const { provenance, correlation } = await captureProvenance(
+        repoRoot,
+        runPrefix,
+        new Date(start).toISOString(),
+        config.base,
+        configText,
+      );
+      const writer =
+        deps.observationWriter ??
+        (await openObservationWriter({
+          ...(input.journalDir === undefined ? {} : { journalDir: resolve(input.journalDir) }),
+          workId: correlation.workId,
+          compositionRunId,
+        }));
+      observation = {
+        writer,
+        persistence: writer.persistence,
+        status: writer.persistence,
+        compositionRunId,
+        workId: correlation.workId,
+        failure: null,
+        kernelRuns: [],
+      };
+      const header: CompositionStartedJournalEvent = {
+        type: 'composition-started',
+        runId: compositionRunId,
+        at: new Date().toISOString(),
+        unitId: null,
+        jobId: null,
+        taskId: null,
+        attempt: null,
+        payload: { journalVersion: 3, provenance, correlation },
+      };
+      try {
+        await writer.append(header);
+      } catch (error) {
+        observationFailure(error);
+      }
       const unitEntry: OpRegistryEntry = {
         name: 'sweep.unit',
         inputSchema: SweepUnitDispatchInputSchema,
@@ -490,6 +666,9 @@ export function makeFixRun(deps: FixRunDeps = {}) {
                 reason: 'enclosing job cancelled before unit dispatch',
               };
             const bindings = bindingsFromDispatch(unit, drivers);
+            bindings.observationWriter = writer;
+            bindings.observationRunId = compositionRunId;
+            bindings.observationUnitId = `${unit.package}/${unit.fixer}`;
             bindings.taskRunBudget = {
               remainingWallMs,
               remainingTokens: () => maxTokens - sharedTokens,
@@ -573,6 +752,32 @@ export function makeFixRun(deps: FixRunDeps = {}) {
         );
       } finally {
         clearTimeout(timer);
+      }
+      // ADR-0008: link every RETURNED kernel run explicitly after the
+      // runPlan result — never a guessed link. The kernelRunId is the run's
+      // actual v3 run id; the descriptor list comes from the T29
+      // foldObservations join surface so a fold can resolve the link.
+      const descriptors =
+        input.journalDir === undefined
+          ? []
+          : await readKernelRunDescriptors(journalDir, [report.run.runId]);
+      observation?.kernelRuns.push(...descriptors);
+      kernelRunLinks = [
+        {
+          type: 'kernel-run-linked',
+          runId: compositionRunId,
+          at: new Date().toISOString(),
+          unitId: null,
+          jobId: null,
+          taskId: null,
+          attempt: null,
+          payload: { kernelRunId: report.run.runId, planId: plan.id, round: 1 },
+        },
+      ];
+      try {
+        await writer.append(kernelRunLinks[0] as KernelRunLinkedJournalEvent);
+      } catch (error) {
+        observationFailure(error);
       }
       // Jobs the run cancelled (an enclosing cancel races dispatch): a job
       // with no journal row is one the runner never dispatched. The blocked
@@ -799,6 +1004,8 @@ export function makeFixRun(deps: FixRunDeps = {}) {
       return await finish('ok');
     } catch (error) {
       return await finish('failed', String(error));
+    } finally {
+      await closeObservation();
     }
   };
 }

@@ -25,6 +25,7 @@ import { BudgetSchema, SandboxPolicySchema, ToolPolicySchema } from '../../kerne
 import { errorClassOf } from '../../driver/errors.js';
 import { createDriverFactory } from '../../driver/factory.js';
 import type { Op, OpRegistryEntry } from '../../kernel/types.js';
+import type { ObservationWriter } from '../../kernel/observation.js';
 import { LedgerThresholdsOverrideSchema } from '../ledger/registry.js';
 import type { CleanupInput } from '../../adapters/git/cleanup.js';
 import { fixerBudgetFault } from './internal/fixerBudget.js';
@@ -330,8 +331,7 @@ export const SweepUnitDispatchInputSchema: z.ZodType<SweepUnitDispatchInput> = z
   })
   .strict();
 
-/** Sweep-lane op registry (planSweep, worktreeFor, unit, salvage, cleanup). */
-export const registry: OpRegistryEntry[] = [
+const registryEntries: OpRegistryEntry[] = [
   {
     name: 'sweep.planSweep',
     inputSchema: PlanSweepInputSchema,
@@ -389,55 +389,7 @@ export const registry: OpRegistryEntry[] = [
     // honest `failed` naming the field; a factory RESOLVE throw is a §2.9
     // PRE-DISPATCH failure (an unbound provider/role is classified
     // 'config') → `needs-human` naming the provider/role.
-    importer: (wiring) =>
-      import('./unit.js').then(
-        (m) =>
-          (async (input: SweepUnitDispatchInput) => {
-            try {
-              // Bindings are built PER DISPATCH from the dispatched input
-              // (input-driven, the worktreeFor precedent); the binding
-              // refusal (no driver or check config) is folded into an honest
-              // `failed` HERE — never a throw across the op seam. The dispatch
-              // seam re-validates input through inputSchema.parseAsync, so
-              // the erased op typing is safe here (the registry precedent).
-              // The dispatch wiring (PR #238 review P2) rides the per-dispatch
-              // factory config: the host's alias-notice sink; absent (every
-              // library caller), the library default — one stderr line.
-              const unitOp: Op<WorkUnit, SweepUnitReport> = m.makeSweepUnitOp(
-                m.bindingsFromDispatch(
-                  input,
-                  createDriverFactory(
-                    wiring?.onDeprecatedAlias !== undefined
-                      ? { onDeprecatedAlias: wiring.onDeprecatedAlias }
-                      : {},
-                  ),
-                ),
-              );
-              return await unitOp({
-                package: input.package,
-                fixer: input.fixer,
-                files: input.files,
-              });
-            } catch (err) {
-              // A CLASSIFIED throw (errorClassOf → 'config'/'auth') is the
-              // factory's pre-dispatch refusal — an unbound provider/role is
-              // deployment CONFIGURATION, the human's to arrange
-              // (review-debt #186 / ADR-0002 §2.9), never `failed` (which
-              // would claim the fixer ran and broke). The unclassified field
-              // refusals above stay honest `failed`s naming the field.
-              if (errorClassOf(err) !== undefined) {
-                return {
-                  status: 'needs-human',
-                  reason: err instanceof Error ? err.message : String(err),
-                };
-              }
-              return {
-                status: 'failed',
-                error: err instanceof Error ? err.message : String(err),
-              };
-            }
-          }) as Op<unknown, unknown>,
-      ),
+    importer: makeSweepUnitImporter(undefined),
   },
   {
     name: 'sweep.salvage',
@@ -471,5 +423,108 @@ export const registry: OpRegistryEntry[] = [
       ),
   },
 ];
+
+/** Sweep-lane op registry (planSweep, worktreeFor, unit, salvage, cleanup). */
+export const registry: OpRegistryEntry[] = makeRegistry();
+
+/**
+ * ADR-0008 T30: build the sweep-lane registry with a RUNTIME observation
+ * writer. The `sweep.unit` entry's importer closes over the writer and adds
+ * it to makeSweepUnitOp's RESOLVED RUNTIME BINDINGS only (the
+ * {@link SweepUnitBindings.observationWriter} seam) — a callback is NEVER
+ * serialized into plan JSON or the dispatch input. The exported default
+ * `registry` is `makeRegistry()`: existing callers retain their behavior
+ * unchanged. The fix composition caller is makeFixRun (src/ops/fix/runFix.ts).
+ */
+export function makeRegistry(
+  options: {
+    /** ADR-0008 composition observation writer (src/kernel/observation.ts). */
+    observationWriter?: ObservationWriter;
+    /** The observation `runId` the writer was opened with (required with a writer). */
+    observationRunId?: string;
+  } = {},
+): OpRegistryEntry[] {
+  const observation = observationOf(options);
+  return registryEntries.map((entry) =>
+    entry.name !== 'sweep.unit'
+      ? entry
+      : {
+          ...entry,
+          importer: makeSweepUnitImporter(observation),
+        },
+  );
+}
+
+/** The observation options a makeRegistry-built sweep.unit importer closes over. */
+type SweepObservation = ReturnType<typeof observationOf>;
+
+function observationOf(options: {
+  observationWriter?: ObservationWriter;
+  observationRunId?: string;
+}): { writer: ObservationWriter; runId: string } | undefined {
+  return options.observationWriter === undefined
+    ? undefined
+    : {
+        writer: options.observationWriter,
+        runId: options.observationRunId ?? options.observationWriter.compositionRunId,
+      };
+}
+
+/**
+ * The sweep.unit importer with the T30 observation closure bound. Split from
+ * the array literal so makeRegistry rebuilds the entry with the writer
+ * without duplicating the dynamic module load or touching any other entry.
+ */
+function makeSweepUnitImporter(observation: SweepObservation) {
+  return async (wiring?: {
+    onDeprecatedAlias?: (message: string) => void;
+  }): Promise<Op<unknown, unknown>> => {
+    const m = await import('./unit.js');
+    return (async (input: SweepUnitDispatchInput) => {
+      try {
+        const bindings = m.bindingsFromDispatch(
+          input,
+          createDriverFactory(
+            wiring?.onDeprecatedAlias !== undefined
+              ? { onDeprecatedAlias: wiring.onDeprecatedAlias }
+              : {},
+          ),
+        );
+        // ADR-0008 T30: the injected observation writer rides the RESOLVED
+        // RUNTIME BINDINGS — never the serialized dispatch input (no
+        // callback ever reaches plan JSON). Unit identity is the dispatched
+        // package (the planned unit's identity).
+        if (observation !== undefined) {
+          bindings.observationWriter = observation.writer;
+          bindings.observationRunId = observation.runId;
+          bindings.observationUnitId = `${input.package}/${input.fixer}`;
+        }
+        const unitOp: Op<WorkUnit, SweepUnitReport> = m.makeSweepUnitOp(bindings);
+        return await unitOp({
+          package: input.package,
+          fixer: input.fixer,
+          files: input.files,
+        });
+      } catch (err) {
+        // A CLASSIFIED throw (errorClassOf → 'config'/'auth') is the
+        // factory's pre-dispatch refusal — an unbound provider/role is
+        // deployment CONFIGURATION, the human's to arrange (review-debt
+        // #186 / ADR-0002 §2.9), never `failed` (which would claim the
+        // fixer ran and broke). Unclassified field refusals stay honest
+        // `failed`s naming the field.
+        if (errorClassOf(err) !== undefined) {
+          return {
+            status: 'needs-human',
+            reason: err instanceof Error ? err.message : String(err),
+          };
+        }
+        return {
+          status: 'failed',
+          error: err instanceof Error ? err.message : String(err),
+        };
+      }
+    }) as unknown as Op<unknown, unknown>;
+  };
+}
 
 // Shared task and stage-path helpers: './tasks.js', './stagePaths.js', './taskLoop.js'.

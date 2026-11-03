@@ -43,12 +43,13 @@ import { classifyStagePaths, stagedPathsOf } from './stagePaths.js';
 import type { StagePathGateResult } from './stagePaths.js';
 import { runTaskLoop } from './taskLoop.js';
 import type {
-  TaskLoopConfig,
-  TaskWorker,
   FixTaskReport,
   TaskEscalation,
+  TaskLoopConfig,
   TaskRunBudget,
+  TaskWorker,
 } from './taskLoop.js';
+import type { ObservationWriter } from '../../kernel/observation.js';
 import type { FixTask } from './tasks.js';
 import { defaultHarnessConfig } from '../../harness/config.js';
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
@@ -227,6 +228,24 @@ export interface SweepUnitBindings {
   taskWorker?: TaskWorker;
   taskEscalation?: TaskEscalation;
   taskRunBudget?: TaskRunBudget;
+  /**
+   * ADR-0008 T30: the composition observation writer, injected at RUNTIME by
+   * makeRegistry/makeFixRun — never serialized into plan JSON and never a
+   * dispatch-input field. Present, runTaskLoopInner emits `attempt-finished`
+   * at every inner attempt boundary; absent, behavior is unchanged.
+   */
+  observationWriter?: ObservationWriter;
+  /**
+   * The observation `runId` (the composition run id) the writer was opened
+   * with; required whenever observationWriter is set (the writer refuses an
+   * event whose runId does not match its stream).
+   */
+  observationRunId?: string;
+  /**
+   * The stable composition unit identity carried on each attempt event's
+   * envelope `unitId` (never a jobId alias); default the dispatched package.
+   */
+  observationUnitId?: string;
   deriveTasks?: (baseline: FailureSet) => FixTask[];
   /** Repository the worktrees check out from. */
   repoRoot: string;
