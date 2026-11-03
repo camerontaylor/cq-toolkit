@@ -23,7 +23,7 @@ import { fetchReviewState } from '../../adapters/forge-github/fetchReviewState.j
 import { requestReviewers } from '../../adapters/forge-github/requestReviewers.js';
 import { fileWorktreeRegistry, type WorktreeRegistry } from '../../adapters/git/prWorktree.js';
 import { loopReplyVerdict, replySignature } from '../../plans/review-loop.js';
-import { parseCqConfig, type CqConfig } from '../analyze/cqConfig.js';
+import { DEFAULT_REVIEW_WALL_MS, parseCqConfig, type CqConfig } from '../analyze/cqConfig.js';
 import { resolveCqConfigDefaults, requireAgenticTokenBudget } from '../analyze/cqConfigDefaults.js';
 import { makeDevDisposition } from '../dev/disposition.js';
 import { makeSubprocessDevEffects } from '../dev/effects.js';
@@ -598,7 +598,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
       if (!policy.roles.worker || !policy.roles.reviewer)
         return await finish('needs-human', 'cq.json roles.worker and roles.reviewer are required');
       // Wall is a runaway guard, not a calibrated allocation between fixing and review.
-      const reviewWallMs = 6 * 60 * 60 * 1000;
+      const reviewWallMs = DEFAULT_REVIEW_WALL_MS;
       const cap = Math.min(config.budgets?.run?.wallMs ?? reviewWallMs, input.wallMs ?? Infinity);
       const remainingTokens = () =>
         policy.budgets.run.maxTokens! -

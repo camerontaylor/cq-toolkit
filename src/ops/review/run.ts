@@ -8,7 +8,7 @@ import { readFile, mkdir, readdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { DriverFactory } from '../../driver/factory.js';
 import type { OpResult } from '../../kernel/types.js';
-import { parseCqConfig } from '../analyze/cqConfig.js';
+import { DEFAULT_REVIEW_WALL_MS, parseCqConfig } from '../analyze/cqConfig.js';
 import { resolveCqConfigDefaults, requireAgenticTokenBudget } from '../analyze/cqConfigDefaults.js';
 import {
   makeDevReview,
@@ -168,7 +168,7 @@ export function makeReviewRun(
       ...(input.reviewers === undefined ? {} : { review: { reviewers: input.reviewers } }),
     });
     const wallMs = Math.min(
-      parsedConfig.config.budgets?.run?.wallMs ?? 6 * 60 * 60 * 1000,
+      parsedConfig.config.budgets?.run?.wallMs ?? DEFAULT_REVIEW_WALL_MS,
       input.wallMs ?? Infinity,
     );
     const parent = deps.parentSignal ?? currentJobContext()?.signal;
