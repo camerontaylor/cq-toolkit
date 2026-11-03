@@ -13,6 +13,7 @@ from pathlib import Path
 import subprocess
 
 import backfill_accounting as accounting
+import backfill_coverage as coverage
 import backfill_history as history
 import backfill_inventory as inventory
 import backfill_jobs as jobs
@@ -150,6 +151,7 @@ def rank4_gate(c, queue, item, dry=False):
 
 
 MISSING_EVIDENCE = "missing retained evidence; reconcile before dispatch"
+COVERAGE_PENDING = "coverage snapshot pending off-lock refresh"
 
 
 def select(c, queue, log, dry, only):
@@ -177,7 +179,7 @@ def select(c, queue, log, dry, only):
     pending[0]["wait_reason"] = before  # the pass below assigns each job's reason
     if before is None:
         del pending[0]["wait_reason"]
-    repo, store, outbox, publisher = services(c, config)
+    _, _, _, publisher = services(c, config)
     # New publication may remove eligibility without moving the job's T.
     head, events = publisher.fetch()
     def reconciliation(eligible):
@@ -190,19 +192,21 @@ def select(c, queue, log, dry, only):
             if item.get("wait_reason") != MISSING_EVIDENCE:
                 item["wait_reason"] = refused
         return None, bool(last.get("available"))
-    # Within one runner process, coverage for an unchanged ledger head is reused,
-    # so an admission loop calling select again does not repeat it.
-    cache = getattr(c, "_backfill_coverage_cache", None)
-    if not cache or cache["head"] != head:
-        cache = {"head": head, "by_target": {}}
-        setattr(c, "_backfill_coverage_cache", cache)
-    coverage_by_target = cache["by_target"]
+    # Coverage is never computed here, under tick.lock: it costs minutes of Git
+    # work per target. Read the off-lock snapshot; a stale one leaves its jobs
+    # waiting and asks the refresher (crq-publisher) for an update.
+    snapshots, stale = {}, set()
     def coverage_for(target):
-        if target not in coverage_by_target:
-            coverage_by_target[target] = repo.coverage(target, events, store)
-        return coverage_by_target[target]
+        if target not in snapshots:
+            snapshots[target] = coverage.load(c.STATE, target, events)
+            if snapshots[target] is None:
+                stale.add(target)
+        return snapshots[target]
     for item in items:
-        covered, _, _ = coverage_for(item["target"])
+        if item.get("state") != "pending" or coverage_for(item["target"]) is None:
+            item.setdefault("dispatch_tier_importance", item["tier_importance"])
+            continue
+        covered, _ = coverage_for(item["target"])
         remaining = [r for r in item["scope"] if ledger.intervals(r["intervals"]) - covered.get(r["path"], set())]
         item["dispatch_tier_importance"] = min((item.get("path_tiers", {}).get(r["path"], item["tier_importance"]) for r in remaining), default=item["tier_importance"])
     items.sort(key=lambda j: (j["dispatch_tier_importance"], j.get("retry", False), j["subject_kind"],
@@ -213,7 +217,10 @@ def select(c, queue, log, dry, only):
         if not jobs.eligible(queue, item, c.iso()):
             continue
         seen.append(item)
-        covered, _, gaps = coverage_for(item["target"])
+        if coverage_for(item["target"]) is None:
+            item["wait_reason"] = COVERAGE_PENDING
+            continue
+        covered, gaps = coverage_for(item["target"])
         if gaps:
             item["wait_reason"] = MISSING_EVIDENCE
             continue
@@ -253,8 +260,11 @@ def select(c, queue, log, dry, only):
                 item.update(state="launch-unknown", vendor_state="unknown")
             c.save_queue(queue)
             raise
-    if not only:  # a selective start covers one job, not the natural pass
+    if stale:
+        coverage.request(c.STATE, head, stale)
+    elif not only:  # a selective start covers one job, not the natural pass
         # Keyed on the jobs this pass saw eligible and left pending (done ones drop out).
+        # A pass with stale snapshots records nothing, so the next pass re-reads them.
         queue["backfill_coverage_reconciled"] = {"digest": reconciliation(seen), "available": available}
     return None, available
 

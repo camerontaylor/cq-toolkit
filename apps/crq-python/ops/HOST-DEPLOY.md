@@ -396,6 +396,25 @@ with `reconciliation-pending`, keeps the request marker and retries on the next
 trigger, with no failure marker or halt. `backfill_publication_error` reports a failed attempt; retry clears it only
 after verified remote reconciliation. Pending/live jobs retain ownership. The
 45-minute worker limit bounds each invocation without deleting pending evidence.
+
+### Backfill coverage snapshots
+
+Rank-4 selection (slot and tick, under `tick.lock`) never computes ledger coverage:
+that costs minutes of Git work per target. It reads
+`state/backfill/coverage/<target>.json`, which records coverage over a prefix of
+the ledger's events. A snapshot stays valid at a later ledger head when the appended
+events hold no creditable review, which is true for state and finding events, the
+common head moves. A missing or stale snapshot leaves its jobs waiting with
+`coverage snapshot pending off-lock refresh` and writes
+`state/backfill/coverage-request.json`.
+
+After each publication run, the same `crq-publisher.service` invocation refreshes
+snapshots (`backfill_coverage.run`, under `state/backfill/coverage.lock`, not
+`tick.lock`) when a request marker exists or publication moved the ledger head. It
+folds only the appended events into each pending target's snapshot, retries
+earlier gap reviews, recomputes in full only for a new target or a non-extending
+sequence, and deletes snapshots that no pending job uses. Snapshots are derived
+state; deleting the directory is safe, and the next request rebuilds it.
 Publication failures also retain `publication-failure.json`, which blocks new
 rank-4 admissions even when the queue lock is busy. Only successful validated
 queue reconciliation clears it. Operation-tagged inventory/request halts recover

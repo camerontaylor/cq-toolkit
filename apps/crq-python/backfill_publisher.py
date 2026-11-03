@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import subprocess
 import uuid
 
+import backfill_coverage
 import backfill_runtime as runtime
 import finding_delivery
 import review_ledger as ledger
@@ -92,8 +93,16 @@ def run(c):
             raise
 
 
+def main(c):
+    result = run(c)
+    # Off tick.lock: refresh the coverage snapshots selection reads, after a
+    # publication moved the ledger head or when selection asked for one.
+    result["coverage"] = backfill_coverage.run(c, published_head=result.get("ledger_head"))
+    return result
+
+
 if __name__ == "__main__":
     import json
     import crq
     # Journal the outcome so recurring reconciliation-pending runs are visible.
-    print(json.dumps(run(crq), sort_keys=True))
+    print(json.dumps(main(crq), sort_keys=True))

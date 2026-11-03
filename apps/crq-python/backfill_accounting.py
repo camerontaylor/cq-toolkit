@@ -311,6 +311,13 @@ class Repository:
     def coverage(self, target, reviews, artifacts):
         ledger.validate_sequence(reviews)
         covered, evidence, gaps = collections.defaultdict(set), collections.defaultdict(list), []
+        self.fold(target, reviews, artifacts, covered, evidence, gaps)
+        return dict(covered), dict(evidence), gaps
+
+    def fold(self, target, reviews, artifacts, covered, evidence, gaps):
+        """Add each creditable review's credit at target. Coverage is a union over
+        independent reviews, so callers may fold an already validated ledger
+        sequence incrementally (a suffix, or retried gap reviews)."""
         for value in reviews:
             if not ledger.creditable(value):
                 continue
@@ -326,7 +333,6 @@ class Repository:
                         evidence[mapped].append(value["id"])
             except (OSError, ValueError, subprocess.SubprocessError) as exc:
                 gaps.append({"review": value["id"], "reason": str(exc)[:200]})
-        return dict(covered), dict(evidence), gaps
 
     def churn(self, target, evaluated_at):
         at = ledger.timestamp(evaluated_at)
