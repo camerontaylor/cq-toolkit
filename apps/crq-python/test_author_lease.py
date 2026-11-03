@@ -14,7 +14,8 @@ from unittest import mock
 
 import author_lease
 import author_quota
-import test_author_quota as legacy
+import test_author_quota_fixtures as legacy
+import test_author_quota_launch as legacy_launch
 
 crq = legacy.crq
 AT = "2026-10-16T06:00:00Z"
@@ -118,7 +119,7 @@ class LeasePolicyTest(unittest.TestCase):
 
 class LeaseLaunchTest(unittest.TestCase):
     def setUp(self):
-        legacy.LaunchTest.setUp(self)
+        legacy_launch.LaunchTest.setUp(self)
 
     def launch(self, q, item):
         with mock.patch.object(crq, "secret_scan", return_value=(True, {})), \
