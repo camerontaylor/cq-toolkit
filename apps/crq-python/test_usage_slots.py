@@ -9,7 +9,9 @@ from types import SimpleNamespace
 from unittest import mock
 
 import usage_slots
-import test_author_quota as fixtures
+import test_author_quota_fixtures as fixtures
+import test_author_quota_harvest as harvest_fixtures
+import test_author_quota_tick as tick_fixtures
 
 crq = fixtures.crq
 REFRESH = crq.refresh_slot_deadline
@@ -59,7 +61,7 @@ class UsageTest(unittest.TestCase):
 
 class ConcurrencyTest(unittest.TestCase):
     def setUp(self):
-        fixtures.TickTest.setUp(self)
+        tick_fixtures.TickTest.setUp(self)
         crq.CONFIG.update(max_inflight=10, max_starts_per_tick=10)
         self.runs = self.root / 'runs'
         self.runs.mkdir()
@@ -317,8 +319,8 @@ class ConcurrencyTest(unittest.TestCase):
                 self.q['author_requests'] = {}
                 self.started.clear()
                 crq.CONFIG['max_inflight'] = 1
-                rdir = fixtures.HarvestTest._run_dir(self, outcome, exit_code=0 if outcome == 'completed' else 1)
-                item = fixtures.HarvestTest._item(self, self.q, outcome)
+                rdir = harvest_fixtures.HarvestTest._run_dir(self, outcome, exit_code=0 if outcome == 'completed' else 1)
+                item = harvest_fixtures.HarvestTest._item(self, self.q, outcome)
                 event = ({'type': 'complete', 'status': 'review_completed'} if outcome == 'completed' else
                          {'type': 'error', 'errorType': 'auth'})
                 (rdir / 'review.ndjson').write_text(json.dumps(event) + '\n')

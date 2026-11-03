@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 
 import author_quota
-from test_author_quota import crq, binding
+from test_author_quota_fixtures import crq, binding
 
 AT = "2026-10-16T06:00:00Z"
 FIXTURE = Path(__file__).parent / "fixtures" / "author-0e35cd11.json"
