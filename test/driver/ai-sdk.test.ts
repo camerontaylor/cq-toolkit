@@ -827,14 +827,31 @@ describe('ai-sdk driver specifics (mock model)', () => {
 
   test('a small maxSteps budget is honoured: the last step is invited to answer instead of calling tools', async () => {
     const toolCounts: number[] = [];
+    let resuming = false;
+    let sawReplay = false;
     const mock = new MockLanguageModelV4({
       modelId: 'mock-1',
       doGenerate: async (options) => {
+        if (resuming) {
+          const assistantTexts = options.prompt
+            .filter((message) => message.role === 'assistant')
+            .flatMap((message) =>
+              message.content.filter((part) => part.type === 'text').map((part) => part.text),
+            );
+          expect(assistantTexts.every((text) => text.trim() !== '')).toBe(true);
+          expect(assistantTexts.some((text) => text.includes('"toolName":"read"'))).toBe(true);
+          sawReplay = true;
+        }
         const tools = offeredToolCount(options);
         toolCounts.push(tools);
-        return tools > 0
-          ? toolCallResult('read', { path: 'absent.txt' })
-          : textResult('{"fixed":true,"notes":"ok"}');
+        if (tools > 0) {
+          const reply = toolCallResult('read', { path: 'absent.txt' });
+          return {
+            ...reply,
+            content: [{ type: 'text' as const, text: 'Reading evidence.' }, ...reply.content],
+          };
+        }
+        return textResult('{"fixed":true,"notes":"ok"}');
       },
     });
     const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-small-steps-'));
@@ -843,20 +860,39 @@ describe('ai-sdk driver specifics (mock model)', () => {
         providers: { mock: () => mock },
         sessionsDir: join(scratchDir, 'sessions'),
       });
-      const result = await driver.run(
-        invocation({
-          budget: { maxSteps: 3 },
-          toolPolicy: { allow: ['read'], mode: 'allowlist' },
-          outputSchema: toOutputSchema(
-            'test/small-steps/v1',
-            z.object({ fixed: z.boolean(), notes: z.string() }).strict(),
-          ),
-        }),
-      );
+      const request = invocation({
+        budget: { maxSteps: 3 },
+        toolPolicy: { allow: ['read'], mode: 'allowlist' },
+        outputSchema: toOutputSchema(
+          'test/small-steps/v1',
+          z.object({ fixed: z.boolean(), notes: z.string() }).strict(),
+        ),
+      });
+      const result = await driver.run(request);
       expect(result.stopReason).toBe('complete');
       expect(result.structuredOutput).toEqual({ fixed: true, notes: 'ok' });
       expect(result.steps).toBe(3);
       expect(toolCounts.map((count) => count > 0)).toEqual([true, true, false]);
+      const record = await new SessionStore(join(scratchDir, 'sessions')).load(
+        result.sessionId as string,
+      );
+      const steps = record?.messages.filter(
+        (message) => message.role === 'assistant' && message.usage !== undefined,
+      );
+      expect(steps).toHaveLength(3);
+      expect(steps?.map((message) => message.usage)).toEqual([
+        { input: 100, output: 12, cacheRead: 15, cacheWrite: 5 },
+        { input: 100, output: 12, cacheRead: 15, cacheWrite: 5 },
+        { input: 100, output: 12, cacheRead: 15, cacheWrite: 5 },
+      ]);
+      expect(steps?.slice(0, 2).every((message) => message.toolCalls?.includes('read'))).toBe(true);
+      expect(steps?.[2]?.toolCalls).toBeUndefined();
+      expect(steps?.[0]?.content).toContain('Reading evidence.');
+      expect(steps?.[0]?.content).not.toContain('absent.txt');
+      resuming = true;
+      const resumed = await driver.run({ ...request, sessionRef: result.sessionId as string });
+      expect(resumed.stopReason).toBe('complete');
+      expect(sawReplay).toBe(true);
     } finally {
       await rm(scratchDir, { recursive: true, force: true });
     }
@@ -948,6 +984,46 @@ describe('ai-sdk driver specifics (mock model)', () => {
         expect(requests[3]?.tail).toContain('did not satisfy the required JSON contract');
       } finally {
         await rm(scratchDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test.each([false, true])(
+    'a structured miss persists each main step once (budget stop: %s)',
+    async (budgetStop) => {
+      const root = await mkdtemp(join(tmpdir(), 'aidrv-miss-transcript-'));
+      try {
+        const mock = new MockLanguageModelV4({
+          modelId: 'mock-1',
+          doGenerate: [textResult('not JSON'), textResult('{"answer":"repaired"}')],
+        });
+        const driver = new AiSdkDriver({
+          providers: { zai: () => mock },
+          sessionsDir: join(root, 'sessions'),
+        });
+        const result = await driver.run(
+          invocation({
+            modelSpec: { provider: 'zai', model: 'mock-1' },
+            toolPolicy: { mode: 'none', allow: [] },
+            budget: budgetStop ? { maxTokens: 1 } : {},
+            outputSchema: toOutputSchema(
+              'test/miss-transcript/v1',
+              z.object({ answer: z.string() }),
+            ),
+          }),
+        );
+        expect(result.stopReason).toBe(budgetStop ? 'budget' : 'complete');
+        expect(mock.doGenerateCalls).toHaveLength(budgetStop ? 1 : 2);
+        const record = await new SessionStore(join(root, 'sessions')).load(
+          result.sessionId as string,
+        );
+        const assistants = record?.messages.filter((message) => message.role === 'assistant');
+        expect(assistants).toHaveLength(budgetStop ? 1 : 2);
+        expect(assistants?.filter((message) => message.content === 'not JSON')).toHaveLength(1);
+        expect(assistants?.[0]?.usage).toBeDefined();
+        if (!budgetStop) expect(assistants?.[1]?.content).toBe('{"answer":"repaired"}');
+      } finally {
+        await rm(root, { recursive: true, force: true });
       }
     },
   );

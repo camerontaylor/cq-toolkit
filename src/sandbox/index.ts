@@ -1,5 +1,5 @@
 // Sandbox launcher helpers.  Backend launchers receive this scrubbed
-// environment; CQ_* policy knobs are intentionally absent so a model-directed
+// environment; sandbox policy knobs are intentionally absent so a model-directed
 // child cannot reconfigure its own boundary.
 import { resolveSandboxConfig, SANDBOX_POLICY_ENV_NAMES } from './config.js';
 import type { SandboxConfig } from './config.js';
@@ -16,6 +16,13 @@ const SAFE_ENV = new Set([
   'SystemRoot',
   'COMSPEC',
   'PATHEXT',
+  // Non-secret correlation and session-store location, never sandbox policy.
+  'CQ_WORK_ID',
+  'CQ_PARENT_WORK_ID',
+  'CQ_ROLE',
+  'CQ_TASK',
+  'CQ_RUN_ID',
+  'CQ_SESSIONS_DIR',
 ]);
 
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;

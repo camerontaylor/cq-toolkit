@@ -366,9 +366,10 @@ describe('driver factory — wrapping', () => {
     });
     const verdict = await resolved.driver.run(invocation());
     expect(verdict.stopReason).toBe('complete');
-    expect(verdict.sessionId).toBeDefined();
-    const store = new SessionStore(join(dir, 'sessions'));
-    await expect(store.load(verdict.sessionId as string)).resolves.toBeUndefined();
+    expect(verdict.sessionId).toBeUndefined();
+    expect(
+      (await readdir(join(dir, 'sessions'))).filter((name) => name.endsWith('.jsonl')),
+    ).toHaveLength(0);
   });
 
   test('reap-on-settle deletes the fresh record on an ERROR verdict too', async () => {
@@ -382,10 +383,51 @@ describe('driver factory — wrapping', () => {
     });
     const verdict = await resolved.driver.run(invocation());
     expect(verdict.stopReason).toBe('error');
-    expect(verdict.sessionId).toBeDefined();
-    const store = new SessionStore(join(dir, 'sessions'));
-    await expect(store.load(verdict.sessionId as string)).resolves.toBeUndefined();
+    expect(verdict.sessionId).toBeUndefined();
+    expect(
+      (await readdir(join(dir, 'sessions'))).filter((name) => name.endsWith('.jsonl')),
+    ).toHaveLength(0);
   });
+
+  test.each([false, true])(
+    'cleanup failure preserves the resolved link or original rejection (reject=%s)',
+    async (reject) => {
+      stubKey();
+      const dir = await scratch();
+      const remove = vi
+        .spyOn(SessionStore.prototype, 'remove')
+        .mockRejectedValue(new Error('cleanup unavailable'));
+      if (reject) {
+        vi.spyOn(harnessSurface, 'buildManifest').mockRejectedValue(
+          new DispatchError('config', 'manifest setup failed'),
+        );
+      }
+      const driver = createDriverFactory(subprocessConfig(dir, [])).resolve({
+        role: 'fixer',
+        modelSpec: { provider: 'construction', model: 'construction-model' },
+        sessionRetention: 'reap-on-settle',
+      }).driver;
+      const running = driver.run(invocation());
+      if (reject) {
+        await expect(running).rejects.toMatchObject({
+          message: 'manifest setup failed',
+          dispatchClass: 'config',
+        });
+      } else {
+        const result = await running;
+        expect(result.stopReason).toBe('complete');
+        expect(result.sessionId).toBeDefined();
+        await expect(
+          new SessionStore(join(dir, 'sessions')).load(result.sessionId as string),
+        ).resolves.toBeDefined();
+        expect(remove).toHaveBeenCalledWith(result.sessionId);
+      }
+      expect(remove).toHaveBeenCalledTimes(1);
+      expect(
+        (await readdir(join(dir, 'sessions'))).filter((name) => name.endsWith('.jsonl')),
+      ).toHaveLength(1);
+    },
+  );
 
   test('a sessionRef-resumed record is NEVER reaped', async () => {
     stubKey();
@@ -446,7 +488,7 @@ describe('driver factory — wrapping', () => {
     expect(verdict.stopReason).toBe('complete');
     expect(verdict.sessionId).not.toBe(concurrent.sessionId);
     // The wrapped run's fresh record is reaped...
-    await expect(store.load(verdict.sessionId as string)).resolves.toBeUndefined();
+    expect(verdict.sessionId).toBeUndefined();
     // ...and the concurrent run's record is UNTOUCHED.
     await expect(store.load(concurrent.sessionId)).resolves.toBeDefined();
   });
@@ -566,10 +608,10 @@ describe('driver factory — knobs reach the constructed lane', () => {
       })
       .driver.run(invocation());
     expect(reaped.stopReason).toBe('complete');
-    expect(reaped.sessionId).toBeDefined();
-    await expect(
-      new SessionStore(logsDir).load(reaped.sessionId as string),
-    ).resolves.toBeUndefined();
+    expect(reaped.sessionId).toBeUndefined();
+    expect((await readdir(logsDir)).filter((name) => name.endsWith('.jsonl'))).toEqual([
+      `${keep.sessionId}.jsonl`,
+    ]);
   });
 
   test('config.pricing reaches the lane (cost derived off the observed served id)', async () => {

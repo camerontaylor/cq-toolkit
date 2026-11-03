@@ -103,7 +103,7 @@ describe('fixReviewItem factory request', () => {
   });
 
   test.each([
-    ['retainSessions absent', undefined, 'keep'],
+    ['retainSessions absent', undefined, undefined],
     ['retainSessions true', true, 'keep'],
     ['retainSessions false', false, 'reap-on-settle'],
   ])('%s → sessionRetention %s', async (_name, retainSessions, expected) => {

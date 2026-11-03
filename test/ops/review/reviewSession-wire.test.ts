@@ -268,7 +268,8 @@ describe('review session wire hook', () => {
     expect(generated).toBe(2);
     expect(calls.map((call) => call.kind)).toEqual([
       'model-request',
-      'tool-output',
+      'tool-output', // read result upload scan
+      'tool-output', // retained assistant tool-call diagnostic scan
       'model-request',
     ]);
     expect(calls[1]!.text).not.toBe(calls[0]!.text);
@@ -278,7 +279,11 @@ describe('review session wire hook', () => {
     expect(calls[1]!.text).toContain('… [line truncated at 2000 chars]');
     expect(firstSerialized).toBe(calls[0]!.text);
     expect(calls[1]!.contents.some((content) => content.text === plan.prompt)).toBe(false);
-    expect(scanCalls).toHaveLength(3);
+    expect(scanCalls).toHaveLength(4);
+    expect(JSON.parse(calls[2]!.text)).toMatchObject({
+      toolCalls: [{ toolName: 'read', input: { file_path: 'src/a.ts' } }],
+    });
+    expect(scanCalls[2]!.some((component) => component.text === 'src/a.ts')).toBe(true);
     // The model sees the numbered display; the guard also receives the raw
     // selected lines with path provenance.
     expect(scanCalls[1]!.some((component) => component.text === calls[1]!.text)).toBe(true);
@@ -369,10 +374,19 @@ describe('review session wire hook', () => {
     expect(generated).toBe(3);
     expect(calls.map((call) => call.kind)).toEqual([
       'model-request',
+      'tool-output', // denied call's retained assistant diagnostic
       'model-request',
-      'tool-output',
+      'tool-output', // successful read result upload scan
+      'tool-output', // successful call's retained assistant diagnostic
       'model-request',
     ]);
+    expect(JSON.parse(calls[1]!.text)).toMatchObject({
+      toolCalls: [{ toolName: 'read', input: { file_path: '../outside.txt' } }],
+    });
+    expect(JSON.parse(calls[4]!.text)).toMatchObject({
+      toolCalls: [{ toolName: 'read', input: { file_path: 'src/big.txt' } }],
+    });
+    expect(scanCalls).toHaveLength(6);
     expect(evidence.status).toBe('complete');
     expect(evidence.denials).toBe(1);
     expect(evidence.requests).toHaveLength(3);

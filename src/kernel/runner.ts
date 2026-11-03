@@ -299,11 +299,15 @@ export function sessionsOfResult(result: OpResult<unknown>): JobSessionLink[] | 
   const sessionId = (value as { sessionId?: unknown }).sessionId;
   if (typeof sessionId !== 'string' || sessionId === '') return undefined;
   const nativeSessionId = (value as { nativeSessionId?: unknown }).nativeSessionId;
+  const nativeSessionPath = (value as { nativeSessionPath?: unknown }).nativeSessionPath;
   return [
     {
       driver: 'unknown',
       sessionId,
       ...(typeof nativeSessionId === 'string' && nativeSessionId !== '' ? { nativeSessionId } : {}),
+      ...(typeof nativeSessionPath === 'string' && nativeSessionPath !== ''
+        ? { path: nativeSessionPath }
+        : {}),
     },
   ];
 }

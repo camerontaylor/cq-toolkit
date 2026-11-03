@@ -1018,13 +1018,6 @@ export class AiSdkDriver implements Driver {
     /** Seam v3: provider usage was actually observed on at least one step. */
     let usageEvidence = false;
     let completedSteps = 0;
-    // Session-log fidelity (item 1.7): the FINAL completed step, so the
-    // persisted assistant turn can carry its own usage and requested tool
-    // calls. Undefined when no step completed (an immediate abort) — the
-    // message then persists without the fidelity fields, exactly as before.
-    let lastStep:
-      | { usage: LanguageModelUsage; toolCalls: readonly unknown[] | undefined }
-      | undefined;
     try {
       let result: Awaited<ReturnType<typeof generateText>>;
       try {
@@ -1089,10 +1082,53 @@ export class AiSdkDriver implements Driver {
             if (hasReportedUsage(step.usage)) usageEvidence = true;
             stepUsage = addUsage(stepUsage, usageFromSdk(step.usage));
             responseMessages.push(...normalizeToolErrors(step.response.messages));
-            lastStep = {
-              usage: step.usage,
-              toolCalls: step.toolCalls as readonly unknown[] | undefined,
-            };
+            // Session evidence is diagnostic output too: never bypass the
+            // scanner with tool inputs that the failure record has redacted.
+            let calls: readonly unknown[] = step.toolCalls;
+            let content = step.text;
+            if (uploadRefused) {
+              content = '[redacted: upload scan refused]';
+              calls = [];
+            } else if (this.beforeRequest !== undefined && step.toolCalls.length > 0) {
+              try {
+                const contents: Array<{ text: string }> = [];
+                const collect = (value: unknown): void => {
+                  if (typeof value === 'string') contents.push({ text: value });
+                  else if (value !== null && typeof value === 'object')
+                    for (const [key, child] of Object.entries(value)) {
+                      contents.push({ text: key });
+                      collect(child);
+                    }
+                };
+                collect({ text: step.text, toolCalls: step.toolCalls });
+                await this.beforeRequest(
+                  JSON.stringify({ text: step.text, toolCalls: step.toolCalls }),
+                  contents,
+                  { kind: 'tool-output' },
+                );
+              } catch {
+                content = '[redacted: diagnostic scan refused]';
+                calls = [];
+              }
+            } else if (step.toolCalls.length > 0) {
+              // Keep only names from the trusted selected surface. Neither
+              // provider-supplied ids nor argument values are safe unscanned.
+              calls = step.toolCalls.map((call) => ({
+                toolName: selected.some((tool) => tool.name === call.toolName)
+                  ? call.toolName
+                  : '[unavailable]',
+                input: '[values omitted: no scanner]',
+              }));
+              content =
+                step.text !== '' ? `${step.text}\n${JSON.stringify(calls)}` : JSON.stringify(calls);
+            }
+            await store.appendMessage(record.sessionId, {
+              role: 'assistant',
+              content: content !== '' ? content : JSON.stringify(calls.length > 0 ? calls : ''),
+              usage: usageFromSdk(step.usage),
+              ...(calls.length > 0 ? { toolCalls: JSON.stringify(calls) } : {}),
+              at: nowIso(),
+            });
           },
           ...(abortSignal !== undefined ? { abortSignal } : {}),
           // Transport (ADR-0002 §2.3): the SDK's structured output over the
@@ -1218,23 +1254,15 @@ export class AiSdkDriver implements Driver {
         }
       }
 
-      // Assistant turn persisted in OUR vocabulary before the verdict —
-      // now with the step's OWN usage (item 1.7: the store answers "what
-      // did this turn spend" without the journal) and the step's requested
-      // tool calls (the role-'tool' lines that follow are the results).
-      await store.appendMessage(record.sessionId, {
-        role: 'assistant',
-        content: text !== '' ? text : JSON.stringify(structuredOutput ?? ''),
-        ...(lastStep !== undefined
-          ? {
-              usage: usageFromSdk(lastStep.usage),
-              ...(lastStep.toolCalls !== undefined && lastStep.toolCalls.length > 0
-                ? { toolCalls: JSON.stringify(lastStep.toolCalls) }
-                : {}),
-            }
-          : {}),
-        at: nowIso(),
-      });
+      // Completed steps already persisted their own assistant turns. Retain
+      // the settle-time fallback only when the SDK emitted no step callback.
+      if (completedSteps === 0) {
+        await store.appendMessage(record.sessionId, {
+          role: 'assistant',
+          content: text !== '' ? text : JSON.stringify(structuredOutput ?? ''),
+          at: nowIso(),
+        });
+      }
 
       const stopReason = stopReasonOf({
         finishReason,
@@ -1466,11 +1494,9 @@ export class AiSdkDriver implements Driver {
       return signals !== undefined ? { providerSignals: signals } : {};
     };
 
-    // Persist the assistant turn exactly as the success path does — the
-    // model's text is real evidence even though the required object missed.
-    // Deliberate skip when there is no text: the model produced NEITHER text
-    // NOR the object, so there is no assistant turn.
-    if (mainText.trim() !== '') {
+    // As on success, completed steps already persisted their assistant turn.
+    // Keep only the no-callback fallback, never duplicate a schema miss.
+    if (mainSteps === 0 && mainText.trim() !== '') {
       await store.appendMessage(record.sessionId, {
         role: 'assistant',
         content: mainText,

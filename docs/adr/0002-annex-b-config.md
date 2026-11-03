@@ -570,3 +570,29 @@ enter config only as the structural exclusion set (§B.8.2).
 - **Hashing secrets into the journal:** a stable fingerprint of a long-lived secret is a correlation handle with no
   audit value the `layer`/`set` pair doesn't already give.
 - **Env-configurable pricing:** see §B.1 (no checkable direction; it would break the budget bound).
+
+### Session store migration and constrained environments
+
+The durable default is `${XDG_STATE_HOME:-~/.local/state}/cq/sessions`.
+Deployments with an absent or read-only home must explicitly set
+`CQ_SESSIONS_DIR` (or the factory's `sessionsDir`) to a writable directory.
+There is no automatic fallback. To resume records created under the old
+`$TMPDIR/cq-harness/sessions` default, select that directory explicitly or
+migrate the complete store, including sidecars, to the configured durable
+directory. A `sessionRef` is resolved only in the selected store.
+
+Retention overrides on review.fixItem are sent only when retainSessions
+is explicitly configured; otherwise the deployment factory policy applies.
+Successfully reaped records are omitted from returned session links.
+Native transcript paths are reported only when the file exists and carried
+into result-derived journal session links as `sessions[].path`.
+SDK transcripts keep each completed step's usage and requested tool calls;
+the final answer is not appended a second time.
+
+Tool-call step evidence is diagnostic output: a configured scanner checks
+the complete step and decoded nested strings and keys before persistence.
+A refusal replaces the assistant record with a redaction marker and omits
+its tool-call metadata. Without a scanner, tool-call input values and provider-supplied identifiers
+are omitted; trusted offered tool names and omission markers survive.
+Assistant text, including narration accompanying tool calls, retains its
+existing behavior. An empty tool-only turn replays the safe call summary.

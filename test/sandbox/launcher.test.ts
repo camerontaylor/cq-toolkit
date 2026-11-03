@@ -130,6 +130,23 @@ describe('the launcher env scrub reaches the actual run child', () => {
     }
   });
 
+  test('correlation and session location survive the first-stage scrub without policy knobs', () => {
+    const correlation = {
+      CQ_WORK_ID: 'work-1',
+      CQ_PARENT_WORK_ID: 'parent-1',
+      CQ_ROLE: 'fixer',
+      CQ_TASK: 'task-1',
+      CQ_RUN_ID: 'run-1',
+      CQ_SESSIONS_DIR: '/sessions',
+    };
+    expect(
+      buildSandboxLauncherEnv(
+        { ...correlation, CQ_SANDBOX: 'off', GH_TOKEN: 'secret' },
+        { envPassthrough: [] },
+      ),
+    ).toEqual(correlation);
+  });
+
   test('the launcher keeps Windows executable essentials while scrubbing secrets', () => {
     const env = buildSandboxLauncherEnv(
       {
