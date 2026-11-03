@@ -224,7 +224,7 @@ class PrTest(unittest.TestCase):
 
     def tick(self):
         """A real tick with only the vendor/process boundary faked; returns the
-        detached-review spawns and the secret_scan mock for assertions."""
+        detached-review spawns, secret_scan mock and tick log for assertions."""
         real_popen = subprocess.Popen
 
         def fake_child(argv, **kw):
@@ -243,10 +243,10 @@ class PrTest(unittest.TestCase):
             scan = stack.enter_context(mock.patch.object(
                 crq, "secret_scan", return_value=(True, {"denylist_hits": [], "gitleaks_hits": []})))
             child = stack.enter_context(mock.patch.object(crq.subprocess, "Popen", side_effect=fake_child))
-            crq.with_lock(crq.tick, dry=False, only=None)
+            log = crq.with_lock(crq.tick, dry=False, only=None)
             spawns = sum(call.args[0][0] == sys.executable and "_review" in call.args[0]
                          for call in child.call_args_list)
-        return spawns, scan
+        return spawns, scan, log
 
     # ------------------------------------------------------------- tests
 
@@ -383,11 +383,17 @@ class PrTest(unittest.TestCase):
         self.assertNotIn("issue", item)
         self.assertEqual(file_issue.call_args, None)
         self.assertEqual(result, f"{item['id']}: completed (1 findings)")
-        with mock.patch.object(crq.finding_issues, "file_issue", return_value=filed) as file_issue:
-            message = crq._deliver_push_findings(self.q, item)
+        crq.save_queue(self.q)
+        with self.fake_gh(), \
+             mock.patch.object(crq.finding_issues, "file_issue", return_value=filed) as file_issue:
+            _, _, log = self.tick()
+            item = crq.load_queue()["items"][0]
+        self.assertEqual([message for message in log if message.startswith("findings issue")],
+                         ["findings issue #3 (created)"])
         self.assertEqual(item["issue"], filed)
         self.assertFalse(item["issue_pending"])
-        self.assertEqual(message, "findings issue #3 (created)")
+        file_issue.assert_called_once()
+        self.assertIn("issue_attempt_at", item)
         self.assertEqual(file_issue.call_args.kwargs["base"], self.base)
         self.assertEqual(file_issue.call_args.kwargs["head"], h1)
         self.assertEqual(file_issue.call_args.kwargs["meta"]["repo"], FOREIGN)
@@ -399,8 +405,13 @@ class PrTest(unittest.TestCase):
         # The quiet window reads the head locally before planning, so every
         # enrollable PR's head must be fetched first, even on first enrollment.
         h1 = self.foreign_commit("pr work", {"a.txt": "a\n"})
+        calls = mock.Mock()
         with mock.patch.object(crq, "fetch") as fetch, \
-             mock.patch.object(crq, "ensure_commit", return_value=True) as ensure:
+             mock.patch.object(crq, "ensure_commit", return_value=True) as ensure, \
+             mock.patch.object(crq, "git", wraps=crq.git) as git:
+            calls.attach_mock(fetch, "fetch")
+            calls.attach_mock(ensure, "ensure")
+            calls.attach_mock(git, "git")
             self.enroll([self.pr_row(5, h1)])
         fetch.assert_called_once()
         self.assertEqual(fetch.call_args.kwargs["clone"], Path(self.foreign))
@@ -408,6 +419,12 @@ class PrTest(unittest.TestCase):
         ensure.assert_called_once()
         self.assertEqual(ensure.call_args.args[:2], (5, h1))
         self.assertEqual(ensure.call_args.kwargs["clone"], Path(self.foreign))
+        self.assertEqual(calls.mock_calls, [
+            mock.call.fetch(clone=Path(self.foreign),
+                            refspec="+refs/heads/main:refs/remotes/origin/main"),
+            mock.call.ensure(5, h1, clone=Path(self.foreign)),
+            mock.call.git("merge-base", "origin/main", h1, cwd=Path(self.foreign)),
+        ])
 
     def test_legacy_issue_request_without_range_falls_back_to_the_subject(self):
         (self.root / "findings.md").write_text("- finding\n")
@@ -425,9 +442,31 @@ class PrTest(unittest.TestCase):
 
     def test_primary_enrollment_reads_only_primary_items(self):
         self.repos[0] = self.cfg()
+        foreign_cycle = {"run_id": "foreign", "head": "f" * 40,
+                         "completed_at": "2026-11-02T00:00:00Z"}
         self.q["items"].append({"id": "infra-pr7", "repo": FOREIGN, "kind": "open", "pr": 7,
-                                "state": "done", "cycles": []})
+                                "state": "done", "cycles": [foreign_cycle]})
         self.assertIsNone(crq.last_reviewed(self.q, 7))
+        primary_cycle = {"run_id": "primary", "head": "a" * 40,
+                         "completed_at": "2026-11-01T00:00:00Z"}
+        self.q["items"].append({"id": "pr7", "kind": "open", "pr": 7,
+                                "state": "done", "cycles": [primary_cycle]})
+        self.assertEqual(crq.last_reviewed(self.q, 7), primary_cycle)
+
+    def test_repair_enqueue_rejects_foreign_items_before_reading_findings(self):
+        for kind in ("open", "delta", "push-current"):
+            with self.subTest(kind=kind):
+                item = {"id": "infra-pr7", "repo": FOREIGN, "kind": kind, "pr": 7}
+                q = {"items": [item]}
+                with mock.patch.object(crq.repair_tick, "findings") as findings, \
+                     mock.patch.object(crq.repair_tick, "atomic") as atomic, \
+                     mock.patch.object(crq, "git") as git:
+                    self.assertFalse(crq.repair_tick.enqueue(crq, q, item, {}, self.root))
+                findings.assert_not_called()
+                atomic.assert_not_called()
+                git.assert_not_called()
+                self.assertEqual(item, {"id": "infra-pr7", "repo": FOREIGN, "kind": kind, "pr": 7})
+                self.assertFalse((crq.STATE / "repair").exists())
 
     def test_legacy_repair_backfill_ignores_foreign_cycles(self):
         q = {"items": [{"id": "push-infra-legacy", "repo": FOREIGN, "kind": "push-current",
@@ -475,7 +514,7 @@ class PrTest(unittest.TestCase):
     def test_tick_enrolls_and_launches_a_foreign_open_review(self):
         h1 = self.foreign_commit("pr work", {"a.txt": "a\n"})
         with self.fake_gh(opened=[self.pr_row(5, h1)], view=self.pr_view(5, h1)):
-            spawns, scan = self.tick()
+            spawns, scan, _ = self.tick()
         self.assertEqual(spawns, 1)
         self.q = crq.load_queue()
         item = next(i for i in self.q["items"] if i["id"] == "infra-pr5")
