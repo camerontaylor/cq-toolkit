@@ -455,8 +455,10 @@ describe('analyze.fix — agent proposal', () => {
     expect(readFileSync(preview.value.preview.proposalPath, 'utf8')).toBe(PATCH);
     expect(source(dir)).toBe(BAD);
     // ONE step (model + apply, no digest): a fresh, unseen proposal — refused.
+    const beforeOneStep = invocations.length;
     const oneStep = await fix({ dir, clusterId, model: MODEL, apply: true });
     expect(oneStep.status).toBe('needs-human');
+    expect(invocations.length).toBe(beforeOneStep);
     if (oneStep.status === 'needs-human')
       expect(oneStep.reason).toContain('--previewDigest=sha256:');
     expect(source(dir)).toBe(BAD);
@@ -542,7 +544,6 @@ describe('analyze.fix — agent proposal', () => {
       dir,
       clusterId,
       model: MODEL,
-      apply: true,
     });
     expect(result.status === 'ok' && result.value.preview.kind).toBe('agent-summary');
     expect(result.status === 'ok' && result.value.mode).toBe('preview');
@@ -566,7 +567,6 @@ describe('analyze.fix — agent proposal', () => {
       dir,
       clusterId,
       model: MODEL,
-      apply: true,
     });
     expect(refused.status).toBe('failed');
     if (refused.status === 'failed') expect(refused.error).toContain('escapes');
@@ -590,6 +590,12 @@ describe('analyze.fix — agent proposal', () => {
 });
 
 describe('patchTargets', () => {
+  test('refuses malformed hunk headers', () => {
+    expect(patchTargets('--- a/x.ts\n+++ b/x.ts\n@@ malformed\n-a\n+b')).toEqual({
+      ok: false,
+      reason: 'malformed hunk header',
+    });
+  });
   test('parses git and plain unified headers', () => {
     expect(patchTargets(PATCH)).toEqual({ ok: true, targets: ['src/index.ts'] });
     expect(patchTargets('--- a/x.ts\t2020\n+++ b/x.ts\t2020\n@@ -1 +1 @@\n-a\n+b\n')).toEqual({

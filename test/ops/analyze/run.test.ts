@@ -146,6 +146,24 @@ describe('analyze.run — the dataflow', () => {
     expect(result.value.clusters.map((cluster) => cluster.ruleId)).toEqual(['TS2322']);
   });
 
+  test('a diagnostic through an escaping symlink is skipped before rendering', async () => {
+    const dir = project({ 'cq.json': CONFIG });
+    const external = project({ 'lib.ts': 'x\n' });
+    symlinkSync(join(external, 'lib.ts'), join(dir, 'alias.ts'));
+    const result = await makeAnalyzeRun(
+      scripted([
+        {
+          stdout: "alias.ts(1,1): error TS2304: Cannot find name 'q'.\n",
+          exitCode: 1,
+        },
+      ]),
+    )({ dir });
+    expect(result.status).toBe('ok');
+    if (result.status !== 'ok') return;
+    expect(result.value.failureCount).toBe(0);
+    expect(result.value.outsideDirFiles).toEqual([join(external, 'lib.ts')]);
+  });
+
   test('no failures behind exit 0 → honest ok, failureCount 0, an empty report pair', async () => {
     const dir = project({ 'cq.json': CONFIG });
     const result = await makeAnalyzeRun(scripted([{ stdout: '', exitCode: 0 }]))({ dir });
