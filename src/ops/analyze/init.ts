@@ -17,9 +17,11 @@
 // overwritten unless `force: true`; a directory where nothing is detected
 // gets no file (an empty check list would make `analyze.run` vacuous).
 import {
+  chmodSync,
   existsSync,
   lstatSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   renameSync,
   rmSync,
@@ -167,6 +169,16 @@ export function makeAnalyzeInit(): Op<AnalyzeInitInput, AnalyzeInitReport> {
     }
     if (input.migrate === true) {
       try {
+        // A killed migration can leave its private staging directory behind.
+        // Keep recent directories (another migration may still be using one).
+        for (const entry of readdirSync(input.dir, { withFileTypes: true })) {
+          if (!entry.isDirectory() || !/^\.cq-config-migrate-[A-Za-z0-9]{6}$/.test(entry.name))
+            continue;
+          const scratch = join(input.dir, entry.name);
+          if (Date.now() - lstatSync(scratch).mtimeMs > 24 * 60 * 60 * 1000) {
+            rmSync(scratch, { recursive: true, force: true });
+          }
+        }
         const migrated = migrateCqConfig(readFileSync(configPath, 'utf8'));
         if (!migrated.ok)
           return {
@@ -181,6 +193,7 @@ export function makeAnalyzeInit(): Op<AnalyzeInitInput, AnalyzeInitReport> {
               encoding: 'utf8',
               mode: existing?.mode ?? 0o600,
             });
+            if (existing !== undefined) chmodSync(temporary, existing.mode & 0o7777);
             renameSync(temporary, configPath);
           } finally {
             rmSync(scratch, { recursive: true, force: true });

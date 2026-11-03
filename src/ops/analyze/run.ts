@@ -132,14 +132,14 @@ export function resolveChecks(
   } catch (err) {
     return {
       ok: false,
-      error: `analyze.run: no checks configured — could not read '${configPath}' (${messageOf(err)}); run \`cq analyze.init --dir=${dir}\` to write one, or pass checks explicitly`,
+      error: `analyze.run: no checks configured — could not read '${configPath}' (${messageOf(err)}); run \`cq analyze.init --dir='${dir.replace(/'/g, "'\\''")}'\` to write one, or pass checks explicitly`,
     };
   }
   const parsed = parseCqConfig(text, dir);
   if (!parsed.ok) {
     return {
       ok: false,
-      error: `analyze.run: '${configPath}' ${parsed.reason}${parsed.migrationRequired === true ? '' : `; fix it, or regenerate it with \`cq analyze.init --dir=${dir} --force\``}`,
+      error: `analyze.run: '${configPath}' ${parsed.reason}${parsed.migrationRequired === true ? '' : `; fix it, or regenerate it with \`cq analyze.init --dir='${dir.replace(/'/g, "'\\''")}' --force\``}`,
     };
   }
   const checks = parsed.config.checks

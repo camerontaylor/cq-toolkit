@@ -3,6 +3,7 @@
 // (existing file without force, nothing detected, missing dir) is `failed`
 // with nothing written.
 import {
+  chmodSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
@@ -10,6 +11,7 @@ import {
   rmSync,
   statSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -143,6 +145,27 @@ describe('parseCqConfig', () => {
 });
 
 describe('analyze.init migration', () => {
+  test('preserves group-write mode despite umask and cleans only stale migration directories', async () => {
+    const dir = project({
+      'cq.json': JSON.stringify({
+        schemaVersion: 1,
+        checks: [{ adapter: 'tsc-lines', command: { command: 'tsc', args: [] } }],
+      }),
+    });
+    chmodSync(join(dir, 'cq.json'), 0o664);
+    const stale = join(dir, '.cq-config-migrate-ABC123');
+    const recent = join(dir, '.cq-config-migrate-DEF456');
+    mkdirSync(stale);
+    mkdirSync(recent);
+    writeFileSync(join(stale, 'cq.json'), 'partial');
+    const old = new Date(Date.now() - 48 * 60 * 60 * 1000);
+    utimesSync(stale, old, old);
+    const result = await init({ dir, migrate: true });
+    expect(result.status).toBe('ok');
+    expect(statSync(join(dir, 'cq.json')).mode & 0o777).toBe(0o664);
+    expect(readdirSync(dir).sort()).toEqual(['.cq-config-migrate-DEF456', 'cq.json']);
+  });
+
   test('migrates without check detection, preserving checks exactly and adding no optional keys', async () => {
     const checks = [
       {
