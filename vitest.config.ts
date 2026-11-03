@@ -19,7 +19,7 @@
 // the classification is auditable and a file absent from the manifest falls
 // into `process` (conservative: real-process budgets, serial; this includes
 // the lint/rules RuleTester suites and plain-.mjs tooling tests such as
-// test/api-report.test.mjs). The process-backed projects carry
+// test/api-report.cli.test.mjs). The process-backed projects carry
 // distinct `sequence.groupOrder`s (process 1, live 2, integration 3) so a
 // bare run keeps the old root-level global serialization: same-order
 // projects run concurrently, different orders run one after another.
