@@ -39,6 +39,7 @@ import {
 import { foldOrderRuns, openRunLog } from '../../src/kernel/journal.js';
 import {
   JournalEventV1V2Schema,
+  KernelRunLinkedPayloadSchema,
   ObservationEventSchema,
   RunStartedV3JournalEventSchema,
 } from '../../src/kernel/schema.js';
@@ -348,6 +349,12 @@ describe('T29 unknown evidence', () => {
     // Round 0 is a valid NonnegativeSafeCount: pinned so the bound stays
     // nonnegative, not positive.
     expect(() => ObservationEventSchema.parse(linked(KERNEL_RUN, 0))).not.toThrow();
+    // K5: the payload grammar refuses path traversal in kernelRunId at the
+    // SCHEMA level (before the descriptor reader's assertSafeRunId).
+    expect(
+      KernelRunLinkedPayloadSchema.safeParse({ kernelRunId: '../x', planId: 'p', round: 1 })
+        .success,
+    ).toBe(false);
     const dir = await tempDir();
     try {
       await writeStream(dir, [header()]);
@@ -523,10 +530,18 @@ describe('T29 unknown evidence', () => {
 
   test('out-of-band duplicate and misplaced headers are refused; stray root file is isolated', async () => {
     // A stray FILE directly under observations/ is isolated, never fatal.
+    // Both spellings are covered: a dotfile the UUID check skips, and a file
+    // whose name IS a valid UUID — the readdir-withFileTypes isDirectory
+    // filter is what keeps the latter from failing the scan with ENOTDIR.
     const dir0 = await tempDir();
     try {
       await writeStream(dir0, [header()]);
       await writeFile(join(dir0, 'observations', '.DS_Store'), 'junk\n', 'utf8');
+      await writeFile(
+        join(dir0, 'observations', '9f2b8c1e-1111-4222-8333-444455556666'),
+        'junk\n',
+        'utf8',
+      );
       const streams = await readObservations(dir0);
       expect(streams.map((s) => s.compositionRunId)).toEqual([CR_ID]);
     } finally {
@@ -564,6 +579,39 @@ describe('T29 unknown evidence', () => {
       await expect(readObservations(dir2)).rejects.toThrow(/composition-started header/);
     } finally {
       await rm(dir2, { recursive: true, force: true });
+    }
+    // M16: torn-tail streams whose COMPLETE events are already corrupt are
+    // still refused — incompleteness waives only the required-header check
+    // for a stream with NO complete event, never a misplaced or duplicate
+    // header among complete events.
+    for (const [name, events] of [
+      [
+        'cr-torn-misplaced',
+        [
+          linked('plan-x', 1, { runId: 'cr-torn-misplaced' }),
+          header({ runId: 'cr-torn-misplaced' }),
+        ],
+      ],
+      [
+        'cr-torn-duplicate',
+        [header({ runId: 'cr-torn-duplicate' }), header({ runId: 'cr-torn-duplicate' })],
+      ],
+    ] as const) {
+      const dirT = await tempDir();
+      try {
+        const streamDir = join(dirT, 'observations', WORK_ID);
+        await mkdir(streamDir, { recursive: true });
+        await writeFile(
+          join(streamDir, `${name}.ndjson`),
+          `${events.map((e) => JSON.stringify(e)).join('\n')}\n{"torn`,
+          'utf8',
+        );
+        await expect(readObservations(dirT)).rejects.toThrow(
+          /misplaced or duplicate composition-started/,
+        );
+      } finally {
+        await rm(dirT, { recursive: true, force: true });
+      }
     }
   });
 
@@ -1008,10 +1056,8 @@ describe('T29 kernel isolation (P2-5)', () => {
   test('a kernel v3 file carrying composition-started or kernel-run-linked is refused', async () => {
     const dir = await tempDir();
     try {
-      // A composition carrier under a v3 kernel header is refused by the
-      // per-file version strictness? No — v3 kernel files accept the carriers
-      // defensively (T02); but a composition-started carrier is not in the
-      // kernel union at all: JournalEventSchema rejects it.
+      // Composition carriers are not members of the kernel union at all:
+      // JournalEventSchema rejects them.
       expect(() => JournalEventV1V2Schema.parse(header())).toThrow();
       expect(() => RunStartedV3JournalEventSchema.parse(header())).toThrow();
       // And a kernel RunLog append (v1/v2 shapes only) refuses both.
