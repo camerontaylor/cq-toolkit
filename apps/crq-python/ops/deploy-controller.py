@@ -837,6 +837,18 @@ def health_observation(effects: Effects, prior_tick: str) -> dict:
             "receipts_valid": validation["valid"] if validation else None}
 
 
+def wait_for_first_tick(effects: Effects, prior_tick: str, timeout: float,
+                        *, sleep=time.sleep, clock=time.monotonic) -> dict:
+    """Bounded polling for a completed tick; no deployment mutations."""
+    deadline = clock() + timeout
+    while True:
+        observation = health_observation(effects, prior_tick)
+        remaining = deadline - clock()
+        if observation["advanced"] or remaining <= 0:
+            return observation
+        sleep(min(5, remaining))
+
+
 def two_slot_health(effects: Effects, observe) -> dict:
     """Two advancing-tick observations via the injected ``observe`` callable
     (wall-clock sleeping belongs to the caller, never the controller).
@@ -1208,7 +1220,11 @@ def main(argv=None) -> int:
                             help="two advancing completed-tick observations")
     health.add_argument("--interval-seconds", type=int, default=0,
                         help="seconds between observations (caller-timed)")
+    health.add_argument("--first-tick-timeout-seconds", type=int, default=1500,
+                        help="first completed-tick wait (default: 20-minute cadence plus 5-minute slack)")
     args = parser.parse_args(argv)
+    if args.operation == "health" and (args.first_tick_timeout_seconds < 0 or args.interval_seconds < 0):
+        parser.error("health wait intervals must be nonnegative")
 
     root = args.root.resolve()
     helper_path = args.helper or (root / "apps/crq-python/ops/prepare-host.py")
@@ -1233,7 +1249,13 @@ def main(argv=None) -> int:
             print(json.dumps({"operation": "rollback", **result}, indent=2,
                              sort_keys=True))
         else:
+            first_observation = True
+
             def observe(prior_tick):
+                nonlocal first_observation
+                if first_observation:
+                    first_observation = False
+                    return wait_for_first_tick(effects, prior_tick, args.first_tick_timeout_seconds)
                 if args.interval_seconds:
                     time.sleep(args.interval_seconds)
                 return health_observation(effects, prior_tick)
