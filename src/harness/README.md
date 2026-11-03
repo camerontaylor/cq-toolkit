@@ -52,7 +52,8 @@ marker naming the skip.
 Counts are matching lines within the existing search limits; truncation
 markers identify partial results; capped count rows use `+` for lower bounds. Bash accepts `timeoutMs` for `timeout`,
 `workdir`/`cwd` within the workspace (lexical and symlink containment), and
-an advisory `description`. Its command allowlist still applies. Background
+an advisory `description`. Omitted cwd uses the configured `tools.bash.defaultCwd`
+(or the workspace root); the same containment and command allowlist checks apply. Background
 execution (`run_in_background: true`) is explicitly unsupported.
 
 `HarnessConfig.logToolFailures` defaults to false. `cq.json` exposes the

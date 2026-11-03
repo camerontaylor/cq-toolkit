@@ -123,6 +123,10 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
                   },
                   "type": "array"
                 },
+                "defaultCwd": {
+                  "minLength": 1,
+                  "type": "string"
+                },
                 "enabled": {
                   "type": "boolean"
                 },
@@ -199,6 +203,10 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
                     "type": "string"
                   },
                   "type": "array"
+                },
+                "defaultCwd": {
+                  "minLength": 1,
+                  "type": "string"
                 },
                 "enabled": {
                   "type": "boolean"
