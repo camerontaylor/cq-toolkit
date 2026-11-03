@@ -93,4 +93,28 @@ describe('review.address round-1 baseline', () => {
       await w.cleanup();
     }
   });
+  test('a PR admission refusal still saves the full round-1 population', async () => {
+    // T1 is admitted and fixed, then T2's admission refuses. The dispatch
+    // capture alone would save ['T1'] and a consumer would read 1/2; the
+    // pre-dispatch seed has already recorded every open thread the run was
+    // about to work, so the saved denominator stays the whole round.
+    const w = await world(true, { refuseAdmissionAt: 2, concurrency: 1 });
+    try {
+      const result = await w.run();
+      const report = reportOf(result);
+      expect(result.status).toBe('needs-human');
+      expect(report.reasons.join(' ')).toContain('admission refused');
+      // Only T1 was dispatched and admitted…
+      expect(report.fixes.map((fix) => fix.finding.id)).toEqual(['T1']);
+      // …yet the saved baseline is the FULL population, not the dispatched ids.
+      expect(report.initialOpenBlocking).toEqual(['T1', 'T2']);
+      expect(reviewPlannedUnitsOf(report)).toEqual(['T1', 'T2']);
+      const persisted = JSON.parse(await readFile(report.reportPath, 'utf8')) as {
+        initialOpenBlocking?: string[];
+      };
+      expect(persisted.initialOpenBlocking).toEqual(['T1', 'T2']);
+    } finally {
+      await w.cleanup();
+    }
+  });
 });

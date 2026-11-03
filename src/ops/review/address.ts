@@ -139,18 +139,20 @@ export interface ReviewAddressReport {
   advisories?: string[];
   openBlocking: Finding[];
   /**
-   * ADR-0008 baseline seam: the ROUND-1 open-blocker population. It is
-   * captured at dispatch, before `admitRecord` can refuse (so a dispatched
-   * item that is then refused is still counted), and round 1 may only GAIN
-   * ids from later captures — deduplicated, in first-seen order. On the PR
-   * path round 1 also completes it from the full open-thread population
-   * before its re-review, so an item stopped BEFORE admission (the fix-wall
-   * stop, a refusal, a parent cancel) is still part of the denominator. It is
-   * never reassigned and never shrunk afterwards: `openBlocking` is recomputed
-   * after fixes and replaced by each successful re-review, so substituting it
-   * for the measurement baseline would inflate fixes-per-run. Absent only when
-   * the invocation refused before capturing any round-1 population at all —
-   * unknown, never an empty baseline.
+   * ADR-0008 baseline seam: the ROUND-1 open-blocker population. It is seeded
+   * BEFORE the dispatch loop from the full pre-dispatch item population (the
+   * open blocking threads the run is about to work), so every exit, including
+   * one taken before any item admits (an admission or closure refusal, a
+   * truncated fetch, a moved worker branch, a throwing fetch), reports the
+   * whole round-1 population and not just the ids dispatched so far. Round 1
+   * may only GAIN ids afterwards, deduplicated, in first-seen order: each PR
+   * dispatch item still captures its own id before `admitRecord` can refuse,
+   * and the PR path still merges the full open-thread population before its
+   * re-review (dedup-only; the population is already seeded). It is never
+   * reassigned and never shrunk: `openBlocking` is recomputed after fixes and
+   * replaced by each successful re-review, so substituting it for the
+   * measurement baseline would inflate fixes-per-run. Absent only when the run
+   * exits before that population is known: unknown, never an empty baseline.
    */
   initialOpenBlocking?: string[];
   fixes: AddressFix[];
@@ -1769,31 +1771,35 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
               report.admissionHead ??= head;
             };
             /**
-             * ADR-0008 baseline seam: the ROUND-1 open-blocker population,
-             * captured before any fix. Round 1's captures are the initial
-             * population; every capture only GAINS ids, deduplicated, in
-             * first-seen order, and a later round is ignored, so the list is
-             * never reassigned or shrunk. Two round-1 sources feed it: each PR
-             * dispatch item before `admitRecord` can refuse (a dispatched item
-             * that is then refused stays counted), and the full open-thread
-             * population merged before the PR re-review (so an item stopped
-             * BEFORE admission — the fix-wall stop, a refusal, a cancel — is
-             * still in the denominator). Nothing else writes this field:
-             * `openBlocking` is recomputed after fixes and `rounds[].record` is
-             * replaced by a re-review, so neither may feed the measurement
-             * baseline.
+             * ADR-0008 baseline seam: the ROUND-1 open-blocker population.
+             * It is seeded from the full pre-dispatch item population (the
+             * open blocking threads the run is about to work) BEFORE the
+             * dispatch loop, so every exit reports the whole round-1
+             * population, not just the ids dispatched so far. Every capture
+             * only GAINS ids, deduplicated, in first-seen order, and a later
+             * round is ignored, so the list is never reassigned or shrunk.
+             * Round-1 sources: the pre-dispatch seed, each PR dispatch item
+             * before `admitRecord` can refuse (a dispatched item that is then
+             * refused stays counted), and the full open-thread population
+             * merged before the PR re-review (dedup-only; already seeded).
+             * Nothing else writes this field: `openBlocking` is recomputed
+             * after fixes and `rounds[].record` is replaced by a re-review,
+             * so neither may feed the measurement baseline.
              */
+            const noteInitialOpenIds = (round: number, ids: readonly string[]) => {
+              if (round !== 1) return;
+              report.initialOpenBlocking = [
+                ...new Set([...(report.initialOpenBlocking ?? []), ...ids]),
+              ];
+            };
             const noteInitialOpenBlocking = (
               round: number,
               record: Pick<FindingsRecord, 'findings'>,
             ) => {
-              if (round !== 1) return;
-              const ids = openBlocking(record, policy.review.blockingSeverities).map(
-                (finding) => finding.id,
+              noteInitialOpenIds(
+                round,
+                openBlocking(record, policy.review.blockingSeverities).map((finding) => finding.id),
               );
-              report.initialOpenBlocking = [
-                ...new Set([...(report.initialOpenBlocking ?? []), ...ids]),
-              ];
             };
             const admitCleanRecord = async (root: string, record: FindingsRecord) => {
               const effects = makeSubprocessDevEffects(root);
@@ -2583,6 +2589,12 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                   engineOwnedConcurrency: policy.review.addressConcurrency,
                   publish: input.push === true,
                   publicationTreeClean,
+                  // ADR-0008: the round's item population is known HERE,
+                  // before anything dispatches, so an exit taken before the
+                  // post-fetch merge (an admission or closure refusal, a
+                  // truncated fetch, a moved branch, a throwing fetch) still
+                  // reports the whole round-1 population.
+                  onItemsPlanned: (ids) => noteInitialOpenIds(round, ids),
                   onFixRunSettled: (run) => {
                     // Retain the settled run before later Git/forge work can throw.
                     // An initial refusal has no admitted work to record; a refused
