@@ -220,7 +220,7 @@ async function captureProvenance(
     // No remote: repoId is null/unavailable (ADR-0008), never a failure.
     git(['config', '--get', 'remote.origin.url']).catch(() => null),
     git(['rev-parse', '--verify', `${base}^{commit}`]),
-    readFile(new URL('../../../package.json', import.meta.url), 'utf8'),
+    readFile(new URL('../../../package.json', import.meta.url), 'utf8').catch(() => '{}'),
   ]);
   const version =
     process.env.CQ_PRODUCER_VERSION ??
@@ -453,6 +453,7 @@ export function makeFixRun(deps: FixRunDeps = {}) {
           kernelRuns: [...observation.kernelRuns],
         };
       }
+      // Deliberate: the entire report is persisted, beyond the sanitized observation header.
       Object.assign(report, sanitizeObservation(report));
       try {
         await mkdir(dirname(report.reportPath), { recursive: true });

@@ -28,6 +28,7 @@ import { openObservationWriter, readObservations } from '../../../src/kernel/obs
 import type { Op, OpRegistryEntry } from '../../../src/kernel/types.js';
 import type { DriverFactory } from '../../../src/driver/factory.js';
 import { makeRegistry, registry } from '../../../src/ops/sweep/registry.js';
+import * as runnerModule from '../../../src/kernel/runner.js';
 import * as plannerModule from '../../../src/ops/sweep/planSweep.js';
 import * as unitModule from '../../../src/ops/sweep/unit.js';
 import type { SweepUnitReport } from '../../../src/ops/sweep/unit.js';
@@ -273,11 +274,10 @@ describe('T30 round-trip through the fix composition', () => {
 // ---- T30 unknown evidence -------------------------------------------------
 
 describe('T30 unknown evidence: unreturned kernel runs stay unlinked', () => {
-  test('a run that never returned leaves no kernel-run-linked event and no guessed id', async () => {
+  test('a returned run requiring human review links its actual kernel run id', async () => {
     const f = await fixture();
     try {
-      // The composition refuses BEFORE any kernel run returns (cq.json is
-      // fine, but the planner stub yields needs-human through the unit).
+      // The unit requires human review, but the kernel run still returns.
       const failingUnit = {
         ...fixedUnitReport(),
         budgetStopped: true,
@@ -304,6 +304,23 @@ describe('T30 unknown evidence: unreturned kernel runs stay unlinked', () => {
       await rm(f.root, { recursive: true, force: true });
       roots = roots.filter((root) => root !== f.root);
     }
+  });
+
+  test('a thrown runPlan records no kernel-run links', async () => {
+    const f = await fixture();
+    vi.spyOn(runnerModule, 'runPlan').mockRejectedValueOnce(new Error('kernel run failed'));
+    const result = await makeFixRun()(input(f));
+    expect(result.status).toBe('failed');
+    expect(reportOf(result).run).toBeUndefined();
+    const streams = await readObservations(f.journalDir);
+    expect(streams).toHaveLength(1);
+    expect(streams[0]?.events[0]?.type).toBe('composition-started');
+    expect(
+      streams.flatMap((stream) =>
+        stream.events.filter((event) => event.type === 'kernel-run-linked'),
+      ),
+    ).toEqual([]);
+    expect(reportOf(result).observation?.kernelRuns).toEqual([]);
   });
 
   test('readObservations ignores non-UUID directories instead of failing the scan', async () => {
