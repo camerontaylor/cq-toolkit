@@ -4,6 +4,10 @@ Design at base `1eea0b5b323de8b23a9388a72da4e97f8e631450` (#517).
 Current scope is a fixture-only prototype; H1 production implementation is not complete.
 The original production recompute source and dependency-resolution path are unchanged.
 
+> Path note: this record predates the split of `test/ops/ratchet/recomputeTypecheck.test.ts`;
+> that suite is now `test/ops/ratchet/recomputeTypecheck.*.test.ts`, and the
+> recorded `recomputeTypecheck` commands and results below are left exactly as captured.
+
 Publish-safe provenance: host names are generic role labels and personal home
 paths use `<USER_HOME>`. Versions, hashes, result lines and proof limitations
 are preserved. Identity excerpts below are sanitized representations; original

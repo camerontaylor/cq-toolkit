@@ -1,6 +1,6 @@
 // Residual R1 — cq-verify's in-process typecheck recompute
 // (src/selfhost/recompute-typecheck.ts). The op itself is
-// test/ops/ratchet/recomputeTypecheck.test.ts's; this file pins the carrier:
+// test/ops/ratchet/recomputeTypecheck.core.test.ts's; this file pins the carrier:
 // the op's own schema over strict argv and the output contract cq-verify's
 // compute step validates (a numeric `.value.count` on an ok result).
 import { describe, expect, test } from 'vitest';
