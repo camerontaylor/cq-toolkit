@@ -171,7 +171,7 @@ verdict invariants (resolved has five passes; uncertain never carries a
 fail; check names are always a canonical prefix).
 
 The helper tests are pure computation on literals. The op-path tests in
-`address.test.ts` and `address-pr.rereview.test.ts` exercise opt-in uncertainty,
+`address.composition.test.ts` and `address-pr.rereview.test.ts` exercise opt-in uncertainty,
 unchanged default behavior, pinned snapshots despite live-file drift,
 report persistence and PR-thread resolution refusal. They script model
 responses; the local composition test uses real git.
