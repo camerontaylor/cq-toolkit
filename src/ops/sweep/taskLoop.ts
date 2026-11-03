@@ -73,13 +73,15 @@ export function promptRound(round: NonNullable<FixTaskReport['rounds']>[number] 
   const { validation, ...context } = round;
   return {
     ...context,
-    ...(validation === undefined ? {} : {
-      validation: {
-        verdict: validation.verdict,
-        gates: validation.gates,
-        ...(validation.regression ? { regression: true } : {}),
-      },
-    }),
+    ...(validation === undefined
+      ? {}
+      : {
+          validation: {
+            verdict: validation.verdict,
+            gates: validation.gates,
+            ...(validation.regression ? { regression: true } : {}),
+          },
+        }),
   };
 }
 
