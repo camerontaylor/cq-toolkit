@@ -64,7 +64,7 @@ describe('real-process inventory', () => {
     // A scan that silently matched nothing would make the check below vacuous.
     expect(await processBackedTestFiles()).toEqual(
       expect.arrayContaining([
-        'test/driver/claude-code/cli.test.ts',
+        'test/driver/claude-code/cli.child-process.test.ts',
         'test/ops/ratchet/git.test.ts',
       ]),
     );

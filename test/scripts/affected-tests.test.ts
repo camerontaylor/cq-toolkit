@@ -82,7 +82,7 @@ describe('selectAffected', () => {
       'test/driver/harness-parity.level1-calltool-result.test.ts',
       'test/driver/harness-parity.run-env.test.ts',
       'test/driver/served-model-sites.test.ts',
-      'test/driver/claude-code/cli.test.ts',
+      'test/driver/claude-code/cli.child-process.test.ts',
       'test/harness/mcp-bin.test.ts',
       'test/kernel/driver-hygiene.test.ts',
       'test/ops/gates/policyDiff.test.ts',
@@ -108,7 +108,7 @@ describe('selectAffected', () => {
       'test/ops/gates/protectedPaths.closure.test.ts',
     ]);
     expect(pick('src/kernel/runner.ts')).toEqual([
-      'test/driver/claude-code/cli.test.ts',
+      'test/driver/claude-code/cli.child-process.test.ts',
       'test/kernel/driver-hygiene.test.ts',
       'test/ops/gates/protectedPaths.closure.test.ts',
     ]);
@@ -123,7 +123,7 @@ describe('selectAffected', () => {
     ]);
     expect(pick('src/harness/mcp/server.ts')).toEqual([
       'test/cli/driver-alias-notice.test.ts',
-      'test/driver/claude-code/cli.test.ts',
+      'test/driver/claude-code/cli.child-process.test.ts',
       'test/driver/harness-parity.invalid-input.test.ts',
       'test/driver/harness-parity.level1-calltool-result.test.ts',
       'test/driver/harness-parity.run-env.test.ts',
@@ -131,7 +131,7 @@ describe('selectAffected', () => {
       'test/ops/gates/protectedPaths.closure.test.ts',
     ]);
     expect(pick('src/cli/main.ts')).toEqual([
-      'test/driver/claude-code/cli.test.ts',
+      'test/driver/claude-code/cli.child-process.test.ts',
       'test/ops/gates/protectedPaths.closure.test.ts',
     ]);
     // The generic scripts/ row adds every test/workflows suite as well.
