@@ -310,7 +310,8 @@ previously dirty files. Only format/diff checks follow the evidence note.
 The review correctly identified that the unused exported preparation prototype
 contained a fixture-only `--trust-lockfile` bypass in production source. The
 prototype, bounded parser, environment helper and bypass now live entirely in
-`test/ops/ratchet/recomputeTypecheck.test.ts` as private fixture code. Production
+`test/ops/ratchet/recomputeTypecheck.helpers.ts` and its sibling
+`recomputeTypecheck.*.test.ts` files as private fixture code. Production
 `src/ops/ratchet/recomputeTypecheck.ts` is restored byte-for-byte to the pinned
 base, SHA256 `752a950b474af5c37884968cd5945f54dac1833bc9252b85e14208f911a1fb7f`.
 The original production path still resolves trusted checkout dependencies; this
