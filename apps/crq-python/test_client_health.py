@@ -59,6 +59,30 @@ class HealthTests(unittest.TestCase):
             health.record(c, q, discovery_enabled=True)
         self.assertEqual(c.gh_json.call_count, 5)  # reopen stored issue, no new issue
 
+    def test_completed_partition_part_is_not_discovery_complete(self):
+        # P3-2: while a width hint is set, a part that completed is one step
+        # of the inventory-cap drain, not the end of discovery. Health keeps
+        # reporting incomplete and the streak grows until the final,
+        # un-narrowed interval completes; the advisory issue spans the drain
+        # once instead of flapping per part.
+        c = self.runner()
+        q = {"merged_discovery": {"complete": False}}
+        health.record(c, q, discovery_enabled=True)
+        self.assertFalse(q["client_health"]["complete"])
+        q["merged_discovery"] = {"complete": True, "span": 86400}
+        for n in (2, 3):
+            q = json.loads(json.dumps(q))  # simulate restart from durable queue
+            health.record(c, q, discovery_enabled=True)
+            self.assertFalse(q["client_health"]["complete"])
+            self.assertEqual(q["client_health"]["incomplete_ticks"], n)
+        self.assertTrue(q["client_health"]["issue_open"])
+        q["merged_discovery"] = {"complete": True}  # final interval; hint lapsed
+        health.record(c, q, discovery_enabled=True)
+        self.assertTrue(q["client_health"]["complete"])
+        self.assertEqual(q["client_health"]["incomplete_ticks"], 0)
+        self.assertFalse(q["client_health"]["issue_open"])
+        self.assertIs(health.snapshot(q)["discoveryComplete"], True)
+
     def test_skipped_discovery_preserves_streak(self):
         c = self.runner()
         q = {"merged_discovery": {"complete": False}}
