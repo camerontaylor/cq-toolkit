@@ -705,12 +705,23 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
       // disagrees with the stream's final state (each tracked link is already
       // caught, so this await never rejects).
       await Promise.all([...pendingLinks]);
+      // ADR-0008 T14: settle every fixer invocation still in flight BEFORE the
+      // attempt failures are read and the stream closes. runPlan can return
+      // while an op body is still running (the ladder's kill rung DETACHES an
+      // invocation that ignored the abort), and that invocation appends its
+      // attempt event last: racing close() would push the refusal after the
+      // fold below, silently losing it. The bounded drain either lands those
+      // events first, or records the outstanding invocation as evidence.
+      await worker?.settleObservations?.();
       // ADR-0008 T14: attempt observations the worker could not hand to the
       // writer (a strict-schema refusal, or an append the writer refused
       // without marking its own `failure`) are EVIDENCE only: they make the
       // surface indeterminate and never change the run verdict.
       for (const failure of worker?.observationFailures?.() ?? []) observationFailure(failure);
       await closeObservation();
+      // A refusal recorded while the writer drained is evidence too: fold once
+      // more after close so no attempt-observation failure is silently lost.
+      for (const failure of worker?.observationFailures?.() ?? []) observationFailure(failure);
       const observedSurface = observationSurface();
       if (observedSurface !== undefined) report.observation = observedSurface;
       // ADR-0008 T31: sanitize the WHOLE persisted artifact at the same
@@ -1483,6 +1494,9 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                   : {}),
                 ...(implementation.observationFailures
                   ? { observationFailures: () => implementation.observationFailures!() }
+                  : {}),
+                ...(implementation.settleObservations
+                  ? { settleObservations: () => implementation.settleObservations!() }
                   : {}),
                 ...(implementation.withVerifiedHead
                   ? {

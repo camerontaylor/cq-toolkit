@@ -54,6 +54,7 @@ export async function fixture(
     objectFormat?: 'sha256';
     observationWriter?: ObservationWriter;
     observationRunId?: string;
+    observationDrainMs?: number;
     usage?: Usage;
   } = {},
 ) {
@@ -207,6 +208,9 @@ export async function fixture(
     ...(options.terminalBinding ? { terminalBinding: options.terminalBinding } : {}),
     ...(options.observationWriter ? { observationWriter: options.observationWriter } : {}),
     ...(options.observationRunId ? { observationRunId: options.observationRunId } : {}),
+    ...(options.observationDrainMs === undefined
+      ? {}
+      : { observationDrainMs: options.observationDrainMs }),
   };
   const engine = makeAddressWorker(engineDeps);
   return {

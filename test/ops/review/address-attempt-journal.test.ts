@@ -427,4 +427,297 @@ describe('T14 address attempt journal', () => {
       await rm(journal.root, { recursive: true, force: true });
     }
   });
+
+  test('T14 pre-dispatch refusal: a request scan is the engine stop, not a driver error', async () => {
+    // A request scan rejects a secret mid-dispatch (the row exists, the driver
+    // has not produced anything). The refusal is engine-sourced: it keeps its
+    // own human-deferred class and message — never error.source 'driver' and
+    // never a doubled stopReason.
+    const journal = await headerWriter();
+    const f = await fixture(slowHandler, '', {
+      observationWriter: journal.writer,
+      runPrefix: 'cq-address/test',
+      providerRequest: true,
+      scanner: async (components) =>
+        components.map((component) => ({
+          component: component.component,
+          hits:
+            component.component === 'request' && component.text.includes('synthetic request')
+              ? [{ ruleId: 'secret', lines: [1] }]
+              : [],
+        })),
+    });
+    try {
+      const fix = await f.engine.fix(finding(), 1);
+      expect(fix.finding.status).toBe('deferred');
+      const events = attemptEvents(journal.writer);
+      expect(events).toHaveLength(1);
+      const event = events[0];
+      if (event === undefined) throw new Error('no refusal event');
+      // The dispatch was resolved and its row recorded before the refusal.
+      expect(event.payload.model).toEqual({ provider: 'mock', model: 'worker' });
+      expect(event.payload.class).toBe('human');
+      expect(event.payload.stopCode).toBe('human-deferred');
+      expect(event.payload.stopReason).toBe(
+        'upload refused: missing, failed or positive denylist scan',
+      );
+      expect(event.payload.error).toBeNull();
+      expect(event.payload.tokens).toBeNull();
+    } finally {
+      await f.cleanup();
+      await rm(journal.root, { recursive: true, force: true });
+    }
+  });
+
+  test('T14 a cancel observed at admission is the cancel stop, never anonymous', async () => {
+    // The parent aborts during the REQUEST scan; the admission gate after the
+    // scan is where the cancel is first observable. stop() is asked in its own
+    // order, so the stop is the cancel — not a bare 'unclassified' throw that
+    // would keep the finally path from ever naming the cancel.
+    const journal = await headerWriter();
+    const controller = new AbortController();
+    let scans = 0;
+    const f = await fixture(slowHandler, '', {
+      observationWriter: journal.writer,
+      runPrefix: 'cq-address/test',
+      parentSignal: controller.signal,
+      providerRequest: true,
+      scanner: async (components) => {
+        scans++;
+        if (scans === 2) controller.abort();
+        return components.map((component) => ({ component: component.component, hits: [] }));
+      },
+    });
+    try {
+      const fix = await f.engine.fix(finding(), 1);
+      expect(fix.finding.status).toBe('deferred');
+      const events = attemptEvents(journal.writer);
+      expect(events).toHaveLength(1);
+      const event = events[0];
+      if (event === undefined) throw new Error('no cancel-at-admission event');
+      expect(event.payload.stopReason).toBe('enclosing job cancelled');
+      expect(event.payload.error?.code).toBe('cancelled');
+      expect(event.payload.class).toBe('infrastructure');
+    } finally {
+      await f.cleanup();
+      await rm(journal.root, { recursive: true, force: true });
+    }
+  });
+
+  test('T14 a cancel that coincides with an exhausted budget is the cancel, not the cap', async () => {
+    // The completed result spends the last token, so the ledger is exhausted
+    // when the parent cancel lands. stop()'s own order decides first: the
+    // cancel is the stop, and the exhausted cap is never mislabelled as it.
+    const journal = await headerWriter();
+    const controller = new AbortController();
+    const f = await fixture(
+      async () => {
+        controller.abort();
+        return { disposition: 'deferred', reason: 'cancelled', evidence: [] };
+      },
+      '',
+      {
+        observationWriter: journal.writer,
+        parentSignal: controller.signal,
+        maxTokens: 3,
+      },
+    );
+    try {
+      const fix = await f.engine.fix(finding(), 1);
+      expect(fix.finding.status).toBe('deferred');
+      const events = attemptEvents(journal.writer);
+      expect(events).toHaveLength(1);
+      const event = events[0];
+      if (event === undefined) throw new Error('no cancel-over-budget event');
+      expect(event.payload.stopReason).toBe('enclosing job cancelled');
+      expect(event.payload.error?.code).toBe('cancelled');
+      expect(event.payload.class).toBe('infrastructure');
+      // The spend is still observed; only the label is the cancel.
+      expect(event.payload.tokens).toBe(3);
+      expect(event.payload.budget.remaining.tokens).toBe(0);
+    } finally {
+      await f.cleanup();
+      await rm(journal.root, { recursive: true, force: true });
+    }
+  });
+
+  test('T14 the event wall is the dispatch row wall, not the pre-dispatch scan', async () => {
+    // The prompt scan runs BEFORE the row exists and is not part of the
+    // dispatch budget. A slow scan must not be charged to the event or to
+    // budget.remaining.wallMs (which would understate what is left).
+    const journal = await headerWriter();
+    let scans = 0;
+    const f = await fixture(slowHandler, '', {
+      observationWriter: journal.writer,
+      runPrefix: 'cq-address/test',
+      scanner: async (components) => {
+        scans++;
+        if (scans === 1) await new Promise((resolve) => setTimeout(resolve, 120));
+        return components.map((component) => ({ component: component.component, hits: [] }));
+      },
+    });
+    try {
+      const fix = await f.engine.fix(finding(), 1);
+      expect(fix.finding.status).toBe('fixed');
+      const events = attemptEvents(journal.writer);
+      expect(events).toHaveLength(2);
+      const rows = f.attempts.filter((row) => row.tier !== 'reviewer');
+      expect(rows).toHaveLength(2);
+      events.forEach((event, index) => {
+        const row = rows[index];
+        if (row === undefined) throw new Error('missing dispatch row');
+        // Same wall as the AddressAttempt row, exactly as T13 records it.
+        expect(event.payload.wallMs).toBe(row.wallMs);
+        expect(event.payload.budget.spent.wallMs).toBe(row.wallMs);
+        expect(event.payload.budget.remaining.wallMs).toBe(
+          (event.payload.budget.allowed.wallMs ?? 0) - row.wallMs,
+        );
+      });
+      // The 120 ms prompt scan is excluded: the dispatch itself stays far below.
+      expect(events[0]?.payload.wallMs ?? 1000).toBeLessThan(100);
+    } finally {
+      await f.cleanup();
+      await rm(journal.root, { recursive: true, force: true });
+    }
+  });
+
+  test('T14 a refusal before dispatch finishes once, model null, wall cap', async () => {
+    // The unit wall budget expires inside the head read that precedes the
+    // dispatch, so invoke()'s own admission gate refuses: exactly one event,
+    // no model ever resolved, and the unit wall bound named as the cap.
+    const journal = await headerWriter();
+    const unitWallMs = 1_200;
+    let headReads = 0;
+    let firstHeadRead: number | undefined;
+    const f = await fixture(slowHandler, '', {
+      observationWriter: journal.writer,
+      runPrefix: 'cq-address/test',
+      unitWallMs,
+      gitHook: async (args, run) => {
+        if (args.includes('rev-parse') && args.includes('HEAD')) {
+          headReads++;
+          firstHeadRead ??= Date.now();
+          // Read 1 is initialize(), read 2 the baseline head; read 3 is the
+          // dispatched head, taken after the outer pre-dispatch guard, so the
+          // overrun lands inside invoke()'s own admission gate.
+          if (headReads >= 3) {
+            const wait = (firstHeadRead ?? Date.now()) + unitWallMs + 150 - Date.now();
+            if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
+          }
+        }
+        return run(args);
+      },
+    });
+    try {
+      const fix = await f.engine.fix(finding(), 1);
+      expect(fix.finding.status).toBe('deferred');
+      // No driver call: the refusal is the engine's own gate.
+      expect(f.calls()).toBe(0);
+      const events = attemptEvents(journal.writer);
+      expect(events).toHaveLength(1);
+      const event = events[0];
+      if (event === undefined) throw new Error('no pre-dispatch event');
+      expect(event.payload.model).toBeNull();
+      expect(event.payload.class).toBe('budget');
+      expect(event.payload.stopCode).toBe('wall-cap');
+      expect(event.payload.stopReason).toBe('unit wall budget exhausted');
+      expect(event.payload.tokens).toBeNull();
+    } finally {
+      await f.cleanup();
+      await rm(journal.root, { recursive: true, force: true });
+    }
+  });
+
+  test('T14 settleObservations is a true barrier: no append can follow it', async () => {
+    // The open-question witness: an invocation still in flight when the
+    // composition wants to close its stream. The drain resolves only after
+    // that invocation's attempt event has been handed to the writer.
+    const journal = await headerWriter();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let dispatched!: () => void;
+    const seen = new Promise<void>((resolve) => {
+      dispatched = resolve;
+    });
+    const f = await fixture(
+      async (input) => {
+        dispatched();
+        await gate;
+        if (input.outputSchema?.name === 'review.address.closure/v1')
+          return { closed: true, reason: 'candidate fixed' };
+        if (input.prompt.includes('initial finding'))
+          await writeFile(join(input.workspace!.path, 'src/a.ts'), 'GOOD\n');
+        return { disposition: 'fixed', reason: 'fixed', evidence: [] };
+      },
+      '',
+      { observationWriter: journal.writer, runPrefix: 'cq-address/test' },
+    );
+    try {
+      const fixing = f.engine.fix(finding(), 1);
+      await seen;
+      let drained = false;
+      const draining = (f.engine.settleObservations?.() ?? Promise.resolve()).then(() => {
+        drained = true;
+      });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      // Still in flight: the barrier has not resolved and nothing landed.
+      expect(drained).toBe(false);
+      expect(attemptEvents(journal.writer)).toHaveLength(0);
+      release();
+      await fixing;
+      await draining;
+      expect(drained).toBe(true);
+      const events = attemptEvents(journal.writer);
+      expect(events).toHaveLength(2);
+      // Landed BEFORE the drain resolved: a close after the drain cannot
+      // refuse them.
+      expect(events.every((event) => event.payload.stopCode === 'completed')).toBe(true);
+    } finally {
+      release();
+      await f.cleanup();
+      await rm(journal.root, { recursive: true, force: true });
+    }
+  });
+
+  test('T14 settleObservations is bounded and names what it could not settle', async () => {
+    // A detached invocation cannot be killed in-process. The drain must never
+    // hang the report behind it: it returns at its bound and records the
+    // outstanding invocation as observation evidence.
+    const journal = await headerWriter();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let dispatched!: () => void;
+    const seen = new Promise<void>((resolve) => {
+      dispatched = resolve;
+    });
+    const f = await fixture(
+      async () => {
+        dispatched();
+        await gate;
+        return { disposition: 'deferred', reason: 'held', evidence: [] };
+      },
+      '',
+      { observationWriter: journal.writer, observationDrainMs: 20 },
+    );
+    try {
+      const fixing = f.engine.fix(finding(), 1);
+      await seen;
+      const before = (f.engine.observationFailures?.() ?? []).length;
+      await f.engine.settleObservations?.();
+      const failures = f.engine.observationFailures?.() ?? [];
+      expect(failures.length).toBe(before + 1);
+      expect(failures.at(-1)).toContain('attempt observation still in flight at close');
+      expect(attemptEvents(journal.writer)).toHaveLength(0);
+      release();
+      await fixing;
+    } finally {
+      release();
+      await f.cleanup();
+      await rm(journal.root, { recursive: true, force: true });
+    }
+  });
 });

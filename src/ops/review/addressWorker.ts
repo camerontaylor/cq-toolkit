@@ -135,6 +135,15 @@ export interface AddressWorker {
    * observation.status 'indeterminate'; they never change a verdict.
    */
   observationFailures?(): readonly string[];
+  /**
+   * ADR-0008 T14: settle every fixer invocation still in flight, bounded by
+   * `observationDrainMs`. A composition closes its observation stream before
+   * it persists the report (T31), and `runPlan` can return with an op body
+   * still running (the ladder's kill rung DETACHES an invocation that ignored
+   * the abort), so the composition drains here first: an attempt-finished
+   * append then lands before the close instead of being refused by it.
+   */
+  settleObservations?(): Promise<void>;
 }
 export interface AddressWorkerDeps {
   git: GhFn;
@@ -177,6 +186,12 @@ export interface AddressWorkerDeps {
    * null on run-scoped events — never a fabricated kernel jobId.
    */
   observationUnitId?: string | null;
+  /**
+   * Upper bound on `settleObservations()`. A detached invocation cannot be
+   * killed in-process, so the drain reports it as observation evidence
+   * (indeterminate) rather than hanging the report behind a hung driver.
+   */
+  observationDrainMs?: number;
 }
 
 /** Only engine observations may stop retries or invalidate the shared worker tree. */
@@ -283,6 +298,12 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
   // observationFailures() hands them to the composition, which folds them
   // into observation.status 'indeterminate'.
   const observationFailures: string[] = [];
+  // ADR-0008 T14: fixer invocations whose attempt event has not yet been
+  // handed to the writer. finish() drains these BEFORE it closes the stream
+  // (settleObservations), because runPlan can return with an op body still
+  // running when the ladder's kill rung detaches it.
+  const inFlightInvocations = new Set<Promise<void>>();
+  const observationDrainMs = deps.observationDrainMs ?? 5_000;
   // ADR-0008 T14 emitter (mirrors T13): the event is BUILT inside the try so a
   // schema refusal becomes evidence instead of escaping the invocation, and an
   // append failure is read back from the writer's own `failure` unless the
@@ -485,6 +506,14 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
     sources: readonly { path: string; text: string }[] = [],
     diagnostics: readonly FailureSet[] = [],
   ) => {
+    // Registered at the boundary and released only AFTER the attempt event has
+    // been handed to the writer (the final finally), so settleObservations()
+    // is a true barrier: no event can be appended once it resolves.
+    let releaseInvocation!: () => void;
+    const invocationSettled = new Promise<void>((resolve) => {
+      releaseInvocation = resolve;
+    });
+    inFlightInvocations.add(invocationSettled);
     // ADR-0008 T14: the attempt boundary is the FIXER dispatch. A reviewer
     // closure verifies an attempt already recorded, and the payload's tier has
     // no reviewer member: labelling it 'worker' would fabricate evidence, so a
@@ -532,21 +561,33 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
         };
       return null;
     };
-    // The engine's own admission gate with the observed stop recorded first,
-    // so a refusal never reaches the boundary anonymously.
-    const admitAttempt = (): void => {
+    // A thrown admission gate (or a stop after a completed result) is
+    // classified in stop()'s OWN order — the fatal refusal first, then the
+    // parent's cancel, then the budget — so a cancel or a fatal that coincides
+    // with an exhausted budget is never labelled the cap it merely met.
+    const classifyStopThrow = (error: unknown): FinishAttemptStop => {
+      if (fatal !== undefined) return { stopCode: 'unclassified', stopReason: fatal };
+      if (deps.parentSignal?.aborted === true || currentJobContext()?.signal?.aborted === true)
+        return cancelStop();
       const cap = budgetCap();
-      if (cap !== null) setStop(cap);
+      if (cap !== null) return cap;
+      return {
+        stopCode: 'unclassified',
+        stopReason: error instanceof Error ? error.message : String(error),
+      };
+    };
+    // The engine's own admission gate. stop() is asked FIRST, in its own
+    // precedence, so a refusal never reaches the boundary anonymously and the
+    // cap is only named once stop() itself allowed the dispatch.
+    const admitAttempt = (): void => {
       try {
         stop();
       } catch (error) {
-        if (!stopSet)
-          setStop({
-            stopCode: 'unclassified',
-            stopReason: error instanceof Error ? error.message : String(error),
-          });
+        if (!stopSet) setStop(classifyStopThrow(error));
         throw error;
       }
+      const cap = budgetCap();
+      if (cap !== null) setStop(cap);
     };
     // A refused upload is an observed human deferral, exactly as T13 records it.
     const scanned = async (action: () => Promise<void>): Promise<void> => {
@@ -559,6 +600,7 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
       }
     };
     const boundaryStart = Date.now();
+    let attemptRow: AddressAttempt | undefined;
     let dispatchedModel: ModelSpec | null = null;
     let deadline: FixerDeadline | undefined;
     let allowedTokens: number | null = null;
@@ -629,6 +671,10 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
       };
       await onDispatch?.(row);
       deps.attempts.push(row);
+      // ADR-0008 T14: once the row exists, the event reuses ITS wall (the
+      // dispatch, exactly as T13 does), so the prompt scan before dispatch is
+      // not reported as budget-remaining wall that was never available.
+      attemptRow = row;
       dispatchedModel = resolved.modelSpec;
       const start = Date.now();
       const signals = [deps.parentSignal, currentJobContext()?.signal].filter(
@@ -685,8 +731,10 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
           );
         } catch (driverError) {
           // Only a driver-call rejection is a driver-sourced cause; a loop throw
-          // must not be misattributed to the driver.
-          driverThrew = true;
+          // must not be misattributed to the driver. A refusal the engine
+          // recorded BEFORE dispatch (a request scan) is the engine's own stop,
+          // not the driver's: it keeps its own source and class.
+          driverThrew = requestRefusal === undefined;
           throw driverError;
         }
         deps.account(result);
@@ -701,8 +749,16 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
         servedModel = result.model ?? null;
         if (result.costUSD !== undefined) row.costUSD = result.costUSD;
         if (requestRefusal) throw requestRefusal;
-        // A cap reached by an otherwise complete result is the budget variant
+        // stop() is asked FIRST, in its own order (fatal, cancel, budget), so a
+        // cancel that coincides with an exhausted cap stays the cancel. A cap
+        // reached by an otherwise complete result is then the budget variant
         // with the cap named; a fired deadline is the wall cap.
+        try {
+          stop();
+        } catch (error) {
+          if (!stopSet) setStop(classifyStopThrow(error));
+          throw error;
+        }
         const cap = budgetCap();
         if (cap !== null) setStop(cap);
         else if (attemptDeadline.expired())
@@ -711,7 +767,6 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
             budgetStopCode: 'wall-cap',
             stopReason: 'address fixer wallClockMs deadline expired',
           });
-        stop();
         if (attemptDeadline.expired()) throw new AddressRefusal('step wall budget exhausted');
         if (result.stopReason !== 'complete') {
           // A worker-reported budget stop without a named cap keeps the raw code:
@@ -754,7 +809,10 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
       // budget exhaustion, a refusal before dispatch). Observation failures
       // never change the outcome: emitAttempt swallows them into evidence.
       if (attemptTier !== null) {
-        const wallMs = Date.now() - boundaryStart;
+        // Once the row exists its measured dispatch wall is the event's wall;
+        // only a refusal that never reached the row falls back to the whole
+        // boundary (which includes the pre-dispatch scan).
+        const wallMs = attemptRow?.wallMs ?? Date.now() - boundaryStart;
         await emitAttempt(() => ({
           type: 'attempt-finished',
           runId: deps.observationRunId ?? deps.observationWriter?.compositionRunId ?? '',
@@ -834,7 +892,35 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
           }),
         }));
       }
+      // The barrier is released LAST: the invocation counts as in flight until
+      // its attempt event has been handed to the writer above.
+      inFlightInvocations.delete(invocationSettled);
+      releaseInvocation();
     }
+  };
+  /**
+   * ADR-0008 T14: settle the invocations still in flight, bounded. Resolving
+   * means every attempt event has been handed to the writer, so the caller may
+   * fold observationFailures() and close the stream without racing an append;
+   * timing out means a detached invocation could not be settled in-process, and
+   * that is recorded as observation evidence rather than a silent loss.
+   */
+  const settleObservations = async (): Promise<void> => {
+    if (inFlightInvocations.size === 0) return;
+    const outstanding = [...inFlightInvocations];
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const settled = await Promise.race([
+      Promise.allSettled(outstanding).then(() => true),
+      new Promise<boolean>((resolve) => {
+        timer = setTimeout(() => resolve(false), observationDrainMs);
+        timer.unref();
+      }),
+    ]);
+    if (timer !== undefined) clearTimeout(timer);
+    if (!settled)
+      observationFailures.push(
+        `attempt observation still in flight at close: ${String(outstanding.length)} invocation(s)`,
+      );
   };
   const runChecks = async (
     cwd: string,
@@ -1083,6 +1169,7 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
     preconditionFailure: () => preconditionFailure,
     preconditions: () => preconditions,
     observationFailures: () => observationFailures,
+    settleObservations,
     async withVerifiedHead(action) {
       await initialize();
       return withMutation(async () => {
