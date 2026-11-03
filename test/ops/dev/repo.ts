@@ -102,6 +102,7 @@ export function repoEffects(
     logs,
     nowIso: () => '2026-10-18T00:00:00.000Z',
     withHostLock: async (fn) => fn(),
+    reviewLogSha256: async () => 'a'.repeat(64),
     writeReviewLog: async (_branch, stamp, content) => {
       logs.push(content);
       return `/tmp/fake-cq-dev-review/${stamp}.log`;

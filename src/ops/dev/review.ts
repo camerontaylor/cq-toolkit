@@ -450,6 +450,16 @@ function makeReviewCycle(
           reviewer,
         });
         if (selection === null) return;
+        if (effects.reviewLogSha256 === undefined) {
+          throw new Error('retained review log validation is unavailable');
+        }
+        const retainedDigest = await effects.reviewLogSha256(selection.cycle.logPath);
+        if (
+          selection.cycle.logSha256 !== undefined &&
+          retainedDigest !== selection.cycle.logSha256
+        ) {
+          throw new Error('retained review log digest does not match');
+        }
         const resolvesCycleId =
           selection.basis === 'no-fresh-tail' ? selection.resolvesCycleId : undefined;
         const selectionAt = effects.nowIso();
@@ -850,6 +860,7 @@ function makeReviewCycle(
     // the verdict and the log path rather than burying the paid cycle.
     let record: DevCycleRecord;
     try {
+      const logSha256 = await effects.reviewLogSha256?.(span.logPath);
       record = await effects.openLedger(state.branch).mutate((ledger) => {
         const cycleCount = ledger.records.filter((entry) => entry.kind === 'cycle').length;
         const cycleId = `c${String(cycleCount + 1).padStart(3, '0')}-${state.head.slice(0, 8)}`;
@@ -871,6 +882,7 @@ function makeReviewCycle(
           ...(span.vendorFailure === undefined ? {} : { vendorFailure: span.vendorFailure }),
           ...(span.agentCoverage === undefined ? {} : { agentCoverage: span.agentCoverage }),
           logPath: span.logPath,
+          ...(logSha256 === undefined ? {} : { logSha256 }),
           untracked: state.untracked,
           at,
         };

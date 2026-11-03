@@ -73,6 +73,8 @@ export interface DevEffects {
    * Save one review's raw log OUTSIDE the repository; resolves with the
    * absolute log path recorded in the cycle.
    */
+  /** Hash a retained raw log; absent/unreadable artifacts reject. */
+  reviewLogSha256?(path: string): Promise<string>;
   writeReviewLog(branch: string, cycleStamp: string, content: string): Promise<string>;
   /**
    * Read one repo-relative worktree file's content for the secret scan.
@@ -238,6 +240,10 @@ export function makeSubprocessDevEffects(repoRoot: string): DevEffects {
       at: new Date().toISOString(),
     }),
     withHostLock: (fn, signal) => mutex.withLock(fn, signal),
+    reviewLogSha256: async (path) =>
+      createHash('sha256')
+        .update(await readFile(path))
+        .digest('hex'),
     writeReviewLog: async (branch, cycleStamp, content) => {
       // Owner-only dir and file: the log carries raw diff content.
       const dir = reviewLogDir();

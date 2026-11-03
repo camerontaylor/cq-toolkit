@@ -1239,6 +1239,61 @@ describe('dev.review cycle', () => {
     "reviewer completed 'review_completed' with an AFFIRMATIVE no-fresh/skipped notice " +
     '("No fresh detailed file review was performed in this run.") — a fresh detailed review never ran';
 
+  test('current scan policy refuses reuse of a previously allowed cycle', async () => {
+    await seed(repo);
+    const effects = repoEffects(repo);
+    const result = await cycleReview(effects, async (components) =>
+      components.map(({ component }) => ({
+        component,
+        hits: [{ ruleId: 'new-policy-rule', lines: [1] }],
+      })),
+    )({ repoRoot: repo.root });
+    expect(result.status).toBe('needs-human');
+    expect(reviewerCalls(effects)).toHaveLength(0);
+    expect(
+      effects
+        .openLedger('feature/x')
+        .load()
+        .records.some((r) => r.kind === 'reuse'),
+    ).toBe(false);
+  });
+
+  test.each(['missing', 'altered'])(
+    'retained %s log refuses without vendor dispatch',
+    async (fault) => {
+      await seed(repo);
+      let vendorCalls = 0;
+      const effects = repoEffects(repo, (command) => {
+        if (command === 'coderabbit') vendorCalls += 1;
+        return reviewer(ran(0))(command, []);
+      });
+      if (fault === 'missing')
+        effects.reviewLogSha256 = async () => {
+          throw new Error('missing log');
+        };
+      else {
+        await effects.openLedger('feature/x').mutate((ledger) => ({
+          ledger: {
+            ...ledger,
+            records: ledger.records.map((record) =>
+              record.kind === 'cycle' ? { ...record, logSha256: 'b'.repeat(64) } : record,
+            ),
+          },
+          value: undefined,
+        }));
+      }
+      const result = await cycleReview(effects, stubScanner())({ repoRoot: repo.root });
+      expect(result.status).toBe('needs-human');
+      expect(vendorCalls).toBe(0);
+      expect(
+        effects
+          .openLedger('feature/x')
+          .load()
+          .records.some((r) => r.kind === 'reuse'),
+      ).toBe(false);
+    },
+  );
+
   test('an unchanged rerun over an exact terminal record makes ZERO vendor calls and returns reuse evidence', async () => {
     const state = await seed(repo);
     // The reuse id derives the head8 of the CURRENT HEAD (review.ts).
