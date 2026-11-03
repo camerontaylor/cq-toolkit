@@ -157,6 +157,11 @@ export function openObservationWriter(options: OpenObservationWriterOptions): Ob
         // composition run is refused, never merged into one file.
         handle = await open(streamPath, 'wx');
         await syncStreamDir(streamDir as string);
+        // mkdir -p may have created observations/ and observations/<workId>:
+        // make those directory entries durable too (the stream file's whole
+        // directory chain, matching openRunLog's per-creation fsync).
+        await syncStreamDir(join(journalDir as string, 'observations'));
+        await syncStreamDir(journalDir as string);
       }
       await handle.writeFile(line, 'utf8');
       await handle.datasync();

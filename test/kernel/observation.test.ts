@@ -287,13 +287,14 @@ describe('T29 unknown evidence', () => {
     try {
       await writeStream(dir, [header()]);
       // A second writer for the same composition run is refused at exclusive
-      // create — a duplicate stream is never merged into one file.
+      // create: the header append reaches open('wx') and fails with EEXIST —
+      // a regression from 'wx' to append-mode would fail this assertion.
       const dup = openObservationWriter({
         journalDir: dir,
         workId: WORK_ID,
         compositionRunId: CR_ID,
       });
-      await expect(dup.append(linked())).rejects.toThrow();
+      await expect(dup.append(header())).rejects.toMatchObject({ code: 'EEXIST' });
       await dup.close();
       // A writer whose events claim another runId is refused.
       const other = openObservationWriter({
