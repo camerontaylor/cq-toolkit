@@ -1,7 +1,7 @@
 // Slice 2 (goal T4.1) — tests for the scheduled merge-dispatch ENTRY module
 // (src/selfhost/self-merge-prs.ts).
 //
-// Pinned here (the pipeline itself is pinned by test/ops/merge/runPrs.test.ts
+// Pinned here (the pipeline itself is pinned by test/ops/merge/runPrs.*.test.ts
 // — this file pins the DEPLOYMENT WIRING):
 //   1. buildRunInput, the exported pure input builder: every field comes
 //      from the frozen SelfhostDefaults or the cfg — baseBranch
