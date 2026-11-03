@@ -15,7 +15,7 @@ opt-in stock mode, and the live A10 conformance leg with the A.5a–k probes.
 | Published bin `cq-harness-mcp`; `@modelcontextprotocol/sdk` as a devDependency only (conformance client)                                                                                     | `package.json`                                   |
 | claude-agent moved onto the core, plus `settingSources: []`, `strictMcpConfig: true` and a fail-closed init assertion                                                                        | `src/driver/claude-code/sdk.ts`                  |
 | Subprocess closed surface: argv, per-run 0600/`O_EXCL` MCP config, init assertion, three-way `is_error` fold, harness-name mapping, stock mode                                               | `src/driver/claude-code/cli.ts`                  |
-| Parity test (both lanes, same core)                                                                                                                                                          | `test/driver/harness-parity.test.ts`             |
+| Parity test (both lanes, same core)                                                                                                                                                          | `test/driver/harness-parity.*.test.ts`           |
 | Live conformance leg (opt-in, real CLI, built `dist`)                                                                                                                                        | `test/driver/harness-live.test.ts`               |
 
 ## Decisions (recorded; no owner input was available)

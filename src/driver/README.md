@@ -398,7 +398,7 @@ harness config, env names) → CLI over stdio (`cq-harness-mcp`,
 re-validates the manifest, chdirs, scrubs its env, or exits 78 before
 `initialize`), SDK in-process (`createSdkMcpServer` + `tool(...)`, handler
 `surface.call` — byte-identical CallToolResults; the two-level parity test
-`test/driver/harness-parity.test.ts` pins it). The driver asserts the
+`test/driver/harness-parity.*.test.ts` pins it). The driver asserts the
 FIRST `system/init` fail-closed (exactly `cq-harness`/connected and
 exactly the qualified selected tools, plus `StructuredOutput` when
 structured output is requested), classifies `is_error` harness results
