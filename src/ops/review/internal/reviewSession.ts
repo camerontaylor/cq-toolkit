@@ -16,6 +16,7 @@ import {
   prepareFindingEvidence,
   type EvidencePreparationContext,
 } from './reviewEvidencePreparation.js';
+import type { PlannedReviewSession } from './reviewPlan.js';
 import type { ReviewCoverageV2 } from './reviewCoverageV2.js';
 
 // A finding item STRIPS unknown keys (S7 attempts G/H: GLM added
@@ -52,15 +53,6 @@ const sumUsage = (a: ReviewCoverageV2['sessions'][number]['usage'], b: Usage): U
     ? {}
     : { reasoning: (a.reasoning ?? 0) + (b.reasoning ?? 0) }),
 });
-
-export interface PlannedReviewSession {
-  contextOnly?: boolean;
-  id: string;
-  prompt: string;
-  placements: { component: string; start: number; end: number; offset: number }[];
-  tools: boolean;
-  maxSteps?: number;
-}
 
 /** Every scan input needs an explicit, clean verdict; an empty response proves nothing. */
 export async function scanReviewUpload(
