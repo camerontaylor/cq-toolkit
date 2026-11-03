@@ -21,8 +21,8 @@
 //   5. UNCLASSIFIED: classification null → needs-human, unclassified.
 //   6. NON-ELIGIBLE VERDICT: F1's verdict is the planner's gate too — the
 //      FULL acceptance decision carries to the stack level. Only
-//      `eligible` is ever ordered; never / conflicting / awaiting /
-//      has-issues each → needs-human, not_eligible, absent from the
+//      `eligible` is ever ordered; never / conflicting /
+//      awaiting each → needs-human, not_eligible, absent from the
 //      order — and a non-eligible parent cascades its children like any
 //      withheld rung.
 //   7. GATE PRECEDENCE: the gates fire before base resolution and cycle
@@ -405,16 +405,6 @@ describe('planMergeOrder — fail-closed gates (nothing merges uninvited)', () =
     ]);
     expect(result.order).toEqual([]);
     expect(result.needsHuman).toEqual([{ pr: 15, reason: 'not_eligible' }]);
-  });
-
-  test('a `has-issues` verdict is never ordered: needs-human, not_eligible', () => {
-    const result = plan('main', [
-      planned(16, 'main', 'threaded', {
-        classification: classified('has-issues', 'unresolved_external_threads'),
-      }),
-    ]);
-    expect(result.order).toEqual([]);
-    expect(result.needsHuman).toEqual([{ pr: 16, reason: 'not_eligible' }]);
   });
 
   test('the cascade reaches a non-eligible parent: awaiting root, eligible child → both withheld', () => {

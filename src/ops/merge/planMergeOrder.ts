@@ -29,7 +29,7 @@
 //   2. truncated fetch data            → `review_data_truncated`  (UC row 42)
 //   3. no F1 classification            → `unclassified`
 //   4. F1 verdict is not `eligible`    → `not_eligible`
-//      (never / conflicting / awaiting / has-issues — a PR F1 judged not
+//      (never / conflicting / awaiting — a PR F1 judged not
 //      mergeable is not re-graded into the order by the planner)
 //   5. base ref resolves to nothing    → `unresolved_base`
 //      (neither the base branch nor any fetched headRefName — a stack
