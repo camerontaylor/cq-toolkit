@@ -33,6 +33,7 @@ import author_lease
 import review_receipt
 import deferred_refresh
 import merged_reconcile
+import push_current
 import repo_registry
 import usage_slots
 import backfill_runtime
@@ -122,8 +123,8 @@ def git(*args: str, check: bool = True, env: Optional[dict] = None, cwd: Optiona
     return run(["git", *args], cwd=cwd or CLONE, check=check, env=env).stdout.strip()
 
 
-def is_ancestor(a: str, b: str) -> bool:
-    return run(["git", "merge-base", "--is-ancestor", a, b], cwd=CLONE, check=False).returncode == 0
+def is_ancestor(a: str, b: str, *, clone: Optional[Path] = None) -> bool:
+    return run(["git", "merge-base", "--is-ancestor", a, b], cwd=clone or CLONE, check=False).returncode == 0
 
 
 _FORGE_BUDGET = None
@@ -293,40 +294,56 @@ def pid_alive(pid: Optional[int]) -> bool:
         return True
 
 
-def fetch() -> None:
-    git("fetch", "--prune", "--quiet", "origin")
+def fetch(*, clone: Optional[Path] = None, refspec: Optional[str] = None) -> None:
+    """Fetch the primary clone; a (clone, refspec) pair fetches a configured
+    non-primary repo's default branch into its origin/<branch> remote-tracking
+    ref (docs/multi-repo.md push discovery). The refspec is forced: a rewritten
+    upstream branch must move the tracking ref so divergence is detectable."""
+    if refspec:
+        git("fetch", "--quiet", "origin", refspec, cwd=clone or CLONE)
+    else:
+        git("fetch", "--prune", "--quiet", "origin", cwd=clone or CLONE)
 
 
 # ----------------------------------------------------------- worktrees
 
 
-def make_worktree(name: str, commit: str) -> Tuple[Path, str]:
-    """Worktree on a local-only branch `crq/<name>` (never pushed)."""
+def make_worktree(name: str, commit: str, *, clone: Optional[Path] = None) -> Tuple[Path, str]:
+    """Worktree on a local-only branch `crq/<name>` (never pushed). The owning
+    repository is the primary clone unless a non-primary repo's clone is given."""
     path = WT_ROOT / f"{WT_PREFIX}{name}"
     branch = f"crq/{name}"
-    remove_worktree(path, branch)
+    remove_worktree(path, branch, clone=clone)
     try:
-        git("worktree", "add", "--quiet", "-B", branch, str(path), commit)
+        git("worktree", "add", "--quiet", "-B", branch, str(path), commit, cwd=clone)
     except RuntimeError:
-        remove_worktree(path, branch)
+        remove_worktree(path, branch, clone=clone)
         raise
     return path, branch
 
 
-def remove_worktree(path: Path, branch: Optional[str] = None) -> None:
+def remove_worktree(path: Path, branch: Optional[str] = None, *, clone: Optional[Path] = None) -> None:
     if path.exists():
-        git("worktree", "remove", "--force", str(path), check=False)
+        git("worktree", "remove", "--force", str(path), cwd=clone, check=False)
         if path.exists() and path.name.startswith(WT_PREFIX):
             shutil.rmtree(path, ignore_errors=True)
-    git("worktree", "prune", check=False)
+    git("worktree", "prune", cwd=clone, check=False)
     if branch:
-        git("branch", "-D", branch, check=False)
+        git("branch", "-D", branch, cwd=clone, check=False)
 
 
 # ----------------------------------------------------------- secret scan
 
 ALLOWLIST_PATHS = [r"(^|/)\.git/", r"(^|/)node_modules/", r"(^|/)dist/", r"(^|/)\.gjc/", r"(^|/)\.DS_Store$",
                    r"^policy/denylist/patterns\.yml$"]
+
+# Secret SHAPES that must never upload anywhere, scanned for EVERY repository.
+# The remaining denylist classes are cq-toolkit PUBLISH classes — fleet
+# vocabulary the primary repo must not publish, but which is the ordinary
+# subject matter of the reviewed repos (docs/multi-repo.md); they stay
+# primary-only so foreign diffs are not blocked in a retry loop.
+UNIVERSAL_SCAN_CLASSES = frozenset({"class:token-ssh-plumbing", "class:route-key-material",
+                                    "class:key-material-env", "class:inline-secret-assignments"})
 
 
 def _unquote(v: str) -> str:
@@ -338,8 +355,14 @@ def _unquote(v: str) -> str:
     return v
 
 
-def denylist_rules() -> List[Dict[str, str]]:
-    """Parse policy/denylist/patterns.yml (constrained format) from the default branch."""
+def denylist_rules(classes: Optional[frozenset] = None) -> List[Dict[str, str]]:
+    """Parse policy/denylist/patterns.yml (constrained format) from the default branch.
+
+    classes=None keeps today's full rule set (the primary repo's publish
+    classes). A class set filters to those rule ids and fails closed — same
+    posture as a parse failure — when any requested id is absent from the file
+    or the filter empties the set: a foreign repo must never fall back to an
+    unfiltered scan by accident."""
     text = git("show", f"{DEFAULT_REF}:policy/denylist/patterns.yml")
     rules: List[Dict[str, str]] = []
     cur: Optional[Dict[str, str]] = None
@@ -362,18 +385,26 @@ def denylist_rules() -> List[Dict[str, str]]:
             cur[m.group(1)] = _unquote(m.group(2))
     if not rules or any("regex" not in r for r in rules):
         raise RuntimeError("denylist parse failed (fail closed)")
+    if classes is not None:
+        missing = sorted(classes - {r["id"] for r in rules})
+        if missing:
+            raise RuntimeError(f"scan class set references unknown denylist rule: {missing[0]}")
+        rules = [r for r in rules if r["id"] in classes]
+        if not rules:
+            raise RuntimeError("scan class set filtered the denylist to zero rules (fail closed)")
     return rules
 
 
-def secret_scan(base: str, head: str, out: Path) -> Tuple[bool, Dict[str, Any]]:
+def secret_scan(base: str, head: str, out: Path, *, classes: Optional[frozenset] = None) -> Tuple[bool, Dict[str, Any]]:
     """Scan added AND removed lines of base..head. Never records matched content."""
     diff = git("diff", "--no-color", "--no-ext-diff", "--unified=0", base, head)
-    return secret_scan_diff(diff, out, base=base, head=head)
+    return secret_scan_diff(diff, out, base=base, head=head, classes=classes)
 
 
-def secret_scan_diff(diff: str, out: Path, *, base=None, head=None) -> Tuple[bool, Dict[str, Any]]:
+def secret_scan_diff(diff: str, out: Path, *, base=None, head=None,
+                     classes: Optional[frozenset] = None) -> Tuple[bool, Dict[str, Any]]:
     """Use identical denylist/gitleaks policy for prepared source evidence."""
-    rules = denylist_rules()
+    rules = denylist_rules(classes)
     compiled = [(r["id"], re.compile(r["regex"]), re.compile(r["path"]) if "path" in r else None) for r in rules]
     allow = [re.compile(p) for p in ALLOWLIST_PATHS]
     hits: List[Dict[str, Any]] = []
@@ -754,8 +785,8 @@ def rename_map(a: str, b: str) -> Dict[str, str]:
     return out
 
 
-def path_exists(rev: str, path: str) -> bool:
-    return run(["git", "cat-file", "-e", f"{rev}:{path}"], cwd=CLONE, check=False).returncode == 0
+def path_exists(rev: str, path: str, *, clone: Optional[Path] = None) -> bool:
+    return run(["git", "cat-file", "-e", f"{rev}:{path}"], cwd=clone or CLONE, check=False).returncode == 0
 
 
 def is_doc(path: str) -> bool:
@@ -861,14 +892,14 @@ def build_synthetic(item: Dict[str, Any], target: str) -> Tuple[str, str, int]:
 CURRENT_PATH_CAP = 1000
 
 
-def git_z(*args: str, timeout: int = 600) -> List[str]:
+def git_z(*args: str, timeout: int = 600, cwd: Optional[Path] = None) -> List[str]:
     """NUL-delimited git output read as bytes, so paths stay exact.
 
     Text mode would translate \\r and \\r\\n, collapsing distinct paths.
     surrogateescape keeps undecodable bytes distinct and round-trips them to git.
     Same 600 s timeout as run(): subprocess.TimeoutExpired propagates.
     """
-    p = subprocess.run(["git", *args], cwd=CLONE, capture_output=True, timeout=timeout)
+    p = subprocess.run(["git", *args], cwd=str(cwd or CLONE), capture_output=True, timeout=timeout)
     if p.returncode != 0:
         raise RuntimeError(f"git {' '.join(args[:5])} … exit {p.returncode}: "
                            f"{p.stderr.decode('utf-8', 'replace').strip()[:400]}")
@@ -906,16 +937,21 @@ def oversized_current_paths(names: List[str]) -> List[Dict[str, Any]]:
             for n, name in enumerate(names[:CURRENT_PATH_CAP])]
 
 
-def current_paths(merge: str, target: str) -> List[Dict[str, Any]]:
-    """Full affected files at T, without blame/survival or historical content."""
-    if not is_ancestor(merge, target):
+def current_paths(merge: str, target: str, *, pre: Optional[str] = None,
+                  clone: Optional[Path] = None) -> List[Dict[str, Any]]:
+    """Full affected files at T, without blame/survival or historical content.
+
+    Merged-PR callers keep the implicit pre=merge^1 in the primary clone; a push
+    range passes its range base explicitly and the repo's own clone
+    (docs/multi-repo.md review unit)."""
+    if not is_ancestor(merge, target, clone=clone):
         raise NotReady("not-yet-promoted: source merge is not an ancestor of selected target")
     # An explicit first parent is required. Never guess at missing source history.
-    pre = git("rev-parse", f"{merge}^1")
-    names = sorted(set(git_z("diff", "--name-only", "--no-renames", "-z", pre, merge)))
+    pre = pre or git("rev-parse", f"{merge}^1", cwd=clone)
+    names = sorted(set(git_z("diff", "--name-only", "--no-renames", "-z", pre, merge, cwd=clone)))
     if len(names) > CURRENT_PATH_CAP:
         return oversized_current_paths(names)
-    fields = git_z("diff", "--name-status", "-M50%", "-z", merge, target)
+    fields = git_z("diff", "--name-status", "-M50%", "-z", merge, target, cwd=clone)
     renames = {}
     removed = []
     added = []
@@ -934,8 +970,8 @@ def current_paths(merge: str, target: str) -> List[Dict[str, Any]]:
             added.append(old)
     # Git's rename heuristic can arbitrarily pair duplicate identical files.
     # Such lineage is not enough to claim current scope; retain ambiguity.
-    old_blobs = [git("rev-parse", merge + ":" + path) for path in removed]
-    new_blobs = [git("rev-parse", target + ":" + path) for path in added]
+    old_blobs = [git("rev-parse", merge + ":" + path, cwd=clone) for path in removed]
+    new_blobs = [git("rev-parse", target + ":" + path, cwd=clone) for path in added]
     result = []
     total = 0
     for original in names:
@@ -945,8 +981,8 @@ def current_paths(merge: str, target: str) -> List[Dict[str, Any]]:
             result.append({"source_path": original, "path": path, "resolution": evidence,
                            "disposition": "unsupported", "reason": NON_UTF8_PATH})
             continue
-        if not path_exists(target, path) and path in renames:
-            blob = git("rev-parse", merge + ":" + path)
+        if not path_exists(target, path, clone=clone) and path in renames:
+            blob = git("rev-parse", merge + ":" + path, cwd=clone)
             path = renames[path]
             if old_blobs.count(blob) > 1 or new_blobs.count(blob) > 1:
                 result.append({"source_path": original, "path": path, "resolution": "git-rename-M50",
@@ -962,7 +998,7 @@ def current_paths(merge: str, target: str) -> List[Dict[str, Any]]:
             row.update(disposition="unsupported", reason="path cannot be safely scanned")
             result.append(row)
             continue
-        entries = [e for e in git_z("ls-tree", "-z", target, "--", ":(literal)" + path) if e]
+        entries = [e for e in git_z("ls-tree", "-z", target, "--", ":(literal)" + path, cwd=clone) if e]
         if not entries:
             row.update(disposition="deleted", reason="no current path or evidenced rename")
         elif len(entries) != 1:
@@ -974,12 +1010,12 @@ def current_paths(merge: str, target: str) -> List[Dict[str, Any]]:
             if typ != "blob" or mode not in ("100644", "100755"):
                 row.update(disposition="unsupported", reason="non-regular file; never dereferenced")
             else:
-                size = int(git("cat-file", "-s", blob))
+                size = int(git("cat-file", "-s", blob, cwd=clone))
                 row["bytes"] = size
                 if size > 262144 or total + size > 2097152:
                     row.update(disposition="unsupported", reason="current content exceeds scope byte cap")
                 else:
-                    data = subprocess.run(["git", "cat-file", "blob", blob], cwd=CLONE,
+                    data = subprocess.run(["git", "cat-file", "blob", blob], cwd=str(clone or CLONE),
                                           capture_output=True, check=True).stdout
                     try:
                         data.decode("utf-8")
@@ -997,18 +1033,19 @@ def current_paths(merge: str, target: str) -> List[Dict[str, Any]]:
     return result
 
 
-def build_current_projection(target: str, paths: List[str]) -> Tuple[str, str]:
+def build_current_projection(target: str, paths: List[str], *, clone: Optional[Path] = None) -> Tuple[str, str]:
     """B = T minus selected files; H.tree = T, so B..H contains only additions."""
     with tempfile.TemporaryDirectory() as td:
         env = dict(os.environ, GIT_INDEX_FILE=str(Path(td) / "index"), GIT_LITERAL_PATHSPECS="1")
-        git("read-tree", target, env=env)
+        git("read-tree", target, env=env, cwd=clone)
         for path in sorted(set(paths)):
-            git("update-index", "--force-remove", "--", path, env=env)
-        tree = git("write-tree", env=env)
+            git("update-index", "--force-remove", "--", path, env=env, cwd=clone)
+        tree = git("write-tree", env=env, cwd=clone)
     ident = dict(os.environ, GIT_AUTHOR_NAME="crq", GIT_AUTHOR_EMAIL="crq@localhost",
                  GIT_COMMITTER_NAME="crq", GIT_COMMITTER_EMAIL="crq@localhost")
-    base = git("commit-tree", tree, "-p", target, "-m", "crq current affected files removed", env=ident)
-    head = git("commit-tree", target + "^{tree}", "-p", base, "-m", "crq current affected files restored", env=ident)
+    base = git("commit-tree", tree, "-p", target, "-m", "crq current affected files removed", env=ident, cwd=clone)
+    head = git("commit-tree", target + "^{tree}", "-p", base, "-m", "crq current affected files restored",
+               env=ident, cwd=clone)
     return base, head
 
 
@@ -1722,8 +1759,8 @@ def plan_merged(item: Dict[str, Any], dry: bool) -> Dict[str, Any]:
             "label": f"post-merge current projection ({n} PR-touched paths at promoted main)", "notes": []}
 
 
-def object_present(sha: str) -> bool:
-    return run(["git", "cat-file", "-e", f"{sha}^{{commit}}"], cwd=CLONE, check=False).returncode == 0
+def object_present(sha: str, *, clone: Optional[Path] = None) -> bool:
+    return run(["git", "cat-file", "-e", f"{sha}^{{commit}}"], cwd=clone or CLONE, check=False).returncode == 0
 
 
 def plan_author(item: Dict[str, Any], dry: bool) -> Dict[str, Any]:
@@ -1779,10 +1816,21 @@ def launch(q: Dict[str, Any], item: Dict[str, Any], plan: Dict[str, Any]) -> str
     run_id = f"{item['id']}-{now().strftime('%Y%m%dT%H%M%SZ')}"
     rdir = RUNS / run_id
     rdir.mkdir(parents=True)
-    if item["kind"] == review_receipt.KIND:
+    repo_clone = None
+    scan_classes = None
+    if item["kind"] == push_current.KIND:
+        cfg = repo_registry.by_repo(REPOS, item_repo(item))
+        if cfg is None:
+            raise RuntimeError(f"push item names an unconfigured repo: {item_repo(item)}")
+        repo_clone = Path(cfg["clone"])
+        # Universal secret shapes plus this repo's configured extra classes;
+        # the primary repo's publish classes stay out of foreign scans.
+        scan_classes = UNIVERSAL_SCAN_CLASSES | set(cfg["scan_extra_classes"])
+    if item["kind"] in (review_receipt.KIND, push_current.KIND):
         patch = git("diff", "--text", "--no-textconv", "--no-ext-diff", "--no-renames", "--no-color",
-                    "--unified=0", plan["base"], plan["head"])
-        ok, scan = secret_scan_diff(patch, rdir / "secret-scan.json", base=plan["base"], head=plan["head"])
+                    "--unified=0", plan["base"], plan["head"], cwd=repo_clone)
+        ok, scan = secret_scan_diff(patch, rdir / "secret-scan.json", base=plan["base"], head=plan["head"],
+                                    classes=scan_classes)
     else:
         ok, scan = secret_scan(plan["base"], plan["head"], rdir / "secret-scan.json")
     if ok and item["kind"] == backfill_jobs.KIND:
@@ -1796,14 +1844,14 @@ def launch(q: Dict[str, Any], item: Dict[str, Any], plan: Dict[str, Any]) -> str
         if item["kind"] == author_quota.AUTHOR_KIND and "author_lease" in item:
             item["author_lease"]["secret_scan_blocked"] = True
             save_queue(q)
-        if item["kind"] == review_receipt.KIND:
+        if item["kind"] in (review_receipt.KIND, push_current.KIND):
             item["receipt_id"] = review_receipt.write_receipt(STATE / "receipts",
                 current_document(item, "blocked-secret-scan", rdir=rdir))
             save_queue(q)
         event("blocked", item=item["id"], reason=item["last_error"])
         return run_id
     try:
-        wt, wbranch = make_worktree(f"wt-{run_id}", plan["head"])
+        wt, wbranch = make_worktree(f"wt-{run_id}", plan["head"], clone=repo_clone)
     except RuntimeError as exc:
         if item["kind"] != author_quota.AUTHOR_KIND:
             raise
@@ -1812,7 +1860,7 @@ def launch(q: Dict[str, Any], item: Dict[str, Any], plan: Dict[str, Any]) -> str
         # authorizes the agent fallback, instead of failing every tick.
         raise author_quota.AuthorRefused("author head cannot be checked out") from exc
     cli_cmd = ["coderabbit", "review", "--agent", "--deep"]
-    if item["kind"] in (author_quota.AUTHOR_KIND, review_receipt.KIND) or plan.get("range_policy"):
+    if item["kind"] in (author_quota.AUTHOR_KIND, review_receipt.KIND, push_current.KIND) or plan.get("range_policy"):
         # Author/current/full-range cycles review the COMMITTED base..head (the original manual cycle 1
         # form) on a clean worktree, never uncommitted working-tree edits. The
         # natural argv is deliberately unchanged.
@@ -1829,6 +1877,9 @@ def launch(q: Dict[str, Any], item: Dict[str, Any], plan: Dict[str, Any]) -> str
     if item["kind"] == review_receipt.KIND:
         meta["capture"] = item["capture"]
         meta["source"] = item["subject"]
+    if item["kind"] == push_current.KIND:
+        meta["push"] = {"base": item["subject"]["base"], "head": item["subject"]["head"],
+                        "target": plan["target"]}
     if item["kind"] in ("merged", "coverage"):
         meta["planned_paths"] = (item.get("measure") or {}).get("synthetic_paths")
         meta["reviewed_tip"] = (item.get("measure") or {}).get("merge_queue")
@@ -2154,6 +2205,48 @@ def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
         save_queue(q)
         remove_worktree(Path(meta["worktree"]), meta["wt_branch"])
         return f"{item['id']}: {outcome}; receipt {item['receipt_id']} (repair evidence tracked separately)"
+    if item["kind"] == push_current.KIND:
+        # Receipt before queue mutation: a crash here is recovered by re-harvest.
+        # Findings stay in the receipt (issue filing is a separate change), and
+        # NO repair/coverage/ledger/publication path ever runs for a foreign repo.
+        partial = any(p["disposition"] in ("unsupported", "ambiguous") for p in item["capture"]["paths"])
+        outcome = ("partial-scope" if partial else "terminal-with-findings" if cls["findings"] else "terminal-clean") if cls["counted"] else cls["outcome"]
+        item["receipt_id"] = review_receipt.write_receipt(STATE / "receipts",
+            current_document(item, outcome, meta=meta, cls=cls, rdir=rdir))
+        item.setdefault("attempts", []).append({"run_id": r["run_id"], "outcome": cls["outcome"],
+                                                "counted": cls["counted"], "receipt_id": item["receipt_id"]})
+        item["run"] = None
+        if cls["counted"]:
+            # reviewed_tip advances ONLY on a counted review of the pinned range
+            # (docs/multi-repo.md push discovery); a deferred-split row is an
+            # explicit follow-up part, not missing scope, and never blocks the tip.
+            q.setdefault("push_discovery", {}).setdefault(item_repo(item), {})["reviewed_tip"] = \
+                item["capture"]["target"]
+            item["failures"] = 0
+            item["last_error"] = None
+            item["state"] = "done"
+        elif cls["outcome"] == "rate_limited":
+            set_rate_cooldown(q, cls, rdir)
+            item["last_error"] = f"rate limited ({cls.get('message')}); not counted"
+            item["state"] = "pending"
+        elif cls["outcome"] in ("action_required", "auth"):
+            q.update(paused=True, pause_reason=f"{cls['outcome']} on {r['run_id']}; owner action needed")
+            item["last_error"] = cls.get("message")
+            item["state"] = "pending"
+        else:
+            item["failures"] = item.get("failures", 0) + 1
+            item["last_error"] = f"{cls['outcome']}: {cls.get('message')}"
+            if cls["outcome"] in ("skipped", "too_large") or item["failures"] >= CONFIG["max_item_failures"]:
+                item["state"] = "blocked"
+            else:
+                item["state"] = "pending"
+                item["not_before"] = iso(now() + dt.timedelta(
+                    minutes=CONFIG["error_backoff_min"] * 2 ** (item["failures"] - 1)))
+        save_queue(q)
+        push_cfg = repo_registry.by_repo(REPOS, item_repo(item))
+        remove_worktree(Path(meta["worktree"]), meta["wt_branch"],
+                        clone=Path(push_cfg["clone"]) if push_cfg else None)
+        return f"{item['id']}: {outcome}; receipt {item['receipt_id']}"
     if item["kind"] == backfill_jobs.KIND:
         return backfill_runtime.harvest(sys.modules[__name__], q, item, rdir, meta, cls, exit_code,
                                         terminal_verified=(state == "harvest"))
@@ -2570,6 +2663,11 @@ def start_one(q, log, dry, only, ignore_quiet, capture_current=True):
                 if plan is None:
                     log.append(f"{item['id']}: {item['state']} (no vendor start)")
                     continue
+            elif item["kind"] == push_current.KIND:
+                plan = push_current.prepare(sys.modules[__name__], q, item, dry)
+                if plan is None:
+                    log.append(f"{item['id']}: {item['state']} (no vendor start)")
+                    continue
             elif item["kind"] == "merged":
                 plan = plan_merged(item, dry)
             else:
@@ -2803,6 +2901,9 @@ def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = Fal
                 log.append("merged discovery disabled: invalid configured interval")
             else:
                 log += discover_merged(q, budget, interval=interval, recent=True)
+        # Push-range discovery per configured non-primary repo (docs/multi-repo.md).
+        # State persists before admission so a crash cannot re-enroll a range.
+        log += push_current.discover(sys.modules[__name__], q, dry)
     starts_before = len(q.get("starts", []))
     for item in list(live_items(q)):
         if item["state"] == "reviewing":

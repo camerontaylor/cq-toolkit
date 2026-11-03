@@ -22,7 +22,7 @@ DEFAULT_FINDINGS = "issue"
 FINDINGS_MODES = ("issue", "none")
 
 _ALLOWED = frozenset({"repo", "clone", "default_branch", "discovery", "floor", "quiet_minutes",
-                      "include", "exclude", "rank_tier", "findings"})
+                      "include", "exclude", "rank_tier", "findings", "scan_extra_classes"})
 
 
 def _refuse(entry: Any, why: str) -> None:
@@ -79,10 +79,15 @@ def parse_entry(entry: Any) -> Dict[str, Any]:
     findings = entry.get("findings", DEFAULT_FINDINGS)
     if findings not in FINDINGS_MODES:
         _refuse(entry, f"findings must be one of {FINDINGS_MODES}")
+    scan_extra = entry.get("scan_extra_classes", [])
+    if not isinstance(scan_extra, list) or any(
+            not isinstance(x, str) or not x or "\n" in x or "\r" in x or "\0" in x for x in scan_extra):
+        _refuse(entry, "scan_extra_classes must be a list of denylist class ids")
     return {"repo": repo, "name": repo.split("/", 1)[1], "clone": clone, "default_branch": branch,
             "default_ref": f"origin/{branch}", "push": push, "pr": pr, "floor": floor,
             "quiet_minutes": quiet, "include": _string_list(entry, "include", ["**"]),
-            "exclude": _string_list(entry, "exclude", []), "rank_tier": rank, "findings": findings}
+            "exclude": _string_list(entry, "exclude", []), "rank_tier": rank, "findings": findings,
+            "scan_extra_classes": list(scan_extra)}
 
 
 def parse(config: Dict[str, Any]) -> List[Dict[str, Any]]:
