@@ -622,7 +622,7 @@ describe('claude-code driver, CLI transport specifics (fake agent CLI)', () => {
       // defence is the observable fact: WorkerResult.model carries the id
       // the endpoint actually served, and the shared served-model assertion
       // (ADR-0002 §2.6 — the factory applies it to every resolved driver;
-      // see served-model.test.ts / factory.test.ts) fails the mismatch
+      // see served-model.test.ts / factory.wrappers.test.ts) fails the mismatch
       // post-hoc with errorClass 'served-model-mismatch'.
       const remapped = await driver.run(
         invocation({ modelSpec: { provider: 'deepseek', model: 'gpt-9-imaginary' } }),

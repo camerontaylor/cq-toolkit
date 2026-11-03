@@ -70,7 +70,8 @@ function fakeDriver(
  * A scripted FACTORY: records every DriverRequest and resolves to the
  * given driver verbatim on the 'ai-sdk' lane with the request's modelSpec
  * (the real factory's lane selection and served-model wrapper are its own
- * concern — test/driver/factory.test.ts owns them).
+ * concern — test/driver/factory.resolution-*.test.ts and
+ * factory.wrappers.test.ts own them).
  */
 function fakeFactory(driver: Driver): DriverFactory & { requests: DriverRequest[] } {
   const requests: DriverRequest[] = [];

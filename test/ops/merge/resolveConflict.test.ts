@@ -17,7 +17,7 @@
 //      modelSpec on the invocation (never the input's). The served-model
 //      wrapper is NOT tested here: the fake factory's driver is what the
 //      op dispatches, and the wrapper is the real factory's concern
-//      (test/driver/factory.test.ts owns it).
+//      (test/driver/factory.wrappers.test.ts owns it).
 //   3. THE DECISION CONTRACT (parseMergeConflictDecision): the object form;
 //      the 'escalated' alias normalized; unknown extra keys tolerated; a
 //      JSON line embedded in narration; last-valid-line-wins; and the
