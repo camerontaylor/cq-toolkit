@@ -473,7 +473,9 @@ jobs:
             --measureConclusion="$CONCLUSION"
             --measurementPath="${RUNNER_TEMP}/cq-measure/measurement.json"
           )
-          if [[ "$TYPECHECK_COUNT" =~ ^[0-9]+$ ]]; then
+          if [ -n "$TYPECHECK_SKIP_REASON" ]; then
+            args+=(--typecheckSkipped="$TYPECHECK_SKIP_REASON")
+          elif [[ "$TYPECHECK_COUNT" =~ ^[0-9]+$ ]]; then
             args+=(--typecheckCount="$TYPECHECK_COUNT")
           fi
           node trust/dist/selfhost/verify-ratchet.js "${args[@]}" \

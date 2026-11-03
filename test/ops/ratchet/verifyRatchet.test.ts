@@ -142,7 +142,7 @@ async function verify(
     base: 'merge-queue',
     measureConclusion: 'success',
     measurementPath: good(),
-    typecheckCount: 0,
+    ...(over.typecheckSkipped === undefined ? { typecheckCount: 0 } : {}),
     ...over,
   });
   if (result.status !== 'ok') throw new Error(`verify ${result.status}: ${JSON.stringify(result)}`);
@@ -194,6 +194,24 @@ describe('verifyRatchet: a clean PR', SLOW, () => {
       }),
       expect.objectContaining({ metric: 'coverage', value: 90, baseline: 90, verdict: 'pass' }),
     ]);
+  });
+
+  test('an intentional PR recompute skip passes with good coverage and still judges bad coverage', async () => {
+    const head = prBranch('pr-skip-tc', 'merge-queue', () =>
+      write('pnpm-lock.yaml', 'changed dependency graph\n'),
+    );
+    const reason = 'PR changes pnpm-lock.yaml; trusted typecheck recompute skipped';
+    const v = await verify(head, { typecheckSkipped: reason });
+    expect(v.verdict).toBe('pass');
+    expect(v.results).toContainEqual(
+      expect.objectContaining({ metric: 'typecheck-count', verdict: 'skipped', reason }),
+    );
+    expect(v.reasons.join('\n')).toContain(reason);
+    expect(v.reasons.join('\n')).not.toContain('produced no count');
+    const down = artifact('skip-down.json', { schemaVersion: 1, metrics: { coverage: 80 } });
+    expect((await verify(head, { typecheckSkipped: reason, measurementPath: down })).verdict).toBe(
+      'fail',
+    );
   });
 
   test('coverage is judged at one decimal place (89.96 → 90.0 passes, 89.94 → 89.9 fails)', async () => {

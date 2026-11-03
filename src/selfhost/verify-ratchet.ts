@@ -24,6 +24,7 @@ const ArgsSchema = z
     measureConclusion: z.string().min(1),
     measurementPath: z.string().min(1).exactOptional(),
     typecheckCount: z.coerce.number().int().nonnegative().exactOptional(),
+    typecheckSkipped: z.string().min(1).exactOptional(),
   })
   .strict();
 
@@ -59,6 +60,7 @@ export async function verifySubject(
     measureConclusion: args.measureConclusion,
     ...(args.measurementPath === undefined ? {} : { measurementPath: args.measurementPath }),
     ...(args.typecheckCount === undefined ? {} : { typecheckCount: args.typecheckCount }),
+    ...(args.typecheckSkipped === undefined ? {} : { typecheckSkipped: args.typecheckSkipped }),
   });
   return result;
 }
