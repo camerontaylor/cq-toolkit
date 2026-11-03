@@ -18,6 +18,7 @@ from unittest import mock
 import deferred_refresh
 import review_receipt
 import queue_transport
+import push_current
 import repo_registry
 
 ROOT = Path(__file__).resolve().parent
@@ -1013,10 +1014,10 @@ class CurrentTest(unittest.TestCase):
         def no_per_path_git(*args, **kw):
             self.assertFalse(args[0] == "rev-parse" and ":" in args[-1], args)
             return real_git(*args, **kw)
-        def source_listing_only(*args):
+        def source_listing_only(*args, **kw):
             self.assertEqual(args[:4], ("diff", "--name-only", "--no-renames", "-z"),
                              "rename diff and ls-tree are skipped for an oversized source")
-            return real_git_z(*args)
+            return real_git_z(*args, **kw)
         with mock.patch.object(crq, "CURRENT_PATH_CAP", cap), \
              mock.patch.object(crq, "git", side_effect=no_per_path_git), \
              mock.patch.object(crq, "git_z", side_effect=source_listing_only) as listing, \
@@ -3666,3 +3667,33 @@ class MultiRepoIdentityTests(unittest.TestCase):
         by_id = {i["id"]: i for i in data["items"]}
         self.assertEqual(by_id["push-infra-aaaa000000-bbbb000000"]["repo"], "camerontaylor/infra")
         self.assertEqual(by_id["pr12"]["repo"], crq.REPO)
+
+
+class PushDispatchTest(unittest.TestCase):
+    """start_one dispatches kind push-current through push_current.prepare (PR2);
+    the rest of the push lane lives in test_push_current.py."""
+
+    def test_start_one_dispatches_push_current_to_prepare(self):
+        plan = {"base": "b" * 40, "head": "h" * 40, "target": "t" * 40, "review_pin": "t" * 40,
+                "cycle": None, "branch": None, "label": "fixture push", "notes": []}
+        item = {"id": "push-infra-aaaaaaaaa0-bbbbbbbbb0", "repo": "camerontaylor/infra",
+                "kind": "push-current", "pr": 0, "state": "pending", "order": 1,
+                "subject": {"type": "push-range", "repo": "camerontaylor/infra",
+                            "base": "b" * 40, "head": "h" * 40,
+                            "policy": "affected-current-additions-v1"},
+                "cycles": [], "attempts": [], "failures": 0, "notes": []}
+        q = {"items": [item], "starts": [], "paused": False}
+        with mock.patch.object(push_current, "prepare", return_value=plan) as prepare, \
+                mock.patch.object(crq, "launch") as launch, \
+                mock.patch.object(crq.usage_slots, "read_usage", return_value=None):
+            crq.start_one(q, [], False, None, False)
+        prepare.assert_called_once()
+        self.assertEqual(prepare.call_args.args, (crq, q, item, False))
+        launch.assert_called_once_with(q, item, plan)
+        # A dry run plans through the same seam and never launches.
+        with mock.patch.object(push_current, "prepare", return_value=plan) as prepare, \
+                mock.patch.object(crq, "launch") as launch:
+            crq.start_one(q, [], True, None, False)
+        prepare.assert_called_once()
+        self.assertEqual(prepare.call_args.args, (crq, q, item, True))
+        launch.assert_not_called()
