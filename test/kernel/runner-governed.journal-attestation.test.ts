@@ -122,9 +122,9 @@ describe('governed journal v2 + resume', () => {
     journalEnclosure(2),
   );
 
-  test(
-    'resume pins the parent for previously failed jobs despite a changed launcher',
-    async () => {
+  test.each([false, true])(
+    'resume preserves recorded parents and falls back for legacy journals (legacy=%s)',
+    async (legacy) => {
       const seen: Array<{ jobId: string; parent: string | undefined }> = [];
       let fail = true;
       const probe = async (raw: unknown): Promise<OpResult<unknown>> => {
@@ -141,19 +141,21 @@ describe('governed journal v2 + resume', () => {
           viewWith(entry('probe', probe)),
           { governor: createGovernor({ maxUsd: 5 }), allowAdvisory: true },
         );
-      vi.stubEnv('CQ_WORK_ID', 'original-parent');
+      vi.stubEnv('CQ_WORK_ID', legacy ? '' : 'original-parent');
+      vi.stubEnv('CQ_PARENT_WORK_ID', '');
+      vi.stubEnv('PASEO_AGENT_ID', '');
       await run(false);
       fail = false;
       vi.stubEnv('CQ_WORK_ID', 'changed-parent');
       const resumed = await run(true);
       expect(seen).toEqual([
-        { jobId: 'j1', parent: 'original-parent' },
-        { jobId: 'j2', parent: 'original-parent' },
-        { jobId: 'j2', parent: 'original-parent' },
+        { jobId: 'j1', parent: legacy ? undefined : 'original-parent' },
+        { jobId: 'j2', parent: legacy ? undefined : 'original-parent' },
+        { jobId: 'j2', parent: legacy ? 'changed-parent' : 'original-parent' },
       ]);
       expect(jobFinishes(await openRunLog(dir).read(resumed.runId))).toMatchObject([
-        { jobId: 'j1', parentWorkId: 'original-parent' },
-        { jobId: 'j2', parentWorkId: 'original-parent' },
+        { jobId: 'j1', ...(legacy ? {} : { parentWorkId: 'original-parent' }) },
+        { jobId: 'j2', parentWorkId: legacy ? 'changed-parent' : 'original-parent' },
       ]);
     },
     journalEnclosure(2),

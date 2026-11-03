@@ -1076,12 +1076,13 @@ async function runPlanUnderLease(
     // invocation without the runner mutating process.env (concurrent jobs
     // in a wave must not cross-stain each other's children).
     const correlationByJob = new Map<string, WorkCorrelation>();
-    // The parent every job's correlation names: the launcher's CQ_* identity,
-    // else the enclosing Paseo agent (`paseo:<PASEO_AGENT_ID>`). Read once,
-    // never written — see inboundParentWorkId.
+    // Prefer a recorded finish's parent on resume; legacy journals and runs
+    // that crashed before any finish fall back to the current launcher's
+    // CQ_* identity or Paseo agent. This is a finish-based pin, not a
+    // run-start anchor. Never mutate process.env — see inboundParentWorkId.
     const priorFinish = replay.values().next().value;
     const parentWorkId =
-      priorFinish !== undefined ? priorFinish.parentWorkId : inboundParentWorkId(process.env);
+      priorFinish?.parentWorkId ?? inboundParentWorkId(process.env);
 
     // Under a governed SIGNAL stop the never-dispatched rows are cancelled,
     // not failed. This is a PREDICATE, not a run-start snapshot: the trip
