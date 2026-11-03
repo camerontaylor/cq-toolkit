@@ -13,7 +13,7 @@
 //      only lazily-computed), the head-commit timestamp from the REST
 //      commits read, and threads/reviews/issueComments from a faked
 //      fetchReviewState payload (GraphQL wire shapes copied from
-//      test/ops/review/fetchReviewState.test.ts, including reply-chain
+//      test/ops/review/fetchReviewState.helpers.ts, including reply-chain
 //      reconstruction from REST).
 //   2. The #142 fork contract: a cross-repository head is excluded with the
 //      exact contract reason and costs zero review-state reads.
@@ -63,7 +63,7 @@ import type { GhFn, GhResult } from '../../src/adapters/forge-github/gh.js';
 
 // ---------------------------------------------------------------------------
 // Wire-shape fixture builders (gh payloads, camelCase/snake_case as gh
-// returns them — shapes mirrored from test/ops/review/fetchReviewState.test.ts)
+// returns them — shapes mirrored from test/ops/review/fetchReviewState.helpers.ts)
 // ---------------------------------------------------------------------------
 
 export const OWNER = 'octo';
