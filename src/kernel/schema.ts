@@ -1277,8 +1277,9 @@ export const ObservationStreamSchema: z.ZodType<ObservationStream> = z
       }
     });
     if (!stream.complete) {
-      // A duplicate or misplaced header is corrupt in BOTH modes; only the
-      // MISSING-header requirement is waived for a torn/empty prefix.
+      // A duplicate or misplaced header is corrupt in BOTH modes, and only a
+      // stream with NO complete event may lack its header (only the final
+      // line can be torn — events without a header are a broken stream).
       const torn = stream.events.filter((e) => e.type === 'composition-started');
       if (
         torn.length > 1 ||
@@ -1287,6 +1288,13 @@ export const ObservationStreamSchema: z.ZodType<ObservationStream> = z
         ctx.addIssue({
           code: 'custom',
           message: 'a stream cannot carry a misplaced or duplicate composition-started header',
+          path: ['events'],
+        });
+      }
+      if (stream.events.length > 0 && torn.length === 0) {
+        ctx.addIssue({
+          code: 'custom',
+          message: 'an incomplete stream with events must carry its composition-started header',
           path: ['events'],
         });
       }

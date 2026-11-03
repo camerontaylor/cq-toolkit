@@ -360,7 +360,18 @@ function assertStreamIdentity(stream: ObservationStream): void {
         `duplicate composition-started header (found ${headers.length})`,
     );
   }
-  if (!stream.complete) return; // torn/empty prefix: missing header waived
+  if (!stream.complete) {
+    // Torn/empty prefix: only a stream with NO complete event may lack a
+    // header — only the final line can be torn, so events without a header
+    // are a broken stream, not a torn one.
+    if (stream.events.length > 0 && headers.length === 0) {
+      throw new Error(
+        `observation: stream '${stream.workId}/${stream.compositionRunId}' is incomplete ` +
+          'but carries events without its composition-started header',
+      );
+    }
+    return;
+  }
   if (headers.length !== 1) {
     throw new Error(
       `observation: stream '${stream.workId}/${stream.compositionRunId}' must carry exactly ` +
