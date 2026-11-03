@@ -980,7 +980,9 @@ describe('Ruff and Knip JSON adapters', () => {
         line: 10,
         column: 3,
       });
-      expect(parsed.set.failures.some((failure) => failure.message === 'exports: unused')).toBe(true);
+      expect(parsed.set.failures.some((failure) => failure.message === 'exports: unused')).toBe(
+        true,
+      );
     }
     expect(parsed.set.failures[0]?.file).toBe(
       tool === 'ruff' ? '/project/input.py' : 'src/unused.ts',
