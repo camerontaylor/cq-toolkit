@@ -1,3 +1,4 @@
+import { reviewBranchKey } from '../../../src/ops/review/internal/branchKey.js';
 import { mkdir, mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -134,6 +135,47 @@ describe('review.run', () => {
         findings: unknown[];
       };
       expect(persisted.findings).toEqual(result.value.findings);
+    } finally {
+      await repo.cleanup();
+    }
+  });
+
+  it('persists sequential findings for long branches without prefix collisions', async () => {
+    const repo = await makeTestRepo();
+    try {
+      await configureAgentRepo(repo);
+      expect(reviewBranchKey('feature/x')).toBe('feature%2Fx');
+      for (const length of [178, 179]) {
+        const key = reviewBranchKey('x'.repeat(length) + 'é' + 'y'.repeat(100));
+        const prefix = key.slice(0, key.lastIndexOf('-'));
+        expect(prefix).not.toMatch(/%[0-9A-F]?$/);
+        expect(prefix).toBe('%_' + 'x'.repeat(length));
+      }
+      const prefix = 'long/' + 'é/'.repeat(80);
+      const branches = [
+        prefix + 'one',
+        prefix + 'two',
+        'a/'.repeat(80) + 'tail',
+        'a/'.repeat(45) + '-462a0fe9a6d5689f',
+      ];
+      // The last ordinary branch previously aliased the shortened long key.
+      expect(reviewBranchKey(branches[2]!)).not.toBe(reviewBranchKey(branches[3]!));
+      expect(reviewBranchKey(branches[0]!)).not.toBe(reviewBranchKey(branches[1]!));
+      for (const branch of branches) {
+        repo.git('checkout', '-b', branch);
+        const run = makeReviewRun({
+          drivers: scriptedDrivers(),
+          effectsFactory: () => repoEffects(repo),
+          scannerFactory: () => async (components) =>
+            components.map(({ component }) => ({ component, hits: [] })),
+        });
+        for (let index = 1; index <= 2; index++) {
+          const result = await run({ repoRoot: repo.root });
+          expect(result.status).toBe('ok');
+          const path = join(repo.root, '.cq', 'review', reviewBranchKey(branch), `${index}.json`);
+          expect(JSON.parse(await readFile(path, 'utf8'))).toMatchObject({ branch });
+        }
+      }
     } finally {
       await repo.cleanup();
     }

@@ -1,3 +1,4 @@
+import { reviewBranchKey } from './internal/branchKey.js';
 import type {
   EvidencePreparationContext,
   AnchorBlobInput,
@@ -915,7 +916,7 @@ export function makeReviewRun(
           error: `review.run: normalized findings record failed validation — ${error instanceof Error ? error.message : String(error)}`,
         };
       }
-      const folder = join(input.repoRoot, '.cq', 'review', encodeURIComponent(state.branch));
+      const folder = join(input.repoRoot, '.cq', 'review', reviewBranchKey(state.branch));
       let names: string[];
       try {
         await mkdir(folder, { recursive: true });

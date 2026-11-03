@@ -1,3 +1,4 @@
+import { reviewBranchKey } from './branchKey.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { lstat, open, readFile, realpath, rename, unlink } from 'node:fs/promises';
 import { dirname, relative, resolve } from 'node:path';
@@ -59,7 +60,7 @@ export function makeAddressBookkeepingReceipt(deps: {
       /^[0-9a-f]{64}\.json$/.test(relative(resolve(root, '.cq/queue-evidence'), path))
     )
       return true;
-    const folder = resolve(root, '.cq/review', encodeURIComponent(branch));
+    const folder = resolve(root, '.cq/review', reviewBranchKey(branch));
     return dirname(path) === folder && /^\d+\.json$/.test(relative(folder, path));
   };
   const validateQueueEvidence = (root: string, path: string, bytes: Buffer) => {
