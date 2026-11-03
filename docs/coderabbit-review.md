@@ -185,7 +185,8 @@ Reuse validates that the retained raw log can be read and, when recorded,
 matches its SHA-256 digest. Missing or altered artifacts refuse without
 vendor dispatch. Historic cycle records without a digest remain readable
 and reusable after an existence/readability check; their integrity is
-unverified. New cycles record a digest when the effects support it.
+unverified. New cycles record a digest when available; a failed hash read
+keeps the paid cycle and its findings without integrity metadata.
 
 The scan contract is current-policy equivalence: every reuse request
 recollects and scans current content under the current scanner before
