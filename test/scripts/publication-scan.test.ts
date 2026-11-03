@@ -103,6 +103,81 @@ describe.skipIf(!available)('publication scans of outgoing git objects', () => {
     });
   });
 
+  test('tree-local ignores with working absolute fingerprints cannot suppress tree scans', () => {
+    replay((root) => {
+      const controls = mkdtempSync(join(tmpdir(), 'ignore-controls-'));
+      try {
+        writeFileSync(
+          join(root, 'probe.txt'),
+          'ghp_' + 'tB3nR9kWxQmZ2vLhG' + 'sYaP7dKxXcMvFsNwEeR',
+        );
+        const report = join(controls, 'findings.json');
+        const rawScan = (source: string) =>
+          spawnSync(
+            'gitleaks',
+            [
+              'detect',
+              '--no-git',
+              '--source',
+              source,
+              '--report-format',
+              'json',
+              '--report-path',
+              report,
+              '--redact',
+            ],
+            { cwd: root, encoding: 'utf8' },
+          );
+        expect(rawScan(root).status).toBe(1);
+        const findings = JSON.parse(readFileSync(report, 'utf8')) as {
+          Fingerprint: string;
+          File: string;
+          RuleID: string;
+          StartLine: number;
+        }[];
+        expect(findings.some((finding) => finding.File === join(root, 'probe.txt'))).toBe(true);
+        writeFileSync(
+          join(root, '.gitleaksignore'),
+          findings
+            .flatMap((finding) => [
+              finding.Fingerprint,
+              finding.File.slice(root.length + 1) +
+                ':' +
+                finding.RuleID +
+                ':' +
+                String(finding.StartLine),
+            ])
+            .join('\n') + '\n',
+        );
+        // Positive suppression controls: these fingerprints really match.
+        expect(rawScan(root).status).toBe(0);
+        expect(rawScan('.').status).toBe(0);
+        const result = spawnSync(
+          process.execPath,
+          [join(root, 'scripts/denylist-scan'), '--tree'],
+          {
+            cwd: root,
+            encoding: 'utf8',
+          },
+        );
+        expect(result.status, result.stderr).toBe(1);
+      } finally {
+        rmSync(controls, { recursive: true, force: true });
+      }
+    });
+  });
+
+  test('batch framing preserves binary bytes and unusual filenames', () => {
+    replay((root, git, scan) => {
+      writeFileSync(join(root, 'space and\nnewline.bin'), Buffer.from([0, 10, 255, 13]));
+      writeFileSync(join(root, 'empty.txt'), '');
+      writeFileSync(join(root, 'unicode-λ.txt'), 'safe unicode content');
+      git('add', '.');
+      git('commit', '-qm', 'binary and unusual paths');
+      expect(scan()).toBe(0);
+    });
+  });
+
   test('a commit message is scanned even with an unchanged tree', () => {
     replay((_root, git, scan) => {
       git('commit', '--allow-empty', '-qm', ['port', 'key'].join(''));
