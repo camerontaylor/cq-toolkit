@@ -1,48 +1,25 @@
+// Split provenance: test/ops/fix/runFix.test.ts was split by subject into
+// runFix.compare-links.test.ts, runFix.fixes-per-run.test.ts,
+// runFix.composition-context.test.ts, runFix.composition-metrics.test.ts
+// (this file), runFix.pr-base.test.ts and runFix.atomic-report.test.ts.
+// This file keeps the real-composition metrics cases (M1 verified-commit,
+// M7-fix retained spend, additive reasoning) with their shared fixture surface.
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdir, mkdtemp, rm, writeFile, readFile, readdir } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { z } from 'zod';
-import { createGovernor, currentJobContext } from '../../../src/kernel/governor.js';
-import { runPlan, type OpRegistryView } from '../../../src/kernel/runner.js';
-import type { Op, OpRegistryEntry } from '../../../src/kernel/types.js';
-import {
-  fixesPerRunOf,
-  githubCompareBaseUrl,
-  makeFixRun,
-  resolveFixPrBase,
-  writeAtomicFixReport,
-  type FixRunReport,
-} from '../../../src/ops/fix/runFix.js';
+import { currentJobContext } from '../../../src/kernel/governor.js';
+import type { OpRegistryEntry } from '../../../src/kernel/types.js';
+import { makeFixRun, type FixRunReport } from '../../../src/ops/fix/runFix.js';
 import type { FixTaskReport } from '../../../src/ops/sweep/taskLoop.js';
 import type { SweepUnitReport } from '../../../src/ops/sweep/unit.js';
 import type { DriverFactory } from '../../../src/driver/factory.js';
 import { generateScratchRepo } from '../../fixtures/scratch-repo/generate.js';
 import { scrubbedGitEnv } from '../../helpers/git-env.js';
 import { makeGitleaksFixture } from '../../helpers/gitleaks-fixture.js';
-
-describe('failed-attempt compare links', () => {
-  test('builds an encoded GitHub comparison URL from a remote and pinned base revision', () => {
-    expect(githubCompareBaseUrl('git@github.com:example/scratch.git', 'a'.repeat(40))).toBe(
-      `https://github.com/example/scratch/compare/${'a'.repeat(40)}...`,
-    );
-  });
-
-  test('does not invent a GitHub link for a non-GitHub remote or invalid revision', () => {
-    expect(githubCompareBaseUrl('/tmp/origin.git', 'a'.repeat(40))).toBeUndefined();
-    expect(githubCompareBaseUrl('https://github.com/example/scratch.git', 'HEAD')).toBeUndefined();
-  });
-});
-
-const task = (outcome: FixTaskReport['outcome'], commits: string[]): FixTaskReport => ({
-  task: { id: `t-${commits.join()}-${outcome}`, files: [], failures: [] },
-  attempts: [],
-  outcome,
-  branch: 'cq/fix/static/x',
-  commits,
-});
 
 /** A fixed row carrying the given verified commit SHAs. */
 const fixedTask = (id: string, sha: string): FixTaskReport => ({
@@ -73,59 +50,6 @@ const openTask = (id: string, failedShas: string[]): FixTaskReport => ({
 });
 
 const emptyFailureSet = () => ({ tool: 'vitest', failures: [], exitCode: 0, numTotalTests: 0 });
-
-describe('M1 verified-commit evidence', () => {
-  test('M1 nominal evidence', () => {
-    expect(fixesPerRunOf([task('fixed', ['abc123']), task('fixed', ['abc123'])])).toBe(1);
-    expect(fixesPerRunOf([task('fixed', ['abc']), task('fixed', ['def'])])).toBe(2);
-  });
-
-  test('M1 missing evidence', () => {
-    // The #419 sibling fixed/no-commit row resolves nothing; a non-fixed row
-    // contributes nothing even when attempt evidence carries SHAs.
-    expect(
-      fixesPerRunOf([
-        task('fixed', ['abc']),
-        task('fixed', []),
-        task('unfixed', []),
-        task('escalated-to-human', []),
-      ]),
-    ).toBe(1);
-  });
-
-  test('M1 failure evidence', () => {
-    // A failed run's tasks (attempted, nothing verified) count zero, and a
-    // todo/never-attempted row is not distinguishable from evidence here: at
-    // the FixTaskReport layer only fixed outcomes with commit SHAs count.
-    expect(fixesPerRunOf([task('unfixed', []), task('unfixed', ['dropped'])])).toBe(0);
-  });
-});
-
-describe('fix.run composition context', () => {
-  test('a CLI-style direct invocation gives the inner worker plan its own governed job context', async () => {
-    let seenJob: string | undefined;
-    const worker: Op<unknown, unknown> = async () => {
-      seenJob = currentJobContext()?.info.jobKey;
-      return { status: 'ok', value: 'worker ran' };
-    };
-    const entry = {
-      name: 'fixture.worker',
-      inputSchema: z.object({}).strict(),
-      importer: async () => worker,
-    } as unknown as OpRegistryEntry<never, never>;
-    const registry: OpRegistryView = { get: () => entry };
-    expect(currentJobContext()).toBeUndefined();
-    const report = await runPlan(
-      { id: 'fix-run-context', jobs: [{ id: 'task', op: entry.name, input: {} }] },
-      { concurrency: 1, stopOnError: false },
-      registry,
-      { governor: createGovernor({ maxTokens: 100 }), allowAdvisory: true },
-    );
-    expect(report.jobs[0]?.result).toEqual({ status: 'ok', value: 'worker ran' });
-    expect(seenJob).toBe('task');
-    expect(currentJobContext()).toBeUndefined();
-  });
-});
 
 describe('M1 fix.run metrics through the real composition', () => {
   vi.setConfig({ testTimeout: 30_000 });
@@ -638,56 +562,4 @@ process.exitCode = failed ? 1 : 0;
       await rm(f.root, { recursive: true, force: true });
     }
   });
-});
-
-test('PR base resolves the remote default, explicit branches and upstream; refuses revisions', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'cq-pr-base-'));
-  const git = async (...args: string[]) =>
-    promisify(execFile)('git', ['-C', root, ...args], { env: scrubbedGitEnv() });
-  try {
-    await git('init', '-b', 'main');
-    await git('config', 'user.name', 'Fixture');
-    await git('config', 'user.email', 'fixture@invalid');
-    await git('commit', '--allow-empty', '-m', 'baseline');
-    expect(await resolveFixPrBase(root)).toBeUndefined();
-    await git('update-ref', 'refs/remotes/origin/main', 'HEAD');
-    await git('update-ref', 'refs/remotes/origin/release', 'HEAD');
-    await git('symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main');
-    expect(await resolveFixPrBase(root)).toBe('main');
-    expect(await resolveFixPrBase(root, 'origin/HEAD')).toBe('main');
-    expect(await resolveFixPrBase(root, 'refs/remotes/origin/HEAD')).toBe('main');
-    expect(await resolveFixPrBase(root, 'release')).toBe('release');
-    expect(await resolveFixPrBase(root, 'origin/release')).toBe('release');
-    expect(await resolveFixPrBase(root, 'HEAD~1')).toBeUndefined();
-    await git('symbolic-ref', '--delete', 'refs/remotes/origin/HEAD');
-    await git('config', 'remote.origin.url', '.');
-    await git('config', 'remote.origin.fetch', '+refs/heads/*:refs/remotes/origin/*');
-    await git('config', 'branch.main.remote', 'origin');
-    await git('config', 'branch.main.merge', 'refs/heads/main');
-    expect(await resolveFixPrBase(root)).toBe('main');
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
-test('atomic report replaces complete files and cleans up failed replacements', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'cq-atomic-report-'));
-  try {
-    const path = join(root, 'report.json');
-    await writeFile(path, 'previous');
-    const cyclic: { self?: unknown } = {};
-    cyclic.self = cyclic;
-    await expect(writeAtomicFixReport(path, cyclic)).rejects.toThrow();
-    expect(await readFile(path, 'utf8')).toBe('previous');
-    await writeAtomicFixReport(path, { complete: true });
-    expect(JSON.parse(await readFile(path, 'utf8'))).toEqual({ complete: true });
-    const directory = join(root, 'blocked');
-    await mkdir(directory);
-    await writeFile(join(directory, 'previous'), 'preserved');
-    await expect(writeAtomicFixReport(directory, {})).rejects.toThrow();
-    expect(await readFile(join(directory, 'previous'), 'utf8')).toBe('preserved');
-    expect((await readdir(root)).filter((name) => name.includes('.tmp-'))).toEqual([]);
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
 });
