@@ -5,7 +5,7 @@
 // a14-privileged-workflow.helpers.ts.
 import { describe, expect, test } from 'vitest';
 import {
-  attestedRef,
+  attestedTrust,
   events,
   heads,
   judge,
@@ -24,7 +24,7 @@ describe('§7 A14 promotion needs the D11 authorization (both postures, both sid
     const subject = heads['exfil-gate']!;
     const out = await judge(
       prSubject(subject, {
-        trustRef: attestedRef(),
+        trustRef: attestedTrust,
         pr: PR,
         repository: 'o/r',
         ownerId: OWNER_ID,

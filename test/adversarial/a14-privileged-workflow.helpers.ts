@@ -228,7 +228,7 @@ let root: string;
 let repo: string;
 let eventsDir: string;
 let trust: string;
-let attestedTrust: string;
+export let attestedTrust: string;
 let savedPath: string | undefined;
 
 /** Write every spec as one commit per branch with ONE `git fast-import`. */
@@ -388,9 +388,6 @@ function ledgerFor(head: string): string {
     },
   });
 }
-
-/** The C3-attested trust ref (readable once the fixture's beforeAll has run). */
-export const attestedRef = (): string => attestedTrust;
 
 /**
  * Build this test file's scratch repository. Every importing test file calls
