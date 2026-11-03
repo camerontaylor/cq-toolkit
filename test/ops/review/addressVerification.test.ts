@@ -378,6 +378,28 @@ describe('review.address closure evidence verifier', () => {
     expect(result.checks[3]?.detail).toContain('PARTIAL_MODE');
   });
 
+  test.each([false, true])('modified declaration with surviving trigger=%s', (survives) => {
+    const before = 'export function add(a, b) { return a - b; }';
+    const after = survives
+      ? 'export function add(a, b) { return a - b; /* still broken */ }'
+      : 'export function add(a, b) { return a + b; }';
+    const result = verifyClosureEvidence(
+      makePacket({
+        finding: {
+          id: 'arithmetic',
+          text: '"a - b" subtracts rather than adds',
+          file: 'src/config.ts',
+          line: 1,
+        },
+        before,
+        after,
+        patch: replacementPatch(before, after),
+      }),
+    );
+    expect(result.verdict).toBe(survives ? 'unresolved' : 'resolved');
+    if (survives) expect(result.reason).toBe('deleted-trigger-survives');
+  });
+
   test('a removed declaration re-declared in after is unresolved', () => {
     const finding = {
       id: 'F2',
