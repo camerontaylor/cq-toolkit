@@ -123,6 +123,43 @@ describe('governed journal v2 + resume', () => {
   );
 
   test(
+    'resume pins the parent for previously failed jobs despite a changed launcher',
+    async () => {
+      const seen: Array<{ jobId: string; parent: string | undefined }> = [];
+      let fail = true;
+      const probe = async (raw: unknown): Promise<OpResult<unknown>> => {
+        const jobId = (raw as { jobId: string }).jobId;
+        seen.push({ jobId, parent: currentJobContext()?.info.correlation?.parentWorkId });
+        if (jobId === 'j2' && fail) return { status: 'failed', error: 'retry on resume' };
+        return { status: 'ok', value: {} };
+      };
+      const plan = independentPlan('plan-parent-retry', 2, 'probe');
+      const run = (resume: boolean) =>
+        runPlan(
+          plan,
+          { concurrency: 1, stopOnError: false, journalDir: dir, resume },
+          viewWith(entry('probe', probe)),
+          { governor: createGovernor({ maxUsd: 5 }), allowAdvisory: true },
+        );
+      vi.stubEnv('CQ_WORK_ID', 'original-parent');
+      await run(false);
+      fail = false;
+      vi.stubEnv('CQ_WORK_ID', 'changed-parent');
+      const resumed = await run(true);
+      expect(seen).toEqual([
+        { jobId: 'j1', parent: 'original-parent' },
+        { jobId: 'j2', parent: 'original-parent' },
+        { jobId: 'j2', parent: 'original-parent' },
+      ]);
+      expect(jobFinishes(await openRunLog(dir).read(resumed.runId))).toMatchObject([
+        { jobId: 'j1', parentWorkId: 'original-parent' },
+        { jobId: 'j2', parentWorkId: 'original-parent' },
+      ]);
+    },
+    journalEnclosure(2),
+  );
+
+  test(
     'job correlation names the launching Paseo agent as parent; explicit CQ_* wins (session-log 1.3)',
     async () => {
       const seen: (string | undefined)[] = [];
