@@ -33,8 +33,9 @@ import { execFileSync } from 'node:child_process';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, test } from 'vitest';
+import { describe, expect, test, vi } from 'vitest';
 import { makeGhRunner } from '../../../src/adapters/forge-github/gh.js';
+import * as addressModule from '../../../src/ops/review/address.js';
 import { registry } from '../../../src/ops/review/registry.js';
 
 /** The op result shape the adapters fold to (loose, for assertions). */
@@ -200,6 +201,50 @@ describe('review family registry entries', () => {
       schema.safeParse({ repoRoot: '/repo', target: 'main', base: '1234567abcdef0' }).success,
     ).toBe(true);
     expect(schema.safeParse({ repoRoot: '/repo', base: 'origin/main' }).success).toBe(false);
+  });
+
+  test.each(['origin/main', 'xyz1234', '123456', 'a'.repeat(65)])(
+    'review.address rejects malformed base %s',
+    (base) => {
+      const entry = entryByName('review.address');
+      expect(entry.inputSchema.safeParse({ ...minimalInput('review.address'), base }).success).toBe(
+        false,
+      );
+    },
+  );
+
+  test.each(['abcdef0', 'A'.repeat(40), 'b'.repeat(64)])(
+    'review.address accepts hexadecimal base %s',
+    (base) => {
+      expect(
+        entryByName('review.address').inputSchema.safeParse({
+          ...minimalInput('review.address'),
+          base,
+        }).success,
+      ).toBe(true);
+    },
+  );
+
+  test('review.address forwards the dispatch alias notice sink to its driver factory', async () => {
+    const sink = vi.fn();
+    const constructor = vi.spyOn(addressModule, 'makeReviewAddress');
+    try {
+      await entryByName('review.address').importer({ onDeprecatedAlias: sink });
+      const drivers = constructor.mock.calls.at(-1)?.[0]?.drivers;
+      expect(drivers).toBeDefined();
+      // Resolution emits the notice before any provider request; no worker runs.
+      try {
+        drivers?.resolve({ modelSpec: { provider: 'ai-sdk', model: 'fixture' }, role: 'reviewer' });
+      } catch {
+        /* credentials may be absent */
+      }
+      expect(sink).toHaveBeenCalledOnce();
+      expect(sink.mock.calls[0]?.[0]).toContain('deprecated');
+      await entryByName('review.address').importer();
+      expect(constructor.mock.calls.at(-1)?.[0]?.drivers).toBeDefined();
+    } finally {
+      constructor.mockRestore();
+    }
   });
 
   test('the classifyThreads mirror rejects an unknown key INSIDE the state too', () => {
