@@ -68,7 +68,9 @@ describe('selectAffected', () => {
     const suites = [
       'test/api-report.test.mjs',
       'test/cli/driver-alias-notice.test.ts',
-      'test/driver/harness-parity.test.ts',
+      'test/driver/harness-parity.invalid-input.test.ts',
+      'test/driver/harness-parity.level1-calltool-result.test.ts',
+      'test/driver/harness-parity.run-env.test.ts',
       'test/driver/served-model-sites.test.ts',
       'test/driver/claude-code/cli.test.ts',
       'test/harness/mcp-bin.test.ts',
@@ -88,7 +90,9 @@ describe('selectAffected', () => {
       'test/ops/gates/protectedPaths.test.ts',
     ]);
     expect(pick('src/kernel/governor.ts')).toEqual([
-      'test/driver/harness-parity.test.ts',
+      'test/driver/harness-parity.invalid-input.test.ts',
+      'test/driver/harness-parity.level1-calltool-result.test.ts',
+      'test/driver/harness-parity.run-env.test.ts',
       'test/harness/mcp-bin.test.ts',
       'test/kernel/driver-hygiene.test.ts',
       'test/ops/gates/protectedPaths.test.ts',
@@ -110,7 +114,9 @@ describe('selectAffected', () => {
     expect(pick('src/harness/mcp/server.ts')).toEqual([
       'test/cli/driver-alias-notice.test.ts',
       'test/driver/claude-code/cli.test.ts',
-      'test/driver/harness-parity.test.ts',
+      'test/driver/harness-parity.invalid-input.test.ts',
+      'test/driver/harness-parity.level1-calltool-result.test.ts',
+      'test/driver/harness-parity.run-env.test.ts',
       'test/harness/mcp-bin.test.ts',
       'test/ops/gates/protectedPaths.test.ts',
     ]);

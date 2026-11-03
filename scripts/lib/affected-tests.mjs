@@ -57,7 +57,10 @@ export const NON_IMPORT_MAP = [
   // fixture) by path: their closures, less what the suites import.
   [
     /^src\/(harness\/mcp\/|kernel\/governor)/,
-    [/^test\/harness\/mcp-bin\.test\.ts$/, /^test\/driver\/harness-parity\.test\.ts$/],
+    [
+      /^test\/harness\/mcp-bin\.test\.ts$/,
+      /^test\/driver\/harness-parity\.(invalid-input|level1-calltool-result|run-env)\.test\.ts$/,
+    ],
   ],
   [
     /^src\/(cli\.ts$|cli\/|harness\/|kernel\/(journal|lanes|manifest|output|runner)\.ts$|plans\/registry\.ts$|registry\/)/,
