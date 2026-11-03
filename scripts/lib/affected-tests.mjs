@@ -98,7 +98,7 @@ export const NON_IMPORT_MAP = [
       /^lint\//,
       /^test\/scripts\/(oxlint-boundaries|static-conformance|tooling-commands)\.test\.ts$/,
       /^test\/ops\/gates\/protectedPaths(?:\.[\w-]+)?\.test\.ts$/,
-      /^test\/ops\/sweep\/unit-registry\.test\.ts$/,
+      /^test\/ops\/sweep\/unit-registry\.staging-policy\.test\.ts$/,
     ],
   ],
   // Workflows and composite actions: the suites that read them from disk.
