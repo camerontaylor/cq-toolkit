@@ -53,10 +53,10 @@ describe('observation redaction (T12)', () => {
 
   it('repo identifiers expose only the opaque digest', () => {
     const id = repoIdFromRemote('ssh://git@github.com/camerontaylor/cq-toolkit.git');
-    expect(id).toMatch(/^sha256:[0-9a-f]{64}$/);
-    expect(id).not.toContain('camerontaylor');
+    expect(id.repoId).toMatch(/^sha256:[0-9a-f]{64}$/);
+    expect(id.repoId).not.toContain('camerontaylor');
     expect(id).toEqual(repoIdFromRemote('ssh://github.com/camerontaylor/cq-toolkit.git'));
-    expect(repoIdFromRemote(undefined)).toEqual(null);
+    expect(repoIdFromRemote(undefined)).toEqual({ repoId: null, reason: 'no-remote' });
   });
 });
 

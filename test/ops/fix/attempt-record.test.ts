@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   finishAttempt,
+  MAX_SANITIZED_CHARS,
   repoIdFromRemote,
   sanitizeObservation,
   STOP_CODE_CLASS,
@@ -12,6 +13,24 @@ const base = {
   invocation: 'edit',
   model: { model: 'fake-model', provider: 'fake' },
 };
+
+/** Literal ADR-0008 stop-code table; STOP_CODE_CLASS must equal it exactly. */
+const ADR_STOP_TABLE: ReadonlyArray<readonly [string, string]> = [
+  ['spawn', 'infrastructure'],
+  ['dns', 'infrastructure'],
+  ['transport', 'infrastructure'],
+  ['provider-outage', 'infrastructure'],
+  ['unclassified', 'infrastructure'],
+  ['wall-cap', 'budget'],
+  ['token-cap', 'budget'],
+  ['human-deferred', 'human'],
+  ['approval-expired', 'human'],
+  ['validation-failed', 'terminal'],
+  ['model-output', 'terminal'],
+  ['nochange', 'terminal'],
+  ['completed', 'terminal'],
+  ['provider-retryable', 'retriable'],
+];
 
 describe('sanitizeObservation', () => {
   it('T12 round-trip', () => {
@@ -63,6 +82,66 @@ describe('sanitizeObservation', () => {
       delete process.env.FAKE_DB_PASSWORD;
     }
   });
+
+  it('post-redaction pass kills a secret the stripping mangled (ZZ_TOKEN=ss@host…)', () => {
+    process.env.ZZ_TOKEN = 'ss@host.example';
+    try {
+      const out = sanitizeObservation('https://u:p@ss@host.example/x');
+      expect(out).toEqual('https://[redacted]/x');
+    } finally {
+      delete process.env.ZZ_TOKEN;
+    }
+  });
+
+  it('prose ?, #123 and ## survive; only URL tokens are cut', () => {
+    const out = sanitizeObservation(
+      'What happened? The worker saw #123 and ## heading text. See https://u:tok@docs.example/g?x=1 for details.',
+    );
+    expect(out).toContain('What happened?');
+    expect(out).toContain('#123');
+    expect(out).toContain('## heading');
+    expect(out).toContain('https://docs.example/g');
+    expect(out).not.toContain('tok@');
+    expect(out).not.toContain('?x=1');
+  });
+
+  it('both URLs in a multi-URL string are kept and stripped', () => {
+    const out = sanitizeObservation(
+      'compare https://a:1@one.example/p?x=1 with https://b:2@two.example/q#f',
+    );
+    expect(out).toContain('https://one.example/p');
+    expect(out).toContain('https://two.example/q');
+    expect(out).not.toContain('?x=1');
+    expect(out).not.toContain('#f');
+  });
+
+  it('fragment-only credentials are stripped (https://h/cb#access_token=X)', () => {
+    const out = sanitizeObservation('cb https://h.example/cb#access_token=X');
+    expect(out).toEqual('cb https://h.example/cb');
+    expect(out).not.toContain('access_token');
+  });
+
+  it('__proto__ keys pass through as data on null-prototype objects', () => {
+    const input = JSON.parse('{"__proto__": {"stopReason": "safe"}}') as Record<string, unknown>;
+    const out = sanitizeObservation(input) as Record<string, unknown>;
+    expect(Object.keys(out)).toContain('__proto__');
+    expect((out['__proto__'] as Record<string, unknown>).stopReason).toEqual('safe');
+  });
+
+  it('caps runaway strings with a truncation marker', () => {
+    const out = sanitizeObservation('x'.repeat(MAX_SANITIZED_CHARS + 10));
+    expect(out.length).toBeLessThan(MAX_SANITIZED_CHARS + 40);
+    expect(out).toMatch(/…\[truncated 10 chars\]$/);
+  });
+
+  it('is linear on 200k-char adversarial input (well under a 5s bound)', () => {
+    const adversarial = 'a://'.repeat(50_000);
+    const start = Date.now();
+    const out = sanitizeObservation(adversarial) as string;
+    const elapsedMs = Date.now() - start;
+    expect(out.length).toBeLessThanOrEqual(MAX_SANITIZED_CHARS + 40);
+    expect(elapsedMs).toBeLessThan(5000);
+  });
 });
 
 describe('credential stripping (critic table)', () => {
@@ -75,8 +154,8 @@ describe('credential stripping (critic table)', () => {
       'https://host.example/x',
     ],
     [
-      'base64 slash inside the secret',
-      'https://user:YWJjZA==@host.example/x',
+      'base64 with slashes inside the secret',
+      'https://user:YWJjZA/+@host.example/x',
       'https://host.example/x',
     ],
     ['fragment stripped with query', 'https://host.example/x?a=1#frag', 'https://host.example/x'],
@@ -98,11 +177,18 @@ describe('credential stripping (critic table)', () => {
     ['equals-boundary prefix', 'export CFG=tok@host.example:', 'export host.example:'],
     ['plus-tagged user', 'user+tag@host.example:', 'host.example:'],
     [
-      'newline inside scheme userinfo',
+      'newline inside scheme userinfo splits the token',
       'https://u\nser:pw@host.example/x',
-      'https://host.example/x',
+      'https://u\nhost.example/x',
     ],
     ['uppercase scheme', 'HTTPS://User:Tok@Host.Example/Path', 'HTTPS://Host.Example/Path'],
+    [
+      'AKIA-style secret with plus and equals',
+      'https://AKIA:abc/def+xyz==@host.example/x',
+      'https://host.example/x',
+    ],
+    ['fatal prefix', 'fatal: user:tok@host.example refused', 'fatal: host.example refused'],
+    ['greedy to last @ in free text', 'log user:p@ss@host.example: done', 'log host.example: done'],
     [
       'SHA unchanged',
       'sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
@@ -111,42 +197,64 @@ describe('credential stripping (critic table)', () => {
   ])('%s', (_name, input, expected) => {
     expect(strip(input)).toEqual(expected);
   });
+
+  it('package-spec over-strip is documented over-matching (vitest@5.0.0)', () => {
+    // Deliberate: `name@version:` is indistinguishable from user:token@host
+    // in free text, and failing closed is preferred over leaking.
+    expect(strip('run vitest@5.0.0:')).toEqual('run 5.0.0:');
+  });
 });
 
 describe('repoIdFromRemote (canonical host/path)', () => {
   const spellings = [
     'https://user:tok@GitHub.com/camerontaylor/cq-toolkit',
     'https://github.com/camerontaylor/cq-toolkit/',
+    'https://github.com//camerontaylor/cq-toolkit/',
     'ssh://git@github.com:22/camerontaylor/cq-toolkit.git',
     'git@github.com:camerontaylor/cq-toolkit.git',
   ];
   const ids = spellings.map((remote) => repoIdFromRemote(remote));
 
-  it('https, scp, ssh://, .git, trailing slash and case give one digest', () => {
-    expect(new Set(ids).size).toEqual(1);
-    expect(ids[0]).toMatch(/^sha256:[0-9a-f]{64}$/);
+  it('https, scp, ssh://, .git, repeated/trailing slash and case give one digest', () => {
+    expect(new Set(ids.map((r) => r.repoId)).size).toEqual(1);
+    expect(ids[0]?.repoId).toMatch(/^sha256:[0-9a-f]{64}$/);
   });
 
   it('a credential never changes the digest and the raw remote never persists', () => {
     expect(repoIdFromRemote('https://github.com/camerontaylor/cq-toolkit')).toEqual(ids[0]);
-    expect(ids[0]).not.toContain('github');
-    expect(ids[0]).not.toContain('camerontaylor');
+    expect(ids[0]?.repoId).not.toContain('github');
+    expect(ids[0]?.repoId).not.toContain('camerontaylor');
   });
 
-  it('no remote gives null', () => {
-    expect(repoIdFromRemote(null)).toEqual(null);
-    expect(repoIdFromRemote(undefined)).toEqual(null);
-    expect(repoIdFromRemote('   ')).toEqual(null);
+  it('no remote vs unparseable remote are distinguished', () => {
+    expect(repoIdFromRemote(null)).toEqual({ repoId: null, reason: 'no-remote' });
+    expect(repoIdFromRemote(undefined)).toEqual({ repoId: null, reason: 'no-remote' });
+    expect(repoIdFromRemote('   ')).toEqual({ repoId: null, reason: 'no-remote' });
+    expect(repoIdFromRemote('not a remote at all')).toEqual({
+      repoId: null,
+      reason: 'unparseable-remote',
+    });
   });
 });
 
 describe('finishAttempt', () => {
-  it('classifies every STOP_CODE_CLASS row by table only', () => {
-    for (const [code, expected] of STOP_CODE_CLASS) {
+  it('matches the literal ADR stop-code table exactly', () => {
+    expect([...STOP_CODE_CLASS.entries()]).toEqual(ADR_STOP_TABLE);
+  });
+
+  it('classifies every ADR row by table only', () => {
+    for (const [code, expected] of ADR_STOP_TABLE) {
       const record = finishAttempt({ ...base, stopCode: code, stopReason: 'x' });
       expect(record.stopCode).toEqual(code);
       expect(record.class).toEqual(expected);
     }
+  });
+
+  it('a bare write-denied code is unclassified, not the writeDenied variant', () => {
+    const record = finishAttempt({ ...base, stopCode: 'write-denied', stopReason: 'x' });
+    expect(record.stopCode).toEqual('unclassified');
+    expect(record.class).toEqual('infrastructure');
+    expect(record.error?.code).toEqual('write-denied');
   });
 
   it('T12 round-trip: sanitized full payload parses against the strict schema', () => {
@@ -218,5 +326,12 @@ describe('finishAttempt', () => {
     const record = finishAttempt({ ...base, completed: true, stopCode: 'nochange' });
     expect(record.stopCode).toEqual('nochange');
     expect(record.class).toEqual('terminal');
+  });
+
+  it('bare unclassified code goes through the unknown-certainty branch', () => {
+    const record = finishAttempt({ ...base, stopCode: 'unclassified' });
+    expect(record.stopCode).toEqual('unclassified');
+    expect(record.class).toEqual('infrastructure');
+    expect(record.error?.certainty).toEqual('unknown');
   });
 });

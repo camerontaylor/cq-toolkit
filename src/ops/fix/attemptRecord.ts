@@ -5,9 +5,12 @@
 // otherwise cut an environment secret mid-value (a `*_URL` secret survives as
 // its stripped host form; a `*_PASSWORD` containing `@` or `:` leaks its
 // tail), so the pre-pass removes whole known secret values first and the
-// post-pass catches any value the stripping mangled. The archive repoId is a
-// digest of the canonical credential-free `host/path` form, never the
-// hostname/path itself. No journal writes here — writers land in T30/T31.
+// post-pass catches any value the stripping mangled. Each sanitized string is
+// capped at MAX_SANITIZED_CHARS so a hostile input cannot run the regex
+// pipeline unboundedly; the overflow is marked, never silently dropped. The
+// archive repoId is a digest of the canonical credential-free `host/path`
+// form, never the hostname/path itself. No journal writes here — writers land
+// in T30/T31.
 import { createHash } from 'node:crypto';
 import { redactSensitiveText } from '../../driver/error-text.js';
 import type { ModelSpec } from '../../driver/types.js';
@@ -24,7 +27,9 @@ import { AttemptFinishedPayloadSchema } from '../../kernel/schema.js';
 /**
  * Stop-code classification table (ADR-0008): fixed mapping, never inferred by
  * substring-matching human prose. Unrecognized codes become infrastructure
- * with stopCode `unclassified`.
+ * with stopCode `unclassified`. `write-denied` is intentionally absent: it is
+ * produced only through the {@link FinishAttemptStop} writeDenied variant,
+ * whose class follows the existing gate verdict rather than this table.
  */
 export const STOP_CODE_CLASS: ReadonlyMap<string, AttemptStopClass> = new Map([
   ['spawn', 'infrastructure'],
@@ -40,54 +45,89 @@ export const STOP_CODE_CLASS: ReadonlyMap<string, AttemptStopClass> = new Map([
   ['model-output', 'terminal'],
   ['nochange', 'terminal'],
   ['completed', 'terminal'],
-  ['write-denied', 'terminal'],
   ['provider-retryable', 'retriable'],
 ]);
+
+/** Per-string cap for sanitized output; overflow is marked, not dropped. */
+export const MAX_SANITIZED_CHARS = 64 * 1024;
 
 /**
  * Strip URL userinfo/query/fragment and SCP-style (or bare email-like)
  * `user[:secret]@host` prefixes from a text fragment.
  *
  * Deliberate over-matching: a bare `name@host` in free text (an email
- * address) is also stripped, because a credential prefix and an email are
- * indistinguishable without scheme context and the sanitizer fails closed.
+ * address, or a package spec like `vitest@5.0.0` that happens to end in a
+ * colon-terminated token) is also stripped, because a credential prefix is
+ * indistinguishable from these without scheme context and the sanitizer fails
+ * closed. Credential leakage is worse than a mangled spec string.
  */
 function stripCredentialText(text: string): string {
-  // Scheme authority: credentials live only inside the authority, which ends
-  // at `/`, `?` or `#`. The userinfo is everything up to the LAST `@` (base64
-  // padding `/` and `@`-bearing secrets may appear inside the userinfo), and
-  // a newline inside the userinfo must not end the match.
-  let out = text.replace(
-    /([a-z][a-z0-9+.-]*:\/\/)([^/?#]*)/gi,
-    (_match, scheme: string, authority: string) => {
-      const at = authority.lastIndexOf('@');
-      return at === -1 ? scheme + authority : scheme + authority.slice(at + 1);
-    },
-  );
-  // Query and fragment: run to a closing quote/bracket/brace/comma delimiter
-  // or end of text, so a trailing sentence boundary survives.
-  out = out.replace(/[?#][^)\]}'",]*/g, '');
-  // SCP and free-text credential prefixes: `[user][:secret]@host`, including
-  // `x-access-token:ghp_x@github.com:`, `=tok@host:`, `user+tag@host:` and
-  // `user:token@host` with no trailing colon. The leading boundary character
-  // is preserved.
+  // Stage 1 — schemed URL tokens. The token runs to whitespace, or a quote,
+  // bracket, semicolon or comma delimiter, so prose `?`/`#` (questions,
+  // issue references, markdown headings) and a second URL in the same string
+  // are never touched. The lookbehind anchors the scheme so a run of `://`
+  // inside a longer token cannot restart the match — without it the scan is
+  // quadratic on adversarial input. Inside the token the cut is at the LAST
+  // `@` (base64 `=`/`/` and `@`-bearing secrets appear inside userinfo, so
+  // this fails closed), then any `?`/`#` suffix is dropped.
+  let out = '';
+  let last = 0;
+  for (const m of text.matchAll(/(?<![a-z0-9+.-])[a-z][a-z0-9+.-]*:\/\/[^\s'"()[\]{}<>,;]*/gi)) {
+    const token = m[0];
+    const schemeM = /^[a-z][a-z0-9+.-]*:\/\//i.exec(token);
+    const scheme = schemeM === null ? '' : schemeM[0];
+    let replacement: string;
+    const at = token.lastIndexOf('@');
+    if (at === -1) {
+      const rest = token.slice(scheme.length);
+      const headM = /^[^/?#]*/.exec(rest);
+      const headEnd = headM === null ? rest.length : headM[0].length;
+      const tail = rest.slice(headEnd);
+      const q = /[?#]/.exec(tail);
+      replacement = q === null ? token : scheme + rest.slice(0, headEnd + q.index);
+    } else {
+      let rest = token.slice(at + 1);
+      const q = /[?#]/.exec(rest);
+      if (q !== null) rest = rest.slice(0, q.index);
+      replacement = scheme + rest;
+    }
+    out += text.slice(last, m.index) + replacement;
+    last = m.index + token.length;
+  }
+  out += text.slice(last);
+  // Stage 2 — SCP and free-text credential prefixes: `[user][:secret]@host`,
+  // including `x-access-token:ghp_x@github.com:`, `user:p@ss@host:` (the
+  // repeated `user:secret@` groups strip greedily to the last `@` in the run)
+  // and `user:token@host` with no trailing colon. The leading boundary
+  // character is preserved. A scheme URL never matches here: the character
+  // before its userinfo is `:`, not a boundary.
   out = out.replace(
-    /(^|[\s'"([{=,;])(?:[^\s@'"()[\]{},:]+(?::[^\s@'"()[\]{},:]*)?)@([\w.-]+(?::\d+)?)/g,
+    /(^|[\s'"([{=,;])(?:[^\s@'"()[\]{},:]+(?::[^\s@'"()[\]{},:]*)?@)+([\w.-]+(?::\d+)?)/g,
     (_match, boundary: string, host: string) => boundary + host,
   );
   return out;
 }
 
+/** Cap a sanitized string, marking (not hiding) the overflow size. */
+function capSanitized(text: string): string {
+  if (text.length <= MAX_SANITIZED_CHARS) return text;
+  const overflow = text.length - MAX_SANITIZED_CHARS;
+  return `${text.slice(0, MAX_SANITIZED_CHARS)} …[truncated ${overflow} chars]`;
+}
+
 /**
  * Recursively sanitize a persisted observation: redact environment secrets,
  * strip credential URL/SCP prefixes, then redact again so a secret the
- * stripping mangled cannot survive as a partial value. Sanitized objects and
- * arrays use null prototypes so `__proto__`-style keys pass through as data.
- * Non-JSON values are outside the observation contract and pass through.
+ * stripping mangled cannot survive as a partial value; the result is capped at
+ * {@link MAX_SANITIZED_CHARS} per string. Sanitized objects and arrays use
+ * null prototypes so `__proto__`-style keys pass through as data. Non-JSON
+ * values are outside the observation contract and pass through.
  */
 export function sanitizeObservation<T>(value: T): T {
   if (typeof value === 'string') {
-    return redactSensitiveText(stripCredentialText(redactSensitiveText(value))) as unknown as T;
+    return capSanitized(
+      redactSensitiveText(stripCredentialText(redactSensitiveText(value))),
+    ) as unknown as T;
   }
   if (Array.isArray(value)) {
     const out: unknown[] = [];
@@ -106,49 +146,74 @@ export function sanitizeObservation<T>(value: T): T {
 function canonicalRepoPath(remote: string): string | null {
   let rest = remote.trim();
   if (rest === '') return null;
-  // Drop userinfo inside a scheme authority, then any query/fragment.
-  rest = rest.replace(
-    /([a-z][a-z0-9+.-]*:\/\/)([^/?#]*)/i,
-    (_match, scheme: string, authority: string) => {
-      const at = authority.lastIndexOf('@');
-      return at === -1 ? scheme + authority : scheme + authority.slice(at + 1);
-    },
-  );
-  rest = rest.replace(/[?#][^)\]}'",]*/g, '');
-  const scheme = /^[a-z][a-z0-9+.-]*:\/\//i.exec(rest);
+  // Strip userinfo: scan the anchored scheme procedurally (linear, ReDoS-safe
+  // — see stripCredentialText) and cut the authority at the LAST `@`.
+  const schemeM = /(?<![a-z0-9+.-])[a-z][a-z0-9+.-]*:\/\//i.exec(rest);
+  if (schemeM !== null) {
+    const schemeEnd = schemeM.index + schemeM[0].length;
+    let end = schemeEnd;
+    while (end < rest.length) {
+      const ch: string | undefined = rest[end];
+      if (ch === undefined || /\s/.test(ch) || ch === '?' || ch === '#') break;
+      end++;
+    }
+    const authority = rest.slice(schemeEnd, end);
+    const at = authority.lastIndexOf('@');
+    rest =
+      rest.slice(0, schemeEnd) +
+      (at === -1 ? authority : authority.slice(at + 1)) +
+      rest.slice(end);
+  }
+  // Cut query/fragment.
+  const q = /[?#]/.exec(rest);
+  if (q !== null) rest = rest.slice(0, q.index);
+  const hasScheme = schemeM !== null && /^[a-z][a-z0-9+.-]*:\/\//i.test(rest);
   let host: string;
   let path: string;
-  if (scheme !== null) {
-    rest = rest.slice(scheme[0].length);
-    const split = /^([^/?#]+)(?:\/([\s\S]*))?$/.exec(rest);
+  if (hasScheme) {
+    const afterScheme = rest.replace(/^[a-z][a-z0-9+.-]*:\/\//i, '');
+    const split = /^([^/?#\s]+)(?:\/([\s\S]*))?$/.exec(afterScheme);
     if (split === null) return null;
     host = split[1] ?? '';
     path = split[2] ?? '';
   } else {
     // SCP form: `[user@]host[:port]:path` (the host/path separator is `:`).
-    const scp = /^(?:[^\s@/:]+@)?([\w.-]+(?::\d+)?):([\s\S]+)$/.exec(rest);
+    // Matched only at the start of the (whitespace-free) remote string.
+    const scp = /^(?:[^\s@/:]+@)?([\w.-]+)(?::(\d+))?:([^\s]+)$/.exec(rest);
     if (scp === null) return null;
     host = scp[1] ?? '';
-    path = scp[2] ?? '';
+    path = scp[3] ?? '';
   }
   host = host.toLowerCase().replace(/:\d+$/, '');
-  path = path.replace(/\/+$/, '').replace(/\.git$/i, '');
+  path = path
+    .replace(/^\/+/, '')
+    .replace(/\/{2,}/g, '/')
+    .replace(/\/+$/, '')
+    .replace(/\.git$/i, '');
   return path === '' ? host : `${host}/${path}`;
 }
+
+/** Why no repoId was produced for a remote that was supplied. */
+export type RepoIdFailure = 'no-remote' | 'unparseable-remote';
 
 /**
  * Archive-safe repoId: `sha256:` + SHA-256 of the canonical credential-free
  * remote form (`host/path`: credentials stripped, scheme and port dropped,
- * host lowercased, trailing `/` and `.git` removed). https, ssh:// and SCP
- * spellings of the same repository hash identically and the raw remote —
- * hostname, path or credential — is never persisted. No remote gives null
- * (reported as unavailable with availability).
+ * host lowercased, repeated/trailing `/` and `.git` removed). https, ssh://
+ * and SCP spellings of the same repository hash identically and the raw
+ * remote — hostname, path or credential — is never persisted. No remote gives
+ * `{ repoId: null, reason: 'no-remote' }`; a remote that exists but does not
+ * parse gives `{ repoId: null, reason: 'unparseable-remote' }`, so absence is
+ * never confused with a malformed value.
  */
-export function repoIdFromRemote(remote: string | null | undefined): string | null {
-  if (remote === null || remote === undefined) return null;
+export function repoIdFromRemote(
+  remote: string | null | undefined,
+): { repoId: string; reason?: undefined } | { repoId: null; reason: RepoIdFailure } {
+  if (remote === null || remote === undefined) return { repoId: null, reason: 'no-remote' };
+  if (remote.trim() === '') return { repoId: null, reason: 'no-remote' };
   const canonical = canonicalRepoPath(remote);
-  if (canonical === null) return null;
-  return `sha256:${createHash('sha256').update(canonical, 'utf8').digest('hex')}`;
+  if (canonical === null) return { repoId: null, reason: 'unparseable-remote' };
+  return { repoId: `sha256:${createHash('sha256').update(canonical, 'utf8').digest('hex')}` };
 }
 
 const NOT_COLLECTED: AvailabilityRecord = Object.freeze({
@@ -232,6 +297,10 @@ function availabilityWith(
  * an unrecognized code becomes infrastructure / `unclassified` with certainty
  * `unknown`, preserving the sanitized raw code in `error.code`. All text is
  * sanitized and the result is schema-validated before it is returned.
+ *
+ * Throws: a ZodError when an input value (for example a negative or
+ * non-integer count) fails the strict schema. Finally-path callers must catch
+ * it so the original attempt error is not masked.
  */
 export function finishAttempt(input: FinishAttemptInput): AttemptFinishedPayload {
   let stopCode: string;
@@ -251,13 +320,17 @@ export function finishAttempt(input: FinishAttemptInput): AttemptFinishedPayload
     stopClass = STOP_CODE_CLASS.get(stopCode) ?? 'terminal';
   } else {
     const raw = (input as { stopCode?: string }).stopCode;
-    const classified = raw !== undefined ? STOP_CODE_CLASS.get(raw) : undefined;
+    // Bare 'unclassified' also routes through the unknown-certainty branch so
+    // its evidence shape matches every other unrecognized code.
+    const classified =
+      raw !== undefined && raw !== 'unclassified' ? STOP_CODE_CLASS.get(raw) : undefined;
     if (raw !== undefined && classified !== undefined) {
       stopCode = raw;
       stopClass = classified;
     } else {
       // Unrecognized live error: infrastructure / unclassified with certainty
       // unknown; the sanitized raw code is preserved, never prose-matched.
+      // A bare 'unclassified' code takes this same branch (certainty unknown).
       stopCode = 'unclassified';
       stopClass = 'infrastructure';
       const rawCode = error?.code ?? raw ?? '';
