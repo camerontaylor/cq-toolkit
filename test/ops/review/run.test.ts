@@ -2419,6 +2419,7 @@ it.each(['full', 'uncommitted'] as const)(
       repo.commitAll('RUN_CONTEXT_COMMITTED\n\n' + 'x'.repeat(5000));
       await repo.write('src/dirty-context.ts', 'export const dirty = 1;\n');
       repo.git('add', 'src/dirty-context.ts');
+      await repo.write('src/untracked-context.ts', 'export const untracked = true;');
       const review = vi.fn<
         typeof import('../../../src/ops/review/agentReviewer.js').runAgentReviewer
       >(async () => ({ status: 'needs-human' as const, reason: 'fixture context captured' }));
@@ -2435,6 +2436,7 @@ it.each(['full', 'uncommitted'] as const)(
       expect(input[1].intent!.length).toBeLessThanOrEqual(4000);
       expect(input[1].fileList!.length).toBeLessThanOrEqual(4000);
       expect(input[1].fileList).toContain('src/dirty-context.ts');
+      expect(input[1].fileList).toContain('(untracked)\t"src/untracked-context.ts"');
       if (scope === 'full') {
         expect(input[1].intent).toContain('RUN_CONTEXT_COMMITTED');
         expect(input[1].intent).toContain('[truncated:');

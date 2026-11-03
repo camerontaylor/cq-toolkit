@@ -516,6 +516,7 @@ export function makeReviewRun(
               state.head,
               input.uncommitted ? 'uncommitted' : 'full',
               { ...(deadline.signal ? { signal: deadline.signal } : {}), remainingWallMs },
+              state.untracked,
             );
             if (!context.ok && context.fatal)
               return { status: 'failed', error: `review.run: ${context.reason}` };
