@@ -2231,10 +2231,14 @@ def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
         item["run"] = None
         if cls["counted"]:
             # reviewed_tip advances ONLY on a counted review of the pinned range
-            # (docs/multi-repo.md push discovery); a deferred-split row is an
-            # explicit follow-up part, not missing scope, and never blocks the tip.
-            q.setdefault("push_discovery", {}).setdefault(item_repo(item), {})["reviewed_tip"] = \
-                item["capture"]["target"]
+            # (docs/multi-repo.md push discovery). A follow-up split part covers
+            # a path SUBSET of its range: it never advances the tip, or a later
+            # coalesce could drop the unreviewed remainder of that range.
+            record = q.setdefault("push_discovery", {}).setdefault(item_repo(item), {})
+            whole_range = not (item["subject"].get("paths_filter") or item.get("depends_on"))
+            reviewed = record.get("reviewed_tip")
+            if whole_range and reviewed in (None, item["subject"]["base"]):
+                record["reviewed_tip"] = item["capture"]["target"]
             item["failures"] = 0
             item["last_error"] = None
             item["state"] = "done"

@@ -381,6 +381,41 @@ class PushTest(unittest.TestCase):
                          followup["subject"]["paths_filter"])
         self.assertEqual(fplan["base"], followup["capture"]["base"])
 
+    def test_split_part_harvest_does_not_advance_the_reviewed_tip(self):
+        # A follow-up part (-p2) reviews a path SUBSET of its range. Harvesting
+        # it counted must not claim the whole tip, or a later push could
+        # coalesce away the unreviewed remainder of that range.
+        big = {f"f{n}.py": "x" * 256000 + "\n" for n in range(9)}
+        self.commit(self.foreign_origin, "big range", when=self.ago(2), files=big)
+        item = self.enroll_push(floor=self.iso_of(self.ago(36)), quiet_minutes=1)
+        self.prepare(item)
+        followup = next(i for i in self.q["items"] if i["id"] != item["id"])
+        self.launch(item)
+        self.harvest(item)
+        target = item["capture"]["target"]
+        self.assertEqual(self.q["push_discovery"][FOREIGN]["reviewed_tip"], target)
+        # The branch moves while p2 is still pending; discovery enrolls the
+        # whole T1..T2 range.
+        self.commit(self.foreign_origin, "later push", when=self.ago(minutes=10), files={"other.py": "o\n"})
+        self.discover()
+        whole = next(i for i in self.q["items"] if i["id"] not in (item["id"], followup["id"]))
+        self.assertEqual(whole["state"], "pending")
+        # p2 captures at the current tip but covers only its filtered paths:
+        # its counted harvest must leave the reviewed tip where it was.
+        self.launch(followup)
+        self.assertEqual([r["path"] for r in followup["capture"]["paths"]],
+                         followup["subject"]["paths_filter"])
+        self.harvest(followup)
+        self.assertEqual(followup["state"], "done")
+        self.assertEqual(self.q["push_discovery"][FOREIGN]["reviewed_tip"], target)
+        # The next range therefore starts at the reviewed tip, covering the
+        # whole remainder (including the paths p2 never reviewed).
+        c3 = self.commit(self.foreign_origin, "third push", when=self.ago(minutes=5), files={"third.py": "t\n"})
+        self.discover()
+        newest = next(i for i in self.q["items"]
+                      if i["id"] not in (item["id"], followup["id"], whole["id"]))
+        self.assertEqual((newest["subject"]["base"], newest["subject"]["head"]), (target, c3))
+
     def test_quiet_window_waits(self):
         self.repos[0] = self.cfg(floor=self.iso_of(self.ago(36)))
         self.commit(self.foreign_origin, "fresh work",
