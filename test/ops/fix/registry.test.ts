@@ -350,3 +350,16 @@ describe('fix-run report accounting', () => {
     expect(rows[1]).toMatchObject({ gate: 'broader', outcome: 'unfixed' });
   });
 });
+
+test('fix.run install hook is optional, argv-only and strict', () => {
+  const input = { repoRoot: '/fixture', source: 'tests', selector: { mode: 'workspace-all' } };
+  expect(FixRunInputSchema.parse(input).install).toBeUndefined();
+  const install = { command: 'node', args: ['install.cjs'], timeoutMs: 1000 };
+  expect(FixRunInputSchema.parse({ ...input, install }).install).toEqual(install);
+  for (const invalid of [
+    { ...install, shell: true },
+    { ...install, timeoutMs: 0 },
+    { command: 'node' },
+  ])
+    expect(FixRunInputSchema.safeParse({ ...input, install: invalid }).success).toBe(false);
+});

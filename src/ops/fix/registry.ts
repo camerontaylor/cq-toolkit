@@ -11,6 +11,13 @@ import type { FixRunInput } from './runFix.js';
 // run-correlation helper; not a registered op — pure allocation/adoption
 // over the correlation record, referenced here to keep the family's
 // registry coverage explicit).
+const SweepInstallSchema = z
+  .object({
+    command: z.string().min(1),
+    args: z.array(z.string()),
+    timeoutMs: z.number().int().positive().exactOptional(),
+  })
+  .strict();
 export const FixRunInputSchema = z
   .object({
     repoRoot: z.string().min(1),
@@ -29,7 +36,8 @@ export const FixRunInputSchema = z
     protectTests: z.boolean().default(false),
     concurrency: z.number().int().positive().default(1),
     runPrefix: z.string().min(1).exactOptional(),
-    base: z.string().min(1).default('HEAD'),
+    base: z.string().min(1).exactOptional(),
+    install: SweepInstallSchema.exactOptional(),
     journalDir: z.string().min(1).exactOptional(),
     maxTokens: z.number().int().positive().exactOptional(),
   })

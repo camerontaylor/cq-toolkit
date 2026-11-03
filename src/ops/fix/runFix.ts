@@ -8,7 +8,7 @@ import {
 import type { z } from 'zod';
 import { createHash, randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, rename, unlink } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import {
@@ -254,6 +254,46 @@ async function captureProvenance(
   return sanitizeObservation({ provenance, correlation });
 }
 
+/** Replace a report only after its complete sibling file has been written. */
+export async function writeAtomicFixReport(path: string, report: unknown): Promise<void> {
+  await mkdir(dirname(path), { recursive: true });
+  const temporary = `${path}.tmp-${randomUUID()}`;
+  try {
+    await writeFile(temporary, JSON.stringify(report, null, 2) + '\n', { flag: 'wx' });
+    await rename(temporary, path);
+  } finally {
+    await unlink(temporary).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== 'ENOENT') throw error;
+    });
+  }
+}
+
+/** Resolve PR targets separately from the local comparison revision. */
+export async function resolveFixPrBase(
+  repoRoot: string,
+  base?: string,
+): Promise<string | undefined> {
+  const git = async (...args: string[]) =>
+    (await execFileAsync('git', ['-C', repoRoot, ...args], { timeout: 10_000 })).stdout.trim();
+  try {
+    let ref = base;
+    if (ref === undefined || ref === 'HEAD') {
+      ref = await git('symbolic-ref', 'refs/remotes/origin/HEAD').catch(() =>
+        git('rev-parse', '--symbolic-full-name', '@{upstream}'),
+      );
+    }
+    const branch = ref
+      .replace(/^refs\/remotes\/origin\//, '')
+      .replace(/^origin\//, '')
+      .replace(/^refs\/heads\//, '');
+    await git('check-ref-format', `refs/heads/${branch}`);
+    await git('show-ref', '--verify', `refs/remotes/origin/${branch}`);
+    return branch;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Two-phase sweep composition; no kernel policy or taxonomy changes. */
 export function makeFixRun(deps: FixRunDeps = {}) {
   return async (input: FixRunInput): Promise<FixRunResult> => {
@@ -455,8 +495,7 @@ export function makeFixRun(deps: FixRunDeps = {}) {
       }
       Object.assign(report, sanitizeObservation(report));
       try {
-        await mkdir(dirname(report.reportPath), { recursive: true });
-        await writeFile(report.reportPath, JSON.stringify(report, null, 2) + '\n');
+        await writeAtomicFixReport(report.reportPath, report);
       } catch (error) {
         report.verdict = 'fail';
         return {
@@ -541,6 +580,12 @@ export function makeFixRun(deps: FixRunDeps = {}) {
         return await finish('needs-human', 'check cwd must be repository-relative');
       if (input.pr && input.proposeOnly)
         return await finish('needs-human', 'pr and proposeOnly cannot be combined');
+      const prBase = input.pr ? await resolveFixPrBase(repoRoot, input.base) : undefined;
+      if (input.pr && prBase === undefined)
+        return await finish(
+          'needs-human',
+          'PR publication requires a usable remote base branch; set base explicitly',
+        );
       const config = {
         repoRoot,
         worktreesDir: resolve(journalDir, 'worktrees'),
@@ -586,6 +631,7 @@ export function makeFixRun(deps: FixRunDeps = {}) {
             ? {}
             : { relatedArgs: check.relatedArgs }),
         };
+        if (input.install !== undefined) unit.install = input.install;
         unit.push = (input.push ?? false) || (input.pr ?? false);
         unit.proposeOnly = input.proposeOnly ?? false;
         unit.runStateDir = resolve(journalDir, 'state');
@@ -855,6 +901,7 @@ export function makeFixRun(deps: FixRunDeps = {}) {
         const tracker = fullPlan.jobs.find((job) => job.id === SWEEP_PLAN_JOB_IDS.trackerBranch);
         if (template && tracker && markers.length) {
           const assembly = template.input as AssemblePrsInput;
+          if (prBase !== undefined) assembly.base = prBase;
           const compareBase = report.tasks.some((task) => task.failedAttemptPublished)
             ? await githubCompareBase(repoRoot, assembly.base)
             : undefined;

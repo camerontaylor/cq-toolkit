@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile, readFile, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
@@ -12,6 +12,8 @@ import {
   fixesPerRunOf,
   githubCompareBaseUrl,
   makeFixRun,
+  resolveFixPrBase,
+  writeAtomicFixReport,
   type FixRunReport,
 } from '../../../src/ops/fix/runFix.js';
 import type { FixTaskReport } from '../../../src/ops/sweep/taskLoop.js';
@@ -232,6 +234,33 @@ process.exitCode = failed ? 1 : 0;
     }),
   });
 
+  test('install hook reaches isolated unit jobs without implicit installation', async () => {
+    const f = await fixture();
+    const received: unknown[] = [];
+    const unitEntry = {
+      name: 'sweep.unit',
+      inputSchema: z.unknown(),
+      importer: async () => async (raw: { install?: unknown }) => {
+        received.push(raw.install);
+        return { status: 'ok' as const, value: sharedUnitReport() };
+      },
+    } as unknown as OpRegistryEntry<never, never>;
+    const install = { command: process.execPath, args: ['-e', 'process.exit(0)'] };
+    try {
+      for (const hook of [undefined, install]) {
+        await makeFixRun({
+          registry: { get: (name) => (name === 'sweep.unit' ? unitEntry : undefined) },
+        })({
+          ...input(f),
+          ...(hook === undefined ? {} : { install: hook }),
+        });
+      }
+      expect(received).toEqual([undefined, install]);
+    } finally {
+      await rm(f.root, { recursive: true, force: true });
+    }
+  });
+
   /**
    * Registry entries stubbing BOTH sweep ops: the planner (returning one unit
    * so the plan fans out a single unit job) and the unit op (returning the
@@ -329,6 +358,8 @@ process.exitCode = failed ? 1 : 0;
   test('M1 missing evidence through fix.run composition', async () => {
     const f = await fixture();
     try {
+      await git(f.repo, 'update-ref', 'refs/remotes/origin/main', 'HEAD');
+      await git(f.repo, 'symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main');
       // Seed a committed marker under the run-state dir so the pr:true leg
       // reaches real assembly bookkeeping (marker read + package matching),
       // with the tracker/assemble ops stubbed so no forge is contacted.
@@ -607,4 +638,54 @@ process.exitCode = failed ? 1 : 0;
       await rm(f.root, { recursive: true, force: true });
     }
   });
+});
+
+test('PR base resolves the remote default, explicit branches and upstream; refuses revisions', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'cq-pr-base-'));
+  const git = async (...args: string[]) =>
+    promisify(execFile)('git', ['-C', root, ...args], { env: scrubbedGitEnv() });
+  try {
+    await git('init', '-b', 'main');
+    await git('config', 'user.name', 'Fixture');
+    await git('config', 'user.email', 'fixture@invalid');
+    await git('commit', '--allow-empty', '-m', 'baseline');
+    expect(await resolveFixPrBase(root)).toBeUndefined();
+    await git('update-ref', 'refs/remotes/origin/main', 'HEAD');
+    await git('update-ref', 'refs/remotes/origin/release', 'HEAD');
+    await git('symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main');
+    expect(await resolveFixPrBase(root)).toBe('main');
+    expect(await resolveFixPrBase(root, 'release')).toBe('release');
+    expect(await resolveFixPrBase(root, 'origin/release')).toBe('release');
+    expect(await resolveFixPrBase(root, 'HEAD~1')).toBeUndefined();
+    await git('symbolic-ref', '--delete', 'refs/remotes/origin/HEAD');
+    await git('config', 'remote.origin.url', '.');
+    await git('config', 'remote.origin.fetch', '+refs/heads/*:refs/remotes/origin/*');
+    await git('config', 'branch.main.remote', 'origin');
+    await git('config', 'branch.main.merge', 'refs/heads/main');
+    expect(await resolveFixPrBase(root)).toBe('main');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('atomic report replaces complete files and cleans up failed replacements', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'cq-atomic-report-'));
+  try {
+    const path = join(root, 'report.json');
+    await writeFile(path, 'previous');
+    const cyclic: { self?: unknown } = {};
+    cyclic.self = cyclic;
+    await expect(writeAtomicFixReport(path, cyclic)).rejects.toThrow();
+    expect(await readFile(path, 'utf8')).toBe('previous');
+    await writeAtomicFixReport(path, { complete: true });
+    expect(JSON.parse(await readFile(path, 'utf8'))).toEqual({ complete: true });
+    const directory = join(root, 'blocked');
+    await mkdir(directory);
+    await writeFile(join(directory, 'previous'), 'preserved');
+    await expect(writeAtomicFixReport(directory, {})).rejects.toThrow();
+    expect(await readFile(join(directory, 'previous'), 'utf8')).toBe('preserved');
+    expect((await readdir(root)).filter((name) => name.includes('.tmp-'))).toEqual([]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
