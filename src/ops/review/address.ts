@@ -182,9 +182,12 @@ export interface ReviewAddressReport {
   /** Durable author debt remains explicit; address success is not vendor completion. */
   deferredVendorDebt?: DeferredVendorDebt;
   /**
-   * ADR-0008 T31: the composition observation surface. Present once the
-   * stream is open (including pre-dispatch refusals after open); absent on
-   * refusals before the stream opened. The report never carries the writer.
+   * ADR-0008 T31: the composition observation surface. Present whenever the
+   * composition declared one: a durable stream once ownership is held, or the
+   * explicit no-stream surface (unavailable/indeterminate plus a reason) when
+   * the run never held ownership, the base was unwitnessable, or the journal
+   * was unusable. It never claims durable observation without an open stream,
+   * and never carries the writer.
    */
   observation?: ReviewAddressObservation;
 }
@@ -415,6 +418,24 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
       }
       if (writer.failure !== null) observationFailure(writer.failure);
     };
+    /**
+     * The report DTO for the observation surface — never the writer instance.
+     * Shared by finish() and by the pre-ownership refusal paths, so a run that
+     * never held ownership reports the same explicit no-stream shape instead
+     * of silently omitting it.
+     */
+    const observationSurface = (): ReviewAddressObservation | undefined =>
+      observation === undefined
+        ? undefined
+        : {
+            persistence: observation.persistence,
+            status: observation.status,
+            compositionRunId: observation.compositionRunId,
+            workId: observation.workId,
+            baseSha: observation.baseSha,
+            failure: observation.failure,
+            kernelRuns: [...observation.kernelRuns],
+          };
     const bookkeeping = new Map<string, string>();
     let bookkeepingTampered = false;
     let bookkeepingRevision = 0;
@@ -676,16 +697,8 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
       // caught, so this await never rejects).
       await Promise.all([...pendingLinks]);
       await closeObservation();
-      if (observation !== undefined)
-        report.observation = {
-          persistence: observation.persistence,
-          status: observation.status,
-          compositionRunId,
-          workId: observation.workId,
-          baseSha: observation.baseSha,
-          failure: observation.failure,
-          kernelRuns: [...observation.kernelRuns],
-        };
+      const observedSurface = observationSurface();
+      if (observedSurface !== undefined) report.observation = observedSurface;
       // ADR-0008 T31: sanitize the WHOLE persisted artifact at the same
       // boundary T30 uses (runFix), not just the observation surface — every
       // string that reaches disk passes the same redaction/cap discipline.
@@ -849,48 +862,49 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                 },
               )
             ).provenance;
-      // Open the composition stream ONLY when the journal directory is usable:
-      // a journalDir whose ancestor is a non-directory is refused by the
-      // ownership-entry mkdir with its own terminal error, so the writer never
-      // pre-empts that refusal with a divergent mkdir failure. A directory that
-      // does not exist yet is USABLE: the writer creates it (mkdir -p), which is
-      // exactly the fresh journal dir addressMany hands every PR run.
-      let journalDirUsable = input.journalDir === undefined;
-      if (!journalDirUsable) {
-        try {
-          journalDirUsable = (await lstat(journalDir)).isDirectory();
-        } catch (error) {
-          journalDirUsable = (error as NodeJS.ErrnoException).code === 'ENOENT';
+      // ADR-0008 T31: DECLARE the observation surface here, but open nothing
+      // yet. Opening the writer creates the journal directory (mkdir -p) and
+      // the composition header append is journal IO; a run refused before it
+      // holds ownership (admission/active-guard refusal) or one that fails in
+      // the lifetime catch owns no journal, so it must perform none of that.
+      // Until the owned path opens the stream the surface reports honestly:
+      // no stream, indeterminate, with the reason.
+      const surface: ReviewAddressObservation & { writer?: ObservationWriter } = {
+        persistence: 'unavailable',
+        status: 'indeterminate',
+        compositionRunId,
+        workId: correlationRecord.workId,
+        baseSha,
+        failure:
+          baseSha === null
+            ? 'observation: base witness unavailable'
+            : 'observation: ownership not held',
+        kernelRuns: [],
+      };
+      observation = surface;
+      // Called ONLY from the owned path, after the ownership entry created the
+      // journal directory. A null base has no schema-valid header, so no
+      // stream opens (an injected writer is still adopted for close, never
+      // appended without a header); otherwise the writer opens and the header
+      // is its first event. P2-1 is preserved: a fresh journal dir (ENOENT at
+      // pre-flight) is usable because the ownership entry creates it first.
+      const openCompositionObservation = async () => {
+        if (baseSha === null) {
+          if (injectedWriter !== undefined) surface.writer = injectedWriter;
+          return;
         }
-      }
-      // A stream can only open once a base is witnessed: the composition
-      // header's provenance is schema-required to carry a real SHA, so a null
-      // base has no valid header to write and no stream opens (the surface
-      // below still records the unavailable base). An injected writer is
-      // adopted for close either way — it is never appended without a header.
-      const writer =
-        baseSha === null
-          ? injectedWriter
-          : (injectedWriter ??
-            (journalDirUsable
-              ? await openObservationWriter({
-                  ...(input.journalDir === undefined ? {} : { journalDir }),
-                  workId: correlationRecord.workId,
-                  compositionRunId,
-                })
-              : undefined));
-      if (baseSha === null || writer !== undefined)
-        observation = {
-          ...(writer === undefined ? {} : { writer }),
-          persistence: writer?.persistence ?? 'unavailable',
-          status: baseSha === null ? 'indeterminate' : (writer?.persistence ?? 'indeterminate'),
-          compositionRunId,
-          workId: correlationRecord.workId,
-          baseSha,
-          failure: baseSha === null ? 'observation: base witness unavailable' : null,
-          kernelRuns: [],
-        };
-      if (writer !== undefined && sanitizedProvenance !== null)
+        const writer =
+          injectedWriter ??
+          (await openObservationWriter({
+            ...(input.journalDir === undefined ? {} : { journalDir }),
+            workId: correlationRecord.workId,
+            compositionRunId,
+          }));
+        surface.writer = writer;
+        surface.persistence = writer.persistence;
+        surface.status = writer.persistence;
+        surface.failure = null;
+        if (sanitizedProvenance === null) return;
         try {
           await writer.append({
             type: 'composition-started',
@@ -909,6 +923,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
         } catch (error) {
           observationFailure(error);
         }
+      };
       // ADR-0008: link every RETURNED kernel run explicitly, after the
       // runPlan result — including partial results when present. Never a
       // guessed link: unreturned kernel runs stay unlinked/unknown. The
@@ -1079,13 +1094,23 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
           } catch {
             // Error formatting cannot reenter effectful finalization.
           }
+          // A run that never entered the owned action holds no ownership and
+          // performed no journal IO. Report the observation surface honestly
+          // (no stream, indeterminate, with its reason) instead of omitting
+          // it, so a future change cannot start writing before ownership
+          // without a visible report-shape change.
+          const unheld = entered ? undefined : observationSurface();
+          const reportOfRefusal = <T extends object>(observed: T) =>
+            unheld === undefined || 'observation' in observed
+              ? observed
+              : { ...observed, observation: unheld };
           if (!entered && isAddressOwnershipAdmissionRefusal(cause)) {
             const { stop: _stop, ...observed } = report;
             return {
               status: 'needs-human' as const,
               reason: detail,
               report: {
-                ...observed,
+                ...reportOfRefusal(observed),
                 reasons: observed.reasons.includes(detail)
                   ? [...observed.reasons]
                   : [...observed.reasons, detail],
@@ -1098,7 +1123,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
             status: 'failed' as const,
             error,
             report: {
-              ...observed,
+              ...reportOfRefusal(observed),
               reasons: observed.reasons.includes(error)
                 ? [...observed.reasons]
                 : [...observed.reasons, error],
@@ -1115,6 +1140,10 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
           try {
             await lease.assertOwned();
             await mkdir(journalDir, { recursive: true });
+            // ADR-0008 T31: ownership is held and the journal directory exists
+            // (created above, or already present) — only NOW may the
+            // observation writer open and the header append.
+            await openCompositionObservation();
             const bookkeepingKey = async (root: string, path: string) =>
               resolve(await realpath(root), path);
             const untrackedAllowed = async (root: string, path: string) => {
@@ -1380,10 +1409,10 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                 account,
                 // ADR-0008 T31: runtime deps only — the writer is NEVER
                 // serialized into any dispatch input/plan JSON.
-                ...(writer === undefined
+                ...(surface.writer === undefined
                   ? {}
                   : {
-                      observationWriter: writer,
+                      observationWriter: surface.writer,
                       observationRunId: compositionRunId,
                     }),
                 observationUnitId: null,

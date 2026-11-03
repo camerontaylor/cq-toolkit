@@ -28,6 +28,7 @@ import {
   type ObservationWriter,
 } from '../../../src/kernel/observation.js';
 import { makeReviewAddress, type ReviewAddressReport } from '../../../src/ops/review/address.js';
+import { makeAddressOwnership } from '../../../src/ops/review/internal/addressOwnership.js';
 import {
   makeAddressWorker,
   type AddressWorkerDeps,
@@ -342,10 +343,52 @@ describe('T31 round-trip through the address composition', () => {
       expect(result.status, JSON.stringify(result)).toBe('ok');
       const report = reportOf(result);
       expect(report?.observation?.persistence).toBe('durable');
+      expect(report?.observation?.status).toBe('durable');
+      expect(report?.observation?.failure).toBeNull();
       const streams = await readObservations(fresh);
       expect(streams).toHaveLength(1);
       expect(streams[0]?.complete).toBe(true);
       expect(streams[0]?.events[0]?.type).toBe('composition-started');
+    } finally {
+      await f.cleanup();
+      await rm(fresh, { recursive: true, force: true });
+    }
+  });
+
+  test('an admission refusal before ownership creates no journal dir and opens no stream', async () => {
+    const f = await fixture();
+    // A fresh directory that does not exist yet: opening the writer would
+    // create it (mkdir -p), so its continued absence is the ordering witness.
+    const fresh = join(dirname(f.repo.root), 'refused-fresh-journal');
+    const git = makeGhRunner({ bin: 'git', cwd: f.repo.root, timeoutMs: 10_000 });
+    const owner = await makeAddressOwnership({ repoRoot: f.repo.root, git });
+    try {
+      await expect(lstat(fresh)).rejects.toMatchObject({ code: 'ENOENT' });
+      await owner.withLock(async () => {
+        // Another owner holds the guard, so this run is refused in admission
+        // BEFORE it enters the owned action.
+        const result = await makeReviewAddress({
+          drivers: f.drivers,
+          initialRecord: f.record,
+          review: f.review,
+        })({ repoRoot: f.repo.root, source: 'local' as const, journalDir: fresh });
+        expect(result.status).toBe('needs-human');
+        // No ownership, no journal IO: neither the journal dir nor the stream
+        // location may appear.
+        await expect(lstat(fresh)).rejects.toMatchObject({ code: 'ENOENT' });
+        await expect(lstat(join(fresh, 'observations'))).rejects.toMatchObject({
+          code: 'ENOENT',
+        });
+        // The no-stream surface is EXPLICIT, not an accidental omission: a
+        // future change that starts writing before ownership must change this
+        // report shape to pass.
+        const report = reportOf(result);
+        expect(report?.observation).toBeDefined();
+        expect(report?.observation?.persistence).toBe('unavailable');
+        expect(report?.observation?.status).toBe('indeterminate');
+        expect(report?.observation?.failure).toContain('ownership not held');
+        expect(report?.observation?.kernelRuns).toEqual([]);
+      });
     } finally {
       await f.cleanup();
       await rm(fresh, { recursive: true, force: true });
