@@ -47,7 +47,7 @@ afterAll(() => {
 /**
  * A FAKE factory (ADR-0002 §2.5): bindingsFromDispatch resolves role 'fixer'
  * through it ONCE — the fake records nothing (the dispatch-shape assertions
- * live in test/plans/sweep.test.ts's capturing driver) but hands back a
+ * live in test/plans/sweep.runtime.test.ts's capturing driver) but hands back a
  * distinguished driver + RESOLVED spec, so the tests can pin that the
  * bindings carry the RESOLVED form (never the input's raw spec).
  */
