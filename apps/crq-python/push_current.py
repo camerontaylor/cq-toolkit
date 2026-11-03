@@ -136,7 +136,11 @@ def _discover_repo(runner, q: Dict[str, Any], cfg: Dict[str, Any], dry: bool) ->
     if dry:
         log.append(f"DRY-RUN would enroll {item_id} ({reviewed[:10]}..{tip[:10]})")
         return log
-    for old in (i for i in mine if i["state"] == "pending" and not i.get("capture")):
+    # Only whole-range items coalesce. Part items (-pN: paths_filter +
+    # depends_on) are never candidates: skipping one would silently drop its
+    # overflow scope from review, since a new range need not touch those paths.
+    for old in (i for i in mine if i["state"] == "pending" and not i.get("capture")
+                and not i["subject"].get("paths_filter") and not i.get("depends_on")):
         old["state"] = "skipped"
         old.setdefault("notes", []).append(f"{runner.iso()} coalesced into {item_id}")
         log.append(f"push discovery {repo}: coalesced {old['id']} into {item_id}")
