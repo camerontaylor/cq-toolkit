@@ -3,7 +3,10 @@ import type { OpRegistryEntry } from '../../kernel/types.js';
 import { PlanSweepSelectorSchema } from '../sweep/registry.js';
 import type { FixRunInput } from './runFix.js';
 // Shared validation protocol companions: './validate.js', './escalation.js',
-// './report.js' (fix-run report accounting helpers over the run's results).
+// './report.js' (fix-run report accounting helpers over the run's results),
+// './measurement.js' (ADR-0008 T34 run metric helper; not a registered op —
+// pure functions over the fix-run report, referenced here to keep the
+// family's registry coverage explicit).
 export const FixRunInputSchema = z
   .object({
     repoRoot: z.string().min(1),
