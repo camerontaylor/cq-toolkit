@@ -69,6 +69,9 @@ def merged_current_enabled(c):
 
 
 def enqueue(c, q, item, meta, rdir):
+    if c.item_repo(item) != c.REPO:
+        # The repair drain never runs for non-primary repositories.
+        return False
     if item['kind'] == review_receipt.KIND:
         if not merged_current_enabled(c):
             return False
@@ -344,6 +347,9 @@ def backfill(c, q):
         return
     missing = []
     for item in q['items']:
+        if c.item_repo(item) != c.REPO:
+            # Foreign cycles are review evidence, never legacy repair debt.
+            continue
         for cycle in item.get('cycles', []):
             run = cycle['run_id']
             path = c.RUNS / run

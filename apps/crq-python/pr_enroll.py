@@ -37,6 +37,13 @@ def _enroll_repo(runner, q: Dict[str, Any], cfg: Dict[str, Any], opened: List[Di
                  dry: bool) -> List[str]:
     log: List[str] = []
     repo, branch, clone = cfg["repo"], cfg["default_branch"], Path(cfg["clone"])
+    try:
+        # Every local read below (quiet window, merge-base, plan) needs a current
+        # default branch; ensure_commit then brings the PR head into the clone.
+        runner.fetch(clone=clone, refspec=f"+refs/heads/{branch}:refs/remotes/origin/{branch}")
+    except Exception as exc:
+        log.append(f"pr discovery {repo}: fetch failed: {str(exc)[:200]}")
+        return log
     for p in sorted(opened, key=lambda x: x["number"]):
         n, head = p["number"], p["headRefOid"]
         if p["isDraft"]:
@@ -45,6 +52,15 @@ def _enroll_repo(runner, q: Dict[str, Any], cfg: Dict[str, Any], opened: List[Di
             # No stacked-chain walking in v1 (docs/multi-repo.md): only PRs
             # targeting the repo's default branch are enrollable.
             log.append(f"pr discovery {repo}: PR #{n} targets {p['baseRefName']}, not {branch}; skipped")
+            continue
+        # The head must be local BEFORE any tick reads it (quiet window runs
+        # before the plan), so fetch it for every enrollable PR, not only deltas.
+        try:
+            if not runner.ensure_commit(n, head, clone=clone):
+                raise runner.NotReady("source head unavailable")
+            pin = runner.git("merge-base", f"origin/{branch}", head, cwd=clone)
+        except (runner.NotReady, OSError, RuntimeError, subprocess.TimeoutExpired):
+            log.append(f"pr discovery {repo}: PR #{n} range identity unavailable; enrollment deferred")
             continue
         # PR numbers collide across repos: scope every lookup to this repo.
         mine = [i for i in runner.live_items(q) if i["pr"] == n and i["kind"] in ("open", "delta")
@@ -55,13 +71,6 @@ def _enroll_repo(runner, q: Dict[str, Any], cfg: Dict[str, Any], opened: List[Di
             continue
         if any(i["state"] in ("pending", "reviewing", "repairing", "blocked")
                and not runner.optional_open(i) for i in mine):
-            continue
-        try:
-            if not runner.ensure_commit(n, head, clone=clone):
-                raise runner.NotReady("source head unavailable")
-            pin = runner.git("merge-base", f"origin/{branch}", head, cwd=clone)
-        except (runner.NotReady, OSError, RuntimeError, subprocess.TimeoutExpired):
-            log.append(f"pr discovery {repo}: PR #{n} range identity unavailable; enrollment deferred")
             continue
         evidence = [record for item in mine for record in item.get("cycles", [])]
         equivalent = any(record.get("base") == pin and record.get("head") == head and

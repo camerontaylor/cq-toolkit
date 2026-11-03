@@ -2208,11 +2208,17 @@ def _deliver_push_findings(q: Dict[str, Any], item: Dict[str, Any]) -> Optional[
     except OSError as exc:
         item["issue_error"] = f"findings markdown unavailable: {exc}"[:300]
         return None
+    subject = item.get("subject") or {}
+    base = request.get("base") or subject.get("base")
+    head = request.get("head") or subject.get("head")
+    if not base or not head:
+        # Debt persisted before the range fields existed: never crash the tick.
+        item["issue_error"] = "findings request lacks a review range"
+        return None
     meta = {"repo": item_repo(item), "item_id": item["id"], "run_id": request["run_id"],
-            "base": request["base"], "head": request["head"],
-            "receipt_id": item.get("receipt_id")}
+            "base": base, "head": head, "receipt_id": item.get("receipt_id")}
     try:
-        result = finding_issues.file_issue(cfg, base=request["base"], head=request["head"], meta=meta,
+        result = finding_issues.file_issue(cfg, base=base, head=head, meta=meta,
                                            severity_counts=request["severity_counts"],
                                            findings_md=markdown)
     except RuntimeError as exc:
@@ -2399,15 +2405,14 @@ def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
             # Foreign open/delta review (docs/multi-repo.md): the cycle is real
             # evidence, but coverage credit and repair enqueue stay primary-only;
             # findings are delivered as one issue in the repo instead.
-            delivery = None
             if cls["findings"]:
+                # Debt only: the bounded post-harvest pass performs the upload.
                 item["issue_request"] = {"run_id": r["run_id"], "severity_counts": cls["severity_counts"],
                                          "findings_md": str(rdir / "findings.md"),
                                          "base": meta["base"], "head": meta["head"]}
                 item["issue_pending"] = True
-                delivery = _deliver_push_findings(q, item)
             item["state"] = "done"
-            return f"{item['id']}: completed ({cls['findings']} findings)" + (f"; {delivery}" if delivery else "")
+            return f"{item['id']}: completed ({cls['findings']} findings)"
         terminal_paths = []
         for line in (rdir / "review.ndjson").read_text().splitlines():
             try:
@@ -2553,7 +2558,8 @@ def sort_key(item: Dict[str, Any]) -> Tuple:
 
 def last_reviewed(q: Dict[str, Any], pr: int) -> Optional[Dict[str, Any]]:
     """Newest completed CLI review of the PR's own head (open cycles and deltas)."""
-    recs = [c for i in live_items(q) if i["pr"] == pr and i["kind"] in ("open", "delta") for c in i.get("cycles", [])]
+    recs = [c for i in live_items(q) if i["pr"] == pr and i["kind"] in ("open", "delta")
+            and item_repo(i) == REPO for c in i.get("cycles", [])]
     return max(recs, key=lambda c: c["completed_at"]) if recs else None
 
 
@@ -2604,7 +2610,8 @@ def enroll(q: Dict[str, Any], dry: bool) -> List[str]:
         n, head = p["number"], p["headRefOid"]
         if p["isDraft"] or not chains_to_target(p, by_head):
             continue
-        mine = [i for i in live_items(q) if i["pr"] == n and i["kind"] in ("open", "delta")]
+        mine = [i for i in live_items(q) if i["pr"] == n and i["kind"] in ("open", "delta")
+                and item_repo(i) == REPO]
         if not mine:
             stacked = "" if p["baseRefName"] in DISCOVERY_BRANCHES else f", stacked on {p['baseRefName']}"
             new_item(q, log, dry, id=f"pr{n}", pr=n, kind="open", tier=1, prior_cycles=0,

@@ -376,18 +376,65 @@ class PrTest(unittest.TestCase):
         cycle = item["cycles"][0]
         self.assertEqual((cycle["base"], cycle["head"]), (self.base, h1))
         self.assertEqual(cycle["range_policy"], "full-range-once-v1")
-        # The issue carries the PR range identity from issue_request.
+        # Debt only at harvest: the bounded post-harvest pass performs the upload.
         self.assertEqual(item["issue_request"]["base"], self.base)
         self.assertEqual(item["issue_request"]["head"], h1)
+        self.assertTrue(item["issue_pending"])
+        self.assertNotIn("issue", item)
+        self.assertEqual(file_issue.call_args, None)
+        self.assertEqual(result, f"{item['id']}: completed (1 findings)")
+        with mock.patch.object(crq.finding_issues, "file_issue", return_value=filed) as file_issue:
+            message = crq._deliver_push_findings(self.q, item)
         self.assertEqual(item["issue"], filed)
-        self.assertFalse(item.get("issue_pending"))
+        self.assertFalse(item["issue_pending"])
+        self.assertEqual(message, "findings issue #3 (created)")
         self.assertEqual(file_issue.call_args.kwargs["base"], self.base)
         self.assertEqual(file_issue.call_args.kwargs["head"], h1)
         self.assertEqual(file_issue.call_args.kwargs["meta"]["repo"], FOREIGN)
         self.assertEqual(file_issue.call_args.kwargs["meta"]["base"], self.base)
-        self.assertEqual(result, f"{item['id']}: completed (1 findings); findings issue #3 (created)")
         remove.assert_called_once()
         self.assertEqual(remove.call_args.kwargs["clone"], Path(self.foreign))
+
+    def test_pr_heads_are_fetched_before_local_reads(self):
+        # The quiet window reads the head locally before planning, so every
+        # enrollable PR's head must be fetched first, even on first enrollment.
+        h1 = self.foreign_commit("pr work", {"a.txt": "a\n"})
+        with mock.patch.object(crq, "fetch") as fetch, \
+             mock.patch.object(crq, "ensure_commit", return_value=True) as ensure:
+            self.enroll([self.pr_row(5, h1)])
+        fetch.assert_called_once()
+        self.assertEqual(fetch.call_args.kwargs["clone"], Path(self.foreign))
+        self.assertIn("refs/heads/main", fetch.call_args.kwargs["refspec"])
+        ensure.assert_called_once()
+        self.assertEqual(ensure.call_args.args[:2], (5, h1))
+        self.assertEqual(ensure.call_args.kwargs["clone"], Path(self.foreign))
+
+    def test_legacy_issue_request_without_range_falls_back_to_the_subject(self):
+        (self.root / "findings.md").write_text("- finding\n")
+        item = {"id": "push-infra-legacy", "repo": FOREIGN, "kind": "push-current",
+                "state": "done", "issue_pending": True,
+                "subject": {"type": "push-range", "repo": FOREIGN, "base": "b" * 40, "head": "h" * 40},
+                "issue_request": {"run_id": "r-legacy", "severity_counts": {"major": 1},
+                                  "findings_md": str(self.root / "findings.md")}}
+        filed = {"issue_url": f"https://github.com/{FOREIGN}/issues/9",
+                 "issue_number": 9, "created": True}
+        with mock.patch.object(crq.finding_issues, "file_issue", return_value=filed) as file_issue:
+            self.assertEqual(crq._deliver_push_findings(self.q, item), "findings issue #9 (created)")
+        self.assertEqual(file_issue.call_args.kwargs["base"], "b" * 40)
+        self.assertEqual(file_issue.call_args.kwargs["head"], "h" * 40)
+
+    def test_primary_enrollment_reads_only_primary_items(self):
+        self.repos[0] = self.cfg()
+        self.q["items"].append({"id": "infra-pr7", "repo": FOREIGN, "kind": "open", "pr": 7,
+                                "state": "done", "cycles": []})
+        self.assertIsNone(crq.last_reviewed(self.q, 7))
+
+    def test_legacy_repair_backfill_ignores_foreign_cycles(self):
+        q = {"items": [{"id": "push-infra-legacy", "repo": FOREIGN, "kind": "push-current",
+                        "cycles": [{"run_id": "run-missing", "findings": 1}]}]}
+        crq.repair_tick.backfill(crq, q)
+        self.assertEqual(q.get("legacy_repair_missing"), [])
+        self.assertTrue(q.get("legacy_repair_backfilled"))
 
     def test_primary_enrollment_unchanged_without_pr_repos(self):
         # An empty repos list (or no pr flag) keeps pr enrollment a no-op:
