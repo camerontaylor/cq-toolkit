@@ -75,7 +75,7 @@ export const NON_IMPORT_MAP = [
       /^test\/workflows\//,
       /^test\/scripts\//,
       /^test\/ops\/gates\//,
-      /^test\/adversarial\/a14-privileged-workflow\.test\.ts$/,
+      /^test\/adversarial\/a14-privileged-workflow(?:\.[\w-]+)?\.test\.ts$/,
     ],
   ],
   [/^policy\/self-host\//, [/^test\/workflows\//, /^test\/selfhost\//]],
@@ -110,7 +110,7 @@ export const NON_IMPORT_MAP = [
       /^test\/ops\/gates\/policyDiff(\..+)?\.test\.ts$/,
       /^test\/ops\/ratchet\/definitions\.test\.ts$/,
       /^test\/scripts\/(github-settings(\..+)?|adversarial-suite)\.test\.ts$/,
-      /^test\/adversarial\/a14-privileged-workflow\.test\.ts$/,
+      /^test\/adversarial\/a14-privileged-workflow(?:\.[\w-]+)?\.test\.ts$/,
     ],
   ],
   // Dependency and compiler inputs affect every test project.

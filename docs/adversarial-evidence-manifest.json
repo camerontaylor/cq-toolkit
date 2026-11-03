@@ -153,7 +153,7 @@
       "attackExecuted": false,
       "observedOutcome": null,
       "prerequisite": "W1.7, W1.9, W1.10; live Apps, IDs, rulesets and promotion gate",
-      "permanentRegression": "test/adversarial/a14-privileged-workflow.test.ts",
+      "permanentRegression": "test/adversarial/a14-privileged-workflow.exfil-trigger.test.ts",
       "attempts": [],
       "blocker": "No independently observed, head-bound live policy verdict for every required profile"
     },
