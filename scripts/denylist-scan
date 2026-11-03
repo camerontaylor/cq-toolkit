@@ -534,9 +534,22 @@ function runScan(tmpRoot, name, configToml, source, spawnOpts = {}) {
   // Ignore policy is owned by this scanner, never by the scanned tree.
   const ignorePath = path.join(tmpRoot, 'empty.gitleaksignore');
   fs.writeFileSync(ignorePath, '');
+  let scanSource = source;
+  let scanOptions = spawnOpts;
+  const sourceRoot = path.resolve(spawnOpts.cwd || process.cwd(), source);
+  if (fs.existsSync(path.join(sourceRoot, '.gitleaksignore'))) {
+    // Gitleaks always loads the source root's ignore file, even with an
+    // explicit --gitleaks-ignore-path. Snapshot beneath a clean scan root
+    // so the original ignore file is still scanned as ordinary content.
+    const wrapper = path.join(tmpRoot, name + '-isolated');
+    fs.mkdirSync(wrapper);
+    fs.cpSync(sourceRoot, path.join(wrapper, 'payload'), { recursive: true });
+    scanSource = '.';
+    scanOptions = { ...spawnOpts, cwd: wrapper };
+  }
   const res = spawnGitleaks(
-    [...gitleaksArgs(source, configPath, reportPath), '--gitleaks-ignore-path', ignorePath],
-    name, spawnOpts,
+    [...gitleaksArgs(scanSource, configPath, reportPath), '--gitleaks-ignore-path', ignorePath],
+    name, scanOptions,
   );
   return { res, findings: readReport(reportPath) };
 }
@@ -787,7 +800,7 @@ function selfTestTreeConfig(tmpRoot, rules, cleanProbes) {
     // The real scan must detect every probe even when the scanned tree
     // tries to suppress its exact fingerprint.
     fs.writeFileSync(path.join(dir, '.gitleaksignore'),
-      rules.map((rule) => probeFileFor(rule) + ':' + rule.id + ':1').join('\n') + '\n');
+      rules.map((rule) => path.join(dir, probeFileFor(rule)) + ':' + rule.id + ':1').join('\n') + '\n');
     fs.writeFileSync(path.join(dir, 'clean-probes.txt'), `${cleanProbes.join('\n')}\n`);
     const copyPath = path.join(dir, PATTERNS_REL);
     fs.mkdirSync(path.dirname(copyPath), { recursive: true });

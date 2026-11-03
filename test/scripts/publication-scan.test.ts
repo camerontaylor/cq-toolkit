@@ -103,16 +103,67 @@ describe.skipIf(!available)('publication scans of outgoing git objects', () => {
     });
   });
 
-  test('tree-local gitleaks ignores cannot suppress publication findings', () => {
-    replay((root, git, scan) => {
-      writeFileSync(join(root, 'probe.txt'), ['port', 'key'].join(''));
-      writeFileSync(
-        join(root, '.gitleaksignore'),
-        'probe.txt:class:' + ['port', 'key'].join('') + '-config:1\n',
-      );
-      git('add', 'probe.txt', '.gitleaksignore');
-      git('commit', '-qm', 'ignored probe');
-      expect(scan()).toBe(1);
+  test('tree-local ignores with working absolute fingerprints cannot suppress tree scans', () => {
+    replay((root) => {
+      const controls = mkdtempSync(join(tmpdir(), 'ignore-controls-'));
+      try {
+        writeFileSync(
+          join(root, 'probe.txt'),
+          'ghp_' + 'tB3nR9kWxQmZ2vLhG' + 'sYaP7dKxXcMvFsNwEeR',
+        );
+        const report = join(controls, 'findings.json');
+        const rawScan = (source: string) =>
+          spawnSync(
+            'gitleaks',
+            [
+              'detect',
+              '--no-git',
+              '--source',
+              source,
+              '--report-format',
+              'json',
+              '--report-path',
+              report,
+              '--redact',
+            ],
+            { cwd: root, encoding: 'utf8' },
+          );
+        expect(rawScan(root).status).toBe(1);
+        const findings = JSON.parse(readFileSync(report, 'utf8')) as {
+          Fingerprint: string;
+          File: string;
+          RuleID: string;
+          StartLine: number;
+        }[];
+        expect(findings.some((finding) => finding.File === join(root, 'probe.txt'))).toBe(true);
+        writeFileSync(
+          join(root, '.gitleaksignore'),
+          findings
+            .flatMap((finding) => [
+              finding.Fingerprint,
+              finding.File.slice(root.length + 1) +
+                ':' +
+                finding.RuleID +
+                ':' +
+                String(finding.StartLine),
+            ])
+            .join('\n') + '\n',
+        );
+        // Positive suppression controls: these fingerprints really match.
+        expect(rawScan(root).status).toBe(0);
+        expect(rawScan('.').status).toBe(0);
+        const result = spawnSync(
+          process.execPath,
+          [join(root, 'scripts/denylist-scan'), '--tree'],
+          {
+            cwd: root,
+            encoding: 'utf8',
+          },
+        );
+        expect(result.status, result.stderr).toBe(1);
+      } finally {
+        rmSync(controls, { recursive: true, force: true });
+      }
     });
   });
 
