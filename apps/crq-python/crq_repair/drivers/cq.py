@@ -1,6 +1,7 @@
 """Source-verified cq CLI JSON flag adapter; never launches tests."""
 import json
 import os
+import time
 from pathlib import Path
 from crq_repair import command
 
@@ -42,7 +43,9 @@ def invoke(config, role, job, wt, directory):
     argv = ['node', config['repair']['cq_bin'], 'review.fixItem', '--json']
     argv += ['--' + k + '=' + json.dumps(v) for k, v in payload.items()]
     p = command(argv, cwd=wt, env=env, timeout=config['repair']['budget']['wall_clock_min'] * 60)
-    Path(directory, 'driver.log').write_text(p.stdout + '\n' + p.stderr)
+    with Path(directory, 'driver.log').open('a') as log:
+        log.write('\n# invocation ' + time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()) + '\n'
+                  + p.stdout + '\n' + p.stderr)
     try:
         data = json.loads(p.stdout)
     except ValueError:
@@ -53,12 +56,12 @@ def invoke(config, role, job, wt, directory):
     # one `<sessionId>.jsonl` per session this job's runner created. A
     # value-level sessionId (if a later runner returns one) wins.
     result = data.get('value') or data.get('result') or {}
-    stored = sorted(f.stem for f in sessions_dir.glob('*.jsonl')) if sessions_dir.is_dir() else []
-    sid = result.get('sessionId') if isinstance(result, dict) else None
-    if not (isinstance(sid, str) and sid) and len(stored) == 1:
-        sid = stored[0]
     from crq_repair import atomic as _atomic
     try:  # best-effort: the session link never outranks the verdict
+        stored = sorted(f.stem for f in sessions_dir.glob('*.jsonl')) if sessions_dir.is_dir() else []
+        sid = result.get('sessionId') if isinstance(result, dict) else None
+        if not (isinstance(sid, str) and sid) and len(stored) == 1:
+            sid = stored[0]
         _atomic(Path(directory) / 'session.json', {
             'harness': 'cq', 'sessionId': sid if isinstance(sid, str) and sid else None,
             'sessionIds': stored,
@@ -92,7 +95,9 @@ def judge(config, role, job, wt, directory):
     bridge = Path(__file__).parents[1] / 'judge-cq.mjs'
     p = command(['node', str(bridge), str(path)], cwd=wt,
                 timeout=config['repair']['budget']['wall_clock_min'] * 60)
-    (directory / 'driver.log').write_text(p.stdout + '\n' + p.stderr)
+    with (directory / 'driver.log').open('a') as log:
+        log.write('\n# invocation ' + time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()) + '\n'
+                  + p.stdout + '\n' + p.stderr)
     if p.returncode:
         return {'stop': 'error', 'verdict': 'unsure', 'reason': 'cq read-only judge failed'}
     return json.loads(p.stdout)

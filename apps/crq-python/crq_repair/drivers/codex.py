@@ -34,7 +34,9 @@ def _stream_codex(argv, cwd, env, timeout, log_path):
     err_lines: list[str] = []
     lock = threading.Lock()
     log_open = [True]  # flipped under `lock` before driver.log closes
-    with open(log_path, 'w', encoding='utf-8') as log:
+    with open(log_path, 'a', encoding='utf-8') as log:
+        log.write('\n# invocation ' + time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()) + '\n')
+        log.flush()
         process = subprocess.Popen(argv, cwd=cwd, env=env, stdout=subprocess.PIPE,
                                    stderr=subprocess.PIPE, text=True,
                                    encoding='utf-8', errors='replace',
@@ -142,8 +144,18 @@ def invoke(config, role, job, wt, directory, judge=False):
     # any verdict return: the session exists as soon as the stream says so.
     tid = _thread_id(out_lines)
     try:  # best-effort: the session link never outranks the verdict
-        atomic(directory / 'session.json', {
-            'harness': 'codex', 'threadId': tid,
+        session_path = directory / 'session.json'
+        try:
+            previous = json.loads(session_path.read_text())
+        except (OSError, ValueError):
+            previous = {}
+        tids = previous.get('threadIds', []) if isinstance(previous, dict) else []
+        if not isinstance(tids, list):
+            tids = []
+        old_tid = previous.get('threadId') if isinstance(previous, dict) else None
+        tids = list(dict.fromkeys(t for t in [*tids, old_tid, tid] if isinstance(t, str) and t))
+        atomic(session_path, {
+            'harness': 'codex', 'threadId': tid, 'threadIds': tids,
             'workId': os.environ.get('CQ_WORK_ID'),
             'timedOut': timed_out,
         })
