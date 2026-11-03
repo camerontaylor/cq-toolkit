@@ -18,6 +18,10 @@ export function createAreaReviewPlan(input: CreateReviewPlanInput): ReviewPlan {
     original.advisories.push(`area review fallback: ${areas.reason}`);
     return original;
   }
+  if (areas.areas.some((area) => area.contractsTruncated)) {
+    original.advisories.push('area review fallback: contract descriptors truncated');
+    return original;
+  }
   const plans = areas.areas.map((area) => {
     const plan = createReviewPlan({
       ...input,
