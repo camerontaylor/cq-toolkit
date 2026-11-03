@@ -757,11 +757,17 @@ export function makeFixRun(deps: FixRunDeps = {}) {
       // runPlan result — never a guessed link. The kernelRunId is the run's
       // actual v3 run id; the descriptor list comes from the T29
       // foldObservations join surface so a fold can resolve the link.
-      const descriptors =
-        input.journalDir === undefined
-          ? []
-          : await readKernelRunDescriptors(journalDir, [report.run.runId]);
-      observation?.kernelRuns.push(...descriptors);
+      // A descriptor read is observation, not verdict: its failure is
+      // indeterminate evidence and never changes the run's own result.
+      try {
+        const descriptors =
+          input.journalDir === undefined
+            ? []
+            : await readKernelRunDescriptors(journalDir, [report.run.runId]);
+        observation?.kernelRuns.push(...descriptors);
+      } catch (error) {
+        observationFailure(error);
+      }
       kernelRunLinks = [
         {
           type: 'kernel-run-linked',
