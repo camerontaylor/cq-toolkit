@@ -87,7 +87,7 @@ function stream(events: unknown[] = [], overrides: Record<string, unknown> = {})
           provenance: {
             cqVersion: '0.0.0-test',
             producerVersion: '0.0.0-test',
-            repoId: null,
+            repoId: 'sha256:aaaabbbbccccddddaaaabbbbccccddddaaaabbbbccccddddaaaabbbbccccdddd',
             cqJsonHash: 'sha256:0000000000000000000000000000000000000000000000000000000000000000',
             baseSha: '42a1f04bdeadbeef42a1f04bdeadbeef42a1f04b',
             runPrefix: 'run-test',
@@ -126,6 +126,9 @@ describe('M6c nominal evidence', () => {
     });
     expect(index.indexVersion).toBe(1);
     const row = index.sessions[0]!;
+    expect(row.repo).toBe(
+      'sha256:aaaabbbbccccddddaaaabbbbccccddddaaaabbbbccccddddaaaabbbbccccdddd',
+    );
     expect(row.sessionId).toBe('sess-abc');
     expect(row.workId).toBe(correlationRecord.workId);
     expect(row.parentWorkId).toBeNull();
@@ -135,8 +138,8 @@ describe('M6c nominal evidence', () => {
     expect(row.agentId).toBe('agent-1');
     expect(row.model).toEqual({ model: 'glm-5.3', provider: 'zai' });
     expect(row.attempts).toBe(1);
-    expect(row.tokens).toBe(100);
-    expect(row.wallMs).toBe(500);
+    expect(row.tokens).toEqual({ knownSubtotal: 100, complete: true });
+    expect(row.wallMs).toEqual({ knownSubtotal: 500, complete: true });
     expect(row.stopReasons).toEqual([{ stopCode: 'completed', class: 'terminal' }]);
     // Known fields carry no availability entries: availability accompanies
     // unknown values only.
@@ -203,8 +206,8 @@ describe('M6c missing evidence', () => {
       stream: stream([first, second]),
     });
     const row = index.sessions[0]!;
-    expect(row.tokens).toBeNull();
-    expect(row.wallMs).toBe(1200);
+    expect(row.tokens).toEqual({ knownSubtotal: 100, complete: false });
+    expect(row.wallMs).toEqual({ knownSubtotal: 1200, complete: true });
     expect(row.availability['/tokens']).toMatchObject({ state: 'partial' });
     expect(row.availability['/wallMs']).toBeUndefined();
   });
@@ -214,6 +217,7 @@ describe('M6c missing evidence', () => {
     const row = index.sessions[0]!;
     expect(row.attempts).toBe(0);
     expect(row.tokens).toBeNull();
+    expect(row.wallMs).toBeNull();
     expect(row.model).toBeNull();
     expect(row.availability['/model']).toMatchObject({ state: 'not-collected' });
     expect(row.availability['/tokens']).toMatchObject({ state: 'not-collected' });
@@ -260,9 +264,10 @@ describe('M6c failure evidence', () => {
     });
     const row = index.sessions[0]!;
     expect(row.stopReasons).toEqual([{ stopCode: 'dns', class: 'infrastructure' }]);
-    // Unknown usage stays unknown even on a failed attempt.
-    expect(row.tokens).toBeNull();
-    expect(row.availability['/tokens']).toMatchObject({ state: 'not-collected' });
+    // Unknown usage stays unknown even on a failed attempt: knownSubtotal
+    // zero is explicit partial, never silently claimed complete.
+    expect(row.tokens).toEqual({ knownSubtotal: 0, complete: false });
+    expect(row.availability['/tokens']).toMatchObject({ state: 'partial' });
   });
 
   it('moved branch does not relabel commit: rows keep observed branch per commitSha', () => {
@@ -318,6 +323,109 @@ describe('M6c failure evidence', () => {
     (smuggling.events[0] as Record<string, unknown>).branch = 'feat/invented';
     expect(() => buildSessionIndex({ correlation: correlation(), stream: smuggling })).toThrow(
       /failed schema validation/,
+    );
+  });
+});
+
+describe('M6c join integrity (review iterations)', () => {
+  it('repo join: provenance repoId lands in the row; absent digest is null with availability', () => {
+    const index = buildSessionIndex({
+      correlation: correlation(),
+      stream: stream([attemptEvent()]),
+    });
+    const row = index.sessions[0]!;
+    expect(row.repo).toBe(
+      'sha256:aaaabbbbccccddddaaaabbbbccccddddaaaabbbbccccddddaaaabbbbccccdddd',
+    );
+    expect(row.availability['/repo']).toBeUndefined();
+    const noRepo = stream([attemptEvent()]);
+    (noRepo.events[0] as Record<string, unknown>).payload = {
+      ...((noRepo.events[0] as Record<string, unknown>).payload as Record<string, unknown>),
+      provenance: {
+        ...(((noRepo.events[0] as Record<string, unknown>).payload as Record<string, unknown>)
+          .provenance as Record<string, unknown>),
+        repoId: null,
+      },
+    };
+    const rowNoRepo = buildSessionIndex({
+      correlation: correlation(),
+      stream: noRepo,
+    }).sessions[0]!;
+    expect(rowNoRepo.repo).toBeNull();
+    expect(rowNoRepo.availability['/repo']).toMatchObject({ state: 'not-collected' });
+  });
+
+  it('partial aggregates preserve the known subtotal and mark partial, never drop it', () => {
+    const first = attemptEvent();
+    const second = attemptEvent({
+      attempt: 2,
+      payload: { ...first.payload, invocation: 'inv-2', tokens: null, wallMs: null },
+    });
+    const index = buildSessionIndex({
+      correlation: correlation(),
+      stream: stream([first, second]),
+    });
+    const row = index.sessions[0]!;
+    expect(row.tokens).toEqual({ knownSubtotal: 100, complete: false });
+    expect(row.wallMs).toEqual({ knownSubtotal: 500, complete: false });
+    expect(row.availability['/tokens']).toMatchObject({ state: 'partial' });
+    expect(row.availability['/wallMs']).toMatchObject({ state: 'partial' });
+  });
+
+  it('malformed availability rows fail artifact validation, never commit malformed', () => {
+    const index = buildSessionIndex({
+      correlation: correlation(),
+      stream: stream([attemptEvent()]),
+    });
+    // Hand-forge a bad availability entry (invented state, missing source):
+    // the strict row schema must reject it.
+    const forged = {
+      indexVersion: 1 as const,
+      sessions: [
+        JSON.parse(JSON.stringify(index.sessions[0])) as {
+          availability: Record<string, unknown>;
+        },
+      ],
+    };
+    const row = forged.sessions[0]!;
+    row.availability['/tokens'] = { state: 'made-up', reason: 'x' };
+    expect(() => SessionIndexSchema.parse(forged)).toThrow();
+    row.availability['/tokens'] = { state: 'partial', reason: 'x' };
+    expect(() => SessionIndexSchema.parse(forged)).toThrow();
+    row.availability['/tokens'] = { state: 'partial', reason: 'x', source: null };
+    expect(() => SessionIndexSchema.parse(forged)).not.toThrow();
+  });
+
+  it('complete=false stream folds as explicitly partial, never silently complete', () => {
+    const index = buildSessionIndex({
+      correlation: correlation(),
+      stream: stream([attemptEvent()], { complete: false }),
+    });
+    const row = index.sessions[0]!;
+    expect(row.availability['/']).toMatchObject({ state: 'partial' });
+    expect(row.availability['/']!.reason).toContain('incomplete');
+    // A complete stream carries no root availability entry.
+    const full = buildSessionIndex({
+      correlation: correlation(),
+      stream: stream([attemptEvent()]),
+    });
+    expect(full.sessions[0]!.availability['/']).toBeUndefined();
+  });
+
+  it('workId mismatch between correlation and stream is refused, never joined', () => {
+    // The strict stream schema itself couples the composition-started header
+    // to the stream's workId; the index ALSO cross-checks the outer
+    // correlation record, so a swapped-but-self-consistent stream cannot
+    // join. Forge a stream whose header agrees with its (different) workId.
+    const otherWork = '11111111-1111-4111-8111-111111111111';
+    const mismatched = stream([attemptEvent()], { workId: otherWork });
+    const header = mismatched.events[0] as Record<string, unknown>;
+    header.payload = {
+      ...(header.payload as Record<string, unknown>),
+      correlation: correlation({ workId: otherWork }),
+    };
+    expect(() => buildSessionIndex({ correlation: correlation(), stream: mismatched })).toThrow(
+      /does not match correlation/,
     );
   });
 });

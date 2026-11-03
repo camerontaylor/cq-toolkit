@@ -17,13 +17,13 @@
 // inference: buildSessionIndex reads only the supplied v3 records and folds
 // nothing the evidence does not state.
 //
-// Plain JavaScript (like scripts/api-report.mjs): this offline tool is
-// deliberately NOT imported into typechecked engine code — no .mjs module
-// may import TS sources under Vitest's transform, and the engine must never
-// read this artifact, so the boundary stays one-directional (tests import
-// this script; production code never does).
+// Plain JavaScript (like scripts/demo-eval-axes.mjs): this offline tool is
+// deliberately NOT imported into engine code — the engine must never read
+// this artifact; the boundary stays one-directional. It loads the strict
+// v3 schemas from the BUILT engine (../dist), the same self-host pattern
+// as the eval-axes demo, so plain Node resolves them (no TS sources).
 import { z } from 'zod';
-import { CorrelationRecordSchema, ObservationStreamSchema } from '../src/kernel/schema.js';
+import { CorrelationRecordSchema, ObservationStreamSchema } from '../dist/kernel/schema.js';
 
 /** Availability helper: explicit absence with reason, never a guessed value. */
 function availability(state, reason) {
@@ -33,6 +33,8 @@ function availability(state, reason) {
 /** Strict schema for the committed index artifact (dual-reader ready). */
 export const SessionIndexRowSchema = z
   .object({
+    /** Archive-safe opaque remote digest; null when no remote exists. */
+    repo: z.string().nullable(),
     sessionId: z.string().nullable(),
     workId: z.string(),
     parentWorkId: z.string().nullable(),
@@ -42,8 +44,22 @@ export const SessionIndexRowSchema = z
     agentId: z.string().nullable(),
     model: z.object({ model: z.string(), provider: z.string() }).strict().nullable(),
     attempts: z.number().int().nonnegative(),
-    tokens: z.number().int().nonnegative().nullable(),
-    wallMs: z.number().nonnegative().nullable(),
+    tokens: z
+      .object({
+        /** Known subtotal across attempts with known counts; null with none. */
+        knownSubtotal: z.number().int().nonnegative().nullable(),
+        /** True when every contributing attempt carried a known count. */
+        complete: z.boolean(),
+      })
+      .strict()
+      .nullable(),
+    wallMs: z
+      .object({
+        knownSubtotal: z.number().nonnegative().nullable(),
+        complete: z.boolean(),
+      })
+      .strict()
+      .nullable(),
     stopReasons: z.array(
       z
         .object({
@@ -52,7 +68,16 @@ export const SessionIndexRowSchema = z
         })
         .strict(),
     ),
-    availability: z.record(z.string(), z.any()),
+    availability: z.record(
+      z.string(),
+      z
+        .object({
+          state: z.enum(['known-zero', 'not-collected', 'unavailable', 'partial', 'n-a', 'known']),
+          reason: z.string(),
+          source: z.string().nullable(),
+        })
+        .strict(),
+    ),
   })
   .strict();
 
@@ -117,6 +142,21 @@ export function buildSessionIndex(input) {
   }
   const stream = streamParsed.data;
 
+  // The stream is written under the correlation's workId directory; a
+  // disagreement means the two artifacts are from different works — refuse
+  // to join them rather than manufacturing a row from mismatched evidence.
+  if (stream.workId !== correlation.record.workId) {
+    throw new Error(
+      `session-index: stream workId '${stream.workId}' does not match correlation ` +
+        `workId '${correlation.record.workId}' — refusing to join mismatched evidence`,
+    );
+  }
+
+  // Partial evidence is folded as partial, never silently as complete: the
+  // artifact must carry the incompleteness so offline readers cannot mistake
+  // a torn stream for full observation.
+  const streamComplete = stream.complete === true;
+
   const attempts = stream.events.filter((event) => event.type === 'attempt-finished');
 
   // Model provenance: collect distinct {model, provider} across attempts in
@@ -133,14 +173,24 @@ export function buildSessionIndex(input) {
   // Closure commit: the correlation record's observed SHA only — never
   // inferred from branches or transcript content.
   const commitSha = correlation.record.commitSha;
+  // Partial aggregates keep the known subtotal (ADR-0008 availability row:
+  // "partial preserves known subtotal without claiming completeness").
+  const knownTokens = attempts.filter((a) => a.payload.tokens !== null);
   const tokens =
-    attempts.length > 0 && attempts.every((a) => a.payload.tokens !== null)
-      ? attempts.reduce((sum, a) => sum + a.payload.tokens, 0)
-      : null;
+    attempts.length === 0
+      ? null
+      : {
+          knownSubtotal: knownTokens.reduce((sum, a) => sum + a.payload.tokens, 0),
+          complete: knownTokens.length === attempts.length,
+        };
+  const knownWall = attempts.filter((a) => a.payload.wallMs !== null);
   const wallMs =
-    attempts.length > 0 && attempts.every((a) => a.payload.wallMs !== null)
-      ? attempts.reduce((sum, a) => sum + a.payload.wallMs, 0)
-      : null;
+    attempts.length === 0
+      ? null
+      : {
+          knownSubtotal: knownWall.reduce((sum, a) => sum + a.payload.wallMs, 0),
+          complete: knownWall.length === attempts.length,
+        };
 
   const availabilityEntries = {};
   if (correlation.record.sessionId === null) {
@@ -177,18 +227,55 @@ export function buildSessionIndex(input) {
       `model is ambiguous: ${models.length} distinct model identities were observed across attempts`,
     );
   }
+  // The repo join comes from the composition header provenance (the
+  // archive-safe opaque remote digest); the stream's composition-started
+  // header carries the provenance this run recorded.
+  const header = stream.events.find((event) => event.type === 'composition-started');
+  const provenanceRepo =
+    header && header.payload.provenance.repoId !== undefined
+      ? header.payload.provenance.repoId
+      : null;
+
+  if (!streamComplete) {
+    availabilityEntries['/'] = availability(
+      'partial',
+      'the observation stream is incomplete (torn final line or crash before close); ' +
+        'this row folds partial evidence only',
+    );
+  }
   if (tokens === null) {
-    availabilityEntries['/tokens'] = attempts.some((a) => a.payload.tokens !== null)
-      ? availability('partial', 'some attempts carried known token counts; the sum is unknown')
-      : availability('not-collected', 'no attempt carried a token count');
+    availabilityEntries['/tokens'] = availability(
+      'not-collected',
+      'no attempts were recorded; no token evidence exists',
+    );
+  } else if (!tokens.complete) {
+    availabilityEntries['/tokens'] = availability(
+      'partial',
+      'some attempts carried known token counts; knownSubtotal preserves them without ' +
+        'claiming a complete sum',
+    );
   }
   if (wallMs === null) {
-    availabilityEntries['/wallMs'] = attempts.some((a) => a.payload.wallMs !== null)
-      ? availability('partial', 'some attempts carried known wall times; the sum is unknown')
-      : availability('not-collected', 'no attempt carried a wall time');
+    availabilityEntries['/wallMs'] = availability(
+      'not-collected',
+      'no attempts were recorded; no wall-time evidence exists',
+    );
+  } else if (!wallMs.complete) {
+    availabilityEntries['/wallMs'] = availability(
+      'partial',
+      'some attempts carried known wall times; knownSubtotal preserves them without ' +
+        'claiming a complete sum',
+    );
+  }
+  if (provenanceRepo === null) {
+    availabilityEntries['/repo'] = availability(
+      'not-collected',
+      'no archive-safe remote digest was observed in the composition header provenance',
+    );
   }
 
   const row = {
+    repo: provenanceRepo,
     sessionId: correlation.record.sessionId,
     workId: correlation.record.workId,
     parentWorkId: correlation.record.parentWorkId,
