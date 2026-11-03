@@ -44,7 +44,7 @@ class InventoryTest(unittest.TestCase):
             inventory.replay(manifest, self.f.store)
 
     def test_protected_overlapping_test_paths_and_catchall(self):
-        self.assertEqual(inventory.tier("apps/crq-python/test_crq.py", self.tiers), "T1")
+        self.assertEqual(inventory.tier("apps/crq-python/test_crq_slot.py", self.tiers), "T1")
         self.assertEqual(inventory.tier("src/selfhost/test/docs.md", self.tiers), "T2")
         self.assertEqual(inventory.tier("src/new.ts", self.tiers), "T3")
         self.assertEqual(inventory.tier("unknown/future", self.tiers), "T4")
