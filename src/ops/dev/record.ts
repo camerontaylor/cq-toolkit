@@ -616,16 +616,29 @@ export function findReusableCycle(
     .find((cycle) => cycle.completion.kind === 'terminal' && cycle.vendorFailure === undefined);
   if (selected === undefined) return null;
   const configured = new Set(input.configuredReviewers ?? ['coderabbit', 'agent']);
-  const laterBlocker = records
+  const laterCycles = records
     .slice(records.indexOf(selected) + 1)
-    .some(
-      (record) =>
-        record.kind === 'cycle' &&
-        (configured.has(record.reviewer) ||
-          (record.reviewer.startsWith('agent:') && configured.has('agent'))) &&
-        record.completion.kind === 'blocked' &&
-        !(sameIdentity(record) && isAffirmativeNoFreshAttempt(record)),
-    );
+    .filter((record): record is DevCycleRecord => record.kind === 'cycle');
+  const laterBlocker = laterCycles.some(
+    (record, index) =>
+      (configured.has(record.reviewer) ||
+        (record.reviewer.startsWith('agent:') && configured.has('agent'))) &&
+      record.completion.kind === 'blocked' &&
+      !(sameIdentity(record) && isAffirmativeNoFreshAttempt(record)) &&
+      !laterCycles
+        .slice(index + 1)
+        .some(
+          (later) =>
+            later.completion.kind === 'terminal' &&
+            later.vendorFailure === undefined &&
+            later.scope === record.scope &&
+            later.reviewer === record.reviewer &&
+            later.target === record.target &&
+            later.base === record.base &&
+            later.head === record.head &&
+            later.dirtySha256 === record.dirtySha256,
+        ),
+  );
   if (laterBlocker) return null;
   const tail = cycles.slice(cycles.lastIndexOf(selected) + 1);
   const latest = tail.at(-1);

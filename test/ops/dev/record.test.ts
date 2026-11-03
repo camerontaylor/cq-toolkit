@@ -713,6 +713,24 @@ const REQUEST = {
 };
 
 describe('findReusableCycle', () => {
+  test('a later terminal resolves a blocker only at its own full identity', () => {
+    const blocked = cycleRecord({
+      cycleId: 'c002',
+      head: 'd'.repeat(40),
+      completion: { kind: 'blocked', reason: 'failed' },
+    });
+    const terminal = cycleRecord({ cycleId: 'c003', head: blocked.head });
+    expect(findReusableCycle([cycleRecord(), blocked, terminal], REQUEST)?.basis).toBe(
+      'exact-terminal',
+    );
+    expect(
+      findReusableCycle(
+        [cycleRecord(), blocked, { ...terminal, dirtySha256: 'different' }],
+        REQUEST,
+      ),
+    ).toBeNull();
+  });
+
   test.each([
     { scope: 'uncommitted' as const },
     { head: 'd'.repeat(40) },
