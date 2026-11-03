@@ -459,10 +459,6 @@ function gitleaksArgs(source, configPath, reportPath) {
   ];
 }
 
-function runGitleaks(source, configPath, reportPath, label, spawnOpts = {}) {
-  return spawnGitleaks(gitleaksArgs(source, configPath, reportPath), label, spawnOpts);
-}
-
 // Run at the start of the scan/self-test branches: this scanner only targets
 // the 8.x `detect` surface, so a different major (different CLI or report
 // shape) must fail loudly. Version tokens are matched on stdout only and the
@@ -535,7 +531,13 @@ function runScan(tmpRoot, name, configToml, source, spawnOpts = {}) {
   const configPath = path.join(tmpRoot, `${name}.toml`);
   const reportPath = path.join(tmpRoot, `${name}.json`);
   fs.writeFileSync(configPath, configToml);
-  const res = runGitleaks(source, configPath, reportPath, name, spawnOpts);
+  // Ignore policy is owned by this scanner, never by the scanned tree.
+  const ignorePath = path.join(tmpRoot, 'empty.gitleaksignore');
+  fs.writeFileSync(ignorePath, '');
+  const res = spawnGitleaks(
+    [...gitleaksArgs(source, configPath, reportPath), '--gitleaks-ignore-path', ignorePath],
+    name, spawnOpts,
+  );
   return { res, findings: readReport(reportPath) };
 }
 
@@ -606,15 +608,36 @@ function outgoingScan(base, head = 'HEAD') {
       fs.mkdirSync(source);
       // Read blobs directly: archive would honor export-ignore attributes and
       // omit tracked files. Materialize symlink blobs as text, never follow them.
-      for (const entry of git(['ls-tree', '-rz', '--full-tree', commit]).split('\0').filter(Boolean)) {
-        const match = /^([0-7]+) (blob|commit) ([0-9a-f]+)\t([\s\S]+)$/.exec(entry);
-        if (!match) throw new ConfigError('invalid git tree entry');
-        if (match[2] === 'commit') continue; // gitlinks contain no local blob
-        const target = path.resolve(source, match[4]);
+      const blobs = git(['ls-tree', '-rz', '--full-tree', commit]).split('\0').filter(Boolean)
+        .map((entry) => {
+          const match = /^([0-7]+) (blob|commit) ([0-9a-f]+)\t([\s\S]+)$/.exec(entry);
+          if (!match) throw new ConfigError('invalid git tree entry');
+          return { type: match[2], oid: match[3], name: match[4] };
+        }).filter((entry) => entry.type === 'blob');
+      const batch = spawnSync('git', ['cat-file', '--batch'], {
+        cwd: REPO_ROOT, input: blobs.map((entry) => entry.oid + '\n').join(''),
+        maxBuffer: 256 * 1024 * 1024,
+      });
+      if (batch.error || batch.status !== 0) throw new ConfigError('git cat-file batch failed');
+      let offset = 0;
+      for (const entry of blobs) {
+        const newline = batch.stdout.indexOf(10, offset);
+        if (newline < 0) throw new ConfigError('missing git batch header');
+        const header = batch.stdout.subarray(offset, newline).toString('ascii');
+        const match = /^([0-9a-f]+) blob ([0-9]+)$/.exec(header);
+        if (!match || match[1] !== entry.oid) throw new ConfigError('invalid git batch header');
+        const size = Number(match[2]);
+        offset = newline + 1;
+        const end = offset + size;
+        if (!Number.isSafeInteger(size) || end >= batch.stdout.length || batch.stdout[end] !== 10)
+          throw new ConfigError('invalid git batch size');
+        const target = path.resolve(source, entry.name);
         if (!target.startsWith(source + path.sep)) throw new ConfigError('invalid git tree path');
         fs.mkdirSync(path.dirname(target), { recursive: true });
-        fs.writeFileSync(target, git(['cat-file', 'blob', match[3]], true));
+        fs.writeFileSync(target, batch.stdout.subarray(offset, end));
+        offset = end + 1;
       }
+      if (offset !== batch.stdout.length) throw new ConfigError('unexpected git batch output');
       const messageDir = path.join(tmp, 'message');
       fs.mkdirSync(messageDir, { recursive: true });
       fs.writeFileSync(path.join(messageDir, 'commit-message.txt'), git(['show', '-s', '--format=%B', commit]));

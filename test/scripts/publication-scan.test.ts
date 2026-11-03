@@ -103,6 +103,30 @@ describe.skipIf(!available)('publication scans of outgoing git objects', () => {
     });
   });
 
+  test('tree-local gitleaks ignores cannot suppress publication findings', () => {
+    replay((root, git, scan) => {
+      writeFileSync(join(root, 'probe.txt'), ['port', 'key'].join(''));
+      writeFileSync(
+        join(root, '.gitleaksignore'),
+        'probe.txt:class:' + ['port', 'key'].join('') + '-config:1\n',
+      );
+      git('add', 'probe.txt', '.gitleaksignore');
+      git('commit', '-qm', 'ignored probe');
+      expect(scan()).toBe(1);
+    });
+  });
+
+  test('batch framing preserves binary bytes and unusual filenames', () => {
+    replay((root, git, scan) => {
+      writeFileSync(join(root, 'space and\nnewline.bin'), Buffer.from([0, 10, 255, 13]));
+      writeFileSync(join(root, 'empty.txt'), '');
+      writeFileSync(join(root, 'unicode-λ.txt'), 'safe unicode content');
+      git('add', '.');
+      git('commit', '-qm', 'binary and unusual paths');
+      expect(scan()).toBe(0);
+    });
+  });
+
   test('a commit message is scanned even with an unchanged tree', () => {
     replay((_root, git, scan) => {
       git('commit', '--allow-empty', '-qm', ['port', 'key'].join(''));
