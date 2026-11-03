@@ -30,8 +30,19 @@ describe('policyDiff: faults are failed, never a pass', SLOW, () => {
         files: { [POLICY_LIST_PATH]: JSON.stringify({ ...POLICY, protectedPaths: ['src/'] }) },
       },
       'no-policy-list': { files: { [POLICY_LIST_PATH]: null } },
-      'jobs-bad-key': { files: { [POLICY_LIST_PATH]: JSON.stringify({ ...POLICY, requiredJobs: { '../ci.yml': ['static'] } }) } },
-      'jobs-empty': { files: { [POLICY_LIST_PATH]: JSON.stringify({ ...POLICY, requiredJobs: { 'ci.yml': [] } }) } },
+      'jobs-bad-key': {
+        files: {
+          [POLICY_LIST_PATH]: JSON.stringify({
+            ...POLICY,
+            requiredJobs: { '../ci.yml': ['static'] },
+          }),
+        },
+      },
+      'jobs-empty': {
+        files: {
+          [POLICY_LIST_PATH]: JSON.stringify({ ...POLICY, requiredJobs: { 'ci.yml': [] } }),
+        },
+      },
       'no-manifest': { files: { [MANIFEST_PATH]: null } },
     });
   }, HOOK_MS);
