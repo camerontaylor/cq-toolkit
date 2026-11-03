@@ -15,6 +15,9 @@ const INDIRECT_DIST_TESTS = new Set([
   // through the .mjs module it imports (scripts/measurement-session-index.mjs),
   // so the content check cannot see it — an explicit indirect entry.
   'test/measurement-session-index.test.ts',
+  // Same indirect shape: measurement-inputs.test.ts reaches dist only through
+  // scripts/measurement-inputs.mjs (the v2 report schema import).
+  'test/measurement-inputs.test.ts',
 ]);
 export function needsDist(files, root) {
   return files.some((file) => {
