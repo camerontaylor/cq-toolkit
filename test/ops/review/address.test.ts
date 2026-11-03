@@ -657,6 +657,52 @@ describe('review.address composition', () => {
       await f.cleanup();
     }
   });
+  test.each(['', '   \n'])(
+    'blank finding evidence (%j) records an empty evidence list, never [""]',
+    async (blank) => {
+      const f = await fixture([{ ...finding('a'), evidence: blank }]);
+      const { disposition: _bypass, ...realDeps } = f.deps;
+      try {
+        await f.repo.write('.gitignore', '/.cq/\n');
+        f.repo.commitAll('ignore engine state');
+        let fixedHead = '';
+        const result = await makeReviewAddress({
+          ...realDeps,
+          initialRecord: f.record(),
+          workerFactory: () => ({
+            escalation: createEscalationState,
+            fix: async (target) => {
+              await f.repo.write(`src/${target.id}.ts`, 'export const fixed = 1;\n');
+              fixedHead = f.repo.commitAll(`fix ${target.id}`);
+              return {
+                finding: { ...target, status: 'fixed' as const, reason: 'fixed' },
+                reason: 'fixed',
+                observedHead: fixedHead,
+                commit: fixedHead,
+                validation: [],
+              };
+            },
+          }),
+          review: async () => ({
+            status: 'ok' as const,
+            value: { ...f.record(), head: fixedHead, findings: [] },
+          }),
+        })({ ...f.input, rounds: 1 });
+        const report = reportOf(result);
+        expect(result.status, report.reasons.join(' | ')).toBe('ok');
+        const ledger = JSON.parse(
+          await readFile(devLedgerPath(f.repo.root, 'feature/x'), 'utf8'),
+        ) as { records: { kind: string; findingId?: string; evidence?: unknown }[] };
+        const recorded = ledger.records.find(
+          (entry) => entry.kind === 'disposition' && entry.findingId === 'a',
+        );
+        expect(recorded, report.reasons.join(' | ')).toBeDefined();
+        expect(recorded?.evidence).toEqual([]);
+      } finally {
+        await f.cleanup();
+      }
+    },
+  );
   test('a head-matching record refused for its sources never fabricates a witness', async () => {
     const f = await fixture([finding('a')]);
     const { disposition: _bypass, ...realDeps } = f.deps;

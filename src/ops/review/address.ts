@@ -1423,8 +1423,9 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                         // for a fixed disposition (addressWorker), the
                         // path/line JSON for rejected/deferred, the failed
                         // attempt otherwise. Never manufactured, never
-                        // dropped; empty stays empty.
-                        evidence: finding.evidence === undefined ? [] : [finding.evidence],
+                        // dropped; an absent, empty or whitespace-only value
+                        // records no evidence entries (never ['']).
+                        evidence: finding.evidence?.trim() ? [finding.evidence] : [],
                         ...(finding.status === 'deferred'
                           ? {
                               reviewTrigger:
