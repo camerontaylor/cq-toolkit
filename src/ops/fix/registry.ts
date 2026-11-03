@@ -10,7 +10,10 @@ import type { FixRunInput } from './runFix.js';
 // family's registry coverage explicit), './correlation.js' (ADR-0008 T05
 // run-correlation helper; not a registered op — pure allocation/adoption
 // over the correlation record, referenced here to keep the family's
-// registry coverage explicit).
+// registry coverage explicit). './reportFold.js' (ADR-0008 T36 report-v2
+// fold; not a registered op — read-only assembly over the composition
+// observation stream, referenced here to keep the family's registry
+// coverage explicit).
 const SweepInstallSchema = z
   .object({
     command: z.string().min(1),

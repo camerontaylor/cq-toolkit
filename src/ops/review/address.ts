@@ -95,9 +95,16 @@ import {
   type KernelRunDescriptor,
   type ObservationWriter,
 } from '../../kernel/observation.js';
-import type { KernelRunLinkedJournalEvent, ProvenanceRecord } from '../../kernel/types.js';
+import type {
+  AvailabilityRecord,
+  CompositionStartedJournalEvent,
+  ReportV2,
+  KernelRunLinkedJournalEvent,
+  ProvenanceRecord,
+} from '../../kernel/types.js';
 import { repoIdFromRemote, sanitizeObservation } from '../fix/attemptRecord.js';
 import { resolveCorrelation } from '../fix/correlation.js';
+import { assembleReportV2 } from '../fix/reportFold.js';
 
 export interface ReviewAddressInput {
   repoRoot: string;
@@ -190,6 +197,7 @@ export interface ReviewAddressReport {
    * and never carries the writer.
    */
   observation?: ReviewAddressObservation;
+  reportV2?: ReportV2;
 }
 
 /** The composition observation surface makeReviewAddress exposes to its report. */
@@ -207,6 +215,8 @@ export interface ReviewAddressObservation {
   baseSha: string | null;
   failure: string | null;
   kernelRuns: KernelRunDescriptor[];
+  /** Availability of ReportV2 assembly; observational failures never change the verdict. */
+  availability?: AvailabilityRecord;
 }
 export type ReviewAddressResult = OpResult<ReviewAddressReport> & {
   report?: ReviewAddressReport;
@@ -395,6 +405,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
       | (ReviewAddressObservation & {
           writer?: ObservationWriter;
           closeWriter?: ObservationWriter;
+          header?: CompositionStartedJournalEvent;
         })
       | undefined;
     let observationClosed = false;
@@ -433,18 +444,28 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
      * never held ownership reports the same explicit no-stream shape instead
      * of silently omitting it.
      */
-    const observationSurface = (): ReviewAddressObservation | undefined =>
-      observation === undefined
-        ? undefined
-        : {
-            persistence: observation.persistence,
-            status: observation.status,
-            compositionRunId: observation.compositionRunId,
-            workId: observation.workId,
-            baseSha: observation.baseSha,
-            failure: observation.failure,
-            kernelRuns: [...observation.kernelRuns],
-          };
+    const observationSurface = (): ReviewAddressObservation | undefined => {
+      if (observation === undefined) return undefined;
+      const writer = observation.writer;
+      const assembled = assembleReportV2({
+        writer,
+        header: observation.header,
+        failureFree: observation.status !== 'indeterminate',
+        kernelRuns: observation.kernelRuns,
+        producer: 'address',
+      });
+      if (assembled.reportV2) report.reportV2 = assembled.reportV2;
+      return {
+        availability: assembled.availability,
+        persistence: observation.persistence,
+        status: observation.status,
+        compositionRunId: observation.compositionRunId,
+        workId: observation.workId,
+        baseSha: observation.baseSha,
+        failure: observation.failure,
+        kernelRuns: [...observation.kernelRuns],
+      };
+    };
     const bookkeeping = new Map<string, string>();
     let bookkeepingTampered = false;
     let bookkeepingRevision = 0;
@@ -887,6 +908,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
       const surface: ReviewAddressObservation & {
         writer?: ObservationWriter;
         closeWriter?: ObservationWriter;
+        header?: CompositionStartedJournalEvent;
       } = {
         persistence: 'unavailable',
         status: 'indeterminate',
@@ -898,6 +920,24 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
             ? 'observation: base witness unavailable'
             : 'observation: ownership not held',
         kernelRuns: [],
+        ...(sanitizedProvenance === null
+          ? {}
+          : {
+              header: {
+                type: 'composition-started' as const,
+                runId: compositionRunId,
+                at: new Date(start).toISOString(),
+                unitId: null,
+                jobId: null,
+                taskId: null,
+                attempt: null,
+                payload: {
+                  journalVersion: 3 as const,
+                  provenance: sanitizedProvenance,
+                  correlation: correlationRecord,
+                },
+              },
+            }),
       };
       observation = surface;
       // Called ONLY from the owned path, after the ownership entry created the

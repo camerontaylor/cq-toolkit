@@ -17,7 +17,10 @@ import {
   type KernelRunDescriptor,
   type ObservationWriter,
 } from '../../kernel/observation.js';
+import { assembleReportV2 } from './reportFold.js';
 import type {
+  AvailabilityRecord,
+  ReportV2,
   CompositionStartedJournalEvent,
   CorrelationRecord,
   KernelRunLinkedJournalEvent,
@@ -102,6 +105,7 @@ export interface FixRunReport {
    * open; absent on pre-dispatch refusals.
    */
   observation?: FixRunObservation;
+  reportV2?: ReportV2;
   run?: RunReport;
   assembly?: RunReport;
   escalation?: Omit<EscalationState, 'events'> & {
@@ -130,6 +134,8 @@ export interface FixRunObservation {
   workId: string;
   failure: string | null;
   kernelRuns: KernelRunDescriptor[];
+  /** Availability of ReportV2 assembly; observational failures never change the verdict. */
+  availability?: AvailabilityRecord;
 }
 
 async function scanPrBodyForUpload(scanner: DiffSecretScanner, body: string): Promise<void> {
@@ -339,7 +345,12 @@ export function makeFixRun(deps: FixRunDeps = {}) {
     // writer API is memory-only and the report declares persistence
     // unavailable — it never claims durability.
     const compositionRunId = randomUUID();
-    let observation: (FixRunObservation & { writer?: ObservationWriter }) | undefined;
+    let observation:
+      | (FixRunObservation & {
+          writer?: ObservationWriter;
+          header?: CompositionStartedJournalEvent;
+        })
+      | undefined;
     let observationClosed = false;
     const observationFailure = (error: unknown) => {
       if (observation) {
@@ -489,7 +500,17 @@ export function makeFixRun(deps: FixRunDeps = {}) {
       report.wallMs = Date.now() - start;
       await closeObservation();
       if (observation !== undefined) {
+        const writer = observation.writer;
+        const assembled = assembleReportV2({
+          writer,
+          header: observation.header,
+          failureFree: observation.status !== 'indeterminate',
+          kernelRuns: observation.kernelRuns,
+          producer: 'fix',
+        });
+        if (assembled.reportV2) report.reportV2 = assembled.reportV2;
         report.observation = {
+          availability: assembled.availability,
           persistence: observation.persistence,
           status: observation.status,
           compositionRunId,
@@ -713,6 +734,7 @@ export function makeFixRun(deps: FixRunDeps = {}) {
         attempt: null,
         payload: { journalVersion: 3, provenance, correlation },
       };
+      observation.header = header;
       if (writer !== undefined) {
         try {
           await writer.append(header);

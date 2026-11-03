@@ -1,3 +1,4 @@
+import { ReportV2Schema } from '../../../src/kernel/schema.js';
 // ADR-0008 T30 — fix composition observation writer wiring (M0-fix-writer).
 //
 // What is pinned here:
@@ -218,6 +219,8 @@ describe('T30 round-trip through the fix composition', () => {
       })(input(f));
       // The composition ran; the stream persisted under journalDir.
       expect(reportOf(result).observation).toBeDefined();
+      expect(ReportV2Schema.safeParse(reportOf(result).reportV2).success).toBe(true);
+      expect(reportOf(result).reportV2?.availability['']?.state).toBe('known');
       // No writer/callback ever reached the serialized dispatch input.
       expect(JSON.stringify(seen.input)).not.toContain('observationWriter');
       expect(JSON.stringify(seen.input)).not.toContain('append');
@@ -259,6 +262,7 @@ describe('T30 round-trip through the fix composition', () => {
       });
       const report = reportOf(result);
       expect(report.observation).toBeDefined();
+      expect(ReportV2Schema.safeParse(report.reportV2).success).toBe(true);
       expect(report.observation?.persistence).toBe('unavailable');
       expect(report.observation?.kernelRuns).toEqual([]);
       // No durability claim: no stream file was created anywhere.
@@ -339,7 +343,7 @@ describe('T30 unknown evidence: unreturned kernel runs stay unlinked', () => {
 // ---- T30 failure boundary -------------------------------------------------
 
 describe('T30 failure boundary', () => {
-  test.each(['header', 'link', 'close'])(
+  test.each(['header', 'link', 'close', 'fold'])(
     '%s failure preserves unit evidence and persists indeterminate status',
     async (boundary) => {
       const f = await fixture();
@@ -349,6 +353,10 @@ describe('T30 failure boundary', () => {
       });
       const append = writer.append.bind(writer);
       const originalClose = writer.close.bind(writer);
+      if (boundary === 'fold') {
+        const events = writer.events.bind(writer);
+        vi.spyOn(writer, 'events').mockImplementation(() => [...events(), ...events()]);
+      }
       vi.spyOn(writer, 'append').mockImplementation(async (event) => {
         if (boundary === 'header' && event.type === 'composition-started')
           throw new Error('https://u:tok@h/x?k=v');
@@ -392,8 +400,12 @@ describe('T30 failure boundary', () => {
       expect(report.units).toHaveLength(1);
       expect(report.tasks.length).toBeGreaterThan(0);
       expect(close).toHaveBeenCalledTimes(1);
-      expect(report.observation?.status).toBe('indeterminate');
-      expect(report.observation?.failure).not.toContain('tok');
+      expect(ReportV2Schema.safeParse(report.reportV2).success).toBe(true);
+      expect(report.reportV2?.availability['']?.state).toBe(
+        boundary === 'header' || boundary === 'fold' ? 'unavailable' : 'partial',
+      );
+      if (boundary !== 'fold') expect(report.observation?.status).toBe('indeterminate');
+      if (boundary !== 'fold') expect(report.observation?.failure).not.toContain('tok');
       const persisted = JSON.parse(await readFile(report.reportPath, 'utf8')) as {
         observation: FixRunReport['observation'] & { writer?: unknown };
       };
@@ -551,6 +563,7 @@ describe('T30 failure boundary', () => {
       const result = await makeFixRun({ drivers: fixingDrivers() })(input(f));
       expect(result.status).toBe('failed');
       expect(reportOf(result).observation).toBeUndefined();
+      expect(reportOf(result).reportV2).toBeUndefined();
     } finally {
       await rm(f.root, { recursive: true, force: true });
       roots = roots.filter((root) => root !== f.root);
