@@ -177,7 +177,7 @@ function stripCredentialText(text: string): string {
       const nextRun = text.slice(nextStart, next);
       const nextAt = nextRun.indexOf('@');
       const splitUsername =
-        !nextRun.includes('://') &&
+        !nextRun.slice(0, nextAt).includes('://') &&
         /^[a-z][a-z0-9_-]*$/i.test(run) &&
         nextAt >= 0 &&
         nextRun.slice(0, nextAt).includes(':');

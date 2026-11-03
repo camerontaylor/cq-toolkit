@@ -150,6 +150,9 @@ describe('sanitizeObservation', () => {
     ['src/ab:cd\nx@y', 'src/ab:cd\ny'],
     ['us\ner:SEC@host', '\nhost'],
     ['user\n:SEC@host', '\nhost'],
+    ['us\ner:SEC91@host,https://x', '\nhost,https://x'],
+    ['abc\ner:SEC95@h/https://x', '\nh/https://x'],
+    [String.raw`<https://h/x?q=\>SEC>`, '<https://h/x>SEC>'],
     ['https://h/x\nuser@host', 'https://h/x\nhost'],
   ])('pins accepted sanitizer edge case: %s', (input, expected) => {
     expect(sanitizeObservation(input)).toEqual(expected);
