@@ -17,6 +17,7 @@ import {
   type KernelRunDescriptor,
   type ObservationWriter,
 } from '../../kernel/observation.js';
+import { foldObservations, observationStreamOf, type ReportObservationFold } from './reportFold.js';
 import type {
   CompositionStartedJournalEvent,
   CorrelationRecord,
@@ -130,6 +131,8 @@ export interface FixRunObservation {
   workId: string;
   failure: string | null;
   kernelRuns: KernelRunDescriptor[];
+  /** ADR-0008 T36: report-v2 fold of this composition stream and its links. */
+  fold: ReportObservationFold;
 }
 
 async function scanPrBodyForUpload(scanner: DiffSecretScanner, body: string): Promise<void> {
@@ -489,6 +492,7 @@ export function makeFixRun(deps: FixRunDeps = {}) {
       report.wallMs = Date.now() - start;
       await closeObservation();
       if (observation !== undefined) {
+        const writer = observation.writer;
         report.observation = {
           persistence: observation.persistence,
           status: observation.status,
@@ -496,6 +500,14 @@ export function makeFixRun(deps: FixRunDeps = {}) {
           workId: observation.workId,
           failure: observation.failure,
           kernelRuns: [...observation.kernelRuns],
+          fold: foldObservations({
+            streams:
+              writer === undefined
+                ? []
+                : [observationStreamOf(writer, observation.status !== 'indeterminate')],
+            kernelRuns: observation.kernelRuns,
+            persistence: observation.persistence,
+          }),
         };
       }
       // Deliberate: the entire report is persisted, beyond the sanitized observation header.
@@ -701,6 +713,9 @@ export function makeFixRun(deps: FixRunDeps = {}) {
         workId: correlation.workId,
         failure: null,
         kernelRuns: [],
+        // Placeholder until the report is built; the final fold reads the
+        // closed writer's accepted events and the resolved descriptors.
+        fold: foldObservations({ streams: [], persistence: writer?.persistence ?? 'unavailable' }),
       };
       if (openFailure !== undefined) observationFailure(openFailure);
       const header: CompositionStartedJournalEvent = {

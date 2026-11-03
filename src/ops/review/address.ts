@@ -98,6 +98,11 @@ import {
 import type { KernelRunLinkedJournalEvent, ProvenanceRecord } from '../../kernel/types.js';
 import { repoIdFromRemote, sanitizeObservation } from '../fix/attemptRecord.js';
 import { resolveCorrelation } from '../fix/correlation.js';
+import {
+  foldObservations,
+  observationStreamOf,
+  type ReportObservationFold,
+} from '../fix/reportFold.js';
 
 export interface ReviewAddressInput {
   repoRoot: string;
@@ -207,6 +212,8 @@ export interface ReviewAddressObservation {
   baseSha: string | null;
   failure: string | null;
   kernelRuns: KernelRunDescriptor[];
+  /** ADR-0008 T36: report-v2 fold of this composition stream and its links. */
+  fold: ReportObservationFold;
 }
 export type ReviewAddressResult = OpResult<ReviewAddressReport> & {
   report?: ReviewAddressReport;
@@ -433,18 +440,27 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
      * never held ownership reports the same explicit no-stream shape instead
      * of silently omitting it.
      */
-    const observationSurface = (): ReviewAddressObservation | undefined =>
-      observation === undefined
-        ? undefined
-        : {
-            persistence: observation.persistence,
-            status: observation.status,
-            compositionRunId: observation.compositionRunId,
-            workId: observation.workId,
-            baseSha: observation.baseSha,
-            failure: observation.failure,
-            kernelRuns: [...observation.kernelRuns],
-          };
+    const observationSurface = (): ReviewAddressObservation | undefined => {
+      if (observation === undefined) return undefined;
+      const writer = observation.writer;
+      return {
+        persistence: observation.persistence,
+        status: observation.status,
+        compositionRunId: observation.compositionRunId,
+        workId: observation.workId,
+        baseSha: observation.baseSha,
+        failure: observation.failure,
+        kernelRuns: [...observation.kernelRuns],
+        fold: foldObservations({
+          streams:
+            writer === undefined
+              ? []
+              : [observationStreamOf(writer, observation.status !== 'indeterminate')],
+          kernelRuns: observation.kernelRuns,
+          persistence: observation.persistence,
+        }),
+      };
+    };
     const bookkeeping = new Map<string, string>();
     let bookkeepingTampered = false;
     let bookkeepingRevision = 0;
@@ -898,6 +914,9 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
             ? 'observation: base witness unavailable'
             : 'observation: ownership not held',
         kernelRuns: [],
+        // Placeholder until the surface is read; the fold is recomputed from
+        // the writer's accepted events and resolved descriptors each call.
+        fold: foldObservations({ streams: [], persistence: 'unavailable' }),
       };
       observation = surface;
       // Called ONLY from the owned path, after the ownership entry created the
