@@ -784,6 +784,10 @@ function selfTestCleanProbes(tmpRoot, rules, cleanProbes) {
 function selfTestTreeConfig(tmpRoot, rules, cleanProbes) {
   const { res, findings } = scanFixture(tmpRoot, 'tree-config', treeConfigToml(rules), (dir) => {
     writeProbes(dir, rules);
+    // The real scan must detect every probe even when the scanned tree
+    // tries to suppress its exact fingerprint.
+    fs.writeFileSync(path.join(dir, '.gitleaksignore'),
+      rules.map((rule) => probeFileFor(rule) + ':' + rule.id + ':1').join('\n') + '\n');
     fs.writeFileSync(path.join(dir, 'clean-probes.txt'), `${cleanProbes.join('\n')}\n`);
     const copyPath = path.join(dir, PATTERNS_REL);
     fs.mkdirSync(path.dirname(copyPath), { recursive: true });
