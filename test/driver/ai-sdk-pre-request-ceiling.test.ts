@@ -1053,6 +1053,7 @@ describe('ai-sdk driver strictTokenBudget', () => {
             new MockLanguageModelV4({ modelId: 'claude-test', doGenerate: textResult('ok') }),
         },
         sessionsDir: join(scratch, 'sessions'),
+        resolveRg: async () => ({ ok: false, reason: 'absent' }),
         strictTokenCapability: () =>
           fakeCapability({
             count: () => {
@@ -1062,12 +1063,16 @@ describe('ai-sdk driver strictTokenBudget', () => {
       });
       const result = await driver.run(
         invocation({
+          toolPolicy: { allow: ['grep'], mode: 'allowlist' },
+          sandboxPolicy: { level: 'read-only' },
           budget: { strictTokenBudget: { maxInputTokens: 1_000_000, reserveOutputTokens: 64 } },
         }),
       );
       expect(result.stopReason).toBe('error');
       expect(result.errorClass).toBeDefined();
       expect(result.error).toContain('infrastructure');
+      expect(result.capabilities?.rg).toMatchObject({ available: false, probe: 'absent' });
+      expect(result.advisories).toContain('search tools unavailable: ripgrep not found');
     } finally {
       await rm(scratch, { recursive: true, force: true });
     }
