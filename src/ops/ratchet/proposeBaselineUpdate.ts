@@ -149,6 +149,8 @@ function errorMessage(err: unknown): string {
  * suppression on GITHUB_TOKEN-created PRs would drop the required I4 check).
  */
 export interface BaselinePrEffects {
+  /** Close the open PR for exactly this head and the configured base, with a comment. */
+  closeOpenPrByHead(head: string, comment: string): Promise<void>;
   /**
    * The open PR whose head branch equals `head`, or null when none is open.
    * SEAM CONTRACT for implementations (review-debt #87 round-3, item 6):
@@ -816,6 +818,30 @@ export function createProposeBaselineUpdate(
     // hash are all stable regardless of the caller's improvement order.
     applied.sort(byPair);
     if (applied.length === 0) {
+      // Only usable, non-tightening readings justify withdrawal. Missing or
+      // corrupt baselines are not evidence that an existing proposal is stale.
+      if (
+        judged.length > 0 &&
+        skipped.every((entry) => entry.reason.includes('not a tightening'))
+      ) {
+        const pairs = [...judged].sort(byPair).map((entry) => [entry.target, entry.metric]);
+        const digest = createHash('sha256')
+          .update(JSON.stringify(pairs), 'utf8')
+          .digest('hex')
+          .slice(0, 12);
+        const head = `${input.headPrefix ?? DEFAULT_HEAD_PREFIX}-${digest}`;
+        const comment =
+          'Closing this baseline proposal: the latest measurements no longer tighten the committed baselines.\n\n' +
+          judged.map((entry) => `${entry.target}/${entry.metric}: ${entry.value}`).join('\n');
+        try {
+          await effects.closeOpenPrByHead(head, comment);
+        } catch (err) {
+          return {
+            status: 'indeterminate',
+            detail: `ratchet: could not withdraw stale proposal — ${errorMessage(err)}`,
+          };
+        }
+      }
       return {
         status: 'ok',
         value: { proposal: 'none', prNumber: null, prUrl: null, head: null, applied: [], skipped },

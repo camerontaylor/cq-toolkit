@@ -49,11 +49,9 @@
 // for lower-is-better, at the baseline file's own precision — is the one
 // rounding a proposal may carry; a half-up here would turn a 94.29
 // measurement into a 94.3 proposal a re-measurement cannot reproduce. The
-// tightens() check below is only a fast path: it can never reject an
-// improvement the op would propose, because the op's rounded value is never
-// stricter than the raw one it rounds. Worst case for a forged reading is
-// still a too-tight proposal — a visible PR judged by the same checks as
-// any other.
+// Non-tightening readings also reach the op so it can withdraw a stale
+// proposal for the exact same metric set. Forged readings still cannot
+// bypass the checks that judge the resulting proposal PR.
 //
 // ONE BRAIN: the driver only collects readings and enumerates committed
 // baselines; every decision the op owns — grouping, the tighten gate,
@@ -398,14 +396,8 @@ for (const entry of tree
   baselineBlobs.push({ path, content });
 }
 
-// ---- improvements: only genuine TIGHTENs, judged by the engine's own comparator ----
-// A NECESSARY condition only: the op judges at the baseline file's precision
-// with directional rounding, and its rounded value is never stricter than
-// the raw reading, so anything the op would propose also tightens here
-// raw-vs-committed. Normalizing the baseline side (roundCoveragePct) could
-// reject a real proposal against a finer-grained file (94.29 over a 94.25
-// baseline: the normalized side says not-tighter, the op says 94.29) — so
-// the comparison stays raw.
+// Pass every available measured baseline to the op: it owns directional
+// rounding, tightening and withdrawal when a rerun no longer tightens.
 const improvements = [];
 for (const b of committed) {
   const value = Object.hasOwn(live, b.metric) ? live[b.metric] : undefined;
@@ -416,14 +408,8 @@ for (const b of committed) {
     continue;
   }
   if (value === null) continue; // note already emitted above
-  if (engine.tightens(b.value, value, b.direction)) {
-    improvements.push({ target: b.target, metric: b.metric, value });
-  } else {
-    console.error(
-      `ratchet-propose: ${b.target}/${b.metric} ${b.value} → ${value} is not a tightening ` +
-        `(${b.direction}) against ${BASE} — nothing to propose`,
-    );
-  }
+  // Pass non-tightening readings too: the op must withdraw stale proposals.
+  improvements.push({ target: b.target, metric: b.metric, value });
 }
 
 if (improvements.length === 0) {
@@ -457,11 +443,12 @@ function listOpenProposalPrs(head, base) {
       '--state',
       'open',
       '--json',
-      'number,url',
+      'number,url,headRefName,baseRefName',
     ]),
     [],
   );
   return list.filter((pr) => {
+    if (pr.headRefName !== head || pr.baseRefName !== base) return false;
     // Full --json object (never -q: parseGhJson handles JSON, and -q prints
     // a bare string — review-debt #120's own PR-105 finding shape).
     const viewed = parseGhJson(runGh(['pr', 'view', String(pr.number), '--json', 'state']), {});
@@ -475,6 +462,19 @@ const ws = join(wsParent, 'ws');
 
 /** BaselinePrEffects over gh CLI + git, operating inside `ws` (never ROOT). */
 const effects = {
+  async closeOpenPrByHead(head, comment) {
+    for (const pr of listOpenProposalPrs(head, BASE)) {
+      const dir = mkdtempSync(join(tmpdir(), 'ratchet-close-'));
+      try {
+        const bodyFile = join(dir, 'comment.md');
+        writeFileSync(bodyFile, comment, 'utf8');
+        runGh(['pr', 'comment', String(pr.number), '--body-file', bodyFile]);
+        runGh(['pr', 'close', String(pr.number)]);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+  },
   async findOpenPrByHead(head) {
     const list = listOpenProposalPrs(head, BASE);
     return list.length > 0 ? { number: list[0].number, url: list[0].url } : null;

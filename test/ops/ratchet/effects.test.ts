@@ -77,7 +77,7 @@ beforeAll(() => {
       "if (args[0] === 'pr' && args[1] === 'create') { process.stdout.write((process.env.FAKE_GH_PR_CREATE ?? '" +
         PR_URL +
         "') + '\\n'); process.exit(0); }",
-      "if (args[0] === 'pr' && args[1] === 'edit') { process.exit(0); }",
+      "if (args[0] === 'pr' && ['edit', 'comment', 'close'].includes(args[1])) { process.exit(0); }",
       "process.stderr.write('fake gh: unexpected ' + args.join(' ') + '\\n');",
       'process.exit(2);',
       '',
@@ -148,11 +148,29 @@ function upsert(worktree: string, listJson: string) {
 }
 
 describe('makeSubprocessBaselinePrEffects', () => {
+  test('withdrawal comments then closes only the exact head and base', async () => {
+    const effects = makeSubprocessBaselinePrEffects(work, 'main');
+    process.env.FAKE_GH_PR_LIST = JSON.stringify([
+      { number: 8, url: PR_URL, baseRefName: 'main', headRefName: 'other' },
+      { number: 7, url: PR_URL, baseRefName: 'main', headRefName: HEAD },
+    ]);
+    const before = ghCalls().length;
+    await effects.closeOpenPrByHead(HEAD, 'Latest measurement no longer tightens: 11');
+    const calls = ghCalls().slice(before);
+    expect(calls[1]?.slice(0, 4)).toEqual(['pr', 'comment', '7', '--body-file']);
+    expect(calls[2]).toEqual(['pr', 'close', '7']);
+  });
+
   test('findOpenPrByHead returns only the PR whose base matches the (head, base) pair', async () => {
     const effects = makeSubprocessBaselinePrEffects(work, 'main');
     process.env.FAKE_GH_PR_LIST = JSON.stringify([
-      { number: 1, url: 'https://example.test/o/r/pull/1', baseRefName: 'release' },
-      { number: 2, url: 'https://example.test/o/r/pull/2', baseRefName: 'main' },
+      {
+        number: 1,
+        url: 'https://example.test/o/r/pull/1',
+        baseRefName: 'release',
+        headRefName: HEAD,
+      },
+      { number: 2, url: 'https://example.test/o/r/pull/2', baseRefName: 'main', headRefName: HEAD },
     ]);
     await expect(effects.findOpenPrByHead(HEAD)).resolves.toEqual({
       number: 2,
@@ -160,7 +178,12 @@ describe('makeSubprocessBaselinePrEffects', () => {
     });
     // A head carrying ONLY a different-base PR is not this proposal's PR.
     process.env.FAKE_GH_PR_LIST = JSON.stringify([
-      { number: 1, url: 'https://example.test/o/r/pull/1', baseRefName: 'release' },
+      {
+        number: 1,
+        url: 'https://example.test/o/r/pull/1',
+        baseRefName: 'release',
+        headRefName: HEAD,
+      },
     ]);
     await expect(effects.findOpenPrByHead(HEAD)).resolves.toBeNull();
   });
@@ -178,7 +201,7 @@ describe('makeSubprocessBaselinePrEffects', () => {
     const logLengthBefore = ghCalls().length;
     const second = await upsert(
       fresh,
-      JSON.stringify([{ number: 7, url: PR_URL, baseRefName: 'main' }]),
+      JSON.stringify([{ number: 7, url: PR_URL, baseRefName: 'main', headRefName: HEAD }]),
     );
     expect(second).toEqual({ created: false, number: 7, url: PR_URL });
     expect(git(bare, ['rev-parse', `refs/heads/${HEAD}`]).trim()).toBe(pushedSha);

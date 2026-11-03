@@ -360,7 +360,7 @@ describe('ratchet-propose: happy path against a local main origin', () => {
       const res = propose(ctx, { coverage: 89.96 }); // below 90 — not tighter at any precision
       expect(res.status, `${res.stdout}${res.stderr}`).toBe(0);
       expect(res.stderr).toContain('no tightening to propose');
-      expect(existsSync(ctx.ghLog)).toBe(false);
+      expect(readFileSync(ctx.ghLog, 'utf8')).not.toContain('pr create');
     },
   );
 
