@@ -916,6 +916,94 @@ export interface MeasurementSummaryJournalEvent {
   payload: MeasurementSummaryPayload;
 }
 
+/** The `composition-started` payload (ADR-0008 composition header row). */
+export interface CompositionStartedPayload {
+  journalVersion: 3;
+  provenance: ProvenanceRecord;
+  correlation: CorrelationRecord;
+}
+
+/**
+ * Journal: the one composition header (ADR-0008). The only header a
+ * composition stream carries; its witnesses are composition-scoped, while
+ * kernel execution witnesses remain on the kernel stream's own v3 header.
+ * Missing metadata for a standalone kernel invocation is null/unavailable,
+ * never synthesized cq.json state. Writer enabled with T29.
+ */
+export interface CompositionStartedJournalEvent {
+  type: 'composition-started';
+  runId: string;
+  /** UTC ISO-8601 with milliseconds. */
+  at: string;
+  // Envelope for new event kinds is exactly
+  // {type,runId,at,unitId,jobId,taskId,attempt,payload} (ADR-0008); these
+  // are run-scoped, so the scope fields are null (required, not absent).
+  unitId: string | null;
+  jobId: string | null;
+  taskId: string | null;
+  attempt: number | null;
+  payload: CompositionStartedPayload;
+}
+
+/** The `kernel-run-linked` payload (ADR-0008 composition header/link row). */
+export interface KernelRunLinkedPayload {
+  kernelRunId: string;
+  planId: string;
+  round: number;
+}
+
+/**
+ * Journal: one link from the composition stream to a returned kernel run
+ * (ADR-0008). Emitted after each runPlan result, including partial results
+ * when present; unreturned kernel runs remain unlinked/unknown, never
+ * guessed. Writer enabled with T29.
+ */
+export interface KernelRunLinkedJournalEvent {
+  type: 'kernel-run-linked';
+  runId: string;
+  /** UTC ISO-8601 with milliseconds. */
+  at: string;
+  unitId: string | null;
+  jobId: string | null;
+  taskId: string | null;
+  attempt: number | null;
+  payload: KernelRunLinkedPayload;
+}
+
+/**
+ * The v3 observational event union (ADR-0008): the kernel journal v3
+ * carriers plus the composition-only header/link carriers. One stream file
+ * holds exactly one composition header and only these event kinds; kernel
+ * RunLog files never hold the composition carriers.
+ */
+export type ObservationEvent =
+  | CompositionStartedJournalEvent
+  | KernelRunLinkedJournalEvent
+  | AttemptFinishedJournalEvent
+  | GateVerdictJournalEvent
+  | TaskFinishedJournalEvent
+  | ApprovalJournalEvent
+  | WriteObservationJournalEvent
+  | FindingDispositionJournalEvent
+  | HeadAcceptanceJournalEvent
+  | ReviewObservedJournalEvent
+  | MeasurementSummaryJournalEvent;
+
+/**
+ * One composition observation stream (ADR-0008): the events of
+ * `<journalDir>/observations/<workId>/<compositionRunId>.ndjson` in file
+ * order, plus the completeness of its evidence. `complete: false` means the
+ * stream ended in a torn final line (a crash mid-append) — the returned
+ * prefix is real but the terminal evidence stays partial, never an invented
+ * completion.
+ */
+export interface ObservationStream {
+  workId: string;
+  compositionRunId: string;
+  events: ObservationEvent[];
+  complete: boolean;
+}
+
 /**
  * Report v2 root (ADR-0008 report row): a versioned payload inside I1's
  * existing report carrier. Rows fold the journal v3 payloads; unknown or

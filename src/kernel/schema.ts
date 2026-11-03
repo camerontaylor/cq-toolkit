@@ -51,6 +51,12 @@ import type {
   RunReport,
   RunStartedV3JournalEvent,
   WitnessesRecord,
+  CompositionStartedJournalEvent,
+  CompositionStartedPayload,
+  KernelRunLinkedJournalEvent,
+  KernelRunLinkedPayload,
+  ObservationEvent,
+  ObservationStream,
   AttemptFinishedJournalEvent,
   AttemptFinishedPayload,
   ApprovalJournalEvent,
@@ -1165,6 +1171,169 @@ export const ReportV2Schema: z.ZodType<ReportV2> = z
     checkMetric(report.metric, report.availability, ctx);
   });
 
+// ---------------------------------------------------------------------------
+// Kernel: journal v3 composition header/link schemas (ADR-0008, T29 — the
+// composition stream carries exactly one composition-started header; the
+// kernel RunLog never carries these composition-only carriers)
+// ---------------------------------------------------------------------------
+
+export const CompositionStartedPayloadSchema: z.ZodType<CompositionStartedPayload> = z
+  .object({
+    journalVersion: z.literal(3),
+    provenance: ProvenanceRecordSchema,
+    correlation: CorrelationRecordSchema,
+  })
+  .strict()
+  // Envelope coupling (ADR-0008): the header's baseSha and witnesses.base
+  // must agree, as on the kernel v3 header.
+  .superRefine((payload, ctx) => {
+    if (payload.provenance.baseSha !== payload.provenance.witnesses.base) {
+      ctx.addIssue({
+        code: 'custom',
+        message: 'provenance.baseSha and provenance.witnesses.base must agree',
+        path: ['provenance'],
+      });
+    }
+  });
+
+export const CompositionStartedJournalEventSchema: z.ZodType<CompositionStartedJournalEvent> = z
+  .object({
+    type: z.literal('composition-started'),
+    runId: z.string(),
+    at: z.iso.datetime({ precision: 3 }),
+    // Envelope for new event kinds is exactly
+    // {type,runId,at,unitId,jobId,taskId,attempt,payload} (ADR-0008): these
+    // are run-scoped here, so the scope fields are null (required, not
+    // absent). T04 owns filling the header handoff later.
+    unitId: z.string().min(1).nullable(),
+    jobId: z.string().min(1).nullable(),
+    taskId: z.string().min(1).nullable(),
+    attempt: z.number().int().min(1).nullable(),
+    payload: CompositionStartedPayloadSchema,
+  })
+  .strict();
+
+export const KernelRunLinkedPayloadSchema: z.ZodType<KernelRunLinkedPayload> = z
+  .object({
+    // Filesystem-safe: a kernelRunId becomes `<runId>.ndjson` at the
+    // descriptor read side (readKernelRunDescriptors), so the journal's
+    // runId grammar applies here too — no separators, no traversal.
+    kernelRunId: z
+      .string()
+      .min(1)
+      .regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/),
+    planId: z.string().min(1),
+    round: NonnegativeSafeCountSchema,
+  })
+  .strict();
+
+export const KernelRunLinkedJournalEventSchema: z.ZodType<KernelRunLinkedJournalEvent> = z
+  .object({
+    type: z.literal('kernel-run-linked'),
+    runId: z.string(),
+    at: z.iso.datetime({ precision: 3 }),
+    unitId: z.string().min(1).nullable(),
+    jobId: z.string().min(1).nullable(),
+    taskId: z.string().min(1).nullable(),
+    attempt: z.number().int().min(1).nullable(),
+    payload: KernelRunLinkedPayloadSchema,
+  })
+  .strict();
+
+/** One observation stream line (ADR-0008): composition carriers plus the v3 observational carriers. */
+export const ObservationEventSchema: z.ZodType<ObservationEvent> = z.union([
+  CompositionStartedJournalEventSchema,
+  KernelRunLinkedJournalEventSchema,
+  AttemptFinishedJournalEventSchema,
+  GateVerdictJournalEventSchema,
+  TaskFinishedJournalEventSchema,
+  ApprovalJournalEventSchema,
+  WriteObservationJournalEventSchema,
+  FindingDispositionJournalEventSchema,
+  HeadAcceptanceJournalEventSchema,
+  ReviewObservedJournalEventSchema,
+  MeasurementSummaryJournalEventSchema,
+]);
+
+export const ObservationStreamSchema: z.ZodType<ObservationStream> = z
+  .object({
+    workId: z.uuid(),
+    compositionRunId: z.string().min(1),
+    events: z.array(ObservationEventSchema),
+    complete: z.boolean(),
+  })
+  .strict()
+  // Stream couplings (ADR-0008), encoded per the refinements policy —
+  // validated on PARSE, not only at write time (writer-side checks do not
+  // validate supplied or on-disk streams):
+  //   - a COMPLETE stream opens with exactly one composition-started header
+  //     (an INCOMPLETE stream is exempt: a crash during the header write can
+  //     leave a torn, headerless prefix);
+  //   - the header's correlation.workId matches the stream's directory workId
+  //     (a mismatch would misattribute the whole stream at the join);
+  //   - every event's runId matches the stream's compositionRunId.
+  //   The workId must be a UUID: the schema's own z.uuid() guards it.
+  .superRefine((stream, ctx) => {
+    // Identity of the events ALREADY PRESENT is validated even in an
+    // incomplete stream: partial evidence is still attributed evidence. Only
+    // the required-header check is waived for a torn/empty prefix.
+    stream.events.forEach((event, i) => {
+      if (event.runId !== stream.compositionRunId) {
+        ctx.addIssue({
+          code: 'custom',
+          message:
+            `event.runId '${event.runId}' does not match this stream's ` +
+            `compositionRunId '${stream.compositionRunId}'`,
+          path: ['events', i],
+        });
+      }
+      if (
+        event.type === 'composition-started' &&
+        event.payload.correlation.workId !== stream.workId
+      ) {
+        ctx.addIssue({
+          code: 'custom',
+          message:
+            `header correlation.workId '${event.payload.correlation.workId}' does not ` +
+            `match this stream's workId '${stream.workId}'`,
+          path: ['events', i],
+        });
+      }
+    });
+    if (!stream.complete) {
+      // A duplicate or misplaced header is corrupt in BOTH modes, and only a
+      // stream with NO complete event may lack its header (only the final
+      // line can be torn — events without a header are a broken stream).
+      const torn = stream.events.filter((e) => e.type === 'composition-started');
+      if (
+        torn.length > 1 ||
+        (torn.length === 1 && stream.events[0]?.type !== 'composition-started')
+      ) {
+        ctx.addIssue({
+          code: 'custom',
+          message: 'a stream cannot carry a misplaced or duplicate composition-started header',
+          path: ['events'],
+        });
+      }
+      if (stream.events.length > 0 && torn.length === 0) {
+        ctx.addIssue({
+          code: 'custom',
+          message: 'an incomplete stream with events must carry its composition-started header',
+          path: ['events'],
+        });
+      }
+      return;
+    }
+    const headers = stream.events.filter((e) => e.type === 'composition-started');
+    if (headers.length !== 1 || stream.events[0]?.type !== 'composition-started') {
+      ctx.addIssue({
+        code: 'custom',
+        message: 'a complete stream must open with exactly one composition-started header',
+        path: ['events'],
+      });
+    }
+  });
+
 /**
  * The v1/v2 kernel event union exactly as it stood before the v3 dual reader
  * (ADR-0008 T02): a v3-shaped record must never parse through it.
@@ -1188,6 +1357,14 @@ export const JournalEventV1V2Schema = z.discriminatedUnion('type', [
  * (absent → v1, 2 → v2, 3 → v3); unknown future versions fail explicitly.
  * Observational events never alter reservations, sequence claims or job
  * statuses — see `deriveJobStatuses` and `foldOrderRuns`.
+ *
+ * T29 ruling: observational carriers have NO kernel producer (T29 puts them
+ * only in composition streams via src/kernel/observation.ts). This union
+ * ACCEPTS them defensively — a composition carrier written into a kernel
+ * file must be detected and refused by the kernel's per-file reader, not
+ * silently parsed here; readEvents' per-file version strictness and the
+ * T29 tests pin that refusal. The union stays wide so corruption surfaces
+ * as a loud, classified error at the file level.
  */
 export const JournalEventSchema: z.ZodType<JournalEvent> = z.union([
   JournalEventV1V2Schema,
