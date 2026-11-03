@@ -179,13 +179,15 @@ async function runTaskLoopInner(
   // ADR-0008 T13 emitter: one attempt-finished event per worker invocation,
   // written through the T30 runtime observation writer in the invocation's
   // finally (spawn failure, cancellation and budget exhaustion all finish
-  // exactly once). A write failure makes the run's evidence indeterminate; it
-  // never breaks the loop.
-  const emitAttempt = async (event: AttemptFinishedJournalEvent): Promise<void> => {
+  // exactly once). The event is built INSIDE the try so a payload-validation
+  // failure is recorded as indeterminate, never escaped into the attempt.
+  // A write failure also makes the run's evidence indeterminate; neither
+  // ever breaks the loop.
+  const emitAttempt = async (build: () => AttemptFinishedJournalEvent): Promise<void> => {
     const writer = bindings.observationWriter;
     if (writer === undefined) return;
     try {
-      await writer.append(event);
+      await writer.append(build());
     } catch (error) {
       indeterminate ??= `attempt observation failed: ${String(error)}`;
     }
@@ -367,6 +369,7 @@ async function runTaskLoopInner(
           let usage: typeof first.usage | undefined;
           let servedModel: string | undefined;
           let thrown: unknown;
+          let driverThrew = false;
           let allowedTokens: number | null = null;
           let allowedWall: number | null = null;
           let boundWallMs: number | null = null;
@@ -440,8 +443,9 @@ async function runTaskLoopInner(
               reason: invocation === 'edit' ? decision.reason : 'related-check feedback',
             };
             row.attempts.push(attempt);
+            let worker: Awaited<ReturnType<typeof resolved.driver.run>>;
             try {
-              const worker = await resolved.driver.run(
+              worker = await resolved.driver.run(
                 {
                   prompt: text,
                   modelSpec: resolved.modelSpec,
@@ -486,6 +490,13 @@ async function runTaskLoopInner(
                 },
                 { signal: deadline.signal },
               );
+            } catch (driverError) {
+              // Only a driver-call rejection is a driver-sourced cause; loop
+              // throws must not be misattributed to the driver.
+              driverThrew = true;
+              throw driverError;
+            }
+            try {
               attempt.usage = worker.usage;
               usage = worker.usage;
               servedModel = worker.model;
@@ -565,9 +576,22 @@ async function runTaskLoopInner(
             }
           } catch (error) {
             thrown ??= error;
-            // A cancellation that landed mid-flight (the driver threw while the
-            // enclosing job was cancelled) still routes through the cancel stop.
-            if (!stopSet && bindings.cancelled?.()) setStop(cancelStop());
+            // Classify throws with no observed stop before the boundary: a
+            // fired wallClockMs deadline is the budget variant with the cap
+            // named; a cancelled or governed-aborted job is the cancel stop.
+            // budgetStopped is set so escalation stops scheduling attempts.
+            if (!stopSet) {
+              if (deadline?.expired() === true) {
+                budgetStopped = true;
+                setStop({
+                  budgetExpired: true,
+                  budgetStopCode: 'wall-cap',
+                  stopReason: 'sweep fixer wallClockMs deadline expired',
+                });
+              } else if (bindings.cancelled?.() || currentJobContext()?.signal.aborted) {
+                setStop(cancelStop());
+              }
+            }
             throw error;
           } finally {
             deadline?.dispose();
@@ -580,7 +604,7 @@ async function runTaskLoopInner(
                   usage.cacheRead +
                   usage.cacheWrite +
                   (usage.reasoning ?? 0);
-            await emitAttempt({
+            await emitAttempt(() => ({
               type: 'attempt-finished',
               runId:
                 bindings.observationRunId ?? bindings.observationWriter?.compositionRunId ?? '',
@@ -610,9 +634,8 @@ async function runTaskLoopInner(
                       },
                 requests: usage === undefined ? null : 1,
                 wallMs,
-                ...(thrown === undefined
-                  ? {}
-                  : {
+                ...(driverThrew && thrown !== undefined
+                  ? {
                       error: {
                         type: thrown instanceof Error ? thrown.name : null,
                         code: thrown instanceof Error ? thrown.message : String(thrown),
@@ -620,7 +643,8 @@ async function runTaskLoopInner(
                         source: 'driver',
                         certainty: 'observed' as const,
                       },
-                    }),
+                    }
+                  : {}),
                 timeout:
                   deadline === undefined || !deadline.expired()
                     ? null
@@ -641,7 +665,7 @@ async function runTaskLoopInner(
                   },
                 },
               }),
-            });
+            }));
           }
         };
         const first = await invoke('edit', prompt, priorFailedFeedback?.contents);
