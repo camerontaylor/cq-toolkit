@@ -351,10 +351,10 @@ async function scanOps(
       const shape = (unwrapped as { shape?: unknown }).shape;
       if (typeof shape === 'object' && shape !== null && !Array.isArray(shape)) {
         for (const key of Object.keys(shape)) {
-          if (key === 'json' || key === 'help' || key === 'h') {
+          if (key === 'json' || key === 'help' || key === 'h' || key === 'fail-on-verdict') {
             throw new Error(
               `op family '${family}': op '${e.name}' input schema declares the reserved CLI key ` +
-                `'${key}' (op input schemas must not declare reserved keys: json, help, h)`,
+                `'${key}' (op input schemas must not declare reserved keys: json, help, h, fail-on-verdict)`,
             );
           }
         }

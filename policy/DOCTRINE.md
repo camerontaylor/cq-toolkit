@@ -24,7 +24,10 @@ human" gets it wrong — the exit code is the composition-level signal.
 **Enforcement.** Lands in phase 1 with the kernel op contract (`src/kernel`): a
 typed result envelope; the plan runner treats non-JSON stdout or an unexpected
 exit code as thrown. The phase-3 CLI (`src/cli`) maps arg errors to 2,
-escalations to 3. Known deviation today: `scripts/denylist-scan` exits 2 for
+escalations to 3. The CLI uses reportError, hasFailVerdict,
+exitCodeForOpResult and exitCodeForRunReport; test/cli/json-errors.test.ts and
+test/cli/verdict-exit.test.ts cover error artifacts and verdict exits.
+Known deviation today: `scripts/denylist-scan` exits 2 for
 thrown config errors and 127 for a missing binary — binding from phase 1.
 
 ## I2 — no-privileged-reviewer acceptance
