@@ -459,7 +459,21 @@ def reconcile_publication(c, queue, head, ids):
     c.save_queue(queue)
 
 
-def collect_required(repo, target, required, store):
+def cached_required(filename, key, store):
+    """A disposable index into retained, content-verified acquisition results."""
+    try:
+        reference = ledger.loads(filename.read_bytes())
+        store.verify(reference)
+        value = ledger.loads(Path(reference["location"]).read_bytes())
+        if (isinstance(value, dict) and value.get("key") == key
+                and isinstance(value.get("paths"), list) and isinstance(value.get("member"), dict)):
+            return value
+    except (OSError, ValueError, KeyError, TypeError):
+        pass  # A missing/stale/corrupt index never substitutes for acquisition.
+    return None
+
+
+def collect_required(repo, target, required, store, *, cache_dir=None):
     """Read-only forge acquisition; captured bytes precede deterministic ranking."""
     paths, members = {}, {}
     for row in required["rows"]:
@@ -468,6 +482,15 @@ def collect_required(repo, target, required, store):
         reference = store.put(raw); value = ledger.loads(raw)
         if value.get("number") != pr or not value.get("merged"):
             raise ledger.IntegrityError("required PR identity/merge mismatch")
+        # Re-fetch forge metadata every time. Only immutable Git-derived work is
+        # reused, bound to the exact response, target and accounting semantics.
+        # Keep one pointer per required PR, not one per timer/target forever.
+        key = ledger.digest({"version": 1, "target": target, "source": reference})
+        filename = Path(cache_dir) / (str(pr) + ".json") if cache_dir is not None else None
+        cached = cached_required(filename, key, store) if filename is not None else None
+        if cached is not None:
+            paths[str(pr)], members[str(pr)] = cached["paths"], cached["member"]
+            continue
         merge = repo.resolve(value["merge_commit_sha"])
         parent = repo.git("rev-parse", merge + "^1").decode().strip()
         names = repo.git("diff", "--name-only", "--no-renames", "-z", parent, merge).split(b"\0")
@@ -489,6 +512,9 @@ def collect_required(repo, target, required, store):
         members[str(pr)] = {"merge": merge, "paths": member_paths,
                             "pr": pr,
                             "context": {"trust": "untrusted-data-only", "title": value.get("title", ""), "body": value.get("body") or ""}}
+        if filename is not None:
+            result = {"key": key, "paths": paths[str(pr)], "member": members[str(pr)]}
+            ledger.atomic(filename, ledger.canonical(store.put(ledger.canonical(result))))
     return paths, members
 
 
@@ -505,7 +531,8 @@ def run_inventory(c, queue, *, required_paths=None, members=None, fetch=True, en
     target = repo.git("rev-parse", DEFAULT_REF + "^{commit}").decode().strip()
     ledger_head, events = publisher.fetch()
     if required_paths is None:
-        required_paths, members = collect_required(repo, target, required, store)
+        required_paths, members = collect_required(repo, target, required, store,
+                                                   cache_dir=c.STATE / "backfill/required-cache")
     manifest = inventory.capture(repo, target, ledger_head, events, store, queue, required, tiers, limits, c.iso(),
                                  required_paths, (ROOT / "policy/protected-paths.json").read_bytes(), members)
     ranked = inventory.replay(manifest, store)

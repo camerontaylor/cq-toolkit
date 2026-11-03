@@ -97,6 +97,21 @@ capacity shortfall/failures and the capacity estimate; zero cannot be claimed
 from removed lines, exceptions or fixtures. Strict T1 zero includes zero
 unresolved T1 objects at the reported tip.
 
+Inventory keeps a disposable `state/backfill/required-cache/<pr>.json` index
+pointing to content-verified acquisition results in the durable artifact store.
+Each entry is bound to the exact inventory target, freshly fetched PR response
+and accounting-cache version. An unchanged second inventory reuses required-PR
+path mappings without Git lineage work. A new target or changed forge response
+recomputes them. Missing, malformed or stale index entries fall back to normal
+acquisition; removing this index does not remove review evidence or coverage.
+Only one current pointer is kept per required PR. Historical lineage still
+rejects intermediate deletions and ambiguous renames, including for coverage
+and ownership carry callers. Its parsed first-parent steps are invocation-local
+and bounded to 32 MiB. Between lineage endpoints, full trees are read only when
+a relevant rename needs blob-uniqueness checks, not for unrelated edits at
+every commit.
+The six-hour timer and 45-minute service timeout are unchanged.
+
 All findings enter triage, including threadless/unanchored occurrences. Use
 `backfill.py triage` with an actor/reason against a newly fetched promoted tip;
 only confirmed mapped anchors may be delivered with `backfill.py deliver`.
