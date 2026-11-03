@@ -149,6 +149,9 @@ def rank4_gate(c, queue, item, dry=False):
     return True
 
 
+MISSING_EVIDENCE = "missing retained evidence; reconcile before dispatch"
+
+
 def select(c, queue, log, dry, only):
     if (queue.get("backfill_halted") or queue.get("backfill_publication_error")
             or (c.STATE / "backfill/publication-failure.json").exists()):
@@ -161,10 +164,39 @@ def select(c, queue, log, dry, only):
     items = [j for j in queue["items"] if j.get("kind") == jobs.KIND and (not only or only == j["id"])]
     items.sort(key=lambda j: (j["tier_importance"], j.get("retry", False), j["subject_kind"],
                              j.get("row") or 0 if j["subject_kind"] == "A" else -j["score"], j["subject_id"]))
+    pending = [j for j in items if jobs.eligible(queue, j, c.iso())]
+    if not pending:
+        return None, False
+    # Coverage costs minutes of CPU on a large queue. Every gate refusal is
+    # item-independent, so ask the gate first; a refusal skips coverage unless
+    # the ledger head or the job set changed since the last full pass, which
+    # still marks newly covered jobs done.
+    refused, before = None, pending[0].get("wait_reason")
+    if not rank4_gate(c, queue, pending[0], dry=True):
+        refused = pending[0].get("wait_reason") or "rank4-gate-refused"
+    pending[0]["wait_reason"] = before  # the pass below assigns each job's reason
+    if before is None:
+        del pending[0]["wait_reason"]
     repo, store, outbox, publisher = services(c, config)
     # New publication may remove eligibility without moving the job's T.
     head, events = publisher.fetch()
-    coverage_by_target = {}
+    def reconciliation(eligible):
+        return ledger.digest({"head": head, "jobs": sorted(j["id"] for j in items),
+                              "eligible": sorted(j["id"] for j in eligible)})
+    reconciled = reconciliation(pending)
+    last = queue.get("backfill_coverage_reconciled")
+    if refused and isinstance(last, dict) and last.get("digest") == reconciled:
+        for item in pending:
+            if item.get("wait_reason") != MISSING_EVIDENCE:
+                item["wait_reason"] = refused
+        return None, bool(last.get("available"))
+    # Within one runner process, coverage for an unchanged ledger head is reused,
+    # so an admission loop calling select again does not repeat it.
+    cache = getattr(c, "_backfill_coverage_cache", None)
+    if not cache or cache["head"] != head:
+        cache = {"head": head, "by_target": {}}
+        setattr(c, "_backfill_coverage_cache", cache)
+    coverage_by_target = cache["by_target"]
     def coverage_for(target):
         if target not in coverage_by_target:
             coverage_by_target[target] = repo.coverage(target, events, store)
@@ -176,17 +208,19 @@ def select(c, queue, log, dry, only):
     items.sort(key=lambda j: (j["dispatch_tier_importance"], j.get("retry", False), j["subject_kind"],
                              j.get("row") or 0 if j["subject_kind"] == "A" else -j["score"], j["subject_id"]))
     available = False
-    refused = None
+    seen = []  # eligible ids this pass left pending, for the reconciliation record
     for item in items:
         if not jobs.eligible(queue, item, c.iso()):
             continue
+        seen.append(item)
         covered, _, gaps = coverage_for(item["target"])
         if gaps:
-            item["wait_reason"] = "missing retained evidence; reconcile before dispatch"
+            item["wait_reason"] = MISSING_EVIDENCE
             continue
         desired = ledger.scope(item["scope"])
         if all(lines <= covered.get(name, set()) for (name, _), lines in desired.items()):
             item.update(state="done", coverage_satisfied_by=head)
+            seen.pop()
             continue
         available = True
         if refused:
@@ -219,6 +253,9 @@ def select(c, queue, log, dry, only):
                 item.update(state="launch-unknown", vendor_state="unknown")
             c.save_queue(queue)
             raise
+    if not only:  # a selective start covers one job, not the natural pass
+        # Keyed on the jobs this pass saw eligible and left pending (done ones drop out).
+        queue["backfill_coverage_reconciled"] = {"digest": reconciliation(seen), "available": available}
     return None, available
 
 

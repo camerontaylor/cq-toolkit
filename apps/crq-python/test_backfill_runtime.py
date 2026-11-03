@@ -176,6 +176,104 @@ class RuntimeTest(unittest.TestCase):
             self.assertEqual(runtime.select(self.c, self.q, [], False, None), (None, True))
         self.assertEqual(len(self.q["backfill_admissions"]), 1)
         self.assertEqual({job["wait_reason"] for job in items}, {"one-slot-reserve"})
+        self.assertEqual(repo.coverage.call_count, 1)  # first pass reconciles the one shared target
+        with mock.patch.object(runtime, "services", return_value=(repo, object(), object(), publisher)), \
+             mock.patch.object(jobs, "eligible", return_value=True):
+            self.assertEqual(runtime.select(self.c, self.q, [], False, None), (None, True))
+        # Same head and job set: a refusal skips coverage entirely.
+        self.assertEqual(repo.coverage.call_count, 1)
+        self.assertEqual(len(self.q["backfill_admissions"]), 2)
+
+    def test_refusal_still_marks_jobs_done_when_ledger_head_or_jobs_change(self):
+        job = copy.deepcopy(self.item); self.q["items"] = [job]
+        self.q["backfill_usage"] = {"successful": True, "remaining": 1, "observed_at": AT, "reflected_reservations": []}
+        repo = SimpleNamespace(coverage=mock.Mock(return_value=({}, [], [])))
+        publisher = SimpleNamespace(fetch=mock.Mock(return_value=("head1", [])))
+        with mock.patch.object(runtime, "services", return_value=(repo, object(), object(), publisher)), \
+             mock.patch.object(jobs, "eligible", side_effect=lambda q, item, at: item["state"] == "pending"):
+            runtime.select(self.c, self.q, [], False, None)
+            self.assertEqual(job["state"], "pending")
+            full = {r["path"]: ledger.intervals(r["intervals"]) for r in job["scope"]}
+            repo.coverage.return_value = (full, [], [])
+            publisher.fetch.return_value = ("head2", [])  # publication covered the job
+            self.assertEqual(runtime.select(self.c, self.q, [], False, None), (None, False))
+            self.assertEqual(job["state"], "done")
+            added = copy.deepcopy(self.item); added["id"] += "-added"; self.q["items"].append(added)
+            runtime.select(self.c, self.q, [], False, None)  # a new job is reconciled under the same head
+            self.assertEqual(added["state"], "done")
+            calls = repo.coverage.call_count
+            self.c._backfill_coverage_cache = None  # a later process: the shortcut, not the cache, skips coverage
+            # Nothing dispatchable remains: an unchanged refusal pass reports no candidate.
+            self.assertEqual(runtime.select(self.c, self.q, [], False, None), (None, False))
+            self.assertEqual(repo.coverage.call_count, calls)
+
+    def test_refusal_reconciles_when_a_job_becomes_eligible_and_ignores_selective_starts(self):
+        first = copy.deepcopy(self.item); second = copy.deepcopy(self.item); second["id"] += "-later"
+        self.q["items"] = [first, second]
+        self.q["backfill_usage"] = {"successful": True, "remaining": 1, "observed_at": AT, "reflected_reservations": []}
+        repo = SimpleNamespace(coverage=mock.Mock(return_value=({}, [], [])))
+        publisher = SimpleNamespace(fetch=mock.Mock(return_value=("head", [])))
+        backoff = {second["id"]}
+        with mock.patch.object(runtime, "services", return_value=(repo, object(), object(), publisher)), \
+             mock.patch.object(jobs, "eligible", side_effect=lambda q, item, at: item["state"] == "pending" and item["id"] not in backoff):
+            runtime.select(self.c, self.q, [], False, None)
+            recorded = self.q["backfill_coverage_reconciled"]
+            runtime.select(self.c, self.q, [], False, first["id"])  # selective start: record untouched
+            self.assertEqual(self.q["backfill_coverage_reconciled"], recorded)
+            calls = repo.coverage.call_count
+            backoff.clear()  # the backoff expired under the same head and job set
+            full = {r["path"]: ledger.intervals(r["intervals"]) for r in second["scope"]}
+            repo.coverage.return_value = (full, [], [])
+            self.c._backfill_coverage_cache = None
+            runtime.select(self.c, self.q, [], False, None)
+        self.assertGreater(repo.coverage.call_count, calls)
+        self.assertEqual(second["state"], "done")
+
+    def test_job_eligible_only_after_the_loop_passed_it_forces_a_full_pass(self):
+        first = copy.deepcopy(self.item); second = copy.deepcopy(self.item); second["id"] += "-mid"
+        self.q["items"] = [first, second]
+        self.q["backfill_usage"] = {"successful": True, "remaining": 1, "observed_at": AT, "reflected_reservations": []}
+        repo = SimpleNamespace(coverage=mock.Mock(return_value=({}, [], [])))
+        publisher = SimpleNamespace(fetch=mock.Mock(return_value=("head", [])))
+        checks = {"n": 0}
+        def eligible(q, item, at):
+            if item["id"] != second["id"]:
+                return True
+            checks["n"] += 1
+            return checks["n"] > 2  # ineligible for pending and the loop; its backoff expires afterwards
+        with mock.patch.object(runtime, "services", return_value=(repo, object(), object(), publisher)), \
+             mock.patch.object(jobs, "eligible", side_effect=eligible):
+            runtime.select(self.c, self.q, [], False, None)
+            self.c._backfill_coverage_cache = None
+            calls = repo.coverage.call_count
+            runtime.select(self.c, self.q, [], False, None)
+        self.assertGreater(repo.coverage.call_count, calls)  # not skipped: the eligible set changed
+        self.assertEqual(second["wait_reason"], "one-slot-reserve")
+
+    def test_refusal_keeps_missing_evidence_reason(self):
+        job = copy.deepcopy(self.item); self.q["items"] = [job]
+        self.q["backfill_usage"] = {"successful": True, "remaining": 1, "observed_at": AT, "reflected_reservations": []}
+        repo = SimpleNamespace(coverage=mock.Mock(return_value=({}, [], ["gap"])))
+        publisher = SimpleNamespace(fetch=mock.Mock(return_value=("head", [])))
+        with mock.patch.object(runtime, "services", return_value=(repo, object(), object(), publisher)), \
+             mock.patch.object(jobs, "eligible", return_value=True):
+            self.assertEqual(runtime.select(self.c, self.q, [], False, None), (None, False))
+            self.assertEqual(runtime.select(self.c, self.q, [], False, None), (None, False))
+        self.assertEqual(job["wait_reason"], runtime.MISSING_EVIDENCE)
+        self.assertEqual(repo.coverage.call_count, 1)
+
+    def test_open_gate_dry_run_admits_without_reserving(self):
+        self.q["items"] = [self.item]
+        self.q["backfill_usage"] = {"successful": True, "remaining": 5, "observed_at": AT, "reflected_reservations": []}
+        repo = SimpleNamespace(coverage=mock.Mock(return_value=({}, [], [])))
+        publisher = SimpleNamespace(fetch=mock.Mock(return_value=("head", [])))
+        log = []
+        with mock.patch.object(runtime, "services", return_value=(repo, object(), object(), publisher)), \
+             mock.patch.object(jobs, "eligible", return_value=True):
+            self.assertEqual(runtime.select(self.c, self.q, log, True, None), (None, True))
+        self.assertEqual(log, ["DRY-RUN would admit " + self.item["id"]])
+        self.assertEqual([row["decision"] for row in self.q["backfill_admissions"]], ["admit", "admit"])
+        self.assertFalse(self.q.get("backfill_reservations"))
 
     def test_select_reuses_coverage_only_within_one_ledger_snapshot(self):
         first = copy.deepcopy(self.item)
@@ -183,11 +281,14 @@ class RuntimeTest(unittest.TestCase):
         third = copy.deepcopy(self.item); third["id"] += "-third"; third["target"] = "c" * 40
         self.q["items"] = [first, second, third]
         repo = SimpleNamespace(coverage=mock.Mock(return_value=({}, [], [])))
-        publisher = SimpleNamespace(fetch=mock.Mock(side_effect=[("head1", ["first"]), ("head2", ["second"])]))
+        publisher = SimpleNamespace(fetch=mock.Mock(side_effect=[("head1", ["first"]), ("head1", ["first"]), ("head2", ["second"])]))
+        # The cheap pre-coverage gate passes; the post-coverage gate refuses.
         with mock.patch.object(runtime, "services", return_value=(repo, object(), object(), publisher)), \
              mock.patch.object(jobs, "eligible", return_value=True), \
-             mock.patch.object(runtime, "rank4_gate", return_value=False):
+             mock.patch.object(runtime, "rank4_gate", side_effect=lambda c, q, item, dry=False: dry):
             runtime.select(self.c, self.q, [], False, None)
+            self.assertEqual(repo.coverage.call_count, 2)
+            runtime.select(self.c, self.q, [], False, None)  # same head: an admission loop's next pass reuses it
             self.assertEqual(repo.coverage.call_count, 2)
             runtime.select(self.c, self.q, [], False, None)
         self.assertEqual(repo.coverage.call_count, 4)
@@ -333,6 +434,9 @@ class RuntimeTest(unittest.TestCase):
         self.c.launch = launch
         started, available = runtime.select(self.c, self.q, [], False, None)
         self.assertEqual(started, "vendor-1"); self.assertTrue(available)
+        # The real gate sequence: a non-reserving pre-coverage check, then one reservation.
+        self.assertEqual([row["decision"] for row in self.q["backfill_admissions"]], ["admit", "admit"])
+        self.assertEqual(len(self.q["backfill_reservations"]), 1)
         raw = ledger.canonical({"type": "complete", "status": "review_completed", "head": self.item["head"], "reviewedFiles": self.item["scope"]})
         rdir = self.root / "run"; rdir.mkdir()
         (rdir / "review.ndjson").write_bytes(raw)
