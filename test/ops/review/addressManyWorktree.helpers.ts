@@ -8,11 +8,6 @@ import { makeGhRunner } from '../../../src/adapters/forge-github/gh.js';
 import { fileWorktreeRegistry, resolvePrWorktree } from '../../../src/adapters/git/prWorktree.js';
 import { makeTestRepo, type TestRepo } from '../dev/repo.js';
 import type { ReviewAddressReport } from '../../../src/ops/review/address.js';
-// Shared fixtures and helpers for the addressManyWorktree suites, moved
-// byte-for-byte out of the original single-file suite. Each *.test.ts
-// sibling imports only the helpers it uses. The vitest fault-injection
-// mock registrations (vi.hoisted + vi.mock) stay inside each test file
-// that needs them: vitest registers mocks per test file.
 
 export const authorityStore = (guardPath: string) =>
   join(dirname(guardPath), 'cq-review-address-ownership.store');
