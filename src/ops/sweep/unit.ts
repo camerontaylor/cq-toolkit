@@ -398,6 +398,14 @@ export interface SweepUnitReport {
   tasks?: FixTaskReport[];
   budgetStopped?: boolean;
   indeterminate?: string;
+  /**
+   * ADR-0008 T13: attempt-observation payloads that could not be built (a
+   * strict-schema rejection) and therefore never reached the observation
+   * writer. Evidence only — the composition folds these into
+   * `observation.status: 'indeterminate'`; they never change this unit's
+   * verdict and never gate publication.
+   */
+  observationFailures?: string[];
   package: string;
   fixer: string;
   /** The worktree the unit ran in (create or I7 reuse). */

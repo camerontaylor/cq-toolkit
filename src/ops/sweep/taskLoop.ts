@@ -3,6 +3,7 @@ import { unlink } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { relative, resolve } from 'node:path';
 import type { Driver, ModelSpec, Usage, WorkerResult } from '../../driver/types.js';
+import { errorClassOf } from '../../driver/errors.js';
 import { currentJobContext } from '../../kernel/governor.js';
 import { correlationInvocation } from '../../driver/correlationInvocation.js';
 import type { OpResult } from '../../kernel/types.js';
@@ -171,6 +172,13 @@ async function runTaskLoopInner(
   let lastSha: string | undefined;
   let budgetStopped = false;
   let indeterminate: string | undefined;
+  // ADR-0008 T13: observation failures are EVIDENCE, never a verdict. An
+  // attempt event that fails to build (finishAttempt's strict payload schema,
+  // or the writer's validation) never reaches the writer, so the writer's own
+  // failure surface cannot record it; this field carries it for runFix to fold
+  // into `observation.status`. It never gates publication or changes the unit
+  // verdict.
+  const observationFailures: string[] = [];
   let spentTokens = 0;
   // ADR-0008 T13: inner attempt ordinal — one per worker invocation, distinct
   // from the kernel job retry ordinal (LadderContextInfo.attempt).
@@ -179,17 +187,30 @@ async function runTaskLoopInner(
   // ADR-0008 T13 emitter: one attempt-finished event per worker invocation,
   // written through the T30 runtime observation writer in the invocation's
   // finally (spawn failure, cancellation and budget exhaustion all finish
-  // exactly once). The event is built INSIDE the try so a payload-validation
-  // failure is recorded as indeterminate, never escaped into the attempt.
-  // A write failure also makes the run's evidence indeterminate; neither
-  // ever breaks the loop.
+  // exactly once). Observation failures NEVER change the run verdict: an I/O
+  // write failure fail-stops the writer and is read back from `failure` by
+  // closeObservation, while a build/validation failure — which never reaches
+  // the writer — is recorded on the report's `observationFailures`. Neither
+  // ever breaks the loop or marks the unit indeterminate.
   const emitAttempt = async (build: () => AttemptFinishedJournalEvent): Promise<void> => {
     const writer = bindings.observationWriter;
     if (writer === undefined) return;
+    let event: AttemptFinishedJournalEvent;
     try {
-      await writer.append(build());
+      event = build();
     } catch (error) {
-      indeterminate ??= `attempt observation failed: ${String(error)}`;
+      observationFailures.push(`attempt observation failed: ${String(error)}`);
+      return;
+    }
+    try {
+      await writer.append(event);
+    } catch (error) {
+      // The writer fail-stops on an I/O write failure and exposes it through
+      // `failure` (closeObservation folds it into observation.status). A
+      // writer-side validation/identity refusal does not mark the writer, so
+      // record that one here rather than losing it.
+      if (writer.failure === null)
+        observationFailures.push(`attempt observation failed: ${String(error)}`);
     }
   };
   const git = async (args: string[]) => {
@@ -620,7 +641,10 @@ async function runTaskLoopInner(
               runId:
                 bindings.observationRunId ?? bindings.observationWriter?.compositionRunId ?? '',
               at: new Date().toISOString(),
-              unitId: bindings.observationUnitId ?? `${unit.fixer}/${unit.package}`,
+              // Production identity is `<package>/<fixer>` (runFix, registry,
+              // unit.ts); the fallback matches it rather than inventing a
+              // second order for unwired callers.
+              unitId: bindings.observationUnitId ?? `${unit.package}/${unit.fixer}`,
               jobId: currentJobContext()?.info.jobKey ?? null,
               taskId: task.id,
               attempt: ordinal,
@@ -659,7 +683,10 @@ async function runTaskLoopInner(
                         code:
                           typeof (thrown as { code?: unknown } | null)?.code === 'string'
                             ? (thrown as { code: string }).code
-                            : null,
+                            : // A pre-dispatch DispatchError carries its class as
+                              // structured data; it is the stable code when the
+                              // error has no `code` of its own.
+                              (errorClassOf(thrown) ?? null),
                         providerFinishReason: null,
                         source: 'driver',
                         certainty: 'observed' as const,
@@ -1006,6 +1033,7 @@ async function runTaskLoopInner(
       pushed,
       tasks: reports,
       budgetStopped,
+      ...(observationFailures.length === 0 ? {} : { observationFailures }),
       ...(indeterminate === undefined ? {} : { indeterminate }),
     },
   };
