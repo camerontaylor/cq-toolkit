@@ -158,7 +158,7 @@ function stripCredentialText(text: string): string {
       const incomplete =
         at < 0 &&
         !hostPort &&
-        ((i < text.length && authority.includes(':')) ||
+        ((authority.includes(':') && !/^\[[^\]]*\]$/.test(authority)) ||
           (newlineCredential && authorityEnd === token.length));
       chunks.push(run.slice(scheme.start, scheme.authority));
       chunks.push(incomplete ? '' : token.slice(at >= 0 ? at + 1 : 0, end));

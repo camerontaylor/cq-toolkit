@@ -143,6 +143,9 @@ describe('sanitizeObservation', () => {
 
   it.each([
     ["https://a/?q=xhttps://b/y'SEC", 'https://a/'],
+    ['https://user:SEC38', 'https://'],
+    ['https://[::1]/x', 'https://[::1]/x'],
+    ['https://[::1]', 'https://[::1]'],
     ['Error: 12:34\nfoo@bar', 'Error: 12:34\nbar'],
     ['src/ab:cd\nx@y', 'src/ab:cd\ny'],
     ['us\ner:SEC@host', '\nhost'],
