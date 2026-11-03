@@ -1,5 +1,9 @@
 # Queue client protocol (Q3)
 
+> Owner ruling 2026-11-03: CodeRabbit is advisory; no outage enrollment is required.
+> The deferred queue protocol below remains for deployed CRQ compatibility and
+> existing deployed debt. New CLI attempts no longer create outage authority.
+
 Stack parent/base: `queue/q1-merged-current` at
 `c088ec6eb720d01d4c4739695ba71adc91384ef8` (Q1 documentation correction; preserving the frozen
 `f3944022a8cebc622742c397cd7a756d818943cf` helper API). Queue baseline:
