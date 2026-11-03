@@ -491,5 +491,8 @@ need the D11 record. A gate pass that relied on the window is judged again
 at push time. The gate's required job names are declared in that list
 (`requiredJobs`). The tables, the two named residuals (R1, the CLI dispatch
 shell in the verifier jobs; R2, privileged jobs running unprotected code)
-and the window parameters are in
-[`docs/protected-scope.md`](../protected-scope.md).
+are in [`docs/protected-scope.md`](../protected-scope.md).
+
+The window source was retired 2026-10-20 and its implementation removed
+2026-11-03 (#385); Annex B §B.1 is back to the project env and the per-call
+opt-in.

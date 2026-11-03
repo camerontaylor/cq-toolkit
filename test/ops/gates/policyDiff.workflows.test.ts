@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from 'vitest';
+import { POLICY_LIST_PATH, createPolicyDiff } from '../../../src/ops/gates/policyDiff.js';
 import { bindD11Authorization } from '../../../src/ops/gates/d11Authorization.js';
 import {
   HOOK_MS,
@@ -7,6 +8,8 @@ import {
   CI_PATH,
   DEPLOY_PATH,
   MATRIX_PATH,
+  POLICY,
+  trust,
   edit,
   importCommits,
   kinds,
@@ -31,6 +34,23 @@ describe('policyDiff: workflows', SLOW, () => {
   let c: Record<string, string>;
   beforeAll(() => {
     const specs: Record<string, Spec> = {
+      'missing-job-trust': {
+        files: {
+          [POLICY_LIST_PATH]: JSON.stringify({
+            ...POLICY,
+            requiredJobs: { 'ci.yml': ['static', 'smoke'] },
+          }),
+        },
+      },
+      'subject-required-jobs': {
+        files: {
+          [POLICY_LIST_PATH]: JSON.stringify({
+            ...POLICY,
+            requiredJobs: { 'ci.yml': ['static', 'smoke'] },
+          }),
+          [CI_PATH]: edit(CI_PATH, '# lint the tree', '# lint the whole tree'),
+        },
+      },
       'new-wf': { files: { '.github/workflows/new.yml': CI } },
       trigger: {
         files: { [CI_PATH]: edit(CI_PATH, '  pull_request:\n', '  pull_request:\n  push:\n') },
@@ -289,5 +309,37 @@ describe('policyDiff: workflows', SLOW, () => {
       },
     ]);
     expect(out.verdict).toBe('needs-human');
+  });
+
+  test('missing required jobs are findings and requiredJobs come from the trust ref', async () => {
+    const judge = async (trustRef: string, subject: string) => {
+      const result = await createPolicyDiff({ posture: 'diff-check', layer: 'env' })({
+        repo,
+        trustRef,
+        subject,
+        subjectKind: 'pr',
+        base: 'merge-queue',
+      });
+      if (result.status !== 'ok') throw new Error(JSON.stringify(result));
+      return result.value;
+    };
+    const control = await judge(trust, c['comment']!);
+    expect(control.verdict).toBe('pass');
+    const out = await judge(c['missing-job-trust']!, c['comment']!);
+    expect(out.findings).toContainEqual({
+      kind: 'required-check',
+      path: CI_PATH,
+      reason: 'no statically named required job smoke',
+    });
+    expect(out.verdict).toBe('needs-human');
+    expect(out.requiredJobs).toEqual({ 'ci.yml': ['static', 'smoke'] });
+
+    const subjectOnly = await judge(trust, c['subject-required-jobs']!);
+    expect(subjectOnly.requiredJobs).toEqual({ 'ci.yml': ['static'] });
+    expect(subjectOnly.findings).not.toContainEqual({
+      kind: 'required-check',
+      path: CI_PATH,
+      reason: 'no statically named required job smoke',
+    });
   });
 });

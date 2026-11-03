@@ -16,9 +16,7 @@
 //     `assertRepoRelPath` (#224's `.git` segment and the rest) is reported as
 //     `unsafe-path` and never read.
 //   - THE POSTURE is resolved by the caller (the registry importer, once per
-//     dispatch) and bound into the op; op input never carries it. A D-P
-//     revision window in the trust ref's list may relax a default-layer
-//     posture to `diff-check` until its explicit expiry (policyConfig.ts).
+//     dispatch) and bound into the op; op input never carries it.
 //     Under `advisory` (development posture, 2026-10-20) only a
 //     `privileged-path` (a path the trust ref's project `protectedPaths`
 //     list names), `baseline-loosened`, `target-removed` or `entry-removed`
@@ -70,13 +68,7 @@ import {
   parseC3Attestation,
   type OverrideEvaluation,
 } from './overrideRecord.js';
-import {
-  RevisionWindowSchema,
-  applyRevisionWindow,
-  type EffectivePosture,
-  type ProtectedPathsConfig,
-  type ProtectedPathsPosture,
-} from './policyConfig.js';
+import { type ProtectedPathsConfig, type ProtectedPathsPosture } from './policyConfig.js';
 import { isProtectedPolicyPath } from './protectedPaths.js';
 import {
   diffWorkflow,
@@ -169,9 +161,9 @@ export interface PolicyFinding {
 
 export interface PolicyDiffOutcome {
   verdict: 'pass' | 'fail' | 'needs-human';
-  /** The EFFECTIVE posture: the resolved one after the trust ref's revision window. */
+  /** The caller-resolved posture. */
   posture: ProtectedPathsPosture;
-  postureLayer: EffectivePosture['layer'];
+  postureLayer: ProtectedPathsConfig['layer'];
   /** The trust ref's `requiredJobs` (empty when none): what the promotion gate requires by name. */
   requiredJobs: Readonly<Record<string, readonly string[]>>;
   /** Resolved 40-hex SHAs the verdict is bound to. */
@@ -221,8 +213,6 @@ const PolicyListSchema = z
     requiredJobs: z
       .record(z.string().regex(WORKFLOW_FILE), z.array(z.string().min(1)).min(1))
       .exactOptional(),
-    // The D-P revision window (policyConfig.ts `applyRevisionWindow`).
-    revisionWindow: RevisionWindowSchema.exactOptional(),
   })
   .strict();
 
@@ -613,17 +603,15 @@ function judge(
 
 /**
  * The policy-diff op, bound to a resolved posture. See the module header for
- * what is trusted and why. `now` is the clock the trust ref's revision
- * window is judged by (injected for tests). `options.settleStatePath` binds
+ * what is trusted and why. `options.settleStatePath` binds
  * where the settle ledger is read from on the settle ref — composition-owned
  * configuration (selfhost passes its configured path; never op input, see
  * {@link DEFAULT_SETTLE_STATE_PATH}), defaulting to the deployed wire path.
  */
 export function createPolicyDiff(
   config: ProtectedPathsConfig,
-  options: { now?: () => number; settleStatePath?: string } = {},
+  options: { settleStatePath?: string } = {},
 ): Op<PolicyDiffInput, PolicyDiffOutcome> {
-  const now = options.now ?? Date.now;
   const settlePath = options.settleStatePath ?? DEFAULT_SETTLE_STATE_PATH;
   return async (input) => {
     // Same base rule as verifyRatchet: a push subject is judged against main,
@@ -1007,7 +995,7 @@ export function createPolicyDiff(
     // `requiredJobs` by display name in each verified workflow's run, so a
     // changed workflow that no longer statically names one would block every
     // promotion. That is a definition change: needs-human under `human` and
-    // `diff-check` (never a revision-window pass), an `advisory:` annotation
+    // `diff-check`, an `advisory:` annotation
     // under `advisory`.
     for (const [file, jobs] of Object.entries(policy.requiredJobs ?? {})) {
       const wf = `${WORKFLOWS_DIR}/${file}`;
@@ -1038,15 +1026,13 @@ export function createPolicyDiff(
     }
     const override = await evaluateOverride(input, trust, subject, settlePath, notes);
 
-    // The window comes from the TRUST REF's list only (never the subject's).
-    const effective = applyRevisionWindow(config, policy.revisionWindow, now());
-    let verdict = judge(effective.posture, findings);
+    let verdict = judge(config.posture, findings);
     let d11: D11Decision | undefined;
     if (input.subjectKind === 'push' && verdict === 'needs-human') {
       if (input.authorization === undefined) {
         notes.push('d11: no authorization bound for this push subject — needs-human stands');
       } else {
-        const paths = humanFindings(effective.posture, findings).map((f) => f.path);
+        const paths = humanFindings(config.posture, findings).map((f) => f.path);
         d11 = authorizePaths(input.authorization, paths);
       }
     }
@@ -1056,17 +1042,16 @@ export function createPolicyDiff(
     if (authorized) verdict = 'pass';
 
     const report: string[] = [
-      `posture: ${effective.posture} (layer ${effective.layer})`,
-      ...effective.lines,
+      `posture: ${config.posture} (layer ${config.layer})`,
       `range: ${rangeBase}..${subject} (trust ${trust})`,
     ];
     if (findings.length === 0) report.push('findings: none');
     // Under `advisory` a finding that needs no human is an annotation: still
     // listed, prefixed so the run report says it did not decide the verdict.
-    const needsHuman = new Set(humanFindings(effective.posture, findings));
+    const needsHuman = new Set(humanFindings(config.posture, findings));
     for (const f of findings) {
       const note =
-        effective.posture === 'advisory' && f.kind !== 'lint' && !needsHuman.has(f)
+        config.posture === 'advisory' && f.kind !== 'lint' && !needsHuman.has(f)
           ? 'advisory: '
           : '';
       report.push(`${note}${f.kind}: ${f.path} — ${f.reason}`);
@@ -1089,8 +1074,8 @@ export function createPolicyDiff(
       status: 'ok',
       value: {
         verdict,
-        posture: effective.posture,
-        postureLayer: effective.layer,
+        posture: config.posture,
+        postureLayer: config.layer,
         requiredJobs: policy.requiredJobs ?? {},
         trustRef: trust,
         subject,
