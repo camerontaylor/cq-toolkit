@@ -377,16 +377,12 @@ function constructLane(lane: LaneId, request: DriverRequest, config: DriverFacto
 /**
  * The reap-on-settle wrapper (§2.5): after the run settles — WHATEVER the
  * verdict — delete ONLY the FRESH record that run created: the run created
- * a record iff it resolved with a `sessionId` AND the invocation carried NO
+ * a record iff it reports a `sessionId` on resolve or rejection AND carried NO
  * `sessionRef`. The id is the run's OWN handle, so a concurrent run sharing
  * the sessionsDir can never be touched (a directory-wide "created since we
  * started" delta would reap OTHER runs' records under overlap). A
  * sessionRef-resumed record predates the run and is never reaped.
  *
- * KNOWN LIMITATION (recorded, PR #238 review round 5): a lane that THROWS
- * after creating its fresh record leaves that record behind — a rejection
- * carries no sessionId, and any non-run-specific ownership mechanism (a
- * directory-wide delta) would endanger concurrent runs sharing the dir.
  * Rejected runs expose their own created session id; cleanup never scans a
  * shared directory or guesses ownership. Cleanup is
  * best-effort: a reap failure is swallowed, the verdict outranks it (the
