@@ -274,7 +274,7 @@ describe('complete immutable queue result consumption', () => {
       f.document.capture.paths,
     );
     f.document.capture.paths[0]!.path = 'src/changed.ts';
-    expect(() => parseQueueReceipt(f.document)).toThrow();
+    expect(() => parseQueueReceipt(f.document)).toThrow('queue scope manifest digest mismatch');
   });
 
   test('affected-current clean cannot become full-branch readiness or independent acceptance', async () => {
