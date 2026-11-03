@@ -180,7 +180,10 @@ def select(c, queue, log, dry, only):
     repo, store, outbox, publisher = services(c, config)
     # New publication may remove eligibility without moving the job's T.
     head, events = publisher.fetch()
-    reconciled = ledger.digest({"head": head, "jobs": sorted(j["id"] for j in items)})
+    def reconciliation(eligible):
+        return ledger.digest({"head": head, "jobs": sorted(j["id"] for j in items),
+                              "eligible": sorted(j["id"] for j in eligible)})
+    reconciled = reconciliation(pending)
     last = queue.get("backfill_coverage_reconciled")
     if refused and isinstance(last, dict) and last.get("digest") == reconciled:
         for item in pending:
@@ -247,7 +250,10 @@ def select(c, queue, log, dry, only):
                 item.update(state="launch-unknown", vendor_state="unknown")
             c.save_queue(queue)
             raise
-    queue["backfill_coverage_reconciled"] = {"digest": reconciled, "available": available}
+    if not only:  # a selective start covers one job, not the natural pass
+        # Keyed on the post-pass eligible set: jobs just marked done drop out of it.
+        after = [j for j in items if jobs.eligible(queue, j, c.iso())]
+        queue["backfill_coverage_reconciled"] = {"digest": reconciliation(after), "available": available}
     return None, available
 
 
