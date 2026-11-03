@@ -9,7 +9,8 @@ surface and defines no TestCase.
 
 Offline push-discovery integration: real temporary Git repos; fake forge/CLI.
 
-Fixture shape follows CurrentTest (test_crq.py): module-global patching of the
+Fixture shape follows the crq suite's current-test base class (now the
+``test_crq_*`` split modules): module-global patching of the
 loaded crq module, real git for both the primary fixture and the foreign
 origin/clone pair, no network, and a fake coderabbit CLI version. The foreign
 repo is a real clone of a local origin so discovery's refspec fetch is exercised
