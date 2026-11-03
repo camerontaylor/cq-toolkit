@@ -33,6 +33,7 @@ import author_lease
 import review_receipt
 import deferred_refresh
 import merged_reconcile
+import repo_registry
 import usage_slots
 import backfill_runtime
 import backfill_jobs
@@ -77,6 +78,15 @@ CLONE = Path(CONFIG["clone"])
 WT_ROOT = Path(CONFIG["worktree_root"])
 WT_PREFIX = CONFIG["worktree_prefix"]
 REPO = CONFIG["repo"]
+# Non-primary reviewed repositories ([] keeps single-repo behavior); docs/multi-repo.md.
+REPOS = repo_registry.parse(CONFIG)
+
+
+def item_repo(item: Dict[str, Any]) -> str:
+    """Every reader normalizes: legacy items without `repo` are primary-repo
+    items (docs/multi-repo.md). New writers stamp `repo` at item creation, so
+    the field spreads through the queue as items are created — no reset."""
+    return item.get("repo") or REPO
 BLOCKING_SEVERITIES = {"critical", "major"}
 SEVERITIES = ["critical", "major", "minor", "trivial", "info", "none"]
 
@@ -1808,7 +1818,7 @@ def launch(q: Dict[str, Any], item: Dict[str, Any], plan: Dict[str, Any]) -> str
         # natural argv is deliberately unchanged.
         cli_cmd.append("--committed")
     meta = {"run_id": run_id, "item_id": item["id"], "pr": item["pr"], "kind": item["kind"],
-            "workId": f"crq:{run_id}",
+            "repo": item_repo(item), "workId": f"crq:{run_id}",
             "label": plan["label"], "cycle": plan["cycle"], "base": plan["base"], "head": plan["head"],
             "pr_head": plan.get("pr_head", plan["head"]), "review_pin": plan.get("review_pin", plan["base"]),
             "target": plan["target"], "pr_branch": plan["branch"], "worktree": str(wt), "wt_branch": wbranch,
@@ -1850,7 +1860,7 @@ def launch(q: Dict[str, Any], item: Dict[str, Any], plan: Dict[str, Any]) -> str
         "runId": run_id,
         "host": os.uname().nodename,
         "harness": "coderabbit",
-        "repo": REPO,
+        "repo": item_repo(item),
         "pr": item["pr"],
         "head": plan["head"],
     })
@@ -2299,9 +2309,17 @@ def ledger_append(item: Dict[str, Any], meta: Dict[str, Any], cls: Dict[str, Any
 
 def rank(item: Dict[str, Any]) -> int:
     """Required open 0, open delta 1, merged follow-ups/current 2, backlog 3,
-    author/coverage 4, optional additional cycles 5."""
+    author/coverage 4, optional additional cycles 5.
+
+    A non-primary repo's items use its configured rank_tier (default 3:
+    between primary ordinary work and backfill); the primary repo's items
+    keep their kind-specific rank (docs/multi-repo.md).
+    """
     if additional_cycle(item):
         return 5
+    repo_rank = repo_registry.rank_for(item, REPO, REPOS)
+    if repo_rank is not None:
+        return repo_rank
     if item["kind"] == review_receipt.KIND:
         return 2
     if item["kind"] in ("coverage", backfill_jobs.KIND):
@@ -2838,11 +2856,27 @@ def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = Fal
 # ----------------------------------------------------------- status
 
 
+def repo_status_lines(q: Dict[str, Any], items: List[Dict[str, Any]]) -> List[str]:
+    """One status line per configured non-primary repo (docs/multi-repo.md)."""
+    lines = []
+    for cfg in REPOS:
+        slug = cfg["repo"]
+        mine = [i for i in items if item_repo(i) == slug]
+        counts = {state: sum(1 for i in mine if i["state"] == state)
+                  for state in ("pending", "reviewing", "blocked")}
+        tip = ((q.get("push_discovery") or {}).get(slug) or {}).get("reviewed_tip")
+        lines.append(f"- repo {slug}: {len(mine)} item(s) "
+                     f"({counts['pending']} pending, {counts['reviewing']} reviewing, {counts['blocked']} blocked); "
+                     f"push reviewed_tip {tip or 'uninitialized'}")
+    return lines
+
+
 def write_status(q: Dict[str, Any]) -> None:
     items = sorted(live_items(q), key=sort_key)
     owed_open = sum(max(0, 1 - completed_open_cycles(i)) for i in items
                     if i["kind"] == "open" and i["state"] not in ("skipped",))
     rows = []
+    repo_lines = repo_status_lines(q, items)
     for i in items:
         if i["kind"] == "open":
             cyc = f"{completed_open_cycles(i)}/1"
@@ -2863,7 +2897,8 @@ def write_status(q: Dict[str, Any]) -> None:
             why = f"Owner intervention required — gate stalled since {i['gate_stalled_at']}; {why}"
         kind = (f"{i['kind']}{' t' + str(i['tier']) if i.get('tier') else ''}"
                 f"{' new' if i.get('source') == 'followup' else ''}{' post-merge' if i.get('followup') == 'merged' else ''}")
-        rows.append(f"| {i['id']} | {kind} | {i['state']} | {cyc} "
+        repo_col = item_repo(i)
+        rows.append(f"| {i['id']} | {'' if repo_col == REPO else repo_col} | {kind} | {i['state']} | {cyc} "
                     f"| {(i.get('pinned_base') or '')[:10]} | {last.get('outcome', '')} | {(why or '')[:110]} | {extra} |")
     sched = CONFIG.get("schedule_id")
     next_run = ""
@@ -2888,8 +2923,9 @@ def write_status(q: Dict[str, Any]) -> None:
           "- merged-current discovery/receipt proof (retained capture T): " +
           json.dumps(status_summary.merged_current(q, STATE / "receipts"), sort_keys=True),
           f"- last tick: {q.get('last_tick')}", "",
-          "| item | kind | state | cycles | pinned base | last outcome | wait / last error | supersession |",
-          "|---|---|---|---|---|---|---|---|", *rows, "", "## Recent events", "", "```", *recent, "```", ""]
+          *repo_status_lines(q, items), *([""] if repo_lines else []),
+          "| item | repo | kind | state | cycles | pinned base | last outcome | wait / last error | supersession |",
+          "|---|---|---|---|---|---|---|---|---|", *rows, "", "## Recent events", "", "```", *recent, "```", ""]
     md.extend(["## Repair and utilization", "", "```json",
                json.dumps({"repair": repair_tick.digest(ROOT, q),
                    "utilization": coverage.utilization_digest(q, q.get("coverage") or coverage.new_ledger(),
@@ -2897,9 +2933,10 @@ def write_status(q: Dict[str, Any]) -> None:
     (STATE / "status.md").write_text("\n".join(md))
     (STATE / "status.json").write_text(json.dumps({"generated_at": iso(), "paused": q.get("paused"),
                                                    "cooldown_until": q.get("cooldown_until"),
-                                                   "items": [{k: i.get(k) for k in ("id", "kind", "state",
+                                                   "items": [{**{k: i.get(k) for k in ("id", "kind", "state",
                                                               "prior_cycles", "cycles", "operator_priority", "optional_cycle", "pinned_base", "last_error",
-                                                              "wait_reason", "gate_stalled_at")} for i in items]}, indent=2) + "\n")
+                                                              "wait_reason", "gate_stalled_at")},
+                                                              "repo": item_repo(i)} for i in items]}, indent=2) + "\n")
     try:
         status_summary.publish(ROOT, q, CONFIG, schedule)
     except Exception as exc:

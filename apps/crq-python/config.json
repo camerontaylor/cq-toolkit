@@ -2,6 +2,8 @@
   "repo": "camerontaylor/cq-toolkit",
   "clone": "@HOST_CLONE@",
   "worktree_root": "@HOST_WORKTREE_ROOT@",
+  "repos": [],
+  "_repos_note": "Per-repo review config for non-primary repositories; empty keeps single-repo behavior. Shape and semantics: docs/multi-repo.md. Host overlays supply entries with real clone paths at deploy time.",
   "worktree_prefix": "coderabbit-queue-",
   "max_starts_per_hour": 5,
   "max_starts_per_tick": 10,

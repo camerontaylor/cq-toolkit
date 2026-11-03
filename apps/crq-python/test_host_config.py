@@ -204,6 +204,30 @@ class HostConfigTests(unittest.TestCase):
         overlay['config']['paseo_hosts'] = [endpoint, endpoint, 'other.example.invalid:6767']
         self.assertEqual(host.validate(overlay), overlay)
 
+    def test_overlay_carries_per_repo_review_config(self):
+        host.validate(self.overlay)  # absent: the committed empty list stays
+        self.assertEqual(host.apply(host.committed(self.root), self.overlay)['repos'], [])
+        overlay = copy.deepcopy(self.overlay)
+        overlay['config']['repos'] = [
+            {'repo': 'camerontaylor/infra', 'clone': str(self.base / 'infra'),
+             'discovery': {'push': True, 'pr': False}, 'rank_tier': 3},
+        ]
+        self.assertEqual(host.validate(overlay), overlay)
+        self.assertEqual(host.apply(host.committed(self.root), overlay)['repos'],
+                         overlay['config']['repos'])
+        for repos in ['camerontaylor/infra', {'repo': 'camerontaylor/infra'}, [1],
+                      [{'clone': str(self.base / 'infra')}],
+                      [{'repo': 'infra'}],
+                      [{'repo': 'camerontaylor/infra', 'clone': 'relative/infra'}],
+                      [{'repo': 'camerontaylor/infra', 'clone': '/srv/../infra'}],
+                      [{'repo': 'camerontaylor/infra'},
+                       {'repo': 'camerontaylor/infra'}]]:
+            with self.subTest(repos=repos):
+                bad = copy.deepcopy(self.overlay)
+                bad['config']['repos'] = repos
+                with self.assertRaises(ValueError):
+                    host.validate(bad)
+
     def test_alert_agent_id_is_optional_and_rendered(self):
         host.validate(self.overlay)  # absent: the committed recipient stays
         overlay = copy.deepcopy(self.overlay)
