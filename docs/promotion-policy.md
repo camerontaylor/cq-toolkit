@@ -28,8 +28,8 @@ receipt or admin flag is part of the normal merge path. Keep the ordinary
 history protections; never rewrite shared history or force-push `main`.
 
 Run focused local checks under the [focused-checks contract](focused-checks-contract.md).
-The full suite runs in CI. Author-side review follows the
-[CodeRabbit protocol](coderabbit-review.md); post-merge CRQ review does not
+The full suite runs in CI. CodeRabbit is advisory
+([guidance](coderabbit-review.md)); post-merge CRQ review does not
 replace the independent pre-merge review.
 
 The former branch-promotion workflows and their gate are retired. Branch and

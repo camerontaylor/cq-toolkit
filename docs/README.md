@@ -15,7 +15,7 @@ I1 stdout = one JSON artifact: the OpResult, optionally with a `report` field ca
 4. [ADR index](adr/README.md) and [accepted ADRs](adr/) — accepted design decisions and their amendments.
 5. [Policy adoption guide](../policy/README.md) — token setup and required-check registration.
 6. [Focused checks contract](focused-checks-contract.md) — local and CI gate responsibilities.
-7. [Agent instructions](../AGENTS.md) and [CodeRabbit review protocol](coderabbit-review.md) — repository workflow and review evidence.
+7. [Agent instructions](../AGENTS.md) and [CodeRabbit review guidance](coderabbit-review.md) — repository workflow and review evidence.
 8. [Current contract and backlog](current-contract-and-backlog.md) — the normative contract and its backlog (supersedes the 2026-09-12 spec).
 
 ## Historical and evidence records

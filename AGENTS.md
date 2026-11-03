@@ -27,11 +27,7 @@ Your local duty, on a coherent change:
   removes or rewires the last import of a file or package, and skip it
   otherwise (canonical condition: the contract's §1)
 
-**Zero local full gates per PR.** No protocol step requires of a worker a local full
-`pnpm run test` / `test:unit`, and a clean review adds no run beyond the review
-protocol's own two fixed checkpoints — before and after the single CLI
-cycle — (which are the cheap deterministic
-gates plus the affected tests, never the suite).
+**Zero local full gates per PR.** Run focused checks locally; CI owns the full gates.
 The full suite — plus the build, the from-source smoke plan, the coverage
 ratchet and the denylist scan + self-test — runs in CI on every push/PR, and
 **green `static` and `denylist` on the exact PR head**, plus one independent
@@ -104,61 +100,12 @@ stop GLM toolkit workers 5 minutes before the window and resume them
 after it ends — don't manually restart GLM work during the blackout;
 use a non-GLM provider or wait.
 
-## Code review — mandatory before every PR
+## Code review
 
-ONE completed CodeRabbit CLI review-and-address cycle over the full
-intended PR diff, or the approved durable vendor-debt path during a vendor
-outage (DEC1, 2026-10-27), then one independent head-bound review of the PR
-(owner ruling D-J, development posture 2026-10-20). Full
-protocol: [docs/coderabbit-review.md](docs/coderabbit-review.md).
-
-- Pin ONE immutable base per task: the merge-base against the task's
-  EXPLICIT intended PR target (`origin/main` for this repository). Never a moving
-  branch, never blindly task-start HEAD when the branch carries previous
-  work. Record target, base, reviewed HEAD, and the dirty-diff identity
-  when uncommitted work is in scope.
-- A cycle counts only when the CLI exits successfully, the output ends
-  with a terminal non-skipped completion, and no error/action_required
-  occurred — a `complete` event alone is insufficient. Failed, skipped,
-  interrupted, auth-failed, or rate-limited runs do not count: report the
-  true reason; they never count as completed. Under DEC1, proven vendor
-  availability, rate-limit or login/operational failure becomes visible
-  deferred debt after authorized durable enrollment. Ready PRs and merge
-  may proceed, including before vendor recovery, with deterministic gates
-  and independent exact-head acceptance. Agent review, leases, queue
-  assignment and consumption acknowledgements never mean vendor completion.
-  Queue authorization/persistence failures, unsupported deployment, unknown
-  failures, scan/tamper, stale identity, substantive blocking findings, red
-  CI, missing independence and privileged trust remain blockers. No inline
-  paid retry or extra scheduler. The older exception for `cq dev.cycle` (2026-10-27,
-  #509): when its address leg's re-review is blocked on a network/transient
-  class, it is retried once; if it is still blocked and at least one
-  verified fix exists, the final deterministic gates run and a DRAFT PR
-  naming the blocked re-review is published (red gates still publish
-  nothing). Without DEC1's durable enrollment this remains draft-only and
-  is not a counted cycle. See the protocol's deferred-debt lifecycle.
-- Run the deterministic gates before the cycle and after addressing it.
-  Those gates are the cheap deterministic ones plus the affected tests — the
-  full suite is CI's, and Knip runs per the contract's condition (see
-  [docs/focused-checks-contract.md](docs/focused-checks-contract.md)).
-  Whitespace/conflict-marker checks cover the pinned base through HEAD,
-  staged changes, and unstaged tracked changes separately (commands in the
-  protocol §5); stage your own new files first.
-- Adjudicate every critical/major finding: fix the technically valid ones,
-  reject false positives with concrete reasons. Minor findings only when
-  materially beneficial. Record dispositions concisely. P2 findings left
-  open after the cycle go to follow-up issues, not more review loops; give
-  the reviewers the owner rulings as context.
-- No valid unresolved critical/major finding may coexist with a
-  ready-to-merge claim. The independent non-author review is on the final
-  PR head; passing gates alone is insufficient.
-
-The GitHub CodeRabbit App reviews the opened PR (already installed and
-active on this repo). CLI cycles are the author-side pre-PR pass and stay
-distinct from the PR review and from non-author acceptance (doctrine I2).
-Reviewer independence is between agents or humans, not GitHub accounts. An
-independent reviewer agent may share the author's GitHub account using the
-enabled exact-head attestation path documented in the policy templates.
+CodeRabbit is advisory; handle its findings like any other review comment.
+The merge bar is green `static` and `denylist` on the exact PR head plus
+one independent exact-head `PASS`. Reviewer independence is between agents
+or humans, not GitHub accounts. See [review guidance](docs/coderabbit-review.md).
 
 ## Doctrine
 

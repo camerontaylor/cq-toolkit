@@ -6,7 +6,6 @@
 
 - Intended PR target: `main`
 - Immutable base SHA:
-- CodeRabbit author cycle: <!-- one completed cycle, or durable vendor debt per docs/coderabbit-review.md -->
 - Findings and dispositions:
 - Focused checks: <!-- named pnpm test:narrow files, static, formatting, Knip when relevant; real results only -->
 

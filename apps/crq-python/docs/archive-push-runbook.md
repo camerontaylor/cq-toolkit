@@ -26,12 +26,6 @@ Everything under crq's `state/`:
   `agent.json`, `judge-result.json` per job, plus the cq runner's
   `sessions/` store under each job dir once the SDK half ships)
 
-**Not pushed:** the signer's run ledger (`run-ledger.jsonl`). The signer
-writes it in its own private state directory (`signer/crq-signer.py`
-`RUN_LEDGER`, under the signer account's `~/.local/state/crq-signer/`),
-outside crq's `state/`, so this unit does not reach it. Archiving it needs
-its own owner-authorized step; tracked as a follow-up issue.
-
 Append-only: `rclone copy` (never `sync`/`--delete`), under `nice`/`ionice`.
 
 ## Prerequisites (owner)

@@ -128,6 +128,10 @@ lockstep under D-P.
 every finding, and an independent review of the final head are required before merge-readiness;
 material changes get a targeted re-review.
 
+Superseded by the owner ruling of 2026-11-03: CodeRabbit is advisory; the
+merge bar is green `static` and `denylist` on the exact head plus one
+independent exact-head `PASS`. See [review guidance](../coderabbit-review.md).
+
 ## Consequences
 
 - Positive: an adopter can import a decision function with zero infrastructure; tests become
