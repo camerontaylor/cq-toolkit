@@ -827,9 +827,21 @@ describe('ai-sdk driver specifics (mock model)', () => {
 
   test('a small maxSteps budget is honoured: the last step is invited to answer instead of calling tools', async () => {
     const toolCounts: number[] = [];
+    let resuming = false;
+    let sawReplay = false;
     const mock = new MockLanguageModelV4({
       modelId: 'mock-1',
       doGenerate: async (options) => {
+        if (resuming) {
+          const assistantTexts = options.prompt
+            .filter((message) => message.role === 'assistant')
+            .flatMap((message) =>
+              message.content.filter((part) => part.type === 'text').map((part) => part.text),
+            );
+          expect(assistantTexts.every((text) => text.trim() !== '')).toBe(true);
+          expect(assistantTexts.some((text) => text.includes('"toolName":"read"'))).toBe(true);
+          sawReplay = true;
+        }
         const tools = offeredToolCount(options);
         toolCounts.push(tools);
         return tools > 0
@@ -843,16 +855,15 @@ describe('ai-sdk driver specifics (mock model)', () => {
         providers: { mock: () => mock },
         sessionsDir: join(scratchDir, 'sessions'),
       });
-      const result = await driver.run(
-        invocation({
-          budget: { maxSteps: 3 },
-          toolPolicy: { allow: ['read'], mode: 'allowlist' },
-          outputSchema: toOutputSchema(
-            'test/small-steps/v1',
-            z.object({ fixed: z.boolean(), notes: z.string() }).strict(),
-          ),
-        }),
-      );
+      const request = invocation({
+        budget: { maxSteps: 3 },
+        toolPolicy: { allow: ['read'], mode: 'allowlist' },
+        outputSchema: toOutputSchema(
+          'test/small-steps/v1',
+          z.object({ fixed: z.boolean(), notes: z.string() }).strict(),
+        ),
+      });
+      const result = await driver.run(request);
       expect(result.stopReason).toBe('complete');
       expect(result.structuredOutput).toEqual({ fixed: true, notes: 'ok' });
       expect(result.steps).toBe(3);
@@ -871,6 +882,10 @@ describe('ai-sdk driver specifics (mock model)', () => {
       ]);
       expect(steps?.slice(0, 2).every((message) => message.toolCalls?.includes('read'))).toBe(true);
       expect(steps?.[2]?.toolCalls).toBeUndefined();
+      resuming = true;
+      const resumed = await driver.run({ ...request, sessionRef: result.sessionId as string });
+      expect(resumed.stopReason).toBe('complete');
+      expect(sawReplay).toBe(true);
     } finally {
       await rm(scratchDir, { recursive: true, force: true });
     }

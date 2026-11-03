@@ -1084,7 +1084,10 @@ export class AiSdkDriver implements Driver {
             responseMessages.push(...normalizeToolErrors(step.response.messages));
             await store.appendMessage(record.sessionId, {
               role: 'assistant',
-              content: step.text,
+              content:
+                step.text !== ''
+                  ? step.text
+                  : JSON.stringify(step.toolCalls.length > 0 ? step.toolCalls : ''),
               usage: usageFromSdk(step.usage),
               ...(step.toolCalls.length > 0 ? { toolCalls: JSON.stringify(step.toolCalls) } : {}),
               at: nowIso(),
