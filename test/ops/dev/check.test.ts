@@ -7,6 +7,7 @@
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
+import { DEV_LEDGER_VERSION } from '../../../src/ops/dev/record.js';
 import { knipTrigger, makeDevCheck, rangeFault } from '../../../src/ops/dev/check.js';
 import type { CommandResult } from '../../../src/ops/dev/effects.js';
 import { failResult, makeFakeEffects } from './fakes.js';
@@ -399,7 +400,7 @@ describe('dev.check', () => {
     const { testSelection: _dropped, ...withoutSelection } = legacy;
     void _dropped;
     effects.openLedger('feature/x').save({
-      version: 2,
+      version: DEV_LEDGER_VERSION,
       branch: 'feature/x',
       records: [withoutSelection],
     });

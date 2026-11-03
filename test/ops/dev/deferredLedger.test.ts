@@ -23,6 +23,7 @@ import {
 import { renderReadinessSection } from '../../../src/ops/pr/open.js';
 import {
   assembleReadiness,
+  DEV_LEDGER_VERSION,
   findReusableCycle,
   parseDevLedger,
   serializeDevLedger,
@@ -137,7 +138,7 @@ async function fixture() {
     agentCoverage: coverage,
   });
   const ledger: DevLedgerFile = {
-    version: 2,
+    version: DEV_LEDGER_VERSION,
     branch: state.branch,
     records: [
       origin,
@@ -161,7 +162,7 @@ async function fixture() {
   return { repo, effects, state, client, ledger, debt, origin, agent, assemble, identity };
 }
 
-test('strict additive ledger keeps old v2 readable and refuses forged failure classes/reuse', async () => {
+test('strict additive ledger round-trips at the current version and refuses forged failure classes/reuse', async () => {
   const f = await fixture();
   expect(parseDevLedger(serializeDevLedger(f.ledger))).toEqual(f.ledger);
   const legacy = { ...f.ledger, records: [cycleRecord()] };
@@ -1074,7 +1075,7 @@ test('the authorized-predecessor pass stops nonfatally at the count backstop', a
   );
   const records = f.ledger.records.filter((entry) => entry.kind !== 'vendor-debt');
   f.effects.openLedger(f.state.branch).save({
-    version: 2,
+    version: DEV_LEDGER_VERSION,
     branch: f.state.branch,
     records: [
       ...records,
