@@ -52,6 +52,15 @@ describe('T05 round-trip', () => {
     );
   });
 
+  it('rejects a null restored record on the correlation-error path, not a TypeError', () => {
+    expect(() =>
+      resolveCorrelation({
+        branch: 'feat/demo',
+        restored: null as unknown as NonNullable<ResolveCorrelationInput['restored']>,
+      }),
+    ).toThrow(/restored record must be a correlation object/);
+  });
+
   it('rejects a restored record with an omitted work ID (incomplete resume record)', () => {
     expect(() =>
       resolveCorrelation({
