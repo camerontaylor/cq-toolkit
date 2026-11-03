@@ -72,8 +72,10 @@ export { branchPathFault };
  * to parse rather than silently re-labeling its evidence.
  *
  * v3 (ADR-0008 T38) adds the disposition provenance fields: `owner`,
- * `evidence: string[]`, `reviewTrigger` (required nonempty for a
- * `deferred`), `fingerprint` (FindingFingerprint v1) and `acceptedRisk`.
+ * `evidence: string[]` (required key, may be [] when no evidence exists —
+ * entries are never manufactured to make it nonempty), `reviewTrigger`
+ * (required nonempty for a `deferred`), `fingerprint` (FindingFingerprint
+ * v1, EXPLICIT NULL when the identity is unknown) and `acceptedRisk`.
  * parseDevLedger dual-reads 2 and 3: a legacy v2 disposition keeps its new
  * fields ABSENT — unknown is never manufactured — while a v3 disposition
  * requires them all. Versions 1 and anything newer throw.
@@ -279,11 +281,11 @@ export interface DevCheckRecord {
  * One disposition: the author's recorded adjudication of one finding.
  * The v2 carrier fields are unchanged (ADR-0008 T38: action/why/head/at map
  * to status/reason/observedHead/observedAt in the journal without renaming
- * the dev carrier). The v3 provenance fields are optional HERE because this
- * persistence subpart only teaches the format to dual-read; the disposition
- * producer (disposition.ts) still records the v2 carrier until its own
- * ticket adds the input fields — never fabricate them at this layer. On a
- * legacy record they are absent: a reader must treat that as UNKNOWN.
+ * the dev carrier). The v3 provenance fields are optional on the TYPE for
+ * the dual-read (a legacy v2 record lacks them); the disposition producer
+ * (disposition.ts) now writes every v3 key, with an unknown fingerprint as
+ * an explicit null — never omitted, never fabricated. On a legacy record
+ * they are absent: a reader must treat that as UNKNOWN.
  */
 export interface DevDispositionRecord {
   kind: 'disposition';
@@ -300,8 +302,8 @@ export interface DevDispositionRecord {
   evidence?: string[];
   /** When the disposition must be re-reviewed; required nonempty for `deferred` (v3). */
   reviewTrigger?: string | null;
-  /** The finding's shared cross-run identity, fingerprint version 1 (v3). */
-  fingerprint?: FindingFingerprint;
+  /** The finding's shared cross-run identity, fingerprint version 1 (v3); null when unknown. */
+  fingerprint?: FindingFingerprint | null;
   /** The explicitly accepted risk, when a deferral accepts one (v3). */
   acceptedRisk?: string | null;
 }
@@ -462,7 +464,10 @@ const DevDispositionRecordSchemaV3 = z
     owner: z.string().min(1),
     evidence: z.array(z.string()),
     reviewTrigger: z.string().min(1).nullable(),
-    fingerprint: FindingFingerprintSchema,
+    // Unknown identity is an EXPLICIT NULL (ADR-0008: null means unknown,
+    // never zero/omitted) — never manufactured, and the key is required on
+    // a v3 record so an omission fails the schema.
+    fingerprint: FindingFingerprintSchema.nullable(),
     acceptedRisk: z.string().nullable(),
   })
   .strict()

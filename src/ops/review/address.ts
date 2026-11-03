@@ -1418,6 +1418,19 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                         findingId: finding.id,
                         action: finding.status as 'fixed' | 'rejected' | 'deferred',
                         why: finding.reason ?? 'engine validated fix',
+                        owner: 'review.address',
+                        // The finding's own evidence, verbatim: the commit SHA
+                        // for a fixed disposition (addressWorker), the
+                        // path/line JSON for rejected/deferred, the failed
+                        // attempt otherwise. Never manufactured, never
+                        // dropped; empty stays empty.
+                        evidence: finding.evidence === undefined ? [] : [finding.evidence],
+                        ...(finding.status === 'deferred'
+                          ? {
+                              reviewTrigger:
+                                'review.address: retained and re-presented at next re-review',
+                            }
+                          : {}),
                       });
                   if (recorded.status !== 'ok') {
                     bookkeepingFailed = true;

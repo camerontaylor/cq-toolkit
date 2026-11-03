@@ -27,6 +27,7 @@
 // role with the explicit `agent:<role>` flag value.
 import { z } from 'zod';
 import type { Op, OpRegistryEntry } from '../../kernel/types.js';
+import { FindingFingerprintSchema } from '../../kernel/schema.js';
 import { CODERABBIT_REVIEWER } from './coderabbit.js';
 import type { DevCheckInput } from './check.js';
 import type { DevCycleCompositionInput } from './cycle.js';
@@ -130,6 +131,11 @@ export const DevReviewInputSchema: z.ZodType<DevReviewInput> = z.union([
   DevTransportInputSchema,
 ]);
 
+// Defaults are applied by the OPS (`target ?? DEFAULT_DEV_TARGET`), not the
+// schemas — the drift pins mirror the hand-written optional input types, so
+// every optional field is `.exactOptional()` (exactOptionalPropertyTypes).
+// The disposition schema below follows the same rule; its deferred refine
+// mirrors the ledger record's own v3 rule (record.ts).
 export const DevDispositionInputSchema: z.ZodType<DevDispositionInput> = z
   .object({
     repoRoot: z.string().min(1),
@@ -138,8 +144,23 @@ export const DevDispositionInputSchema: z.ZodType<DevDispositionInput> = z
     why: z
       .string()
       .regex(/\S/, 'why must name the fix, the false-positive mechanism, or the tracking issue'),
+    owner: z.string().regex(/\S/, 'owner must name who made the adjudication'),
+    evidence: z.array(z.string().min(1)),
+    reviewTrigger: z
+      .string()
+      .regex(/\S/, 'reviewTrigger must name when the disposition is re-reviewed')
+      .nullable()
+      .exactOptional(),
+    fingerprint: FindingFingerprintSchema.exactOptional(),
+    acceptedRisk: z.string().nullable().exactOptional(),
   })
-  .strict();
+  .strict()
+  .refine(
+    (input) =>
+      input.action !== 'deferred' ||
+      (input.reviewTrigger !== null && input.reviewTrigger !== undefined),
+    'a deferred disposition requires a nonempty reviewTrigger',
+  );
 
 export const DevReadyInputSchema: z.ZodType<DevReadyInput> = z
   .object({

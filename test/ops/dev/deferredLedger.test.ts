@@ -598,6 +598,8 @@ test('verified findings retain provenance, block readiness, and require explicit
         findingId: 'receipt-unknown#f1',
         action: 'fixed',
         why: 'typo',
+        owner: 'test',
+        evidence: [],
       })
     ).status,
   ).toBe('failed');
@@ -608,6 +610,9 @@ test('verified findings retain provenance, block readiness, and require explicit
         findingId: finding.id,
         action: 'deferred',
         why: 'tracked elsewhere',
+        owner: 'test',
+        evidence: [],
+        reviewTrigger: 're-check at next head',
       })
     ).status,
   ).toBe('ok');
@@ -620,6 +625,8 @@ test('verified findings retain provenance, block readiness, and require explicit
         findingId: finding.id,
         action: 'fixed',
         why: 'concrete fix independently recorded',
+        owner: 'test',
+        evidence: [],
       })
     ).status,
   ).toBe('ok');
@@ -896,6 +903,8 @@ test('raw Q1 finding events survive Q3 paged delivery, settlement, findings and 
     findingId: imported[0]!.id,
     action: 'fixed',
     why: 'explicit concrete fix for original raw vendor finding',
+    owner: 'test',
+    evidence: [],
   });
   expect(disposition.status).toBe('ok');
   expect(f.assemble(f.effects.openLedger(f.state.branch).load(), completed).ready).toBe(true);

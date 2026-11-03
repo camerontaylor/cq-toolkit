@@ -16,6 +16,12 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "properties": {
+    "acceptedRisk": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "action": {
       "enum": [
         "fixed",
@@ -24,13 +30,81 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
       ],
       "type": "string"
     },
+    "evidence": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "type": "array"
+    },
     "findingId": {
       "minLength": 1,
+      "type": "string"
+    },
+    "fingerprint": {
+      "additionalProperties": false,
+      "properties": {
+        "checkId": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "rule": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "spanContentHash": {
+          "anyOf": [
+            {
+              "pattern": "^sha256:[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "version": {
+          "const": 1,
+          "type": "number"
+        }
+      },
+      "required": [
+        "version",
+        "checkId",
+        "rule",
+        "path",
+        "spanContentHash"
+      ],
+      "type": "object"
+    },
+    "owner": {
+      "pattern": "\\S",
       "type": "string"
     },
     "repoRoot": {
       "minLength": 1,
       "type": "string"
+    },
+    "reviewTrigger": {
+      "anyOf": [
+        {
+          "pattern": "\\S",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
     },
     "why": {
       "pattern": "\\S",
@@ -41,7 +115,9 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
     "repoRoot",
     "findingId",
     "action",
-    "why"
+    "why",
+    "owner",
+    "evidence"
   ],
   "type": "object"
 }

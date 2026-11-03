@@ -269,6 +269,8 @@ describe('dev.disposition', () => {
       findingId: 'c002-bbbbbbbb#f1',
       action: 'rejected',
       why: '  false positive: the path is test-only  ',
+      owner: 'test',
+      evidence: [],
     });
     expect(result).toEqual({
       status: 'ok',
@@ -279,6 +281,11 @@ describe('dev.disposition', () => {
         why: 'false positive: the path is test-only',
         head: state.head,
         at: '2026-10-18T00:00:00.000Z',
+        owner: 'test',
+        evidence: [],
+        reviewTrigger: null,
+        fingerprint: null,
+        acceptedRisk: null,
       },
     });
     expect(effects.openLedger('feature/x').load().records.at(-1)?.kind).toBe('disposition');
@@ -293,6 +300,8 @@ describe('dev.disposition', () => {
       findingId: 'c009-zzzzzzzz#f1',
       action: 'fixed',
       why: 'done',
+      owner: 'test',
+      evidence: [],
     });
     expect(result.status).toBe('failed');
     expect(effects.openLedger('feature/x').load()).toEqual(before);
@@ -325,6 +334,8 @@ describe('dev.disposition', () => {
           findingId: 'c001-aaaaaaaa#f1',
           action: 'fixed',
           why: 'done',
+          owner: 'test',
+          evidence: [],
         }),
       ).toEqual({
         status: 'needs-human',
@@ -340,6 +351,8 @@ describe('dev.disposition', () => {
       findingId: 'c001-aaaaaaaa#f1',
       action: 'fixed',
       why: 'done',
+      owner: 'test',
+      evidence: [],
     });
     expect(result.status).toBe('needs-human');
   });
