@@ -51,24 +51,21 @@ function isAllowedZodFile(filename, zodFiles) {
   return zodFiles.some((allowed) => normalized === allowed || normalized.endsWith(`/${allowed}`));
 }
 
-// Repo-relative POSIX path of the importing file. RuleTester filenames are
-// already repo-relative; real lint runs hand the rule an absolute path whose
-// repo-relative form starts at the LAST '/src/' segment (the config only ever
-// applies this rule to 'src/cli/**' and 'src/cli.ts'). Windows separators are
-// normalized to forward slashes first.
-// The '/src/' slice is deliberately NOT gated on path.posix.isAbsolute: on
-// Windows an absolute path is 'C:/repo/src/cli/main.ts', which is NOT
-// posix-absolute ('C:/' is a drive prefix, not a leading '/') — gating on
-// absoluteness left the drive-letter path whole, so every relative source
-// resolved against 'C:/repo/src/cli' and containment failed on the entire
-// tree (the rule would misfire on everything). Slice whenever a '/src/'
-// segment exists, whatever the absoluteness; only the no-segment case keeps
-// the input as-is (RuleTester's already-repo-relative filenames).
-function repoRelative(filename) {
-  const normalized = filename.split('\\').join('/');
-  const srcIndex = normalized.lastIndexOf('/src/');
-  if (srcIndex !== -1) return normalized.slice(srcIndex + 1);
-  return normalized;
+// Every CLI anchor is a possible repository root, including when a checkout
+// parent or a nested CLI directory repeats the same layout. Fail closed if
+// any candidate resolves an import outside the allowed boundary.
+function repoRelativeCandidates(filename) {
+  const normalized = `/${filename.split('\\').join('/')}`;
+  const candidates = [];
+  for (
+    let index = normalized.indexOf('/src/cli/');
+    index !== -1;
+    index = normalized.indexOf('/src/cli/', index + 1)
+  ) {
+    candidates.push(normalized.slice(index + 1));
+  }
+  if (normalized.endsWith('/src/cli.ts')) candidates.push('src/cli.ts');
+  return candidates.length > 0 ? candidates : [normalized.slice(1)];
 }
 
 // True when `child` IS `parent` or lives underneath it — a segment-boundary
@@ -125,7 +122,7 @@ function checkSource(context, sourceNode, reportNode) {
   if (!sourceNode) return;
   const [options] = context.options;
   const zodFiles = options?.zodFiles ?? [];
-  const importerPath = repoRelative(context.filename);
+  const importerPaths = repoRelativeCandidates(context.filename);
   const source = sourceText(sourceNode);
   if (source === null) {
     // FAIL CLOSED: a COMPUTED source — a variable (`import(t)`), a template
@@ -147,7 +144,10 @@ function checkSource(context, sourceNode, reportNode) {
     });
     return;
   }
-  if (!isAllowedSource(source, zodFiles, importerPath)) {
+  const importerPath = importerPaths.find(
+    (candidate) => !isAllowedSource(source, zodFiles, candidate),
+  );
+  if (importerPath !== undefined) {
     const arrow = isRelativeSpecifier(source)
       ? ` (resolves to '${resolveRelative(source, importerPath)}')`
       : '';
