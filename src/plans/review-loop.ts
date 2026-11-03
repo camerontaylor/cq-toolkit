@@ -1535,7 +1535,7 @@ async function runOwnedReviewLoop(
           `item ${sources.get(row.jobId)?.itemId ?? row.jobId}: publish-withheld-mixed-worktree — a sibling fix row failed; the loop pushed nothing and withheld this item's reply and resolve${
             opts.publish === false
               ? '; this run publishes nothing at engine exit (publication requires --push)'
-              : '; publication may still happen at engine exit'
+              : "; any publication is the caller's responsibility"
           }`,
         );
       }
