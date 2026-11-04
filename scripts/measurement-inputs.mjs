@@ -2,7 +2,9 @@
 // bundle directories only (the M8a shape): no ambient scan, no cwd walk, no
 // network. bundleVersion and every stored sha256 are validated, and reports are
 // validated against the strict v2 report schema from the built engine (the
-// M6c self-host pattern). Missing, corrupt, unverifiable or ambiguous evidence
+// M6c self-host pattern) — including the v2 payload embedded at reportV2 in
+// persisted operation reports, which is the only form production writers
+// emit. Missing, corrupt, unverifiable or ambiguous evidence
 // goes to the UNKNOWN bucket with a reason, never to a fallback zero — and any
 // unknown, torn or partially observed input forces partial or unavailable
 // totals, never a known one.
@@ -138,6 +140,24 @@ function addLeaf(record, result) {
 }
 
 function ingestJson(parsed, source, result) {
+  // Persisted operation reports (fix runs, review-address) carry the v2
+  // payload embedded at reportV2: runFix and review.address assign the
+  // assembled payload to the outer report and persist that, and no writer
+  // emits a standalone v2 report — so in real bundles the embedded payload is
+  // where the attempt evidence lives. Unwrap it before classification; the
+  // strict schema below still governs admission. A session index is never
+  // unwrapped (indexVersion stays authoritative for indexes).
+  if (
+    parsed?.reportVersion === undefined &&
+    parsed?.indexVersion === undefined &&
+    parsed?.reportV2 !== undefined
+  ) {
+    if (parsed.reportV2?.reportVersion === undefined)
+      return void result.unknown.push(
+        bad(source, 'corrupt', 'reportV2 is not a v2 report payload'),
+      );
+    parsed = parsed.reportV2;
+  }
   if (parsed?.reportVersion !== undefined) {
     if (parsed.reportVersion !== REPORT)
       return void result.unknown.push(
@@ -156,7 +176,11 @@ function ingestJson(parsed, source, result) {
     flagAvailability(result, availability, '/attempts', ['tokens', 'wallMs', 'modeledUsd']);
     for (const event of attempts) {
       const { payload } = event;
-      // A leaf's own field availability marks that field's total incomplete.
+      // A leaf's own availability marks its totals incomplete — the root
+      // pointer ('' — valid per AvailabilityMapSchema, relative to the
+      // containing payload) covers every field, exactly as the report root
+      // does; the field pointers mark their own totals.
+      flagAvailability(result, payload.availability, '', ['tokens', 'wallMs', 'modeledUsd']);
       flagAvailability(result, payload.availability, '/tokens', ['tokens']);
       flagAvailability(result, payload.availability, '/wallMs', ['wallMs']);
       flagAvailability(result, payload.availability, '/modeledUsd', ['modeledUsd']);
@@ -166,7 +190,7 @@ function ingestJson(parsed, source, result) {
   }
   if (parsed?.indexVersion === undefined)
     return void result.unknown.push(
-      bad(source, 'unsupported', 'no reportVersion or indexVersion (legacy report)'),
+      bad(source, 'unsupported', 'no reportVersion, reportV2 or indexVersion (legacy report)'),
     );
   if (parsed.indexVersion !== INDEX || !Array.isArray(parsed.sessions))
     return void result.unknown.push(
@@ -341,16 +365,17 @@ export async function readMeasurementInputs({ dirs } = {}) {
   for (const dir of [...new Set(dirs)]) await readBundle(dir, result);
   // Leaves observed per (repo, workId, runId). A parent mirrors its leaves as
   // soon as one is seen (the aggregate is not added), but it is complete only
-  // when every leaf its row claims was observed and the leaf token sum
-  // reaches the row total; otherwise the shortfall is a partial unknown. With
-  // no leaf observed the row aggregate is the evidence and its own
-  // availability governs completeness.
+  // when every leaf its row claims was observed and the leaf token and
+  // wall-time sums reach the row totals; otherwise the shortfall is a partial
+  // unknown. With no leaf observed the row aggregate is the evidence and its
+  // own availability governs completeness.
   const leaves = new Map();
   for (const record of result.inputs) {
     const key = `${record.repo ?? ''}\u0000${record.workId}\u0000${record.runId}`;
-    const seen = leaves.get(key) ?? { count: 0, tokens: 0 };
+    const seen = leaves.get(key) ?? { count: 0, tokens: 0, wallMs: 0 };
     seen.count += 1;
     seen.tokens += record.tokens ?? 0;
+    seen.wallMs += record.wallMs ?? 0;
     leaves.set(key, seen);
   }
   for (const parent of result.parents) {
@@ -373,12 +398,23 @@ export async function readMeasurementInputs({ dirs } = {}) {
           `run ${parent.runId}: leaf token sum ${seen.tokens} is below the row total ${parent.tokens}`,
         ),
       );
+    else if (parent.wallMs !== null && seen.wallMs < parent.wallMs)
+      result.unknown.push(
+        bad(
+          parent.source,
+          'partial',
+          `run ${parent.runId}: leaf wall-time sum ${seen.wallMs} is below the row total ${parent.wallMs}`,
+        ),
+      );
   }
+  const unmirrored = result.parents.filter((parent) => !parent.mirrored);
   const contributors = [
     ...result.inputs,
-    ...result.parents
-      .filter((parent) => !parent.mirrored)
-      .map((parent) => ({ tokens: parent.tokens, wallMs: parent.wallMs, modeledUsd: null })),
+    ...unmirrored.map((parent) => ({
+      tokens: parent.tokens,
+      wallMs: parent.wallMs,
+      modeledUsd: null,
+    })),
   ];
   // Any unknown entry is measurement evidence that could not be used, so no
   // total may claim completeness while one exists.
@@ -402,7 +438,12 @@ export async function readMeasurementInputs({ dirs } = {}) {
     parents: result.parents,
     unknown: result.unknown,
     totals: {
-      attempts: result.inputs.length,
+      // Every admitted leaf is one measured attempt; an unmirrored parent row
+      // contributes its stated attempt count (the same double-count guard as
+      // costs — a mirrored row's attempts are its leaves, already counted), so
+      // an index-only bundle never reports measured costs beside zero
+      // attempts.
+      attempts: result.inputs.length + unmirrored.reduce((sum, parent) => sum + parent.attempts, 0),
       tokens: tokens.value,
       wallMs: wallMs.value,
       modeledUsd: modeledUsd.value,

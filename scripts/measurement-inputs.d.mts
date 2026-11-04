@@ -51,6 +51,11 @@ export interface UnknownMeasurementInput {
 }
 
 export interface MeasurementTotals {
+  /**
+   * Measured attempts: every admitted attempt row plus the stated attempts of
+   * unmirrored parent rows (a mirrored row's attempts are its leaves, already
+   * counted — the same double-count guard as costs).
+   */
   attempts: number;
   tokens: number | null;
   wallMs: number | null;

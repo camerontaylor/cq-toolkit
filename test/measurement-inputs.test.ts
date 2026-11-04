@@ -445,6 +445,56 @@ describe('M10b nominal evidence', () => {
     expect(result.totals.availability['/tokens']?.state).toBe('known');
   });
 
+  test('reads the embedded v2 payload in persisted operation reports', async () => {
+    const base = await workspace();
+    const embedded = JSON.stringify(report([attempt('inv-a', 100, 400)]));
+    const dir = await bundle(base, 'persisted', {
+      // The shapes runFix and review.address persist: an outer report whose
+      // reportV2 carries the assembled v2 payload — no writer emits a
+      // standalone v2 report, so this is where attempt evidence lives.
+      'fix/state/fix-run-report-9f2c.json': `{"verdict":"ok","reportV2":${embedded}}`,
+      'fix/state/review-address-report.json': `{"verdict":"ok","reportV2":${embedded}}`,
+    });
+
+    const result = await readMeasurementInputs({ dirs: [dir] });
+
+    // Both outer reports embed the same payload: one identity, read once.
+    expect(result.inputs).toHaveLength(1);
+    expect(result.inputs[0]?.invocation).toBe('inv-a');
+    expect(result.unknown).toEqual([]);
+    expect(result.totals.attempts).toBe(1);
+    expect(result.totals.tokens).toBe(100);
+    expect(result.totals.availability['/tokens']?.state).toBe('known');
+  });
+
+  test('unmirrored session rows contribute their stated attempts to the total', async () => {
+    const base = await workspace();
+    const indexOnly = await bundle(base, 'index-only', {
+      'session-index/session-index.json': JSON.stringify(index(150, 600, { attempts: 2 })),
+    });
+
+    const onlyIndex = await readMeasurementInputs({ dirs: [indexOnly] });
+
+    // The row's costs are admitted as evidence; its attempt count is evidence
+    // too — reporting measured costs alongside zero attempts contradicts it.
+    expect(onlyIndex.totals.attempts).toBe(2);
+    expect(onlyIndex.totals.tokens).toBe(150);
+    expect(onlyIndex.totals.availability['/tokens']?.state).toBe('known');
+
+    const mixed = await bundle(base, 'mixed', {
+      'fix/state/report.json': JSON.stringify(report([attempt('inv-a', 100, 400)])),
+      'session-index/other.json': JSON.stringify(index(50, 200, { attempts: 2, workId: WORK2 })),
+    });
+
+    const mixedResult = await readMeasurementInputs({ dirs: [mixed] });
+
+    // The report's leaf counts once; the unmirrored parent of another work
+    // adds its own attempts with the same double-count guard as costs.
+    expect(mixedResult.totals.attempts).toBe(3);
+    expect(mixedResult.totals.tokens).toBe(150);
+    expect(mixedResult.unknown).toEqual([]);
+  });
+
   test('parent-child references prevent double-counting costs', async () => {
     const base = await workspace();
     const dir = await bundle(base, 'parent', {
@@ -562,6 +612,24 @@ describe('M10b failure evidence', () => {
     expect(result.totals.availability['/tokens']?.state).toBe('partial');
   });
 
+  test('an embedded reportV2 that fails the strict schema is corrupt, not ingested', async () => {
+    const base = await workspace();
+    const dir = await bundle(base, 'persisted-invalid', {
+      'fix/state/fix-run-report-bad.json': JSON.stringify({
+        verdict: 'ok',
+        reportV2: { ...report([attempt('inv-a', 100, 400)]), attempts: 'nope' },
+      }),
+    });
+
+    const result = await readMeasurementInputs({ dirs: [dir] });
+
+    expect(result.inputs).toEqual([]);
+    expect(result.unknown[0]).toMatchObject({ kind: 'corrupt' });
+    expect(result.totals.tokens).toBeNull();
+    expect(result.totals.tokens).not.toBe(0);
+    expect(result.totals.availability['/tokens']?.state).toBe('unavailable');
+  });
+
   test('all-corrupt evidence is unavailable, never n-a', async () => {
     const base = await workspace();
     const corrupt = await bundle(base, 'corrupt', {
@@ -601,6 +669,28 @@ describe('M10b failure evidence', () => {
     expect(result.parents[0]?.mirrored).toBe(true);
     expect(result.totals.tokens).toBe(100);
     expect(result.totals.availability['/tokens']?.state).toBe('partial');
+  });
+
+  test('a session row with a partial field subtotal stays partial, never known', async () => {
+    const base = await workspace();
+    const dir = await bundle(base, 'row-partial-field', {
+      'session-index/session-index.json': JSON.stringify(
+        index(100, 400, {
+          attempts: 1,
+          availability: {
+            '/tokens': avail('partial', 'some attempts reported a known token count'),
+          },
+        }),
+      ),
+    });
+
+    const result = await readMeasurementInputs({ dirs: [dir] });
+
+    // buildSessionIndex emits numeric subtotals with field availability
+    // 'partial'; the row's own availability governs the aggregate, per field.
+    expect(result.totals.tokens).toBe(100);
+    expect(result.totals.availability['/tokens']?.state).toBe('partial');
+    expect(result.totals.availability['/wallMs']?.state).toBe('known');
   });
 
   test('a report whose attempts are unavailable forces partial or unavailable totals', async () => {
@@ -653,6 +743,28 @@ describe('M10b failure evidence', () => {
     expect(result.totals.availability['/tokens']?.state).not.toBe('known-zero');
   });
 
+  test('an attempt payload whose root availability is not known forces partial totals', async () => {
+    const base = await workspace();
+    const dir = await bundle(base, 'attempt-root', {
+      'fix/state/report.json': JSON.stringify(
+        report([
+          attempt('inv-a', 100, 400, {
+            availability: { '': avail('partial', 'the attempt payload is torn') },
+          }),
+        ]),
+      ),
+    });
+
+    const result = await readMeasurementInputs({ dirs: [dir] });
+
+    // The payload's own root entry ('' — valid per AvailabilityMapSchema)
+    // marks every field it covers incomplete, exactly as the report root does.
+    expect(result.totals.tokens).toBe(100);
+    expect(result.totals.availability['/tokens']?.state).toBe('partial');
+    expect(result.totals.availability['/wallMs']?.state).toBe('partial');
+    expect(result.totals.availability['/modeledUsd']?.state).toBe('unavailable');
+  });
+
   test('partially observed leaves force a partial total, never known', async () => {
     const base = await workspace();
     const dir = await bundle(base, 'partial-leaves', {
@@ -684,6 +796,39 @@ describe('M10b failure evidence', () => {
     expect(result.unknown[0]).toMatchObject({ kind: 'partial' });
     expect(result.totals.tokens).toBe(150);
     expect(result.totals.availability['/tokens']?.state).toBe('partial');
+  });
+
+  test('a leaf wall-time sum below the row total forces a partial total', async () => {
+    const base = await workspace();
+    const dir = await bundle(base, 'short-wall', {
+      'fix/state/report.json': JSON.stringify(report([attempt('inv-a', 100, 400)])),
+      'session-index/session-index.json': JSON.stringify(index(100, 900, { attempts: 1 })),
+    });
+
+    const result = await readMeasurementInputs({ dirs: [dir] });
+
+    // Leaf count and token sum match the row, but the leaf wall sum does not:
+    // the 500 ms shortfall must surface, not vanish beside a `known` total.
+    expect(result.parents[0]?.mirrored).toBe(true);
+    expect(result.unknown[0]).toMatchObject({ kind: 'partial' });
+    expect(result.unknown[0]?.reason).toContain('wall');
+    expect(result.totals.wallMs).toBe(400);
+    expect(result.totals.availability['/wallMs']?.state).toBe('partial');
+  });
+
+  test('a mirrored row adds no attempts beyond its observed leaves', async () => {
+    const base = await workspace();
+    const dir = await bundle(base, 'mirrored-attempts', {
+      'fix/state/report.json': JSON.stringify(report([attempt('inv-a', 100, 400)])),
+      'session-index/session-index.json': JSON.stringify(index(150, 600, { attempts: 2 })),
+    });
+
+    const result = await readMeasurementInputs({ dirs: [dir] });
+
+    // One of the row's two attempts was observed: the parent's stated 2 must
+    // not inflate the count beside its own partial unknown.
+    expect(result.totals.attempts).toBe(1);
+    expect(result.unknown[0]?.kind).toBe('partial');
   });
 
   test('fully observed leaves stay known', async () => {
@@ -770,6 +915,34 @@ describe('M10b failure evidence', () => {
     expect(result.unknown.filter((entry) => entry.kind === 'conflict')).toHaveLength(2);
     expect(result.totals.tokens).toBeNull();
     expect(result.totals.availability['/tokens']?.state).toBe('unavailable');
+  });
+
+  test('conflicted identities stay excluded in any manifest order', async () => {
+    const base = await workspace();
+    const copies = {
+      'fix/state/a.json': JSON.stringify(report([attempt('inv-a', 100, 400)])),
+      'fix/state/b.json': JSON.stringify(report([attempt('inv-a', 999, 999)])),
+      'fix/state/c.json': JSON.stringify(report([attempt('inv-a', 100, 400)])),
+    };
+    const forward = await bundle(base, 'forward', copies);
+    const reversed = await bundle(base, 'reversed', copies);
+    const manifestPath = join(reversed, 'manifest.json');
+    const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as { files: unknown[] };
+    manifest.files.reverse();
+    await writeFile(manifestPath, JSON.stringify(manifest));
+
+    // The tombstone set is consulted before the prior-lookup in every order,
+    // so no third copy is re-admitted and no order changes the result.
+    for (const result of [
+      await readMeasurementInputs({ dirs: [forward] }),
+      await readMeasurementInputs({ dirs: [reversed] }),
+    ]) {
+      expect(result.inputs).toEqual([]);
+      expect(result.unknown.filter((entry) => entry.kind === 'conflict')).toHaveLength(2);
+      expect(result.totals.tokens).toBeNull();
+      expect(result.totals.tokens).not.toBe(0);
+      expect(result.totals.availability['/tokens']?.state).toBe('unavailable');
+    }
   });
 
   test('a malformed session row is skipped without dropping later rows', async () => {
