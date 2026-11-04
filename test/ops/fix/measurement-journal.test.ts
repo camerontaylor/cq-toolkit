@@ -319,6 +319,13 @@ test('T23 failure boundary', async () => {
     // Round 1 seeded the full initial population before the abort; no closure
     // landed, so the numerator is an honest known zero.
     expect(summaries[0]?.payload.metric.fixesPerRun).toEqual({ numerator: 0, denominator: 1 });
+    // The cancelled envelope carries the observation surface too: the counts
+    // it printed — and any emission failure — never vanish from the result
+    // the caller reads (the lease's cancelled result is this same report).
+    const cancelled = governed.value;
+    if (cancelled.status === 'ok' || cancelled.report === undefined) throw new Error('no report');
+    expect(cancelled.report.observation?.status).toBe('durable');
+    expect(cancelled.report.reportV2?.metric).toEqual(summaries[0]?.payload.metric);
   } finally {
     await a.cleanup();
   }

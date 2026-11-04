@@ -664,8 +664,14 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
       report.usageSummary = usageLedger.snapshot();
       if (parent?.aborted) {
         // Cancellation is an exit too (ADR-0008 T23): print this run's
-        // counts before the cancelled result returns.
+        // counts before the cancelled result returns, and surface the
+        // observation state — the lease's cancelled result carries this
+        // same report object, so an emission failure must not vanish from
+        // the cancelled envelope. The writer's close stays with the normal
+        // exit: a pr flow's tracked links may still append during unwind.
         await appendMeasurementSummary();
+        const observedSurface = observationSurface();
+        if (observedSurface !== undefined) report.observation = observedSurface;
         delete report.stop;
         if (!report.reasons.includes('parent cancelled')) report.reasons.push('parent cancelled');
         if (!addressLease) return { status: 'needs-human', reason: 'parent cancelled', report };
