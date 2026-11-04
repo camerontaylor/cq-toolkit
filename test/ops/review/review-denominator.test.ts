@@ -91,10 +91,14 @@ const incompleteCoverage = (head: string): ReviewCoverageV2 => ({
   ],
 });
 
-/** Legacy (v1) coverage: one whole-component partition, complete. */
-const legacyCoverage = (head: string) => ({
+/**
+ * Legacy (v1) coverage: one whole-component partition, complete. The base and
+ * scope mirror the record's `reviewed` proof — `isComplete` demands they agree
+ * before a re-reviewed record counts as a complete review source.
+ */
+const legacyCoverage = (head: string, base: string) => ({
   head,
-  base: 'c'.repeat(40),
+  base,
   scope: 'full' as const,
   components: [{ component: 'c0', path: 'src/a.ts', sha256: hash('a'), chars: 4, bytes: 4 }],
   partitions: [
@@ -198,8 +202,9 @@ test('T21 unknown evidence', async () => {
   const f2 = await fixture();
   try {
     const head = f2.record().head;
+    const base = f2.record().reviewed!.base;
     const sources: ReviewSource[] = [
-      { kind: 'agent', status: 'terminal', coverage: legacyCoverage(head) },
+      { kind: 'agent', status: 'terminal', coverage: legacyCoverage(head, base) },
     ];
     const result = await makeReviewAddress({
       ...f2.deps,
