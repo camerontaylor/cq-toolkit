@@ -9,6 +9,7 @@ the target pinned at capture time. The runner module is injected exactly like
 repair_tick/backfill_runtime receive `c` — no import cycle, tests pass fakes.
 """
 from pathlib import Path
+import json
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -35,6 +36,81 @@ def part_id(cfg: Dict[str, Any], base: str, head: str, part: int = 1) -> str:
 def _part_number(item_id: str) -> int:
     match = re.search(r"-p(\d+)$", item_id)
     return int(match.group(1)) if match else 1
+
+
+def recover(runner, item_id: str, action: str, *, reason: str, verdict: str,
+            operator: str) -> Dict[str, Any]:
+    """Caller owns tick.lock. Retain the refused capture, never waive its scan.
+
+    Recapture replaces the whole original range, including split overflow. A
+    release only removes its lane pin: the next changed tip still owes review
+    from reviewed_tip. Neither action claims a counted review or starts a CLI.
+    """
+    if action not in ("recapture", "release") or verdict not in ("false-positive", "source-fixed", "abandon"):
+        raise ValueError("invalid push recovery action or verdict")
+    if not reason.strip() or not operator.strip():
+        raise ValueError("push recovery requires a reason and operator")
+    q = runner.load_queue()
+    item = next((i for i in runner.live_items(q) if i["id"] == item_id), None)
+    if not item or item.get("kind") != KIND or item.get("state") != "blocked" or item.get("run"):
+        raise ValueError("push recovery requires a scan-blocked, non-running push item")
+    receipt_id = item.get("receipt_id")
+    runner.review_receipt.read_receipt(runner.STATE / "receipts", receipt_id)
+    document = json.loads((runner.STATE / "receipts" / (receipt_id + ".json")).read_text())
+    if (document.get("outcome") != "blocked-secret-scan"
+            or document.get("capture") != item.get("capture")
+            or document.get("source") != item.get("subject")):
+        raise ValueError("push recovery requires the matching blocked-secret-scan receipt")
+    cfg = repo_registry.by_repo(runner.REPOS, runner.item_repo(item))
+    if cfg is None:
+        raise ValueError("push recovery repo is not configured")
+    subject = item["subject"]
+    # Retire only unstarted parts of this exact source range. Running or
+    # previously dispatched work must be harvested, not overwritten by an op.
+    family = [i for i in runner.live_items(q) if i.get("kind") == KIND
+              and runner.item_repo(i) == cfg["repo"]
+              and i["subject"]["base"] == subject["base"]
+              and i["subject"]["head"] == subject["head"]
+              and i.get("state") in ("pending", "blocked", "reviewing", "repairing")]
+    if any(i.get("run") or i.get("attempts") or i.get("cycles")
+           or i["state"] not in ("pending", "blocked") for i in family):
+        raise ValueError("push recovery refuses dispatched range parts")
+    if action == "release" and (subject.get("paths_filter") or item.get("depends_on")
+                               or q.get("push_discovery", {}).get(cfg["repo"], {}).get("reviewed_tip") != subject["base"]):
+        raise ValueError("release requires an unadvanced whole range; recapture split debt instead")
+    record = {"at": runner.iso(), "action": action, "reason": reason.strip(),
+              "verdict": verdict, "operator": operator.strip(), "receipt_id": receipt_id,
+              "items": [i["id"] for i in family], "replacement": None}
+    replacement = None
+    if action == "recapture":
+        clone = Path(cfg["clone"])
+        runner.fetch(clone=clone,
+                     refspec=f"+refs/heads/{cfg['default_branch']}:refs/remotes/origin/{cfg['default_branch']}")
+        tip = runner.git("rev-parse", cfg["default_ref"] + "^{commit}", cwd=clone)
+        if not runner.is_ancestor(subject["base"], tip, clone=clone):
+            raise ValueError("push recovery refuses rewritten history")
+        stem = part_id(cfg, subject["base"], tip)
+        new_id = stem
+        generation = 1
+        used = {i["id"] for i in runner.live_items(q)}
+        while new_id in used:
+            new_id = f"{stem}-r{generation}"
+            generation += 1
+        replacement = _enroll(runner, q, cfg, subject["base"], tip, new_id, pin=tip)
+        record["replacement"] = new_id
+    for old in family:
+        old["state"] = "skipped"
+        old["push_recovery"] = dict(record)
+        old.setdefault("notes", []).append(f"{record['at']} push recovery {action}: {reason.strip()}")
+    if replacement is not None:
+        replacement["recovered_from"] = item_id
+        # Capture immediately under the same lock. prepare saves the complete
+        # queue, including retired parts, but launch still owns the fresh scan.
+        prepare(runner, q, replacement, False)
+    runner.save_queue(q)
+    runner.event("push_recovery", item=item_id, **record)
+    runner.write_status(q)
+    return {"version": 1, "item": item_id, "state": "skipped", **record}
 
 
 def _enroll(runner, q, cfg: Dict[str, Any], base: str, head: str, item_id: str, *,
@@ -231,7 +307,7 @@ def prepare(runner, q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Optio
         followup_id = None
         if overflow:
             n = _part_number(item["id"])
-            followup_id = part_id(cfg, item["subject"]["base"], item["subject"]["head"], n + 1)
+            followup_id = re.sub(r"-p\d+$", "", item["id"]) + f"-p{n + 1}"
             _enroll(runner, q, cfg, item["subject"]["base"], item["subject"]["head"], followup_id,
                     depends_on=item["id"], paths_filter=sorted({r["path"] for r in overflow}),
                     pin=target)

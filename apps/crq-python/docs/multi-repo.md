@@ -99,6 +99,40 @@ sha}`. Each tick, for each repo with `discovery.push`:
 `reviewed_tip` advances only when a counted completed review of the pinned
 range is harvested.
 
+### Recovering a scan-blocked capture
+
+`crq.py push-recover <item> recapture|release --operator <identity>
+--verdict false-positive|source-fixed|abandon --reason <explanation>` is an
+explicit operator action under `tick.lock`. It validates the digest-bound
+`blocked-secret-scan` receipt against the item's source and capture. It never
+changes scanner policy, reserves quota or dispatches a review.
+
+- **recapture** fetches the configured repository and pins its current default
+  tip. It retains the old item, capture and receipt as `skipped` history, with
+  the operator's disposition in `push_recovery`, and captures a new item from
+  the **original base** through that tip. The natural tick must scan this fresh
+  projection before any vendor invocation. An unchanged tip is allowed, but
+  unchanged flagged content will block again. Existing ids are never reused:
+  recovery generations use `-rN`, and overflow parts retain that generation.
+- **release** retires the blocked whole range without a replacement. Its
+  unchanged tip is not automatically enrolled again. The next changed tip is
+  still reviewed from the unchanged `reviewed_tip`, so release is not review
+  credit and does not forgive the range. Split-only debt or an already advanced
+  boundary requires recapture instead, to avoid losing outstanding paths.
+
+Unstarted active split parts of the same source range are retired together;
+recapture rebuilds the whole affected scope, including overflow. Dispatched
+active parts refuse recovery and must be harvested first. Both actions retain
+`reviewed_tip`, existing receipts and captured objects. A terminal old item
+cannot be recovered twice. See [the operator runbook](../ops/push-recovery.md).
+
+This is deliberately explicit rather than automatic supersession on a later
+push: unrelated pushes must not silently replace refused evidence. Repository
+`.gitleaksignore` files are not imported into the stdin projection scan.
+Gitleaks' own inline `gitleaks:allow` behavior is unchanged, but it does not
+bypass the independent denylist. Prefer correcting a documentation example
+(for example, generating a handshake nonce inline) over weakening scan policy.
+
 ## Review unit — reuse of the merged-current machinery
 
 The review unit is the affected-current-additions projection (policy
