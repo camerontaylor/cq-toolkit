@@ -106,18 +106,28 @@ export function computeMeasurementPanels({ runs, unknown = [], evidenceAvailabil
       'computeMeasurementPanels: runs and unknown must be arrays; every run needs an attempts array',
     );
   const anyUnknown = unknown.length > 0;
+  // Unattested report-level availability degrades every cost total to
+  // partial: without the reader's availability the panel cannot claim
+  // completeness (unknown is never known), and the omission is also reported
+  // through the /evidenceAvailability entry.
+  const unattested = evidenceAvailability === undefined;
+  const UNATTESTED =
+    'report-level availability was not provided; completeness is claimed over leaves and the unknown bucket only';
   const incomplete = {
-    channels: anyUnknown,
-    wall: anyUnknown,
-    usd: anyUnknown,
-    elapsed: anyUnknown,
+    channels: anyUnknown || unattested,
+    wall: anyUnknown || unattested,
+    usd: anyUnknown || unattested,
+    elapsed: anyUnknown || unattested,
   };
   const channelTorn = new Set();
   // An availability record degrades exactly the totals its pointer names:
   // the root pointer covers all, '/attempts' the attempt evidence totals,
   // the umbrella and escaped per-channel pointers their channels, and the
-  // field pointers their fields. A pointer the panel does not consume
-  // (/servedModel and similar) is not a statement about these totals.
+  // field pointers their fields. Provenance gates only the fields the window
+  // is made of — '/provenance/startedAt' and '/provenance/endedAt' — never
+  // journalLink/reportLink/witnesses and similar provenance the window does
+  // not read. A pointer the panel does not consume at all is not a statement
+  // about these totals.
   const flagAvailability = (map) => {
     for (const [pointer, record] of Object.entries(map ?? {})) {
       if (KNOWN_STATES.has(record?.state)) continue;
@@ -129,7 +139,11 @@ export function computeMeasurementPanels({ runs, unknown = [], evidenceAvailabil
         channelTorn.add(pointer.slice(15).replaceAll('~1', '/').replaceAll('~0', '~'));
       else if (pointer === '/wallMs') incomplete.wall = true;
       else if (pointer === '/modeledUsd') incomplete.usd = true;
-      else if (pointer === '/provenance' || pointer.startsWith('/provenance/'))
+      else if (
+        pointer === '/provenance' ||
+        pointer === '/provenance/startedAt' ||
+        pointer === '/provenance/endedAt'
+      )
         incomplete.elapsed = true;
     }
   };
@@ -191,9 +205,10 @@ export function computeMeasurementPanels({ runs, unknown = [], evidenceAvailabil
       channels.set(name, [...(channels.get(name) ?? []), { value }]);
   const usageChannels = {};
   const usageAvailability = {};
+  const unattestedWhy = unattested ? UNATTESTED : undefined;
   if (channels.size === 0)
     usageAvailability['/usageChannels'] = entry(
-      aggregate([], 'value', 'usage channel', incomplete.channels),
+      aggregate([], 'value', 'usage channel', incomplete.channels, unattestedWhy),
     );
   else
     for (const [name, records] of channels) {
@@ -202,6 +217,7 @@ export function computeMeasurementPanels({ runs, unknown = [], evidenceAvailabil
         'value',
         `usage channel ${name}`,
         incomplete.channels || channelTorn.has(name),
+        unattestedWhy,
       );
       usageChannels[name] = total.value;
       usageAvailability[`/usageChannels/${name.replaceAll('~', '~0').replaceAll('/', '~1')}`] =
@@ -212,6 +228,7 @@ export function computeMeasurementPanels({ runs, unknown = [], evidenceAvailabil
     'wallMs',
     'wall',
     incomplete.wall,
+    unattestedWhy,
   );
   const windows = admitted.map(conflictedWindow);
   const badWindow = windows.some((window) => window.bad);
@@ -220,7 +237,7 @@ export function computeMeasurementPanels({ runs, unknown = [], evidenceAvailabil
     'ms',
     'run elapsed',
     incomplete.elapsed || badWindow,
-    badWindow ? 'a run window is inverted, unparseable or conflicted' : undefined,
+    badWindow ? 'a run window is inverted, unparseable or conflicted' : unattestedWhy,
   );
   // Modeled price coverage is explicit: the sum never claims completeness
   // while coverage or the price table is absent or mixed across the priced
@@ -235,7 +252,7 @@ export function computeMeasurementPanels({ runs, unknown = [], evidenceAvailabil
     'usd',
     'modeled USD',
     incomplete.usd || coverageIncomplete,
-    coverageIncomplete ? 'price coverage is absent or mixed across attempts' : undefined,
+    coverageIncomplete ? 'price coverage is absent or mixed across attempts' : unattestedWhy,
   );
   // Fix panel, per-run only, mirroring the ADR-0008 MetricRecord: the
   // numerator counts distinct verified non-todo commits, cross-checked

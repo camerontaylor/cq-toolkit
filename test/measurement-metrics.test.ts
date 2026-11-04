@@ -115,9 +115,21 @@ function makeRun(overrides: Partial<MeasurementPanelRun> = {}): MeasurementPanel
   };
 }
 
+/**
+ * Fixtures opt in to completeness claims with an explicit (all-known)
+ * availability map; a readout that omits report-level availability degrades
+ * every cost total to partial (unknown is never known).
+ */
+function attested(input: Parameters<typeof computeMeasurementPanels>[0]) {
+  return computeMeasurementPanels({
+    ...input,
+    evidenceAvailability: input.evidenceAvailability ?? {},
+  });
+}
+
 describe('M10c nominal evidence', () => {
   test('verified SHAs separate defects', () => {
-    const panels = computeMeasurementPanels({
+    const panels = attested({
       runs: [
         makeRun({
           closures: [closure(SHA1), closure(SHA1), closure(SHA2, true), closure(SHA3)],
@@ -134,7 +146,7 @@ describe('M10c nominal evidence', () => {
     // One commit closing two distinct findings (different task links) is
     // multiplicity, never a conflict: it still counts once, and a matching
     // producer-recorded scalar cross-checks through.
-    const multiplicity = computeMeasurementPanels({
+    const multiplicity = attested({
       runs: [
         makeRun({
           closures: [{ ...closure(SHA1), taskIds: ['task-2'] }, closure(SHA1), closure(SHA3)],
@@ -149,7 +161,7 @@ describe('M10c nominal evidence', () => {
 
   test('dedup invocation usage channels', () => {
     const once = leaf('inv-1', { usageChannels: { input: 100, output: 50 }, wallMs: 60_000 });
-    const panels = computeMeasurementPanels({
+    const panels = attested({
       runs: [makeRun({ attempts: [once, { ...once }] })],
     });
     expect(panels.cost.usageChannels).toEqual({ input: 100, output: 50 });
@@ -158,7 +170,7 @@ describe('M10c nominal evidence', () => {
   });
 
   test('run elapsed differs from summed attempt wall', () => {
-    const panels = computeMeasurementPanels({
+    const panels = attested({
       runs: [
         makeRun({
           startedAt: '2026-11-03T04:00:00.000Z',
@@ -172,19 +184,19 @@ describe('M10c nominal evidence', () => {
     expect(panels.cost.runElapsedMs).toBe(120_000);
     expect(panels.cost.attemptWallMs).toBe(90_000);
     // Fractional instants compare as instants, never as strings.
-    const fractional = computeMeasurementPanels({
+    const fractional = attested({
       runs: [makeRun({ startedAt: '2026-11-03T04:00:00.000Z', endedAt: '2026-11-03T04:02:00.5Z' })],
     });
     expect(fractional.cost.runElapsedMs).toBe(120_500);
     // An identical duplicate run entry is admitted once: the window is not
     // doubled and there is one fix row.
     const once = makeRun({ attempts: [leaf('inv-3')] });
-    const duplicated = computeMeasurementPanels({ runs: [once, { ...once }] });
+    const duplicated = attested({ runs: [once, { ...once }] });
     expect(duplicated.cost.runElapsedMs).toBe(120_000);
     expect(duplicated.fix.runs).toHaveLength(1);
     // A run split across entries only in its attempts is not a disagreement:
     // the leaves are admitted on their own identity and both count.
-    const split = computeMeasurementPanels({
+    const split = attested({
       runs: [
         makeRun({ attempts: [leaf('inv-4', { wallMs: 30_000 })] }),
         makeRun({ attempts: [leaf('inv-5', { wallMs: 15_000 })] }),
@@ -196,7 +208,7 @@ describe('M10c nominal evidence', () => {
   });
 
   test('modeled price coverage explicit', () => {
-    const panels = computeMeasurementPanels({
+    const panels = attested({
       runs: [
         makeRun({
           attempts: [
@@ -221,7 +233,7 @@ describe('M10c nominal evidence', () => {
   });
 
   test('untrusted child values unknown rather than zero', () => {
-    const panels = computeMeasurementPanels({
+    const panels = attested({
       runs: [
         makeRun({ attempts: [leaf('inv-1', { usageChannels: { input: 100, cached: null } })] }),
       ],
@@ -235,7 +247,7 @@ describe('M10c nominal evidence', () => {
     // A torn per-channel pointer degrades exactly its own channel: the sibling
     // channel and the attempt wall stay known, and a pointer the panel does
     // not consume (/servedModel) degrades nothing at all.
-    const scoped = computeMeasurementPanels({
+    const scoped = attested({
       runs: [
         makeRun({
           attempts: [
@@ -253,7 +265,7 @@ describe('M10c nominal evidence', () => {
     expect(scoped.cost.availability['/attemptWallMs']?.state).toBe('known');
     // A channel name containing the pointer metacharacters is escaped in its
     // availability pointer and torn exactly on its own channel.
-    const escaped = computeMeasurementPanels({
+    const escaped = attested({
       runs: [
         makeRun({
           attempts: [
@@ -268,7 +280,7 @@ describe('M10c nominal evidence', () => {
     expect(escaped.cost.usageChannels['cache/edge~2']).toBe(25);
     expect(escaped.cost.availability['/usageChannels/cache~1edge~02']?.state).toBe('partial');
     expect(escaped.cost.availability['/usageChannels/input']?.state).toBe('known');
-    const unrelated = computeMeasurementPanels({
+    const unrelated = attested({
       runs: [
         makeRun({
           attempts: [
@@ -284,7 +296,7 @@ describe('M10c nominal evidence', () => {
   });
 
   test('per-run denominator only, never mix placeholder units with failures', () => {
-    const panels = computeMeasurementPanels({
+    const panels = attested({
       runs: [
         makeRun({ baselineFailures: [baseline('unit-1', 3), baseline('unit-2', 4)] }),
         makeRun({
@@ -300,7 +312,7 @@ describe('M10c nominal evidence', () => {
     expect(panels.fix.runs[1]?.fixesPerRun.denominator).toBeNull();
     // Identical duplicate baseline rows are admitted once: the denominator
     // is not doubled.
-    const dupUnits = computeMeasurementPanels({
+    const dupUnits = attested({
       runs: [makeRun({ baselineFailures: [baseline('unit-1', 3), baseline('unit-1', 3)] })],
     });
     expect(dupUnits.fix.runs[0]?.fixesPerRun.denominator).toBe(3);
@@ -309,7 +321,7 @@ describe('M10c nominal evidence', () => {
 
 describe('M10c missing evidence', () => {
   test('verified SHAs separate defects', () => {
-    const panels = computeMeasurementPanels({
+    const panels = attested({
       runs: [
         {
           repo: REPO,
@@ -326,13 +338,13 @@ describe('M10c missing evidence', () => {
   });
 
   test('dedup invocation usage channels', () => {
-    const panels = computeMeasurementPanels({ runs: [makeRun()] });
+    const panels = attested({ runs: [makeRun()] });
     expect(panels.cost.usageChannels).toEqual({});
     expect(panels.cost.availability['/usageChannels']?.state).toBe('n-a');
   });
 
   test('run elapsed differs from summed attempt wall', () => {
-    const panels = computeMeasurementPanels({
+    const panels = attested({
       runs: [makeRun({ endedAt: null, attempts: [leaf('inv-1', { wallMs: 60_000 })] })],
     });
     // The window never completed: elapsed is unknown and never borrows the
@@ -343,7 +355,7 @@ describe('M10c missing evidence', () => {
   });
 
   test('modeled price coverage explicit', () => {
-    const panels = computeMeasurementPanels({
+    const panels = attested({
       runs: [makeRun({ attempts: [leaf('inv-1'), leaf('inv-2')] })],
     });
     // No modeled price was collected: null with an explicit coverage
@@ -354,7 +366,7 @@ describe('M10c missing evidence', () => {
   });
 
   test('untrusted child values unknown rather than zero', () => {
-    const panels = computeMeasurementPanels({
+    const panels = attested({
       runs: [
         makeRun({
           attempts: [leaf('inv-1', { wallMs: 1_000 }), leaf('inv-2', { wallMs: null })],
@@ -368,7 +380,7 @@ describe('M10c missing evidence', () => {
   });
 
   test('per-run denominator only, never mix placeholder units with failures', () => {
-    const panels = computeMeasurementPanels({
+    const panels = attested({
       runs: [
         {
           repo: REPO,
@@ -386,7 +398,7 @@ describe('M10c missing evidence', () => {
 
 describe('M10c failure evidence', () => {
   test('verified SHAs separate defects', () => {
-    const panels = computeMeasurementPanels({
+    const panels = attested({
       runs: [makeRun({ closures: [closure(SHA1, true), closure(SHA2, true)] })],
     });
     // Every closure is a todo commit: a measured zero, never an unknown and
@@ -395,19 +407,19 @@ describe('M10c failure evidence', () => {
     expect(panels.fix.runs[0]?.verifiedCommits).toEqual([]);
     // The producer declared the numerator unknown (unreadable trailer
     // commits) while closure rows exist: it stays unknown, never a count.
-    const declaredUnknown = computeMeasurementPanels({
+    const declaredUnknown = attested({
       runs: [makeRun({ closures: [closure(SHA3)], recordedNumerator: null })],
     });
     expect(declaredUnknown.fix.runs[0]?.fixesPerRun.numerator).toBeNull();
     expect(declaredUnknown.fix.runs[0]?.verifiedCommits).toEqual([SHA3]);
     // A recorded scalar disagreeing with the distinct-SHA count is withheld.
-    const disagreement = computeMeasurementPanels({
+    const disagreement = attested({
       runs: [makeRun({ closures: [closure(SHA3)], recordedNumerator: 5 })],
     });
     expect(disagreement.fix.runs[0]?.fixesPerRun.numerator).toBeNull();
     // The same SHA with contradictory todo trailers is a conflict: the count
     // is uncertain and therefore unknown.
-    const todoConflict = computeMeasurementPanels({
+    const todoConflict = attested({
       runs: [makeRun({ closures: [closure(SHA1), closure(SHA1, true)] })],
     });
     expect(todoConflict.fix.runs[0]?.fixesPerRun.numerator).toBeNull();
@@ -415,7 +427,7 @@ describe('M10c failure evidence', () => {
   });
 
   test('dedup invocation usage channels', () => {
-    const panels = computeMeasurementPanels({
+    const panels = attested({
       runs: [
         makeRun({
           attempts: [
@@ -433,7 +445,7 @@ describe('M10c failure evidence', () => {
     expect(panels.cost.availability['/attemptWallMs']?.state).toBe('unavailable');
     // The conflict is order-independent, and a third copy cannot resurrect
     // the identity: whichever order the evidence arrives in, nothing counts.
-    const reversed = computeMeasurementPanels({
+    const reversed = attested({
       runs: [
         makeRun({
           attempts: [
@@ -445,7 +457,7 @@ describe('M10c failure evidence', () => {
     });
     expect(reversed.cost.usageChannels).toEqual({});
     expect(reversed.cost.attemptWallMs).toBeNull();
-    const triple = computeMeasurementPanels({
+    const triple = attested({
       runs: [
         makeRun({
           attempts: [
@@ -480,7 +492,7 @@ describe('M10c failure evidence', () => {
     ).toThrow(TypeError);
     // An attempt row with a missing wall field is unknown, never a known NaN.
     const { wallMs: _wallMs, ...rowless } = leaf('inv-2');
-    const missing = computeMeasurementPanels({
+    const missing = attested({
       runs: [makeRun({ attempts: [rowless as MeasurementInputRecord] })],
     });
     expect(missing.cost.attemptWallMs).toBeNull();
@@ -488,7 +500,7 @@ describe('M10c failure evidence', () => {
   });
 
   test('run elapsed differs from summed attempt wall', () => {
-    const panels = computeMeasurementPanels({
+    const panels = attested({
       runs: [
         makeRun({
           startedAt: '2026-11-03T04:02:00.000Z',
@@ -501,12 +513,12 @@ describe('M10c failure evidence', () => {
     // silently wrong window (2h reads as 13h under UTC+11): ADR-0008 instants
     // are UTC ISO-8601, so anything but the Z-form on both stamps is unknown,
     // whatever the host timezone is.
-    const mixedStamps = computeMeasurementPanels({
+    const mixedStamps = attested({
       runs: [makeRun({ startedAt: '2026-11-03T04:00:00.000Z', endedAt: '2026-11-03T06:00:00' })],
     });
     expect(mixedStamps.cost.runElapsedMs).toBeNull();
     expect(mixedStamps.cost.availability['/runElapsedMs']?.state).toBe('unavailable');
-    const offsetlessPair = computeMeasurementPanels({
+    const offsetlessPair = attested({
       runs: [makeRun({ startedAt: '2026-11-03T04:00:00', endedAt: '2026-11-03T06:00:00' })],
     });
     expect(offsetlessPair.cost.runElapsedMs).toBeNull();
@@ -519,7 +531,7 @@ describe('M10c failure evidence', () => {
     // Two disagreeing run entries conflict: the window is unknown and the fix
     // figures are an explicit unknown row, never silently picked from one
     // copy and never silently dropped.
-    const conflictedRun = computeMeasurementPanels({
+    const conflictedRun = attested({
       runs: [
         makeRun({ startedAt: '2026-11-03T04:00:00.000Z' }),
         makeRun({ startedAt: '2026-11-03T05:00:00.000Z' }),
@@ -532,14 +544,14 @@ describe('M10c failure evidence', () => {
     // Fractional instants compare as instants even where the string order
     // disagrees: .12Z to .1Z is inverted (120ms after 100ms is backwards),
     // whatever lex order says.
-    const stringTrap = computeMeasurementPanels({
+    const stringTrap = attested({
       runs: [makeRun({ startedAt: '2026-11-03T04:00:00.12Z', endedAt: '2026-11-03T04:00:00.1Z' })],
     });
     expect(stringTrap.cost.runElapsedMs).toBeNull();
     expect(stringTrap.cost.availability['/runElapsedMs']?.state).toBe('unavailable');
     // A normalised calendar part is an invalid stamp, never the day it rolls
     // into: Feb 30 is not Mar 2.
-    const feb30 = computeMeasurementPanels({
+    const feb30 = attested({
       runs: [
         makeRun({ startedAt: '2026-02-30T00:00:00.000Z', endedAt: '2026-11-03T04:00:00.000Z' }),
       ],
@@ -549,7 +561,7 @@ describe('M10c failure evidence', () => {
   });
 
   test('modeled price coverage explicit', () => {
-    const panels = computeMeasurementPanels({
+    const panels = attested({
       runs: [
         makeRun({
           attempts: [
@@ -571,7 +583,7 @@ describe('M10c failure evidence', () => {
     expect(panels.cost.availability['/modeledUsd']?.reason).toContain('price coverage');
     // Uniform coverage over two different price tables is still not a known
     // total: USD from mixed (or unstated) tables stays a partial subtotal.
-    const mixedTables = computeMeasurementPanels({
+    const mixedTables = attested({
       runs: [
         makeRun({
           attempts: [
@@ -593,7 +605,7 @@ describe('M10c failure evidence', () => {
       kind: 'untrusted',
       reason: 'checksum mismatch',
     };
-    const panels = computeMeasurementPanels({
+    const panels = attested({
       runs: [
         makeRun({ attempts: [leaf('inv-1', { usageChannels: { input: 100 }, wallMs: 1_000 })] }),
       ],
@@ -609,7 +621,7 @@ describe('M10c failure evidence', () => {
     expect(panels.cost.availability['/runElapsedMs']?.state).toBe('partial');
     // Report-level availability reaches the panel through the reader's own
     // totals availability: a torn report root never reads known here.
-    const tornReport = computeMeasurementPanels({
+    const tornReport = attested({
       runs: [
         makeRun({ attempts: [leaf('inv-2', { usageChannels: { input: 100 }, wallMs: 1_000 })] }),
       ],
@@ -622,37 +634,64 @@ describe('M10c failure evidence', () => {
     expect(tornReport.cost.availability['/attemptWallMs']?.state).toBe('partial');
     expect(tornReport.cost.usageChannels.input).toBe(100);
     expect(tornReport.cost.availability['/usageChannels/input']?.state).toBe('partial');
-    const tornAttempts = computeMeasurementPanels({
+    const tornAttempts = attested({
       runs: [makeRun({ attempts: [leaf('inv-3')] })],
       evidenceAvailability: { '/attempts': avail('partial', 'torn attempts list') },
     });
     expect(tornAttempts.cost.availability['/attemptWallMs']?.state).toBe('partial');
     // Provenance availability scopes to the window it vouches for: elapsed
     // degrades, the attempt totals do not.
-    const tornProvenance = computeMeasurementPanels({
+    const tornProvenance = attested({
       runs: [makeRun({ attempts: [leaf('inv-4', { wallMs: 1_000 })] })],
       evidenceAvailability: { '/provenance': avail('not-collected', 'header torn') },
     });
     expect(tornProvenance.cost.availability['/runElapsedMs']?.state).toBe('partial');
     expect(tornProvenance.cost.availability['/attemptWallMs']?.state).toBe('known');
     expect(tornProvenance.cost.availability['/evidenceAvailability']).toBeUndefined();
-    // A malformed (non-number) row value is unknown, never a known NaN.
-    const malformed = computeMeasurementPanels({
-      runs: [makeRun({ attempts: [{ ...leaf('inv-5'), wallMs: '1000' as unknown as number }] })],
+    // Provenance gates only the fields the window is made of: an unavailable
+    // journal link (or report link, version, witnesses) says nothing about
+    // the stamps, and a known window stays known beside it.
+    const tornJournalLink = attested({
+      runs: [makeRun({ attempts: [leaf('inv-5')] })],
+      evidenceAvailability: { '/provenance/journalLink': avail('unavailable', 'link torn') },
+    });
+    expect(tornJournalLink.cost.availability['/runElapsedMs']?.state).toBe('known');
+    expect(tornJournalLink.cost.runElapsedMs).toBe(120_000);
+    const tornStamp = attested({
+      runs: [makeRun({ attempts: [leaf('inv-6')] })],
+      evidenceAvailability: { '/provenance/endedAt': avail('not-collected', 'never observed') },
+    });
+    expect(tornStamp.cost.availability['/runElapsedMs']?.state).toBe('partial');
+    // A malformed row value — a string or NaN — is unknown, never a known
+    // total; Number.isFinite is load-bearing (NaN is a number).
+    const malformed = attested({
+      runs: [makeRun({ attempts: [{ ...leaf('inv-7'), wallMs: '1000' as unknown as number }] })],
     });
     expect(malformed.cost.attemptWallMs).toBeNull();
     expect(malformed.cost.availability['/attemptWallMs']?.state).toBe('not-collected');
-    // Omitting the reader's availability is reported as such: the entry says
-    // the completeness claim covers leaves and the unknown bucket only.
-    const omitted = computeMeasurementPanels({ runs: [makeRun({ attempts: [leaf('inv-6')] })] });
+    const nanWall = attested({
+      runs: [makeRun({ attempts: [{ ...leaf('inv-8'), wallMs: Number.NaN }] })],
+    });
+    expect(nanWall.cost.attemptWallMs).toBeNull();
+    expect(nanWall.cost.availability['/attemptWallMs']?.state).toBe('not-collected');
+    // Omitting the reader's availability degrades every cost total to
+    // partial with the explicit reason, and the omission is reported through
+    // the /evidenceAvailability entry as well.
+    const omitted = computeMeasurementPanels({
+      runs: [
+        makeRun({ attempts: [leaf('inv-9', { usageChannels: { input: 100 }, wallMs: 1_000 })] }),
+      ],
+    });
+    expect(omitted.cost.attemptWallMs).toBe(1_000);
+    expect(omitted.cost.availability['/attemptWallMs']?.state).toBe('partial');
+    expect(omitted.cost.availability['/attemptWallMs']?.reason).toContain('was not provided');
+    expect(omitted.cost.usageChannels.input).toBe(100);
+    expect(omitted.cost.availability['/usageChannels/input']?.state).toBe('partial');
     expect(omitted.cost.availability['/evidenceAvailability']?.state).toBe('not-collected');
-    expect(omitted.cost.availability['/evidenceAvailability']?.reason).toContain(
-      'was not provided',
-    );
   });
 
   test('per-run denominator only, never mix placeholder units with failures', () => {
-    const panels = computeMeasurementPanels({
+    const panels = attested({
       runs: [
         makeRun({
           baselineFailures: [
@@ -668,13 +707,13 @@ describe('M10c failure evidence', () => {
     expect(panels.fix.runs[0]?.fixesPerRun.denominator).toBeNull();
     // Disagreeing duplicate rows for one unit conflict: the denominator is
     // unknown, never their sum and never one pick.
-    const conflictUnits = computeMeasurementPanels({
+    const conflictUnits = attested({
       runs: [makeRun({ baselineFailures: [baseline('unit-1', 3), baseline('unit-1', 4)] })],
     });
     expect(conflictUnits.fix.runs[0]?.fixesPerRun.denominator).toBeNull();
     // An uncompleted probe's count is not failure evidence: completed is
     // required, whatever the count says.
-    const uncompleted = computeMeasurementPanels({
+    const uncompleted = attested({
       runs: [
         makeRun({
           baselineFailures: [

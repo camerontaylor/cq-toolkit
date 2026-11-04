@@ -68,13 +68,14 @@ export declare function computeMeasurementPanels(input: {
   /**
    * Reader totals availability (or a report availability map): a non-known
    * state at '', '/attempts', '/usageChannels', an escaped
-   * '/usageChannels/<name>', '/wallMs', '/modeledUsd' or '/provenance' (the
-   * window's voucher, scoped to run elapsed) degrades the matching cost
-   * totals, so evidence the reader calls partial is never known here. A
-   * readout over the reader's output MUST pass `totals.availability`; when
-   * omitted, the panel reports a '/evidenceAvailability' not-collected entry
-   * stating that its completeness claim covers leaves and the unknown bucket
-   * only.
+   * '/usageChannels/<name>', '/wallMs', '/modeledUsd', or '/provenance',
+   * '/provenance/startedAt', '/provenance/endedAt' (the window's stamps,
+   * scoped to run elapsed — never journalLink/reportLink/witnesses) degrades
+   * the matching cost totals, so evidence the reader calls partial is never
+   * known here. A readout over the reader's output MUST pass
+   * `totals.availability`; omitting it degrades every cost total to partial
+   * with an explicit reason, reported alongside a '/evidenceAvailability'
+   * not-collected entry.
    */
   evidenceAvailability?: Record<string, AvailabilityRecord>;
 }): MeasurementPanels;
