@@ -18,6 +18,14 @@ export interface MeasurementPanelRun {
   closures?: ClosureRecord[];
   /** Baseline evidence for every planned unit; omit when none was collected. */
   baselineFailures?: BaselineFailureRecord[];
+  /**
+   * Producer-recorded numerator (the report metric scalar): null means the
+   * producer declared it unknown while closure evidence exists (unreadable
+   * trailer commits) and the count is withheld, never recomputed; a number is
+   * cross-checked against the distinct verified SHA count and a disagreement
+   * withholds it, exactly as reportFold does.
+   */
+  recordedNumerator?: number | null;
   /** Report provenance window; a null endedAt leaves run elapsed unknown. */
   startedAt: string | null;
   endedAt: string | null;
@@ -55,4 +63,11 @@ export declare function computeMeasurementPanels(input: {
   runs: MeasurementPanelRun[];
   /** Reader unknown bucket; any entry degrades cost completeness. */
   unknown?: UnknownMeasurementInput[];
+  /**
+   * Reader totals availability (or a report availability map): a non-known
+   * state at '', '/attempts', '/usageChannels', an escaped
+   * '/usageChannels/<name>', '/wallMs' or '/modeledUsd' degrades the matching
+   * cost totals, so evidence the reader calls partial is never known here.
+   */
+  evidenceAvailability?: Record<string, AvailabilityRecord>;
 }): MeasurementPanels;

@@ -20,7 +20,12 @@
 // no providers, no network.
 import { describe, expect, test } from 'vitest';
 import { computeMeasurementPanels } from '../scripts/measurement-metrics.mjs';
-import type { BaselineFailureRecord, ClosureRecord } from '../src/kernel/types.js';
+import type {
+  AvailabilityRecord,
+  AvailabilityState,
+  BaselineFailureRecord,
+  ClosureRecord,
+} from '../src/kernel/types.js';
 import type {
   MeasurementInputRecord,
   UnknownMeasurementInput,
@@ -71,7 +76,11 @@ function leaf(
   };
 }
 
-const avail = (state: string, reason: string) => ({ state, reason, source: null });
+const avail = (state: AvailabilityState, reason: string): AvailabilityRecord => ({
+  state,
+  reason,
+  source: null,
+});
 
 function closure(commitSha: string, todo = false): ClosureRecord {
   return {
@@ -122,6 +131,20 @@ describe('M10c nominal evidence', () => {
     expect(row?.fixesPerRun.numerator).toBe(2);
     expect(row?.verifiedCommits).toEqual([SHA1, SHA3]);
     expect(row?.fixesPerRun.denominator).toBe(7);
+    // One commit closing two distinct findings (different task links) is
+    // multiplicity, never a conflict: it still counts once, and a matching
+    // producer-recorded scalar cross-checks through.
+    const multiplicity = computeMeasurementPanels({
+      runs: [
+        makeRun({
+          closures: [{ ...closure(SHA1), taskIds: ['task-2'] }, closure(SHA1), closure(SHA3)],
+          recordedNumerator: 2,
+          baselineFailures: [baseline('unit-1', 3), baseline('unit-2', 4)],
+        }),
+      ],
+    });
+    expect(multiplicity.fix.runs[0]?.fixesPerRun.numerator).toBe(2);
+    expect(multiplicity.fix.runs[0]?.verifiedCommits).toEqual([SHA1, SHA3]);
   });
 
   test('dedup invocation usage channels', () => {
@@ -148,6 +171,17 @@ describe('M10c nominal evidence', () => {
     // are reported, neither substituted for the other.
     expect(panels.cost.runElapsedMs).toBe(120_000);
     expect(panels.cost.attemptWallMs).toBe(90_000);
+    // Fractional instants compare as instants, never as strings.
+    const fractional = computeMeasurementPanels({
+      runs: [makeRun({ startedAt: '2026-11-03T04:00:00.000Z', endedAt: '2026-11-03T04:02:00.5Z' })],
+    });
+    expect(fractional.cost.runElapsedMs).toBe(120_500);
+    // An identical duplicate run entry is admitted once: the window is not
+    // doubled and there is one fix row.
+    const once = makeRun({ attempts: [leaf('inv-3')] });
+    const duplicated = computeMeasurementPanels({ runs: [once, { ...once }] });
+    expect(duplicated.cost.runElapsedMs).toBe(120_000);
+    expect(duplicated.fix.runs).toHaveLength(1);
   });
 
   test('modeled price coverage explicit', () => {
@@ -206,6 +240,23 @@ describe('M10c nominal evidence', () => {
     expect(scoped.cost.availability['/usageChannels/input']?.state).toBe('partial');
     expect(scoped.cost.availability['/usageChannels/output']?.state).toBe('known');
     expect(scoped.cost.availability['/attemptWallMs']?.state).toBe('known');
+    // A channel name containing the pointer metacharacters is escaped in its
+    // availability pointer and torn exactly on its own channel.
+    const escaped = computeMeasurementPanels({
+      runs: [
+        makeRun({
+          attempts: [
+            leaf('inv-4', {
+              usageChannels: { 'cache/edge~2': 25, input: 100 },
+              availability: { '/usageChannels/cache~1edge~02': avail('partial', 'settled late') },
+            }),
+          ],
+        }),
+      ],
+    });
+    expect(escaped.cost.usageChannels['cache/edge~2']).toBe(25);
+    expect(escaped.cost.availability['/usageChannels/cache~1edge~02']?.state).toBe('partial');
+    expect(escaped.cost.availability['/usageChannels/input']?.state).toBe('known');
     const unrelated = computeMeasurementPanels({
       runs: [
         makeRun({
@@ -236,6 +287,12 @@ describe('M10c nominal evidence', () => {
     expect(panels.fix.runs[0]?.fixesPerRun.denominator).toBe(7);
     // A placeholder unit never mixes into run-2's denominator: unknown, not 2.
     expect(panels.fix.runs[1]?.fixesPerRun.denominator).toBeNull();
+    // Identical duplicate baseline rows are admitted once: the denominator
+    // is not doubled.
+    const dupUnits = computeMeasurementPanels({
+      runs: [makeRun({ baselineFailures: [baseline('unit-1', 3), baseline('unit-1', 3)] })],
+    });
+    expect(dupUnits.fix.runs[0]?.fixesPerRun.denominator).toBe(3);
   });
 });
 
@@ -325,6 +382,25 @@ describe('M10c failure evidence', () => {
     // never a counted defect.
     expect(panels.fix.runs[0]?.fixesPerRun.numerator).toBe(0);
     expect(panels.fix.runs[0]?.verifiedCommits).toEqual([]);
+    // The producer declared the numerator unknown (unreadable trailer
+    // commits) while closure rows exist: it stays unknown, never a count.
+    const declaredUnknown = computeMeasurementPanels({
+      runs: [makeRun({ closures: [closure(SHA3)], recordedNumerator: null })],
+    });
+    expect(declaredUnknown.fix.runs[0]?.fixesPerRun.numerator).toBeNull();
+    expect(declaredUnknown.fix.runs[0]?.verifiedCommits).toEqual([SHA3]);
+    // A recorded scalar disagreeing with the distinct-SHA count is withheld.
+    const disagreement = computeMeasurementPanels({
+      runs: [makeRun({ closures: [closure(SHA3)], recordedNumerator: 5 })],
+    });
+    expect(disagreement.fix.runs[0]?.fixesPerRun.numerator).toBeNull();
+    // The same SHA with contradictory todo trailers is a conflict: the count
+    // is uncertain and therefore unknown.
+    const todoConflict = computeMeasurementPanels({
+      runs: [makeRun({ closures: [closure(SHA1), closure(SHA1, true)] })],
+    });
+    expect(todoConflict.fix.runs[0]?.fixesPerRun.numerator).toBeNull();
+    expect(todoConflict.fix.runs[0]?.verifiedCommits).toEqual([]);
   });
 
   test('dedup invocation usage channels', () => {
@@ -344,6 +420,60 @@ describe('M10c failure evidence', () => {
     expect(panels.cost.availability['/usageChannels']?.state).toBe('unavailable');
     expect(panels.cost.attemptWallMs).toBeNull();
     expect(panels.cost.availability['/attemptWallMs']?.state).toBe('unavailable');
+    // The conflict is order-independent, and a third copy cannot resurrect
+    // the identity: whichever order the evidence arrives in, nothing counts.
+    const reversed = computeMeasurementPanels({
+      runs: [
+        makeRun({
+          attempts: [
+            leaf('inv-1', { usageChannels: { input: 300 }, wallMs: 2_000 }),
+            leaf('inv-1', { usageChannels: { input: 100 }, wallMs: 1_000 }),
+          ],
+        }),
+      ],
+    });
+    expect(reversed.cost.usageChannels).toEqual({});
+    expect(reversed.cost.attemptWallMs).toBeNull();
+    const triple = computeMeasurementPanels({
+      runs: [
+        makeRun({
+          attempts: [
+            leaf('inv-1', { usageChannels: { input: 300 } }),
+            leaf('inv-1', { usageChannels: { input: 100 } }),
+            leaf('inv-1', { usageChannels: { input: 100 } }),
+          ],
+        }),
+      ],
+    });
+    expect(triple.cost.usageChannels).toEqual({});
+    // Shape guards reject malformed input rather than reading it.
+    expect(() => computeMeasurementPanels({ runs: [makeRun(), makeRun()] })).not.toThrow();
+    expect(() =>
+      computeMeasurementPanels({
+        // @ts-expect-error runtime shape guard, not a type-level one
+        runs: null,
+      }),
+    ).toThrow(TypeError);
+    expect(() =>
+      computeMeasurementPanels({
+        // @ts-expect-error runtime shape guard, not a type-level one
+        runs: [{ repo: REPO, runId: RUN }],
+      }),
+    ).toThrow(TypeError);
+    expect(() =>
+      computeMeasurementPanels({
+        runs: [makeRun()],
+        // @ts-expect-error runtime shape guard, not a type-level one
+        unknown: 'nope',
+      }),
+    ).toThrow(TypeError);
+    // An attempt row with a missing wall field is unknown, never a known NaN.
+    const { wallMs: _wallMs, ...rowless } = leaf('inv-2');
+    const missing = computeMeasurementPanels({
+      runs: [makeRun({ attempts: [rowless as MeasurementInputRecord] })],
+    });
+    expect(missing.cost.attemptWallMs).toBeNull();
+    expect(missing.cost.availability['/attemptWallMs']?.state).toBe('not-collected');
   });
 
   test('run elapsed differs from summed attempt wall', () => {
@@ -375,6 +505,17 @@ describe('M10c failure evidence', () => {
     expect(panels.cost.runElapsedMs).toBeNull();
     expect(panels.cost.availability['/runElapsedMs']?.state).toBe('unavailable');
     expect(panels.cost.attemptWallMs).toBe(60_000);
+    // Two disagreeing run entries conflict: the window is unknown and the fix
+    // figures are withheld, never silently picked from one copy.
+    const conflictedRun = computeMeasurementPanels({
+      runs: [
+        makeRun({ startedAt: '2026-11-03T04:00:00.000Z' }),
+        makeRun({ startedAt: '2026-11-03T05:00:00.000Z' }),
+      ],
+    });
+    expect(conflictedRun.cost.runElapsedMs).toBeNull();
+    expect(conflictedRun.cost.availability['/runElapsedMs']?.state).toBe('unavailable');
+    expect(conflictedRun.fix.runs).toHaveLength(0);
   });
 
   test('modeled price coverage explicit', () => {
@@ -436,6 +577,26 @@ describe('M10c failure evidence', () => {
     expect(panels.cost.availability['/attemptWallMs']?.state).toBe('partial');
     expect(panels.cost.runElapsedMs).toBe(120_000);
     expect(panels.cost.availability['/runElapsedMs']?.state).toBe('partial');
+    // Report-level availability reaches the panel through the reader's own
+    // totals availability: a torn report root never reads known here.
+    const tornReport = computeMeasurementPanels({
+      runs: [
+        makeRun({ attempts: [leaf('inv-2', { usageChannels: { input: 100 }, wallMs: 1_000 })] }),
+      ],
+      evidenceAvailability: {
+        '': avail('partial', 'report stream torn'),
+        '/attempts': avail('known', 'measured attempt-finished events'),
+      },
+    });
+    expect(tornReport.cost.attemptWallMs).toBe(1_000);
+    expect(tornReport.cost.availability['/attemptWallMs']?.state).toBe('partial');
+    expect(tornReport.cost.usageChannels.input).toBe(100);
+    expect(tornReport.cost.availability['/usageChannels/input']?.state).toBe('partial');
+    const tornAttempts = computeMeasurementPanels({
+      runs: [makeRun({ attempts: [leaf('inv-3')] })],
+      evidenceAvailability: { '/attempts': avail('partial', 'torn attempts list') },
+    });
+    expect(tornAttempts.cost.availability['/attemptWallMs']?.state).toBe('partial');
   });
 
   test('per-run denominator only, never mix placeholder units with failures', () => {
@@ -453,5 +614,29 @@ describe('M10c failure evidence', () => {
     // Known counts sit beside placeholders: the denominator is unknown with
     // the known subtotal withheld, never 3 and never 5.
     expect(panels.fix.runs[0]?.fixesPerRun.denominator).toBeNull();
+    // Disagreeing duplicate rows for one unit conflict: the denominator is
+    // unknown, never their sum and never one pick.
+    const conflictUnits = computeMeasurementPanels({
+      runs: [makeRun({ baselineFailures: [baseline('unit-1', 3), baseline('unit-1', 4)] })],
+    });
+    expect(conflictUnits.fix.runs[0]?.fixesPerRun.denominator).toBeNull();
+    // An uncompleted probe's count is not failure evidence: completed is
+    // required, whatever the count says.
+    const uncompleted = computeMeasurementPanels({
+      runs: [
+        makeRun({
+          baselineFailures: [
+            {
+              unitId: 'unit-1',
+              probeHead: null,
+              completed: false,
+              count: 3,
+              unknownReason: 'baseline probe did not complete for this unit',
+            },
+          ],
+        }),
+      ],
+    });
+    expect(uncompleted.fix.runs[0]?.fixesPerRun.denominator).toBeNull();
   });
 });
