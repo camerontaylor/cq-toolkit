@@ -231,4 +231,29 @@ describe('review.address round-1 baseline', () => {
       await w.cleanup();
     }
   });
+  test('a blocking agent re-review finding dispatched in round 1 joins the baseline', async () => {
+    // The round-1 PR agent re-review can return a NEW blocker (the
+    // open-finding fixture's agent-follow-up) that the PR path dispatches in
+    // the SAME round. The population merge before the re-review saw only the
+    // forge-thread population, so without a capture at the agent dispatch the
+    // run works a unit the round-1 baseline never counts — reviewPlannedUnitsOf
+    // understates the denominator and fixes-per-run reads inflated.
+    const w = await world(false, { reviewOutcome: 'open-finding' });
+    try {
+      const result = await w.run();
+      const report = reportOf(result);
+      expect(result.status).toBe('needs-human');
+      // The agent finding really was dispatched as round-1 work…
+      expect(w.prompts.some((p) => p.includes('agent-follow-up'))).toBe(true);
+      // …so the round-1 baseline holds the thread AND the agent finding.
+      expect(report.initialOpenBlocking).toEqual(['T1', 'agent-follow-up']);
+      expect(reviewPlannedUnitsOf(report)).toEqual(['T1', 'agent-follow-up']);
+      const persisted = JSON.parse(await readFile(report.reportPath, 'utf8')) as {
+        initialOpenBlocking?: string[];
+      };
+      expect(persisted.initialOpenBlocking).toEqual(['T1', 'agent-follow-up']);
+    } finally {
+      await w.cleanup();
+    }
+  });
 });

@@ -1787,10 +1787,14 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
              * Round-1 sources: the pre-dispatch seed, each PR dispatch item
              * before `admitRecord` can refuse (a dispatched item that is then
              * refused stays counted), the full open-thread population merged
-             * before the PR re-review (dedup-only; already seeded), and the
-             * local path's admitted record captured after deferred-source
-             * restoration and before its dispatch (restoration can reopen or
-             * append blockers, and the baseline must cover what is dispatched).
+             * before the PR re-review (dedup-only; already seeded), the
+             * round-1 PR agent re-review's record captured before its
+             * same-round dispatch (the merge above saw only the forge-thread
+             * population, and the baseline must cover what is dispatched),
+             * and the local path's admitted record captured after
+             * deferred-source restoration and before its dispatch
+             * (restoration can reopen or append blockers, and the baseline
+             * must cover what is dispatched).
              * Nothing else writes this field: `openBlocking` is recomputed
              * after fixes and `rounds[].record` is replaced by a re-review,
              * so neither may feed the measurement baseline.
@@ -2893,7 +2897,14 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                   return await finish('ok');
                 }
                 // Local agent findings share the same engine and round cap as forge threads.
-                const unresolved = await dispatchFindings(root, retainDeferred(agent.value), round);
+                const agentRecord = retainDeferred(agent.value);
+                // ADR-0008: the agent re-review can return NEW blockers this
+                // same round then dispatches; the merge before the re-review
+                // saw only the forge-thread population, so they join the
+                // round-1 baseline here, before dispatchFindings plans them.
+                // The helper's round guard keeps later rounds out, as elsewhere.
+                noteInitialOpenBlocking(round, agentRecord);
+                const unresolved = await dispatchFindings(root, agentRecord, round);
                 await publishOnExit();
                 if (unresolved) return await finish('needs-human', stop() ?? unresolved);
                 continue;
