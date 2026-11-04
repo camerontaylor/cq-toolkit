@@ -14,6 +14,7 @@ import type { GhFn, GhResult } from '../../../src/adapters/forge-github/gh.js';
 import type { DriverFactory } from '../../../src/driver/factory.js';
 import { makeAddressWorker } from '../../../src/ops/review/addressWorker.js';
 import type { ReviewRunInput } from '../../../src/ops/review/run.js';
+import { replyHeadStamp, replySignature, settleRound } from '../../../src/plans/review-loop.js';
 import { GIT_HARDEN } from '../../../src/shared/gitHarden.js';
 
 export const initial = 'a'.repeat(40),
@@ -63,6 +64,21 @@ export async function world(
     concurrency?: number;
     /** Blocking severities for the round's planned population (default: the policy's own). */
     blockingSeverities?: readonly CqSeverity[];
+    /**
+     * Every thread's latest REST reply is the responder's own settled loop
+     * reply — the signature line plus a head stamp naming the checked-out
+     * head and the thread's settle round — so the whole plan is skipped
+     * (loop-replied-this-head) and onItemsPlanned sees an empty list.
+     */
+    settledLoopReplies?: boolean;
+    /**
+     * PR-state graphql queries (the $reviewsAfter document) from this
+     * 1-based ordinal on answer truncated reviewThreads pagination
+     * (hasNextPage with no endCursor) while earlier queries stay complete:
+     * ordinal 2 keeps the loop's classification fetch complete and makes the
+     * engine's post-dispatch fetch fail closed.
+     */
+    truncatePrStateFrom?: number;
   } = {},
 ) {
   // The failer knob only has a defined thread order inside the default
@@ -92,6 +108,7 @@ export async function world(
   let login = 'responder';
   let reviewerCalls = 0;
   let admissionCalls = 0;
+  let prStateCalls = 0;
   const reports: string[] = [];
   const replies: Array<{
     id: number;
@@ -179,6 +196,13 @@ export async function world(
         actions.push(`resolve:${id}`);
         return ok({ data: { resolveReviewThread: { thread: { id, isResolved: true } } } });
       }
+      // The PR-state document is the only graphql query carrying
+      // $reviewsAfter (the resolved-threads snapshot query does not), so
+      // that substring counts exactly the fetchReviewState pagination loops.
+      const prState = query.includes('$reviewsAfter');
+      if (prState) prStateCalls += 1;
+      const truncatedThreads =
+        options.truncatePrStateFrom !== undefined && prStateCalls >= options.truncatePrStateFrom;
       return ok({
         data: {
           repository: {
@@ -188,7 +212,12 @@ export async function world(
               headRefOid: remote,
               reviewThreads: {
                 nodes: threads.map((t) => ({ ...t, isResolved: resolved.has(t.id) })),
-                pageInfo: { hasNextPage: false, endCursor: null },
+                // hasNextPage with no endCursor is the fail-closed
+                // truncation: the fetch keeps the page's data and records
+                // the truncatedBecause cause.
+                pageInfo: truncatedThreads
+                  ? { hasNextPage: true, endCursor: null }
+                  : { hasNextPage: false, endCursor: null },
               },
               reviews: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } },
             },
@@ -227,6 +256,37 @@ export async function world(
           created_at: thread.comments.nodes[0]!.createdAt,
         })),
         ...replies,
+      ]);
+    if (options.settledLoopReplies && endpoint.includes('/pulls/7/comments'))
+      return ok([
+        // Chain roots: each thread's own root comment (the GraphQL root
+        // databaseId join attachRestReplies matches on).
+        ...threads.map((thread) => ({
+          id: thread.comments.nodes[0]!.databaseId,
+          in_reply_to_id: null,
+          body: thread.comments.nodes[0]!.body,
+          user: { login: 'reviewer' },
+          created_at: thread.comments.nodes[0]!.createdAt,
+        })),
+        // The responder's settled loop reply on every thread: signature
+        // line, a head stamp binding the checked-out head and the thread's
+        // settle round (no prior replies), then the summary after a blank
+        // line — the exact header shape loopReplyVerdict authenticates.
+        ...threads.map((thread) => ({
+          id: 900 + thread.comments.nodes[0]!.databaseId,
+          in_reply_to_id: thread.comments.nodes[0]!.databaseId,
+          body: [
+            replySignature('octo', 'widget', 7),
+            replyHeadStamp(
+              initial,
+              settleRound({ id: thread.id, body: thread.comments.nodes[0]!.body }, []),
+            ),
+            '',
+            'answered in the prior run',
+          ].join('\n'),
+          user: { login },
+          created_at: new Date().toISOString(),
+        })),
       ]);
     if (options.discussion && endpoint.includes('/pulls/7/comments'))
       return ok([

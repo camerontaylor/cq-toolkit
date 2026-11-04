@@ -203,4 +203,32 @@ describe('review.address round-1 baseline', () => {
       await w.cleanup();
     }
   });
+  test('an all-skipped plan with a truncated post-dispatch fetch persists no round-1 baseline', async () => {
+    // The pre-merge empty-plan trap: every unresolved foreign thread is
+    // skipped (the responder's own settled loop reply has the last word —
+    // loop-replied-this-head), so the plan is empty and onItemsPlanned([])
+    // fires. The post-dispatch fetch is then truncated, exiting needs-human
+    // BEFORE the post-fetch merge. An empty seed would persist
+    // initialOpenBlocking: [] — a PRESENT-empty list a measurement consumer
+    // reads as known-zero while the blocking thread still exists — so the
+    // field must stay ABSENT (unknown). Only the post-fetch merge and the
+    // local-path capture may write a genuinely known-empty population.
+    const w = await world(false, { settledLoopReplies: true, truncatePrStateFrom: 2 });
+    try {
+      const result = await w.run();
+      const report = reportOf(result);
+      expect(result.status).toBe('needs-human');
+      expect(report.reasons.join(' ')).toContain('PR review source truncated');
+      // The empty-plan premise itself: nothing was planned or dispatched.
+      expect(report.fixes).toEqual([]);
+      expect(report.initialOpenBlocking).toBeUndefined();
+      const persisted = JSON.parse(await readFile(report.reportPath, 'utf8')) as {
+        initialOpenBlocking?: string[];
+      };
+      expect(persisted.initialOpenBlocking).toBeUndefined();
+      expect('initialOpenBlocking' in persisted).toBe(false);
+    } finally {
+      await w.cleanup();
+    }
+  });
 });

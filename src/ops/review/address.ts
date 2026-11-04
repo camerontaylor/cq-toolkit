@@ -2602,8 +2602,16 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                   // before anything dispatches, so an exit taken before the
                   // post-fetch merge (an admission or closure refusal, a
                   // truncated fetch, a moved branch, a throwing fetch) still
-                  // reports the whole round-1 population.
-                  onItemsPlanned: (ids) =>
+                  // reports the whole round-1 population. An EMPTY plan may
+                  // not CREATE a baseline: every thread skipped (answered
+                  // this round, loop-replied at this head) is still an open
+                  // population this seed never observed, and a pre-merge
+                  // exit below would persist a present-empty list a
+                  // measurement consumer reads as known-zero. Absent stays
+                  // absent — the post-fetch merge and the local-path
+                  // capture still write a genuinely known-empty population.
+                  onItemsPlanned: (ids) => {
+                    if (ids.length === 0 && report.initialOpenBlocking === undefined) return;
                     noteInitialOpenBlocking(round, {
                       // Minimal PR-thread shape; only id/severity/status feed the filter.
                       findings: ids.map((id) => ({
@@ -2613,7 +2621,8 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                         text: '',
                         status: 'open' as const,
                       })),
-                    }),
+                    });
+                  },
                   onFixRunSettled: (run) => {
                     // Retain the settled run before later Git/forge work can throw.
                     // An initial refusal has no admitted work to record; a refused
