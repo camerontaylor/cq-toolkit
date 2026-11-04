@@ -3,16 +3,30 @@
 // are read and no unmerged lineage inputs are assumed. The M10b discipline
 // governs every row: malformed, conflicting or missing-lineage evidence
 // lands in the unknown list with a reason — never a count, never a zero.
+// Rows whose own availability map marks consumed fields incomplete are
+// unknown ('unavailable'), and CI red counts are null unless the caller
+// states which heads' CI was examined (unknown is never zero).
 const SHA = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
-const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/;
+// z.iso.datetime({ precision: 3 }) as in ReportV2Schema, plus the calendar
+// round-trip in instant(): shape, parse and round-trip must all agree.
+const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const CI_RED = new Set(['flake', 'regression', 'infrastructure']);
-// A re-fix stops being a harm candidate only when its own evidence records
-// prior-correctness (the prior fix held) or a finding-edit (the finding
-// changed between observations, so it is not the same defect).
-const EXONERATING = /prior-correctness|finding-edit/;
+// A re-fix stops being a harm candidate only when its own evidence carries
+// an exact leading marker — prior-correctness (the prior fix held) or
+// finding-edit (the finding changed between observations). Substring
+// matches in human prose never exonerate (ADR-0008 T-classification rule).
+const EXONERATING = /^(?:prior-correctness|finding-edit)(?::|$)/;
 const text = (v) => typeof v === 'string' && v.length > 0;
+const strings = (v) => Array.isArray(v) && v.every((item) => typeof item === 'string');
+const map_ = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 const sha = (v) => typeof v === 'string' && SHA.test(v);
+const instant = (v) => {
+  if (!text(v) || !ISO.test(v)) return false;
+  const ms = Date.parse(v);
+  return !Number.isNaN(ms) && new Date(ms).toISOString() === v;
+};
 const bad = (source, kind, reason) => ({ source, kind, reason });
+const KNOWN = new Set(['known', 'known-zero']);
 
 /** Stable serialization: same content, same key (the M10b fingerprint). */
 const canonical = (v) =>
@@ -38,10 +52,15 @@ const dispositionOk = (d) =>
   typeof d === 'object' &&
   fingerprintOk(d.fingerprint) &&
   ['fixed', 'rejected', 'deferred'].includes(d.status) &&
-  Array.isArray(d.evidence) &&
-  d.evidence.every(text) &&
+  typeof d.reason === 'string' &&
+  text(d.owner) &&
+  strings(d.evidence) &&
+  (d.reviewTrigger === null || text(d.reviewTrigger)) &&
+  (d.status !== 'deferred' || text(d.reviewTrigger)) &&
   sha(d.observedHead) &&
-  ISO.test(d.observedAt ?? '');
+  instant(d.observedAt) &&
+  (d.acceptedRisk === null || typeof d.acceptedRisk === 'string') &&
+  map_(d.availability);
 const reviewOk = (r) =>
   r !== null &&
   typeof r === 'object' &&
@@ -49,16 +68,28 @@ const reviewOk = (r) =>
   sha(r.headSha) &&
   Array.isArray(r.findingFingerprints) &&
   r.findingFingerprints.every(fingerprintOk) &&
+  typeof r.coverage === 'string' &&
+  (r.initialBlocking === null || r.initialBlocking.every(fingerprintOk)) &&
+  text(r.reviewerId) &&
   text(r.source) &&
   Number.isSafeInteger(r.round) &&
-  r.round >= 0;
+  r.round >= 0 &&
+  strings(r.delivered) &&
+  strings(r.completed) &&
+  strings(r.omissions) &&
+  ['completed', 'not-completed', 'unknown'].includes(r.vendorCompletion) &&
+  map_(r.availability);
 const acceptanceOk = (a) =>
   a !== null &&
   typeof a === 'object' &&
   sha(a.headSha) &&
   sha(a.reviewedBaseSha) &&
   text(a.reviewerId) &&
-  ['PASS', 'HOLD', 'RETRACT'].includes(a.verdict);
+  text(a.authorId) &&
+  typeof a.independent === 'boolean' &&
+  ['PASS', 'HOLD', 'RETRACT'].includes(a.verdict) &&
+  strings(a.evidence) &&
+  map_(a.availability);
 
 /**
  * Admit rows by identity: malformed ones are corrupt unknowns; identical
@@ -93,6 +124,30 @@ function admit(rows, ok, identity, label, unknown) {
   return out;
 }
 
+/** Drop rows whose availability marks consumed fields incomplete (never known). */
+function usable(rows, pointers, label, unknown) {
+  return rows.filter((row) => {
+    const pointer = pointers.find((p) => {
+      const entry = row.availability?.[p];
+      return entry !== undefined && !KNOWN.has(entry?.state);
+    });
+    if (pointer === undefined) return true;
+    unknown.push(
+      bad(
+        `${label}${pointer === '' ? ' root' : pointer}`,
+        'unavailable',
+        'row availability marks consumed fields incomplete',
+      ),
+    );
+    return false;
+  });
+}
+
+/** A review establishes a covered range only with recorded, completed coverage. */
+const covered = (r) =>
+  (r.coverage.startsWith('v2:') || r.coverage.startsWith('legacy:')) &&
+  r.vendorCompletion === 'completed';
+
 /** Compute the M10e harm, missed-defect and population panels. */
 export function computeOutcomePanels({
   reviews = [],
@@ -100,27 +155,40 @@ export function computeOutcomePanels({
   acceptances = [],
   ciRed = [],
   population = [],
+  ciObservedHeads,
   followUpDays,
   observedAt,
 } = {}) {
   if (![reviews, dispositions, acceptances, ciRed, population].every(Array.isArray))
     throw new TypeError('computeOutcomePanels: the five record arguments must be arrays');
+  if (ciObservedHeads !== undefined && !strings(ciObservedHeads))
+    throw new TypeError('computeOutcomePanels: ciObservedHeads must be an array of head shas');
   if (!(typeof followUpDays === 'number' && Number.isFinite(followUpDays) && followUpDays > 0))
     throw new TypeError('computeOutcomePanels: followUpDays must be a positive number of days');
-  if (!text(observedAt) || Number.isNaN(Date.parse(observedAt)))
+  if (!instant(observedAt))
     throw new TypeError('computeOutcomePanels: observedAt must be an ISO datetime');
   const unknown = [];
-  const keptDispositions = admit(
-    dispositions,
-    dispositionOk,
-    (d) => `${canonical(d.fingerprint)}\u0000${d.observedHead}\u0000${d.observedAt}`,
+  const keptDispositions = usable(
+    admit(
+      dispositions,
+      dispositionOk,
+      (d) => `${canonical(d.fingerprint)}\u0000${d.observedHead}\u0000${d.observedAt}`,
+      'disposition',
+      unknown,
+    ),
+    ['', '/fingerprint', '/evidence', '/observedHead', '/observedAt'],
     'disposition',
     unknown,
   );
-  const keptReviews = admit(
-    reviews,
-    reviewOk,
-    (r) => `${r.baseSha}\u0000${r.headSha}\u0000${r.source}\u0000${r.round}`,
+  const keptReviews = usable(
+    admit(
+      reviews,
+      reviewOk,
+      (r) => `${r.baseSha}\u0000${r.headSha}\u0000${r.source}\u0000${r.round}`,
+      'review',
+      unknown,
+    ),
+    [''],
     'review',
     unknown,
   );
@@ -133,10 +201,12 @@ export function computeOutcomePanels({
   );
 
   // Harm panel 1 — re-fixes: a second-or-later `fixed` disposition for one
-  // fingerprint. It is a harm candidate only while its lineage holds (some
-  // review observed the finding at a covered range) and no evidence
+  // fingerprint. It is a harm candidate only while its lineage holds (a
+  // covered review observed the finding at its range) and no evidence
   // exonerates it; an unreviewed re-fix is missing lineage.
-  const reviewed = new Set(keptReviews.flatMap((r) => r.findingFingerprints.map(canonical)));
+  const reviewed = new Set(
+    keptReviews.filter(covered).flatMap((r) => r.findingFingerprints.map(canonical)),
+  );
   const runsByFingerprint = new Map();
   for (const d of keptDispositions) {
     if (d.status !== 'fixed') continue;
@@ -147,9 +217,12 @@ export function computeOutcomePanels({
   }
   const refix = { candidates: 0, explained: 0, unknown: 0 };
   for (const [key, runs] of runsByFingerprint) {
-    // observedAt is fixed-width ISO, so string order is time order; the head
-    // breaks ties.
-    runs.sort((x, y) => (x.observedAt + x.observedHead < y.observedAt + y.observedHead ? -1 : 1));
+    // Instant order with the head breaking exact-time ties.
+    runs.sort(
+      (x, y) =>
+        Date.parse(x.observedAt) - Date.parse(y.observedAt) ||
+        (x.observedHead < y.observedHead ? -1 : 1),
+    );
     for (const d of runs.slice(1)) {
       if (!reviewed.has(key)) {
         refix.unknown++;
@@ -158,45 +231,25 @@ export function computeOutcomePanels({
         );
         continue;
       }
-      if (d.evidence.some((line) => EXONERATING.test(line))) refix.explained++;
+      if (d.evidence.some((line) => EXONERATING.test(line.trim()))) refix.explained++;
       else refix.candidates++;
     }
   }
 
-  // Harm panel 2 — post-merge CI red: flake / regression / infrastructure /
-  // unknown. An unrecognized or absent classification is unknown evidence,
-  // never a guess.
-  const ciRedPanel = { flake: 0, regression: 0, infrastructure: 0, unknown: 0 };
-  for (const [i, row] of ciRed.entries()) {
-    if (row === null || typeof row !== 'object' || !sha(row.sha) || !text(row.source)) {
-      ciRedPanel.unknown++;
-      unknown.push(bad(`ciRed[${i}]`, 'corrupt', 'CI red row is malformed'));
-      continue;
+  // Missed panel — restored crq findings: a crq review based at an
+  // independently accepted PR head is post-merge, and its findings count
+  // missed only when the finding existed at the pre-merge covered range.
+  // Two independent PASSes certifying different bases leave that range
+  // ambiguous: unknown, whichever acceptance arrived first.
+  const qualifying = new Map();
+  for (const a of keptAcceptances)
+    if (a.verdict === 'PASS' && a.independent) {
+      const bases = qualifying.get(a.headSha) ?? new Set();
+      bases.add(a.reviewedBaseSha);
+      qualifying.set(a.headSha, bases);
     }
-    if (CI_RED.has(row.classification)) ciRedPanel[row.classification]++;
-    else if (row.classification === 'unknown') ciRedPanel.unknown++;
-    else {
-      ciRedPanel.unknown++;
-      unknown.push(
-        bad(
-          `ciRed[${i}]`,
-          'unsupported',
-          `classification '${String(row.classification)}' is not recognized`,
-        ),
-      );
-    }
-  }
-
-  // Missed panel — restored crq findings: a crq review based at an accepted
-  // PR head is post-merge, and its findings count missed only when the
-  // finding existed at the pre-merge covered range (a review at the range
-  // the acceptance certifies observed it). Other findings there are new,
-  // and an unlinkable review is missing lineage.
-  const accepted = new Map(
-    keptAcceptances.filter((a) => a.verdict === 'PASS').map((a) => [a.headSha, a]),
-  );
   const fingerprintsAt = new Map();
-  for (const r of keptReviews) {
+  for (const r of keptReviews.filter(covered)) {
     const key = `${r.headSha}\u0000${r.baseSha}`;
     const set = fingerprintsAt.get(key) ?? new Set();
     for (const f of r.findingFingerprints) set.add(canonical(f));
@@ -205,15 +258,25 @@ export function computeOutcomePanels({
   const restored = { missed: 0, notMissed: 0, unknown: 0 };
   for (const r of keptReviews) {
     if (r.source !== 'crq') continue;
-    const atHead = accepted.get(r.headSha);
-    if (atHead !== undefined && atHead.reviewedBaseSha === r.baseSha) continue; // a pre-merge review itself
-    const a = accepted.get(r.baseSha);
-    if (a === undefined) {
+    if (qualifying.get(r.headSha)?.has(r.baseSha)) continue; // a pre-merge review itself
+    const bases = qualifying.get(r.baseSha);
+    if (bases === undefined) {
       restored.unknown++;
       unknown.push(bad(`review ${r.headSha}`, 'missing', 'crq review base has no accepted head'));
       continue;
     }
-    const pre = fingerprintsAt.get(`${a.headSha}\u0000${a.reviewedBaseSha}`);
+    if (bases.size > 1) {
+      restored.unknown++;
+      unknown.push(
+        bad(
+          `review ${r.headSha}`,
+          'conflict',
+          'two independent PASSes certify different pre-merge ranges',
+        ),
+      );
+      continue;
+    }
+    const pre = fingerprintsAt.get(`${r.baseSha}\u0000${[...bases][0]}`);
     if (pre === undefined) {
       restored.unknown++;
       unknown.push(bad(`review ${r.headSha}`, 'missing', 'acceptance has no pre-merge review'));
@@ -223,29 +286,93 @@ export function computeOutcomePanels({
       pre.has(canonical(f)) ? restored.missed++ : restored.notMissed++;
   }
 
-  // Population panel — eligibility is a PASS acceptance at the exact head;
-  // a PR is mature once the explicit follow-up window has elapsed by the
-  // observation instant, and a younger PR is explicitly right-censored.
+  // Population panel — eligibility is an independent PASS acceptance at the
+  // exact head; a PR is mature once the explicit follow-up window has
+  // elapsed by the observation instant, and a younger PR is explicitly
+  // right-censored. One declared PR is one row: duplicates collapse and
+  // disagreeing declarations conflict out.
+  const keptPopulation = admit(
+    population,
+    (row) => row !== null && typeof row === 'object' && sha(row.headSha) && instant(row.mergedAt),
+    (row) => row.headSha,
+    'population',
+    unknown,
+  );
   const populationPanel = { eligible: 0, mature: 0, rightCensored: 0, followUpDays };
-  for (const [i, row] of population.entries()) {
-    if (
-      row === null ||
-      typeof row !== 'object' ||
-      !sha(row.headSha) ||
-      !text(row.mergedAt) ||
-      Number.isNaN(Date.parse(row.mergedAt))
-    ) {
-      unknown.push(bad(`population[${i}]`, 'corrupt', 'population row is malformed'));
-      continue;
-    }
-    if (!accepted.has(row.headSha)) {
-      unknown.push(bad(`population ${row.headSha}`, 'missing', 'PR head has no PASS acceptance'));
+  const eligibleHeads = [];
+  for (const row of keptPopulation) {
+    if (!qualifying.has(row.headSha)) {
+      unknown.push(
+        bad(`population ${row.headSha}`, 'missing', 'PR head has no independent PASS acceptance'),
+      );
       continue;
     }
     populationPanel.eligible++;
+    eligibleHeads.push(row.headSha);
     if (Date.parse(observedAt) - Date.parse(row.mergedAt) >= followUpDays * 86400000)
       populationPanel.mature++;
     else populationPanel.rightCensored++;
+  }
+
+  // Harm panel 2 — post-merge CI red: flake / regression / infrastructure /
+  // unknown, over one observation per (sha, source). With no stated examined
+  // heads the counts are null (unknown, never zero); a red at an unexamined
+  // head is partial evidence.
+  const ciRedPanel = {
+    flake: 0,
+    regression: 0,
+    infrastructure: 0,
+    unknown: 0,
+    observedHeads: null,
+    unobservedHeads: null,
+  };
+  if (ciObservedHeads === undefined) {
+    ciRedPanel.flake =
+      ciRedPanel.regression =
+      ciRedPanel.infrastructure =
+      ciRedPanel.unknown =
+        null;
+    unknown.push(
+      bad(
+        'ciRed',
+        'unavailable',
+        'no CI evidence was examined; CI red counts are unknown, never zero',
+      ),
+    );
+  } else {
+    const examined = new Set();
+    ciObservedHeads.forEach((head, i) => {
+      if (!sha(head))
+        unknown.push(bad(`ciObservedHeads[${i}]`, 'corrupt', 'examined head is not a sha'));
+      else examined.add(head);
+    });
+    ciRedPanel.observedHeads = [...examined].sort();
+    ciRedPanel.unobservedHeads = eligibleHeads.filter((head) => !examined.has(head)).sort();
+    for (const row of admit(
+      ciRed,
+      (row) => row !== null && typeof row === 'object' && sha(row.sha) && text(row.source),
+      (row) => `${row.sha}\u0000${row.source}`,
+      'ciRed',
+      unknown,
+    )) {
+      if (!examined.has(row.sha)) {
+        ciRedPanel.unknown++;
+        unknown.push(bad(`ciRed ${row.sha}`, 'partial', 'CI red at an unexamined head'));
+        continue;
+      }
+      if (CI_RED.has(row.classification)) ciRedPanel[row.classification]++;
+      else if (row.classification === 'unknown') ciRedPanel.unknown++;
+      else {
+        ciRedPanel.unknown++;
+        unknown.push(
+          bad(
+            `ciRed ${row.sha}`,
+            'unsupported',
+            `classification '${String(row.classification)}' is not recognized`,
+          ),
+        );
+      }
+    }
   }
 
   return {

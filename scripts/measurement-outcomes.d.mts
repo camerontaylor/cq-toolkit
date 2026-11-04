@@ -24,15 +24,27 @@ export interface PopulationRow {
   mergedAt: string;
 }
 
+export interface CiRedCounts {
+  flake: number | null;
+  regression: number | null;
+  infrastructure: number | null;
+  unknown: number | null;
+  /** Heads whose CI was examined (sorted); null when CI was not examined. */
+  observedHeads: string[] | null;
+  /** Eligible heads whose CI was not examined (sorted); null when CI was not examined. */
+  unobservedHeads: string[] | null;
+}
+
 export interface OutcomePanels {
   /** Reviewed-range re-fixes: candidates until prior-correctness/finding-edit evidence. */
   harm: {
     refix: { candidates: number; explained: number; unknown: number };
-    ciRed: { flake: number; regression: number; infrastructure: number; unknown: number };
+    /** Counts are null (unknown, never zero) unless ciObservedHeads states the examined heads. */
+    ciRed: CiRedCounts;
   };
   /** Restored crq findings: missed only when they existed at the pre-merge covered range. */
   missed: { restored: { missed: number; notMissed: number; unknown: number } };
-  /** Eligible = PASS acceptance at the exact head; mature once the window elapsed. */
+  /** Eligible = independent PASS acceptance at the exact head; mature once the window elapsed. */
   population: { eligible: number; mature: number; rightCensored: number; followUpDays: number };
   /** Malformed, conflicting or missing-lineage rows with a reason, never a count. */
   unknown: Array<{ source: string; kind: string; reason: string }>;
@@ -44,6 +56,8 @@ export interface OutcomePanelsInput {
   acceptances?: AcceptancePayload[];
   ciRed?: CiRedObservation[];
   population?: PopulationRow[];
+  /** Heads whose CI was examined; omit it and the CI red counts are null, never zero. */
+  ciObservedHeads?: string[];
   /** Follow-up window in days a PR must age past to be mature. */
   followUpDays: number;
   /** ISO datetime the panels are computed at (the right-censoring instant). */

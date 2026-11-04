@@ -6,19 +6,22 @@
 //   - CI red classification flake/regression/infrastructure/unknown;
 //   - restored crq finding must exist at pre-merge covered range to count
 //     missed;
-//   - missing lineage -> unknown (a re-fix no review observed, a post-merge
-//     review with no accepted head, an acceptance with no pre-merge review,
-//     a declared PR with no PASS acceptance);
+//   - missing lineage -> unknown (a re-fix no covered review observed, a
+//     post-merge review with no accepted head, an acceptance with no
+//     pre-merge review, a declared PR with no independent PASS acceptance,
+//     CI red with no stated examined heads, a red at an unexamined head);
 //   - mature eligible PR population and follow-up days/right censoring
 //     explicit.
-// Failure cases keep the M10b discipline: malformed or conflicting rows are
-// unknown evidence with a reason — never a crash, never a fallback zero —
-// and invalid panel arguments throw TypeError. Local fixtures only: no
-// providers, no network, no files.
+// Failure cases keep the M10b discipline: malformed, conflicting or
+// availability-incomplete rows are unknown evidence with a reason — never a
+// crash, never a fallback zero — and invalid panel arguments throw
+// TypeError. Local fixtures only: no providers, no network, no files.
 import { describe, expect, test } from 'vitest';
 import { computeOutcomePanels } from '../scripts/measurement-outcomes.mjs';
 import type {
   AcceptancePayload,
+  AvailabilityRecord,
+  AvailabilityState,
   DispositionPayload,
   FindingFingerprint,
   ReviewObservedPayload,
@@ -31,11 +34,13 @@ const HEAD3 = 'd'.repeat(40);
 const HEAD4 = 'e'.repeat(40);
 const HEAD6 = 'f'.repeat(40);
 const HEAD7 = '0'.repeat(40);
-const HEAD8 = '1'.repeat(40);
 const HEAD9 = '2'.repeat(40);
 const T1 = '2026-11-01T00:00:00.000Z';
 const T2 = '2026-11-02T00:00:00.000Z';
 const OBSERVED_AT = '2026-11-20T00:00:00.000Z';
+const avail = (state: AvailabilityState): Record<string, AvailabilityRecord> => ({
+  '': { state, reason: 'fixture', source: null },
+});
 
 const fingerprint = (path: string): FindingFingerprint => ({
   version: 1,
@@ -50,11 +55,16 @@ const F2 = fingerprint('src/two.ts');
 const F3 = fingerprint('src/three.ts');
 const F9 = fingerprint('src/new.ts');
 
+interface DispositionOptions {
+  observedAt?: string;
+  availability?: Record<string, AvailabilityRecord>;
+}
+
 const disposition = (
   of: FindingFingerprint,
   observedHead: string,
   evidence: string[],
-  observedAt = T1,
+  options: DispositionOptions = {},
 ): DispositionPayload => ({
   fingerprint: of,
   status: 'fixed',
@@ -63,12 +73,16 @@ const disposition = (
   evidence,
   reviewTrigger: null,
   observedHead,
-  observedAt,
+  observedAt: options.observedAt ?? T1,
   acceptedRisk: null,
-  availability: {},
+  availability: options.availability ?? {},
 });
 
-const review = (over: Partial<ReviewObservedPayload> = {}): ReviewObservedPayload => ({
+interface ReviewOptions extends Partial<ReviewObservedPayload> {
+  availability?: Record<string, AvailabilityRecord>;
+}
+
+const review = (over: ReviewOptions = {}): ReviewObservedPayload => ({
   baseSha: BASE,
   headSha: HEAD1,
   findingFingerprints: [],
@@ -99,28 +113,36 @@ const acceptance = (over: Partial<AcceptancePayload> = {}): AcceptancePayload =>
 
 describe('M10e nominal evidence', () => {
   test('reviewed-range re-fixes are candidates until prior-correctness/finding-edit evidence', () => {
-    // The pre-merge review observed F1, F2 and F3 at the covered range, so
-    // each second fix is a reviewed-range re-fix: a candidate while its
-    // evidence says nothing, explained once prior-correctness or finding-edit
-    // evidence is recorded.
+    // The covered pre-merge review observed F1..F5, so each second fix is a
+    // reviewed-range re-fix: a candidate while its evidence says nothing or
+    // merely mentions a marker in prose, explained only by an exact leading
+    // prior-correctness/finding-edit token — and the re-fix is the LATER
+    // run by instant order, so its evidence is the evidence evaluated.
+    const F4 = fingerprint('src/four.ts');
+    const F5 = fingerprint('src/five.ts');
     const panels = computeOutcomePanels({
-      reviews: [review({ findingFingerprints: [F1, F2, F3] })],
+      reviews: [review({ findingFingerprints: [F1, F2, F3, F4, F5] })],
       dispositions: [
-        disposition(F1, HEAD1, ['fix verified'], T1),
-        disposition(F1, HEAD2, ['fix verified again'], T2),
-        disposition(F2, HEAD1, ['fix verified'], T1),
-        disposition(F2, HEAD2, ['prior-correctness: the prior fix held'], T2),
-        disposition(F3, HEAD1, ['fix verified'], T1),
-        disposition(F3, HEAD2, ['finding-edit: the finding text changed'], T2),
+        disposition(F1, HEAD1, ['fix verified'], { observedAt: T1 }),
+        disposition(F1, HEAD2, ['fix verified again'], { observedAt: T2 }),
+        disposition(F2, HEAD1, ['fix verified'], { observedAt: T1 }),
+        disposition(F2, HEAD2, ['prior-correctness: the prior fix held'], { observedAt: T2 }),
+        disposition(F3, HEAD1, ['fix verified'], { observedAt: T1 }),
+        disposition(F3, HEAD2, ['finding-edit: the finding text changed'], { observedAt: T2 }),
+        disposition(F4, HEAD1, ['fix verified'], { observedAt: T1 }),
+        disposition(F4, HEAD2, ['no finding-edit occurred'], { observedAt: T2 }),
+        disposition(F5, HEAD1, ['fix verified'], { observedAt: '2026-11-01T00:00:00.000Z' }),
+        disposition(F5, HEAD2, ['prior-correctness: held'], {
+          observedAt: '2026-11-01T00:00:00.500Z',
+        }),
       ],
       acceptances: [acceptance()],
-      ciRed: [],
-      population: [],
+      ciObservedHeads: [HEAD1],
       followUpDays: 10,
       observedAt: OBSERVED_AT,
     });
 
-    expect(panels.harm.refix).toEqual({ candidates: 1, explained: 2, unknown: 0 });
+    expect(panels.harm.refix).toEqual({ candidates: 2, explained: 3, unknown: 0 });
     expect(panels.unknown).toEqual([]);
   });
 
@@ -131,11 +153,11 @@ describe('M10e nominal evidence', () => {
       acceptances: [],
       ciRed: [
         { sha: HEAD1, source: 'gh-actions', classification: 'flake' },
-        { sha: HEAD1, source: 'gh-actions', classification: 'regression' },
+        { sha: HEAD1, source: 'circle', classification: 'regression' },
         { sha: HEAD2, source: 'gh-actions', classification: 'infrastructure' },
-        { sha: HEAD2, source: 'gh-actions', classification: 'unknown' },
+        { sha: HEAD2, source: 'circle', classification: 'unknown' },
       ],
-      population: [],
+      ciObservedHeads: [HEAD2, HEAD1],
       followUpDays: 10,
       observedAt: OBSERVED_AT,
     });
@@ -145,13 +167,15 @@ describe('M10e nominal evidence', () => {
       regression: 1,
       infrastructure: 1,
       unknown: 1,
+      observedHeads: [HEAD1, HEAD2],
+      unobservedHeads: [],
     });
     expect(panels.unknown).toEqual([]);
   });
 
   test('restored crq finding must exist at pre-merge covered range to count missed', () => {
     // The post-merge crq review (based at the accepted head) restores F1 —
-    // which the pre-merge review observed at the covered range — and also
+    // which the covered pre-merge review observed at its range — and also
     // reports F9, which did not exist there. F1 is missed; F9 is a new
     // post-merge finding, explicitly not missed.
     const panels = computeOutcomePanels({
@@ -162,8 +186,7 @@ describe('M10e nominal evidence', () => {
       ],
       dispositions: [],
       acceptances: [acceptance(), acceptance({ headSha: HEAD3 })],
-      ciRed: [],
-      population: [],
+      ciObservedHeads: [],
       followUpDays: 10,
       observedAt: OBSERVED_AT,
     });
@@ -173,10 +196,11 @@ describe('M10e nominal evidence', () => {
   });
 
   test('mature eligible PR population and follow-up days/right censoring explicit', () => {
-    // Eligibility is a PASS acceptance at the exact head; maturity is the
-    // explicit follow-up window elapsing by the observation instant — at
-    // exactly followUpDays a PR is mature, and a younger one is explicitly
-    // right-censored, never silently dropped.
+    // Eligibility is an independent PASS acceptance at the exact head;
+    // maturity is the explicit follow-up window elapsing by the observation
+    // instant — at exactly followUpDays a PR is mature, and a younger one is
+    // explicitly right-censored, never silently dropped. CI observation
+    // coverage of the eligible population is reported the same way.
     const panels = computeOutcomePanels({
       reviews: [review(), review({ headSha: HEAD3 })],
       dispositions: [],
@@ -185,7 +209,7 @@ describe('M10e nominal evidence', () => {
         acceptance({ headSha: HEAD3 }),
         acceptance({ headSha: HEAD4, reviewedBaseSha: HEAD1 }),
       ],
-      ciRed: [],
+      ciObservedHeads: [HEAD1],
       population: [
         { headSha: HEAD1, mergedAt: '2026-11-01T00:00:00.000Z' },
         { headSha: HEAD4, mergedAt: '2026-11-10T00:00:00.000Z' },
@@ -201,17 +225,19 @@ describe('M10e nominal evidence', () => {
       rightCensored: 1,
       followUpDays: 10,
     });
+    expect(panels.harm.ciRed.observedHeads).toEqual([HEAD1]);
+    expect(panels.harm.ciRed.unobservedHeads).toEqual([HEAD3, HEAD4]);
     expect(panels.unknown).toEqual([]);
   });
 });
 
 describe('M10e missing evidence', () => {
   test('missing lineage -> unknown', () => {
-    // Four missing lineages: a re-fix no review ever observed (no reviewed
-    // range), a post-merge crq review based at no accepted head, a crq
-    // review whose acceptance has no pre-merge review at the covered range,
-    // and a declared PR with no PASS acceptance. Each is an unknown with a
-    // reason — never a count, never a fallback zero.
+    // Four missing lineages: a re-fix no covered review observed, a
+    // post-merge crq review based at no accepted head, a crq review whose
+    // acceptance has no pre-merge review, and a declared PR whose only PASS
+    // acceptance is not independent. Each is an unknown with a reason —
+    // never a count, never a fallback zero.
     const F5 = fingerprint('src/five.ts');
     const panels = computeOutcomePanels({
       reviews: [
@@ -219,14 +245,14 @@ describe('M10e missing evidence', () => {
         review({ baseSha: HEAD9, headSha: HEAD2, source: 'crq', findingFingerprints: [F2] }),
       ],
       dispositions: [
-        disposition(F5, HEAD1, ['fix verified'], T1),
-        disposition(F5, HEAD2, ['fix verified again'], T2),
+        disposition(F5, HEAD1, ['fix verified']),
+        disposition(F5, HEAD2, ['fix verified again'], { observedAt: T2 }),
       ],
       acceptances: [
         acceptance({ headSha: HEAD6 }),
-        acceptance({ headSha: HEAD8, verdict: 'HOLD' }),
+        acceptance({ headSha: HEAD7, independent: false }),
       ],
-      ciRed: [],
+      ciObservedHeads: [],
       population: [{ headSha: HEAD7, mergedAt: '2026-11-01T00:00:00.000Z' }],
       followUpDays: 10,
       observedAt: OBSERVED_AT,
@@ -242,78 +268,277 @@ describe('M10e missing evidence', () => {
     });
     expect(panels.unknown).toHaveLength(4);
     for (const entry of panels.unknown) expect(entry.kind).toBe('missing');
-    expect(panels.unknown.map((entry) => entry.reason).join('\n')).toContain('no reviewed range');
-    expect(panels.unknown.map((entry) => entry.reason).join('\n')).toContain('no accepted head');
-    expect(panels.unknown.map((entry) => entry.reason).join('\n')).toContain('no pre-merge review');
-    expect(panels.unknown.map((entry) => entry.reason).join('\n')).toContain('no PASS acceptance');
+    const reasons = panels.unknown.map((entry) => entry.reason).join('\n');
+    expect(reasons).toContain('no reviewed range');
+    expect(reasons).toContain('no accepted head');
+    expect(reasons).toContain('no pre-merge review');
+    expect(reasons).toContain('no independent PASS acceptance');
+  });
+
+  test('CI red counts are unknown unless the examined heads are stated', () => {
+    // With no ciObservedHeads there is no CI evidence at all: the four
+    // counts are null with one unavailable unknown — never four zeros.
+    const panels = computeOutcomePanels({
+      reviews: [],
+      dispositions: [],
+      acceptances: [],
+      ciRed: [{ sha: HEAD1, source: 'gh-actions', classification: 'flake' }],
+      followUpDays: 10,
+      observedAt: OBSERVED_AT,
+    });
+
+    expect(panels.harm.ciRed).toEqual({
+      flake: null,
+      regression: null,
+      infrastructure: null,
+      unknown: null,
+      observedHeads: null,
+      unobservedHeads: null,
+    });
+    expect(panels.unknown).toHaveLength(1);
+    expect(panels.unknown[0]?.kind).toBe('unavailable');
+  });
+
+  test('a red at an unexamined head is partial evidence', () => {
+    const panels = computeOutcomePanels({
+      reviews: [],
+      dispositions: [],
+      acceptances: [],
+      ciRed: [{ sha: HEAD2, source: 'gh-actions', classification: 'flake' }],
+      ciObservedHeads: [HEAD1],
+      followUpDays: 10,
+      observedAt: OBSERVED_AT,
+    });
+
+    expect(panels.harm.ciRed).toEqual({
+      flake: 0,
+      regression: 0,
+      infrastructure: 0,
+      unknown: 1,
+      observedHeads: [HEAD1],
+      unobservedHeads: [],
+    });
+    expect(panels.unknown).toHaveLength(1);
+    expect(panels.unknown[0]?.kind).toBe('partial');
   });
 });
 
 describe('M10e failure evidence', () => {
   test('malformed rows are unknown evidence, never a crash', () => {
-    const valid = disposition(F1, HEAD1, ['fix verified'], T1);
     const panels = computeOutcomePanels({
       reviews: [
         review({ findingFingerprints: [F1] }),
         review({ baseSha: 'short', headSha: HEAD1, findingFingerprints: [F2] }),
       ],
       dispositions: [
-        valid,
-        disposition(F1, HEAD2, ['fix verified again'], T2),
-        { ...disposition(F2, HEAD2, ['fix verified'], T2), observedHead: 'not-a-sha' },
-        { ...disposition(F3, HEAD2, ['fix verified'], T2), status: 'delivered' as never },
+        disposition(F1, HEAD1, ['fix verified']),
+        disposition(F1, HEAD2, ['fix verified again'], { observedAt: T2 }),
+        {
+          ...disposition(F2, HEAD2, ['fix verified'], { observedAt: T2 }),
+          observedHead: 'not-a-sha',
+        },
+        {
+          ...disposition(F3, HEAD2, ['fix verified'], { observedAt: T2 }),
+          status: 'delivered' as never,
+        },
+        { ...disposition(F3, HEAD2, ['fix verified'], { observedAt: T2 }), owner: '' },
+        disposition(fingerprint('src/nofrac.ts'), HEAD2, ['fix verified'], {
+          observedAt: '2026-11-02T00:00:00Z',
+        }),
       ],
       acceptances: [acceptance(), { ...acceptance({ headSha: HEAD9 }), verdict: 'MAYBE' as never }],
       ciRed: [
         { sha: HEAD1, source: 'gh-actions', classification: 'flake' },
         { sha: 'nope', source: 'gh-actions', classification: 'flake' },
       ],
+      ciObservedHeads: [HEAD1],
       population: [
         { headSha: HEAD1, mergedAt: '2026-11-01T00:00:00.000Z' },
         { headSha: 4 as never, mergedAt: '2026-11-01T00:00:00.000Z' },
+        { headSha: HEAD2, mergedAt: '2026-02-30T00:00:00.000Z' },
       ],
       followUpDays: 10,
       observedAt: OBSERVED_AT,
     });
 
     // The valid re-fix pair still counts beside the damage; every malformed
-    // row is an unknown with a reason and adds nothing to any count.
+    // row (short sha, bad status, empty owner, fraction-less or impossible
+    // timestamp) is an unknown with a reason and adds nothing to any count.
     expect(panels.harm.refix).toEqual({ candidates: 1, explained: 0, unknown: 0 });
-    expect(panels.harm.ciRed).toEqual({ flake: 1, regression: 0, infrastructure: 0, unknown: 1 });
+    expect(panels.harm.ciRed).toEqual({
+      flake: 1,
+      regression: 0,
+      infrastructure: 0,
+      unknown: 0,
+      observedHeads: [HEAD1],
+      unobservedHeads: [],
+    });
     expect(panels.population).toEqual({
       eligible: 1,
       mature: 1,
       rightCensored: 0,
       followUpDays: 10,
     });
-    expect(panels.unknown).toHaveLength(6);
+    expect(panels.unknown).toHaveLength(9);
     for (const entry of panels.unknown) expect(entry.kind).toBe('corrupt');
   });
 
   test('conflicting duplicate observations are all unknown, identical ones dedup', () => {
-    // Two dispositions of one identity with different evidence conflict and
-    // both leave the panel (a re-fix pair fabricated from the disagreement
-    // must not count), while an identical copy of another observation is one
-    // observation, not two.
+    // Dispositions: two rows of one identity with different evidence
+    // conflict and both leave the panel. ciRed: an identical repeat of one
+    // (sha, source) observation is one observation, while a disagreeing
+    // classification is a conflict that counts in no bucket. population:
+    // the same declared PR twice is one PR, and a disagreeing mergedAt is a
+    // conflict that makes it eligible for nothing.
     const panels = computeOutcomePanels({
       reviews: [review({ findingFingerprints: [F1, F2] })],
       dispositions: [
-        disposition(F1, HEAD1, ['one story'], T1),
-        disposition(F1, HEAD1, ['another story'], T1),
-        disposition(F2, HEAD1, ['fix verified'], T1),
-        disposition(F2, HEAD1, ['fix verified'], T1),
-        disposition(F2, HEAD2, ['fix verified again'], T2),
+        disposition(F1, HEAD1, ['one story']),
+        disposition(F1, HEAD1, ['another story']),
+        disposition(F2, HEAD1, ['fix verified']),
+        disposition(F2, HEAD2, ['fix verified again'], { observedAt: T2 }),
       ],
-      acceptances: [],
-      ciRed: [],
-      population: [],
+      acceptances: [acceptance()],
+      ciRed: [
+        { sha: HEAD1, source: 'gh-actions', classification: 'flake' },
+        { sha: HEAD1, source: 'gh-actions', classification: 'flake' },
+        { sha: HEAD2, source: 'gh-actions', classification: 'flake' },
+        { sha: HEAD2, source: 'gh-actions', classification: 'regression' },
+      ],
+      ciObservedHeads: [HEAD1, HEAD2],
+      population: [
+        { headSha: HEAD1, mergedAt: '2026-11-01T00:00:00.000Z' },
+        { headSha: HEAD1, mergedAt: '2026-11-01T00:00:00.000Z' },
+      ],
       followUpDays: 10,
       observedAt: OBSERVED_AT,
     });
 
     expect(panels.harm.refix).toEqual({ candidates: 1, explained: 0, unknown: 0 });
+    expect(panels.harm.ciRed).toEqual({
+      flake: 1,
+      regression: 0,
+      infrastructure: 0,
+      unknown: 0,
+      observedHeads: [HEAD1, HEAD2],
+      unobservedHeads: [],
+    });
+    expect(panels.population).toEqual({
+      eligible: 1,
+      mature: 1,
+      rightCensored: 0,
+      followUpDays: 10,
+    });
+    expect(panels.unknown).toHaveLength(2);
+    for (const entry of panels.unknown) expect(entry.kind).toBe('conflict');
+
+    const conflicted = computeOutcomePanels({
+      reviews: [],
+      dispositions: [],
+      acceptances: [acceptance()],
+      ciObservedHeads: [HEAD1],
+      population: [
+        { headSha: HEAD1, mergedAt: '2026-11-01T00:00:00.000Z' },
+        { headSha: HEAD1, mergedAt: '2026-11-18T00:00:00.000Z' },
+      ],
+      followUpDays: 10,
+      observedAt: OBSERVED_AT,
+    });
+    expect(conflicted.population).toEqual({
+      eligible: 0,
+      mature: 0,
+      rightCensored: 0,
+      followUpDays: 10,
+    });
+    expect(conflicted.unknown).toHaveLength(1);
+    expect(conflicted.unknown[0]?.kind).toBe('conflict');
+  });
+
+  test('two independent PASSes at one head with different bases are an ambiguous range', () => {
+    // Whichever acceptance arrives first, the pre-merge range the accepted
+    // head certifies is ambiguous: the restored finding is unknown, never
+    // missed by the luck of input order.
+    const crq = review({
+      baseSha: HEAD1,
+      headSha: HEAD2,
+      source: 'crq',
+      findingFingerprints: [F1],
+    });
+    const preMerge = review({ findingFingerprints: [F1] });
+    for (const order of [
+      [acceptance(), acceptance({ reviewedBaseSha: HEAD2 })],
+      [acceptance({ reviewedBaseSha: HEAD2 }), acceptance()],
+    ]) {
+      const panels = computeOutcomePanels({
+        reviews: [preMerge, crq],
+        dispositions: [],
+        acceptances: order,
+        ciObservedHeads: [],
+        followUpDays: 10,
+        observedAt: OBSERVED_AT,
+      });
+      expect(panels.missed.restored).toEqual({ missed: 0, notMissed: 0, unknown: 1 });
+      expect(panels.unknown).toHaveLength(1);
+      expect(panels.unknown[0]?.kind).toBe('conflict');
+    }
+  });
+
+  test('a row whose availability marks consumed fields incomplete is unknown', () => {
+    // A torn disposition (root availability partial) never enters a re-fix
+    // run at all, and a torn review never establishes a covered range — the
+    // re-fix that relied on it is missing lineage, not a candidate.
+    const FA = fingerprint('src/torn.ts');
+    const FB = fingerprint('src/lost-range.ts');
+    const panels = computeOutcomePanels({
+      reviews: [review({ findingFingerprints: [FB], availability: avail('partial') })],
+      dispositions: [
+        disposition(FA, HEAD1, ['fix verified']),
+        disposition(FA, HEAD2, ['fix verified again'], {
+          observedAt: T2,
+          availability: avail('partial'),
+        }),
+        disposition(FB, HEAD1, ['fix verified']),
+        disposition(FB, HEAD2, ['fix verified again'], { observedAt: T2 }),
+      ],
+      acceptances: [],
+      ciObservedHeads: [],
+      followUpDays: 10,
+      observedAt: OBSERVED_AT,
+    });
+
+    expect(panels.harm.refix).toEqual({ candidates: 0, explained: 0, unknown: 1 });
+    expect(panels.unknown).toHaveLength(3);
+    expect(panels.unknown.filter((entry) => entry.kind === 'unavailable')).toHaveLength(2);
+    expect(panels.unknown.filter((entry) => entry.kind === 'missing')).toHaveLength(1);
+  });
+
+  test('an uncovered review never establishes a covered range', () => {
+    // A review that recorded no coverage proof, or one the vendor did not
+    // complete, observed nothing at a covered range: a re-fix of its
+    // finding is missing lineage, not a harm candidate.
+    const F5 = fingerprint('src/uncovered.ts');
+    const panels = computeOutcomePanels({
+      reviews: [
+        review({
+          coverage: 'none-recorded',
+          vendorCompletion: 'unknown',
+          findingFingerprints: [F5],
+        }),
+        review({ vendorCompletion: 'not-completed', findingFingerprints: [F1] }),
+      ],
+      dispositions: [
+        disposition(F5, HEAD1, ['fix verified']),
+        disposition(F5, HEAD2, ['fix verified again'], { observedAt: T2 }),
+      ],
+      acceptances: [],
+      ciObservedHeads: [],
+      followUpDays: 10,
+      observedAt: OBSERVED_AT,
+    });
+
+    expect(panels.harm.refix).toEqual({ candidates: 0, explained: 0, unknown: 1 });
     expect(panels.unknown).toHaveLength(1);
-    expect(panels.unknown[0]?.kind).toBe('conflict');
+    expect(panels.unknown[0]?.kind).toBe('missing');
   });
 
   test('an unrecognized CI red classification is unknown evidence', () => {
@@ -326,12 +551,19 @@ describe('M10e failure evidence', () => {
         // A row with no classification at all: absent, never guessed.
         { sha: HEAD1, source: 'gh-actions' } as never,
       ],
-      population: [],
+      ciObservedHeads: [HEAD1],
       followUpDays: 10,
       observedAt: OBSERVED_AT,
     });
 
-    expect(panels.harm.ciRed).toEqual({ flake: 0, regression: 0, infrastructure: 0, unknown: 2 });
+    expect(panels.harm.ciRed).toEqual({
+      flake: 0,
+      regression: 0,
+      infrastructure: 0,
+      unknown: 2,
+      observedHeads: [HEAD1],
+      unobservedHeads: [],
+    });
     expect(panels.unknown).toHaveLength(2);
     for (const entry of panels.unknown) expect(entry.kind).toBe('unsupported');
   });
@@ -343,27 +575,21 @@ describe('M10e failure evidence', () => {
       acceptances: [],
       ciRed: [],
       population: [],
+      ciObservedHeads: [],
+      followUpDays: 10,
       observedAt: OBSERVED_AT,
     };
     expect(() => computeOutcomePanels({ ...valid, followUpDays: 0 })).toThrow(TypeError);
     expect(() => computeOutcomePanels({ ...valid, followUpDays: '10' as never })).toThrow(
       TypeError,
     );
-    expect(() =>
-      computeOutcomePanels({
-        reviews: [],
-        dispositions: [],
-        acceptances: [],
-        ciRed: [],
-        population: [],
-        followUpDays: 10,
-        observedAt: 'yesterday',
-      }),
-    ).toThrow(TypeError);
+    expect(() => computeOutcomePanels({ ...valid, observedAt: 'Nov 20 2026' })).toThrow(TypeError);
+    expect(() => computeOutcomePanels({ ...valid, ciObservedHeads: 'nope' as never })).toThrow(
+      TypeError,
+    );
     expect(() =>
       computeOutcomePanels({
         ...valid,
-        followUpDays: 10,
         reviews: 'nope' as never,
       }),
     ).toThrow(TypeError);
