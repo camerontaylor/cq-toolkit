@@ -13,7 +13,9 @@
 // provenance.repoId; a null repo (no remote exists) keys as the empty identity
 // and is DISTINCT from any named repo: a null-repo row never adopts a named
 // repo's rows and vice versa, and two named repos never collide on one
-// invocation. Parent rows (session index) are keyed by (repo, workId, runId) —
+// invocation. That identity under two workIds is a conflict (unknown), never
+// a silent dedup — one invocation cannot belong to two works. Parent rows
+// (session index) are keyed by (repo, workId, runId) —
 // a composition run may span several works — and are derived aggregates: a row
 // is not added when leaves of its identity are observed, so costs count once,
 // and a row whose observed leaves fall short of its claims is recorded as a
@@ -48,9 +50,14 @@ const canonical = (value) =>
           .join(',')}}`
       : JSON.stringify(value);
 
-/** Leaf fingerprint: the whole attempt payload, minus the added identity fields. */
+/**
+ * Leaf fingerprint: the whole attempt payload, minus the file source and the
+ * key fields already equal within a key (repo, runId). workId stays in: the
+ * same (repo, runId, invocation) under two works is a conflict, not a silent
+ * dedup that drops one work's evidence while its index row re-adds the cost.
+ */
 function leafFingerprint(record) {
-  const { repo: _repo, workId: _workId, runId: _runId, source: _source, ...payload } = record;
+  const { repo: _repo, runId: _runId, source: _source, ...payload } = record;
   return canonical(payload);
 }
 
@@ -188,10 +195,11 @@ function ingestJson(parsed, source, result) {
     }
     return;
   }
-  if (parsed?.indexVersion === undefined)
-    return void result.unknown.push(
-      bad(source, 'unsupported', 'no reportVersion, reportV2 or indexVersion (legacy report)'),
-    );
+  // No measurement marker at all (no reportVersion, reportV2 or indexVersion):
+  // a non-measurement .json — package.json and similar under custom roots —
+  // not evidence. Skipped silently, never an unknown that would degrade every
+  // total; a marker that is present but fails validation stays unknown below.
+  if (parsed?.indexVersion === undefined) return;
   if (parsed.indexVersion !== INDEX || !Array.isArray(parsed.sessions))
     return void result.unknown.push(
       bad(source, 'unsupported', `indexVersion ${String(parsed.indexVersion)}`),

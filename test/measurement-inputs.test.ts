@@ -1,7 +1,9 @@
 // M10b: read offline measurement artifacts. One case per asserted condition:
 //   - explicit local directories only (no ambient scan, no network);
-//   - dedup by repo/run/invocation identity (null repo is its own identity);
+//   - dedup by repo/run/invocation identity (null repo is its own identity; a
+//     workId disagreement on one identity is a conflict, never a silent dedup);
 //   - schema version and checksum validation (full v2 report schema);
+//   - non-measurement files (.log, markerless .json) are skipped silently;
 //   - corrupt/missing/untrusted/unsupported/conflicting children -> unknown
 //     bucket, never a fallback zero, and never a known total (P1-1: any
 //     rejected, torn, partially observed or unavailable input forces partial
@@ -445,6 +447,24 @@ describe('M10b nominal evidence', () => {
     expect(result.totals.availability['/tokens']?.state).toBe('known');
   });
 
+  test('a stray markerless .json beside a valid report never degrades totals', async () => {
+    const base = await workspace();
+    const dir = await bundle(base, 'stray-json', {
+      'fix/state/report.json': JSON.stringify(report([attempt('inv-a', 100, 400)])),
+      'worktree/package.json': '{"name":"not-a-report"}',
+    });
+
+    const result = await readMeasurementInputs({ dirs: [dir] });
+
+    // package.json parses but carries none of the measurement markers
+    // (reportVersion, reportV2, indexVersion): non-measurement, skipped
+    // silently — the report's totals stay known, never partial.
+    expect(result.unknown).toEqual([]);
+    expect(result.inputs).toHaveLength(1);
+    expect(result.totals.tokens).toBe(100);
+    expect(result.totals.availability['/tokens']?.state).toBe('known');
+  });
+
   test('reads the embedded v2 payload in persisted operation reports', async () => {
     const base = await workspace();
     const embedded = JSON.stringify(report([attempt('inv-a', 100, 400)]));
@@ -560,18 +580,31 @@ describe('M10b missing evidence', () => {
     expect(result.totals.availability['/tokens']?.state).toBe('unavailable');
   });
 
-  test('a legacy report without reportVersion is unsupported, not silent', async () => {
+  test('a markerless .json is non-measurement; a wrong marker stays unknown', async () => {
     const base = await workspace();
-    const dir = await bundle(base, 'legacy', {
-      'fix/state/report.json': '{"attempts":[{"tokens":5}]}',
+    const stray = await bundle(base, 'stray', {
+      'worktree/package.json': '{"name":"not-a-report"}',
     });
+    const strayResult = await readMeasurementInputs({ dirs: [stray] });
 
-    const result = await readMeasurementInputs({ dirs: [dir] });
+    // No reportVersion, reportV2 or indexVersion anywhere: not measurement
+    // evidence — skipped silently, never an unknown that would degrade totals.
+    expect(strayResult.unknown).toEqual([]);
+    expect(strayResult.inputs).toEqual([]);
+    expect(strayResult.totals.tokens).toBeNull();
+    expect(strayResult.totals.availability['/tokens']?.state).toBe('n-a');
 
-    expect(result.unknown).toHaveLength(1);
-    expect(result.unknown[0]).toMatchObject({ kind: 'unsupported' });
-    expect(result.totals.tokens).toBeNull();
-    expect(result.totals.availability['/tokens']?.state).toBe('unavailable');
+    const wrongVersion = await bundle(base, 'wrong-version', {
+      'fix/state/report.json': '{"reportVersion":3,"attempts":[]}',
+    });
+    const versionResult = await readMeasurementInputs({ dirs: [wrongVersion] });
+
+    // A marker that is present but fails validation is measurement evidence
+    // that could not be used: unknown, never a silent skip.
+    expect(versionResult.unknown).toHaveLength(1);
+    expect(versionResult.unknown[0]).toMatchObject({ kind: 'unsupported' });
+    expect(versionResult.totals.tokens).toBeNull();
+    expect(versionResult.totals.availability['/tokens']?.state).toBe('unavailable');
   });
 });
 
@@ -899,6 +932,30 @@ describe('M10b failure evidence', () => {
 
     expect(result.inputs).toEqual([]);
     expect(result.unknown[0]).toMatchObject({ kind: 'conflict' });
+  });
+
+  test('the same invocation under two works is a conflict, never a silent dedup', async () => {
+    const base = await workspace();
+    const dir = await bundle(base, 'two-works-one-invocation', {
+      'fix/state/report-a.json': JSON.stringify(report([attempt('inv-a', 100, 400)])),
+      'fix/state/report-b.json': JSON.stringify(
+        report([attempt('inv-a', 100, 400)], { workId: WORK2 }),
+      ),
+      'session-index/index-a.json': JSON.stringify(index(100, 400, { attempts: 1 })),
+      'session-index/index-b.json': JSON.stringify(index(100, 400, { attempts: 1, workId: WORK2 })),
+    });
+
+    const result = await readMeasurementInputs({ dirs: [dir] });
+
+    // One (repo, runId, invocation) identity claimed by two works: neither
+    // copy may win silently and drop the other work's evidence while its
+    // unmirrored index row re-adds the cost beside a known total. The workId
+    // disagreement is a conflict unknown and the total is partial.
+    expect(result.inputs).toEqual([]);
+    expect(result.unknown.filter((entry) => entry.kind === 'conflict')).toHaveLength(1);
+    expect(result.totals.tokens).toBe(200);
+    expect(result.totals.availability['/tokens']?.state).toBe('partial');
+    expect(result.totals.availability['/tokens']?.state).not.toBe('known');
   });
 
   test('conflicting parent copies are all unknown, regardless of order', async () => {
