@@ -4,45 +4,56 @@
 // What is pinned here:
 //   1. Round-trip: makeReviewAddress appends one review-observed event per
 //      review source exposure — per source/head/round, never a last-head
-//      overwrite (every round-1 population survives round 2's exposure) —
-//      with the review scope, the initial blocking population and the
-//      delivered/completed coverage of each vendor; foldObservations mirrors
-//      them into report v2 `reviews` with `/reviews` known.
+//      overwrite (every earlier population survives later rounds) — with the
+//      review scope, the per-source blocking population and the
+//      delivered/completed coverage of each vendor; the inherited initial
+//      population is stamped round 0; foldObservations mirrors them into
+//      report v2 `reviews` with `/reviews` known.
 //   2. Unknown evidence: a legacy record without a reviewed base proof is
-//      WITHHELD silently (never a fabricated base, and neutral to the
-//      observation surface — the status stays durable) while the
-//      composition's own exposures still land and the report's /reviews
-//      availability carries the gap as partial (T21 ruling); a source
-//      without coverage proof reports vendorCompletion `unknown` with
-//      not-collected lists (empty is unknown, never known-empty); legacy
-//      coverage contributes receipt references and cannot prove omissions.
+//      WITHHELD silently and counted (the report's /reviews reads partial,
+//      the observation surface stays durable); a source without coverage
+//      proof reports vendorCompletion `unknown` with not-collected lists;
+//      a FOREIGN coverage proof (another head or base) is never attached;
+//      legacy coverage contributes receipt references and cannot prove
+//      omissions; a missing cycle id degrades reviewerId with availability.
 //   3. Failure boundary: an incomplete vendor is `not-completed` (a budget
 //      session, a delivered-not-completed piece, an excluded piece and a
-//      blocked sibling source are all recorded), and a failed review-observed
-//      append marks the surface indeterminate without moving the verdict.
+//      blocked sibling source are all recorded); abort paths EMIT the
+//      blocked re-review report or COUNT the exposure withheld with a
+//      distinct reason (no anchored head, identity changed, merge-base
+//      unresolved) — never dropped, /reviews never known over a gap; and a
+//      failed review-observed append marks the surface indeterminate
+//      without moving the verdict.
 // Fake/local inputs only: no provider, no network, no credentials.
 import { randomUUID } from 'node:crypto';
+import { join } from 'node:path';
 import { expect, test } from 'vitest';
 import { makeReviewAddress } from '../../../src/ops/review/address.js';
 import type { ReviewCoverageV2 } from '../../../src/ops/review/internal/reviewCoverageV2.js';
-import type { ReviewSource } from '../../../src/ops/review/findings.js';
+import type { FindingsRecord, Finding, ReviewSource } from '../../../src/ops/review/findings.js';
 import { foldObservations } from '../../../src/ops/fix/reportFold.js';
 import { ReportV2Schema } from '../../../src/kernel/schema.js';
 import { openObservationWriter, readObservations } from '../../../src/kernel/observation.js';
 import type { ObservationWriter } from '../../../src/kernel/observation.js';
 import type { ObservationEvent, ReviewObservedPayload } from '../../../src/kernel/types.js';
-import { fixture, reportOf } from './address.helpers.js';
+import { fixture, finding, reportOf } from './address.helpers.js';
+import { initial, world } from './address-pr.helpers.js';
 
 const reviewEvents = (events: readonly ObservationEvent[]): ReviewObservedPayload[] =>
   events.flatMap((event) => (event.type === 'review-observed' ? [event.payload] : []));
 
+const reviewsOf = async (journalDir: string) => {
+  const streams = await readObservations(journalDir);
+  return { streams, reviews: reviewEvents(streams[0]!.events) };
+};
+
 const hash = (character: string) => character.repeat(64);
 
 /** A v2 coverage fixture: one completed piece, one budget-stalled delivery, one exclusion. */
-const incompleteCoverage = (head: string): ReviewCoverageV2 => ({
+const incompleteCoverage = (head: string, base: string): ReviewCoverageV2 => ({
   version: 2,
   head,
-  base: 'c'.repeat(40),
+  base,
   scope: 'full',
   mode: 'session',
   modeReason: 'fixture',
@@ -114,6 +125,11 @@ const legacyCoverage = (head: string, base: string) => ({
   ],
 });
 
+const withReviewed = (record: FindingsRecord): FindingsRecord => {
+  const { reviewed: _reviewed, ...legacy } = record;
+  return legacy;
+};
+
 // ---- T21 round-trip -------------------------------------------------------
 
 test('T21 round-trip', async () => {
@@ -123,13 +139,11 @@ test('T21 round-trip', async () => {
     expect(result.status, JSON.stringify(result)).toBe('needs-human');
     expect(reportOf(result).stop).toBe('round-cap');
 
-    const streams = await readObservations(f.input.journalDir);
-    expect(streams).toHaveLength(1);
-    const reviews = reviewEvents(streams[0]!.events);
-    // Round 1's initial population, round 1's re-review and round 2's
-    // re-review: every exposure of the head is retained — the round-2 event
-    // never overwrote a round-1 population (the stream is append-only).
-    expect(reviews.map((payload) => payload.round)).toEqual([1, 1, 2]);
+    const { streams, reviews } = await reviewsOf(f.input.journalDir);
+    // The inherited initial population (round 0), round 1's re-review and
+    // round 2's re-review: every exposure of the head is retained — a later
+    // round never overwrote an earlier population (append-only stream).
+    expect(reviews.map((payload) => payload.round)).toEqual([0, 1, 2]);
     const base = f.repo.git('merge-base', 'origin/main', 'HEAD').trim();
     const head = f.record().head;
     const fingerprint = {
@@ -144,7 +158,7 @@ test('T21 round-trip', async () => {
       headSha: head,
       source: 'agent',
       reviewerId: 'agent',
-      round: 1,
+      round: 0,
       coverage: 'none-recorded',
       findingFingerprints: [fingerprint],
       initialBlocking: [fingerprint],
@@ -153,10 +167,12 @@ test('T21 round-trip', async () => {
       omissions: [],
       vendorCompletion: 'unknown',
     });
+    // No cycle id on the fixture source: the kind stands in, disclosed.
     expect(Object.keys(reviews[0]!.availability).sort()).toEqual([
       '/completed',
       '/delivered',
       '/omissions',
+      '/reviewerId',
     ]);
     // The re-review that found nothing reports a KNOWN-EMPTY population.
     expect(reviews[1]!.headSha).toBe(head);
@@ -184,10 +200,9 @@ test('T21 unknown evidence', async () => {
   try {
     // A legacy initial record without a reviewed base proof cannot anchor a
     // scope row: the exposure is withheld SILENTLY — nothing is fabricated,
-    // and the withholding is neutral to the observation surface (the wiring
-    // contract keeps the status durable and the close/drain reason intact).
-    const { reviewed: _reviewed, ...legacy } = f.record();
-    const result = await makeReviewAddress({ ...f.deps, initialRecord: legacy })({
+    // the withholding is neutral to the observation surface, and the count
+    // alone carries the gap into /reviews as partial.
+    const result = await makeReviewAddress({ ...f.deps, initialRecord: withReviewed(f.record()) })({
       ...f.input,
       rounds: 2,
     });
@@ -195,14 +210,11 @@ test('T21 unknown evidence', async () => {
     const report = reportOf(result);
     expect(report.observation?.failure).toBeNull();
     expect(report.observation?.status).toBe('durable');
-    const streams = await readObservations(f.input.journalDir);
-    const reviews = reviewEvents(streams[0]!.events);
+    const { reviews } = await reviewsOf(f.input.journalDir);
     // Only this composition's own exposures (the two re-reviews) landed; the
     // withheld initial population appears as no event at all.
     expect(reviews.map((payload) => payload.round)).toEqual([1, 2]);
     expect(reviews.some((payload) => payload.initialBlocking?.length)).toBe(false);
-    // The report-side note (T21 ruling): the withheld count — never the
-    // stream — carries the gap, so /reviews reads partial, not known.
     expect(report.reportV2?.availability['/reviews']).toMatchObject({
       state: 'partial',
       reason: '1 exposure(s) withheld: no reviewed base proof',
@@ -225,8 +237,7 @@ test('T21 unknown evidence', async () => {
       review: async () => ({ status: 'ok', value: { ...f2.record(), sources, findings: [] } }),
     })({ ...f2.input, rounds: 2 });
     expect(result.status, JSON.stringify(result)).toBe('needs-human');
-    const streams = await readObservations(f2.input.journalDir);
-    const reviews = reviewEvents(streams[0]!.events);
+    const { reviews } = await reviewsOf(f2.input.journalDir);
     expect(reviews).toHaveLength(3);
     const legacy = reviews[1]!;
     expect(legacy).toMatchObject({
@@ -244,6 +255,33 @@ test('T21 unknown evidence', async () => {
   } finally {
     await f2.cleanup();
   }
+
+  // A foreign coverage proof — one naming another head — is never attached.
+  const f3 = await fixture();
+  try {
+    const base = f3.record().reviewed!.base;
+    const sources: ReviewSource[] = [
+      {
+        kind: 'agent',
+        status: 'terminal',
+        coverage: incompleteCoverage('e'.repeat(40), base),
+      },
+    ];
+    const result = await makeReviewAddress({
+      ...f3.deps,
+      review: async () => ({ status: 'ok', value: { ...f3.record(), sources, findings: [] } }),
+    })({ ...f3.input, rounds: 1 });
+    expect(result.status, JSON.stringify(result)).toBe('needs-human');
+    const { reviews } = await reviewsOf(f3.input.journalDir);
+    const foreign = reviews[1]!;
+    expect(foreign.coverage).toBe('foreign');
+    expect(foreign.vendorCompletion).toBe('unknown');
+    expect(foreign.delivered).toEqual([]);
+    expect(foreign.availability['/delivered']?.state).toBe('not-collected');
+    expect(foreign.availability['/delivered']?.reason).toContain('foreign proof is never attached');
+  } finally {
+    await f3.cleanup();
+  }
 }, 120_000);
 
 // ---- T21 withheld exposure beside a normal one ----------------------------
@@ -255,8 +293,7 @@ test('T21 withheld exposure beside a normal one', async () => {
   // report's /reviews availability carries the gap as partial.
   const f = await fixture();
   try {
-    const { reviewed: _reviewed, ...legacy } = f.record();
-    const result = await makeReviewAddress({ ...f.deps, initialRecord: legacy })({
+    const result = await makeReviewAddress({ ...f.deps, initialRecord: withReviewed(f.record()) })({
       ...f.input,
       rounds: 1,
     });
@@ -264,8 +301,7 @@ test('T21 withheld exposure beside a normal one', async () => {
     const report = reportOf(result);
     expect(report.observation?.status).toBe('durable');
     expect(report.observation?.failure).toBeNull();
-    const streams = await readObservations(f.input.journalDir);
-    const reviews = reviewEvents(streams[0]!.events);
+    const { reviews } = await reviewsOf(f.input.journalDir);
     expect(reviews.map((payload) => payload.round)).toEqual([1]);
     expect(report.reportV2?.reviews).toHaveLength(1);
     expect(report.reportV2?.availability['/reviews']).toMatchObject({
@@ -286,8 +322,9 @@ test('T21 failure boundary', async () => {
   const f = await fixture();
   try {
     const head = f.record().head;
+    const base = f.record().reviewed!.base;
     const sources: ReviewSource[] = [
-      { kind: 'agent', status: 'terminal', coverage: incompleteCoverage(head) },
+      { kind: 'agent', status: 'terminal', coverage: incompleteCoverage(head, base) },
       { kind: 'coderabbit', status: 'blocked', reason: 'vendor auth refused' },
     ];
     const result = await makeReviewAddress({
@@ -295,9 +332,8 @@ test('T21 failure boundary', async () => {
       review: async () => ({ status: 'ok', value: { ...f.record(), sources, findings: [] } }),
     })({ ...f.input, rounds: 1 });
     expect(result.status, JSON.stringify(result)).toBe('needs-human');
-    const streams = await readObservations(f.input.journalDir);
-    const reviews = reviewEvents(streams[0]!.events);
-    // The initial exposure plus one event per refreshed source: the
+    const { reviews } = await reviewsOf(f.input.journalDir);
+    // The inherited exposure plus one event per refreshed source: the
     // incomplete agent vendor AND the blocked coderabbit sibling.
     expect(reviews.map((payload) => payload.source)).toEqual(['agent', 'agent', 'coderabbit']);
     expect(reviews[1]).toMatchObject({
@@ -360,3 +396,189 @@ test('T21 failure boundary', async () => {
     await f2.cleanup();
   }
 }, 120_000);
+
+// ---- T21 abort paths ------------------------------------------------------
+
+test('T21 re-review exposures survive abort paths', async () => {
+  // P1 probe C: a blocked vendor re-review (needs-human WITH a report) is
+  // EMITTED — blocked sources as not-completed — instead of dropped, and
+  // /reviews reads known (a measured exposure, no gap).
+  const f = await fixture();
+  try {
+    const blockedReport: FindingsRecord = {
+      ...f.record(),
+      sources: [{ kind: 'coderabbit', status: 'blocked', reason: 'vendor auth refused' }],
+      findings: [],
+    };
+    const result = await makeReviewAddress({
+      ...f.deps,
+      review: async () => ({
+        status: 'needs-human',
+        reason: 'review unavailable',
+        report: blockedReport,
+      }),
+    })({ ...f.input, rounds: 2 });
+    expect(result.status, JSON.stringify(result)).toBe('needs-human');
+    const report = reportOf(result);
+    const { reviews } = await reviewsOf(f.input.journalDir);
+    expect(reviews.map((payload) => [payload.round, payload.source])).toEqual([
+      [0, 'agent'],
+      [1, 'coderabbit'],
+    ]);
+    expect(reviews[1]!.vendorCompletion).toBe('not-completed');
+    expect(report.reportV2?.availability['/reviews']).toMatchObject({ state: 'known' });
+  } finally {
+    await f.cleanup();
+  }
+
+  // No report at all: counted withheld with its distinct reason; never dropped.
+  const f2 = await fixture();
+  try {
+    const result = await makeReviewAddress({
+      ...f2.deps,
+      review: async () => ({ status: 'failed', error: 'scripted reviewer crash' }),
+    })({ ...f2.input, rounds: 1 });
+    expect(result.status, JSON.stringify(result)).toBe('needs-human');
+    expect(reportOf(result).reportV2?.availability['/reviews']).toMatchObject({
+      state: 'partial',
+      reason: '1 exposure(s) withheld: re-review returned no anchored head',
+    });
+    const { reviews } = await reviewsOf(f2.input.journalDir);
+    expect(reviews.map((payload) => payload.round)).toEqual([0]);
+  } finally {
+    await f2.cleanup();
+  }
+
+  // Identity changed: withheld with its distinct reason.
+  const f3 = await fixture();
+  try {
+    const result = await makeReviewAddress({
+      ...f3.deps,
+      review: async () => ({ status: 'ok', value: { ...f3.record(), head: 'd'.repeat(40) } }),
+    })({ ...f3.input, rounds: 1 });
+    expect(result.status, JSON.stringify(result)).toBe('needs-human');
+    expect(reportOf(result).reportV2?.availability['/reviews']).toMatchObject({
+      state: 'partial',
+      reason: '1 exposure(s) withheld: identity changed before the re-review was recorded',
+    });
+  } finally {
+    await f3.cleanup();
+  }
+}, 120_000);
+
+// ---- T21 per-source rows --------------------------------------------------
+
+test('T21 rows are per source with per-source identity', async () => {
+  // P3-2: each row carries only its own source's findings and blocking
+  // population; reviewerId comes from the source's cycle identity when
+  // recorded, and degrades with availability (never a guessed identity).
+  const f = await fixture();
+  try {
+    const record: FindingsRecord = {
+      ...f.record(),
+      sources: [
+        { kind: 'agent', status: 'terminal', cycleId: 'cyc-42' },
+        { kind: 'coderabbit', status: 'terminal' },
+      ],
+      findings: [
+        { ...finding('a1'), severity: 'major' } satisfies Finding,
+        { ...finding('a2'), severity: 'minor' } satisfies Finding,
+        { ...finding('c1'), source: 'coderabbit' } satisfies Finding,
+      ],
+    };
+    const result = await makeReviewAddress({ ...f.deps, initialRecord: record })({
+      ...f.input,
+      rounds: 1,
+    });
+    expect(result.status, JSON.stringify(result)).toBe('needs-human');
+    const { reviews } = await reviewsOf(f.input.journalDir);
+    expect(reviews.map((payload) => payload.source)).toEqual(['agent', 'coderabbit']);
+    expect(reviews[0]!.reviewerId).toBe('cyc-42');
+    expect(reviews[0]!.availability['/reviewerId']).toBeUndefined();
+    expect(reviews[0]!.findingFingerprints.map((fp) => fp.path)).toEqual([
+      'src/a1.ts',
+      'src/a2.ts',
+    ]);
+    expect(reviews[0]!.initialBlocking?.map((fp) => fp.path)).toEqual(['src/a1.ts']);
+    expect(reviews[1]!.reviewerId).toBe('coderabbit');
+    expect(reviews[1]!.availability['/reviewerId']).toMatchObject({ state: 'not-collected' });
+    expect(reviews[1]!.findingFingerprints.map((fp) => fp.path)).toEqual(['src/c1.ts']);
+  } finally {
+    await f.cleanup();
+  }
+}, 120_000);
+
+// ---- T21 PR lane ----------------------------------------------------------
+
+test('T21 PR lane emits both exposure sites with the pinned base', async () => {
+  const w = await world(false, { expectedHead: initial });
+  try {
+    const result = await w.run();
+    const report = result.status === 'ok' ? result.value : result.report!;
+    const { reviews } = await reviewsOf(join(w.root, 'journal'));
+    // Site 1: the PR-thread population of the round's head. Site 2: the
+    // agent re-review of the same head. One lane base pins both scopes.
+    expect(reviews.map((payload) => [payload.source, payload.round])).toEqual([
+      ['pr-threads', 1],
+      ['agent', 1],
+    ]);
+    expect(reviews[0]!.baseSha).toMatch(/^[0-9a-f]{40}$/);
+    expect(reviews[1]!.baseSha).toBe(reviews[0]!.baseSha);
+    expect(reviews[0]!.headSha).toBe(reviews[1]!.headSha);
+    expect(report.observation?.status).toBe('durable');
+  } finally {
+    await w.cleanup();
+  }
+}, 180_000);
+
+test('T21 PR lane counts a withheld exposure when the merge-base is unresolved', async () => {
+  // P3-3: the pin failure carries its own distinct withheld reason (never
+  // the record's "no reviewed base proof"), and the surface stays durable.
+  const w = await world(false, { expectedHead: initial, failMergeBase: true });
+  try {
+    const result = await w.run();
+    const report = result.status === 'ok' ? result.value : result.report!;
+    const { reviews } = await reviewsOf(join(w.root, 'journal'));
+    expect(reviews).toEqual([]);
+    expect(report.reportV2?.availability['/reviews']).toMatchObject({
+      state: 'partial',
+      reason: '1 exposure(s) withheld: merge-base unresolved',
+    });
+    expect(report.observation?.status).toBe('durable');
+  } finally {
+    await w.cleanup();
+  }
+}, 180_000);
+
+test('T21 PR lane abort paths count withheld re-reviews', async () => {
+  // P1 PR equivalent: a failed re-review (no report) and an identity change
+  // are counted withheld with distinct reasons; the PR-thread population
+  // that already landed stays recorded, and /reviews reads partial.
+  const w = await world(false, { expectedHead: initial, reviewOutcome: 'failed' });
+  try {
+    const result = await w.run();
+    const report = result.status === 'ok' ? result.value : result.report!;
+    const { reviews } = await reviewsOf(join(w.root, 'journal'));
+    expect(reviews.map((payload) => [payload.source, payload.round])).toEqual([['pr-threads', 1]]);
+    expect(report.reportV2?.availability['/reviews']).toMatchObject({
+      state: 'partial',
+      reason: '1 exposure(s) withheld: re-review returned no anchored head',
+    });
+  } finally {
+    await w.cleanup();
+  }
+
+  const w2 = await world(false, { expectedHead: initial, reviewOutcome: 'wrong-head' });
+  try {
+    const result = await w2.run();
+    const report = result.status === 'ok' ? result.value : result.report!;
+    const { reviews } = await reviewsOf(join(w2.root, 'journal'));
+    expect(reviews.map((payload) => [payload.source, payload.round])).toEqual([['pr-threads', 1]]);
+    expect(report.reportV2?.availability['/reviews']).toMatchObject({
+      state: 'partial',
+      reason: '1 exposure(s) withheld: identity changed before the re-review was recorded',
+    });
+  } finally {
+    await w2.cleanup();
+  }
+}, 240_000);

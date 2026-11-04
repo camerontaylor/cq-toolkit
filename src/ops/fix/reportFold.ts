@@ -19,11 +19,19 @@ export interface ReportFoldInput {
   kernelRuns?: readonly KernelRunDescriptor[];
   producer: 'fix' | 'address';
   /**
-   * ADR-0008 T21 ruling (2026-11-04): review exposures withheld for lack of
-   * a reviewed base proof — no event, no surface effect, so this count alone
-   * keeps the gap from reading as complete evidence. Nonnegative.
+   * ADR-0008 T21 rulings (2026-11-04): review exposures the composition
+   * withheld, one entry per source with its distinct reason (no reviewed base
+   * proof, merge-base unresolved, identity changed, no anchored head) — no
+   * event, no surface effect, so the reasons alone keep the gap from reading
+   * as complete evidence.
    */
-  withheldReviews?: number;
+  withheldReviewReasons?: readonly string[];
+  /**
+   * Records whose exposures were representable (guards passed), so an empty
+   * review list can distinguish known-zero from a run that never observed a
+   * review exposure.
+   */
+  reviewExposureRecords?: number;
 }
 const unavailable = (reason: string): AvailabilityRecord => ({
   state: 'unavailable',
@@ -124,18 +132,22 @@ export function foldObservations(input: ReportFoldInput): ReportV2 {
   ]) {
     availability[`/${field}`] = unavailable('producer not yet wired to the composition report');
   }
-  // Same producer-first rule as /dispositions. A withheld exposure leaves
-  // the stream clean, so its count — never the stream — carries the gap.
-  const withheld = input.withheldReviews ?? 0;
+  // Same producer-first rule as /dispositions. Withheld exposures leave the
+  // stream clean, so their reasons — never the stream — carry the gap, and
+  // /reviews is never known while anything is withheld. An empty list is
+  // known-zero only when a record's exposures were actually observed.
+  const withheldReasons = input.withheldReviewReasons ?? [];
   availability['/reviews'] =
     input.producer !== 'address'
       ? unavailable('the fix composition has no review-observed producer')
-      : partial || withheld > 0
+      : partial || withheldReasons.length > 0
         ? {
             state: 'partial',
             reason: [
               partial ? 'torn observation stream; partial evidence only' : null,
-              withheld > 0 ? `${withheld} exposure(s) withheld: no reviewed base proof` : null,
+              withheldReasons.length > 0
+                ? `${withheldReasons.length} exposure(s) withheld: ${[...new Set(withheldReasons)].join('; ')}`
+                : null,
             ]
               .filter((clause) => clause !== null)
               .join('; '),
@@ -147,11 +159,13 @@ export function foldObservations(input: ReportFoldInput): ReportV2 {
               reason: 'measured review-observed events in the composition stream',
               source: null,
             }
-          : {
-              state: 'known-zero',
-              reason: 'the complete address stream recorded no review exposure',
-              source: null,
-            };
+          : (input.reviewExposureRecords ?? 0) > 0
+            ? {
+                state: 'known-zero',
+                reason: 'the complete address stream recorded no review exposure',
+                source: null,
+              }
+            : unavailable('the run ended before any review exposure was observed');
   // The producer check comes FIRST: T36 semantics are unchanged, so a fix
   // composition has no finding-disposition producer at all, and a torn stream
   // or header fallback must not re-label that absence as partial evidence.
@@ -229,7 +243,12 @@ export function assembleReportV2(
     try {
       const reportV2 = foldObservations({
         producer: input.producer,
-        ...(input.withheldReviews !== undefined ? { withheldReviews: input.withheldReviews } : {}),
+        ...(input.withheldReviewReasons !== undefined
+          ? { withheldReviewReasons: input.withheldReviewReasons }
+          : {}),
+        ...(input.reviewExposureRecords !== undefined
+          ? { reviewExposureRecords: input.reviewExposureRecords }
+          : {}),
         streams: [
           {
             workId: input.header.payload.correlation.workId,

@@ -49,6 +49,8 @@ export async function world(
     failPushFrom?: { ordinal: number; stderr: string };
     /** Caller-asserted PR head (the pr:N base witness inputs). */
     expectedHead?: string;
+    /** Fail every merge-base read, so the composition's PR pin cannot resolve. */
+    failMergeBase?: boolean;
     /**
      * The clone NAMES the asserted head but does not CONTAIN its object: ref
      * and string paths resolve it (admission and the worktree guard agree on
@@ -442,6 +444,8 @@ export async function world(
       return cur === from ? ok(out.join('\n')) : { code: 1, stdout: '', stderr: 'bad range' };
     }
     if (a[0] === 'merge-base') {
+      if (options.failMergeBase)
+        return { code: 1, stdout: '', stderr: 'fake: merge-base unresolved' };
       const from = a[2],
         to = a[3] === 'HEAD' ? head : a[3];
       // The read form (with --end-of-options, four args) returns the actual

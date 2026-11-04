@@ -448,8 +448,11 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
         })
       | undefined;
     let observationClosed = false;
-    // T21 ruling: withheld exposures carry their gap into /reviews availability only.
-    let withheldReviewExposures = 0;
+    // T21 rulings: every exposure is emitted or counted withheld (one entry
+    // per source, with its distinct reason); representable records count
+    // separately so /reviews can distinguish known-zero from never-attempted.
+    const withheldReviewReasons: string[] = [];
+    let reviewExposureRecords = 0;
     // Links recorded by a settled PR fix run are appended asynchronously (the
     // loop does not await that callback). Keep every pending link so finish()
     // can drain them BEFORE the stream closes: a link must never race close(),
@@ -494,7 +497,8 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
         failureFree: observation.status !== 'indeterminate',
         kernelRuns: observation.kernelRuns,
         producer: 'address',
-        withheldReviews: withheldReviewExposures,
+        withheldReviewReasons: [...withheldReviewReasons],
+        reviewExposureRecords,
       });
       if (assembled.reportV2) report.reportV2 = assembled.reportV2;
       return {
@@ -2467,30 +2471,41 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
              * reviewed record — append-only, never a last-head overwrite;
              * blocked vendors count as not-completed. Scope base: the
              * record's `reviewed` proof, else the lane base for records this
-             * composition produced; else withheld silently and counted into
-             * /reviews availability (never surfaced on the stream, never a
-             * fabricated base). A failed append is an observation failure;
-             * it never rewrites the verdict.
+             * composition produced; else withheld silently (one entry per
+             * source, distinct reason) and folded into /reviews as partial.
+             * A foreign coverage proof (head or base naming another record)
+             * is never attached. Rows carry the findings attributed to their
+             * source; with no attributable findings anywhere the record
+             * union stands in. A failed append is an observation failure; it
+             * never rewrites the verdict.
              */
             const emitReviewObserved = async (
               round: number,
               record: FindingsRecord,
-              laneBase?: string | undefined,
+              lane?: { base?: string | undefined; unresolved?: string | undefined },
             ): Promise<void> => {
               if (observation?.writer === undefined) return;
               const writer = observation.writer;
               const COMMIT_ID = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
-              if (!COMMIT_ID.test(record.head)) return;
+              const withhold = (reason: string): void => {
+                for (let index = 0; index < record.sources.length; index++)
+                  withheldReviewReasons.push(reason);
+              };
+              if (!COMMIT_ID.test(record.head)) {
+                withhold('record head is not a commit id');
+                return;
+              }
               const base =
                 record.reviewed !== undefined && COMMIT_ID.test(record.reviewed.base)
                   ? record.reviewed.base
-                  : laneBase !== undefined && COMMIT_ID.test(laneBase)
-                    ? laneBase
+                  : lane?.base !== undefined && COMMIT_ID.test(lane.base)
+                    ? lane.base
                     : undefined;
               if (base === undefined) {
-                withheldReviewExposures++;
+                withhold(lane?.unresolved ?? 'no reviewed base proof');
                 return;
               }
+              reviewExposureRecords++;
               const fingerprintOf = (finding: Finding): FindingFingerprint =>
                 finding.fingerprint ?? {
                   version: 1,
@@ -2499,29 +2514,38 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                   path: finding.file ?? '',
                   spanContentHash: null,
                 };
-              const scope = record.findings.map(fingerprintOf);
-              const initialBlocking = openBlocking(record, policy.review.blockingSeverities).map(
-                fingerprintOf,
-              );
               const notCollected = (reason: string): AvailabilityRecord => ({
                 state: 'not-collected',
                 reason,
                 source: null,
               });
+              const anyAttributed = record.findings.some((finding) =>
+                record.sources.some((source) => source.kind === finding.source),
+              );
               for (const source of record.sources) {
                 const parsed =
                   source.coverage === undefined
                     ? undefined
                     : ReviewCoverageSchema.safeParse(source.coverage);
                 const proof = parsed?.success ? parsed.data : undefined;
-                const v2 = proof !== undefined && 'version' in proof ? proof : undefined;
-                const legacy = proof !== undefined && !('version' in proof) ? proof : undefined;
+                const usable =
+                  proof !== undefined && proof.head === record.head && proof.base === base
+                    ? proof
+                    : undefined;
+                const v2 = usable !== undefined && 'version' in usable ? usable : undefined;
+                const legacy = usable !== undefined && !('version' in usable) ? usable : undefined;
                 const availability: Record<string, AvailabilityRecord> = {};
                 let delivered: string[] = [];
                 let completed: string[] = [];
                 let omissions: string[] = [];
                 let coverage = 'none-recorded';
-                if (v2 !== undefined) {
+                if (proof !== undefined && usable === undefined) {
+                  for (const pointer of ['/delivered', '/completed', '/omissions'])
+                    availability[pointer] = notCollected(
+                      'the coverage proof names another head or base; a foreign proof is never attached',
+                    );
+                  coverage = 'foreign';
+                } else if (v2 !== undefined) {
                   delivered = v2.pieces
                     .filter((piece) => piece.state === 'delivered' || piece.state === 'completed')
                     .map((piece) => piece.path);
@@ -2559,6 +2583,13 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                           ? ('completed' as const)
                           : ('not-completed' as const)
                         : ('unknown' as const);
+                if (source.cycleId === undefined)
+                  availability['/reviewerId'] = notCollected(
+                    'the source recorded no cycle id; the producer kind stands in, never a guessed vendor identity',
+                  );
+                const row = anyAttributed
+                  ? record.findings.filter((finding) => finding.source === source.kind)
+                  : record.findings;
                 const event: ReviewObservedJournalEvent = {
                   type: 'review-observed',
                   runId: observation.compositionRunId,
@@ -2570,10 +2601,13 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                   payload: {
                     baseSha: base,
                     headSha: record.head,
-                    findingFingerprints: scope,
+                    findingFingerprints: row.map(fingerprintOf),
                     coverage,
-                    initialBlocking,
-                    reviewerId: source.kind,
+                    initialBlocking: openBlocking(
+                      { findings: row },
+                      policy.review.blockingSeverities,
+                    ).map(fingerprintOf),
+                    reviewerId: source.cycleId ?? source.kind,
                     source: source.kind,
                     round,
                     delivered,
@@ -2590,13 +2624,20 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                 }
               }
             };
-            /** The PR lane comparison base for review-observed scope rows. */
-            const prLaneBase = async (): Promise<string | undefined> => {
-              if (input.base !== undefined) return input.base;
+            /**
+             * The PR lane comparison base for review-observed scope rows: the
+             * caller-asserted base, else the once-pinned merge-base. A pin
+             * failure carries its own withheld reason.
+             */
+            const prLaneBase = async (): Promise<{
+              base?: string | undefined;
+              unresolved?: string | undefined;
+            }> => {
+              if (input.base !== undefined) return { base: input.base };
               try {
-                return await reviewedBasePinned?.();
+                return { base: await reviewedBasePinned?.() };
               } catch {
-                return undefined; // the pin's own failure surfaces at its consumer
+                return { unresolved: 'merge-base unresolved' };
               }
             };
             for (let round = 1; round <= policy.review.rounds; round++) {
@@ -3018,14 +3059,22 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                 });
                 if (agent.status !== 'ok') {
                   if (agent.report) noteAdvisories(agent.report);
+                  // T21/P1: the aborted re-review is still an exposure —
+                  // emit its record (blocked vendors as not-completed) or
+                  // count it withheld; never dropped on the exit path.
+                  if (agent.report !== undefined)
+                    await emitReviewObserved(round, agent.report, await prLaneBase());
+                  else withheldReviewReasons.push('re-review returned no anchored head');
                   return await finish(
                     'needs-human',
                     `PR re-review: ${issue(agent)}`,
                     rereviewStop(agent),
                   );
                 }
-                if (agent.value.branch !== threads.branch || agent.value.head !== threads.head)
+                if (agent.value.branch !== threads.branch || agent.value.head !== threads.head) {
+                  withheldReviewReasons.push('identity changed before the re-review was recorded');
                   return await finish('needs-human', 'PR re-review identity changed');
+                }
                 // T21: the agent re-review exposure of the same head.
                 await emitReviewObserved(round, agent.value, await prLaneBase());
                 previous = retainDeferred(merge([threads, agent.value]));
@@ -3103,9 +3152,10 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                   );
                 previous = record;
                 report.verifiedHead ??= record.head;
-                // T21: the inherited initial population; its base proof is
-                // the record's own (produced outside this composition).
-                await emitReviewObserved(round, record);
+                // T21: the inherited initial population, stamped round 0
+                // (inherited before round 1); its base proof is the record's
+                // own (produced outside this composition).
+                await emitReviewObserved(0, record);
               }
               report.findings = previous.findings;
               noteAdvisories(previous);
@@ -3151,6 +3201,12 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                     : undefined;
               if (!refreshedRecord) {
                 if (refreshed.report) noteAdvisories(refreshed.report);
+                // T21/P1: the aborted re-review is still an exposure —
+                // emit its record (blocked vendors as not-completed) or
+                // count it withheld; never dropped on the exit path.
+                if (refreshed.report !== undefined)
+                  await emitReviewObserved(round, refreshed.report, { base: reviewedBase });
+                else withheldReviewReasons.push('re-review returned no anchored head');
                 return await finish(
                   'needs-human',
                   `re-review: ${issue(refreshed)}`,
@@ -3160,10 +3216,12 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
               if (
                 refreshedRecord.branch !== (await branchName(root)) ||
                 refreshedRecord.head !== (await gitText(root, ['rev-parse', 'HEAD']))
-              )
+              ) {
+                withheldReviewReasons.push('identity changed before the re-review was recorded');
                 return await finish('needs-human', 're-review identity changed');
+              }
               // T21: the re-review exposure of this round's head.
-              await emitReviewObserved(round, refreshedRecord, reviewedBase);
+              await emitReviewObserved(round, refreshedRecord, { base: reviewedBase });
               previous = retainDeferred(refreshedRecord);
               const complete = await hasRequiredSources(root, previous);
               if (stop()) return await finish('needs-human', stop());
