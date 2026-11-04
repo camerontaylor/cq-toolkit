@@ -71,6 +71,8 @@ function leaf(
   };
 }
 
+const avail = (state: string, reason: string) => ({ state, reason, source: null });
+
 function closure(commitSha: string, todo = false): ClosureRecord {
   return {
     commitSha,
@@ -185,6 +187,38 @@ describe('M10c nominal evidence', () => {
     expect(panels.cost.availability['/usageChannels/cached']?.state).toBe('not-collected');
     expect(panels.cost.usageChannels.input).toBe(100);
     expect(panels.cost.availability['/usageChannels/input']?.state).toBe('known');
+    // A torn per-channel pointer degrades exactly its own channel: the sibling
+    // channel and the attempt wall stay known, and a pointer the panel does
+    // not consume (/servedModel) degrades nothing at all.
+    const scoped = computeMeasurementPanels({
+      runs: [
+        makeRun({
+          attempts: [
+            leaf('inv-2', {
+              usageChannels: { input: 100, output: 50 },
+              wallMs: 5_000,
+              availability: { '/usageChannels/input': avail('partial', 'settled late') },
+            }),
+          ],
+        }),
+      ],
+    });
+    expect(scoped.cost.availability['/usageChannels/input']?.state).toBe('partial');
+    expect(scoped.cost.availability['/usageChannels/output']?.state).toBe('known');
+    expect(scoped.cost.availability['/attemptWallMs']?.state).toBe('known');
+    const unrelated = computeMeasurementPanels({
+      runs: [
+        makeRun({
+          attempts: [
+            leaf('inv-3', {
+              usageChannels: { input: 100 },
+              availability: { '/servedModel': avail('unavailable', 'provider omitted it') },
+            }),
+          ],
+        }),
+      ],
+    });
+    expect(unrelated.cost.availability['/usageChannels/input']?.state).toBe('known');
   });
 
   test('per-run denominator only, never mix placeholder units with failures', () => {
@@ -364,6 +398,22 @@ describe('M10c failure evidence', () => {
     expect(panels.cost.priceCoverage).toBeNull();
     expect(panels.cost.availability['/modeledUsd']?.state).toBe('partial');
     expect(panels.cost.availability['/modeledUsd']?.reason).toContain('price coverage');
+    // Uniform coverage over two different price tables is still not a known
+    // total: USD from mixed (or unstated) tables stays a partial subtotal.
+    const mixedTables = computeMeasurementPanels({
+      runs: [
+        makeRun({
+          attempts: [
+            leaf('inv-3', { modeledUsd: 0.25, priceCoverage: 'full', priceTableRevision: 'rev-a' }),
+            leaf('inv-4', { modeledUsd: 0.5, priceCoverage: 'full', priceTableRevision: 'rev-b' }),
+          ],
+        }),
+      ],
+    });
+    expect(mixedTables.cost.modeledUsd).toBe(0.75);
+    expect(mixedTables.cost.priceTableRevision).toBeNull();
+    expect(mixedTables.cost.availability['/modeledUsd']?.state).toBe('partial');
+    expect(mixedTables.cost.availability['/modeledUsd']?.reason).toContain('price coverage');
   });
 
   test('untrusted child values unknown rather than zero', () => {

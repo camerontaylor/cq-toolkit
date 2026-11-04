@@ -109,12 +109,21 @@ export function computeMeasurementPanels({ runs, unknown = [] } = {}) {
       }
     }
   if (conflicted.size > 0) incomplete.channels = incomplete.wall = incomplete.usd = true;
-  // A leaf's own non-known availability degrades the cost totals it feeds,
-  // conservatively across all of them (never less than the reader would).
+  // A leaf's own non-known availability degrades exactly the totals its
+  // pointers name: the root pointer covers all; the umbrella, per-channel
+  // (JSON-Pointer-escaped) and field pointers cover their own. A pointer the
+  // cost panel does not consume (/servedModel and similar) is not a statement
+  // about these totals and degrades nothing here.
+  const channelTorn = new Set();
   for (const leaf of leaves)
-    if (Object.values(leaf.availability ?? {}).some((record) => !KNOWN_STATES.has(record?.state))) {
-      incomplete.channels = incomplete.wall = incomplete.usd = true;
-      break;
+    for (const [pointer, record] of Object.entries(leaf.availability ?? {})) {
+      if (KNOWN_STATES.has(record?.state)) continue;
+      if (pointer === '') incomplete.channels = incomplete.wall = incomplete.usd = true;
+      else if (pointer === '/usageChannels') incomplete.channels = true;
+      else if (pointer.startsWith('/usageChannels/'))
+        channelTorn.add(pointer.slice(15).replaceAll('~1', '/').replaceAll('~0', '~'));
+      else if (pointer === '/wallMs') incomplete.wall = true;
+      else if (pointer === '/modeledUsd') incomplete.usd = true;
     }
   const channels = new Map();
   for (const leaf of leaves)
@@ -128,7 +137,12 @@ export function computeMeasurementPanels({ runs, unknown = [] } = {}) {
     );
   else
     for (const [name, records] of channels) {
-      const total = aggregate(records, 'value', `usage channel ${name}`, incomplete.channels);
+      const total = aggregate(
+        records,
+        'value',
+        `usage channel ${name}`,
+        incomplete.channels || channelTorn.has(name),
+      );
       usageChannels[name] = total.value;
       usageAvailability[`/usageChannels/${name.replaceAll('~', '~0').replaceAll('/', '~1')}`] =
         entry(total);
@@ -149,11 +163,13 @@ export function computeMeasurementPanels({ runs, unknown = [] } = {}) {
     badWindow ? 'a run window is inverted or unparseable' : undefined,
   );
   // Modeled price coverage is explicit: the sum never claims completeness
-  // while coverage is absent or mixed across the attempts that priced.
+  // while coverage or the price table is absent or mixed across the priced
+  // attempts (USD from different or unstated tables is never a known total).
   const coverages = [...new Set(leaves.map((leaf) => leaf.priceCoverage))];
   const revisions = [...new Set(leaves.map((leaf) => leaf.priceTableRevision))];
   const uniform = (values) => values.length === 1 && values[0] !== null;
-  const coverageIncomplete = leaves.some((leaf) => leaf.modeledUsd !== null) && !uniform(coverages);
+  const coverageIncomplete =
+    leaves.some((leaf) => leaf.modeledUsd !== null) && !(uniform(coverages) && uniform(revisions));
   const usdTotal = aggregate(
     leaves.map((leaf) => ({ usd: leaf.modeledUsd })),
     'usd',
