@@ -4,8 +4,9 @@
 //     workId disagreement on one identity is a conflict, never a silent dedup);
 //   - schema version and checksum validation (full v2 report schema);
 //   - non-measurement files (.log, markerless .json away from producer
-//     report paths) are skipped silently, while a markerless .json AT a
-//     producer report path is a legacy report — an unsupported unknown;
+//     paths) are skipped silently, while a markerless .json AT a producer
+//     path (report basename or the session-index root) is a legacy
+//     artifact — an unsupported unknown;
 //   - corrupt/missing/untrusted/unsupported/conflicting children -> unknown
 //     bucket, never a fallback zero, and never a known total (P1-1: any
 //     rejected, torn, partially observed or unavailable input forces partial
@@ -612,6 +613,27 @@ describe('M10b missing evidence', () => {
     expect(fixRunResult.inputs).toEqual([]);
     expect(fixRunResult.totals.tokens).toBeNull();
     expect(fixRunResult.totals.availability['/tokens']?.state).toBe('unavailable');
+  });
+
+  test('a markerless session index under the session-index root is unsupported, not silent', async () => {
+    const base = await workspace();
+    const dir = await bundle(base, 'legacy-index', {
+      'session-index/sessions.json': '{"sessions":[{"runId":"run-1"}]}',
+    });
+
+    // The session-index root is where the index producer writes — the archive
+    // capture explicitly selects the index artifact there (basename(path) in
+    // scripts/archive-measurement-evidence.mjs) — so a .json that parses but
+    // omits indexVersion is a legacy or broken index: expected measurement
+    // evidence that must not vanish beside valid reports (known totals
+    // despite the unusable index) or read an index-only bundle as empty n-a.
+    const result = await readMeasurementInputs({ dirs: [dir] });
+
+    expect(result.unknown).toHaveLength(1);
+    expect(result.unknown[0]).toMatchObject({ kind: 'unsupported' });
+    expect(result.inputs).toEqual([]);
+    expect(result.totals.tokens).toBeNull();
+    expect(result.totals.availability['/tokens']?.state).toBe('unavailable');
   });
 
   test('a markerless .json away from producer paths is non-measurement; a wrong marker stays unknown', async () => {
