@@ -8,7 +8,7 @@ import { describe, expect, test, vi } from 'vitest';
 import { makeReviewAddress } from '../../../src/ops/review/address.js';
 import { createEscalationState } from '../../../src/ops/fix/escalation.js';
 import { reviewPlannedUnitsOf } from '../../../src/ops/fix/measurement.js';
-import { finding, fixture, reportOf } from './address.helpers.js';
+import { config, finding, fixture, reportOf } from './address.helpers.js';
 import { world } from './address-pr.helpers.js';
 
 describe('review.address round-1 baseline', () => {
@@ -55,6 +55,75 @@ describe('review.address round-1 baseline', () => {
         initialOpenBlocking?: string[];
       };
       expect(persisted.initialOpenBlocking).toEqual(['a']);
+    } finally {
+      await f.cleanup();
+    }
+  });
+  test('a blocking finding restored by source validation joins the round-1 baseline', async () => {
+    // Q17b: with a coderabbit reviewer configured, hasRequiredSources runs
+    // deferred-context resolution BEFORE dispatch, and that resolution mutates
+    // the record — here a cached 'fixed' row with no ledger witness is
+    // reopened to open. The baseline capture must see the post-restoration
+    // population: the run dispatches and fixes the reopened row, so a
+    // pre-restoration capture would understate the denominator it reports.
+    const f = await fixture([
+      finding('a'),
+      { ...finding('b'), status: 'fixed' as const, reason: 'cached disposition' },
+    ]);
+    const { disposition: _bypass, ...realDeps } = f.deps;
+    try {
+      await f.repo.write('.gitignore', '/.cq/\n');
+      f.repo.commitAll('ignore engine state');
+      const sources = [
+        { kind: 'agent' as const, status: 'terminal' as const },
+        { kind: 'coderabbit' as const, status: 'terminal' as const },
+      ];
+      const fixedIds: string[] = [];
+      let fixedHead = '';
+      const result = await makeReviewAddress({
+        ...realDeps,
+        config: {
+          ...config,
+          review: {
+            ...config.review,
+            reviewers: ['agent', 'coderabbit'],
+            addressConcurrency: 1,
+          },
+        },
+        resolveDeferredVendorContext: async () => undefined,
+        initialRecord: { ...f.record(), sources },
+        workerFactory: () => ({
+          escalation: createEscalationState,
+          fix: async (target) => {
+            fixedIds.push(target.id);
+            await f.repo.write(`src/${target.id}.ts`, 'export const fixed = 1;\n');
+            fixedHead = f.repo.commitAll(`fix ${target.id}`);
+            return {
+              finding: { ...target, status: 'fixed' as const, reason: 'fixed' },
+              reason: 'fixed',
+              observedHead: fixedHead,
+              commit: fixedHead,
+              validation: [],
+            };
+          },
+        }),
+        review: async () => ({
+          status: 'ok' as const,
+          value: { ...f.record(), head: fixedHead, sources, findings: [] },
+        }),
+      })({ ...f.input, rounds: 1 });
+      const report = reportOf(result);
+      expect(result.status, report.reasons.join(' | ')).toBe('ok');
+      // The cached-fixed row was restored to open before dispatch…
+      expect(fixedIds).toEqual(['a', 'b']);
+      // …so the round-1 baseline holds both blockers the run worked, not just
+      // the row that was open in the raw record.
+      expect(report.initialOpenBlocking).toEqual(['a', 'b']);
+      expect(reviewPlannedUnitsOf(report)).toEqual(['a', 'b']);
+      const persisted = JSON.parse(await readFile(report.reportPath, 'utf8')) as {
+        initialOpenBlocking?: string[];
+      };
+      expect(persisted.initialOpenBlocking).toEqual(['a', 'b']);
     } finally {
       await f.cleanup();
     }

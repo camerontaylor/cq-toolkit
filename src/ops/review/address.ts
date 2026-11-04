@@ -148,7 +148,10 @@ export interface ReviewAddressReport {
    * may only GAIN ids afterwards, deduplicated, in first-seen order: each PR
    * dispatch item still captures its own id before `admitRecord` can refuse,
    * and the PR path still merges the full open-thread population before its
-   * re-review (dedup-only; the population is already seeded). It is never
+   * re-review (dedup-only; the population is already seeded). The local path
+   * captures its admitted record after deferred-source restoration and before
+   * dispatch, so a blocker the restoration reopens or appends is in the
+   * population the run works. It is never
    * reassigned and never shrunk: `openBlocking` is recomputed after fixes and
    * replaced by each successful re-review, so substituting it for the
    * measurement baseline would inflate fixes-per-run. Absent only when the run
@@ -1783,8 +1786,11 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
              * from planning (blocked).
              * Round-1 sources: the pre-dispatch seed, each PR dispatch item
              * before `admitRecord` can refuse (a dispatched item that is then
-             * refused stays counted), and the full open-thread population
-             * merged before the PR re-review (dedup-only; already seeded).
+             * refused stays counted), the full open-thread population merged
+             * before the PR re-review (dedup-only; already seeded), and the
+             * local path's admitted record captured after deferred-source
+             * restoration and before its dispatch (restoration can reopen or
+             * append blockers, and the baseline must cover what is dispatched).
              * Nothing else writes this field: `openBlocking` is recomputed
              * after fixes and `rounds[].record` is replaced by a re-review,
              * so neither may feed the measurement baseline.
@@ -2921,12 +2927,15 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
               report.findings = previous.findings;
               noteAdvisories(previous);
               report.openBlocking = openBlocking(previous, policy.review.blockingSeverities);
-              // Before any dispatch: round 1's admitted record is the initial
-              // open-blocker population. Later rounds are ignored by the guard.
-              noteInitialOpenBlocking(round, previous);
               if (!(await hasRequiredSources(root, previous)))
                 return await finish('needs-human', 'review source incomplete');
               if (stop()) return await finish('needs-human', stop());
+              // AFTER source validation and disposition restoration, BEFORE any
+              // dispatch: round 1's admitted record — including blockers that
+              // the restoration reopened or appended — is the initial
+              // open-blocker population, so the baseline covers exactly the
+              // rows this run dispatches. Later rounds are ignored by the guard.
+              noteInitialOpenBlocking(round, previous);
               report.findings = previous.findings;
               report.openBlocking = openBlocking(previous, policy.review.blockingSeverities);
               const pending = previous.findings.filter((f) => f.status === 'open');
