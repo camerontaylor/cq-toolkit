@@ -52,6 +52,13 @@ export function foldObservations(input: ReportFoldInput): ReportV2 {
   const attempts = folded.flatMap(({ stream }) =>
     stream.events.filter((event) => event.type === 'attempt-finished'),
   );
+  // ADR-0008 T19: the address composition emits one finding-disposition per
+  // DURABLE terminal adjudication. An empty list on a complete address
+  // stream is a measured zero; a torn stream stays partial; the fix producer
+  // has no disposition writer yet and stays explicitly unavailable.
+  const dispositions = folded.flatMap(({ stream }) =>
+    stream.events.flatMap((event) => (event.type === 'finding-disposition' ? [event.payload] : [])),
+  );
   const availability: ReportV2['availability'] = {
     '': {
       state: partial ? 'partial' : 'known',
@@ -94,7 +101,6 @@ export function foldObservations(input: ReportFoldInput): ReportV2 {
   for (const field of [
     'tasks',
     'gates',
-    'dispositions',
     'reviews',
     'approvals',
     'writeDecisions',
@@ -104,6 +110,29 @@ export function foldObservations(input: ReportFoldInput): ReportV2 {
   ]) {
     availability[`/${field}`] = unavailable('producer not yet wired to the composition report');
   }
+  // The producer check comes FIRST: T36 semantics are unchanged, so a fix
+  // composition has no finding-disposition producer at all, and a torn stream
+  // or header fallback must not re-label that absence as partial evidence.
+  availability['/dispositions'] =
+    input.producer !== 'address'
+      ? unavailable('the fix composition has no finding-disposition producer yet')
+      : partial
+        ? {
+            state: 'partial',
+            reason: 'torn observation stream; partial evidence only',
+            source: null,
+          }
+        : dispositions.length > 0
+          ? {
+              state: 'known',
+              reason: 'measured finding-disposition events in the composition stream',
+              source: null,
+            }
+          : {
+              state: 'known-zero',
+              reason: 'the complete address stream recorded no terminal disposition',
+              source: null,
+            };
   availability['/acceptances'] = unavailable(
     'T20 acceptance importer deferred; empty evidence is not all-clear',
   );
@@ -115,7 +144,7 @@ export function foldObservations(input: ReportFoldInput): ReportV2 {
       tasks: [],
       attempts,
       gates: [],
-      dispositions: [],
+      dispositions,
       acceptances: [],
       reviews: [],
       approvals: [],
