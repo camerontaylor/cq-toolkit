@@ -256,21 +256,29 @@ export function baselineFailuresOf(
  * Evidence rows come from either producer: FixTaskReport for a fix run,
  * AddressFix for a review run. Both normalize through the same predicate
  * above. For a review run `plannedUnits` is the INITIAL open-blocker
- * population (each initial blocker is one observed baseline failure); the
- * post-fix `openBlocking` is never substituted, so the baseline cannot shrink
- * to whatever survived the run.
+ * population (each initial blocker is one observed baseline failure), passed
+ * as `reviewPlannedUnitsOf(report)` with no `?? []`: null means the report
+ * never captured a baseline (an unseeded run), and the denominator is then
+ * UNAVAILABLE — never a known-zero read off an empty list. An explicitly
+ * empty array is different: a captured, genuinely empty population is a
+ * known zero. The post-fix `openBlocking` is never substituted, so the
+ * baseline cannot shrink to whatever survived the run.
  */
 export function measureRun(
   evidence: readonly (FixTaskReport | AddressFix)[],
-  plannedUnits: readonly string[],
+  plannedUnits: readonly string[] | null,
   probeCounts: ReadonlyMap<string, { completed: boolean; count: number | null }>,
   readCommitMessage: (sha: string) => string | undefined,
 ): MetricRecord & { availability: Record<string, AvailabilityRecord> } {
   const { closures, unknownTrailerShas } = closuresOf(evidence.map(candidateOf), readCommitMessage);
   const verified = closures.filter((closure) => !closure.todo);
   const distinctVerified = [...new Set(verified.map((closure) => closure.commitSha))];
-  const baselineFailures = baselineFailuresOf(plannedUnits, probeCounts);
-  const denominatorKnown = baselineFailures.every((row) => row.count !== null);
+  const baselineFailures =
+    plannedUnits === null ? [] : baselineFailuresOf(plannedUnits, probeCounts);
+  // null plannedUnits must not fall through `[].every` to a completed-zero
+  // read: no capture is unknown, not known-zero.
+  const denominatorKnown =
+    plannedUnits !== null && baselineFailures.every((row) => row.count !== null);
   const numerator: number | null = unknownTrailerShas.length > 0 ? null : distinctVerified.length;
   const availability: Record<string, AvailabilityRecord> = {
     // A missing entry is only required for null values (T28 checkMetric);
@@ -289,19 +297,30 @@ export function measureRun(
               source: null,
             }
           : { state: 'known', reason: 'counted from run closure evidence', source: null },
-    '/metric/fixesPerRun/denominator': !denominatorKnown
-      ? {
-          state: 'not-collected',
-          reason: 'a planned unit has no completed baseline probe',
-          source: null,
-        }
-      : baselineFailures.reduce((sum, row) => sum + (row.count ?? 0), 0) === 0
+    '/metric/fixesPerRun/denominator':
+      plannedUnits === null
         ? {
-            state: 'known-zero',
-            reason: 'every completed probe reported zero failures',
+            state: 'unavailable',
+            reason: 'no initial open-blocker population captured for this run',
             source: null,
           }
-        : { state: 'known', reason: 'summed from completed unit baseline probes', source: null },
+        : !denominatorKnown
+          ? {
+              state: 'not-collected',
+              reason: 'a planned unit has no completed baseline probe',
+              source: null,
+            }
+          : baselineFailures.reduce((sum, row) => sum + (row.count ?? 0), 0) === 0
+            ? {
+                state: 'known-zero',
+                reason: 'every completed probe reported zero failures',
+                source: null,
+              }
+            : {
+                state: 'known',
+                reason: 'summed from completed unit baseline probes',
+                source: null,
+              },
   };
   baselineFailures.forEach((row, i) => {
     if (row.count === null)

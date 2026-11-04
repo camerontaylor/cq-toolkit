@@ -184,12 +184,32 @@ describe('reviewClosuresOf', () => {
     const probes = new Map(
       (planned ?? []).map((id) => [id, { completed: true, count: 1 }] as const),
     );
-    const metric = measureRun([reviewFix({})], planned ?? [], probes, messageOf);
+    const metric = measureRun([reviewFix({})], planned, probes, messageOf);
     expect(metric.fixesPerRun).toEqual({ numerator: 1, denominator: 2 });
     expect(metric.baselineFailures.map((row) => row.unitId)).toEqual(['finding-1', 'finding-2']);
     // A report without the capture is unknown, never the recomputed population.
     const recomputed = { openBlocking: [finding('finding-1')] };
     expect(reviewPlannedUnitsOf(recomputed)).toBeNull();
+  });
+
+  it('T35 an unseeded report is an unavailable denominator, never known-zero', () => {
+    // A report with no initialOpenBlocking capture (an early exit before any
+    // seed) yields a null planned population. Passing it straight through —
+    // no ?? [] — must leave the denominator UNAVAILABLE, never a zero read
+    // off an empty list, while the numerator still counts real closures.
+    const unseeded = { openBlocking: [finding('finding-1')] };
+    const planned = reviewPlannedUnitsOf(unseeded);
+    expect(planned).toBeNull();
+    const metric = measureRun([reviewFix({})], planned, new Map(), messageOf);
+    expect(metric.fixesPerRun.numerator).toBe(1);
+    expect(metric.fixesPerRun.denominator).toBeNull();
+    expect(metric.availability['/metric/fixesPerRun/denominator']?.state).toBe('unavailable');
+    expect(metric.baselineFailures).toEqual([]);
+    // A captured, genuinely empty population is still a known zero, not
+    // unavailable: null (unknown) and [] (known-empty) stay distinct.
+    const emptyKnown = measureRun([reviewFix({})], [], new Map(), messageOf);
+    expect(emptyKnown.fixesPerRun.denominator).toBe(0);
+    expect(emptyKnown.availability['/metric/fixesPerRun/denominator']?.state).toBe('known-zero');
   });
 
   it('T35 unknown evidence', () => {
