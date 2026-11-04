@@ -25,7 +25,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 import { buildMeasurementBundle } from '../scripts/archive-measurement-evidence.mjs';
-import { runMeasurementArchive } from '../scripts/archive-measurement-wrapper.mjs';
+import {
+  mapRcloneFailure,
+  runMeasurementArchive,
+} from '../scripts/archive-measurement-wrapper.mjs';
 
 const TARGET = 'session-archive:session-log-archive/crq';
 const dirs: string[] = [];
@@ -115,6 +118,7 @@ describe('M8b nominal evidence', () => {
       'copyto',
       `${root}/manifest.json`,
       `${destination}/manifest.json`,
+      '--immutable',
     ]);
     expect(calls[4]?.args).toEqual([
       'check',
@@ -244,6 +248,37 @@ describe('M8b failure evidence', () => {
     expect(result.reason).toContain('commit marker');
     expect(result.reason).toContain('partial content');
     expect(result.reason).toContain('permission denied');
+    expect(calls.map((args) => args[0])).toEqual(['lsf', 'copy', 'check', 'copyto']);
+  });
+
+  test('a differing remote manifest is never overwritten: copyto is immutable', async () => {
+    const base = await workspace();
+    const bundle = await bundleIn(base, 'run-m8b-immutable');
+    const calls: string[][] = [];
+    // Simulates rclone against a remote that already holds a different
+    // manifest.json: with --immutable the copyto fails loudly; without it the
+    // archived marker is silently rewritten and the run reports 'archived'.
+    const run = async (_command: string, args: string[]) => {
+      calls.push(args);
+      if (args[0] !== 'copyto') return { code: 0 };
+      return args.includes('--immutable')
+        ? { code: 6, stderr: 'ERROR : manifest.json: immutable file modified' }
+        : { code: 0 };
+    };
+
+    const result = await runMeasurementArchive({
+      bundleDir: bundle,
+      target: TARGET,
+      host: 'triton',
+      run,
+    });
+
+    expect(result.state).toBe('local');
+    expect(result.reason).toContain('commit marker');
+    expect(result.reason).toContain('immutable file modified');
+    expect(calls[3]?.[0]).toBe('copyto');
+    expect(calls[3]).toContain('--immutable');
+    // The overwritten-marker path never reaches the final verification.
     expect(calls.map((args) => args[0])).toEqual(['lsf', 'copy', 'check', 'copyto']);
   });
 
@@ -423,11 +458,12 @@ describe('M8b failure evidence', () => {
     expect(run).not.toHaveBeenCalled();
   });
 
-  test('a killed rclone is a labelled timeout; only ENOENT/EACCES read as never-run', async () => {
+  test('an externally killed rclone names its signal; only ENOENT/EACCES read as never-run', async () => {
     const base = await workspace();
     const bundle = await bundleIn(base, 'run-m8b-timeout');
-    // Real runner against a fake rclone that dies from a signal, like the
-    // execFile timeout kill (code null, signal SIGTERM).
+    // Real runner against a fake rclone that dies from a signal execFile did
+    // not send (killed false, code null) — the shape an OOM kill or a
+    // systemctl stop leaves behind.
     const bin = join(base, 'bin');
     await mkdir(bin, { recursive: true });
     await writeFile(join(bin, 'rclone'), '#!/bin/sh\nkill -TERM $$\n');
@@ -442,7 +478,22 @@ describe('M8b failure evidence', () => {
 
     expect(killed.state).toBe('local');
     expect(killed.archive.state).toBe('unavailable');
-    expect(killed.reason).toContain('timed out');
+    expect(killed.reason).toContain('was killed by SIGTERM');
+    expect(killed.reason).not.toContain('timed out');
+
+    // The maxBuffer abort is execFile killing the child for flooding stdio,
+    // not the timeout: it keeps its own code and stays a ran path.
+    await writeFile(join(bin, 'rclone'), '#!/bin/sh\nexec yes m8b\n');
+    const flooded = await runMeasurementArchive({
+      bundleDir: bundle,
+      target: TARGET,
+      host: 'triton',
+    });
+
+    expect(flooded.state).toBe('local');
+    expect(flooded.archive.state).toBe('unavailable');
+    expect(flooded.reason).toContain('maxBuffer');
+    expect(flooded.reason).not.toContain('timed out');
 
     // A string code that is not ENOENT/EACCES (the maxBuffer abort) means
     // rclone ran: unavailable, never "never ran".
@@ -465,6 +516,37 @@ describe('M8b failure evidence', () => {
       run: async () => ({ code: 'ENOENT' }),
     });
     expect(absent.archive.state).toBe('unknown');
+  });
+
+  test('only the execFile timeout kill is labelled a timeout', () => {
+    // killed is execFile reporting the kill it performed itself — in this
+    // wrapper the 5-minute timeout, which a test cannot wait out. The exact
+    // mapping is pinned on the shapes child_process reports for each death
+    // (probed: timeout kill, external signal, maxBuffer abort).
+    const timeout = mapRcloneFailure({ killed: true, signal: 'SIGTERM', code: null }, [
+      'lsf',
+      TARGET,
+    ]);
+    expect(timeout.code).toBe('timeout');
+    expect(timeout.stderr).toContain('timed out');
+
+    const killed = mapRcloneFailure({ killed: false, signal: 'SIGKILL', code: null }, [
+      'copy',
+      'src',
+      'dst',
+    ]);
+    expect(killed.code).toBe('SIGKILL');
+    expect(killed.stderr).toBe('rclone copy was killed by SIGKILL');
+
+    const buffered = mapRcloneFailure(
+      { code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER', message: 'stdout maxBuffer length exceeded' },
+      ['lsf', TARGET],
+    );
+    expect(buffered.code).toBe('ERR_CHILD_PROCESS_STDIO_MAXBUFFER');
+    expect(buffered.stderr).toContain('maxBuffer');
+
+    const missing = mapRcloneFailure({ code: 'ENOENT' }, ['lsf', TARGET]);
+    expect(missing.code).toBe('ENOENT');
   });
 
   test('a missing rclone is unknown, not unavailable, and keeps evidence local', async () => {

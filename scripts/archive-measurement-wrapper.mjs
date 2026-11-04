@@ -3,9 +3,9 @@
 // is checked against the configured session archive, copied to
 // <target>/<host>/measurement/<runId>, verified with `rclone check --one-way`,
 // and only then given manifest.json as the commit marker, which is confirmed
-// by a final filtered check. The copy is append-only (`copy --immutable`,
-// never `sync`/`--delete`); the bundle is read-only and the session manifest
-// is never written. If the archive check, copy, verification, commit or
+// by a final filtered check. The copy is append-only (`copy`/`copyto` with
+// `--immutable`, never `sync`/`--delete`); the bundle is read-only and the
+// session manifest is never written. If the archive check, copy, verification, commit or
 // marker check fails, the result says so and names the untouched local
 // bundle as the explicit fallback. Reasons are sanitized; command lines
 // carry no env values.
@@ -57,6 +57,30 @@ function validTarget(target) {
   );
 }
 
+/**
+ * Map an execFile failure onto the runner's result shape. Only ENOENT and
+ * EACCES mean the binary never ran; any other failure — an exit code, the
+ * maxBuffer abort — means it did. `killed` is set only when execFile killed
+ * the child itself, which here is the timeout; a signal without it (OOM,
+ * systemctl stop) is an external kill, not a timeout, and names its signal.
+ */
+export function mapRcloneFailure(error, args) {
+  const timedOut = error?.killed === true;
+  const signal = typeof error?.signal === 'string' ? error.signal : null;
+  const code = error?.code;
+  return {
+    code: timedOut
+      ? 'timeout'
+      : (signal ?? (typeof code === 'number' || typeof code === 'string' ? code : 1)),
+    stdout: String(error?.stdout ?? ''),
+    stderr: timedOut
+      ? `rclone ${args[0]} timed out after ${RCLONE_TIMEOUT_MS} ms`
+      : signal
+        ? `rclone ${args[0]} was killed by ${signal}`
+        : String(error?.stderr || error?.message || ''),
+  };
+}
+
 async function runRclone(command, args) {
   try {
     const { stdout, stderr } = await execFileAsync(command, args, {
@@ -65,19 +89,7 @@ async function runRclone(command, args) {
     });
     return { code: 0, stdout, stderr };
   } catch (error) {
-    // Only ENOENT/EACCES mean the binary never ran; any other failure — an
-    // exit code, the maxBuffer abort — means it did. A kill signal (the
-    // timeout) leaves no exit code at all, so label it 'timeout' with its own
-    // reason instead of guessing from a null code.
-    const killed = error?.killed === true || typeof error?.signal === 'string';
-    const code = error?.code;
-    return {
-      code: killed ? 'timeout' : typeof code === 'number' || typeof code === 'string' ? code : 1,
-      stdout: String(error?.stdout ?? ''),
-      stderr: killed
-        ? `rclone ${args[0]} timed out after ${RCLONE_TIMEOUT_MS} ms`
-        : String(error?.stderr || error?.message || ''),
-    };
+    return mapRcloneFailure(error, args);
   }
 }
 
@@ -261,10 +273,13 @@ export async function runMeasurementArchive(input = {}) {
   }
   // manifest.json is the commit marker: it only appears once the payload copy
   // has been verified, so an interrupted push never looks like a whole bundle.
+  // --immutable keeps the marker append-only as well: a re-run (or a tampered
+  // remote) with a differing manifest fails instead of overwriting the archive.
   const commit = await run(RCLONE, [
     'copyto',
     `${bundle.root}/manifest.json`,
     `${destination}/manifest.json`,
+    '--immutable',
   ]);
   if (commit.code !== 0) {
     const reason = reasonLine(commit.stderr, `rclone copyto exited ${commit.code}`);

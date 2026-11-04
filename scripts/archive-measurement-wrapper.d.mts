@@ -10,6 +10,12 @@ export interface MeasurementArchiveResult {
   archive: { state: 'present' | 'unavailable' | 'unknown'; reason?: string };
 }
 
+/** Map an execFile failure onto the rclone runner's result shape. */
+export declare function mapRcloneFailure(
+  error: unknown,
+  args: string[],
+): { code: number | string; stdout: string; stderr: string };
+
 export declare function runMeasurementArchive(input?: {
   bundleDir?: string;
   target?: string;
