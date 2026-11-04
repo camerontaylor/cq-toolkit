@@ -482,8 +482,12 @@ describe('M8b failure evidence', () => {
     expect(killed.reason).not.toContain('timed out');
 
     // The maxBuffer abort is execFile killing the child for flooding stdio,
-    // not the timeout: it keeps its own code and stays a ran path.
-    await writeFile(join(bin, 'rclone'), '#!/bin/sh\nexec yes m8b\n');
+    // not the timeout: it keeps its own code and stays a ran path. The flood
+    // is a shell loop so it needs nothing from the stubbed PATH.
+    await writeFile(
+      join(bin, 'rclone'),
+      '#!/bin/sh\nwhile :; do echo m8b-flood-m8b-flood-m8b-flood-m8b-flood; done\n',
+    );
     const flooded = await runMeasurementArchive({
       bundleDir: bundle,
       target: TARGET,
