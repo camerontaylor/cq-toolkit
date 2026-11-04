@@ -138,6 +138,28 @@ export interface ReviewAddressReport {
   /** Report context only: review advisories never enter `findings` or dispatch. */
   advisories?: string[];
   openBlocking: Finding[];
+  /**
+   * ADR-0008 baseline seam: the ROUND-1 open-blocker population. It is seeded
+   * BEFORE the dispatch loop from the PLANNED item population (the open
+   * blocking threads the run is about to work), so an exit taken before any
+   * item admits (an admission or closure refusal, a truncated fetch, a moved
+   * worker branch, a throwing fetch) still reports the planned population and
+   * not just the ids dispatched so far. The FULL open-thread population is
+   * merged only on the normal path, before the PR re-review: on an early
+   * exit, a thread excluded from planning (blocked) can be missing from this
+   * baseline. Round 1 may only GAIN ids afterwards, deduplicated, in
+   * first-seen order: each PR dispatch item still captures its own id before
+   * `admitRecord` can refuse, the round-1 agent re-review's record is
+   * captured before its same-round dispatch, and the local path captures its
+   * admitted record after deferred-source restoration and before dispatch,
+   * so a blocker the restoration reopens or appends is in the population the
+   * run works. It is never reassigned and never shrunk: `openBlocking` is
+   * recomputed after fixes and replaced by each successful re-review, so
+   * substituting it for the measurement baseline would inflate
+   * fixes-per-run. Absent only when the run exits before that population is
+   * known: unknown, never an empty baseline.
+   */
+  initialOpenBlocking?: string[];
   fixes: AddressFix[];
   closureVerifications?: Array<{
     finding: string;
@@ -352,6 +374,16 @@ const discussionText = (
  * run into needs-human-with-PR; callers must propagate those verbatim.
  */
 export const REVIEW_ADDRESS_ROUNDCAP_REASON = 'review round cap reached with open findings';
+
+/**
+ * The severity every PR-thread finding is stamped with: the loop's dispatch
+ * item, the fetched-thread record built before the re-review, and the round-1
+ * seed's minimal PR-thread shape. One shared constant so the seed's blocking
+ * filter and the produced rows can never drift apart — the seed filters the
+ * ids it is handed against `blockingSeverities`, which must mean the same
+ * severity the real rows carry.
+ */
+const PR_THREAD_FINDING_SEVERITY = 'major' as const;
 
 /** SDK-first fix/disposition/re-review composition; kernel dispatch itself remains retry-free. */
 export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
@@ -1753,6 +1785,47 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
             const noteAdmission = (head: string) => {
               report.admissionHead ??= head;
             };
+            /**
+             * ADR-0008 baseline seam: the ROUND-1 open-blocker population.
+             * It is seeded from the full pre-dispatch item population (the
+             * open blocking threads the run is about to work) BEFORE the
+             * dispatch loop, so every exit reports the whole round-1
+             * population, not just the ids dispatched so far. Every capture
+             * only GAINS ids, deduplicated, in first-seen order, and a later
+             * round is ignored, so the list is never reassigned or shrunk.
+             * An early exit taken before the post-fetch merge saves only the
+             * planned population, which can omit threads that were excluded
+             * from planning (blocked).
+             * Round-1 sources: the pre-dispatch seed, each PR dispatch item
+             * before `admitRecord` can refuse (a dispatched item that is then
+             * refused stays counted), the full open-thread population merged
+             * before the PR re-review (dedup-only; already seeded), the
+             * round-1 PR agent re-review's record captured before its
+             * same-round dispatch (the merge above saw only the forge-thread
+             * population, and the baseline must cover what is dispatched),
+             * and the local path's admitted record captured after
+             * deferred-source restoration and before its dispatch
+             * (restoration can reopen or append blockers, and the baseline
+             * must cover what is dispatched).
+             * Nothing else writes this field: `openBlocking` is recomputed
+             * after fixes and `rounds[].record` is replaced by a re-review,
+             * so neither may feed the measurement baseline.
+             */
+            const noteInitialOpenIds = (round: number, ids: readonly string[]) => {
+              if (round !== 1) return;
+              report.initialOpenBlocking = [
+                ...new Set([...(report.initialOpenBlocking ?? []), ...ids]),
+              ];
+            };
+            const noteInitialOpenBlocking = (
+              round: number,
+              record: Pick<FindingsRecord, 'findings'>,
+            ) => {
+              noteInitialOpenIds(
+                round,
+                openBlocking(record, policy.review.blockingSeverities).map((finding) => finding.id),
+              );
+            };
             const admitCleanRecord = async (root: string, record: FindingsRecord) => {
               const effects = makeSubprocessDevEffects(root);
               const read = await readWorkState(effects, {
@@ -2411,7 +2484,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                       source: 'pr-threads',
                       ...(item.item.path ? { file: item.item.path } : {}),
                       ...(item.item.line && item.item.line > 0 ? { line: item.item.line } : {}),
-                      severity: 'major',
+                      severity: PR_THREAD_FINDING_SEVERITY,
                       text: discussionText(item.item.body, item.item.comments),
                       status: 'open',
                     };
@@ -2428,6 +2501,9 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                         sources: [{ kind: 'pr-threads', status: 'terminal' }],
                         findings: [finding],
                       };
+                      // Before this item's fix, and before admitRecord can
+                      // refuse: the finding was dispatched as an open blocker.
+                      noteInitialOpenBlocking(round, record);
                       await admitRecord(root, record);
                       report.verifiedHead ??= record.head;
                       dispatchedRecord ??= record;
@@ -2538,6 +2614,31 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                   engineOwnedConcurrency: policy.review.addressConcurrency,
                   publish: input.push === true,
                   publicationTreeClean,
+                  // ADR-0008: the round's item population is known HERE,
+                  // before anything dispatches, so an exit taken before the
+                  // post-fetch merge (an admission or closure refusal, a
+                  // truncated fetch, a moved branch, a throwing fetch) still
+                  // reports the whole round-1 population. An EMPTY plan may
+                  // not CREATE a baseline: every thread skipped (answered
+                  // this round, loop-replied at this head) is still an open
+                  // population this seed never observed, and a pre-merge
+                  // exit below would persist a present-empty list a
+                  // measurement consumer reads as known-zero. Absent stays
+                  // absent — the post-fetch merge and the local-path
+                  // capture still write a genuinely known-empty population.
+                  onItemsPlanned: (ids) => {
+                    if (ids.length === 0 && report.initialOpenBlocking === undefined) return;
+                    noteInitialOpenBlocking(round, {
+                      // Minimal PR-thread shape; only id/severity/status feed the filter.
+                      findings: ids.map((id) => ({
+                        id,
+                        source: 'pr-threads',
+                        severity: PR_THREAD_FINDING_SEVERITY,
+                        text: '',
+                        status: 'open' as const,
+                      })),
+                    });
+                  },
                   onFixRunSettled: (run) => {
                     // Retain the settled run before later Git/forge work can throw.
                     // An initial refusal has no admitted work to record; a refused
@@ -2731,7 +2832,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                       ...(thread.path ? { file: thread.path } : {}),
                       ...(thread.line && thread.line > 0 ? { line: thread.line } : {}),
                       text: discussionText(thread.body, thread.replies),
-                      severity: 'major',
+                      severity: PR_THREAD_FINDING_SEVERITY,
                       status: rejectionReasons.has(thread.id) ? 'rejected' : 'open',
                       ...(rejectionReasons.has(thread.id)
                         ? { reason: rejectionReasons.get(thread.id)! }
@@ -2744,6 +2845,13 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                   { ...threads, findings: report.findings },
                   policy.review.blockingSeverities,
                 );
+                // Round 1 ALWAYS merges the full open-thread population: items
+                // stopped BEFORE admission (the fix-wall stop, a refusal, a
+                // parent cancel) never reached the dispatch capture, so the
+                // baseline is completed here. The helper is round-1-only and
+                // only gains ids (deduplicated, first-seen order), so it can
+                // never shrink or replace the list a later round sees.
+                noteInitialOpenBlocking(round, { findings: report.findings });
                 if (stop()) return await finish('needs-human', stop());
                 const priorFindings = priorRoundFindings(previous, [
                   ...threads.findings,
@@ -2801,7 +2909,14 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                   return await finish('ok');
                 }
                 // Local agent findings share the same engine and round cap as forge threads.
-                const unresolved = await dispatchFindings(root, retainDeferred(agent.value), round);
+                const agentRecord = retainDeferred(agent.value);
+                // ADR-0008: the agent re-review can return NEW blockers this
+                // same round then dispatches; the merge before the re-review
+                // saw only the forge-thread population, so they join the
+                // round-1 baseline here, before dispatchFindings plans them.
+                // The helper's round guard keeps later rounds out, as elsewhere.
+                noteInitialOpenBlocking(round, agentRecord);
+                const unresolved = await dispatchFindings(root, agentRecord, round);
                 await publishOnExit();
                 if (unresolved) return await finish('needs-human', stop() ?? unresolved);
                 continue;
@@ -2847,6 +2962,12 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
               if (!(await hasRequiredSources(root, previous)))
                 return await finish('needs-human', 'review source incomplete');
               if (stop()) return await finish('needs-human', stop());
+              // AFTER source validation and disposition restoration, BEFORE any
+              // dispatch: round 1's admitted record — including blockers that
+              // the restoration reopened or appended — is the initial
+              // open-blocker population, so the baseline covers exactly the
+              // rows this run dispatches. Later rounds are ignored by the guard.
+              noteInitialOpenBlocking(round, previous);
               report.findings = previous.findings;
               report.openBlocking = openBlocking(previous, policy.review.blockingSeverities);
               const pending = previous.findings.filter((f) => f.status === 'open');
