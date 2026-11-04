@@ -177,15 +177,10 @@ describe('report v2 fold (T36)', () => {
     // T19 wires the address disposition producer, so a torn stream is partial
     // evidence here rather than the old "not wired" unavailable.
     expect(report.availability['/dispositions']?.state).toBe('partial');
+    // T21 wires the address review-observed producer: same transition.
+    expect(report.availability['/reviews']?.state).toBe('partial');
     expect(report.metric.fixesPerRun).toEqual({ numerator: null, denominator: null });
-    for (const path of [
-      '/tasks',
-      '/gates',
-      '/reviews',
-      '/approvals',
-      '/writeDecisions',
-      '/metric',
-    ]) {
+    for (const path of ['/tasks', '/gates', '/approvals', '/writeDecisions', '/metric']) {
       expect(report.availability[path]?.state).toBe('unavailable');
     }
     const torn = foldObservations({
@@ -208,9 +203,16 @@ describe('report v2 fold (T36)', () => {
       state: 'unavailable',
       reason: 'the fix composition has no finding-disposition producer yet',
     });
+    expect(torn.availability['/reviews']).toMatchObject({
+      state: 'unavailable',
+      reason: 'the fix composition has no review-observed producer',
+    });
     const complete = [stream([header()])];
     expect(
       foldObservations({ streams: complete, producer: 'fix' }).availability['/dispositions'],
+    ).toMatchObject({ state: 'unavailable' });
+    expect(
+      foldObservations({ streams: complete, producer: 'fix' }).availability['/reviews'],
     ).toMatchObject({ state: 'unavailable' });
     expect(
       foldObservations({ streams: complete, producer: 'fix' }).availability['/attempts']?.state,

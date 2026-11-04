@@ -101,10 +101,14 @@ import type {
   AvailabilityRecord,
   CompositionStartedJournalEvent,
   FindingDispositionJournalEvent,
+  FindingFingerprint,
   ReportV2,
   KernelRunLinkedJournalEvent,
   ProvenanceRecord,
+  ReviewObservedJournalEvent,
 } from '../../kernel/types.js';
+import { ReviewCoverageSchema } from './internal/reviewPartitions.js';
+import { isCoverageV2Complete } from './internal/reviewCoverageV2.js';
 import { repoIdFromRemote, sanitizeObservation } from '../fix/attemptRecord.js';
 import { resolveCorrelation } from '../fix/correlation.js';
 import { assembleReportV2 } from '../fix/reportFold.js';
@@ -2455,6 +2459,153 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                 return pinnedBase;
               };
             }
+            /**
+             * ADR-0008 T21: snapshot every reviewed head exposure. One
+             * `review-observed` event per review source on each reviewed
+             * record — the stream is append-only, so every source/head/round
+             * population is retained and a later round or head can never
+             * overwrite an earlier one. Blocked vendor observations are
+             * recorded too, with vendorCompletion `not-completed`. The scope
+             * base is the record's own `reviewed` proof, else the lane
+             * comparison base for records this composition produced; without
+             * either the exposure is WITHHELD (an observation failure on the
+             * surface, never a fabricated base). An append failure marks the
+             * surface indeterminate; it never rewrites the verdict.
+             */
+            const emitReviewObserved = async (
+              round: number,
+              record: FindingsRecord,
+              laneBase?: string | undefined,
+            ): Promise<void> => {
+              if (observation?.writer === undefined) return;
+              const writer = observation.writer;
+              const COMMIT_ID = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
+              if (!COMMIT_ID.test(record.head)) {
+                observationFailure(
+                  `review-observed round ${round}: record head is not a commit id; exposure withheld`,
+                );
+                return;
+              }
+              const base =
+                record.reviewed !== undefined && COMMIT_ID.test(record.reviewed.base)
+                  ? record.reviewed.base
+                  : laneBase !== undefined && COMMIT_ID.test(laneBase)
+                    ? laneBase
+                    : undefined;
+              if (base === undefined) {
+                observationFailure(
+                  `review-observed round ${round}: no reviewed base proof on the record or lane; exposure withheld`,
+                );
+                return;
+              }
+              const fingerprintOf = (finding: Finding): FindingFingerprint =>
+                finding.fingerprint ?? {
+                  version: 1,
+                  checkId: finding.source,
+                  rule: finding.rule ?? null,
+                  path: finding.file ?? '',
+                  spanContentHash: null,
+                };
+              const scope = record.findings.map(fingerprintOf);
+              const initialBlocking = openBlocking(record, policy.review.blockingSeverities).map(
+                fingerprintOf,
+              );
+              const notCollected = (reason: string): AvailabilityRecord => ({
+                state: 'not-collected',
+                reason,
+                source: null,
+              });
+              for (const source of record.sources) {
+                const parsed =
+                  source.coverage === undefined
+                    ? undefined
+                    : ReviewCoverageSchema.safeParse(source.coverage);
+                const proof = parsed?.success ? parsed.data : undefined;
+                const v2 = proof !== undefined && 'version' in proof ? proof : undefined;
+                const legacy = proof !== undefined && !('version' in proof) ? proof : undefined;
+                const availability: Record<string, AvailabilityRecord> = {};
+                let delivered: string[] = [];
+                let completed: string[] = [];
+                let omissions: string[] = [];
+                let coverage = 'none-recorded';
+                if (v2 !== undefined) {
+                  delivered = v2.pieces
+                    .filter((piece) => piece.state === 'delivered' || piece.state === 'completed')
+                    .map((piece) => piece.path);
+                  completed = v2.pieces
+                    .filter((piece) => piece.state === 'completed')
+                    .map((piece) => piece.path);
+                  omissions = v2.pieces
+                    .filter((piece) => piece.state === 'excluded' || piece.state === 'planned')
+                    .map((piece) => piece.path);
+                  coverage = `v2:${v2.mode}:${v2.scope}`;
+                } else if (legacy !== undefined) {
+                  delivered = legacy.partitions.map((partition) => partition.receipt);
+                  completed = legacy.partitions
+                    .filter((partition) => partition.complete)
+                    .map((partition) => partition.receipt);
+                  coverage = `legacy:${legacy.scope}`;
+                  availability['/omissions'] = notCollected(
+                    'legacy coverage records no omission evidence; absence is unknown, never none',
+                  );
+                } else {
+                  for (const pointer of ['/delivered', '/completed', '/omissions'])
+                    availability[pointer] = notCollected(
+                      'the review source recorded no coverage proof; empty lists are unknown, never known-empty',
+                    );
+                }
+                const vendorCompletion =
+                  source.status === 'blocked'
+                    ? ('not-completed' as const)
+                    : v2 !== undefined
+                      ? isCoverageV2Complete(v2)
+                        ? ('completed' as const)
+                        : ('not-completed' as const)
+                      : legacy !== undefined
+                        ? legacy.partitions.every((partition) => partition.complete)
+                          ? ('completed' as const)
+                          : ('not-completed' as const)
+                        : ('unknown' as const);
+                const event: ReviewObservedJournalEvent = {
+                  type: 'review-observed',
+                  runId: observation.compositionRunId,
+                  at: new Date().toISOString(),
+                  unitId: null,
+                  jobId: null,
+                  taskId: null,
+                  attempt: null,
+                  payload: {
+                    baseSha: base,
+                    headSha: record.head,
+                    findingFingerprints: scope,
+                    coverage,
+                    initialBlocking,
+                    reviewerId: source.kind,
+                    source: source.kind,
+                    round,
+                    delivered,
+                    completed,
+                    omissions,
+                    vendorCompletion,
+                    availability,
+                  },
+                };
+                try {
+                  await writer.append(sanitizeObservation(event));
+                } catch (error) {
+                  observationFailure(error);
+                }
+              }
+            };
+            /** The PR lane comparison base for review-observed scope rows. */
+            const prLaneBase = async (): Promise<string | undefined> => {
+              if (input.base !== undefined) return input.base;
+              try {
+                return await reviewedBasePinned?.();
+              } catch {
+                return undefined; // the pin's own failure surfaces at its consumer
+              }
+            };
             for (let round = 1; round <= policy.review.rounds; round++) {
               const stopped = stop();
               if (stopped) return await finish('needs-human', stopped);
@@ -2839,6 +2990,8 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                         : {}),
                     })),
                 };
+                // ADR-0008 T21: the PR-thread population of this round's head.
+                await emitReviewObserved(round, threads, await prLaneBase());
                 report.findings = retainDeferred(threads).findings;
                 noteAdvisories(threads);
                 report.openBlocking = openBlocking(
@@ -2880,6 +3033,8 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                 }
                 if (agent.value.branch !== threads.branch || agent.value.head !== threads.head)
                   return await finish('needs-human', 'PR re-review identity changed');
+                // ADR-0008 T21: the agent re-review exposure of the same head.
+                await emitReviewObserved(round, agent.value, await prLaneBase());
                 previous = retainDeferred(merge([threads, agent.value]));
                 noteAdvisories(previous);
                 noteRound(round, previous).record = previous;
@@ -2955,6 +3110,10 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                   );
                 previous = record;
                 report.verifiedHead ??= record.head;
+                // ADR-0008 T21: the initial review population this composition
+                // inherited; its base proof is the record's own, never the
+                // lane's (the record was produced outside this composition).
+                await emitReviewObserved(round, record);
               }
               report.findings = previous.findings;
               noteAdvisories(previous);
@@ -3011,6 +3170,9 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                 refreshedRecord.head !== (await gitText(root, ['rev-parse', 'HEAD']))
               )
                 return await finish('needs-human', 're-review identity changed');
+              // ADR-0008 T21: the re-review exposure of this round's head,
+              // retained per source/head/round next to the initial population.
+              await emitReviewObserved(round, refreshedRecord, reviewedBase);
               previous = retainDeferred(refreshedRecord);
               const complete = await hasRequiredSources(root, previous);
               if (stop()) return await finish('needs-human', stop());

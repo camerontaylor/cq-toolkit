@@ -59,6 +59,15 @@ export function foldObservations(input: ReportFoldInput): ReportV2 {
   const dispositions = folded.flatMap(({ stream }) =>
     stream.events.flatMap((event) => (event.type === 'finding-disposition' ? [event.payload] : [])),
   );
+  // ADR-0008 T21: the address composition appends one review-observed event
+  // per review source exposure (per source/head/round, never overwritten).
+  // The report mirrors the payloads in order; the review denominator reader
+  // groups them per head. An empty list on a complete address stream is a
+  // measured zero; a torn stream stays partial; the fix producer has no
+  // review-observed producer and stays explicitly unavailable.
+  const reviews = folded.flatMap(({ stream }) =>
+    stream.events.flatMap((event) => (event.type === 'review-observed' ? [event.payload] : [])),
+  );
   const availability: ReportV2['availability'] = {
     '': {
       state: partial ? 'partial' : 'known',
@@ -101,7 +110,6 @@ export function foldObservations(input: ReportFoldInput): ReportV2 {
   for (const field of [
     'tasks',
     'gates',
-    'reviews',
     'approvals',
     'writeDecisions',
     'metric',
@@ -110,6 +118,29 @@ export function foldObservations(input: ReportFoldInput): ReportV2 {
   ]) {
     availability[`/${field}`] = unavailable('producer not yet wired to the composition report');
   }
+  // Same producer-first rule as /dispositions: a fix composition has no
+  // review-observed producer at all, and a torn stream or header fallback
+  // must not re-label that absence as partial evidence.
+  availability['/reviews'] =
+    input.producer !== 'address'
+      ? unavailable('the fix composition has no review-observed producer')
+      : partial
+        ? {
+            state: 'partial',
+            reason: 'torn observation stream; partial evidence only',
+            source: null,
+          }
+        : reviews.length > 0
+          ? {
+              state: 'known',
+              reason: 'measured review-observed events in the composition stream',
+              source: null,
+            }
+          : {
+              state: 'known-zero',
+              reason: 'the complete address stream recorded no review exposure',
+              source: null,
+            };
   // The producer check comes FIRST: T36 semantics are unchanged, so a fix
   // composition has no finding-disposition producer at all, and a torn stream
   // or header fallback must not re-label that absence as partial evidence.
@@ -146,7 +177,7 @@ export function foldObservations(input: ReportFoldInput): ReportV2 {
       gates: [],
       dispositions,
       acceptances: [],
-      reviews: [],
+      reviews,
       approvals: [],
       writeDecisions: [],
       metric: {
