@@ -28,6 +28,10 @@
 // Local fixtures only: M8a-shaped bundle directories, no providers, no network.
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+// The ACTUAL fs promises, distinct from the node:fs/promises specifier the
+// race hook wraps: workspace() must resolve the physical temp path even on
+// macOS alias roots, without routing through the mocked realpath.
+import { promises as actualFs } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -61,7 +65,12 @@ vi.mock('node:fs/promises', async (importOriginal) => {
 });
 
 async function workspace(): Promise<string> {
-  const dir = await mkdtemp(join(tmpdir(), 'cq-m10b-'));
+  const made = await mkdtemp(join(tmpdir(), 'cq-m10b-'));
+  // The physical path, not the alias macOS gives tmpdir() (/var ->
+  // /private/var): the reader canonicalizes the bundle root, and the race
+  // hooks match on resolved paths — an aliased base would miss every match,
+  // so the FIFO and ELOOP swaps never fire on static-macos.
+  const dir = await actualFs.realpath(made);
   dirs.push(dir);
   return dir;
 }
