@@ -321,6 +321,11 @@ describe('M10b nominal evidence', () => {
         wallMs: null,
         modeledUsd: null,
         availability: {
+          '/attempts': {
+            state: 'known-zero',
+            reason: 'zero attempts observed',
+            source: null,
+          },
           '/tokens': {
             state: 'n-a',
             reason: 'no token evidence was observed',
