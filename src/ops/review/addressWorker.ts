@@ -1226,8 +1226,14 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
         if (!file) {
           // A deliberate deferral is a durable disposition, so it must carry
           // the verified head — read exactly the way the dispatch loop does.
-          // The admission (withVerifiedHead) has already populated
-          // verifiedHeads; a head outside that set is the existing refusal.
+          // initialize(stop) is the same admission withVerifiedHead runs; it
+          // is memoized, so the PR path and an already-dispatched filed
+          // sibling join the existing admission rather than re-admitting.
+          // Only a fileless finding that precedes every admission — the
+          // local dispatch path, which calls fix directly — runs it here, so
+          // verifiedHeads holds the head this read accepts; a head outside
+          // that set is the existing refusal.
+          await initialize(stop);
           observedHead = await withMutation(async () => {
             const head = await git(root, ['rev-parse', 'HEAD']);
             if (!verifiedHeads.has(head))

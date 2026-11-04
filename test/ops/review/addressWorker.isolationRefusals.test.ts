@@ -30,15 +30,22 @@ describe('review.address candidate isolation', () => {
     // T19: the unanchored deferral is a durable disposition, so before it
     // returns it must read the observation head exactly the way the dispatch
     // loop does — through withMutation, accepted only from verifiedHeads. A
-    // direct call with no prior admission finds no verified head and refuses;
-    // the admitted case (40-hex head on the emitted disposition) is covered
-    // by address-pr.humanDeferral. The lock setup settles within the fix
-    // call's lifetime: identity is requested once, nothing leaks after.
+    // direct call with no prior admission (the local dispatch path, which
+    // calls fix without withVerifiedHead) takes the same memoized initialize
+    // admission and defers with the verified head instead of refusing; the
+    // composition-level outcome is covered by address-local.full-cycle. The
+    // lock setup settles within the fix call's lifetime: identity is
+    // requested once (the checkout mutex is memoized across the admission
+    // and the head read), nothing leaks after.
     const f = await fixture();
     try {
       const item = finding();
       delete item.file;
-      await expect(f.engine.fix(item, 1)).rejects.toThrow('unexpected worker execution head');
+      const fix = await f.engine.fix(item, 1);
+      expect(fix.finding.status).toBe('deferred');
+      expect(fix.reason).toBe('unanchored finding needs human scope');
+      expect(fix.failure).toBeUndefined();
+      expect(fix.observedHead).toBe(f.initial);
       await new Promise<void>((resolve) => setTimeout(resolve, 30));
       expect(f.identityRequests()).toBe(1);
       expect(f.calls()).toBe(0);
