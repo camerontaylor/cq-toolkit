@@ -17,7 +17,9 @@
 //     while a row of the same run under another workId is a cross-work
 //     conflict that adds nothing (P1-2, P2-1, P3-4);
 //   - totals.attempts carries its own '/attempts' availability with the same
-//     unknown-never-zero rule as the costs (P2-2);
+//     unknown-never-zero rule as the costs (P2-2), flagged incomplete by every
+//     whole-record availability (report root, report '/attempts', leaf root,
+//     row root) — and a row claiming zero attempts beside costs is corrupt;
 //   - a malformed manifest (non-object files[] element, an unsupported
 //     capture state, a declared session index with no ingested artifact) is
 //     unknown evidence, never a silent drop (P3-1..P3-3);
@@ -665,6 +667,25 @@ describe('M10b missing evidence', () => {
     expect(result.totals.availability['/tokens']?.state).toBe('partial');
   });
 
+  test('an unparseable session index is one corrupt unknown, not two', async () => {
+    const base = await workspace();
+    const dir = await bundle(
+      base,
+      'index-not-json',
+      { 'session-index/sessions.json': '{ not json' },
+      { manifest: { sessionIndex: { state: 'present' } } },
+    );
+
+    const result = await readMeasurementInputs({ dirs: [dir] });
+
+    // The artifact was present and checksum-valid — the capture DID deliver
+    // the declared index — so its damage is one corrupt unknown. The
+    // declared-index-missing unknown must not fire on top of it.
+    expect(result.unknown).toHaveLength(1);
+    expect(result.unknown[0]).toMatchObject({ kind: 'corrupt' });
+    expect(result.unknown[0]?.reason).toBe('artifact is not JSON');
+  });
+
   test('a legacy report without reportVersion is unsupported, not silent', async () => {
     const base = await workspace();
     const address = await bundle(base, 'legacy-address', {
@@ -957,6 +978,31 @@ describe('M10b failure evidence', () => {
     expect(result.totals.availability['/attempts']?.state).toBe('partial');
   });
 
+  test('a torn stream behind an index row marks the attempt count partial', async () => {
+    const base = await workspace();
+    const dir = await bundle(base, 'torn-stream', {
+      'session-index/session-index.json': JSON.stringify(
+        index(100, 400, {
+          attempts: 2,
+          availability: { '': avail('partial', 'stream.complete: false') },
+        }),
+      ),
+    });
+
+    const result = await readMeasurementInputs({ dirs: [dir] });
+
+    // The row's own availability says its stream was torn (the real index
+    // producer writes stream completeness there): the costs are partial AND
+    // so is the attempt count it states — a known count beside partial costs
+    // would contradict the same artifact's record.
+    expect(result.unknown).toEqual([]);
+    expect(result.parents).toHaveLength(1);
+    expect(result.totals.attempts).toBe(2);
+    expect(result.totals.availability['/attempts']?.state).toBe('partial');
+    expect(result.totals.availability['/tokens']?.state).toBe('partial');
+    expect(result.totals.availability['/wallMs']?.state).toBe('partial');
+  });
+
   test('a leaf token sum below the row total forces a partial total', async () => {
     const base = await workspace();
     const dir = await bundle(base, 'short-sum', {
@@ -1220,6 +1266,27 @@ describe('M10b failure evidence', () => {
       expect(result.totals.tokens).not.toBe(0);
       expect(result.totals.availability['/tokens']?.state).toBe('unavailable');
     }
+  });
+
+  test('a row claiming zero attempts beside costs is corrupt, not known-zero', async () => {
+    const base = await workspace();
+    const dir = await bundle(base, 'zero-attempts-costs', {
+      'session-index/session-index.json': JSON.stringify({
+        indexVersion: 1,
+        sessions: [row(100, 400, { attempts: 0 })],
+      }),
+    });
+
+    const result = await readMeasurementInputs({ dirs: [dir] });
+
+    // attempts 0 beside non-null tokens/wallMs contradicts itself: measured
+    // work with no attempts to measure it in. Admitting the row would state
+    // a known-zero-adjacent count beside measured costs, so it is a corrupt
+    // row, exactly like a malformed one.
+    expect(result.parents).toEqual([]);
+    expect(result.unknown).toHaveLength(1);
+    expect(result.unknown[0]).toMatchObject({ kind: 'corrupt' });
+    expect(result.unknown[0]?.reason).toContain('zero attempts beside costs');
   });
 
   test('a malformed session row is skipped without dropping later rows', async () => {

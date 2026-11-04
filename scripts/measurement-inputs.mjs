@@ -200,16 +200,28 @@ function ingestJson(parsed, source, result, atProducerPath) {
     const { attempts, correlation, provenance, availability } = check.data;
     const repo = provenance.repoId;
     // A torn report or an uncollected attempts list makes every total
-    // incomplete: the attempts array is not the whole story.
-    flagAvailability(result, availability, '', ['tokens', 'wallMs', 'modeledUsd']);
-    flagAvailability(result, availability, '/attempts', ['tokens', 'wallMs', 'modeledUsd']);
+    // incomplete, the attempt count included: the attempts array is not the
+    // whole story.
+    flagAvailability(result, availability, '', ['tokens', 'wallMs', 'modeledUsd', 'attempts']);
+    flagAvailability(result, availability, '/attempts', [
+      'tokens',
+      'wallMs',
+      'modeledUsd',
+      'attempts',
+    ]);
     for (const event of attempts) {
       const { payload } = event;
       // A leaf's own availability marks its totals incomplete — the root
       // pointer ('' — valid per AvailabilityMapSchema, relative to the
-      // containing payload) covers every field, exactly as the report root
-      // does; the field pointers mark their own totals.
-      flagAvailability(result, payload.availability, '', ['tokens', 'wallMs', 'modeledUsd']);
+      // containing payload) covers every field (the attempt count included),
+      // exactly as the report root does; the field pointers mark their own
+      // totals.
+      flagAvailability(result, payload.availability, '', [
+        'tokens',
+        'wallMs',
+        'modeledUsd',
+        'attempts',
+      ]);
       flagAvailability(result, payload.availability, '/tokens', ['tokens']);
       flagAvailability(result, payload.availability, '/wallMs', ['wallMs']);
       flagAvailability(result, payload.availability, '/modeledUsd', ['modeledUsd']);
@@ -237,21 +249,36 @@ function ingestJson(parsed, source, result, atProducerPath) {
       bad(source, 'unsupported', `indexVersion ${String(parsed.indexVersion)}`),
     );
   for (const [i, row] of parsed.sessions.entries()) {
+    // Zero attempts beside non-null costs contradicts itself: measured work
+    // with no attempts to measure it in.
+    const zeroBesideCosts =
+      row?.attempts === 0 && ((row?.tokens ?? null) !== null || (row?.wallMs ?? null) !== null);
     if (
       !text(row?.runId) ||
       !text(row?.workId) ||
       !count(row?.attempts) ||
       (row?.repo !== null && typeof row?.repo !== 'string') ||
       (row.tokens !== null && !count(row.tokens)) ||
-      (row.wallMs !== null && !num(row.wallMs))
+      (row.wallMs !== null && !num(row.wallMs)) ||
+      zeroBesideCosts
     ) {
-      // One malformed row is skipped; the rest of the index is still read.
-      result.unknown.push(bad(source, 'corrupt', `sessions[${i}] is malformed`));
+      // One malformed or self-contradictory row is skipped; the rest of the
+      // index is still read.
+      result.unknown.push(
+        bad(
+          source,
+          'corrupt',
+          zeroBesideCosts
+            ? `sessions[${i}] claims zero attempts beside costs`
+            : `sessions[${i}] is malformed`,
+        ),
+      );
       continue;
     }
-    // Row availability: a torn row ('') marks every total, and the field
-    // pointers mark their own totals.
-    flagAvailability(result, row.availability, '', ['tokens', 'wallMs', 'modeledUsd']);
+    // Row availability: a torn row ('') marks every total — the attempt
+    // count included, so a torn stream never reads as a known count beside
+    // partial costs — and the field pointers mark their own totals.
+    flagAvailability(result, row.availability, '', ['tokens', 'wallMs', 'modeledUsd', 'attempts']);
     flagAvailability(result, row.availability, '/tokens', ['tokens']);
     flagAvailability(result, row.availability, '/wallMs', ['wallMs']);
     const key = `${row.repo ?? ''}\u0000${row.workId}\u0000${row.runId}`;
@@ -359,6 +386,10 @@ async function readBundle(dir, result) {
     else if (sha256(read.bytes) !== entry.sha256)
       result.unknown.push(bad(source, 'untrusted', 'checksum mismatch'));
     else {
+      // The capture delivered this artifact (present, checksum-valid): an
+      // unparseable index is ingested-as-evidence with its damage recorded,
+      // and must not also trip the declared-index-missing check below.
+      if (entry.root === 'session-index') indexIngested = true;
       try {
         ingestJson(
           JSON.parse(read.bytes.toString('utf8')),
@@ -366,7 +397,6 @@ async function readBundle(dir, result) {
           result,
           producerPath(entry.root, entry.path),
         );
-        if (entry.root === 'session-index') indexIngested = true;
       } catch {
         result.unknown.push(bad(source, 'corrupt', 'artifact is not JSON'));
       }
@@ -435,7 +465,7 @@ export async function readMeasurementInputs({ dirs } = {}) {
     parentByKey: new Map(),
     conflictedLeaves: new Set(),
     conflictedParents: new Set(),
-    incomplete: { tokens: false, wallMs: false, modeledUsd: false },
+    incomplete: { tokens: false, wallMs: false, modeledUsd: false, attempts: false },
   };
   for (const dir of [...new Set(dirs)]) await readBundle(dir, result);
   // Leaves observed per (repo, workId, runId), and the works observed per
@@ -560,8 +590,11 @@ export async function readMeasurementInputs({ dirs } = {}) {
   // The attempt count states its completeness with the same rule as the
   // costs: unusable evidence beside nothing observed is unavailable, beside
   // something observed is partial; only fully observed evidence is known —
-  // or known-zero at a measured zero.
-  const attemptsAvailability = anyUnknown
+  // or known-zero at a measured zero. The flag covers both unknown entries
+  // and whole-record availability records (a torn report, report attempts
+  // list, leaf payload or session row).
+  const attemptsIncomplete = anyUnknown || result.incomplete.attempts;
+  const attemptsAvailability = attemptsIncomplete
     ? attemptsValue > 0
       ? {
           state: 'partial',

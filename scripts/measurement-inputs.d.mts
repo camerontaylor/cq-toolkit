@@ -40,7 +40,7 @@ export interface MeasurementParentRecord {
   wallMs: number | null;
   /** Bundle directory and artifact path the row came from. */
   source: string;
-  /** True when leaf attempts for this run were observed; the aggregate is not added. */
+  /** True when the row's aggregate is not added to totals: its leaf attempts were observed, or the row conflicted across works. */
   mirrored: boolean;
 }
 
