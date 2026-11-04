@@ -56,13 +56,20 @@ function aggregate(records, field, label, incomplete, why) {
   };
 }
 
-/** Observed provenance window; ms null when not observed, unparseable or inverted; bad only when both stamps are present yet no window exists. */
+/** ADR-0008 instants are UTC ISO-8601: only the Z-form is a valid stamp. An offset-less stamp would be read in the host timezone and could mix into a silently wrong window, so it is never one. */
+const UTC_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/;
+const instant = (stamp) =>
+  typeof stamp === 'string' && UTC_INSTANT.test(stamp) ? Date.parse(stamp) : null;
+
+/** Observed provenance window; ms null when not observed, malformed (non-UTC form) or inverted; bad only when both stamps are present yet no window exists. */
 const windowOf = (run) => {
-  const start = run.startedAt == null ? null : Date.parse(run.startedAt);
-  const end = run.endedAt == null ? null : Date.parse(run.endedAt);
-  const present = start !== null && end !== null;
-  const whole = present && Number.isFinite(start) && Number.isFinite(end) && end >= start;
-  return { ms: whole ? end - start : null, bad: present && !whole };
+  const start = instant(run.startedAt);
+  const end = instant(run.endedAt);
+  const whole = start !== null && end !== null && end >= start;
+  return {
+    ms: whole ? end - start : null,
+    bad: run.startedAt != null && run.endedAt != null && !whole,
+  };
 };
 
 /** Compute the fix and cost panels over explicitly provided measurement evidence. */

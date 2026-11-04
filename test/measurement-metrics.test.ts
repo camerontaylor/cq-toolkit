@@ -322,6 +322,20 @@ describe('M10c failure evidence', () => {
         }),
       ],
     });
+    // An offset-less stamp would be read in the host timezone and mix into a
+    // silently wrong window (2h reads as 13h under UTC+11): ADR-0008 instants
+    // are UTC ISO-8601, so anything but the Z-form on both stamps is unknown,
+    // whatever the host timezone is.
+    const mixedStamps = computeMeasurementPanels({
+      runs: [makeRun({ startedAt: '2026-11-03T04:00:00.000Z', endedAt: '2026-11-03T06:00:00' })],
+    });
+    expect(mixedStamps.cost.runElapsedMs).toBeNull();
+    expect(mixedStamps.cost.availability['/runElapsedMs']?.state).toBe('unavailable');
+    const offsetlessPair = computeMeasurementPanels({
+      runs: [makeRun({ startedAt: '2026-11-03T04:00:00', endedAt: '2026-11-03T06:00:00' })],
+    });
+    expect(offsetlessPair.cost.runElapsedMs).toBeNull();
+    expect(offsetlessPair.cost.availability['/runElapsedMs']?.state).toBe('unavailable');
     // An inverted window is unknown, and the attempt wall stays known beside
     // it: the failure of one figure never corrupts the other.
     expect(panels.cost.runElapsedMs).toBeNull();
