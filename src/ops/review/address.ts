@@ -2468,9 +2468,13 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
              * recorded too, with vendorCompletion `not-completed`. The scope
              * base is the record's own `reviewed` proof, else the lane
              * comparison base for records this composition produced; without
-             * either the exposure is WITHHELD (an observation failure on the
-             * surface, never a fabricated base). An append failure marks the
-             * surface indeterminate; it never rewrites the verdict.
+             * either the exposure is WITHHELD silently — the carrier cannot
+             * represent an unknown base (baseSha is a required SHA), and the
+             * withholding must stay NEUTRAL to the observation surface: it
+             * never flips the status, never displaces a close/drain reason
+             * and never becomes a fabricated base. Only a failed append is
+             * an observation failure; it marks the surface indeterminate
+             * without rewriting the verdict.
              */
             const emitReviewObserved = async (
               round: number,
@@ -2480,24 +2484,14 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
               if (observation?.writer === undefined) return;
               const writer = observation.writer;
               const COMMIT_ID = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
-              if (!COMMIT_ID.test(record.head)) {
-                observationFailure(
-                  `review-observed round ${round}: record head is not a commit id; exposure withheld`,
-                );
-                return;
-              }
+              if (!COMMIT_ID.test(record.head)) return;
               const base =
                 record.reviewed !== undefined && COMMIT_ID.test(record.reviewed.base)
                   ? record.reviewed.base
                   : laneBase !== undefined && COMMIT_ID.test(laneBase)
                     ? laneBase
                     : undefined;
-              if (base === undefined) {
-                observationFailure(
-                  `review-observed round ${round}: no reviewed base proof on the record or lane; exposure withheld`,
-                );
-                return;
-              }
+              if (base === undefined) return;
               const fingerprintOf = (finding: Finding): FindingFingerprint =>
                 finding.fingerprint ?? {
                   version: 1,

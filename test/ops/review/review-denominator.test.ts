@@ -9,7 +9,8 @@
 //      delivered/completed coverage of each vendor; foldObservations mirrors
 //      them into report v2 `reviews` with `/reviews` known.
 //   2. Unknown evidence: a legacy record without a reviewed base proof is
-//      WITHHELD (an observation failure, never a fabricated base) while the
+//      WITHHELD silently (never a fabricated base, and neutral to the
+//      observation surface — the status stays durable) while the
 //      composition's own exposures still land; a source without coverage
 //      proof reports vendorCompletion `unknown` with not-collected lists
 //      (empty is unknown, never known-empty); legacy coverage contributes
@@ -177,8 +178,9 @@ test('T21 unknown evidence', async () => {
   const f = await fixture();
   try {
     // A legacy initial record without a reviewed base proof cannot anchor a
-    // scope row: the exposure is withheld with an observation failure — the
-    // verdict is unchanged and nothing is fabricated.
+    // scope row: the exposure is withheld SILENTLY — nothing is fabricated,
+    // and the withholding is neutral to the observation surface (the wiring
+    // contract keeps the status durable and the close/drain reason intact).
     const { reviewed: _reviewed, ...legacy } = f.record();
     const result = await makeReviewAddress({ ...f.deps, initialRecord: legacy })({
       ...f.input,
@@ -186,8 +188,8 @@ test('T21 unknown evidence', async () => {
     });
     expect(result.status, JSON.stringify(result)).toBe('needs-human');
     const report = reportOf(result);
-    expect(report.observation?.failure).toContain('no reviewed base proof');
-    expect(report.observation?.status).toBe('indeterminate');
+    expect(report.observation?.failure).toBeNull();
+    expect(report.observation?.status).toBe('durable');
     const streams = await readObservations(f.input.journalDir);
     const reviews = reviewEvents(streams[0]!.events);
     // Only this composition's own exposures (the two re-reviews) landed; the
