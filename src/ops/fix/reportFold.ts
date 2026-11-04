@@ -18,6 +18,20 @@ export interface ReportFoldInput {
   streams: readonly ObservationStream[];
   kernelRuns?: readonly KernelRunDescriptor[];
   producer: 'fix' | 'address';
+  /**
+   * ADR-0008 T21 rulings (2026-11-04): review exposures the composition
+   * withheld, one entry per source with its distinct reason (no reviewed base
+   * proof, merge-base unresolved, identity changed, no anchored head) — no
+   * event, no surface effect, so the reasons alone keep the gap from reading
+   * as complete evidence.
+   */
+  withheldReviewReasons?: readonly string[];
+  /**
+   * Records whose exposures were representable (guards passed), so an empty
+   * review list can distinguish known-zero from a run that never observed a
+   * review exposure.
+   */
+  reviewExposureRecords?: number;
 }
 const unavailable = (reason: string): AvailabilityRecord => ({
   state: 'unavailable',
@@ -58,6 +72,15 @@ export function foldObservations(input: ReportFoldInput): ReportV2 {
   // has no disposition writer yet and stays explicitly unavailable.
   const dispositions = folded.flatMap(({ stream }) =>
     stream.events.flatMap((event) => (event.type === 'finding-disposition' ? [event.payload] : [])),
+  );
+  // ADR-0008 T21: the address composition appends one review-observed event
+  // per review source exposure (per source/head/round, never overwritten).
+  // The report mirrors the payloads in order; the review denominator reader
+  // groups them per head. An empty list on a complete address stream is a
+  // measured zero; a torn stream stays partial; the fix producer has no
+  // review-observed producer and stays explicitly unavailable.
+  const reviews = folded.flatMap(({ stream }) =>
+    stream.events.flatMap((event) => (event.type === 'review-observed' ? [event.payload] : [])),
   );
   const availability: ReportV2['availability'] = {
     '': {
@@ -101,7 +124,6 @@ export function foldObservations(input: ReportFoldInput): ReportV2 {
   for (const field of [
     'tasks',
     'gates',
-    'reviews',
     'approvals',
     'writeDecisions',
     'metric',
@@ -110,6 +132,40 @@ export function foldObservations(input: ReportFoldInput): ReportV2 {
   ]) {
     availability[`/${field}`] = unavailable('producer not yet wired to the composition report');
   }
+  // Same producer-first rule as /dispositions. Withheld exposures leave the
+  // stream clean, so their reasons — never the stream — carry the gap, and
+  // /reviews is never known while anything is withheld. An empty list is
+  // known-zero only when a record's exposures were actually observed.
+  const withheldReasons = input.withheldReviewReasons ?? [];
+  availability['/reviews'] =
+    input.producer !== 'address'
+      ? unavailable('the fix composition has no review-observed producer')
+      : partial || withheldReasons.length > 0
+        ? {
+            state: 'partial',
+            reason: [
+              partial ? 'torn observation stream; partial evidence only' : null,
+              withheldReasons.length > 0
+                ? `${withheldReasons.length} exposure(s) withheld: ${[...new Set(withheldReasons)].join('; ')}`
+                : null,
+            ]
+              .filter((clause) => clause !== null)
+              .join('; '),
+            source: null,
+          }
+        : reviews.length > 0
+          ? {
+              state: 'known',
+              reason: 'measured review-observed events in the composition stream',
+              source: null,
+            }
+          : (input.reviewExposureRecords ?? 0) > 0
+            ? {
+                state: 'known-zero',
+                reason: 'the complete address stream recorded no review exposure',
+                source: null,
+              }
+            : unavailable('the run ended before any review exposure was observed');
   // The producer check comes FIRST: T36 semantics are unchanged, so a fix
   // composition has no finding-disposition producer at all, and a torn stream
   // or header fallback must not re-label that absence as partial evidence.
@@ -146,7 +202,7 @@ export function foldObservations(input: ReportFoldInput): ReportV2 {
       gates: [],
       dispositions,
       acceptances: [],
-      reviews: [],
+      reviews,
       approvals: [],
       writeDecisions: [],
       metric: {
@@ -187,6 +243,12 @@ export function assembleReportV2(
     try {
       const reportV2 = foldObservations({
         producer: input.producer,
+        ...(input.withheldReviewReasons !== undefined
+          ? { withheldReviewReasons: input.withheldReviewReasons }
+          : {}),
+        ...(input.reviewExposureRecords !== undefined
+          ? { reviewExposureRecords: input.reviewExposureRecords }
+          : {}),
         streams: [
           {
             workId: input.header.payload.correlation.workId,
