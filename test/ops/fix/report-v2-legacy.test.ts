@@ -287,13 +287,17 @@ describe('report v2 legacy projection (T37)', () => {
     expect(absent.availability.state).toBe('not-collected');
     expect(absent.availability.reason).toContain('no report v2');
 
-    // A folded report whose metric producer has not landed is unknown; the
-    // recorded availability is preserved instead of guessing a count.
+    // A folded report with no measurement-summary event is unknown; the
+    // recorded availability is preserved instead of guessing a count. T23
+    // moved the no-event reason to its producer (the fold), so the projection
+    // carries that reason verbatim.
     const folded = baseReport([header(), attempt()]);
     const unknown = legacyReportProjection({ reportV2: folded });
     expect(unknown.fixesPerRun).toBeNull();
     expect(unknown.availability.state).toBe('unavailable');
-    expect(unknown.availability.reason).toContain('producer not yet wired');
+    expect(unknown.availability.reason).toContain(
+      'no measurement-summary event landed in the composition stream',
+    );
 
     // Evidence is never replayed: the projection holds only the scalar and
     // availability, while the report's attempt row stays exactly where it was.

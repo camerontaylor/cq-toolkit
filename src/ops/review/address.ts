@@ -112,6 +112,7 @@ import { isCoverageV2Complete } from './internal/reviewCoverageV2.js';
 import { repoIdFromRemote, sanitizeObservation } from '../fix/attemptRecord.js';
 import { resolveCorrelation } from '../fix/correlation.js';
 import { assembleReportV2 } from '../fix/reportFold.js';
+import { measureRun, reviewPlannedUnitsOf } from '../fix/measurement.js';
 
 export interface ReviewAddressInput {
   repoRoot: string;
@@ -512,6 +513,62 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
         kernelRuns: [...observation.kernelRuns],
       };
     };
+    /**
+     * ADR-0008 T23: print the honest review denominators on every exit AFTER
+     * THE COMPOSITION STREAM OPENS — exactly one measurement-summary per run
+     * through the composition writer, computed from this run's evidence
+     * alone (no cross-run state). The exits before the header lands print
+     * nothing: no stream exists, and that is correct.
+     * `plannedUnits` is the captured INITIAL open-blocker population passed
+     * with no `?? []`: an unseeded report is an unavailable denominator,
+     * never a known-zero empty list, and each captured blocker is one
+     * observed baseline failure. A commit whose message cannot be read
+     * leaves the numerator unknown. An emission failure is evidence
+     * (indeterminate observation), never a verdict.
+     */
+    let measurementEmitted = false;
+    const appendMeasurementSummary = async (): Promise<void> => {
+      const writer = observation?.writer;
+      if (writer === undefined || measurementEmitted) return;
+      measurementEmitted = true;
+      try {
+        const planned = reviewPlannedUnitsOf(report);
+        const git =
+          deps.git ?? makeGhRunner({ bin: 'git', cwd: input.repoRoot, timeoutMs: 10_000 });
+        const messages = new Map<string, string>();
+        for (const sha of new Set(
+          report.fixes.flatMap((fix) => (fix.commit === undefined ? [] : [fix.commit])),
+        )) {
+          // Only a full lowercase object id ever reaches git: any other
+          // value is an unreadable message (unknown), never a spawn.
+          if (!/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(sha)) continue;
+          try {
+            const message = await git(['show', '-s', '--format=%B', sha]);
+            if (message.code === 0) messages.set(sha, message.stdout);
+          } catch {
+            // Unreadable message: that closure's trailer status is unknown.
+          }
+        }
+        const { availability, ...metric } = measureRun(
+          report.fixes,
+          planned,
+          new Map((planned ?? []).map((unitId) => [unitId, { completed: true, count: 1 }])),
+          (sha) => messages.get(sha),
+        );
+        await writer.append({
+          type: 'measurement-summary',
+          runId: compositionRunId,
+          at: new Date().toISOString(),
+          unitId: null,
+          jobId: null,
+          taskId: null,
+          attempt: null,
+          payload: { metric, availability },
+        });
+      } catch (error) {
+        observationFailure(error);
+      }
+    };
     const bookkeeping = new Map<string, string>();
     let bookkeepingTampered = false;
     let bookkeepingRevision = 0;
@@ -610,6 +667,15 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
       // other wire contract changes.
       report.usageSummary = usageLedger.snapshot();
       if (parent?.aborted) {
+        // Cancellation is an exit too (ADR-0008 T23): print this run's
+        // counts before the cancelled result returns, and surface the
+        // observation state — the lease's cancelled result carries this
+        // same report object, so an emission failure must not vanish from
+        // the cancelled envelope. The writer's close stays with the normal
+        // exit: a pr flow's tracked links may still append during unwind.
+        await appendMeasurementSummary();
+        const observedSurface = observationSurface();
+        if (observedSurface !== undefined) report.observation = observedSurface;
         delete report.stop;
         if (!report.reasons.includes('parent cancelled')) report.reasons.push('parent cancelled');
         if (!addressLease) return { status: 'needs-human', reason: 'parent cancelled', report };
@@ -785,6 +851,9 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
       // without marking its own `failure`) are EVIDENCE only: they make the
       // surface indeterminate and never change the run verdict.
       for (const failure of worker?.observationFailures?.() ?? []) observationFailure(failure);
+      // ADR-0008 T23: the run's counts print on every exit — as the stream's
+      // terminal event, after every link and attempt observation landed.
+      await appendMeasurementSummary();
       await closeObservation();
       // A refusal recorded while the writer drained is evidence too: fold once
       // more after close so no attempt-observation failure is silently lost.

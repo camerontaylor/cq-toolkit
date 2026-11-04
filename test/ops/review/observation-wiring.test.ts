@@ -654,7 +654,14 @@ describe('T31 unknown evidence: unreturned runs stay unlinked', () => {
       const streams = await readObservations(f.journalDir);
       expect(streams).toHaveLength(1);
       expect(streams[0]?.complete).toBe(true);
-      expect(streams[0]?.events.map((event) => event.type)).toEqual(['composition-started']);
+      // No kernel-run link is guessed; the terminal measurement-summary
+      // (ADR-0008 T23) is the only event after the header — this exit prints
+      // its counts too, with an unseeded denominator.
+      expect(streams[0]?.events.map((event) => event.type)).toEqual([
+        'composition-started',
+        'measurement-summary',
+      ]);
+      expect(streams[0]?.events.some((event) => event.type === 'kernel-run-linked')).toBe(false);
       expect(reportOf(result)?.observation?.kernelRuns).toEqual([]);
     } finally {
       await f.cleanup();

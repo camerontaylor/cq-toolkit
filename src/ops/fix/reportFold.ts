@@ -121,15 +121,10 @@ export function foldObservations(input: ReportFoldInput): ReportV2 {
         unknownLinks.map((link) => link.reason).join('; '),
     );
   }
-  for (const field of [
-    'tasks',
-    'gates',
-    'approvals',
-    'writeDecisions',
-    'metric',
-    'metric/fixesPerRun/numerator',
-    'metric/fixesPerRun/denominator',
-  ]) {
+  // Upstream T21 removed 'reviews' (its producer landed in M9); T23 removes
+  // the metric pointers (the measurement-summary is their producer). Both
+  // removals hold: only the genuinely-unwired producers remain listed.
+  for (const field of ['tasks', 'gates', 'approvals', 'writeDecisions']) {
     availability[`/${field}`] = unavailable('producer not yet wired to the composition report');
   }
   // Same producer-first rule as /dispositions. Withheld exposures leave the
@@ -166,6 +161,38 @@ export function foldObservations(input: ReportFoldInput): ReportV2 {
                 source: null,
               }
             : unavailable('the run ended before any review exposure was observed');
+  // ADR-0008 T23: the composition's terminal measurement-summary is the sole
+  // metric evidence. Exactly one lands per run (every exit through the
+  // writer); the LAST one in stream order is authoritative. Its payload's
+  // availability entries are report-relative JSON Pointers already, so they
+  // merge straight in. No event (a stream from a pre-writer exit, or a torn
+  // write) leaves the metric explicitly unavailable — never a guessed zero.
+  // Container-pointer convention (same as /provenance): a record at /metric
+  // states the container is present; each child pointer (/metric/fixesPerRun/
+  // numerator, …, per-baseline counts) carries its own state.
+  const measurement = folded
+    .flatMap(({ stream }) => stream.events)
+    .findLast((event) => event.type === 'measurement-summary');
+  if (measurement === undefined) {
+    for (const pointer of [
+      '/metric',
+      '/metric/fixesPerRun/numerator',
+      '/metric/fixesPerRun/denominator',
+    ]) {
+      availability[pointer] = unavailable(
+        'no measurement-summary event landed in the composition stream',
+      );
+    }
+  } else {
+    Object.assign(availability, measurement.payload.availability);
+    availability['/metric'] = {
+      state: partial ? 'partial' : 'known',
+      reason: partial
+        ? 'torn observation stream; the measurement-summary is partial evidence only'
+        : "measured by the composition stream's measurement-summary event",
+      source: null,
+    };
+  }
   // The producer check comes FIRST: T36 semantics are unchanged, so a fix
   // composition has no finding-disposition producer at all, and a torn stream
   // or header fallback must not re-label that absence as partial evidence.
@@ -205,12 +232,15 @@ export function foldObservations(input: ReportFoldInput): ReportV2 {
       reviews,
       approvals: [],
       writeDecisions: [],
-      metric: {
-        fixesPerRun: { numerator: null, denominator: null },
-        verifiedCommits: [],
-        closures: [],
-        baselineFailures: [],
-      },
+      metric:
+        measurement === undefined
+          ? {
+              fixesPerRun: { numerator: null, denominator: null },
+              verifiedCommits: [],
+              closures: [],
+              baselineFailures: [],
+            }
+          : measurement.payload.metric,
       availability,
     }),
   );
