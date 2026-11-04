@@ -524,7 +524,7 @@ describe('M10e failure evidence', () => {
           vendorCompletion: 'unknown',
           findingFingerprints: [F5],
         }),
-        review({ vendorCompletion: 'not-completed', findingFingerprints: [F1] }),
+        review({ round: 2, vendorCompletion: 'not-completed', findingFingerprints: [F1] }),
       ],
       dispositions: [
         disposition(F5, HEAD1, ['fix verified']),
@@ -549,7 +549,7 @@ describe('M10e failure evidence', () => {
       ciRed: [
         { sha: HEAD1, source: 'gh-actions', classification: 'timeout-guessed' },
         // A row with no classification at all: absent, never guessed.
-        { sha: HEAD1, source: 'gh-actions' } as never,
+        { sha: HEAD1, source: 'circle' } as never,
       ],
       ciObservedHeads: [HEAD1],
       followUpDays: 10,
