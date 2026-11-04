@@ -167,6 +167,9 @@ export function foldObservations(input: ReportFoldInput): ReportV2 {
   // availability entries are report-relative JSON Pointers already, so they
   // merge straight in. No event (a stream from a pre-writer exit, or a torn
   // write) leaves the metric explicitly unavailable — never a guessed zero.
+  // Container-pointer convention (same as /provenance): a record at /metric
+  // states the container is present; each child pointer (/metric/fixesPerRun/
+  // numerator, …, per-baseline counts) carries its own state.
   const measurement = folded
     .flatMap(({ stream }) => stream.events)
     .findLast((event) => event.type === 'measurement-summary');

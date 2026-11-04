@@ -505,17 +505,22 @@ export function makeFixRun(deps: FixRunDeps = {}) {
           rescuePool: rescueAllocation(escalation, escalationPolicy),
         };
       report.wallMs = Date.now() - start;
-      // ADR-0008 T23: print the honest fix denominators on EVERY exit — one
-      // measurement-summary through the composition writer, computed from
-      // this run's evidence alone (no cross-run state). No baseline probe
-      // producer is wired yet, so every planned unit is honestly unprobed:
-      // the denominator is null, never a guessed zero, and a commit whose
+      // ADR-0008 T23: print the honest fix denominators on every exit AFTER
+      // THE COMPOSITION STREAM OPENS — one measurement-summary through the
+      // composition writer, computed from this run's evidence alone (no
+      // cross-run state). The exits before the writer opens print nothing:
+      // no stream exists, and that is correct. No baseline probe producer is
+      // wired yet, so every planned unit is honestly unprobed: the
+      // denominator is null, never a guessed zero, and a commit whose
       // message cannot be read leaves the numerator unknown. An emission
       // failure is evidence (indeterminate observation), never a verdict.
       if (observation?.writer !== undefined && !observationClosed) {
         try {
           const messages = new Map<string, string>();
           for (const sha of new Set(report.tasks.flatMap((task) => task.commits))) {
+            // Only a full lowercase object id ever reaches git: any other
+            // value is an unreadable message (unknown), never a spawn.
+            if (!/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(sha)) continue;
             try {
               messages.set(
                 sha,

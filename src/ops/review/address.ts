@@ -514,16 +514,17 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
       };
     };
     /**
-     * ADR-0008 T23: print the honest review denominators on EVERY exit —
-     * exactly one measurement-summary per run through the composition
-     * writer, computed from this run's evidence alone (no cross-run state).
+     * ADR-0008 T23: print the honest review denominators on every exit AFTER
+     * THE COMPOSITION STREAM OPENS — exactly one measurement-summary per run
+     * through the composition writer, computed from this run's evidence
+     * alone (no cross-run state). The exits before the header lands print
+     * nothing: no stream exists, and that is correct.
      * `plannedUnits` is the captured INITIAL open-blocker population passed
      * with no `?? []`: an unseeded report is an unavailable denominator,
      * never a known-zero empty list, and each captured blocker is one
      * observed baseline failure. A commit whose message cannot be read
      * leaves the numerator unknown. An emission failure is evidence
-     * (indeterminate observation), never a verdict; a pre-header exit has
-     * no stream, so it prints nothing.
+     * (indeterminate observation), never a verdict.
      */
     let measurementEmitted = false;
     const appendMeasurementSummary = async (): Promise<void> => {
@@ -538,6 +539,9 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
         for (const sha of new Set(
           report.fixes.flatMap((fix) => (fix.commit === undefined ? [] : [fix.commit])),
         )) {
+          // Only a full lowercase object id ever reaches git: any other
+          // value is an unreadable message (unknown), never a spawn.
+          if (!/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(sha)) continue;
           try {
             const message = await git(['show', '-s', '--format=%B', sha]);
             if (message.code === 0) messages.set(sha, message.stdout);

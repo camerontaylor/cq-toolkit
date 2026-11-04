@@ -21,6 +21,7 @@ import type {
   ObservationEvent,
 } from '../../../src/kernel/types.js';
 import { runLadder } from '../../../src/kernel/governor.js';
+import { makeGhRunner } from '../../../src/adapters/forge-github/gh.js';
 import type { DriverFactory } from '../../../src/driver/factory.js';
 import { makeFixRun } from '../../../src/ops/fix/runFix.js';
 import { makeReviewAddress } from '../../../src/ops/review/address.js';
@@ -200,14 +201,23 @@ test('T23 unknown evidence', async () => {
           finding: { ...finding, status: 'fixed' as const, reason: 'fixed' },
           reason: 'fixed',
           observedHead: a.record().head,
-          commit: 'e'.repeat(40),
+          commit: 'zz-not-a-sha',
           validation: [passing],
         }),
       }),
     };
+    // A non-object-id commit never reaches git (P3-3): the recording seam
+    // delegates every call, and the guard must keep `show` at zero.
+    const realGit = makeGhRunner({ bin: 'git', timeoutMs: 10_000 });
+    let showCalls = 0;
+    deps.git = async (args: string[]) => {
+      if (args[0] === 'show') showCalls++;
+      return realGit(args);
+    };
     const report = addressReportOf(await makeReviewAddress(deps)(a.input));
     const metric = report.reportV2?.metric;
     expect(metric?.fixesPerRun).toEqual({ numerator: null, denominator: 1 });
+    expect(showCalls).toBe(0);
     expect(report.reportV2?.availability['/metric/fixesPerRun/numerator']?.state).toBe(
       'unavailable',
     );
@@ -316,6 +326,10 @@ test('T23 failure boundary', async () => {
     const streams = await readObservations(a.journalDir);
     const summaries = streams.flatMap((stream) => summariesOf(stream.events));
     expect(summaries).toHaveLength(1);
+    // The summary is the LAST event on the cancel path: the link drain and
+    // settleObservations are skipped there, so nothing appends after it.
+    const events = streams.flatMap((stream) => stream.events);
+    expect(events[events.length - 1]?.type).toBe('measurement-summary');
     // Round 1 seeded the full initial population before the abort; no closure
     // landed, so the numerator is an honest known zero.
     expect(summaries[0]?.payload.metric.fixesPerRun).toEqual({ numerator: 0, denominator: 1 });
