@@ -73,9 +73,10 @@ export declare function computeMeasurementPanels(input: {
    * scoped to run elapsed — never journalLink/reportLink/witnesses) degrades
    * the matching cost totals, so evidence the reader calls partial is never
    * known here. A readout over the reader's output MUST pass
-   * `totals.availability`; omitting it degrades every cost total to partial
-   * with an explicit reason, reported alongside a '/evidenceAvailability'
-   * not-collected entry.
+   * `totals.availability`; omitting it degrades every cost total to
+   * partial — or unavailable where nothing was observed — with an explicit
+   * reason, reported alongside a '/evidenceAvailability' not-collected
+   * entry.
    */
   evidenceAvailability?: Record<string, AvailabilityRecord>;
 }): MeasurementPanels;

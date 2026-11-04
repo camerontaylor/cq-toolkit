@@ -107,9 +107,10 @@ export function computeMeasurementPanels({ runs, unknown = [], evidenceAvailabil
     );
   const anyUnknown = unknown.length > 0;
   // Unattested report-level availability degrades every cost total to
-  // partial: without the reader's availability the panel cannot claim
-  // completeness (unknown is never known), and the omission is also reported
-  // through the /evidenceAvailability entry.
+  // partial, or unavailable where nothing was observed: without the reader's
+  // availability the panel cannot claim completeness (unknown is never
+  // known), and the omission is also reported through the
+  // /evidenceAvailability entry.
   const unattested = evidenceAvailability == null;
   const UNATTESTED =
     'report-level availability was not provided; completeness is claimed over leaves and the unknown bucket only';

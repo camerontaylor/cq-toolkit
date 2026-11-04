@@ -120,7 +120,8 @@ function makeRun(overrides: Partial<MeasurementPanelRun> = {}): MeasurementPanel
  * availability map — no degradation entries, the all-known read of fixture
  * evidence with no report-level tears; an explicit map (including a null one)
  * passes through untouched. A readout that omits report-level availability
- * degrades every cost total to partial (unknown is never known).
+ * degrades every cost total to partial — or unavailable where nothing was
+ * observed — (unknown is never known).
  */
 function attested(input: Parameters<typeof computeMeasurementPanels>[0]) {
   return computeMeasurementPanels(
