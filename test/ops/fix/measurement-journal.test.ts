@@ -16,7 +16,10 @@ import {
   readObservations,
   type ObservationWriter,
 } from '../../../src/kernel/observation.js';
-import type { MeasurementSummaryJournalEvent, ObservationEvent } from '../../../src/kernel/types.js';
+import type {
+  MeasurementSummaryJournalEvent,
+  ObservationEvent,
+} from '../../../src/kernel/types.js';
 import { runLadder } from '../../../src/kernel/governor.js';
 import type { DriverFactory } from '../../../src/driver/factory.js';
 import { makeFixRun } from '../../../src/ops/fix/runFix.js';
@@ -140,7 +143,9 @@ test('T23 round-trip', async () => {
     expect(metric?.baselineFailures).toEqual([
       { unitId: 'a', probeHead: null, completed: true, count: 1, unknownReason: null },
     ]);
-    expect(report.reportV2?.availability['/metric/fixesPerRun/numerator']?.state).toBe('known-zero');
+    expect(report.reportV2?.availability['/metric/fixesPerRun/numerator']?.state).toBe(
+      'known-zero',
+    );
     expect(report.reportV2?.availability['/metric/fixesPerRun/denominator']?.state).toBe('known');
     const streams = await readObservations(a.input.journalDir);
     const summaries = streams.flatMap((stream) => summariesOf(stream.events));
@@ -232,7 +237,20 @@ test('T23 failure boundary', async () => {
     append: async (event) => {
       if (event.type === 'measurement-summary')
         throw new Error('measurement append refused: disk full');
-      await base.append(event);
+      // The injected writer has a distinct stream identity (as in the T30
+      // boundary fixtures): pass-through events adopt it.
+      await base.append(
+        event.type === 'composition-started'
+          ? {
+              ...event,
+              runId: base.compositionRunId,
+              payload: {
+                ...event.payload,
+                correlation: { ...event.payload.correlation, workId: base.workId },
+              },
+            }
+          : { ...event, runId: base.compositionRunId },
+      );
     },
     close: () => base.close(),
   };
