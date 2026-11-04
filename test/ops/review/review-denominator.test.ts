@@ -492,7 +492,11 @@ test('T21 rows are per source with per-source identity', async () => {
     });
     expect(result.status, JSON.stringify(result)).toBe('needs-human');
     const { reviews } = await reviewsOf(f.input.journalDir);
-    expect(reviews.map((payload) => payload.source)).toEqual(['agent', 'coderabbit']);
+    expect(reviews.map((payload) => [payload.source, payload.round])).toEqual([
+      ['agent', 0],
+      ['coderabbit', 0],
+      ['agent', 1],
+    ]);
     expect(reviews[0]!.reviewerId).toBe('cyc-42');
     expect(reviews[0]!.availability['/reviewerId']).toBeUndefined();
     expect(reviews[0]!.findingFingerprints.map((fp) => fp.path)).toEqual([
