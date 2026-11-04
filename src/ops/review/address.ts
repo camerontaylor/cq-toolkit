@@ -448,6 +448,8 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
         })
       | undefined;
     let observationClosed = false;
+    // T21 ruling: withheld exposures carry their gap into /reviews availability only.
+    let withheldReviewExposures = 0;
     // Links recorded by a settled PR fix run are appended asynchronously (the
     // loop does not await that callback). Keep every pending link so finish()
     // can drain them BEFORE the stream closes: a link must never race close(),
@@ -492,6 +494,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
         failureFree: observation.status !== 'indeterminate',
         kernelRuns: observation.kernelRuns,
         producer: 'address',
+        withheldReviews: withheldReviewExposures,
       });
       if (assembled.reportV2) report.reportV2 = assembled.reportV2;
       return {
@@ -2460,21 +2463,14 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
               };
             }
             /**
-             * ADR-0008 T21: snapshot every reviewed head exposure. One
-             * `review-observed` event per review source on each reviewed
-             * record — the stream is append-only, so every source/head/round
-             * population is retained and a later round or head can never
-             * overwrite an earlier one. Blocked vendor observations are
-             * recorded too, with vendorCompletion `not-completed`. The scope
-             * base is the record's own `reviewed` proof, else the lane
-             * comparison base for records this composition produced; without
-             * either the exposure is WITHHELD silently — the carrier cannot
-             * represent an unknown base (baseSha is a required SHA), and the
-             * withholding must stay NEUTRAL to the observation surface: it
-             * never flips the status, never displaces a close/drain reason
-             * and never becomes a fabricated base. Only a failed append is
-             * an observation failure; it marks the surface indeterminate
-             * without rewriting the verdict.
+             * ADR-0008 T21: one `review-observed` event per review source per
+             * reviewed record — append-only, never a last-head overwrite;
+             * blocked vendors count as not-completed. Scope base: the
+             * record's `reviewed` proof, else the lane base for records this
+             * composition produced; else withheld silently and counted into
+             * /reviews availability (never surfaced on the stream, never a
+             * fabricated base). A failed append is an observation failure;
+             * it never rewrites the verdict.
              */
             const emitReviewObserved = async (
               round: number,
@@ -2491,7 +2487,10 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                   : laneBase !== undefined && COMMIT_ID.test(laneBase)
                     ? laneBase
                     : undefined;
-              if (base === undefined) return;
+              if (base === undefined) {
+                withheldReviewExposures++;
+                return;
+              }
               const fingerprintOf = (finding: Finding): FindingFingerprint =>
                 finding.fingerprint ?? {
                   version: 1,
@@ -2984,7 +2983,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                         : {}),
                     })),
                 };
-                // ADR-0008 T21: the PR-thread population of this round's head.
+                // T21: the PR-thread population of this round's head.
                 await emitReviewObserved(round, threads, await prLaneBase());
                 report.findings = retainDeferred(threads).findings;
                 noteAdvisories(threads);
@@ -3027,7 +3026,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                 }
                 if (agent.value.branch !== threads.branch || agent.value.head !== threads.head)
                   return await finish('needs-human', 'PR re-review identity changed');
-                // ADR-0008 T21: the agent re-review exposure of the same head.
+                // T21: the agent re-review exposure of the same head.
                 await emitReviewObserved(round, agent.value, await prLaneBase());
                 previous = retainDeferred(merge([threads, agent.value]));
                 noteAdvisories(previous);
@@ -3104,9 +3103,8 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                   );
                 previous = record;
                 report.verifiedHead ??= record.head;
-                // ADR-0008 T21: the initial review population this composition
-                // inherited; its base proof is the record's own, never the
-                // lane's (the record was produced outside this composition).
+                // T21: the inherited initial population; its base proof is
+                // the record's own (produced outside this composition).
                 await emitReviewObserved(round, record);
               }
               report.findings = previous.findings;
@@ -3164,8 +3162,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                 refreshedRecord.head !== (await gitText(root, ['rev-parse', 'HEAD']))
               )
                 return await finish('needs-human', 're-review identity changed');
-              // ADR-0008 T21: the re-review exposure of this round's head,
-              // retained per source/head/round next to the initial population.
+              // T21: the re-review exposure of this round's head.
               await emitReviewObserved(round, refreshedRecord, reviewedBase);
               previous = retainDeferred(refreshedRecord);
               const complete = await hasRequiredSources(root, previous);

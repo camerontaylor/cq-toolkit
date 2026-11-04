@@ -18,6 +18,12 @@ export interface ReportFoldInput {
   streams: readonly ObservationStream[];
   kernelRuns?: readonly KernelRunDescriptor[];
   producer: 'fix' | 'address';
+  /**
+   * ADR-0008 T21 ruling (2026-11-04): review exposures withheld for lack of
+   * a reviewed base proof — no event, no surface effect, so this count alone
+   * keeps the gap from reading as complete evidence. Nonnegative.
+   */
+  withheldReviews?: number;
 }
 const unavailable = (reason: string): AvailabilityRecord => ({
   state: 'unavailable',
@@ -118,16 +124,21 @@ export function foldObservations(input: ReportFoldInput): ReportV2 {
   ]) {
     availability[`/${field}`] = unavailable('producer not yet wired to the composition report');
   }
-  // Same producer-first rule as /dispositions: a fix composition has no
-  // review-observed producer at all, and a torn stream or header fallback
-  // must not re-label that absence as partial evidence.
+  // Same producer-first rule as /dispositions. A withheld exposure leaves
+  // the stream clean, so its count — never the stream — carries the gap.
+  const withheld = input.withheldReviews ?? 0;
   availability['/reviews'] =
     input.producer !== 'address'
       ? unavailable('the fix composition has no review-observed producer')
-      : partial
+      : partial || withheld > 0
         ? {
             state: 'partial',
-            reason: 'torn observation stream; partial evidence only',
+            reason: [
+              partial ? 'torn observation stream; partial evidence only' : null,
+              withheld > 0 ? `${withheld} exposure(s) withheld: no reviewed base proof` : null,
+            ]
+              .filter((clause) => clause !== null)
+              .join('; '),
             source: null,
           }
         : reviews.length > 0
@@ -218,6 +229,7 @@ export function assembleReportV2(
     try {
       const reportV2 = foldObservations({
         producer: input.producer,
+        ...(input.withheldReviews !== undefined ? { withheldReviews: input.withheldReviews } : {}),
         streams: [
           {
             workId: input.header.payload.correlation.workId,

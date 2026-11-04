@@ -11,10 +11,11 @@
 //   2. Unknown evidence: a legacy record without a reviewed base proof is
 //      WITHHELD silently (never a fabricated base, and neutral to the
 //      observation surface — the status stays durable) while the
-//      composition's own exposures still land; a source without coverage
-//      proof reports vendorCompletion `unknown` with not-collected lists
-//      (empty is unknown, never known-empty); legacy coverage contributes
-//      receipt references and cannot prove omissions.
+//      composition's own exposures still land and the report's /reviews
+//      availability carries the gap as partial (T21 ruling); a source
+//      without coverage proof reports vendorCompletion `unknown` with
+//      not-collected lists (empty is unknown, never known-empty); legacy
+//      coverage contributes receipt references and cannot prove omissions.
 //   3. Failure boundary: an incomplete vendor is `not-completed` (a budget
 //      session, a delivered-not-completed piece, an excluded piece and a
 //      blocked sibling source are all recorded), and a failed review-observed
@@ -166,6 +167,10 @@ test('T21 round-trip', async () => {
     expect(folded.reviews).toEqual(reviews);
     expect(folded.availability['/reviews']).toMatchObject({ state: 'known' });
     expect(ReportV2Schema.parse(folded)).toEqual(folded);
+    // Nothing withheld: the composition's own report reads /reviews known.
+    expect(reportOf(result).reportV2?.availability['/reviews']).toMatchObject({
+      state: 'known',
+    });
     expect(reportOf(result).reportV2?.reviews).toHaveLength(3);
   } finally {
     await f.cleanup();
@@ -196,6 +201,13 @@ test('T21 unknown evidence', async () => {
     // withheld initial population appears as no event at all.
     expect(reviews.map((payload) => payload.round)).toEqual([1, 2]);
     expect(reviews.some((payload) => payload.initialBlocking?.length)).toBe(false);
+    // The report-side note (T21 ruling): the withheld count — never the
+    // stream — carries the gap, so /reviews reads partial, not known.
+    expect(report.reportV2?.availability['/reviews']).toMatchObject({
+      state: 'partial',
+      reason: '1 exposure(s) withheld: no reviewed base proof',
+    });
+    expect(report.reportV2?.reviews).toHaveLength(2);
   } finally {
     await f.cleanup();
   }
@@ -231,6 +243,37 @@ test('T21 unknown evidence', async () => {
     expect(reviews[0]!.vendorCompletion).toBe('unknown');
   } finally {
     await f2.cleanup();
+  }
+}, 120_000);
+
+// ---- T21 withheld exposure beside a normal one ----------------------------
+
+test('T21 withheld exposure beside a normal one', async () => {
+  // T21 ruling: a withheld exposure never reads as complete evidence. The
+  // stream stays clean (no event, no surface effect — the status is durable),
+  // the normal exposure in the same stream is still recorded, and only the
+  // report's /reviews availability carries the gap as partial.
+  const f = await fixture();
+  try {
+    const { reviewed: _reviewed, ...legacy } = f.record();
+    const result = await makeReviewAddress({ ...f.deps, initialRecord: legacy })({
+      ...f.input,
+      rounds: 1,
+    });
+    expect(result.status, JSON.stringify(result)).toBe('needs-human');
+    const report = reportOf(result);
+    expect(report.observation?.status).toBe('durable');
+    expect(report.observation?.failure).toBeNull();
+    const streams = await readObservations(f.input.journalDir);
+    const reviews = reviewEvents(streams[0]!.events);
+    expect(reviews.map((payload) => payload.round)).toEqual([1]);
+    expect(report.reportV2?.reviews).toHaveLength(1);
+    expect(report.reportV2?.availability['/reviews']).toMatchObject({
+      state: 'partial',
+      reason: '1 exposure(s) withheld: no reviewed base proof',
+    });
+  } finally {
+    await f.cleanup();
   }
 }, 120_000);
 
