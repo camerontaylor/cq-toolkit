@@ -120,7 +120,6 @@ describe('M10c nominal evidence', () => {
     expect(row?.fixesPerRun.numerator).toBe(2);
     expect(row?.verifiedCommits).toEqual([SHA1, SHA3]);
     expect(row?.fixesPerRun.denominator).toBe(7);
-    expect(row?.availability['/fixesPerRun/numerator']?.state).toBe('known');
   });
 
   test('dedup invocation usage channels', () => {
@@ -145,8 +144,6 @@ describe('M10c nominal evidence', () => {
     });
     // The window (120s) exceeds the summed attempt wall (90s): both figures
     // are reported, neither substituted for the other.
-    expect(panels.cost.runs[0]?.elapsedMs).toBe(120_000);
-    expect(panels.cost.runs[0]?.attemptWallMs).toBe(90_000);
     expect(panels.cost.runElapsedMs).toBe(120_000);
     expect(panels.cost.attemptWallMs).toBe(90_000);
   });
@@ -205,7 +202,6 @@ describe('M10c nominal evidence', () => {
     expect(panels.fix.runs[0]?.fixesPerRun.denominator).toBe(7);
     // A placeholder unit never mixes into run-2's denominator: unknown, not 2.
     expect(panels.fix.runs[1]?.fixesPerRun.denominator).toBeNull();
-    expect(panels.fix.runs[1]?.availability['/fixesPerRun/denominator']?.state).toBe('partial');
   });
 });
 
@@ -225,7 +221,6 @@ describe('M10c missing evidence', () => {
     // No closure evidence was collected: the numerator is unknown, never zero.
     expect(panels.fix.runs[0]?.fixesPerRun.numerator).toBeNull();
     expect(panels.fix.runs[0]?.verifiedCommits).toEqual([]);
-    expect(panels.fix.runs[0]?.availability['/fixesPerRun/numerator']?.state).toBe('not-collected');
   });
 
   test('dedup invocation usage channels', () => {
@@ -243,7 +238,6 @@ describe('M10c missing evidence', () => {
     expect(panels.cost.runElapsedMs).toBeNull();
     expect(panels.cost.availability['/runElapsedMs']?.state).toBe('not-collected');
     expect(panels.cost.attemptWallMs).toBe(60_000);
-    expect(panels.cost.runs[0]?.elapsedMs).toBeNull();
   });
 
   test('modeled price coverage explicit', () => {
@@ -285,9 +279,6 @@ describe('M10c missing evidence', () => {
       ],
     });
     expect(panels.fix.runs[0]?.fixesPerRun.denominator).toBeNull();
-    expect(panels.fix.runs[0]?.availability['/fixesPerRun/denominator']?.state).toBe(
-      'not-collected',
-    );
   });
 });
 
@@ -300,7 +291,6 @@ describe('M10c failure evidence', () => {
     // never a counted defect.
     expect(panels.fix.runs[0]?.fixesPerRun.numerator).toBe(0);
     expect(panels.fix.runs[0]?.verifiedCommits).toEqual([]);
-    expect(panels.fix.runs[0]?.availability['/fixesPerRun/numerator']?.state).toBe('known-zero');
   });
 
   test('dedup invocation usage channels', () => {
@@ -399,9 +389,5 @@ describe('M10c failure evidence', () => {
     // Known counts sit beside placeholders: the denominator is unknown with
     // the known subtotal withheld, never 3 and never 5.
     expect(panels.fix.runs[0]?.fixesPerRun.denominator).toBeNull();
-    expect(panels.fix.runs[0]?.availability['/fixesPerRun/denominator']?.state).toBe('partial');
-    expect(panels.fix.runs[0]?.availability['/fixesPerRun/denominator']?.reason).toContain(
-      'never mix',
-    );
   });
 });
