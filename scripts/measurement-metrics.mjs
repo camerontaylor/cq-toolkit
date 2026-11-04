@@ -31,10 +31,12 @@ const canonical = (value) =>
           .join(',')}}`
       : JSON.stringify(value);
 
-/** M10b aggregate semantics: known values sum; incomplete evidence yields unavailable (nothing observed) or partial (a subtotal beside unknowns); only fully observed evidence is known, and a fully observed zero is known-zero. A missing (undefined) field is unknown, never a known NaN. */
+/** M10b aggregate semantics: known values sum; incomplete evidence yields unavailable (nothing observed) or partial (a subtotal beside unknowns); only fully observed evidence is known, and a fully observed zero is known-zero. A missing, non-number or non-finite field is unknown, never a known NaN. */
 function aggregate(records, field, label, incomplete, why) {
   const reason = why ?? 'measurement inputs were rejected, incomplete or unavailable';
-  const known = records.filter((record) => record[field] != null);
+  const known = records.filter(
+    (record) => typeof record[field] === 'number' && Number.isFinite(record[field]),
+  );
   if (incomplete && known.length === 0)
     return { value: null, ...avail('unavailable', `no ${label} value was observed; ${reason}`) };
   if (records.length === 0)
@@ -59,10 +61,28 @@ function aggregate(records, field, label, incomplete, why) {
   };
 }
 
-/** ADR-0008 instants are UTC ISO-8601: only the Z-form is a valid stamp. An offset-less stamp would be read in the host timezone and could mix into a silently wrong window, so it is never one. */
-const UTC_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/;
-const instant = (stamp) =>
-  typeof stamp === 'string' && UTC_INSTANT.test(stamp) ? Date.parse(stamp) : null;
+/** ADR-0008 instants are UTC ISO-8601: only the Z-form is a valid stamp, as strict as the schema instant — an offset-less stamp would be read in the host timezone, and a normalised calendar part (Feb 30) is an invalid stamp, never the day it rolls into. */
+const UTC_INSTANT = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?Z$/;
+const instant = (stamp) => {
+  if (typeof stamp !== 'string') return null;
+  const match = UTC_INSTANT.exec(stamp);
+  if (match === null) return null;
+  const [, year, month, day, hour, minute, second, fraction] = match;
+  const utc = Date.UTC(+year, +month - 1, +day, +hour, +minute, +second);
+  const date = new Date(utc);
+  const calendar =
+    +month >= 1 &&
+    +month <= 12 &&
+    +hour < 24 &&
+    +minute < 60 &&
+    +second < 60 &&
+    date.getUTCFullYear() === +year &&
+    date.getUTCMonth() === +month - 1 &&
+    date.getUTCDate() === +day;
+  return calendar
+    ? utc + (fraction ? +`0.${fraction.padEnd(3, '0').slice(0, 3)}` * 1000 : 0)
+    : null;
+};
 
 /** Observed provenance window; ms null when not observed, malformed (non-UTC form) or inverted; bad only when both stamps are present yet no window exists. */
 const windowOf = (run) => {
@@ -109,6 +129,8 @@ export function computeMeasurementPanels({ runs, unknown = [], evidenceAvailabil
         channelTorn.add(pointer.slice(15).replaceAll('~1', '/').replaceAll('~0', '~'));
       else if (pointer === '/wallMs') incomplete.wall = true;
       else if (pointer === '/modeledUsd') incomplete.usd = true;
+      else if (pointer === '/provenance' || pointer.startsWith('/provenance/'))
+        incomplete.elapsed = true;
     }
   };
   // Report/run-level availability (the reader's totals availability) reaches
@@ -116,8 +138,10 @@ export function computeMeasurementPanels({ runs, unknown = [], evidenceAvailabil
   // partial is never known here.
   flagAvailability(evidenceAvailability);
   // Admit runs the M10b way: identical copies of one (repo, runId) count
-  // once; disagreeing copies are a conflict whose run-level figures (fix
-  // counts, window) contribute nothing.
+  // once, and a run split across entries only in its attempts is not a
+  // disagreement (leaves are admitted on their own identity below); any
+  // other disagreement is a conflict, and a conflicted identity keeps one
+  // row whose run-level figures (fix counts, window) are explicitly unknown.
   const admitted = [];
   const byIdentity = new Map();
   const conflictedRuns = new Set();
@@ -128,11 +152,8 @@ export function computeMeasurementPanels({ runs, unknown = [], evidenceAvailabil
     if (prior === undefined) {
       byIdentity.set(key, run);
       admitted.push(run);
-    } else if (canonical(prior) !== canonical(run)) {
-      byIdentity.delete(key);
+    } else if (canonical({ ...prior, attempts: null }) !== canonical({ ...run, attempts: null }))
       conflictedRuns.add(key);
-      admitted.splice(admitted.indexOf(prior), 1);
-    }
   }
   const conflictedWindow = (run) =>
     conflictedRuns.has(`${run.repo ?? ''}\u0000${run.runId}`)
@@ -220,11 +241,12 @@ export function computeMeasurementPanels({ runs, unknown = [], evidenceAvailabil
   // numerator counts distinct verified non-todo commits, cross-checked
   // against the producer-recorded scalar (a recorded null is a
   // producer-declared unknown, held, never counted; a disagreement withholds
-  // the count, exactly as reportFold does); closure rows are admitted by
-  // commitSha (a todo disagreement makes the count unknown); baseline rows
-  // are admitted by unitId and must each be completed with a known count —
-  // a placeholder, uncompleted or conflicting unit makes the denominator
-  // unknown, with the known subtotal withheld, never mixed in.
+  // the count, exactly as reportFold does); a conflicted run identity keeps
+  // an explicitly unknown row; closure rows treat one commit closing several
+  // findings as multiplicity (a todo disagreement makes the count unknown);
+  // baseline rows are admitted by unitId and must each be completed with a
+  // known count — a placeholder, uncompleted or conflicting unit makes the
+  // denominator unknown, with the known subtotal withheld, never mixed in.
   const fixRuns = admitted.map((run) => {
     if (conflictedRuns.has(`${run.repo ?? ''}\u0000${run.runId}`))
       return {
@@ -254,10 +276,11 @@ export function computeMeasurementPanels({ runs, unknown = [], evidenceAvailabil
             ),
           ];
     const counted = shas === null || conflictedShas.size > 0 ? null : shas.length;
-    let numerator = counted;
-    if (run.recordedNumerator === null) numerator = null;
-    else if (run.recordedNumerator !== undefined && run.recordedNumerator !== counted)
-      numerator = null;
+    // A producer-declared unknown (recorded null) or a scalar disagreeing
+    // with the distinct verified count withholds the figure — one rule,
+    // reportFold parity.
+    const numerator =
+      run.recordedNumerator !== undefined && run.recordedNumerator !== counted ? null : counted;
     // Baseline rows are admitted by unitId: identical duplicates count once;
     // disagreeing ones conflict. A unit counts only when its probe completed
     // with a known count — a placeholder, uncompleted or conflicting unit
@@ -307,6 +330,14 @@ export function computeMeasurementPanels({ runs, unknown = [], evidenceAvailabil
         '/attemptWallMs': entry(wallTotal),
         '/runElapsedMs': entry(elapsedTotal),
         '/modeledUsd': entry(usdTotal),
+        ...(evidenceAvailability === undefined
+          ? {
+              '/evidenceAvailability': avail(
+                'not-collected',
+                'report-level availability was not provided; completeness is claimed over leaves and the unknown bucket only',
+              ),
+            }
+          : {}),
       },
     },
   };

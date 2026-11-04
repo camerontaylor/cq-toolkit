@@ -23,7 +23,9 @@ export interface MeasurementPanelRun {
    * producer declared it unknown while closure evidence exists (unreadable
    * trailer commits) and the count is withheld, never recomputed; a number is
    * cross-checked against the distinct verified SHA count and a disagreement
-   * withholds it, exactly as reportFold does.
+   * withholds it, exactly as reportFold does. A readout over report metrics
+   * MUST pass it; omitting it means the count is not cross-checked against
+   * the producer scalar.
    */
   recordedNumerator?: number | null;
   /** Report provenance window; a null endedAt leaves run elapsed unknown. */
@@ -66,8 +68,13 @@ export declare function computeMeasurementPanels(input: {
   /**
    * Reader totals availability (or a report availability map): a non-known
    * state at '', '/attempts', '/usageChannels', an escaped
-   * '/usageChannels/<name>', '/wallMs' or '/modeledUsd' degrades the matching
-   * cost totals, so evidence the reader calls partial is never known here.
+   * '/usageChannels/<name>', '/wallMs', '/modeledUsd' or '/provenance' (the
+   * window's voucher, scoped to run elapsed) degrades the matching cost
+   * totals, so evidence the reader calls partial is never known here. A
+   * readout over the reader's output MUST pass `totals.availability`; when
+   * omitted, the panel reports a '/evidenceAvailability' not-collected entry
+   * stating that its completeness claim covers leaves and the unknown bucket
+   * only.
    */
   evidenceAvailability?: Record<string, AvailabilityRecord>;
 }): MeasurementPanels;

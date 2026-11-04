@@ -182,6 +182,17 @@ describe('M10c nominal evidence', () => {
     const duplicated = computeMeasurementPanels({ runs: [once, { ...once }] });
     expect(duplicated.cost.runElapsedMs).toBe(120_000);
     expect(duplicated.fix.runs).toHaveLength(1);
+    // A run split across entries only in its attempts is not a disagreement:
+    // the leaves are admitted on their own identity and both count.
+    const split = computeMeasurementPanels({
+      runs: [
+        makeRun({ attempts: [leaf('inv-4', { wallMs: 30_000 })] }),
+        makeRun({ attempts: [leaf('inv-5', { wallMs: 15_000 })] }),
+      ],
+    });
+    expect(split.cost.runElapsedMs).toBe(120_000);
+    expect(split.cost.attemptWallMs).toBe(45_000);
+    expect(split.fix.runs).toHaveLength(1);
   });
 
   test('modeled price coverage explicit', () => {
@@ -506,7 +517,8 @@ describe('M10c failure evidence', () => {
     expect(panels.cost.availability['/runElapsedMs']?.state).toBe('unavailable');
     expect(panels.cost.attemptWallMs).toBe(60_000);
     // Two disagreeing run entries conflict: the window is unknown and the fix
-    // figures are withheld, never silently picked from one copy.
+    // figures are an explicit unknown row, never silently picked from one
+    // copy and never silently dropped.
     const conflictedRun = computeMeasurementPanels({
       runs: [
         makeRun({ startedAt: '2026-11-03T04:00:00.000Z' }),
@@ -515,7 +527,25 @@ describe('M10c failure evidence', () => {
     });
     expect(conflictedRun.cost.runElapsedMs).toBeNull();
     expect(conflictedRun.cost.availability['/runElapsedMs']?.state).toBe('unavailable');
-    expect(conflictedRun.fix.runs).toHaveLength(0);
+    expect(conflictedRun.fix.runs).toHaveLength(1);
+    expect(conflictedRun.fix.runs[0]?.fixesPerRun).toEqual({ numerator: null, denominator: null });
+    // Fractional instants compare as instants even where the string order
+    // disagrees: .12Z to .1Z is inverted (120ms after 100ms is backwards),
+    // whatever lex order says.
+    const stringTrap = computeMeasurementPanels({
+      runs: [makeRun({ startedAt: '2026-11-03T04:00:00.12Z', endedAt: '2026-11-03T04:00:00.1Z' })],
+    });
+    expect(stringTrap.cost.runElapsedMs).toBeNull();
+    expect(stringTrap.cost.availability['/runElapsedMs']?.state).toBe('unavailable');
+    // A normalised calendar part is an invalid stamp, never the day it rolls
+    // into: Feb 30 is not Mar 2.
+    const feb30 = computeMeasurementPanels({
+      runs: [
+        makeRun({ startedAt: '2026-02-30T00:00:00.000Z', endedAt: '2026-11-03T04:00:00.000Z' }),
+      ],
+    });
+    expect(feb30.cost.runElapsedMs).toBeNull();
+    expect(feb30.cost.availability['/runElapsedMs']?.state).toBe('unavailable');
   });
 
   test('modeled price coverage explicit', () => {
@@ -597,6 +627,28 @@ describe('M10c failure evidence', () => {
       evidenceAvailability: { '/attempts': avail('partial', 'torn attempts list') },
     });
     expect(tornAttempts.cost.availability['/attemptWallMs']?.state).toBe('partial');
+    // Provenance availability scopes to the window it vouches for: elapsed
+    // degrades, the attempt totals do not.
+    const tornProvenance = computeMeasurementPanels({
+      runs: [makeRun({ attempts: [leaf('inv-4', { wallMs: 1_000 })] })],
+      evidenceAvailability: { '/provenance': avail('not-collected', 'header torn') },
+    });
+    expect(tornProvenance.cost.availability['/runElapsedMs']?.state).toBe('partial');
+    expect(tornProvenance.cost.availability['/attemptWallMs']?.state).toBe('known');
+    expect(tornProvenance.cost.availability['/evidenceAvailability']).toBeUndefined();
+    // A malformed (non-number) row value is unknown, never a known NaN.
+    const malformed = computeMeasurementPanels({
+      runs: [makeRun({ attempts: [{ ...leaf('inv-5'), wallMs: '1000' as unknown as number }] })],
+    });
+    expect(malformed.cost.attemptWallMs).toBeNull();
+    expect(malformed.cost.availability['/attemptWallMs']?.state).toBe('not-collected');
+    // Omitting the reader's availability is reported as such: the entry says
+    // the completeness claim covers leaves and the unknown bucket only.
+    const omitted = computeMeasurementPanels({ runs: [makeRun({ attempts: [leaf('inv-6')] })] });
+    expect(omitted.cost.availability['/evidenceAvailability']?.state).toBe('not-collected');
+    expect(omitted.cost.availability['/evidenceAvailability']?.reason).toContain(
+      'was not provided',
+    );
   });
 
   test('per-run denominator only, never mix placeholder units with failures', () => {
