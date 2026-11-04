@@ -474,8 +474,12 @@ test('T21 re-review exposures survive abort paths', async () => {
     const result = await makeReviewAddress({
       ...f4.deps,
       review: async () => {
+        // Produce the record BEFORE breaking git: the fixture's record()
+        // itself runs git, and the throw we inject must be the identity
+        // check's, not the review's own.
+        const value = { ...f4.record(), findings: [] };
         await rm(join(f4.repo.root, '.git', 'HEAD'));
-        return { status: 'ok', value: { ...f4.record(), findings: [] } };
+        return { status: 'ok', value };
       },
     })({ ...f4.input, rounds: 1 });
     expect(result.status, JSON.stringify(result)).toBe('needs-human');
