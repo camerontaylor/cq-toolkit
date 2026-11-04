@@ -3432,6 +3432,12 @@ def main() -> int:
     p.add_argument("item")
     p.add_argument("--ignore-quiet", action="store_true", help="skip the quiet-window gate (active agents still block)")
     p.add_argument("--dry-run", action="store_true")
+    p = sub.add_parser("push-recover", help="recapture or release a scan-blocked push range; never dispatch")
+    p.add_argument("item")
+    p.add_argument("action", choices=("recapture", "release"))
+    p.add_argument("--reason", required=True)
+    p.add_argument("--verdict", choices=("false-positive", "source-fixed", "abandon"), required=True)
+    p.add_argument("--operator", required=True)
     p = sub.add_parser("author-enroll", help="enroll ONE author CLI cycle into the locked natural tick; "
                                              "creates a PENDING item and never dispatches")
     p.add_argument("--request-id", required=True)
@@ -3477,6 +3483,17 @@ def main() -> int:
     p.add_argument("run_id")
     args = ap.parse_args()
 
+    if args.cmd == "push-recover":
+        try:
+            result = with_lock(push_current.recover, sys.modules[__name__], args.item, args.action,
+                               reason=args.reason, verdict=args.verdict, operator=args.operator)
+            if result is None:
+                return 3
+            print(json.dumps(result, sort_keys=True))
+            return 0
+        except (ValueError, OSError, RuntimeError) as exc:
+            print(f"push-recover refused: {exc}", file=sys.stderr)
+            return 3
     if args.cmd in ("enqueue-merged", "report", "reconcile-merged"):
         try:
             if args.cmd == "reconcile-merged":
