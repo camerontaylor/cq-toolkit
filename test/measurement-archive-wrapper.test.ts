@@ -6,7 +6,9 @@
 //     untouched local bundle, and deletes/mutates nothing;
 //   - invalid input: a bad target, host, runId or manifest is failed with no
 //     remote command at all.
-// Local fixtures and a fake subprocess runner only: no rclone, no network.
+// Local fixtures and a fake subprocess runner, plus real-rclone immutability
+// probes against a hermetic local alias remote: no ambient config, no
+// credentials, no network; the probes skip only where rclone is absent.
 import { execFileSync } from 'node:child_process';
 import { constants } from 'node:fs';
 import {
@@ -83,7 +85,7 @@ describe('M8b nominal evidence', () => {
       run,
     });
 
-    expect(calls.map((call) => call.args[0])).toEqual(['lsf', 'copy', 'check', 'copyto', 'check']);
+    expect(calls.map((call) => call.args[0])).toEqual(['lsf', 'copy', 'check', 'copy', 'check']);
     expect(calls[0]).toEqual({
       command: 'rclone',
       args: ['lsf', TARGET, '--max-depth', '1'],
@@ -114,11 +116,22 @@ describe('M8b nominal evidence', () => {
       '/manifest.json',
       '--copy-links',
     ]);
+    // The marker is a directory-scope copy with the payload copy's flags:
+    // single-file copyto skips the --immutable check (rclone issue #4921).
     expect(calls[3]?.args).toEqual([
-      'copyto',
-      `${root}/manifest.json`,
-      `${destination}/manifest.json`,
+      'copy',
+      root,
+      destination,
       '--immutable',
+      '--transfers',
+      '2',
+      '--checkers',
+      '2',
+      '--low-level-retries',
+      '4',
+      '--no-update-modtime',
+      '--include',
+      '/manifest.json',
     ]);
     expect(calls[4]?.args).toEqual([
       'check',
@@ -230,10 +243,12 @@ describe('M8b failure evidence', () => {
     const base = await workspace();
     const bundle = await bundleIn(base, 'run-m8b-commit');
     const calls: string[][] = [];
+    // The marker copy is the copy filtered to the manifest (--include); the
+    // payload copy carries --exclude instead.
     const run = async (_command: string, args: string[]) => {
       calls.push(args);
-      return args[0] === 'copyto'
-        ? { code: 5, stderr: 'Failed to copyto: permission denied' }
+      return args[0] === 'copy' && args.includes('--include')
+        ? { code: 5, stderr: 'Failed to copy: permission denied' }
         : { code: 0 };
     };
 
@@ -248,19 +263,20 @@ describe('M8b failure evidence', () => {
     expect(result.reason).toContain('commit marker');
     expect(result.reason).toContain('partial content');
     expect(result.reason).toContain('permission denied');
-    expect(calls.map((args) => args[0])).toEqual(['lsf', 'copy', 'check', 'copyto']);
+    expect(calls.map((args) => args[0])).toEqual(['lsf', 'copy', 'check', 'copy']);
   });
 
-  test('a differing remote manifest is never overwritten: copyto is immutable', async () => {
+  test('a differing remote manifest is never overwritten: the marker copy is immutable', async () => {
     const base = await workspace();
     const bundle = await bundleIn(base, 'run-m8b-immutable');
     const calls: string[][] = [];
     // Simulates rclone against a remote that already holds a different
-    // manifest.json: with --immutable the copyto fails loudly; without it the
-    // archived marker is silently rewritten and the run reports 'archived'.
+    // manifest.json: with --immutable the directory-scope marker copy fails
+    // loudly; without it the archived marker is silently rewritten and the
+    // run reports 'archived'.
     const run = async (_command: string, args: string[]) => {
       calls.push(args);
-      if (args[0] !== 'copyto') return { code: 0 };
+      if (!(args[0] === 'copy' && args.includes('--include'))) return { code: 0 };
       return args.includes('--immutable')
         ? { code: 6, stderr: 'ERROR : manifest.json: immutable file modified' }
         : { code: 0 };
@@ -276,10 +292,11 @@ describe('M8b failure evidence', () => {
     expect(result.state).toBe('local');
     expect(result.reason).toContain('commit marker');
     expect(result.reason).toContain('immutable file modified');
-    expect(calls[3]?.[0]).toBe('copyto');
+    expect(calls[3]?.[0]).toBe('copy');
     expect(calls[3]).toContain('--immutable');
+    expect(calls[3]).toContain('/manifest.json');
     // The overwritten-marker path never reaches the final verification.
-    expect(calls.map((args) => args[0])).toEqual(['lsf', 'copy', 'check', 'copyto']);
+    expect(calls.map((args) => args[0])).toEqual(['lsf', 'copy', 'check', 'copy']);
   });
 
   test('a failed remote verification is local and reports an incomplete copy', async () => {
@@ -320,9 +337,11 @@ describe('M8b failure evidence', () => {
     ]);
 
     const markerCalls: string[][] = [];
+    // Fail only the marker-verification check: the marker copy is a copy too,
+    // distinguished by --include.
     const markerRun = async (_command: string, args: string[]) => {
       markerCalls.push(args);
-      return args.includes('--include')
+      return args[0] === 'check' && args.includes('--include')
         ? { code: 1, stderr: 'ERROR : manifest.json: sizes differ' }
         : { code: 0 };
     };
@@ -336,7 +355,7 @@ describe('M8b failure evidence', () => {
     expect(marker.state).toBe('local');
     expect(marker.reason).toContain('could not be verified');
     expect(marker.archive.state).toBe('present');
-    expect(markerCalls.map((args) => args[0])).toEqual(['lsf', 'copy', 'check', 'copyto', 'check']);
+    expect(markerCalls.map((args) => args[0])).toEqual(['lsf', 'copy', 'check', 'copy', 'check']);
   });
 
   test('invalid targets, hosts, runIds and manifests are failed with zero remote calls', async () => {
@@ -569,5 +588,80 @@ describe('M8b failure evidence', () => {
     expect(result.reason).toContain('could not be checked');
     expect(result.reason).toContain('ENOENT');
     expect(result.localBundle).toBe(await realpath(bundle));
+  });
+});
+
+// Real-rclone probes for the commit marker's immutability. A fake runner can
+// only encode the assumption; these run the actual binary. Single-file copyto
+// skips the --immutable check entirely (rclone issue #4921), so the marker is
+// a directory-scope copy filtered to /manifest.json. Hermetic: the alias
+// remote lives in a temp RCLONE_CONFIG the spawned rclone alone reads — no
+// ambient config, no credentials, no network — and both roots are cleaned.
+const rclonePresent = (() => {
+  try {
+    execFileSync('rclone', ['version'], { stdio: 'ignore' });
+    return true;
+  } catch {
+    return false;
+  }
+})();
+
+describe('M8b real-rclone commit-marker immutability', () => {
+  /** A built bundle plus an archive root reached through an alias remote. */
+  async function realRcloneWorkspace(runId: string): Promise<{
+    bundle: string;
+    target: string;
+    remoteManifest: string;
+  }> {
+    const base = await workspace();
+    const remoteRoot = join(base, 'remote');
+    // The archive root must exist: lsf on a missing directory fails and the
+    // wrapper would stop before any copy.
+    await mkdir(join(remoteRoot, 'crq'), { recursive: true });
+    vi.stubEnv('RCLONE_CONFIG', join(base, 'rclone.conf'));
+    await writeFile(join(base, 'rclone.conf'), `[m8btest]\ntype = alias\nremote = ${remoteRoot}\n`);
+    const bundle = await bundleIn(base, runId);
+    return {
+      bundle,
+      target: 'm8btest:crq',
+      remoteManifest: join(remoteRoot, 'crq', 'triton', 'measurement', runId, 'manifest.json'),
+    };
+  }
+
+  test.skipIf(!rclonePresent)(
+    'a changed local manifest never overwrites the archived marker',
+    async () => {
+      const { bundle, target, remoteManifest } = await realRcloneWorkspace('run-m8b-real-local');
+      // First push archives the whole bundle through the real rclone.
+      const first = await runMeasurementArchive({ bundleDir: bundle, target, host: 'triton' });
+      expect(first.state).toBe('archived');
+      const archived = await readFile(remoteManifest);
+
+      // The payload is re-verified, but the changed manifest must fail the
+      // marker copy instead of overwriting what was already archived. A
+      // trailing newline keeps the manifest valid JSON for the local read.
+      await writeFile(join(bundle, 'manifest.json'), `${archived.toString()}\n`);
+      const rerun = await runMeasurementArchive({ bundleDir: bundle, target, host: 'triton' });
+
+      expect(rerun.state).toBe('local');
+      expect(rerun.reason).toContain('immutable file modified');
+      expect(await readFile(remoteManifest)).toEqual(archived);
+    },
+  );
+
+  test.skipIf(!rclonePresent)('a tampered remote manifest is never overwritten', async () => {
+    const { bundle, target, remoteManifest } = await realRcloneWorkspace('run-m8b-real-remote');
+    const first = await runMeasurementArchive({ bundleDir: bundle, target, host: 'triton' });
+    expect(first.state).toBe('archived');
+
+    // A tampered archive manifest: the re-run must fail loudly and leave the
+    // remote bytes exactly as they were left.
+    const tampered = Buffer.from('{"bundleVersion":1,"runId":"run-m8b-real-remote","x":1}\n');
+    await writeFile(remoteManifest, tampered);
+    const rerun = await runMeasurementArchive({ bundleDir: bundle, target, host: 'triton' });
+
+    expect(rerun.state).toBe('local');
+    expect(rerun.reason).toContain('immutable file modified');
+    expect(await readFile(remoteManifest)).toEqual(tampered);
   });
 });

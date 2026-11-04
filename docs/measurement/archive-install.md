@@ -38,9 +38,13 @@ M8a bundle. Each rclone call runs with a five-minute timeout.
    commit marker is never written. `--copy-links` makes `check` follow a
    local symlink instead of skipping it on both sides, so one the walk missed
    is still caught.
-5. `rclone copyto <bundleDir>/manifest.json <dest>/manifest.json` writes the
-   commit marker: the manifest appears on the remote only after the payload
-   has been verified, so an interrupted push never looks like a whole bundle.
+5. `rclone copy <bundleDir> <dest> --immutable --include /manifest.json` writes
+   the commit marker with the payload copy's flag set (`--transfers 2`,
+   `--checkers 2`, `--low-level-retries 4`, `--no-update-modtime`): the
+   manifest appears on the remote only after the payload has been verified, so
+   an interrupted push never looks like a whole bundle. The copy is
+   directory-scoped because single-file `copyto` skips `--immutable`
+   (rclone issue #4921).
 6. `rclone check <bundleDir> <dest> --one-way --include /manifest.json
 --copy-links` confirms the marker itself (`check` cannot compare single
    files, so the tree comparison is filtered to the manifest path); a failure

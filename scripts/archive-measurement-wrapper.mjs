@@ -3,7 +3,7 @@
 // is checked against the configured session archive, copied to
 // <target>/<host>/measurement/<runId>, verified with `rclone check --one-way`,
 // and only then given manifest.json as the commit marker, which is confirmed
-// by a final filtered check. The copy is append-only (`copy`/`copyto` with
+// by a final filtered check. The copy is append-only (`copy` with
 // `--immutable`, never `sync`/`--delete`); the bundle is read-only and the
 // session manifest is never written. If the archive check, copy, verification, commit or
 // marker check fails, the result says so and names the untouched local
@@ -273,16 +273,28 @@ export async function runMeasurementArchive(input = {}) {
   }
   // manifest.json is the commit marker: it only appears once the payload copy
   // has been verified, so an interrupted push never looks like a whole bundle.
-  // --immutable keeps the marker append-only as well: a re-run (or a tampered
-  // remote) with a differing manifest fails instead of overwriting the archive.
+  // The marker copy is directory-scoped with the payload copy's flags, because
+  // a single-file copyto skips the --immutable check (rclone issue #4921):
+  // with copyto, a re-run or a tampered remote silently overwrote the marker.
+  // --include keeps it to the manifest alone; --immutable keeps the marker
+  // append-only: a differing manifest fails instead of overwriting the archive.
   const commit = await run(RCLONE, [
-    'copyto',
-    `${bundle.root}/manifest.json`,
-    `${destination}/manifest.json`,
+    'copy',
+    bundle.root,
+    destination,
     '--immutable',
+    '--transfers',
+    '2',
+    '--checkers',
+    '2',
+    '--low-level-retries',
+    '4',
+    '--no-update-modtime',
+    '--include',
+    '/manifest.json',
   ]);
   if (commit.code !== 0) {
-    const reason = reasonLine(commit.stderr, `rclone copyto exited ${commit.code}`);
+    const reason = reasonLine(commit.stderr, `rclone copy exited ${commit.code}`);
     return {
       ...local,
       state: 'local',
