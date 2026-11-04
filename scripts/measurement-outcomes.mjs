@@ -188,14 +188,25 @@ export function computeOutcomePanels({
       'review',
       unknown,
     ),
-    [''],
+    // Root and the consumed finding list, plus the pointers the review
+    // producer actually writes (address.ts: /delivered, /completed,
+    // /omissions, /reviewerId) — a review whose own evidence markers say
+    // not-collected never acts as known evidence.
+    ['', '/findingFingerprints', '/delivered', '/completed', '/omissions', '/reviewerId'],
     'review',
     unknown,
   );
-  const keptAcceptances = admit(
-    acceptances,
-    acceptanceOk,
-    (a) => `${a.headSha}\u0000${a.reviewedBaseSha}\u0000${a.reviewerId}`,
+  const keptAcceptances = usable(
+    admit(
+      acceptances,
+      acceptanceOk,
+      (a) => `${a.headSha}\u0000${a.reviewedBaseSha}\u0000${a.reviewerId}`,
+      'acceptance',
+      unknown,
+    ),
+    // Acceptance field pointers have no producer yet (T20), so the root
+    // record governs; a torn acceptance never makes a PR eligible.
+    [''],
     'acceptance',
     unknown,
   );
@@ -315,9 +326,10 @@ export function computeOutcomePanels({
   }
 
   // Harm panel 2 — post-merge CI red: flake / regression / infrastructure /
-  // unknown, over one observation per (sha, source). With no stated examined
-  // heads the counts are null (unknown, never zero); a red at an unexamined
-  // head is partial evidence.
+  // unknown, over one observation per (sha, source). The four counts describe
+  // examined reds only: with no coverage declaration — or a corrupt one — the
+  // counts are null (unknown, never zero), and a red at an unexamined head is
+  // a top-level partial entry, never a count.
   const ciRedPanel = {
     flake: 0,
     regression: 0,
@@ -326,51 +338,51 @@ export function computeOutcomePanels({
     observedHeads: null,
     unobservedHeads: null,
   };
-  if (ciObservedHeads === undefined) {
+  const noCoverage = (reason) => {
     ciRedPanel.flake =
       ciRedPanel.regression =
       ciRedPanel.infrastructure =
       ciRedPanel.unknown =
         null;
-    unknown.push(
-      bad(
-        'ciRed',
-        'unavailable',
-        'no CI evidence was examined; CI red counts are unknown, never zero',
-      ),
-    );
-  } else {
+    unknown.push(bad('ciRed', 'unavailable', reason));
+  };
+  if (ciObservedHeads === undefined) noCoverage('no CI coverage declared');
+  else {
     const examined = new Set();
+    let corrupt = false;
     ciObservedHeads.forEach((head, i) => {
-      if (!sha(head))
+      if (!sha(head)) {
+        corrupt = true;
         unknown.push(bad(`ciObservedHeads[${i}]`, 'corrupt', 'examined head is not a sha'));
-      else examined.add(head);
+      } else examined.add(head);
     });
-    ciRedPanel.observedHeads = [...examined].sort();
-    ciRedPanel.unobservedHeads = eligibleHeads.filter((head) => !examined.has(head)).sort();
-    for (const row of admit(
-      ciRed,
-      (row) => row !== null && typeof row === 'object' && sha(row.sha) && text(row.source),
-      (row) => `${row.sha}\u0000${row.source}`,
-      'ciRed',
-      unknown,
-    )) {
-      if (!examined.has(row.sha)) {
-        ciRedPanel.unknown++;
-        unknown.push(bad(`ciRed ${row.sha}`, 'partial', 'CI red at an unexamined head'));
-        continue;
-      }
-      if (CI_RED.has(row.classification)) ciRedPanel[row.classification]++;
-      else if (row.classification === 'unknown') ciRedPanel.unknown++;
-      else {
-        ciRedPanel.unknown++;
-        unknown.push(
-          bad(
-            `ciRed ${row.sha}`,
-            'unsupported',
-            `classification '${String(row.classification)}' is not recognized`,
-          ),
-        );
+    if (corrupt) noCoverage('the CI coverage declaration is corrupt; counts are unknown');
+    else {
+      ciRedPanel.observedHeads = [...examined].sort();
+      ciRedPanel.unobservedHeads = eligibleHeads.filter((head) => !examined.has(head)).sort();
+      for (const row of admit(
+        ciRed,
+        (row) => row !== null && typeof row === 'object' && sha(row.sha) && text(row.source),
+        (row) => `${row.sha}\u0000${row.source}`,
+        'ciRed',
+        unknown,
+      )) {
+        if (!examined.has(row.sha)) {
+          unknown.push(bad(`ciRed ${row.sha}`, 'partial', 'CI red at an unexamined head'));
+          continue;
+        }
+        if (CI_RED.has(row.classification)) ciRedPanel[row.classification]++;
+        else if (row.classification === 'unknown') ciRedPanel.unknown++;
+        else {
+          ciRedPanel.unknown++;
+          unknown.push(
+            bad(
+              `ciRed ${row.sha}`,
+              'unsupported',
+              `classification '${String(row.classification)}' is not recognized`,
+            ),
+          );
+        }
       }
     }
   }

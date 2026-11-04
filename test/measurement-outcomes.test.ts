@@ -296,16 +296,23 @@ describe('M10e missing evidence', () => {
       unobservedHeads: null,
     });
     expect(panels.unknown).toHaveLength(1);
-    expect(panels.unknown[0]?.kind).toBe('unavailable');
+    expect(panels.unknown[0]).toMatchObject({
+      kind: 'unavailable',
+      reason: 'no CI coverage declared',
+    });
   });
 
   test('a red at an unexamined head is partial evidence', () => {
+    // The red's head is an eligible PR whose CI was not examined: the four
+    // counts still describe only examined reds, the coverage gap rides as a
+    // top-level partial entry, and the head is reported unobserved.
     const panels = computeOutcomePanels({
-      reviews: [],
+      reviews: [review({ headSha: HEAD2 })],
       dispositions: [],
-      acceptances: [],
+      acceptances: [acceptance({ headSha: HEAD2 })],
       ciRed: [{ sha: HEAD2, source: 'gh-actions', classification: 'flake' }],
       ciObservedHeads: [HEAD1],
+      population: [{ headSha: HEAD2, mergedAt: '2026-11-01T00:00:00.000Z' }],
       followUpDays: 10,
       observedAt: OBSERVED_AT,
     });
@@ -314,12 +321,38 @@ describe('M10e missing evidence', () => {
       flake: 0,
       regression: 0,
       infrastructure: 0,
-      unknown: 1,
+      unknown: 0,
       observedHeads: [HEAD1],
-      unobservedHeads: [],
+      unobservedHeads: [HEAD2],
     });
     expect(panels.unknown).toHaveLength(1);
     expect(panels.unknown[0]?.kind).toBe('partial');
+  });
+
+  test('a corrupt CI coverage declaration degrades the counts', () => {
+    // One non-sha entry makes the whole declaration unusable: the counts are
+    // null beside the corrupt entry, never computed over the valid rest.
+    const panels = computeOutcomePanels({
+      reviews: [],
+      dispositions: [],
+      acceptances: [],
+      ciRed: [{ sha: HEAD1, source: 'gh-actions', classification: 'flake' }],
+      ciObservedHeads: [HEAD1, 'nope'],
+      followUpDays: 10,
+      observedAt: OBSERVED_AT,
+    });
+
+    expect(panels.harm.ciRed).toEqual({
+      flake: null,
+      regression: null,
+      infrastructure: null,
+      unknown: null,
+      observedHeads: null,
+      unobservedHeads: null,
+    });
+    expect(panels.unknown).toHaveLength(2);
+    expect(panels.unknown[0]?.kind).toBe('corrupt');
+    expect(panels.unknown[1]?.kind).toBe('unavailable');
   });
 });
 
@@ -485,12 +518,25 @@ describe('M10e failure evidence', () => {
 
   test('a row whose availability marks consumed fields incomplete is unknown', () => {
     // A torn disposition (root availability partial) never enters a re-fix
-    // run at all, and a torn review never establishes a covered range — the
-    // re-fix that relied on it is missing lineage, not a candidate.
+    // run, a review whose finding list is marked unavailable (or whose root
+    // is torn) never establishes a covered range — the re-fix that relied on
+    // it is missing lineage — and a torn acceptance never makes a PR
+    // eligible.
     const FA = fingerprint('src/torn.ts');
     const FB = fingerprint('src/lost-range.ts');
+    const FC = fingerprint('src/torn-list.ts');
+    const pointer = (key: string): Record<string, AvailabilityRecord> => ({
+      [key]: { state: 'unavailable', reason: 'fixture', source: null },
+    });
     const panels = computeOutcomePanels({
-      reviews: [review({ findingFingerprints: [FB], availability: avail('partial') })],
+      reviews: [
+        review({ findingFingerprints: [FB], availability: avail('partial') }),
+        review({
+          round: 2,
+          findingFingerprints: [FC],
+          availability: pointer('/findingFingerprints'),
+        }),
+      ],
       dispositions: [
         disposition(FA, HEAD1, ['fix verified']),
         disposition(FA, HEAD2, ['fix verified again'], {
@@ -499,17 +545,28 @@ describe('M10e failure evidence', () => {
         }),
         disposition(FB, HEAD1, ['fix verified']),
         disposition(FB, HEAD2, ['fix verified again'], { observedAt: T2 }),
+        disposition(FC, HEAD1, ['fix verified']),
+        disposition(FC, HEAD2, ['fix verified again'], { observedAt: T2 }),
       ],
-      acceptances: [],
+      acceptances: [acceptance({ headSha: HEAD2, availability: avail('partial') })],
       ciObservedHeads: [],
+      population: [{ headSha: HEAD2, mergedAt: '2026-11-01T00:00:00.000Z' }],
       followUpDays: 10,
       observedAt: OBSERVED_AT,
     });
 
-    expect(panels.harm.refix).toEqual({ candidates: 0, explained: 0, unknown: 1 });
-    expect(panels.unknown).toHaveLength(3);
-    expect(panels.unknown.filter((entry) => entry.kind === 'unavailable')).toHaveLength(2);
-    expect(panels.unknown.filter((entry) => entry.kind === 'missing')).toHaveLength(1);
+    expect(panels.harm.refix).toEqual({ candidates: 0, explained: 0, unknown: 2 });
+    expect(panels.population).toEqual({
+      eligible: 0,
+      mature: 0,
+      rightCensored: 0,
+      followUpDays: 10,
+    });
+    // The torn acceptance also leaves the declared PR without qualifying
+    // lineage: its own 'unavailable' plus the population row's 'missing'.
+    expect(panels.unknown).toHaveLength(7);
+    expect(panels.unknown.filter((entry) => entry.kind === 'unavailable')).toHaveLength(4);
+    expect(panels.unknown.filter((entry) => entry.kind === 'missing')).toHaveLength(3);
   });
 
   test('an uncovered review never establishes a covered range', () => {
