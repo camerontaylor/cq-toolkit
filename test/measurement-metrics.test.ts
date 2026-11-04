@@ -116,15 +116,16 @@ function makeRun(overrides: Partial<MeasurementPanelRun> = {}): MeasurementPanel
 }
 
 /**
- * Fixtures opt in to completeness claims with an explicit (all-known)
- * availability map; a readout that omits report-level availability degrades
- * every cost total to partial (unknown is never known).
+ * Fixtures opt in to completeness claims by passing an explicit empty
+ * availability map — no degradation entries, the all-known read of fixture
+ * evidence with no report-level tears; an explicit map (including a null one)
+ * passes through untouched. A readout that omits report-level availability
+ * degrades every cost total to partial (unknown is never known).
  */
 function attested(input: Parameters<typeof computeMeasurementPanels>[0]) {
-  return computeMeasurementPanels({
-    ...input,
-    evidenceAvailability: input.evidenceAvailability ?? {},
-  });
+  return computeMeasurementPanels(
+    input.evidenceAvailability === undefined ? { ...input, evidenceAvailability: {} } : input,
+  );
 }
 
 describe('M10c nominal evidence', () => {
@@ -674,9 +675,9 @@ describe('M10c failure evidence', () => {
     });
     expect(nanWall.cost.attemptWallMs).toBeNull();
     expect(nanWall.cost.availability['/attemptWallMs']?.state).toBe('not-collected');
-    // Omitting the reader's availability degrades every cost total to
-    // partial with the explicit reason, and the omission is reported through
-    // the /evidenceAvailability entry as well.
+    // Omitting the reader's availability degrades every cost total — wall,
+    // channels, elapsed and USD alike — with the explicit reason, and the
+    // omission is reported through the /evidenceAvailability entry as well.
     const omitted = computeMeasurementPanels({
       runs: [
         makeRun({ attempts: [leaf('inv-9', { usageChannels: { input: 100 }, wallMs: 1_000 })] }),
@@ -687,7 +688,19 @@ describe('M10c failure evidence', () => {
     expect(omitted.cost.availability['/attemptWallMs']?.reason).toContain('was not provided');
     expect(omitted.cost.usageChannels.input).toBe(100);
     expect(omitted.cost.availability['/usageChannels/input']?.state).toBe('partial');
+    expect(omitted.cost.runElapsedMs).toBe(120_000);
+    expect(omitted.cost.availability['/runElapsedMs']?.state).toBe('partial');
+    expect(omitted.cost.modeledUsd).toBeNull();
+    expect(omitted.cost.availability['/modeledUsd']?.state).toBe('unavailable');
     expect(omitted.cost.availability['/evidenceAvailability']?.state).toBe('not-collected');
+    // A null map is the omitted case at runtime, never an all-known read.
+    const nullMap = computeMeasurementPanels({
+      runs: [makeRun({ attempts: [leaf('inv-10', { wallMs: 1_000 })] })],
+      // @ts-expect-error null is the omitted case at runtime, not a map
+      evidenceAvailability: null,
+    });
+    expect(nullMap.cost.availability['/attemptWallMs']?.state).toBe('partial');
+    expect(nullMap.cost.availability['/evidenceAvailability']?.state).toBe('not-collected');
   });
 
   test('per-run denominator only, never mix placeholder units with failures', () => {

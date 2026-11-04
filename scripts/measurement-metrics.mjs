@@ -110,7 +110,7 @@ export function computeMeasurementPanels({ runs, unknown = [], evidenceAvailabil
   // partial: without the reader's availability the panel cannot claim
   // completeness (unknown is never known), and the omission is also reported
   // through the /evidenceAvailability entry.
-  const unattested = evidenceAvailability === undefined;
+  const unattested = evidenceAvailability == null;
   const UNATTESTED =
     'report-level availability was not provided; completeness is claimed over leaves and the unknown bucket only';
   const incomplete = {
@@ -347,7 +347,7 @@ export function computeMeasurementPanels({ runs, unknown = [], evidenceAvailabil
         '/attemptWallMs': entry(wallTotal),
         '/runElapsedMs': entry(elapsedTotal),
         '/modeledUsd': entry(usdTotal),
-        ...(evidenceAvailability === undefined
+        ...(unattested
           ? {
               '/evidenceAvailability': avail(
                 'not-collected',
