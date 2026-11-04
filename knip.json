@@ -14,6 +14,7 @@
     "scripts/lib/test-narrow.d.mts",
     "scripts/lib/related-tests.d.mts",
     "scripts/archive-measurement-evidence.d.mts",
+    "scripts/archive-measurement-wrapper.d.mts",
     "scripts/measurement-session-index.d.mts",
     "test/fixtures/ratchet-lib-selfhost.mjs",
     "test/fixtures/cli-ops/fixture/*.js",
