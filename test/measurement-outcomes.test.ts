@@ -275,6 +275,61 @@ describe('M10e missing evidence', () => {
     expect(reasons).toContain('no independent PASS acceptance');
   });
 
+  test('producer not-collected markers on unconsumed fields never drop a valid review', () => {
+    // address.ts writes /reviewerId not-collected whenever a source has no
+    // cycle id, and /omissions not-collected on every legacy coverage proof
+    // — fields no panel consumes. A covered review carrying them still
+    // establishes its covered range, and a post-merge crq review carrying
+    // them still counts its findings.
+    const notCollected = (key: string): Record<string, AvailabilityRecord> => ({
+      [key]: { state: 'not-collected', reason: 'fixture', source: null },
+    });
+    const panels = computeOutcomePanels({
+      reviews: [
+        review({
+          coverage: 'legacy:full',
+          findingFingerprints: [F1],
+          availability: notCollected('/omissions'),
+        }),
+        review({ round: 2, findingFingerprints: [F2], availability: notCollected('/reviewerId') }),
+      ],
+      dispositions: [
+        disposition(F1, HEAD1, ['fix verified']),
+        disposition(F1, HEAD2, ['fix verified again'], { observedAt: T2 }),
+        disposition(F2, HEAD1, ['fix verified']),
+        disposition(F2, HEAD2, ['fix verified again'], { observedAt: T2 }),
+      ],
+      acceptances: [],
+      ciObservedHeads: [],
+      followUpDays: 10,
+      observedAt: OBSERVED_AT,
+    });
+
+    expect(panels.harm.refix).toEqual({ candidates: 2, explained: 0, unknown: 0 });
+    expect(panels.unknown).toEqual([]);
+
+    const missed = computeOutcomePanels({
+      reviews: [
+        review({ findingFingerprints: [F1] }),
+        review({
+          baseSha: HEAD1,
+          headSha: HEAD2,
+          source: 'crq',
+          findingFingerprints: [F1],
+          availability: notCollected('/reviewerId'),
+        }),
+      ],
+      dispositions: [],
+      acceptances: [acceptance()],
+      ciObservedHeads: [],
+      followUpDays: 10,
+      observedAt: OBSERVED_AT,
+    });
+
+    expect(missed.missed.restored).toEqual({ missed: 1, notMissed: 0, unknown: 0 });
+    expect(missed.unknown).toEqual([]);
+  });
+
   test('CI red counts are unknown unless the examined heads are stated', () => {
     // With no ciObservedHeads there is no CI evidence at all: the four
     // counts are null with one unavailable unknown — never four zeros.

@@ -188,11 +188,14 @@ export function computeOutcomePanels({
       'review',
       unknown,
     ),
-    // Root and the consumed finding list, plus the pointers the review
-    // producer actually writes (address.ts: /delivered, /completed,
-    // /omissions, /reviewerId) — a review whose own evidence markers say
-    // not-collected never acts as known evidence.
-    ['', '/findingFingerprints', '/delivered', '/completed', '/omissions', '/reviewerId'],
+    // Root and the consumed finding list only: availability gates just the
+    // fields the panels read. The coverage-proof pointers (/delivered,
+    // /completed, /omissions) and /reviewerId mark unconsumed fields —
+    // /reviewerId is not-collected whenever a source has no cycle id and
+    // /omissions on every legacy proof — and covered() already gates
+    // coverage and vendor completion, so a not-collected marker there must
+    // not drop a valid covered range.
+    ['', '/findingFingerprints'],
     'review',
     unknown,
   );
