@@ -3213,12 +3213,22 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                   rereviewStop(refreshed),
                 );
               }
-              if (
-                refreshedRecord.branch !== (await branchName(root)) ||
-                refreshedRecord.head !== (await gitText(root, ['rev-parse', 'HEAD']))
-              ) {
-                withheldReviewReasons.push('identity changed before the re-review was recorded');
-                return await finish('needs-human', 're-review identity changed');
+              try {
+                if (
+                  refreshedRecord.branch !== (await branchName(root)) ||
+                  refreshedRecord.head !== (await gitText(root, ['rev-parse', 'HEAD']))
+                ) {
+                  withheldReviewReasons.push('identity changed before the re-review was recorded');
+                  return await finish('needs-human', 're-review identity changed');
+                }
+              } catch (error) {
+                // T21/P3: the exposure exists but the check itself failed —
+                // count it withheld so /reviews stays truthful, then let the
+                // run's own failure path decide the outcome.
+                withheldReviewReasons.push(
+                  'identity check failed before the re-review was recorded',
+                );
+                throw error;
               }
               // T21: the re-review exposure of this round's head.
               await emitReviewObserved(round, refreshedRecord, { base: reviewedBase });

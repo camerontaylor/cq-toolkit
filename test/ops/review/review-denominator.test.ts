@@ -26,6 +26,7 @@
 //      without moving the verdict.
 // Fake/local inputs only: no provider, no network, no credentials.
 import { randomUUID } from 'node:crypto';
+import { rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { expect, test } from 'vitest';
 import { makeReviewAddress } from '../../../src/ops/review/address.js';
@@ -463,6 +464,31 @@ test('T21 re-review exposures survive abort paths', async () => {
     });
   } finally {
     await f3.cleanup();
+  }
+
+  // The identity check itself failing (git unreadable between the produced
+  // record and its emission) counts the row withheld — /reviews partial with
+  // its own reason — and the rethrow keeps the run outcome unchanged.
+  const f4 = await fixture();
+  try {
+    const result = await makeReviewAddress({
+      ...f4.deps,
+      review: async () => {
+        await rm(join(f4.repo.root, '.git', 'HEAD'));
+        return { status: 'ok', value: { ...f4.record(), findings: [] } };
+      },
+    })({ ...f4.input, rounds: 1 });
+    expect(result.status, JSON.stringify(result)).toBe('needs-human');
+    const report = reportOf(result);
+    expect(report.reportV2?.availability['/reviews']).toMatchObject({
+      state: 'partial',
+      reason: '1 exposure(s) withheld: identity check failed before the re-review was recorded',
+    });
+    const { reviews } = await reviewsOf(f4.input.journalDir);
+    expect(reviews.map((payload) => payload.round)).toEqual([0]);
+    expect(report.observation?.status).toBe('durable');
+  } finally {
+    await f4.cleanup();
   }
 }, 120_000);
 
