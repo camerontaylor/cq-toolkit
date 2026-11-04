@@ -18,8 +18,11 @@
 // (session index) are keyed by (repo, workId, runId) —
 // a composition run may span several works — and are derived aggregates: a row
 // is not added when leaves of its identity are observed, so costs count once,
-// and a row whose observed leaves fall short of its claims is recorded as a
-// partial unknown that forces partial totals.
+// and a row whose observed leaves fall short of — or exceed — its claims is
+// recorded as a partial unknown that forces partial totals. Reports carry one
+// correlation.workId per report (the producer foldObservations takes a single
+// work today), so an index row of the same (repo, runId) under another workId
+// is a cross-work conflict, never an additive sibling.
 import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
 import { lstat, open, realpath } from 'node:fs/promises';
@@ -310,7 +313,14 @@ async function readBundle(dir, result) {
     );
   if (!Array.isArray(parsed.files))
     return void result.unknown.push(bad(dir, 'corrupt', 'manifest.files is not an array'));
+  let indexIngested = false;
   for (const entry of parsed.files) {
+    // A files[] element that is not an object is a corrupt manifest, never a
+    // silent drop — the manifest lied about its own shape.
+    if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
+      result.unknown.push(bad(dir, 'corrupt', 'manifest entry is not an object'));
+      continue;
+    }
     // Measurement inputs are recognised artifacts only: report/index JSON and
     // the session index. Receipts (git-common-dir roots), .ndjson streams and
     // other files (.log and similar) are not measurement inputs — their state
@@ -322,11 +332,22 @@ async function readBundle(dir, result) {
       (entry?.root === 'session-index' ||
         (typeof entry?.path === 'string' && entry.path.endsWith('.json')));
     if (!artifact) continue;
-    const source = `${dir}:${entry?.root ?? '?'}/${entry?.path ?? '?'}`;
-    if (entry?.state !== 'present') {
-      result.unknown.push(
-        bad(source, entry.state === 'missing' ? 'missing' : 'untrusted', 'artifact absent'),
-      );
+    const source = `${dir}:${entry.root ?? '?'}/${entry.path ?? '?'}`;
+    if (entry.state !== 'present') {
+      // The capture vocabulary is preserved — missing stays missing,
+      // unsupported stays unsupported, anything else is untrusted — and the
+      // capture reason rides along in the message instead of being relabelled.
+      const kind =
+        entry.state === 'missing'
+          ? 'missing'
+          : entry.state === 'unsupported'
+            ? 'unsupported'
+            : 'untrusted';
+      const reason =
+        typeof entry.reason === 'string' && entry.reason.length > 0
+          ? `artifact absent (${entry.reason})`
+          : 'artifact absent';
+      result.unknown.push(bad(source, kind, reason));
       continue;
     }
     if (!text(entry.pointer) || !text(entry.sha256)) {
@@ -343,13 +364,25 @@ async function readBundle(dir, result) {
           JSON.parse(read.bytes.toString('utf8')),
           source,
           result,
-          producerPath(entry?.root, entry?.path),
+          producerPath(entry.root, entry.path),
         );
+        if (entry.root === 'session-index') indexIngested = true;
       } catch {
         result.unknown.push(bad(source, 'corrupt', 'artifact is not JSON'));
       }
     }
   }
+  // The manifest declares a captured session index; if no session-index
+  // artifact was ingested, that index evidence is missing, never silently
+  // absent.
+  if (parsed.sessionIndex?.state === 'present' && !indexIngested)
+    result.unknown.push(
+      bad(
+        dir,
+        'missing',
+        'manifest.sessionIndex is present but no session-index artifact was ingested',
+      ),
+    );
 }
 
 function aggregate(records, field, label, incomplete) {
@@ -405,13 +438,18 @@ export async function readMeasurementInputs({ dirs } = {}) {
     incomplete: { tokens: false, wallMs: false, modeledUsd: false },
   };
   for (const dir of [...new Set(dirs)]) await readBundle(dir, result);
-  // Leaves observed per (repo, workId, runId). A parent mirrors its leaves as
-  // soon as one is seen (the aggregate is not added), but it is complete only
-  // when every leaf its row claims was observed and the leaf token and
-  // wall-time sums reach the row totals; otherwise the shortfall is a partial
-  // unknown. With no leaf observed the row aggregate is the evidence and its
-  // own availability governs completeness.
+  // Leaves observed per (repo, workId, runId), and the works observed per
+  // (repo, runId) among report leaves. A parent mirrors its leaves as soon as
+  // one is seen (the aggregate is not added), but it is complete only when
+  // every leaf its row claims was observed and the leaf count, token and
+  // wall-time sums match the row totals; a shortfall OR an excess is a partial
+  // unknown (an excess means leaves the row does not account for). With no
+  // leaf observed the row aggregate is the evidence and its own availability
+  // governs completeness. And a row of the same (repo, runId) whose leaves
+  // all sit under another workId is a cross-work conflict: reports carry one
+  // workId each, so the row cannot be their mirror and must add nothing.
   const leaves = new Map();
+  const runWorks = new Map();
   for (const record of result.inputs) {
     const key = `${record.repo ?? ''}\u0000${record.workId}\u0000${record.runId}`;
     const seen = leaves.get(key) ?? { count: 0, tokens: 0, wallMs: 0 };
@@ -419,8 +457,28 @@ export async function readMeasurementInputs({ dirs } = {}) {
     seen.tokens += record.tokens ?? 0;
     seen.wallMs += record.wallMs ?? 0;
     leaves.set(key, seen);
+    const runKey = `${record.repo ?? ''}\u0000${record.runId}`;
+    const works = runWorks.get(runKey) ?? new Set();
+    works.add(record.workId);
+    runWorks.set(runKey, works);
   }
   for (const parent of result.parents) {
+    const works = runWorks.get(`${parent.repo ?? ''}\u0000${parent.runId}`);
+    if (works !== undefined && !works.has(parent.workId)) {
+      // The run's costs are already counted once, under the observed work;
+      // adding this row on top would double-count the run. One run cannot be
+      // two works: the disagreement is a conflict unknown, and the row (its
+      // costs and its attempt count) adds nothing.
+      parent.mirrored = true;
+      result.unknown.push(
+        bad(
+          parent.source,
+          'conflict',
+          `run ${parent.runId}: leaves sit under work ${[...works].join(', ')} but the row claims ${parent.workId}`,
+        ),
+      );
+      continue;
+    }
     const seen = leaves.get(`${parent.repo ?? ''}\u0000${parent.workId}\u0000${parent.runId}`);
     parent.mirrored = seen !== undefined && seen.count > 0;
     if (!parent.mirrored) continue;
@@ -448,6 +506,30 @@ export async function readMeasurementInputs({ dirs } = {}) {
           `run ${parent.runId}: leaf wall-time sum ${seen.wallMs} is below the row total ${parent.wallMs}`,
         ),
       );
+    else if (seen.count > parent.attempts)
+      result.unknown.push(
+        bad(
+          parent.source,
+          'partial',
+          `run ${parent.runId}: leaf count sum ${seen.count} exceeds the row total ${parent.attempts}`,
+        ),
+      );
+    else if (parent.tokens !== null && seen.tokens > parent.tokens)
+      result.unknown.push(
+        bad(
+          parent.source,
+          'partial',
+          `run ${parent.runId}: leaf token sum ${seen.tokens} exceeds the row total ${parent.tokens}`,
+        ),
+      );
+    else if (parent.wallMs !== null && seen.wallMs > parent.wallMs)
+      result.unknown.push(
+        bad(
+          parent.source,
+          'partial',
+          `run ${parent.runId}: leaf wall sum ${seen.wallMs} exceeds the row total ${parent.wallMs}`,
+        ),
+      );
   }
   const unmirrored = result.parents.filter((parent) => !parent.mirrored);
   const contributors = [
@@ -469,23 +551,44 @@ export async function readMeasurementInputs({ dirs } = {}) {
     'modeled USD',
     anyUnknown || result.incomplete.modeledUsd,
   );
+  // Every admitted leaf is one measured attempt; an unmirrored parent row
+  // contributes its stated attempt count (the same double-count guard as
+  // costs — a mirrored row's attempts are its leaves, already counted), so
+  // an index-only bundle never reports measured costs beside zero attempts.
+  const attemptsValue =
+    result.inputs.length + unmirrored.reduce((sum, parent) => sum + parent.attempts, 0);
+  // The attempt count states its completeness with the same rule as the
+  // costs: unusable evidence beside nothing observed is unavailable, beside
+  // something observed is partial; only fully observed evidence is known —
+  // or known-zero at a measured zero.
+  const attemptsAvailability = anyUnknown
+    ? attemptsValue > 0
+      ? {
+          state: 'partial',
+          reason: `observed ${attemptsValue} attempts; measurement inputs were rejected, incomplete or unavailable`,
+        }
+      : {
+          state: 'unavailable',
+          reason:
+            'no attempt was observed; measurement inputs were rejected, incomplete or unavailable',
+        }
+    : attemptsValue > 0
+      ? { state: 'known', reason: `observed ${attemptsValue} attempts` }
+      : { state: 'known-zero', reason: 'zero attempts observed' };
   const availability = Object.fromEntries(
-    [tokens, wallMs, modeledUsd].map((item, index) => [
-      ['/tokens', '/wallMs', '/modeledUsd'][index],
-      { state: item.state, reason: item.reason, source: null },
-    ]),
+    [
+      [attemptsAvailability, '/attempts'],
+      [tokens, '/tokens'],
+      [wallMs, '/wallMs'],
+      [modeledUsd, '/modeledUsd'],
+    ].map(([item, pointer]) => [pointer, { state: item.state, reason: item.reason, source: null }]),
   );
   return sanitizeDeep({
     inputs: result.inputs,
     parents: result.parents,
     unknown: result.unknown,
     totals: {
-      // Every admitted leaf is one measured attempt; an unmirrored parent row
-      // contributes its stated attempt count (the same double-count guard as
-      // costs — a mirrored row's attempts are its leaves, already counted), so
-      // an index-only bundle never reports measured costs beside zero
-      // attempts.
-      attempts: result.inputs.length + unmirrored.reduce((sum, parent) => sum + parent.attempts, 0),
+      attempts: attemptsValue,
       tokens: tokens.value,
       wallMs: wallMs.value,
       modeledUsd: modeledUsd.value,

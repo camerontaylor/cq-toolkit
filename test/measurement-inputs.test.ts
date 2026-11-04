@@ -12,7 +12,15 @@
 //     rejected, torn, partially observed or unavailable input forces partial
 //     or unavailable totals);
 //   - parent-child references prevent double-counting costs, and a parent is
-//     only complete when every leaf its row claims was observed (P1-2);
+//     only complete when every leaf its row claims was observed with sums
+//     that MATCH the row — a shortfall or an excess is a partial unknown —
+//     while a row of the same run under another workId is a cross-work
+//     conflict that adds nothing (P1-2, P2-1, P3-4);
+//   - totals.attempts carries its own '/attempts' availability with the same
+//     unknown-never-zero rule as the costs (P2-2);
+//   - a malformed manifest (non-object files[] element, an unsupported
+//     capture state, a declared session index with no ingested artifact) is
+//     unknown evidence, never a silent drop (P3-1..P3-3);
 //   - the lstat/open race (FIFO or symlink swapped in mid-read) is refused
 //     without blocking (P2-3, P3-2).
 // Local fixtures only: M8a-shaped bundle directories, no providers, no network.
@@ -490,7 +498,7 @@ describe('M10b nominal evidence', () => {
     expect(result.totals.availability['/tokens']?.state).toBe('known');
   });
 
-  test('unmirrored session rows contribute their stated attempts to the total', async () => {
+  test('unmirrored session rows contribute attempts, never across works', async () => {
     const base = await workspace();
     const indexOnly = await bundle(base, 'index-only', {
       'session-index/session-index.json': JSON.stringify(index(150, 600, { attempts: 2 })),
@@ -511,11 +519,14 @@ describe('M10b nominal evidence', () => {
 
     const mixedResult = await readMeasurementInputs({ dirs: [mixed] });
 
-    // The report's leaf counts once; the unmirrored parent of another work
-    // adds its own attempts with the same double-count guard as costs.
-    expect(mixedResult.totals.attempts).toBe(3);
-    expect(mixedResult.totals.tokens).toBe(150);
-    expect(mixedResult.unknown).toEqual([]);
+    // The report's leaf counts once; a sibling row of the same run under
+    // another workId is a cross-work conflict (one run cannot be two works),
+    // so its attempts and costs are never added on top of the leaf's.
+    expect(mixedResult.totals.attempts).toBe(1);
+    expect(mixedResult.totals.tokens).toBe(100);
+    expect(mixedResult.unknown).toHaveLength(1);
+    expect(mixedResult.unknown[0]).toMatchObject({ kind: 'conflict' });
+    expect(mixedResult.totals.availability['/tokens']?.state).toBe('partial');
   });
 
   test('parent-child references prevent double-counting costs', async () => {
@@ -581,6 +592,72 @@ describe('M10b missing evidence', () => {
     expect(result.unknown[0]).toMatchObject({ kind: 'corrupt' });
     expect(result.totals.tokens).toBeNull();
     expect(result.totals.availability['/tokens']?.state).toBe('unavailable');
+  });
+
+  test('a non-object manifest entry is corrupt, not silently dropped', async () => {
+    const base = await workspace();
+    const dir = await bundle(base, 'entry-not-object', {}, { manifest: { files: ['nope', null] } });
+
+    const result = await readMeasurementInputs({ dirs: [dir] });
+
+    // A files[] element that is not an object is a corrupt manifest, never a
+    // silent drop — the manifest lied about its own shape.
+    expect(result.unknown).toHaveLength(2);
+    for (const entry of result.unknown) expect(entry).toMatchObject({ kind: 'corrupt' });
+    expect(result.unknown[0]?.reason).toBe('manifest entry is not an object');
+    expect(result.totals.availability['/tokens']?.state).toBe('unavailable');
+  });
+
+  test('an unsupported capture state stays unsupported with its reason', async () => {
+    const base = await workspace();
+    const dir = await bundle(
+      base,
+      'state-unsupported',
+      {},
+      {
+        manifest: {
+          files: [
+            {
+              root: 'fix',
+              path: 'state/report.json',
+              state: 'unsupported',
+              reason: 'root unavailable (EPERM)',
+            },
+          ],
+        },
+      },
+    );
+
+    const result = await readMeasurementInputs({ dirs: [dir] });
+
+    // The capture vocabulary is preserved — missing stays missing,
+    // unsupported stays unsupported, anything else is untrusted — and the
+    // capture reason rides along in the message instead of being relabelled.
+    expect(result.unknown).toHaveLength(1);
+    expect(result.unknown[0]).toMatchObject({ kind: 'unsupported' });
+    expect(result.unknown[0]?.reason).toContain('artifact absent');
+    expect(result.unknown[0]?.reason).toContain('root unavailable (EPERM)');
+  });
+
+  test('a declared session index with no ingested index artifact is unknown', async () => {
+    const base = await workspace();
+    const dir = await bundle(
+      base,
+      'declared-index-missing',
+      { 'fix/state/report.json': JSON.stringify(report([attempt('inv-a', 100, 400)])) },
+      { manifest: { sessionIndex: { state: 'present' } } },
+    );
+
+    const result = await readMeasurementInputs({ dirs: [dir] });
+
+    // The manifest declares a captured session index, but no session-index
+    // artifact was ingested: that index evidence is missing, never silently
+    // absent — the report beside it stays partial, not known.
+    expect(result.unknown).toHaveLength(1);
+    expect(result.unknown[0]).toMatchObject({ kind: 'missing' });
+    expect(result.unknown[0]?.reason).toContain('sessionIndex');
+    expect(result.totals.tokens).toBe(100);
+    expect(result.totals.availability['/tokens']?.state).toBe('partial');
   });
 
   test('a legacy report without reportVersion is unsupported, not silent', async () => {
@@ -740,6 +817,8 @@ describe('M10b failure evidence', () => {
     expect(result.totals.tokens).toBeNull();
     expect(result.totals.tokens).not.toBe(0);
     expect(result.totals.availability['/tokens']?.state).toBe('unavailable');
+    expect(result.totals.attempts).toBe(0);
+    expect(result.totals.availability['/attempts']?.state).toBe('unavailable');
   });
 
   test('a torn session row forces partial totals even with known values', async () => {
@@ -870,6 +949,7 @@ describe('M10b failure evidence', () => {
     expect(result.totals.tokens).toBe(100);
     expect(result.totals.availability['/tokens']?.state).toBe('partial');
     expect(result.totals.availability['/wallMs']?.state).toBe('partial');
+    expect(result.totals.availability['/attempts']?.state).toBe('partial');
   });
 
   test('a leaf token sum below the row total forces a partial total', async () => {
@@ -904,6 +984,62 @@ describe('M10b failure evidence', () => {
     expect(result.unknown[0]?.reason).toContain('wall');
     expect(result.totals.wallMs).toBe(400);
     expect(result.totals.availability['/wallMs']?.state).toBe('partial');
+  });
+
+  test('a leaf token sum above the row total forces a partial total', async () => {
+    const base = await workspace();
+    const dir = await bundle(base, 'token-above-row', {
+      'fix/state/report.json': JSON.stringify(report([attempt('inv-a', 200, 400)])),
+      'session-index/session-index.json': JSON.stringify(index(100, 400, { attempts: 1 })),
+    });
+
+    const result = await readMeasurementInputs({ dirs: [dir] });
+
+    // Leaf count and wall sum match the row, but the leaf token sum is double
+    // the row total: the evidence disagrees, so the run cannot be known — an
+    // excess is a partial unknown exactly as a shortfall is.
+    expect(result.unknown).toHaveLength(1);
+    expect(result.unknown[0]).toMatchObject({ kind: 'partial' });
+    expect(result.unknown[0]?.reason).toContain('exceeds the row total');
+    expect(result.totals.tokens).toBe(200);
+    expect(result.totals.availability['/tokens']?.state).toBe('partial');
+  });
+
+  test('a leaf wall-time sum above the row total forces a partial total', async () => {
+    const base = await workspace();
+    const dir = await bundle(base, 'wall-above-row', {
+      'fix/state/report.json': JSON.stringify(report([attempt('inv-a', 100, 1000)])),
+      'session-index/session-index.json': JSON.stringify(index(100, 400, { attempts: 1 })),
+    });
+
+    const result = await readMeasurementInputs({ dirs: [dir] });
+
+    expect(result.unknown).toHaveLength(1);
+    expect(result.unknown[0]).toMatchObject({ kind: 'partial' });
+    expect(result.unknown[0]?.reason).toContain('exceeds the row total');
+    expect(result.totals.wallMs).toBe(1000);
+    expect(result.totals.availability['/wallMs']?.state).toBe('partial');
+  });
+
+  test('more leaves than the row claims forces a partial total', async () => {
+    const base = await workspace();
+    const dir = await bundle(base, 'count-above-row', {
+      'fix/state/report.json': JSON.stringify(
+        report([attempt('inv-a', 100, 400), attempt('inv-b', 100, 400)]),
+      ),
+      'session-index/session-index.json': JSON.stringify(index(100, 400, { attempts: 1 })),
+    });
+
+    const result = await readMeasurementInputs({ dirs: [dir] });
+
+    // Two observed leaves against a row claiming one attempt: the row does
+    // not account for its own run, so nothing about it may read as known.
+    expect(result.unknown).toHaveLength(1);
+    expect(result.unknown[0]).toMatchObject({ kind: 'partial' });
+    expect(result.unknown[0]?.reason).toContain('exceeds the row total');
+    expect(result.totals.tokens).toBe(200);
+    expect(result.totals.attempts).toBe(2);
+    expect(result.totals.availability['/tokens']?.state).toBe('partial');
   });
 
   test('a mirrored row adds no attempts beyond its observed leaves', async () => {
@@ -1013,6 +1149,28 @@ describe('M10b failure evidence', () => {
     expect(result.totals.tokens).toBe(200);
     expect(result.totals.availability['/tokens']?.state).toBe('partial');
     expect(result.totals.availability['/tokens']?.state).not.toBe('known');
+  });
+
+  test('a sibling index row of the same run under another work is a conflict, never an added cost', async () => {
+    const base = await workspace();
+    const dir = await bundle(base, 'cross-work-row', {
+      'fix/state/report.json': JSON.stringify(report([attempt('inv-a', 100, 400)])),
+      'session-index/index.json': JSON.stringify(index(50, 200, { attempts: 1, workId: WORK2 })),
+    });
+
+    const result = await readMeasurementInputs({ dirs: [dir] });
+
+    // The report's leaves carry one workId (the producer fold takes a single
+    // work per report), so a row of the same (repo, runId) under another
+    // workId cannot be their mirror: its costs must not be added on top of
+    // the leaves'. The disagreement is a conflict unknown and the row adds
+    // nothing — not its tokens, and not its attempt count.
+    expect(result.parents[0]?.mirrored).toBe(true);
+    expect(result.unknown).toHaveLength(1);
+    expect(result.unknown[0]).toMatchObject({ kind: 'conflict' });
+    expect(result.totals.tokens).toBe(100);
+    expect(result.totals.attempts).toBe(1);
+    expect(result.totals.availability['/tokens']?.state).toBe('partial');
   });
 
   test('conflicting parent copies are all unknown, regardless of order', async () => {

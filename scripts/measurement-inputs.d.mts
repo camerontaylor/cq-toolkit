@@ -54,12 +54,16 @@ export interface MeasurementTotals {
   /**
    * Measured attempts: every admitted attempt row plus the stated attempts of
    * unmirrored parent rows (a mirrored row's attempts are its leaves, already
-   * counted — the same double-count guard as costs).
+   * counted — the same double-count guard as costs). Its completeness is
+   * stated at availability['/attempts'] with the same unknown-never-zero rule
+   * as the costs: unavailable (unknowns, nothing observed), partial
+   * (unknowns, something observed), known, or known-zero at zero.
    */
   attempts: number;
   tokens: number | null;
   wallMs: number | null;
   modeledUsd: number | null;
+  /** Per-total availability records, keyed '/attempts', '/tokens', '/wallMs', '/modeledUsd'. */
   availability: Record<string, AvailabilityRecord>;
 }
 
