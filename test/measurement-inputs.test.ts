@@ -3,7 +3,9 @@
 //   - dedup by repo/run/invocation identity (null repo is its own identity; a
 //     workId disagreement on one identity is a conflict, never a silent dedup);
 //   - schema version and checksum validation (full v2 report schema);
-//   - non-measurement files (.log, markerless .json) are skipped silently;
+//   - non-measurement files (.log, markerless .json away from producer
+//     report paths) are skipped silently, while a markerless .json AT a
+//     producer report path is a legacy report — an unsupported unknown;
 //   - corrupt/missing/untrusted/unsupported/conflicting children -> unknown
 //     bucket, never a fallback zero, and never a known total (P1-1: any
 //     rejected, torn, partially observed or unavailable input forces partial
@@ -580,15 +582,48 @@ describe('M10b missing evidence', () => {
     expect(result.totals.availability['/tokens']?.state).toBe('unavailable');
   });
 
-  test('a markerless .json is non-measurement; a wrong marker stays unknown', async () => {
+  test('a legacy report without reportVersion is unsupported, not silent', async () => {
+    const base = await workspace();
+    const address = await bundle(base, 'legacy-address', {
+      'review-journal/w/review-address-report.json': '{"attempts":[{"tokens":5}]}',
+    });
+
+    // review.address persists review-address-report.json into its journal
+    // (src/ops/review/address.ts) and the bundle capture keeps that basename:
+    // a markerless .json at a producer report path is a legacy report — an
+    // unsupported unknown that degrades totals, never a silent skip that
+    // would leave a too-low known total.
+    const addressResult = await readMeasurementInputs({ dirs: [address] });
+    expect(addressResult.unknown).toHaveLength(1);
+    expect(addressResult.unknown[0]).toMatchObject({ kind: 'unsupported' });
+    expect(addressResult.inputs).toEqual([]);
+    expect(addressResult.totals.tokens).toBeNull();
+    expect(addressResult.totals.availability['/tokens']?.state).toBe('unavailable');
+
+    // runFix persists fix-run-report-<uuid>.json (src/ops/fix/runFix.ts): the
+    // same legacy rule, matched by the UUID basename at the capture root.
+    const fixRun = await bundle(base, 'legacy-fix-run', {
+      'fix-journal/fix-run-report-9f2b7c4d-8e1a-4b3c-9d5e-6a7f8b9c0d1e.json':
+        '{"attempts":[{"tokens":5}]}',
+    });
+    const fixRunResult = await readMeasurementInputs({ dirs: [fixRun] });
+    expect(fixRunResult.unknown).toHaveLength(1);
+    expect(fixRunResult.unknown[0]).toMatchObject({ kind: 'unsupported' });
+    expect(fixRunResult.inputs).toEqual([]);
+    expect(fixRunResult.totals.tokens).toBeNull();
+    expect(fixRunResult.totals.availability['/tokens']?.state).toBe('unavailable');
+  });
+
+  test('a markerless .json away from producer paths is non-measurement; a wrong marker stays unknown', async () => {
     const base = await workspace();
     const stray = await bundle(base, 'stray', {
       'worktree/package.json': '{"name":"not-a-report"}',
     });
     const strayResult = await readMeasurementInputs({ dirs: [stray] });
 
-    // No reportVersion, reportV2 or indexVersion anywhere: not measurement
-    // evidence — skipped silently, never an unknown that would degrade totals.
+    // No reportVersion, reportV2 or indexVersion, and not at a producer
+    // report path: not measurement evidence — skipped silently, never an
+    // unknown that would degrade totals.
     expect(strayResult.unknown).toEqual([]);
     expect(strayResult.inputs).toEqual([]);
     expect(strayResult.totals.tokens).toBeNull();

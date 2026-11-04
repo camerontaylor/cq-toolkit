@@ -23,7 +23,7 @@
 import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
 import { lstat, open, realpath } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 import { sanitizeEvidenceText } from './archive-measurement-evidence.mjs';
 import { ReportV2Schema } from '../dist/kernel/schema.js';
 
@@ -146,7 +146,23 @@ function addLeaf(record, result) {
   );
 }
 
-function ingestJson(parsed, source, result) {
+// Producer report paths — a report is recognised by WHERE the producers write
+// it, not only by its markers: review.address persists a fixed basename
+// (src/ops/review/address.ts) and runFix persists fix-run-report-<uuid>.json
+// (src/ops/fix/runFix.ts, crypto.randomUUID()); a bundle capture keeps that
+// basename under the captured root (scripts/archive-measurement-evidence.mjs).
+// The session-index root is an index root, never a report path.
+const FIX_RUN_REPORT_NAME =
+  /^fix-run-report-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.json$/;
+
+/** Is this artifact one of the persisted report paths the producers write? */
+function producerReportPath(root, path) {
+  if (root === 'session-index' || typeof path !== 'string') return false;
+  const name = basename(path);
+  return name === 'review-address-report.json' || FIX_RUN_REPORT_NAME.test(name);
+}
+
+function ingestJson(parsed, source, result, producerReport) {
   // Persisted operation reports (fix runs, review-address) carry the v2
   // payload embedded at reportV2: runFix and review.address assign the
   // assembled payload to the outer report and persist that, and no writer
@@ -196,10 +212,19 @@ function ingestJson(parsed, source, result) {
     return;
   }
   // No measurement marker at all (no reportVersion, reportV2 or indexVersion):
-  // a non-measurement .json — package.json and similar under custom roots —
-  // not evidence. Skipped silently, never an unknown that would degrade every
-  // total; a marker that is present but fails validation stays unknown below.
-  if (parsed?.indexVersion === undefined) return;
+  // WHERE the artifact sits decides. At a producer report path it is a legacy
+  // report from before the markers existed — an unknown that degrades totals,
+  // never a silent skip that could leave a too-low known total. Anywhere else
+  // it is a non-measurement .json — package.json and similar under custom
+  // roots — skipped silently; a marker that is present but fails validation
+  // stays unknown below.
+  if (parsed?.indexVersion === undefined) {
+    if (producerReport)
+      return void result.unknown.push(
+        bad(source, 'unsupported', 'no reportVersion, reportV2 or indexVersion (legacy report)'),
+      );
+    return;
+  }
   if (parsed.indexVersion !== INDEX || !Array.isArray(parsed.sessions))
     return void result.unknown.push(
       bad(source, 'unsupported', `indexVersion ${String(parsed.indexVersion)}`),
@@ -310,7 +335,12 @@ async function readBundle(dir, result) {
       result.unknown.push(bad(source, 'untrusted', 'checksum mismatch'));
     else {
       try {
-        ingestJson(JSON.parse(read.bytes.toString('utf8')), source, result);
+        ingestJson(
+          JSON.parse(read.bytes.toString('utf8')),
+          source,
+          result,
+          producerReportPath(entry?.root, entry?.path),
+        );
       } catch {
         result.unknown.push(bad(source, 'corrupt', 'artifact is not JSON'));
       }
