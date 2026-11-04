@@ -140,22 +140,24 @@ export interface ReviewAddressReport {
   openBlocking: Finding[];
   /**
    * ADR-0008 baseline seam: the ROUND-1 open-blocker population. It is seeded
-   * BEFORE the dispatch loop from the full pre-dispatch item population (the
-   * open blocking threads the run is about to work), so every exit, including
-   * one taken before any item admits (an admission or closure refusal, a
-   * truncated fetch, a moved worker branch, a throwing fetch), reports the
-   * whole round-1 population and not just the ids dispatched so far. Round 1
-   * may only GAIN ids afterwards, deduplicated, in first-seen order: each PR
-   * dispatch item still captures its own id before `admitRecord` can refuse,
-   * and the PR path still merges the full open-thread population before its
-   * re-review (dedup-only; the population is already seeded). The local path
-   * captures its admitted record after deferred-source restoration and before
-   * dispatch, so a blocker the restoration reopens or appends is in the
-   * population the run works. It is never
-   * reassigned and never shrunk: `openBlocking` is recomputed after fixes and
-   * replaced by each successful re-review, so substituting it for the
-   * measurement baseline would inflate fixes-per-run. Absent only when the run
-   * exits before that population is known: unknown, never an empty baseline.
+   * BEFORE the dispatch loop from the PLANNED item population (the open
+   * blocking threads the run is about to work), so an exit taken before any
+   * item admits (an admission or closure refusal, a truncated fetch, a moved
+   * worker branch, a throwing fetch) still reports the planned population and
+   * not just the ids dispatched so far. The FULL open-thread population is
+   * merged only on the normal path, before the PR re-review: on an early
+   * exit, a thread excluded from planning (blocked) can be missing from this
+   * baseline. Round 1 may only GAIN ids afterwards, deduplicated, in
+   * first-seen order: each PR dispatch item still captures its own id before
+   * `admitRecord` can refuse, the round-1 agent re-review's record is
+   * captured before its same-round dispatch, and the local path captures its
+   * admitted record after deferred-source restoration and before dispatch,
+   * so a blocker the restoration reopens or appends is in the population the
+   * run works. It is never reassigned and never shrunk: `openBlocking` is
+   * recomputed after fixes and replaced by each successful re-review, so
+   * substituting it for the measurement baseline would inflate
+   * fixes-per-run. Absent only when the run exits before that population is
+   * known: unknown, never an empty baseline.
    */
   initialOpenBlocking?: string[];
   fixes: AddressFix[];
@@ -372,6 +374,16 @@ const discussionText = (
  * run into needs-human-with-PR; callers must propagate those verbatim.
  */
 export const REVIEW_ADDRESS_ROUNDCAP_REASON = 'review round cap reached with open findings';
+
+/**
+ * The severity every PR-thread finding is stamped with: the loop's dispatch
+ * item, the fetched-thread record built before the re-review, and the round-1
+ * seed's minimal PR-thread shape. One shared constant so the seed's blocking
+ * filter and the produced rows can never drift apart — the seed filters the
+ * ids it is handed against `blockingSeverities`, which must mean the same
+ * severity the real rows carry.
+ */
+const PR_THREAD_FINDING_SEVERITY = 'major' as const;
 
 /** SDK-first fix/disposition/re-review composition; kernel dispatch itself remains retry-free. */
 export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
@@ -2472,7 +2484,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                       source: 'pr-threads',
                       ...(item.item.path ? { file: item.item.path } : {}),
                       ...(item.item.line && item.item.line > 0 ? { line: item.item.line } : {}),
-                      severity: 'major',
+                      severity: PR_THREAD_FINDING_SEVERITY,
                       text: discussionText(item.item.body, item.item.comments),
                       status: 'open',
                     };
@@ -2621,7 +2633,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                       findings: ids.map((id) => ({
                         id,
                         source: 'pr-threads',
-                        severity: 'major',
+                        severity: PR_THREAD_FINDING_SEVERITY,
                         text: '',
                         status: 'open' as const,
                       })),
@@ -2820,7 +2832,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                       ...(thread.path ? { file: thread.path } : {}),
                       ...(thread.line && thread.line > 0 ? { line: thread.line } : {}),
                       text: discussionText(thread.body, thread.replies),
-                      severity: 'major',
+                      severity: PR_THREAD_FINDING_SEVERITY,
                       status: rejectionReasons.has(thread.id) ? 'rejected' : 'open',
                       ...(rejectionReasons.has(thread.id)
                         ? { reason: rejectionReasons.get(thread.id)! }
