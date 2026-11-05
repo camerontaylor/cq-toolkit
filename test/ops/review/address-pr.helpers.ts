@@ -4,11 +4,11 @@
 // address-pr.publication.test.ts, address-pr.exitPublication.test.ts and
 // address-pr.recovery.test.ts. This module holds the shared phase-one
 // orchestration fixture; it declares no tests.
-import { mkdtemp, mkdir, rm, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, rm, readFile, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
-import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { makeReviewAddress } from '../../../src/ops/review/address.js';
+import { realTmpDir } from '../../helpers/tmp-dir.js';
 import type { CqSeverity } from '../../../src/ops/analyze/cqConfig.js';
 import type { GhFn, GhResult } from '../../../src/adapters/forge-github/gh.js';
 import type { DriverFactory } from '../../../src/driver/factory.js';
@@ -92,7 +92,7 @@ export async function world(
     throw new Error('world(): failer cannot be combined with human, sameFile or fileless');
   if (options.missingHeadObject && options.expectedHead === undefined)
     throw new Error('world(): missingHeadObject requires expectedHead');
-  const root = await mkdtemp(join(tmpdir(), 'cq-address-memory-'));
+  const root = await realTmpDir('cq-address-memory-');
   const worktree = join(root, 'git', 'cq-review-worktrees', 'worker');
   await mkdir(worktree, { recursive: true });
   // A PR head the clone does not contain YET: the head ref names it (ref and

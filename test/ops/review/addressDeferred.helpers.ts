@@ -3,9 +3,7 @@
 // importProvenance,emptyFileAdmission}.test.ts. This module carries the shared
 // fixture surface verbatim from the original file; it declares no tests.
 import { createHash } from 'node:crypto';
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { rm } from 'node:fs/promises';
 import { resolveDeferredVendorContext } from '../../../src/ops/review/internal/addressDeferred.js';
 import { prepareDeferredVendorReview } from '../../../src/ops/dev/internal/deferredLedger.js';
 import { readWorkState } from '../../../src/ops/dev/internal/workState.js';
@@ -17,6 +15,7 @@ import type {
 } from '../../../src/ops/review/internal/queueProtocol.js';
 import { makeTestRepo, repoEffects } from '../dev/repo.js';
 import { cycleRecord } from '../dev/fakes.js';
+import { realTmpDir } from '../../helpers/tmp-dir.js';
 
 export const config: CqConfig = {
   schemaVersion: 2,
@@ -36,7 +35,7 @@ export async function fixture(ignoreState = true) {
   await repo.write('.gitignore', ignoreState ? '/.cq/\n' : '/.cq/dev/\n');
   await repo.write('cq.json', JSON.stringify(config));
   repo.commitAll('configure offline review');
-  const journalDir = await mkdtemp(join(tmpdir(), 'cq-address-debt-'));
+  const journalDir = await realTmpDir('cq-address-debt-');
   const effects = repoEffects(repo, (command, args) =>
     command === 'gh' ? (args[0] === 'api' ? 'author' : 'owner/repo') : undefined,
   );

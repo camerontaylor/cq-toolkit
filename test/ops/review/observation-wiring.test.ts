@@ -18,9 +18,9 @@ import { ReportV2Schema } from '../../../src/kernel/schema.js';
 //      first error and the status is indeterminate.
 // Fake/local inputs only: no provider, no network, no credentials.
 import { createHash } from 'node:crypto';
-import { lstat, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { lstat, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
+import { realTmpDir } from '../../helpers/tmp-dir.js';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { makeGhRunner, type GhFn } from '../../../src/adapters/forge-github/gh.js';
 import {
@@ -77,7 +77,7 @@ async function fixture(): Promise<Fixture> {
   const repo = await makeTestRepo();
   repo.git('config', 'user.name', 'Test');
   repo.git('config', 'user.email', 'test@example.invalid');
-  const journalDir = await mkdtemp(join(tmpdir(), 't31-obs-'));
+  const journalDir = await realTmpDir('t31-obs-');
   const role = { provider: 'mock', model: 'worker' };
   const config: CqConfig = {
     schemaVersion: 2,

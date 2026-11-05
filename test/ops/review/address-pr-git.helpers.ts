@@ -5,7 +5,6 @@
 // changed (the mocks stay in each test file).
 import { createHash } from 'node:crypto';
 import {
-  mkdtemp,
   readFile,
   readdir,
   realpath,
@@ -15,8 +14,8 @@ import {
   writeFile,
   mkdir,
 } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
+import { realTmpDir } from '../../helpers/tmp-dir.js';
 import { expect, vi } from 'vitest';
 import { makeAddressWorker } from '../../../src/ops/review/addressWorker.js';
 import { isolateAddressMany } from '../../../src/ops/review/addressMany.js';
@@ -124,7 +123,7 @@ export async function runPrAdapterCase(
   const earlyTamper = mode === 'bookkeeping-before-disposition';
   const tampered = mode === 'bookkeeping-tamper' || earlyTamper;
   const repo = await makeTestRepo();
-  const journal = await mkdtemp(join(tmpdir(), 'cq-address-pr-git-'));
+  const journal = await realTmpDir('cq-address-pr-git-');
   const role = { provider: 'scripted', model: 'worker' };
   try {
     await repo.write('src/a.ts', 'export const a = "BAD";\n');
@@ -906,7 +905,7 @@ export type RejectionMode =
 
 export async function runPersistedRejectionCase(mode: RejectionMode): Promise<void> {
   const repo = await makeTestRepo();
-  const journal = await mkdtemp(join(tmpdir(), 'cq-address-rejection-'));
+  const journal = await realTmpDir('cq-address-rejection-');
   try {
     await repo.write('.gitignore', '.cq/\n');
     repo.commitAll('ignore engine state');

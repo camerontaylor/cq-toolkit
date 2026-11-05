@@ -2,9 +2,8 @@
 // addressBookkeeping.*.test.ts siblings in this directory; the shared fixtures and
 // helpers live here.
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import { tmpdir } from 'node:os';
 import { vi } from 'vitest';
 import { makeAddressBookkeepingReceipt } from '../../../src/ops/review/internal/addressBookkeeping.js';
 import { DEV_LEDGER_VERSION, devLedgerPath } from '../../../src/ops/dev/record.js';
@@ -14,6 +13,7 @@ import type { DriverFactory } from '../../../src/driver/factory.js';
 import type { CqConfig } from '../../../src/ops/analyze/cqConfig.js';
 import { Finding, FindingsRecord } from '../../../src/ops/review/findings.js';
 import { makeGitleaksFixture } from '../../helpers/gitleaks-fixture.js';
+import { realTmpDir } from '../../helpers/tmp-dir.js';
 
 export const hash = (bytes: string) => createHash('sha256').update(bytes).digest('hex');
 
@@ -192,7 +192,7 @@ export async function usageHarness(
   const repo = await makeTestRepo();
   repo.git('config', 'user.name', 'Test');
   repo.git('config', 'user.email', 'test@example.invalid');
-  const journalDir = await mkdtemp(join(tmpdir(), 'cq-address-usage-'));
+  const journalDir = await realTmpDir('cq-address-usage-');
   const role = { provider: 'mock', model: 'worker' };
   const config: CqConfig = {
     schemaVersion: 2,

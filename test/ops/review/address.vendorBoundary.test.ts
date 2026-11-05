@@ -3,6 +3,7 @@
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { realTmpDir } from '../../helpers/tmp-dir.js';
 import { describe, expect, test, vi } from 'vitest';
 import type { CqConfig } from '../../../src/ops/analyze/cqConfig.js';
 import { makeReviewAddress } from '../../../src/ops/review/address.js';
@@ -82,7 +83,7 @@ async function vendorAddressFixture() {
     `#!${process.execPath}\nconst args = process.argv.slice(2);\nif (args[0] === 'repo') process.stdout.write('owner/repo\\n');\nelse if (args[0] === 'api') process.stdout.write('author\\n');\nelse process.exit(1);\n`,
     { mode: 0o755 },
   );
-  const journalDir = await mkdtemp(join(tmpdir(), 'cq-address-vendor-'));
+  const journalDir = await realTmpDir('cq-address-vendor-');
   const record = (): FindingsRecord => ({
     schemaVersion: 1,
     branch,

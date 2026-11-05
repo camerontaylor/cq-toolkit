@@ -1,5 +1,4 @@
-import { mkdtemp, writeFile, rm, symlink, mkdir } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { writeFile, rm, symlink, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
   makeAddressWorker,
@@ -15,6 +14,7 @@ import type { DiffSecretScanner } from '../../../src/ops/dev/denylist.js';
 import { makeGhRunner, type GhFn } from '../../../src/adapters/forge-github/gh.js';
 import type { Finding } from '../../../src/ops/review/findings.js';
 import { makeTestRepo } from '../dev/repo.js';
+import { realTmpDir } from '../../helpers/tmp-dir.js';
 
 export const role = { provider: 'mock', model: 'worker' };
 export const finding = (file = 'src/a.ts'): Finding => ({
@@ -68,7 +68,7 @@ export async function fixture(
   await repo.write('scripts/check.cjs', check || 'process.exitCode = 0;\n');
   repo.commitAll('fixture');
   const initial = repo.git('rev-parse', 'HEAD').trim();
-  const journal = await mkdtemp(join(tmpdir(), 'cq-address-test-'));
+  const journal = await realTmpDir('cq-address-test-');
   const alias = join(journal, 'repo-alias');
   if (options.aliasRoot) await symlink(repo.root, alias, 'dir');
   const dependencyRoot = join(journal, 'installed-caller');

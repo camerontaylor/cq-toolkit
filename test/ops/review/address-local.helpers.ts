@@ -4,8 +4,7 @@
 // address-local.cancellation.test.ts and
 // address-local.opaque-cancellation.test.ts. The scanner hooks and the
 // review.address fixture below are shared by all of them.
-import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readFile, writeFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, beforeEach, vi } from 'vitest';
 import { makeReviewAddress } from '../../../src/ops/review/address.js';
@@ -13,6 +12,7 @@ import type { CqConfig } from '../../../src/ops/analyze/cqConfig.js';
 import type { DriverFactory } from '../../../src/driver/factory.js';
 import type { Finding, FindingsRecord } from '../../../src/ops/review/findings.js';
 import { makeTestRepo } from '../dev/repo.js';
+import { realTmpDir } from '../../helpers/tmp-dir.js';
 import { makeGitleaksFixture } from '../../helpers/gitleaks-fixture.js';
 
 let scanner: Awaited<ReturnType<typeof makeGitleaksFixture>>;
@@ -51,7 +51,7 @@ export async function fixture(
   const repo = await makeTestRepo();
   repo.git('config', 'user.name', 'Test');
   repo.git('config', 'user.email', 'test@example.invalid');
-  const journalDir = await mkdtemp(join(tmpdir(), 'cq-address-local-'));
+  const journalDir = await realTmpDir('cq-address-local-');
   const role = { provider: 'mock', model: 'worker' };
   const config: CqConfig = {
     schemaVersion: 2,

@@ -1,9 +1,8 @@
 // Split provenance: test/ops/review/address.test.ts was split into this shared
 // fixture module plus address.{composition,reviewRounds,admission,blockedRereview,vendorBoundary,lock,m5b3Correlation}.test.ts.
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { rm } from 'node:fs/promises';
 import type { CqConfig } from '../../../src/ops/analyze/cqConfig.js';
+import { realTmpDir } from '../../helpers/tmp-dir.js';
 import {
   makeReviewAddress,
   type ReviewAddressDeps,
@@ -31,7 +30,7 @@ export const config: CqConfig = {
 };
 export async function fixture(findings: Finding[] = [finding('a')]) {
   const repo = await makeTestRepo();
-  const journalDir = await mkdtemp(join(tmpdir(), 'cq-address-composition-'));
+  const journalDir = await realTmpDir('cq-address-composition-');
   const record = (): FindingsRecord => ({
     schemaVersion: 1,
     branch: 'feature/x',

@@ -8,9 +8,9 @@
 // original comparison's GOOD diff leg. Under live-target behavior the
 // advanced target collapses the round-2 merge-base onto the round-1 fix, so
 // the re-review is dispatched over an empty comparison instead.
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { realTmpDir } from '../../helpers/tmp-dir.js';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { makeReviewAddress } from '../../../src/ops/review/address.js';
 import { makeGhRunner, type GhFn, type GhResult } from '../../../src/adapters/forge-github/gh.js';
@@ -37,7 +37,7 @@ afterEach(async () => {
 
 test('the round-2 re-review keeps the invocation-pinned comparison when the target advances mid-run', async () => {
   const repo = await makeTestRepo();
-  const journal = await mkdtemp(join(tmpdir(), 'cq-address-pin-rework-'));
+  const journal = await realTmpDir('cq-address-pin-rework-');
   const role = { provider: 'scripted', model: 'worker' };
   try {
     await repo.write('src/a.ts', 'export const a = "BAD";\n');

@@ -1,11 +1,11 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdtemp, mkdir, readFile, writeFile, rm, symlink } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, readFile, writeFile, rm, symlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { makeGitleaksFixture } from '../../helpers/gitleaks-fixture.js';
+import { realTmpDir } from '../../helpers/tmp-dir.js';
 import { generateScratchRepo } from '../../fixtures/scratch-repo/generate.js';
 import type { ReviewAddressReport } from '../../../src/ops/review/address.js';
 import { scrubbedGitEnv } from '../../helpers/git-env.js';
@@ -26,7 +26,7 @@ const git = async (root: string, ...args: string[]) =>
     await exec('git', ['-C', root, ...args], { env: scrubbedGitEnv(), timeout: 10000 })
   ).stdout.trim();
 async function fixture(model = 'scripted', maxTokens = 1000) {
-  const root = await mkdtemp(join(tmpdir(), 'cq-address-cli-'));
+  const root = await realTmpDir('cq-address-cli-');
   const repo = join(root, 'repo');
   await generateScratchRepo(repo);
   await git(repo, 'config', 'user.name', 'Test');
