@@ -1,0 +1,57 @@
+# Acceptance import recipe (M4b1)
+
+A **recorded snapshot** of one PR's comments is captured by hand, read-only,
+with the recipe below (always `env -u GITHUB_TOKEN gh api`). The importer
+(`importAcceptance` in `scripts/measurement-acceptance.mjs`) is a pure
+function over the recorded JSON: no `gh`, no network, no journal writes.
+Rows are reader artifacts for M10e's `acceptances` input, never runtime
+engine inputs; a re-capture is not byte-for-byte reproducible.
+
+## Independence is self-declared
+
+Every agent posts to GitHub as the same account, so the comment author
+cannot tell a reviewer from a PR author. The importer believes the comment's
+own header and records that the header is the only basis (the
+`/independent` availability). That is accepted for the measurement readout
+only: nothing in the engine, the merge bar or any check may use these rows.
+
+## Recipe
+
+```bash
+# 1. the PR — record number, user.login, head.sha, base.ref, merged_at,
+#    merge_commit_sha
+env -u GITHUB_TOKEN gh api repos/{owner}/{repo}/pulls/{n}
+# 2. the issue comments, --paginate --slurp, flattened to one list — record
+#    id, html_url, created_at, updated_at, user.login, body
+env -u GITHUB_TOKEN gh api "repos/{owner}/{repo}/issues/{n}/comments?per_page=100" --paginate --slurp
+# 3. per head named by an acceptance header, at capture time —
+#    bases[headSha] = merge_base_commit.sha, null when compare fails
+env -u GITHUB_TOKEN gh api repos/{owner}/{repo}/compare/{base.ref}...{headSha}
+```
+
+## What counts as an acceptance
+
+Only the comment's first line (one trailing `\r` trimmed), anchored exact:
+
+- **Review** — ``**Independent review (<reviewer>): PASS|ITERATE for
+`<40-hex sha>`**``: `reviewerId` is `self-declared:<reviewer>`; ITERATE
+  maps to HOLD.
+- **Coordinator carry-over** — ``**Independent PASS carried to [rebased ]
+head `<40-hex sha>`.**``: `self-declared:coordinator`, PASS; any
+  `issuecomment-<id>` URLs in the body join the evidence, in body order.
+
+A first line starting `**Independent` that matches neither form is a
+malformed-header unknown, not a row; every other comment is simply not an
+acceptance.
+
+## Snapshot shape and unknowns
+
+Snake_case: `repo`, `pr_number`, `fetched_at` (ISO 8601 UTC); `pr` and
+`comments` as above; `bases`; `pagination`/`complete`/`failed_step` as in
+the M10a2 CI snapshot recipe (`export-ci-snapshot.md`). Unknown is never
+zero: `complete: false` still yields its rows plus one partial unknown
+naming `failed_step`; an absent or malformed snapshot (not an object,
+missing `pr`, `comments` not an array) yields no rows plus one corrupt
+unknown; a head with no recorded base is an unknown, never a row; identical
+duplicates under the head+base+reviewer key dedupe while disagreeing copies
+conflict out — and the output never depends on comment order.
