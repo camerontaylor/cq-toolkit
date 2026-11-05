@@ -13,6 +13,7 @@
     "h2": "cccccccccccccccccccccccccccccccccccccccc",
     "c1": "1111111111111111111111111111111111111111",
     "c2": "2222222222222222222222222222222222222222",
+    "f1": "ffffffffffffffffffffffffffffffffffffffff",
     "todoCommit": "dddddddddddddddddddddddddddddddddddddddd"
   },
   "fixRun": {
@@ -142,7 +143,14 @@
       "closures": [
         {
           "commitSha": "1111111111111111111111111111111111111111",
-          "taskIds": ["task-t1", "task-t2"],
+          "taskIds": ["task-t1"],
+          "findingFingerprints": [],
+          "verificationEvidence": ["validation:pass"],
+          "todo": false
+        },
+        {
+          "commitSha": "1111111111111111111111111111111111111111",
+          "taskIds": ["task-t2"],
           "findingFingerprints": [],
           "verificationEvidence": ["validation:pass"],
           "todo": false

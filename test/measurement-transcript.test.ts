@@ -18,6 +18,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, test } from 'vitest';
 import { openObservationWriter, readObservations } from '../src/kernel/observation.js';
 import { STOP_CODE_CLASS, finishAttempt } from '../src/ops/fix/attemptRecord.js';
+import { reviewPlannedUnitsOf } from '../src/ops/fix/measurement.js';
 import { computeMeasurementPanels } from '../scripts/measurement-metrics.mjs';
 import type { MeasurementPanelRun } from '../scripts/measurement-metrics.mjs';
 import type { MeasurementInputRecord } from '../scripts/measurement-inputs.mjs';
@@ -250,7 +251,12 @@ const acceptanceRow = () => fixture.reviewRun.acceptance as unknown as Acceptanc
 const fpKey = (f: FindingFingerprint): string =>
   JSON.stringify([f.version, f.checkId, f.rule, f.path, f.spanContentHash]);
 
-/** Latest open blockers: the initial population minus terminal dispositions. A deferred finding stays open. */
+/**
+ * Latest open blockers: the initial population minus terminal dispositions. A
+ * deferred finding stays open. Fixture-level derivation: no merged reader
+ * computes latestOpenBlocking over finding-disposition records, so this helper
+ * derives it from the transcript's own rows.
+ */
 function openRemainder(
   initial: readonly FindingFingerprint[],
   dispositions: readonly DispositionPayload[],
@@ -314,9 +320,11 @@ describe('M11-fixture nominal evidence', () => {
     const fix = fixture.fixRun;
     const fixPanels = attested({ runs: [panelRunOf(fix)] });
     const fixRow = fixPanels.fix.runs[0];
-    // c1 is the one verified closure (t1 and t2 both resolved by it: one commit,
-    // counted once); the todo commit is excluded and the failed retained commit
-    // f1 never became a closure (fixed+validated is the closure rule).
+    // c1 closes BOTH t1 and t2 (two closure rows, the producer's one-row-per-
+    // unit shape, sharing one commit SHA): one commit, counted once. The todo
+    // commit is excluded, and the failed retained commit f1 — excluded upstream
+    // by the producer predicate (fixed + validated, verifiedClosuresOf) — never
+    // reaches the panel as a closure.
     expect(fixRow?.fixesPerRun).toEqual({ numerator: 1, denominator: null });
     expect(fixRow?.verifiedCommits).toEqual([fixture.shas.c1]);
     expect(fixRow?.verifiedCommits).not.toContain(fixture.shas.f1);
@@ -356,8 +364,9 @@ describe('M11-fixture nominal evidence', () => {
     ).toHaveLength(1);
     // rounds/exposures=2: both review rounds are observed (1 and 2).
     expect(reviewRows().map((row) => row.round)).toEqual([1, 2]);
-    // initialOpenBlocking=3, latestOpenBlocking=1: only the deferred finding c
-    // stays open (fixed a and rejected b are terminal).
+    // initialOpenBlocking=3, latestOpenBlocking=1 (fixture-level derivation):
+    // only the deferred finding c stays open (fixed a and rejected b are
+    // terminal).
     const initial = reviewRows()[0]?.initialBlocking ?? [];
     expect(initial).toHaveLength(3);
     const open = openRemainder(initial, dispositionRows());
@@ -403,6 +412,9 @@ describe('M11-fixture nominal evidence', () => {
   });
 
   test('imported historical RP01 probable/unknown stay so', () => {
+    // No merged historical importer exists yet, so these cases pin the rows'
+    // recorded certainty against the classification's refusal to re-guess;
+    // the upgrade refusal becomes enforceable when an importer lands.
     const rows = historicalRows();
     expect(rows).toHaveLength(36);
     expect(causeCounts(rows)).toEqual({ timeout: 21, outage: 9, unknown: 6 });
@@ -438,6 +450,8 @@ describe('M11-fixture missing evidence', () => {
       ],
     });
     expect(fixMissing.fix.runs[0]?.fixesPerRun.numerator).toBeNull();
+    // The empty list is not evidence of zero commits: the null numerator above
+    // carries the unknown (merged M10c behaviour).
     expect(fixMissing.fix.runs[0]?.verifiedCommits).toEqual([]);
     // No initial open-blocker population was captured: the review denominator
     // is unknown, never recomputed from the survivors.
@@ -456,8 +470,13 @@ describe('M11-fixture missing evidence', () => {
       ],
     });
     expect(reviewMissing.fix.runs[0]?.fixesPerRun.denominator).toBeNull();
-    const missingCapture = reviewRows().map((row) => ({ ...row, initialBlocking: null }));
-    expect(missingCapture[0]?.initialBlocking).toBeNull();
+    // The merged planned-units seam says the same thing about the capture: a
+    // captured population is the denominator evidence, and a report that never
+    // captured one yields null (unknown) — never a known zero off an empty list.
+    const captured = (fixture.reviewRun.reviews as unknown as FixtureReviewRow[])[0]
+      ?.initialBlocking;
+    expect(captured && reviewPlannedUnitsOf({ initialOpenBlocking: captured })).toHaveLength(3);
+    expect(reviewPlannedUnitsOf({})).toBeNull();
     // No acceptance evidence was imported: no head is eligible and both
     // declared PRs are unknown, never silently clean.
     const outcomes = computeOutcomePanels({
@@ -510,7 +529,9 @@ describe('M11-fixture missing evidence', () => {
   test('imported historical RP01 probable/unknown stay so', () => {
     // The original error detail is lost; the recorded certainty is the
     // evidence: probable rows stay inferred and unrecoverable rows stay
-    // unknown — never observed, and never re-guessed from what is gone.
+    // unknown — never observed, and never re-guessed from what is gone. (No
+    // merged importer exists yet; this pins the recorded certainty, not an
+    // admission path.)
     const rows = historicalRows().map((row) => ({
       ...row,
       error:
@@ -686,7 +707,15 @@ describe('M11-fixture failure evidence', () => {
     expect(rows).toHaveLength(38);
     expect(causeCounts(rows)).toEqual({ timeout: 21, outage: 10, unknown: 7 });
     expect(classesConsistent(rows)).toBe(true);
-    expect(causeCounts(rows)).toEqual(causeCounts(rows));
+    // Classifying independent copies a second time upgrades nothing: the same
+    // buckets, the same recorded certainties (no merged importer exists yet, so
+    // this pins the recorded certainty rather than an admission path).
+    const copies = rows.map((row) => ({
+      ...row,
+      error: row.error === null ? null : { ...row.error },
+    }));
+    expect(causeCounts(copies)).toEqual({ timeout: 21, outage: 10, unknown: 7 });
+    expect(copies.every((row) => row.error?.certainty !== 'observed')).toBe(true);
     for (const cause of ['timeout', 'outage'])
       expect(rowsOfCause(rows, cause).every((row) => row.error?.certainty === 'inferred')).toBe(
         true,
