@@ -18,7 +18,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, test } from 'vitest';
 import { openObservationWriter, readObservations } from '../src/kernel/observation.js';
 import { STOP_CODE_CLASS, finishAttempt } from '../src/ops/fix/attemptRecord.js';
-import { reviewPlannedUnitsOf } from '../src/ops/fix/measurement.js';
+import { reviewPlannedUnitsOf, verifiedClosuresOf } from '../src/ops/fix/measurement.js';
 import { computeMeasurementPanels } from '../scripts/measurement-metrics.mjs';
 import type { MeasurementPanelRun } from '../scripts/measurement-metrics.mjs';
 import type { MeasurementInputRecord } from '../scripts/measurement-inputs.mjs';
@@ -322,12 +322,39 @@ describe('M11-fixture nominal evidence', () => {
     const fixRow = fixPanels.fix.runs[0];
     // c1 closes BOTH t1 and t2 (two closure rows, the producer's one-row-per-
     // unit shape, sharing one commit SHA): one commit, counted once. The todo
-    // commit is excluded, and the failed retained commit f1 — excluded upstream
-    // by the producer predicate (fixed + validated, verifiedClosuresOf) — never
-    // reaches the panel as a closure.
+    // commit is excluded by the panel's todo rule.
     expect(fixRow?.fixesPerRun).toEqual({ numerator: 1, denominator: null });
     expect(fixRow?.verifiedCommits).toEqual([fixture.shas.c1]);
-    expect(fixRow?.verifiedCommits).not.toContain(fixture.shas.f1);
+    // The failed retained commit f1 is excluded by the producer predicate
+    // itself (fixed + validated + trailer-linked): driven through the merged
+    // verifiedClosuresOf, the failed task's commit never becomes a closure, so
+    // it can never reach the panel's verified list.
+    const messages = new Map([
+      [fixture.shas.c1, 'fix unit A\n\nCq-Task: task-t1'],
+      [fixture.shas.f1, 'failed attempt evidence\n\nCq-Task: task-f1'],
+    ]);
+    const produced = verifiedClosuresOf(
+      [
+        {
+          task: { id: 'task-t1', files: [], failures: [] },
+          attempts: [],
+          outcome: 'fixed',
+          branch: 'fixture/f',
+          commits: [fixture.shas.c1],
+          validation: { verdict: 'pass', gates: [] },
+        },
+        {
+          task: { id: 'task-f1', files: [], failures: [] },
+          attempts: [],
+          outcome: 'unfixed',
+          branch: 'fixture/f',
+          commits: [fixture.shas.f1],
+        },
+      ],
+      (sha) => messages.get(sha),
+    );
+    expect(produced.closures.map((row) => row.commitSha)).toEqual([fixture.shas.c1]);
+    expect(produced.unknownTrailerShas).toEqual([]);
     // baselineFailures known=5 (A=3, B=2) beside unknownUnits=1 (C cancelled
     // before its probe): the denominator is unknown, never 5 and never 0.
     const units = fix.fixEvidence?.baselineFailures ?? [];
@@ -680,6 +707,8 @@ describe('M11-fixture failure evidence', () => {
   });
 
   test('imported historical RP01 probable/unknown stay so', () => {
+    // No merged historical importer exists yet: this pins the recorded
+    // certainty, not an admission path.
     const outage = fixture.rp01Historical.groups[1]?.row;
     if (outage === undefined) throw new Error('fixture rp01 outage group is missing');
     const rows = [
