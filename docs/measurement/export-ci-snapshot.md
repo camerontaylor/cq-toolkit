@@ -13,9 +13,10 @@ beyond the caller's existing `gh` auth.
 
 All commands are `gh api` against `repos/{owner}/{repo}/…`. Every one of the
 five uses `per_page=100` with `--paginate --slurp`, so each output is an
-array with one entry per fetched page and no list is silently truncated.
+array with one entry per fetched page and no offered page is skipped.
 `attempts/{n}` returns a single object; its slurped output is a one-element
-array.
+array. Exhausting pagination is necessary but not sufficient for coverage:
+GitHub caps some lists silently; see Coverage.
 
 1. **Runs for the head** — workflow runs whose `head_sha` matches:
 
@@ -87,12 +88,15 @@ its own schema in code.
 
 ## Log probe
 
-Each run object carries a `logs_url`, and expiry is not derivable from the
-field. Probe it with `gh api --method GET {logs_url}`; this downloads the
-zip — the endpoint answers `405` to a HEAD request, so there is no lighter
-probe. A `404` or `410` response means the log expired: the run keeps its
-metadata, `logs_expired` is set to `true`, and its `log_evidence` is
-`"unknown"`.
+Each run object carries a run-level `logs_url`, and expiry is not derivable
+from the field. After a partial re-run that archive holds only the re-run
+jobs, so probe the attempt archive
+`repos/{owner}/{repo}/actions/runs/{run_id}/attempts/{n}/logs` for each
+recorded attempt. Probe with `gh api --method GET …`; this downloads the
+zip — both log endpoints answer `405` to a HEAD request, so there is no
+lighter probe. A `404` or `410` response means that attempt's log expired:
+the run keeps its metadata, `logs_expired` is set to `true`, and its
+`log_evidence` is `"unknown"`.
 
 ## Coverage
 
@@ -101,13 +105,21 @@ Unknown is never zero:
 - A snapshot covers exactly one head. The head is **observed** only when all
   five steps completed to exhaustion: then `complete: true`. Otherwise
   `complete: false`, with `failed_step` naming the step that failed.
+- Exhaustion is not always proof: GitHub caps some lists silently. A
+  `head_sha` run search returns at most 1,000 runs, and check runs cover at
+  most the 1,000 most recent check suites. When a step reached a documented
+  cap, its coverage is not proven: record `complete: false` with
+  `failed_step` naming the capped step, never a "no red".
 - Feed observed heads into M10e's `ciObservedHeads` input
   (`OutcomePanelsInput.ciObservedHeads` in `scripts/measurement-outcomes.d.mts`)
   and point each `CiRedObservation.source` at the snapshot path. A head with
   no complete snapshot is unobserved: it is never a "no red". M10e counts
   eligible heads missing from the coverage set in `ciRed.unobservedHeads`,
   and with no coverage declared the `ciRed` counts are null.
-- A required check name absent from step 4 at exhaustion is `unknown`, not
-  `pending` or `failed` — the export cannot distinguish "not yet reported"
-  from "never will be".
+- The required-check names are not in these responses; take them from the
+  target repository's own policy or trust reference. A required check name
+  absent from step 4 at exhaustion is `unknown`, not `pending` or `failed` —
+  the export cannot distinguish "not yet reported" from "never will be".
+  Absence is unknown evidence only: never write a `CiRedObservation` for an
+  absent check; an observation records an actual red.
 - An expired log (see Log probe) is `unknown` evidence.
