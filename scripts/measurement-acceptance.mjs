@@ -1,0 +1,128 @@
+// M4b1: import self-declared acceptances from a recorded PR-comment
+// snapshot (ADR-0008 T20; docs/measurement/import-acceptance.md). Pure and
+// offline: no files, no network, no `gh`. Independence is self-declared —
+// every agent posts as the same GitHub account, so the comment's own header
+// is the only basis and /independent records exactly that. Rows feed M10e's
+// acceptances input; near-miss headers, missing bases, corrupt or
+// conflicting rows are unknown entries with a reason, never a zero.
+const SHA40 = /^[0-9a-f]{40}$/;
+const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/; // strict UTC
+// Anchored first-line forms only: no substring search, no case folding.
+const REVIEW =
+  /^\*\*Independent review \(([A-Za-z][A-Za-z0-9.+ -]{0,39})\): (PASS|ITERATE) for `([0-9a-f]{40})`\*\*$/;
+const CARRY = /^\*\*Independent PASS carried to (?:rebased )?head `([0-9a-f]{40})`\.\*\*$/;
+const REFERENCED = /https?:\/\/\S*?issuecomment-\d+/g;
+const INDEPENDENT_REASON =
+  'self-declared in review comment header; reviewer identity not verified (shared GitHub account)';
+const text = (v) => typeof v === 'string' && v.length > 0;
+const map_ = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
+const bad = (source, kind, reason) => ({ source, kind, reason });
+// Rows and unknowns are built here with a fixed key order, so stringify is
+// their stable equivalence (the M10b fingerprint role).
+const shapely = (s) => map_(s) && map_(s.pr) && text(s.pr.user?.login) && Array.isArray(s.comments);
+
+/** Strict UTC instant normalised to milliseconds; null when invalid. */
+function instant(v) {
+  if (!text(v) || !ISO.test(v)) return null;
+  const ms = Date.parse(v);
+  if (Number.isNaN(ms)) return null;
+  // Round trip: calendar-invalid dates (2026-02-30 rolls to March) and
+  // out-of-range clock fields never survive; deeper fractions truncate.
+  const tail = /(?:\.\d+)?Z$/.exec(v)[0];
+  const normal = `${v.slice(0, -tail.length)}.${(tail.slice(1, -1) + '000').slice(0, 3)}Z`;
+  return new Date(ms).toISOString() === normal ? normal : null;
+}
+
+/** Import from one recorded snapshot; see the header comment for shape. */
+export function importAcceptance(snapshot) {
+  const unknown = [];
+  const rows = [];
+  if (!shapely(snapshot)) {
+    unknown.push(bad('snapshot', 'corrupt', 'snapshot is absent or malformed'));
+    return { acceptances: [], meta: [], unknown };
+  }
+  const bases = map_(snapshot.bases) ? snapshot.bases : {};
+  for (const comment of snapshot.comments) {
+    if (!map_(comment)) {
+      unknown.push(bad('snapshot comments', 'corrupt', 'comment entry is not an object'));
+      continue;
+    }
+    const url = text(comment.html_url) ? comment.html_url : null;
+    const source = url ?? `comment ${JSON.stringify(comment.id ?? null)}`;
+    if (typeof comment.body !== 'string') {
+      unknown.push(bad(source, 'corrupt', 'comment body is not a string'));
+      continue;
+    }
+    const first = comment.body.split('\n', 1)[0].replace(/\r$/, '');
+    const review = REVIEW.exec(first);
+    const carry = review === null ? CARRY.exec(first) : null;
+    if (review === null && carry === null) {
+      // A near-miss header is never dropped silently; anything else is
+      // simply not an acceptance and yields nothing.
+      if (first.startsWith('**Independent'))
+        unknown.push(bad(source, 'unavailable', 'malformed acceptance header'));
+      continue;
+    }
+    if (url === null) {
+      unknown.push(bad(source, 'corrupt', 'acceptance comment is missing html_url'));
+      continue;
+    }
+    const at = instant(comment.created_at);
+    if (at === null) {
+      unknown.push(bad(source, 'corrupt', 'comment created_at is not a UTC instant'));
+      continue;
+    }
+    const headSha = review?.[3] ?? carry[1];
+    const base = bases[headSha];
+    if (typeof base !== 'string' || !SHA40.test(base)) {
+      unknown.push(bad(source, 'unavailable', 'reviewed base not recorded'));
+      continue;
+    }
+    const reviewerId = review === null ? 'self-declared:coordinator' : `self-declared:${review[1]}`;
+    const refs = carry === null ? [] : (comment.body.match(REFERENCED) ?? []);
+    rows.push({
+      key: `${headSha}\u0000${base}\u0000${reviewerId}`,
+      at,
+      source,
+      payload: {
+        headSha,
+        reviewedBaseSha: base,
+        reviewerId,
+        authorId: `github:${snapshot.pr.user.login}`,
+        independent: true,
+        verdict: review === null || review[2] === 'PASS' ? 'PASS' : 'HOLD',
+        evidence: [comment.html_url, ...refs],
+        availability: {
+          '/independent': { state: 'known', reason: INDEPENDENT_REASON, source: comment.html_url },
+        },
+      },
+    });
+  }
+  // One admission path on the M10e key (head, base, reviewer): identical
+  // duplicates keep one copy; disagreeing copies conflict and emit nothing.
+  const groups = new Map();
+  for (const row of rows) groups.set(row.key, [...(groups.get(row.key) ?? []), row]);
+  const acceptances = [];
+  const meta = [];
+  for (const key of [...groups.keys()].sort()) {
+    const group = groups.get(key);
+    const first = JSON.stringify(group[0]);
+    if (group.every((row) => JSON.stringify(row) === first)) {
+      acceptances.push(group[0].payload);
+      meta.push({ at: group[0].at });
+    } else {
+      const sources = group
+        .map((row) => row.source)
+        .sort()
+        .join(' + ');
+      unknown.push(bad(sources, 'conflict', 'conflicting acceptance observations'));
+    }
+  }
+  if (snapshot.complete === false) {
+    const step = text(snapshot.failed_step) ? `'${snapshot.failed_step}'` : 'not recorded';
+    unknown.push(bad('snapshot', 'partial', `incomplete snapshot; failed_step ${step}`));
+  }
+  // Deterministic output whatever order the comments were recorded in.
+  unknown.sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+  return { acceptances, meta, unknown };
+}
