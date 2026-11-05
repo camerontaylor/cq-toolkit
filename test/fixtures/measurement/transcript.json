@@ -1,0 +1,634 @@
+{
+  "fixture": "measurement-transcript",
+  "synthetic": true,
+  "label": "SYNTHETIC offline measurement fixture transcript (M11-fixture)",
+  "notes": [
+    "SYNTHETIC evidence only: fake drivers, fixed timestamps, seeded local repositories.",
+    "This transcript is not a live dogfood run and claims no completed 30-day collection."
+  ],
+  "repo": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "shas": {
+    "h0": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "h1": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "h2": "cccccccccccccccccccccccccccccccccccccccc",
+    "c1": "1111111111111111111111111111111111111111",
+    "c2": "2222222222222222222222222222222222222222",
+    "f1": "ffffffffffffffffffffffffffffffffffffffff",
+    "todoCommit": "dddddddddddddddddddddddddddddddddddddddd"
+  },
+  "fixRun": {
+    "runId": "fixture-fix-f",
+    "workId": "1f0e9d3a-5b2c-4c8e-9a7f-3e2d1c0b9a88",
+    "compositionRunId": "cr-fixture-fix-f",
+    "startedAt": "2026-11-02T10:00:00.000Z",
+    "endedAt": "2026-11-02T10:05:00.000Z",
+    "header": {
+      "type": "composition-started",
+      "runId": "cr-fixture-fix-f",
+      "at": "2026-11-02T10:00:00.000Z",
+      "unitId": null,
+      "jobId": null,
+      "taskId": null,
+      "attempt": null,
+      "payload": {
+        "journalVersion": 3,
+        "provenance": {
+          "cqVersion": "0.2.0-fixture",
+          "producerVersion": "cq-fixture",
+          "repoId": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "cqJsonHash": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+          "baseSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "runPrefix": "fixture",
+          "startedAt": "2026-11-02T10:00:00.000Z",
+          "endedAt": null,
+          "journalLink": "observations/1f0e9d3a-5b2c-4c8e-9a7f-3e2d1c0b9a88/cr-fixture-fix-f.ndjson",
+          "reportLink": "reports/fixture-fix-f.json",
+          "witnesses": {
+            "base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "admitted": null,
+            "execution": null,
+            "reviewed": null,
+            "accepted": null
+          }
+        },
+        "correlation": {
+          "workId": "1f0e9d3a-5b2c-4c8e-9a7f-3e2d1c0b9a88",
+          "parentWorkId": null,
+          "branch": "feat/fixture-transcript",
+          "commitSha": null,
+          "sessionId": null,
+          "agentId": "fixture-agent"
+        }
+      }
+    },
+    "attempts": [
+      {
+        "type": "attempt-finished",
+        "runId": "cr-fixture-fix-f",
+        "at": "2026-11-02T10:01:00.000Z",
+        "unitId": "unit-a",
+        "jobId": null,
+        "taskId": "task-t1",
+        "attempt": 1,
+        "payload": {
+          "tier": "worker",
+          "invocation": "fix-f/unit-a/task-t1/1",
+          "model": { "model": "fake/worker", "provider": "fixture" },
+          "provider": "fixture",
+          "requestedModel": "fake/worker",
+          "servedModel": null,
+          "tokens": 120,
+          "usageChannels": { "input": 120, "output": 30 },
+          "requests": 1,
+          "wallMs": 50,
+          "modeledUsd": null,
+          "priceTableRevision": null,
+          "priceCoverage": null,
+          "stopReason": "step bound exceeded before the attempt completed",
+          "stopCode": "transport",
+          "class": "infrastructure",
+          "error": {
+            "type": "TimeoutError",
+            "code": null,
+            "providerFinishReason": null,
+            "source": "fixture step bound",
+            "certainty": "observed"
+          },
+          "timeout": { "scope": "step", "boundMs": 60000, "source": "fixture step bound" },
+          "budget": {
+            "allowed": { "tokens": null, "wallMs": 60000 },
+            "spent": { "tokens": 120, "wallMs": 50 },
+            "remaining": { "tokens": null, "wallMs": null }
+          },
+          "availability": {}
+        }
+      },
+      {
+        "type": "attempt-finished",
+        "runId": "cr-fixture-fix-f",
+        "at": "2026-11-02T10:02:00.000Z",
+        "unitId": "unit-a",
+        "jobId": null,
+        "taskId": "task-t1",
+        "attempt": 2,
+        "payload": {
+          "tier": "rescue",
+          "invocation": "fix-f/unit-a/task-t1/2",
+          "model": { "model": "fake/rescue", "provider": "fixture" },
+          "provider": "fixture",
+          "requestedModel": "fake/rescue",
+          "servedModel": null,
+          "tokens": 80,
+          "usageChannels": { "input": 80, "output": 20 },
+          "requests": 1,
+          "wallMs": 30,
+          "modeledUsd": null,
+          "priceTableRevision": null,
+          "priceCoverage": null,
+          "stopReason": "completed",
+          "stopCode": "completed",
+          "class": "terminal",
+          "error": null,
+          "timeout": null,
+          "budget": {
+            "allowed": { "tokens": null, "wallMs": null },
+            "spent": { "tokens": 80, "wallMs": 30 },
+            "remaining": { "tokens": null, "wallMs": null }
+          },
+          "availability": {}
+        }
+      }
+    ],
+    "fixEvidence": {
+      "closures": [
+        {
+          "commitSha": "1111111111111111111111111111111111111111",
+          "taskIds": ["task-t1"],
+          "findingFingerprints": [],
+          "verificationEvidence": ["validation:pass"],
+          "todo": false
+        },
+        {
+          "commitSha": "1111111111111111111111111111111111111111",
+          "taskIds": ["task-t2"],
+          "findingFingerprints": [],
+          "verificationEvidence": ["validation:pass"],
+          "todo": false
+        },
+        {
+          "commitSha": "dddddddddddddddddddddddddddddddddddddddd",
+          "taskIds": ["task-t3"],
+          "findingFingerprints": [],
+          "verificationEvidence": ["validation:pass"],
+          "todo": true
+        }
+      ],
+      "baselineFailures": [
+        {
+          "unitId": "unit-a",
+          "probeHead": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "completed": true,
+          "count": 3,
+          "unknownReason": null
+        },
+        {
+          "unitId": "unit-b",
+          "probeHead": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "completed": true,
+          "count": 2,
+          "unknownReason": null
+        },
+        {
+          "unitId": "unit-c",
+          "probeHead": null,
+          "completed": false,
+          "count": null,
+          "unknownReason": "run cancelled before the baseline probe"
+        }
+      ],
+      "recordedNumerator": 1
+    }
+  },
+  "reviewRun": {
+    "runId": "fixture-review-r",
+    "workId": "2a1f8e4b-6c3d-4d9f-8b6e-4f3e2d1c0b99",
+    "compositionRunId": "cr-fixture-review-r",
+    "startedAt": "2026-11-02T11:00:00.000Z",
+    "endedAt": "2026-11-02T11:04:00.000Z",
+    "header": {
+      "type": "composition-started",
+      "runId": "cr-fixture-review-r",
+      "at": "2026-11-02T11:00:00.000Z",
+      "unitId": null,
+      "jobId": null,
+      "taskId": null,
+      "attempt": null,
+      "payload": {
+        "journalVersion": 3,
+        "provenance": {
+          "cqVersion": "0.2.0-fixture",
+          "producerVersion": "cq-fixture",
+          "repoId": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "cqJsonHash": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+          "baseSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "runPrefix": "fixture",
+          "startedAt": "2026-11-02T11:00:00.000Z",
+          "endedAt": null,
+          "journalLink": "observations/2a1f8e4b-6c3d-4d9f-8b6e-4f3e2d1c0b99/cr-fixture-review-r.ndjson",
+          "reportLink": "reports/fixture-review-r.json",
+          "witnesses": {
+            "base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "admitted": null,
+            "execution": null,
+            "reviewed": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "accepted": null
+          }
+        },
+        "correlation": {
+          "workId": "2a1f8e4b-6c3d-4d9f-8b6e-4f3e2d1c0b99",
+          "parentWorkId": null,
+          "branch": "feat/fixture-transcript",
+          "commitSha": null,
+          "sessionId": null,
+          "agentId": "fixture-agent"
+        }
+      }
+    },
+    "attempts": [
+      {
+        "type": "attempt-finished",
+        "runId": "cr-fixture-review-r",
+        "at": "2026-11-02T11:01:00.000Z",
+        "unitId": "finding-a",
+        "jobId": null,
+        "taskId": "finding-a",
+        "attempt": 1,
+        "payload": {
+          "tier": "worker",
+          "invocation": "review-r/finding-a/1",
+          "model": { "model": "fake/worker", "provider": "fixture" },
+          "provider": "fixture",
+          "requestedModel": "fake/worker",
+          "servedModel": null,
+          "tokens": 90,
+          "usageChannels": { "input": 90, "output": 25 },
+          "requests": 1,
+          "wallMs": 20,
+          "modeledUsd": null,
+          "priceTableRevision": null,
+          "priceCoverage": null,
+          "stopReason": "completed",
+          "stopCode": "completed",
+          "class": "terminal",
+          "error": null,
+          "timeout": null,
+          "budget": {
+            "allowed": { "tokens": null, "wallMs": null },
+            "spent": { "tokens": 90, "wallMs": 20 },
+            "remaining": { "tokens": null, "wallMs": null }
+          },
+          "availability": {}
+        }
+      },
+      {
+        "type": "attempt-finished",
+        "runId": "cr-fixture-review-r",
+        "at": "2026-11-02T11:01:30.000Z",
+        "unitId": "finding-c",
+        "jobId": null,
+        "taskId": "finding-c",
+        "attempt": 1,
+        "payload": {
+          "tier": "worker",
+          "invocation": "review-r/finding-c/1",
+          "model": { "model": "fake/worker", "provider": "fixture" },
+          "provider": "fixture",
+          "requestedModel": "fake/worker",
+          "servedModel": null,
+          "tokens": 10,
+          "usageChannels": { "input": 10, "output": 5 },
+          "requests": 1,
+          "wallMs": 5,
+          "modeledUsd": null,
+          "priceTableRevision": null,
+          "priceCoverage": null,
+          "stopReason": "getaddrinfo EAI_AGAIN fixture.invalid",
+          "stopCode": "dns",
+          "class": "infrastructure",
+          "error": {
+            "type": "Error",
+            "code": "EAI_AGAIN",
+            "providerFinishReason": null,
+            "source": "fixture dns resolver",
+            "certainty": "observed"
+          },
+          "timeout": null,
+          "budget": {
+            "allowed": { "tokens": null, "wallMs": null },
+            "spent": { "tokens": 10, "wallMs": 5 },
+            "remaining": { "tokens": null, "wallMs": null }
+          },
+          "availability": {}
+        }
+      }
+    ],
+    "fingerprints": {
+      "a": {
+        "version": 1,
+        "checkId": "fixture-check",
+        "rule": "fixture-rule",
+        "path": "src/a.ts",
+        "spanContentHash": "sha256:0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a"
+      },
+      "b": {
+        "version": 1,
+        "checkId": "fixture-check",
+        "rule": "fixture-rule",
+        "path": "src/b.ts",
+        "spanContentHash": "sha256:0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b"
+      },
+      "c": {
+        "version": 1,
+        "checkId": "fixture-check",
+        "rule": "fixture-rule",
+        "path": "src/c.ts",
+        "spanContentHash": "sha256:0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c"
+      }
+    },
+    "fixEvidence": {
+      "closures": [
+        {
+          "commitSha": "2222222222222222222222222222222222222222",
+          "taskIds": ["finding-a"],
+          "findingFingerprints": [],
+          "verificationEvidence": ["validation:pass"],
+          "todo": false
+        }
+      ],
+      "baselineFailures": [
+        {
+          "unitId": "finding-a",
+          "probeHead": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "completed": true,
+          "count": 1,
+          "unknownReason": null
+        },
+        {
+          "unitId": "finding-b",
+          "probeHead": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "completed": true,
+          "count": 1,
+          "unknownReason": null
+        },
+        {
+          "unitId": "finding-c",
+          "probeHead": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "completed": true,
+          "count": 1,
+          "unknownReason": null
+        }
+      ],
+      "recordedNumerator": 1
+    },
+    "dispositions": [
+      {
+        "fingerprint": "a",
+        "status": "fixed",
+        "reason": "verified fix landed",
+        "owner": "fixture",
+        "evidence": ["verified:c2"],
+        "reviewTrigger": null,
+        "observedHead": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "observedAt": "2026-11-02T11:02:00.000Z",
+        "acceptedRisk": null,
+        "availability": {}
+      },
+      {
+        "fingerprint": "b",
+        "status": "rejected",
+        "reason": "contradicted by the requirement",
+        "owner": "fixture",
+        "evidence": ["requirement:r1"],
+        "reviewTrigger": null,
+        "observedHead": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "observedAt": "2026-11-02T11:02:30.000Z",
+        "acceptedRisk": null,
+        "availability": {}
+      },
+      {
+        "fingerprint": "c",
+        "status": "deferred",
+        "reason": "needs domain input",
+        "owner": "fixture",
+        "evidence": ["discussion:d1"],
+        "reviewTrigger": "domain-answer",
+        "observedHead": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "observedAt": "2026-11-02T11:03:00.000Z",
+        "acceptedRisk": null,
+        "availability": {}
+      }
+    ],
+    "acceptance": {
+      "headSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "reviewedBaseSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "reviewerId": "fixture-critic",
+      "authorId": "fixture-author",
+      "independent": true,
+      "verdict": "PASS",
+      "evidence": ["acceptance:a1"],
+      "availability": {}
+    },
+    "reviews": [
+      {
+        "baseSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "headSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "findingFingerprints": ["a", "b", "c"],
+        "coverage": "v2:range:src/a.ts:1-20",
+        "initialBlocking": ["a", "b", "c"],
+        "reviewerId": "fixture-reviewer",
+        "source": "agent",
+        "round": 1,
+        "delivered": ["src/a.ts:1-20"],
+        "completed": ["src/a.ts:1-20"],
+        "omissions": [],
+        "vendorCompletion": "completed",
+        "availability": {}
+      },
+      {
+        "baseSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "headSha": "cccccccccccccccccccccccccccccccccccccccc",
+        "findingFingerprints": ["c"],
+        "coverage": "v2:range:src/a.ts:1-25",
+        "initialBlocking": null,
+        "reviewerId": "fixture-reviewer",
+        "source": "agent",
+        "round": 2,
+        "delivered": ["src/a.ts:1-25"],
+        "completed": ["src/a.ts:1-25"],
+        "omissions": [],
+        "vendorCompletion": "completed",
+        "availability": {}
+      }
+    ],
+    "population": [
+      {
+        "headSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "mergedAt": "2026-11-02T12:00:00.000Z"
+      },
+      {
+        "headSha": "cccccccccccccccccccccccccccccccccccccccc",
+        "mergedAt": "2026-11-02T13:00:00.000Z"
+      }
+    ],
+    "observedAt": "2026-11-20T00:00:00.000Z",
+    "followUpDays": 7
+  },
+  "rp01Regression": {
+    "synthetic": true,
+    "note": "SYNTHETIC RP01 regression reconstruction: 129 synthetic failures with explicit timeout/DNS/model/unknown causes, classified from journal lines alone; no session archive exists or is read.",
+    "workId": "3b2a7f5c-7d4e-4e0a-9c5f-5a4f3e2d1c00",
+    "compositionRunId": "cr-rp01-regression",
+    "firstAt": "2026-10-30T09:00:00.000Z",
+    "header": {
+      "type": "composition-started",
+      "runId": "cr-rp01-regression",
+      "at": "2026-10-30T09:00:00.000Z",
+      "unitId": null,
+      "jobId": null,
+      "taskId": null,
+      "attempt": null,
+      "payload": {
+        "journalVersion": 3,
+        "provenance": {
+          "cqVersion": "0.2.0-fixture",
+          "producerVersion": "cq-fixture",
+          "repoId": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "cqJsonHash": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+          "baseSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "runPrefix": "rp01-regression",
+          "startedAt": "2026-10-30T09:00:00.000Z",
+          "endedAt": null,
+          "journalLink": "observations/3b2a7f5c-7d4e-4e0a-9c5f-5a4f3e2d1c00/cr-rp01-regression.ndjson",
+          "reportLink": "reports/rp01-regression.json",
+          "witnesses": {
+            "base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "admitted": null,
+            "execution": null,
+            "reviewed": null,
+            "accepted": null
+          }
+        },
+        "correlation": {
+          "workId": "3b2a7f5c-7d4e-4e0a-9c5f-5a4f3e2d1c00",
+          "parentWorkId": null,
+          "branch": "rp01/regression",
+          "commitSha": null,
+          "sessionId": null,
+          "agentId": "fixture-rp01"
+        }
+      }
+    },
+    "causes": { "timeout": 41, "dns": 29, "model": 47, "unknown": 12 },
+    "shared": {
+      "tier": "worker",
+      "model": { "model": "fake/worker", "provider": "fixture" },
+      "provider": "fixture",
+      "requestedModel": "fake/worker",
+      "servedModel": null,
+      "tokens": 100,
+      "usageChannels": { "input": 100, "output": 20 },
+      "requests": 1,
+      "wallMs": 100,
+      "modeledUsd": null,
+      "priceTableRevision": null,
+      "priceCoverage": null,
+      "budget": {
+        "allowed": { "tokens": null, "wallMs": 30000 },
+        "spent": { "tokens": 100, "wallMs": 100 },
+        "remaining": { "tokens": null, "wallMs": null }
+      },
+      "availability": {}
+    },
+    "templates": {
+      "timeout": {
+        "stopReason": "request exceeded its configured bound",
+        "stopCode": "transport",
+        "class": "infrastructure",
+        "error": {
+          "type": "TimeoutError",
+          "code": null,
+          "providerFinishReason": null,
+          "source": "fixture request bound",
+          "certainty": "observed"
+        },
+        "timeout": { "scope": "request", "boundMs": 30000, "source": "fixture request bound" }
+      },
+      "dns": {
+        "stopReason": "getaddrinfo EAI_AGAIN fixture.invalid",
+        "stopCode": "dns",
+        "class": "infrastructure",
+        "error": {
+          "type": "Error",
+          "code": "EAI_AGAIN",
+          "providerFinishReason": null,
+          "source": "fixture dns resolver",
+          "certainty": "observed"
+        },
+        "timeout": null
+      },
+      "model": {
+        "stopReason": "model emitted an unparsable tool call",
+        "stopCode": "model-output",
+        "class": "terminal",
+        "error": {
+          "type": "APIError",
+          "code": "malformed-tool-call",
+          "providerFinishReason": "length",
+          "source": "fixture model adapter",
+          "certainty": "observed"
+        },
+        "timeout": null
+      },
+      "unknown": {
+        "stopReason": "unattributed failure",
+        "stopCode": "unclassified",
+        "class": "infrastructure",
+        "error": {
+          "type": "Error",
+          "code": "ENOENT",
+          "providerFinishReason": null,
+          "source": "fixture unattributed",
+          "certainty": "unknown"
+        },
+        "timeout": null
+      }
+    }
+  },
+  "rp01Historical": {
+    "note": "Imported historical RP01 rows keep their recorded certainty: probable causes stay inferred and unrecoverable causes stay unknown; new instrumentation cannot recover old lost causes.",
+    "groups": [
+      {
+        "group": "probable-timeouts",
+        "count": 21,
+        "row": {
+          "stopReason": "probable timeout (wall-clock overlap; original cause lost)",
+          "stopCode": "transport",
+          "class": "infrastructure",
+          "error": {
+            "type": "TimeoutError",
+            "code": null,
+            "providerFinishReason": null,
+            "source": "rp01 historical import 2026-10-30",
+            "certainty": "inferred"
+          }
+        }
+      },
+      {
+        "group": "probable-outages",
+        "count": 9,
+        "row": {
+          "stopReason": "probable provider outage (status-page overlap; original cause lost)",
+          "stopCode": "provider-outage",
+          "class": "infrastructure",
+          "error": {
+            "type": null,
+            "code": "503",
+            "providerFinishReason": null,
+            "source": "rp01 historical import 2026-10-30",
+            "certainty": "inferred"
+          }
+        }
+      },
+      {
+        "group": "unrecoverable",
+        "count": 6,
+        "row": {
+          "stopReason": "cause unrecoverable from surviving evidence",
+          "stopCode": "unclassified",
+          "class": "infrastructure",
+          "error": null
+        }
+      }
+    ]
+  }
+}
