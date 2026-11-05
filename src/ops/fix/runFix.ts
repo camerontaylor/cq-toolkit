@@ -18,7 +18,7 @@ import {
   type ObservationWriter,
 } from '../../kernel/observation.js';
 import { assembleReportV2 } from './reportFold.js';
-import { distinctFixedCommitCount } from './measurement.js';
+import { distinctFixedCommitCount, measureRun } from './measurement.js';
 import type {
   AvailabilityRecord,
   ReportV2,
@@ -369,6 +369,13 @@ export function makeFixRun(deps: FixRunDeps = {}) {
       if (observation.writer.failure !== null) observationFailure(observation.writer.failure);
     };
     let kernelRunLinks: KernelRunLinkedJournalEvent[] = [];
+    /**
+     * ADR-0008 T23: every PLANNED unit's identity (`package/fixer`, the same
+     * identity the unit's observation events carry), set once the plan is
+     * built and null on the exits that precede planning (no captured planned
+     * population: an unavailable denominator, never a known-zero empty list).
+     */
+    let plannedUnitIds: string[] | null = null;
     const unstartedUnits: Array<{
       unit: SweepUnitDispatchInput;
       segments: { kind: string; slug: string; branch: string };
@@ -498,6 +505,56 @@ export function makeFixRun(deps: FixRunDeps = {}) {
           rescuePool: rescueAllocation(escalation, escalationPolicy),
         };
       report.wallMs = Date.now() - start;
+      // ADR-0008 T23: print the honest fix denominators on every exit AFTER
+      // THE COMPOSITION STREAM OPENS — one measurement-summary through the
+      // composition writer, computed from this run's evidence alone (no
+      // cross-run state). The exits before the writer opens print nothing:
+      // no stream exists, and that is correct. No baseline probe producer is
+      // wired yet, so every planned unit is honestly unprobed: the
+      // denominator is null, never a guessed zero, and a commit whose
+      // message cannot be read leaves the numerator unknown. An emission
+      // failure is evidence (indeterminate observation), never a verdict.
+      if (observation?.writer !== undefined && !observationClosed) {
+        try {
+          const messages = new Map<string, string>();
+          for (const sha of new Set(report.tasks.flatMap((task) => task.commits))) {
+            // Only a full lowercase object id ever reaches git: any other
+            // value is an unreadable message (unknown), never a spawn.
+            if (!/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(sha)) continue;
+            try {
+              messages.set(
+                sha,
+                (
+                  await execFileAsync('git', ['-C', repoRoot, 'show', '-s', '--format=%B', sha], {
+                    timeout: 5_000,
+                    maxBuffer: 256 * 1024,
+                  })
+                ).stdout,
+              );
+            } catch {
+              // Unreadable message: that closure's trailer status is unknown.
+            }
+          }
+          const { availability, ...metric } = measureRun(
+            report.tasks,
+            plannedUnitIds,
+            new Map(),
+            (sha) => messages.get(sha),
+          );
+          await observation.writer.append({
+            type: 'measurement-summary',
+            runId: compositionRunId,
+            at: new Date().toISOString(),
+            unitId: null,
+            jobId: null,
+            taskId: null,
+            attempt: null,
+            payload: { metric, availability },
+          });
+        } catch (error) {
+          observationFailure(error);
+        }
+      }
       await closeObservation();
       if (observation !== undefined) {
         const writer = observation.writer;
@@ -640,6 +697,18 @@ export function makeFixRun(deps: FixRunDeps = {}) {
             job.id !== SWEEP_PLAN_JOB_IDS.assemble && job.id !== SWEEP_PLAN_JOB_IDS.trackerBranch,
         ),
       };
+      // Every planned unit, dispatched or not, is the honest denominator
+      // population (ADR-0008 T23); the identity matches the unit seam's
+      // observation unitId exactly.
+      plannedUnitIds = [
+        ...new Set(
+          plan.jobs.flatMap((job) => {
+            if (job.op !== 'sweep.unit') return [];
+            const unit = job.input as SweepUnitDispatchInput;
+            return [`${unit.package}/${unit.fixer}`];
+          }),
+        ),
+      ];
       for (const job of plan.jobs) {
         if (job.op !== 'sweep.unit') continue;
         const unit = job.input as SweepUnitDispatchInput;

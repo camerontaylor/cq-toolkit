@@ -117,6 +117,14 @@ export interface AddressFix {
   commit?: string;
   evidence?: Array<{ path: string; line: number }>;
   reason: string;
+  /**
+   * ADR-0008 T19: present ONLY on the operational failure path (failed()).
+   * That path reuses the `deferred` status because the finding is unresolved,
+   * but it is not an adjudication: the composition must never promote it into
+   * a durable disposition. A deliberate `deferred` returned by a worker has
+   * no `failure`, even when it omits the optional evidence array.
+   */
+  failure?: { reason: string };
   validation: ValidationVerdict[];
   failedAttempts?: AddressFailedAttempt[];
 }
@@ -1181,7 +1189,22 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
         let observedHead = '';
         const history: AddressFailedAttempt[] = [];
         const validations: ValidationVerdict[] = [];
-        const failed = (reason: string): AddressFix => ({
+        /**
+         * ADR-0008 T19 converse: a deliberate scope deferral is a terminal
+         * adjudication, not an operational failure. It shares failed()'s shape
+         * exactly but never carries the `failure` discriminator, so the
+         * composition records the disposition instead of withholding it.
+         * Classification rule: a result is DELIBERATE when it is decided
+         * from the finding's own data and policy BEFORE any attempt or
+         * execution; it is OPERATIONAL when it arises during or after an
+         * attempt, or depends on resources or environment. The unanchored
+         * finding and the pre-attempt protected-scope refusal are deliberate;
+         * every human-tier escalation outcome (missing rescue role,
+         * per-package or per-run rescue exhaustion) is resource failure and
+         * stays on failed(). Each deliberate deferral must carry a verified
+         * observation head, read the way the dispatch loop reads it.
+         */
+        const deferredForHuman = (reason: string): AddressFix => ({
           finding: {
             ...finding,
             status: 'deferred',
@@ -1193,8 +1216,32 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
           validation: validations,
           failedAttempts: history,
         });
+        const failed = (reason: string): AddressFix => ({
+          ...deferredForHuman(reason),
+          // The ONLY producer of this discriminator: an operational failure is
+          // never a deliberate deferral (ADR-0008 T19).
+          failure: { reason },
+        });
         let file = finding.file;
-        if (!file) return failed('unanchored finding needs human scope');
+        if (!file) {
+          // A deliberate deferral is a durable disposition, so it must carry
+          // the verified head — read exactly the way the dispatch loop does.
+          // initialize(stop) is the same admission withVerifiedHead runs; it
+          // is memoized, so the PR path and an already-dispatched filed
+          // sibling join the existing admission rather than re-admitting.
+          // Only a fileless finding that precedes every admission — the
+          // local dispatch path, which calls fix directly — runs it here, so
+          // verifiedHeads holds the head this read accepts; a head outside
+          // that set is the existing refusal.
+          await initialize(stop);
+          observedHead = await withMutation(async () => {
+            const head = await git(root, ['rev-parse', 'HEAD']);
+            if (!verifiedHeads.has(head))
+              throw new AddressRefusal('unexpected worker execution head', true);
+            return head;
+          }, stop);
+          return deferredForHuman('unanchored finding needs human scope');
+        }
         try {
           file = relative(await realpath(root), await safeFile(root, file));
           finding = { ...finding, file };
@@ -1336,7 +1383,18 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
           await initialize(admitMutation);
           await safeFile(root, file);
           const classified = classifyStagePaths([file], undefined, false, false);
-          if (classified.kind !== 'clean') return failed(classified.message ?? 'protected scope');
+          if (classified.kind !== 'clean') {
+            // Pre-attempt policy refusal on the finding's own path: DELIBERATE
+            // by the classification rule, so it defers (with a verified head)
+            // instead of failing. initialize() just admitted this head.
+            observedHead = await withMutation(async () => {
+              const head = await git(root, ['rev-parse', 'HEAD']);
+              if (!verifiedHeads.has(head))
+                throw new AddressRefusal('unexpected worker execution head', true);
+              return head;
+            }, admitMutation);
+            return deferredForHuman(classified.message ?? 'protected scope');
+          }
           if (!policy.roles.reviewer)
             refusePrecondition(
               new Error('roles.reviewer required for assigned-finding closure'),

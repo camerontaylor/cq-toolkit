@@ -4,7 +4,9 @@
 import { readFile } from 'node:fs/promises';
 import { describe, expect, test } from 'vitest';
 import type { ReviewAddressReport } from '../../../src/ops/review/address.js';
+import type { Finding } from '../../../src/ops/review/findings.js';
 import { makeSubprocessDevEffects } from '../../../src/ops/dev/effects.js';
+import { readObservations } from '../../../src/kernel/observation.js';
 import { runPlan } from '../../../src/kernel/runner.js';
 import { createGovernor } from '../../../src/kernel/governor.js';
 import type { OpRegistryEntry } from '../../../src/kernel/types.js';
@@ -165,4 +167,46 @@ describe('review.address local full cycle', () => {
       await f.cleanup();
     }
   });
+  test.each(['alone', 'first'] as const)(
+    'a fileless finding dispatched %s defers with a verified head like a filed sibling',
+    async (kind) => {
+      // T19 round 4: the local dispatch path calls the worker's fix directly,
+      // without withVerifiedHead, so a fileless finding can precede every
+      // admission. Before the unanchored branch ran initialize(stop), its
+      // outcome depended on dispatch order — alone or first it was refused as
+      // 'unexpected worker execution head' and dropped; only after a filed
+      // sibling did it defer. Now every order matches filed-first and the PR
+      // path: needs-human with exactly one deferred finding-disposition
+      // carrying a verified 40-hex head.
+      const f = await fixture();
+      try {
+        const seed = f.record.findings[0]!;
+        const fileless: Finding = { ...seed, id: 'seed-fileless', file: undefined };
+        f.record.findings = kind === 'alone' ? [fileless] : [fileless, seed];
+        const result = await f.op({
+          repoRoot: f.repo.root,
+          source: 'local',
+          journalDir: f.journalDir,
+        });
+        expect(result.status, JSON.stringify(result)).toBe('needs-human');
+        const report = result.status === 'ok' ? result.value : result.report!;
+        expect(report.openBlocking).toMatchObject([
+          {
+            id: 'seed-fileless',
+            status: 'deferred',
+            reason: 'unanchored finding needs human scope',
+          },
+        ]);
+        const streams = await readObservations(f.journalDir);
+        const deferred = streams
+          .flatMap((stream) => stream.events)
+          .flatMap((event) => (event.type === 'finding-disposition' ? [event.payload] : []))
+          .filter((payload) => payload.status === 'deferred' && payload.fingerprint.path === '');
+        expect(deferred).toHaveLength(1);
+        expect(deferred[0]?.observedHead).toMatch(/^[0-9a-f]{40}$/);
+      } finally {
+        await f.cleanup();
+      }
+    },
+  );
 });

@@ -9,7 +9,7 @@ The fixture config uses workerAttempts=2, rescueBase=1, rescuePerFixed=10 and re
 Reproduce all captures with:
 
 ```sh
-CQ_FIX_ESCALATION_TRANSCRIPT_DIR=/tmp/s4-transcript pnpm test:narrow --include-integration test/e2e/fix/fix-run.e2e.test.ts test/cli/registry.test.ts
+CQ_FIX_ESCALATION_TRANSCRIPT_DIR=/tmp/s4-transcript pnpm test:narrow --include-integration test/e2e/fix/fix-run-*.e2e.test.ts test/cli/registry.test.ts
 ```
 
 These are selected report fields from each actual stdout JSON artifact. Temporary fixture paths are normalized to <fixture>; those fresh repositories are removed after assertions.

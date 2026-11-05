@@ -1,9 +1,13 @@
 // Split provenance: test/e2e/merge/live.test.ts was split by subject into
 // live.test.ts (the gated describe and the single sequenced drill test) and
 // this module (the drill's constants, typed exec/json helpers, synthetic
-// evidence candidate builder and scripted conflict agent). This module
-// declares no tests.
+// evidence candidate builder, scripted conflict agent, and the drill's local
+// non-assertion steps: clone-bound git helpers, PR creation, the branch
+// seeder, head observation, the convergence predicate and the first-parent
+// rev-list reader). This module declares no tests.
 import { execFile } from 'node:child_process';
+import { writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { expect } from 'vitest';
 import type { RoutingTable } from '../../../src/driver/claude-code/routing.js';
 import type { ExecutionReport } from '../../../src/ops/merge/executeMerges.js';
@@ -324,3 +328,144 @@ export const reportSummary = (report: ExecutionReport): string =>
   ` stale=[${report.stale.map((entry) => String(entry.pr)).join(',')}]` +
   ` failed=[${report.failed.map((entry) => String(entry.pr)).join(',')}]` +
   ` blocked=[${report.blocked.map((entry) => String(entry.pr)).join(',')}]`;
+
+// ---------------------------------------------------------------------------
+// The drill's local steps (steps 2-7): each is a factory over the drill's
+// per-run bindings (cloneDir, repo, drillPrs, the observed-head map). No
+// assertion lives here — the drill owns every expect() — and every failure is
+// still failOutcome-based.
+// ---------------------------------------------------------------------------
+
+interface CloneTools {
+  gitInClone: (args: readonly string[]) => Promise<ExecOutcome>;
+  gitOk: (what: string, args: readonly string[]) => Promise<string>;
+  revParse: (ref: string) => Promise<string>;
+  writeInClone: (relPath: string, content: string) => Promise<void>;
+}
+
+/** Git reads/writes bound to one clone (step 2): every spawn is execFile. */
+export const makeCloneTools = (cloneDir: string): CloneTools => {
+  const gitInClone = async (args: readonly string[]): Promise<ExecOutcome> =>
+    exec('git', ['-C', cloneDir, ...args]);
+  const gitOk = async (what: string, args: readonly string[]): Promise<string> => {
+    const outcome = await gitInClone(args);
+    if (outcome.code !== 0) throw failOutcome(what, outcome);
+    return outcome.stdout.trim();
+  };
+  const revParse = async (ref: string): Promise<string> =>
+    gitOk(`rev-parse ${ref}`, ['rev-parse', ref]);
+  const writeInClone = async (relPath: string, content: string): Promise<void> => {
+    await writeFile(join(cloneDir, relPath), content, 'utf8');
+  };
+  return { gitInClone, gitOk, revParse, writeInClone };
+};
+
+/** PR creation (step 3): `gh pr create` against the drill's scratch repo. */
+export const makePrCreator = (repo: string) => {
+  const createPr = async (base: string, head: string, title: string): Promise<number> => {
+    const outcome = await exec('gh', [
+      'pr',
+      'create',
+      '--repo',
+      repo,
+      '--base',
+      base,
+      '--head',
+      head,
+      '--title',
+      title,
+      '--body',
+      'F5 live drill scratch PR — the scratch repo is left in place for the owner to delete.',
+    ]);
+    if (outcome.code !== 0) throw failOutcome(`gh pr create ${head} -> ${base}`, outcome);
+    const url =
+      outcome.stdout
+        .split('\n')
+        .map((line) => line.trim())
+        .findLast((line) => line.includes('/pull/')) ?? '';
+    const match = /\/pull\/(\d+)$/.exec(url);
+    if (match === null) throw new Error(`gh pr create printed no pull URL: ${outcome.stdout}`);
+    return Number(match[1]);
+  };
+  return createPr;
+};
+
+/** One stack rung (step 3): branch from `from`, reword the seed line, push. */
+export const makeBranchSeeder = (cloneDir: string) => {
+  const { gitInClone, revParse, writeInClone } = makeCloneTools(cloneDir);
+  const commitBranchSeed = async (
+    branch: string,
+    from: string,
+    firstLine: string,
+    message: string,
+  ): Promise<string> => {
+    const checkout = await gitInClone(['checkout', '-b', branch, from]);
+    if (checkout.code !== 0) throw failOutcome(`git checkout -b ${branch} ${from}`, checkout);
+    await writeInClone('seed.txt', seedWith(firstLine));
+    const add = await gitInClone(['add', 'seed.txt']);
+    if (add.code !== 0) throw failOutcome(`git add (seed.txt on ${branch})`, add);
+    const commit = await gitInClone(['commit', '-m', message]);
+    if (commit.code !== 0) throw failOutcome(`git commit (${branch})`, commit);
+    const push = await gitInClone(['push', 'origin', branch]);
+    if (push.code !== 0) throw failOutcome(`git push origin ${branch}`, push);
+    return revParse(branch);
+  };
+  return commitBranchSeed;
+};
+
+interface HeadObservation {
+  observedHeads: Map<string, Set<string>>;
+  observeHead: (branch: string, sha: string) => void;
+}
+
+/** The no-force evidence (7c): every head sha ever observed per branch. */
+export const makeHeadObserver = (): HeadObservation => {
+  const observedHeads = new Map<string, Set<string>>();
+  const observeHead = (branch: string, sha: string): void => {
+    let seen = observedHeads.get(branch);
+    if (seen === undefined) {
+      seen = new Set<string>();
+      observedHeads.set(branch, seen);
+    }
+    seen.add(sha);
+  };
+  return { observedHeads, observeHead };
+};
+
+/** Step 6's stop predicate: every drill PR reports merged on the live forge. */
+export const makeAllThreeMerged = (
+  repo: string,
+  drillPrs: DrillPr[],
+  observeHead: (branch: string, sha: string) => void,
+) => {
+  const allThreeMerged = async (): Promise<boolean> => {
+    for (const drillPr of drillPrs) {
+      const pull = await ghApiObject(`repos/${repo}/pulls/${String(drillPr.number)}`);
+      observeHead(drillPr.headBranch, asString(asRecord(pull['head'])['sha']));
+      // REST has no 'MERGED' state: merged:true + state:'closed' is its
+      // spelling of GraphQL's MERGED.
+      if (!(pull['merged'] === true && asString(pull['state']) === 'closed')) return false;
+    }
+    return true;
+  };
+  return allThreeMerged;
+};
+
+/** Step 7b's first-parent rev-list reader over the drill range. */
+export const makeRevList = (
+  gitOk: (what: string, args: readonly string[]) => Promise<string>,
+  drillRange: readonly string[],
+) => {
+  const revList = async (extra: readonly string[]): Promise<string[]> =>
+    (
+      await gitOk(`rev-list ${extra.join(' ')}`, [
+        'rev-list',
+        '--first-parent',
+        ...extra,
+        ...drillRange,
+      ])
+    )
+      .split('\n')
+      .filter((line) => line !== '');
+  return revList;
+};

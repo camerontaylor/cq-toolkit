@@ -26,7 +26,7 @@ describe('isProtectedPolicyPath (D11, ADR-0004 D-G.1)', () => {
     'src/foo.test.ts',
     'test_widget.py',
     'widget_test.py',
-    'apps/crq-python/test_crq.py',
+    'apps/crq-python/test_crq_slot.py',
     'pkg/widget_test.py',
     '__snapshots__/a.snap',
     'test/unit/a.ts',

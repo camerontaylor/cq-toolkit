@@ -7,7 +7,7 @@
 // forge-github adapter since Phase 1.4:
 // src/adapters/forge-github/snapshotPrState.ts.
 //
-// The contract (each clause pinned in test/ops/review/verifyReviewOutcome.test.ts):
+// The contract (each clause pinned in test/ops/review/verifyReviewOutcome.*.test.ts):
 //   - snapshotPrState (the adapter) captures the before/after evidence
 //     (I/O through the gh seam only; `at` is the injected nowMs, never
 //     Date.now). STRICT payloads: a PR object without a usable head.sha, a

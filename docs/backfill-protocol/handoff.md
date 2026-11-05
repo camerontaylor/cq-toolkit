@@ -40,7 +40,7 @@ pnpm test:narrow apps/crq-python/test_review_ledger.py apps/crq-python/test_back
 `test:narrow result="pass" exit=0 files=10 projects="python" tests="63/63" failed=0 skipped=0 wait="0.0s" duration="10.1s" nice=5 load="0.8" uptime="1059172s" source="explicit"`.
 
 ```sh
-pnpm test:narrow apps/crq-python/test_backfill_history.py apps/crq-python/test_crq.py
+pnpm test:narrow apps/crq-python/test_backfill_history.py apps/crq-python/test_crq_slot.py
 ```
 
 `test:narrow result="pass" exit=0 files=2 projects="python" tests="80/80" failed=0 skipped=0 wait="0.0s" duration="14.4s" nice=5 load="0.4" uptime="1059011s" source="explicit"`.

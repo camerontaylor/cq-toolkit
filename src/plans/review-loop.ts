@@ -506,6 +506,15 @@ export interface ReviewLoopOpts {
    * Absent when the fix run never returns a report; errors propagate.
    */
   onFixRunSettled?: (report: RunReport) => void;
+  /**
+   * Called ONCE, with the id of every planned fix item, after planning and
+   * enrichment and BEFORE the fix fan-out dispatches anything. The review path
+   * uses it to capture the round's item population before any item's admission
+   * can refuse, so an exit after a partial dispatch still reports the whole
+   * population. Absent on an exit taken before the population exists (no
+   * fetch, a truncated classification), and absent → no reporting.
+   */
+  onItemsPlanned?: (itemIds: readonly string[]) => void;
 }
 
 /** The loop's terminal report. Plain JSON; `ok` only when every stage came back clean. */
@@ -1180,6 +1189,10 @@ async function runOwnedReviewLoop(
     if (!Number.isSafeInteger(opts.engineOwnedConcurrency) || opts.engineOwnedConcurrency < 1)
       throw new Error('engineOwnedConcurrency must be positive');
   }
+  // The plan is FIXED and nothing has dispatched yet: hand the caller the
+  // whole item population BEFORE the fan-out, so a caller capturing a
+  // baseline cannot end up with only the ids dispatched before a refusal.
+  opts.onItemsPlanned?.(fixInputs.map((input) => input.item.id));
   const pending = new Set<Promise<void>>();
   const priorByFile = new Map<string, Promise<void>>();
   let barrier = Promise.resolve();

@@ -7,6 +7,11 @@ production `review.run` re-review. No provider credentials or network are
 used. The fixture omits `review.denylistPatternsFile`, exercising portable
 default scanning. Each invocation starts a fresh repository.
 
+> Path note: these captures predate the gate-adapter split; the recorded `ran=`
+> selections name `test/ops/gates/adapters.test.ts`, which is now
+> `test/ops/gates/adapters.*.test.ts`. The recorded output is left exactly as
+> captured.
+
 ```sh
 pnpm test:narrow --include-integration test/e2e/review/review-address.e2e.test.ts test/cli/registry.test.ts
 ```
@@ -98,6 +103,12 @@ production dogfood or CodeRabbit invocation.
 test:narrow result="pass" exit=0 files=7 projects="pure,process" tests="179/179" failed=0 skipped=0 wait="0.0s" duration="34.4s" nice=5 load="1.6" uptime="536466s" source="explicit" ran="test/driver/process-inventory.test.ts,test/ops/gates/adapters.test.ts,test/ops/review/address-pr.test.ts,test/ops/review/address.test.ts,test/ops/review/addressWorker.test.ts,test/ops/review/findings.test.ts,test/ops/review/run.test.ts"
 test:narrow result="pass" exit=0 files=7 projects="pure,process,integration" tests="198/198" failed=0 skipped=0 wait="0.0s" duration="15.2s" nice=5 load="2.3" uptime="536506s" source="explicit" ran="test/cli/registry-props.test.ts,test/cli/registry.test.ts,test/driver/process-inventory.test.ts,test/e2e/review/review-address.e2e.test.ts,test/ops/review/address-local.test.ts,test/ops/review/address-pr-git.test.ts,test/ops/review/registry.test.ts"
 ```
+
+> Path note: the `ran=` selections recorded in this transcript, above and later
+> in the file, name `test/ops/review/run.test.ts`. That file has since been
+> split into `test/ops/review/run.*.test.ts` modules, so the recorded name is
+> historical provenance, not a currently selectable file. Every capture is left
+> exactly as recorded.
 
 ### Late producer identity and publication recovery repairs (#448, #449)
 

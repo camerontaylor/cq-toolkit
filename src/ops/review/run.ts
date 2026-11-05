@@ -46,6 +46,7 @@ import { ReviewCoverageV2Schema } from './internal/reviewCoverageV2.js';
 import {
   FindingsRecordSchema,
   isComplete,
+  legacyEvidenceText,
   merge,
   type Finding,
   type FindingsRecord,
@@ -799,18 +800,21 @@ export function makeReviewRun(
                         ...(blockedReason === undefined && coverage.ok
                           ? { agentCoverage: coverage.coverage }
                           : {}),
-                        findings: agentFindings.map((finding, index) => ({
-                          id: `${id}#f${String(index + 1)}`,
-                          severity: finding.severity,
-                          ...(finding.file !== undefined ? { fileName: finding.file } : {}),
-                          ...(finding.line !== undefined ? { line: finding.line } : {}),
-                          ...(finding.rule !== undefined ? { rule: finding.rule } : {}),
-                          ...(finding.evidence !== undefined ? { evidence: finding.evidence } : {}),
-                          ...(finding.evidenceV1 !== undefined
-                            ? { evidenceV1: finding.evidenceV1 }
-                            : {}),
-                          excerpt: finding.text,
-                        })),
+                        findings: agentFindings.map((finding, index) => {
+                          const evidence = legacyEvidenceText(finding);
+                          return {
+                            id: `${id}#f${String(index + 1)}`,
+                            severity: finding.severity,
+                            ...(finding.file !== undefined ? { fileName: finding.file } : {}),
+                            ...(finding.line !== undefined ? { line: finding.line } : {}),
+                            ...(finding.rule !== undefined ? { rule: finding.rule } : {}),
+                            ...(evidence === undefined ? {} : { evidence }),
+                            ...(finding.evidenceV1 !== undefined
+                              ? { evidenceV1: finding.evidenceV1 }
+                              : {}),
+                            excerpt: finding.text,
+                          };
+                        }),
                         ...(advisories.length > 0 ? { advisories } : {}),
                         logPath,
                         untracked: state.untracked,

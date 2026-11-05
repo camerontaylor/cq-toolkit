@@ -29,7 +29,9 @@ import { makeDevDisposition } from '../dev/disposition.js';
 import { makeSubprocessDevEffects } from '../dev/effects.js';
 import {
   FindingsRecordSchema,
+  findingDispositionView,
   isComplete,
+  legacyEvidenceText,
   merge,
   openBlocking,
   type Finding,
@@ -98,13 +100,19 @@ import {
 import type {
   AvailabilityRecord,
   CompositionStartedJournalEvent,
+  FindingDispositionJournalEvent,
+  FindingFingerprint,
   ReportV2,
   KernelRunLinkedJournalEvent,
   ProvenanceRecord,
+  ReviewObservedJournalEvent,
 } from '../../kernel/types.js';
+import { ReviewCoverageSchema } from './internal/reviewPartitions.js';
+import { isCoverageV2Complete } from './internal/reviewCoverageV2.js';
 import { repoIdFromRemote, sanitizeObservation } from '../fix/attemptRecord.js';
 import { resolveCorrelation } from '../fix/correlation.js';
 import { assembleReportV2 } from '../fix/reportFold.js';
+import { measureRun, reviewPlannedUnitsOf } from '../fix/measurement.js';
 
 export interface ReviewAddressInput {
   repoRoot: string;
@@ -135,6 +143,28 @@ export interface ReviewAddressReport {
   /** Report context only: review advisories never enter `findings` or dispatch. */
   advisories?: string[];
   openBlocking: Finding[];
+  /**
+   * ADR-0008 baseline seam: the ROUND-1 open-blocker population. It is seeded
+   * BEFORE the dispatch loop from the PLANNED item population (the open
+   * blocking threads the run is about to work), so an exit taken before any
+   * item admits (an admission or closure refusal, a truncated fetch, a moved
+   * worker branch, a throwing fetch) still reports the planned population and
+   * not just the ids dispatched so far. The FULL open-thread population is
+   * merged only on the normal path, before the PR re-review: on an early
+   * exit, a thread excluded from planning (blocked) can be missing from this
+   * baseline. Round 1 may only GAIN ids afterwards, deduplicated, in
+   * first-seen order: each PR dispatch item still captures its own id before
+   * `admitRecord` can refuse, the round-1 agent re-review's record is
+   * captured before its same-round dispatch, and the local path captures its
+   * admitted record after deferred-source restoration and before dispatch,
+   * so a blocker the restoration reopens or appends is in the population the
+   * run works. It is never reassigned and never shrunk: `openBlocking` is
+   * recomputed after fixes and replaced by each successful re-review, so
+   * substituting it for the measurement baseline would inflate
+   * fixes-per-run. Absent only when the run exits before that population is
+   * known: unknown, never an empty baseline.
+   */
+  initialOpenBlocking?: string[];
   fixes: AddressFix[];
   closureVerifications?: Array<{
     finding: string;
@@ -350,6 +380,16 @@ const discussionText = (
  */
 export const REVIEW_ADDRESS_ROUNDCAP_REASON = 'review round cap reached with open findings';
 
+/**
+ * The severity every PR-thread finding is stamped with: the loop's dispatch
+ * item, the fetched-thread record built before the re-review, and the round-1
+ * seed's minimal PR-thread shape. One shared constant so the seed's blocking
+ * filter and the produced rows can never drift apart — the seed filters the
+ * ids it is handed against `blockingSeverities`, which must mean the same
+ * severity the real rows carry.
+ */
+const PR_THREAD_FINDING_SEVERITY = 'major' as const;
+
 /** SDK-first fix/disposition/re-review composition; kernel dispatch itself remains retry-free. */
 export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
   return async (input: ReviewAddressInput): Promise<ReviewAddressResult> => {
@@ -409,6 +449,11 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
         })
       | undefined;
     let observationClosed = false;
+    // T21 rulings: every exposure is emitted or counted withheld (one entry
+    // per source, with its distinct reason); representable records count
+    // separately so /reviews can distinguish known-zero from never-attempted.
+    const withheldReviewReasons: string[] = [];
+    let reviewExposureRecords = 0;
     // Links recorded by a settled PR fix run are appended asynchronously (the
     // loop does not await that callback). Keep every pending link so finish()
     // can drain them BEFORE the stream closes: a link must never race close(),
@@ -453,6 +498,8 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
         failureFree: observation.status !== 'indeterminate',
         kernelRuns: observation.kernelRuns,
         producer: 'address',
+        withheldReviewReasons: [...withheldReviewReasons],
+        reviewExposureRecords,
       });
       if (assembled.reportV2) report.reportV2 = assembled.reportV2;
       return {
@@ -465,6 +512,62 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
         failure: observation.failure,
         kernelRuns: [...observation.kernelRuns],
       };
+    };
+    /**
+     * ADR-0008 T23: print the honest review denominators on every exit AFTER
+     * THE COMPOSITION STREAM OPENS — exactly one measurement-summary per run
+     * through the composition writer, computed from this run's evidence
+     * alone (no cross-run state). The exits before the header lands print
+     * nothing: no stream exists, and that is correct.
+     * `plannedUnits` is the captured INITIAL open-blocker population passed
+     * with no `?? []`: an unseeded report is an unavailable denominator,
+     * never a known-zero empty list, and each captured blocker is one
+     * observed baseline failure. A commit whose message cannot be read
+     * leaves the numerator unknown. An emission failure is evidence
+     * (indeterminate observation), never a verdict.
+     */
+    let measurementEmitted = false;
+    const appendMeasurementSummary = async (): Promise<void> => {
+      const writer = observation?.writer;
+      if (writer === undefined || measurementEmitted) return;
+      measurementEmitted = true;
+      try {
+        const planned = reviewPlannedUnitsOf(report);
+        const git =
+          deps.git ?? makeGhRunner({ bin: 'git', cwd: input.repoRoot, timeoutMs: 10_000 });
+        const messages = new Map<string, string>();
+        for (const sha of new Set(
+          report.fixes.flatMap((fix) => (fix.commit === undefined ? [] : [fix.commit])),
+        )) {
+          // Only a full lowercase object id ever reaches git: any other
+          // value is an unreadable message (unknown), never a spawn.
+          if (!/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(sha)) continue;
+          try {
+            const message = await git(['show', '-s', '--format=%B', sha]);
+            if (message.code === 0) messages.set(sha, message.stdout);
+          } catch {
+            // Unreadable message: that closure's trailer status is unknown.
+          }
+        }
+        const { availability, ...metric } = measureRun(
+          report.fixes,
+          planned,
+          new Map((planned ?? []).map((unitId) => [unitId, { completed: true, count: 1 }])),
+          (sha) => messages.get(sha),
+        );
+        await writer.append({
+          type: 'measurement-summary',
+          runId: compositionRunId,
+          at: new Date().toISOString(),
+          unitId: null,
+          jobId: null,
+          taskId: null,
+          attempt: null,
+          payload: { metric, availability },
+        });
+      } catch (error) {
+        observationFailure(error);
+      }
     };
     const bookkeeping = new Map<string, string>();
     let bookkeepingTampered = false;
@@ -564,6 +667,15 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
       // other wire contract changes.
       report.usageSummary = usageLedger.snapshot();
       if (parent?.aborted) {
+        // Cancellation is an exit too (ADR-0008 T23): print this run's
+        // counts before the cancelled result returns, and surface the
+        // observation state — the lease's cancelled result carries this
+        // same report object, so an emission failure must not vanish from
+        // the cancelled envelope. The writer's close stays with the normal
+        // exit: a pr flow's tracked links may still append during unwind.
+        await appendMeasurementSummary();
+        const observedSurface = observationSurface();
+        if (observedSurface !== undefined) report.observation = observedSurface;
         delete report.stop;
         if (!report.reasons.includes('parent cancelled')) report.reasons.push('parent cancelled');
         if (!addressLease) return { status: 'needs-human', reason: 'parent cancelled', report };
@@ -739,6 +851,9 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
       // without marking its own `failure`) are EVIDENCE only: they make the
       // surface indeterminate and never change the run verdict.
       for (const failure of worker?.observationFailures?.() ?? []) observationFailure(failure);
+      // ADR-0008 T23: the run's counts print on every exit — as the stream's
+      // terminal event, after every link and attempt observation landed.
+      await appendMeasurementSummary();
       await closeObservation();
       // A refusal recorded while the writer drained is evidence too: fold once
       // more after close so no attempt-observation failure is silently lost.
@@ -1750,6 +1865,47 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
             const noteAdmission = (head: string) => {
               report.admissionHead ??= head;
             };
+            /**
+             * ADR-0008 baseline seam: the ROUND-1 open-blocker population.
+             * It is seeded from the full pre-dispatch item population (the
+             * open blocking threads the run is about to work) BEFORE the
+             * dispatch loop, so every exit reports the whole round-1
+             * population, not just the ids dispatched so far. Every capture
+             * only GAINS ids, deduplicated, in first-seen order, and a later
+             * round is ignored, so the list is never reassigned or shrunk.
+             * An early exit taken before the post-fetch merge saves only the
+             * planned population, which can omit threads that were excluded
+             * from planning (blocked).
+             * Round-1 sources: the pre-dispatch seed, each PR dispatch item
+             * before `admitRecord` can refuse (a dispatched item that is then
+             * refused stays counted), the full open-thread population merged
+             * before the PR re-review (dedup-only; already seeded), the
+             * round-1 PR agent re-review's record captured before its
+             * same-round dispatch (the merge above saw only the forge-thread
+             * population, and the baseline must cover what is dispatched),
+             * and the local path's admitted record captured after
+             * deferred-source restoration and before its dispatch
+             * (restoration can reopen or append blockers, and the baseline
+             * must cover what is dispatched).
+             * Nothing else writes this field: `openBlocking` is recomputed
+             * after fixes and `rounds[].record` is replaced by a re-review,
+             * so neither may feed the measurement baseline.
+             */
+            const noteInitialOpenIds = (round: number, ids: readonly string[]) => {
+              if (round !== 1) return;
+              report.initialOpenBlocking = [
+                ...new Set([...(report.initialOpenBlocking ?? []), ...ids]),
+              ];
+            };
+            const noteInitialOpenBlocking = (
+              round: number,
+              record: Pick<FindingsRecord, 'findings'>,
+            ) => {
+              noteInitialOpenIds(
+                round,
+                openBlocking(record, policy.review.blockingSeverities).map((finding) => finding.id),
+              );
+            };
             const admitCleanRecord = async (root: string, record: FindingsRecord) => {
               const effects = makeSubprocessDevEffects(root);
               const read = await readWorkState(effects, {
@@ -1809,18 +1965,21 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                     head: state.head,
                     dirtySha256: state.dirtySha256,
                     completion: { kind: 'terminal' },
-                    findings: record.findings.map((finding) => ({
-                      id: finding.id,
-                      severity: finding.severity,
-                      ...(finding.file !== undefined ? { fileName: finding.file } : {}),
-                      ...(finding.line !== undefined ? { line: finding.line } : {}),
-                      ...(finding.rule !== undefined ? { rule: finding.rule } : {}),
-                      ...(finding.evidence !== undefined ? { evidence: finding.evidence } : {}),
-                      ...(finding.evidenceV1 !== undefined
-                        ? { evidenceV1: finding.evidenceV1 }
-                        : {}),
-                      excerpt: finding.text,
-                    })),
+                    findings: record.findings.map((finding) => {
+                      const evidence = legacyEvidenceText(finding);
+                      return {
+                        id: finding.id,
+                        severity: finding.severity,
+                        ...(finding.file !== undefined ? { fileName: finding.file } : {}),
+                        ...(finding.line !== undefined ? { line: finding.line } : {}),
+                        ...(finding.rule !== undefined ? { rule: finding.rule } : {}),
+                        ...(evidence === undefined ? {} : { evidence }),
+                        ...(finding.evidenceV1 !== undefined
+                          ? { evidenceV1: finding.evidenceV1 }
+                          : {}),
+                        excerpt: finding.text,
+                      };
+                    }),
                     logPath: report.reportPath,
                     untracked: state.untracked,
                     at: effects.nowIso(),
@@ -1845,8 +2004,133 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                 noteAdmission(state.head);
               });
             };
-            const recordDisposition = async (root: string, finding: Finding) => {
+            const DEFERRED_REVIEW_TRIGGER =
+              'review.address: retained and re-presented at next re-review';
+            /**
+             * ADR-0008 T19 boundary: `isDeliberateDisposition` admits only a
+             * real terminal adjudication. The worker's OPERATIONAL failure
+             * path reuses `status: 'deferred'` for an unresolved finding but
+             * marks itself with `failure` — that is never a deferral, and it
+             * stays out of the disposition record even when a caller injects
+             * its own disposition authority (a thrown worker, a timeout or a
+             * driver error adjudicates nothing). The converse holds too: a
+             * custom worker's deliberate `rejected`/`deferred` is recorded
+             * even when it omits the optional evidence array. No injected dep
+             * and no evidence shape may widen or narrow this predicate.
+             */
+            const isDeliberateDisposition = (fix: AddressFix): boolean =>
+              fix.finding.status !== 'open' && fix.failure === undefined;
+            /**
+             * ADR-0008 T19: a new disposition records the worker's observed
+             * points as one `path:line` entry each (never a single JSON blob,
+             * which a reader would have to re-parse). A fixed disposition has
+             * no evidence array; the finding's commit SHA is adapted by the
+             * shared dual-read view.
+             */
+            const dispositionEvidenceFor = (fix: AddressFix): string[] | null =>
+              fix.evidence === undefined
+                ? findingDispositionView(fix.finding).evidence
+                : fix.evidence.map((entry) => `${entry.path}:${entry.line}`);
+            /**
+             * ADR-0008 T19: one `finding-disposition` per DURABLE terminal
+             * adjudication. Only a successful recordDisposition reaches this
+             * call, so an infrastructure failure (whose finding stays open)
+             * never becomes a deferral. An append failure marks the
+             * observation surface indeterminate; it never rewrites the
+             * finding, the durable disposition or the verdict.
+             */
+            const emitFindingDisposition = async (
+              finding: Finding,
+              observedHead: string,
+              evidence: string[] | null,
+            ): Promise<void> => {
+              if (observation === undefined) return;
+              if (finding.status === 'open') return;
+              if (finding.reason === undefined || finding.reason.trim() === '') {
+                observationFailure(
+                  `finding-disposition ${finding.id}: no reason recorded; incomplete disposition withheld`,
+                );
+                return;
+              }
+              const at = new Date().toISOString();
+              const availability: Record<string, AvailabilityRecord> = {
+                '/fingerprint/spanContentHash': {
+                  state: 'unavailable',
+                  reason:
+                    'address dispatch does not extract the pinned span; a null hash cannot prove equality',
+                  source: null,
+                },
+                '/acceptedRisk': {
+                  state: 'not-collected',
+                  reason: 'the adjudicator recorded no accepted risk (null is unknown, never none)',
+                  source: null,
+                },
+              };
+              if (evidence === null)
+                availability['/evidence'] = {
+                  state: 'not-collected',
+                  reason: 'no evidence was recorded; absence is unknown, never an empty proof',
+                  source: null,
+                };
+              if (finding.status !== 'deferred')
+                availability['/reviewTrigger'] = {
+                  state: 'n-a',
+                  reason: 'the disposition is not deferred, so no re-review trigger applies',
+                  source: null,
+                };
+              const event: FindingDispositionJournalEvent = {
+                type: 'finding-disposition',
+                runId: observation.compositionRunId,
+                at,
+                unitId: null,
+                jobId: null,
+                taskId: null,
+                attempt: null,
+                payload: {
+                  // F1 identity from what the review finding proves: the
+                  // source is the check, rule/path are recorded values, and
+                  // span content is UNAVAILABLE (null cannot match) until the
+                  // F1 adapter extracts it. Never a guessed identity.
+                  fingerprint: {
+                    version: 1,
+                    checkId: finding.source,
+                    rule: finding.rule ?? null,
+                    path: finding.file ?? '',
+                    spanContentHash: null,
+                  },
+                  status: finding.status,
+                  reason: finding.reason,
+                  owner: 'review.address',
+                  evidence: evidence ?? [],
+                  reviewTrigger: finding.status === 'deferred' ? DEFERRED_REVIEW_TRIGGER : null,
+                  observedHead,
+                  observedAt: at,
+                  acceptedRisk: null,
+                  availability,
+                },
+              };
               try {
+                await observation.writer?.append(sanitizeObservation(event));
+              } catch (error) {
+                observationFailure(error);
+              }
+            };
+            type DispositionRecorded = 'recorded' | 'withheld' | 'failed';
+            const recordDisposition = async (
+              root: string,
+              fix: AddressFix,
+            ): Promise<DispositionRecorded> => {
+              const finding = fix.finding;
+              try {
+                // A disposition exists only for a deliberate terminal
+                // adjudication: an open finding is an unfinished attempt and a
+                // failure-path `deferred` is an operational failure, never a
+                // deferral.
+                if (finding.status === 'open' || !isDeliberateDisposition(fix)) return 'withheld';
+                // The worker's observed evidence (path:line per point) or, for a
+                // fixed disposition, the adapted finding evidence (the commit
+                // SHA). One value feeds both the ledger and the journal event.
+                const evidence = dispositionEvidenceFor(fix);
                 return await withBookkeepingAccess(root, async () => {
                   const recorded = deps.disposition
                     ? await deps.disposition(root, finding)
@@ -1856,24 +2140,21 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                         action: finding.status as 'fixed' | 'rejected' | 'deferred',
                         why: finding.reason ?? 'engine validated fix',
                         owner: 'review.address',
-                        // The finding's own evidence, verbatim: the commit SHA
-                        // for a fixed disposition (addressWorker), the
-                        // path/line JSON for rejected/deferred, the failed
-                        // attempt otherwise. Never manufactured, never
-                        // dropped; an absent, empty or whitespace-only value
-                        // records no evidence entries (never ['']).
-                        evidence: finding.evidence?.trim() ? [finding.evidence] : [],
+                        // The worker's own evidence: the commit SHA for a fixed
+                        // disposition, `path:line` per observed point for
+                        // rejected/deferred. Never manufactured, never dropped;
+                        // an absent value records no evidence entries.
+                        evidence: evidence ?? [],
                         ...(finding.status === 'deferred'
                           ? {
-                              reviewTrigger:
-                                'review.address: retained and re-presented at next re-review',
+                              reviewTrigger: DEFERRED_REVIEW_TRIGGER,
                             }
                           : {}),
                       });
                   if (recorded.status !== 'ok') {
                     bookkeepingFailed = true;
                     report.reasons.push(`disposition ${finding.id}: ${issue(recorded)}`);
-                    return false;
+                    return 'failed';
                   }
                   if (!deps.disposition) {
                     const branch = await branchName(root);
@@ -1882,12 +2163,13 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                     );
                   }
                   dispositions.set(identity(finding), finding);
-                  return true;
+                  await emitFindingDisposition(finding, fix.observedHead, evidence);
+                  return 'recorded';
                 });
               } catch (error) {
                 bookkeepingFailed = true;
                 report.reasons.push(`disposition ${finding.id}: ${String(error)}`);
-                return false;
+                return 'failed';
               }
             };
             const noteRound = (round: number, record: FindingsRecord, run?: RunReport) => {
@@ -2055,7 +2337,8 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                   }
                   const fix = row.result.value as AddressFix;
                   if (fix.finding.status === 'open') continue;
-                  if (!(await recordDisposition(root, fix.finding))) fix.finding.status = 'open';
+                  if ((await recordDisposition(root, fix)) !== 'recorded')
+                    fix.finding.status = 'open';
                 }
                 noteRound(round, record, run);
               }
@@ -2252,6 +2535,180 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                 return pinnedBase;
               };
             }
+            /**
+             * ADR-0008 T21: one `review-observed` event per review source per
+             * reviewed record — append-only, never a last-head overwrite;
+             * blocked vendors count as not-completed. Scope base: the
+             * record's `reviewed` proof, else the lane base for records this
+             * composition produced; else withheld silently (one entry per
+             * source, distinct reason) and folded into /reviews as partial.
+             * A foreign coverage proof (head or base naming another record)
+             * is never attached. Rows carry the findings attributed to their
+             * source; with no attributable findings anywhere the record
+             * union stands in. A failed append is an observation failure; it
+             * never rewrites the verdict.
+             */
+            const emitReviewObserved = async (
+              round: number,
+              record: FindingsRecord,
+              lane?: { base?: string | undefined; unresolved?: string | undefined },
+            ): Promise<void> => {
+              if (observation?.writer === undefined) return;
+              const writer = observation.writer;
+              const COMMIT_ID = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
+              const withhold = (reason: string): void => {
+                for (let index = 0; index < record.sources.length; index++)
+                  withheldReviewReasons.push(reason);
+              };
+              if (!COMMIT_ID.test(record.head)) {
+                withhold('record head is not a commit id');
+                return;
+              }
+              const base =
+                record.reviewed !== undefined && COMMIT_ID.test(record.reviewed.base)
+                  ? record.reviewed.base
+                  : lane?.base !== undefined && COMMIT_ID.test(lane.base)
+                    ? lane.base
+                    : undefined;
+              if (base === undefined) {
+                withhold(lane?.unresolved ?? 'no reviewed base proof');
+                return;
+              }
+              reviewExposureRecords++;
+              const fingerprintOf = (finding: Finding): FindingFingerprint =>
+                finding.fingerprint ?? {
+                  version: 1,
+                  checkId: finding.source,
+                  rule: finding.rule ?? null,
+                  path: finding.file ?? '',
+                  spanContentHash: null,
+                };
+              const notCollected = (reason: string): AvailabilityRecord => ({
+                state: 'not-collected',
+                reason,
+                source: null,
+              });
+              const anyAttributed = record.findings.some((finding) =>
+                record.sources.some((source) => source.kind === finding.source),
+              );
+              for (const source of record.sources) {
+                const parsed =
+                  source.coverage === undefined
+                    ? undefined
+                    : ReviewCoverageSchema.safeParse(source.coverage);
+                const proof = parsed?.success ? parsed.data : undefined;
+                const usable =
+                  proof !== undefined && proof.head === record.head && proof.base === base
+                    ? proof
+                    : undefined;
+                const v2 = usable !== undefined && 'version' in usable ? usable : undefined;
+                const legacy = usable !== undefined && !('version' in usable) ? usable : undefined;
+                const availability: Record<string, AvailabilityRecord> = {};
+                let delivered: string[] = [];
+                let completed: string[] = [];
+                let omissions: string[] = [];
+                let coverage = 'none-recorded';
+                if (proof !== undefined && usable === undefined) {
+                  for (const pointer of ['/delivered', '/completed', '/omissions'])
+                    availability[pointer] = notCollected(
+                      'the coverage proof names another head or base; a foreign proof is never attached',
+                    );
+                  coverage = 'foreign';
+                } else if (v2 !== undefined) {
+                  delivered = v2.pieces
+                    .filter((piece) => piece.state === 'delivered' || piece.state === 'completed')
+                    .map((piece) => piece.path);
+                  completed = v2.pieces
+                    .filter((piece) => piece.state === 'completed')
+                    .map((piece) => piece.path);
+                  omissions = v2.pieces
+                    .filter((piece) => piece.state === 'excluded' || piece.state === 'planned')
+                    .map((piece) => piece.path);
+                  coverage = `v2:${v2.mode}:${v2.scope}`;
+                } else if (legacy !== undefined) {
+                  delivered = legacy.partitions.map((partition) => partition.receipt);
+                  completed = legacy.partitions
+                    .filter((partition) => partition.complete)
+                    .map((partition) => partition.receipt);
+                  coverage = `legacy:${legacy.scope}`;
+                  availability['/omissions'] = notCollected(
+                    'legacy coverage records no omission evidence; absence is unknown, never none',
+                  );
+                } else {
+                  for (const pointer of ['/delivered', '/completed', '/omissions'])
+                    availability[pointer] = notCollected(
+                      'the review source recorded no coverage proof; empty lists are unknown, never known-empty',
+                    );
+                }
+                const vendorCompletion =
+                  source.status === 'blocked'
+                    ? ('not-completed' as const)
+                    : v2 !== undefined
+                      ? isCoverageV2Complete(v2)
+                        ? ('completed' as const)
+                        : ('not-completed' as const)
+                      : legacy !== undefined
+                        ? legacy.partitions.every((partition) => partition.complete)
+                          ? ('completed' as const)
+                          : ('not-completed' as const)
+                        : ('unknown' as const);
+                if (source.cycleId === undefined)
+                  availability['/reviewerId'] = notCollected(
+                    'the source recorded no cycle id; the producer kind stands in, never a guessed vendor identity',
+                  );
+                const row = anyAttributed
+                  ? record.findings.filter((finding) => finding.source === source.kind)
+                  : record.findings;
+                const event: ReviewObservedJournalEvent = {
+                  type: 'review-observed',
+                  runId: observation.compositionRunId,
+                  at: new Date().toISOString(),
+                  unitId: null,
+                  jobId: null,
+                  taskId: null,
+                  attempt: null,
+                  payload: {
+                    baseSha: base,
+                    headSha: record.head,
+                    findingFingerprints: row.map(fingerprintOf),
+                    coverage,
+                    initialBlocking: openBlocking(
+                      { findings: row },
+                      policy.review.blockingSeverities,
+                    ).map(fingerprintOf),
+                    reviewerId: source.cycleId ?? source.kind,
+                    source: source.kind,
+                    round,
+                    delivered,
+                    completed,
+                    omissions,
+                    vendorCompletion,
+                    availability,
+                  },
+                };
+                try {
+                  await writer.append(sanitizeObservation(event));
+                } catch (error) {
+                  observationFailure(error);
+                }
+              }
+            };
+            /**
+             * The PR lane comparison base for review-observed scope rows: the
+             * caller-asserted base, else the once-pinned merge-base. A pin
+             * failure carries its own withheld reason.
+             */
+            const prLaneBase = async (): Promise<{
+              base?: string | undefined;
+              unresolved?: string | undefined;
+            }> => {
+              if (input.base !== undefined) return { base: input.base };
+              try {
+                return { base: await reviewedBasePinned?.() };
+              } catch {
+                return { unresolved: 'merge-base unresolved' };
+              }
+            };
             for (let round = 1; round <= policy.review.rounds; round++) {
               const stopped = stop();
               if (stopped) return await finish('needs-human', stopped);
@@ -2281,7 +2738,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                       source: 'pr-threads',
                       ...(item.item.path ? { file: item.item.path } : {}),
                       ...(item.item.line && item.item.line > 0 ? { line: item.item.line } : {}),
-                      severity: 'major',
+                      severity: PR_THREAD_FINDING_SEVERITY,
                       text: discussionText(item.item.body, item.item.comments),
                       status: 'open',
                     };
@@ -2298,6 +2755,9 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                         sources: [{ kind: 'pr-threads', status: 'terminal' }],
                         findings: [finding],
                       };
+                      // Before this item's fix, and before admitRecord can
+                      // refuse: the finding was dispatched as an open blocker.
+                      noteInitialOpenBlocking(round, record);
                       await admitRecord(root, record);
                       report.verifiedHead ??= record.head;
                       dispatchedRecord ??= record;
@@ -2325,11 +2785,16 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                       remember(fix);
                       return { status: 'needs-human', reason: fix.reason };
                     }
-                    const dispositionRecorded = await recordDisposition(root, fix.finding);
-                    if (!dispositionRecorded) fix.finding.status = 'open';
+                    const disposition = await recordDisposition(root, fix);
+                    if (disposition !== 'recorded') fix.finding.status = 'open';
                     remember(fix);
                     fixesById.set(finding.id, fix);
-                    if (!dispositionRecorded)
+                    if (disposition === 'withheld')
+                      return {
+                        status: 'needs-human',
+                        reason: `${NO_OUTCOME_REASON}: ${fix.reason}`,
+                      };
+                    if (disposition === 'failed')
                       return {
                         status: 'needs-human',
                         reason: `${NO_OUTCOME_REASON}: disposition persistence failed`,
@@ -2403,6 +2868,31 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                   engineOwnedConcurrency: policy.review.addressConcurrency,
                   publish: input.push === true,
                   publicationTreeClean,
+                  // ADR-0008: the round's item population is known HERE,
+                  // before anything dispatches, so an exit taken before the
+                  // post-fetch merge (an admission or closure refusal, a
+                  // truncated fetch, a moved branch, a throwing fetch) still
+                  // reports the whole round-1 population. An EMPTY plan may
+                  // not CREATE a baseline: every thread skipped (answered
+                  // this round, loop-replied at this head) is still an open
+                  // population this seed never observed, and a pre-merge
+                  // exit below would persist a present-empty list a
+                  // measurement consumer reads as known-zero. Absent stays
+                  // absent — the post-fetch merge and the local-path
+                  // capture still write a genuinely known-empty population.
+                  onItemsPlanned: (ids) => {
+                    if (ids.length === 0 && report.initialOpenBlocking === undefined) return;
+                    noteInitialOpenBlocking(round, {
+                      // Minimal PR-thread shape; only id/severity/status feed the filter.
+                      findings: ids.map((id) => ({
+                        id,
+                        source: 'pr-threads',
+                        severity: PR_THREAD_FINDING_SEVERITY,
+                        text: '',
+                        status: 'open' as const,
+                      })),
+                    });
+                  },
                   onFixRunSettled: (run) => {
                     // Retain the settled run before later Git/forge work can throw.
                     // An initial refusal has no admitted work to record; a refused
@@ -2596,19 +3086,28 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                       ...(thread.path ? { file: thread.path } : {}),
                       ...(thread.line && thread.line > 0 ? { line: thread.line } : {}),
                       text: discussionText(thread.body, thread.replies),
-                      severity: 'major',
+                      severity: PR_THREAD_FINDING_SEVERITY,
                       status: rejectionReasons.has(thread.id) ? 'rejected' : 'open',
                       ...(rejectionReasons.has(thread.id)
                         ? { reason: rejectionReasons.get(thread.id)! }
                         : {}),
                     })),
                 };
+                // T21: the PR-thread population of this round's head.
+                await emitReviewObserved(round, threads, await prLaneBase());
                 report.findings = retainDeferred(threads).findings;
                 noteAdvisories(threads);
                 report.openBlocking = openBlocking(
                   { ...threads, findings: report.findings },
                   policy.review.blockingSeverities,
                 );
+                // Round 1 ALWAYS merges the full open-thread population: items
+                // stopped BEFORE admission (the fix-wall stop, a refusal, a
+                // parent cancel) never reached the dispatch capture, so the
+                // baseline is completed here. The helper is round-1-only and
+                // only gains ids (deduplicated, first-seen order), so it can
+                // never shrink or replace the list a later round sees.
+                noteInitialOpenBlocking(round, { findings: report.findings });
                 if (stop()) return await finish('needs-human', stop());
                 const priorFindings = priorRoundFindings(previous, [
                   ...threads.findings,
@@ -2629,14 +3128,24 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                 });
                 if (agent.status !== 'ok') {
                   if (agent.report) noteAdvisories(agent.report);
+                  // T21/P1: the aborted re-review is still an exposure —
+                  // emit its record (blocked vendors as not-completed) or
+                  // count it withheld; never dropped on the exit path.
+                  if (agent.report !== undefined)
+                    await emitReviewObserved(round, agent.report, await prLaneBase());
+                  else withheldReviewReasons.push('re-review returned no anchored head');
                   return await finish(
                     'needs-human',
                     `PR re-review: ${issue(agent)}`,
                     rereviewStop(agent),
                   );
                 }
-                if (agent.value.branch !== threads.branch || agent.value.head !== threads.head)
+                if (agent.value.branch !== threads.branch || agent.value.head !== threads.head) {
+                  withheldReviewReasons.push('identity changed before the re-review was recorded');
                   return await finish('needs-human', 'PR re-review identity changed');
+                }
+                // T21: the agent re-review exposure of the same head.
+                await emitReviewObserved(round, agent.value, await prLaneBase());
                 previous = retainDeferred(merge([threads, agent.value]));
                 noteAdvisories(previous);
                 noteRound(round, previous).record = previous;
@@ -2666,7 +3175,14 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                   return await finish('ok');
                 }
                 // Local agent findings share the same engine and round cap as forge threads.
-                const unresolved = await dispatchFindings(root, retainDeferred(agent.value), round);
+                const agentRecord = retainDeferred(agent.value);
+                // ADR-0008: the agent re-review can return NEW blockers this
+                // same round then dispatches; the merge before the re-review
+                // saw only the forge-thread population, so they join the
+                // round-1 baseline here, before dispatchFindings plans them.
+                // The helper's round guard keeps later rounds out, as elsewhere.
+                noteInitialOpenBlocking(round, agentRecord);
+                const unresolved = await dispatchFindings(root, agentRecord, round);
                 await publishOnExit();
                 if (unresolved) return await finish('needs-human', stop() ?? unresolved);
                 continue;
@@ -2705,6 +3221,10 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                   );
                 previous = record;
                 report.verifiedHead ??= record.head;
+                // T21: the inherited initial population, stamped round 0
+                // (inherited before round 1); its base proof is the record's
+                // own (produced outside this composition).
+                await emitReviewObserved(0, record);
               }
               report.findings = previous.findings;
               noteAdvisories(previous);
@@ -2712,6 +3232,12 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
               if (!(await hasRequiredSources(root, previous)))
                 return await finish('needs-human', 'review source incomplete');
               if (stop()) return await finish('needs-human', stop());
+              // AFTER source validation and disposition restoration, BEFORE any
+              // dispatch: round 1's admitted record — including blockers that
+              // the restoration reopened or appended — is the initial
+              // open-blocker population, so the baseline covers exactly the
+              // rows this run dispatches. Later rounds are ignored by the guard.
+              noteInitialOpenBlocking(round, previous);
               report.findings = previous.findings;
               report.openBlocking = openBlocking(previous, policy.review.blockingSeverities);
               const pending = previous.findings.filter((f) => f.status === 'open');
@@ -2744,17 +3270,37 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                     : undefined;
               if (!refreshedRecord) {
                 if (refreshed.report) noteAdvisories(refreshed.report);
+                // T21/P1: the aborted re-review is still an exposure —
+                // emit its record (blocked vendors as not-completed) or
+                // count it withheld; never dropped on the exit path.
+                if (refreshed.report !== undefined)
+                  await emitReviewObserved(round, refreshed.report, { base: reviewedBase });
+                else withheldReviewReasons.push('re-review returned no anchored head');
                 return await finish(
                   'needs-human',
                   `re-review: ${issue(refreshed)}`,
                   rereviewStop(refreshed),
                 );
               }
-              if (
-                refreshedRecord.branch !== (await branchName(root)) ||
-                refreshedRecord.head !== (await gitText(root, ['rev-parse', 'HEAD']))
-              )
-                return await finish('needs-human', 're-review identity changed');
+              try {
+                if (
+                  refreshedRecord.branch !== (await branchName(root)) ||
+                  refreshedRecord.head !== (await gitText(root, ['rev-parse', 'HEAD']))
+                ) {
+                  withheldReviewReasons.push('identity changed before the re-review was recorded');
+                  return await finish('needs-human', 're-review identity changed');
+                }
+              } catch (error) {
+                // T21/P3: the exposure exists but the check itself failed —
+                // count it withheld so /reviews stays truthful, then let the
+                // run's own failure path decide the outcome.
+                withheldReviewReasons.push(
+                  'identity check failed before the re-review was recorded',
+                );
+                throw error;
+              }
+              // T21: the re-review exposure of this round's head.
+              await emitReviewObserved(round, refreshedRecord, { base: reviewedBase });
               previous = retainDeferred(refreshedRecord);
               const complete = await hasRequiredSources(root, previous);
               if (stop()) return await finish('needs-human', stop());

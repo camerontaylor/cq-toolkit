@@ -82,7 +82,7 @@ describe('selectAffected', () => {
       'test/driver/harness-parity.level1-calltool-result.test.ts',
       'test/driver/harness-parity.run-env.test.ts',
       'test/driver/served-model-sites.test.ts',
-      'test/driver/claude-code/cli.test.ts',
+      'test/driver/claude-code/cli.child-process.test.ts',
       'test/harness/mcp-bin.test.ts',
       'test/kernel/driver-hygiene.test.ts',
       'test/ops/gates/policyDiff.test.ts',
@@ -108,7 +108,7 @@ describe('selectAffected', () => {
       'test/ops/gates/protectedPaths.closure.test.ts',
     ]);
     expect(pick('src/kernel/runner.ts')).toEqual([
-      'test/driver/claude-code/cli.test.ts',
+      'test/driver/claude-code/cli.child-process.test.ts',
       'test/kernel/driver-hygiene.test.ts',
       'test/ops/gates/protectedPaths.closure.test.ts',
     ]);
@@ -123,7 +123,7 @@ describe('selectAffected', () => {
     ]);
     expect(pick('src/harness/mcp/server.ts')).toEqual([
       'test/cli/driver-alias-notice.test.ts',
-      'test/driver/claude-code/cli.test.ts',
+      'test/driver/claude-code/cli.child-process.test.ts',
       'test/driver/harness-parity.invalid-input.test.ts',
       'test/driver/harness-parity.level1-calltool-result.test.ts',
       'test/driver/harness-parity.run-env.test.ts',
@@ -131,7 +131,7 @@ describe('selectAffected', () => {
       'test/ops/gates/protectedPaths.closure.test.ts',
     ]);
     expect(pick('src/cli/main.ts')).toEqual([
-      'test/driver/claude-code/cli.test.ts',
+      'test/driver/claude-code/cli.child-process.test.ts',
       'test/ops/gates/protectedPaths.closure.test.ts',
     ]);
     // The generic scripts/ row adds every test/workflows suite as well.
@@ -149,18 +149,20 @@ describe('selectAffected', () => {
   });
 
   it('maps workflow and template edits to the adversarial suites that scan them', () => {
-    const pool = [
-      ...allTests,
-      'test/adversarial/a14-privileged-workflow.test.ts',
-      'test/scripts/adversarial-suite.test.ts',
+    // A14 is split by subject; the whole family scans workflows and templates.
+    const family = [
+      'test/adversarial/a14-privileged-workflow.benign-edits.test.ts',
+      'test/adversarial/a14-privileged-workflow.classifier-postures.test.ts',
+      'test/adversarial/a14-privileged-workflow.d11-authorization.test.ts',
+      'test/adversarial/a14-privileged-workflow.exfil-trigger.test.ts',
+      'test/adversarial/a14-privileged-workflow.token-reachability.test.ts',
+      'test/adversarial/a14-privileged-workflow.workflow-inventory.test.ts',
     ];
+    const pool = [...allTests, ...family, 'test/scripts/adversarial-suite.test.ts'];
     const pick = (path: string) => selectAffected({ changed: [path], allTests: pool, related: [] });
     for (const path of ['.github/workflows/adversarial-suite.yml', 'policy/templates/gate.yml']) {
       expect(pick(path).files).toEqual(
-        expect.arrayContaining([
-          'test/adversarial/a14-privileged-workflow.test.ts',
-          'test/scripts/adversarial-suite.test.ts',
-        ]),
+        expect.arrayContaining([...family, 'test/scripts/adversarial-suite.test.ts']),
       );
     }
   });
@@ -331,7 +333,7 @@ describe('bounded per-fix related mapping', () => {
   const tests = [
     'test/ops/dev/check.test.ts',
     'test/ops/dev/check-affected.test.ts',
-    'test/ops/review/run.test.ts',
+    'test/ops/review/run.deadline.test.ts',
   ];
   it('maps source prefixes and touched tests, deduplicated', () => {
     expect(selectRelatedTests(['src/ops/dev/check.ts', tests[0]!], tests)).toEqual({
@@ -360,7 +362,10 @@ it('maps gate adapters to their shared owner suite despite layout differences', 
   expect(
     selectRelatedTests(
       ['src/ops/gates/adapters/testNarrow.ts'],
-      ['test/ops/gates/adapters.test.ts', 'test/ops/gates/protectedPaths.closure.test.ts'],
+      [
+        'test/ops/gates/adapters.checkRunner.test.ts',
+        'test/ops/gates/protectedPaths.closure.test.ts',
+      ],
     ).files,
-  ).toContain('test/ops/gates/adapters.test.ts');
+  ).toContain('test/ops/gates/adapters.checkRunner.test.ts');
 });

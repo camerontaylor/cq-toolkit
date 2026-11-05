@@ -6,15 +6,19 @@ import { relative, resolve, sep } from 'node:path';
 // content check, including path.join(..., 'dist') references.
 const INDIRECT_DIST_TESTS = new Set([
   'test/e2e/review/review-address.e2e.test.ts',
-  'test/e2e/fix/fix-run.e2e.test.ts',
+  'test/e2e/fix/fix-run-cli.e2e.test.ts',
+  'test/e2e/fix/fix-run-static.e2e.test.ts',
   'test/scripts/static-conformance.test.ts',
   'test/scripts/tooling-commands.test.ts',
   'test/scripts/ratchet-propose.test.ts',
-  'test/ops/review/address.test.ts',
+  'test/ops/review/address.composition.test.ts',
   // measurement-session-index.test.ts loads ../dist/kernel/schema.js only
   // through the .mjs module it imports (scripts/measurement-session-index.mjs),
   // so the content check cannot see it — an explicit indirect entry.
   'test/measurement-session-index.test.ts',
+  // Same indirect shape: measurement-inputs.test.ts reaches dist only through
+  // scripts/measurement-inputs.mjs (the v2 report schema import).
+  'test/measurement-inputs.test.ts',
 ]);
 export function needsDist(files, root) {
   return files.some((file) => {

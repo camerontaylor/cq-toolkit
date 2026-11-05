@@ -107,7 +107,9 @@ describe('review.address failed-attempt branches', () => {
         'CQ fix engine <cq-fix-engine@invalid>',
       );
       expect(f.repo.git('show', '-s', '--format=%B', retained.sha)).toContain('Cq-Tier: worker');
-      expect(JSON.parse(failed.finding.evidence!)).toEqual(retained);
+      const evidence = failed.finding.evidence;
+      if (typeof evidence !== 'string') throw new Error('expected legacy evidence text');
+      expect(JSON.parse(evidence)).toEqual(retained);
       expect(f.attempts[1]!.failedAttempt).toEqual(retained);
       expect(f.repo.git('for-each-ref', '--format=%(refname)', 'refs/stash', 'refs/cq')).toBe('');
       release();

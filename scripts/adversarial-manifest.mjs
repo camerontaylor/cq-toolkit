@@ -63,7 +63,7 @@ const regression = {
   A6: 'test/adversarial/boundary-rows.test.ts',
   A10: 'test/adversarial/boundary-rows.test.ts',
   A11: 'test/adversarial/boundary-rows.test.ts',
-  A14: 'test/adversarial/a14-privileged-workflow.test.ts',
+  A14: 'test/adversarial/a14-privileged-workflow.exfil-trigger.test.ts',
   A15: 'test/adversarial/trust-rows.test.ts',
   A17: 'test/adversarial/boundary-rows.test.ts',
   A20: 'test/adversarial/trust-rows.test.ts',

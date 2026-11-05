@@ -1,6 +1,8 @@
 import { z } from 'zod';
 import { ReviewCoverageSchema } from './internal/reviewPartitions.js';
 import { isCoverageV2Complete } from './internal/reviewCoverageV2.js';
+import { FindingFingerprintSchema } from '../../kernel/schema.js';
+import type { AvailabilityRecord } from '../../kernel/types.js';
 
 /**
  * Side-aware location of an exact quoted range in one tree of the reviewed
@@ -58,7 +60,16 @@ export const FindingEvidenceV1Schema = z
   .strict();
 export type FindingEvidenceV1 = z.infer<typeof FindingEvidenceV1Schema>;
 
-/** Normalized finding shared by local and forge review producers. */
+const ObservedShaSchema = z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/);
+
+/**
+ * Normalized finding shared by local and forge review producers. The
+ * disposition fields are ADR-0008 findings-record v2 additions: OPTIONAL on
+ * the type because a legacy v1 record cannot prove them (unknown is never
+ * fabricated), REQUIRED by the record refinement below on every v2 terminal
+ * disposition. `evidence` is one legacy string in v1 and a string array in
+ * v2; the record refinement enforces which belongs to which version.
+ */
 export const FindingSchema = z
   .object({
     id: z.string().min(1),
@@ -70,7 +81,7 @@ export const FindingSchema = z
     text: z.string(),
     status: z.enum(['open', 'fixed', 'rejected', 'deferred']),
     reason: z.string().optional(),
-    evidence: z.string().optional(),
+    evidence: z.union([z.string(), z.array(z.string())]).optional(),
     /**
      * Optional versioned evidence payload. Legacy records (including every
      * CodeRabbit-shaped finding) lack it and stay valid unchanged; the record
@@ -79,6 +90,18 @@ export const FindingSchema = z
      * add a sibling field without breaking any reader of this one.
      */
     evidenceV1: FindingEvidenceV1Schema.optional(),
+    /** F1 shared identity; absent on legacy records, never guessed. */
+    fingerprint: FindingFingerprintSchema.optional(),
+    /** Who made the terminal adjudication (v2). */
+    owner: z.string().min(1).optional(),
+    /** Re-review trigger; nonempty when the v2 disposition is deferred. */
+    reviewTrigger: z.string().min(1).nullable().optional(),
+    /** Head the adjudicator observed (v2). */
+    observedHead: ObservedShaSchema.optional(),
+    /** UTC ISO-8601 with milliseconds (v2). */
+    observedAt: z.iso.datetime({ precision: 3 }).optional(),
+    /** Explicitly accepted risk, or null when unknown (v2). */
+    acceptedRisk: z.string().nullable().optional(),
   })
   .strict();
 export type Finding = z.infer<typeof FindingSchema>;
@@ -92,9 +115,83 @@ export const ReviewSourceSchema = z
   })
   .strict();
 export type ReviewSource = z.infer<typeof ReviewSourceSchema>;
+
+/**
+ * ADR-0008 findings-record migration: v1 is unchanged; v2 adds the complete
+ * disposition provenance. A legacy v1 record may not carry v2 fields (an old
+ * reader must reject v2 explicitly), and a v2 terminal disposition is
+ * complete or it is not a disposition. Open v2 findings may still lack
+ * adjudication fields: nothing has been adjudicated yet.
+ */
+const V2_DISPOSITION_FIELDS = [
+  'fingerprint',
+  'owner',
+  'reviewTrigger',
+  'observedHead',
+  'observedAt',
+  'acceptedRisk',
+] as const;
+
+function validateFindingVersions(
+  record: { schemaVersion: 1 | 2; findings: Finding[] },
+  ctx: z.RefinementCtx,
+): void {
+  record.findings.forEach((finding, index) => {
+    const at = ['findings', index] as const;
+    if (record.schemaVersion === 1) {
+      if (Array.isArray(finding.evidence))
+        ctx.addIssue({
+          code: 'custom',
+          path: [...at, 'evidence'],
+          message: 'a v1 finding stores evidence as one string; an array requires schemaVersion 2',
+        });
+      for (const field of V2_DISPOSITION_FIELDS)
+        if (finding[field] !== undefined)
+          ctx.addIssue({
+            code: 'custom',
+            path: [...at, field],
+            message: `a v1 finding cannot carry the v2 disposition field '${field}'`,
+          });
+      return;
+    }
+    if (finding.evidence !== undefined && !Array.isArray(finding.evidence))
+      ctx.addIssue({
+        code: 'custom',
+        path: [...at, 'evidence'],
+        message: 'a v2 finding stores evidence as a string array',
+      });
+    if (finding.status === 'open') return;
+    for (const field of V2_DISPOSITION_FIELDS)
+      if (finding[field] === undefined)
+        ctx.addIssue({
+          code: 'custom',
+          path: [...at, field],
+          message: `a v2 terminal disposition requires '${field}' (null when unknown, never omitted)`,
+        });
+    if (finding.evidence === undefined)
+      ctx.addIssue({
+        code: 'custom',
+        path: [...at, 'evidence'],
+        message: 'a v2 terminal disposition requires its evidence array',
+      });
+    if (finding.reason === undefined || finding.reason.trim() === '')
+      ctx.addIssue({
+        code: 'custom',
+        path: [...at, 'reason'],
+        message: 'a v2 terminal disposition requires a nonempty reason',
+      });
+    if (finding.status === 'deferred' && !finding.reviewTrigger)
+      ctx.addIssue({
+        code: 'custom',
+        path: [...at, 'reviewTrigger'],
+        message: 'a deferred disposition requires a nonempty reviewTrigger',
+      });
+  });
+}
+
 export const FindingsRecordSchema = z
   .object({
-    schemaVersion: z.literal(1),
+    schemaVersion: z.union([z.literal(1), z.literal(2)]),
     branch: z.string(),
     head: z.string(),
     /** Immutable comparison and coverage attested by the review producer. Legacy records lack proof. */
@@ -110,8 +207,109 @@ export const FindingsRecordSchema = z
     /** Report context only: never dispatched to a fixer or counted as blocking. */
     advisories: z.array(z.string().min(1)).optional(),
   })
-  .strict();
+  .strict()
+  .superRefine(validateFindingVersions);
 export type FindingsRecord = z.infer<typeof FindingsRecordSchema>;
+
+/**
+ * Legacy carrier projection for review carriers that still store ONE evidence
+ * string (the dev cycle record). A v2 array is JSON-encoded rather than
+ * dropped; an absent value stays absent.
+ */
+export function legacyEvidenceText(finding: Pick<Finding, 'evidence'>): string | undefined {
+  return Array.isArray(finding.evidence) ? JSON.stringify(finding.evidence) : finding.evidence;
+}
+
+/**
+ * ADR-0008 findings-record dual-read adapter (T19): the ONE place a finding's
+ * stored disposition is adapted to its v2 read shape, for every reader.
+ *
+ * - a legacy v1 evidence string becomes a one-element array (never a JSON
+ *   re-encode that a reader would have to parse);
+ * - absent or whitespace-only evidence is null, never [] (unknown is not an
+ *   empty proof);
+ * - missing `fingerprint` and the new provenance fields are null, with an
+ *   availability entry explaining the absence. Nothing is fabricated and no
+ *   legacy identity is guessed.
+ *
+ * Producers write v2 directly; only readers adapt. The availability pointers
+ * are relative to a disposition payload, so a producer that derives its own
+ * values (address builds the fingerprint and observed head itself) keeps its
+ * own producer-specific availability.
+ */
+export interface FindingDispositionView {
+  status: Finding['status'];
+  reason: string | null;
+  evidence: string[] | null;
+  fingerprint: Finding['fingerprint'] | null;
+  owner: string | null;
+  reviewTrigger: string | null;
+  observedHead: string | null;
+  observedAt: string | null;
+  acceptedRisk: string | null;
+  availability: Record<string, AvailabilityRecord>;
+}
+
+export function findingDispositionView(finding: Finding): FindingDispositionView {
+  const retained = finding.evidence;
+  const evidence =
+    retained === undefined || (typeof retained === 'string' && retained.trim() === '')
+      ? null
+      : Array.isArray(retained)
+        ? retained
+        : [retained];
+  const availability: Record<string, AvailabilityRecord> = {};
+  const unknown = (
+    pointer: string,
+    reason: string,
+    state: AvailabilityRecord['state'] = 'unavailable',
+  ) => {
+    availability[pointer] = { state, reason, source: null };
+  };
+  if (evidence === null)
+    unknown(
+      '/evidence',
+      'no evidence was recorded; absence is unknown, never an empty proof',
+      'not-collected',
+    );
+  if (finding.fingerprint === undefined)
+    unknown('/fingerprint', 'no F1 identity recorded; a legacy identity is never guessed');
+  if (finding.owner === undefined)
+    unknown('/owner', 'no owner recorded; the adjudicating authority is unknown');
+  if (finding.observedHead === undefined)
+    unknown('/observedHead', 'no observed head recorded; the disposition is tied to no head');
+  if (finding.observedAt === undefined)
+    unknown('/observedAt', 'no observed-at timestamp recorded; the adjudication time is unknown');
+  if (finding.acceptedRisk === undefined)
+    unknown(
+      '/acceptedRisk',
+      'the adjudicator recorded no accepted risk (null is unknown, never none)',
+      'not-collected',
+    );
+  if (finding.status !== 'deferred')
+    unknown(
+      '/reviewTrigger',
+      'the disposition is not deferred, so no re-review trigger applies',
+      'n-a',
+    );
+  else if (finding.reviewTrigger === undefined || finding.reviewTrigger === null)
+    unknown(
+      '/reviewTrigger',
+      'a deferred disposition recorded no re-review trigger; re-review timing is unknown',
+    );
+  return {
+    status: finding.status,
+    reason: finding.reason ?? null,
+    evidence,
+    fingerprint: finding.fingerprint ?? null,
+    owner: finding.owner ?? null,
+    reviewTrigger: finding.reviewTrigger ?? null,
+    observedHead: finding.observedHead ?? null,
+    observedAt: finding.observedAt ?? null,
+    acceptedRisk: finding.acceptedRisk ?? null,
+    availability,
+  };
+}
 
 function key(finding: Finding): string {
   return finding.file !== undefined && finding.line !== undefined && finding.rule !== undefined
@@ -171,6 +369,13 @@ export function merge(records: readonly FindingsRecord[]): FindingsRecord {
   const findings = new Map<string, Finding>();
   const advisories = new Set<string>();
   for (const record of records) {
+    // This legacy projection only knows the v1 finding shape. Merging a v2
+    // record here would silently drop its disposition provenance; the
+    // versioned merger is T09's.
+    if (record.schemaVersion !== 1)
+      throw new Error(
+        `findings.merge: schemaVersion ${String(record.schemaVersion)} records require the versioned merger`,
+      );
     if (record.branch !== first.branch || record.head !== first.head)
       throw new Error('findings records must describe the same branch and head');
     for (const source of record.sources)

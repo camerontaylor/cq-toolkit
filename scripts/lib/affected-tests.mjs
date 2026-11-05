@@ -17,7 +17,7 @@
 /** [path pattern, test-file patterns]; first matching rows all contribute. */
 export const NON_IMPORT_MAP = [
   // All gate adapters share one owner suite rather than matching the source layout.
-  [/^src\/ops\/gates\/adapters\//, [/^test\/ops\/gates\/adapters\.test\.ts$/]],
+  [/^src\/ops\/gates\/adapters\//, [/^test\/ops\/gates\/adapters(\..+)?\.test\.ts$/]],
   [/^src\/.*\.prompt$/, [/^test\/(driver|kernel|plans|ops)\//]],
   // Fixtures are consumed across areas (sweep, ratchet-baseline, ...) and
   // fixture paths are not part of the related-source query: select every test.
@@ -64,7 +64,8 @@ export const NON_IMPORT_MAP = [
   ],
   [
     /^src\/(cli\.ts$|cli\/|harness\/|kernel\/(journal|lanes|manifest|output|runner)\.ts$|plans\/registry\.ts$|registry\/)/,
-    [/^test\/driver\/claude-code\/cli\.test\.ts$/],
+    // The former single cli.test.ts was split (pure move) into the cli.*.test.ts suites.
+    [/^test\/driver\/claude-code\/cli\./],
   ],
   [/^src\/(driver|harness|sandbox)\//, [/^test\/cli\/driver-alias-notice\.test\.ts$/]],
   [/^scripts\/api-report\.mjs$/, [/^test\/api-report\.[\w-]+\.test\.mjs$/]],
@@ -74,7 +75,7 @@ export const NON_IMPORT_MAP = [
       /^test\/workflows\//,
       /^test\/scripts\//,
       /^test\/ops\/gates\//,
-      /^test\/adversarial\/a14-privileged-workflow\.test\.ts$/,
+      /^test\/adversarial\/a14-privileged-workflow(?:\.[\w-]+)?\.test\.ts$/,
     ],
   ],
   [/^policy\/self-host\//, [/^test\/workflows\//, /^test\/selfhost\//]],
@@ -97,7 +98,7 @@ export const NON_IMPORT_MAP = [
       /^lint\//,
       /^test\/scripts\/(oxlint-boundaries|static-conformance|tooling-commands)\.test\.ts$/,
       /^test\/ops\/gates\/protectedPaths(?:\.[\w-]+)?\.test\.ts$/,
-      /^test\/ops\/sweep\/unit-registry\.test\.ts$/,
+      /^test\/ops\/sweep\/unit-registry\.staging-policy\.test\.ts$/,
     ],
   ],
   // Workflows and composite actions: the suites that read them from disk.
@@ -109,7 +110,7 @@ export const NON_IMPORT_MAP = [
       /^test\/ops\/gates\/policyDiff(\..+)?\.test\.ts$/,
       /^test\/ops\/ratchet\/definitions\.test\.ts$/,
       /^test\/scripts\/(github-settings(\..+)?|adversarial-suite)\.test\.ts$/,
-      /^test\/adversarial\/a14-privileged-workflow\.test\.ts$/,
+      /^test\/adversarial\/a14-privileged-workflow(?:\.[\w-]+)?\.test\.ts$/,
     ],
   ],
   // Dependency and compiler inputs affect every test project.

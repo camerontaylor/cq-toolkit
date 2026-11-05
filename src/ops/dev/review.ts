@@ -46,7 +46,7 @@ import {
   type ReviewCoverageV2,
 } from '../review/internal/reviewCoverageV2.js';
 import { LegacyReviewCoverageSchema } from '../review/internal/reviewPartitions.js';
-import type { Finding } from '../review/findings.js';
+import { legacyEvidenceText, type Finding } from '../review/findings.js';
 import { restoreDurableDisposition } from '../review/internal/durableDisposition.js';
 import { HARDENED_DIFF_FLAGS } from '../../shared/gitHarden.js';
 import {
@@ -653,15 +653,18 @@ function makeReviewCycle(
           return {
             completion,
             logPath,
-            findings: findings.map((finding) => ({
-              severity: finding.severity,
-              ...(finding.file !== undefined ? { fileName: finding.file } : {}),
-              ...(finding.line !== undefined ? { line: finding.line } : {}),
-              ...(finding.rule !== undefined ? { rule: finding.rule } : {}),
-              ...(finding.evidence !== undefined ? { evidence: finding.evidence } : {}),
-              ...(finding.evidenceV1 !== undefined ? { evidenceV1: finding.evidenceV1 } : {}),
-              excerpt: finding.text,
-            })),
+            findings: findings.map((finding) => {
+              const evidence = legacyEvidenceText(finding);
+              return {
+                severity: finding.severity,
+                ...(finding.file !== undefined ? { fileName: finding.file } : {}),
+                ...(finding.line !== undefined ? { line: finding.line } : {}),
+                ...(finding.rule !== undefined ? { rule: finding.rule } : {}),
+                ...(evidence === undefined ? {} : { evidence }),
+                ...(finding.evidenceV1 !== undefined ? { evidenceV1: finding.evidenceV1 } : {}),
+                excerpt: finding.text,
+              };
+            }),
             advisories,
             ...(completion.kind === 'terminal' &&
             coverage.ok &&

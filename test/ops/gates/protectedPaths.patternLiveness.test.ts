@@ -32,7 +32,7 @@ const PATTERN_REPRESENTATIVES: Readonly<Record<string, readonly string[]>> = {
   '(?:^|\\/)(?:test_[^/]*|[^/]*_test)\\.py$': [
     'test_widget.py',
     'widget_test.py',
-    'apps/crq-python/test_crq.py',
+    'apps/crq-python/test_crq_slot.py',
     'pkg/widget_test.py',
   ],
   '\\.config\\.[^/]+$': ['vitest.config.ts', 'packages/a/vite.config.js'],
