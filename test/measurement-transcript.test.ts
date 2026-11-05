@@ -222,6 +222,12 @@ const fp = (key: string): FindingFingerprint => {
   return found;
 };
 
+const shaOf = (key: string): string => {
+  const found = fixture.shas[key];
+  if (found === undefined) throw new Error(`fixture sha '${key}' is missing`);
+  return found;
+};
+
 function dispositionRows(): DispositionPayload[] {
   return (
     fixture.reviewRun.dispositions as unknown as Array<
@@ -330,8 +336,8 @@ describe('M11-fixture nominal evidence', () => {
     // verifiedClosuresOf, the failed task's commit never becomes a closure, so
     // it can never reach the panel's verified list.
     const messages = new Map([
-      [fixture.shas.c1, 'fix unit A\n\nCq-Task: task-t1'],
-      [fixture.shas.f1, 'failed attempt evidence\n\nCq-Task: task-f1'],
+      [shaOf('c1'), 'fix unit A\n\nCq-Task: task-t1'],
+      [shaOf('f1'), 'failed attempt evidence\n\nCq-Task: task-f1'],
     ]);
     const produced = verifiedClosuresOf(
       [
@@ -340,7 +346,7 @@ describe('M11-fixture nominal evidence', () => {
           attempts: [],
           outcome: 'fixed',
           branch: 'fixture/f',
-          commits: [fixture.shas.c1],
+          commits: [shaOf('c1')],
           validation: { verdict: 'pass', gates: [] },
         },
         {
@@ -348,12 +354,12 @@ describe('M11-fixture nominal evidence', () => {
           attempts: [],
           outcome: 'unfixed',
           branch: 'fixture/f',
-          commits: [fixture.shas.f1],
+          commits: [shaOf('f1')],
         },
       ],
       (sha) => messages.get(sha),
     );
-    expect(produced.closures.map((row) => row.commitSha)).toEqual([fixture.shas.c1]);
+    expect(produced.closures.map((row) => row.commitSha)).toEqual([shaOf('c1')]);
     expect(produced.unknownTrailerShas).toEqual([]);
     // baselineFailures known=5 (A=3, B=2) beside unknownUnits=1 (C cancelled
     // before its probe): the denominator is unknown, never 5 and never 0.
