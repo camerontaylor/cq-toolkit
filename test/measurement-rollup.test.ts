@@ -11,19 +11,28 @@
 //     artifacts with a stable key order, and artifact references render
 //     sorted and deduplicated;
 //   - per-run numerator/denominator with unknown counts — one row per run,
-//     and null figures render as unknown, never zero;
+//     and null figures render as unknown, never zero; a non-known numeric
+//     total (zero attempts under unavailable) renders unknown and partial
+//     keeps a labelled subtotal, and an unobserved channel set is stated,
+//     never blank;
 //   - no cross-run success ratio, no causal score — no aggregate ratio key
 //     exists anywhere and the only ratio mention is the disclaimer;
 //   - artifact references and all four panels readable — fix, cost, harm and
-//     missed (plus population) render with their figures in both formats;
+//     missed (plus population) render with their figures in both formats, the
+//     JSON embeds the panels verbatim, channel pointers are looked up escaped,
+//     merged unknown buckets dedupe and untrusted text renders inert;
 //   - no live calls or engine writes — pure rendering only: the module's
 //     imports are exactly the local-file set, no clock is read, no files are
-//     written, and malformed inputs are refused rather than rendered.
+//     written, the CLI entry is exercised as a real subprocess writing
+//     exactly the two reports, and malformed inputs are refused rather than
+//     rendered.
 // Local fixtures only: in-memory rows in the merged shapes, no providers, no
 // network, no bundle reads.
-import { mkdtemp, readdir, readFile } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { mkdtemp, readdir, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
+import { promisify } from 'node:util';
 import { describe, expect, test } from 'vitest';
 import { computeMeasurementPanels } from '../scripts/measurement-metrics.mjs';
 import type { MeasurementPanelRun } from '../scripts/measurement-metrics.mjs';
@@ -291,13 +300,15 @@ function input(options: ComposeOptions = {}): MeasurementReadoutInput {
     artifacts: options.artifacts ?? ['bundles/run-a', 'bundles/run-b'],
     measurement: computeMeasurementPanels({
       runs: options.runs ?? nominalRuns(),
-      unknown: [],
+      unknown: reader.unknown,
       evidenceAvailability: reader.totals.availability,
     }),
     outcome: options.outcome ? options.outcome() : computeOutcomePanels(nominalOutcomeArgs()),
     reader,
   };
 }
+
+const runCli = promisify(execFile);
 
 /** Malformed overrides over an otherwise valid input: runtime shape guards. */
 function malformed(overrides: Record<string, unknown>) {
@@ -378,6 +389,26 @@ describe('M10d nominal evidence', () => {
     expect(rendered.markdown).toContain(
       '- modeled USD: unknown (unavailable: no modeled USD value was observed',
     );
+    // A channel name carrying the pointer metacharacters is looked up through
+    // its escaped pointer: exactly that channel degrades to a labelled
+    // subtotal, the sibling channel stays known, and an unescaped lookup
+    // would render it as unstated.
+    const torn = compose({
+      runs: [
+        makeRun({
+          attempts: [
+            leaf('inv-1', {
+              usageChannels: { input: 100, 'cache~read/x': 5 },
+              availability: { '/usageChannels/cache~0read~1x': avail('partial', 'settled late') },
+            }),
+          ],
+        }),
+      ],
+    });
+    expect(torn.markdown).toContain(
+      '- usage channel cache~read/x: 5 subtotal (partial: observed 1 of 1 usage channel cache~read/x values; measurement inputs were rejected, incomplete or unavailable)',
+    );
+    expect(torn.markdown).toContain('- usage channel input: 100 (known)');
   });
 
   test('no cross-run success ratio, no causal score', () => {
@@ -401,6 +432,17 @@ describe('M10d nominal evidence', () => {
     expect(rendered.report.artifacts).toEqual(['bundles/run-a', 'bundles/run-b']);
     for (const key of ['fix', 'cost', 'harm', 'missed', 'population'])
       expect(rendered.report.panels).toHaveProperty(key);
+    // The JSON embeds the composed panels verbatim — the "recomputes
+    // nothing" contract, by reference and byte-for-byte.
+    const composed = input();
+    const verbatim = renderMeasurementReport(composed);
+    expect(verbatim.report.panels).toEqual({
+      fix: composed.measurement.fix,
+      cost: composed.measurement.cost,
+      harm: composed.outcome.harm,
+      missed: composed.outcome.missed,
+      population: composed.outcome.population,
+    });
     expect(rendered.markdown).toContain('## Evidence artifacts');
     expect(rendered.markdown).toContain('- bundles/run-a');
     expect(rendered.markdown).toContain('- bundles/run-b');
@@ -496,6 +538,11 @@ describe('M10d missing evidence', () => {
       '- CI red coverage: not examined — counts are unknown, never zero',
     );
     expect(rendered.markdown).toContain('- tokens: unknown (n-a: no token evidence was observed)');
+    // An unobserved usage-channel set is stated through its umbrella
+    // availability entry, never silently blank.
+    expect(rendered.markdown).toContain(
+      '- usage channels: unknown (n-a: no usage channel evidence was observed)',
+    );
   });
 
   test('no cross-run success ratio, no causal score', () => {
@@ -549,13 +596,27 @@ describe('M10d failure evidence', () => {
       over({ start: '2026-11-01T00:00:00.000Z', end: '2026-10-02T00:00:00.000Z' }),
     ).toThrow(TypeError);
     expect(() => over({ start: WINDOW.start, end: WINDOW.start })).toThrow(TypeError);
-    // The stated window is exactly 30 days: a 29-day window is refused.
+    // The stated window is exactly 30 days: a 29-day window is refused, and
+    // so is one millisecond more — while exactly 30 days at another instant
+    // is accepted.
     expect(() =>
       renderMeasurementReport({
         ...input(),
         window: { start: WINDOW.start, end: '2026-10-31T00:00:00.000Z' },
       }),
     ).toThrow(/window must span exactly 30 days/);
+    expect(() =>
+      renderMeasurementReport({
+        ...input(),
+        window: { start: WINDOW.start, end: '2026-11-01T00:00:00.001Z' },
+      }),
+    ).toThrow(/window must span exactly 30 days/);
+    expect(() =>
+      renderMeasurementReport({
+        ...input(),
+        window: { start: '2026-10-03T00:00:00.000Z', end: '2026-11-02T00:00:00.000Z' },
+      }),
+    ).not.toThrow();
   });
 
   test('deterministic JSON+Markdown', () => {
@@ -614,6 +675,44 @@ describe('M10d failure evidence', () => {
       kind: 'corrupt',
       reason: 'examined head is not a sha',
     });
+    // A non-known numeric total never renders its stored number: zero
+    // attempts under unavailable render unknown, and a partial total keeps
+    // an explicitly labelled subtotal.
+    const degraded = compose({
+      reader: {
+        totals: {
+          attempts: 0,
+          tokens: 20,
+          wallMs: 1000,
+          modeledUsd: null,
+          availability: {
+            '/attempts': avail('unavailable', 'no attempt was observed'),
+            '/tokens': avail('partial', 'observed 2 of 3 token values'),
+            '/wallMs': avail('known', 'observed 2 of 2 wall values'),
+            '/modeledUsd': avail('not-collected', 'no modeled USD value was observed'),
+          },
+        },
+        unknown: [],
+      },
+    });
+    expect(degraded.markdown).toContain(
+      '- attempts: unknown (unavailable: no attempt was observed)',
+    );
+    expect(degraded.markdown).toContain(
+      '- tokens: 20 subtotal (partial: observed 2 of 3 token values)',
+    );
+    // Cost totals keep the same rule: a partially observed attempt wall is a
+    // labelled subtotal, never a plain known-looking number.
+    const partialWall = compose({
+      runs: [
+        makeRun({
+          attempts: [leaf('inv-1', { wallMs: 1_000 }), leaf('inv-2', { wallMs: null })],
+        }),
+      ],
+    });
+    expect(partialWall.markdown).toContain(
+      '- attempt wall (ms): 1000 subtotal (partial: observed 1 of 2 wall values)',
+    );
   });
 
   test('no cross-run success ratio, no causal score', () => {
@@ -680,6 +779,99 @@ describe('M10d failure evidence', () => {
     expect(() => malformed({ outcome: { ...input().outcome, unknown: [badUnknownRow] } })).toThrow(
       TypeError,
     );
+    // Nested corrupt figures are refused, never rendered: string counts, a
+    // non-sha examined-head list and non-sha verified commits.
+    const panels = input();
+    expect(() =>
+      malformed({
+        outcome: {
+          ...panels.outcome,
+          harm: {
+            ...panels.outcome.harm,
+            ciRed: { ...panels.outcome.harm.ciRed, flake: '3' },
+          },
+        },
+      }),
+    ).toThrow(TypeError);
+    expect(() =>
+      malformed({
+        outcome: {
+          ...panels.outcome,
+          harm: {
+            ...panels.outcome.harm,
+            refix: { candidates: 'x', explained: 0, unknown: 0 },
+          },
+        },
+      }),
+    ).toThrow(TypeError);
+    expect(() =>
+      malformed({
+        outcome: {
+          ...panels.outcome,
+          harm: {
+            ...panels.outcome.harm,
+            ciRed: { ...panels.outcome.harm.ciRed, observedHeads: 'abc' },
+          },
+        },
+      }),
+    ).toThrow(TypeError);
+    expect(() =>
+      malformed({
+        measurement: {
+          ...panels.measurement,
+          fix: {
+            runs: [
+              {
+                repo: REPO,
+                runId: RUN,
+                fixesPerRun: { numerator: 1, denominator: 2 },
+                verifiedCommits: ['not-a-sha'],
+              },
+            ],
+          },
+        },
+      }),
+    ).toThrow(TypeError);
+    expect(() =>
+      malformed({
+        reader: { totals: { ...knownReader().totals, attempts: 'three' }, unknown: [] },
+      }),
+    ).toThrow(TypeError);
+    // An identical unknown row in both buckets renders once, like duplicate
+    // artifact references.
+    const echoed = renderMeasurementReport(
+      input({
+        outcome: emptyOutcomePanels,
+        reader: {
+          ...emptyReader(),
+          unknown: [{ source: 'ciRed', kind: 'unavailable', reason: 'no CI coverage declared' }],
+        },
+      }),
+    );
+    expect(echoed.report.unknown).toEqual([
+      { source: 'ciRed', kind: 'unavailable', reason: 'no CI coverage declared' },
+    ]);
+    expect(echoed.markdown.match(/- ciRed — unavailable: no CI coverage declared/g)).toHaveLength(
+      1,
+    );
+    // Untrusted text renders inert: pipes escape in cells and bullets, and a
+    // line break in an unknown reason collapses instead of injecting a line.
+    const escaped = compose({
+      artifacts: ['bundles/run|a', 'bundles/run-b'],
+      runs: [makeRun({ runId: 'run|1' })],
+    });
+    expect(escaped.markdown).toContain('- bundles/run\\|a');
+    expect(escaped.markdown).toContain(`| ${REPO} | run\\|1 |`);
+    const multiline = renderMeasurementReport(
+      input({
+        reader: {
+          ...knownReader(),
+          unknown: [{ source: 'bundle:x.json', kind: 'corrupt', reason: 'line one\nline two' }],
+        },
+      }),
+    );
+    expect(multiline.markdown).toContain('- bundle:x.json — corrupt: line one line two');
+    expect(multiline.markdown).not.toContain('line one\nline two');
     // Minimal but valid panels still render.
     expect(() =>
       renderMeasurementReport({
@@ -702,6 +894,55 @@ describe('M10d failure evidence', () => {
     const dir = await mkdtemp(join(tmpdir(), 'm10d-rollup-'));
     expect(compose().report).toBeDefined();
     expect(await readdir(dir)).toEqual([]);
+    // The CLI entry is the documented path to the readout: a real subprocess
+    // writes exactly the two reports over explicit local paths and exits 0,
+    // and a missing input exits 1 with an error object, writing nothing.
+    const cliDir = await mkdtemp(join(tmpdir(), 'm10d-cli-'));
+    const inputPath = join(cliDir, 'readout-input.json');
+    await writeFile(inputPath, JSON.stringify(input()));
+    const out = join(cliDir, 'out');
+    const done = await runCli(process.execPath, [
+      resolve('scripts', 'measurement-rollup.mjs'),
+      '--input',
+      inputPath,
+      '--out',
+      out,
+    ]);
+    expect((await readdir(out)).sort()).toEqual([
+      'measurement-readout.json',
+      'measurement-readout.md',
+    ]);
+    const written = JSON.parse(await readFile(join(out, 'measurement-readout.json'), 'utf8')) as {
+      window: { days: number };
+    };
+    expect(written.window.days).toBe(30);
+    expect(await readFile(join(out, 'measurement-readout.md'), 'utf8')).toContain(
+      '# cq-toolkit monthly measurement readout',
+    );
+    expect(done.stdout.trim()).toBe(
+      JSON.stringify({
+        json: join(out, 'measurement-readout.json'),
+        markdown: join(out, 'measurement-readout.md'),
+      }),
+    );
+    let failure: { code?: number; stderr?: string } = {};
+    try {
+      await runCli(process.execPath, [
+        resolve('scripts', 'measurement-rollup.mjs'),
+        '--input',
+        join(cliDir, 'absent.json'),
+        '--out',
+        join(cliDir, 'bad'),
+      ]);
+    } catch (error) {
+      failure = error as { code?: number; stderr?: string };
+    }
+    expect(failure.code).toBe(1);
+    const failureReport = JSON.parse(failure.stderr ?? '{}') as { error: string };
+    expect(failureReport.error).toContain('ENOENT');
+    // Only the input file and the out directory exist: nothing else was
+    // written, and the failed run created nothing.
+    expect((await readdir(cliDir)).sort()).toEqual(['out', 'readout-input.json']);
     const source = await readFile('scripts/measurement-rollup.mjs', 'utf8');
     // File writes exist only in the CLI entry block, after the pure renderer.
     expect(source.indexOf('export function renderMeasurementReport')).toBeLessThan(

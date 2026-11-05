@@ -6,7 +6,10 @@
 // derived, unknown renders as unknown (never zero, never a count), every
 // panel section states the window, and identical inputs render byte-identical
 // JSON and Markdown. Corrupt panel shapes are refused at render time, never
-// rendered as fabricated figures. The CLI reads one explicit local input
+// rendered as fabricated figures; untrusted text renders inert (line breaks
+// collapse, pipes escape); identical unknown rows across the two buckets
+// collapse. The window is a caller-declared label: the renderer does not
+// verify the panels fall inside it. The CLI reads one explicit local input
 // artifact and writes the two reports beside it; no provider is called and no
 // engine state is written.
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
@@ -18,6 +21,7 @@ const DAY_MS = 86_400_000;
 // all agree — Feb 30 or hour 24 rolls over and fails the round-trip, and an
 // offset form would be read outside UTC, so only the strict Z form is a stamp.
 const INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+const SHA = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
 const KNOWN = new Set(['known', 'known-zero']);
 const instantMs = (stamp) => {
   if (typeof stamp !== 'string' || !INSTANT.test(stamp)) return null;
@@ -48,6 +52,8 @@ const unknownRows = (rows) =>
       typeof row.kind === 'string' &&
       typeof row.reason === 'string',
   );
+const shaList = (value) =>
+  Array.isArray(value) && value.every((item) => typeof item === 'string' && SHA.test(item));
 
 /** Render the monthly readout from already-computed panels; deterministic, pure. */
 export function renderMeasurementReport({
@@ -75,6 +81,10 @@ export function renderMeasurementReport({
   const { harm, missed, population } = outcome ?? {};
   need(Array.isArray(fix?.runs), 'measurement must be computeMeasurementPanels output (fix.runs)');
   need(
+    fix.runs.every((run) => shaList(run.verifiedCommits)),
+    'fix.runs rows must carry arrays of sha verified commits',
+  );
+  need(
     cost !== null &&
       typeof cost === 'object' &&
       cost.usageChannels !== null &&
@@ -84,7 +94,9 @@ export function renderMeasurementReport({
     'measurement must be computeMeasurementPanels output (cost panel)',
   );
   need(
-    [harm, missed, population].every((panel) => panel !== null && typeof panel === 'object'),
+    [harm, missed, population].every((panel) => panel !== null && typeof panel === 'object') &&
+      (harm.ciRed?.observedHeads === null || shaList(harm.ciRed.observedHeads)) &&
+      (harm.ciRed?.unobservedHeads === null || shaList(harm.ciRed.unobservedHeads)),
     'outcome must be computeOutcomePanels output',
   );
   need(unknownRows(outcome?.unknown), 'outcome.unknown must be unknown-evidence rows');
@@ -95,24 +107,46 @@ export function renderMeasurementReport({
     'reader.totals must be the readMeasurementInputs totals',
   );
   need(unknownRows(reader.unknown), 'reader.unknown must be unknown-evidence rows');
-  // figure() is the render-time shape guard: null is the honest unknown, a
-  // number or string renders, and anything else (undefined on a corrupt panel
-  // row) is refused rather than rendered as a fabricated figure.
+  // count() and figure() are the render-time shape guards: null is the honest
+  // unknown, counts accept only numbers, identifiers also accept strings, and
+  // anything else (undefined or corrupt on a panel row) is refused rather
+  // than rendered as a fabricated figure.
+  const count = (value) => {
+    if (value === null) return 'unknown';
+    if (typeof value !== 'number' || !Number.isFinite(value))
+      throw new TypeError('renderMeasurementReport: counts and totals must be numbers or null');
+    return String(value);
+  };
   const figure = (value) => {
     if (value === null) return 'unknown';
     if (typeof value !== 'number' && typeof value !== 'string')
-      throw new TypeError(
-        'renderMeasurementReport: panel figures must be numbers, strings or null',
-      );
+      throw new TypeError('renderMeasurementReport: identifiers must be numbers, strings or null');
     return String(value);
   };
-  const stated = (value, entry) =>
-    entry == null
-      ? `${figure(value)} (availability unstated)`
-      : `${figure(value)} (${KNOWN.has(entry.state) ? entry.state : `${entry.state}: ${entry.reason}`})`;
+  /** Untrusted text renders inert in Markdown: line breaks collapse, pipes escape. */
+  const md = (text) =>
+    String(text).replaceAll('\r', ' ').replaceAll('\n', ' ').replaceAll('|', '\\|');
+  // A non-known total never renders its stored number: unavailable,
+  // not-collected and n-a render unknown; partial keeps an explicitly
+  // labelled subtotal.
+  const stated = (value, entry) => {
+    if (entry == null) return `${count(value)} (availability unstated)`;
+    if (entry.state === 'partial') return `${count(value)} subtotal (partial: ${md(entry.reason)})`;
+    if (!KNOWN.has(entry.state)) return `unknown (${md(entry.state)}: ${md(entry.reason)})`;
+    return `${count(value)} (${entry.state})`;
+  };
   const span = `[${window.start}, ${window.end})`;
   const refs = [...new Set(artifacts)].sort();
-  const unknown = [...reader.unknown, ...outcome.unknown];
+  // Identical rows in both buckets are one unknown entry (reader first), like
+  // duplicate artifact references.
+  const unknown = [];
+  const seenUnknown = new Set();
+  for (const row of [...reader.unknown, ...outcome.unknown]) {
+    const key = `${row.source}\u0000${row.kind}\u0000${row.reason}`;
+    if (seenUnknown.has(key)) continue;
+    seenUnknown.add(key);
+    unknown.push(row);
+  }
   const escape = (name) => name.replaceAll('~', '~0').replaceAll('/', '~1');
   const lines = [
     '# cq-toolkit monthly measurement readout',
@@ -123,13 +157,13 @@ export function renderMeasurementReport({
     '',
     '## Evidence artifacts',
     '',
-    ...(refs.length === 0 ? ['- (none)'] : refs.map((ref) => `- ${ref}`)),
+    ...(refs.length === 0 ? ['- (none)'] : refs.map((ref) => `- ${md(ref)}`)),
     '',
     '## Unknown evidence',
     '',
     ...(unknown.length === 0
       ? ['- (none)']
-      : unknown.map((row) => `- ${row.source} — ${row.kind}: ${row.reason}`)),
+      : unknown.map((row) => `- ${md(row.source)} — ${md(row.kind)}: ${md(row.reason)}`)),
     '',
     `## Fix panel — window ${span}`,
     '',
@@ -137,35 +171,39 @@ export function renderMeasurementReport({
     '| --- | --- | --- | --- | --- |',
     ...fix.runs.map(
       (run) =>
-        `| ${run.repo === null ? '-' : figure(run.repo)} | ${figure(run.runId)} | ${figure(run.fixesPerRun.numerator)} | ${figure(run.fixesPerRun.denominator)} | ${run.verifiedCommits.join(', ') || '-'} |`,
+        `| ${run.repo === null ? '-' : md(figure(run.repo))} | ${md(figure(run.runId))} | ${count(run.fixesPerRun.numerator)} | ${count(run.fixesPerRun.denominator)} | ${md(run.verifiedCommits.join(', ')) || '-'} |`,
     ),
     '',
     `## Cost panel — window ${span}`,
     '',
-    ...Object.entries(cost.usageChannels).map(
-      ([name, value]) =>
-        `- usage channel ${name}: ${stated(value, cost.availability[`/usageChannels/${escape(name)}`])}`,
-    ),
+    // An empty channel set is stated, never silently blank: the umbrella
+    // availability entry says why no channel was observed.
+    ...(Object.keys(cost.usageChannels).length === 0
+      ? [`- usage channels: ${stated(null, cost.availability['/usageChannels'])}`]
+      : Object.entries(cost.usageChannels).map(
+          ([name, value]) =>
+            `- usage channel ${md(name)}: ${stated(value, cost.availability[`/usageChannels/${escape(name)}`])}`,
+        )),
     `- attempt wall (ms): ${stated(cost.attemptWallMs, cost.availability['/attemptWallMs'])}`,
     `- run elapsed (ms): ${stated(cost.runElapsedMs, cost.availability['/runElapsedMs'])}`,
     `- modeled USD: ${stated(cost.modeledUsd, cost.availability['/modeledUsd'])}`,
-    `- price table: ${figure(cost.priceTableRevision)}; coverage: ${figure(cost.priceCoverage)}`,
+    `- price table: ${md(figure(cost.priceTableRevision))}; coverage: ${md(figure(cost.priceCoverage))}`,
     '',
     `## Harm panel — window ${span}`,
     '',
-    `- re-fixes: ${figure(harm.refix.candidates)} candidates, ${figure(harm.refix.explained)} explained, ${figure(harm.refix.unknown)} unknown`,
-    `- CI red: flake ${figure(harm.ciRed.flake)}, regression ${figure(harm.ciRed.regression)}, infrastructure ${figure(harm.ciRed.infrastructure)}, unknown ${figure(harm.ciRed.unknown)}`,
+    `- re-fixes: ${count(harm.refix.candidates)} candidates, ${count(harm.refix.explained)} explained, ${count(harm.refix.unknown)} unknown`,
+    `- CI red: flake ${count(harm.ciRed.flake)}, regression ${count(harm.ciRed.regression)}, infrastructure ${count(harm.ciRed.infrastructure)}, unknown ${count(harm.ciRed.unknown)}`,
     harm.ciRed.observedHeads === null
       ? '- CI red coverage: not examined — counts are unknown, never zero'
       : `- CI red coverage: ${harm.ciRed.observedHeads.length} heads examined${harm.ciRed.unobservedHeads === null || harm.ciRed.unobservedHeads.length === 0 ? '' : `; ${harm.ciRed.unobservedHeads.length} eligible heads unexamined (${harm.ciRed.unobservedHeads.join(', ')})`}`,
     '',
     `## Missed panel — window ${span}`,
     '',
-    `- restored crq findings: ${figure(missed.restored.missed)} missed, ${figure(missed.restored.notMissed)} not missed, ${figure(missed.restored.unknown)} unknown`,
+    `- restored crq findings: ${count(missed.restored.missed)} missed, ${count(missed.restored.notMissed)} not missed, ${count(missed.restored.unknown)} unknown`,
     '',
     `## Population panel — window ${span}`,
     '',
-    `- eligible: ${figure(population.eligible)}; mature: ${figure(population.mature)}; right-censored: ${figure(population.rightCensored)}; follow-up window: ${figure(population.followUpDays)} days`,
+    `- eligible: ${count(population.eligible)}; mature: ${count(population.mature)}; right-censored: ${count(population.rightCensored)}; follow-up window: ${count(population.followUpDays)} days`,
     '',
     '## Reader totals',
     '',
