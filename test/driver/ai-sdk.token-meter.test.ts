@@ -124,7 +124,9 @@ async function runLoop(
       .join('')
       .split('\n')
       .filter((l) => l !== '')
-      .map((l) => JSON.parse(l) as { type: string; cause?: string; detail?: string });
+      .map(
+        (l) => JSON.parse(l) as { type: string; cause?: string; detail?: string; step?: number },
+      );
     return { result, calls: calls(), stops: lines.filter((l) => l.type === 'budget-stop') };
   } finally {
     await rm(scratch, { recursive: true, force: true });
@@ -142,6 +144,9 @@ describe('ai-sdk driver token meter', () => {
     expect(calls).toBe(2);
     expect(stops.map((s) => s.cause)).toEqual(['context']);
     expect(stops[0]?.detail).toContain('205000 input tokens');
+    // The line's step and the detail's step number are the same count.
+    expect(stops[0]?.step).toBe(2);
+    expect(stops[0]?.detail).toContain('step 2 ');
   });
 
   test('output cap ignores large cached context and stops on output alone', async () => {

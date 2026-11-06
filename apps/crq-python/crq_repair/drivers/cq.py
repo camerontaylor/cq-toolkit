@@ -65,19 +65,31 @@ def budget(config, role):
             'wallClockMs': base['wall_clock_min'] * 60000}
 
 
-def budget_stop(sessions_dir):
-    """The driver's `budget-stop` session line, as one sentence, or None."""
-    try:
-        for path in sorted(Path(sessions_dir).glob('*.jsonl')):
-            for line in path.read_text(errors='replace').splitlines():
-                try:
-                    entry = json.loads(line)
-                except ValueError:
-                    continue
-                if isinstance(entry, dict) and entry.get('type') == 'budget-stop':
-                    return str(entry.get('detail') or entry.get('cause'))[:300]
-    except OSError:
-        return None
+def session_files(sessions_dir):
+    """Session file names in the job-local store (empty if none yet)."""
+    directory = Path(sessions_dir)
+    return {f.name for f in directory.glob('*.jsonl')} if directory.is_dir() else set()
+
+
+def budget_stop(sessions_dir, names):
+    """The `budget-stop` detail from THIS invocation's session files, or None.
+
+    `names` are the files the invocation created (the store listing after the
+    run minus the listing before it): a deferred rung that re-runs in the same
+    attempt directory must not report an earlier run's stop. Unparseable or
+    torn lines are skipped."""
+    for name in sorted(names):
+        try:
+            text = (Path(sessions_dir) / name).read_text(errors='replace')
+        except OSError:
+            continue
+        for line in text.splitlines():
+            try:
+                entry = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(entry, dict) and entry.get('type') == 'budget-stop':
+                return str(entry.get('detail') or entry.get('cause'))[:300]
     return None
 
 
@@ -112,7 +124,9 @@ def invoke(config, role, job, wt, directory):
             env[key] = os.environ[key]
     argv = ['node', config['repair']['cq_bin'], 'review.fixItem', '--json']
     argv += ['--' + k + '=' + json.dumps(v) for k, v in payload.items()]
+    before = session_files(sessions_dir)
     p = command(argv, cwd=wt, env=env, timeout=config['repair']['budget']['wall_clock_min'] * 60)
+    created = session_files(sessions_dir) - before
     with Path(directory, 'driver.log').open('a') as log:
         log.write('\n# invocation ' + time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()) + '\n'
                   + p.stdout + '\n' + p.stderr)
@@ -152,7 +166,7 @@ def invoke(config, role, job, wt, directory):
         summary = str(data.get('reason') or error or data.get('status'))
         if stop == 'budget':
             # The op result carries no detail; the driver records why in the session.
-            summary = 'budget-exhausted: ' + (budget_stop(sessions_dir)
+            summary = 'budget-exhausted: ' + (budget_stop(sessions_dir, created)
                                               or 'token or wall-clock cap (no budget-stop line)')
         return {'stop': stop, 'changed': False, 'summary': summary, 'commits': [],
                 'retry_after_ms': signals.get('retryAfterMs')}
