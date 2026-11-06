@@ -422,6 +422,9 @@ export const ReviewRunInputSchema: z.ZodType<ReviewRunInput> = z
     prepareEvidence: z.boolean().exactOptional(),
     target: z.string().min(1).exactOptional(),
     base: ReviewBaseRevision.exactOptional(),
+    // Previous-round findings for an internal address round (see
+    // ReviewRunInput); the strict mirror must accept the declared field.
+    priorFindings: z.array(FindingSchema).exactOptional(),
   })
   .strict();
 
@@ -458,17 +461,9 @@ const FixableReviewItemSchema: z.ZodType<FixableReviewItem> = z
     path: z.string().min(1).nullable(),
     line: z.number().int().nullable(),
     body: z.string(),
-    comments: z
-      .array(
-        z
-          .object({
-            authorLogin: z.string().nullable(),
-            body: z.string(),
-            createdAt: z.string().min(1).nullable(),
-          })
-          .strict(),
-      )
-      .max(100),
+    // Reuse the shared mirror: the inline object omitted `authorType`, so an
+    // item whose prior comment carried it failed the JSON boundary.
+    comments: z.array(ThreadCommentSchema).max(100),
   })
   .strict();
 
@@ -569,7 +564,11 @@ export const ReviewAddressManyInputSchema = z
     concurrency: z.number().int().positive().exactOptional(),
     cloneRoot: z.string().min(1).exactOptional(),
     enrollments: z
-      .array(z.object({ number: z.number().int().positive(), request: QueueEnqueueInputSchema }))
+      .array(
+        z
+          .object({ number: z.number().int().positive(), request: QueueEnqueueInputSchema })
+          .strict(),
+      )
       .exactOptional(),
     owner: z.string().min(1),
     maxTokens: z.number().int().positive(),
@@ -596,8 +595,14 @@ export const registry: OpRegistryEntry[] = [
   {
     name: 'review.addressMany',
     inputSchema: ReviewAddressManyInputSchema,
-    importer: async () =>
-      (await import('./addressMany.js')).makeReviewAddressMany() as Op<unknown, unknown>,
+    importer: async (wiring) =>
+      (await import('./addressMany.js')).makeReviewAddressMany({
+        drivers: createDriverFactory(
+          wiring?.onDeprecatedAlias !== undefined
+            ? { onDeprecatedAlias: wiring.onDeprecatedAlias }
+            : {},
+        ),
+      }) as Op<unknown, unknown>,
   },
   // ./queue.js owns queue-v1; ./internal/queueEvidence.js is isolated from findings v1.
   {

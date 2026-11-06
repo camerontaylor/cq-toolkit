@@ -35,6 +35,8 @@
 //   e. PER-ACTION FAILURE ISOLATION: one nonzero gh response does not stop
 //      the run; the failure lands in `failed` with the GhError-shaped
 //      message and is NOT recorded — failed actions retry on the next run.
+//      A malformed response (non-JSON output, a non-object JSON payload, or
+//      a non-array `errors` value) is the same isolated, unrecorded failure.
 //      THE IDEMPOTENT EXCEPTION: a resolve whose GraphQL errors say the
 //      thread is "already resolved" is a SUCCESS-EQUIVALENT replay (the
 //      previous run's mutation landed but its record did not — the crash
@@ -490,9 +492,9 @@ export async function replyAndResolve(
       }
       // A 200 can still carry the mutation's failure: a non-empty GraphQL
       // errors array means the thread is NOT resolved — a safe retry.
-      let payload: GraphqlPayload;
+      let parsedPayload: unknown;
       try {
-        payload = JSON.parse(result.stdout) as GraphqlPayload;
+        parsedPayload = JSON.parse(result.stdout) as unknown;
       } catch {
         failed.push({
           action,
@@ -500,7 +502,36 @@ export async function replyAndResolve(
         });
         return;
       }
-      if (payload.errors !== null && payload.errors !== undefined && payload.errors.length > 0) {
+      // A valid JSON value that is not an object (notably `null`) cannot carry
+      // the mutation's effect, and reading `.errors` off it would throw past
+      // this action and abort the rest of the batch. Like the non-JSON branch
+      // above, fail ONLY this action and leave it unrecorded for retry.
+      if (
+        parsedPayload === null ||
+        typeof parsedPayload !== 'object' ||
+        Array.isArray(parsedPayload)
+      ) {
+        failed.push({
+          action,
+          error: `gh api graphql printed a non-object JSON payload (exit ${result.code}) — mutation outcome unknown, left unrecorded for retry`,
+        });
+        return;
+      }
+      const payload = parsedPayload as GraphqlPayload;
+      // Fail closed on a malformed `errors` value: it must never fall through
+      // to the success check below.
+      if (
+        payload.errors !== null &&
+        payload.errors !== undefined &&
+        !Array.isArray(payload.errors)
+      ) {
+        failed.push({
+          action,
+          error: `gh api graphql returned a non-array errors value (exit ${result.code}) — mutation outcome unknown, left unrecorded for retry`,
+        });
+        return;
+      }
+      if (Array.isArray(payload.errors) && payload.errors.length > 0) {
         const messages = payload.errors.map((error) => error.message ?? JSON.stringify(error));
         // SUCCESS-EQUIVALENT replay: GitHub rejects a resolve of an
         // already-resolved thread with this error — meaning a prior run's

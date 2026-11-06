@@ -36,6 +36,7 @@ import { join } from 'node:path';
 import { describe, expect, test, vi } from 'vitest';
 import { makeGhRunner } from '../../../src/adapters/forge-github/gh.js';
 import * as addressModule from '../../../src/ops/review/address.js';
+import * as addressManyModule from '../../../src/ops/review/addressMany.js';
 import { registry } from '../../../src/ops/review/registry.js';
 
 /** The op result shape the adapters fold to (loose, for assertions). */
@@ -247,6 +248,42 @@ describe('review family registry entries', () => {
     }
   });
 
+  test('review.addressMany forwards the dispatch alias notice sink to its driver factory', async () => {
+    const constructor = vi.spyOn(addressManyModule, 'makeReviewAddressMany');
+    try {
+      await entryByName('review.addressMany').importer({ onDeprecatedAlias: () => {} });
+      expect(constructor.mock.calls.at(-1)?.[0]?.drivers).toBeDefined();
+    } finally {
+      constructor.mockRestore();
+    }
+  });
+
+  test('review.run accepts the declared priorFindings array', () => {
+    const schema = entryByName('review.run').inputSchema;
+    const finding = {
+      id: 'F1',
+      source: 'agent',
+      severity: 'minor',
+      text: 'prior-round finding',
+      status: 'open',
+    };
+    expect(schema.safeParse({ repoRoot: '/repo', priorFindings: [finding] }).success).toBe(true);
+    // Each mirrored finding stays strict.
+    expect(
+      schema.safeParse({ repoRoot: '/repo', priorFindings: [{ ...finding, surprise: 1 }] }).success,
+    ).toBe(false);
+  });
+
+  test('review.addressMany rejects an unknown key inside an enrollment row', () => {
+    const entry = entryByName('review.addressMany');
+    const input = minimalInput('review.addressMany');
+    const row = { number: 1, request: minimalInputs['review.enqueue']!() };
+    input.enrollments = [row];
+    expect(entry.inputSchema.safeParse(input).success).toBe(true);
+    input.enrollments = [{ ...row, surprise: true }];
+    expect(entry.inputSchema.safeParse(input).success).toBe(false);
+  });
+
   test('the classifyThreads mirror rejects an unknown key INSIDE the state too', () => {
     const entry = entryByName('review.classifyThreads');
     const state = fetchedState();
@@ -280,6 +317,17 @@ describe('review family registry entries', () => {
         };
       }
     ).item.comments = [{ authorLogin: 'someone', body: '', createdAt: null }];
+    expect(entry.inputSchema.safeParse(input).success).toBe(true);
+  });
+
+  test('review.fixItem: a comment carrying authorType is accepted (the ThreadComment mirror)', () => {
+    // FixableReviewItem.comments is ThreadComment[]; the fetch supplies
+    // authorType when GitHub does, so the mirror must accept it.
+    const entry = entryByName('review.fixItem');
+    const input = minimalInput('review.fixItem');
+    (input as { item: { comments: unknown[] } }).item.comments = [
+      { authorLogin: 'review-bot', authorType: 'Bot', body: 'done', createdAt: null },
+    ];
     expect(entry.inputSchema.safeParse(input).success).toBe(true);
   });
 
