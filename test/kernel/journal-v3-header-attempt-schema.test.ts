@@ -241,12 +241,17 @@ describe('journal v3 header/attempt schemas (T25)', () => {
         ungoverned: { optIn: true },
       }).success,
     ).toBe(false);
-    expect(
-      RunStartedV3JournalEventSchema.safeParse({
-        ...header(),
-        governance: undefined,
-      } as unknown as RunStartedV3JournalEvent).success,
-    ).toBe(false);
+    // Neither marker: omit `governance` entirely. An explicit `undefined` would
+    // be rejected by `.exactOptional()` at the object stage, before the
+    // exactly-one-marker refinement could run.
+    const { governance: _governance, ...markerless } = header();
+    const neither = RunStartedV3JournalEventSchema.safeParse(markerless);
+    expect(neither.success).toBe(false);
+    if (!neither.success) {
+      expect(neither.error.issues.map((issue) => issue.message)).toContain(
+        'a v3 run-started requires exactly one of governance or ungoverned',
+      );
+    }
     // The header's baseSha and witnesses.base must agree (ADR envelope rule).
     const disagreeing = header();
     disagreeing.provenance.witnesses.base = 'c'.repeat(40);

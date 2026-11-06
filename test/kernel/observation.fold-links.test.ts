@@ -132,7 +132,7 @@ describe('T29 unknown evidence', () => {
       );
       expect(wrongPlan[0]?.kernelRunLinks[0]?.state).toBe('unknown');
       if (wrongPlan[0]?.kernelRunLinks[0]?.state === 'unknown') {
-        expect(wrongPlan[0].kernelRunLinks[0].reason).toContain('plan');
+        expect(wrongPlan[0].kernelRunLinks[0].reason).toContain("not 'plan-other'");
       }
       // With NO kernel descriptors, every link stays unknown (never guessed).
       const noRuns = foldObservations(await readObservations(dir), []);
