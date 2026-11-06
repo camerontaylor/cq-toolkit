@@ -200,6 +200,69 @@ describe('cq.json v2', () => {
     }
   });
 
+  describe('schema error text', () => {
+    const reasonOf = (value: unknown): string => {
+      const result = parseCqConfig(JSON.stringify(value));
+      expect(result.ok).toBe(false);
+      return result.ok ? '' : result.reason;
+    };
+
+    test('reports every issue with did-you-mean suggestions, on one line', () => {
+      const reason = reasonOf({
+        ...minimal,
+        budget: {},
+        review: { rounds: 1, searchTool: true },
+      });
+      expect(reason).toMatch(/^does not match the cq\.json schema \(/);
+      expect(reason).toContain('"budget" (did you mean `budgets`?)');
+      expect(reason).toContain(
+        'review: unrecognized key "searchTool" (did you mean `searchTools`?)',
+      );
+      expect(reason).not.toMatch(/\s{2}|\n/);
+    });
+
+    test('does not truncate beyond five issues', () => {
+      const reason = reasonOf({
+        schemaVersion: 2,
+        checks: [],
+        a1: 1,
+        a2: 1,
+        a3: 1,
+        a4: 1,
+        a5: 1,
+        a6: 1,
+        a7: 1,
+      });
+      for (const key of ['a1', 'a2', 'a3', 'a4', 'a5', 'a6', 'a7'])
+        expect(reason).toContain(`"${key}"`);
+      expect(reason).toContain('checks:');
+      expect(reason).not.toContain('more)');
+    });
+
+    test('suggests nothing when no valid key is close', () => {
+      const reason = reasonOf({ ...minimal, completelyUnrelatedThing: 1 });
+      expect(reason).toContain('"completelyUnrelatedThing"');
+      expect(reason).not.toContain('did you mean');
+    });
+
+    test('scales the suggestion distance with key length', () => {
+      const short = reasonOf({ ...minimal, roles: { x: 1, ab: 1 } });
+      expect(short).toContain('"x"');
+      expect(short).not.toContain('did you mean');
+      expect(reasonOf({ ...minimal, budget: {} })).toContain('did you mean `budgets`?');
+    });
+
+    test('suggests through nested objects and array elements', () => {
+      const reason = reasonOf({
+        ...minimal,
+        roles: { reviwer: { provider: 'p', model: 'm' } },
+        checks: [{ ...check, adaptor: 'x' }],
+      });
+      expect(reason).toContain('roles: unrecognized key "reviwer" (did you mean `reviewer`?)');
+      expect(reason).toContain('checks.0: unrecognized key "adaptor" (did you mean `adapter`?)');
+    });
+  });
+
   test('toolkit root config keeps CodeRabbit first and pins repository and address verification checks', () => {
     const result = parseCqConfig(
       readFileSync(new URL('../../../cq.json', import.meta.url), 'utf8'),
