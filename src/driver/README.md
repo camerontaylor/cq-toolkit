@@ -173,10 +173,11 @@ realpath-recheck existing paths (pre-existing symlinks are denied), but a
 symlink planted after the check is a documented TOCTOU window; the mitigation
 is keeping run command allowlists tight (never allowlist `ln`).
 
-Mixed-model `modelUsage` is priced per contributing model. Unknown model IDs
-use the served model's rate when available and record
-`{cq: 'pricing-fallback', models: [...], rate: 'served-model'}` in session
-narration. If neither rate is known, modeled cost remains absent.
+Mixed-model `modelUsage` is priced per contributing model. An unpriced
+model ID is never priced at another rate: modeled cost stays absent (so a
+`maxUsd` cap trips fail-loud, DD-9 §4) and
+`{cq: 'pricing-fallback', models: [...], rate: 'none'}` names the unpriced
+models in session narration.
 
 Budget mapping (I8): the driver owns NO wall clock — it forwards the
 run's `RunOptions.signal` (seam v2 — the caller passes the governed rung-1
