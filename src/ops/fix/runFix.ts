@@ -262,10 +262,13 @@ async function captureProvenance(
 
 /** Replace a report only after its complete sibling file has been written. */
 export async function writeAtomicFixReport(path: string, report: unknown): Promise<void> {
-  await mkdir(dirname(path), { recursive: true });
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   const temporary = `${path}.tmp-${randomUUID()}`;
   try {
-    await writeFile(temporary, JSON.stringify(report, null, 2) + '\n', { flag: 'wx' });
+    await writeFile(temporary, JSON.stringify(report, null, 2) + '\n', {
+      flag: 'wx',
+      mode: 0o600,
+    });
     await rename(temporary, path);
   } finally {
     await unlink(temporary).catch((error: NodeJS.ErrnoException) => {
@@ -344,7 +347,7 @@ export function makeFixRun(deps: FixRunDeps = {}) {
     // Without a journalDir (or with the memory-only test writer) the same
     // writer API is memory-only and the report declares persistence
     // unavailable — it never claims durability.
-    const compositionRunId = randomUUID();
+    const compositionRunId = deps.observationWriter?.compositionRunId ?? randomUUID();
     let observation:
       | (FixRunObservation & {
           writer?: ObservationWriter;
@@ -595,9 +598,10 @@ export function makeFixRun(deps: FixRunDeps = {}) {
         };
       }
       // Deliberate: the entire report is persisted, beyond the sanitized observation header.
+      const plannedReportPath = report.reportPath;
       Object.assign(report, sanitizeObservation(report));
       try {
-        await writeAtomicFixReport(report.reportPath, report);
+        await writeAtomicFixReport(plannedReportPath, report);
       } catch (error) {
         report.verdict = 'fail';
         return {
@@ -778,13 +782,19 @@ export function makeFixRun(deps: FixRunDeps = {}) {
       // Open the composition stream and capture the header metadata. A
       // append or close failure marks observation indeterminate and preserves the run.
       // Memory-only kernelRuns is [].
-      const { provenance, correlation } = await captureProvenance(
+      const captured = await captureProvenance(
         repoRoot,
         runPrefix,
         new Date(start).toISOString(),
         config.base,
         configText,
       );
+      const { provenance } = captured;
+      // An injected writer owns the stream's identities; adopt its workId.
+      const correlation = {
+        ...captured.correlation,
+        workId: deps.observationWriter?.workId ?? captured.correlation.workId,
+      };
       // The open itself is observation, never verdict: a refused open
       // (EACCES/ENOSPC/EEXIST, ...) leaves the run to proceed without a
       // writer and makes the observation indeterminate.
@@ -1007,7 +1017,9 @@ export function makeFixRun(deps: FixRunDeps = {}) {
               row.result.status === 'failed'
                 ? `unit failed before deriving tasks: ${row.result.error}`
                 : row.result.status === 'indeterminate'
-                  ? `unit did not produce a verdict: ${row.result.detail}`
+                  ? parentSignal?.aborted && row.result.detail.startsWith('queued')
+                    ? 'enclosing job cancelled before unit dispatch'
+                    : `unit did not produce a verdict: ${row.result.detail}`
                   : row.result.status === 'needs-human'
                     ? `unit stopped for human review: ${row.result.reason}`
                     : 'unit halted on a budget bound',
@@ -1048,7 +1060,7 @@ export function makeFixRun(deps: FixRunDeps = {}) {
           const assembly = template.input as AssemblePrsInput;
           if (prBase !== undefined) assembly.base = prBase;
           const compareBase = report.tasks.some((task) => task.failedAttemptPublished)
-            ? await githubCompareBase(repoRoot, assembly.base)
+            ? await githubCompareBase(repoRoot, `refs/remotes/origin/${assembly.base}`)
             : undefined;
           const packages: typeof assembly.packages = [];
           for (const pkg of assembly.packages.filter((candidate) =>
