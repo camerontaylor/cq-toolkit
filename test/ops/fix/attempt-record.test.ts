@@ -502,4 +502,38 @@ describe('finishAttempt', () => {
     expect(record.class).toEqual('infrastructure');
     expect(record.error?.certainty).toEqual('unknown');
   });
+
+  it('keeps the unrecognized stop code when error.code is also set', () => {
+    const record = finishAttempt({
+      ...base,
+      stopCode: 'mystery-code',
+      error: {
+        type: 'EPIPE',
+        code: 'ECONNRESET',
+        providerFinishReason: null,
+        source: 'worker',
+        certainty: 'observed',
+      },
+    });
+    expect(record.stopCode).toEqual('unclassified');
+    expect(record.error?.code).toEqual('mystery-code');
+  });
+
+  it('preserves @-versioned model identifiers through sanitization', () => {
+    const record = finishAttempt({
+      ...base,
+      completed: true,
+      invocation: 'edit@2',
+      model: { model: 'claude-3-5-sonnet-v2@20241022', provider: 'vertex' },
+      provider: 'vertex',
+      requestedModel: 'claude-3-5-sonnet-v2@20241022',
+      servedModel: 'claude-3-5-sonnet-v2@20241023',
+      priceTableRevision: 'rev@7',
+    });
+    expect(record.invocation).toEqual('edit@2');
+    expect(record.model?.model).toEqual('claude-3-5-sonnet-v2@20241022');
+    expect(record.requestedModel).toEqual('claude-3-5-sonnet-v2@20241022');
+    expect(record.servedModel).toEqual('claude-3-5-sonnet-v2@20241023');
+    expect(record.priceTableRevision).toEqual('rev@7');
+  });
 });

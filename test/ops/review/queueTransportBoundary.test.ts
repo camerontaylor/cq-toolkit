@@ -149,6 +149,42 @@ test('a stalled process is killed at the existing 45 second delivery deadline', 
   child.emit('close', null);
   expect(vi.getTimerCount()).toBe(0);
 });
+test('an in-flight caller abort kills the child and preserves the exact reason', async () => {
+  const child = childProcess();
+  const controller = new AbortController();
+  const reason = new Error('caller cancelled receipt delivery');
+  const pending = sshQueueTransport('queue')('{}\n', { signal: controller.signal });
+  const refused = expect(pending).rejects.toBe(reason);
+  child.stdout.emit('data', Buffer.from('{"partial":'));
+  controller.abort(reason);
+  await refused;
+  expect(child.kill).toHaveBeenCalledExactlyOnceWith('SIGKILL');
+  expect(vi.getTimerCount()).toBe(0);
+  child.emit('close', null);
+});
+
+test('an already aborted caller signal refuses before any process is spawned', async () => {
+  const controller = new AbortController();
+  const reason = new Error('caller cancelled before dispatch');
+  controller.abort(reason);
+  await expect(sshQueueTransport('queue')('{}\n', { signal: controller.signal })).rejects.toBe(
+    reason,
+  );
+  expect(mocks.spawn).not.toHaveBeenCalled();
+});
+
+test('the delivery deadline is clamped to the caller remaining budget', async () => {
+  const child = childProcess();
+  const pending = sshQueueTransport('queue')('{}\n', { remainingMs: () => 2000 });
+  const refused = expect(pending).rejects.toThrow('queue delivery unknown: timeout');
+  await vi.advanceTimersByTimeAsync(1999);
+  expect(child.kill).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(1);
+  await refused;
+  expect(child.kill).toHaveBeenCalledExactlyOnceWith('SIGKILL');
+  child.emit('close', null);
+});
+
 test('old runner refusal is unsupported only for the pre-write capability probe', async () => {
   for (const op of ['retry-capability', 'retry']) {
     const child = childProcess();

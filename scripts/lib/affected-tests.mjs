@@ -45,7 +45,7 @@ export const NON_IMPORT_MAP = [
   [
     /^src\/ops\//,
     [
-      /^test\/cli\/(registry|conformance)\.test\.ts$/,
+      /^test\/cli\/(registry\.family-scan|conformance)\.test\.ts$/,
       /^test\/driver\/served-model-sites\.test\.ts$/,
     ],
   ],
@@ -106,7 +106,7 @@ export const NON_IMPORT_MAP = [
     /^\.github\/(workflows|actions)\//,
     [
       /^test\/workflows\//,
-      /^test\/ops\/gates\/(?:workflowScan|protectedPaths(?:\.[\w-]+)?)\.test\.ts$/,
+      /^test\/ops\/gates\/(?:workflowScan|protectedPaths)(?:\.[\w-]+)?\.test\.ts$/,
       /^test\/ops\/gates\/policyDiff(\..+)?\.test\.ts$/,
       /^test\/ops\/ratchet\/definitions\.test\.ts$/,
       /^test\/scripts\/(github-settings(\..+)?|adversarial-suite)\.test\.ts$/,

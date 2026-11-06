@@ -296,6 +296,40 @@ describe('ai-sdk driver failure classes (#210)', () => {
     }
   });
 
+  test('a bare AbortError with no governed abort is a transient run failure, not a cancellation', async () => {
+    const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-'));
+    try {
+      // The SDK step timeout during retry backoff rejects with a generic
+      // AbortError that drops `signal.reason`. RunOptions.signal never fired
+      // here, so this is NOT cancellation (I8): the run failed transiently.
+      const driver = new AiSdkDriver({
+        providers: {
+          mock: () =>
+            new MockLanguageModelV4({
+              modelId: 'mock-1',
+              doGenerate: async () => {
+                const error = new Error('The operation was aborted');
+                error.name = 'AbortError';
+                throw error;
+              },
+            }),
+        },
+        sessionsDir: join(scratchDir, 'sessions'),
+      });
+      const result = await driver.run(invocation());
+      expect(result.stopReason).toBe('error');
+      expect(result.errorClass).toBe('transient');
+      expect(result.error).toContain('aborted');
+      // Unit-pin the classifier directly: the driver's catch already ruled
+      // out a governed signal by the time it calls this.
+      const bare = new Error('aborted');
+      bare.name = 'AbortError';
+      expect(classifyRunFailure(bare)).toBe('transient');
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
   test('a resolved run ending on finishReason error/content-filter carries a class too', async () => {
     const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-'));
     try {

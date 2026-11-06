@@ -14,10 +14,11 @@ python3 apps/crq-python/crq.py enqueue-merged --pr=42 --merge-sha=<full-source-m
 python3 apps/crq-python/crq.py report --request-id=outage-pr42
 ```
 
-Enrollment verifies the forge PR is merged into `main` with exactly that
-merge SHA, binds the stable request ID in the existing queue under `tick.lock`,
-and starts nothing. Repeating the same binding, including through another request
-ID, returns the same intent. Reusing an ID with a different binding refuses.
+Enrollment verifies the forge PR is merged into an accepted target branch
+(`main` or `merge-queue`) with exactly that merge SHA, binds the stable request
+ID in the existing queue under `tick.lock`, and starts nothing. Repeating the
+same binding, including through another request ID, returns the same intent.
+Reusing an ID with a different binding refuses.
 The normal tick alone selects work, respecting pause, cooldown, starts/hour,
 inflight capacity, dependency gates and the pre-upload scan. Selective `start`
 refuses merged-current dispatch. Generic `requeue` refuses: consumed or ambiguous

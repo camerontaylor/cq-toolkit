@@ -45,8 +45,9 @@ describe('fetchMergeCandidates', () => {
 
   test('unbounded pagination: a final page of exactly 100 rows is NOT truncation — candidates ride truncated=false', async () => {
     const hundred = Array.from({ length: 100 }, (_unused, i) => pullRow(i + 1));
+    const calls: string[] = [];
     const full = await fetchMergeCandidates({
-      gh: fakeGh({ list: () => hundred }), // FLAT payload — the slurpedComments tolerance
+      gh: fakeGh({ list: () => hundred }, calls), // FLAT payload — the slurpedComments tolerance
       owner: OWNER,
       repo: REPO,
     });
@@ -56,6 +57,16 @@ describe('fetchMergeCandidates', () => {
     // fully-paginated fetch. The contract is "no candidate is truncated" —
     // asserted positively so a partial regression cannot slip through.
     expect(full.candidates.every((candidate) => !candidate.truncated)).toBe(true);
+    // The non-truncation contract depends on the listing actually paginating:
+    // without --paginate a 100-row page IS the whole fetch. Name the flag on
+    // the open-listing call itself, not on some unrelated invocation.
+    expect(
+      calls.some(
+        (line) =>
+          line.includes(`repos/${REPO_PATH}/pulls?state=open&per_page=100`) &&
+          line.includes('--paginate'),
+      ),
+    ).toBe(true);
 
     const ninetyNine = await fetchMergeCandidates({
       gh: fakeGh({ list: () => hundred.slice(0, 99) }),

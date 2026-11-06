@@ -200,6 +200,16 @@ function capSanitized(text: string): string {
 }
 
 /**
+ * Sanitize a structured identifier: redact environment secrets and cap it.
+ * Identifier fields skip credential-prefix stripping because an `@`-versioned
+ * handle (for example a Vertex model id) is identity, not the free-text
+ * `user@host` shape {@link sanitizeObservation} fails closed on.
+ */
+function sanitizeIdentifier(text: string): string {
+  return capSanitized(redactSensitiveText(text));
+}
+
+/**
  * Recursively sanitize a persisted observation: redact environment secrets,
  * strip credential URL/SCP prefixes, then redact again so a secret the
  * stripping mangled cannot survive as a partial value; the result is capped at
@@ -421,7 +431,10 @@ export function finishAttempt(input: FinishAttemptInput): AttemptFinishedPayload
       // A bare 'unclassified' code takes this same branch (certainty unknown).
       stopCode = 'unclassified';
       stopClass = 'infrastructure';
-      const rawCode = error?.code ?? raw ?? '';
+      // The classifier input is the stable evidence of what was observed, so
+      // it wins over the caller's error code when it is a real code.
+      const rawCode =
+        raw !== undefined && raw !== 'unclassified' ? raw : (error?.code ?? raw ?? '');
       error = {
         type: error?.type ?? null,
         code: rawCode === '' ? null : rawCode,
@@ -472,5 +485,24 @@ export function finishAttempt(input: FinishAttemptInput): AttemptFinishedPayload
     budget,
     availability,
   };
-  return AttemptFinishedPayloadSchema.parse(sanitizeObservation(record));
+  // Prose and evidence fields take the full strip-and-redact pass; identifier
+  // fields keep their `@` so persisted model attribution survives.
+  const sanitized = sanitizeObservation(record);
+  return AttemptFinishedPayloadSchema.parse({
+    ...sanitized,
+    invocation: sanitizeIdentifier(record.invocation),
+    model:
+      record.model === null
+        ? null
+        : {
+            model: sanitizeIdentifier(record.model.model),
+            provider: sanitizeIdentifier(record.model.provider),
+          },
+    provider: sanitizeIdentifier(record.provider),
+    requestedModel: sanitizeIdentifier(record.requestedModel),
+    servedModel: record.servedModel === null ? null : sanitizeIdentifier(record.servedModel),
+    priceTableRevision:
+      record.priceTableRevision === null ? null : sanitizeIdentifier(record.priceTableRevision),
+    stopCode: sanitizeIdentifier(record.stopCode),
+  });
 }

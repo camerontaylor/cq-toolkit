@@ -502,13 +502,25 @@ class GitLedger:
         if previous and subprocess.run(["git", "merge-base", "--is-ancestor", previous, head], cwd=self.repo, capture_output=True).returncode:
             raise IntegrityError("ledger head is not a descendant of validated history")
         values = self.read(head)
-        try:
-            self.git("update-ref", checkpoint, head, previous or "0" * len(head))
-        except subprocess.CalledProcessError:
-            latest = self.git("rev-parse", "--verify", checkpoint).decode().strip()
-            # Another full validation may have advanced the shared checkpoint.
-            # Accept only an equal/descendant checkpoint, never move it backward.
-            self.git("merge-base", "--is-ancestor", head, latest)
+        def ancestor(a, b):
+            return subprocess.run(["git", "merge-base", "--is-ancestor", a, b],
+                                  cwd=self.repo, capture_output=True).returncode == 0
+
+        expected = previous or "0" * len(head)
+        for _ in range(8):
+            try:
+                self.git("update-ref", checkpoint, head, expected)
+                break
+            except subprocess.CalledProcessError:
+                latest = self.git("rev-parse", "--verify", checkpoint).decode().strip()
+                # Never move the checkpoint backward; advance past an older concurrent validation.
+                if ancestor(head, latest):
+                    break
+                if not ancestor(latest, head):
+                    raise IntegrityError("validated checkpoint diverged from ledger head")
+                expected = latest
+        else:
+            raise IntegrityError("validated checkpoint contention")
         return head, values
 
     def publish(self, outbox, attempts=3):

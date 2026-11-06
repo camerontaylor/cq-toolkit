@@ -148,8 +148,12 @@ the dual in-flight/dispatch caps. Source: `src/kernel/governor.ts`.
      op promise is detached (its later settlement suppressed, no unhandled
      rejection), the invocation settles `{status:'budget-exhausted'}`, and
      the run no longer waits on it. A fake op that ignores the abort signal
-     is therefore still terminated at the final rung — that is the slice-2
-     test.
+     therefore cannot hold the run: its INVOCATION settles
+     `{status:'budget-exhausted'}` at the final rung — that is the slice-2
+     test. Detaching the promise stops the run WAITING, not the operation:
+     an op that ignores every cancel can keep consuming resources (or
+     spend) after its invocation has settled, which is why the cancel ports
+     above come first.
      An op that settles early disarms every pending rung. A port primitive that
      THROWS is recorded on the rung marker (`delivered: false` plus an `error`
      note — mirrored on the governor's `ladder-rung` event) and the ladder
@@ -263,9 +267,11 @@ the dual in-flight/dispatch caps. Source: `src/kernel/governor.ts`.
   narrates `cq: bound excludes ungoverned runs <runIds>` (annex §3 rule 7).
   Consequence: budget-exhausted rows are terminal and
   are NOT auto-retried by resume in any effective sense — a seeded,
-  still-tripped governor re-marks them without op invocation; only an
-  input change (new `inputsHash`, which defeats even ok-skip in replay)
-  puts them back under the caps as genuinely new work.
+  still-tripped governor re-marks them without op invocation. A new
+  `inputsHash` only defeats replay skipping (it re-dispatches a job the
+  governor would otherwise skip as `ok`); it does NOT reset the seeded
+  attempt count or spend, so a tripped governor still refuses the
+  dispatch and the resumed job continues the SAME budget.
   Cost scope, named (do not double-count): the RUN-level `costUSD` on a
   report is the cumulative seeded LEDGER (prior runs' finishes plus this
   run's evidence), while each per-row `costUSD` is THIS run's evidence
@@ -334,8 +340,9 @@ acquisition in progress or interrupted` until the guard lease is stale,
 ## Reserve-then-settle (W2.3, ADR-0003 §2.2/§2.3)
 
 A governed dispatch under a USD cap holds a RESERVATION — the admission
-invariant is `settled + outstanding + reserved ≤ C`, held synchronously
-from `reserve` to `settle`.
+invariant is `settled + unconsumed hold + reserved ≤ C` (a hold counts only
+its part not yet folded into `settled`), held synchronously from `reserve`
+to `settle`.
 
 - **Write-ahead (A12b).** `reservation-opened` is fdatasync'd BEFORE the op
   runs; `reservation-settled` BEFORE the outcome is journalled. A hard
@@ -389,9 +396,12 @@ from `reserve` to `settle`.
   demonstrated-worst-case; the floor machinery is W2.1/W3.5's (HARD rows).
   A zero cap admits nothing: the first reserve trips `exhausted` before any
   dispatch (a zero budget that dispatches anyway is the lie the cap
-  prevents). Uncapped governed runs are reservation-less (there is no bound
-  to hold capacity against; their ledger folds observed evidence exactly as
-  W2.2). Token caps are not a reservation dimension — USD is the ledger's
+  prevents). Governed runs with NEITHER a configured nor an inherited cap
+  are reservation-less (there is no bound to hold capacity against; their
+  ledger folds observed evidence exactly as W2.2). A capless run over capped
+  history is NOT one of those: it inherits the predecessor cap and DOES
+  reserve against it (see "Capless governed runs inherit C_prev" below).
+  Token caps are not a reservation dimension — USD is the ledger's
   binding unit (the W2.2 `prevCapTokens` record); the token rollup binds
   through the DD-9 folds unchanged.
 - **Charges.** Evidence folds attribute to the job's open reservation.
@@ -595,22 +605,23 @@ carries its own bounded re-dispatch loop.
 
 ## Recorded design decisions (T1.3)
 
-- **Decorator seam** chosen over the `runPlan` `gov` parameter: purely
-  additive, runner untouched; the `gov` parameter is the recorded T1.4
-  runner-integration path.
+- **Decorator seam** _(T1.3's decision — SUPERSEDED by W2.2: the decorator
+  (`governRegistry`/`withBudgetStop`/`seedFromRunLog`) was deleted; the
+  `runPlan` `gov` parameter is the governed seam, see "Budget governor"
+  above)_: at the time it was chosen over the `gov` parameter for being
+  purely additive with the runner untouched.
 - **Ladder kills settle `budget-exhausted`**, not `indeterminate`: known
   budget cause; journal stays honest; resume re-runs the row.
 - **No in-wrapper retries**: retries must rise through the runner so
   `JobStartedJournalEvent.attempt` rises; anything else hides attempts from
   the journal.
-- **Job-key identity**: the frozen Op contract carries no job id, so caps
-  key on an explicit `jobKey` extractor, the `input.jobId` plan-jobId
-  convention, else the OP NAME — under that fallback every dispatch of an op
-  counts as another attempt of that op, so the per-job attempt cap always
-  exists (a per-dispatch unique key would make it a silent no-op).
-  `seedFromJournal` seeds BOTH keys (journal jobId and op name) so a resumed
-  run's caps hold under either identity. Stable per-job identity needs
-  `config.jobKey` or `input.jobId`.
+- **Job-key identity** _(T1.3's decision — SUPERSEDED by W2.2: the
+  runtime-only `jobKey` extractor was removed)_: admission, the per-job
+  attempt cap and the resume attempt seed all key on the real plan
+  `job.id`. The recorded residual is rename evasion: a plan that renames
+  its job ids between runs presents as fresh jobs, resets its attempt
+  lineage and escapes a standing A12b quarantine (see "Composable with
+  resume (ledger continuity)" above).
 - **Seed dedupe**: usage is counted only for journal finishes that close an
   open start — an orphan finish in a multi-run journal is a replay
   re-attestation of an already-counted dispatch, and counting it again would

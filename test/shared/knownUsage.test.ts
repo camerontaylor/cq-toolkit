@@ -125,6 +125,18 @@ describe('known usage across driver exits', () => {
     expect(mixed.usage.input).toBe(4);
   });
 
+  it('clamps folded sums of saturated summaries like snapshot()', () => {
+    const max = Number.MAX_SAFE_INTEGER;
+    const saturated = {
+      usage: { input: max, output: max, cacheRead: max, cacheWrite: max, reasoning: max },
+      costUSD: Number.MAX_VALUE,
+      knownCount: max,
+      unknownCount: max,
+      unpricedCount: max,
+    };
+    expect(foldKnownUsageSummaries([saturated, saturated])).toEqual(saturated);
+  });
+
   it('normalizes usage and cost independently at the driver boundary', () => {
     const ledger = createKnownUsageLedger();
     ledger.record(

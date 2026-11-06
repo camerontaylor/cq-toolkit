@@ -212,6 +212,32 @@ describe('reviewClosuresOf', () => {
     expect(emptyKnown.availability['/metric/fixesPerRun/denominator']?.state).toBe('known-zero');
   });
 
+  it('T35 counts only closures inside the planned population', () => {
+    // Review planning records only blocking findings in the denominator while
+    // dispatch fixes every open finding: a verified non-blocking closure must
+    // not lift the numerator above a population it was never counted in.
+    const fixes = [reviewFix({}), reviewFix({ finding: finding('finding-2'), commit: 'review2' })];
+    const metric = measureRun(
+      fixes,
+      ['finding-1'],
+      new Map([['finding-1', { completed: true, count: 1 } as const]]),
+      messageOf,
+    );
+    expect(metric.fixesPerRun).toEqual({ numerator: 1, denominator: 1 });
+    expect(metric.verifiedCommits).toEqual(['review1']);
+    expect(metric.closures.map((closure) => closure.commitSha)).toEqual(['review1']);
+    // The planned id keeps its raw spelling for the baseline row, but matches
+    // the canonical closure link when the population is built.
+    const padded = measureRun(
+      [reviewFix({})],
+      ['  finding-1  '],
+      new Map([['  finding-1  ', { completed: true, count: 1 } as const]]),
+      messageOf,
+    );
+    expect(padded.fixesPerRun).toEqual({ numerator: 1, denominator: 1 });
+    expect(padded.baselineFailures[0]?.unitId).toEqual('  finding-1  ');
+  });
+
   it('T35 unknown evidence', () => {
     // A candidate closure with an unavailable message is genuinely unknown:
     // the numerator is null (never zero), with an unavailable availability
@@ -316,8 +342,8 @@ describe('reviewClosuresOf', () => {
         reviewFix({ commit: 'proseTodo' }),
         reviewFix({ validation: [pass, fail] }),
       ],
-      [],
-      new Map(),
+      ['finding-1'],
+      new Map([['finding-1', { completed: true, count: 0 } as const]]),
       messageOf,
     );
     expect(metric.fixesPerRun).toEqual({ numerator: 1, denominator: 0 });

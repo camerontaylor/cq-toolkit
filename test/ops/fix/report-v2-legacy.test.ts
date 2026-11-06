@@ -152,6 +152,7 @@ const measuredReport = (
     metric: measured(numerator, commits),
     availability: {
       ...base.availability,
+      '/metric': availability('known', 'measured metric'),
       '/metric/fixesPerRun/numerator': availability('known', 'measured numerator'),
       '/metric/fixesPerRun/denominator': availability('known', 'measured denominator'),
     },
@@ -304,6 +305,35 @@ describe('report v2 legacy projection (T37)', () => {
     expect(Object.keys(unknown).sort()).toEqual(['availability', 'fixesPerRun', 'lossy']);
     expect(folded.attempts).toHaveLength(1);
     expect(folded.attempts[0]).toEqual(attempt());
+  });
+
+  test('T37 partial evidence withholds the scalar', () => {
+    // A torn stream leaves the numerator matching its verified commits but
+    // marks /metric (and the report root) partial. The doc comment promises
+    // null when evidence is partial, so partial evidence is never projected as
+    // a measured count.
+    const measuredBase = measuredReport(1, [COMMIT_ONE]);
+    const partialReport = ReportV2Schema.parse({
+      ...measuredBase,
+      availability: {
+        ...measuredBase.availability,
+        '/metric': availability('partial', 'torn observation stream; partial evidence only'),
+      },
+    });
+    const withheld = legacyReportProjection({ reportV2: partialReport });
+    expect(withheld.fixesPerRun).toBeNull();
+    expect(withheld.availability.state).toBe('partial');
+
+    const partialRoot = ReportV2Schema.parse({
+      ...measuredBase,
+      availability: {
+        ...measuredBase.availability,
+        '': availability('partial', 'torn observation stream; partial evidence only'),
+      },
+    });
+    const rootWithheld = legacyReportProjection({ reportV2: partialRoot });
+    expect(rootWithheld.fixesPerRun).toBeNull();
+    expect(rootWithheld.availability.state).toBe('partial');
   });
 
   test('T37 failure boundary', () => {

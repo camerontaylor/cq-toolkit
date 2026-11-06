@@ -144,6 +144,29 @@ test('drain retains successful observations alongside per-ID errors and enforces
     },
   });
 });
+test('zero-wait drain still observes each request once', async () => {
+  const calls: string[] = [];
+  const ops = makeQueueOps(async (raw) => {
+    const req = JSON.parse(raw) as { requestId: string; binding: unknown };
+    calls.push(req.requestId);
+    return JSON.stringify({
+      v: 1,
+      requestId: req.requestId,
+      binding: req.binding,
+      result: pending,
+    });
+  });
+  expect(await ops.drain({ requests: [ref], waitMs: 0 })).toMatchObject({
+    status: 'ok',
+    value: {
+      action: 'observed',
+      accepted: false,
+      unfinished: [ref.requestId],
+      observations: { 'request-1': { reviewed: false } },
+    },
+  });
+  expect(calls).toEqual(['request-1']);
+});
 test('transport rejection at the deadline still returns unfinished IDs', async () => {
   vi.useFakeTimers();
   const ops = makeQueueOps(

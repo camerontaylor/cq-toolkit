@@ -18,27 +18,41 @@ export interface KnownUsageSummary {
   unpricedCount: number;
 }
 
+// Guarded fold: a sum is clamped at the safe integer bound rather than
+// silently wrapping, so a saturated summary is visibly extreme instead
+// of a plausible-looking wrong number.
+const addCount = (total: number, value: number): number => {
+  const sum = total + value;
+  return Number.isSafeInteger(sum) ? sum : Number.MAX_SAFE_INTEGER;
+};
+
+const addCost = (total: number, value: number): number => {
+  const sum = total + value;
+  return Number.isFinite(sum) ? sum : Number.MAX_VALUE;
+};
+
 /** Fold engine summaries without treating each aggregate as one driver call. */
 export function foldKnownUsageSummaries(
   summaries: readonly KnownUsageSummary[],
 ): KnownUsageSummary {
   const folded: KnownUsageSummary = { knownCount: 0, unknownCount: 0, unpricedCount: 0 };
   for (const summary of summaries) {
-    folded.knownCount += summary.knownCount;
-    folded.unknownCount += summary.unknownCount;
-    folded.unpricedCount += summary.unpricedCount;
+    folded.knownCount = addCount(folded.knownCount, summary.knownCount);
+    folded.unknownCount = addCount(folded.unknownCount, summary.unknownCount);
+    folded.unpricedCount = addCount(folded.unpricedCount, summary.unpricedCount);
     if (summary.usage !== undefined) {
       if (folded.usage === undefined) folded.usage = { ...summary.usage };
       else {
-        folded.usage.input += summary.usage.input;
-        folded.usage.output += summary.usage.output;
-        folded.usage.cacheRead += summary.usage.cacheRead;
-        folded.usage.cacheWrite += summary.usage.cacheWrite;
+        folded.usage.input = addCount(folded.usage.input, summary.usage.input);
+        folded.usage.output = addCount(folded.usage.output, summary.usage.output);
+        folded.usage.cacheRead = addCount(folded.usage.cacheRead, summary.usage.cacheRead);
+        folded.usage.cacheWrite = addCount(folded.usage.cacheWrite, summary.usage.cacheWrite);
         if (summary.usage.reasoning !== undefined)
-          folded.usage.reasoning = (folded.usage.reasoning ?? 0) + summary.usage.reasoning;
+          folded.usage.reasoning = addCount(folded.usage.reasoning ?? 0, summary.usage.reasoning);
       }
     }
-    if (summary.costUSD !== undefined) folded.costUSD = (folded.costUSD ?? 0) + summary.costUSD;
+    if (summary.costUSD !== undefined)
+      folded.costUSD = addCost(folded.costUSD ?? 0, summary.costUSD);
   }
   return folded;
 }
@@ -113,13 +127,6 @@ export function createKnownUsageLedger() {
       let knownCount = 0;
       let unknownCount = 0;
       let unpricedCount = 0;
-      // Guarded fold: a sum is clamped at the safe integer bound rather than
-      // silently wrapping, so a saturated summary is visibly extreme instead
-      // of a plausible-looking wrong number.
-      const addCount = (total: number, value: number): number => {
-        const sum = total + value;
-        return Number.isSafeInteger(sum) ? sum : Number.MAX_SAFE_INTEGER;
-      };
       for (const observation of observations.values()) {
         if (observation.usage === undefined) unknownCount++;
         else {
@@ -137,8 +144,7 @@ export function createKnownUsageLedger() {
         }
         if (observation.costUSD === undefined) unpricedCount++;
         else {
-          const sum = (costUSD ?? 0) + observation.costUSD;
-          costUSD = Number.isFinite(sum) ? sum : Number.MAX_VALUE;
+          costUSD = addCost(costUSD ?? 0, observation.costUSD);
         }
       }
       return {

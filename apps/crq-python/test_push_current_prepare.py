@@ -72,6 +72,25 @@ class PushTest(PushTestBase, unittest.TestCase):
         fdiff = self.git(self.foreign, "diff", "--name-status", fplan["base"], fplan["head"])
         self.assertEqual(fdiff.splitlines(), ["A\t" + split["path"]])
 
+    def test_scope_rescue_rejects_binary_overflow_content(self):
+        # current_paths decides the cumulative 2 MiB cap before reading a blob,
+        # so an overflow row is never content-checked. A rescued row must not
+        # smuggle binary content into the projection.
+        big = {f"f{n}.py": "x" * 256000 + "\n" for n in range(8)}  # they fill the 2 MiB scope
+        self.commit(self.foreign_origin, "big range", when=self.ago(2), files=big)
+        (self.foreign_origin / "z.bin").write_bytes(b"\x00\xff" * 128000)  # 256000 bytes, binary
+        self.commit(self.foreign_origin, "binary overflow", when=self.ago(1))
+        item = self.enroll_push(floor=self.iso_of(self.ago(36)))
+        plan = self.prepare(item)
+        rows = {r["path"]: r for r in item["capture"]["paths"]}
+        self.assertEqual(rows["z.bin"]["disposition"], "unsupported")
+        self.assertEqual(rows["z.bin"]["reason"], "binary or non-UTF8 current blob")
+        self.assertEqual(sum(r["disposition"] == "included" for r in rows.values()), 8)
+        self.assertEqual([r["path"] for r in rows.values() if r["disposition"] == "deferred-split"], [])
+        self.assertEqual([i["id"] for i in self.q["items"]], [item["id"]])
+        diff = self.git(self.foreign, "diff", "--name-status", plan["base"], plan["head"])
+        self.assertEqual(len(diff.splitlines()), 8)
+
 
 if __name__ == "__main__":
     unittest.main()

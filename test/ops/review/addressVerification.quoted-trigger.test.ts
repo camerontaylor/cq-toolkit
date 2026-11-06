@@ -96,4 +96,43 @@ describe('review.address closure evidence verifier', () => {
     expect(result.verdict).toBe(survives ? 'unresolved' : 'resolved');
     if (survives) expect(result.reason).toBe('deleted-trigger-survives');
   });
+
+  test('a contraction does not hide a surviving single-quoted trigger', () => {
+    const before = "const OLD_FLAG = 1;\nif (m === 'LEGACY') run();";
+    const after = "if (m === 'LEGACY') run();";
+    const result = verifyClosureEvidence(
+      makePacket({
+        finding: {
+          id: 'contraction',
+          text: `Replace "OLD_FLAG"; don't keep 'LEGACY' anywhere`,
+          file: 'src/config.ts',
+          line: 1,
+        },
+        before,
+        after,
+        patch: replacementPatch(before, after),
+      }),
+    );
+    expect(result.verdict).toBe('unresolved');
+    expect(result.reason).toBe('deleted-trigger-survives');
+  });
+
+  test('a suggested replacement absent from before is not a surviving trigger', () => {
+    const before = 'const v = a - b;';
+    const after = 'const v = a + b;';
+    const result = verifyClosureEvidence(
+      makePacket({
+        finding: {
+          id: 'replacement',
+          text: 'Replace `a - b` with `a + b`',
+          file: 'src/config.ts',
+          line: 1,
+        },
+        before,
+        after,
+        patch: replacementPatch(before, after),
+      }),
+    );
+    expect(result.reason).not.toBe('deleted-trigger-survives');
+  });
 });

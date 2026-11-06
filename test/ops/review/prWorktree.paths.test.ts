@@ -144,6 +144,10 @@ describe('canonical reclaim — the target slot matches across spelling divergen
         repoRoot,
         pr: PR,
         headRefName: 'main',
+        // The caller spells the root through the alias; only canonicalization
+        // can pair the alias-spelled target slot with the canonical parked
+        // tree real git porcelain reports.
+        worktreeRoot: aliasRoot,
         run: fakeGit(model, calls),
         registry: memRegistry(),
         nowMs: NOW,
@@ -154,10 +158,10 @@ describe('canonical reclaim — the target slot matches across spelling divergen
       const removeArgs = calls.find((args) => args.includes('remove'));
       expect(removeArgs?.[removeArgs.length - 1]).toBe(parkedPath);
       const addArgs = calls.find((args) => args.includes('add'));
-      expect(addArgs?.[6]).toBe(join(canonicalRoot, `pr-${PR}-main`));
+      expect(addArgs?.[6]).toBe(join(aliasRoot, `pr-${PR}-main`));
       expect(addArgs?.[7]).toBe(SHA_B);
       expect(result.reused).toBe(false);
-      expect(result.path).toBe(join(canonicalRoot, `pr-${PR}-main`));
+      expect(result.path).toBe(join(aliasRoot, `pr-${PR}-main`));
     } finally {
       await rm(repoRoot, { recursive: true, force: true });
     }
