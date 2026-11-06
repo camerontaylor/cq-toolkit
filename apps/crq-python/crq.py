@@ -3427,6 +3427,18 @@ def with_lock(fn, *a, lock_wait=0, **kw):
         fh.close()
 
 
+def ran_locked(fn, *a, lock_wait: int = 0) -> bool:
+    """True when fn ran under the tick lock; False when the lock was busy.
+
+    The mutating commands return None on success, so with_lock's None cannot
+    tell a completed run from a lock-busy no-op; this wrapper makes it explicit.
+    """
+    def run():
+        fn(*a)
+        return True
+    return with_lock(run, lock_wait=lock_wait) is not None
+
+
 def admin(action: str, item_id: Optional[str], reason: Optional[str], *,
           audit_from: Optional[str] = None, audit_at: Optional[str] = None) -> None:
     q = load_queue()
@@ -3639,9 +3651,11 @@ def main() -> int:
     if args.cmd == "selfcheck":
         return cmd_selfcheck()
     if args.cmd == "init":
-        with_lock(cmd_init, args.force)
+        if not ran_locked(cmd_init, args.force):
+            return 3
     elif args.cmd == "measure":
-        with_lock(cmd_measure)
+        if not ran_locked(cmd_measure):
+            return 3
     elif args.cmd == "repair-prepare":
         def prepare():
             evidence = json.loads(Path(args.revalidation).read_text())
@@ -3649,7 +3663,8 @@ def main() -> int:
                                                     args.job, args.source_sha, evidence)
             event("repair_prepared", origin_job=args.job, job=job_id, source_sha=args.source_sha)
             print(job_id)
-        with_lock(prepare)
+        if not ran_locked(prepare):
+            return 3
     elif args.cmd in ("tick", "start"):
         only = getattr(args, "item", None)
         out = with_lock(tick, args.dry_run, only, getattr(args, "ignore_quiet", False), lock_wait=90)
@@ -3679,8 +3694,9 @@ def main() -> int:
         print(f"PR #{args.pr}: {n} paths; base {base} head {head}")
         print(git("diff", "--shortstat", base, head))
     elif args.cmd == "author-enroll":
-        with_lock(enroll_author, args.request_id, args.base, args.head, args.target, args.cycle,
-                  args.review_policy, args.fallback_reviewer)
+        if not ran_locked(enroll_author, args.request_id, args.base, args.head, args.target, args.cycle,
+                          args.review_policy, args.fallback_reviewer):
+            return 3
     elif args.cmd in ("author-lease", "author-fallback"):
         try:
             result = with_lock(author_lease_command, args.request_id, args.cmd == "author-fallback")
@@ -3691,10 +3707,12 @@ def main() -> int:
             return 3
         print(json.dumps(result, sort_keys=True))
     elif args.cmd == "author-observe":
-        with_lock(author_observe, args.manifest)
+        if not ran_locked(author_observe, args.manifest):
+            return 3
     else:
         try:
-            with_lock(admin, args.cmd, getattr(args, "item", None), getattr(args, "reason", None))
+            if not ran_locked(admin, args.cmd, getattr(args, "item", None), getattr(args, "reason", None)):
+                return 3
         except AdminRefused as exc:
             print(f"{args.cmd} refused: {exc}", file=sys.stderr)
             return 3

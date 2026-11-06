@@ -68,6 +68,14 @@ class CurrentTest(CurrentFixture, unittest.TestCase):
         self.assertIn("needs-human", err.getvalue())
         self.assertEqual(crq.QUEUE.read_bytes(), before)
 
+    def test_lock_busy_mutating_commands_exit_needs_human(self):
+        for argv in (["crq", "init"], ["crq", "measure"], ["crq", "pause"],
+                     ["crq", "author-observe", "manifest.json"]):
+            with self.subTest(argv=argv), mock.patch.object(sys, "argv", argv), \
+                 mock.patch.object(crq, "with_lock", return_value=None), \
+                 contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(crq.main(), 3)
+
     def test_selfcheck_fails_on_a_banned_third_party_reviewer_identity(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
