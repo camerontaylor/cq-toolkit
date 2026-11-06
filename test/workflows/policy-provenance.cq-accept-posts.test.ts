@@ -115,6 +115,54 @@ gh() {
   );
 
   it.each(bothCopies('cq-accept.yml'))(
+    '%s: an interim (no verdict App) row labels itself unauthenticated; App mode does not',
+    { timeout: 60_000 },
+    (_label, text) => {
+      const script = runScript(
+        jobBlocks(code(text)).get('judge') ?? '',
+        "'Judge (CLI: selfhost/acceptance)'",
+      );
+      const judge = (appId: string | undefined) => {
+        const dir = mkdtempSync(join(tmpdir(), 'cq-accept-mode-'));
+        try {
+          const node = `node() { printf '%s\\n' "$VERDICT"; }\n`;
+          const r = spawnSync('bash', ['-c', node + script], {
+            encoding: 'utf8',
+            env: {
+              PATH: process.env['PATH'] ?? '',
+              RUNNER_TEMP: dir,
+              GH_TOKEN: 'x',
+              REPO: 'o/r',
+              TRUST: 'trust',
+              ...(appId === undefined ? {} : { VERDICT_APP_ID: appId }),
+              TARGETS: JSON.stringify([{ pr: 7, subject: SHA }]),
+              VERDICT: JSON.stringify({
+                status: 'ok',
+                value: { verdict: 'pass', report: ['ok'] },
+              }),
+            },
+          });
+          expect(r.status, r.stdout + r.stderr).toBe(0);
+          return (
+            JSON.parse(readFileSync(join(dir, 'cq-accept', '7.check-run.json'), 'utf8')) as {
+              output: { title: string; summary: string };
+            }
+          ).output;
+        } finally {
+          rmSync(dir, { recursive: true, force: true });
+        }
+      };
+      for (const interim of [judge(''), judge(undefined)]) {
+        expect(interim.title).toBe('acceptance: pass (#7) (interim: unauthenticated)');
+        expect(interim.summary).toMatch(/Interim mode: no verdict App is registered/);
+      }
+      const app = judge('5113217');
+      expect(app.title).toBe('acceptance: pass (#7)');
+      expect(app.summary).not.toMatch(/Interim mode/);
+    },
+  );
+
+  it.each(bothCopies('cq-accept.yml'))(
     '%s: posts only a verdict no newer same-app row supersedes',
     // ~45 bash + jq runs of the post step: slow on a loaded host.
     { timeout: 180_000 },

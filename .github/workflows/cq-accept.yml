@@ -282,6 +282,10 @@ jobs:
           REPO: ${{ github.repository }}
           TRUST: ${{ github.sha }}
           TARGETS: ${{ needs.resolve.outputs.targets }}
+          # Blank = interim mode: the row is posted as github-actions, which
+          # any Actions job with checks: write can also post, so the row
+          # says it is unauthenticated (contract 14: advisory, not deciding).
+          VERDICT_APP_ID: ${{ vars.CQ_VERDICT_APP_ID }}
         run: |
           set -euo pipefail
           dir="${RUNNER_TEMP}/cq-accept"
@@ -329,8 +333,11 @@ jobs:
             jq -n --slurpfile v "$verdict" \
               --arg sha "$subject" --arg ext "${TRUST}:${subject}" \
               --arg judged "$(cat "${dir}/${pr}.judged-at")" \
+              --arg app "${VERDICT_APP_ID:-}" \
               --argjson pr "$pr" '
               ($v[0] // {}) as $r
+              | (if $app == "" then " (interim: unauthenticated)"
+                 else "" end) as $mode
               | ($r.value.verdict // "fail") as $verdict
               | (if $r.status == "ok" then ($r.value.report | join("\n"))
                  else (($r.error // $r.detail
@@ -349,14 +356,20 @@ jobs:
                   status: "completed",
                   conclusion: "neutral",
                   output: {
-                    title: (if $r.status != "ok"
+                    title: ((if $r.status != "ok"
                       then "acceptance: check " + ($r.status // "crashed")
                       else "acceptance: " + $verdict
-                        + " (#" + ($pr | tostring) + ")" end),
+                        + " (#" + ($pr | tostring) + ")" end) + $mode),
                     summary: ("```text\n"
                       + ($report | gsub("`{3,}"; "` ` `"))
                       + "\n```"
-                      + "\n\ntrust ref `" + $ext + "`")
+                      + "\n\ntrust ref `" + $ext + "`"
+                      + (if $mode == "" then ""
+                         else "\n\nInterim mode: no verdict App is registered"
+                           + " (vars.CQ_VERDICT_APP_ID), so this row is posted"
+                           + " as github-actions and any Actions job with"
+                           + " checks: write could post one like it. Advisory"
+                           + " only." end))
                   }
                 }' > "${dir}/${pr}.check-run.json"
           done
