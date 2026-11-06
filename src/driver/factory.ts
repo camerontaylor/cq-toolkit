@@ -42,6 +42,7 @@ import type { AiSdkDriverOptions } from './ai-sdk/index.js';
 import { ClaudeCodeDriver } from './claude-code/index.js';
 import type { ClaudeCodeDriverOptions, ClaudeCodeTransport } from './claude-code/index.js';
 import { DispatchError } from './errors.js';
+import { nearestKey } from '../shared/nearest.js';
 import { defaultSessionsDir } from './sessions-dir.js';
 import { assertStrictTokenBudgetSupported } from './common/strict-budget.js';
 import type { PerMillionRates } from './pricing/index.js';
@@ -245,42 +246,82 @@ const stderrAliasNotice = (message: string): void => {
   process.stderr.write(message);
 };
 
+const KNOWN_ROLES: readonly string[] = ['fixer', 'conflict-resolver', 'remediator', 'classifier'];
+
+const didYouMean = (name: string, valid: readonly string[]): string => {
+  const near = nearestKey(name, valid);
+  return near === undefined ? '' : ` — did you mean \`${near}\`?`;
+};
+
+/** Every binding whose value is not a lane id, across the WHOLE table. */
+function bindingProblems(bindings: DriverFactoryConfig['bindings']): string[] {
+  const problems: string[] = [];
+  for (const [role, byProvider] of Object.entries(bindings ?? {})) {
+    for (const [provider, configured] of Object.entries(byProvider)) {
+      // Runtime binding validation (PR #238 review round 2): decoded/JS config
+      // is plain data the compiler already trusted — a value outside the four
+      // lanes must fail as a structured pre-dispatch 'config' throw, never as
+      // a wrapper around an unconstructable lane whose run() dies later.
+      if (!LANE_IDS.includes(configured)) {
+        problems.push(
+          `binding for role '${role}' on provider '${provider}' names unknown lane '${String(configured)}' — expected one of: ${LANE_IDS.join(', ')}${didYouMean(String(configured), LANE_IDS)}`,
+        );
+      }
+    }
+  }
+  return problems;
+}
+
+/** The request's own (role, provider) problem, or undefined when a lane resolves. */
+function unboundProblem(
+  role: WorkerRole,
+  provider: string,
+  bindings: DriverFactoryConfig['bindings'],
+): string | undefined {
+  const byRole = bindings?.[role];
+  if (byRole?.[provider] !== undefined || byRole?.['*'] !== undefined) return undefined;
+  if (DEFAULT_PROVIDERS.includes(provider)) return undefined;
+  const hints: string[] = [];
+  const nearProvider = nearestKey(provider, [...DEFAULT_PROVIDERS, ...Object.keys(byRole ?? {})]);
+  if (nearProvider !== undefined) hints.push(`provider \`${nearProvider}\``);
+  if (byRole === undefined) {
+    const nearRole = nearestKey(role, [...KNOWN_ROLES, ...Object.keys(bindings ?? {})]);
+    if (nearRole !== undefined && nearRole !== role) hints.push(`role \`${nearRole}\``);
+  }
+  return `no lane binding for role '${role}' on provider '${provider}' — bind it in DriverFactoryConfig.bindings ('${provider}' is not a default provider, and the factory never falls back)${hints.length > 0 ? ` — did you mean ${hints.join(' / ')}?` : ''}`;
+}
+
+/** One problem keeps the plain one-line message; several are listed, one per line. */
+function throwConfigProblems(problems: readonly string[]): never {
+  if (problems.length === 1) {
+    throw new DispatchError('config', `driver factory: ${problems[0]}`);
+  }
+  throw new DispatchError(
+    'config',
+    `driver factory: ${problems.length} configuration problems:\n${problems.map((p) => `- ${p}`).join('\n')}`,
+  );
+}
+
 /**
  * Resolve the lane for a (role, provider) pair: configured bindings win
- * (exact provider, then the '*' wildcard), then the conservative default —
- * else a DispatchError('config') naming both. Never a silent fallback.
+ * (exact provider, then the '*' wildcard), then the conservative default.
+ * A request whose pair is unbound is a DispatchError('config'). Bad lane
+ * values are rejected earlier, once, at createDriverFactory. Never a silent
+ * fallback.
  */
 function laneForRole(
   role: WorkerRole,
   provider: string,
   bindings: DriverFactoryConfig['bindings'],
 ): LaneId {
+  const unbound = unboundProblem(role, provider, bindings);
+  if (unbound !== undefined) throwConfigProblems([unbound]);
   const byRole = bindings?.[role];
   const configured =
     byRole !== undefined && Object.prototype.hasOwnProperty.call(byRole, provider)
       ? byRole[provider]
       : byRole?.['*'];
-  if (configured !== undefined) {
-    // Runtime binding validation (PR #238 review round 2): decoded/JS config
-    // is plain data the compiler already trusted — a value outside the four
-    // lanes must fail HERE as a structured pre-dispatch 'config' throw (the
-    // factory contract), never as a wrapper around an unconstructable lane
-    // whose run() dies later with an unclassified error, after the caller
-    // may have fetched refs or prepared a worktree. Covers exact and
-    // wildcard bindings alike — both flow through `configured`.
-    if (!LANE_IDS.includes(configured)) {
-      throw new DispatchError(
-        'config',
-        `driver factory: binding for role '${role}' on provider '${provider}' names unknown lane '${String(configured)}' — expected one of: ${LANE_IDS.join(', ')}`,
-      );
-    }
-    return configured;
-  }
-  if (DEFAULT_PROVIDERS.includes(provider)) return DEFAULT_LANE;
-  throw new DispatchError(
-    'config',
-    `driver factory: no lane binding for role '${role}' on provider '${provider}' — bind it in DriverFactoryConfig.bindings ('${provider}' is not a default provider, and the factory never falls back)`,
-  );
+  return configured ?? DEFAULT_LANE;
 }
 
 /** The lane-config sessionsDir override, else the factory's, else the lanes' shared default. */
@@ -469,6 +510,10 @@ export function createDriverFactory(config: DriverFactoryConfig = {}): DriverFac
   // that owns a narration contract injects it through the config; absent,
   // the library default keeps today's stderr line byte-for-byte.
   const onDeprecatedAlias = config.onDeprecatedAlias ?? stderrAliasNotice;
+  // Fail fast: the whole bindings table is known now, so every bad lane value
+  // is reported together at construction, whichever role is resolved later.
+  const tableProblems = bindingProblems(config.bindings);
+  if (tableProblems.length > 0) throwConfigProblems(tableProblems);
   return {
     resolve(request: DriverRequest): ResolvedDriver {
       // Deprecated provider alias (review-debt #186): normalise FIRST, so
