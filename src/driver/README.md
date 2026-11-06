@@ -15,7 +15,7 @@ parts live in `src/driver/schema.ts` and are re-exported by
 - `toolPolicy: ToolPolicy` — `{ allow: readonly string[]; mode?: 'allowlist' | 'unrestricted' | 'none' }`
 - `sandboxPolicy: SandboxPolicy` — `{ level: 'none' | 'workspace-write' | 'read-only' }`
 - `sessionRef?: string` — opaque session handle for multi-turn continuation
-- `budget: Budget` — `{ maxUsd?, maxTokens?, maxSteps?, wallClockMs?, maxAttempts? }`
+- `budget: Budget` — `{ maxUsd?, maxTokens?, maxSteps?, maxOutputTokens?, maxContextTokens?, wallClockMs?, maxAttempts? }`
 
 `WorkerResult` — the plain-data outcome:
 
@@ -63,6 +63,17 @@ semantics are independent of `maxSteps` and unchanged. In particular,
 `maxTokens` remains a post-step usage check on `ai-sdk`, not a strict
 pre-request guarantee. Unenforced lanes do not imply enforcement or
 synthesize a `steps` value.
+
+`Budget.maxOutputTokens` and `Budget.maxContextTokens` are optional positive
+integers enforced by the `ai-sdk` lane only; other lanes ignore them.
+`maxOutputTokens` caps the summed provider-reported output tokens (reasoning
+included), unlike `maxTokens`, which also counts the input and cache reads
+every tool-loop step re-sends. `maxContextTokens` stops the run once a
+completed step's reported input (fresh + cache read + cache write) reaches
+it, before the next request. It is measured, not predicted, so the request
+that crosses the ceiling has already been sent; use `strictTokenBudget` for a
+pre-request guarantee. Either stop settles `stopReason: 'budget'` and appends
+one `type: "budget-stop"` session line with the cause and a one-line detail.
 
 ## Freeze rule
 

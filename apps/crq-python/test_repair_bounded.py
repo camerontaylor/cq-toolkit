@@ -209,7 +209,7 @@ class BoundedRepairTest(unittest.TestCase):
         job['source_snapshot'] = {'source_sha': SOURCE, 'source': '2: pinned code'}
         job['mechanical_evidence'] = 'Earlier verification failed'
         self.config.update(repo='example/repo')
-        self.config['repair'].update(cq_bin='/unused/cli.js', budget={'max_tokens': 8000, 'wall_clock_min': 2})
+        self.config['repair'].update(cq_bin='/unused/cli.js', budget={'max_output_tokens': 8000, 'max_context_tokens': 9000, 'wall_clock_min': 2})
         response = SimpleNamespace(returncode=0, stdout='{"status":"ok","value":{"changed":false}}', stderr='')
         with mock.patch.object(service.cq, 'command', return_value=response) as cmd:
             service.cq.invoke(self.config, {'model': 'zai/glm-5.3-flash'}, job, self.root, self.root)

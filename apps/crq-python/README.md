@@ -222,6 +222,15 @@ reviewed head). This is independent of the repair enqueue above, which still run
 
 The cq fixer passes JSON item/worktree/driver/budget and the shipped git-only
 harness, removes CQ_SANDBOX* and CQ_RUN_TOOL, and never uses promptOverride.
+Each finding job runs one fresh `review.fixItem` process and session per rung
+(A0, A1, A2), and the judge is another; nothing carries over between them
+except the mechanical evidence string. The budget is per attempt:
+`repair.budget.max_output_tokens` (default 500k) counts output tokens only,
+`max_context_tokens` (default 200k) stops an attempt once a request's input
+context reaches it, and `wall_clock_min` bounds time. A budget stop's reason
+comes from the session's `budget-stop` line. These need a `cq_bin` built with
+`Budget.maxOutputTokens`/`maxContextTokens`; an older build rejects the input.
+`max_tokens` is read only by the Codex/Paseo launchers.
 Codex uses ephemeral structured output with workspace-write for fixing and
 read-only for judgement; remote pushurl is overridden to /dev/null in children.
 The cq read-only judge bridge uses the toolkit AI SDK driver with tools disabled.

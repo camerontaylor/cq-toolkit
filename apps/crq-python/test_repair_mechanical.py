@@ -101,12 +101,14 @@ class CqDriverTest(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         config = {'repo': 'example/repo', 'repair': {'cq_bin': '/unused/cli.js',
-                  'budget': {'wall_clock_min': 1, 'max_tokens': 1000}}}
+                  'budget': {'wall_clock_min': 1, 'max_tokens': 1000, 'max_output_tokens': 500,
+                             'max_context_tokens': 2000}}}
+        self.directory = Path(tmp.name)
         job = {'job': 'crq-run1-F1', 'pr': pr, 'finding': {'path': 'src/a.ts', 'line': 1, 'body': 'x'},
                'source_snapshot': {}}
         with mock.patch.object(cq, 'command', return_value=SimpleNamespace(
                 returncode=returncode, stdout=stdout, stderr='')) as command:
-            report = cq.invoke(config, {'model': 'zai/glm-5.3-flash'}, job, Path(tmp.name), Path(tmp.name))
+            report = cq.invoke(config, {'model': 'zai/glm-5.3-flash'}, job, Path(tmp.name), self.directory)
         return report, command.call_args.args[0]
 
     def test_quota_exhaustion_pauses_like_a_rate_limit(self):
@@ -121,6 +123,47 @@ class CqDriverTest(unittest.TestCase):
         self.assertEqual(report['stop'], 'error')
         report, _ = self.invoke(json.dumps({'status': 'budget-exhausted'}))
         self.assertEqual(report['stop'], 'budget')
+
+    def test_budget_counts_output_and_caps_context(self):
+        _, argv = self.invoke('{"status":"ok","value":{"changed":false}}', returncode=0)
+        sent = json.loads(next(a for a in argv if a.startswith('--budget='))[len('--budget='):])
+        self.assertEqual(sent, {'maxOutputTokens': 500, 'maxContextTokens': 2000, 'wallClockMs': 60000})
+
+    def budget_run(self, own_lines):
+        """Run invoke once in an attempt dir that already holds an earlier
+        run's session (a deferred rung re-runs in the same directory)."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        sessions = Path(tmp.name) / 'sessions'
+        sessions.mkdir()
+        stale = {'type': 'budget-stop', 'cause': 'output-tokens', 'step': 3, 'at': 'x',
+                 'detail': 'output budget: 500 output tokens over 3 steps (cap 500)'}
+        (sessions / 'ses-0-earlier.jsonl').write_text(json.dumps(stale) + '\n')
+
+        def fake(argv, **kwargs):
+            # This run's own session: one malformed line and a torn tail.
+            (Path(kwargs['env']['CQ_SESSIONS_DIR']) / 'ses-9-this-run.jsonl').write_text(
+                '\n'.join([json.dumps({'type': 'session'}), '{not json', *own_lines, '{"type": "budget-st']))
+            return SimpleNamespace(returncode=3, stdout='{"status":"budget-exhausted"}', stderr='')
+        config = {'repo': 'example/repo', 'repair': {'cq_bin': '/unused/cli.js', 'budget': {
+            'wall_clock_min': 1, 'max_output_tokens': 500, 'max_context_tokens': 2000}}}
+        job = {'job': 'crq-run1-F1', 'finding': {'path': 'src/a.ts', 'line': 1, 'body': 'x'},
+               'source_snapshot': {}}
+        with mock.patch.object(cq, 'command', side_effect=fake):
+            return cq.invoke(config, {'model': 'zai/glm-5.3-flash'}, job, Path(tmp.name), Path(tmp.name))
+
+    def test_budget_stop_reason_comes_from_this_runs_session(self):
+        stop = {'type': 'budget-stop', 'cause': 'context', 'step': 8, 'at': 'x',
+                'detail': 'context ceiling: step 8 carried 201000 input tokens (ceiling 200000)'}
+        report = self.budget_run([json.dumps(stop)])
+        self.assertEqual(report['stop'], 'budget')
+        self.assertEqual(report['summary'],
+                         'budget-exhausted: context ceiling: step 8 carried 201000 input tokens (ceiling 200000)')
+
+    def test_an_earlier_runs_budget_stop_is_never_reported(self):
+        report = self.budget_run([])
+        self.assertEqual(report['summary'],
+                         'budget-exhausted: token or wall-clock cap (no budget-stop line)')
 
     def test_pr_flag_is_omitted_without_a_positive_pr(self):
         # Backfill and merged-current jobs carry pr 0; review.fixItem rejects

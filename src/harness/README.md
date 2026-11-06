@@ -67,8 +67,13 @@ the same scan rule and appear on their tool message. Diagnostic lines share
 the store's serialized append and torn-tail recovery, and are not replayed
 as conversation turns. Old sessions remain readable.
 
+The ai-sdk driver also appends one `type: "budget-stop"` line (cause
+`output-tokens` or `context`, detail, step) when `Budget.maxOutputTokens` or
+`Budget.maxContextTokens` ends a run. It is diagnostic only, never replayed.
+
 Session compatibility is forward-only. A new reader resumes an old JSONL
-session. An old reader rejects a session containing new `tool-failure` rows or
+session. An old reader rejects a session containing new `tool-failure` or
+`budget-stop` rows or
 new message fields (`usage`, `toolCalls`, `description`) at its strict line
 schema; it must not ignore them. For downgrade, use the old binary with a fresh
 session and workspace, or restore a session snapshot made before the new rows.

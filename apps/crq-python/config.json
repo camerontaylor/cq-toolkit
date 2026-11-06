@@ -78,7 +78,9 @@
     },
     "budget": {
       "wall_clock_min": 20,
-      "max_tokens": 400000
+      "max_tokens": 400000,
+      "max_output_tokens": 500000,
+      "max_context_tokens": 200000
     },
     "mechanical": {
       "tests": false,

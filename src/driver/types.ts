@@ -130,6 +130,23 @@ export interface Budget {
   /** Main-loop completed-step cap; an optional one-step structured-output repair may exceed it. */
   maxSteps?: number;
   /**
+   * Cumulative OUTPUT-token cap (provider-reported output tokens, reasoning
+   * included, summed over completed steps). Unlike `maxTokens` it ignores
+   * input and cache reads, which every tool-loop step re-sends. Positive
+   * integer. Enforced by the ai-sdk lane after each step; other lanes do not
+   * honour it.
+   */
+  maxOutputTokens?: number;
+  /**
+   * Per-request input-context ceiling: when a completed step's reported
+   * input (fresh + cache read + cache write) reaches it, the run stops
+   * before the next request as `budget`. Measured, not predicted, so the
+   * request that crosses it has already been sent; it bounds context growth,
+   * it is not the strict pre-request ceiling. Positive integer. Enforced by
+   * the ai-sdk lane; other lanes do not honour it.
+   */
+  maxContextTokens?: number;
+  /**
    * Opt-in binding pre-request token ceiling (strict). Absent = the legacy
    * soft `maxTokens` semantics, unchanged — enabling this does not redefine
    * what `maxTokens` means.
