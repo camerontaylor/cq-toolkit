@@ -3,7 +3,22 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { ROOT } from './policy-provenance.helpers.js';
+import { ROOT, code } from './policy-provenance.helpers.js';
+
+// The loop step's `env:` block: the `run:` script starts at `run: |` and
+// everything up to it (after `env:`) is the block. Keys must be ACTIVE
+// declarations there — a commented-out key still satisfies a raw-text
+// `toContain` but exports nothing at runtime.
+function loopStepEnv(body: string): string {
+  const stepAt = body.indexOf('- name: Review loop over this repo');
+  if (stepAt === -1) throw new Error('no review-loop step');
+  const step = body.slice(stepAt);
+  const envAt = step.indexOf('env:');
+  if (envAt === -1) throw new Error('no env: block in review-loop step');
+  const runAt = step.indexOf('run: |');
+  if (runAt === -1) throw new Error('no run: block in review-loop step');
+  return step.slice(envAt, runAt);
+}
 
 describe('self-review-loop peak-aware model selection (D11)', () => {
   it('template and instantiation switch models instead of excluding the peak', () => {
@@ -20,10 +35,18 @@ describe('self-review-loop peak-aware model selection (D11)', () => {
         'refusing to initiate operations',
       );
       expect(text, `${file}: no weekday guard read`).not.toContain('date -u +%u');
-      // Both provider keys are exported unconditionally …
-      expect(text, `${file}: off-peak key declaration`).toContain('ZAI_API_KEY: ${{ secrets.');
-      expect(text, `${file}: peak key declaration`).toContain('OPENCODE_GO_API_KEY: ${{ secrets.');
-      expect(text, `${file}: peak base URL declaration`).toContain(
+      // Both provider keys are exported unconditionally in the loop step's
+      // env: block — asserted on comment-free content so a commented-out
+      // key cannot satisfy the check.
+      const body = code(text);
+      const envBlock = loopStepEnv(body);
+      expect(envBlock, `${file}: off-peak key declaration`).toContain(
+        'ZAI_API_KEY: ${{ secrets.',
+      );
+      expect(envBlock, `${file}: peak key declaration`).toContain(
+        'OPENCODE_GO_API_KEY: ${{ secrets.',
+      );
+      expect(envBlock, `${file}: peak base URL declaration`).toContain(
         'OPENCODE_GO_BASE_URL: ${{ vars.OPENCODE_GO_BASE_URL }}',
       );
       // … and the required one is derived from the toolkit's ONE decision

@@ -280,8 +280,8 @@ describe('deciding legs run trusted code over head data (ADR-0004 D-B, D-C, D-E)
         base: { ref: base },
       });
       for (const pulls of [
-        [pull('main'), pull('main')],
-        [pull('main'), pull('main')],
+        [pull('main'), pull('merge-queue')],
+        [pull('merge-queue'), pull('main')],
       ]) {
         const result = spawnSync(
           'jq',
@@ -302,6 +302,28 @@ describe('deciding legs run trusted code over head data (ADR-0004 D-B, D-C, D-E)
         );
         expect(result.status, result.stderr).toBe(0);
         expect(result.stdout.trim()).toBe('main');
+      }
+      // A non-main-only association must produce empty output (nothing to judge).
+      {
+        const result = spawnSync(
+          'jq',
+          [
+            '-r',
+            '--arg',
+            'sha',
+            '0123456789abcdef0123456789abcdef01234567',
+            '--argjson',
+            'repo',
+            '42',
+            filter ?? '',
+          ],
+          {
+            input: JSON.stringify([pull('merge-queue')]),
+            encoding: 'utf8',
+          },
+        );
+        expect(result.status, result.stderr).toBe(0);
+        expect(result.stdout.trim()).toBe('');
       }
     },
   );
