@@ -62,7 +62,10 @@ class CliTests(ControllerFixture):
                 self.assertIn("refused:", result.stderr)
                 self.assertIn("helper", result.stderr)
                 self.assertNotIn("--sha", result.stderr)
-                self.assertEqual(result.stdout, "")
+                error = json.loads(result.stdout)["error"]
+                self.assertEqual(error["kind"], "refused")
+                self.assertEqual(error["subcommand"], "switch")
+                self.assertEqual(error["exitCode"], 2)
                 self.assertFalse(lock.exists())
                 self.assertEqual(list(self.record_dir.iterdir()), [])
                 self.assertEqual(self.command("rev-parse", "HEAD").strip(), self.before)
@@ -155,12 +158,15 @@ class CliTests(ControllerFixture):
         # an isolated XDG_STATE_HOME means the actual user heartbeat is never
         # consulted, and no queue tick can substitute for it.
         self.write_state("queue.json", {"last_tick": "2026-10-28T00:00:00Z"})
-        result = self.run_cli("health",
+        result = self.run_cli("health", "--interval-seconds", "0",
                               env={"XDG_STATE_HOME": str(self.base / "cli-xdg")})
         self.assertEqual(result.returncode, 2)
         self.assertIn("refused:", result.stderr)
         self.assertIn("completion heartbeat", result.stderr)
-        self.assertEqual(result.stdout, "")
+        error = json.loads(result.stdout)["error"]
+        self.assertEqual(error["kind"], "refused")
+        self.assertEqual(error["subcommand"], "health")
+        self.assertEqual(error["exitCode"], 2)
 
     def test_health_cli_stale_heartbeat_is_unhealthy_with_unchanged_shape(self):
         xdg = self.base / "cli-xdg"
@@ -171,7 +177,9 @@ class CliTests(ControllerFixture):
         (xdg / "crq/heartbeat.json").write_text(json.dumps(payload) + "\n")
         # An advancing queue save must not mask the stale completion slot.
         self.write_state("queue.json", {"last_tick": "2026-10-28T00:20:00Z"})
-        result = self.run_cli("health", "--first-tick-timeout-seconds", "0", env={"XDG_STATE_HOME": str(xdg)})
+        result = self.run_cli("health", "--interval-seconds", "0",
+                              "--first-tick-timeout-seconds", "0",
+                              env={"XDG_STATE_HOME": str(xdg)})
         self.assertEqual(result.returncode, 1)
         artifact = json.loads(result.stdout)
         self.assertEqual(artifact["operation"], "health")
@@ -182,11 +190,36 @@ class CliTests(ControllerFixture):
         self.assertFalse(first["advanced"])
         self.assertIn("receipts", first)
 
-    def test_refusal_exits_2_with_stderr_reason_and_no_stdout_artifact(self):
+    def test_refusal_exits_2_with_json_error_artifact_and_stderr_reason(self):
         result = self.run_cli("switch", "--sha", "nothex", "--tag", self.tag)
         self.assertEqual(result.returncode, 2)
         self.assertIn("refused:", result.stderr)
-        self.assertEqual(result.stdout, "")
+        error = json.loads(result.stdout)["error"]
+        self.assertEqual(error["kind"], "refused")
+        self.assertEqual(error["subcommand"], "switch")
+        self.assertEqual(error["message"], result.stderr.split("refused: ", 1)[1].strip())
+        self.assertEqual(error["exitCode"], 2)
+
+    def test_pre_helper_failure_exits_2_with_refused_artifact(self):
+        # A malformed prior record fails before helper entry: the helper made no
+        # change, so this is a refusal (exit 2), never a health failure (exit 1).
+        record = self.base / "prior.json"
+        record.write_text("{not json")
+        result = self.run_cli("rollback", "--prior-record", str(record))
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("refused:", result.stderr)
+        error = json.loads(result.stdout)["error"]
+        self.assertEqual(error["kind"], "refused")
+        self.assertEqual(error["subcommand"], "rollback")
+        self.assertEqual(error["exitCode"], 2)
+
+    def test_health_requires_interval_seconds(self):
+        # The default 0 could never observe a second advancing tick; the caller
+        # must choose the later-observation delay instead.
+        result = self.run_cli("health",
+                              env={"XDG_STATE_HOME": str(self.base / "cli-xdg")})
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("--interval-seconds", result.stderr)
 
 
 if __name__ == "__main__":
