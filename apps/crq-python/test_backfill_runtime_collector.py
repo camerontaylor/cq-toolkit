@@ -100,6 +100,22 @@ class RuntimeTest(RuntimeTestBase):
             self.assertEqual(self.cached_collection(merge, response), expected)
             self.assertGreater(lineage.call_count, 0)
 
+    def test_cache_pointer_with_wrong_shaped_mappings_recomputes(self):
+        merge = self.f.commit({"new": b"unique\n"})
+        response = {"number": 7, "merged": True, "merge_commit_sha": merge}
+        expected = self.cached_collection(merge, response)
+        filename = self.state / "required-cache/7.json"
+        value = ledger.loads(Path(ledger.loads(filename.read_bytes())["location"]).read_bytes())
+        for field, wrong in (("paths", {}), ("member", [])):
+            with self.subTest(field=field):
+                # In-store, digest-valid and carrying the right key: only the
+                # shape guard can reject this pointer.
+                forged = self.f.store.put(ledger.canonical({**value, field: wrong}))
+                filename.write_bytes(ledger.canonical(forged))
+                with mock.patch.object(self.f.repo, "lineage", wraps=self.f.repo.lineage) as lineage:
+                    self.assertEqual(self.cached_collection(merge, response), expected)
+                    self.assertGreater(lineage.call_count, 0)
+
     def test_lineage_epoch_invalidates_cached_mappings(self):
         merge = self.f.commit({"new": b"unique\n"})
         response = {"number": 7, "merged": True, "merge_commit_sha": merge}
