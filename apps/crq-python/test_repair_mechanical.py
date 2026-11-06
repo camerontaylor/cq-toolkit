@@ -97,12 +97,12 @@ class MechanicalGateTest(unittest.TestCase):
 
 
 class CqDriverTest(unittest.TestCase):
-    def invoke(self, stdout, returncode=1):
+    def invoke(self, stdout, returncode=1, pr=None):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         config = {'repo': 'example/repo', 'repair': {'cq_bin': '/unused/cli.js',
                   'budget': {'wall_clock_min': 1, 'max_tokens': 1000}}}
-        job = {'job': 'crq-run1-F1', 'finding': {'path': 'src/a.ts', 'line': 1, 'body': 'x'},
+        job = {'job': 'crq-run1-F1', 'pr': pr, 'finding': {'path': 'src/a.ts', 'line': 1, 'body': 'x'},
                'source_snapshot': {}}
         with mock.patch.object(cq, 'command', return_value=SimpleNamespace(
                 returncode=returncode, stdout=stdout, stderr='')) as command:
@@ -121,6 +121,14 @@ class CqDriverTest(unittest.TestCase):
         self.assertEqual(report['stop'], 'error')
         report, _ = self.invoke(json.dumps({'status': 'budget-exhausted'}))
         self.assertEqual(report['stop'], 'budget')
+
+    def test_pr_flag_is_omitted_without_a_positive_pr(self):
+        # Backfill and merged-current jobs carry pr 0; review.fixItem rejects
+        # `pr: 0` ("Too small: expected number to be >0") but accepts no pr.
+        for pr, expected in ((0, None), (None, None), (42, '--pr=42')):
+            with self.subTest(pr=pr):
+                _, argv = self.invoke('{"status":"ok","value":{"changed":false}}', returncode=0, pr=pr)
+                self.assertEqual(next((a for a in argv if a.startswith('--pr=')), None), expected)
 
     def test_fixer_is_told_its_shell_allowlist(self):
         _, argv = self.invoke('{"status":"ok","value":{"changed":false}}', returncode=0)

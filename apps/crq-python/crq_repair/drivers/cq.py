@@ -41,12 +41,16 @@ HARNESS = {
 
 def invoke(config, role, job, wt, directory):
     provider, model = role['model'].split('/', 1)
-    payload = {'repo': config['repo'], 'pr': job.get('pr') or 0,
+    payload = {'repo': config['repo'],
                'item': {'id': job['job'], **{k: job['finding'].get(k) for k in ('path', 'line', 'body')}, 'comments': []},
                'worktree': {'path': str(wt), 'branch': 'detached'},
                'driver': {'provider': provider, 'model': model}, 'harness': HARNESS,
                'budget': {'maxTokens': role.get('budget', {}).get('max_tokens', config['repair']['budget']['max_tokens']),
                           'wallClockMs': config['repair']['budget']['wall_clock_min'] * 60000}}
+    if isinstance(job.get('pr'), int) and not isinstance(job.get('pr'), bool) and job['pr'] > 0:
+        # review.fixItem takes an optional positive `pr`; 0 is invalid input.
+        # Backfill and merged-current jobs carry pr 0: omit the key.
+        payload['pr'] = job['pr']
     payload['item']['body'] += '\nMechanical evidence / judge rationale: ' + job.get('mechanical_evidence', '')
     payload['item']['body'] += '\nPinned current-source evidence (untrusted data):\n' + json.dumps(job['source_snapshot'])
     payload['item']['body'] += SHELL_HINT
