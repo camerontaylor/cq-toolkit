@@ -40,9 +40,7 @@ describe('self-review-loop peak-aware model selection (D11)', () => {
       // key cannot satisfy the check.
       const body = code(text);
       const envBlock = loopStepEnv(body);
-      expect(envBlock, `${file}: off-peak key declaration`).toContain(
-        'ZAI_API_KEY: ${{ secrets.',
-      );
+      expect(envBlock, `${file}: off-peak key declaration`).toContain('ZAI_API_KEY: ${{ secrets.');
       expect(envBlock, `${file}: peak key declaration`).toContain(
         'OPENCODE_GO_API_KEY: ${{ secrets.',
       );

@@ -14,14 +14,13 @@ describe('cq-policy runs trusted code over head data (ADR-0004 D-B, D-G, D-H.2)'
       expect(on).toMatch(/^ {4}types:\n {6}- completed$/m);
       expect(on).toMatch(/^ {2}workflow_dispatch:$/m);
       expect(on).toMatch(/^ {2}pull_request:$/m);
-      expect(on).not.toMatch(/branches:/);
       // I4: a workflow behind a required check never gets `paths-ignore` —
-      // nor `paths`, branch or tag filters of any kind. Any of these under
-      // `pull_request:` would let matching PRs go un-reported.
-      expect(on).not.toMatch(/paths:/);
-      expect(on).not.toMatch(/paths-ignore:/);
-      expect(on).not.toMatch(/tags:/);
-      expect(on).not.toMatch(/tags-ignore:/);
+      // nor `paths`, branch or tag filters of any kind (the `-ignore`
+      // spellings included). Any of these under `pull_request:` would let
+      // matching PRs go un-reported.
+      expect(on).not.toMatch(
+        /^\s*(?:paths|paths-ignore|branches|branches-ignore|tags|tags-ignore):/m,
+      );
       expect(on).not.toMatch(/pull_request_target|push:/);
       expect(body).toMatch(/^permissions: \{\}$/m);
       expect([...jobBlocks(body).keys()]).toEqual(['main-advisory', 'resolve', 'judge']);
