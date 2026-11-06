@@ -1,10 +1,14 @@
 # Driver seam
 
 The seam between the toolkit and any worker that can run a prompt. One
-method: `Driver.run(opInvocation) → Promise<WorkerResult>`. Source of
-truth: `src/driver/types.ts` (types); zod mirrors of the serializable
-parts live in `src/driver/schema.ts` and are re-exported by
-`src/kernel/schema.ts`.
+method: `Driver.run(opInvocation, options?) → Promise<WorkerResult>`.
+`opInvocation` is the plain-data request (below); `options` is the
+runtime-only `RunOptions` and carries the governed abort `signal`. A
+governed caller MUST pass `options.signal` — it is the only cancellation
+channel the lanes honor (conformance leg b-iii), and a run dispatched
+without it cannot be stopped. Source of truth: `src/driver/types.ts`
+(types); zod mirrors of the serializable parts live in
+`src/driver/schema.ts` and are re-exported by `src/kernel/schema.ts`.
 
 ## The contract
 
@@ -35,8 +39,9 @@ parts live in `src/driver/schema.ts` and are re-exported by
 ## Seam rules
 
 - Tokens are the source of truth. `costUSD` is OPTIONAL and derived-only:
-  callers compute it from a price map over `usage`; drivers never report
-  trusted USD. A present `costUSD` is labeled `costBasis: 'modeled'` — the
+  each driver attaches it from its price map over `usage` (unknown model →
+  absent), and the kernel only observes the figure. Drivers never report
+  vendor-trusted USD. A present `costUSD` is labeled `costBasis: 'modeled'` — the
   api-equivalent list-price proxy for the tokens consumed, never presented
   as billed (`billed` is reserved for a lane whose provider reports actual
   invoiced cost; none exists in v1) — and a result with no `costUSD`
