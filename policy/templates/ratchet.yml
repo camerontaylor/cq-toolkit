@@ -1,17 +1,18 @@
-# Advisory ratchet measurements and one issue on a main PR drop.
+# Advisory baseline monotonicity guard and one issue when a main PR loosens a
+# baseline. This workflow runs no test suite: coverage is measured once per PR
+# by cq-measure and judged with typecheck-count by cq-verify (`cq/ratchet`),
+# and the required `static` check already runs the typecheck ratchet.
 name: ratchet
 
 on:
   pull_request:
-  push:
-  workflow_dispatch:
 
 permissions:
   contents: read
 
-# Supersede older diagnostics for the same event and ref.
+# Supersede older diagnostics for the same ref.
 concurrency:
-  group: ratchet-${{ github.event_name }}-${{ github.ref }}
+  group: ratchet-${{ github.ref }}
   cancel-in-progress: true
 
 # pnpm-workspace.yaml's global virtual store is a local-worktree speedup
@@ -24,14 +25,9 @@ jobs:
   ratchet:
     name: ratchet
     runs-on: ubuntu-latest
-    timeout-minutes: 20
-    # The `cq-state` settle ledger is machine-written; its pushes are not
-    # reviewable changes (review-debt #226). Job-level, never a trigger
-    # filter — I4 keeps the trigger surface intact.
-    if: ${{ github.ref != 'refs/heads/cq-state' }}
+    timeout-minutes: 10
     outputs:
-      suite_failed: ${{ steps.suite.outcome == 'failure' }}
-      drop: ${{ steps.suite.outcome == 'failure' || steps.typecheck.outcome == 'failure' || steps.coverage.outcome == 'failure' || steps.monotonic.outcome == 'failure' }}
+      drop: ${{ steps.monotonic.outcome == 'failure' }}
     steps:
       - name: Check out the repo (full history — the guard needs the base diff)
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (immutable commit pin; repo policy)
@@ -40,8 +36,6 @@ jobs:
           # pnpm runs repo code below, so the checkout token must not
           # survive checkout (persist-credentials: false).
           persist-credentials: false
-      - name: Install ripgrep for harness search tools
-        uses: ./.github/actions/install-ripgrep
       - name: Set up pnpm (version from package.json packageManager)
         # v6.1.0, immutable commit pin (repo policy)
         uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413
@@ -54,46 +48,9 @@ jobs:
         run: pnpm install --frozen-lockfile
       - name: Build the CLI from source
         run: pnpm run build
-      - name: 'Typecheck ratchet (CLI: ratchet.checkRatchet)'
-        id: typecheck
-        continue-on-error: ${{ github.event_name == 'pull_request' && github.base_ref == 'main' }}
-        run: |
-          # The `command` source runs lane C's CheckRunner over a real tsc
-          # invocation; `parse: "tsc-text"` applies the shared evidence rule
-          # (a clean exit 0 over an empty capture is the authoritative zero,
-          # exits 1/2 hand over the diagnostics text, anything else is
-          # non-passing evidence). No expression interpolation in the script:
-          # the source JSON is a literal.
-          out="$(node dist/cli.js ratchet.checkRatchet \
-            --ws=. \
-            --target=typecheck \
-            --metric=typecheck-count \
-            --source='{"kind":"command","command":"node","args":["node_modules/typescript/bin/tsc","--noEmit","-p","tsconfig.json","--pretty","false"],"parse":"tsc-text"}')"
-          printf '%s\n' "$out"
-          printf '%s' "$out" | jq -e '.status == "ok" and .value.verdict == "pass"' >/dev/null
-      - name: Run coverage suite
-        id: suite
-        continue-on-error: ${{ github.event_name == 'pull_request' && github.base_ref == 'main' }}
-        run: |
-          # Remove stale evidence before measuring; a crashed suite cannot reuse it.
-          rm -f coverage/coverage-summary.json
-          pnpm exec vitest run --coverage
-      - name: 'Coverage ratchet (CLI: ratchet.checkRatchet)'
-        id: coverage
-        if: ${{ !cancelled() && steps.suite.outcome == 'success' }}
-        continue-on-error: ${{ github.event_name == 'pull_request' && github.base_ref == 'main' }}
-        run: |
-          out="$(node dist/cli.js ratchet.checkRatchet \
-            --ws=. \
-            --target=coverage \
-            --metric=coverage \
-            --source='{"kind":"file","path":"coverage/coverage-summary.json","parse":"coverage-json"}')"
-          printf '%s\n' "$out"
-          printf '%s' "$out" | jq -e '.status == "ok" and .value.verdict == "pass"' >/dev/null
       - name: 'Baseline monotonicity guard (CLI: ratchet.monotonicGuard)'
         id: monotonic
-        continue-on-error: ${{ github.event_name == 'pull_request' && github.base_ref == 'main' }}
-        if: ${{ github.event_name == 'pull_request' && !cancelled() }}
+        continue-on-error: ${{ github.base_ref == 'main' }}
         env:
           # Env-indirection doctrine: expression values reach the shell as
           # env vars, never as interpolated text (an empty expression inside
@@ -114,7 +71,7 @@ jobs:
     # Fork tokens may be read-only; reporting remains advisory.
     continue-on-error: true
     needs: ratchet
-    if: github.event_name == 'pull_request' && github.base_ref == 'main' && needs.ratchet.outputs.drop == 'true'
+    if: github.base_ref == 'main' && needs.ratchet.outputs.drop == 'true'
     runs-on: ubuntu-latest
     permissions:
       issues: write
@@ -123,17 +80,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          SUITE_FAILED: ${{ needs.ratchet.outputs.suite_failed }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
           issue="$(gh issue list --state open --search 'ratchet in:title' --json number,title --jq '[.[] | select(.title == "ratchet")][0].number // empty')"
-          if [ "$SUITE_FAILED" = "true" ]; then
-            body="Ratchet test execution failed on PR #${PR_NUMBER}; coverage was not measured. Inspect the run for any additional baseline diagnostics. Evidence: ${RUN_URL}"
-          else
-            body="Ratchet coverage/baseline drop or measurement failure on PR #${PR_NUMBER}. Evidence: ${RUN_URL}"
-          fi
+          body="Ratchet baseline monotonicity guard failed on PR #${PR_NUMBER}: a committed baseline was loosened, or deleted without a replacement. Evidence: ${RUN_URL}"
           if [ -n "$issue" ]; then
             gh issue edit "$issue" --body "$body"
           else
