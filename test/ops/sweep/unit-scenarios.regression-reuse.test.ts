@@ -80,4 +80,28 @@ describe('sweep unit in-process scenarios', () => {
       await rm(world.root, { recursive: true, force: true });
     }
   });
+
+  test('M2c head on create and reuse', async () => {
+    // headSha is the tree's `git rev-parse HEAD` on BOTH acquisition paths
+    // (the effects seam's revParse is exactly that query): a fresh create
+    // records the new tree's HEAD — not an absence — and a reuse keeps
+    // recording its own carried HEAD.
+    const world = await makeWorld([{ failing: false }, { failing: false }]);
+    try {
+      const first = await runUnit(world);
+      expect(first.status).toBe('ok');
+      if (first.status === 'ok') {
+        expect(first.value.worktree.reused).toBe(false);
+        expect(first.value.worktree.headSha).toBe('head-sha');
+      }
+      const reused = await runUnit(world);
+      expect(reused.status).toBe('ok');
+      if (reused.status === 'ok') {
+        expect(reused.value.worktree.reused).toBe(true);
+        expect(reused.value.worktree.headSha).toBe('head-sha');
+      }
+    } finally {
+      await rm(world.root, { recursive: true, force: true });
+    }
+  });
 });

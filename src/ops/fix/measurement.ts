@@ -222,15 +222,24 @@ export function reviewPlannedUnitsOf(report: {
 }
 
 /**
+ * One planned unit's baseline-probe evidence (M2c): a completed probe names
+ * its failure count and the worktree HEAD it ran at. `probeHead` is OPTIONAL
+ * so a producer without a head — the review run's own completed/count-1 map
+ * — needs no change; an absent head stays null on the emitted row.
+ */
+type BaselineProbe = { completed: boolean; count: number | null; probeHead?: string | null };
+
+/**
  * Denominator evidence for every planned unit (ADR-0008 baseline row): every
  * planned unit is represented. A completed probe reports its count; a bailed,
  * absent or probeless unit is unknown with a reason, never zero. `probeHead`
- * stays null: FixTaskReport carries no probe head, and the baseline probe
- * producer (ADR-0008 planner/T35 scope) is not wired in this slice.
+ * carries the completed probe's own head when its producer knows it (M2c: the
+ * fix run wires each unit's baseline probe at its worktree HEAD); a producer
+ * without one leaves the row's head null.
  */
 export function baselineFailuresOf(
   plannedUnits: readonly string[],
-  probeCounts: ReadonlyMap<string, { completed: boolean; count: number | null }>,
+  probeCounts: ReadonlyMap<string, BaselineProbe>,
 ): BaselineFailureRecord[] {
   return plannedUnits.map((unitId) => {
     const probe = probeCounts.get(unitId);
@@ -242,7 +251,13 @@ export function baselineFailuresOf(
         count: null,
         unknownReason: 'baseline probe did not complete for this unit',
       };
-    return { unitId, probeHead: null, completed: true, count: probe.count, unknownReason: null };
+    return {
+      unitId,
+      probeHead: probe.probeHead ?? null,
+      completed: true,
+      count: probe.count,
+      unknownReason: null,
+    };
   });
 }
 
@@ -267,7 +282,7 @@ export function baselineFailuresOf(
 export function measureRun(
   evidence: readonly (FixTaskReport | AddressFix)[],
   plannedUnits: readonly string[] | null,
-  probeCounts: ReadonlyMap<string, { completed: boolean; count: number | null }>,
+  probeCounts: ReadonlyMap<string, BaselineProbe>,
   readCommitMessage: (sha: string) => string | undefined,
 ): MetricRecord & { availability: Record<string, AvailabilityRecord> } {
   const { closures, unknownTrailerShas } = closuresOf(evidence.map(candidateOf), readCommitMessage);
