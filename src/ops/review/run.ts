@@ -284,8 +284,18 @@ export function makeReviewRun(
       }
       // Retained receipt findings are obligations, not a current review source.
       // Include them even when settling an old head requires a fresh vendor run.
-      const retainedLedger = effects.openLedger(state.branch).load();
-      const retainedFindings = retainedReceiptFindings(retainedLedger);
+      let retainedLedger: DevLedgerFile;
+      let retainedFindings: Finding[];
+      try {
+        retainedLedger = effects.openLedger(state.branch).load();
+        retainedFindings = retainedReceiptFindings(retainedLedger);
+      } catch (error) {
+        // Corrupt persisted ledger state is a taxonomy failure, never a rejection.
+        return {
+          status: 'failed',
+          error: `review.run: retained vendor debt could not be read (${error instanceof Error ? error.message : String(error)})`,
+        };
+      }
       if (retainedFindings.length > 0)
         records.push({
           schemaVersion: 1,
@@ -1119,11 +1129,22 @@ export function makeReviewRun(
         base: state.base,
         dirtySha256: state.dirtySha256,
       };
-      const ancestry = readCurrentEnrollment(
-        effects.openLedger(state.branch).load(),
-        currentIdentity,
-        target,
-      );
+      let ancestry: ReturnType<typeof readCurrentEnrollment>;
+      try {
+        ancestry = readCurrentEnrollment(
+          effects.openLedger(state.branch).load(),
+          currentIdentity,
+          target,
+        );
+      } catch (error) {
+        // The findings record was already persisted: return the taxonomy failure
+        // with that record rather than rejecting with no result at all.
+        return {
+          status: 'failed',
+          error: `review.run: current enrollment lineage could not be read (${error instanceof Error ? error.message : String(error)})`,
+          report: record,
+        };
+      }
       const pendingAtThisIdentity =
         ancestry.kind === 'ambiguous'
           ? ancestry.requestIds

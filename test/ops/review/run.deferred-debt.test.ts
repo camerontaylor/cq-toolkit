@@ -164,3 +164,132 @@ it.each(['current', 'changed', 'queue-auth', 'empty-file', 'absent-file'] as con
     }
   },
 );
+
+it('maps a corrupt retained ledger read to a failed result', async () => {
+  const repo = await makeTestRepo();
+  try {
+    await configureAgentRepo(repo);
+    const real = repoEffects(repo);
+    const effects = {
+      ...real,
+      openLedger: (branch: string) => ({
+        ...real.openLedger(branch),
+        load: () => {
+          throw new Error('dev-record: schema violation');
+        },
+      }),
+    };
+    const result = await makeReviewRun({
+      drivers: scriptedDrivers(),
+      effectsFactory: () => effects,
+      scannerFactory: () => async (components) =>
+        components.map((component) => ({ component: component.component, hits: [] })),
+    })({ repoRoot: repo.root });
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed')
+      expect(result.error).toContain('retained vendor debt could not be read');
+    expect(result.error).toContain('dev-record: schema violation');
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+it('maps corrupt enrollment lineage to a failed result that keeps the persisted record', async () => {
+  const repo = await makeTestRepo();
+  try {
+    await configureAgentRepo(repo);
+    const effects = repoEffects(repo, (command, args) =>
+      command === 'gh' ? (args[0] === 'api' ? 'author' : 'owner/repo') : undefined,
+    );
+    const read = await readWorkState(effects, { target: 'main' });
+    if (!read.ok) throw new Error(read.reason);
+    const state = read.state;
+    const status: QueueStatus = {
+      state: 'awaiting-pr',
+      pr: null,
+      mergeSha: null,
+      itemId: null,
+      receiptId: null,
+      consumed: false,
+      reviewed: false,
+      fixed: false,
+    };
+    const queue: DeferredQueueClient = {
+      enqueue: async () => status,
+      bind: async () => status,
+      cancel: async () => {
+        throw new Error('do not cancel');
+      },
+      status: async () => status,
+    };
+    const failure = {
+      source: 'vendor' as const,
+      category: 'vendor-unavailable' as const,
+      codes: ['con_err'],
+    };
+    const origin = cycleRecord({
+      head: state.head,
+      base: state.base,
+      dirtySha256: 'clean-tree',
+      cycleId: 'c001-origin',
+      vendorFailure: failure,
+      completion: { kind: 'blocked', reason: 'structured local vendor outage' },
+    });
+    const attempt = {
+      cycleId: origin.cycleId,
+      head: state.head,
+      base: state.base,
+      target: 'main',
+      scope: 'full' as const,
+      dirtySha256: 'clean-tree',
+      failure,
+    };
+    const enroll = (requestId: string) =>
+      deferVendorReview(
+        queue,
+        {
+          requestId,
+          binding: {
+            kind: 'deferred-author',
+            repo: 'owner/repo',
+            producer: 'author',
+            head: state.head,
+            target: 'main',
+            targetSelector: 'promoted-main',
+          },
+        },
+        'unavailable',
+        { id: requestId, base: state.base, dirtySha256: 'clean-tree' },
+        attempt,
+      );
+    const debt = await enroll('origin-intent');
+    const prior = await enroll('dangling-predecessor');
+    // The retained snapshot the predecessor names is never written: the lineage
+    // read can only fail, after the findings record has been persisted.
+    effects.openLedger(state.branch).save({
+      version: 2,
+      branch: state.branch,
+      records: [
+        origin,
+        {
+          kind: 'vendor-debt',
+          debt: { ...debt, predecessor: prior.reference },
+          at: effects.nowIso(),
+        },
+      ],
+    });
+    const result = await makeReviewRun({
+      drivers: scriptedDrivers(),
+      effectsFactory: () => effects,
+      scannerFactory: () => async (components) =>
+        components.map((component) => ({ component: component.component, hits: [] })),
+    })({ repoRoot: repo.root });
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed')
+      expect(result.error).toContain('current enrollment lineage could not be read');
+    expect(result.report?.head).toBe(repo.git('rev-parse', 'HEAD').trim());
+    expect(result.report?.sources.some((source) => source.kind === 'agent')).toBe(true);
+  } finally {
+    await repo.cleanup();
+  }
+});
