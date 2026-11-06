@@ -7,11 +7,13 @@ test_backfill_runtime_coverage.py, test_backfill_runtime_publish.py,
 test_backfill_runtime_quota.py, test_backfill_runtime_events.py and
 test_backfill_runtime_fixtures.py.
 """
+from pathlib import Path
 import subprocess
 import unittest
 from types import SimpleNamespace
 from unittest import mock
 
+import backfill_accounting as accounting
 import backfill_runtime as runtime
 import review_ledger as ledger
 from test_backfill_runtime_fixtures import RuntimeTestBase
@@ -74,6 +76,42 @@ class RuntimeTest(RuntimeTestBase):
             self.assertEqual(self.cached_collection(target, response), newer)
             self.assertGreater(lineage.call_count, 0)
 
+    def test_cache_pointer_must_name_an_intact_durable_artifact(self):
+        merge = self.f.commit({"new": b"unique\n"})
+        response = {"number": 7, "merged": True, "merge_commit_sha": merge}
+        expected = self.cached_collection(merge, response)
+        filename = self.state / "required-cache/7.json"
+        reference = ledger.loads(filename.read_bytes())
+        artifact = Path(reference["location"])
+        # Same bytes outside the durable store: confinement, not content, rejects it.
+        outside = self.state / "outside.json"
+        outside.write_bytes(artifact.read_bytes())
+        filename.write_bytes(ledger.canonical({**reference, "location": str(outside)}))
+        with mock.patch.object(self.f.repo, "lineage", wraps=self.f.repo.lineage) as lineage:
+            self.assertEqual(self.cached_collection(merge, response), expected)
+            self.assertGreater(lineage.call_count, 0)
+        # In-store location whose bytes do not hash to the pointer's digest.
+        value = ledger.loads(artifact.read_bytes())
+        value["member"]["context"]["title"] = "injected"
+        forged = artifact.parent / ("f" * 64)
+        forged.write_bytes(ledger.canonical(value))
+        filename.write_bytes(ledger.canonical({"sha256": "f" * 64, "location": str(forged)}))
+        with mock.patch.object(self.f.repo, "lineage", wraps=self.f.repo.lineage) as lineage:
+            self.assertEqual(self.cached_collection(merge, response), expected)
+            self.assertGreater(lineage.call_count, 0)
+
+    def test_lineage_epoch_invalidates_cached_mappings(self):
+        merge = self.f.commit({"new": b"unique\n"})
+        response = {"number": 7, "merged": True, "merge_commit_sha": merge}
+        expected = self.cached_collection(merge, response)
+        reference = {"sha256": "0" * 64, "location": "/x"}
+        current = runtime.required_key(merge, reference)
+        with mock.patch.object(accounting, "LINEAGE_RESULT_EPOCH", accounting.LINEAGE_RESULT_EPOCH + 1):
+            self.assertNotEqual(runtime.required_key(merge, reference), current)
+            with mock.patch.object(self.f.repo, "lineage", wraps=self.f.repo.lineage) as lineage:
+                self.assertEqual(self.cached_collection(merge, response), expected)
+                self.assertGreater(lineage.call_count, 0)
+
     def test_cache_pointer_write_failure_does_not_block_inventory(self):
         merge = self.f.commit({"new": b"unique\n"})
         response = {"number": 7, "merged": True, "merge_commit_sha": merge}
@@ -89,9 +127,17 @@ class RuntimeTest(RuntimeTestBase):
             with mock.patch.object(self.f.repo, "lineage", wraps=self.f.repo.lineage) as lineage:
                 self.assertEqual(self.cached_collection(merge, response), first)
                 self.assertGreater(lineage.call_count, 0)
-        with mock.patch.object(self.f.store, "put", side_effect=OSError("durable artifact failure")):
+        # The forge response put succeeds; only the result artifact fails.
+        original_put = self.f.store.put
+        def result_put(data):
+            if "number" not in ledger.loads(data):
+                raise OSError("durable artifact failure")
+            return original_put(data)
+        with mock.patch.object(self.f.store, "put", side_effect=result_put) as put:
             with self.assertRaisesRegex(OSError, "durable artifact failure"):
                 self.cached_collection(merge, response)
+            self.assertEqual(put.call_count, 2)
+        self.assertFalse(filename.exists())
 
     def test_required_collector_rejects_ambiguous_rename_as_deletion(self):
         self.f.commit({"unrelated": b"before\n"})

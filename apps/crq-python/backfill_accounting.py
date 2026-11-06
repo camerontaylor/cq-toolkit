@@ -13,6 +13,9 @@ import review_ledger as ledger
 ENTRY_CACHE_TREES = 1024
 ENTRY_CACHE_BYTES = 256 * 1024 * 1024
 LINEAGE_CACHE_BYTES = 32 * 1024 * 1024
+# Bump when lineage/proven_deleted result semantics change: persisted required-PR
+# mappings written under an older epoch must stop matching.
+LINEAGE_RESULT_EPOCH = 1
 
 BLAME_OPTIONS = ["--line-porcelain", "--encoding=UTF-8"]
 
@@ -279,6 +282,8 @@ class Repository:
 
     def lineage(self, old, new, name):
         """Only first-parent ancestry and unique exact renames are evidenced v1.
+
+        Changing what this returns requires bumping LINEAGE_RESULT_EPOCH.
 
         Any intermediate deletion, copy, non-exact rename or duplicate source blob
         ends inherited coverage. Explicit verified nonancestor mappings may be

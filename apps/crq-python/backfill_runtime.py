@@ -473,6 +473,11 @@ def cached_required(filename, key, store):
     return None
 
 
+def required_key(target, reference):
+    """Bind a required-PR mapping to target, exact forge response and lineage semantics."""
+    return ledger.digest({"epoch": accounting.LINEAGE_RESULT_EPOCH, "target": target, "source": reference})
+
+
 def collect_required(repo, target, required, store, *, cache_dir=None):
     """Read-only forge acquisition; captured bytes precede deterministic ranking."""
     paths, members = {}, {}
@@ -485,7 +490,7 @@ def collect_required(repo, target, required, store, *, cache_dir=None):
         # Re-fetch forge metadata every time. Only immutable Git-derived work is
         # reused, bound to the exact response, target and accounting semantics.
         # Keep one pointer per required PR, not one per timer/target forever.
-        key = ledger.digest({"version": 1, "target": target, "source": reference})
+        key = required_key(target, reference)
         filename = Path(cache_dir) / (str(pr) + ".json") if cache_dir is not None else None
         cached = cached_required(filename, key, store) if filename is not None else None
         if cached is not None:

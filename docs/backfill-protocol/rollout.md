@@ -104,7 +104,14 @@ and accounting-cache version. An unchanged second inventory reuses required-PR
 path mappings without Git lineage work. A new target or changed forge response
 recomputes them. Missing, malformed or stale index entries fall back to normal
 acquisition; removing this index does not remove review evidence or coverage.
-Only one current pointer is kept per required PR. Historical lineage still
+Only one current pointer is kept per required PR. The pointer is disposable;
+the object it points to is not. Each recomputation keeps one more
+content-addressed object in the durable artifact store, and nothing collects it
+once the pointer moves on. Because the target changes on most runs, that is up
+to one object per required PR per six-hour run. Durable-store collection is a
+later operator task (`apps/crq-python/ops/tree-snapshots.md`). Bump `LINEAGE_RESULT_EPOCH` in
+`backfill_accounting.py` when lineage result semantics change, so that old
+pointers stop matching. Historical lineage still
 rejects intermediate deletions and ambiguous renames, including for coverage
 and ownership carry callers. Its parsed first-parent steps are invocation-local
 and bounded to 32 MiB. Between lineage endpoints, full trees are read only when

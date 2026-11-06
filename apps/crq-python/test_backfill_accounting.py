@@ -108,6 +108,22 @@ class ImmutableCacheTest(unittest.TestCase):
                 self.assertEqual(repo.lineage(old, target, "a"), "a")
                 self.assertFalse(repo._lineage_steps)
 
+    def test_parsed_lineage_cache_evicts_on_overflow(self):
+        with tempfile.TemporaryDirectory() as td:
+            fixture = Fixture(Path(td) / "repo")
+            old = fixture.commit({"a": b"one\n"})
+            middle = fixture.commit({"a": b"two\n"})
+            target = fixture.commit({"a": b"six\n"})  # Same change shape, same step size.
+            repo = fixture.repo
+            repo.begin_invocation()
+            repo._lineage_step(middle)
+            one_step = repo._lineage_bytes
+            repo.begin_invocation()
+            with mock.patch.object(accounting, "LINEAGE_CACHE_BYTES", one_step):
+                self.assertEqual(repo.lineage(old, target, "a"), "a")
+                self.assertEqual(list(repo._lineage_steps), [target])
+                self.assertLessEqual(repo._lineage_bytes, one_step)
+
     def test_private_trees_are_immutable_and_lru_bounds_evict_one(self):
         with tempfile.TemporaryDirectory() as td:
             fixture = Fixture(Path(td) / "repo")
