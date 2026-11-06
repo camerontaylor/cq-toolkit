@@ -115,5 +115,5 @@ fixed in `79247f4`, and gate run 3 was taken after that commit:
   that channel is OS confinement (T1.8/RS-13), and it is not claimed here.
 - A server killed without SIGTERM (SIGKILL or a crash) orphans an in-flight command group until that group exits
   on its own.
-- W1.5 dependency: on the claude-agent lane, `run` children still inherit the host `process.env`. Passing an
-  explicit `buildChildEnv` there belongs to W1.5.
+- Resolved after W1.5: `run` children on the claude-agent lane use the shared default-deny `buildChildEnv`
+  policy. `test/driver/harness-parity.run-env.test.ts` pins parity with core and stdio.
