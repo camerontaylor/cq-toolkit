@@ -3,6 +3,7 @@ import importlib.util
 from importlib.machinery import SourceFileLoader
 import hashlib
 import io
+import os
 import resource
 import struct
 import zlib
@@ -295,3 +296,42 @@ class LedgerSignerTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "outside transport capability"):
                     spool.main()
                 connect.assert_not_called()
+
+    def test_read_bundle_returns_complete_frame_within_deadline(self):
+        read_fd, write_fd = os.pipe()
+        try:
+            os.write(write_fd, b"bundle-bytes")
+            os.close(write_fd); write_fd = -1
+            self.assertEqual(spool.read_bundle(read_fd, limit=16, deadline_s=5), b"bundle-bytes")
+        finally:
+            os.close(read_fd)
+            if write_fd >= 0:
+                os.close(write_fd)
+
+    def test_read_bundle_refuses_stalled_input_and_oversized_body(self):
+        read_fd, write_fd = os.pipe()
+        try:
+            # Writer stays open with nothing to send: select reports no data,
+            # so the stalled upload is refused instead of blocking.
+            with self.assertRaisesRegex(ValueError, "deadline exceeded"):
+                spool.read_bundle(read_fd, limit=16, deadline_s=0.1)
+            os.write(write_fd, b"x" * 17)
+            os.close(write_fd); write_fd = -1
+            body = spool.read_bundle(read_fd, limit=16, deadline_s=5)
+            self.assertEqual(len(body), 17)
+            self.assertGreater(len(body), 16)
+        finally:
+            os.close(read_fd)
+            if write_fd >= 0:
+                os.close(write_fd)
+
+    def test_read_bundle_size_cap_kept_by_caller(self):
+        # read_bundle returns limit + 1 so main() can still apply its size check.
+        read_fd, write_fd = os.pipe()
+        os.close(write_fd)
+        try:
+            self.assertEqual(spool.read_bundle(read_fd, limit=3, deadline_s=5), b"")
+        finally:
+            os.close(read_fd)
+        self.assertLessEqual(spool.BUNDLE_LIMIT, 64 * 1024 * 1024)
+        self.assertLess(spool.INPUT_DEADLINE_S, 330)
