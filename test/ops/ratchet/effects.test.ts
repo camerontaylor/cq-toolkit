@@ -15,7 +15,15 @@
 //      throws loudly, never falls back to an ambient GH_TOKEN/GITHUB_TOKEN,
 //      and never invokes gh.
 import { execFileSync } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, test } from 'vitest';
@@ -262,6 +270,48 @@ describe('makeSubprocessBaselinePrEffects', () => {
     }
   });
 
+  test('a non-array gh list payload throws instead of reading as no open PR', async () => {
+    const previous = process.env.FAKE_GH_PR_LIST;
+    process.env.FAKE_GH_PR_LIST = '{"unexpected":true}';
+    try {
+      const effects = makeSubprocessBaselinePrEffects(work, 'main');
+      await expect(effects.findOpenPrByHead(HEAD)).rejects.toThrow(/non-array JSON payload/);
+    } finally {
+      if (previous === undefined) delete process.env.FAKE_GH_PR_LIST;
+      else process.env.FAKE_GH_PR_LIST = previous;
+    }
+  });
+
+  test('an input base that differs from the captured base is refused', async () => {
+    const effects = makeSubprocessBaselinePrEffects(work, 'main');
+    await expect(
+      effects.commitAndUpsertPr({
+        head: HEAD,
+        base: 'other',
+        title: 't',
+        body: 'b',
+        commitMessage: 'm',
+        files: [],
+      }),
+    ).rejects.toThrow(/differs from the effects base/);
+  });
+
+  test('a file path escaping the checkout is refused before any write', async () => {
+    const effects = makeSubprocessBaselinePrEffects(fresh, 'main');
+    await expect(
+      effects.commitAndUpsertPr({
+        head: HEAD,
+        base: 'main',
+        title: 't',
+        body: 'b',
+        commitMessage: 'm',
+        files: [{ path: '../escaped.txt', content: 'x' }],
+      }),
+    ).rejects.toThrow(/refusing to write outside the checkout/);
+    expect(existsSync(join(tmp, 'escaped.txt'))).toBe(false);
+    expect(git(fresh, ['branch', '--show-current']).trim()).toBe('main');
+  }, 60_000);
+
   test.each([
     ['no URL', 'not a URL', /gh pr create returned no URL/],
     ['no PR identity', 'https://example.test/not-a-pull', /no PR identity/],
@@ -306,6 +356,28 @@ describe('makeSubprocessBaselinePrEffects', () => {
     }
   }, 60_000);
 });
+
+test('a detached original checkout is restored, not left on the proposal head', async () => {
+  const sha = git(fresh, ['rev-parse', 'HEAD']).trim();
+  git(fresh, ['checkout', '-q', '--detach']);
+  try {
+    const effects = makeSubprocessBaselinePrEffects(fresh, 'main');
+    await expect(
+      effects.commitAndUpsertPr({
+        head: HEAD,
+        base: 'main',
+        title: 't',
+        body: 'b',
+        commitMessage: 'm',
+        files: [{ path: '../escaped.txt', content: 'x' }],
+      }),
+    ).rejects.toThrow(/refusing to write outside the checkout/);
+    expect(git(fresh, ['branch', '--show-current']).trim()).toBe('');
+    expect(git(fresh, ['rev-parse', 'HEAD']).trim()).toBe(sha);
+  } finally {
+    git(fresh, ['checkout', '-q', 'main']);
+  }
+}, 60_000);
 
 test('real reused proposal branch restores a previous-run tightening that is no longer applied', async () => {
   const checkout = join(tmp, 'mixed-metric-checkout');
