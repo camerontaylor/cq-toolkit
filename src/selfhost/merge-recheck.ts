@@ -901,19 +901,30 @@ const isTrusted = (
   return review.authorType === 'User' && policy.trustedAssociations.has(review.association);
 };
 
-/** Match plain exact-head PASS comments, including shared-account reviewers. */
+/**
+ * Match plain exact-head PASS comments, including shared-account reviewers.
+ * Trusted actors only: the PR author, or a User with a trusted association;
+ * excluded and null logins never count.
+ */
 const sameAccountAgentAccepted = (
   snapshot: PrSnapshot,
   headSha: string,
-  _policy: TrustPolicy,
+  policy: TrustPolicy,
 ): AuthenticatedR4Evidence | null => {
   for (const review of [...snapshot.reviews, ...(snapshot.allClear?.comments ?? [])]) {
-    if (review.authorType === 'Bot' || review.authorLogin?.toLowerCase().endsWith('[bot]'))
-      continue;
+    const login = review.authorLogin;
+    if (login === null || login === '' || review.authorType !== 'User') continue;
+    if (/\[bot\]$/i.test(login)) continue;
+    const name = bareName(login);
+    if ([...policy.excludedLogins].some((entry) => bareName(entry) === name)) continue;
+    // The PR author may accept as themselves (shared-account design); anyone
+    // else must hold a trusted association.
+    const isAuthor = snapshot.authorLogin !== null && bareName(snapshot.authorLogin) === name;
+    if (!isAuthor && !policy.trustedAssociations.has(review.association)) continue;
     const parsed = parseIndependentReview(review.body, headSha);
     if (parsed.kind !== 'valid') continue;
     return Object.freeze({
-      actorKey: `user:${review.authorLogin ?? 'reviewer'}`,
+      actorKey: review.actorKey,
       reviewNodeId: review.nodeId,
       reviewCommitOid: headSha,
       submittedAt: review.submittedAt ?? '',
