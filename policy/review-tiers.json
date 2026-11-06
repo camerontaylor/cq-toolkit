@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "protected_policy_sha256": "2cd954a49620b057e6c105cdc06e56efd3637f3c7791964cae837114b72dce1d",
+  "protected_policy_sha256": "33a0c095f391c50e1c18ed66e9d35bf66adc304020956916490e287cd7ce1ca3",
   "protected_patterns": [
     "^policy/protected-paths\\.json$",
     "^policy/promotion-reviewer\\.json$",
