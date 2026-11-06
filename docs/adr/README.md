@@ -71,7 +71,8 @@ something lands or which rule applies. The plan itself is not published.
 
 ## Post-acceptance notes
 
-Recorded 2026-10-08 (N1–N10) and 2026-10-11 (N11–N17, N19–N21), with N22–N23 added later and N24 on 2026-11-06; each earlier set rechecked
+Recorded 2026-10-08 (N1–N10) and 2026-10-11 (N11–N17, N19–N21), with N22–N23 added later
+and N24–N25 on 2026-11-06; each earlier set rechecked
 against `merge-queue` the same day. Each note names the accepted text, what
 changed or remains open, and where the current source of truth is.
 
@@ -508,3 +509,20 @@ the hand-written key tables, which are generated from `src/config/env.ts`.
 Secret-by-suffix and env-only secrets (N4), the CI variable mapping (N15,
 N21) and the ADR-0004 trust boundaries stay in force. This closes ADR-0005's
 Phase 1.7 pointer.
+
+### N25 — ADR-0003 §2.2 and §4 step 2: the per-invocation gate is withdrawn
+
+Owner decision of 2026-11-06: the invocation gate of §2.2 ("one reservation =
+one `Driver.run`") and §4 landing step 2's "invocation gate in shadow mode"
+will not be built. The job gate is the write-ahead reservation granularity:
+[`src/kernel/runner.ts`](../../src/kernel/runner.ts) appends `reservation-opened`
+durably before dispatch, and an unsettled crash is charged in full with the job
+quarantined on resume. Per-attempt spend on every exit path — spawn failure and
+cancellation included — is recorded by `attempt-finished` (ADR-0008 T13/T14)
+and the M7 series, which closed issue
+[#393](https://github.com/camerontaylor/cq-toolkit/issues/393) on 2026-11-03.
+`governDriverFactory` and `src/kernel/governed-driver.ts` will not exist; a
+per-invocation gate returns only with an owner decision to enforce per-call
+budgets. This note withdraws the spec-conformance audit atom A0003.9 (each
+`Driver.run` inside a governed scope has a write-ahead reservation and
+settlement at invocation granularity).
