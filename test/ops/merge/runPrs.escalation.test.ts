@@ -74,6 +74,21 @@ describe('runMergePrs', () => {
     expect(calls).toEqual([]);
   });
 
+  test('conflictResolutionDisabled wins over a supplied modelSpec on the library path', async () => {
+    const effects = new FakeMergeEffects();
+    const { resolve, calls } = fakeResolve(acted(45));
+    const input = {
+      ...baseInput([conflicting(45)], MODEL_SPEC),
+      conflictResolutionDisabled: true,
+    };
+    const outcome = await runMergePrs(input, { effects, resolve });
+    expect(outcome.needsHuman).toEqual([
+      { pr: 45, reason: 'conflict resolution disabled by self-host policy — needs human' },
+    ]);
+    expect(outcome.resolutions).toEqual([]);
+    expect(calls).toEqual([]);
+  });
+
   test('conflict → failed resolve: escalate with the did-not-complete prefix; NO second pass', async () => {
     const effects = new FakeMergeEffects();
     const { resolve, calls } = fakeResolve(resolveFailed('worktree add exploded'));

@@ -9,8 +9,15 @@ export function selectRelatedTests(changed, allTests) {
     const stem = /^src\/(.*)\.(?:ts|mts|js|mjs)$/.exec(file)?.[1];
     if (stem) {
       const prefix = `test/${stem}`;
-      for (const test of allTests)
-        if (test.startsWith(prefix) && !test.slice(prefix.length).includes('/')) selected.add(test);
+      for (const test of allTests) {
+        const rest = test.slice(prefix.length);
+        if (
+          test.startsWith(prefix) &&
+          (rest.startsWith('.') || rest.startsWith('-')) &&
+          !rest.includes('/')
+        )
+          selected.add(test);
+      }
     }
     for (const [pattern, targets] of NON_IMPORT_MAP) {
       if (pattern.test(file))

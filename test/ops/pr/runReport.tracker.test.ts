@@ -4,8 +4,9 @@ import { describe, expect, test } from 'vitest';
 import { READINESS_SECTION_MARKER } from '../../../src/ops/pr/assemblePrs.js';
 import type { PrEffects } from '../../../src/ops/pr/assemblePrs.js';
 import { makeSubprocessPrEffects } from '../../../src/adapters/forge-github/ghEffects.js';
+import type { DiffSecretScanner } from '../../../src/ops/dev/denylist.js';
 import { makeRunReport } from '../../../src/ops/pr/runReport.js';
-import { makeReportHarness } from './runReport.helpers.js';
+import { cleanScanner, makeReportHarness } from './runReport.helpers.js';
 
 const { fakeGh, inputOf, okReport } = makeReportHarness();
 
@@ -19,7 +20,10 @@ describe('the tracker is updated in place, and nothing ever merges', () => {
       checks: new Map([[11, { state: 'pass' }]]),
       reviews: new Map([[11, { state: 'approved' }]]),
     });
-    const report = await okReport(makeRunReport(fake.gh), inputOf({ tracker: { number: 7 } }));
+    const report = await okReport(
+      makeRunReport(fake.gh, undefined, cleanScanner),
+      inputOf({ tracker: { number: 7 } }),
+    );
     expect(report.trackerUpdated).toBe(true);
     expect(fake.edits.get(7)).toContain('`core` — #11 — checks: pass; review: approved — READY');
     expect(fake.edits.get(7)).toContain('never auto-merges');
@@ -47,7 +51,11 @@ describe('the tracker is updated in place, and nothing ever merges', () => {
     fake.gh.editPrBody = async () => {
       throw new Error('edit refused');
     };
-    const result = await makeRunReport(fake.gh)(inputOf({ tracker: { number: 7 } }));
+    const result = await makeRunReport(
+      fake.gh,
+      undefined,
+      cleanScanner,
+    )(inputOf({ tracker: { number: 7 } }));
     expect(result.status).toBe('failed');
     expect(result.status === 'failed' && result.error).toContain('tracker PR #7');
     // The progressNote pattern: the fleet's evidence rides the failure text.
@@ -56,10 +64,39 @@ describe('the tracker is updated in place, and nothing ever merges', () => {
     );
   });
 
+  test('a tracker write with no denylist scanner is refused before any read or write', async () => {
+    const fake = fakeGh();
+    const result = await makeRunReport(fake.gh)(inputOf({ tracker: { number: 7 } }));
+    expect(result.status).toBe('failed');
+    expect(result.status === 'failed' && result.error).toContain('no PR payload denylist scanner');
+    expect(fake.edits.size).toBe(0);
+  });
+
+  test('a denylist hit in the composed section refuses the tracker edit', async () => {
+    const fake = fakeGh();
+    const hitScanner: DiffSecretScanner = (components) =>
+      components.map(({ component }) => ({
+        component,
+        hits: [{ ruleId: 'test-rule', lines: [1] }],
+      }));
+    const result = await makeRunReport(
+      fake.gh,
+      undefined,
+      hitScanner,
+    )(inputOf({ tracker: { number: 7 } }));
+    expect(result.status).toBe('failed');
+    expect(result.status === 'failed' && result.error).toContain('refused by denylist scan');
+    expect(fake.edits.size).toBe(0);
+  });
+
   test('a NON-OPEN tracker number is refused before any write (r2#2), rows carried in the error', async () => {
     for (const trackerState of ['merged', 'closed', 'unknown'] as const) {
       const fake = fakeGh({ metas: new Map([[7, trackerState]]) });
-      const result = await makeRunReport(fake.gh)(inputOf({ tracker: { number: 7 } }));
+      const result = await makeRunReport(
+        fake.gh,
+        undefined,
+        cleanScanner,
+      )(inputOf({ tracker: { number: 7 } }));
       expect(result.status).toBe('failed');
       expect(result.status === 'failed' && result.error).toContain(`is in state '${trackerState}'`);
       expect(result.status === 'failed' && result.error).toContain('core #11');
@@ -69,7 +106,11 @@ describe('the tracker is updated in place, and nothing ever merges', () => {
 
   test('a tracker META-read fault fails the op with the rows (the lifecycle guard needs the read)', async () => {
     const fake = fakeGh({ readinessFaults: new Map([[7, 'meta read boom']]) });
-    const result = await makeRunReport(fake.gh)(inputOf({ tracker: { number: 7 } }));
+    const result = await makeRunReport(
+      fake.gh,
+      undefined,
+      cleanScanner,
+    )(inputOf({ tracker: { number: 7 } }));
     expect(result.status).toBe('failed');
     expect(result.status === 'failed' && result.error).toContain('lifecycle state');
     expect(result.status === 'failed' && result.error).toContain('meta read boom');
@@ -93,7 +134,10 @@ describe('the tracker is updated in place, and nothing ever merges', () => {
       reviews: new Map([[11, { state: 'approved' }]]),
       bodies: new Map([[7, manifestBody]]),
     });
-    const report = await okReport(makeRunReport(fake.gh), inputOf({ tracker: { number: 7 } }));
+    const report = await okReport(
+      makeRunReport(fake.gh, undefined, cleanScanner),
+      inputOf({ tracker: { number: 7 } }),
+    );
     expect(report.trackerUpdated).toBe(true);
     const written = fake.edits.get(7);
     expect(written).toContain(READINESS_SECTION_MARKER);
@@ -108,7 +152,7 @@ describe('the tracker is updated in place, and nothing ever merges', () => {
       reviews: new Map([[11, { state: 'approved' }]]),
     });
     await okReport(
-      makeRunReport(fake.gh),
+      makeRunReport(fake.gh, undefined, cleanScanner),
       inputOf({
         tracker: { number: 7 },
         packages: [{ name: 'co`re<b>', number: 11 }],

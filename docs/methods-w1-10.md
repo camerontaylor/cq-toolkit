@@ -47,11 +47,16 @@ paths stay in use, as ADR-0004 D-G.4 allows.
    The target state has no classic branch protection on either branch. The drift check reports
    today's classic protection as drift.
 
-4. **R2's required checks.** `cq/policy`, `cq/ratchet` and `cq/acceptance` are pinned to the
-   verdict App's `integration_id`. Today's classic contexts (`static`, `denylist`, `from-source`,
-   `pack-audit`) are kept as belts pinned to the GitHub Actions app (15368). ADR-0004 lists only
-   the three `cq/*` checks. Keeping the belts means a red CI run still blocks a PR merge into
-   the queue. They are block-only: the gate never reads them by name (D-F.2).
+4. **R2's required checks.** _Superseded by the 2026-10-16 amendment under
+   "`protected-paths.json` `requiredChecks` versus ruleset R2" below: R2 now requires only
+   `cq/policy`, `cq/acceptance` and `denylist`, and the gate enforces `cq/ratchet` and the
+   remaining CI jobs (`static`, `from-source`, `pack-audit`) on the queue tip. Do not roll out the
+   earlier set._ As originally decided: `cq/policy`, `cq/ratchet` and `cq/acceptance` are pinned
+   to the verdict App's `integration_id`. Today's classic contexts (`static`, `denylist`,
+   `from-source`, `pack-audit`) are kept as belts pinned to the GitHub Actions app (15368).
+   ADR-0004 lists only the three `cq/*` checks. Keeping the belts means a red CI run still
+   blocks a PR merge into the queue. They are block-only: the gate never reads them by name
+   (D-F.2).
 5. **Verdict selection (D-F.1), with an interim form.** When `vars.CQ_VERDICT_APP_ID` is set, a
    verdict is a check run with that numeric `app.id`, `head_sha` equal to the subject, and
    `external_id` equal to `<trust-sha>:<subject>`. The newest such row wins, and rows from any

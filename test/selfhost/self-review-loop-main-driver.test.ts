@@ -1,6 +1,6 @@
 // Split from self-review-loop.test.ts (pure move); shared fixtures in ./self-review-loop-fakes.js.
 import { join } from 'node:path';
-import { afterEach, describe, expect, test, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { main } from '../../src/selfhost/self-review-loop.js';
 import { SelfhostDefaults, SelfhostPeak, driverKeyEnv } from '../../src/selfhost/config.js';
 import {
@@ -19,6 +19,16 @@ afterEach(cleanupTempRoots);
 
 describe('main — peak-aware driver credential (fail closed)', () => {
   const originalArgv = process.argv;
+  // Several tests here run main() through to the usage tail, whose
+  // appendStepSummaryTable/writeSweepUsageFile read these from the real
+  // environment. GitHub Actions sets GITHUB_STEP_SUMMARY on every job, so
+  // unstubbed they would append fixture tables to the real job summary (and
+  // write the usage artifact if the workflow exported SWEEP_USAGE_OUT).
+  // Both helpers treat '' as absent; afterEach's unstubAllEnvs restores.
+  beforeEach(() => {
+    vi.stubEnv('GITHUB_STEP_SUMMARY', '');
+    vi.stubEnv('SWEEP_USAGE_OUT', '');
+  });
   afterEach(() => {
     vi.unstubAllEnvs();
     vi.restoreAllMocks();

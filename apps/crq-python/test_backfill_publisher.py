@@ -162,6 +162,7 @@ class PublisherTest(unittest.TestCase):
         for busy in (False, True):
             with self.subTest(busy=busy):
                 self.prepare()
+                (self.state / "backfill/publish-request.json").unlink(missing_ok=True)
                 original = ledger.IntegrityError("original integrity failure")
                 atomic = ledger.atomic
                 def marker_fault(filename, data):

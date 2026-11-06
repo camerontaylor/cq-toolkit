@@ -860,6 +860,15 @@ export class AcpDriver implements Driver {
         );
       }
     }
+    if (
+      this.modelEnv !== undefined &&
+      ['CQ_WORK_ID', 'CQ_ROLE', 'CQ_TASK', 'CQ_RUN_ID', 'CQ_PARENT_WORK_ID'].includes(this.modelEnv)
+    ) {
+      throw new DispatchError(
+        'config',
+        `acp driver: modelEnv '${this.modelEnv}' collides with a session-correlation env name`,
+      );
+    }
     const childEnv = buildChildEnv(process.env, undefined, extraNames);
     // Session-log correlation (items 1.3–1.5): the invocation's work
     // identity rides the agent's env, as on the claude-code transports.
@@ -987,6 +996,8 @@ export class AcpDriver implements Driver {
     // within this window the only response that can arrive is the
     // establishment's own).
     let establishing = false;
+    // The session id requested by session/load or resume (their responses carry none).
+    let establishingRequestedId: string | undefined;
 
     const graceOpts = (): AcpGraceLadderOptions => ({
       ...(this.termGraceMs !== undefined ? { termGraceMs: this.termGraceMs } : {}),
@@ -1214,6 +1225,7 @@ export class AcpDriver implements Driver {
         if (establishing) {
           const sid = sessionIdOf(result);
           if (sid !== undefined) acpSessionId = sid;
+          else if (establishingRequestedId !== undefined) acpSessionId = establishingRequestedId;
         }
       },
       onUnparseableLine: (line) => observation.narration.push(line.slice(0, 2000)),
@@ -1394,6 +1406,7 @@ export class AcpDriver implements Driver {
           // (header, §5). cwd + mcpServers stay present (the recorded
           // Devin quirk generalizes: keep the params present).
           replaying = true;
+          establishingRequestedId = resumeAcpSessionId;
           try {
             const loadedRaw = await wire.request(ACP_METHODS.sessionLoad, {
               sessionId: resumeAcpSessionId,
@@ -1424,6 +1437,7 @@ export class AcpDriver implements Driver {
           // NO history replay on this rung, so no replay window). The same
           // { sessionId, cwd, mcpServers } param shape as load — the Devin
           // quirk generalizes to "keep the params present".
+          establishingRequestedId = resumeAcpSessionId;
           const resumedRaw = await wire.request(ACP_METHODS.unstableResumeSession, {
             sessionId: resumeAcpSessionId,
             cwd: workspace,
@@ -1459,6 +1473,7 @@ export class AcpDriver implements Driver {
           : `session establishment failed: ${messageOf(err)}`;
       } finally {
         establishing = false;
+        establishingRequestedId = undefined;
       }
     }
 
@@ -1554,8 +1569,10 @@ export class AcpDriver implements Driver {
     // --- Settle: terminate the child (the vendor session dies with the
     // process — §6), then fold the verdict. Bounded: the ladder always
     // settles (its SIGKILL rung force-resolves).
-    await terminateAcpProcess(child, graceOpts(), onRung);
+    // Detach first: the child is being terminated anyway, and an abort
+    // inside the grace window must not turn a finished run into 'aborted'.
     signal?.removeEventListener('abort', onAbort);
+    await terminateAcpProcess(child, graceOpts(), onRung);
 
     // --- The never-asks tripwire, evaluated AT SETTLE (first-channel-
     // wins per toolCallId — header): any tool_call stream id with NO
@@ -2034,7 +2051,14 @@ function foldUpdate(observation: RunObservation, update: AcpUpdate): void {
       // First-write-wins channel tracking: a tool_call arriving before any
       // permission request for its id is never-asks evidence (evaluated
       // at settle — header).
-      if (!observation.toolFirstSeen.has(id)) {
+      // A 'pending' announcement is spec order (it precedes the permission
+      // request), so it leaves the slot free; only an executing/terminal
+      // status seen before any gate is never-asks evidence.
+      const executing =
+        update.status === 'in_progress' ||
+        update.status === 'completed' ||
+        update.status === 'failed';
+      if (executing && !observation.toolFirstSeen.has(id)) {
         observation.toolFirstSeen.set(id, 'tool_call');
       }
       const existing = observation.tools.get(id) ?? {

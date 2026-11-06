@@ -55,6 +55,9 @@ describe('parseReviewerStream', () => {
       }),
     );
     expect(parsed.findings[0]).toMatchObject({ fileName: 'src/a.ts', line });
+    // A finding carrying BOTH fields keeps the reviewer's comment: the contract
+    // defines the excerpt as the comment (or its first suggestion).
+    expect(parsed.findings[0]).toHaveProperty('excerpt', 'Fixture issue details');
     expect(parsed.findings[0]).not.toHaveProperty('rule');
   });
   test.each([0, -1, 1.5, '1', null])('ignores invalid optional finding line %s', (line) => {

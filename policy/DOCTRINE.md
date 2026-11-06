@@ -12,10 +12,10 @@ stdout = one JSON artifact: the OpResult, optionally with a `report` field carry
 **Rule.** Every operation invocation writes machine-readable JSON to stdout and human
 narration to stderr, never mixed. Exit codes: 0 clean, 1 thrown error, 2 arg error,
 3 needs-human. In machine mode (`--json`) stderr stays empty and an error that has no
-result writes one `{ "error": { kind, subcommand, message, exitCode } }` object to
+result writes one `{ "error": { "kind": "usage", "subcommand": "<name>", "message": "<text>", "exitCode": 2 } }` object to
 stdout instead, so stdout is still exactly one JSON artifact. An `ok` result whose
-value carries `verdict: "fail"` exits 0 unless the caller passes `--fail-on-verdict`
-(exit 1).
+value carries `verdict: "fail"` or `verdict: "regression"` exits 0 unless the
+caller passes `--fail-on-verdict` (exit 1).
 
 **Why.** Operations compose programmatically; narration on stdout makes the result
 unparseable, and a caller parsing prose to tell "failed" from "misused" from "needs a
@@ -102,7 +102,7 @@ baseline fails with "only tightening passes", and a nonzero-exit run with no
 parsable diagnostics is refused before the engine ever sees a reading. The same
 rule now covers every wired summary: `cq-measure` measures coverage once per
 PR and `cq-verify` judges it with typecheck-count against the trust ref's
-baselines (`cq/ratchet`), and the ratchet workflow
+baselines (`cq/ratchet`), and the advisory ratchet workflow
 (`policy/templates/ratchet.yml`) drives the shipped CLI op
 `ratchet.monotonicGuard` over a PR's baseline diff
 (the former local driver `scripts/ratchet-check.mjs` was deleted in Phase 0.2).

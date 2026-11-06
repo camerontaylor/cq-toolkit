@@ -166,7 +166,7 @@ export function parseReviewerStream(stdout: string): ParsedReviewerStream {
             ? suggestion[0]
             : undefined;
         const codegen = stringAt(event, 'codegenInstructions');
-        const excerpt = codegen ?? comment ?? firstSuggestion;
+        const excerpt = comment ?? firstSuggestion ?? codegen;
         const fileName = typeof event['fileName'] === 'string' ? event['fileName'] : undefined;
         const finding: Omit<DevFinding, 'id'> = { severity };
         if (fileName !== undefined) finding.fileName = fileName;

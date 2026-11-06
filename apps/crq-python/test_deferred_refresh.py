@@ -67,15 +67,19 @@ class DeferredRefreshTests(unittest.TestCase):
         for key in ["head", "producer", "target", "repo", "pr"]:
             with self.subTest(key=key):
                 self.entry.update(state="awaiting-merge", pr=12)
+                self.entry.pop("reason", None)
                 original = self.forge[key]
                 self.forge[key] = 99 if key == "pr" else "changed"
                 self.run_refresh()
                 self.assertEqual(self.entry["reason"]["category"], "identity")
                 self.forge[key] = original
         self.entry["state"] = "awaiting-merge"
+        self.entry.pop("reason", None)
         self.forge.update(state="MERGED", mergeSha="bad")
         self.run_refresh()
         self.assertEqual(self.q["items"], [])
+        self.assertEqual(self.entry["state"], "awaiting-merge")
+        self.assertEqual(self.entry["reason"]["category"], "identity")
 
     def test_bounded_fair_refresh_and_retryable_forge_failure(self):
         self.q["queue_client_requests"]["request-2"] = copy.deepcopy(self.entry)

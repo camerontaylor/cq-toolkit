@@ -42,11 +42,13 @@ def command(argv, cwd=None, env=None, timeout=1200):
             # Only this command's owned process group, never unrelated workers.
             os.killpg(process.pid, signal.SIGTERM)
             try:
-                process.communicate(timeout=5)
+                stdout, stderr = process.communicate(timeout=5)
             except subprocess.TimeoutExpired:
                 os.killpg(process.pid, signal.SIGKILL)
-                process.communicate()
-            raise
+                stdout, stderr = process.communicate()
+            # Keep the partial output: the caller must still be able to write
+            # the timed-out invocation to driver.log.
+            raise subprocess.TimeoutExpired(argv, timeout, output=stdout, stderr=stderr)
         return subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
 
 
