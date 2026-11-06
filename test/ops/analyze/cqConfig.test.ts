@@ -245,6 +245,13 @@ describe('cq.json v2', () => {
       expect(reason).not.toContain('did you mean');
     });
 
+    test('scales the suggestion distance with key length', () => {
+      const short = reasonOf({ ...minimal, roles: { x: 1, ab: 1 } });
+      expect(short).toContain('"x"');
+      expect(short).not.toContain('did you mean');
+      expect(reasonOf({ ...minimal, budget: {} })).toContain('did you mean `budgets`?');
+    });
+
     test('suggests through nested objects and array elements', () => {
       const reason = reasonOf({
         ...minimal,

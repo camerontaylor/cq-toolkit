@@ -220,7 +220,9 @@ const MAX_SUGGESTION_DISTANCE = 3;
 
 function nearestKey(unknown: string, valid: readonly string[]): string | undefined {
   let best: string | undefined;
-  let bestDistance = MAX_SUGGESTION_DISTANCE + 1;
+  // Short names tolerate fewer edits, otherwise "x" would match any 3-letter key.
+  const limit = Math.min(MAX_SUGGESTION_DISTANCE, Math.max(1, Math.floor(unknown.length / 2)));
+  let bestDistance = limit + 1;
   for (const candidate of valid) {
     const distance = editDistance(unknown.toLowerCase(), candidate.toLowerCase());
     if (distance < bestDistance) {
