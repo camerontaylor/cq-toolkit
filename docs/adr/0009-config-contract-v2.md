@@ -35,7 +35,10 @@
 
 **Precedence.** built-in → `cq.json` (committed, schema-strict) → env (`CQ_*`) → per call (CLI flag or op
 input). Trust-boundary keys (sandbox, merge trust set, protected branch and paths, approval) skip the `cq.json`
-and per-call layers: they never come from `cq.json`, plan JSON or op input.
+and per-call layers: they never come from `cq.json`, plan JSON or op input. The list is examples: the `trust`
+flag in the registry (`src/config/env.ts`) is authoritative for which keys are trust-boundary keys.
+
+`CQ_PROFILE` profile seeding (Annex B §B.4.1) is retired. Nothing in `src` reads `CQ_PROFILE`.
 
 **Secrets** come from env only. A key is secret by name suffix, as in Annex B.
 
@@ -62,6 +65,7 @@ exits 1 on any warning. It is opt-in, not a required check.
 
 Superseded:
 
+- §B.4.1 `CQ_PROFILE` profile seeding.
 - §B.2.5 strictness and the reserved-key refusal (replaced by "names warn, values fail").
 - §B.1 "never read from workspace files" for non-trust keys (replaced by the precedence above).
 - Closed-domain enforcement, and the `optIn` relaxation machinery with its generated per-call union.

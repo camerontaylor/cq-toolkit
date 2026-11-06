@@ -71,7 +71,7 @@ something lands or which rule applies. The plan itself is not published.
 
 ## Post-acceptance notes
 
-Recorded 2026-10-08 (N1–N10) and 2026-10-11 (N11–N17, N19–N21), each set rechecked
+Recorded 2026-10-08 (N1–N10) and 2026-10-11 (N11–N17, N19–N21), with N22–N23 added later and N24 on 2026-11-06; each earlier set rechecked
 against `merge-queue` the same day. Each note names the accepted text, what
 changed or remains open, and where the current source of truth is.
 
