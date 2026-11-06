@@ -382,12 +382,23 @@ class RepairDrainTest(unittest.TestCase):
         self.queue['items'].append({'id': 'promo-7f440274a8+', 'kind': 'promotion', 'state': 'done',
                                     'repair_runs': {'signer-promo-7f440274a8+': {
                                         'jobs': [promo], 'state': 'queued'}}})
-        # A queued run's job left behind after its run went terminal is also orphaned.
-        self.queue['items'][2]['repair_runs']['run3']['state'] = 'failed'
+        # A queued run's job left behind after its run went terminal is also
+        # orphaned; publish_failed is the tick's to retry, never the drain's.
+        self.queue['items'][2]['repair_runs']['run3']['state'] = 'publish_failed'
+        # A promotion item's queued run with a valid id IS drainable (drain_job
+        # does not filter on kind), so it counts as inbox work.
+        self.queue['items'].append({'id': 'promo-ok', 'kind': 'promotion', 'state': 'done',
+                                    'repair_runs': {'run6': {'jobs': ['crq-run6-F1'], 'state': 'queued',
+                                                             'base': self.pin}}})
+        self.job('crq-run6-F1', 'promo-ok', 'run6', 'src/kept.ts')
         digest = repair_tick.digest(self.root, self.queue)
-        self.assertEqual(digest['inbox'], 3)  # run1 F1/F2 and run2 F1 still drain
+        self.assertEqual(digest['inbox'], 4)  # run1 F1/F2, run2 F1 and run6 F1 still drain
         self.assertEqual(digest['orphaned'], 2)
-        for job_id in ('crq-run1-F1', 'crq-run1-F2', 'crq-run2-F1'):
+        drainable = {j for j in bounded.drain_order(self.root)
+                     if bounded.drain_job(self.root, self.config, self.queue, j)[2]
+                     != 'no queued tick-owned repair run'}
+        self.assertEqual(drainable, {'crq-run1-F1', 'crq-run1-F2', 'crq-run2-F1', 'crq-run6-F1'})
+        for job_id in ('crq-run1-F1', 'crq-run1-F2', 'crq-run2-F1', 'crq-run6-F1'):
             service.mark_stale({'job': job_id, 'item': 'x'}, 'test')
         digest = repair_tick.digest(self.root, self.queue)
         self.assertEqual((digest['inbox'], digest['oldest_age_minutes']), (0, 0))

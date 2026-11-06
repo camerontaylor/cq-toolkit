@@ -510,14 +510,15 @@ def digest(root, queue):
                 judged = (value.get('judge') or {}).get('verdict')
                 if judged in ('valid', 'invalid'):
                     counts['judged-' + judged] += 1
-    # Only jobs the drain can still select count as inbox work: a live (non-
-    # promotion) item's queued run, under the drain's job-id grammar. Anything
-    # else (a retired promotion run, a terminal run, an id the drain refuses
-    # such as 'crq-signer-promo-7f440274a8+-F1') never drains, so it would
-    # pin the oldest age forever; report it separately as orphaned.
-    drainable = {job for item in queue['items'] if item.get('kind') != 'promotion'
+    # Only jobs the drain can still select count as inbox work. This mirrors
+    # bounded.drain_job/drain_order: a job listed in a 'queued' run (any item
+    # kind) whose id passes the drain's job-id grammar. Anything else (a
+    # terminal run, an id the drain refuses such as the retired
+    # 'crq-signer-promo-7f440274a8+-F1') never drains, so it would pin the
+    # oldest age forever; report it separately as orphaned.
+    drainable = {job for item in queue['items']
                  for record in item.get('repair_runs', {}).values()
-                 if record.get('state') in ('queued', 'publish_failed')
+                 if record.get('state') == 'queued'
                  for job in record.get('jobs', []) if JOB_ID.fullmatch(job)}
     inbox = Path(root) / 'state/repair/inbox'
     pending, deferred, running, orphaned = [], 0, 0, 0

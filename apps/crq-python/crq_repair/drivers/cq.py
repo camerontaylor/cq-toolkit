@@ -9,26 +9,35 @@ from crq_repair import command
 # only in a read-only sandbox, so without these the fixer cannot search at all:
 # on the runner host half of all tool calls in budget-exhausted attempts (1681 of 3326)
 # were denied grep/rg/git grep/ls-files/ls/find calls, each a paid turn that
-# re-sends the whole context. Anchored re: grants, no shell metacharacters,
-# and no option that executes a program or leaves the repository:
-# `git grep -O/--open-files-in-pager` runs a pager command, `--no-index`
-# searches outside the repo, `git show --output` writes a file, and
-# `--ext-diff` runs an external diff driver. Long options are refused by any
-# unambiguous prefix (git accepts abbreviations). Plain grep/rg/find stay
-# denied: they read outside the worktree (rg --pre and find -exec also run
-# programs).
-_SAFE_ARGS = r'[^;&|$`()<>\n\r]*'
-_NO_EXEC = r'(?!.*\s(?:-[A-Za-z0-9]*O|--op|--no-i|--ou|--ext|--no-ext))'
+# re-sends the whole context.
+#
+# Allowed commands run through `/bin/sh -c`, so the shell rewrites the string
+# before git parses argv: quotes, backslashes, globs, tildes, `$`, backticks
+# and the like could hide an option from a guard over the raw text
+# (`git grep "-O"cmd x` runs a pager). Each argument is therefore limited to a
+# character set the shell passes through unchanged and splits only on single
+# spaces, so the raw tokens ARE git's argv. On those tokens, refuse every
+# option that runs a program or leaves the repository, including git's
+# abbreviated long options: `-O`/`--open-files-in-pager` (alone or in a
+# short-option bundle) runs a pager command, `--no-index` searches outside
+# the repo, `--textconv` and `--ext-*` run configured filters. `git show`
+# is not granted (diff output runs textconv/external diff by default).
+# Git config cannot add an execution path: the harness refuses read/edit of
+# `.git`, so config stays operator-owned. Plain grep/rg/find stay denied:
+# they read outside the worktree (rg --pre and find -exec also run programs).
+_TOKEN = r'[A-Za-z0-9_./:=@%+,^-]+'
+_NO_EXEC = (r'(?!.* (?:-[A-Za-z0-9_./:=@%+,^]*O|--op|--no-i|--tex|--ext|--ou))')
 SEARCH_PATTERNS = [
-    're:^git grep' + _NO_EXEC + r'(?:[ \t]' + _SAFE_ARGS + ')?$',
-    're:^git (?:ls-files|ls-tree|show)' + _NO_EXEC + r'(?:[ \t]' + _SAFE_ARGS + ')?$',
+    're:^git (?:grep|ls-files|ls-tree)' + _NO_EXEC + '(?: ' + _TOKEN + ')*$',
 ]
 SHELL_HINT = ('\nShell: the bash tool runs ONLY these commands, with no pipes, redirection or '
-              '`cd`: git grep, git ls-files, git ls-tree, git show, git status, git add, git commit, '
+              '`cd`: git grep, git ls-files, git ls-tree, git status, git add, git commit, '
               'git rev-parse, the closed forms `git diff`, `git diff --cached`, `git log -n 1`, '
               '`git log --oneline -n 20`. Search with `git grep -n <pattern> [-- <path>]`, list files '
-              'with `git ls-files <dir>`; use the read tool for file contents. Anything else is denied '
-              'and wastes budget, as does any of ; & | $ ` ( ) < > in a command (search patterns included).')
+              'with `git ls-files <dir>`; use the read tool for file contents. Search arguments may '
+              'use only letters, digits, single spaces and _ . / : = @ % + , ^ -; no quotes, '
+              'backslashes, globs or other shell characters (a `.` in a pattern matches any '
+              'character). Anything else is denied and wastes budget.')
 HARNESS = {
     'tools': {
         'read': {'enabled': True, 'pathPatterns': ['**/*'], 'maxOutputChars': 200000},

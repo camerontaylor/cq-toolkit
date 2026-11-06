@@ -135,20 +135,29 @@ class CqDriverTest(unittest.TestCase):
         body = json.loads(next(a for a in argv if a.startswith('--item='))[len('--item='):])['body']
         self.assertIn('git grep -n', body)
         harness = json.loads(next(a for a in argv if a.startswith('--harness='))[len('--harness='):])
-        self.assertEqual(harness['tools']['run']['commandPatterns'][-2:], cq.SEARCH_PATTERNS)
+        self.assertEqual(harness['tools']['run']['commandPatterns'][-len(cq.SEARCH_PATTERNS):],
+                         cq.SEARCH_PATTERNS)
 
 
-ALLOWED = ['git grep -n "import.meta.url" -- scripts', 'git grep -rn foo', 'git grep foo',
+ALLOWED = ['git grep -n import.meta.url -- scripts', 'git grep -rn foo', 'git grep foo',
            'git ls-files', 'git ls-files scripts test', 'git ls-tree -r HEAD src',
-           'git show HEAD:src/a.ts', 'git show -s --format=%B HEAD', 'git grep -c needle']
-DENIED = ['git grep -O vim x', 'git grep -nO x', 'git grep -Ovim x', 'git grep --open-files-in-pager=vim x',
-          'git grep --op=vim x', 'git grep --no-index x /etc', 'git grep --no-ind x',
-          'git show --output=/tmp/x HEAD', 'git show --outp=/tmp/x HEAD', 'git show --ext-diff HEAD',
-          'git grep x | sh', 'git grep $(id)', 'git grep x > /tmp/o', 'git grep x; id',
-          'git grep `id`', 'git grepx', 'git ls-files\nid', 'git -c core.pager=id grep x',
-          'grep -rn x .', 'rg -n x', 'find . -exec id ;', 'ls']
-
-
+           'git grep -c needle', 'git grep -n -e def.process -- apps/crq-python/crq_repair.py',
+           'git grep --no-textconv x', 'git grep -n a%b+c,d=e@f:g^h']
+DENIED = [
+    # Executing or escaping options, plain and abbreviated.
+    'git grep -O vim x', 'git grep -nO x', 'git grep -Ovim x', 'git grep --open-files-in-pager=vim x',
+    'git grep --op=vim x', 'git grep --no-index x /etc', 'git grep --no-ind x', 'git grep --textconv x',
+    'git grep --tex x', 'git grep --ext-grep x', 'git ls-files --output=x',
+    # Shell rewriting: quotes, backslashes, globs and expansions hide options from the raw text.
+    'git grep "-O"touch x', 'git grep "-O"cat" /home/u/.key" pat', "git grep '-O'touch x",
+    'git grep -\\O touch x', 'git grep \\-O touch x', 'git grep -"-"open-files-in-pager=id x',
+    'git ls-files "--"output=/tmp/x', 'git grep x *', 'git grep x -?', 'git grep x [-]O',
+    'git grep x ~/.ssh', 'git grep $HOME x', 'git grep x # comment', 'git grep x  -O',
+    # Chaining, substitution, redirection, other programs.
+    'git grep x | sh', 'git grep $(id)', 'git grep x > /tmp/o', 'git grep x; id', 'git grep `id`',
+    'git grepx', 'git ls-files\nid', 'git ls-files\tx', 'git -c core.pager=id grep x',
+    'git show HEAD', 'git show --output=/tmp/x HEAD', 'git show "--"output=/tmp/x HEAD',
+    'grep -rn x .', 'rg -n x', 'find . -exec id ;', 'ls', ' git grep x', 'git grep x ']
 def allowed(command, matcher):
     return any(matcher(pattern[len('re:'):], command) for pattern in cq.SEARCH_PATTERNS)
 
@@ -170,6 +179,24 @@ class SearchAllowlistTest(unittest.TestCase):
         out = subprocess.run(['node', '-e', script, json.dumps([cq.SEARCH_PATTERNS, ALLOWED + DENIED])],
                              check=True, capture_output=True, text=True).stdout
         self.assertEqual(json.loads(out), [True] * len(ALLOWED) + [False] * len(DENIED))
+
+    @unittest.skipUnless(Path('/bin/sh').exists(), 'needs /bin/sh, as the harness run tool uses')
+    def test_shell_passes_allowed_commands_through_unchanged(self):
+        # The guard reads the raw string; the harness runs it with `/bin/sh -c`.
+        # Every allowed command must reach git as exactly its space-split
+        # tokens, or the guard could be checking something other than argv.
+        stub = Path(tempfile.mkdtemp()) / 'git'
+        self.addCleanup(shutil.rmtree, stub.parent)
+        stub.write_text('#!/bin/sh\nfor a in "$@"; do printf "%s\\0" "$a"; done\n')
+        stub.chmod(0o755)
+        every_char = 'git grep -n ' + ' '.join(ch * 2 for ch in 'A_./:=@%+,^-9z')
+        for command in ALLOWED + [every_char]:
+            with self.subTest(command=command):
+                match = lambda pattern, text: re.search(pattern, text) is not None
+                self.assertTrue(allowed(command, match))
+                out = subprocess.run(['/bin/sh', '-c', str(stub) + command[len('git'):]], check=True,
+                                     capture_output=True, text=True, cwd=stub.parent).stdout
+                self.assertEqual(out.split('\0')[:-1], command.split(' ')[1:])
 
 
 if __name__ == '__main__':
