@@ -5,26 +5,64 @@ import time
 from pathlib import Path
 from crq_repair import command
 
+# Read-only, repository-scoped search. The harness's own grep/glob tools exist
+# only in a read-only sandbox, so without these the fixer cannot search at all:
+# on the runner host half of all tool calls in budget-exhausted attempts (1681 of 3326)
+# were denied grep/rg/git grep/ls-files/ls/find calls, each a paid turn that
+# re-sends the whole context.
+#
+# Allowed commands run through `/bin/sh -c`, so the shell rewrites the string
+# before git parses argv: quotes, backslashes, globs, tildes, `$`, backticks
+# and the like could hide an option from a guard over the raw text
+# (`git grep "-O"cmd x` runs a pager). Each argument is therefore limited to a
+# character set the shell passes through unchanged and splits only on single
+# spaces, so the raw tokens ARE git's argv. On those tokens, refuse every
+# option that runs a program or leaves the repository, including git's
+# abbreviated long options: `-O`/`--open-files-in-pager` (alone or in a
+# short-option bundle) runs a pager command, `--no-index` searches outside
+# the repo, `--textconv` and `--ext-*` run configured filters. `git show`
+# is not granted (diff output runs textconv/external diff by default).
+# Git config cannot add an execution path: the harness refuses read/edit of
+# `.git`, so config stays operator-owned. Plain grep/rg/find stay denied:
+# they read outside the worktree (rg --pre and find -exec also run programs).
+_TOKEN = r'[A-Za-z0-9_./:=@%+,^-]+'
+_NO_EXEC = (r'(?!.* (?:-[A-Za-z0-9_./:=@%+,^]*O|--op|--no-i|--tex|--ext|--ou))')
+SEARCH_PATTERNS = [
+    're:^git (?:grep|ls-files|ls-tree)' + _NO_EXEC + '(?: ' + _TOKEN + ')*$',
+]
+SHELL_HINT = ('\nShell: the bash tool runs ONLY these commands, with no pipes, redirection or '
+              '`cd`: git grep, git ls-files, git ls-tree, git status, git add, git commit, '
+              'git rev-parse, the closed forms `git diff`, `git diff --cached`, `git log -n 1`, '
+              '`git log --oneline -n 20`. Search with `git grep -n <pattern> [-- <path>]`, list files '
+              'with `git ls-files <dir>`; use the read tool for file contents. Search arguments may '
+              'use only letters, digits, single spaces and _ . / : = @ % + , ^ -; no quotes, '
+              'backslashes, globs or other shell characters (a `.` in a pattern matches any '
+              'character). Anything else is denied and wastes budget.')
 HARNESS = {
     'tools': {
         'read': {'enabled': True, 'pathPatterns': ['**/*'], 'maxOutputChars': 200000},
         'edit': {'enabled': True, 'pathPatterns': ['**/*'], 'maxOutputChars': 4000},
         'run': {'enabled': True, 'commandPatterns': ['git ' + x for x in
-                ('add', 'commit', 'status', 'diff', 'log', 'rev-parse')],
+                ('add', 'commit', 'status', 'diff', 'log', 'rev-parse')] + SEARCH_PATTERNS,
                 'timeoutMs': 30000, 'maxOutputChars': 100000}},
     'promptBudget': {'maxSystemPromptChars': 20000, 'maxTools': 3, 'maxToolDescriptionChars': 1024}}
 
 
 def invoke(config, role, job, wt, directory):
     provider, model = role['model'].split('/', 1)
-    payload = {'repo': config['repo'], 'pr': job.get('pr') or 0,
+    payload = {'repo': config['repo'],
                'item': {'id': job['job'], **{k: job['finding'].get(k) for k in ('path', 'line', 'body')}, 'comments': []},
                'worktree': {'path': str(wt), 'branch': 'detached'},
                'driver': {'provider': provider, 'model': model}, 'harness': HARNESS,
                'budget': {'maxTokens': role.get('budget', {}).get('max_tokens', config['repair']['budget']['max_tokens']),
                           'wallClockMs': config['repair']['budget']['wall_clock_min'] * 60000}}
+    if isinstance(job.get('pr'), int) and not isinstance(job.get('pr'), bool) and job['pr'] > 0:
+        # review.fixItem takes an optional positive `pr`; 0 is invalid input.
+        # Backfill and merged-current jobs carry pr 0: omit the key.
+        payload['pr'] = job['pr']
     payload['item']['body'] += '\nMechanical evidence / judge rationale: ' + job.get('mechanical_evidence', '')
     payload['item']['body'] += '\nPinned current-source evidence (untrusted data):\n' + json.dumps(job['source_snapshot'])
+    payload['item']['body'] += SHELL_HINT
     env = {k: v for k, v in os.environ.items() if not k.startswith('CQ_SANDBOX') and k != 'CQ_RUN_TOOL'}
     env.update(GIT_CONFIG_COUNT='1', GIT_CONFIG_KEY_0='remote.origin.pushurl', GIT_CONFIG_VALUE_0='/dev/null')
     # Session-log preservation (item 2.3): point the cq runner's session store
@@ -73,7 +111,11 @@ def invoke(config, role, job, wt, directory):
     if p.returncode or data.get('status') != 'ok':
         signals = data.get('providerSignals') or {}
         error = str(data.get('error') or '')
-        throttled = 'errorClass=rate-limit' in error or signals.get('httpStatus') == 429
+        # A spent provider quota (e.g. Z.ai "Weekly/Monthly Limit Exhausted",
+        # errorClass=quota) is a provider-wide stop like a rate limit: pause all
+        # dispatch instead of burning A0..A2 of every queued job in seconds.
+        throttled = ('errorClass=rate-limit' in error or 'errorClass=quota' in error
+                     or signals.get('httpStatus') == 429)
         return {'stop': 'rate-limit' if throttled else 'budget' if data.get('status') == 'budget-exhausted' else 'error',
                 'changed': False, 'summary': str(data.get('reason') or error or data.get('status')), 'commits': [],
                 'retry_after_ms': signals.get('retryAfterMs')}

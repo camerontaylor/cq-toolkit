@@ -8,6 +8,8 @@ from pathlib import Path
 from types import SimpleNamespace
 import subprocess
 import tempfile
+import threading
+import time
 import unittest
 from unittest import mock
 from crq_repair import atomic
@@ -329,6 +331,7 @@ class RepairDrainTest(unittest.TestCase):
         self.assertEqual((report['stop'], report['retry_after_ms']), ('rate-limit', 5000))
 
     def test_drain_skips_pass_while_the_tick_holds_its_lock(self):
+        self.config['repair']['tick_lock_wait_s'] = 0
         lock_path = self.root / 'state/tick.lock'
         with lock_path.open('w') as held:
             fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -344,6 +347,77 @@ class RepairDrainTest(unittest.TestCase):
              mock.patch.object(service, 'process_item') as process_item:
             service.drain(self.config)
         self.assertEqual(self.result('crq-run1-F2')['verdict'], 'STALE')
+
+    def test_drain_waits_for_a_tick_that_releases_its_lock(self):
+        # A path-triggered drain starts while the enqueuing tick still holds
+        # tick.lock; it must wait for the release, not drop the pass.
+        lock_path = self.root / 'state/tick.lock'
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        held = lock_path.open('w')
+        fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        timer = threading.Timer(0.5, lambda: (fcntl.flock(held, fcntl.LOCK_UN), held.close()))
+        timer.start()
+        self.addCleanup(timer.cancel)
+        self.config['repair']['tick_lock_wait_s'] = 10
+        with mock.patch.object(service, 'blocked', return_value=False), \
+             mock.patch.object(service, 'process_item'):
+            service.drain(self.config)
+        self.assertEqual(self.result('crq-run1-F2')['verdict'], 'STALE')
+
+    def test_lock_wait_gives_up_after_its_bound(self):
+        lock_path = self.root / 'state/tick.lock'
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with lock_path.open('w') as held:
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            start = time.monotonic()
+            self.assertEqual(service.fetch_clone(self.config, lock_wait=0.3), 'crq tick holds tick.lock')
+            self.assertLess(time.monotonic() - start, 5)
+
+    def test_digest_ignores_jobs_the_drain_can_never_select(self):
+        # The retired promotion run on the runner host: '+' is outside the job-id grammar
+        # and promotion items are never harvested, so it pinned 'oldest' forever.
+        promo = 'crq-signer-promo-7f440274a8+-F1'
+        (self.root / 'state/repair/inbox' / (promo + '.json')).write_text(json.dumps(
+            {'job': promo, 'item': 'promo-7f440274a8+', 'run': 'signer-promo-7f440274a8+'}))
+        self.queue['items'].append({'id': 'promo-7f440274a8+', 'kind': 'promotion', 'state': 'done',
+                                    'repair_runs': {'signer-promo-7f440274a8+': {
+                                        'jobs': [promo], 'state': 'queued'}}})
+        # A queued run's job left behind after its run went terminal is also
+        # orphaned; publish_failed is the tick's to retry, never the drain's.
+        self.queue['items'][2]['repair_runs']['run3']['state'] = 'publish_failed'
+        # A promotion item's queued run with a valid id IS drainable (drain_job
+        # does not filter on kind), so it counts as inbox work.
+        self.queue['items'].append({'id': 'promo-ok', 'kind': 'promotion', 'state': 'done',
+                                    'repair_runs': {'run6': {'jobs': ['crq-run6-F1'], 'state': 'queued',
+                                                             'base': self.pin}}})
+        self.job('crq-run6-F1', 'promo-ok', 'run6', 'src/kept.ts')
+        digest = repair_tick.digest(self.root, self.queue)
+        self.assertEqual(digest['inbox'], 4)  # run1 F1/F2, run2 F1 and run6 F1 still drain
+        self.assertEqual(digest['orphaned'], 2)
+        drainable = {j for j in bounded.drain_order(self.root)
+                     if bounded.drain_job(self.root, self.config, self.queue, j)[2]
+                     != 'no queued tick-owned repair run'}
+        self.assertEqual(drainable, {'crq-run1-F1', 'crq-run1-F2', 'crq-run2-F1', 'crq-run6-F1'})
+        for job_id in ('crq-run1-F1', 'crq-run1-F2', 'crq-run2-F1', 'crq-run6-F1'):
+            service.mark_stale({'job': job_id, 'item': 'x'}, 'test')
+        digest = repair_tick.digest(self.root, self.queue)
+        self.assertEqual((digest['inbox'], digest['oldest_age_minutes']), (0, 0))
+
+    def test_enqueue_refuses_run_ids_the_drain_cannot_select(self):
+        rdir = self.root / 'runs/x'
+        rdir.mkdir(parents=True)
+        (rdir / 'review.ndjson').write_text(json.dumps(
+            {'type': 'finding', 'severity': 'major', 'fileName': 'src/kept.ts', 'comment': 'x'}) + '\n')
+        c = SimpleNamespace(REPO='o/r', item_repo=lambda item: 'o/r', CONFIG=self.config,
+                            STATE=self.root / 'state', git=lambda *a, **k: '' if a[0] == 'rev-list' else self.tip)
+        q = {'items': []}
+        for run, queued in (('promo-7f440274a8+', False), ('pr9-20261106T000000Z', True)):
+            item = {'id': 'pr9', 'pr': 9, 'kind': 'merged', 'state': 'reviewing'}
+            meta = {'run_id': run, 'base': self.pin, 'head': self.tip}
+            self.assertIs(repair_tick.enqueue(c, q, item, meta, rdir), queued)
+            self.assertEqual(bounded.job_path(self.root, 'crq-' + run + '-F1').exists() if queued
+                             else (self.root / 'state/repair/inbox' / ('crq-' + run + '-F1.json')).exists(),
+                             queued)
 
     def test_judge_deferred_by_blackout_resumes_without_repeating_fixer(self):
         self.job('crq-run1-F1', 'pr1-merged', 'run1', 'src/kept.ts', severity='critical')

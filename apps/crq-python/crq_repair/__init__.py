@@ -80,6 +80,37 @@ def verify(wt, base, commits, job):
     return head
 
 
+# One argv string is capped by the kernel (Linux MAX_ARG_STRLEN, 128 KiB);
+# stay below it so an oversized repair fails closed with a clear reason.
+MAX_HACK_DETECTOR_DIFF_BYTES = 120_000
+
+
+def hack_detector(cq_bin, diff, cwd):
+    """Run `cq gates.hackDetector` over the diff TEXT. Fail closed: raise
+    ValueError unless the op returns status ok with no findings.
+
+    The cq CLI has no `@file` expansion. `--diff=@<path>` scanned the literal
+    path string, which never parses as a diff, so every repair commit was
+    rejected as `indeterminate`. Pass the diff itself."""
+    if len(diff.encode()) > MAX_HACK_DETECTOR_DIFF_BYTES:
+        raise ValueError('hack detector did not pass: repair diff too large to scan (%d bytes)'
+                         % len(diff.encode()))
+    p = command(['node', cq_bin, 'gates.hackDetector', '--diff=' + diff, '--json'], cwd=cwd)
+    try:
+        data = json.loads(p.stdout)
+    except ValueError:
+        raise ValueError('hack detector did not pass: unreadable output (exit %s): %s'
+                         % (p.returncode, (p.stderr or p.stdout)[:300])) from None
+    value = data.get('value')
+    if p.returncode or data.get('status') != 'ok' or not isinstance(value, list) or value:
+        detail = (json.dumps([{k: f.get(k) for k in ('kind', 'file', 'message')} for f in value
+                              if isinstance(f, dict)])
+                  if isinstance(value, list) and value else
+                  str(data.get('detail') or data.get('error') or data.get('status')))
+        raise ValueError('hack detector did not pass: ' + detail[:600])
+    return data
+
+
 def findings(path):
     result = []
     for line in Path(path).read_text(errors="replace").splitlines():

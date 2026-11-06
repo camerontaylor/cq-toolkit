@@ -8,12 +8,15 @@ import re
 from crq_repair import command, git
 
 
+JOB_ID = re.compile(r'crq-[A-Za-z0-9._-]+')
+
+
 def identity(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
 
 
 def job_path(root, job_id):
-    if not isinstance(job_id, str) or not re.fullmatch(r'crq-[A-Za-z0-9._-]+', job_id):
+    if not isinstance(job_id, str) or not JOB_ID.fullmatch(job_id):
         raise ValueError('expected one exact CRQ job id')
     inbox = Path(root) / 'state/repair/inbox'
     target = inbox / (job_id + '.json')
@@ -86,7 +89,7 @@ def drain_order(root):
     """Inbox job ids, oldest file first. Odd names and symlinks are never read."""
     inbox = Path(root) / 'state/repair/inbox'
     paths = [p for p in inbox.glob('*.json')
-             if re.fullmatch(r'crq-[A-Za-z0-9._-]+', p.stem) and not p.is_symlink()]
+             if JOB_ID.fullmatch(p.stem) and not p.is_symlink()]
     return [p.stem for p in sorted(paths, key=lambda p: (p.stat().st_mtime, p.name))]
 
 
