@@ -36,6 +36,8 @@ describe('cq-accept posts: stale-verdict guard and sweep dedupe (W1.10 Decision 
     completed?: string;
     conclusion?: string;
     ext?: string;
+    // Defaults to the post-step fixture payload's title.
+    title?: string;
   };
   const row = (r: Row) => ({
     id: r.id,
@@ -47,6 +49,7 @@ describe('cq-accept posts: stale-verdict guard and sweep dedupe (W1.10 Decision 
     external_id: r.ext ?? `${TRUST_SHA}:${SHA}`,
     started_at: r.started,
     completed_at: r.completed ?? r.started,
+    output: { title: r.title ?? 'pass' },
   });
   const STUB = `date() {
   if [ "$*" = '-u +%s' ]; then echo "$NOW_EPOCH"; else command date "$@"; fi
@@ -156,9 +159,10 @@ gh() {
         expect(interim.title).toBe('acceptance: pass (#7) (interim: unauthenticated)');
         expect(interim.summary).toMatch(/Interim mode: no verdict App is registered/);
       }
+      // App mode is unchanged: the exact pre-label title and summary.
       const app = judge('5113217');
       expect(app.title).toBe('acceptance: pass (#7)');
-      expect(app.summary).not.toMatch(/Interim mode/);
+      expect(app.summary).toBe(`\`\`\`text\nok\n\`\`\`\n\ntrust ref \`trust:${SHA}\``);
     },
   );
 
@@ -411,6 +415,14 @@ gh() {
           },
           true,
           'sweep, conclusion changed',
+        );
+        expectRun(
+          {
+            rows: [{ id: 3, app: 'actions', started: OLDER, title: 'acceptance: pass (#7)' }],
+            event: 'schedule',
+          },
+          true,
+          'sweep, title changed (a row from before the interim label)',
         );
         expectRun(
           {

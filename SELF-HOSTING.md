@@ -184,8 +184,8 @@ no repository-level secrets. The `live-merge` and `live-review` drills remain di
 
 Repository variables: `CQ_VERDICT_APP_ID` and `CQ_VERDICT_APP_CLIENT_ID`
 (verdict App: the client id mints the posting token, the numeric id drives
-the gate's verdict selection, cq-accept's sweep dedupe and the drift
-check); `CQ_PROMOTER_APP_ID` and `CQ_PROMOTER_APP_CLIENT_ID` (promoter App:
+the gate's verdict selection, cq-accept's sweep dedupe, its interim
+"unauthenticated" label when unset, and the drift check); `CQ_PROMOTER_APP_ID` and `CQ_PROMOTER_APP_CLIENT_ID` (promoter App:
 the client id mints the gate's push token, the numeric id is R1's bypass
 actor). Each pair is set together or not at all: every verdict poster,
 `cq-gate` and `settings-drift` refuse when exactly one of a pair is set.

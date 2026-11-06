@@ -448,7 +448,8 @@ jobs:
               "repos/${REPO}/commits/${subject}/check-runs?check_name=cq/acceptance&filter=all&per_page=100" \
               --jq '.check_runs[]
                 | {id, app_id: .app.id, app_slug: .app.slug,
-                   conclusion, external_id, started_at, completed_at}' |
+                   conclusion, external_id, started_at, completed_at,
+                   title: .output.title}' |
               jq -s --arg app "$VERDICT_APP_ID" --arg ceiling "$ceiling" \
                 --arg subject "$subject" '
                 def stamp: type == "string"
@@ -486,9 +487,12 @@ jobs:
               # reference row (the latest snapshot, selected above), or
               # when a stale row is what GitHub shows as latest (the
               # latest-completed row is not the reference row): otherwise
-              # that stale row would stand until the next PR event.
+              # that stale row would stand until the next PR event. A title
+              # change (e.g. a row from before the interim label) re-posts
+              # once per head, then stabilises.
               if jq -e --slurpfile c "$check" --argjson latest "$latest" '
                   .conclusion == $c[0].conclusion
+                  and .title == $c[0].output.title
                   and .external_id == $c[0].external_id
                   and .id != null and .id == $latest.id' \
                   <<<"$newest" >/dev/null; then
