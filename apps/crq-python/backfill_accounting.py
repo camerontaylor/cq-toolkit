@@ -16,6 +16,7 @@ LINEAGE_CACHE_BYTES = 32 * 1024 * 1024
 # Bump when lineage/proven_deleted result semantics change: persisted required-PR
 # mappings written under an older epoch must stop matching.
 LINEAGE_RESULT_EPOCH = 1
+FACT_CACHE_BYTES = 64 * 1024 * 1024
 
 BLAME_OPTIONS = ["--line-porcelain", "--encoding=UTF-8"]
 
@@ -43,6 +44,9 @@ class Repository:
         self._entry_bytes = 0
         self._lineage_steps = {}
         self._lineage_bytes = 0
+        self.disk_cache = None
+        self._facts = collections.OrderedDict()
+        self._fact_bytes = 0
         self._verified = {}  # review digest -> verified credit or failure; immutable_cache invocations only
 
     def begin_invocation(self):
@@ -52,6 +56,36 @@ class Repository:
         self._verified = {}
         self._lineage_steps = {}
         self._lineage_bytes = 0
+        self._facts.clear()
+        self._fact_bytes = 0
+
+    def _cached(self, kind, identity):
+        return self.disk_cache.get(kind, identity) if self.disk_cache is not None else None
+
+    def _persist(self, kind, identity, value):
+        if self.disk_cache is not None:
+            self.disk_cache.put(kind, identity, value)
+
+    def _has_commit(self, commit):
+        return subprocess.run(["git", "cat-file", "-e", str(commit) + "^{commit}"], cwd=self.root,
+                              capture_output=True, check=False).returncode == 0
+
+    def _memo(self, key):
+        if self.immutable_cache is not None and key in self._facts:
+            self._facts.move_to_end(key)
+            return self._facts[key][0]
+        return None
+
+    def _remember(self, key, value, size):
+        if self.immutable_cache is not None and size <= FACT_CACHE_BYTES:
+            if key in self._facts:
+                _, previous = self._facts.pop(key)
+                self._fact_bytes -= previous
+            while self._facts and self._fact_bytes + size > FACT_CACHE_BYTES:
+                _, (_, evicted) = self._facts.popitem(last=False)
+                self._fact_bytes -= evicted
+            self._facts[key] = (value, size)
+            self._fact_bytes += size
 
     def git(self, *args, check=True, env=None, input=None):
         cacheable = (self.immutable_cache is not None and check and env is None and input is None
@@ -244,7 +278,22 @@ class Repository:
         return result
 
     def blame(self, target, name):
-        raw = self.git("blame", *BLAME_OPTIONS, target, "--", ledger.path(name)).splitlines()
+        name = ledger.path(name)
+        cacheable = re.fullmatch(r"[0-9a-f]{40,64}", target) is not None
+        key = ("blame", target, name)
+        remembered = self._memo(key) if cacheable else None
+        if remembered is not None:
+            return list(remembered)
+        identity = {"target": target, "path": name, "options": BLAME_OPTIONS}
+        cached = self._cached("blame", identity) if cacheable else None
+        if isinstance(cached, list):
+            try:
+                result = [(r[0], r[1], bytes.fromhex(r[2]), bytes.fromhex(r[3])) for r in cached]
+                self._remember_blame(key, result)
+                return result
+            except (TypeError, ValueError, IndexError):
+                pass
+        raw = self.git("blame", *BLAME_OPTIONS, target, "--", name).splitlines()
         result, origin, original_line, filename = [], None, None, None
         for line in raw:
             header = re.fullmatch(rb"([0-9a-f]{40,64}) (\d+) (\d+)(?: \d+)?", line)
@@ -254,24 +303,39 @@ class Repository:
                 filename = line[9:]
             elif line.startswith(b"\t"):
                 result.append((origin, original_line, filename, line[1:]))
+        if cacheable and all(isinstance(r[2], bytes) for r in result):
+            self._persist("blame", identity, [[r[0], r[1], r[2].hex(), r[3].hex()] for r in result])
+            self._remember_blame(key, result)
         return result
+
+    def _remember_blame(self, key, rows):
+        frozen = tuple(rows)
+        size = sys.getsizeof(frozen) + 256
+        size += sum(sys.getsizeof(row) + sum(sys.getsizeof(v) for v in row) for row in frozen)
+        self._remember(key, frozen, size)
 
     def _lineage_step(self, commit):
         if self.immutable_cache is not None and commit in self._lineage_steps:
             return self._lineage_steps[commit]
-        parent = self.git("rev-parse", commit + "^1").decode().strip()
-        raw = self.git("diff", "--name-status", "-z", "--find-renames=100%", parent, commit)
-        fields, changes, i = raw.split(b"\0"), [], 0
-        while i < len(fields) - 1:
-            status, source = fields[i].decode(), fields[i + 1].decode("utf-8", "replace")
-            i += 2
-            destination = None
-            if status.startswith(("R", "C")):
-                destination = fields[i].decode("utf-8", "replace"); i += 1
-            changes.append((status, source, destination))
+        identity = {"commit": commit}
+        cached = self._cached("lineage_step", identity)
+        if isinstance(cached, dict) and "parent" in cached and isinstance(cached.get("changes"), list):
+            parent, changes = cached["parent"], [tuple(row) for row in cached["changes"]]
+        else:
+            parent = self.git("rev-parse", commit + "^1").decode().strip()
+            raw = self.git("diff", "--name-status", "-z", "--find-renames=100%", parent, commit)
+            fields, changes, i = raw.split(b"\0"), [], 0
+            while i < len(fields) - 1:
+                status, source = fields[i].decode(), fields[i + 1].decode("utf-8", "replace")
+                i += 2
+                destination = None
+                if status.startswith(("R", "C")):
+                    destination = fields[i].decode("utf-8", "replace"); i += 1
+                changes.append((status, source, destination))
+            self._persist("lineage_step", identity, {"parent": parent, "changes": [list(row) for row in changes]})
         result = parent, tuple(changes)
         # Conservative bound for decoded strings, tuples and dictionary entries.
-        size = len(raw) * 4 + len(changes) * 256 + 256
+        size = 256 + sum(256 + sum(len(v.encode()) * 4 for v in row if v is not None) for row in changes)
         if self.immutable_cache is not None and size <= LINEAGE_CACHE_BYTES:
             if self._lineage_bytes + size > LINEAGE_CACHE_BYTES:
                 self._lineage_steps.clear()
@@ -289,6 +353,23 @@ class Repository:
         ends inherited coverage. Explicit verified nonancestor mappings may be
         supplied by a later evidence importer; ancestry alone cannot provide one.
         """
+        if self.disk_cache is None or not all(re.fullmatch(r"[0-9a-f]{40,64}", c) for c in (old, new)):
+            return self._lineage(old, new, name)
+        key = ("lineage", old, new, name)
+        remembered = self._memo(key)
+        if remembered is not None:
+            return remembered[0]
+        identity = {"old": old, "new": new, "path": name}
+        cached = self._cached("lineage", identity)
+        if isinstance(cached, dict) and "path" in cached:
+            result = cached["path"]
+        else:
+            result = self._lineage(old, new, name)
+            self._persist("lineage", identity, {"path": result})
+        self._remember(key, (result,), 256 + sum(sys.getsizeof(v) for v in key) + sys.getsizeof(result))
+        return result
+
+    def _lineage(self, old, new, name):
         if name not in self._entries(old):
             return None
         chain = self.git("rev-list", "--first-parent", new).decode().splitlines()
@@ -338,20 +419,62 @@ class Repository:
         return True
 
     def carry(self, old, new, name, lines):
-        mapped = self.lineage(old, new, name)
+        cacheable = all(re.fullmatch(r"[0-9a-f]{40,64}", c) for c in (old, new))
+        key = ("carry", old, new, name, tuple(BLAME_OPTIONS))
+        outcome = self._memo(key) if cacheable else None
+        identity = {"old": old, "new": new, "path": name, "options": BLAME_OPTIONS}
+        if outcome is None:
+            cached = self._cached("carry", identity) if cacheable else None
+            if isinstance(cached, dict) and "path" in cached and "old_lines" in cached and isinstance(cached.get("matches"), list):
+                outcome = cached["path"], dict(cached["matches"]), cached["old_lines"]
+            else:
+                mapped = self.lineage(old, new, name)
+                matches, maximum = {}, 0
+                if mapped is not None:
+                    old_blame, new_blame = self.blame(old, name), self.blame(new, mapped)
+                    counts, old_counts = collections.Counter(new_blame), collections.Counter(old_blame)
+                    positions = {sig: i for i, sig in enumerate(new_blame, 1) if counts[sig] == 1}
+                    matches = {i: positions[sig] for i, sig in enumerate(old_blame, 1)
+                               if old_counts[sig] == 1 and sig in positions}
+                    maximum = len(old_blame)
+                outcome = mapped, matches, maximum
+                if cacheable:
+                    self._persist("carry", identity, {"path": mapped, "matches": [[k, v] for k, v in matches.items()], "old_lines": maximum})
+            if cacheable:
+                size = 512 + sys.getsizeof(outcome[1]) + sum(sys.getsizeof(k) + sys.getsizeof(v) for k, v in outcome[1].items())
+                self._remember(key, outcome, size)
+        mapped, matches, maximum = outcome
         if mapped is None:
             return None, set()
-        old_blame, new_blame = self.blame(old, name), self.blame(new, mapped)
-        original = [old_blame[n - 1] for n in lines if n <= len(old_blame)]
-        counts = collections.Counter(new_blame)
-        old_counts = collections.Counter(old_blame)
-        signatures = {sig for sig in original if counts[sig] == 1 and old_counts[sig] == 1}
-        return mapped, {i for i, sig in enumerate(new_blame, 1) if sig in signatures}
+        selected = set()
+        for number in lines:
+            if number <= maximum:
+                normalized = number if number > 0 else maximum + number
+                if normalized < 1:
+                    raise IndexError("list index out of range")
+                if normalized in matches:
+                    selected.add(matches[normalized])
+        return mapped, selected
 
     def coverage(self, target, reviews, artifacts):
         ledger.validate_sequence(reviews)
+        creditable = [value for value in reviews if ledger.creditable(value)]
+        identity = {"target": target, "reviews": [value["id"] for value in creditable], "options": BLAME_OPTIONS}
+        cached = self._cached("coverage", identity)
+        if isinstance(cached, dict):
+            try:
+                for value in creditable:
+                    for reference in value["payload"]["artifacts"]:
+                        artifacts.verify(reference)
+                return ({name: ledger.intervals(rows) for name, rows in cached["covered"].items()},
+                        {name: list(ids) for name, ids in cached["evidence"].items()}, [])
+            except (OSError, ValueError, KeyError, TypeError):
+                pass  # Missing evidence is retried below and becomes a gap.
         covered, evidence, gaps = collections.defaultdict(set), collections.defaultdict(list), []
         self.fold(target, reviews, artifacts, covered, evidence, gaps)
+        if not gaps:
+            self._persist("coverage", identity, {"covered": {name: ranges(lines) for name, lines in covered.items()},
+                                                  "evidence": dict(evidence)})
         return dict(covered), dict(evidence), gaps
 
     def fold(self, target, reviews, artifacts, covered, evidence, gaps):
@@ -384,8 +507,21 @@ class Repository:
         try:
             for ref in value["payload"]["artifacts"]:
                 artifacts.verify(ref)
-            self.restore(value["payload"]["artifacts"], artifacts)
-            outcome = self.verify_review(value)
+            identity = {"review": key or ledger.digest(value)}
+            cached = self._cached("verified_review", identity)
+            outcome = None
+            if isinstance(cached, dict):
+                try:
+                    outcome = {name: ledger.intervals(rows) for name, rows in cached.items()}
+                except (TypeError, ValueError):
+                    pass
+            if outcome is not None and not self._has_commit(value["payload"]["target"]):
+                # Later lineage/blame at the review target needs its objects.
+                self.restore(value["payload"]["artifacts"], artifacts)
+            if outcome is None:
+                self.restore(value["payload"]["artifacts"], artifacts)
+                outcome = self.verify_review(value)
+                self._persist("verified_review", identity, {name: ranges(lines) for name, lines in outcome.items()})
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
             if key:
                 self._verified[key] = exc

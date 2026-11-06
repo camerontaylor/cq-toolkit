@@ -117,6 +117,17 @@ and ownership carry callers. Its parsed first-parent steps are invocation-local
 and bounded to 32 MiB. Between lineage endpoints, full trees are read only when
 a relevant rename needs blob-uniqueness checks, not for unrelated edits at
 every commit.
+Inventory also keeps a disposable cross-run fact index at
+`state/backfill/inventory-cache/facts/<kind>/<key>.json`. Its kinds are
+first-parent lineage steps, path lineage, blame at a commit, carried line
+mappings, verified review credit, and gap-free coverage per target and review
+set. Every key includes only immutable object IDs, accounting options and
+`backfill_cache.VERSION`. Values live in the artifact store and are verified on
+read. A run after `main` moves therefore repeats only the work for the new
+target. Failed verifications and coverage with gaps are never stored. A cached
+credit hit restores the review's bundles again if its target commit is missing
+from the clone. Deleting the index is safe; bump `VERSION` when the meaning of
+a fact changes.
 The six-hour timer and 45-minute service timeout are unchanged.
 
 All findings enter triage, including threadless/unanchored occurrences. Use
