@@ -27,7 +27,7 @@ describe('the privileged list (advisory development posture)', () => {
     '.github/workflows/denylist.yml',
     'policy/promotion-reviewer.json',
     'policy/denylist/patterns.yml',
-    'scripts/denylist-scan',
+    '.gitleaks.toml',
     'scripts/github-settings-drift.mjs',
     'scripts/lib/github-settings.mjs',
     'policy/templates/github-settings.json',

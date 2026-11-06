@@ -49,7 +49,7 @@ const REPRESENTATIVES: Readonly<Record<string, readonly string[]>> = {
   '^baselines/': ['baselines/coverage--coverage--a8ceec8f7024.json', 'baselines/nested/x.json'],
   // F2: the protected-path list and the required-check list ARE definitions.
   '^src/ops/gates/protectedPaths\\.ts$': ['src/ops/gates/protectedPaths.ts'],
-  '^scripts/denylist-scan$': ['scripts/denylist-scan'],
+  '^\\.gitleaks\\.toml$': ['.gitleaks.toml'],
   // W1.9 (ADR-0004 D-C.4): the D11 protected-path / required-check list and
   // the C3 attestation that activates override records are definitions.
   '^policy/protected-paths\\.json$': ['policy/protected-paths.json'],

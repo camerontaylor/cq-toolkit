@@ -15,10 +15,9 @@
 //     non-code files (docs, workflows, data) skips it, recorded as skipped
 //     with the reason. No import line is parsed: an unnecessary knip run is
 //     cheap, a skipped required run is a hole;
-//   - `scripts/denylist-scan` over the tracked content being checked — the
-//     HEAD archive with the staged/unstaged patch applied, so a green row
-//     means the CURRENT identity was scanned (the protected script's
-//     diff-scoped mode stays its future);
+//   - a gitleaks scan (the tree's own `.gitleaks.toml`) over the tracked
+//     content being checked — the HEAD archive with the staged/unstaged
+//     patch applied, so a green row means the CURRENT identity was scanned;
 //   - `git diff --check` ×3 — committed (against the pinned base or the
 //     range), staged, unstaged.
 //
@@ -210,12 +209,12 @@ async function runGate(
 }
 
 /**
- * The tracked-content denylist scan: the (protected, invoked read-only)
- * script scans the tree it lives in, so run it over an extraction of
- * `git archive HEAD` in a scratch dir OUTSIDE the worktree with the exact
- * staged+unstaged patch applied — gitignored scratch is excluded by
- * construction, and a newly staged file is included. Any step failing
- * faults the gate (never a silently green scan).
+ * The tracked-content secret scan: gitleaks, with the checked tree's own
+ * `.gitleaks.toml`, over an extraction of `git archive HEAD` in a scratch
+ * dir OUTSIDE the worktree with the exact staged+unstaged patch applied —
+ * gitignored scratch is excluded by construction, and a newly staged file
+ * is included. Any step failing faults the gate (never a silently green
+ * scan).
  */
 async function treeComponents(
   tree: string,
@@ -294,11 +293,9 @@ async function denylistGate(
       return scanVerdict(await scanSecrets(await treeComponents(tree, excludedPaths)), startedAt);
     }
     const result = await effects.runCommand(
-      'node',
-      [join(tree, 'scripts', 'denylist-scan'), '--tree'],
-      {
-        timeoutMs: DENYLIST_TIMEOUT_MS,
-      },
+      'gitleaks',
+      ['dir', '--no-banner', '--redact', '--config', join(tree, '.gitleaks.toml'), tree],
+      { timeoutMs: DENYLIST_TIMEOUT_MS },
     );
     return classifyGate('denylist-scan', result, startedAt);
   } catch (err) {
