@@ -165,11 +165,86 @@ export type CqCheck = CheckRunnerInput &
   Pick<z.input<typeof CqCheckSchema>, 'kind' | 'relatedArgs' | 'addressOnly'>;
 export type CqSeverity = z.output<typeof SeveritySchema>;
 
+interface SchemaNode {
+  _zod?: {
+    def?: {
+      type?: string;
+      shape?: Record<string, SchemaNode>;
+      element?: SchemaNode;
+      innerType?: SchemaNode;
+      in?: SchemaNode;
+    };
+  };
+}
+
+/** Peel optional/default/pipe wrappers; zod 4 keeps refinements on the same node. */
+function unwrapSchema(node: SchemaNode | undefined): SchemaNode | undefined {
+  let current = node;
+  for (let depth = 0; depth < 16 && current?._zod?.def; depth++) {
+    const def = current._zod.def;
+    const next = def.innerType ?? (def.type === 'pipe' ? def.in : undefined);
+    if (!next) return current;
+    current = next;
+  }
+  return current;
+}
+
+/** Valid keys of the strict object at `path`, or [] when the path cannot be resolved. */
+function validKeysAt(path: readonly PropertyKey[]): string[] {
+  let node = unwrapSchema(CqConfigSchema as unknown as SchemaNode);
+  for (const segment of path) {
+    const def = node?._zod?.def;
+    if (def?.type === 'array' && typeof segment === 'number') node = unwrapSchema(def.element);
+    else if (def?.type === 'object' && typeof segment === 'string')
+      node = unwrapSchema(def.shape?.[segment]);
+    else return [];
+  }
+  const def = node?._zod?.def;
+  return def?.type === 'object' && def.shape ? Object.keys(def.shape) : [];
+}
+
+function editDistance(a: string, b: string): number {
+  let prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    const row = [i];
+    for (let j = 1; j <= b.length; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      row[j] = Math.min((prev[j] ?? 0) + 1, (row[j - 1] ?? 0) + 1, (prev[j - 1] ?? 0) + cost);
+    }
+    prev = row;
+  }
+  return prev[b.length] ?? 0;
+}
+
+const MAX_SUGGESTION_DISTANCE = 3;
+
+function nearestKey(unknown: string, valid: readonly string[]): string | undefined {
+  let best: string | undefined;
+  let bestDistance = MAX_SUGGESTION_DISTANCE + 1;
+  for (const candidate of valid) {
+    const distance = editDistance(unknown.toLowerCase(), candidate.toLowerCase());
+    if (distance < bestDistance) {
+      best = candidate;
+      bestDistance = distance;
+    }
+  }
+  return best;
+}
+
+function describeIssue(issue: z.core.$ZodIssue): string {
+  const where = issue.path.join('.') || '(root)';
+  if (issue.code !== 'unrecognized_keys') return `${where}: ${issue.message}`;
+  const valid = validKeysAt(issue.path);
+  const parts = issue.keys.map((key) => {
+    const near = nearestKey(key, valid);
+    return near ? `"${key}" (did you mean \`${near}\`?)` : `"${key}"`;
+  });
+  return `${where}: unrecognized key${parts.length === 1 ? '' : 's'} ${parts.join(', ')}`;
+}
+
+/** Every issue is reported: cq.json is small and a capped list forces repeated fix-and-rerun. */
 function schemaReason(error: z.ZodError): string {
-  const issues = error.issues
-    .slice(0, 5)
-    .map((issue) => `${issue.path.join('.') || '(root)'}: ${issue.message}`)
-    .join('; ');
+  const issues = error.issues.map(describeIssue).join('; ');
   return `does not match the cq.json schema (${issues})`.replace(/\s+/g, ' ');
 }
 
