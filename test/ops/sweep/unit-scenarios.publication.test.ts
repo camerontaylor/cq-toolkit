@@ -5,7 +5,8 @@
 // decisions live in the e2e composition helper rather than production.
 import { rm } from 'node:fs/promises';
 import { describe, expect, test, vi } from 'vitest';
-import { makeWorld, runUnit } from './unit-scenarios.helpers.js';
+import { makeSweepUnitOp } from '../../../src/ops/sweep/unit.js';
+import { bindingsOf, makeWorld, runUnit, UNIT } from './unit-scenarios.helpers.js';
 
 describe('sweep unit in-process scenarios', () => {
   test('failed publication pushes the scanned SHA even if its branch moves during scanning', async () => {
@@ -57,6 +58,40 @@ describe('sweep unit in-process scenarios', () => {
         ),
       ).toBe(true);
       expect(result.value.tasks?.[0]?.failedAttemptPublished).toBe(true);
+      // The push is also recorded on the ROUND, so a later attempt cannot
+      // erase the ref from the report.
+      expect(result.value.tasks?.[0]?.rounds?.[0]?.published).toBe(true);
+    } finally {
+      await rm(world.root, { recursive: true, force: true });
+    }
+  });
+
+  test('a local-only sweep (no push binding) never publishes a failed attempt', async () => {
+    const world = await makeWorld([{ failing: true }, { failing: true }]);
+    const scanPrompt = vi.fn(async (_text: string) => {});
+    try {
+      const local = bindingsOf(world, {
+        taskLoop: { pushFailed: true },
+        driver: {
+          run: async () => ({
+            usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+            denials: [],
+            stopReason: 'error',
+          }),
+        },
+        scanPrompt,
+      });
+      // `push: false` in a dispatch omits this binding: the failed-attempt
+      // publication path must follow the same opt-in as the main push.
+      delete local.pushBranch;
+      const result = await makeSweepUnitOp(local)(UNIT);
+      expect(result.status).toBe('ok');
+      if (result.status === 'ok') expect(result.value.tasks?.[0]?.failedAttempt).toBeDefined();
+      expect(
+        scanPrompt.mock.calls.some(([text]) => text.startsWith('Failed-attempt commit ')),
+      ).toBe(false);
+      expect(world.gitCalls.some((args) => args.includes('push'))).toBe(false);
+      expect(world.pushCalls).toEqual([]);
     } finally {
       await rm(world.root, { recursive: true, force: true });
     }
@@ -95,9 +130,15 @@ describe('sweep unit in-process scenarios', () => {
       });
       expect(result.status).toBe('ok');
       if (result.status === 'ok') {
-        expect(result.value.tasks?.[0]?.failedAttempt).toBeDefined();
-        expect(result.value.tasks?.[0]?.failedAttemptPublished).not.toBe(true);
-        expect(result.value.indeterminate).toContain('failed-attempt publication refused');
+        const task = result.value.tasks?.[0];
+        expect(task?.failedAttempt).toBeDefined();
+        expect(task?.failedAttemptPublished).not.toBe(true);
+        // A positive tamper finding is THIS task's refusal: the unit keeps
+        // running (and its verified commits stay publishable), so no
+        // unit-wide indeterminate state is recorded.
+        expect(result.value.indeterminate).toBeUndefined();
+        expect(task?.outcome).toBe('escalated-to-human');
+        expect(task?.reason).toContain('tamper gate refused publication');
         expect(JSON.stringify(result.value)).toContain('tamper gate refused publication');
       }
       expect(

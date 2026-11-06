@@ -40,8 +40,10 @@ describe('optional per-task loop', () => {
         ]);
         expect(task?.failedAttemptPublished).not.toBe(true);
         expect(task?.commits).toEqual([]);
-        expect(invocations).toBe(2);
-        expect(world.checks).toHaveLength(2);
+        // The early path gate refuses before the related check runs on the
+        // worker's staged tree: one invocation, no related probe.
+        expect(invocations).toBe(1);
+        expect(world.checks).toHaveLength(1);
         expect(world.gitCalls.some((args) => args.includes('restore'))).toBe(true);
         expect(
           world.gitCalls.some((args) => args.includes('push') || args.includes('commit')),
