@@ -12,7 +12,9 @@ Stack parent/base: `queue/q1-merged-current` at
 `queue-v1` is a separate forced-command capability. Deployment must explicitly
 allow it; author-v1/v2 bytes and grants are unchanged. No credentials or custody
 change is part of Q3. Old runners are unsupported and require a reviewed runner
-capability deployment. No retry/drain or inline reviewer starts are provided.
+capability deployment. No inline reviewer starts are provided; bounded observation
+(`review.drain`) and explicit transient retry (`review.retry`) are described under
+Q3R below.
 
 The typed seam in `src/ops/review/internal/queueProtocol.ts` binds a stable
 requestId to either merged-current provenance or a deferred-author intent.
@@ -99,7 +101,10 @@ keys: `enabled` (defaults false), `repo`, `read` and `write` principal lists,
 runner import or queue access: activation requires JSON boolean `true`; missing
 or boolean `false` remains unsupported. Other activation types, non-object
 policies, malformed repository/selector/capacity values, and allowlists that are
-not arrays of nonempty strings refuse. Read covers status/report; write covers enqueue/bind/cancel/ack.
+not arrays of nonempty strings refuse. Read covers status/report; write covers
+enqueue/bind/cancel/ack. A consuming `review.report` caller must be listed in
+both: it reads receipt pages under `read` and acknowledges consumption with
+`ack` under `write`.
 Requests are permanently principal/repository/source/target bound. Forge source
 metadata is fetched with fixed API argv before attachment or Q1 enrollment.
 The existing tick lock/process-group supervisor bounds each operation, and
@@ -170,10 +175,12 @@ which the operator must identify from queue state. Do not grant the proposed ID
 unless it has a stored mapping. The client uses the existing SDK
 `status` / `report` methods or `review.queueStatus` / `review.report` commands.
 No enqueue alias is needed. The principal must also have ordinary read authority;
-acknowledgement still requires write authority. The first successful read validates
-forge source and allowed base branch, the exact stored mapping and unique item,
-and capacity before persisting the principal-bound client entry. Adoption neither
-enrolls debt nor starts a review. Existing client entries retain their original
+acknowledgement still requires write authority. A read validates forge source and
+allowed base branch, the exact stored mapping and unique item, and capacity, but
+read-only status/report adoption is not persisted; only a successful `ack` saves
+the principal-bound client entry. Until that `ack`, another granted principal may
+still adopt the same request ID. Adoption neither enrolls debt nor starts a
+review. Existing client entries retain their original
 principal binding: if another client principal already holds the mapped ID,
 adoption by a new principal is refused even with an exact grant. The existing
 principal must consume it, or an authorized writer must explicitly enqueue a new
