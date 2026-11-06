@@ -7,7 +7,9 @@ import contextlib
 import io
 import json
 import sys
+import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 from test_crq_fixtures import (
     CurrentFixture,
@@ -65,6 +67,18 @@ class CurrentTest(CurrentFixture, unittest.TestCase):
         self.assertIn("requeue refused: merged-current retries require explicit lineage", err.getvalue())
         self.assertIn("needs-human", err.getvalue())
         self.assertEqual(crq.QUEUE.read_bytes(), before)
+
+    def test_selfcheck_fails_on_a_banned_third_party_reviewer_identity(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "config.json").write_text("{}")
+            with mock.patch.object(crq, "ROOT", root), contextlib.redirect_stdout(io.StringIO()) as ok:
+                self.assertEqual(crq.cmd_selfcheck(), 0)
+            self.assertIn("no banned third-party reviewer identity", ok.getvalue())
+            (root / "config.json").write_text('{"reviewer": "' + sorted(crq.BANNED_BOT_LOGINS)[0] + '"}')
+            with mock.patch.object(crq, "ROOT", root), contextlib.redirect_stdout(io.StringIO()) as out:
+                self.assertEqual(crq.cmd_selfcheck(), 1)
+            self.assertIn("FAIL: config.json contains banned third-party identity", out.getvalue())
 
     def test_cli_admin_malformed_queue_and_unrelated_value_errors_still_fail(self):
         item = self.enroll()

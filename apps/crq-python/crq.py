@@ -3389,8 +3389,19 @@ def write_heartbeat(q: Dict[str, Any]) -> None:
         event("heartbeat_failed", error=str(exc)[:200])
 
 
+# The third-party App identity wrongly pinned on 2026-10-04 must never reappear
+# in config; `selfcheck` is the independent negative check for it.
+BANNED_BOT_IDS = {202921479}
+BANNED_BOT_LOGINS = {"cq-reviewer[bot]"}
+
+
 def cmd_selfcheck() -> int:
-    print("ok: post-merge review queue")
+    raw = (ROOT / "config.json").read_text()
+    bad = [str(x) for x in BANNED_BOT_IDS if str(x) in raw] + [x for x in BANNED_BOT_LOGINS if x in raw]
+    if bad:
+        print(f"FAIL: config.json contains banned third-party identity {bad}")
+        return 1
+    print("ok: post-merge review queue; no banned third-party reviewer identity")
     return 0
 
 
