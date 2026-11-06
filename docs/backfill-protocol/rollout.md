@@ -25,17 +25,21 @@ and M2 holds. Spare included quota only; no paid retry and no LLM launcher.
    ruleset IDs, fetched final payloads and digests. Test an unauthorized writer
    refusal separately. Rulesets do not enforce add-only content; readers and
    publishers validate every ledger commit and halt on modify/delete/tamper.
-4. The reviewed `submitted-hunks-v1` adapter supports CLI 0.8.2 names-only
-   confirmation. The child records its actual CLI version and clean submitted
+4. The reviewed `submitted-hunks-v1` adapter supports CLI 0.8.2 and 0.9.2
+   names-only confirmation (`backfill_history.REVIEWER_FORMATS` accepts both
+   versions). The child records its actual CLI version and clean submitted
    base/head, attempt, run and head-side hunk manifest before spawning. Harvest
    verifies those identities, recomputes hunks, binds the vendor base context and
    requires successful non-skipped terminal completion. Credit is limited to
    submitted hunks in vendor-confirmed files. Unlisted files remain debt;
    unsubmitted vendor paths, unknown versions or output formats refuse credit.
    Deleted or otherwise interval-free submitted paths earn no line credit.
-   The observed real-vendor bounds and raw evidence digest are recorded in
-   `reviewer-verification-20261031.json`; `policy/review-limits.json` selects
-   conservative limits below that observed successful submission. Historical
+   The active limits in `policy/review-limits.json` select reviewer 0.9.2;
+   the observed real-vendor bounds and raw evidence digest behind those limits
+   are recorded in `reviewer-verification-092-20261031.json`, with conservative
+   limits below that observed successful submission. The older
+   `reviewer-verification-20261031.json` record covers the 0.8.2 submission and
+   remains as historical evidence. Historical
    names-only receipts without bound submission evidence remain uncredited.
 5. Provision a private durable artifact volume with retention at least as long
    as every referencing ledger record. Keep it separate from transient `runs/`.
