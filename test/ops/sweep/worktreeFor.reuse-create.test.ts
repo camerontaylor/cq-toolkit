@@ -97,6 +97,9 @@ describe('sweep.worktreeFor create', () => {
       reused: false,
       clearedBaselineCaches: [],
       refusedBaselineCaches: [],
+      // M2c: the created tree's HEAD, resolved with the same revParse
+      // effect the reuse leg uses (the fake's unseeded answer for HEAD).
+      headSha: 'sha:HEAD',
     });
     expect(repo.addCalls).toEqual([
       { repoRoot: REPO_ROOT, path: PATH, branch: BRANCH, base: 'origin/main' },
@@ -104,6 +107,22 @@ describe('sweep.worktreeFor create', () => {
     // Prune (stale registrations) precedes the add in the same section.
     expect(repo.prunes).toEqual([REPO_ROOT]);
     expect(repo.calls.indexOf('worktreePrune')).toBeLessThan(repo.calls.indexOf('worktreeAdd'));
+  });
+
+  test('a revParse fault on create is a failed result naming the new tree — never a workspace without headSha (M2c)', async () => {
+    const repo = fakeRepo();
+    const effects: WorktreeEffects = {
+      ...effectsOf(repo),
+      revParse: async () => {
+        throw new Error('fatal: bad object HEAD');
+      },
+    };
+    const error = await failedAt(makeWorktreeFor(effects), INPUT);
+    expect(error).toMatch(/could not resolve HEAD in the created worktree/);
+    expect(error).toContain(PATH);
+    expect(error).toContain('bad object HEAD');
+    // The add ran (it is what made the tree); no ok result escaped it.
+    expect(repo.addCalls).toHaveLength(1);
   });
 
   test('an effects fault is a failed result naming the effect — never a throw across the op seam', async () => {

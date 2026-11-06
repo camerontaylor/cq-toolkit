@@ -4,13 +4,16 @@
 // R.metric, stay per-run (no cross-run state), and never become a ratio
 // when the denominator is unknown. The T34/T35 legacy totals on the report
 // carrier keep their own pre-v2 rule and are preserved verbatim.
+// M2c — the fix denominator is WIRED: a real fix run's collected baseline
+// probes (failure counts at their worktree HEADs) reach the summary, and a
+// planned unit with no collected report keeps the denominator null.
 // Fake/local inputs only: no providers, no network, no credentials.
 import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
-import { afterEach, beforeEach, expect, test, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import {
   openObservationWriter,
   readObservations,
@@ -343,4 +346,144 @@ test('T23 failure boundary', async () => {
   } finally {
     await a.cleanup();
   }
+});
+
+describe('M2c baseline probes in the fix denominator', () => {
+  vi.setConfig({ testTimeout: 30_000 });
+
+  /**
+   * A REAL-composition fixture (no stubbed sweep registries — the unit op,
+   * its worktree and its probes all run for real, in-process): the shared
+   * scratch repo plus a runnable vitest-json probe with two seeded failing
+   * cases (the e2e fix-run shape). `extraChecks` appends further planned
+   * checks — a second planned unit — whose commands may be deliberately
+   * broken.
+   */
+  const realFixtureIn = async (
+    roots: string[],
+    extraChecks: Array<{ kind: string; adapter: string; command: Record<string, unknown> }> = [],
+  ): Promise<{ root: string; repo: string; journalDir: string }> => {
+    const f = await fixtureIn(roots);
+    await mkdir(join(f.repo, 'cases'));
+    for (const name of ['a', 'b'])
+      await writeFile(
+        join(f.repo, 'cases', `${name}.test.cjs`),
+        'module.exports = { actual: 1, expected: 2 };\n',
+      );
+    await writeFile(
+      join(f.repo, 'scripts', 'tests.cjs'),
+      `
+const fs = require('node:fs');
+const files = process.argv.slice(2).filter(x => x !== '--');
+const names = files.length ? files : fs.readdirSync('cases').filter(n => n.endsWith('.test.cjs')).sort().map(n => 'cases/' + n);
+let failed = false;
+const testResults = names.map(name => {
+ const { actual, expected } = require(require('node:path').resolve(name));
+ const passes = actual === expected;
+ failed ||= !passes;
+ return { name: require('node:path').resolve(name), status: passes ? 'passed' : 'failed', assertionResults: [{fullName: name, status: passes ? 'passed' : 'failed', failureMessages: passes ? [] : ['expected ' + expected + ', received ' + actual]}] };
+});
+console.log(JSON.stringify({success: !failed, numTotalTests: names.length, testResults}));
+process.exitCode = failed ? 1 : 0;
+`,
+    );
+    const config = JSON.parse(await readFile(join(f.repo, 'cq.json'), 'utf8')) as {
+      checks: Array<{ kind: string; adapter: string; command: Record<string, unknown> }>;
+    };
+    config.checks = [...config.checks, ...extraChecks];
+    await writeFile(join(f.repo, 'cq.json'), JSON.stringify(config));
+    for (const args of [
+      ['add', '-A'],
+      ['commit', '-m', 'seed the runnable probe cases'],
+    ])
+      await execFileAsync('git', ['-C', f.repo, ...args], {
+        env: scrubbedGitEnv(),
+        timeout: 10_000,
+      });
+    return f;
+  };
+  const headOf = async (repo: string): Promise<string> =>
+    (
+      await execFileAsync('git', ['-C', repo, 'rev-parse', 'HEAD'], {
+        env: scrubbedGitEnv(),
+        timeout: 10_000,
+      })
+    ).stdout.trim();
+
+  test('M2c known denominator', async () => {
+    // A fix run whose planned units all report baselines emits a
+    // measurement-summary with a NON-NULL denominator — the summed baseline
+    // failure counts at their probe heads (the seeded repo has exactly two
+    // failing cases; the worktree HEAD at acquisition is the seed commit).
+    const f = await realFixtureIn(roots);
+    try {
+      const seed = await headOf(f.repo);
+      const report = reportOf(await makeFixRun({ drivers: fixingDrivers() })(input(f)));
+      const metric = report.reportV2?.metric;
+      expect(metric?.fixesPerRun).toEqual({ numerator: 2, denominator: 2 });
+      expect(metric?.baselineFailures).toEqual([
+        {
+          unitId: 'scratch-repo/tests-1',
+          probeHead: seed,
+          completed: true,
+          count: 2,
+          unknownReason: null,
+        },
+      ]);
+      expect(report.reportV2?.availability['/metric/fixesPerRun/denominator']?.state).toBe('known');
+      // The persisted stream round-trips the wired denominator.
+      const streams = await readObservations(f.journalDir);
+      const summaries = streams.flatMap((stream) => summariesOf(stream.events));
+      expect(summaries).toHaveLength(1);
+      expect(summaries[0]?.payload.metric.fixesPerRun).toEqual({ numerator: 2, denominator: 2 });
+    } finally {
+      await rm(f.root, { recursive: true, force: true });
+      roots = roots.filter((root) => root !== f.root);
+    }
+  });
+
+  test('M2c partial denominator', async () => {
+    // One planned unit whose probe cannot run (its check script is missing)
+    // produces NO collected report: its baseline row stays unknown with the
+    // existing reason and the denominator stays null — never a zero that
+    // would fake a fully-known population.
+    const f = await realFixtureIn(roots, [
+      {
+        kind: 'tests',
+        adapter: 'vitest-json',
+        command: { command: process.execPath, args: ['scripts/definitely-missing.cjs'] },
+      },
+    ]);
+    try {
+      const seed = await headOf(f.repo);
+      const report = reportOf(await makeFixRun({ drivers: fixingDrivers() })(input(f)));
+      const metric = report.reportV2?.metric;
+      expect(metric?.fixesPerRun).toEqual({ numerator: 2, denominator: null });
+      expect(metric?.baselineFailures).toEqual([
+        {
+          unitId: 'scratch-repo/tests-1',
+          probeHead: seed,
+          completed: true,
+          count: 2,
+          unknownReason: null,
+        },
+        {
+          unitId: 'scratch-repo/tests-2',
+          probeHead: null,
+          completed: false,
+          count: null,
+          unknownReason: 'baseline probe did not complete for this unit',
+        },
+      ]);
+      expect(report.reportV2?.availability['/metric/fixesPerRun/denominator']?.state).toBe(
+        'not-collected',
+      );
+      expect(report.reportV2?.availability['/metric/baselineFailures/1/count']?.state).toBe(
+        'not-collected',
+      );
+    } finally {
+      await rm(f.root, { recursive: true, force: true });
+      roots = roots.filter((root) => root !== f.root);
+    }
+  });
 });
