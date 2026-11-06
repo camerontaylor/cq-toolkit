@@ -211,14 +211,19 @@ def collect_sources(queue, state, store, *, github=None):
             kind = "promotion-range" if item.get("kind") == "promotion" else "crq-counted-cycle"
             raw = json.dumps({"item": item["id"], "kind": item["kind"], "cycle": cycle}, sort_keys=True).encode()
             envelope = {"authenticated": True, "repo": ledger.REPO, "producer": "crq-runner-app",
-                        "author_cycle": item.get("kind") == "author", "exit_code": 0,
+                        "author_cycle": item.get("kind") == "author", "exit_code": None,
                         "completed_at": cycle.get("completed_at"), "source_metadata": store.put(raw)}
             rdir = state / "runs" / run
             if rdir.resolve().parent == (state / "runs").resolve() and (rdir / "review.ndjson").is_file():
                 raw = (rdir / "review.ndjson").read_bytes()
                 for name in ("meta.json", "exit.json", "secret-scan.json"):
                     if (rdir / name).is_file():
-                        envelope[name] = store.put((rdir / name).read_bytes())
+                        data = (rdir / name).read_bytes()
+                        envelope[name] = store.put(data)
+                        if name == "exit.json":
+                            code = ledger.loads(data).get("exit")
+                            if type(code) is int:
+                                envelope["exit_code"] = code
                 # Modern retained event manifests can be validated directly.
                 if (rdir / "review-event.json").is_file():
                     value = ledger.loads((rdir / "review-event.json").read_bytes())

@@ -35,6 +35,8 @@ def settings(state, *, dispatch=False):
     if not filename.exists():
         return None
     value = ledger.loads(filename.read_bytes())
+    if dispatch and value.get("enabled") is not True:
+        return None
     required = ("operational_ruling", "no_live_run_verification", "owner_branch_ruleset_evidence", "durable_artifact_root", "runner_identity", "publisher_spool")
     if any(not value.get(k) for k in required) or value["runner_identity"] != "crq-runner-app":
         raise ledger.IntegrityError("backfill rollout prerequisites incomplete")
@@ -45,8 +47,6 @@ def settings(state, *, dispatch=False):
             or not isinstance(alias, str) or not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9._-]*@[A-Za-z0-9][A-Za-z0-9.:-]*", alias)
             or not isinstance(key, str) or not key.strip() or any(c in key for c in "\n\r\x00")):
         raise ledger.IntegrityError("backfill rollout publisher_spool incomplete or invalid")
-    if dispatch and value.get("enabled") is not True:
-        return None
     if dispatch:
         inventory.effective_limits(policies()[1])
     return value
@@ -271,6 +271,8 @@ def select(c, queue, log, dry, only):
             if not item.get("run"):
                 jobs.cancel_before_vendor(queue, item)
             jobs.terminal(queue, item, c.iso(), "secret-scan", vendor_terminal=not bool(item.get("run")), reason=item.get("last_error", "launch refused"))
+            state_event(c, queue, item, c.iso(), "launch refused before vendor binding")
+            c.save_queue(queue)
         except Exception:
             if not run_bound:
                 item.update(state="launch-unknown", vendor_state="unknown")
@@ -316,7 +318,17 @@ def completion_event(repo, store, item, raw, exit_code, meta, ended_at, submissi
             # whose vendor anchor is absent or outside the pinned repository.
             intervals = []
         else:
-            intervals = value.get("intervals", [])
+            lines = set()
+            try:
+                for start, end in value.get("intervals") or []:
+                    if type(start) is not int or type(end) is not int or not 1 <= start <= end <= 1_000_000:
+                        raise ValueError("invalid vendor interval")
+                    lines.update(range(start, end + 1))
+                    if len(lines) > 1_000_000:
+                        raise ValueError("vendor interval bound")
+                intervals = accounting.ranges(lines)
+            except (TypeError, ValueError):
+                intervals = []
         normalized = {"source_id": str(value["id"]) if value.get("id") is not None else None, "severity": value.get("severity", "info"), "path": name,
                       "blob": entries.get(name, {}).get("blob"), "intervals": intervals,
                       "title": value.get("title") or "Unverified vendor finding anchor",
