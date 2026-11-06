@@ -1,3 +1,5 @@
+import { readFileSync, readdirSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
 import { CqConfigSchema } from '../../src/ops/analyze/cqConfig.js';
 import {
@@ -159,10 +161,88 @@ describe('readCqEnv', () => {
   });
 });
 
+describe('value parsers match the runtime', () => {
+  test('posture: valid, invalid with the runtime prefix, and padded values', () => {
+    expect(
+      readCqEnv({ CQ_MERGE_PROTECTED_PATHS: 'advisory' }).values['CQ_MERGE_PROTECTED_PATHS'],
+    ).toBe('advisory');
+    const bad = readCqEnv({ CQ_MERGE_PROTECTED_PATHS: 'loose' });
+    expect(bad.errors[0]?.message).toContain(
+      "policy: CQ_MERGE_PROTECTED_PATHS must be 'human', 'diff-check' or 'advisory', got 'loose'",
+    );
+    // Runtime compares the raw value, so a padded posture is an error there too.
+    expect(readCqEnv({ CQ_MERGE_PROTECTED_PATHS: ' human ' }).errors).toHaveLength(1);
+  });
+
+  test('trust lists: trimmed entries, case-insensitive states, invalid entries', () => {
+    const ok = readCqEnv({
+      CQ_MERGE_TRUSTED_BOTS: ' coderabbitai[bot] , other ,',
+      CQ_MERGE_ACCEPT_REVIEW_STATES: 'approved, COMMENTED',
+      CQ_MERGE_TRUSTED_ASSOCIATIONS: ' owner ',
+    });
+    expect(ok.errors).toEqual([]);
+    expect(ok.values['CQ_MERGE_TRUSTED_BOTS']).toEqual(['coderabbitai[bot]', 'other']);
+    const bad = readCqEnv({
+      CQ_MERGE_TRUSTED_BOTS: 'ok,not a login',
+      CQ_MERGE_ACCEPT_REVIEW_STATES: 'REJECTED',
+      CQ_MERGE_TRUSTED_ASSOCIATIONS: 'STRANGER',
+    });
+    expect(bad.errors).toHaveLength(3);
+    expect(bad.errors.map((e) => e.message).join('\n')).toContain(
+      'CQ_MERGE_ACCEPT_REVIEW_STATES: unrecognised entry "REJECTED" (expected APPROVED or COMMENTED; comma-separated)',
+    );
+  });
+
+  test('epoch-ms: valid, padded, invalid with the runtime prefix', () => {
+    expect(readCqEnv({ CQ_SELFHOST_NOW_MS: ' 1700000000000 ' }).values['CQ_SELFHOST_NOW_MS']).toBe(
+      1700000000000,
+    );
+    for (const raw of ['-1', '1.5', 'abc', '9007199254740993']) {
+      const result = readCqEnv({ CQ_SELFHOST_NOW_MS: raw });
+      expect(result.errors[0]?.message).toContain(
+        'selfhost-review-loop: CQ_SELFHOST_NOW_MS must be a non-negative safe integer epoch-ms',
+      );
+    }
+  });
+
+  test('passthrough accepts commas and whitespace like the runtime', () => {
+    const result = readCqEnv({ CQ_RUN_ENV_PASSTHROUGH: ' A B,C\tD\n' });
+    expect(result.errors).toEqual([]);
+    expect(result.values['CQ_RUN_ENV_PASSTHROUGH']).toEqual(['A', 'B', 'C', 'D']);
+    expect(readCqEnv({ CQ_RUN_ENV_PASSTHROUGH: 'A 1bad' }).errors).toHaveLength(1);
+    expect(readCqEnv({ CQ_RUN_ENV_PASSTHROUGH: 'CQ_SANDBOX' }).errors).toHaveLength(1);
+  });
+
+  test('model-spec drivers: padded and invalid', () => {
+    expect(readCqEnv({ CQ_SELFHOST_DRIVER: 'zai/glm' }).values['CQ_SELFHOST_DRIVER']).toEqual({
+      provider: 'zai',
+      model: 'glm',
+    });
+    expect(readCqEnv({ CQ_SELFHOST_DRIVER: 'zai' }).errors).toHaveLength(1);
+  });
+});
+
 describe('registry invariants', () => {
-  test('every live CQ_ name in src is registered', () => {
-    expect(CQ_ENV_ENTRIES).toHaveLength(27);
-    expect(new Set(CQ_ENV_ENTRIES.map((e) => e.name)).size).toBe(27);
+  test('the CQ_ string literals in src are exactly the registry (plus an explicit allowlist)', () => {
+    // Denied prefix and non-env constants that look like env names.
+    const allowlist = new Set(['CQ_APPROVAL_KEY', 'CQ_CONFIG_FILE']);
+    const found = new Set<string>();
+    const walk = (dir: string): void => {
+      for (const dirent of readdirSync(dir, { withFileTypes: true })) {
+        const full = join(dir, dirent.name);
+        if (dirent.isDirectory()) walk(full);
+        else if (dirent.name.endsWith('.ts')) {
+          for (const m of readFileSync(full, 'utf8').matchAll(/['"`](CQ_[A-Z0-9_]+)['"`]/g)) {
+            if (m[1] !== undefined) found.add(m[1]);
+          }
+        }
+      }
+    };
+    walk(join(import.meta.dirname, '..', '..', 'src'));
+    for (const name of allowlist) found.delete(name);
+    const registered = new Set(CQ_ENV_ENTRIES.map((e) => e.name));
+    expect([...found].filter((n) => !registered.has(n))).toEqual([]);
+    expect([...registered].filter((n) => !found.has(n))).toEqual([]);
     for (const e of CQ_ENV_ENTRIES) expect(e.name).toMatch(/^CQ_[A-Z0-9_]+$/);
   });
 

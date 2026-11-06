@@ -10,7 +10,7 @@
 //   - Secret values stay in `values` for use but never appear in diagnostics.
 //
 // This slice does not wire the function into entry points; slice C3 does.
-import { nearestKey } from '../ops/analyze/cqConfig.js';
+import { nearestKey } from '../shared/nearest.js';
 import { deepFreeze } from '../shared/deepFreeze.js';
 import { CQ_ENV_REGISTRY, type CqEnvEntry, type CqEnvRegistry } from './env-registry.js';
 

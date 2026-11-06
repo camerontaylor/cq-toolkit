@@ -4,7 +4,6 @@
 // foreign (vendor/forge) names the drivers and selfhost read. Parsers are the
 // existing ones, reused; this module only declares them. Nothing here reads
 // `process.env`; `readCqEnv` (./env.ts) does the reading.
-import { PROTECTED_PATHS_POSTURES, isPosture } from '../ops/gates/policyConfig.js';
 import {
   parseBackend,
   parseMode,
@@ -12,9 +11,9 @@ import {
   parsePassthrough,
   parseRunTool,
 } from '../sandbox/config.js';
-import { ACCEPT_STATES, ASSOCIATIONS, BOT_ENTRY_RE } from '../selfhost/acceptance.js';
 import { parseModelSpec } from '../selfhost/config.js';
 import { isSecretEnvName } from './secret.js';
+import { ACCEPT_STATES, ASSOCIATIONS, BOT_ENTRY_RE, POSTURE_LIST, isPosture } from './values.js';
 
 export type CqEnvKind = 'config' | 'identity' | 'test';
 /**
@@ -70,7 +69,9 @@ function list(parse: (entry: string) => boolean, expected: string, name: string)
       .filter((entry) => entry !== '');
     const bad = entries.find((entry) => !parse(entry));
     if (bad !== undefined) {
-      throw new Error(`${name}: unrecognised entry ${JSON.stringify(bad)} (expected ${expected})`);
+      throw new Error(
+        `${name}: unrecognised entry ${JSON.stringify(bad)} (expected ${expected}; comma-separated)`,
+      );
     }
     return entries;
   };
@@ -78,8 +79,7 @@ function list(parse: (entry: string) => boolean, expected: string, name: string)
 
 const posture: CqEnvParser = (raw) => {
   if (!isPosture(raw)) {
-    const expected = PROTECTED_PATHS_POSTURES.map((p) => `'${p}'`).join(', ');
-    throw new Error(`CQ_MERGE_PROTECTED_PATHS must be one of ${expected}, got '${raw}'`);
+    throw new Error(`policy: CQ_MERGE_PROTECTED_PATHS must be ${POSTURE_LIST}, got '${raw}'`);
   }
   return raw;
 };
@@ -87,10 +87,21 @@ const posture: CqEnvParser = (raw) => {
 const epochMs: CqEnvParser = (raw) => {
   const value = Number(raw);
   if (!Number.isSafeInteger(value) || value < 0) {
-    throw new Error(`CQ_SELFHOST_NOW_MS must be a non-negative safe integer epoch-ms`);
+    throw new Error(
+      `selfhost-review-loop: CQ_SELFHOST_NOW_MS must be a non-negative safe integer epoch-ms — got ${JSON.stringify(raw)}`,
+    );
   }
   return value;
 };
+
+/** Runtime (shared/proc.ts, harness/surface.ts) splits on commas and whitespace. */
+const passthrough: CqEnvParser = (raw) =>
+  parsePassthrough(
+    raw
+      .split(/[,\s]+/)
+      .filter(Boolean)
+      .join(','),
+  );
 
 function entry(
   name: string,
@@ -228,7 +239,7 @@ export const CQ_ENV_ENTRIES: readonly CqEnvEntry[] = [
   entry(
     'CQ_RUN_ENV_PASSTHROUGH',
     'config',
-    parsePassthrough,
+    passthrough,
     'conservative',
     true,
     'Extra env names copied into run children (blank: none).',
