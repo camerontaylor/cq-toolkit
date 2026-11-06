@@ -143,7 +143,8 @@ def legacy_retry_view(queue, pr, original_path, at):
                 deadlines.append(_time(item["not_before"]))
             except (TypeError, ValueError):
                 reasons.append("invalid item deadline")
-        if any(a.get("outcome") not in ("error", "interrupted", "skipped", "too_large", "malformed", "completed", "rate_limited")
+        if any(a.get("outcome") not in ("error", "interrupted", "skipped", "too_large", "malformed", "completed", "rate_limited",
+                                        "auth", "action_required")
                for a in item.get("attempts", [])):
             reasons.append("unknown attempt outcome")
         for attempt in item.get("attempts", []):
