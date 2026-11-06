@@ -27,7 +27,6 @@ approval has been verified and recorded; installation does not authorize spend.
    after state and config are ready on queue-host. Prove worker-host schedule paused and
    marker present, with no matching active tick/review/addressing process. THEN
    remove queue-host state/runner-disabled before enabling its tick/watchdog timers.
-   Start crq-records.service for owner-visible promotion rationale over the mesh.
    Exactly one runner must exist; flock alone cannot coordinate hosts.
 6. Inspect systemctl --user status, journal and heartbeat/summary under
    ${XDG_STATE_HOME:-~/.local/state}/crq. Repair units remain gated and disabled.

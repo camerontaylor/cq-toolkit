@@ -32,6 +32,7 @@ import queue_transport
 import author_lease
 import review_receipt
 import finding_issues
+import pr_review_findings
 import deferred_refresh
 import merged_reconcile
 import push_current
@@ -2236,6 +2237,87 @@ def _deliver_push_findings(q: Dict[str, Any], item: Dict[str, Any]) -> Optional[
     return f"findings issue #{result['issue_number']} ({state})"
 
 
+PR_REVIEW_MAX_ATTEMPTS = 5
+PR_REVIEWS_PER_TICK = 2
+
+
+def _request_pr_review(item: Dict[str, Any], run_id: str, meta: Dict[str, Any], rdir: Path,
+                       cls: Dict[str, Any]) -> None:
+    """Persist PR-review delivery debt for a counted primary open/delta review.
+
+    Deliberate (owner ruling, PR #1069): a newer run of the same item replaces
+    an older request that was never delivered, and the older run's findings are
+    then not posted. The newer review covers the item's current range, so it is
+    the more useful one; an already delivered review is unaffected."""
+    item["pr_review_request"] = {"run_id": run_id, "pr": item["pr"], "base": meta["base"],
+                                 "head": meta["head"], "ndjson": str(rdir / "review.ndjson"),
+                                 "severity_counts": cls["severity_counts"]}
+    item["pr_review_pending"] = True
+    item["pr_review_attempts"] = 0
+    for key in ("pr_review", "pr_review_error"):
+        item.pop(key, None)
+
+
+def _settle_pr_review(item: Dict[str, Any], error: str) -> str:
+    """Stop delivering: record why and leave the review's own state untouched."""
+    request = item.get("pr_review_request") if isinstance(item.get("pr_review_request"), dict) else {}
+    item["pr_review_error"] = error[:300]
+    item["pr_review_pending"] = False
+    event("findings_review_abandoned", item=item["id"], pr=item.get("pr"), run=request.get("run_id"),
+          attempts=item.get("pr_review_attempts"), error=item["pr_review_error"])
+    return f"findings review for PR #{item.get('pr')} abandoned: {item['pr_review_error']}"
+
+
+def _deliver_pr_review(item: Dict[str, Any]) -> Optional[str]:
+    """Post the findings of one counted primary open/delta review on its PR as
+    a pull-request review (pr_review_findings). Idempotent by the run marker,
+    skipped for a closed or merged PR, retried by later ticks up to
+    PR_REVIEW_MAX_ATTEMPTS. Never touches the item's review or repair state,
+    and never raises: a malformed request or an invalid identity is permanent
+    and settles at once instead of crashing the tick before save_queue."""
+    request = item.get("pr_review_request")
+    if not request or not item.get("pr_review_pending"):
+        return None
+    item["pr_review_attempts"] = item.get("pr_review_attempts", 0) + 1
+    try:
+        pr, ndjson = request["pr"], Path(request["ndjson"])
+        meta = {"run_id": request["run_id"], "item_id": item["id"],
+                "base": request["base"], "head": request["head"]}
+    except (KeyError, TypeError) as exc:
+        return _settle_pr_review(item, f"malformed findings review request: {exc!r}")
+    try:
+        result = pr_review_findings.deliver(item_repo(item), pr, meta, ndjson)
+    except ValueError as exc:
+        return _settle_pr_review(item, str(exc))
+    except (RuntimeError, OSError) as exc:
+        item["pr_review_error"] = str(exc)[:300]
+        if item["pr_review_attempts"] >= PR_REVIEW_MAX_ATTEMPTS:
+            return _settle_pr_review(item, f"{item['pr_review_attempts']} attempts failed; last: {exc}")
+        return None
+    item["pr_review"] = result
+    item["pr_review_pending"] = False
+    item.pop("pr_review_error", None)
+    event("findings_review_delivered", item=item["id"], pr=pr, run=meta["run_id"],
+          review=result.get("review_id"), state=result["state"],
+          inline=result.get("inline"), body_only=result.get("body_only"))
+    return f"findings review on PR #{pr} ({result['state']})"
+
+
+def deliver_pending_pr_reviews(q: Dict[str, Any]) -> List[str]:
+    """Bounded post-harvest pass: at most PR_REVIEWS_PER_TICK deliveries, least
+    recently attempted first, so a failing one never starves the rest."""
+    candidates = sorted((i for i in live_items(q) if i.get("pr_review_pending") and
+                         i.get("kind") in ("open", "delta") and item_repo(i) == REPO),
+                        key=lambda i: i.get("pr_review_attempt_at") or "")
+    log = []
+    for pending in candidates[:PR_REVIEWS_PER_TICK]:
+        pending["pr_review_attempt_at"] = iso()
+        msg = _deliver_pr_review(pending)
+        if msg:
+            log.append(msg)
+    return log
+
+
 def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Optional[str]:
     r = item["run"]
     rdir = RUNS / r["run_id"]
@@ -2269,6 +2351,10 @@ def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
     cls = classify(rdir / "review.ndjson", exit_code)
     (rdir / "classification.json").write_text(json.dumps(cls, indent=2) + "\n")
     (rdir / "findings.md").write_text(findings_md(rdir / "review.ndjson", meta, cls))
+    # One finished event per harvested run, before any kind-specific early return,
+    # so status outcomes count every review that review_started counted.
+    event("review_finished", item=item["id"], run=r["run_id"], outcome=cls["outcome"],
+          findings=cls["findings"], severity=cls["severity_counts"])
     if item["kind"] == review_receipt.KIND:
         # Receipt before queue mutation: a crash here is recovered by re-harvest.
         partial = any(p["disposition"] in ("unsupported", "ambiguous") for p in item["capture"]["paths"])
@@ -2383,8 +2469,6 @@ def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
                "head": meta["head"], "base": meta["base"], "message": cls.get("message")}
     item.setdefault("attempts", []).append(attempt)
     item["run"] = None
-    event("review_finished", item=item["id"], run=r["run_id"], outcome=cls["outcome"],
-          findings=cls["findings"], severity=cls["severity_counts"])
     o = cls["outcome"]
     if o == "completed":
         item["failures"] = 0
@@ -2432,6 +2516,9 @@ def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
             counted=True, outcome="completed", focus_paths=meta.get("coverage_paths") or meta.get("planned_paths"))
         if item["kind"] == "coverage" and item.get("coverage_source"):
             coverage.record_legacy_success(q, item, terminal_paths)
+        if item["kind"] in ("open", "delta") and item.get("pr") and cls["findings"]:
+            # Debt only: the bounded post-harvest pass posts the PR review.
+            _request_pr_review(item, r["run_id"], meta, rdir, cls)
         repair_pending = repair_tick.enqueue(sys.modules[__name__], q, item, meta, rdir)
         item["state"] = "repairing" if repair_pending else "done"
         return f"{item['id']}: completed ({cls['findings']} findings)"
@@ -3059,6 +3146,8 @@ def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = Fal
             msg = _deliver_push_findings(q, pending)
             if msg:
                 log.append(msg)
+        # Primary open/delta findings: one PR review each, same bounded shape.
+        log += deliver_pending_pr_reviews(q)
         repair_tick.backfill(sys.modules[__name__], q)
         repair_tick.archive_legacy(sys.modules[__name__], q)
         with forge_window(budget):

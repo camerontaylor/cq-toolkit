@@ -23,7 +23,7 @@ promotion stays fail-closed; no user identity or plain-shell fallback.
 
 ```sh
 ssh queue-host 'git -C /home/operator/repos/coderabbit-queue rev-parse HEAD'
-ssh queue-host 'systemctl --user is-active crq-tick.timer crq-tick.service crq-repair.service crq-repair.path crq-repair.timer crq-watchdog.timer crq-records.service'
+ssh queue-host 'systemctl --user is-active crq-tick.timer crq-tick.service crq-repair.service crq-repair.path crq-repair.timer crq-watchdog.timer'
 ssh queue-host 'test -f /home/operator/repos/coderabbit-queue/state/runner-disabled'
 ```
 
@@ -123,7 +123,7 @@ absent, old marker present, and no matching owned tick/review/addressing process
 Only then release the old tick lock and remove queue-host's marker:
 
 ```sh
-ssh queue-host 'rm /home/operator/repos/coderabbit-queue/state/runner-disabled && systemctl --user start crq-records.service && systemctl --user enable --now crq-tick.timer crq-watchdog.timer'
+ssh queue-host 'rm /home/operator/repos/coderabbit-queue/state/runner-disabled && systemctl --user enable --now crq-tick.timer crq-watchdog.timer'
 ```
 
 Do not enable repair service/path/timer. Inspect unit state/journal and the first

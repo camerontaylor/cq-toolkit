@@ -41,6 +41,9 @@ class PushTest(PushTestBase, unittest.TestCase):
         self.assertTrue(doc["counted"])
         self.assertEqual(doc["outcome"], "terminal-clean")
         self.assertEqual(doc["source"]["repo"], FOREIGN)
+        # The early-returning push-current harvest still feeds status outcomes.
+        finished = [e for e in self.events() if e["event"] == "review_finished"]
+        self.assertEqual([(e["item"], e["outcome"]) for e in finished], [(item["id"], "completed")])
         # A failed review never advances the reviewed tip.
         c3 = self.commit(self.foreign_origin, "later work", when=self.ago(1), files={"e.txt": "e\n"})
         self.assertEqual(self.tick(), 1)   # enroll + launch the next range

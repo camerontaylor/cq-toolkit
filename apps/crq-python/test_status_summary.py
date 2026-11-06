@@ -60,6 +60,31 @@ class SummaryTest(unittest.TestCase):
                                  {"max_starts_per_hour": 5}, [], 0)
         self.assertEqual(data["backlog"]["open"], 2)
 
+    def test_reharvested_run_counts_once(self):
+        events = [{"event": "review_finished", "at": "2026-11-06T00:00:00Z", "run": "r1", "outcome": "error"},
+                  {"event": "review_finished", "at": "2026-11-06T00:01:00Z", "run": "r1", "outcome": "completed"},
+                  {"event": "review_finished", "at": "2026-11-06T00:02:00Z", "run": "r1", "outcome": "completed"},
+                  {"event": "review_finished", "at": "2026-11-06T00:03:00Z", "run": "r2", "outcome": "interrupted"},
+                  {"event": "review_finished", "at": "2026-11-06T00:04:00Z", "outcome": "completed"},
+                  {"event": "review_finished", "at": "2026-11-06T00:05:00Z", "outcome": "completed"}]
+        data = adapter.summarize({"generated_at": "2026-11-06T01:00:00Z"}, {"items": []}, {},
+                                 {"max_starts_per_hour": 5}, events, adapter.timestamp("2026-11-06T01:00:00Z"))
+        self.assertEqual(data["outcomes_24h"], {"completed": 3, "interrupted": 1, "error": 0})
+
+    def test_backfill_and_merged_current_pending_are_backlog(self):
+        queue = {"items": [
+            {"kind": "backfill", "state": "pending"},
+            {"kind": "backfill", "state": "pending"},
+            {"kind": "backfill", "state": "done"},
+            {"kind": "merged-current", "state": "pending"},
+            {"kind": "push-current", "state": "pending", "repo": "camerontaylor/hart"},
+        ]}
+        data = adapter.summarize({"generated_at": "2026-11-06T00:00:00Z"}, queue, {},
+                                 {"repo": "camerontaylor/cq-toolkit", "max_starts_per_hour": 5}, [], 0)
+        self.assertEqual(data["backlog"]["backfill"], 2)
+        self.assertEqual(data["backlog"]["merged-current"], 1)
+        self.assertEqual(data["repos"]["camerontaylor/hart"]["pending"], 1)
+
 
     def test_publish_is_atomic_private_and_omits_queue_details(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -82,8 +107,9 @@ class SummaryTest(unittest.TestCase):
             self.assertEqual(data["outcomes_24h"]["completed"], 1)
             self.assertEqual(data["schema_version"], 2)
             self.assertEqual(set(data["systemd_timers"]),
-                             {"crq-tick.timer", "crq-watchdog.timer", "crq-records.timer"})
-            self.assertEqual(set(data["systemd_services"]), {"crq-records.service"})
+                             {"crq-tick.timer", "crq-watchdog.timer", "crq-slot.timer",
+                              "crq-backfill.timer", "crq-repair.timer"})
+            self.assertEqual(data["systemd_services"], {})
             for entry in list(data["systemd_timers"].values()) + list(data["systemd_services"].values()):
                 self.assertIsNone(entry["active"])
                 self.assertEqual(entry["error"], "systemd unit observation unavailable")
@@ -110,8 +136,8 @@ class SummaryTest(unittest.TestCase):
             self.assertIsNone(data["systemd_timers"]["crq-tick.timer"]["active"])
             self.assertEqual(data["systemd_timers"]["crq-tick.timer"]["error"],
                              "systemctl user show unavailable")
-            self.assertIsNone(data["systemd_services"]["crq-records.service"]["active"])
-            self.assertEqual(data["systemd_services"]["crq-records.service"]["error"],
+            self.assertIsNone(data["systemd_timers"]["crq-backfill.timer"]["active"])
+            self.assertEqual(data["systemd_timers"]["crq-backfill.timer"]["error"],
                              "systemctl user show unavailable")
             with mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(xdg)}), \
                     mock.patch.object(adapter, "command", side_effect=RuntimeError("unavailable")):

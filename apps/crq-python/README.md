@@ -111,13 +111,16 @@ reach into the window, so nothing started at 13:45 runs into 14:00.
 `crq-watchdog.timer` checks completed tick heartbeat age and alerts at 36 minutes.
 Heartbeat and summary are atomic under `${XDG_STATE_HOME:-~/.local/state}/crq`.
 The schema-2 summary retains queue, backfill, slot and health evidence, omits
-promotion fields, and includes `systemd_timers` keyed by `crq-tick.timer`, `crq-watchdog.timer`, and
-`crq-records.timer`. Each observation has `active` (boolean, or null if unknown),
+promotion fields, and includes `systemd_timers` keyed by `crq-tick.timer`, `crq-watchdog.timer`,
+`crq-slot.timer`, `crq-backfill.timer` and `crq-repair.timer`. Each observation has `active` (boolean, or null if unknown),
 `active_state`, `load_state`, `last_trigger`, and `next_elapse` (UTC ISO timestamps,
 or null when unavailable/never), with `error` when observation fails or the unit
 is not loaded. Watchdog monotonic deadlines are converted to UTC at observation.
-Records runs continuously: its absent timer is reported as `load_state=not-found`,
-while `systemd_services["crq-records.service"]` reports its actual activity.
+`systemd_services` is empty: `crq-records.service` served promotion records and
+was retired with promotion (2026-11-01); its unit and script are removed. `backlog` counts pending primary-repo
+items for `open`, `delta`, `merged`, `coverage`, `merged-current` and `backfill`;
+`outcomes_24h` counts each run id once (its last `review_finished` event in the
+window), so a re-harvest after a crash or a retained backfill run never inflates it.
 These observations are independent of `schedule.state`, which names the backend.
 Fleet readers must use that location after handover. Twenty-four-hour acceptance
 requires actual observations and is not implied by installation or static checks.
@@ -171,9 +174,49 @@ verification before publication and scans the final publication range for secret
 Open PR repairs are replayed onto the current head only if it moved forward;
 normal pushes never force. Restacked heads become stale, awaiting a new review.
 Merged, post-merge delta, coverage fixes become one
-`crq/fix-<run>` PR into main containing the verdict table. No finding
-comments, reviews or issues are posted. PR creation is the only repair GitHub
+`crq/fix-<run>` PR into main containing the verdict table. The repair path
+posts no finding comments, reviews or issues; PR creation is its only GitHub
 write. The normal non-author I2 gate still applies to fix PRs.
+
+## Findings on open PRs
+
+A counted primary-repo `open` or `delta` review with findings also posts them
+on the PR as one pull-request review (`pr_review_findings.py`;
+`POST /repos/{repo}/pulls/{pr}/reviews`, event `COMMENT`, `commit_id` = the
+reviewed head). This is independent of the repair enqueue above, which still runs.
+
+- Each finding whose lines fall inside the PR diff for that commit (the
+  compare of the PR base and the reviewed head, context lines included)
+  becomes an inline comment, so it is its own resolvable review thread
+  (GraphQL `reviewThreads`, reply, `resolveReviewThread`). A range is clamped
+  to the first diff hunk it overlaps. Findings without a file or line, outside
+  the diff, or in files with no patch are listed in the review body. If
+  GitHub still rejects the review with HTTP 422 (an anchor, or a head that was
+  force-pushed away), crq posts it once more with every finding in the body
+  and no `commit_id`. At most 50 inline threads per review; exact duplicate
+  findings in one stream are posted once.
+- The review is labelled as crq output, not as a CodeRabbit PR review. The
+  body starts with `<!-- crq-findings run=<run_id> -->` and the header
+  `crq findings (CodeRabbit CLI, local run <run_id>, <base10>..<head10>)`.
+  HTML comments are stripped from finding text, and `suggestion` fences become
+  plain fences, so no vendor marker or committable suggestion is copied.
+  Severity, title and text all get this treatment, and a leftover `<!--`
+  is escaped. `@mentions` outside code (line-start fences and inline spans)
+  get a zero-width joiner after the `@`, so a posted finding never notifies
+  anyone; paths are shown as safe code spans.
+- Delivery is debt, not an inline upload: harvest stores `pr_review_request`
+  and `pr_review_pending` on the item; the bounded post-harvest pass in
+  `tick()` delivers at most two per tick, least recently attempted first.
+  Before posting it skips a closed or merged PR and looks for an existing
+  review by the authenticated `gh` account whose body starts with the run's
+  marker, so a crash after the POST never posts twice. A malformed request
+  or invalid identity settles at once. A failure records `pr_review_error` and retries on later ticks, up
+  to five attempts (`findings_review_abandoned` event); success stores
+  `pr_review` and emits `findings_review_delivered`. A newer run of the same
+  item replaces an undelivered older request.
+- Identity: the tick's `gh` uses the queue host's `gh` login (hosts.yml, no
+  token in the unit environment), so reviews appear under that account.
+  Non-primary repos keep issue delivery (docs/multi-repo.md).
 
 ## Drivers and deployment prerequisites
 

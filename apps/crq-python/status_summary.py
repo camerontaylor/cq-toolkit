@@ -144,17 +144,23 @@ def summarize(status, queue, heartbeat, config, events, now):
                          and not (kind == "open" and
                                   len(i.get("cycles", [])) >= 1)
                          for i in primary_items)
-               for kind in ("open", "delta", "merged", "coverage")}
+               for kind in ("open", "delta", "merged", "coverage",
+                            review_receipt.KIND, "backfill")}
     outcomes = {key: 0 for key in ("completed", "interrupted", "error")}
     other = 0
-    for event in events:
+    # A run can be harvested more than once (crash recovery re-harvests; a backfill
+    # harvest that retains run ownership is retried every slot pass), so count each
+    # run id once, by its latest outcome. Events without a run id count individually.
+    finished = {}
+    for index, event in enumerate(events):
         at = timestamp(event.get("at"))
         if event.get("event") == "review_finished" and at is not None and now - 86400 <= at <= now:
-            outcome = event.get("outcome")
-            if outcome in outcomes:
-                outcomes[outcome] += 1
-            else:
-                other += 1
+            finished[event.get("run") or ("anonymous", index)] = event.get("outcome")
+    for outcome in finished.values():
+        if outcome in outcomes:
+            outcomes[outcome] += 1
+        else:
+            other += 1
     last_tick = heartbeat.get("last_tick") or queue.get("last_tick")
     # Freshness must follow completed ticks, never status-file writes or probes.
     timestamp(last_tick)
@@ -187,8 +193,9 @@ def read_events(path):
 
 def systemd_activity():
     """Observe user units, independently of the configured scheduling backend."""
-    timers = ("crq-tick.timer", "crq-watchdog.timer", "crq-records.timer")
-    services = ("crq-records.service",)
+    timers = ("crq-tick.timer", "crq-watchdog.timer", "crq-slot.timer",
+              "crq-backfill.timer", "crq-repair.timer")
+    services = ()
     units = timers + services
     activity = {unit: {"active": None, "active_state": None, "load_state": None}
                 for unit in units}
