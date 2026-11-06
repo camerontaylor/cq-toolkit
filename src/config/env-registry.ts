@@ -7,11 +7,11 @@
 import {
   parseBackend,
   parseMode,
+  parseModelSpec,
   parseNetwork,
   parsePassthrough,
   parseRunTool,
-} from '../sandbox/config.js';
-import { parseModelSpec } from '../selfhost/config.js';
+} from './parsers.js';
 import { isSecretEnvName } from './secret.js';
 import { ACCEPT_STATES, ASSOCIATIONS, BOT_ENTRY_RE, POSTURE_LIST, isPosture } from './values.js';
 
