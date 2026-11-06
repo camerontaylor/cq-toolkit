@@ -206,6 +206,35 @@ describe('makeManifest', () => {
     // for the ['b', 'c'] spelling with b-before-c input order).
     expect(topoOrder(makeManifest(diamondPlan()).jobs)).toEqual([['a'], ['c', 'b'], ['d']]);
   });
+
+  test('rejects a non-finite number before cloning, naming the job', () => {
+    // JSON.parse('1e400') is Infinity. structuredClone keeps it while the
+    // canonical hash renders it as null — a resumed run could then reuse a
+    // result for a different input.
+    const plan: Plan = {
+      id: 'plan-bad-number',
+      jobs: [{ id: 'n1', op: 'op-n', input: { ratio: Number.POSITIVE_INFINITY } }],
+    };
+    expect(() => makeManifest(plan)).toThrow(/job 'n1'.*non-finite number/);
+  });
+
+  test('rejects a non-plain object before cloning, naming the job', () => {
+    const plan: Plan = {
+      id: 'plan-bad-object',
+      jobs: [{ id: 'd1', op: 'op-d', input: { when: new Date(0) } }],
+    };
+    expect(() => makeManifest(plan)).toThrow(/job 'd1'.*not plain JSON data/);
+  });
+
+  test('still accepts the documented undefined values and sparse arrays', () => {
+    const sparse = new Array(2);
+    const plan: Plan = {
+      id: 'plan-plain-canonical',
+      jobs: [{ id: 'p1', op: 'op-p', input: { gone: undefined, list: sparse } }],
+    };
+    const manifest = makeManifest(plan);
+    expect(manifest.jobs[0]?.inputsHash).toBe(hashInputs('op-p', plan.jobs[0]?.input));
+  });
 });
 
 describe('topoOrder', () => {
