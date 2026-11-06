@@ -240,7 +240,7 @@ is null/unavailable and cannot match. This fixes the F1 extraction policy now,
 rather than letting each adapter choose. Check config hashes and H2 use
 `canonicalJson` followed by SHA-256; cqJsonHash hashes canonical parsed effective
 cq.json, not formatting or file location. H2 operational exclusions are exactly
-`cwd`, `journalDir`, `reportPath` and generated `runPrefix`; nested semantic file
+`cwd`, `journalDir`, `reportPath` and generated run identifiers (`runId`, `runPrefix`); nested semantic file
 paths remain repo-relative. Approval workspace binding remains separate.
 
 Stop-code mapping is fixed: `spawn`, `dns`, `transport`, `provider-outage` →
