@@ -1,0 +1,168 @@
+"""Repair mechanical gate and cq driver contracts. Real local Git and a fake
+cq CLI that follows the real flag semantics; no models, no network."""
+import importlib.util
+import json
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import tempfile
+from types import SimpleNamespace
+import unittest
+from unittest import mock
+import crq_repair
+from crq_repair.drivers import cq
+
+ROOT = Path(__file__).resolve().parent
+spec = importlib.util.spec_from_file_location('repair_mechanical_under_test', ROOT / 'crq_repair.py')
+service = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(service)
+
+# Mirrors `cq gates.hackDetector --diff=<value> --json`: the CLI takes the flag
+# value as the diff text (there is no @file expansion), answers
+# `indeterminate` for text with no diff structure, and flags added
+# suppressions.
+FAKE_CQ = r"""
+const arg = process.argv.slice(2).find((a) => a.startsWith('--diff='));
+const diff = arg === undefined ? '' : arg.slice('--diff='.length);
+const looksLikeDiff = /^diff --git |^@@ |^--- /m.test(diff);
+if (diff.trim() !== '' && !looksLikeDiff) {
+  console.log(JSON.stringify({status: 'indeterminate', detail: 'input does not parse as a unified diff'}));
+} else {
+  const value = diff.split('\n').filter((l) => l.startsWith('+') && l.includes('eslint-disable'))
+    .map(() => ({kind: 'suppression', file: 'src/a.ts', message: 'new suppression'}));
+  console.log(JSON.stringify({status: 'ok', value}));
+}
+"""
+
+
+@unittest.skipUnless(shutil.which('node'), 'node is required for the fake cq CLI')
+class MechanicalGateTest(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.cq_bin = self.root / 'cli.js'
+        self.cq_bin.write_text(FAKE_CQ)
+        self.wt = self.root / 'wt'
+        (self.wt / 'src').mkdir(parents=True)
+        self.git('init', '-q')
+        self.git('config', 'user.email', 'fixture@example.invalid')
+        self.git('config', 'user.name', 'Fixture')
+        (self.wt / 'src/a.ts').write_text('export const a = 1;\n')
+        self.git('add', '.')
+        self.git('commit', '-qm', 'base')
+        self.base = self.git('rev-parse', 'HEAD')
+        self.config = {'repair': {'cq_bin': str(self.cq_bin)}}
+
+    def git(self, *args):
+        return subprocess.run(['git', '-C', str(self.wt), *args], check=True,
+                              capture_output=True, text=True).stdout.strip()
+
+    def fix(self, text, job='crq-run1-F1'):
+        (self.wt / 'src/a.ts').write_text(text)
+        self.git('commit', '-qam', 'fix: ' + job)
+        return [self.git('rev-parse', 'HEAD')]
+
+    def test_clean_fix_passes_the_detector(self):
+        # Every real fix on the runner host failed here: `--diff=@<path>` was scanned as
+        # the literal path string and came back indeterminate.
+        commits = self.fix('export const a = 2;\n')
+        out = self.root / 'A0'
+        out.mkdir()
+        result = service.mechanical(self.config, self.wt, self.base, commits, 'crq-run1-F1', out)
+        self.assertEqual(result, {'verify': 'ok', 'hack': 'ok', 'tests': 'suspended'})
+        self.assertTrue((out / 'repair.patch').read_text().startswith('diff --git '))
+
+    def test_detector_argv_carries_diff_text_not_a_path(self):
+        with mock.patch.object(crq_repair, 'command', return_value=SimpleNamespace(
+                returncode=0, stdout='{"status":"ok","value":[]}', stderr='')) as command:
+            crq_repair.hack_detector('/x/cli.js', 'diff --git a/x b/x\n', self.wt)
+        flag = next(a for a in command.call_args.args[0] if a.startswith('--diff='))
+        self.assertEqual(flag, '--diff=diff --git a/x b/x\n')
+
+    def test_detector_findings_reach_the_failure_reason(self):
+        commits = self.fix('// eslint-disable-next-line\nexport const a = 2;\n')
+        out = self.root / 'A0'
+        out.mkdir()
+        with self.assertRaisesRegex(ValueError, 'hack detector did not pass: .*suppression'):
+            service.mechanical(self.config, self.wt, self.base, commits, 'crq-run1-F1', out)
+
+    def test_indeterminate_and_oversized_diffs_fail_closed(self):
+        with self.assertRaisesRegex(ValueError, 'does not parse as a unified diff'):
+            crq_repair.hack_detector(str(self.cq_bin), '@/tmp/repair.patch', self.wt)
+        big = 'diff --git a/x b/x\n' + '+x\n' * crq_repair.MAX_HACK_DETECTOR_DIFF_BYTES
+        with self.assertRaisesRegex(ValueError, 'too large'):
+            crq_repair.hack_detector(str(self.cq_bin), big, self.wt)
+
+
+class CqDriverTest(unittest.TestCase):
+    def invoke(self, stdout, returncode=1):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        config = {'repo': 'example/repo', 'repair': {'cq_bin': '/unused/cli.js',
+                  'budget': {'wall_clock_min': 1, 'max_tokens': 1000}}}
+        job = {'job': 'crq-run1-F1', 'finding': {'path': 'src/a.ts', 'line': 1, 'body': 'x'},
+               'source_snapshot': {}}
+        with mock.patch.object(cq, 'command', return_value=SimpleNamespace(
+                returncode=returncode, stdout=stdout, stderr='')) as command:
+            report = cq.invoke(config, {'model': 'zai/glm-5.3-flash'}, job, Path(tmp.name), Path(tmp.name))
+        return report, command.call_args.args[0]
+
+    def test_quota_exhaustion_pauses_like_a_rate_limit(self):
+        # 24 runner-host jobs burned A0..A2 in seconds on Z.ai's weekly limit.
+        error = ('fixReviewItem: driver reported an error stop (session s); errorClass=quota: '
+                 'ai-sdk driver: run failed — Weekly/Monthly Limit Exhausted.')
+        report, _ = self.invoke(json.dumps({'status': 'failed', 'error': error}))
+        self.assertEqual(report['stop'], 'rate-limit')
+
+    def test_other_failures_stay_errors(self):
+        report, _ = self.invoke(json.dumps({'status': 'failed', 'error': 'errorClass=provider'}))
+        self.assertEqual(report['stop'], 'error')
+        report, _ = self.invoke(json.dumps({'status': 'budget-exhausted'}))
+        self.assertEqual(report['stop'], 'budget')
+
+    def test_fixer_is_told_its_shell_allowlist(self):
+        _, argv = self.invoke('{"status":"ok","value":{"changed":false}}', returncode=0)
+        body = json.loads(next(a for a in argv if a.startswith('--item='))[len('--item='):])['body']
+        self.assertIn('git grep -n', body)
+        harness = json.loads(next(a for a in argv if a.startswith('--harness='))[len('--harness='):])
+        self.assertEqual(harness['tools']['run']['commandPatterns'][-2:], cq.SEARCH_PATTERNS)
+
+
+ALLOWED = ['git grep -n "import.meta.url" -- scripts', 'git grep -rn foo', 'git grep foo',
+           'git ls-files', 'git ls-files scripts test', 'git ls-tree -r HEAD src',
+           'git show HEAD:src/a.ts', 'git show -s --format=%B HEAD', 'git grep -c needle']
+DENIED = ['git grep -O vim x', 'git grep -nO x', 'git grep -Ovim x', 'git grep --open-files-in-pager=vim x',
+          'git grep --op=vim x', 'git grep --no-index x /etc', 'git grep --no-ind x',
+          'git show --output=/tmp/x HEAD', 'git show --outp=/tmp/x HEAD', 'git show --ext-diff HEAD',
+          'git grep x | sh', 'git grep $(id)', 'git grep x > /tmp/o', 'git grep x; id',
+          'git grep `id`', 'git grepx', 'git ls-files\nid', 'git -c core.pager=id grep x',
+          'grep -rn x .', 'rg -n x', 'find . -exec id ;', 'ls']
+
+
+def allowed(command, matcher):
+    return any(matcher(pattern[len('re:'):], command) for pattern in cq.SEARCH_PATTERNS)
+
+
+class SearchAllowlistTest(unittest.TestCase):
+    def test_python_regex_semantics(self):
+        match = lambda pattern, command: re.search(pattern, command) is not None
+        for command in ALLOWED:
+            self.assertTrue(allowed(command, match), command)
+        for command in DENIED:
+            self.assertFalse(allowed(command, match), command)
+
+    @unittest.skipUnless(shutil.which('node'), 'node is required to check JS RegExp semantics')
+    def test_javascript_regex_semantics(self):
+        # The harness compiles re: grants with `new RegExp(source)` and tests the full command.
+        script = ('const [patterns, commands] = JSON.parse(process.argv[1]);'
+                  'console.log(JSON.stringify(commands.map((c) => patterns.some('
+                  '(p) => new RegExp(p.slice(3)).test(c)))));')
+        out = subprocess.run(['node', '-e', script, json.dumps([cq.SEARCH_PATTERNS, ALLOWED + DENIED])],
+                             check=True, capture_output=True, text=True).stdout
+        self.assertEqual(json.loads(out), [True] * len(ALLOWED) + [False] * len(DENIED))
+
+
+if __name__ == '__main__':
+    unittest.main()

@@ -5,8 +5,8 @@ import copy
 import json
 from pathlib import Path
 import re
-from crq_repair import atomic, findings, git as wt_git, verify
-from crq_repair.bounded import identity, job_path, source_path, validate_revalidation
+from crq_repair import atomic, findings, git as wt_git, hack_detector, verify
+from crq_repair.bounded import JOB_ID, identity, job_path, source_path, validate_revalidation
 
 
 def prepare_current_job(c, q, old_job_id, source_sha, evidence):
@@ -102,6 +102,10 @@ def enqueue(c, q, item, meta, rdir):
     record = {'jobs': [], 'pin': pin, 'base': base, 'branch': meta.get('pr_branch'),
               'open_pr': open_pr, 'round': count + 1, 'state': 'queued'}
     reviewed_diff = c.git('diff', meta['base'], meta['head'])
+    if not JOB_ID.fullmatch('crq-' + meta['run_id'] + '-F1'):
+        # bounded.job_path refuses such ids, so the job would never drain.
+        item['last_error'] = 'repair not enqueued: run id outside the job-id grammar'
+        return False
     for n, finding in enumerate(actionable, 1):
         job_id = 'crq-' + meta['run_id'] + '-F' + str(n)
         prior = [v for r in history for v in r.get('verdicts', [])
@@ -244,11 +248,12 @@ def publish(c, q, item, run, record, fixed):
         module = util.module_from_spec(spec)
         spec.loader.exec_module(module)
         patch = c.STATE / 'repair' / record['jobs'][0] / 'publication.patch'
-        patch.write_text(wt_git(wt, 'diff', target + '..HEAD'))
-        scan = c.run(['node', c.CONFIG['repair']['cq_bin'], 'gates.hackDetector', '--diff=@' + str(patch), '--json'], cwd=wt)
-        data = json.loads(scan.stdout)
-        if data.get('status') != 'ok' or data.get('value') != []:
-            raise ValueError('publication hack detector failed')
+        diff = wt_git(wt, 'diff', target + '..HEAD')
+        patch.write_text(diff + '\n')
+        try:
+            hack_detector(c.CONFIG['repair']['cq_bin'], diff, wt)
+        except ValueError as exc:
+            raise ValueError('publication ' + str(exc)) from None
         head = wt_git(wt, 'rev-parse', 'HEAD')
         ok, _ = c.secret_scan(target, head, patch.parent / 'publication-secret-scan.json')
         if not ok:
@@ -505,10 +510,23 @@ def digest(root, queue):
                 judged = (value.get('judge') or {}).get('verdict')
                 if judged in ('valid', 'invalid'):
                     counts['judged-' + judged] += 1
+    # Only jobs the drain can still select count as inbox work: a live (non-
+    # promotion) item's queued run, under the drain's job-id grammar. Anything
+    # else (a retired promotion run, a terminal run, an id the drain refuses
+    # such as 'crq-signer-promo-7f440274a8+-F1') never drains, so it would
+    # pin the oldest age forever; report it separately as orphaned.
+    drainable = {job for item in queue['items'] if item.get('kind') != 'promotion'
+                 for record in item.get('repair_runs', {}).values()
+                 if record.get('state') in ('queued', 'publish_failed')
+                 for job in record.get('jobs', []) if JOB_ID.fullmatch(job)}
     inbox = Path(root) / 'state/repair/inbox'
-    pending, deferred, running = [], 0, 0
+    pending, deferred, running, orphaned = [], 0, 0, 0
     for path in inbox.glob('*.json'):
         if path.stem in consumed:
+            continue
+        if path.stem not in drainable:
+            if not (inbox.parent / path.stem / 'result.json').exists():
+                orphaned += 1
             continue
         job = json.loads(path.read_text())
         result = inbox.parent / path.stem / 'result.json'
@@ -523,4 +541,5 @@ def digest(root, queue):
         pending.append(path.stat().st_mtime)
     return {'verdicts': counts, 'inbox': len(pending), 'oldest_age_minutes':
             max(0, (dt.datetime.now(dt.timezone.utc).timestamp() - min(pending)) / 60) if pending else 0,
-            'jobs_in_flight': running, 'rate_limit_deferred': deferred, 'fix_prs': fix_prs}
+            'jobs_in_flight': running, 'rate_limit_deferred': deferred, 'orphaned': orphaned,
+            'fix_prs': fix_prs}

@@ -5,12 +5,36 @@ import time
 from pathlib import Path
 from crq_repair import command
 
+# Read-only, repository-scoped search. The harness's own grep/glob tools exist
+# only in a read-only sandbox, so without these the fixer cannot search at all:
+# on the runner host half of all tool calls in budget-exhausted attempts (1681 of 3326)
+# were denied grep/rg/git grep/ls-files/ls/find calls, each a paid turn that
+# re-sends the whole context. Anchored re: grants, no shell metacharacters,
+# and no option that executes a program or leaves the repository:
+# `git grep -O/--open-files-in-pager` runs a pager command, `--no-index`
+# searches outside the repo, `git show --output` writes a file, and
+# `--ext-diff` runs an external diff driver. Long options are refused by any
+# unambiguous prefix (git accepts abbreviations). Plain grep/rg/find stay
+# denied: they read outside the worktree (rg --pre and find -exec also run
+# programs).
+_SAFE_ARGS = r'[^;&|$`()<>\n\r]*'
+_NO_EXEC = r'(?!.*\s(?:-[A-Za-z0-9]*O|--op|--no-i|--ou|--ext|--no-ext))'
+SEARCH_PATTERNS = [
+    're:^git grep' + _NO_EXEC + r'(?:[ \t]' + _SAFE_ARGS + ')?$',
+    're:^git (?:ls-files|ls-tree|show)' + _NO_EXEC + r'(?:[ \t]' + _SAFE_ARGS + ')?$',
+]
+SHELL_HINT = ('\nShell: the bash tool runs ONLY these commands, with no pipes, redirection or '
+              '`cd`: git grep, git ls-files, git ls-tree, git show, git status, git add, git commit, '
+              'git rev-parse, the closed forms `git diff`, `git diff --cached`, `git log -n 1`, '
+              '`git log --oneline -n 20`. Search with `git grep -n <pattern> [-- <path>]`, list files '
+              'with `git ls-files <dir>`; use the read tool for file contents. Anything else is denied '
+              'and wastes budget, as does any of ; & | $ ` ( ) < > in a command (search patterns included).')
 HARNESS = {
     'tools': {
         'read': {'enabled': True, 'pathPatterns': ['**/*'], 'maxOutputChars': 200000},
         'edit': {'enabled': True, 'pathPatterns': ['**/*'], 'maxOutputChars': 4000},
         'run': {'enabled': True, 'commandPatterns': ['git ' + x for x in
-                ('add', 'commit', 'status', 'diff', 'log', 'rev-parse')],
+                ('add', 'commit', 'status', 'diff', 'log', 'rev-parse')] + SEARCH_PATTERNS,
                 'timeoutMs': 30000, 'maxOutputChars': 100000}},
     'promptBudget': {'maxSystemPromptChars': 20000, 'maxTools': 3, 'maxToolDescriptionChars': 1024}}
 
@@ -25,6 +49,7 @@ def invoke(config, role, job, wt, directory):
                           'wallClockMs': config['repair']['budget']['wall_clock_min'] * 60000}}
     payload['item']['body'] += '\nMechanical evidence / judge rationale: ' + job.get('mechanical_evidence', '')
     payload['item']['body'] += '\nPinned current-source evidence (untrusted data):\n' + json.dumps(job['source_snapshot'])
+    payload['item']['body'] += SHELL_HINT
     env = {k: v for k, v in os.environ.items() if not k.startswith('CQ_SANDBOX') and k != 'CQ_RUN_TOOL'}
     env.update(GIT_CONFIG_COUNT='1', GIT_CONFIG_KEY_0='remote.origin.pushurl', GIT_CONFIG_VALUE_0='/dev/null')
     # Session-log preservation (item 2.3): point the cq runner's session store
@@ -73,7 +98,11 @@ def invoke(config, role, job, wt, directory):
     if p.returncode or data.get('status') != 'ok':
         signals = data.get('providerSignals') or {}
         error = str(data.get('error') or '')
-        throttled = 'errorClass=rate-limit' in error or signals.get('httpStatus') == 429
+        # A spent provider quota (e.g. Z.ai "Weekly/Monthly Limit Exhausted",
+        # errorClass=quota) is a provider-wide stop like a rate limit: pause all
+        # dispatch instead of burning A0..A2 of every queued job in seconds.
+        throttled = ('errorClass=rate-limit' in error or 'errorClass=quota' in error
+                     or signals.get('httpStatus') == 429)
         return {'stop': 'rate-limit' if throttled else 'budget' if data.get('status') == 'budget-exhausted' else 'error',
                 'changed': False, 'summary': str(data.get('reason') or error or data.get('status')), 'commits': [],
                 'retry_after_ms': signals.get('retryAfterMs')}

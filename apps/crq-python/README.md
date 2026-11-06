@@ -83,14 +83,18 @@ publication then discards the result. Prepared (`repair-prepare`) jobs keep the
 strict one-job selector, so a moved tip makes them `STALE`.
 `--job/--source-sha/--finding-sha256` still repairs exactly one prepared job.
 
-Any provider rate limit (fixer or judge) atomically writes the global pause
+Any provider rate limit or spent quota (`errorClass=rate-limit` or `quota`,
+fixer or judge) atomically writes the global pause
 marker `state/repair/rate-limited-until` with the provider's retry time
 (`retryAfterMs`; 30 minutes if none, at most 24 hours, never shortened). The
 attempt or pending judge defers to that time and the drain stops. While the
 marker is in the future no pass makes any model call for any item; nothing is
 counted against jobs, so a long quota window fails nothing. The drain's
-`git fetch --prune` runs under the tick's own `state/tick.lock` (non-blocking
-flock, as `crq.with_lock`); if the tick holds it, the pass is skipped.
+`git fetch --prune` runs under the tick's own `state/tick.lock` (flock, as
+`crq.with_lock`). If the tick holds it, the drain polls for up to
+`repair.tick_lock_wait_s` seconds (default 300) before skipping the pass. The
+inbox path unit fires while the enqueuing tick still holds the lock, so an
+instant skip dropped every path-triggered pass.
 Runtime dispatch requires `repair.enabled`, a recorded
 `repair.spend_authorization` string, and `ZAI_API_KEY` in the service environment
 (`EnvironmentFile=-%h/.config/crq/repair.env`). Roles are cq-driver GLM only
@@ -159,7 +163,9 @@ sampling trigger a read-only judge; valid findings receive one A2 refix.
 Tests and probes are suspended. No worker or mechanical stage runs them.
 Mechanics verify full commit SHAs, strict base ancestry, HEAD membership,
 nonempty diffs, finding ID attribution, exact claimed range and clean tree.
-The pure `gates.hackDetector` scans the diff. The tick independently repeats
+The pure `gates.hackDetector` scans the diff text, passed as the `--diff=` flag
+value (the cq CLI has no `@file` expansion; diffs over 120 kB fail closed). Its
+findings become the attempt's failure reason. The tick independently repeats
 verification before publication and scans the final publication range for secrets.
 
 Open PR repairs are replayed onto the current head only if it moved forward;

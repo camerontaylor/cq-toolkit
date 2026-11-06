@@ -9,14 +9,16 @@ import json
 import os
 from pathlib import Path
 import random
+import time
 from zoneinfo import ZoneInfo
-from crq_repair import atomic, command, git, utc, verify
+from crq_repair import atomic, command, git, hack_detector, utc, verify
 from crq_repair.drivers import cq, codex, paseo
 from crq_repair.bounded import drain_job, drain_order, select_job, source_snapshot
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_RATE_LIMIT_PAUSE = dt.timedelta(minutes=30)
 MAX_RATE_LIMIT_PAUSE = dt.timedelta(hours=24)
+TICK_LOCK_WAIT_S = 300
 
 
 def pause_path():
@@ -77,12 +79,9 @@ def blocked(repair, now=None):
 def mechanical(config, wt, base, commits, job, directory):
     verify(wt, base, commits, job)
     patch = Path(directory) / 'repair.patch'
-    patch.write_text(git(wt, 'diff', base + '..HEAD'))
-    p = command(['node', config['repair']['cq_bin'], 'gates.hackDetector', '--diff=@' + str(patch), '--json'], cwd=wt)
-    data = json.loads(p.stdout)
-    value = data.get('value')
-    if p.returncode or data.get('status') != 'ok' or not isinstance(value, list) or value:
-        raise ValueError('hack detector did not pass')
+    diff = git(wt, 'diff', base + '..HEAD')
+    patch.write_text(diff + '\n')  # evidence copy; the detector scans the text itself
+    hack_detector(config['repair']['cq_bin'], diff, wt)
     return {'verify': 'ok', 'hack': 'ok', 'tests': 'suspended'}
 
 
@@ -300,17 +299,29 @@ def mark_stale(job, reason):
         'commits': [], 'attempts': [], 'judge': None, 'started_at': utc(), 'finished_at': utc()})
 
 
-def fetch_clone(config):
+def fetch_clone(config, lock_wait=None):
     """`git fetch --prune` under the tick's own lock (crq.with_lock: the same
-    state/tick.lock file, flock LOCK_EX|LOCK_NB). If the tick holds it, skip
-    this pass rather than race its fetch. Returns an error string, or None."""
+    state/tick.lock file, flock LOCK_EX|LOCK_NB). If the tick holds it, poll
+    for up to `lock_wait` seconds (repair.tick_lock_wait_s, default 300), then
+    skip this pass rather than race its fetch. Ticks hold the lock for ~1-7
+    minutes every 12, so an instant skip dropped about one pass in five.
+    The wait stays below the 10-minute drain timer. Returns an error string,
+    or None."""
+    if lock_wait is None:
+        lock_wait = config.get('repair', {}).get('tick_lock_wait_s', TICK_LOCK_WAIT_S)
     lock_path = ROOT / 'state/tick.lock'
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open('w') as lock:
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            return 'crq tick holds tick.lock'
+        deadline = time.monotonic() + lock_wait
+        while True:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return 'crq tick holds tick.lock'
+                time.sleep(min(5.0, remaining))
         try:
             # Under tick.lock: stay below the tick's 90 s lock wait so a hung fetch
             # skips this drain pass instead of making a tick exit.
