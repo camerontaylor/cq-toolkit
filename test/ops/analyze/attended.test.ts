@@ -4,9 +4,9 @@
 // grant, lock through the write); the `.cq/` exemption ignores the report
 // area and NOTHING else.
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { realTmpDirSync } from '../../helpers/tmp-dir.js';
 import { afterEach, describe, expect, test } from 'vitest';
 import type { ApprovalSubject } from '../../../src/ops/analyze/approval.js';
 import {
@@ -21,7 +21,7 @@ import {
 
 const repos: string[] = [];
 function repo(): { dir: string; git: (args: string[]) => string } {
-  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'cq-attended-')));
+  const dir = realTmpDirSync('cq-attended-');
   repos.push(dir);
   const git = (args: string[]) =>
     execFileSync('git', ['-C', dir, ...args], { encoding: 'utf8' }).trim();
@@ -235,7 +235,7 @@ describe('makeAttendedApprovalAuthority', () => {
   });
 
   test('a repository without a commit is refused as unreadable state', async () => {
-    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'cq-attended-empty-')));
+    const dir = realTmpDirSync('cq-attended-empty-');
     repos.push(dir);
     execFileSync('git', ['-C', dir, 'init', '-q']);
     const authority = makeAttendedApprovalAuthority({ confirm: () => true });

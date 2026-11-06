@@ -4,9 +4,10 @@
 // Split from test/driver/claude-code/cli.test.ts (pure move).
 
 import { baseOptions, invocation, SpawnCall, thrownBy } from './cli.helpers.js';
-import { mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { realTmpDir } from '../../helpers/tmp-dir.js';
 import { describe, expect, test } from 'vitest';
 import { spawnManaged } from '../../../src/shared/proc.js';
 import { DispatchError, errorClassOf } from '../../../src/driver/errors.js';
@@ -70,9 +71,9 @@ describe('claude-code CLI transport seam v2: RunOptions.signal + workspace bindi
   });
 
   test('workspace binding: the tool write lands in workspace.path; the record stays in sessionsDir recording the realpath', async () => {
-    // realpath the scratch parent so the bound dir IS its own realpath
-    // (macOS /var → /private/var) — the assertions then read literally.
-    const scratchDir = await realpath(await mkdtemp(join(tmpdir(), 'subdrv-s2-')));
+    // Canonical scratch root (realTmpDir) so the bound dir IS its own
+    // realpath — the assertions then read literally.
+    const scratchDir = await realTmpDir('subdrv-s2-');
     try {
       const workspaceDir = join(scratchDir, 'ws');
       await mkdir(workspaceDir);
@@ -124,7 +125,7 @@ describe('claude-code CLI transport seam v2: RunOptions.signal + workspace bindi
   });
 
   test('workspace + sessionRef: the same realpath resumes; a different one throws config PRE-DISPATCH', async () => {
-    const scratchDir = await realpath(await mkdtemp(join(tmpdir(), 'subdrv-s2-')));
+    const scratchDir = await realTmpDir('subdrv-s2-');
     try {
       const workspaceDir = join(scratchDir, 'ws');
       const otherDir = join(scratchDir, 'other');
@@ -161,7 +162,7 @@ describe('claude-code CLI transport seam v2: RunOptions.signal + workspace bindi
   });
 
   test('workspace.path that is relative or not an existing directory → DispatchError config, never dispatched', async () => {
-    const scratchDir = await realpath(await mkdtemp(join(tmpdir(), 'subdrv-s2-')));
+    const scratchDir = await realTmpDir('subdrv-s2-');
     try {
       const aFile = join(scratchDir, 'plain-file.txt');
       await writeFile(aFile, 'not a directory', 'utf8');

@@ -2,9 +2,8 @@
 // surface.*.test.ts subject files plus this shared fixture module.
 // Shared fixtures for the harness tool-surface tests — no tests and no
 // `describe` blocks live here.
-import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { rmSync } from 'node:fs';
+import { realTmpDirSync } from '../helpers/tmp-dir.js';
 import { onTestFinished } from 'vitest';
 import { defaultHarnessConfig } from '../../src/harness/config.js';
 import type { HarnessConfig } from '../../src/harness/config.js';
@@ -13,7 +12,7 @@ import type { HarnessManifest } from '../../src/harness/surface.js';
 
 /** A realpath'd scratch workspace (macOS /var → /private/var), removed after the test. */
 export function scratch(): string {
-  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'harness-surface-')));
+  const dir = realTmpDirSync('harness-surface-');
   onTestFinished(() => rmSync(dir, { recursive: true, force: true }));
   return dir;
 }

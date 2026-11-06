@@ -2,9 +2,9 @@
 // native MCP tool-call adapter installed over a real @modelcontextprotocol/sdk
 // server (canonical tool keys, strict raw-shape validation), and the harness
 // tool boundary honoring a wired cancellation signal (W1.4 review cycle 1).
-import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { realTmpDir } from '../../helpers/tmp-dir.js';
 import { describe, expect, test } from 'vitest';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
@@ -18,7 +18,7 @@ import { SessionStore } from '../../../src/harness/session.js';
 import { buildManifest, createHarnessSurface } from '../../../src/harness/surface.js';
 
 test('native MCP registration advertises canonical keys while raw legacy calls reach strict validation', async () => {
-  const dir = await realpath(await mkdtemp(join(tmpdir(), 'cq-native-alias-')));
+  const dir = await realTmpDir('cq-native-alias-');
   const server = new McpServer({ name: 'cq-harness', version: 'test' });
   const client = new Client({ name: 'native-fixture', version: 'test' });
   try {
@@ -95,7 +95,7 @@ describe('claude-agent harness calls are cancellable (W1.4 review cycle 1)', () 
   test.skipIf(process.platform === 'win32')(
     'runHarnessTool forwards the signal: an abort kills a running `run` command group',
     async () => {
-      const dir = await realpath(await mkdtemp(join(tmpdir(), 'cq-ca-cancel-')));
+      const dir = await realTmpDir('cq-ca-cancel-');
       try {
         const workspace = join(dir, 'ws');
         await mkdir(workspace);

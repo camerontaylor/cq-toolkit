@@ -19,28 +19,19 @@
 //   - broken artifacts (a missing required file, a refusing MCP bin, a cq
 //     bin that violates the usage contract) FAIL the run.
 import { spawnSync } from 'node:child_process';
-import {
-  chmodSync,
-  mkdirSync,
-  mkdtempSync,
-  readdirSync,
-  realpathSync,
-  rmSync,
-  writeFileSync,
-} from 'node:fs';
-import { tmpdir } from 'node:os';
+import { chmodSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
+import { realTmpDirSync } from '../helpers/tmp-dir.js';
 import { fileURLToPath } from 'node:url';
 import { expect } from 'vitest';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const SCRIPT = join(ROOT, 'scripts', 'packed-smoke.mjs');
-const TMPDIR = realpathSync(tmpdir());
 
 const roots: string[] = [];
 /** Per-test scratch root; also the ISOLATED TMPDIR the child smoke uses. */
 export function scratch(): string {
-  const dir = realpathSync(mkdtempSync(join(TMPDIR, 'cq-packed-smoke-test-')));
+  const dir = realTmpDirSync('cq-packed-smoke-test-');
   roots.push(dir);
   return dir;
 }

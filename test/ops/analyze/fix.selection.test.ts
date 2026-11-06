@@ -11,9 +11,9 @@
 // fix.applyPreconditions.test.ts, fix.ruleOverFiles.test.ts,
 // fix.agentProposal.test.ts, fix.agentProposalRefusal.test.ts,
 // fix.patchTargets.test.ts, fix.schema.test.ts and fix.helpers.ts.
-import { mkdirSync, mkdtempSync, realpathSync, symlinkSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
+import { realTmpDirSync } from '../../helpers/tmp-dir.js';
 import { describe, expect, test } from 'vitest';
 import { makeAnalyzeFix } from '../../../src/ops/analyze/fix.js';
 import { BAD, RULE, fixture, repos, scriptedRunner, source } from './fix.helpers.js';
@@ -89,7 +89,7 @@ describe('analyze.fix — selection', () => {
   });
 
   test('no sidecar yet → failed naming analyze.run', async () => {
-    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'cq-fix-nosidecar-')));
+    const dir = realTmpDirSync('cq-fix-nosidecar-');
     repos.push(dir);
     const result = await makeAnalyzeFix({ run: scriptedRunner() })({
       dir,

@@ -3,9 +3,10 @@
 // in the loop, and the workspace binding lands tool writes in
 // workspace.path while the record stays in sessionsDir (the same realpath
 // resumes; foreign or malformed paths are rejected pre-dispatch).
-import { mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { realTmpDir } from '../../helpers/tmp-dir.js';
 import { describe, expect, test } from 'vitest';
 import { SESSIONS_DIR } from '../../../src/driver/conformance.js';
 import { DispatchError, errorClassOf } from '../../../src/driver/errors.js';
@@ -61,9 +62,9 @@ describe('claude-code sdk transport seam v2: RunOptions.signal + workspace bindi
   });
 
   test('workspace binding: the tool write lands in workspace.path; the record stays in sessionsDir recording the realpath', async () => {
-    // realpath the scratch parent so the bound dir IS its own realpath
-    // (macOS /var → /private/var) — the assertions then read literally.
-    const scratchDir = await realpath(await mkdtemp(join(tmpdir(), 'agtdrv-s2-')));
+    // Canonical scratch root (realTmpDir) so the bound dir IS its own
+    // realpath — the assertions then read literally.
+    const scratchDir = await realTmpDir('agtdrv-s2-');
     try {
       const workspaceDir = join(scratchDir, 'ws');
       await mkdir(workspaceDir);
@@ -104,7 +105,7 @@ describe('claude-code sdk transport seam v2: RunOptions.signal + workspace bindi
   });
 
   test('workspace + sessionRef: the same realpath resumes; a different one throws config PRE-DISPATCH', async () => {
-    const scratchDir = await realpath(await mkdtemp(join(tmpdir(), 'agtdrv-s2-')));
+    const scratchDir = await realTmpDir('agtdrv-s2-');
     try {
       const workspaceDir = join(scratchDir, 'ws');
       const otherDir = join(scratchDir, 'other');
@@ -142,7 +143,7 @@ describe('claude-code sdk transport seam v2: RunOptions.signal + workspace bindi
   });
 
   test('workspace.path that is relative or not an existing directory → DispatchError config, never dispatched', async () => {
-    const scratchDir = await realpath(await mkdtemp(join(tmpdir(), 'agtdrv-s2-')));
+    const scratchDir = await realTmpDir('agtdrv-s2-');
     try {
       const aFile = join(scratchDir, 'plain-file.txt');
       await writeFile(aFile, 'not a directory', 'utf8');
