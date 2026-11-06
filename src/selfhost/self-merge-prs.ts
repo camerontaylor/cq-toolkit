@@ -69,6 +69,8 @@ import { pathToFileURL } from 'node:url';
 import { createGovernor, governorConfig } from '../kernel/governor.js';
 import { runPlan, type OpRegistryView } from '../kernel/runner.js';
 import type { OpRegistryEntry, RunOptions, RunReport } from '../kernel/types.js';
+import { enterWithCqEnv } from '../config/entry.js';
+import type { CqEnv } from '../config/env.js';
 import { defaultClassifyPrConfig } from '../ops/merge/classify.config.js';
 import { classifyPr } from '../ops/merge/classifyPrs.js';
 import type { PrClassification } from '../ops/merge/classifyPrs.js';
@@ -154,6 +156,8 @@ export interface SelfMergePrsCfg {
   dryRun?: boolean;
   /** Disable model-dispatched conflict resolution; DIRTY rows become needs-human. */
   disableConflictResolution?: boolean;
+  /** The entry point's CQ_* snapshot (driver choice, runPlan); read lazily when absent. */
+  cqEnv?: CqEnv;
   /**
    * The merge-time recheck's trust set (plan D3). Default
    * CONSERVATIVE_TRUST_POLICY — the resolved D3 trust config from W1.1 /
@@ -282,6 +286,7 @@ export function buildRunInput(
     baseBranch?: string;
     journalRoot?: string;
     disableConflictResolution?: boolean;
+    cqEnv?: CqEnv;
     classifyConfig?: ClassifyPrConfig;
   },
   nowMs: number,
@@ -295,7 +300,7 @@ export function buildRunInput(
     wallClockMs: SelfhostDefaults.perJobWallClockMs,
     ...(cfg.disableConflictResolution === true
       ? { conflictResolutionDisabled: true }
-      : { modelSpec: resolveSelfhostDriver(nowMs) }),
+      : { modelSpec: resolveSelfhostDriver(nowMs, cfg.cqEnv) }),
     sessionsDir: join(cfg.journalRoot ?? defaultJournalRoot(cfg.repoRoot), 'sessions'),
     nowMs,
     ...(classifyConfig === undefined
@@ -455,6 +460,7 @@ export async function runSelfMergePrs(
   const runOptions: RunOptions = {
     concurrency: 1,
     stopOnError: false,
+    ...(cfg.cqEnv !== undefined ? { cqEnv: cfg.cqEnv } : {}),
     maxTokens: SelfhostDefaults.maxTokens,
     ...(cfg.maxUsd !== undefined ? { maxUsd: cfg.maxUsd } : {}),
     // The governed run's durable kernel journal (the RunReport's evidence
@@ -551,6 +557,13 @@ export async function runSelfMergePrs(
  * honest outcomes are the contract; only a whole-run throw exits 1.
  */
 async function main(): Promise<void> {
+  // The CQ_* environment is read once for this process; an invalid value
+  // exits 2 before anything runs, warnings print once on stderr.
+  const cqEnv = enterWithCqEnv();
+  if (cqEnv === undefined) {
+    process.exitCode = 2;
+    return;
+  }
   const parsed = parseSelfhostArgs(process.argv.slice(2));
   const repoSpec = parsed.repo ?? process.env['GH_REPOSITORY'] ?? '';
   const parts = repoSpec.split('/');
@@ -569,12 +582,14 @@ async function main(): Promise<void> {
   }
   const repoRoot = process.cwd();
   const result = await runSelfMergePrs(
-    { gh: makeGhRunner(), nowMs: () => Date.now() },
+    { gh: makeGhRunner({ cqEnv }), nowMs: () => Date.now() },
     {
       owner,
       repo,
       repoRoot,
-      baseBranch: process.env['CQ_MERGE_BASE_BRANCH'] || SelfhostDefaults.baseBranch,
+      baseBranch:
+        (cqEnv.values['CQ_MERGE_BASE_BRANCH'] as string | undefined) ?? SelfhostDefaults.baseBranch,
+      cqEnv,
       ...(parsed.maxUsd !== undefined ? { maxUsd: parsed.maxUsd } : {}),
       ...(parsed.journalRoot !== undefined ? { journalRoot: parsed.journalRoot } : {}),
       ...(parsed.dryRun ? { dryRun: true } : {}),

@@ -92,6 +92,7 @@ import { get, list } from '../registry/index.js';
 import { getPlan } from '../registry/plans.js';
 import { KnownUsageSummarySchema, OpResultSchema } from '../kernel/schema.js';
 import type { OpRegistryEntry } from '../kernel/types.js';
+import { checkEntryEnv, type CqEnv } from '../kernel/entry-env.js';
 import { EXIT_CODES, exitCodeForOpResult } from './exit.js';
 import {
   assertJsonLossless,
@@ -508,6 +509,35 @@ async function dispatchCli(
     return EXIT_CODES.ok;
   }
 
+  // The CQ_* environment is read ONCE per process entry, before any dispatch.
+  // Errors (invalid values, denied names) are listed together and exit 2;
+  // warnings (unknown/reserved names) are printed once on stderr — also in
+  // --json mode, where stdout still carries exactly one JSON artifact (the
+  // op/run result shapes have no `warnings` slot, so stderr is the only
+  // channel). `cq config` reports the same diagnostics itself, so it is the
+  // one subcommand that skips the gate.
+  let cqEnv: CqEnv | undefined;
+  if (sub !== 'config') {
+    const check = checkEntryEnv();
+    if (check.errorLines.length > 0) {
+      if (rawMode === 'json') {
+        reportError(
+          io,
+          rawMode,
+          'usage',
+          sub,
+          check.errorLines.map((l) => l.replace(/^cq: error: /, '')).join('; '),
+          EXIT_CODES.usage,
+        );
+      } else {
+        for (const line of check.errorLines) io.stderr(`${line}\n`);
+      }
+      return EXIT_CODES.usage;
+    }
+    for (const line of check.warningLines) io.stderr(`${line}\n`);
+    cqEnv = check.cqEnv;
+  }
+
   // Flag syntax first: duplicate flags throw here → narrated usage error (2);
   // positional tokens are a usage error too.
   let parsed: ReturnType<typeof parseFlags>;
@@ -575,7 +605,11 @@ async function dispatchCli(
       // 'runPlan: ' input-validation class); runtime throws (journal
       // open/write failure, a post-stat read race) escape as throws →
       // narrated exit 1 below.
-      return await runPlanCommand(parsed.flags, io, mode, { ...opts, failOnVerdict });
+      return await runPlanCommand(parsed.flags, io, mode, {
+        ...opts,
+        failOnVerdict,
+        ...(cqEnv !== undefined ? { cqEnv } : {}),
+      });
     } catch (err) {
       // Runtime throw → 1; machine mode writes the error artifact instead.
       return reportError(
@@ -626,6 +660,7 @@ async function dispatchCli(
         return await runPlanEntryCommand(planEntry, parsed.flags, io, mode, {
           ...opts,
           failOnVerdict,
+          ...(cqEnv !== undefined ? { cqEnv } : {}),
         });
       } catch (err) {
         // Runtime throw → 1; machine mode writes the error artifact instead.

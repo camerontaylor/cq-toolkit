@@ -20,6 +20,7 @@
 import { join } from 'node:path';
 import type { ModelSpec } from '../driver/types.js';
 import { parseModelSpec } from '../config/parsers.js';
+import type { CqEnv } from '../config/env.js';
 import { deepFreeze } from '../shared/deepFreeze.js';
 
 /**
@@ -269,8 +270,14 @@ export interface SelfhostDrivers {
  * (the entry modules), never inside an op.
  */
 export function resolveSelfhostDrivers(
-  env: Readonly<Record<string, string | undefined>> = process.env,
+  env: CqEnv | Readonly<Record<string, string | undefined>> = process.env,
 ): SelfhostDrivers {
+  if (isCqEnv(env)) {
+    // The snapshot already parsed (and, at the entry, validated) both specs.
+    const offPeak = env.values[SELFHOST_DRIVER_ENV] as ModelSpec | undefined;
+    const peak = env.values[SELFHOST_PEAK_DRIVER_ENV] as ModelSpec | undefined;
+    return { offPeak: offPeak ?? SelfhostDefaults.driver, peak: peak ?? SelfhostPeak.driver };
+  }
   const offPeakRaw = env[SELFHOST_DRIVER_ENV] ?? '';
   const peakRaw = env[SELFHOST_PEAK_DRIVER_ENV] ?? '';
   return {
@@ -280,9 +287,19 @@ export function resolveSelfhostDrivers(
   };
 }
 
+/** A parsed snapshot (has `values`/`errors`), as opposed to a raw env record. */
+function isCqEnv(env: CqEnv | Readonly<Record<string, string | undefined>>): env is CqEnv {
+  const candidate = env as Partial<CqEnv>;
+  return (
+    typeof candidate.values === 'object' &&
+    candidate.values !== null &&
+    Array.isArray(candidate.errors)
+  );
+}
+
 export function resolveSelfhostDriver(
   nowMs: number,
-  env: Readonly<Record<string, string | undefined>> = process.env,
+  env: CqEnv | Readonly<Record<string, string | undefined>> = process.env,
 ): ModelSpec {
   const drivers = resolveSelfhostDrivers(env);
   return isSelfhostPeak(nowMs) || isSelfhostPeakHeadroom(nowMs) ? drivers.peak : drivers.offPeak;

@@ -16,6 +16,7 @@
 //     (resolves design debt DD-7: per-op failure semantics).
 import type { z } from 'zod';
 import type { ModelSpec, Usage } from '../driver/types.js';
+import type { CqEnv } from '../config/env.js';
 
 /**
  * The atomic-op contract: a typed, async function from a JSON-serializable
@@ -126,6 +127,8 @@ export interface RunOptions {
   maxTokens?: number;
   /** Resume an interrupted run from its journal instead of starting fresh. */
   resume?: boolean;
+  /** The entry point's CQ_* snapshot; computed once by runPlan when absent. */
+  cqEnv?: CqEnv;
 }
 
 /**

@@ -229,6 +229,8 @@ function hermeticEnv(): NodeJS.ProcessEnv {
       key.startsWith('CQ_') ||
       key.startsWith('FAKE_AGENT_') ||
       key === 'SMOKE_API_KEY' ||
+      key === 'SMOKE_T43_KEY' ||
+      key === 'SWEEP_FIXTURE_SESSIONS_DIR' ||
       key === 'SMOKE_BASE_URL' ||
       key === 'GH_TOKEN' ||
       key === 'GITHUB_TOKEN' ||
@@ -496,8 +498,8 @@ describe('the built CLI still drives the subprocess driver + fake agent', () => 
         // The driver route's key VALUE (fake — the URL is a black hole; the
         // fake sweep agent IS the model), plus the fixture factory lane's
         // sessions dir (the spawn evidence read back below).
-        env.CQ_T43_SMOKE_KEY = 't43-smoke-fake-key';
-        env.CQ_SWEEP_FIXTURE_SESSIONS_DIR = built.sessionsDir;
+        env.SMOKE_T43_KEY = 't43-smoke-fake-key';
+        env.SWEEP_FIXTURE_SESSIONS_DIR = built.sessionsDir;
         const res = runCli(
           [
             'run-plan',

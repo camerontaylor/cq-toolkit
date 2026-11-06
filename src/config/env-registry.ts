@@ -157,6 +157,14 @@ export const CQ_ENV_ENTRIES: readonly CqEnvEntry[] = [
     'Automation credential mapped to GH_TOKEN for gh (no ambient fallback).',
   ),
   entry(
+    'CQ_DIST_PREPARED',
+    'test',
+    text,
+    'neutral',
+    false,
+    'Set to 1 by the repo test runners when dist is already fresh (read by test/global-setup.ts).',
+  ),
+  entry(
     'CQ_GH_BIN',
     'config',
     text,
@@ -243,6 +251,14 @@ export const CQ_ENV_ENTRIES: readonly CqEnvEntry[] = [
     'conservative',
     true,
     'Extra env names copied into run children (blank: none).',
+  ),
+  entry(
+    'CQ_RESOURCE_SCOPED',
+    'test',
+    text,
+    'neutral',
+    false,
+    'Set to 1 by the repo scripts once they run inside a memory scope (scripts/lib/resource-scope.mjs).',
   ),
   entry('CQ_RUN_ID', 'identity', text, 'neutral', false, 'Run id stamped into child environments.'),
   entry(

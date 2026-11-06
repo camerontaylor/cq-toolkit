@@ -55,7 +55,8 @@ Secrets are recorded as present or absent, never by value. This extends ADR-0008
 use the resolved value. Any that remain are compared with the resolved value, and a difference fails with `config`.
 Neutral keys such as `sessionsDir` may be set per call and are recorded as the `call` layer.
 
-**Key list.** The key list is generated from the code registry `src/config/env.ts`. Annex B's hand-written key
+**Key list.** The key list is generated from the code registry `src/config/env-registry.ts` into
+[`docs/config.md`](../config.md); the static gate fails when that table is stale. Annex B's hand-written key
 tables are retired; where they differ from the registry, the registry is current.
 
 **Inspection.** `cq config` prints each resolved key, its source layer and the warnings. `cq config --strict`

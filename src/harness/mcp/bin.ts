@@ -27,6 +27,7 @@
 // line); signal termination on SIGTERM/SIGINT/SIGHUP. Every path aborts in-flight calls first,
 // which kills their `run` process groups.
 import { installProcessSignalCleanup } from '../../kernel/governor.js';
+import { enterWithCqEnv } from '../../config/entry.js';
 import { serveStdio } from './server.js';
 import { checkStartup, EXIT_CONFIG, EXIT_PROTOCOL, oneLine, scrubEnvironment } from './startup.js';
 
@@ -41,6 +42,14 @@ function exitAfterFlush(code: number): void {
 }
 
 function main(argv: readonly string[]): void {
+  // Read the CQ_* environment once, before the scrub replaces process.env.
+  // Warnings print once on stderr; any invalid value refuses to start. A
+  // nested harness inherits CQ_WORK_ID etc. (identity names never warn).
+  const cqEnv = enterWithCqEnv();
+  if (cqEnv === undefined) {
+    exitWithLine('cq-harness-mcp: refusing to start — invalid CQ_* environment', EXIT_CONFIG);
+    return;
+  }
   const startup = checkStartup(argv);
   if (!startup.ok) {
     exitWithLine(`cq-harness-mcp: refusing to start — ${startup.reason}`, EXIT_CONFIG);
@@ -48,7 +57,7 @@ function main(argv: readonly string[]): void {
   }
   try {
     process.chdir(startup.manifest.workspace);
-    scrubEnvironment(startup.manifest.envNames);
+    scrubEnvironment(startup.manifest.envNames, cqEnv);
   } catch (err) {
     exitWithLine(`cq-harness-mcp: refusing to start — ${oneLine(err)}`, EXIT_CONFIG);
     return;

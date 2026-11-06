@@ -20,6 +20,7 @@
 // each workflow evaluates the verdict in the emitted artifact.
 import { z } from 'zod';
 import type { OpResult } from '../kernel/types.js';
+import { enterWithCqEnv } from '../config/entry.js';
 
 /**
  * A numeric flag: a plain decimal string (no sign, exponent, hex, space or
@@ -98,10 +99,18 @@ export function exitCodeFor(result: OpResult<unknown>): 0 | 1 | 3 {
 export async function runEntry<T>(
   compute: () => Promise<OpResult<T>>,
   write: (line: string) => void,
+  diag: {
+    env?: Readonly<Record<string, string | undefined>>;
+    stderr?: (text: string) => void;
+  } = {},
 ): Promise<number> {
   let result: OpResult<T>;
   let code: number;
   try {
+    // The CQ_* environment is read once per entry: warnings go to stderr once,
+    // and any invalid value is a usage failure (exit 2) before compute runs.
+    const cqEnv = enterWithCqEnv(diag.stderr, diag.env);
+    if (cqEnv === undefined) throw new EntryUsageError('invalid CQ_* environment (see stderr)');
     result = await compute();
     code = exitCodeFor(result);
   } catch (error) {

@@ -18,7 +18,7 @@
 // dispatch time. The sessions dir is where the fixture factory lane writes
 // the fresh session records (retention 'keep' — worker evidence); the smoke
 // asserts from it that the fake agent genuinely spawned, so the caller MUST
-// name it: CQ_SWEEP_FIXTURE_SESSIONS_DIR.
+// name it: SWEEP_FIXTURE_SESSIONS_DIR.
 import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -32,10 +32,10 @@ if (!existsSync(SWEEP_AGENT)) {
   throw new Error(`sweepfix fixture: the fake sweep agent is missing at '${SWEEP_AGENT}'`);
 }
 
-const sessionsDir = process.env.CQ_SWEEP_FIXTURE_SESSIONS_DIR;
+const sessionsDir = process.env.SWEEP_FIXTURE_SESSIONS_DIR;
 if (typeof sessionsDir !== 'string' || sessionsDir === '') {
   throw new Error(
-    "sweepfix fixture: CQ_SWEEP_FIXTURE_SESSIONS_DIR must name the factory lane's sessions dir (the smoke asserts the fake agent's session records from it)",
+    "sweepfix fixture: SWEEP_FIXTURE_SESSIONS_DIR must name the factory lane's sessions dir (the smoke asserts the fake agent's session records from it)",
   );
 }
 
@@ -52,7 +52,7 @@ const factory = createDriverFactory({
           'cq-t43-smoke': {
             baseUrlEnv: 'CQ_T43_SMOKE_URL',
             baseUrlDefault: 'http://127.0.0.1:9',
-            keyEnv: 'CQ_T43_SMOKE_KEY',
+            keyEnv: 'SMOKE_T43_KEY',
             models: ['sweep-fake'],
             notes:
               'T4.3 real-plan smoke: the sweep agent fixture is the model; the URL is never contacted',
