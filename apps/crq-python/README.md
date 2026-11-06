@@ -107,13 +107,16 @@ reach into the window, so nothing started at 13:45 runs into 14:00.
 `crq-watchdog.timer` checks completed tick heartbeat age and alerts at 36 minutes.
 Heartbeat and summary are atomic under `${XDG_STATE_HOME:-~/.local/state}/crq`.
 The schema-2 summary retains queue, backfill, slot and health evidence, omits
-promotion fields, and includes `systemd_timers` keyed by `crq-tick.timer`, `crq-watchdog.timer`, and
-`crq-records.timer`. Each observation has `active` (boolean, or null if unknown),
+promotion fields, and includes `systemd_timers` keyed by `crq-tick.timer`, `crq-watchdog.timer`,
+`crq-slot.timer`, `crq-backfill.timer` and `crq-repair.timer`. Each observation has `active` (boolean, or null if unknown),
 `active_state`, `load_state`, `last_trigger`, and `next_elapse` (UTC ISO timestamps,
 or null when unavailable/never), with `error` when observation fails or the unit
 is not loaded. Watchdog monotonic deadlines are converted to UTC at observation.
-Records runs continuously: its absent timer is reported as `load_state=not-found`,
-while `systemd_services["crq-records.service"]` reports its actual activity.
+`systemd_services` is empty: `crq-records.service` served promotion records and
+was retired with promotion (2026-11-01); its unit and script are removed. `backlog` counts pending primary-repo
+items for `open`, `delta`, `merged`, `coverage`, `merged-current` and `backfill`;
+`outcomes_24h` counts each run id once (its last `review_finished` event in the
+window), so a re-harvest after a crash or a retained backfill run never inflates it.
 These observations are independent of `schedule.state`, which names the backend.
 Fleet readers must use that location after handover. Twenty-four-hour acceptance
 requires actual observations and is not implied by installation or static checks.
