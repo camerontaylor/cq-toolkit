@@ -225,7 +225,7 @@ describe('selectAffected', () => {
   it('maps filesystem-read consumers that have no import-graph edge', () => {
     const consumers = [
       'test/cli/plans.smoke.test.ts',
-      'test/cli/registry.test.ts',
+      'test/cli/registry.family-scan.test.ts',
       'test/kernel/driver-hygiene.test.ts',
       'test/scripts/static-conformance.test.ts',
       'test/cli/conformance.test.ts',
@@ -237,7 +237,7 @@ describe('selectAffected', () => {
     expect(pick('src/driver/new/x.ts')).toEqual(
       expect.arrayContaining([consumers[2], consumers[3]]),
     );
-    expect(pick('src/ops/new/x.ts')).toContain('test/cli/registry.test.ts');
+    expect(pick('src/ops/new/x.ts')).toContain('test/cli/registry.family-scan.test.ts');
     expect(pick('src/ops/new/x.ts')).toContain('test/cli/conformance.test.ts');
   });
 
@@ -271,7 +271,7 @@ describe('selectAffected', () => {
     const readers = [
       'test/ops/gates/policyDiff.test.ts',
       'test/ops/gates/protectedPaths.closure.test.ts',
-      'test/ops/gates/workflowScan.test.ts',
+      'test/ops/gates/workflowScan.scan.test.ts',
       'test/ops/ratchet/definitions.test.ts',
       'test/scripts/github-settings.target.test.ts',
     ];
