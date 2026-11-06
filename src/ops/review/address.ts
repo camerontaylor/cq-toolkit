@@ -298,13 +298,20 @@ async function captureAddressProvenance(
     // The composition's git transport answers this like every other read; a
     // missing remote is repoId null/unavailable (ADR-0008), never a failure.
     gitText(['config', '--get', 'remote.origin.url']).catch(() => ''),
-    // The emitting package version: the toolkit's own package.json.
-    readFile(new URL('../../../package.json', import.meta.url), 'utf8'),
+    // The emitting package version: the toolkit's own package.json. Like the
+    // remote, this is an optional observation: an unreadable file is
+    // 'unavailable', never a refusal.
+    readFile(new URL('../../../package.json', import.meta.url), 'utf8').catch(() => undefined),
   ]);
-  const version =
-    process.env.CQ_PRODUCER_VERSION ??
-    (JSON.parse(packageText) as { version?: string }).version ??
-    'unavailable';
+  let packageVersion: string | undefined;
+  if (packageText !== undefined) {
+    try {
+      packageVersion = (JSON.parse(packageText) as { version?: string }).version;
+    } catch {
+      // Invalid JSON: the emitting version is simply unavailable.
+    }
+  }
+  const version = process.env.CQ_PRODUCER_VERSION ?? packageVersion ?? 'unavailable';
   const provenance: ProvenanceRecord = {
     cqVersion: version,
     producerVersion: version,
@@ -1944,9 +1951,11 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                   target: input.target ?? 'main',
                   ...(input.base
                     ? { base: input.base }
-                    : reviewedBasePinned
-                      ? { base: await reviewedBasePinned() }
-                      : {}),
+                    : reviewedBase
+                      ? { base: reviewedBase }
+                      : reviewedBasePinned
+                        ? { base: await reviewedBasePinned() }
+                        : {}),
                 });
                 if (!read.ok) throw new Error(read.reason);
                 const state = read.state;
@@ -3194,7 +3203,17 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                   let path = input.record;
                   if (!path) {
                     const folder = resolve(root, '.cq', 'review', reviewBranchKey(branch));
-                    const files = (await readdir(folder))
+                    let names: string[];
+                    try {
+                      names = await readdir(folder);
+                    } catch (error) {
+                      // No review has run on this branch yet: the absent
+                      // folder is the empty population, not a failure.
+                      if (error instanceof Error && 'code' in error && error.code === 'ENOENT')
+                        names = [];
+                      else throw error;
+                    }
+                    const files = names
                       .filter((name) => /^\d+\.json$/.test(name))
                       .sort((a, b) => Number(b.slice(0, -5)) - Number(a.slice(0, -5)));
                     if (!files[0])
