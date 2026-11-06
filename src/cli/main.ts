@@ -43,6 +43,7 @@
 // narration to machine mode (NarrationMode 'json': stderr stays EMPTY,
 // stdout carries ONE JSON artifact). --fail-on-verdict is an exit-code
 // opt-in: an `ok` op result whose value is an object with `verdict: 'fail'`
+// or `verdict: 'regression'`
 // (or, for run-plan/plan subcommands, any ok row with such a value) exits 1
 // instead of 0; every other result maps unchanged and stdout is identical.
 // A VALUED reserved spelling (`--json=x`, `--help=x`, `--h=x`,

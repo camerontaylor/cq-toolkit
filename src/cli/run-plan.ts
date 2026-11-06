@@ -247,6 +247,20 @@ export function inputDefect(
  * schema would silently stop seeing it) and the parsed value would re-point
  * the record's prototype instead.
  */
+/**
+ * The camelCase run-plan keys whose schema fields are numeric. parseFlags
+ * runs schema-less for run-plan/plan subcommands, so a non-canonical
+ * decimal spelling (`--max-usd=0.50`, `--max-usd=5.0`) arrives here as the
+ * raw string (#386 keeps it verbatim to protect string-typed ids) and would
+ * fail the `z.number()` schema with a usage error (exit 2). Only this schema
+ * knows these fields are numeric, so the normalizer converts decimal-only
+ * strings here — parseFlags itself stays unchanged, and string fields such
+ * as plan names keep their raw text. Exponent/hex/leading-zero spellings
+ * stay strings and are still rejected, matching the #386 posture.
+ */
+const NUMERIC_RUN_KEYS: ReadonlySet<string> = new Set(['concurrency', 'maxUsd', 'maxTokens']);
+const DECIMAL_FLAG = /^\d+(\.\d+)?$/;
+
 export function parseRunPlanInput<T>(
   commandName: string,
   flags: Record<string, unknown>,
@@ -275,6 +289,15 @@ export function parseRunPlanInput<T>(
       };
     }
     normalizedFlags[key] = value;
+  }
+  // Decimal-only strings on the known numeric keys become numbers before the
+  // schema sees them (`--max-usd=0.50` → 0.5); every other value rides
+  // through untouched, so unknown keys still fail strictly as before.
+  for (const key of NUMERIC_RUN_KEYS) {
+    const value = normalizedFlags[key];
+    if (typeof value === 'string' && DECIMAL_FLAG.test(value)) {
+      normalizedFlags[key] = Number(value);
+    }
   }
   const check = schema.safeParse(normalizedFlags);
   if (!check.success) {

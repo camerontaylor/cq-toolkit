@@ -344,6 +344,29 @@ describe('run-plan through the governed kernel', () => {
     expect(err).toMatch(/invalid input for 'run-plan': runPlan: resume: true requires journalDir/);
   });
 
+  test('non-canonical decimal spellings coerce for numeric fields (--max-usd=5.0, --concurrency=1.0)', async () => {
+    // parseFlags runs schema-less for run-plan, so a trailing-zero decimal
+    // stays the raw string (#386); the run-plan normalizer converts it where
+    // the schema type is known, so a common dollar-cap spelling is accepted
+    // instead of rejected as invalid input (exit 2).
+    const { planPath } = await writePlanFile(singleJobPlan('echo'));
+    const base = [
+      'run-plan',
+      `--plan=${planPath}`,
+      `--ops-root=${opsRoot}`,
+      '--allow-advisory-budget',
+    ];
+    const usd = await capture([...base, '--max-usd=5.0']);
+    expect(usd.code).toBe(0);
+    expect(RunReportSchema.parse(JSON.parse(usd.out)).counts.done).toBe(1);
+    const concurrency = await capture([...base, '--concurrency=1.0']);
+    expect(concurrency.code).toBe(0);
+    const garbage = await capture([...base, '--max-usd=abc']);
+    expect(garbage.code).toBe(2);
+    expect(garbage.out).toBe('');
+    expect(garbage.err).toMatch(/invalid input for 'run-plan'/);
+  });
+
   test('a genuine runtime throw stays 1: --journal-dir pointing at a regular file', async () => {
     // The plan path is fine; the JOURNAL open (mkdir) fails (EEXIST/ENOTDIR)
     // mid-run — not an input defect (no 'runPlan: ' prefix) — so it

@@ -14,7 +14,7 @@ narration to stderr, never mixed. Exit codes: 0 clean, 1 thrown error, 2 arg err
 3 needs-human. In machine mode (`--json`) stderr stays empty and an error that has no
 result writes one `{ "error": { kind, subcommand, message, exitCode } }` object to
 stdout instead, so stdout is still exactly one JSON artifact. An `ok` result whose
-value carries `verdict: "fail"` exits 0 unless the caller passes `--fail-on-verdict`
+value carries `verdict: "fail"` or `verdict: "regression"` exits 0 unless the caller passes `--fail-on-verdict`
 (exit 1).
 
 **Why.** Operations compose programmatically; narration on stdout makes the result
