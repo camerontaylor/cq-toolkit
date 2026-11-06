@@ -2269,6 +2269,10 @@ def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
     cls = classify(rdir / "review.ndjson", exit_code)
     (rdir / "classification.json").write_text(json.dumps(cls, indent=2) + "\n")
     (rdir / "findings.md").write_text(findings_md(rdir / "review.ndjson", meta, cls))
+    # One finished event per harvested run, before any kind-specific early return,
+    # so status outcomes count every review that review_started counted.
+    event("review_finished", item=item["id"], run=r["run_id"], outcome=cls["outcome"],
+          findings=cls["findings"], severity=cls["severity_counts"])
     if item["kind"] == review_receipt.KIND:
         # Receipt before queue mutation: a crash here is recovered by re-harvest.
         partial = any(p["disposition"] in ("unsupported", "ambiguous") for p in item["capture"]["paths"])
@@ -2383,8 +2387,6 @@ def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
                "head": meta["head"], "base": meta["base"], "message": cls.get("message")}
     item.setdefault("attempts", []).append(attempt)
     item["run"] = None
-    event("review_finished", item=item["id"], run=r["run_id"], outcome=cls["outcome"],
-          findings=cls["findings"], severity=cls["severity_counts"])
     o = cls["outcome"]
     if o == "completed":
         item["failures"] = 0

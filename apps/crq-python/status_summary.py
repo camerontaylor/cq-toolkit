@@ -144,7 +144,8 @@ def summarize(status, queue, heartbeat, config, events, now):
                          and not (kind == "open" and
                                   len(i.get("cycles", [])) >= 1)
                          for i in primary_items)
-               for kind in ("open", "delta", "merged", "coverage")}
+               for kind in ("open", "delta", "merged", "coverage",
+                            review_receipt.KIND, "backfill")}
     outcomes = {key: 0 for key in ("completed", "interrupted", "error")}
     other = 0
     for event in events:
@@ -187,8 +188,9 @@ def read_events(path):
 
 def systemd_activity():
     """Observe user units, independently of the configured scheduling backend."""
-    timers = ("crq-tick.timer", "crq-watchdog.timer", "crq-records.timer")
-    services = ("crq-records.service",)
+    timers = ("crq-tick.timer", "crq-watchdog.timer", "crq-slot.timer",
+              "crq-backfill.timer", "crq-repair.timer")
+    services = ()
     units = timers + services
     activity = {unit: {"active": None, "active_state": None, "load_state": None}
                 for unit in units}
