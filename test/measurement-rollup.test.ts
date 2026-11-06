@@ -34,6 +34,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { describe, expect, test } from 'vitest';
+import { importAcceptance } from '../scripts/measurement-acceptance.mjs';
 import { computeMeasurementPanels } from '../scripts/measurement-metrics.mjs';
 import type { MeasurementPanelRun } from '../scripts/measurement-metrics.mjs';
 import { computeOutcomePanels } from '../scripts/measurement-outcomes.mjs';
@@ -947,6 +948,97 @@ describe('M10d failure evidence', () => {
     // File writes exist only in the CLI entry block, after the pure renderer.
     expect(source.indexOf('export function renderMeasurementReport')).toBeLessThan(
       source.indexOf('writeFile('),
+    );
+  });
+});
+
+describe('M4b1 acceptance import composed into the M10d readout', () => {
+  test('importAcceptance feeds computeOutcomePanels; a missing base renders unknown, never 0', () => {
+    // A small SYNTHETIC snapshot — hand-built for this test, never a recorded
+    // capture; docs/measurement/import-acceptance.md is the real recipe.
+    const reviewUrl = 'https://github.com/synthetic/synthetic/issues/comments/11';
+    const missingBaseUrl = 'https://github.com/synthetic/synthetic/issues/comments/12';
+    const acceptanceComment = (id: number, url: string, headSha: string) => ({
+      id,
+      html_url: url,
+      created_at: '2026-11-05T00:00:00Z',
+      updated_at: '2026-11-05T00:00:00Z',
+      user: { login: 'synthetic-author' },
+      body: `**Independent review (critic): PASS for \`${headSha}\`**`,
+    });
+    const syntheticSnapshot = {
+      repo: 'synthetic/synthetic',
+      pr_number: 1,
+      fetched_at: '2026-11-05T00:00:00Z',
+      pr: { user: { login: 'synthetic-author' } },
+      comments: [
+        acceptanceComment(11, reviewUrl, HEAD1),
+        // HEAD2 has no recorded base: an importer unknown, never a row.
+        acceptanceComment(12, missingBaseUrl, HEAD2),
+      ],
+      bases: { [HEAD1]: BASE },
+      complete: true,
+    };
+    const imported = importAcceptance(syntheticSnapshot);
+    // The one row is a self-declared reader artifact: reviewerId says so and
+    // /independent records the header as the only basis — never an authority.
+    expect(imported.acceptances).toEqual([
+      {
+        headSha: HEAD1,
+        reviewedBaseSha: BASE,
+        reviewerId: 'self-declared:critic',
+        authorId: 'github:synthetic-author',
+        independent: true,
+        verdict: 'PASS',
+        evidence: [reviewUrl],
+        availability: {
+          '/independent': {
+            state: 'known',
+            reason:
+              'self-declared in review comment header; reviewer identity not verified (shared GitHub account)',
+            source: reviewUrl,
+          },
+        },
+      },
+    ]);
+    expect(imported.unknown).toEqual([
+      { source: missingBaseUrl, kind: 'unavailable', reason: 'reviewed base not recorded' },
+    ]);
+    // Compose exactly like the real caller (docs/measurement.md Composition):
+    // the importer's acceptances feed computeOutcomePanels, and the CALLER
+    // merges its unknown rows into the outcome bucket before rendering —
+    // never dropped.
+    const panels = computeOutcomePanels({
+      reviews: [],
+      dispositions: [],
+      acceptances: imported.acceptances,
+      population: [{ headSha: HEAD1, mergedAt: '2026-11-02T00:00:00.000Z' }],
+      ciRed: [],
+      ciObservedHeads: [],
+      followUpDays: 14,
+      observedAt: OBSERVED_AT,
+    });
+    const rendered = renderMeasurementReport(
+      input({ outcome: () => ({ ...panels, unknown: [...panels.unknown, ...imported.unknown] }) }),
+    );
+    // The PASS head renders eligible in the population panel (merged 18 days
+    // before the observation instant: mature, not right-censored).
+    expect(rendered.report.panels.population).toEqual({
+      eligible: 1,
+      mature: 1,
+      rightCensored: 0,
+      followUpDays: 14,
+    });
+    expect(rendered.markdown).toContain(
+      '- eligible: 1; mature: 1; right-censored: 0; follow-up window: 14 days',
+    );
+    // The importer unknown renders as an unknown row of its own, not as a
+    // silent 0: it is the readout's single unknown-evidence entry.
+    expect(rendered.report.unknown).toEqual([
+      { source: missingBaseUrl, kind: 'unavailable', reason: 'reviewed base not recorded' },
+    ]);
+    expect(rendered.markdown).toContain(
+      `- ${missingBaseUrl} — unavailable: reviewed base not recorded`,
     );
   });
 });
