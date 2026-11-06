@@ -1197,8 +1197,18 @@ async function withBaseOwnedFinalTree(
     };
   }
   const worktreesRoot = resolve(bindings.repoRoot, bindings.worktreesDir);
-  await mkdir(worktreesRoot, { recursive: true });
-  const tempDir = await mkdtemp(join(worktreesRoot, '.cq-sweep-final-'));
+  let tempDir: string;
+  try {
+    await mkdir(worktreesRoot, { recursive: true });
+    tempDir = await mkdtemp(join(worktreesRoot, '.cq-sweep-final-'));
+  } catch (err) {
+    return {
+      fault: tagged(
+        'infra',
+        `sweep.unit ${unit.package}: could not create the final-probe scratch dir — ${messageOf(err)}`,
+      ),
+    };
+  }
   const cleanPath = join(tempDir, 'checkout');
   try {
     const added = await bindings.git([
@@ -1234,7 +1244,9 @@ async function withBaseOwnedFinalTree(
     };
   } finally {
     await bindings.git(['-C', worktree.path, 'worktree', 'remove', '--force', cleanPath]);
-    await rm(tempDir, { recursive: true, force: true });
+    // Cleanup is best-effort: a busy scratch dir must not replace the probe's
+    // computed result with its own failure.
+    await rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
   }
 }
 
@@ -1360,17 +1372,31 @@ async function probeLeg(
     };
   }
   // NARROWED past the guards: clean/failing with a FailureSet present.
-  const narrowed: UnitProbe = {
-    verdict: probed.value.verdict,
-    attempts: probed.value.attempts,
-    failureSet:
+  // Task-loop normalization can reject reported paths that resolve outside the
+  // checkout; that is ungateable evidence, never an escaping rejection.
+  let failureSet: FailureSet;
+  try {
+    failureSet =
       bindings.taskLoop === undefined
         ? probed.value.failureSet
         : normalizeFailurePaths(
             probed.value.failureSet,
             worktree.path,
             bindings.checkCommand(unit, worktree.path).cwd ?? worktree.path,
-          ),
+          );
+  } catch (err) {
+    return {
+      worktree,
+      fault: tagged(
+        'probe',
+        `sweep.unit ${unit.package}: the ${leg} probe reported ungateable paths — ${messageOf(err)}`,
+      ),
+    };
+  }
+  const narrowed: UnitProbe = {
+    verdict: probed.value.verdict,
+    attempts: probed.value.attempts,
+    failureSet,
   };
   return { worktree, probe: narrowed };
 }

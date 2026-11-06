@@ -177,6 +177,11 @@ const FULL_SHA_RE = /^[0-9a-f]{40}$/i;
  */
 export async function executeMerges(input: ExecuteMergeInput): Promise<ExecutionReport> {
   const maxRetries = input.maxRetries ?? DEFAULT_MAX_RETRIES;
+  if (!Number.isSafeInteger(maxRetries) || maxRetries < 0) {
+    throw new RangeError(
+      `executeMerges: maxRetries must be a non-negative integer, got ${String(maxRetries)}`,
+    );
+  }
   const { plan, effects } = input;
   const report: ExecutionReport = {
     merged: [],

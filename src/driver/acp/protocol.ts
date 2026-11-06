@@ -632,7 +632,9 @@ export function mapWireUsage(raw: unknown): Usage | undefined {
 export function modelOptionValueFrom(
   configOptions: readonly ConfigOption[] | undefined,
 ): string | undefined {
-  const option = configOptions?.find((entry) => entry.id === 'model' || entry.category === 'model');
+  const option =
+    configOptions?.find((entry) => entry.id === 'model') ??
+    configOptions?.find((entry) => entry.category === 'model');
   const value = option?.currentValue;
   return typeof value === 'string' && value !== '' ? value : undefined;
 }

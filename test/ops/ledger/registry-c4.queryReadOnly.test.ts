@@ -2,7 +2,7 @@
 // registry-c4.*.test.ts siblings in this directory; shared fixtures live in
 // registry-c4.helpers.ts. This file carries the read-only pin: a query over a
 // real path creates nothing.
-import { readdir } from 'node:fs/promises';
+import { readFile, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, describe, expect, test } from 'vitest';
 import { entryNamed, freshScratch, removeScratch } from './registry-c4.helpers.js';
@@ -29,6 +29,7 @@ describe('ledger.query is fs-READ-ONLY (the read-only pin)', () => {
 
     const before = await treeSnapshot(scratchDir);
     expect(before).toContain(`${scratchDir}/ledger.json:f`); // the snapshot sees the real tree
+    const ledgerBytes = await readFile(storePath, 'utf8');
 
     const query = await entryNamed('ledger.query').importer();
     await expect(query({ root: scratchDir, storePath })).resolves.toEqual({
@@ -58,5 +59,7 @@ describe('ledger.query is fs-READ-ONLY (the read-only pin)', () => {
 
     // No files, dirs, or lock dirs appeared: the tree is byte-identical.
     expect(await treeSnapshot(scratchDir)).toEqual(before);
+    // A rewrite of ledger.json would pass the tree snapshot: compare the bytes too.
+    expect(await readFile(storePath, 'utf8')).toBe(ledgerBytes);
   });
 });

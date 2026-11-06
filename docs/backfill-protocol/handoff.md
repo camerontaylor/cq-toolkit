@@ -106,8 +106,11 @@ Owner actions and evidence are concrete in [rollout](rollout.md): branch/ruleset
 reviewer limits and explicit terminal scope adapter capability, durable artifact
 volume and App identity, privileged deployment, exact no-live-run verification,
 history imports, immutable T0, activation ruling, live delivery evidence and
-conditional 14-day progress. Checked-in limits remain unverified and dispatch
-fails closed. Fixture passes do not close operational targets.
+conditional 14-day progress. The checked-in limits are verified
+(`policy/review-limits.json` selects reviewer 0.9.2 with evidence
+`reviewer-verification-092-20261031.json`); dispatch remains gated by the
+rollout `enabled` flag and its prerequisites. Fixture passes do not close
+operational targets.
 
 ## Proposed PR description
 

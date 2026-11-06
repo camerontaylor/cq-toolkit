@@ -3,6 +3,7 @@
 // suite-wide header and shared fixtures live in ./factory.helpers.ts.
 import { describe, expect, test } from 'vitest';
 import { createDriverFactory } from '../../src/driver/factory.js';
+import { DispatchError, errorClassOf } from '../../src/driver/errors.js';
 import { scratch, subprocessConfig } from './factory.helpers.js';
 
 describe('driver factory — resolved shape', () => {
@@ -18,11 +19,20 @@ describe('driver factory — resolved shape', () => {
 test('a scoped request scanner refuses lanes without the pre-send hook', async () => {
   const root = await scratch();
   const factory = createDriverFactory(subprocessConfig(root, []));
-  expect(() =>
+  let thrown: unknown;
+  try {
     factory.resolve({
       role: 'fixer',
       modelSpec: { provider: 'construction', model: 'construction-model' },
       beforeRequest: async () => {},
-    }),
-  ).toThrow('upload scanning requires the ai-sdk request gate');
+    });
+  } catch (err) {
+    thrown = err;
+  }
+  // Pre-dispatch misconfiguration is a STRUCTURED 'config' throw, never a
+  // plain Error that errorClassOf cannot classify.
+  expect(thrown).toBeInstanceOf(DispatchError);
+  expect(errorClassOf(thrown)).toBe('config');
+  expect((thrown as Error).message).toContain('upload scanning requires the ai-sdk request gate');
+  expect((thrown as Error).message).toContain("lane 'claude-code'");
 });

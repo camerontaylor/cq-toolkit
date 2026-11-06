@@ -125,7 +125,29 @@ export function fingerprintFailure(f: CheckFailure, cfg?: FingerprintConfig): st
 export function legacyFingerprintFailure(f: CheckFailure, cfg?: FingerprintConfig): string {
   const resolved = resolveConfig(cfg);
   const ruleId = resolved.tool === 'vitest' && isFreeFormVitestRule(f.ruleId) ? null : f.ruleId;
-  return fnv1a32Hex(JSON.stringify(locationComponents({ ...f, ruleId }, resolved)));
+  const message = resolved.tool === 'vitest' ? legacyVitestMessage(f.message) : f.message;
+  return fnv1a32Hex(JSON.stringify(locationComponents({ ...f, ruleId, message }, resolved)));
+}
+
+/**
+ * The adapter now encodes a title-chain message (no `fullName`) as a JSON
+ * array of strings; scheme 1 joined the non-empty titles with ' > '. Restore
+ * that form so persisted scheme-1 signatures still match. Anything that is not
+ * a JSON string array (a `fullName`, a fallback line) is returned unchanged.
+ */
+function legacyVitestMessage(message: string): string {
+  if (!message.startsWith('[')) {
+    return message;
+  }
+  try {
+    const parts: unknown = JSON.parse(message);
+    if (Array.isArray(parts) && parts.every((part) => typeof part === 'string')) {
+      return (parts as string[]).filter((part) => part !== '').join(' > ');
+    }
+  } catch {
+    // Not JSON: a literal message.
+  }
+  return message;
 }
 
 /**

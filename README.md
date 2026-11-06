@@ -181,11 +181,11 @@ limit dispatch allowances, but cannot account for unsettled in-flight usage or p
 one driver step from overshooting. Retry requests and usage cover both attempts;
 coverage deliveries describe only the final attempt.
 
-This repository's root config declares the compiler check as argv.
-Lint is omitted: Oxlint 1.83 has no ESLint-format output; an `oxlint-json` adapter is a follow-up.
+This repository's root config declares the compiler check as argv, and runs lint
+as an `oxlint-json` check (typed Oxlint with `--format json`).
 Tests are omitted until a config check can honour the `test:narrow` resource preflight and file selection.
 Consequently `cq analyze` / `analyze.run --dir=.`
-here runs the compiler; local development still follows `pnpm test:narrow`
+here runs the compiler and lint (plus the other static checks in `cq.json`); local development still follows `pnpm test:narrow`
 and the focused-check policy below. The root role choices are experiment configuration,
 with no token budget baked in.
 
@@ -289,9 +289,12 @@ For `analyze.run` and `analyze.fix`, use a dedicated report directory for
 attended clean-tree check; pointing it at tracked source directories widens
 that exemption and writes report artifacts alongside source files.
 
-Check configurations also accept `ruff-json` (`ruff check --output-format json .`)
-and `knip-json` (`knip --reporter json`, Knip 6). Both adapters require exit 0
-with an empty report or exit 1 with findings; malformed output, operational exits,
-and contradictory exit/report combinations are indeterminate. Knip's JSON reporter
+Check configurations also accept `ruff-json` (`ruff check --output-format json .`),
+`knip-json` (`knip --reporter json`, Knip 6) and `oxlint-json` (`oxlint --format json`,
+which emits a `diagnostics[]` envelope rather than ESLint's per-file array). Each adapter
+requires exit 0 with an empty report or exit 1 with findings; malformed output,
+operational exits, and contradictory exit/report combinations are indeterminate.
+`oxlint-json` also requires a completed nonempty file scan and accepts warning-only
+reports behind exit 0. Knip's JSON reporter
 does not retain issue severity, so findings are errors and warning-only reports
 behind exit 0 are indeterminate. Avoid `--exit-zero` and mutating fix flags.

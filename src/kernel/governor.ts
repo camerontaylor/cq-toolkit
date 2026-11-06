@@ -733,7 +733,7 @@ export type GovernorEvent =
   | { kind: 'bound-excluded-ungoverned'; runIds: string[]; atMs: number }
   /**
    * W2.3 reserve-then-settle: a reservation was opened against the cap
-   * (settled + outstanding + reserved ≤ cap held at that instant). The
+   * (settled + unconsumed hold + reserved ≤ cap held at that instant). The
    * write-ahead journal event is the runner's; this is the governor's own
    * observation.
    */
@@ -779,8 +779,9 @@ export type AdmissionDecision =
 
 /**
  * An OPEN reservation against the run's USD cap (W2.3 reserve-then-settle):
- * the cap holds `settled + outstanding + reserved ≤ C` from the instant
- * `reserve` resolves until `settle` lands. Kernel-internal by design — the
+ * the cap holds `settled + unconsumed hold + reserved ≤ C` (a hold counts
+ * only its part not yet folded into `settled`) from the instant `reserve`
+ * resolves until `settle` lands. Kernel-internal by design — the
  * driver-seam `RunOptions.reservation` surface is W3.3's (one types bump on
  * the last P2 PR).
  */
@@ -995,7 +996,7 @@ export class BudgetGovernor {
   private tripKindN?: TripKind;
   private readonly slots: SlotPool | undefined;
   // --- W2.3 reserve-then-settle state --------------------------------------
-  /** The outstanding (open) reservations by id — the O in `S + O + r ≤ C` — with the evidence folds attributed to each. */
+  /** The outstanding (open) reservations by id — each holding the unconsumed part of `S + O + r ≤ C` — with the evidence folds attributed to each. */
   private readonly outstanding = new Map<
     string,
     { reservation: BudgetReservation; foldedUsd: number; priced: boolean }
@@ -1113,7 +1114,11 @@ export class BudgetGovernor {
     this.unbindRunSignalN = undefined;
   }
 
-  /** USD currently held by OPEN reservations (the O in `S + O + r ≤ C`). */
+  /**
+   * USD currently held by OPEN reservations (the full hold). Capacity counts
+   * only the part a hold has NOT already folded into the ledger
+   * (`heldBeyondFoldsUsd`); this figure is the raw reservation sum.
+   */
   get outstandingUsd(): number {
     return this.outstandingUsdN;
   }
@@ -1199,14 +1204,17 @@ export class BudgetGovernor {
 
   /**
    * THE RESERVATION GATE. Admits one dispatch against the USD cap under the
-   * reserve-then-settle invariant `settled + outstanding + reserved ≤ C`:
+   * reserve-then-settle invariant `settled + unconsumed hold + reserved ≤ C`,
+   * where a hold's unconsumed part is `max(0, r − folded)`: a fold that lands
+   * mid-flight is already in `settled`, so subtracting the full hold as well
+   * would count it twice and under-admit parallelism until settle.
    *
-   *   capacity = C − S − O;  r = min(proposedUsd, capacity)
+   *   capacity = C − S − Σ max(0, r − folded);  r = min(proposedUsd, capacity)
    *
    * When the proposal exceeds capacity, ADR-0003 §2.2 step 3 decides: with
-   * any reservation OUTSTANDING (`O > 0`) the dispatch WAITS FIFO for a
-   * settle — the full proposal is admitted once room frees; with NOTHING
-   * outstanding (`O = 0`) the reservation SHRINKS to what is left
+   * any reservation OPEN the dispatch WAITS FIFO for a settle — the full
+   * proposal is admitted once room frees; with NOTHING open (`outstanding`
+   * empty) the reservation SHRINKS to what is left
    * (`r = C − S`; `proposedUsd` records the ask), because no settle can
    * ever free capacity again. Any trip wakes and refuses every waiter. The
    * caller opens the write-ahead journal event after this resolves and
@@ -1256,7 +1264,7 @@ export class BudgetGovernor {
       // (budget family).
       this.trip(
         'exhausted',
-        `reservation capacity exhausted: settled ${this.usdSpentN} + outstanding ${this.outstandingUsdN} leave nothing of cap ${cap}`,
+        `reservation capacity exhausted: settled ${this.usdSpentN} + unconsumed hold ${this.heldBeyondFoldsUsd()} leave nothing of cap ${cap}`,
       );
       return { outcome: 'tripped' };
     }
@@ -1269,6 +1277,20 @@ export class BudgetGovernor {
     });
   }
 
+  /**
+   * USD still held beyond what each open reservation has already folded into
+   * `usdSpentN` — the capacity the gate may actually consume. Subtracting
+   * the FULL holds as well would count an in-flight fold twice (once in `S`,
+   * again inside the hold) and under-admit parallelism until settle.
+   */
+  private heldBeyondFoldsUsd(): number {
+    let held = 0;
+    for (const { reservation, foldedUsd } of this.outstanding.values()) {
+      held += Math.max(0, reservation.usd - foldedUsd);
+    }
+    return held;
+  }
+
   /** Grant the head waiter when capacity allows; chain while capacity and waiters remain. */
   private drainWaiters(): void {
     while (this.reserveWaiters.length > 0) {
@@ -1278,14 +1300,15 @@ export class BudgetGovernor {
         return;
       }
       const cap = this.capUsd;
-      const capacity = cap === undefined ? 0 : cap - this.usdSpentN - this.outstandingUsdN;
+      const held = this.heldBeyondFoldsUsd();
+      const capacity = cap === undefined ? 0 : cap - this.usdSpentN - held;
       if (capacity <= USD_EPSILON) {
         if (this.outstanding.size === 0) {
           // Capacity gone for good with nothing left to settle: trip (which
           // wakes every waiter via the tripped branch on re-entry).
           this.trip(
             'exhausted',
-            `reservation capacity exhausted: settled ${this.usdSpentN} + outstanding ${this.outstandingUsdN} leave nothing of cap ${cap}`,
+            `reservation capacity exhausted: settled ${this.usdSpentN} + unconsumed hold ${held} leave nothing of cap ${cap}`,
           );
           return;
         }
@@ -1308,8 +1331,9 @@ export class BudgetGovernor {
     class_: ReservationClass;
   }): BudgetReservation | undefined {
     const cap = this.capUsd;
+    const held = this.heldBeyondFoldsUsd();
     if (cap === undefined) return undefined;
-    const capacity = cap - this.usdSpentN - this.outstandingUsdN;
+    const capacity = cap - this.usdSpentN - held;
     if (capacity <= USD_EPSILON) return undefined;
     // ADR-0003 §2.2 step 3, both branches (`r > C − S − O`): with any
     // reservation OUTSTANDING the dispatch WAITS FIFO for a settle — a

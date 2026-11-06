@@ -19,10 +19,10 @@ import {
 import { appendFile, mkdtemp, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createGovernor } from '../../src/kernel/governor.js';
+import { currentJobContext, createGovernor } from '../../src/kernel/governor.js';
 import { openRunLog } from '../../src/kernel/journal.js';
 import { makeManifest } from '../../src/kernel/manifest.js';
-import { type Plan } from '../../src/kernel/types.js';
+import { type OpResult, type Plan } from '../../src/kernel/types.js';
 
 // ---------------------------------------------------------------------------
 // 3c. Chained governed resumes — the deleted seedFromRunLog helper's pins,
@@ -80,6 +80,56 @@ describe('the governed fold reads ALL chained runs (review VB1B)', () => {
       );
       expect(refusals.map((event) => event.reason)).toEqual(['dispatch-quota']);
       expect(governor2.dispatchCount).toBe(2); // seeded from the fold; refusals do not consume
+    },
+    journalEnclosure(2),
+  );
+
+  test(
+    'a trip at seed still replays a verified job later in the wave: replay is not a dispatch',
+    async () => {
+      const calls: string[] = [];
+      const plan: Plan = {
+        id: 'plan-trip-replay',
+        jobs: [
+          { id: 'j1', op: 'probe', input: { jobId: 'j1' } },
+          { id: 'j2', op: 'spend', input: { jobId: 'j2' } },
+        ],
+      };
+      const probe = async (raw: unknown): Promise<OpResult<unknown>> => {
+        calls.push((raw as { jobId: string }).jobId);
+        return { status: 'failed', error: 'retry on resume' };
+      };
+      const spend = async (raw: unknown): Promise<OpResult<unknown>> => {
+        calls.push((raw as { jobId: string }).jobId);
+        currentJobContext()?.reportResult({
+          usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0 },
+          costUSD: 3,
+        });
+        return { status: 'ok', value: 'j2' };
+      };
+      // Run 1: j1 fails (so it needs a re-run); j2 verifies ok and spends 3.
+      const report1 = await runPlan(
+        plan,
+        { concurrency: 1, stopOnError: false, journalDir: dir },
+        viewWith(entry('probe', probe), entry('spend', spend)),
+        { governor: createGovernor({ maxUsd: 5 }), allowAdvisory: true },
+      );
+      expect(rowStatuses(report1)).toEqual(['failed', 'ok']);
+      expect(calls).toEqual(['j1', 'j2']);
+
+      // Resume under a 2 USD cap: the seeded 3 USD trips at seed. j1 needs a
+      // re-run, so the trip gate leaves it queued (the sweep re-marks it
+      // budget-exhausted); j2 verified ok and must still be re-attested — a
+      // replay spends nothing and needs no admission.
+      calls.length = 0;
+      const report2 = await runPlan(
+        plan,
+        { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
+        viewWith(entry('probe', probe), entry('spend', spend)),
+        { governor: createGovernor({ maxUsd: 2 }), allowAdvisory: true },
+      );
+      expect(calls).toEqual([]); // nothing dispatched
+      expect(rowStatuses(report2)).toEqual(['budget-exhausted', 'ok']);
     },
     journalEnclosure(2),
   );

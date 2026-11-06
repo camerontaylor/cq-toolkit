@@ -135,6 +135,11 @@ function candidateOf(row: FixTaskReport | AddressFix): ClosureCandidate {
   return 'task' in row ? fixCandidateOf(row) : reviewCandidateOf(row);
 }
 
+/** True for the fix-run producer; review rows carry a finding, not a task. */
+function isFixTaskReport(row: FixTaskReport | AddressFix): row is FixTaskReport {
+  return 'task' in row;
+}
+
 /**
  * The exact verified-fix predicate shared by both producers (ADR-0008):
  * terminal `fixed`, validation present with passing verdict, the SHA in the
@@ -278,6 +283,13 @@ export function baselineFailuresOf(
  * empty array is different: a captured, genuinely empty population is a
  * known zero. The post-fix `openBlocking` is never substituted, so the
  * baseline cannot shrink to whatever survived the run.
+ *
+ * Review dispatch covers every open finding while the planned population holds
+ * only blocking findings, so a verified non-blocking review closure is
+ * filtered out before counting: the numerator may not grow past a population
+ * the denominator never counted. Finding identity is compared in the same
+ * canonical form as {@link reviewLinkIdOf}; the raw planned ids are still
+ * what baseline probes are looked up by.
  */
 export function measureRun(
   evidence: readonly (FixTaskReport | AddressFix)[],
@@ -285,7 +297,24 @@ export function measureRun(
   probeCounts: ReadonlyMap<string, BaselineProbe>,
   readCommitMessage: (sha: string) => string | undefined,
 ): MetricRecord & { availability: Record<string, AvailabilityRecord> } {
-  const { closures, unknownTrailerShas } = closuresOf(evidence.map(candidateOf), readCommitMessage);
+  const plannedFindingLinks =
+    plannedUnits === null
+      ? null
+      : new Set(plannedUnits.map(reviewLinkIdOf).filter((link): link is string => link !== null));
+  const candidates: ClosureCandidate[] = [];
+  for (const row of evidence) {
+    const candidate = candidateOf(row);
+    // Fix tasks are always planned units; only review rows can fall outside
+    // the denominator's population.
+    if (
+      isFixTaskReport(row) ||
+      plannedFindingLinks === null ||
+      (candidate.linkId !== null && plannedFindingLinks.has(candidate.linkId))
+    ) {
+      candidates.push(candidate);
+    }
+  }
+  const { closures, unknownTrailerShas } = closuresOf(candidates, readCommitMessage);
   const verified = closures.filter((closure) => !closure.todo);
   const distinctVerified = [...new Set(verified.map((closure) => closure.commitSha))];
   const baselineFailures =

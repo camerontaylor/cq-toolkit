@@ -1,5 +1,5 @@
 import { expect, test } from 'vitest';
-import { checkRecord } from './fakes.js';
+import { checkRecord, cycleRecord } from './fakes.js';
 import { readWorkState } from '../../../src/ops/dev/internal/workState.js';
 import {
   currentLedgerDebt,
@@ -8,7 +8,61 @@ import {
   prepareDeferredVendorReview,
 } from '../../../src/ops/dev/internal/deferredLedger.js';
 import { serializeDevLedger } from '../../../src/ops/dev/record.js';
-import { fixture } from './deferredLedgerHelpers.js';
+import { fixture, terminalReport } from './deferredLedgerHelpers.js';
+
+test('a settled lineage with no new outage never blocks or re-imports a later review', async () => {
+  const f = await fixture();
+  const terminal = terminalReport(f);
+  expect(
+    await loadCurrentDeferredVendorDebt(f.effects, 'main', f.state, f.ledger, terminal.client),
+  ).toMatchObject({ vendorCompleted: true });
+  // A newer CodeRabbit cycle ended terminal (no new outage). The completed
+  // obligation is already settled, so a later review must neither re-import
+  // it nor trip the clean-identity guard.
+  const retained = f.effects.openLedger(f.state.branch).load();
+  const terminalCycle = cycleRecord({
+    ...f.identity,
+    cycleId: 'c008-terminal-after-completion',
+    reviewer: 'coderabbit',
+    completion: { kind: 'terminal' },
+  });
+  f.effects
+    .openLedger(f.state.branch)
+    .save({ ...retained, records: [...retained.records, terminalCycle] });
+  await f.repo.write('src/a.ts', 'export const a = 2;\n');
+  const read = await readWorkState(f.effects, { target: 'main' });
+  if (!read.ok) throw new Error(read.reason);
+  expect(read.state.dirtySha256).not.toBe('clean-tree');
+  expect(
+    await prepareDeferredVendorReview(f.effects, 'main', read.state, f.client),
+  ).toBeUndefined();
+});
+
+test('a newer ineligible vendor outage after settlement admits a fresh review instead of throwing', async () => {
+  const f = await fixture();
+  const terminal = terminalReport(f);
+  await loadCurrentDeferredVendorDebt(f.effects, 'main', f.state, f.ledger, terminal.client);
+  const retained = f.effects.openLedger(f.state.branch).load();
+  // A newer CodeRabbit outage that is not a usable fresh attempt: an
+  // uncommitted scope cannot become debt, so the eligibility check must run
+  // and admit a fresh review rather than falling through to the
+  // clean-identity throw.
+  const newer = cycleRecord({
+    ...f.identity,
+    cycleId: 'c009-newer-outage',
+    reviewer: 'coderabbit',
+    scope: 'uncommitted',
+    completion: { kind: 'blocked', reason: 'vendor outage' },
+    vendorFailure: { source: 'vendor', category: 'vendor-unavailable', codes: ['con_err'] },
+  });
+  f.effects.openLedger(f.state.branch).save({ ...retained, records: [...retained.records, newer] });
+  await f.repo.write('src/a.ts', 'export const a = 3;\n');
+  const read = await readWorkState(f.effects, { target: 'main' });
+  if (!read.ok) throw new Error(read.reason);
+  expect(
+    await prepareDeferredVendorReview(f.effects, 'main', read.state, f.client),
+  ).toBeUndefined();
+});
 
 test('a changed enrolled head cannot be loaded as current vendor debt', async () => {
   const f = await fixture();

@@ -133,9 +133,11 @@ test('M7-address cancellation evidence', async () => {
         { signal: parent.signal },
       );
       // Abort as soon as the first dispatch has STARTED (it is pending on the
-      // abort), so it is cut down mid-flight.
+      // abort), so it is cut down mid-flight. Race the poll against the op so
+      // an early settle surfaces its own error instead of a poll hang.
+      let timer: ReturnType<typeof setInterval> | undefined;
       const cancelledOnceDispatched = new Promise<void>((done) => {
-        const timer = setInterval(() => {
+        timer = setInterval(() => {
           if (f.runs >= 1) {
             clearInterval(timer);
             parent.abort();
@@ -143,7 +145,11 @@ test('M7-address cancellation evidence', async () => {
           }
         }, 1);
       });
-      await cancelledOnceDispatched;
+      try {
+        await Promise.race([cancelledOnceDispatched, opPromise]);
+      } finally {
+        clearInterval(timer);
+      }
       const ladder = await opPromise;
       expect(ladder.outcome).toBe('completed');
       if (ladder.outcome !== 'completed') throw new Error('ladder did not complete');
