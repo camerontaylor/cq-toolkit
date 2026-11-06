@@ -5,7 +5,7 @@
 // decisions live in the e2e composition helper rather than production.
 import { rm } from 'node:fs/promises';
 import { describe, expect, test, vi } from 'vitest';
-import type { Driver } from '../../../src/driver/types.js';
+import type { Driver, OpInvocation } from '../../../src/driver/types.js';
 import { bindingsFromDispatch } from '../../../src/ops/sweep/unit.js';
 import { makeWorld, runUnit } from './unit-scenarios.helpers.js';
 
@@ -27,6 +27,42 @@ describe('sweep unit in-process scenarios', () => {
         },
       });
       expect(seen).toEqual([{ allow: ['read', 'edit'], mode: 'allowlist' }]);
+    } finally {
+      await rm(world.root, { recursive: true, force: true });
+    }
+  });
+
+  test('I6 fix worker sends no session handle', async () => {
+    // DOCTRINE I6: the fix task worker is a fresh isolated invocation — no
+    // caller session context may ride it, on the edit attempt or the
+    // related-check feedback attempt (merge precedent:
+    // resolveConflict.op-outcomes.test.ts).
+    const world = await makeWorld([{ failing: true }, { failing: false }]);
+    const invocations: OpInvocation[] = [];
+    try {
+      const result = await runUnit(world, {
+        taskLoop: {},
+        driver: {
+          run: async (invocation) => {
+            invocations.push(invocation);
+            return {
+              usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+              denials: [],
+              stopReason: 'complete',
+              structuredOutput: { outcome: 'code-bug', summary: 'repair', confidence: 0.9 },
+            };
+          },
+        },
+      });
+      expect(result.status).toBe('ok');
+      // One edit invocation, then one feedback invocation over the failed
+      // related check (its prompt carries the check output).
+      expect(invocations).toHaveLength(2);
+      expect(invocations[0]?.prompt).not.toContain('Related check:');
+      expect(invocations[1]?.prompt).toContain('Related check:');
+      for (const invocation of invocations) {
+        expect('sessionRef' in invocation).toBe(false);
+      }
     } finally {
       await rm(world.root, { recursive: true, force: true });
     }

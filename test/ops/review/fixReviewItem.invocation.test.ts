@@ -62,6 +62,16 @@ describe('fixReviewItem happy path', () => {
     expect(invocation.outputSchema?.schema).toBeTruthy();
   });
 
+  test('I6 review fixer sends no session handle', async () => {
+    // DOCTRINE I6: the review fixer is a fresh isolated invocation — no
+    // caller session context may ride it (merge precedent:
+    // resolveConflict.op-outcomes.test.ts).
+    const { op, invocations } = scriptedOp([completeWorker(UNCHANGED)]);
+    await op(baseInput());
+    expect(invocations).toHaveLength(1);
+    expect('sessionRef' in (invocations[0] as OpInvocation)).toBe(false);
+  });
+
   test("invocation.modelSpec is the FACTORY-RESOLVED spec (the deprecated 'ai-sdk' alias never reaches the invocation)", async () => {
     const { op, invocations } = scriptedOp([completeWorker(UNCHANGED)]);
     await op(baseInput({ driver: { model: 'm', provider: 'ai-sdk' } }));
