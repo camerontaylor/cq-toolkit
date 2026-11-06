@@ -1179,6 +1179,7 @@ export function makeFixRun(deps: FixRunDeps = {}) {
               unit,
               segments: dispatchSegments(unit),
               reason: 'enclosing job cancelled before unit dispatch',
+              outcome: 'not-started',
             });
           }
         }
