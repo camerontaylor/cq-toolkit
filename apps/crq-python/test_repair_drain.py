@@ -58,7 +58,8 @@ class RepairDrainTest(unittest.TestCase):
         self.config = {'clone': str(self.clone), 'worktree_root': str(self.root / 'wt'),
                        'repair': {'enabled': True, 'spend_authorization': 'offline-test-fixture-only',
                                   'max_rounds_per_pin': 2, 'blackout': BLACKOUT, 'roles': ROLES,
-                                  'budget': {'wall_clock_min': 20, 'max_tokens': 400000}}}
+                                  'budget': {'wall_clock_min': 20, 'max_tokens': 400000,
+                                             'max_output_tokens': 500000, 'max_context_tokens': 200000}}}
         self.queue = {'items': [
             self.item('pr1-merged', 'run1', ['crq-run1-F1', 'crq-run1-F2'], open_pr=False),
             self.item('pr2', 'run2', ['crq-run2-F1'], open_pr=True),
@@ -492,7 +493,10 @@ class RepairDrainTest(unittest.TestCase):
         self.assertEqual(repair['roles'], ROLES)
         self.assertEqual(repair['blackout'], {'enabled': False, **BLACKOUT})  # suspended 2026-11-02
         self.assertNotIn('peak', repair)
-        self.assertEqual(repair['budget'], {'wall_clock_min': 20, 'max_tokens': 400000})
+        # Owner 2026-11-06: output-only cap and a 200k context ceiling for cq;
+        # max_tokens is read only by the (disabled) codex/paseo launchers.
+        self.assertEqual(repair['budget'], {'wall_clock_min': 20, 'max_tokens': 400000,
+                                            'max_output_tokens': 500000, 'max_context_tokens': 200000})
         self.assertEqual(repair['max_rounds_per_pin'], 2)
 
 

@@ -514,6 +514,15 @@ export class AiSdkDriver implements Driver {
       );
     }
     const effectiveStepCap = Math.min(budget.maxSteps ?? DEFAULT_MAX_STEPS, DEFAULT_MAX_STEPS);
+    for (const key of ['maxOutputTokens', 'maxContextTokens'] as const) {
+      const value = budget[key];
+      if (value !== undefined && (!Number.isSafeInteger(value) || value <= 0)) {
+        throw new DispatchError(
+          'config',
+          `ai-sdk driver: budget.${key} must be a positive integer, got ${String(value)}`,
+        );
+      }
+    }
 
     // --- Strict pre-request ceiling capability, resolved + REFUSED BEFORE the
     // provider factory: the capability must be INJECTED (trusted operator
@@ -963,6 +972,9 @@ export class AiSdkDriver implements Driver {
     // scheduling primitive (I8).
     const stopWhen: Array<StopCondition<ToolSet>> = [
       ...(budget.maxTokens !== undefined ? [tokenBudgetCondition(budget.maxTokens)] : []),
+      ...(budget.maxOutputTokens !== undefined || budget.maxContextTokens !== undefined
+        ? [tokenMeterCondition(budget)]
+        : []),
       stepCountIs(effectiveStepCap),
     ];
 
@@ -1018,6 +1030,10 @@ export class AiSdkDriver implements Driver {
     /** Seam v3: provider usage was actually observed on at least one step. */
     let usageEvidence = false;
     let completedSteps = 0;
+    // Output-only cap / context ceiling: the same pure verdict the stop
+    // condition uses, recorded once as a `budget-stop` session line.
+    const meteredSteps: Usage[] = [];
+    let meterStop: TokenMeterVerdict | undefined;
     try {
       let result: Awaited<ReturnType<typeof generateText>>;
       try {
@@ -1107,6 +1123,19 @@ export class AiSdkDriver implements Driver {
             toolStep = completedSteps;
             if (hasReportedUsage(step.usage)) usageEvidence = true;
             stepUsage = addUsage(stepUsage, usageFromSdk(step.usage));
+            meteredSteps.push(usageFromSdk(step.usage));
+            if (meterStop === undefined) {
+              meterStop = tokenMeterVerdict(budget, meteredSteps);
+              if (meterStop !== undefined) {
+                await store.appendBudgetStop(record.sessionId, {
+                  type: 'budget-stop',
+                  cause: meterStop.cause,
+                  detail: meterStop.detail,
+                  step: completedSteps,
+                  at: nowIso(),
+                });
+              }
+            }
             responseMessages.push(...normalizeToolErrors(step.response.messages));
             // Session evidence is diagnostic output too: never bypass the
             // scanner with tool inputs that the failure record has redacted.
@@ -1190,6 +1219,7 @@ export class AiSdkDriver implements Driver {
             mainUsage: stepUsage,
             mainUsageEvidence: usageEvidence,
             mainSteps: completedSteps,
+            meterStopped: meterStop !== undefined,
             servedModel:
               typeof err.response?.modelId === 'string' && err.response.modelId !== ''
                 ? err.response.modelId
@@ -1263,6 +1293,7 @@ export class AiSdkDriver implements Driver {
             mainUsage: usage,
             mainUsageEvidence: resolvedUsageMeasured,
             mainSteps: completedSteps,
+            meterStopped: meterStop !== undefined,
             servedModel,
             responseHeaders: result.response.headers,
             finishReason,
@@ -1295,6 +1326,7 @@ export class AiSdkDriver implements Driver {
         aborted: signalAborted(abortSignal),
         tokenBudget: budget.maxTokens,
         totalTokens: totalTokensOf(usage),
+        meterStopped: meterStop !== undefined,
       });
       // PRODUCER RULE (ADR §2.2): every error verdict this lane returns
       // carries errorClass. A resolved run whose final step finished
@@ -1453,6 +1485,8 @@ export class AiSdkDriver implements Driver {
     /** Seam v3: whether the MAIN call observed provider usage. */
     mainUsageEvidence: boolean;
     mainSteps: number;
+    /** The output-only cap or context ceiling stopped the main loop. */
+    meterStopped: boolean;
     servedModel: string | undefined;
     responseHeaders: Record<string, string> | undefined;
     finishReason: FinishReason;
@@ -1534,6 +1568,7 @@ export class AiSdkDriver implements Driver {
       aborted: signalAborted(abortSignal),
       tokenBudget: budget.maxTokens,
       totalTokens: totalTokensOf(mainUsage),
+      meterStopped: inputs.meterStopped,
     });
     // Budget/abort carve-out (ADR §2.3): a cap or cancellation that leaves
     // the final step on tool-calls is the honest stop reason — the missing
@@ -2281,6 +2316,60 @@ function transcriptMessages(messages: readonly SessionMessage[]): ModelMessage[]
   return out;
 }
 
+/** Why the output-only cap or the context ceiling stopped a run. */
+export interface TokenMeterVerdict {
+  cause: 'output-tokens' | 'context';
+  detail: string;
+}
+
+/**
+ * Pure verdict over completed-step usage. Output: the summed provider-
+ * reported output tokens (reasoning is inside them) reach
+ * `maxOutputTokens`. Context: the LAST step's input (fresh + cache read +
+ * cache write) reaches `maxContextTokens`; the next request would be at
+ * least that large, so the run stops before sending it.
+ */
+export function tokenMeterVerdict(
+  budget: Pick<Budget, 'maxOutputTokens' | 'maxContextTokens'>,
+  steps: readonly Usage[],
+): TokenMeterVerdict | undefined {
+  const last = steps.at(-1);
+  if (budget.maxContextTokens !== undefined && last !== undefined) {
+    const context = last.input + last.cacheRead + last.cacheWrite;
+    if (context >= budget.maxContextTokens) {
+      return {
+        cause: 'context',
+        detail: `context ceiling: step ${String(steps.length)} carried ${String(context)} input tokens (ceiling ${String(budget.maxContextTokens)})`,
+      };
+    }
+  }
+  if (budget.maxOutputTokens !== undefined) {
+    const output = steps.reduce((sum, step) => sum + step.output, 0);
+    if (output >= budget.maxOutputTokens) {
+      return {
+        cause: 'output-tokens',
+        detail: `output budget: ${String(output)} output tokens over ${String(steps.length)} steps (cap ${String(budget.maxOutputTokens)})`,
+      };
+    }
+  }
+  return undefined;
+}
+
+/** Stop condition over the same verdict, folding each step's SDK usage. */
+function tokenMeterCondition(
+  budget: Pick<Budget, 'maxOutputTokens' | 'maxContextTokens'>,
+): StopCondition<ToolSet> {
+  return ({ steps }: { steps: ReadonlyArray<{ usage?: LanguageModelUsage }> }): boolean =>
+    tokenMeterVerdict(
+      budget,
+      steps.map((step) =>
+        step.usage === undefined
+          ? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
+          : usageFromSdk(step.usage),
+      ),
+    ) !== undefined;
+}
+
 /** Timer-free Budget.maxTokens stop condition: fold accumulated step usage, compare, done. */
 function tokenBudgetCondition(maxTokens: number): StopCondition<ToolSet> {
   return ({ steps }: { steps: ReadonlyArray<{ usage?: LanguageModelUsage }> }): boolean => {
@@ -2401,12 +2490,15 @@ export interface StopReasonInputs {
   aborted: boolean;
   tokenBudget: number | undefined;
   totalTokens: number;
+  /** The output-only cap or context ceiling tripped (see tokenMeterVerdict). */
+  meterStopped?: boolean;
 }
 
 /** THE mapping (checked in order): aborted → budget → error → complete. */
 export function stopReasonOf(inputs: StopReasonInputs): WorkerResult['stopReason'] {
   if (inputs.aborted) return 'aborted';
   if (inputs.tokenBudget !== undefined && inputs.totalTokens >= inputs.tokenBudget) return 'budget';
+  if (inputs.meterStopped === true) return 'budget';
   if (inputs.finishReason === 'length') return 'budget';
   if (inputs.finishReason === 'error' || inputs.finishReason === 'content-filter') return 'error';
   return 'complete';

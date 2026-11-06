@@ -26,6 +26,7 @@
 //   line 1:   { type: 'session', sessionId, createdAt, workspace }  (header)
 //   lines 2+: { type: 'message', message: SessionMessage }
 //          or { type: 'tool-failure', kind, tool, reason, inputSummary, step, at }
+//          or { type: 'budget-stop', cause, detail, step, at }
 // Every line is validated against its schema BEFORE it hits disk (an invalid
 // record is a loud error, not silent evidence rot). `load` folds the lines
 // into a SessionRecord: the header line supplies identity facts, message
@@ -149,10 +150,24 @@ const ToolFailureLineSchema = z
 
 export type ToolFailureLine = z.infer<typeof ToolFailureLineSchema>;
 
+/** Additive diagnostic line: why a run stopped on a token budget. Never replayed. */
+const BudgetStopLineSchema = z
+  .object({
+    type: z.literal('budget-stop'),
+    cause: z.enum(['output-tokens', 'context']),
+    detail: z.string().max(1024),
+    step: z.number().int().nonnegative(),
+    at: z.string(),
+  })
+  .strict();
+
+export type BudgetStopLine = z.infer<typeof BudgetStopLineSchema>;
+
 export const SessionLineSchema = z.discriminatedUnion('type', [
   SessionHeaderLineSchema,
   SessionMessageLineSchema,
   ToolFailureLineSchema,
+  BudgetStopLineSchema,
 ]);
 
 export type SessionHeaderLine = z.infer<typeof SessionHeaderLineSchema>;
@@ -245,6 +260,10 @@ export class SessionStore {
 
   async appendToolFailure(sessionId: string, failure: ToolFailureLine): Promise<void> {
     await this.appendLine(sessionId, ToolFailureLineSchema.parse(failure));
+  }
+
+  async appendBudgetStop(sessionId: string, stop: BudgetStopLine): Promise<void> {
+    await this.appendLine(sessionId, BudgetStopLineSchema.parse(stop));
   }
 
   private async appendLine(sessionId: string, line: SessionLine): Promise<void> {

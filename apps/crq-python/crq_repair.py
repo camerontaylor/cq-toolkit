@@ -203,7 +203,10 @@ def process(config, job, wt):
                 if report.get('stop') == 'configuration':
                     result['reason'] = report.get('summary', 'driver prerequisite missing; needs human')
                     break
-                if report.get('stop') != 'ok' or report.get('truncated'):
+                if report.get('stop') != 'ok':
+                    raise ValueError('driver stop ' + str(report.get('stop')) + ': '
+                                     + str(report.get('summary') or 'no detail')[:600])
+                if report.get('truncated'):
                     raise ValueError('driver failure or truncated context')
                 if report.get('changed'):
                     attempt['mechanical'] = mechanical(config, wt, base, report.get('commits'), job['job'], attempt_dir)

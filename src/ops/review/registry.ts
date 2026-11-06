@@ -500,6 +500,9 @@ export const FixReviewItemInputSchema: z.ZodType<ReviewFixInput> = z
         maxTokens: z.number().int().positive().exactOptional(),
         wallClockMs: z.number().int().positive().exactOptional(),
         maxAttempts: z.number().int().positive().exactOptional(),
+        // Output-only cap and per-request context ceiling (ai-sdk lane).
+        maxOutputTokens: z.number().int().safe().positive().exactOptional(),
+        maxContextTokens: z.number().int().safe().positive().exactOptional(),
         // The strict pre-request ceiling (opt-in). The review.fixItem lane is
         // the in-process ai-sdk driver for the default providers, so it can
         // carry the capability; both binds are required and positive — an
