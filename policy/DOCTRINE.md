@@ -27,8 +27,6 @@ exit code as thrown. The phase-3 CLI (`src/cli`) maps arg errors to 2,
 escalations to 3. The CLI uses reportError, hasFailVerdict,
 exitCodeForOpResult and exitCodeForRunReport; test/cli/json-errors.test.ts and
 test/cli/verdict-exit.test.ts cover error artifacts and verdict exits.
-Known deviation today: `scripts/denylist-scan` exits 2 for
-thrown config errors and 127 for a missing binary — binding from phase 1.
 
 ## I2 — no-privileged-reviewer acceptance
 
@@ -80,13 +78,11 @@ only skip because it still reports a conclusion.
 
 **Enforcement (today).** The unfiltered `on: push / pull_request` triggers of
 `.github/workflows/ci.yml` (instantiated from `policy/templates/required-check.md`),
-and `.github/workflows/denylist.yml`, which predates the templates and carries
-only their trigger shape (its steps are the scan itself — not regenerable from
-the template; `policy/templates/README.md`), policed by the denylist-scan
-self-test's workflow-I4 leg over `REQUIRED_WORKFLOW_CHECKS` (each entry pairing
-a required workflow file with the check name of the job that must produce it),
-fail-closed on an empty or malformed list, a missing file, or a renamed job. Adopting repos: instantiate `required-check.md`
-and police triggers likewise.
+and `.github/workflows/denylist.yml` (instantiated from
+`policy/templates/denylist.yml`). Nothing polices the trigger shape
+mechanically: review does, and a filtered or renamed required check shows up
+as a pull request whose required check never reports. Adopting repos:
+instantiate `required-check.md` and keep its triggers unfiltered.
 
 ## I5 — baselines only tighten; missing evidence is non-passing
 

@@ -156,30 +156,27 @@ reviews:
       instructions: >-
         Required checks (ci.yml, denylist.yml) carry unfiltered on: push /
         pull_request triggers — never paths/branch/tag filters (I4); job ids
-        static and denylist are policed by the denylist-scan self-test and
-        must not be renamed; actions are pinned to immutable commit SHAs;
+        static and denylist are the required check names and must not be
+        renamed; actions are pinned to immutable commit SHAs;
         code-running jobs set persist-credentials: false. Workflow edits
         route through policy/templates/ re-instantiation, never direct edits
         (provenance headers).
     - path: scripts/**
       instructions: >-
-        Scripts are Node ESM (.mjs); denylist-scan is a Node script
-        (#!/usr/bin/env node) despite its extensionless name, with a known
-        I1 deviation (exits 2 for thrown config errors, 127 for a missing
-        binary). The typecheck ratchet invokes tsc6, never tsc (the bare
-        name is alias-owned); baselines only tighten (I5).
-        policy/denylist/patterns.yml is the single source of
-        publish-forbidden content classes — lowercase word-bounded regexes,
-        fail-closed hand parser; keep example strings out of other files.
+        Scripts are Node ESM (.mjs). The typecheck ratchet invokes tsc6,
+        never tsc (the bare name is alias-owned); baselines only tighten
+        (I5). .gitleaks.toml is the secret and publish-forbidden content
+        scan for CI; keep example strings out of other files, or mark a
+        deliberate fixture line with gitleaks:allow.
     - path: policy/**
       instructions: >-
         Doctrine text: each invariant carries Rule, Why, and Enforcement;
         enforcement claims must name what actually enforces today.
         policy/templates/ is the source workflows are instantiated from
         (provenance headers) — template changes require re-instantiation,
-        not hand edits. policy/denylist/patterns.yml: lowercase
-        word-bounded regexes, fail-closed parser, self-test proves
-        non-vacuity.
+        not hand edits. policy/denylist/patterns.yml is read only by the
+        pre-upload review scanners (dev.review, crq) until they move to
+        .gitleaks.toml.
     - path: baselines/**
       instructions: >-
         Baselines are committed JSON evidence for the ratchet (I5): counts

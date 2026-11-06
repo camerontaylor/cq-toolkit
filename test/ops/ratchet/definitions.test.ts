@@ -161,7 +161,7 @@ describe('isDefinitionPath', () => {
     // F2: the protected-path list and the required-check list are themselves
     // definitions (ADR-0004 D-C.4), so weakening either is needs-human.
     ['src/ops/gates/protectedPaths.ts', true],
-    ['scripts/denylist-scan', true],
+    ['.gitleaks.toml', true],
     ['src/x.ts', false],
     ['test/x.test.ts', false],
     ['docs/package.json.md', false],

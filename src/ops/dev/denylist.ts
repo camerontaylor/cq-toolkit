@@ -57,16 +57,12 @@ export interface ComponentScan {
   hits: DenylistHit[];
 }
 
-// --- The constrained parser: a PORT of scripts/denylist-scan's ---------------
+// --- The constrained parser (ported from the retired scripts/denylist-scan) ---
 //
-// PARITY, NOT RESEMBLANCE: this is a line-for-line port of the protected
-// script's parseScalar / splitKeyValue / assertRelativeProbePath /
-// parsePatterns, so the pre-upload scan accepts exactly the files the
-// authoritative scanner accepts and reads the same rules from them.
-// test/ops/dev/denylist-parity.test.ts loads the script's own parser source
-// and fails on any verdict or rule difference. A malformed rule must never
-// parse as a weaker one: every rejection throws, and dev.review refuses the
-// review before any upload (fail closed).
+// A line-for-line port of the retired script's parser. It goes when
+// dev.review moves to .gitleaks.toml. A malformed rule must never parse as a
+// weaker one: every rejection throws, and dev.review refuses the review
+// before any upload (fail closed).
 
 /** A patterns-file format error (the script's ConfigError). */
 export class PatternsFormatError extends Error {
