@@ -39,6 +39,7 @@ export function makeAgentReviewRunner(deps: {
   return async ({ role, ...reviewInput }) => {
     if (role !== 'reviewer')
       return { status: 'needs-human', reason: `unsupported configured reviewer role '${role}'` };
+    const { signal, remainingWallMs, ...engineInput } = reviewInput;
     const configText = await deps.readFile(`${deps.repoRoot}/cq.json`).catch(() => null);
     if (configText === null)
       return { status: 'needs-human', reason: 'agent reviewer requires cq.json' };
@@ -55,13 +56,23 @@ export function makeAgentReviewRunner(deps: {
       };
     const budgetStop = requireAgenticTokenBudget(policy);
     if (budgetStop !== undefined) return budgetStop;
+    // The cycle wall budget bounds the engine: a cycle abort or expiry
+    // reaches the run through the relayed signal and the capped wallMs /
+    // stepWallMs, so the run cannot outlive the cycle that dispatched it.
+    const remaining = remainingWallMs?.() ?? Infinity;
+    if (!(remaining > 0))
+      return {
+        status: 'needs-human',
+        reason: 'review wall budget exhausted before agent dispatch',
+      };
     return deps.run(deps.drivers, {
-      ...reviewInput,
+      ...engineInput,
+      ...(signal ? { signal } : {}),
       scanSecrets: deps.scanSecrets,
       role: roleSpec,
       maxTokens: policy.budgets.run.maxTokens!,
-      wallMs: policy.budgets.run.wallMs,
-      stepWallMs: Math.min(policy.budgets.step.wallMs, policy.budgets.run.wallMs),
+      wallMs: Math.min(policy.budgets.run.wallMs, remaining),
+      stepWallMs: Math.min(policy.budgets.step.wallMs, policy.budgets.run.wallMs, remaining),
       severityMap: policy.review.agentSeverityMap,
       searchTools: policy.review.searchTools,
       session: policy.review.session,

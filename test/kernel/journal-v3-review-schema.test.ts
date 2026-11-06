@@ -191,6 +191,19 @@ describe('journal v3 disposition/acceptance/review schemas (T27)', () => {
     const rubber = acceptance();
     rubber.payload.verdict = 'RUBBER-STAMP' as 'PASS';
     expect(HeadAcceptanceJournalEventSchema.safeParse(rubber).success).toBe(false);
+    // Author closure is never independent acceptance: an independent verdict
+    // with reviewerId === authorId fails; the same ids pass when not
+    // independent.
+    expect(
+      HeadAcceptanceJournalEventSchema.safeParse(acceptance({ reviewerId: 'worker-agent' }))
+        .success,
+    ).toBe(false);
+    const authoredHold = acceptance({
+      reviewerId: 'worker-agent',
+      independent: false,
+      verdict: 'HOLD',
+    });
+    expect(HeadAcceptanceJournalEventSchema.parse(authoredHold)).toEqual(authoredHold);
     // Unknown vendorCompletion fails.
     const mystery = review();
     mystery.payload.vendorCompletion = 'probably' as 'completed';

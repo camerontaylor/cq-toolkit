@@ -50,6 +50,14 @@ describe('parseEntryArgs', () => {
   );
 });
 
+describe('decimalFlag precision', () => {
+  test('a value that rounds to an in-bounds number is refused, not silently clamped', () => {
+    const loose = decimalFlag(z.number().max(9007199254740992));
+    expect(loose.safeParse('9007199254740993').success).toBe(false);
+    expect(loose.safeParse('9007199254740991').success).toBe(true);
+  });
+});
+
 describe('exitCodeFor (I1)', () => {
   test.each([
     ['ok', 0],

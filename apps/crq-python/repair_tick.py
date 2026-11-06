@@ -99,6 +99,16 @@ def enqueue(c, q, item, meta, rdir):
     open_pr = item['kind'] in ('open', 'delta') and bool(meta.get('pr_branch'))
     base = (item['capture']['target'] if item['kind'] == review_receipt.KIND else
             meta.get('pr_head', meta['head']) if open_pr else c.git('rev-parse', DEFAULT_REF))
+    if not open_pr and item['kind'] != review_receipt.KIND:
+        # An interrupted enqueue can leave inbox jobs whose base predates a
+        # moved default-branch tip; adopt it so harvest's predecessor check holds.
+        for n, finding in enumerate(actionable, 1):
+            old = c.STATE / 'repair/inbox' / ('crq-' + meta['run_id'] + '-F' + str(n) + '.json')
+            if old.exists():
+                prev = json.loads(old.read_text())
+                if prev.get('finding') == finding and prev.get('repair_base'):
+                    base = prev['repair_base']
+                    break
     record = {'jobs': [], 'pin': pin, 'base': base, 'branch': meta.get('pr_branch'),
               'open_pr': open_pr, 'round': count + 1, 'state': 'queued'}
     reviewed_diff = c.git('diff', meta['base'], meta['head'])
@@ -119,6 +129,12 @@ def enqueue(c, q, item, meta, rdir):
         path = c.STATE / 'repair/inbox' / (job_id + '.json')
         if not path.exists():
             atomic(path, job)
+        else:
+            prev = json.loads(path.read_text())
+            if ((prev.get('repair_base') != base or prev.get('finding') != finding)
+                    and not (c.STATE / 'repair' / job_id / 'result.json').exists()):
+                # Stale orphan that never ran: rebind to this record.
+                atomic(path, job)
         record['jobs'].append(job_id)
         for blocker in item.get('blocking', []):
             if blocker.get('run') == meta['run_id'] and blocker.get('run_finding') == n:

@@ -15,8 +15,10 @@ narrow-test rule). Covers:
        pins CQ_* to the selected job (crq:<review run id>).
 """
 import importlib.util
+import io
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import threading
@@ -149,6 +151,65 @@ class CodexStreamTest(unittest.TestCase):
                                       Path(tmp), job_dir)
             self.assertEqual(result['stop'], 'rate-limit')
 
+    def test_rate_limit_comes_from_structured_signals_only(self):
+        """Review content that mentions a rate limit is not a provider stop."""
+        message = [json.dumps({'type': 'item.completed',
+                               'item': {'type': 'agent_message', 'text': 'rate limit'}}) + '\n']
+        self.assertFalse(codex._has_rate_limit(message, ''))
+        self.assertTrue(codex._has_rate_limit([], 'rate limit reached\n'))
+        self.assertTrue(codex._has_rate_limit(
+            [json.dumps({'type': 'error', 'message': 'rate limit exceeded'}) + '\n'], ''))
+        self.assertTrue(codex._has_rate_limit(
+            [json.dumps({'type': 'turn.failed', 'error': {'message': 'rate limit'}}) + '\n'], ''))
+
+    def _invoke_with_stream(self, stream_result, judge=False, preexisting=None):
+        config = {'repair': {'codex_budget_launcher': 'launcher',
+                             'codex_budget_launcher_verified': True,
+                             'budget': {'max_tokens': 100, 'wall_clock_min': 1}}}
+
+        def fake_stream(argv, cwd, env, timeout, log_path):
+            return stream_result
+
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            if preexisting is not None:
+                (directory / 'last.json').write_text(preexisting)
+            with mock.patch.object(codex, '_stream_codex', fake_stream):
+                result = codex.invoke(config, {'model': 'm', 'budget': {}}, {'job': 'j'},
+                                      directory, directory, judge=judge)
+            return result, directory
+
+    def test_stale_last_json_is_never_returned_as_ok(self):
+        config = {'repair': {'codex_budget_launcher': 'launcher',
+                             'codex_budget_launcher_verified': True,
+                             'budget': {'max_tokens': 100, 'wall_clock_min': 1}}}
+        stale = json.dumps({'verdict': 'valid', 'reason': 'an earlier invocation'})
+
+        def fake_stream(argv, cwd, env, timeout, log_path):
+            return 0, [], '', False
+
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            (directory / 'last.json').write_text(stale)
+            with mock.patch.object(codex, '_stream_codex', fake_stream):
+                result = codex.invoke(config, {'model': 'm', 'budget': {}}, {'job': 'j'},
+                                      directory, directory, judge=True)
+            self.assertEqual(result['stop'], 'error')
+            self.assertNotIn('an earlier invocation', json.dumps(result))
+            self.assertFalse((directory / 'last.json').exists())
+
+    def test_unparseable_last_json_is_an_error_stop(self):
+        result, _ = self._invoke_with_stream((0, [], '', False), judge=True,
+                                             preexisting='{"verdict": tru')
+        self.assertEqual((result['stop'], result['verdict']), ('error', 'unsure'))
+
+    def test_judge_failures_report_unsure(self):
+        for stream_result in ((0, [], '', True), (1, [], '', False)):
+            with self.subTest(stream_result=stream_result):
+                result, _ = self._invoke_with_stream(stream_result, judge=True)
+                self.assertEqual((result['stop'], result['verdict']), ('error', 'unsure'))
+                self.assertTrue(result['reason'])
+
     def test_retry_preserves_log_and_thread_links(self):
         config = {'repair': {'codex_budget_launcher': 'launcher',
                              'codex_budget_launcher_verified': True,
@@ -158,8 +219,10 @@ class CodexStreamTest(unittest.TestCase):
 
         def stream(argv, cwd, env, timeout, log_path):
             event = json.dumps({'type': 'thread.started', 'thread_id': next(threads)})
-            script = "import sys; print(sys.argv[1]); print('rate limit'); sys.exit(1)"
-            return real_stream([sys.executable, '-c', script, event], cwd, env, timeout, log_path)
+            failure = json.dumps({'type': 'error', 'message': 'rate limit'})
+            script = "import sys; print(sys.argv[1]); print(sys.argv[2]); sys.exit(1)"
+            return real_stream([sys.executable, '-c', script, event, failure],
+                               cwd, env, timeout, log_path)
 
         with tempfile.TemporaryDirectory() as tmp:
             directory = Path(tmp)
@@ -189,6 +252,9 @@ class CodexStreamTest(unittest.TestCase):
 
         def fake_stream(argv, cwd, env, timeout, log_path):
             captured['argv'] = argv
+            # Codex writes its `-o` result file itself; the driver never seeds it.
+            Path(argv[argv.index('-o') + 1]).write_text(
+                json.dumps({'changed': False, 'summary': 's', 'commits': []}))
             return 0, [json.dumps({'type': 'thread.started', 'thread_id': 't1'}) + '\n'], '', False
 
         config = {'repair': {'codex_budget_launcher': 'launcher',
@@ -197,8 +263,6 @@ class CodexStreamTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             job_dir = Path(tmp) / 'job'
             job_dir.mkdir()
-            out = job_dir / 'last.json'
-            out.write_text(json.dumps({'changed': False, 'summary': 's', 'commits': []}))
             with mock.patch.object(codex, '_stream_codex', fake_stream), \
                  mock.patch.dict(os.environ, {'CQ_WORK_ID': 'w-42'}):
                 result = codex.invoke(config, {'model': 'm', 'budget': {}},
@@ -308,6 +372,54 @@ class CqSessionsDirTest(unittest.TestCase):
         self.assertEqual(session['sessionId'], 's-value')
 
 
+class CqTimeoutLogTest(unittest.TestCase):
+    """A wall-clock kill keeps its invocation output in driver.log."""
+
+    def _config(self):
+        return {'repo': 'o/r', 'repair': {'cq_bin': 'cq.js',
+                                          'budget': {'max_tokens': 1, 'wall_clock_min': 1}}}
+
+    def _timeout(self):
+        return subprocess.TimeoutExpired(['node'], 60, output='partial-out',
+                                         stderr='partial-err')
+
+    def test_invoke_logs_the_timed_out_invocation(self):
+        cqd = _load('crq_cq_driver_timeout', ROOT / 'crq_repair' / 'drivers' / 'cq.py')
+        job = {'job': 'j', 'pr': 1, 'finding': {'path': 'a', 'line': 1, 'body': 'b'},
+               'source_snapshot': {}}
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            with mock.patch.object(cqd, 'command', side_effect=self._timeout()):
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    cqd.invoke(self._config(), {'model': 'p/m', 'budget': {}}, job,
+                               directory, directory)
+            log = (directory / 'driver.log').read_text()
+            self.assertIn('# invocation', log)
+            self.assertIn('partial-out', log)
+            self.assertIn('partial-err', log)
+
+    def test_judge_logs_the_timed_out_invocation(self):
+        cqd = _load('crq_cq_judge_timeout', ROOT / 'crq_repair' / 'drivers' / 'cq.py')
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            with mock.patch.object(cqd, 'command', side_effect=self._timeout()):
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    cqd.judge(self._config(), {'model': 'p/m'}, {}, directory, directory)
+            log = (directory / 'driver.log').read_text()
+            self.assertIn('partial-out', log)
+            self.assertIn('partial-err', log)
+
+    def test_command_keeps_partial_output_on_timeout(self):
+        from crq_repair import command
+        argv = [sys.executable, '-c',
+                "import sys, time; print('late-out', flush=True); "
+                "print('late-err', file=sys.stderr, flush=True); time.sleep(30)"]
+        with self.assertRaises(subprocess.TimeoutExpired) as caught:
+            command(argv, timeout=1)
+        self.assertIn('late-out', caught.exception.stdout or '')
+        self.assertIn('late-err', caught.exception.stderr or '')
+
+
 class PaseoLabelsTest(unittest.TestCase):
     def test_title_and_labels_ride_the_create_argv(self):
         paseo = _load('crq_paseo_driver', ROOT / 'crq_repair' / 'drivers' / 'paseo.py')
@@ -340,6 +452,55 @@ class PaseoLabelsTest(unittest.TestCase):
             self.assertIn('cq.role=judge', labels)
             self.assertIn('cq.work=w-7', labels)
             self.assertIn('cq.run=r-7', labels)
+
+
+class PaseoCleanupTest(unittest.TestCase):
+    """A created agent is reclaimed, and a failed stop is never silent."""
+
+    CONFIG = {'repair': {'paseo_host': 'h', 'paseo_read_only_mode': 'm',
+                         'paseo_budget_launcher': 'launcher',
+                         'paseo_budget_launcher_verified': True,
+                         'budget': {'max_tokens': 1, 'wall_clock_min': 1}}}
+
+    def _run(self, calls):
+        paseo = _load('crq_paseo_driver_cleanup', ROOT / 'crq_repair' / 'drivers' / 'paseo.py')
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp) / 'job'
+            with mock.patch.object(paseo, 'command', side_effect=calls) as cmd, \
+                 mock.patch.object(paseo.sys, 'stderr', new_callable=io.StringIO) as err:
+                # The inspect probe always fails here: the cleanup in `finally`
+                # is the subject, and that failure must still surface.
+                with self.assertRaises(RuntimeError):
+                    paseo.invoke(self.CONFIG, {'model': 'm', 'budget': {}}, {'job': 'j'},
+                                 Path(tmp), directory)
+                argvs = [call.args[0] for call in cmd.call_args_list]
+                record = json.loads((directory / 'agent.json').read_text())
+                return argvs, err.getvalue(), record
+
+    def _ok(self, stdout='{"agentId": "a1"}'):
+        return mock.Mock(returncode=0, stdout=stdout)
+
+    def _failed(self):
+        return mock.Mock(returncode=1, stdout='')
+
+    def test_trailing_launcher_output_still_yields_a_reclaimed_agent(self):
+        argvs, _, record = self._run([self._ok('{"agentId": "a1"}\ntrailing noise'),
+                                      self._failed(), self._ok(), self._ok()])
+        self.assertEqual(record['agentId'], 'a1')
+        self.assertIn(['paseo', '--host', 'h', 'stop', 'a1'], argvs)
+        self.assertIn(['paseo', '--host', 'h', 'archive', 'a1'], argvs)
+
+    def test_failed_stop_is_reported_and_skips_archive(self):
+        argvs, err, _ = self._run([self._ok(), self._failed(), self._failed()])
+        self.assertIn(['paseo', '--host', 'h', 'stop', 'a1'], argvs)
+        self.assertNotIn(['paseo', '--host', 'h', 'archive', 'a1'], argvs)
+        self.assertIn('may still be running; not archived', err)
+
+    def test_stop_exception_does_not_replace_the_verdict(self):
+        argvs, err, _ = self._run([self._ok(), self._failed(), OSError('paseo gone')])
+        self.assertNotIn(['paseo', '--host', 'h', 'archive', 'a1'], argvs)
+        self.assertIn('paseo stop failed for a1', err)
+        self.assertIn('may still be running; not archived', err)
 
 
 if __name__ == '__main__':

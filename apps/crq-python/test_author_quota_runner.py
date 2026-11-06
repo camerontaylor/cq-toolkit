@@ -108,7 +108,8 @@ class WrapperGroupTest(unittest.TestCase):
             "if extra.get('_cli_pid'):\n"
             "    ident['cli_pid'] = p.pid\n"
             "ident.pop('_cli_pid', None)\n"
-            "open(outfile, 'w').write(json.dumps(ident))\n"
+            "open(outfile + '.tmp', 'w').write(json.dumps(ident))\n"
+            "os.replace(outfile + '.tmp', outfile)\n"
             "time.sleep(60)\n")
         proc = subprocess.Popen([sys.executable, str(runner), str(rdir / "review.pid"),
                                  json.dumps(argv), json.dumps(identity)], start_new_session=True)

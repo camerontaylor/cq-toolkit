@@ -193,6 +193,15 @@ export function containerEnvFile(env: Readonly<Record<string, string>>): string 
 /** Control-plane CLI budget (create/inspect/rm), independent of the child's. */
 const CONTAINER_CONTROL_TIMEOUT_MS = 15_000;
 
+/**
+ * Image-pull budget, independent of the control plane's: a first launch on an
+ * uncached image pulls inside `docker create` otherwise, so the pull plus
+ * extraction can exceed the 15 s control budget and fail a launch that would
+ * succeed on retry.  The image is ensured in its own step (below) and `create`
+ * runs with `--pull never`, so a cached host never contacts the registry.
+ */
+const CONTAINER_PULL_TIMEOUT_MS = 300_000;
+
 export function containerAdapter(options: ContainerAdapterOptions = {}): SandboxBackendAdapter {
   const backend: SandboxBackend = 'container';
   // Snapshot and freeze EVERY launch-relevant option at construction (Sol
@@ -344,11 +353,30 @@ export function containerAdapter(options: ContainerAdapterOptions = {}): Sandbox
             envFile,
             request.argv,
           ).slice(3); // omit `<cli> run --rm`
-          created = await runChild(
+          // Ensure the image in its own step: `create` pulls a missing image
+          // by default, so a cold first launch would pull inside the 15 s
+          // control budget and time out.  `image inspect` decides locally —
+          // a cached host never contacts the registry — and only a cache
+          // miss pulls, under the larger pull budget.  `create` then runs
+          // with `--pull never`, so the pull cannot repeat inside it.
+          const inspected = await runChild(
             launcher,
-            ['create', '--name', name, ...createArgs],
+            ['image', 'inspect', resolved.image],
             controlOptions,
           );
+          const pulled = inspected.ok
+            ? inspected
+            : await runChild(launcher, ['pull', resolved.image], {
+                ...controlOptions,
+                timeoutMs: CONTAINER_PULL_TIMEOUT_MS,
+              });
+          created = pulled.ok
+            ? await runChild(
+                launcher,
+                ['create', '--pull', 'never', '--name', name, ...createArgs],
+                controlOptions,
+              )
+            : pulled;
         } finally {
           await rm(envDir, { recursive: true, force: true });
         }

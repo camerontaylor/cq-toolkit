@@ -48,12 +48,25 @@ describe('claude-code sdk transport seam v2: RunOptions.signal + workspace bindi
     try {
       // No runLadder: the ambient governed context is UNDEFINED here, so the
       // only cancellation source is options.signal — the seam-v2 wiring.
-      const { driver } = driverWithCalls(scratchDir, { directive: { kind: 'block-until-abort' } });
-      const controller = new AbortController();
-      setTimeout(() => controller.abort(), 20);
-      const result = await driver.run(invocation({ budget: { maxTokens: 10_000 } }), {
-        signal: controller.signal,
+      const { driver, calls } = driverWithCalls(scratchDir, {
+        directive: { kind: 'block-until-abort' },
       });
+      const controller = new AbortController();
+      const poll = setInterval(() => {
+        if (calls.length > 0) {
+          clearInterval(poll);
+          controller.abort();
+        }
+      }, 5);
+      let result;
+      try {
+        result = await driver.run(invocation({ budget: { maxTokens: 10_000 } }), {
+          signal: controller.signal,
+        });
+      } finally {
+        clearInterval(poll);
+      }
+      expect(calls).toHaveLength(1); // dispatched, then aborted
       expect(result.stopReason).toBe('aborted');
       expect(result.error).toBeUndefined(); // the cancellation is not a failure
     } finally {

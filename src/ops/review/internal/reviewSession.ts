@@ -146,6 +146,10 @@ export async function runReviewSession(
 ): Promise<OpResult<Finding[]> & { errorClass?: WorkerErrorClass; fatal?: boolean }> {
   const { evidence, signal } = input;
   const plan = { ...input.plan };
+  // The repair loop rewrites `plan.prompt`, but coverage evidence stays bound
+  // to the prompt the plan was built from: a repair request is not a new
+  // delivery and must not re-record the context hash or the deliveries.
+  const plannedPrompt = plan.prompt;
   if (evidence.deliveries.length > 0 || evidence.requests.length > 0)
     throw new Error('agent review session evidence must start empty');
   const sources = new Map(input.components.map((component) => [component.component, component]));
@@ -214,12 +218,12 @@ export async function runReviewSession(
         decodedChars: frozenContents.reduce((total, content) => total + content.text.length, 0),
       });
       if (
-        !containsUserPrompt(text, plan.prompt) ||
-        !frozenContents.some((content) => content.text === plan.prompt)
+        !containsUserPrompt(text, plannedPrompt) ||
+        !frozenContents.some((content) => content.text === plannedPrompt)
       )
         return;
       if (plan.contextOnly)
-        evidence.contextSha256 = createHash('sha256').update(plan.prompt).digest('hex');
+        evidence.contextSha256 = createHash('sha256').update(plannedPrompt).digest('hex');
       // Tool steps and repair replay the prompt. They do not add coverage.
       if (evidence.deliveries.length > 0) return;
       for (const placement of plan.placements) {

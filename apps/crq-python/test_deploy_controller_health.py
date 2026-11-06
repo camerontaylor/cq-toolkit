@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 import shutil
+import unittest
 from unittest import mock
 
 import review_receipt
@@ -436,6 +437,8 @@ class HealthTests(ControllerFixture):
         with self.assertRaisesRegex(dc.Refused, "strict UTC"):
             dc._tick_value(self.effects)
 
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0,
+                     "root ignores file permission bits")
     def test_unreadable_heartbeat_refuses(self):
         self.complete_tick("2026-10-28T00:00:00Z")
         (self.watchdog / "heartbeat.json").chmod(0o000)

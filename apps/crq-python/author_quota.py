@@ -46,15 +46,15 @@ AUTHOR_RANK = 4
 # failure states are consumed admissions with no automatic retry.
 AUTHOR_FAILED = "author_failed"  # failed spawn, or a run provably gone with no exit evidence
 
-SHA_RE = re.compile(r"^[0-9a-f]{40}$")
-DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
-REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
+SHA_RE = re.compile(r"^[0-9a-f]{40}\Z")
+DIGEST_RE = re.compile(r"^[0-9a-f]{64}\Z")
+REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}\Z")
 # A ref/revstring a reviewer may name. Deliberately not the full git rev-parse
 # grammar: the tick verifies resolvability against the clone before launching.
-TARGET_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$")
+TARGET_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}\Z")
 # Strict UTC timestamp: exactly YYYY-MM-DDTHH:MM:SSZ. No fractional seconds, no
 # offset, and no silent truncation of a longer value.
-TS_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+TS_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\Z")
 MAX_CYCLE = 2
 OBSERVATION_WINDOW = dt.timedelta(hours=1)
 

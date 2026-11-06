@@ -55,6 +55,11 @@ class ParseTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             repo_registry.parse({"repo": PRIMARY, "repos": [entry(), entry()]})
 
+    def test_duplicate_name_suffix_refused(self):
+        with self.assertRaisesRegex(ValueError, "name collides"):
+            repo_registry.parse({"repo": PRIMARY, "repos": [
+                entry(), entry(repo="other/infra", clone="/srv/crq/infra2")]})
+
     def test_unknown_key_refused(self):
         with self.assertRaises(ValueError):
             repo_registry.parse({"repo": PRIMARY, "repos": [entry(priority=1)]})

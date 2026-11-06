@@ -28,8 +28,10 @@
 export type DriverStopReason = 'complete' | 'aborted' | 'budget' | 'error';
 
 /**
- * Token usage for one driver run. Tokens are the source of truth; USD cost
- * is derived downstream from a price map, never reported by drivers.
+ * Token usage for one driver run. Tokens are the source of truth. Drivers
+ * never report vendor-supplied USD; a lane may attach a `costUSD` it derives
+ * from these tokens through the `src/driver/pricing` price map (costBasis
+ * 'modeled'), and the kernel only observes the figure.
  */
 export interface Usage {
   input: number;
@@ -302,8 +304,9 @@ export interface ProviderSignals {
 
 /**
  * What a worker run returned. Plain data, serializable. `costUSD` is
- * OPTIONAL and derived-only: callers compute it from a price map over
- * `usage`; drivers never report trusted USD.
+ * OPTIONAL and derived-only: the driver computes it from the price map over
+ * `usage` (unknown model → absent); drivers never report vendor-trusted USD,
+ * and the kernel only observes the figure.
  */
 export interface WorkerResult {
   /**

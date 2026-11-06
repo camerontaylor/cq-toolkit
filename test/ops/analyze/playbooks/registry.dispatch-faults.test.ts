@@ -16,7 +16,7 @@
 // registry.quarantine-list.test.ts, registry.rollback.test.ts,
 // registry.lock-fault.test.ts and registry.approved-apply.test.ts; shared
 // fixtures live in registry.helpers.ts.
-import { describe, expect, test } from 'vitest';
+import { describe, expect, test, vi } from 'vitest';
 import type { RawCheckOutput, RunCheck } from '../../../../src/ops/gates/checkRunner.js';
 import { AnalysisStoreError } from '../../../../src/ops/analyze/analysisStore.js';
 import { makePlaybookDispatchOp } from '../../../../src/ops/analyze/playbooks/registry.js';
@@ -63,7 +63,7 @@ describe('makePlaybookDispatchOp (the acceptance flow, fail-closed at every step
       expect(refused.error).toContain('preflight');
       expect(refused.error).toContain('UNSPENT');
     }
-    expect(flaky.verifierCalls).toHaveLength(0);
+    expect(h.run.verifierCalls).toHaveLength(0);
     expect(h.quarantine.isQuarantined('fix-foo-bar')).toBe(false);
     expect(h.store.backing.get('src/a.ts')).toBe(FIXTURE['src/a.ts']);
     // THE load-bearing assertion: the refused dispatch burned NOTHING, so
@@ -224,11 +224,12 @@ describe('makePlaybookDispatchOp (the acceptance flow, fail-closed at every step
     const input = { playbookId: 'fix-foo-bar', dir: '/ws', targets: ['src/a.ts'] };
     const a = serialized(input); // in flight (its verifier will park)
     const b = serialized({ ...input, playbookId: 'pb-second' });
-    // A window for B's engine to run — it must: different ids never block.
+    // Wait until B's engine has run — it must: different ids never block.
     // FOUR scans at the window: each dispatch runs its preflight and its
-    // apply (2 × 2), both parked at their verifiers by the gate.
-    await new Promise((resolve) => setTimeout(resolve, 25));
-    expect(h.run.scans).toHaveLength(4);
+    // apply (2 × 2), both parked at their verifiers by the gate. Condition-
+    // based rather than a fixed sleep, which could expire under CI load
+    // before the four scans completed.
+    await vi.waitFor(() => expect(h.run.scans).toHaveLength(4));
     releaseVerifier?.();
     expect((await a).status).toBe('ok');
     expect((await b).status).toBe('ok');

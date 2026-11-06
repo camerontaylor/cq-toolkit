@@ -293,9 +293,8 @@ describe('the operator ledger is durable before it reports a spend (ADR-0003 §4
   });
 
   test('a write that cannot progress is REFUSED before any consumption is claimed', async () => {
-    // Fail closed: a zero-byte write leaves an incomplete record, so the
-    // ledger must throw and the op must refuse with the nonce UNSPENT —
-    // never report 'consumed' for a record that is not on disk.
+    // Fail closed: a zero-byte write records no nonce, so the ledger must
+    // throw with persistence INDETERMINATE, never report 'consumed'.
     const dir = mkdtempSync(join(tmpdir(), 'cq-short-'));
     const ledgerPath = join(dir, 'approvals.ndjson');
     const ledger = makeFileNonceLedger(ledgerPath, {
@@ -318,7 +317,8 @@ describe('the operator ledger is durable before it reports a spend (ADR-0003 §4
 
   test('a short-write ledger still makes the op refuse rather than write (end to end, fail-closed)', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'cq-short-'));
-    const ledger = makeFileNonceLedger(join(dir, 'approvals.ndjson'), { write: () => 0 });
+    const ledgerPath = join(dir, 'approvals.ndjson');
+    const ledger = makeFileNonceLedger(ledgerPath, { write: () => 0 });
     const authority = makeApprovalAuthority({
       approvals: {
         verifiedFor: (candidate) =>
@@ -336,7 +336,14 @@ describe('the operator ledger is durable before it reports a spend (ADR-0003 §4
     expect(result.status).toBe('needs-human');
     const reason = result.status === 'needs-human' ? result.reason : '';
     expect(reason).toContain('ledger');
-    expect(reason).toContain('UNSPENT');
+    // A fault AFTER the append began is INDETERMINATE, not a clean UNSPENT:
+    // the nonce may or may not be on disk. Assert that wording rather than
+    // the shared boilerplate's conditional mention of UNSPENT.
+    expect(reason).toContain('persistence is INDETERMINATE');
+    expect(reason).toContain('made no progress');
+    expect(reason).toContain('inspect the ledger and re-approve');
+    // The zero-byte writer reached no disk, so the ledger holds no record.
+    expect(readFileSync(ledgerPath, 'utf8')).toBe('');
     expect(spy.calls).toBe(0);
   });
 });
