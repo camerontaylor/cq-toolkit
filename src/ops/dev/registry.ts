@@ -208,44 +208,15 @@ export const registry: OpRegistryEntry[] = [
       import('./check.js').then(
         (m) =>
           (async (input: DevCheckInput) => {
-            const [effects, denylist, cqConfig, fs] = await Promise.all([
+            const [effects, denylist, fs] = await Promise.all([
               import('./effects.js'),
               import('./denylist.js'),
-              import('../analyze/cqConfig.js'),
               import('node:fs/promises'),
             ]);
             const dev = effects.makeSubprocessDevEffects(input.repoRoot);
-            const configText = await fs
-              .readFile(`${input.repoRoot}/cq.json`, 'utf8')
-              .catch(() => null);
-            const packageText = await fs
-              .readFile(`${input.repoRoot}/package.json`, 'utf8')
-              .catch(() => '{}');
-            let packageName = '';
-            try {
-              const data: unknown = JSON.parse(packageText);
-              if (
-                typeof data === 'object' &&
-                data !== null &&
-                'name' in data &&
-                typeof data.name === 'string'
-              )
-                packageName = data.name;
-            } catch {
-              /* malformed package metadata retains legacy behavior */
-            }
-            let scanSecrets;
-            if (configText !== null && packageName !== '@camerontaylor/cq-toolkit') {
-              const parsed = cqConfig.parseCqConfig(configText, input.repoRoot);
-              if (parsed.ok && parsed.config.checks.length > 0) {
-                scanSecrets = denylist.makePortableReviewScanner(
-                  input.repoRoot,
-                  dev,
-                  configText,
-                  packageName,
-                );
-              }
-            }
+            const scanSecrets = await denylist.checkScannerFor(input.repoRoot, dev, (path) =>
+              fs.readFile(path, 'utf8'),
+            );
             return m.makeDevCheck(dev, scanSecrets)(input);
           }) as Op<unknown, unknown>,
       ),
@@ -379,28 +350,9 @@ export const registry: OpRegistryEntry[] = [
             // defaults; the repo's optional cq.json patterns file rides
             // makePortableReviewScanner) — built for one checkout ROOT, so the
             // #536 probe worktree gets its own, from its own configuration.
-            const scannerFor = async (root: string, rootEffects: typeof dev) => {
-              const configText = await fs.readFile(`${root}/cq.json`, 'utf8').catch(() => null);
-              const packageText = await fs
-                .readFile(`${root}/package.json`, 'utf8')
-                .catch(() => '{}');
-              let packageName = 'repository';
-              try {
-                const data: unknown = JSON.parse(packageText);
-                if (
-                  typeof data === 'object' &&
-                  data !== null &&
-                  'name' in data &&
-                  typeof data.name === 'string'
-                )
-                  packageName = data.name;
-              } catch {
-                /* descriptive fallback only */
-              }
-              return configText !== null && packageName !== '@camerontaylor/cq-toolkit'
-                ? denylist.makePortableReviewScanner(root, rootEffects, configText, packageName)
-                : undefined;
-            };
+            const readFile = (path: string) => fs.readFile(path, 'utf8');
+            const scannerFor = async (root: string, rootEffects: typeof dev) =>
+              denylist.checkScannerFor(root, rootEffects, readFile);
             const scanSecrets = await scannerFor(input.repoRoot, dev);
             // #536: the red-final-gate fallback's probe worktree binds its own
             // effects (same construction as `dev`). Its dependency install is

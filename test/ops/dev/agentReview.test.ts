@@ -108,4 +108,34 @@ describe('makeAgentReviewRunner', () => {
       },
     ]);
   });
+
+  it('caps the engine wall budget at the remaining cycle budget and relays the signal', async () => {
+    const { review, run } = runner({ '/repo/cq.json': config() });
+    const signal = AbortSignal.abort();
+    const outcome = await review({
+      ...reviewInput,
+      role: 'reviewer',
+      signal,
+      remainingWallMs: () => 1000,
+    });
+    expect(outcome.status).toBe('ok');
+    const [, input] = run.mock.calls[0] as unknown as [unknown, Record<string, unknown>];
+    expect(input['wallMs']).toBe(1000);
+    expect(input['stepWallMs']).toBe(1000);
+    expect(input['signal']).toBe(signal);
+  });
+
+  it('refuses the agent dispatch when the cycle wall budget is already exhausted', async () => {
+    const { review, run } = runner({ '/repo/cq.json': config() });
+    const outcome = await review({
+      ...reviewInput,
+      role: 'reviewer',
+      remainingWallMs: () => 0,
+    });
+    expect(outcome).toEqual({
+      status: 'needs-human',
+      reason: 'review wall budget exhausted before agent dispatch',
+    });
+    expect(run).not.toHaveBeenCalled();
+  });
 });

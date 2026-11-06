@@ -249,6 +249,10 @@ export interface DevReviewDeps {
     scope: 'full' | 'uncommitted';
     intent?: string;
     fileList?: string;
+    /** Composition-owned cancellation; the engine relays it into its own deadline. */
+    signal?: AbortSignal;
+    /** Live view of the remaining cycle wall budget; the runner caps its engine budget at it. */
+    remainingWallMs?: () => number;
   }) => Promise<AgentReviewResult>;
   /**
    * The author-admission transport (admission actions). When omitted, the
@@ -605,8 +609,15 @@ function makeReviewCycle(
             scope,
             intent: context.context.intent,
             fileList: context.context.fileList,
+            ...(signal ? { signal } : {}),
+            remainingWallMs: contextRemaining,
           });
           await refuseDrift('during the agent review run');
+          // ONE live-budget decision for both completion and coverage
+          // persistence: a run that ended after the cycle abort or wall
+          // budget is blocked and carries no coverage proof, so a later
+          // rerun can never reuse a terminal cycle without its proof.
+          const budgetLive = !signal?.aborted && contextRemaining() > 0;
           const report = result.status === 'ok' ? result.value : result.report;
           const coverage = verifyAgentReviewCoverage(report?.coverage, {
             head: state.head,
@@ -615,11 +626,13 @@ function makeReviewCycle(
           });
           const completion: DevReviewCompletion =
             result.status === 'ok'
-              ? coverage.ok
+              ? coverage.ok && budgetLive
                 ? { kind: 'terminal' }
                 : {
                     kind: 'blocked',
-                    reason: `agent review returned no verifiable coverage proof — ${coverage.reason}`,
+                    reason: coverage.ok
+                      ? 'review cancelled or wall budget exhausted after the agent run'
+                      : `agent review returned no verifiable coverage proof — ${coverage.reason}`,
                   }
               : {
                   kind: 'blocked',
@@ -666,10 +679,7 @@ function makeReviewCycle(
               };
             }),
             advisories,
-            ...(completion.kind === 'terminal' &&
-            coverage.ok &&
-            !signal?.aborted &&
-            (remainingWallMs?.() ?? Infinity) > 0
+            ...(completion.kind === 'terminal' && coverage.ok
               ? { agentCoverage: coverage.coverage }
               : {}),
             ...(result.status === 'needs-human' && report?.transient === true
@@ -994,6 +1004,13 @@ async function collectScanComponents(
   }
   paths += state.untracked.length;
   for (const path of state.untracked) {
+    // The configured rule corpus is excluded from the scan input on every
+    // leg: an untracked (not yet git-added) patterns file is refused exactly
+    // like a tracked change to it, never read and uploaded as a component.
+    if (excludedPath !== undefined && path === excludedPath) {
+      excludedPaths.push(path);
+      continue;
+    }
     const file = await effects.readWorktreeFile(path, SCAN_COMPONENT_CAP_BYTES);
     if (!file.ok) {
       return {
