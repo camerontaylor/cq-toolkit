@@ -110,7 +110,7 @@ test:narrow result="pass" exit=0 files=7 projects="pure,process,integration" tes
 > historical provenance, not a currently selectable file. Every capture is left
 > exactly as recorded.
 
-### Late producer identity and publication recovery repairs (#448, #449)
+## Late producer identity and publication recovery repairs (#448, #449)
 
 A full review of an uncommitted repair cannot prove the restored original HEAD
 clean. The hermetic actual `review.run` → restore → `review.address` fixture

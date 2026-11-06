@@ -274,24 +274,23 @@ describe('removePrWorktree lock discipline (review-debt #121)', () => {
       path: path7,
     });
     await pause.reached;
+    let remove9Settled = false;
     const remove9 = removePrWorktree({
       ...baseOpts(model, harness.registry, { run: fakeGit(model) }),
       pr: 9,
       path: path9,
+    }).finally(() => {
+      remove9Settled = true;
     });
     // A full macrotask turn: every pre-lock step of remove9 has settled, and
     // its critical section is still queued (the lock is held).
     await new Promise<void>((resolve) => {
       setTimeout(resolve, 0);
     });
-    const settled = await Promise.race([
-      remove9.then(
-        () => 'done' as const,
-        () => 'error' as const,
-      ),
-      Promise.resolve('pending' as const),
-    ]);
-    expect(settled).toBe('pending');
+    // Settlement is tracked by a flag, not Promise.race: racing a derived
+    // promise against an already-resolved 'pending' would report pending even
+    // for a settled remove9.
+    expect(remove9Settled).toBe(false);
     pause.release();
     await Promise.all([remove7, remove9]);
     // Deterministic serialized order, and NEITHER key was lost or resurrected

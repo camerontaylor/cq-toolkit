@@ -403,8 +403,12 @@ async function prepareWithLifetime(
     vendor.cycleId !== previous.originAttempt.cycleId
   )
     previous = undefined;
-  if (!previous && !vendor?.vendorFailure) return undefined;
-  if (retained === undefined && vendor?.vendorFailure) {
+  // No open obligation and no new genuine outage: nothing to defer. A
+  // COMPLETED lineage is settled, so a later review on the same or another
+  // head must not re-import it or trip the clean-identity guard.
+  if ((previous === undefined || previous.vendorCompleted) && !vendor?.vendorFailure)
+    return undefined;
+  if (previous === undefined && vendor?.vendorFailure) {
     signalCheck(lifetime);
     // An unusable historical attempt is not debt. Admit a genuine fresh review,
     // without treating malformed provenance or ambiguous ledger identity as stale.
@@ -426,12 +430,13 @@ async function prepareWithLifetime(
       return undefined;
   }
   // A recovered vendor requires a fresh invocation on a new head; old current-code
-  // completion never authorizes a successor outage or inherited coverage.
+  // completion never authorizes a successor outage or inherited coverage. A
+  // completed lineage that reaches here has no newer genuine outage (the reset
+  // above would have cleared it), so no origin-cycle re-check is needed.
   if (
     previous?.vendorCompleted &&
     previous.reference.binding.kind === 'deferred-author' &&
-    previous.reference.binding.head !== state.head &&
-    vendor?.cycleId === previous.originAttempt.cycleId
+    previous.reference.binding.head !== state.head
   )
     return undefined;
   if (state.dirtySha256 !== 'clean-tree')

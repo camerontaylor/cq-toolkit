@@ -29,7 +29,9 @@ class HostConfigTests(HostConfigFixture, unittest.TestCase):
         expected['promotion']['merges_trigger'] = 1
         (legacy / 'config.json').write_bytes(host.encode(expected))
         original = (legacy / 'config.json').read_bytes()
-        with mock.patch.object(host, 'git', return_value=host.LEGACY_SHA), \
+        def accepted_git(*args):
+            return ' M config.json' if 'status' in args else host.LEGACY_SHA
+        with mock.patch.object(host, 'git', side_effect=accepted_git), \
                 mock.patch.object(host, 'committed', return_value=committed), \
                 mock.patch.object(host, 'record') as audit:
             host.legacy_check(legacy, self.overlay, self.raw)
@@ -38,7 +40,7 @@ class HostConfigTests(HostConfigFixture, unittest.TestCase):
         self.assertEqual(list(legacy.iterdir()), [legacy / 'config.json'])
         expected['promotion']['dispatch_after_min'] = 0
         (legacy / 'config.json').write_bytes(host.encode(expected))
-        with mock.patch.object(host, 'git', return_value=host.LEGACY_SHA), \
+        with mock.patch.object(host, 'git', side_effect=accepted_git), \
                 mock.patch.object(host, 'committed', return_value=committed):
             with self.assertRaisesRegex(ValueError, 'dispatch_after_min'):
                 host.legacy_check(legacy, self.overlay, self.raw)
@@ -66,6 +68,28 @@ class HostConfigTests(HostConfigFixture, unittest.TestCase):
             audit.assert_not_called()
         self.assertEqual((legacy / 'config.json').read_bytes(), original)
         self.assertFalse((self.base / 'records').exists())
+
+    def test_legacy_fence_rejects_tracked_edits_other_than_config(self):
+        legacy = self.base / 'old'
+        legacy.mkdir()
+        (legacy / 'config.json').write_bytes(b'{"same_config":true}\n')
+        (legacy / 'crq.py').write_text('accepted\n')
+        subprocess.run(['git', '-C', str(legacy), 'init', '-q'], check=True)
+        for args in [('config', 'user.name', 'Fixture'),
+                     ('config', 'user.email', 'fixture@example.invalid'),
+                     ('add', 'config.json', 'crq.py'), ('commit', '-qm', 'accepted fixture')]:
+            subprocess.run(['git', '-C', str(legacy), *args], check=True)
+        accepted = host.git(legacy, 'rev-parse', 'HEAD')
+        (legacy / 'crq.py').write_text('locally edited\n')
+        with mock.patch.object(host, 'LEGACY_SHA', accepted), \
+                mock.patch.object(host, 'committed') as committed, \
+                mock.patch.object(host, 'drift_check') as drift, \
+                mock.patch.object(host, 'record') as audit:
+            with self.assertRaisesRegex(ValueError, 'tracked changes other than config.json'):
+                host.legacy_check(legacy, self.overlay, self.raw)
+            committed.assert_not_called()
+            drift.assert_not_called()
+            audit.assert_not_called()
 
 
 if __name__ == '__main__':

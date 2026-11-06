@@ -499,6 +499,42 @@ export function makePortableReviewScanner(
 }
 
 /**
+ * The ONE check-leg scanner binding shared by `dev.check` and the
+ * `dev.cycle` check leg: the same two-layer portable composition the check
+ * entry carries. A scanner binds only when cq.json exists, parses, and
+ * configures at least one check; the package name is descriptive context
+ * only ('' when package.json is missing or malformed). Any other shape —
+ * missing, malformed, or check-less config — yields no project scanner, so
+ * both legs reach the same check verdict at the same identity.
+ */
+export async function checkScannerFor(
+  root: string,
+  effects: GitleaksEffects,
+  readFile: (path: string) => Promise<string>,
+): Promise<DiffSecretScanner | undefined> {
+  const configText = await readFile(`${root}/cq.json`).catch(() => null);
+  if (configText === null) return undefined;
+  const packageText = await readFile(`${root}/package.json`).catch(() => '{}');
+  let packageName = '';
+  try {
+    const data: unknown = JSON.parse(packageText);
+    if (
+      typeof data === 'object' &&
+      data !== null &&
+      'name' in data &&
+      typeof data.name === 'string'
+    )
+      packageName = data.name;
+  } catch {
+    /* descriptive fallback only */
+  }
+  if (packageName === '@camerontaylor/cq-toolkit') return undefined;
+  const parsed = parseCqConfig(configText, root);
+  if (!parsed.ok || parsed.config.checks.length === 0) return undefined;
+  return makePortableReviewScanner(root, effects, configText, packageName);
+}
+
+/**
  * The production scanner factory: binds `<repoRoot>/policy/denylist/
  * patterns.yml` and returns a scanner over that rule set. CONSTRUCTION IS
  * INERT (the registry contract — resolving an entry never touches the

@@ -28,18 +28,18 @@ describe('observed worktree movement (slice 9 item 2, drill-6 revision)', () => 
     // publication stays blocked.
     const world = defaultWorld();
     world.worktreeAdvancesAt = 2; // a commit lands during the fix stage
-    const ghLog: string[][] = [];
+    const gitLog: string[][] = [];
     const { outcome } = await runLoop(world, {
       driverResults: [
         completeWorker(fixLine(false, 'Nothing to change: already handled at line 3.', [])),
       ],
-      ghLog,
+      gitLog,
     });
     expect(outcome.status).toBe('needs-human');
     expect(outcome.reasons).toContainEqual(
       `unreported-commit: worktree tip ${'4444'.repeat(10)} is not a claimed fix — a worker committed without reporting it`,
     );
-    expect(gitLogPushes(ghLog)).toBe(0); // no publish
+    expect(gitLogPushes(gitLog)).toBe(0); // no publish
     // Publish-gate unification (jMY2X): the blocked gate withholds the
     // reply — no "nothing to change" post over an unsane tree, nothing
     // recorded; the next run re-plans the still-actionable thread.
@@ -92,16 +92,16 @@ describe('observed worktree movement (slice 9 item 2, drill-6 revision)', () => 
     world.commitMessages = {}; // NEW_SHA carries NO item attribution
     world.worktreeAdvancesAt = 2; // the (claimed) commit lands during the fix stage...
     world.worktreeAdvancesTo = NEW_SHA; // ...and IS the tip
-    const ghLog: string[][] = [];
+    const gitLog: string[][] = [];
     const { outcome } = await runLoop(world, {
       driverResults: [completeWorker(fixLine(true, 'Claims the fix.', [NEW_SHA]))],
-      ghLog,
+      gitLog,
     });
     expect(outcome.status).toBe('needs-human');
     expect(outcome.reasons).toContainEqual(
       `unreported-commit: worktree tip ${NEW_SHA} was claimed but failed verification (attribution-missing)`,
     );
-    expect(gitLogPushes(ghLog)).toBe(0); // publication withheld
+    expect(gitLogPushes(gitLog)).toBe(0); // publication withheld
     // Publish-gate unification (jMY2X): the blocked gate withholds the reply.
     expect(outcome.actionsPosted).toBe(0);
     expect(outcome.reply).toBeUndefined();
@@ -153,12 +153,12 @@ describe('observed worktree movement (slice 9 item 2, drill-6 revision)', () => 
     // the next run skip the retry).
     const world = defaultWorld();
     world.headReadFailsAfter = 2;
-    const ghLog: string[][] = [];
+    const gitLog: string[][] = [];
     const { outcome } = await runLoop(world, {
       driverResults: [
         completeWorker(fixLine(false, 'Nothing to change: already handled at line 3.', [])),
       ],
-      ghLog,
+      gitLog,
     });
     expect(outcome.status).toBe('needs-human');
     expect(outcome.reasons).toContainEqual(
@@ -167,7 +167,7 @@ describe('observed worktree movement (slice 9 item 2, drill-6 revision)', () => 
     expect(outcome.reasons).toContainEqual('reply withheld for fix-1 — publication blocked');
     expect(outcome.actionsPosted).toBe(0); // NO action of any kind: nothing records
     expect(outcome.reply).toBeUndefined();
-    expect(gitLogPushes(ghLog)).toBe(0); // publication withheld fail-closed
+    expect(gitLogPushes(gitLog)).toBe(0); // publication withheld fail-closed
   });
 
   test('an unreadable PRE-run HEAD → fail-closed with the pre-run reason, no publish, reply withheld (P1 + jLtVU)', async () => {
@@ -180,10 +180,10 @@ describe('observed worktree movement (slice 9 item 2, drill-6 revision)', () => 
     // published.
     const world = defaultWorld();
     world.headReadFailsAt = 2;
-    const ghLog: string[][] = [];
+    const gitLog: string[][] = [];
     const { outcome } = await runLoop(world, {
       driverResults: [completeWorker(fixLine(true, 'Claims the fix.', [NEW_SHA]))],
-      ghLog,
+      gitLog,
     });
     expect(outcome.status).toBe('needs-human');
     expect(outcome.reasons).toContainEqual(
@@ -192,7 +192,7 @@ describe('observed worktree movement (slice 9 item 2, drill-6 revision)', () => 
     expect(outcome.reasons).toContainEqual('reply withheld for fix-1 — publication blocked');
     expect(outcome.actionsPosted).toBe(0); // NO action of any kind: nothing records
     expect(outcome.reply).toBeUndefined();
-    expect(gitLogPushes(ghLog)).toBe(0); // publication withheld fail-closed
+    expect(gitLogPushes(gitLog)).toBe(0); // publication withheld fail-closed
   });
 
   test('range accountability (round 2): an unclaimed MID-RANGE commit below the OBSERVED base blocks and names the sha', async () => {
@@ -213,7 +213,7 @@ describe('observed worktree movement (slice 9 item 2, drill-6 revision)', () => 
       [SHA]: [NEW_SHA, MID_SHA], // the observed base sees both added commits
       [BEFORE_SHA]: [], // the stale snapshot base would see an empty range
     };
-    const ghLog: string[][] = [];
+    const gitLog: string[][] = [];
     const { outcome } = await runLoop(world, {
       driverResults: [
         completeWorker(
@@ -221,13 +221,13 @@ describe('observed worktree movement (slice 9 item 2, drill-6 revision)', () => 
         ),
         completeWorker(fixLine(true, 'Fixed B.', [NEW_SHA])),
       ],
-      ghLog,
+      gitLog,
     });
     expect(outcome.status).toBe('needs-human');
     expect(outcome.reasons).toContainEqual(
       `unreported-commit: 1 commit(s) in ${SHA}..HEAD are not claimed fixes: ${MID_SHA}`,
     );
-    expect(gitLogPushes(ghLog)).toBe(0); // publication withheld
+    expect(gitLogPushes(gitLog)).toBe(0); // publication withheld
     // Publish-gate unification (jMY2X): the blocked gate withholds BOTH
     // rows' replies — nothing records; the next run re-plans everything.
     expect(outcome.actionsPosted).toBe(0);
@@ -278,18 +278,18 @@ describe('observed worktree movement (slice 9 item 2, drill-6 revision)', () => 
     world.worktreeAdvancesAt = 2;
     world.worktreeAdvancesTo = ANCESTOR_SHA; // an ancestor of BEFORE_SHA
     world.revListShas = []; // `rev-list <before>..HEAD` is empty behind the base
-    const ghLog: string[][] = [];
+    const gitLog: string[][] = [];
     const { outcome } = await runLoop(world, {
       driverResults: [
         completeWorker(fixLine(false, 'Nothing to change: already handled at line 3.', [])),
       ],
-      ghLog,
+      gitLog,
     });
     expect(outcome.status).toBe('needs-human');
     expect(outcome.reasons).toContainEqual(
       `unreported-commit: worktree head moved to ${ANCESTOR_SHA} but ${SHA}..HEAD is empty — the tip is not a claimed fix (backward or out-of-range movement)`,
     );
-    expect(gitLogPushes(ghLog)).toBe(0); // publication withheld
+    expect(gitLogPushes(gitLog)).toBe(0); // publication withheld
     // Publish-gate unification (jMY2X): the blocked gate withholds the
     // changed:false row's reply too — nothing records.
     expect(outcome.actionsPosted).toBe(0);

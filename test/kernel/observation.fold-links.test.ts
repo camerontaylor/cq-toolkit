@@ -99,6 +99,11 @@ describe('T29 unknown evidence', () => {
       expect(folded).toHaveLength(1);
       const links = folded[0]?.kernelRunLinks ?? [];
       expect(links).toHaveLength(3);
+      // Links are built from the VALIDATED stream, so each link's event is
+      // the same object as its entry in folded.stream.events — a consumer can
+      // match links back to stream events by reference.
+      const foldedEvents = folded[0]?.stream.events ?? [];
+      for (const link of links) expect(foldedEvents).toContain(link.event);
       expect(links[0]?.state).toBe('resolved');
       expect(links[1]?.state).toBe('unknown');
       if (links[1]?.state === 'unknown') {
@@ -132,7 +137,7 @@ describe('T29 unknown evidence', () => {
       );
       expect(wrongPlan[0]?.kernelRunLinks[0]?.state).toBe('unknown');
       if (wrongPlan[0]?.kernelRunLinks[0]?.state === 'unknown') {
-        expect(wrongPlan[0].kernelRunLinks[0].reason).toContain('plan');
+        expect(wrongPlan[0].kernelRunLinks[0].reason).toContain("not 'plan-other'");
       }
       // With NO kernel descriptors, every link stays unknown (never guessed).
       const noRuns = foldObservations(await readObservations(dir), []);

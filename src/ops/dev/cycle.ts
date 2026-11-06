@@ -474,12 +474,13 @@ function makeDevCycleCore(
 
     // The publication leg's shared precondition: the branch on the forge at
     // exactly the local head (the same verified-publication contract
-    // pr.ensureTrackerBranch applies), run once per cycle end.
+    // pr.ensureTrackerBranch applies), run once per cycle end. The refspec
+    // always names the exact reviewed head object: a branch that moves
+    // between the readiness read and the push can never upload another head.
     const pushed = input.push !== false;
     const publishHead = async (
       branch: string,
       head: string,
-      pinHead = false,
     ): Promise<{ ok: true } | { ok: false; reason: string }> => {
       if (!pushed) return { ok: true };
       const result = await git([
@@ -487,7 +488,7 @@ function makeDevCycleCore(
         input.repoRoot,
         'push',
         'origin',
-        `${pinHead ? head : `refs/heads/${branch}`}:refs/heads/${branch}`,
+        `${head}:refs/heads/${branch}`,
       ]);
       if (result.code !== 0)
         return {
@@ -1136,7 +1137,7 @@ function makeDevCycleCore(
             attribution: `${scanned} — the reserve ran out during the publication binding (${String(-left())}ms into the publication margin) — nothing published`,
           };
         pushAttempted = true;
-        const pushedPub = await publishHead(pub, G, true);
+        const pushedPub = await publishHead(pub, G);
         if (!pushedPub.ok)
           return {
             kind: 'published',
@@ -1254,8 +1255,7 @@ function makeDevCycleCore(
         (addressReport.verifiedHead !== head || current.state.dirtySha256 !== CLEAN_TREE)
       )
         return stepResult('review.address', addressResult);
-      // Pin the verified object too: a later branch move cannot upload another head.
-      const publication = await publishHead(branch, head, guardedStop);
+      const publication = await publishHead(branch, head);
       if (!publication.ok)
         return { status: 'needs-human', reason: `dev.cycle (push): ${publication.reason}` };
       const openResult = await open({

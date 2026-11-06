@@ -140,3 +140,9 @@ class QueueTransportTests(QueueTransportFixtureMixin, unittest.TestCase):
         self.policy["repo"] = "owner/repo"
         self.policy["branches"] = ["main"]
         with self.assertRaisesRegex(ValueError, "denied"): self.call("status")
+        self.policy["branches"] = ["merge-queue"]
+        self.policy["max_requests"] = 1
+        before = copy.deepcopy(self.q)
+        with self.assertRaisesRegex(ValueError, "capacity"):
+            self.call("enqueue", requestId="request-2")
+        self.assertEqual(self.q, before)

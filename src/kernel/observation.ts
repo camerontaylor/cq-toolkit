@@ -436,13 +436,23 @@ export async function readObservations(journalDir: string): Promise<ObservationS
       // The stream schema validates identity: workId UUID, compositionRunId
       // shape, header-first couplings, header workId === directory workId,
       // per-event runId === compositionRunId.
-      const stream: ObservationStream = ObservationStreamSchema.parse({
+      const parsed = ObservationStreamSchema.safeParse({
         workId,
         compositionRunId,
         events,
         complete,
       });
-      streams.push(stream);
+      if (!parsed.success) {
+        // A schema failure must name the file like a parse failure does: the
+        // scan stops here, so the path is the operator's only pointer.
+        throw new Error(
+          `observation: invalid stream ${join(dir, file)} — ${parsed.error.message}`,
+          {
+            cause: parsed.error,
+          },
+        );
+      }
+      streams.push(parsed.data);
     }
   }
   return streams;
@@ -472,7 +482,7 @@ export function foldObservations(
     // Validate through the stream schema (P2-3: one set of identity rules —
     // header-first couplings, header workId, per-event runId).
     const validated: ObservationStream = ObservationStreamSchema.parse(stream);
-    const kernelRunLinks: ResolvedKernelRunLink[] = stream.events
+    const kernelRunLinks: ResolvedKernelRunLink[] = validated.events
       .filter((e): e is KernelRunLinkedJournalEvent => e.type === 'kernel-run-linked')
       .map((event): ResolvedKernelRunLink => {
         const byId = byKey.get(`id\u0000${event.payload.kernelRunId}`);
@@ -492,13 +502,13 @@ export function foldObservations(
               `not '${event.payload.planId}'`,
           };
         }
-        if (byId.header.correlation.workId !== stream.workId) {
+        if (byId.header.correlation.workId !== validated.workId) {
           return {
             state: 'unknown',
             event,
             reason:
               `kernel run '${event.payload.kernelRunId}' carries workId ` +
-              `'${byId.header.correlation.workId}', not this stream's '${stream.workId}'`,
+              `'${byId.header.correlation.workId}', not this stream's '${validated.workId}'`,
           };
         }
         return { state: 'resolved', event, kernelRunId: byId.runId, planId: byId.planId };

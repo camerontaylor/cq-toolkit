@@ -60,8 +60,12 @@ class ObservationTest(unittest.TestCase):
                 author_quota.normalize_observation(manifest, now=now)
 
     def test_timestamp_grammar_is_strict_no_truncation(self):
-        for bad in ("2026-10-11T16:09:57.123Z", "2026-10-11T16:09:57+00:00",
-                    "2026-10-11T16:09:57", "2026-10-11T16:09:57Zjunk", "2026-10-11 16:09:57Z"):
+        good = crq.iso(crq.now() - dt.timedelta(minutes=1))
+        stem = good[:-1]
+        manifest, now = self._manifest(started_at=good)
+        author_quota.normalize_observation(manifest, now=now)  # positive control
+        for bad in (stem + ".123Z", stem + "+00:00", stem, good + "junk",
+                    good.replace("T", " ")):
             manifest, now = self._manifest(started_at=bad)
             with self.subTest(bad=bad), self.assertRaises(author_quota.AuthorRefused):
                 author_quota.normalize_observation(manifest, now=now)
@@ -87,3 +91,14 @@ class ObservationTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AnchoredValidatorsRejectTrailingNewline(unittest.TestCase):
+    def test_exact_match_only(self):
+        sha = "a" * 40
+        for call in (lambda: author_quota._sha("base", sha + "\n"),
+                     lambda: author_quota.normalize_binding(request_id="a\n", base=sha, head="b" * 40, target="origin/main", cycle=1),
+                     lambda: author_quota.normalize_binding(request_id="a", base=sha, head="b" * 40, target="origin/main\n", cycle=1),
+                     lambda: author_quota._timestamp("t", "2026-01-01T00:00:00Z\n")):
+            with self.assertRaises(author_quota.AuthorRefused):
+                call()

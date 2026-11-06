@@ -38,6 +38,7 @@ import type {
   PrReviewState,
   PrState,
 } from '../../../src/ops/pr/assemblePrs.js';
+import type { DiffSecretScanner } from '../../../src/ops/dev/denylist.js';
 import type { makeRunReport, RunReportInput } from '../../../src/ops/pr/runReport.js';
 
 // ---------------------------------------------------------------------------
@@ -121,6 +122,10 @@ async function okReport(op: ReturnType<typeof makeRunReport>, input: RunReportIn
   }
   return result.value;
 }
+
+/** A denylist scanner that finds nothing (tracker writes require one). */
+export const cleanScanner: DiffSecretScanner = (components) =>
+  components.map(({ component }) => ({ component, hits: [] }));
 
 export interface ReportHarness {
   fakeGh: typeof fakeGh;

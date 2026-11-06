@@ -99,10 +99,11 @@ function safeAttack(row) {
   if (row.attackExecuted !== true || attack?.kind !== 'second-identity-review') return null;
   if (!Number.isSafeInteger(attack.reviewId) || attack.reviewId <= 0) return null;
   if (!Number.isSafeInteger(attack.actorId) || attack.actorId <= 0) return null;
-  if (!/^[0-9a-f]{40}$/i.test(attack.headSha ?? '')) return null;
+  if (typeof attack.headSha !== 'string' || !/^[0-9a-f]{40}$/i.test(attack.headSha)) return null;
+  if (typeof attack.reviewUrl !== 'string') return null;
   const match =
     /^https:\/\/github\.com\/camerontaylor\/cq-scratch-v11-adversarial\/pull\/(\d+)#pullrequestreview-(\d+)$/.exec(
-      attack.reviewUrl ?? '',
+      attack.reviewUrl,
     );
   if (!match || Number(match[2]) !== attack.reviewId) return null;
   return {

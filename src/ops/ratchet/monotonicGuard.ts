@@ -176,6 +176,10 @@ const METRIC_RE = /"metric"\s*:\s*"((?:[^"\\]|\\.)*)"/g;
 const TARGET_RE = /"target"\s*:\s*"((?:[^"\\]|\\.)*)"/g;
 const UNIT_KEY_RE = /(?:^|[,{])\s*"unit"\s*:/g;
 const UNIT_RE = /"unit"\s*:\s*"((?:[^"\\]|\\.)*)"/g;
+// A property KEY containing any escape: JSON.parse decodes `"val\u0075e"` to
+// `value`, invisible to every literal-key regex above (and the last duplicate
+// key wins). Rendered baselines never escape keys — fail closed.
+const ESCAPED_KEY_RE = /(?:^|[,{])\s*"(?:[^"\\]|\\.)*\\(?:[^"\\]|\\.)*"\s*:/;
 
 /**
  * Decode one captured JSON string body (the capture EXCLUDES the quotes):
@@ -302,6 +306,9 @@ function contentLines(lines: string[]): { minus: string[]; plus: string[]; conte
  * parse back — fail closed wherever it appears.
  */
 function carriesMalformedStringField(minus: string[], plus: string[], context: string[]): boolean {
+  for (const lines of [minus, plus, context]) {
+    if (lines.some((l) => ESCAPED_KEY_RE.test(l))) return true;
+  }
   const fields: Array<[RegExp, RegExp]> = [
     [DIRECTION_KEY_RE, DIRECTION_RE],
     [UNIT_KEY_RE, UNIT_RE],

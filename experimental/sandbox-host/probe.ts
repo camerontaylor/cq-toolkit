@@ -963,9 +963,11 @@ async function probeBackendWithLaunch(
                 id: 'network-loopback',
                 verdict: 'pass',
                 detail:
-                  denial.trim() !== ''
-                    ? denial
-                    : `child connected to 127.0.0.1:${port} under allow posture`,
+                  network === 'allow'
+                    ? `child connected to 127.0.0.1:${port} under allow posture`
+                    : denial.trim() !== ''
+                      ? denial
+                      : `connect to 127.0.0.1:${port} refused: ${detail(sandboxed)}`,
               });
             }
           } finally {
