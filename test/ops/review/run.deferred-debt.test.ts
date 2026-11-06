@@ -186,9 +186,10 @@ it('maps a corrupt retained ledger read to a failed result', async () => {
         components.map((component) => ({ component: component.component, hits: [] })),
     })({ repoRoot: repo.root });
     expect(result.status).toBe('failed');
-    if (result.status === 'failed')
+    if (result.status === 'failed') {
       expect(result.error).toContain('retained vendor debt could not be read');
-    expect(result.error).toContain('dev-record: schema violation');
+      expect(result.error).toContain('dev-record: schema violation');
+    }
   } finally {
     await repo.cleanup();
   }
@@ -241,7 +242,7 @@ it('maps corrupt enrollment lineage to a failed result that keeps the persisted 
       base: state.base,
       target: 'main',
       scope: 'full' as const,
-      dirtySha256: 'clean-tree',
+      dirtySha256: 'clean-tree' as const,
       failure,
     };
     const enroll = (requestId: string) =>
