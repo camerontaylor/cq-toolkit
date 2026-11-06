@@ -786,6 +786,8 @@ def quiet_reason(item: Dict[str, Any], info: Dict[str, Any], ignore_age: bool = 
     ours = (item.get("last_push") or {}).get("sha") == info["headRefOid"]
     if ours:
         return None  # head is our own addressing push and nobody else is running on it
+    if not ensure_commit(item["pr"], info["headRefOid"], clone=clone):
+        return "source head unavailable in repository clone"
     ct = int(git("log", "-1", "--format=%ct", info["headRefOid"], cwd=clone))
     last = max(ct, parse_iso(info["updatedAt"]).timestamp())
     age = (time.time() - last) / 60
@@ -1730,6 +1732,8 @@ def plan_open(item: Dict[str, Any], info: Dict[str, Any], dry: bool) -> Dict[str
     # default branch (docs/multi-repo.md); the primary repo keeps today's path.
     cfg = repo_registry.by_repo(REPOS, item_repo(item))
     clone = Path(cfg["clone"]) if cfg else None
+    if not ensure_commit(item["pr"], head, clone=clone):
+        raise NotReady("source head unavailable")
     target = f"origin/{cfg['default_branch']}" if cfg else f"origin/{info['baseRefName']}"
     pin = git("merge-base", target, head, cwd=clone)
     notes = []
