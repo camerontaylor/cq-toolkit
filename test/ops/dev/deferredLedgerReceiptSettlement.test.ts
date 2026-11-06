@@ -1,5 +1,5 @@
 import { expect, test } from 'vitest';
-import { writeFile } from 'node:fs/promises';
+import { rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { makeDevDisposition } from '../../../src/ops/dev/disposition.js';
 import { deferredReceiptFindings } from '../../../src/ops/dev/internal/deferredReview.js';
@@ -131,6 +131,34 @@ test('verified findings retain provenance, block readiness, and require explicit
   retained = f.effects.openLedger(f.state.branch).load();
   expect(f.assemble(retained, completed).ready).toBe(true);
 });
+test('an imported receipt that cannot be re-read is a failed disposition, not needs-human', async () => {
+  const f = await fixture();
+  const terminal = terminalReport(f, [
+    { type: 'finding', severity: 'major', fileName: 'src/a.ts', excerpt: 'substantive defect' },
+  ]);
+  const completed = await loadCurrentDeferredVendorDebt(
+    f.effects,
+    'main',
+    f.state,
+    f.ledger,
+    terminal.client,
+  );
+  if (!completed?.vendorCompleted) throw new Error('missing completion');
+  const finding = deferredReceiptFindings([completed])[0]!;
+  await rm(join(f.repo.root, '.cq', 'queue-evidence', `${completed.completion.receiptId}.json`));
+  const result = await makeDevDisposition(f.effects)({
+    repoRoot: f.repo.root,
+    findingId: finding.id,
+    action: 'fixed',
+    why: 'concrete fix independently recorded',
+    owner: 'test',
+    evidence: [],
+  });
+  expect(result.status).toBe('failed');
+  if (result.status === 'failed')
+    expect(result.error).toContain('imported receipt failed verification');
+});
+
 test.each([
   'partial',
   'unknown',
