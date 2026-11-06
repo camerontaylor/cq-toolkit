@@ -112,7 +112,7 @@ export function harnessRunGate(
   if (options.sandboxConfig === undefined) {
     const expressed =
       options.cqEnv !== undefined
-        ? [...POLICY_ENV_NAMES].some((name) => options.cqEnv?.values[name] !== undefined)
+        ? [...POLICY_ENV_NAMES].some((name) => options.cqEnv?.present.includes(name))
         : [...POLICY_ENV_NAMES].some(
             (name) => Object.prototype.hasOwnProperty.call(env, name) && env[name] !== undefined,
           );

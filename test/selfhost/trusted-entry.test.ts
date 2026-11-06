@@ -66,6 +66,40 @@ describe('exitCodeFor (I1)', () => {
   });
 });
 
+describe('runEntry config gate', () => {
+  test('an invalid CQ_* value exits 2 before compute, listing every error on stderr', async () => {
+    const lines: string[] = [];
+    const errs: string[] = [];
+    let ran = false;
+    const code = await runEntry(
+      async () => {
+        ran = true;
+        return { status: 'ok', value: 1 } as OpResult<number>;
+      },
+      (line) => lines.push(line),
+      { env: { CQ_SANDBOX: 'of', CQ_RUN_TOOL: 'maybe' }, stderr: (t) => errs.push(t) },
+    );
+    expect(code).toBe(2);
+    expect(ran).toBe(false);
+    expect(errs.filter((l) => l.startsWith('cq: error:'))).toHaveLength(2);
+    expect((JSON.parse(lines.join('')) as { status: string }).status).toBe('failed');
+  });
+
+  test('compute receives the snapshot', async () => {
+    let seen: unknown;
+    const code = await runEntry(
+      async (cqEnv) => {
+        seen = cqEnv.values['CQ_GH_BIN'];
+        return { status: 'ok', value: 1 } as OpResult<number>;
+      },
+      () => {},
+      { env: { CQ_GH_BIN: '/opt/gh' }, stderr: () => {} },
+    );
+    expect(code).toBe(0);
+    expect(seen).toBe('/opt/gh');
+  });
+});
+
 describe('runEntry', () => {
   const run = async (compute: () => Promise<OpResult<unknown>>) => {
     const lines: string[] = [];

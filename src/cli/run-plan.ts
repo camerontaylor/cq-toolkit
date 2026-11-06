@@ -58,7 +58,7 @@ import { z } from 'zod';
 import { GovernanceOptInRefusedError, PlanLockRefusedError } from '../kernel/errors.js';
 import { createGovernor, governorConfig, type Governance } from '../kernel/governor.js';
 import { runPlan, type OpRegistryView } from '../kernel/runner.js';
-import type { CqEnv } from '../kernel/entry-env.js';
+import type { CqEnv } from '../registry/entry-env.js';
 import { PlanSchema } from '../kernel/schema.js';
 import type {
   GovernanceOptIn,

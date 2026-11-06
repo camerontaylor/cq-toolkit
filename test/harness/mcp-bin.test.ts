@@ -182,6 +182,24 @@ describe('startup refusal', () => {
   );
 });
 
+describe('config error at startup', () => {
+  test('an invalid CQ_* value exits 78 listing every error, before serving', async () => {
+    const server = startBin(
+      [JSON.stringify(manifestFor(scratch()))],
+      baseEnv({ CQ_SANDBOX: 'of', CQ_RUN_TOOL: 'maybe' }),
+    );
+    const { code } = await server.exited;
+    expect(code).toBe(78);
+    expect(server.stdout()).toBe('');
+    const errors = server
+      .stderr()
+      .split('\n')
+      .filter((line) => line.startsWith('cq: error:'));
+    expect(errors).toHaveLength(2);
+    expect(server.stderr()).toMatch(/cq-harness-mcp: refusing to start/);
+  }, 20_000);
+});
+
 describe('lifetime', () => {
   test('stdin EOF exits 0 after flushing the last response', async () => {
     const server = startBin([JSON.stringify(manifestFor(scratch()))]);

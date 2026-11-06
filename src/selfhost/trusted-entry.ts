@@ -21,6 +21,7 @@
 import { z } from 'zod';
 import type { OpResult } from '../kernel/types.js';
 import { enterWithCqEnv } from '../config/entry.js';
+import type { CqEnv } from '../config/env.js';
 
 /**
  * A numeric flag: a plain decimal string (no sign, exponent, hex, space or
@@ -97,7 +98,7 @@ export function exitCodeFor(result: OpResult<unknown>): 0 | 1 | 3 {
  * {@link EntryUsageError}, else 1), never an empty stdout.
  */
 export async function runEntry<T>(
-  compute: () => Promise<OpResult<T>>,
+  compute: (cqEnv: CqEnv) => Promise<OpResult<T>>,
   write: (line: string) => void,
   diag: {
     env?: Readonly<Record<string, string | undefined>>;
@@ -111,7 +112,7 @@ export async function runEntry<T>(
     // and any invalid value is a usage failure (exit 2) before compute runs.
     const cqEnv = enterWithCqEnv(diag.stderr, diag.env);
     if (cqEnv === undefined) throw new EntryUsageError('invalid CQ_* environment (see stderr)');
-    result = await compute();
+    result = await compute(cqEnv);
     code = exitCodeFor(result);
   } catch (error) {
     result = { status: 'failed', error: error instanceof Error ? error.message : String(error) };

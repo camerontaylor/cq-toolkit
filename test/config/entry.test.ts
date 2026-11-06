@@ -2,7 +2,7 @@
 import { describe, expect, test } from 'vitest';
 import { assertCqEnv, checkEntryEnv, CqEnvError, enterWithCqEnv } from '../../src/config/entry.js';
 import { readCqEnv } from '../../src/config/env.js';
-import { resolveSandboxConfig } from '../../src/sandbox/config.js';
+import { SANDBOX_POLICY_ENV_NAMES, resolveSandboxConfig } from '../../src/sandbox/config.js';
 import { harnessRunGate } from '../../src/sandbox/index.js';
 import { resolveSelfhostDrivers } from '../../src/selfhost/config.js';
 import { resolveGhBin } from '../../src/adapters/forge-github/ghBin.js';
@@ -39,6 +39,37 @@ describe('entry helpers', () => {
   });
 });
 
+describe('harnessRunGate: snapshot path agrees with the env path', () => {
+  const states: Array<[string, string | undefined]> = [
+    ['unset', undefined],
+    ['blank', ''],
+    ['whitespace', '   '],
+  ];
+  const settings: Record<string, string> = {
+    CQ_SANDBOX: 'required',
+    CQ_SANDBOX_BACKEND: 'auto',
+    CQ_SANDBOX_NETWORK: 'allow',
+    CQ_RUN_TOOL: 'off',
+    CQ_RUN_ENV_PASSTHROUGH: 'FOO',
+  };
+  for (const name of SANDBOX_POLICY_ENV_NAMES) {
+    for (const [label, value] of [...states, ['set', settings[name]] as [string, string]]) {
+      test(`${name} ${label}`, () => {
+        const env = value === undefined ? {} : { [name]: value };
+        expect(harnessRunGate({ cqEnv: readCqEnv(env) })).toEqual(harnessRunGate({ env }));
+      });
+    }
+  }
+
+  test('a blank policy name still counts as expressed (run tool withheld)', () => {
+    expect(harnessRunGate({ cqEnv: readCqEnv({ CQ_SANDBOX: '' }) }).enabled).toBe(false);
+  });
+
+  test('present lists blank names but not unset ones', () => {
+    expect(readCqEnv({ CQ_SANDBOX: '', CQ_TASK: 'x' }).present).toEqual(['CQ_SANDBOX', 'CQ_TASK']);
+  });
+});
+
 describe('readers take the snapshot', () => {
   test('sandbox: a misspelled name leaves the mode required', () => {
     const cqEnv = readCqEnv({ CQ_SANBOX: 'off' });
@@ -68,5 +99,7 @@ describe('readers take the snapshot', () => {
   test('CQ_GH_BIN comes from the snapshot, defaulting to gh', () => {
     expect(resolveGhBin(readCqEnv({ CQ_GH_BIN: '/opt/fake-gh' }))).toBe('/opt/fake-gh');
     expect(resolveGhBin(readCqEnv({}))).toBe('gh');
+    expect(resolveGhBin(readCqEnv({ CQ_GH_BIN: '' }))).toBe('gh');
+    expect(resolveGhBin(readCqEnv({ CQ_GH_BIN: '   ' }))).toBe('gh');
   });
 });

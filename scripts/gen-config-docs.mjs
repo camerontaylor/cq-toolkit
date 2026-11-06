@@ -15,7 +15,10 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const OUT = path.join(ROOT, 'docs', 'config.md');
+// `--out=<file>` redirects the target (the drift-check test's seam).
+const outArg = process.argv.find((arg) => arg.startsWith('--out='));
+const OUT =
+  outArg === undefined ? path.join(ROOT, 'docs', 'config.md') : path.resolve(outArg.slice(6));
 
 const cell = (text) => String(text).replaceAll('|', '\\|').replace(/\s+/g, ' ').trim();
 const byName = (a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
@@ -65,7 +68,7 @@ export function render({ CQ_ENV_ENTRIES, CQ_ENV_DENIED_PREFIXES, FOREIGN_ENV_ENT
 }
 
 async function main(argv) {
-  const unknown = argv.filter((arg) => arg !== '--check');
+  const unknown = argv.filter((arg) => arg !== '--check' && !arg.startsWith('--out='));
   if (unknown.length > 0) {
     console.error(`gen-config-docs: unsupported argument(s): ${unknown.join(' ')}`);
     return 1;

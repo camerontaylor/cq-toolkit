@@ -92,7 +92,7 @@ import { get, list } from '../registry/index.js';
 import { getPlan } from '../registry/plans.js';
 import { KnownUsageSummarySchema, OpResultSchema } from '../kernel/schema.js';
 import type { OpRegistryEntry } from '../kernel/types.js';
-import { checkEntryEnv, type CqEnv } from '../kernel/entry-env.js';
+import { checkEntryEnv, type CqEnv } from '../registry/entry-env.js';
 import { EXIT_CODES, exitCodeForOpResult } from './exit.js';
 import {
   assertJsonLossless,

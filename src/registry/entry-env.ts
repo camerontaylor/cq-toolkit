@@ -1,6 +1,6 @@
 // The CLI layer may import only src/registry and src/kernel (lint rule
 // no-cli-beyond-registry-kernel), so the CLI reaches the env snapshot through
-// this kernel seam. The implementation lives in src/config/entry.ts.
+// this registry-boundary seam (the same precedent as ./plans.ts). The implementation lives in src/config/entry.ts.
 export {
   CqEnvError,
   assertCqEnv,

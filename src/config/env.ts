@@ -26,6 +26,12 @@ export interface CqEnv {
   /** Parsed value per live key; `undefined` when the key is unset. */
   readonly values: Readonly<Record<string, unknown>>;
   readonly sources: Readonly<Record<string, CqEnvSource>>;
+  /**
+   * Every `CQ_*` name the environment carries with a non-undefined value, blank
+   * ones included (sorted). Lets a caller ask whether a knob was EXPRESSED at
+   * all, which `values`/`sources` cannot say once blank means unset.
+   */
+  readonly present: readonly string[];
   readonly warnings: readonly CqEnvDiagnostic[];
   readonly errors: readonly CqEnvDiagnostic[];
 }
@@ -52,6 +58,7 @@ export function readCqEnv(
   const sources: Record<string, CqEnvSource> = {};
   const warnings: CqEnvDiagnostic[] = [];
   const errors: CqEnvDiagnostic[] = [];
+  const present: string[] = [];
   const known = new Map(registry.entries.map((e) => [e.name, e]));
 
   for (const entry of registry.entries) {
@@ -63,6 +70,7 @@ export function readCqEnv(
   for (const name of Object.keys(env).sort()) {
     if (!name.startsWith('CQ_')) continue;
     const raw = env[name];
+    if (raw !== undefined) present.push(name);
     if (isBlank(raw)) continue;
     const denied = registry.denied.find((d) => name.startsWith(d.prefix));
     if (denied !== undefined) {
@@ -99,7 +107,7 @@ export function readCqEnv(
     }
   }
 
-  return deepFreeze({ values, sources, warnings, errors });
+  return deepFreeze({ values, sources, present, warnings, errors });
 }
 
 /** `cq: warning: …` / `cq: error: …` lines, errors first; never contains a value. */
