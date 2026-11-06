@@ -10,6 +10,7 @@ import {
   fingerprintKey,
   fingerprintPairs,
   fingerprintSet,
+  legacyFingerprintFailure,
   fnv1a32Hex,
   type FingerprintConfig,
 } from '../../../src/ops/gates/fingerprint.js';
@@ -413,5 +414,25 @@ describe('fingerprintSet', () => {
 
   test('empty failure set yields an empty fingerprint set', () => {
     expect(fingerprintSet({ tool: 'eslint', failures: [], exitCode: 0 }).size).toBe(0);
+  });
+});
+
+describe('legacyFingerprintFailure (scheme 1)', () => {
+  const base = { line: null, column: null, ruleId: 'rule' } as const;
+
+  test('a title-chain JSON message hashes as the pre-W4.4 " > " join', () => {
+    const legacy = failureOf({ ...base, message: 'suite > nested > case' });
+    const current = failureOf({ ...base, message: JSON.stringify(['suite', 'nested', 'case']) });
+    expect(legacyFingerprintFailure(current, { tool: 'vitest' })).toBe(
+      legacyFingerprintFailure(legacy, { tool: 'vitest' }),
+    );
+  });
+
+  test('the canonical fingerprint keeps the JSON message', () => {
+    const a = failureOf({ ...base, message: JSON.stringify(['a', 'b']) });
+    const b = failureOf({ ...base, message: 'a > b' });
+    expect(fingerprintFailure(a, { tool: 'vitest' })).not.toBe(
+      fingerprintFailure(b, { tool: 'vitest' }),
+    );
   });
 });
