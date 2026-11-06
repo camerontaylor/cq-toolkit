@@ -330,6 +330,10 @@ export function makeReviewRun(
                     severity: finding.severity,
                     text: finding.excerpt ?? '',
                     ...(finding.fileName !== undefined ? { file: finding.fileName } : {}),
+                    ...(finding.line !== undefined ? { line: finding.line } : {}),
+                    ...(finding.rule !== undefined ? { rule: finding.rule } : {}),
+                    ...(finding.evidence !== undefined ? { evidence: finding.evidence } : {}),
+                    ...(finding.evidenceV1 !== undefined ? { evidenceV1: finding.evidenceV1 } : {}),
                     status: disposition?.action ?? 'open',
                     ...(disposition ? { reason: disposition.why } : {}),
                   };

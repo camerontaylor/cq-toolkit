@@ -55,6 +55,12 @@ it.each(['current', 'changed', 'queue-auth', 'empty-file', 'absent-file'] as con
         category: 'vendor-unavailable' as const,
         codes: ['con_err'],
       };
+      const evidenceV1 = {
+        version: 1 as const,
+        failureScenario: 'the retained finding keeps its anchored evidence',
+        primary: { file: 'src/a.ts', side: 'head' as const, start: 12, end: 12, quote: 'a' },
+        supporting: [],
+      };
       const origin = cycleRecord({
         head: state.head,
         base: state.base,
@@ -67,6 +73,10 @@ it.each(['current', 'changed', 'queue-auth', 'empty-file', 'absent-file'] as con
             id: 'retained',
             severity: 'major',
             excerpt: 'prior vendor finding',
+            line: 12,
+            rule: 'vendor-rule',
+            evidence: 'vendor-receipt-1',
+            evidenceV1,
             ...(scenario === 'empty-file' ? { fileName: '' } : {}),
           },
         ],
@@ -130,6 +140,14 @@ it.each(['current', 'changed', 'queue-auth', 'empty-file', 'absent-file'] as con
           const retained = result.value.findings.find((finding) => finding.id === 'retained');
           if (scenario === 'empty-file') expect(retained).toHaveProperty('file', '');
           else expect(retained).not.toHaveProperty('file');
+          // The deferred projection keeps every content field the disposition
+          // check compares, so an unchanged finding keeps its disposition.
+          expect(retained).toMatchObject({
+            line: 12,
+            rule: 'vendor-rule',
+            evidence: 'vendor-receipt-1',
+          });
+          expect(retained?.evidenceV1).toEqual(evidenceV1);
           expect(result.value.sources.find((source) => source.kind === 'coderabbit')?.status).toBe(
             'blocked',
           );
