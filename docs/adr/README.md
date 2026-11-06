@@ -28,6 +28,7 @@ code disagree with an ADR, the code and the notes are current.
 | [ADR-0005 — Architecture revision](0005-architecture-revision.md)                                   | The layered monorepo, policy foundation, driver lanes and TypeScript queue rewrite                         |
 | [ADR-0006 — Fix engine and address-review as CLI compositions](0006-fix-engine-cli-compositions.md) | The developer-loop commands as registered ops owning their dataflow, with `cq.json` as the policy file     |
 | [ADR-0008 — Journal v3 + report v2](0008-journal-v3-report-v2.md)                                   | Proposed batched provenance, identity, attempt accounting and measurement contract amendment               |
+| [ADR-0009 — Config contract v2](0009-config-contract-v2.md)                                         | Names warn, values fail; precedence with `cq.json`; one frozen env snapshot; supersedes parts of Annex B   |
 
 ## Terms and identifiers
 
@@ -496,3 +497,14 @@ are in [`docs/protected-scope.md`](../protected-scope.md).
 The window source was retired 2026-10-20 and its implementation removed
 2026-11-03 (#385); Annex B §B.1 is back to the project env and the per-call
 opt-in.
+
+### N24 — Annex B §B.1, §B.2.5 and the resolver rules: superseded by ADR-0009
+
+Owner acceptance of 2026-11-06. [ADR-0009](0009-config-contract-v2.md) replaces
+the strictness and reserved-key refusal (§B.2.5) with "names warn, values
+fail", lets `cq.json` carry non-trust keys (§B.1 "never workspace files"),
+and retires closed-domain enforcement, the `optIn` relaxation machinery and
+the hand-written key tables, which are generated from `src/config/env.ts`.
+Secret-by-suffix and env-only secrets (N4), the CI variable mapping (N15,
+N21) and the ADR-0004 trust boundaries stay in force. This closes ADR-0005's
+Phase 1.7 pointer.

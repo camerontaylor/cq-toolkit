@@ -7,6 +7,7 @@
   [ADR-0004](0004-policy-check-trust-boundaries.md)
 
 Post-acceptance notes N3, N4, N15 and N23 in the [ADR index](README.md#post-acceptance-notes) narrow parts of this record.
+[ADR-0009](0009-config-contract-v2.md) supersedes §B.2.5 strictness and reserved refusal, §B.1 "never workspace files" for non-trust keys, closed-domain enforcement and the `optIn` machinery (note N24).
 
 This annex fills ADR-0002's Annex B. It also defines the configuration keys ADR-0003 refers to. Neither ADR's main
 text changes.

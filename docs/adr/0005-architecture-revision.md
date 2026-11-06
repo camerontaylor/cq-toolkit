@@ -105,7 +105,7 @@ These phase names use the 2026-10-16 architecture migration sequence. Phase 0 re
 and performs the scoped deletions; Phase 1 breaks dependency edges in the existing package, with
 1.7 introducing separate domain configurations and 1.8 resolving the versioned runtime contract
 before producers and consumers migrate together. The ADR-0002 Annex B safeguards remain in force
-through Phase 0 and change only with the Phase 1.7 configurations. The lane-classification decision
+through Phase 0 and change only with the Phase 1.7 configurations (revised by [ADR-0009](0009-config-contract-v2.md)). The lane-classification decision
 is a Phase 1.8 design gate; `classifyDispatch`, the lane table and `hard`/`advisory` types remain
 live until that contract is decided. Phase 2 cuts the initial six publishable packages bottom-up
 after the in-package edges are broken. Phase 3 adds platform and deployment integrations, with
