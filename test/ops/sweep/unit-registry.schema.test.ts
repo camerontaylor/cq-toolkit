@@ -69,7 +69,7 @@ describe('sweep.unit registry entry (jSKJF)', () => {
     // §2.3/§2.5 — plan data never names an executable or a lane): the strict
     // schema REJECTS each of binary/routingTable/sessionsDir; those knobs
     // moved into DriverFactoryConfig.lanes.subprocess.
-    const baseDriver = { provider: 'cq-e2e', model: 'sweep-fake' };
+    const baseDriver = { ...VALID.driver! };
     const bannedDrivers: Record<string, unknown>[] = [
       { ...baseDriver, binary: ['node', '/opt/agent.mjs'] },
       {
@@ -88,10 +88,12 @@ describe('sweep.unit registry entry (jSKJF)', () => {
       ).toBe(false);
     }
     // A driver section without a model is refused.
+    const driverWithoutModel: Record<string, unknown> = { ...baseDriver };
+    delete driverWithoutModel.model;
     expect(
       SweepUnitDispatchInputSchema.safeParse({
         ...VALID,
-        driver: { provider: 'cq-e2e' },
+        driver: driverWithoutModel,
       } as unknown).success,
     ).toBe(false);
   });

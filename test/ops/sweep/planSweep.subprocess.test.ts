@@ -15,6 +15,7 @@ import {
   mapSweepGitFault,
   parseNullDelimitedChangedFiles,
 } from '../../../src/ops/sweep/planSweep.js';
+import { scrubbedGitEnv } from '../../helpers/git-env.js';
 
 // ---------------------------------------------------------------------------
 // 6. The shipped subprocess deps binding (the registry importer's seam)
@@ -101,12 +102,31 @@ describe('makeSubprocessSweepPlannerDeps (captured fixtures)', () => {
 
   test('REAL git: delete + rename parse into ChangedFile entries with the right target flags (r1 finding 4)', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'sweep-name-status-'));
+    // The fixture must not read the outer repository or host git config: a
+    // hook-inherited GIT_DIR/GIT_WORK_TREE would redirect these commands,
+    // and a host commit.gpgsign/hooksPath would fail the commit below.
+    const env = {
+      ...scrubbedGitEnv(),
+      GIT_CONFIG_GLOBAL: '/dev/null',
+      GIT_CONFIG_SYSTEM: '/dev/null',
+      GIT_CONFIG_NOSYSTEM: '1',
+    };
     const git = (args: string[]): Promise<string> =>
       new Promise((resolve, reject) => {
         execFile(
           'git',
-          ['-c', 'gc.auto=0', '-c', 'maintenance.auto=false', ...args],
-          { cwd: dir, timeout: 15_000, killSignal: 'SIGKILL' },
+          [
+            '-c',
+            'gc.auto=0',
+            '-c',
+            'maintenance.auto=false',
+            '-c',
+            'commit.gpgsign=false',
+            '-c',
+            'core.hooksPath=/dev/null',
+            ...args,
+          ],
+          { cwd: dir, env, timeout: 15_000, killSignal: 'SIGKILL' },
           (error, stdout, stderr) => {
             if (error !== null) reject(new Error(stderr.trim() || error.message));
             else resolve(stdout);
