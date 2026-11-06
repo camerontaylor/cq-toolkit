@@ -31,7 +31,9 @@ import { tmpdir } from 'node:os';
 import { messageOf } from '../../shared/messageOf.js';
 import { execFile } from 'node:child_process';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { dirname, isAbsolute, join, resolve as pathResolve } from 'node:path';
+import { dirname, join } from 'node:path';
+import type { CqEnv } from '../../config/env.js';
+import { resolveGhBin } from './ghBin.js';
 import type { BaselinePrEffects } from '../../ops/ratchet/proposeBaselineUpdate.js';
 
 /** Captured child output can be large (a full diff/PR body) — never truncate. */
@@ -99,23 +101,6 @@ function exec(
 }
 
 /**
- * The gh binary: CQ_GH_BIN (the review/merge family seam), else `gh`. A
- * RELATIVE bin path with a separator resolves against the PROCESS cwd — the
- * same pre-scoping resolution makeGhRunner and the pr effects adapter apply
- * — because {@link runGh} spawns with cwd=repoRoot, which would otherwise
- * silently change which binary a relative CQ_GH_BIN names. Bare names keep
- * PATH lookup; absolute paths pass through.
- */
-function ghBin(): string {
-  const rawBin = process.env['CQ_GH_BIN'] ?? 'gh';
-  return rawBin.includes('/') || rawBin.includes('\\')
-    ? isAbsolute(rawBin)
-      ? rawBin
-      : pathResolve(process.cwd(), rawBin)
-    : rawBin;
-}
-
-/**
  * The gh child env: `CQ_AUTOMATION_TOKEN` as `GH_TOKEN`, with BOTH the
  * ambient `GITHUB_TOKEN` and any ambient `GH_TOKEN` scrubbed. Throws loudly
  * when `CQ_AUTOMATION_TOKEN` is absent — there is no ambient-token fallback
@@ -137,8 +122,12 @@ function ghEnv(): NodeJS.ProcessEnv {
 }
 
 /** One `gh` invocation, throwing on a timeout or a non-zero exit (the op contains the throw). */
-async function runGh(repoRoot: string, args: readonly string[]): Promise<string> {
-  const res = await exec(ghBin(), args, { cwd: repoRoot, env: ghEnv() });
+async function runGhWith(
+  repoRoot: string,
+  args: readonly string[],
+  cqEnv?: CqEnv,
+): Promise<string> {
+  const res = await exec(resolveGhBin(cqEnv), args, { cwd: repoRoot, env: ghEnv() });
   if (res.timedOut) {
     throw new Error(`gh ${args[0] ?? ''} timed out after ${EXEC_TIMEOUT_MS}ms`);
   }
@@ -178,8 +167,14 @@ function prIdentity(url: string): { number: number; url: string } {
  * the proposal's `base`. Inert at construction: subprocesses spawn only when
  * an effect is called.
  */
-export function makeSubprocessBaselinePrEffects(repoRoot: string, base: string): BaselinePrEffects {
+export function makeSubprocessBaselinePrEffects(
+  repoRoot: string,
+  base: string,
+  cqEnv?: CqEnv,
+): BaselinePrEffects {
   assertArgSafeRef(base, 'base');
+  const runGh = (root: string, args: readonly string[]): Promise<string> =>
+    runGhWith(root, args, cqEnv);
   const findOpenPrByHead: BaselinePrEffects['findOpenPrByHead'] = async (head) => {
     assertArgSafeRef(head, 'head');
     const out = await runGh(repoRoot, [

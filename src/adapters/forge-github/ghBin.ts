@@ -1,0 +1,22 @@
+// The ONE gh-binary resolver for the forge adapter: CQ_GH_BIN (the
+// review/merge families' test seam), else `gh`. The value comes from the
+// entry point's CQ_* snapshot when one is passed; without one the environment
+// is read at the call (invocation time), so SDK callers and CLI-driven tests
+// that set CQ_GH_BIN after construction keep working.
+//
+// A RELATIVE bin path with a separator resolves against the PROCESS cwd:
+// spawns may run with cwd=repoRoot, which would otherwise silently change
+// which binary a relative CQ_GH_BIN names. Bare names keep PATH lookup;
+// absolute paths pass through.
+import { isAbsolute, resolve as pathResolve } from 'node:path';
+import { readCqEnv, type CqEnv } from '../../config/env.js';
+
+export function resolveGhBin(cqEnv?: CqEnv): string {
+  const configured = (cqEnv ?? readCqEnv()).values['CQ_GH_BIN'];
+  const rawBin = typeof configured === 'string' ? configured : 'gh';
+  return rawBin.includes('/') || rawBin.includes('\\')
+    ? isAbsolute(rawBin)
+      ? rawBin
+      : pathResolve(process.cwd(), rawBin)
+    : rawBin;
+}

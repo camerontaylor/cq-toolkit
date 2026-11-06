@@ -9,6 +9,7 @@
   "ignorePatterns": [
     "apps/crq-python/**",
     "dist/**",
+    "docs/config.md",
     "coverage/**",
     ".github/workflows/**",
     "test/fixtures/check-outputs/**"

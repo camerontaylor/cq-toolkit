@@ -37,6 +37,7 @@
 // NEVER THROWS (judgeAcceptance): every throw becomes verdict 'fail' with a
 // one-line, capped, log-safe reason. Report lines carry counts, actor keys
 // and reasons — never review bodies or tokens.
+import { enterWithCqEnv } from '../config/entry.js';
 import { pathToFileURL } from 'node:url';
 import { ACCEPT_STATES, ASSOCIATIONS, BOT_ENTRY_RE } from '../config/values.js';
 import { GhError, ghNameOk, makeGhRunner } from '../adapters/forge-github/gh.js';
@@ -422,12 +423,22 @@ export function parseAcceptanceArgs(argv: readonly string[]): AcceptanceArgs {
  * only bad args or a bad trust config are `status: failed` at exit 1.
  */
 async function main(): Promise<void> {
+  // The CQ_* environment is read once per process: an invalid value exits 2
+  // (stdout stays one failed-status JSON line), warnings print once on stderr.
+  const cqEnv = enterWithCqEnv();
+  if (cqEnv === undefined) {
+    process.stdout.write(
+      `${JSON.stringify({ status: 'failed', error: 'invalid CQ_* environment (see stderr)' })}\n`,
+    );
+    process.exitCode = 2;
+    return;
+  }
   let line: string;
   try {
     const args = parseAcceptanceArgs(process.argv.slice(2));
     const trust = resolveAcceptanceTrust(process.env);
     const result = await judgeAcceptance(
-      { gh: makeGhRunner(), owner: args.owner, repo: args.repo, policy: trust.policy },
+      { gh: makeGhRunner({ cqEnv }), owner: args.owner, repo: args.repo, policy: trust.policy },
       args.input,
     );
     line = JSON.stringify({ status: 'ok', value: { ...result, trust: trust.report } });

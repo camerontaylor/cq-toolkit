@@ -3,6 +3,7 @@
 // child cannot reconfigure its own boundary.
 import { resolveSandboxConfig, SANDBOX_POLICY_ENV_NAMES } from './config.js';
 import type { SandboxConfig } from './config.js';
+import type { CqEnv } from '../config/env.js';
 
 const SAFE_ENV = new Set([
   'HOME',
@@ -102,17 +103,24 @@ const POLICY_ENV_NAMES = SANDBOX_POLICY_ENV_NAMES;
 export function harnessRunGate(
   options: {
     env?: Readonly<Record<string, string | undefined>>;
+    /** The entry point's CQ_* snapshot; takes precedence over `env`. */
+    cqEnv?: CqEnv;
     sandboxConfig?: SandboxConfig;
   } = {},
 ): HarnessRunGate {
   const env = options.env ?? process.env;
   if (options.sandboxConfig === undefined) {
-    const expressed = [...POLICY_ENV_NAMES].some(
-      (name) => Object.prototype.hasOwnProperty.call(env, name) && env[name] !== undefined,
-    );
+    const expressed =
+      options.cqEnv !== undefined
+        ? [...POLICY_ENV_NAMES].some((name) => options.cqEnv?.present.includes(name))
+        : [...POLICY_ENV_NAMES].some(
+            (name) => Object.prototype.hasOwnProperty.call(env, name) && env[name] !== undefined,
+          );
     if (!expressed) return { enabled: true, envPassthrough: [] };
   }
-  const config = options.sandboxConfig ?? resolveSandboxConfig({ env });
+  const config =
+    options.sandboxConfig ??
+    resolveSandboxConfig(options.cqEnv !== undefined ? { cqEnv: options.cqEnv } : { env });
   return {
     enabled: config.runTool === 'on',
     envPassthrough: config.envPassthrough,

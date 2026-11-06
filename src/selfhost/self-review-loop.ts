@@ -79,6 +79,8 @@
 // provides it, and the same JSON written to $SWEEP_USAGE_OUT (set by the
 // workflow) for the artifact upload. The 2,000,000-token placeholder cap
 // (`SelfhostDefaults.maxTokens`) exists to be tuned from this evidence.
+import { enterWithCqEnv } from '../config/entry.js';
+import type { CqEnv } from '../config/env.js';
 import { appendFileSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -263,6 +265,8 @@ export interface SelfReviewLoopCfg {
    * callers get).
    */
   startedAtMs?: number;
+  /** The entry point's CQ_* snapshot; the driver falls back to the process env when absent. */
+  cqEnv?: CqEnv;
   /** Journal root override; default `<repoRoot>/.selfhost/journal`. */
   journalRoot?: string;
   /** Fetch + summarize only — resolve nothing, dispatch nothing. */
@@ -531,7 +535,7 @@ export async function runSelfReviewLoop(
   // — a delayed fire or a manual dispatch resolves at ITS OWN start, never
   // at the slot's nominal time, and a sweep that straddles the window edge
   // does not switch models mid-run.
-  const driver = resolveSelfhostDriver(stamp);
+  const driver = resolveSelfhostDriver(stamp, cfg.cqEnv);
   // FIRST-RUN JOURNAL ROOT (CodeRabbit round 2, KyA): on a first run / cache
   // miss `<journalRoot>` does not exist, and the registry's first `withLock`
   // needs `<journalRoot>/worktree-registry.json.lock` — the lockfile layer
@@ -839,7 +843,12 @@ const STARTED_AT_ENV = 'CQ_SELFHOST_NOW_MS';
  * fail loud, never silently fall back to a different peak window than the
  * handshake validated.
  */
-function runStartInstant(deps: SelfReviewLoopDeps): number {
+function runStartInstant(deps: SelfReviewLoopDeps, cqEnv?: CqEnv): number {
+  if (cqEnv !== undefined) {
+    // Already parsed (and validated at the entry) by the registry's epoch-ms parser.
+    const pinned = cqEnv.values[STARTED_AT_ENV];
+    return typeof pinned === 'number' ? pinned : deps.nowMs();
+  }
   const raw = process.env[STARTED_AT_ENV];
   if (raw === undefined || raw === '') return deps.nowMs();
   const value = Number(raw);
@@ -880,8 +889,17 @@ export async function main(
   // PRINT_DRIVER_KEY_ENV_FLAG). An unknown provider prints an empty line —
   // the caller's emptiness test then refuses (fail closed), never guesses.
   const argv = process.argv.slice(2);
+  // The CQ_* environment is read once for this process; an invalid value
+  // exits 2 before anything runs, warnings print once on stderr.
+  const cqEnv = enterWithCqEnv();
+  if (cqEnv === undefined) {
+    process.exitCode = 2;
+    return;
+  }
   if (argv.length === 1 && argv[0] === PRINT_DRIVER_KEY_ENV_FLAG) {
-    process.stdout.write(`${driverKeyEnv(resolveSelfhostDriver(runStartInstant(deps))) ?? ''}\n`);
+    process.stdout.write(
+      `${driverKeyEnv(resolveSelfhostDriver(runStartInstant(deps, cqEnv), cqEnv)) ?? ''}\n`,
+    );
     return;
   }
   let usage = buildSweepUsage(SelfhostDefaults.maxTokens, []);
@@ -912,7 +930,7 @@ export async function main(
     // The workflow PINS this instant per step (CQ_SELFHOST_NOW_MS), so the
     // separate --print-driver-key-env handshake process and this run also
     // agree.
-    const startedAtMs = runStartInstant(deps);
+    const startedAtMs = runStartInstant(deps, cqEnv);
     // FAIL-CLOSED DRIVER CREDENTIAL (peak-aware): resolve the driver for
     // THIS instant and refuse BEFORE any effect when the selected provider's
     // key env is absent — a missing key must never let a sweep start and then
@@ -922,7 +940,7 @@ export async function main(
     // dispatches nothing, so it needs no provider key (its gh reads ride
     // GH_TOKEN).
     if (!parsed.dryRun) {
-      const driver = resolveSelfhostDriver(startedAtMs);
+      const driver = resolveSelfhostDriver(startedAtMs, cqEnv);
       const required = driverRequiredEnv(driver);
       const missing = required?.filter((name) => (process.env[name] ?? '').trim() === '');
       if (missing === undefined || missing.length > 0) {
@@ -933,6 +951,7 @@ export async function main(
     }
     const summary = await runSelfReviewLoop(deps, {
       owner,
+      cqEnv,
       repo,
       repoRoot,
       startedAtMs,

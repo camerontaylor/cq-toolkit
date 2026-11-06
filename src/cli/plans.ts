@@ -18,6 +18,7 @@
 // the entry's discoverable floor instance — the honest, schema-valid,
 // agent-free pass. Real runs author the builder in the SDK / entry modules;
 // `run-plan --plan=<file>` remains the way to run an arbitrary plan JSON.
+import type { CqEnv } from '../registry/entry-env.js';
 import { PlanSchema } from '../kernel/schema.js';
 import type { PlanRegistryEntry } from '../kernel/types.js';
 import { listPlans } from '../registry/plans.js';
@@ -54,7 +55,7 @@ export async function runPlanEntryCommand(
   flags: Record<string, unknown>,
   io: CliIo,
   mode: NarrationMode,
-  opts?: { opsRoot?: string; plansRoot?: string; failOnVerdict?: boolean },
+  opts?: { opsRoot?: string; plansRoot?: string; failOnVerdict?: boolean; cqEnv?: CqEnv },
 ): Promise<number> {
   const parsed = parseRunPlanInput(entry.name, flags, io, mode, RunPlanCommandSchema);
   if (!parsed.ok) return parsed.code;

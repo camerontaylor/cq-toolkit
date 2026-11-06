@@ -93,3 +93,7 @@ runs:
     - name: Check generated op docs
       shell: bash
       run: pnpm run gen:op-docs:check
+    # Same drift gate for the env-registry table (docs/config.md, ADR-0009).
+    - name: Check generated config docs
+      shell: bash
+      run: pnpm run gen:config-docs:check

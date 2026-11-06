@@ -199,17 +199,26 @@ describe('main — peak-aware driver credential (fail closed)', () => {
     expect(calls[0]?.opts.runOptions?.journalDir).toBe(join(journalRoot, `7-${String(pinned)}`));
   });
 
-  test('a malformed CQ_SELFHOST_NOW_MS fails loud instead of falling back', async () => {
+  test('a malformed CQ_SELFHOST_NOW_MS fails loud at the entry (exit 2) instead of falling back', async () => {
     process.argv = ['node', 'self-review-loop.js', '--print-driver-key-env'];
     vi.stubEnv('CQ_SELFHOST_NOW_MS', 'not-a-number');
-    await expect(
-      main(
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const priorExitCode = process.exitCode;
+    try {
+      await main(
         baseDeps(
           fakeGh([]),
           fakeLoop([], async () => fakeOutcome(1)),
         ),
-      ),
-    ).rejects.toThrow('CQ_SELFHOST_NOW_MS');
+      );
+      expect(process.exitCode).toBe(2);
+      expect(stderr.mock.calls.map((call) => String(call[0])).join('')).toContain(
+        'cq: error: CQ_SELFHOST_NOW_MS',
+      );
+    } finally {
+      process.exitCode = priorExitCode;
+      stderr.mockRestore();
+    }
   });
 
   test('a dry run dispatches nothing and needs no provider key', async () => {

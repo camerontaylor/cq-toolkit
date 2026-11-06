@@ -15,6 +15,7 @@ import {
   type SandboxMode,
   type SandboxNetwork,
 } from '../config/parsers.js';
+import type { CqEnv } from '../config/env.js';
 
 export {
   SANDBOX_POLICY_ENV_NAMES,
@@ -50,6 +51,12 @@ export interface SandboxConfig {
 }
 
 export interface ResolveSandboxOptions {
+  /**
+   * The entry point's CQ_* snapshot. Preferred: its already-parsed values form
+   * the env layer. Without it (and without `env`) the process environment is
+   * parsed directly, as before.
+   */
+  cqEnv?: CqEnv;
   env?: Readonly<Record<string, string | undefined>>;
   optIn?: SandboxOptIn;
   platform?: NodeJS.Platform;
@@ -77,18 +84,33 @@ function platformOf(platform: NodeJS.Platform): SandboxPlatform {
  */
 export function resolveSandboxConfig(options: ResolveSandboxOptions = {}): SandboxConfig {
   const env = options.env ?? process.env;
+  const typed = options.cqEnv?.values;
   const optIn = options.optIn ?? {};
-  const mode = parseMode(optIn.sandbox ?? env['CQ_SANDBOX']);
-  const backend = parseBackend(optIn['sandbox.backend'] ?? env['CQ_SANDBOX_BACKEND']) ?? 'auto';
+  // optIn beats the env layer; the env layer is the snapshot's parsed value
+  // when one was passed, else the raw process/explicit env parsed here.
+  const layered = <T>(
+    optInRaw: string | undefined,
+    parse: (raw: string | undefined) => T,
+    name: string,
+  ): T =>
+    optInRaw !== undefined
+      ? parse(optInRaw)
+      : typed !== undefined
+        ? ((typed[name] as T | undefined) ?? parse(undefined))
+        : parse(env[name]);
+  const mode = layered(optIn.sandbox, parseMode, 'CQ_SANDBOX');
+  const backend = layered(optIn['sandbox.backend'], parseBackend, 'CQ_SANDBOX_BACKEND') ?? 'auto';
   if (backend === 'cc-native' && options.driverScopedCcNative !== true) {
     throw new Error(
       'sandbox: cc-native is driver-scoped only; it cannot be selected by the shipped CQ_SANDBOX config',
     );
   }
-  const network = parseNetwork(optIn['sandbox.network'] ?? env['CQ_SANDBOX_NETWORK']);
-  const requestedRunTool = parseRunTool(optIn.run ?? env['CQ_RUN_TOOL']);
-  const envPassthrough = parsePassthrough(
-    optIn['run.envPassthrough'] ?? env['CQ_RUN_ENV_PASSTHROUGH'],
+  const network = layered(optIn['sandbox.network'], parseNetwork, 'CQ_SANDBOX_NETWORK');
+  const requestedRunTool = layered(optIn.run, parseRunTool, 'CQ_RUN_TOOL');
+  const envPassthrough = layered(
+    optIn['run.envPassthrough'],
+    parsePassthrough,
+    'CQ_RUN_ENV_PASSTHROUGH',
   );
 
   const platform = platformOf(options.platform ?? process.platform);

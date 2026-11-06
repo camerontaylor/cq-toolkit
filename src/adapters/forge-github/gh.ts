@@ -14,6 +14,8 @@
 // owner/repo spelling validator and the `--paginate --slurp` payload
 // normalizer) — hoisted here so the seams cannot drift apart.
 import { spawn } from 'node:child_process';
+import type { CqEnv } from '../../config/env.js';
+import { resolveGhBin } from './ghBin.js';
 import { isAbsolute, resolve as pathResolve } from 'node:path';
 
 /** Result of one `gh` invocation: the exit code plus the captured streams. */
@@ -74,6 +76,8 @@ export class GhError extends Error {
  */
 export function makeGhRunner(opts?: {
   bin?: string;
+  /** The entry point's CQ_* snapshot (CQ_GH_BIN); read at invocation when absent. */
+  cqEnv?: CqEnv;
   env?: Record<string, string>;
   timeoutMs?: number;
   /** Spawn cwd — scope gh to a repository root (review-debt #163: without
@@ -91,7 +95,7 @@ export function makeGhRunner(opts?: {
 }): GhFn {
   return (args: string[]) =>
     new Promise<GhResult>((resolve) => {
-      const rawBin = opts?.bin ?? process.env.CQ_GH_BIN ?? 'gh';
+      const rawBin = opts?.bin ?? resolveGhBin(opts?.cqEnv);
       // Bare names PATH-lookup (cwd-independent), but a RELATIVE bin path
       // with a separator resolves against the spawn cwd — with a scoped
       // runner that would silently change which binary runs. Pre-resolve

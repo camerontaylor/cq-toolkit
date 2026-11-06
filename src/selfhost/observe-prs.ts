@@ -1,4 +1,5 @@
 // Observation-only entry: independent of the disabled automated merger.
+import { enterWithCqEnv } from '../config/entry.js';
 import { pathToFileURL } from 'node:url';
 import { ghJson, ghNameOk, makeGhRunner, type GhFn } from '../adapters/forge-github/gh.js';
 import { observeOpenPrs, type ObserveOpenPrsResult } from './merge-recheck.js';
@@ -38,10 +39,19 @@ export async function observeRepository(
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   try {
-    const result = await observeRepository(makeGhRunner(), process.env['GITHUB_REPOSITORY'] ?? '');
-    console.log(JSON.stringify(result));
-    // An observation failure must be visible even though no merge was attempted.
-    if (result.write?.ok === false || result.skipped.length > 0) process.exitCode = 1;
+    // The CQ_* environment is read once; an invalid value exits 2 first.
+    const cqEnv = enterWithCqEnv();
+    if (cqEnv === undefined) {
+      process.exitCode = 2;
+    } else {
+      const result = await observeRepository(
+        makeGhRunner({ cqEnv }),
+        process.env['GITHUB_REPOSITORY'] ?? '',
+      );
+      console.log(JSON.stringify(result));
+      // An observation failure must be visible even though no merge was attempted.
+      if (result.write?.ok === false || result.skipped.length > 0) process.exitCode = 1;
+    }
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));
     process.exitCode = 1;

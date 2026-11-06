@@ -2,6 +2,7 @@
 // A.3) — split from ./bin.ts so they are importable without starting a
 // server. See bin.ts for the check list and exit statuses.
 import { realpathSync, statSync } from 'node:fs';
+import type { CqEnv } from '../../config/env.js';
 import { buildChildEnv } from '../../shared/proc.js';
 import { buildSandboxLauncherEnv, harnessRunGate } from '../../sandbox/index.js';
 import { createHarnessSurface, HarnessManifestSchema } from '../surface.js';
@@ -56,8 +57,8 @@ export function checkStartup(argv: readonly string[]): StartupResult {
 }
 
 /** Replace process.env in place with the default child-env allowlist plus resolved names. */
-export function scrubEnvironment(envNames: readonly string[]): void {
-  const gate = harnessRunGate();
+export function scrubEnvironment(envNames: readonly string[], cqEnv?: CqEnv): void {
+  const gate = harnessRunGate(cqEnv === undefined ? {} : { cqEnv });
   const explicitNames = [...envNames, ...gate.envPassthrough];
   // Validate the final run-child names through the sandbox scrub. This rejects
   // CQ_* policy knobs before process.env is replaced; otherwise a manifest

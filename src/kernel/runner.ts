@@ -146,6 +146,8 @@
 import pLimit from 'p-limit';
 import { randomBytes } from 'node:crypto';
 import { messageOf } from '../shared/messageOf.js';
+import { assertCqEnv } from '../config/entry.js';
+import { readCqEnv } from '../config/env.js';
 import { GovernanceOptInRefusedError } from './errors.js';
 import {
   acquirePlanLock,
@@ -530,6 +532,10 @@ async function runPlanUnderLease(
   gov: Governance | undefined,
   lease: LeaseState,
 ): Promise<RunReport> {
+  // The CQ_* environment is read once per run (or arrives from the entry
+  // point): any invalid value throws here, before a job can dispatch.
+  const cqEnv = opts.cqEnv ?? readCqEnv();
+  assertCqEnv(cqEnv, 'runPlan');
   // Caps guard, BEFORE anything else: a cap without a governor is a lie —
   // there would be no admission gate and no spend observation to enforce it.
   if ((opts.maxUsd !== undefined || opts.maxTokens !== undefined) && gov === undefined) {

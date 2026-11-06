@@ -30,7 +30,8 @@
 // fixture-tested in the test/ops/pr/registry.*.test.ts split files against
 // captured gh JSON shapes.
 import { execFile } from 'node:child_process';
-import { isAbsolute, resolve as pathResolve } from 'node:path';
+import type { CqEnv } from '../../config/env.js';
+import { resolveGhBin } from './ghBin.js';
 import type {
   PrChecks,
   PrEffects,
@@ -63,6 +64,8 @@ const DEFAULT_GH_TIMEOUT_MS = 600_000;
 /** Per-call timeout options of {@link makeSubprocessPrEffects}; absent fields fall back to the shipped default. */
 export interface SubprocessPrEffectsOptions {
   timeoutMs?: number;
+  /** The entry point's CQ_* snapshot (CQ_GH_BIN); read at invocation when absent. */
+  cqEnv?: CqEnv;
 }
 
 /**
@@ -97,23 +100,6 @@ export function mapGhFault(
   );
 }
 
-/** The gh binary for every PR-lane invocation: CQ_GH_BIN (the review/merge
- * families' seam), else `gh` — Phase 1.4 hoisted ONE gh runner convention,
- * so every gh invocation in the adapter honours the same env seam. A
- * RELATIVE bin path with a separator resolves against the PROCESS cwd (the
- * same pre-scoping resolution makeGhRunner applies): runGh below spawns
- * with cwd=repoRoot, which would otherwise silently change which binary a
- * relative CQ_GH_BIN names. Bare names keep PATH lookup; absolute paths
- * pass through. */
-function ghBin(): string {
-  const rawBin = process.env['CQ_GH_BIN'] ?? 'gh';
-  return rawBin.includes('/') || rawBin.includes('\\')
-    ? isAbsolute(rawBin)
-      ? rawBin
-      : pathResolve(process.cwd(), rawBin)
-    : rawBin;
-}
-
 /**
  * Run gh with an execFile ARGS ARRAY. A non-zero exit, a spawn failure, or
  * a run exceeding `timeoutMs` (SIGKILL) rejects with the mapped fault.
@@ -121,10 +107,16 @@ function ghBin(): string {
  * closed; an EPIPE from a child that exited before draining stdin is
  * swallowed — the execFile callback already carries the exit failure.
  */
-function runGh(args: string[], cwd: string, timeoutMs: number, stdin?: string): Promise<string> {
+function runGhWith(
+  args: string[],
+  cwd: string,
+  timeoutMs: number,
+  stdin?: string,
+  cqEnv?: CqEnv,
+): Promise<string> {
   return new Promise((resolve, reject) => {
     const child = execFile(
-      ghBin(),
+      resolveGhBin(cqEnv),
       args,
       {
         cwd,
@@ -447,6 +439,8 @@ export function makeSubprocessPrEffects(
   timeouts?: SubprocessPrEffectsOptions,
 ): PrEffects {
   const timeoutMs = timeouts?.timeoutMs ?? DEFAULT_GH_TIMEOUT_MS;
+  const runGh = (args: string[], cwd: string, timeout: number, stdin?: string): Promise<string> =>
+    runGhWith(args, cwd, timeout, stdin, timeouts?.cqEnv);
   return {
     searchPrByHead: async (head, base) => {
       const matches = parsePrList(

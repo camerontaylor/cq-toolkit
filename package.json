@@ -34,6 +34,8 @@
     "denylist": "gitleaks git --no-banner --redact --log-opts=origin/main..HEAD .",
     "gen:op-docs": "node scripts/gen-op-docs.mjs",
     "gen:op-docs:check": "node scripts/gen-op-docs.mjs --check",
+    "gen:config-docs": "node scripts/gen-config-docs.mjs",
+    "gen:config-docs:check": "node scripts/gen-config-docs.mjs --check",
     "format:check": "oxfmt --check .",
     "check:static": "node scripts/ratchet-typecheck.mjs",
     "lint:fast": "node scripts/lint-fast.mjs",
