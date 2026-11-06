@@ -240,6 +240,22 @@ class FactCacheTest(unittest.TestCase):
             warm.fold(self.f.git("rev-parse", "HEAD"), [value], self.f.store, *([collections.defaultdict(set), collections.defaultdict(list), []]))
         restore.assert_called_once()
 
+    def test_inventory_reads_each_blob_once_per_invocation_and_returns_copies(self):
+        t = self.f.commit({"a": b"one\n", "b": b"two\n"})
+        repo = self.fresh()
+        with mock.patch.object(accounting.subprocess, "run", wraps=subprocess.run) as calls:
+            first = repo.inventory(t, 10)
+            first[0]["tier"] = "mutated"
+            second = repo.inventory(t, 10)
+            reads = [c for c in calls.call_args_list if c.args[0][:2] == ["git", "cat-file"]]
+        self.assertEqual(len(reads), 2)
+        self.assertNotIn("tier", second[0])
+        self.assertEqual(second, accounting.Repository(self.f.root).inventory(t, 10))
+        uncached = accounting.Repository(self.f.root)
+        with mock.patch.object(accounting.subprocess, "run", wraps=subprocess.run) as calls:
+            uncached.inventory(t, 10); uncached.inventory(t, 10)
+            self.assertEqual(len([c for c in calls.call_args_list if c.args[0][:2] == ["git", "cat-file"]]), 4)
+
     def test_failed_verification_is_never_persisted(self):
         t = self.f.commit({"a": b"one\n"})
         value = self.f.full_review(t, "a", [[1, 1]])

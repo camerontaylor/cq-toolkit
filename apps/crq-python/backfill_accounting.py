@@ -48,12 +48,14 @@ class Repository:
         self._facts = collections.OrderedDict()
         self._fact_bytes = 0
         self._verified = {}  # review digest -> verified credit or failure; immutable_cache invocations only
+        self._inventories = {}  # (commit, max_file_bytes) -> rows; immutable_cache invocations only
 
     def begin_invocation(self):
         """Enable the immutable-object cache and forget earlier verification
         outcomes, so a gap from a previous invocation is retried."""
         self.immutable_cache = {}
         self._verified = {}
+        self._inventories = {}
         self._lineage_steps = {}
         self._lineage_bytes = 0
         self._facts.clear()
@@ -184,6 +186,17 @@ class Repository:
         return frozen
 
     def inventory(self, target, max_file_bytes):
+        """Rows for every object at target. Each subject construction asks for the
+        same target, so an invocation reads each blob once; callers get copies."""
+        key = (self.resolve(target), max_file_bytes)
+        if self.immutable_cache is not None and key in self._inventories:
+            return [dict(row) for row in self._inventories[key]]
+        rows = self._inventory(target, max_file_bytes)
+        if self.immutable_cache is not None:
+            self._inventories = {key: tuple(dict(row) for row in rows)}  # one target per invocation
+        return rows
+
+    def _inventory(self, target, max_file_bytes):
         rows = []
         for name, entry in sorted(self._entries(target).items(), key=lambda v: v[0].encode()):
             row = {**entry, "lines": None, "bytes": None, "disposition": "unsupported", "reason": "non-regular object"}
