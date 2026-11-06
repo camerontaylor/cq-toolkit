@@ -211,8 +211,11 @@ test.each(['capped', 'uncapped'] as const)(
     const journal = await events(dir);
     expect(journal.some((event) => event.type === 'run-finished')).toBe(true);
     if (mode === 'capped') {
+      // The guard refused before the op body ran: provably no spend, so the
+      // reservation settles observed-zero instead of charging phantom spend
+      // that a resume would re-seed.
       expect(journal.filter((event) => event.type === 'reservation-settled')).toEqual([
-        expect.objectContaining({ jobId: 'a', charged: 10, basis: 'full' }),
+        expect.objectContaining({ jobId: 'a', charged: 0, basis: 'observed' }),
       ]);
     }
   },
