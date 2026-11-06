@@ -2,19 +2,6 @@
   "version": 1,
   "repo": "camerontaylor/cq-toolkit",
   "prs": {
-    "1031": {
-      "tuple": {
-        "head": "2cddd3b066f437e2fe7f9b120a63066b4bcb5d5c",
-        "base": "56a618808f7973265e1364be7809e5ebce3d9594",
-        "forcePushEpoch": 11
-      },
-      "observations": [
-        {
-          "observedAt": "2026-11-06T08:03:24.143Z",
-          "by": "self-merge-prs:observe"
-        }
-      ]
-    },
     "1060": {
       "tuple": {
         "head": "c7a489afde73a59cf14fa24adda9a39dec255849",
@@ -28,28 +15,15 @@
         }
       ]
     },
-    "1066": {
-      "tuple": {
-        "head": "c91465c4e1a29114cc1bb0f5c86644d8443981e3",
-        "base": "9f2768a963368cde2fbe595ed2a78e01b477103c",
-        "forcePushEpoch": 1
-      },
-      "observations": [
-        {
-          "observedAt": "2026-11-06T08:34:02.241Z",
-          "by": "self-merge-prs:observe"
-        }
-      ]
-    },
     "1067": {
       "tuple": {
-        "head": "025c17e874adfc9d77b4acf2bcea62b6e4a9785e",
-        "base": "56a618808f7973265e1364be7809e5ebce3d9594",
+        "head": "9765353b1e24a42751e30a4bb7585aee94c7ed46",
+        "base": "ea32b197ce0013d6ea912573da1c05f39b9a90f4",
         "forcePushEpoch": 0
       },
       "observations": [
         {
-          "observedAt": "2026-11-06T08:51:28.867Z",
+          "observedAt": "2026-11-06T08:55:42.639Z",
           "by": "self-merge-prs:observe"
         }
       ]
