@@ -10,18 +10,9 @@
 // Redaction is WHOLE-TOKEN: the value floor is short (4 chars), so a bare
 // substring replace would shred unrelated words that merely contain the
 // value — a match is bounded by non-identifier characters instead.
+import { isSecretEnvName } from '../config/secret.js';
+
 const MAX_ERROR_CHARS = 500;
-const SECRET_ENV_SUFFIXES = [
-  '_API_KEY',
-  '_TOKEN',
-  '_AUTH_TOKEN',
-  '_SECRET',
-  '_KEY',
-  '_PASSWORD',
-  '_CREDENTIALS',
-  '_URL',
-  'PRIVATE_KEY',
-];
 
 /** The caught cause as plain message text (never a vendor class name). */
 export function describeError(err: unknown): string {
@@ -36,11 +27,7 @@ export function redactSensitiveText(text: string): string {
     // in lowercase by an operator; classify case-folded so `metrics_url`
     // cannot dodge the redaction.
     const classified = name.toUpperCase();
-    if (
-      value !== undefined &&
-      value.length >= 4 &&
-      SECRET_ENV_SUFFIXES.some((suffix) => classified.endsWith(suffix))
-    ) {
+    if (value !== undefined && value.length >= 4 && isSecretEnvName(classified)) {
       const escaped = value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       out = out.replace(
         new RegExp(`(?<![A-Za-z0-9_])${escaped}(?![A-Za-z0-9_])`, 'g'),
