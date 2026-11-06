@@ -242,6 +242,10 @@ describe('review.address candidate isolation', () => {
       try {
         const first = await f.engine.fix(finding(), 1);
         expect(first.finding.status, first.reason).toBe('fixed');
+        // Benign prose is not a budget stop or a tamper event: the retained
+        // failed attempt carries the neutral gate/outcome.
+        expect(first.failedAttempts?.[0]).toMatchObject({ gate: 'none', outcome: 'unfixed' });
+        expect(first.failedAttempts?.[0]?.reason).toContain(reason);
         expect(
           f.attempts
             .filter((a) => a.finding === 'src/a.ts' && a.invocation === 'edit')
