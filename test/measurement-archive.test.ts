@@ -506,4 +506,29 @@ describe('M8a failure evidence', () => {
     expect(restored.files[0]?.state).toBe('unavailable');
     expect(restored.files[0]?.reason).toContain('checksum');
   });
+
+  test('a stored pointer that symlinks outside the bundle is not resolved', async () => {
+    const base = await workspace();
+    const journal = join(base, 'journal');
+    await mkdir(journal, { recursive: true });
+    await writeFile(join(journal, 'evidence.ndjson'), '{"ok":true}\n');
+    const built = (await buildMeasurementBundle({
+      runId: 'run-m8a-pointer-link',
+      bundleRoot: join(base, 'bundles'),
+      roots: [{ name: 'fix', path: journal, files: ['evidence.ndjson'] }],
+    })) as { bundleDir: string; manifest: Manifest };
+
+    const entry = entryOf(built.manifest, 'fix', 'evidence.ndjson');
+    const stored = join(built.bundleDir, entry.pointer!);
+    // Same bytes, so only the containment check can reject the pointer.
+    const outside = join(base, 'outside-evidence.ndjson');
+    await writeFile(outside, await readFile(stored));
+    await rm(stored);
+    await symlink(outside, stored);
+
+    const restored = (await restoreMeasurementBundle(built.bundleDir)) as Restored;
+    expect(restored.pointers).toEqual({});
+    expect(restored.files[0]?.state).toBe('unavailable');
+    expect(restored.files[0]?.reason).toBe('bundle pointer escapes the bundle');
+  });
 });
