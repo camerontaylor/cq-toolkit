@@ -2258,34 +2258,49 @@ def _request_pr_review(item: Dict[str, Any], run_id: str, meta: Dict[str, Any], 
         item.pop(key, None)
 
 
+def _settle_pr_review(item: Dict[str, Any], error: str) -> str:
+    """Stop delivering: record why and leave the review's own state untouched."""
+    request = item.get("pr_review_request") if isinstance(item.get("pr_review_request"), dict) else {}
+    item["pr_review_error"] = error[:300]
+    item["pr_review_pending"] = False
+    event("findings_review_abandoned", item=item["id"], pr=item.get("pr"), run=request.get("run_id"),
+          attempts=item.get("pr_review_attempts"), error=item["pr_review_error"])
+    return f"findings review for PR #{item.get('pr')} abandoned: {item['pr_review_error']}"
+
+
 def _deliver_pr_review(item: Dict[str, Any]) -> Optional[str]:
     """Post the findings of one counted primary open/delta review on its PR as
     a pull-request review (pr_review_findings). Idempotent by the run marker,
     skipped for a closed or merged PR, retried by later ticks up to
-    PR_REVIEW_MAX_ATTEMPTS. Never touches the item's review or repair state."""
+    PR_REVIEW_MAX_ATTEMPTS. Never touches the item's review or repair state,
+    and never raises: a malformed request or an invalid identity is permanent
+    and settles at once instead of crashing the tick before save_queue."""
     request = item.get("pr_review_request")
     if not request or not item.get("pr_review_pending"):
         return None
     item["pr_review_attempts"] = item.get("pr_review_attempts", 0) + 1
-    meta = {"run_id": request["run_id"], "item_id": item["id"],
-            "base": request["base"], "head": request["head"]}
     try:
-        result = pr_review_findings.deliver(item_repo(item), request["pr"], meta, Path(request["ndjson"]))
-    except (RuntimeError, ValueError, OSError) as exc:
+        pr, ndjson = request["pr"], Path(request["ndjson"])
+        meta = {"run_id": request["run_id"], "item_id": item["id"],
+                "base": request["base"], "head": request["head"]}
+    except (KeyError, TypeError) as exc:
+        return _settle_pr_review(item, f"malformed findings review request: {exc!r}")
+    try:
+        result = pr_review_findings.deliver(item_repo(item), pr, meta, ndjson)
+    except ValueError as exc:
+        return _settle_pr_review(item, str(exc))
+    except (RuntimeError, OSError) as exc:
         item["pr_review_error"] = str(exc)[:300]
         if item["pr_review_attempts"] >= PR_REVIEW_MAX_ATTEMPTS:
-            item["pr_review_pending"] = False
-            event("findings_review_abandoned", item=item["id"], pr=request["pr"], run=request["run_id"],
-                  attempts=item["pr_review_attempts"], error=item["pr_review_error"])
-            return f"findings review for PR #{request['pr']} abandoned after {item['pr_review_attempts']} attempts"
+            return _settle_pr_review(item, f"{item['pr_review_attempts']} attempts failed; last: {exc}")
         return None
     item["pr_review"] = result
     item["pr_review_pending"] = False
     item.pop("pr_review_error", None)
-    event("findings_review_delivered", item=item["id"], pr=request["pr"], run=request["run_id"],
+    event("findings_review_delivered", item=item["id"], pr=pr, run=meta["run_id"],
           review=result.get("review_id"), state=result["state"],
           inline=result.get("inline"), body_only=result.get("body_only"))
-    return f"findings review on PR #{request['pr']} ({result['state']})"
+    return f"findings review on PR #{pr} ({result['state']})"
 
 
 def deliver_pending_pr_reviews(q: Dict[str, Any]) -> List[str]:

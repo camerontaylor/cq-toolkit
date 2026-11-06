@@ -30,9 +30,13 @@ REPO = re.compile(r"[\w.-]+/[\w.-]+")
 SHA = re.compile(r"[0-9a-f]{40}")
 HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", re.M)
 HTML_COMMENT = re.compile(r"<!--.*?-->", re.S)
-# Code spans and fences never notify; everything else is prose.
-CODE = re.compile(r"(```.*?(?:```|\Z)|`[^`\n]*`)", re.S)
+# CommonMark fences: a run of 3+ backticks or tildes at line start (0-3 spaces
+# indent); a backtick fence's info string holds no backtick. Mid-line runs are
+# inline code spans, closed only by an equal-length run on the same line.
+FENCE_OPEN = re.compile(r"^ {0,3}(`{3,}(?=[^`]*$)|~{3,})")
+SPAN = re.compile(r"(?<!`)(`+)(?!`)(.+?)(?<!`)\1(?!`)")
 MENTION = re.compile(r"(?<![\w`@/.])@(?=[A-Za-z0-9])")
+LOGIN = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}(?:\[bot\])?")
 ZWJ = "\u200d"
 
 Gh = Callable[..., Any]
@@ -82,23 +86,71 @@ def _line(value: Any) -> Optional[int]:
     return value if type(value) is int and value > 0 else None
 
 
+def _prose(segment: str) -> str:
+    """Prose outside code: no live mention, no opening of an HTML comment."""
+    return MENTION.sub("@" + ZWJ, segment).replace("<!--", "&lt;!--")
+
+
+def _inline(line: str) -> str:
+    out, at = [], 0
+    for match in SPAN.finditer(line):
+        out += [_prose(line[at:match.start()]), match.group(0)]
+        at = match.end()
+    return "".join(out + [_prose(line[at:])])
+
+
 def neutralise_mentions(text: str) -> str:
     """Insert a zero-width joiner after every `@` that GitHub would treat as a
-    user or team mention, outside code, so a posted finding never notifies
-    anyone. Code spans and fences are left byte-identical (`@types/node`)."""
-    parts = CODE.split(text)
-    return "".join(part if i % 2 else MENTION.sub("@" + ZWJ, part) for i, part in enumerate(parts))
+    user or team mention, and escape any `<!--` left in prose, outside code, so
+    a posted finding never notifies anyone or hides the text after it. Code
+    spans and line-start fences stay byte-identical (`@types/node`). A fence
+    left open is closed here, so it cannot swallow the next finding in the
+    same body and turn that finding's fenced code into live prose."""
+    out, fence = [], None
+    for line in text.split("\n"):
+        if fence:
+            out.append(line)
+            stripped = line.strip()
+            indent = len(line) - len(line.lstrip(" "))
+            if (indent <= 3 and stripped and set(stripped) == {fence[0]}
+                    and len(stripped) >= len(fence)):
+                fence = None
+            continue
+        opened = FENCE_OPEN.match(line)
+        if opened:
+            fence = opened.group(1)
+            out.append(line)
+            continue
+        out.append(_inline(line))
+    if fence:
+        out.append(fence)
+    return "\n".join(out)
+
+
+def one_line(text: str) -> str:
+    """A heading field (severity, title): one line, sanitised like prose."""
+    return neutralise_mentions(" ".join(HTML_COMMENT.sub("", " ".join(str(text).split())).split()))
+
+
+def code_span(text: str) -> str:
+    """`text` as one inline code span whatever backticks it holds (CommonMark:
+    a longer delimiter run, padded when the content touches a backtick)."""
+    text = " ".join(str(text).split())
+    runs = [len(r) for r in re.findall(r"`+", text)]
+    tick = "`" * (max(runs) + 1 if runs else 1)
+    pad = " " if text.startswith("`") or text.endswith("`") else ""
+    return f"{tick}{pad}{text}{pad}{tick}"
 
 
 def clean_text(text: str, title: str = "") -> str:
-    """Finding prose without HTML comments (no foreign bot markers, and no way
-    to forge the crq marker) and without a leading bold copy of the title.
-    Committable ```suggestion blocks become plain fences: a clamped anchor
-    could otherwise offer to replace the wrong lines."""
+    """Finding prose without HTML comments (no foreign bot markers) and without
+    a leading bold copy of the title. Committable ```suggestion blocks become
+    plain fences: a clamped anchor could otherwise offer to replace the wrong
+    lines."""
     text = HTML_COMMENT.sub("", text).strip()
     if title and text.startswith(f"**{title}**"):
         text = text[len(title) + 4:].lstrip()
-    text = re.sub(r"^(\s*)```suggestion\b", r"\1```text", text, flags=re.M)
+    text = re.sub(r"^( {0,3})```suggestion\b", r"\1```text", text, flags=re.M)
     return neutralise_mentions(text)
 
 
@@ -156,9 +208,9 @@ def build_review(meta: Dict[str, Any], findings: List[Dict[str, Any]],
     comments, unanchored = [], []
     for number, finding in enumerate(findings, 1):
         position = anchor(finding, hunks) if hunks is not None and len(comments) < MAX_INLINE else None
-        heading = f"**crq finding F{number} [{finding['severity']}]**"
+        heading = f"**crq finding F{number} [{one_line(finding['severity'])}]**"
         if finding["title"]:
-            heading += f" {neutralise_mentions(finding['title'])}"
+            heading += f" {one_line(finding['title'])}"
         text = clean_text(finding["text"], finding["title"])
         if position:
             where = _lines(finding)
@@ -168,7 +220,8 @@ def build_review(meta: Dict[str, Any], findings: List[Dict[str, Any]],
             unanchored.append((number, finding, heading, text))
     counts: Dict[str, int] = {}
     for finding in findings:
-        counts[finding["severity"]] = counts.get(finding["severity"], 0) + 1
+        severity = one_line(finding["severity"])
+        counts[severity] = counts.get(severity, 0) + 1
     summary = ", ".join(f"{n} {s}" for s, n in sorted(counts.items()))
     lines = [marker(run_id),
              f"### crq findings (CodeRabbit CLI, local run {run_id}, {base[:10]}..{head[:10]})", "",
@@ -180,7 +233,7 @@ def build_review(meta: Dict[str, Any], findings: List[Dict[str, Any]],
     if unanchored:
         lines += ["", "#### Not anchored to the PR diff", ""]
         for number, finding, heading, text in unanchored:
-            where = " ".join(x for x in (f"`{finding['path']}`" if finding["path"] else "", _lines(finding)) if x)
+            where = " ".join(x for x in (code_span(finding["path"]) if finding["path"] else "", _lines(finding)) if x)
             lines += [f"{heading}{' (' + where + ')' if where else ''}", "", _clip(text, MAX_COMMENT), ""]
     body = "\n".join(lines).rstrip() + "\n"
     if len(body) > MAX_BODY:
@@ -230,11 +283,23 @@ def pr_state(gh: Gh, repo: str, pr: int) -> Dict[str, Any]:
     return data
 
 
-def existing_review(gh: Gh, repo: str, pr: int, run_id: str) -> Optional[Dict[str, Any]]:
-    """The PR review already carrying this run's marker, across every page."""
+def authenticated_login(gh: Gh) -> str:
+    """The account this host's gh posts as; only its reviews count as ours."""
+    argv = ["gh", "api", "user", "--jq", ".login"]
+    login = (_ok(argv, _call(gh, argv)).stdout or "").strip()
+    if not LOGIN.fullmatch(login):
+        raise RuntimeError(f"gh api user returned no usable login: {login[:80]!r}")
+    return login
+
+
+def existing_review(gh: Gh, repo: str, pr: int, run_id: str, login: str) -> Optional[Dict[str, Any]]:
+    """The PR review by `login` whose body STARTS with this run's marker, across
+    every page. Neither another author nor a marker quoted inside some other
+    text can suppress a delivery."""
     wanted = json.dumps(marker(run_id))  # a JSON string literal is a jq string literal
     argv = ["gh", "api", "--paginate", f"repos/{repo}/pulls/{pr}/reviews?per_page=100",
-            "--jq", f'.[] | select((.body // "") | contains({wanted})) | {{id: .id, url: .html_url}}']
+            "--jq", f'.[] | select(.user.login == {json.dumps(login)} and '
+                    f'((.body // "") | startswith({wanted}))) | {{id: .id, url: .html_url}}']
     out = _ok(argv, _call(gh, argv))
     for line in (out.stdout or "").splitlines():
         try:
@@ -288,7 +353,7 @@ def deliver(repo: str, pr: int, meta: Dict[str, Any], ndjson: Path,
     state = pr_state(gh, repo, pr)
     if state["state"] != "open" or state.get("merged"):
         return {**result, "state": "skipped-closed"}
-    found = existing_review(gh, repo, pr, run_id)
+    found = existing_review(gh, repo, pr, run_id, authenticated_login(gh))
     if found:
         return {**result, "state": "existing", "review_id": found["id"], "review_url": found["url"]}
     hunks = diff_hunks(gh, repo, state["base"], head) if state.get("base") else None

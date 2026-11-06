@@ -191,14 +191,17 @@ reviewed head). This is independent of the repair enqueue above, which still run
   `crq findings (CodeRabbit CLI, local run <run_id>, <base10>..<head10>)`.
   HTML comments are stripped from finding text, and `suggestion` fences become
   plain fences, so no vendor marker or committable suggestion is copied.
-  `@mentions` outside code get a zero-width joiner after the `@`, so a
-  posted finding never notifies anyone.
+  Severity, title and text all get this treatment, and a leftover `<!--`
+  is escaped. `@mentions` outside code (line-start fences and inline spans)
+  get a zero-width joiner after the `@`, so a posted finding never notifies
+  anyone; paths are shown as safe code spans.
 - Delivery is debt, not an inline upload: harvest stores `pr_review_request`
   and `pr_review_pending` on the item; the bounded post-harvest pass in
   `tick()` delivers at most two per tick, least recently attempted first.
   Before posting it skips a closed or merged PR and looks for an existing
-  review carrying the run's marker, so a crash after the POST never posts
-  twice. A failure records `pr_review_error` and retries on later ticks, up
+  review by the authenticated `gh` account whose body starts with the run's
+  marker, so a crash after the POST never posts twice. A malformed request
+  or invalid identity settles at once. A failure records `pr_review_error` and retries on later ticks, up
   to five attempts (`findings_review_abandoned` event); success stores
   `pr_review` and emits `findings_review_delivered`. A newer run of the same
   item replaces an undelivered older request.

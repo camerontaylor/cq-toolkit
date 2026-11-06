@@ -43,8 +43,12 @@ class FakeGh:
         self.state, self.merged, self.existing = state, merged, existing
         self.post = list(post or [(0, json.dumps({"id": 77, "html_url": "https://x/r/77"}), "")])
 
+    login = "crq-host"
+
     def __call__(self, argv, *, input_text=None):
         self.calls.append((argv, input_text))
+        if argv[2:3] == ["user"]:
+            return SimpleNamespace(returncode=0, stdout=self.login + "\n", stderr="")
         target = next(a for a in argv[2:] if a.startswith("repos/"))
         if "--method" in argv:
             code, out, err = self.post.pop(0)
@@ -144,7 +148,44 @@ class ModuleTest(unittest.TestCase):
         self.assertEqual((result["state"], result["review_id"]), ("existing", 5))
         self.assertEqual(gh.posts(), [])
         listing = next(a for a, _ in gh.calls if "--paginate" in a)
-        self.assertIn('"<!-- crq-findings run=pr7-20261106T000000Z -->"', listing[-1])
+        self.assertIn('startswith("<!-- crq-findings run=pr7-20261106T000000Z -->")', listing[-1])
+        self.assertIn('.user.login == "crq-host"', listing[-1])
+
+    def test_marker_search_needs_a_usable_authenticated_login(self):
+        gh = FakeGh()
+        gh.login = ""
+        with self.assertRaisesRegex(RuntimeError, "no usable login"):
+            prf.deliver(REPO, 7, META, write_ndjson(self.td.name, [ANCHORED]), gh=gh)
+        self.assertEqual(gh.posts(), [])
+
+    def test_severity_title_and_path_are_sanitised(self):
+        forged = {"type": "finding", "severity": "major @sev\n<!-- x -->", "fileName": "a`b`.py @p",
+                  "startLine": 1, "title": "T <!-- crq-findings run=later-run --> @tom <!-- open",
+                  "comment": "body"}
+        review = prf.build_review(META, prf.load_findings(write_ndjson(self.td.name, [forged])), {})
+        body = review["body"]
+        self.assertEqual(body.count("<!--"), 1)  # only the run's own marker, first
+        self.assertTrue(body.startswith(prf.marker(META["run_id"])))
+        self.assertNotIn("later-run", body)
+        self.assertIn("&lt;!-- open", body)
+        self.assertNotRegex(body, r"@(sev|tom)")
+        self.assertIn("**crq finding F1 [major @\u200dsev]**", body)
+        self.assertIn("(``a`b`.py @p`` line 1)", body)
+
+    def test_mid_line_backticks_do_not_hide_later_mentions(self):
+        zwj = "\u200d"
+        cleaned = prf.clean_text("Use ``` here.\nThen ask @dave.")
+        self.assertIn(f"@{zwj}dave", cleaned)
+        self.assertIn(f"@{zwj}x", prf.clean_text("a `code` @x `more`"))
+
+    def test_an_unclosed_line_start_fence_is_code_and_gets_closed(self):
+        cleaned = prf.clean_text("intro @a\n```js\nimport '@scope/pkg'")
+        self.assertEqual(cleaned, "intro @\u200da\n```js\nimport '@scope/pkg'\n```")
+        self.assertEqual(prf.clean_text("~~~~\n@k\n~~~\n~~~~\n@j"), "~~~~\n@k\n~~~\n~~~~\n@\u200dj")
+
+    def test_unterminated_html_comment_is_escaped(self):
+        self.assertEqual(prf.clean_text("keep <!-- hidden rest"), "keep &lt;!-- hidden rest")
+        self.assertEqual(prf.clean_text("a <!-- gone --> b"), "a  b")
 
     def test_closed_or_merged_pr_is_skipped_without_posting(self):
         for gh in (FakeGh(state="closed"), FakeGh(state="closed", merged=True)):
@@ -264,6 +305,27 @@ class CrqIntegrationTest(unittest.TestCase):
         self.assertIn("502", item["pr_review_error"])
         self.assertEqual(event.call_args.args[0], "findings_review_abandoned")
         self.assertIsNone(crq._deliver_pr_review(item))  # no further attempts
+
+    def test_malformed_request_settles_at_once_without_raising(self):
+        item = self.pending("pr6")
+        del item["pr_review_request"]["head"]
+        with mock.patch.object(crq.pr_review_findings, "deliver") as deliver, \
+             mock.patch.object(crq, "event") as event:
+            self.assertIn("abandoned", crq._deliver_pr_review(item))
+        deliver.assert_not_called()
+        self.assertFalse(item["pr_review_pending"])
+        self.assertEqual(item["pr_review_attempts"], 1)
+        self.assertIn("malformed", item["pr_review_error"])
+        self.assertEqual(event.call_args.args[0], "findings_review_abandoned")
+
+    def test_invalid_identity_value_error_is_permanent(self):
+        item = self.pending("pr9")
+        with mock.patch.object(crq.pr_review_findings, "deliver",
+                               side_effect=ValueError("invalid PR review delivery identity")), \
+             mock.patch.object(crq, "event"):
+            self.assertIn("abandoned", crq._deliver_pr_review(item))
+        self.assertFalse(item["pr_review_pending"])
+        self.assertEqual(item["pr_review_attempts"], 1)
 
 
 if __name__ == "__main__":
