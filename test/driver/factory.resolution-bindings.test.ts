@@ -92,3 +92,57 @@ describe('driver factory — resolution', () => {
     await probe(agent.driver, /claude-code driver: unknown provider/);
   });
 });
+
+describe('aggregate config errors', () => {
+  const bad = (bindings: unknown) =>
+    createDriverFactory({ bindings: bindings as NonNullable<DriverFactoryConfig['bindings']> });
+  const msg = (f: () => unknown): string => {
+    try {
+      f();
+    } catch (err) {
+      return (err as Error).message;
+    }
+    return '';
+  };
+
+  test('two bad lane bindings give one error listing both, with suggestions', () => {
+    const f = bad({ fixer: { zai: 'claud-code' }, classifier: { '*': 'vendor' } });
+    const m = msg(() => f.resolve({ role: 'fixer', modelSpec: { provider: 'zai', model: 'm' } }));
+    expect(m).toContain('2 configuration problems');
+    expect(m).toContain("role 'fixer' on provider 'zai' names unknown lane 'claud-code'");
+    expect(m).toContain('did you mean `claude-code`?');
+    expect(m).toContain("role 'classifier' on provider '*' names unknown lane 'vendor'");
+    expect(m.split('\n').filter((l) => l.startsWith('- '))).toHaveLength(2);
+  });
+
+  test('a bad binding plus an unbound request are reported together', () => {
+    const f = bad({ fixer: { zai: 'nope-lane-x' } });
+    const m = msg(() => f.resolve({ role: 'fixer', modelSpec: { provider: 'nope', model: 'm' } }));
+    expect(m).toContain("unknown lane 'nope-lane-x'");
+    expect(m).toContain("no lane binding for role 'fixer' on provider 'nope'");
+  });
+
+  test('misspelled provider and role get suggestions', () => {
+    const f = createDriverFactory();
+    expect(
+      msg(() => f.resolve({ role: 'fixer', modelSpec: { provider: 'anthropc', model: 'm' } })),
+    ).toContain('did you mean provider `anthropic`?');
+    const g = createDriverFactory({ bindings: { fixer: { vendorx: 'acp' } } });
+    expect(
+      msg(() => g.resolve({ role: 'fixr', modelSpec: { provider: 'vendorx', model: 'm' } })),
+    ).toContain('role `fixer`');
+  });
+
+  test('a single problem keeps the old one-line message', () => {
+    const m = msg(() =>
+      createDriverFactory().resolve({
+        role: 'classifier',
+        modelSpec: { provider: 'nope', model: 'm' },
+      }),
+    );
+    expect(
+      m.startsWith("driver factory: no lane binding for role 'classifier' on provider 'nope'"),
+    ).toBe(true);
+    expect(m).not.toContain('\n');
+  });
+});
