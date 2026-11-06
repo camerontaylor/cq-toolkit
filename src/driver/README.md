@@ -239,7 +239,8 @@ earlier "no driver-side retries" note: the same endpoint is healthy on the
 classifier cell, so one retry recovers the hiccup; a governed abort still
 surfaces immediately.
 
-Stop reasons: governed abort or abort-shaped failure → `aborted`; token
+Stop reasons: governed run-signal abort → `aborted` (the ONLY cancellation
+source; an SDK-internal abort-shaped throw is a run failure); token
 budget tripped or SDK `length` → `budget`; SDK `error`/`content-filter` or
 a mid-run throw → `error`; otherwise `complete`.
 
@@ -257,7 +258,8 @@ not a driver failure — and `structuredOutput` is likewise never fabricated
 on those paths. The remaining `errorClass` values come from the structured
 cuts: `'transient'` for the SDK-retryable class (endpoint header timeout,
 network error) AND the non-retryable step-timeout abort (its `TimeoutError`
-name), `'rate-limit'`/`'quota'`/`'auth'`/`'provider-error'` per the limit
+name, or the generic `AbortError` its retry delay substitutes),
+`'rate-limit'`/`'quota'`/`'auth'`/`'provider-error'` per the limit
 rules, and `'unknown'` for anything message-only (a bare message regex is
 never a class). The classification lives in the exported pure
 `classifyRunFailure(err)`.

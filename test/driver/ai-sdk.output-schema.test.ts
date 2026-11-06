@@ -136,9 +136,12 @@ describe('ai-sdk driver seam v2 §2.3: invocation outputSchema + repair + provid
     }
   });
 
-  test.each(['provider', 'abort'] as const)(
-    'failed repair keeps observed usage unpriced: %s',
-    async (failure) => {
+  test.each([
+    ['provider', 'unknown'],
+    ['abort', 'transient'],
+  ] as const)(
+    'failed repair keeps observed usage unpriced: %s → error/%s',
+    async (failure, errorClass) => {
       let modelCalls = 0;
       const mock = new MockLanguageModelV4({
         modelId: 'mock-1',
@@ -159,7 +162,12 @@ describe('ai-sdk driver seam v2 §2.3: invocation outputSchema + repair + provid
         });
         const result = await driver.run(invocation({ outputSchema: ANSWER_OUTPUT_SCHEMA }));
         expect(modelCalls).toBe(2);
-        expect(result.stopReason).toBe(failure === 'abort' ? 'aborted' : 'error');
+        // Only the GOVERNED signal is cancellation (I8): a bare AbortError
+        // here (no RunOptions.signal fired) is a run failure. The SDK step
+        // timeout during retry backoff surfaces exactly this way, so it
+        // classifies as the transient failure it is.
+        expect(result.stopReason).toBe('error');
+        expect(result.errorClass).toBe(errorClass);
         expect(result.usage).toEqual({ input: 100, output: 12, cacheRead: 15, cacheWrite: 5 });
         expect(result.costUSD).toBeUndefined();
         expect(result.costBasis).toBeUndefined();
