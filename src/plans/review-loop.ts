@@ -575,11 +575,13 @@ export interface EnrichedFixItem {
 
 /**
  * Σ of the frozen Usage fields — the governor's token-rollup fold (DD-9
- * totalTokensOf), so a sweep decrements its token budget by exactly what the
+ * totalTokensOf, including additive `reasoning`), so a sweep decrements its token budget by exactly what the
  * governor counted against the cap. Absent usage is 0.
  */
 export const totalTokens = (usage: Usage | undefined): number =>
-  usage === undefined ? 0 : usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
+  usage === undefined
+    ? 0
+    : usage.input + usage.output + usage.cacheRead + usage.cacheWrite + (usage.reasoning ?? 0);
 
 /**
  * Correlate one ClassifiedItem against the fetched state and build the
@@ -1587,14 +1589,20 @@ async function runOwnedReviewLoop(
   const fixJobsRan = plan.jobs.length > 0;
   let verify: VerifyOutcome | undefined;
   if (fixJobsRan) {
-    const after = await snapshotPrState({
-      owner: opts.owner,
-      repo: opts.repo,
-      pr: opts.pr,
-      run: opts.gh,
-      nowMs: opts.nowMs,
-    });
-    verify = verifyPrOutcome(before, after, { responderLogin: opts.responderLogin ?? null });
+    try {
+      const after = await snapshotPrState({
+        owner: opts.owner,
+        repo: opts.repo,
+        pr: opts.pr,
+        run: opts.gh,
+        nowMs: opts.nowMs,
+      });
+      verify = verifyPrOutcome(before, after, { responderLogin: opts.responderLogin ?? null });
+    } catch (err) {
+      // Observability only: a failed after-snapshot is recorded, never hidden
+      // (I5), but must not strand replies/resolves for a fix already pushed.
+      reasons.push(`verify snapshot failed: ${String(err).slice(0, PUSH_REASON_MAX)}`);
+    }
     // VerifyOutcome is OBSERVABILITY ONLY (round-2 finding 6): it rides the
     // outcome payload and never feeds hasFailures — resolve gating is the
     // per-item commit verification, and one thread's missing PR-wide signal
@@ -1766,6 +1774,10 @@ async function runOwnedReviewLoop(
   // already published when the reply recorded, and the resolve mutation
   // pushes nothing.
   actions.push(...carriedResolves);
+  if (opts.publish === false && carriedResolves.length > 0)
+    reasons.push(
+      `${String(carriedResolves.length)} carried resolve(s) withheld; publication requires --push`,
+    );
 
   // (7) Reply + resolve over the gh seam — push-before-post (the same
   // composed worktree push: an idempotent re-assertion against origin races
