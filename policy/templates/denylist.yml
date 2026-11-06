@@ -57,7 +57,9 @@ jobs:
       - name: Scan added commits
         env:
           RANGE: ${{ steps.range.outputs.range }}
-        run: gitleaks git --no-banner --redact --config .gitleaks.toml --log-opts="$RANGE" .
+        # --diff-merges=remerge: git log -p skips merge commits by default; this
+        # shows what each merge itself introduced beyond the automatic merge.
+        run: gitleaks git --no-banner --redact --config .gitleaks.toml --log-opts="$RANGE --diff-merges=remerge" .
       - name: Scan commit messages
         env:
           RANGE: ${{ steps.range.outputs.range }}

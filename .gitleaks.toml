@@ -41,21 +41,28 @@ keywords = ["webfront"]
 [[rules]]
 id = "personal-paths"
 description = "Personal machine and deployment home directories"
-# The secret is the part after /home/: gitleaks' default global allowlist
-# ignores a finding whose secret is a bare /home/... path.
+# The secret is the part after /home/. With useDefault = true, gitleaks'
+# default global allowlist silently drops any finding whose secret is a bare
+# /home/... (or /tmp, /usr, ...) path, so path-shaped rules need secretGroup.
 regex = '''/home/(ctaylor|app/webfront)\b'''
 secretGroup = 1
 keywords = ["ctaylor", "webfront"]
 
 [[rules]]
-id = "env-file"
-description = "A committed .env file is treated as key material"
-path = '''(^|/)\.env(\.[^/]+)?$'''
+id = "route-key-material"
+description = "Gateway route key values"
+regex = '''\bpk-[A-Za-z0-9_-]{16,}'''
+keywords = ["pk-"]
 
 [[rules]]
-id = "agent-credentials"
-description = "Agent credential and local settings files"
-path = '''(^|/)\.claude/(\.credentials\.json|settings\.local\.json)$'''
+id = "env-file"
+description = "A committed .env or .envrc file is treated as key material"
+path = '''(^|/)([^/]*\.env|\.env\.[^/]+|\.envrc)$'''
+
+[[rules]]
+id = "agent-local-state"
+description = "Agent credentials, local settings and session state (history, pastes, shell snapshots)"
+path = '''(^|/)\.claude/(\.credentials\.json|settings\.local\.json|history\.jsonl|paste-cache|shell-snapshots|session-env|file-history)(/|$)|(^|/)\.(zcode|paseo)/'''
 
 [[allowlists]]
 description = "Tooling directories, this file, and the legacy pattern corpus (intentionally dirty samples)"

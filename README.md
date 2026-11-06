@@ -242,7 +242,7 @@ CRQ reviews after merge. See [merge policy](docs/promotion-policy.md) and the
 
 ## Self-hosting
 
-Stage 1 reached: CI runs the toolkit from source. The `from-source` job in [`.github/workflows/ci.yml`](.github/workflows/ci.yml) builds the package and drives a real governed plan through the built barrel (`scripts/smoke-run-plan.mjs` — two jobs, claude-code driver (CLI transport), journal + report + I1 output contract asserted), and the [pack audit](.github/workflows/pack-audit.yml) tarballs the package, asserts every shipped path hangs off the `files` allowlist, and denylist-scans the unpacked tree. The required `static` job regenerates the op reference and fails on drift, so `docs/ops/` cannot diverge from the registry.
+Stage 1 reached: CI runs the toolkit from source. The `from-source` job in [`.github/workflows/ci.yml`](.github/workflows/ci.yml) builds the package and drives a real governed plan through the built barrel (`scripts/smoke-run-plan.mjs` — two jobs, claude-code driver (CLI transport), journal + report + I1 output contract asserted), and the [pack audit](.github/workflows/pack-audit.yml) tarballs the package, asserts every shipped path hangs off the `files` allowlist, and scans the unpacked tree with gitleaks. The required `static` job regenerates the op reference and fails on drift, so `docs/ops/` cannot diverge from the registry.
 
 CI and self-hosted review jobs also require the host `rg` executable for the
 harness search tools. Ripgrep **11.0.0 is the runtime floor**; CI installs the
