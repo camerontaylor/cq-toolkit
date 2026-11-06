@@ -18,6 +18,9 @@ import unittest
 
 from test_deploy_controller_fixtures import OPS, ROOT, ControllerFixture, dc, host
 
+# Generous bound: far above any first-tick wait plus interval the CLI tests use.
+CLI_TIMEOUT_SECONDS = 120
+
 
 class CliTests(ControllerFixture):
     """End-to-end CLI invocations with faked systemctl; JSON on stdout."""
@@ -34,7 +37,8 @@ class CliTests(ControllerFixture):
             ["python3", "-B", str(OPS / "deploy-controller.py"),
              "--root", str(self.root), "--overlay", str(self.overlay_path),
              "--record-dir", str(self.record_dir), *args],
-            capture_output=True, text=True, env=merged)
+            capture_output=True, text=True, env=merged,
+            timeout=CLI_TIMEOUT_SECONDS)
 
     def test_switch_cli_succeeds_with_fake_systemctl_and_emits_json(self):
         self.switch_cli_fixture()
@@ -95,9 +99,10 @@ class CliTests(ControllerFixture):
         self.command("restore", "--", host.CONFIG)
         helper = self.runner / "ops/prepare-host.py"
         original = helper.read_text()
-        helper.write_text(original.replace(
-            "POLICY_FLOOR = 'f748fd43e75505f4e89098a4ffe28fa2a179a50c'",
-            "POLICY_FLOOR = '" + self.before + "'"))
+        pin = "POLICY_FLOOR = 'f748fd43e75505f4e89098a4ffe28fa2a179a50c'"
+        self.assertEqual(original.count(pin), 1,
+                         "prepare-host.py POLICY_FLOOR literal changed; update fixture pin")
+        helper.write_text(original.replace(pin, "POLICY_FLOOR = '" + self.before + "'"))
         # The edited helper bytes must not look like checkout drift: commit the
         # pinned copy into the fixture clone (same content, new commit).
         self.command("add", "apps/crq-python")
