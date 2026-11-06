@@ -333,6 +333,7 @@ describe('bounded per-fix related mapping', () => {
   const tests = [
     'test/ops/dev/check.test.ts',
     'test/ops/dev/check-affected.test.ts',
+    'test/ops/dev/checker.test.ts',
     'test/ops/review/run.deadline.test.ts',
   ];
   it('maps source prefixes and touched tests, deduplicated', () => {
@@ -340,6 +341,9 @@ describe('bounded per-fix related mapping', () => {
       files: tests.slice(0, 2).sort(),
       advisory: undefined,
     });
+    expect(selectRelatedTests(['src/ops/dev/check.ts'], tests).files).not.toContain(
+      'test/ops/dev/checker.test.ts',
+    );
   });
   it('records an advisory when none map', () => {
     expect(selectRelatedTests(['README.md'], tests)).toEqual({
@@ -348,7 +352,7 @@ describe('bounded per-fix related mapping', () => {
     });
   });
   it('keeps all mapped files without a file-count cap', () => {
-    const files = Array.from({ length: 12 }, (_, i) => `test/a${i}.test.ts`);
+    const files = Array.from({ length: 12 }, (_, i) => `test/a.${i}.test.ts`);
     expect(selectRelatedTests(['src/a.ts'], files).files).toHaveLength(12);
   });
   it('reuses non-import mappings', () => {
