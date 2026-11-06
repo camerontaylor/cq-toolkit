@@ -532,6 +532,8 @@ def run_inventory(c, queue, *, required_paths=None, members=None, fetch=True, en
     config = settings(c.STATE)
     if not config:
         raise ledger.IntegrityError("operator rollout configuration required for inventory publication")
+    if enqueue and config.get("enabled") is not True:
+        raise ledger.IntegrityError("operator rollout must be enabled before inventory enqueue")
     repo, store, outbox, publisher = services(c, config)
     repo.immutable_cache = {}  # This invocation only; keys contain immutable object IDs.
     # Cross-run, disposable index of immutable Git-derived facts (lineage, blame,
