@@ -383,6 +383,7 @@ export function makeFixRun(deps: FixRunDeps = {}) {
       unit: SweepUnitDispatchInput;
       segments: { kind: string; slug: string; branch: string };
       reason: string;
+      outcome: 'not-started' | 'exhausted';
     }> = [];
     const collected = new Map<string, SweepUnitReport>();
     /** The dispatch's collision-resolved segments, or the derived default. */
@@ -400,7 +401,7 @@ export function makeFixRun(deps: FixRunDeps = {}) {
         .map(plannedTaskRowOf)
         .concat(
           unstartedUnits.map((entry) =>
-            neverStartedRow(entry.segments, entry.unit.package, entry.reason),
+            neverStartedRow(entry.segments, entry.unit.package, entry.reason, entry.outcome),
           ),
         );
       report.counters = fixRunCounters(report.planned);
@@ -906,6 +907,7 @@ export function makeFixRun(deps: FixRunDeps = {}) {
                       : result.status === 'budget-exhausted'
                         ? 'unit halted on a budget bound'
                         : 'enclosing job cancelled before unit dispatch',
+                outcome: result.status === 'budget-exhausted' ? 'exhausted' : 'not-started',
               });
             return result;
           } catch (error) {
@@ -1023,6 +1025,7 @@ export function makeFixRun(deps: FixRunDeps = {}) {
                   : row.result.status === 'needs-human'
                     ? `unit stopped for human review: ${row.result.reason}`
                     : 'unit halted on a budget bound',
+            outcome: row.result.status === 'budget-exhausted' ? 'exhausted' : 'not-started',
           });
         }
       }
@@ -1188,6 +1191,7 @@ export function makeFixRun(deps: FixRunDeps = {}) {
               unit,
               segments: dispatchSegments(unit),
               reason: 'enclosing job cancelled before unit dispatch',
+              outcome: 'not-started',
             });
           }
         }
