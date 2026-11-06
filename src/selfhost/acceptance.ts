@@ -85,9 +85,9 @@ export interface AcceptanceTrustConfig {
 }
 
 /** A GitHub login, optionally `[bot]`-suffixed — the only bot entry shape accepted. */
-const BOT_ENTRY_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\[bot\])?$/;
-const ACCEPT_STATES: readonly string[] = ['APPROVED', 'COMMENTED'];
-const ASSOCIATIONS: readonly string[] = ['OWNER', 'MEMBER', 'COLLABORATOR'];
+export const BOT_ENTRY_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\[bot\])?$/;
+export const ACCEPT_STATES: readonly string[] = ['APPROVED', 'COMMENTED'];
+export const ASSOCIATIONS: readonly string[] = ['OWNER', 'MEMBER', 'COLLABORATOR'];
 
 /**
  * One P7 comma-list key: entries trimmed, empties dropped, every entry

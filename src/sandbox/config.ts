@@ -79,7 +79,7 @@ function platformOf(platform: NodeJS.Platform): SandboxPlatform {
   return 'other';
 }
 
-function parseBackend(raw: string | undefined): SandboxBackend | 'auto' | undefined {
+export function parseBackend(raw: string | undefined): SandboxBackend | 'auto' | undefined {
   if (raw === undefined || raw.trim() === '') return undefined;
   if (raw === 'auto') return 'auto';
   if (!BACKENDS.has(raw as SandboxBackend)) {
@@ -90,25 +90,25 @@ function parseBackend(raw: string | undefined): SandboxBackend | 'auto' | undefi
   return raw as SandboxBackend;
 }
 
-function parseMode(raw: string | undefined): SandboxMode {
+export function parseMode(raw: string | undefined): SandboxMode {
   if (raw === undefined || raw.trim() === '') return 'required';
   if (raw === 'off' || raw === 'required') return raw;
   throw new Error(`sandbox: CQ_SANDBOX must be 'off' or 'required', got '${raw}'`);
 }
 
-function parseNetwork(raw: string | undefined): SandboxNetwork {
+export function parseNetwork(raw: string | undefined): SandboxNetwork {
   if (raw === undefined || raw.trim() === '') return 'model-only';
   if (raw === 'model-only' || raw === 'allow') return raw;
   throw new Error(`sandbox: CQ_SANDBOX_NETWORK must be 'model-only' or 'allow', got '${raw}'`);
 }
 
-function parseRunTool(raw: string | undefined): 'on' | 'off' {
+export function parseRunTool(raw: string | undefined): 'on' | 'off' {
   if (raw === undefined || raw.trim() === '') return 'on';
   if (raw === 'on' || raw === 'off') return raw;
   throw new Error(`sandbox: CQ_RUN_TOOL must be 'on' or 'off', got '${raw}'`);
 }
 
-function parsePassthrough(raw: string | undefined): readonly string[] {
+export function parsePassthrough(raw: string | undefined): readonly string[] {
   if (raw === undefined || raw.trim() === '') return [];
   const names = raw
     .split(',')

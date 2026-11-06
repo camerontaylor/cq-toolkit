@@ -54,7 +54,7 @@ export interface ProtectedPathsConfig {
   readonly layer: 'default' | 'env' | 'call';
 }
 
-const isPosture = (raw: string): raw is ProtectedPathsPosture =>
+export const isPosture = (raw: string): raw is ProtectedPathsPosture =>
   (PROTECTED_PATHS_POSTURES as readonly string[]).includes(raw);
 
 /**
