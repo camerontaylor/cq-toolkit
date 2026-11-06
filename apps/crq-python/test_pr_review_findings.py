@@ -112,6 +112,21 @@ class ModuleTest(unittest.TestCase):
     def test_suggestion_fences_never_become_committable(self):
         self.assertEqual(prf.clean_text("x\n```suggestion\ny\n```"), "x\n```text\ny\n```")
 
+    def test_mentions_never_notify_but_code_is_untouched(self):
+        zwj = "\u200d"
+        text = "Ask @alice and @org/team; mail a@b.com.\n`@types/node` stays.\n```js\nimport x from '@scope/pkg'\n```\n"
+        cleaned = prf.clean_text(text)
+        self.assertIn(f"@{zwj}alice", cleaned)
+        self.assertIn(f"@{zwj}org/team", cleaned)
+        self.assertIn("a@b.com", cleaned)
+        self.assertIn("`@types/node`", cleaned)
+        self.assertIn("'@scope/pkg'", cleaned)
+        finding = {**OUTSIDE, "title": "Ping @bob", "comment": "cc @carol"}
+        review = prf.build_review(META, prf.load_findings(write_ndjson(self.td.name, [finding])), {})
+        self.assertNotRegex(review["body"], r"@(bob|carol)")
+        self.assertIn(f"Ping @{zwj}bob", review["body"])
+        self.assertIn(f"cc @{zwj}carol", review["body"])
+
     def test_deliver_posts_inline_and_body_findings_once(self):
         gh = FakeGh()
         path = write_ndjson(self.td.name, [ANCHORED, OUTSIDE])

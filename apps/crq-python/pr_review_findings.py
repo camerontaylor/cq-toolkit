@@ -30,6 +30,10 @@ REPO = re.compile(r"[\w.-]+/[\w.-]+")
 SHA = re.compile(r"[0-9a-f]{40}")
 HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", re.M)
 HTML_COMMENT = re.compile(r"<!--.*?-->", re.S)
+# Code spans and fences never notify; everything else is prose.
+CODE = re.compile(r"(```.*?(?:```|\Z)|`[^`\n]*`)", re.S)
+MENTION = re.compile(r"(?<![\w`@/.])@(?=[A-Za-z0-9])")
+ZWJ = "\u200d"
 
 Gh = Callable[..., Any]
 
@@ -78,6 +82,14 @@ def _line(value: Any) -> Optional[int]:
     return value if type(value) is int and value > 0 else None
 
 
+def neutralise_mentions(text: str) -> str:
+    """Insert a zero-width joiner after every `@` that GitHub would treat as a
+    user or team mention, outside code, so a posted finding never notifies
+    anyone. Code spans and fences are left byte-identical (`@types/node`)."""
+    parts = CODE.split(text)
+    return "".join(part if i % 2 else MENTION.sub("@" + ZWJ, part) for i, part in enumerate(parts))
+
+
 def clean_text(text: str, title: str = "") -> str:
     """Finding prose without HTML comments (no foreign bot markers, and no way
     to forge the crq marker) and without a leading bold copy of the title.
@@ -86,7 +98,8 @@ def clean_text(text: str, title: str = "") -> str:
     text = HTML_COMMENT.sub("", text).strip()
     if title and text.startswith(f"**{title}**"):
         text = text[len(title) + 4:].lstrip()
-    return re.sub(r"^(\s*)```suggestion\b", r"\1```text", text, flags=re.M)
+    text = re.sub(r"^(\s*)```suggestion\b", r"\1```text", text, flags=re.M)
+    return neutralise_mentions(text)
 
 
 # ----------------------------------------------------------- anchoring
@@ -145,7 +158,7 @@ def build_review(meta: Dict[str, Any], findings: List[Dict[str, Any]],
         position = anchor(finding, hunks) if hunks is not None and len(comments) < MAX_INLINE else None
         heading = f"**crq finding F{number} [{finding['severity']}]**"
         if finding["title"]:
-            heading += f" {finding['title']}"
+            heading += f" {neutralise_mentions(finding['title'])}"
         text = clean_text(finding["text"], finding["title"])
         if position:
             where = _lines(finding)

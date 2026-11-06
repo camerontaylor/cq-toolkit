@@ -191,6 +191,8 @@ reviewed head). This is independent of the repair enqueue above, which still run
   `crq findings (CodeRabbit CLI, local run <run_id>, <base10>..<head10>)`.
   HTML comments are stripped from finding text, and `suggestion` fences become
   plain fences, so no vendor marker or committable suggestion is copied.
+  `@mentions` outside code get a zero-width joiner after the `@`, so a
+  posted finding never notifies anyone.
 - Delivery is debt, not an inline upload: harvest stores `pr_review_request`
   and `pr_review_pending` on the item; the bounded post-harvest pass in
   `tick()` delivers at most two per tick, least recently attempted first.

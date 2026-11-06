@@ -2245,8 +2245,10 @@ def _request_pr_review(item: Dict[str, Any], run_id: str, meta: Dict[str, Any], 
                        cls: Dict[str, Any]) -> None:
     """Persist PR-review delivery debt for a counted primary open/delta review.
 
-    A newer run of the same item replaces an older undelivered request: the
-    newer review covers the item's current range."""
+    Deliberate (owner ruling, PR #1069): a newer run of the same item replaces
+    an older request that was never delivered, and the older run's findings are
+    then not posted. The newer review covers the item's current range, so it is
+    the more useful one; an already delivered review is unaffected."""
     item["pr_review_request"] = {"run_id": run_id, "pr": item["pr"], "base": meta["base"],
                                  "head": meta["head"], "ndjson": str(rdir / "review.ndjson"),
                                  "severity_counts": cls["severity_counts"]}
