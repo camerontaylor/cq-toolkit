@@ -75,6 +75,12 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
     "set": {
       "additionalProperties": false,
       "properties": {
+        "advisories": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "exitCode": {
           "type": [
             "number",
@@ -136,6 +142,36 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
             "type": "object"
           },
           "type": "array"
+        },
+        "numPassed": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "numPassedTests": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "numPendingTests": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "numSkippedTests": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "numTodoTests": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "numTotalTests": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
         },
         "tool": {
           "maxLength": 500,

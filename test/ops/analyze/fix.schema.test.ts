@@ -22,6 +22,15 @@ describe('AnalyzeFixInputSchema', () => {
     expect(AnalyzeFixInputSchema.safeParse({ dir: '.', clusterId: 'xyz' }).success).toBe(false);
   });
 
+  test('a numeric id shorter than eight digits is refused, never zero-padded', () => {
+    // 1234567 must not become 01234567 (a different cluster's id).
+    expect(AnalyzeFixInputSchema.safeParse({ dir: '.', clusterId: 1234567 }).success).toBe(false);
+    expect(AnalyzeFixInputSchema.safeParse({ dir: '.', clusterId: 123456789 }).success).toBe(false);
+    expect(AnalyzeFixInputSchema.parse({ dir: '.', clusterId: 10000000 }).clusterId).toBe(
+      '10000000',
+    );
+  });
+
   test('a JSON-object rule (what the CLI parses) becomes rule text', () => {
     const parsed = AnalyzeFixInputSchema.parse({ dir: '.', rule: { id: 'r' }, files: ['a.ts'] });
     expect(parsed.rule).toBe('{"id":"r"}');
