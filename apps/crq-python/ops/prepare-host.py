@@ -126,7 +126,9 @@ def validate(overlay):
                 seen.add(repo)
                 clone = entry.get('clone')
                 if clone is not None:
-                    host_path(clone)
+                    clone_path = host_path(clone)
+                    if not outside(clone_path, deploy) or not outside(deploy, clone_path):
+                        raise ValueError('repos clone must be separate from deployment clone')
         elif name in PATH_KEYS:
             # The accepted legacy renderer records a literal ~/ key path.
             # CRQ expands it only at SSH invocation; retain those config bytes.
@@ -285,7 +287,15 @@ def inactive(root):
         args = ['systemctl', '--user', command, '--no-legend', '--no-pager', '--plain']
         if command == 'list-units':
             args.append('--all')
-        for line in run([*args, 'crq-*']).splitlines():
+        try:
+            output = run([*args, 'crq-*'])
+        except subprocess.CalledProcessError as exc:
+            # A unit-file pattern that matches nothing exits 1 with no diagnostic.
+            # An unavailable user bus or any other failure still raises.
+            if command != 'list-unit-files' or exc.returncode != 1 or (exc.stderr or '').strip():
+                raise
+            output = ''
+        for line in output.splitlines():
             name = line.split()[0] if line.split() else ''
             if not name.startswith('crq-') or not re.fullmatch(r'[A-Za-z0-9_.@:-]+', name):
                 raise ValueError('unrecognized CRQ unit listing')
@@ -451,6 +461,9 @@ def legacy_check(root, overlay, raw):
     """Read-only first-deploy fence: accepted source + host overrides + 5→1 only."""
     if git(root, 'rev-parse', 'HEAD') != LEGACY_SHA:
         raise ValueError('legacy checkout HEAD must match the accepted baseline')
+    tracked = git(root, 'status', '--porcelain', '--untracked-files=no').splitlines()
+    if any(line != ' M config.json' for line in tracked):
+        raise ValueError('legacy checkout has tracked changes other than config.json')
     config = apply(committed(root, LEGACY_SHA, 'config.json'), overlay)
     if config['promotion']['merges_trigger'] != 5:
         raise ValueError('unexpected accepted baseline policy')
