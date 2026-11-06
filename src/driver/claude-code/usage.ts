@@ -320,7 +320,12 @@ export function computeDerivedCost(
 
 /**
  * Per-model derived pricing. An unpriced contributing model yields NO cost
- * (its id is reported in `fallbackModels`); it is never priced at another rate.
+ * (DD-9 §4 fail-loud), never a borrowed rate. Its id is reported in
+ * `fallbackModels` only when the fold was PARTIALLY priced: a fold with no
+ * priced contributor at all simply has no modeled cost (the ordinary
+ * unpriced baseline), so nothing is surprising to narrate — routine
+ * bookkeeping must not widen the record's role-'tool' contract (the
+ * conformance mode-none leg pins that record shape).
  */
 export function modelUsageCost(
   pricing: ((modelSpec: ModelSpec) => PerMillionRates | undefined) | undefined,
@@ -332,20 +337,22 @@ export function modelUsageCost(
     return { ...(costUSD === undefined ? {} : { costUSD }), fallbackModels: [] };
   }
   let total = 0;
-  const fallbackModels: string[] = [];
+  let pricedContributors = 0;
+  const unpriced: string[] = [];
   for (const [model, usage] of Object.entries(measured.perModel)) {
     const cost = computeDerivedCost(pricing, { ...served, model }, usage);
     if (cost === undefined) {
-      // Unpriced contributor: no cost (DD-9 §4 fail-loud), never a borrowed rate.
-      fallbackModels.push(model);
-      return { fallbackModels };
+      unpriced.push(model);
+      continue;
     }
     total += cost;
+    pricedContributors += 1;
   }
-  return { costUSD: total, fallbackModels };
+  if (unpriced.length > 0) return { fallbackModels: pricedContributors > 0 ? unpriced : [] };
+  return { costUSD: total, fallbackModels: [] };
 }
 
-/** Measure and price the settled result once, recording any applied rate fallback. */
+/** Measure and price the settled result once, narrating a partially priced fold. */
 export function prepareResultUsage(
   result: Record<string, unknown> | undefined,
   pricing: ((modelSpec: ModelSpec) => PerMillionRates | undefined) | undefined,

@@ -359,6 +359,21 @@ test('mixed-model pricing uses each rate and yields no cost for an unpriced mode
   expect(cost.fallbackModels).toEqual(['unknown']);
 });
 
+test('a fold with no priced contributor stays silent — the unpriced baseline', () => {
+  const measured = measureResultUsage({
+    modelUsage: { 'conformance-1': { inputTokens: 1_000_000 } },
+  })!;
+  const cost = modelUsageCost(
+    undefined,
+    { provider: 'anthropic', model: 'conformance-1' },
+    measured,
+  );
+  expect(cost.costUSD).toBeUndefined();
+  // Nothing was priced, so nothing surprising happened: no marker means the
+  // record keeps its role-'tool' contract (the conformance mode-none leg).
+  expect(cost.fallbackModels).toEqual([]);
+});
+
 test('a malformed per-model entry is unshaped and yields to the flat usage', () => {
   expect(modelUsageEntryFromWire({ inputTokens: 'invalid' })).toBeUndefined();
   expect(
