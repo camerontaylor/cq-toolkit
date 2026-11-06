@@ -35,7 +35,7 @@
     "^\\.cq/tool/",
     "^baselines/",
     "^src/ops/gates/protectedPaths\\.ts$",
-    "^scripts/denylist-scan$",
+    "^\\.gitleaks\\.toml$",
     "^policy/protected-paths\\.json$",
     "^policy/attestations/",
     "(?:^|/)\\.oxlintrc\\.json$",

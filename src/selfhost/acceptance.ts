@@ -38,6 +38,7 @@
 // one-line, capped, log-safe reason. Report lines carry counts, actor keys
 // and reasons — never review bodies or tokens.
 import { pathToFileURL } from 'node:url';
+import { ACCEPT_STATES, ASSOCIATIONS, BOT_ENTRY_RE } from '../config/values.js';
 import { GhError, ghNameOk, makeGhRunner } from '../adapters/forge-github/gh.js';
 import type { GhFn } from '../adapters/forge-github/gh.js';
 import { countUnresolvedThreads } from '../ops/review/threads.js';
@@ -83,11 +84,6 @@ export interface AcceptanceTrustConfig {
   /** One log line per key: `<ENV_KEY>=<resolved value> (<layer>)`. */
   report: string[];
 }
-
-/** A GitHub login, optionally `[bot]`-suffixed — the only bot entry shape accepted. */
-const BOT_ENTRY_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\[bot\])?$/;
-const ACCEPT_STATES: readonly string[] = ['APPROVED', 'COMMENTED'];
-const ASSOCIATIONS: readonly string[] = ['OWNER', 'MEMBER', 'COLLABORATOR'];
 
 /**
  * One P7 comma-list key: entries trimmed, empties dropped, every entry

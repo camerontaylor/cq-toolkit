@@ -17,7 +17,7 @@ export const tools =
   async (command, args) => {
     const scripted = await override(command, args);
     if (scripted !== undefined) return scripted;
-    if (command === 'pnpm' || command === 'node') return 'ok\n';
+    if (command === 'pnpm' || command === 'node' || command === 'gitleaks') return 'ok\n';
     return undefined;
   };
 

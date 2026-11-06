@@ -68,9 +68,9 @@ The instance table supplies token values; preserve the provenance header.
 
 ## The bootstrap rule
 
-`ci.yml` and `denylist.yml` hand-carry the documented `required-check.md` pattern;
-their job bodies are repository-specific, so they are not rendered from YAML
-slots. The static job calls the shared static-gate composite action. An adopter
+`ci.yml` hand-carries the documented `required-check.md` pattern; its job body
+is repository-specific, so it is not rendered from YAML slots. `denylist.yml` is
+rendered from `denylist.yml` here like the other instances. The static job calls the shared static-gate composite action. An adopter
 supplies its own commands in the documentation template's COMMANDS slot.
 Required check workflows never filter PR triggers. Their check-run names,
 not workflow names, are used in repository settings.

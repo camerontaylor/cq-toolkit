@@ -109,7 +109,9 @@ the object it points to is not. Each recomputation keeps one more
 content-addressed object in the durable artifact store, and nothing collects it
 once the pointer moves on. Because the target changes on most runs, that is up
 to one object per required PR per six-hour run. Durable-store collection is a
-later operator task (`apps/crq-python/ops/tree-snapshots.md`). Bump `LINEAGE_RESULT_EPOCH` in
+later operator task (#1064). Step 5 above retains artifacts at least as long
+as every referencing ledger record; no ledger record references these objects,
+only the disposable pointer does. Bump `LINEAGE_RESULT_EPOCH` in
 `backfill_accounting.py` when lineage result semantics change, so that old
 pointers stop matching. Historical lineage still
 rejects intermediate deletions and ambiguous renames, including for coverage

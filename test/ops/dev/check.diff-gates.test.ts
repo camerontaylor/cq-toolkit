@@ -51,9 +51,10 @@ describe('dev.check', () => {
     await repo.write('README.md', '# unstaged edit\n');
     const seen: string[] = [];
     const effects = effectsFor(async (command, args) => {
-      if (command !== 'node') return undefined;
-      expect(args[1]).toBe('--tree');
-      const tree = (args[0] ?? '').replace(/\/scripts\/denylist-scan$/, '');
+      if (command !== 'gitleaks') return undefined;
+      expect(args[0]).toBe('dir');
+      const tree = args.at(-1) ?? '';
+      expect(args).toContain(`${tree}/.gitleaks.toml`);
       seen.push(await readFile(`${tree}/src/staged.ts`, 'utf8'));
       seen.push(await readFile(`${tree}/README.md`, 'utf8'));
       return 'clean\n';
