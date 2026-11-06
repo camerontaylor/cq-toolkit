@@ -3,18 +3,10 @@
 // cq.json or the input, dir-relative failure paths, multi-tool merge, the
 // report pair under .cq/analysis (a sidecar the remediation path can parse),
 // the honest empty result, and every refusal's taxonomy.
-import {
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  realpathSync,
-  rmSync,
-  symlinkSync,
-  writeFileSync,
-} from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { realTmpDirSync } from '../../helpers/tmp-dir.js';
 import { afterEach, describe, expect, test } from 'vitest';
 import type { CheckCommand, RunCheck } from '../../../src/ops/gates/checkRunner.js';
 import { parseAnalysisSidecar } from '../../../src/ops/analyze/renderAnalysisReport.js';
@@ -24,7 +16,7 @@ import { CheckRunnerInputSchema } from '../../../src/ops/gates/registry.js';
 
 const dirs: string[] = [];
 function project(files: Record<string, string>): string {
-  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'cq-run-')));
+  const dir = realTmpDirSync('cq-run-');
   dirs.push(dir);
   for (const [path, text] of Object.entries(files)) {
     mkdirSync(join(dir, path, '..'), { recursive: true });
@@ -269,7 +261,7 @@ describe('analyze.run — refusals keep the taxonomy', () => {
 
   test('an out through a symlinked component is refused BEFORE anything is created outside', async () => {
     const dir = project({ 'cq.json': CONFIG });
-    const external = realpathSync(mkdtempSync(join(tmpdir(), 'cq-run-external-')));
+    const external = realTmpDirSync('cq-run-external-');
     dirs.push(external);
     symlinkSync(external, join(dir, 'reports'));
     const result = await makeAnalyzeRun(scripted([{ stdout: TS2322, exitCode: 1 }]))({

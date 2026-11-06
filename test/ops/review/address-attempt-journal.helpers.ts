@@ -7,9 +7,9 @@
 //
 // Local, fake-driver fixtures only: no provider, no network, no credentials.
 import { randomUUID } from 'node:crypto';
-import { mkdtemp, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { realTmpDir } from '../../helpers/tmp-dir.js';
 import type { OpInvocation } from '../../../src/driver/types.js';
 import { openObservationWriter } from '../../../src/kernel/observation.js';
 import type { ObservationWriter } from '../../../src/kernel/observation.js';
@@ -18,7 +18,7 @@ import type { CqConfig } from '../../../src/ops/analyze/cqConfig.js';
 import type { AddressFix } from '../../../src/ops/review/addressWorker.js';
 
 export async function headerWriter(): Promise<{ writer: ObservationWriter; root: string }> {
-  const root = await mkdtemp(join(tmpdir(), 'cq-address-attempt-journal-'));
+  const root = await realTmpDir('cq-address-attempt-journal-');
   const workId = randomUUID();
   const writer = await openObservationWriter({
     journalDir: root,

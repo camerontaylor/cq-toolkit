@@ -8,9 +8,9 @@
 // Shared fixtures and the fake git model (with the full pinned-behavior
 // header) live in prWorktree.helpers.ts.
 import { describe, expect, test } from 'vitest';
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
+import { realTmpDir } from '../../helpers/tmp-dir.js';
 import { resolvePrWorktree } from '../../../src/adapters/git/prWorktree.js';
 import {
   NOW,
@@ -61,7 +61,7 @@ describe('existing-worktree scan reuse (LABEL match AND SHA match, INSIDE the ro
   });
 
   test('a tree at THIS PR key’s target path on an OLD branch name is RECLAIMED — non-forced remove, create succeeds in the freed slot', async () => {
-    const repoRoot = await mkdtemp(join(tmpdir(), 'cq-wt-reclaim-'));
+    const repoRoot = await realTmpDir('cq-wt-reclaim-');
     try {
       const calls: string[][] = [];
       // The branch was RENAMED after a previous round: the old tree still
@@ -105,7 +105,7 @@ describe('existing-worktree scan reuse (LABEL match AND SHA match, INSIDE the ro
   });
 
   test('a branch-matching stale tree OUTSIDE the root holds the branch — review ops never frees foreign trees: the create refuses and names the holder', async () => {
-    const repoRoot = await mkdtemp(join(tmpdir(), 'cq-wt-foreignstale-'));
+    const repoRoot = await realTmpDir('cq-wt-foreignstale-');
     try {
       const calls: string[][] = [];
       const registry = memRegistry();

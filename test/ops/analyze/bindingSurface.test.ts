@@ -8,13 +8,13 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
-  realpathSync,
   symlinkSync,
   utimesSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { realTmpDirSync } from '../../helpers/tmp-dir.js';
 import { describe, expect, test } from 'vitest';
 import {
   approvalInputDigest,
@@ -49,7 +49,7 @@ describe('approvalInputDigest', () => {
 // Conductor pass (2026-10-08): the three Codex findings fixed on this head.
 describe('index-hidden edits, ledger identity, and the public binding surface', () => {
   test('a relative dangling ledger link uses its canonical parent through a directory alias', async () => {
-    const root = realpathSync(mkdtempSync(join(tmpdir(), 'cq-ledger-parent-alias-')));
+    const root = realTmpDirSync('cq-ledger-parent-alias-');
     const real = join(root, 'real');
     const sub = join(real, 'sub');
     mkdirSync(sub, { recursive: true });
@@ -66,7 +66,7 @@ describe('index-hidden edits, ledger identity, and the public binding surface', 
   });
 
   test('a dangling final symlink shares the target append lock before the ledger exists', async () => {
-    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'cq-dangling-ledger-')));
+    const dir = realTmpDirSync('cq-dangling-ledger-');
     const path = join(dir, 'ledger');
     const alias = join(dir, 'alias');
     symlinkSync('ledger', alias);
@@ -87,7 +87,7 @@ describe('index-hidden edits, ledger identity, and the public binding surface', 
   });
 
   test('an aged append lock cannot be stolen while its holder is alive', async () => {
-    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'cq-aged-ledger-')));
+    const dir = realTmpDirSync('cq-aged-ledger-');
     const path = join(dir, 'ledger');
     const ledger = makeFileNonceLedger(path);
     let settled = false;

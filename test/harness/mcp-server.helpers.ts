@@ -6,9 +6,8 @@
 // sibling subject files. "No output" is asserted by ORDERING: the server
 // handles lines in arrival order, so a ping sent after the probe must be the
 // next message out.
-import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { rmSync } from 'node:fs';
+import { realTmpDirSync } from '../helpers/tmp-dir.js';
 import { PassThrough } from 'node:stream';
 import { onTestFinished } from 'vitest';
 import { defaultHarnessConfig } from '../../src/harness/config.js';
@@ -22,7 +21,7 @@ type Message = Record<string, unknown>;
 
 /** A realpath'd scratch workspace (macOS /var → /private/var), removed after the test. */
 export function scratch(): string {
-  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'harness-mcp-server-')));
+  const dir = realTmpDirSync('harness-mcp-server-');
   onTestFinished(() => rmSync(dir, { recursive: true, force: true }));
   return dir;
 }

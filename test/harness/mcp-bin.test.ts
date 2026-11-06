@@ -14,17 +14,9 @@
 //     tool.
 import { spawn } from 'node:child_process';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
-import {
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  realpathSync,
-  rmSync,
-  symlinkSync,
-  writeFileSync,
-} from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { realTmpDirSync } from '../helpers/tmp-dir.js';
 import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
@@ -49,7 +41,7 @@ const renderRead = (path: string, body: string): string => {
 
 /** A realpath'd scratch workspace (macOS /var → /private/var), removed after the test. */
 function scratch(): string {
-  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'harness-mcp-bin-')));
+  const dir = realTmpDirSync('harness-mcp-bin-');
   onTestFinished(() => rmSync(dir, { recursive: true, force: true }));
   return dir;
 }

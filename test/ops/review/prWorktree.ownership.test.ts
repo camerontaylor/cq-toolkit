@@ -8,9 +8,9 @@
 // Shared fixtures and the fake git model (with the full pinned-behavior
 // header) live in prWorktree.helpers.ts.
 import { describe, expect, test } from 'vitest';
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { rm } from 'node:fs/promises';
 import { join } from 'node:path';
+import { realTmpDir } from '../../helpers/tmp-dir.js';
 import { resolvePrWorktree } from '../../../src/adapters/git/prWorktree.js';
 import {
   NOW,
@@ -61,7 +61,7 @@ describe('ownership boundary — foreign trees are surfaced, never claimed', () 
   });
 
   test('a foreign at-sha tree holding the branch blocks the create — the refusal names the foreign holder (freeing it is the human’s call)', async () => {
-    const repoRoot = await mkdtemp(join(tmpdir(), 'cq-wt-foreignhold-'));
+    const repoRoot = await realTmpDir('cq-wt-foreignhold-');
     try {
       const calls: string[][] = [];
       const registry = memRegistry();
@@ -101,7 +101,7 @@ describe('domain boundary vs the sweep ops worktree', () => {
   test('sweep-family trees on other branches are invisible: no claim, no block, the create lands under the review root', async () => {
     const calls: string[][] = [];
     const registry = memRegistry();
-    const repoRoot = await mkdtemp(join(tmpdir(), 'cq-wt-domain-'));
+    const repoRoot = await realTmpDir('cq-wt-domain-');
     try {
       const sweepA = join(repoRoot, '.sweep-worktrees', 'pkg-a');
       const sweepB = join(repoRoot, '.sweep-worktrees', 'pkg-b');
@@ -136,7 +136,7 @@ describe('domain boundary vs the sweep ops worktree', () => {
   test('a sweep-family tree HOLDING the PR branch (parked at a stale sha, outside the root) blocks the create and the refusal names it — review ops never frees it', async () => {
     const calls: string[][] = [];
     const registry = memRegistry();
-    const repoRoot = await mkdtemp(join(tmpdir(), 'cq-wt-domain2-'));
+    const repoRoot = await realTmpDir('cq-wt-domain2-');
     try {
       const sweepA = join(repoRoot, '.sweep-worktrees', 'pkg-a');
       const model = mkModel([

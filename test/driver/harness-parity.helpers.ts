@@ -41,9 +41,9 @@
 //
 // Every harness-parity file MUST NOT import from
 // '@anthropic-ai/claude-agent-sdk' (I10).
-import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { realTmpDir } from '../helpers/tmp-dir.js';
 import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
@@ -151,7 +151,7 @@ export const renderRead = (path: string, body: string): string => {
 export let scratch: string;
 
 beforeAll(async () => {
-  scratch = await realpath(await mkdtemp(join(tmpdir(), 'cq-parity-')));
+  scratch = await realTmpDir('cq-parity-');
 });
 
 afterAll(async () => {

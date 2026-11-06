@@ -8,9 +8,9 @@
 // Shared fixtures and the fake git model (with the full pinned-behavior
 // header) live in prWorktree.helpers.ts.
 import { describe, expect, test } from 'vitest';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { realTmpDir } from '../../helpers/tmp-dir.js';
 import {
   fileWorktreeRegistry,
   nextRegistryTmpNonce,
@@ -25,7 +25,7 @@ import { NOW, LABEL } from './prWorktree.helpers.js';
 
 describe('fileWorktreeRegistry', () => {
   test('a missing registry file loads as empty, save creates it, and a fresh instance round-trips', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'cq-wt-reg-'));
+    const dir = await realTmpDir('cq-wt-reg-');
     try {
       const path = join(dir, 'worktrees.json');
       const log = fileWorktreeRegistry(path);
@@ -46,7 +46,7 @@ describe('fileWorktreeRegistry', () => {
   });
 
   test('a corrupt registry file throws a CLEAR error (an array is not a registry either)', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'cq-wt-reg-'));
+    const dir = await realTmpDir('cq-wt-reg-');
     try {
       const path = join(dir, 'worktrees.json');
       await writeFile(path, '{not json at all', 'utf8');
@@ -59,7 +59,7 @@ describe('fileWorktreeRegistry', () => {
   });
 
   test('save is ATOMIC (write tmp + rename): interleaved save/load cycles always leave parseable content', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'cq-wt-reg-'));
+    const dir = await realTmpDir('cq-wt-reg-');
     try {
       const path = join(dir, 'worktrees.json');
       const registry = fileWorktreeRegistry(path);
@@ -89,7 +89,7 @@ describe('fileWorktreeRegistry', () => {
   });
 
   test('update() MERGES per key: sequential updates for different PRs preserve each other (no whole-map clobber)', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'cq-wt-reg-'));
+    const dir = await realTmpDir('cq-wt-reg-');
     try {
       const path = join(dir, 'worktrees.json');
       const registry = fileWorktreeRegistry(path);
@@ -124,7 +124,7 @@ describe('fileWorktreeRegistry', () => {
   });
 
   test('update() rides withLock on the file-backed registry: two concurrent updates for different keys BOTH persist', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'cq-wt-reg-'));
+    const dir = await realTmpDir('cq-wt-reg-');
     try {
       const path = join(dir, 'worktrees.json');
       const registry = fileWorktreeRegistry(path);

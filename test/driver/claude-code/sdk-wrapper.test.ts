@@ -1,9 +1,9 @@
 // Exercise the optional Agent SDK's real tool() → createSdkMcpServer() path.
 // The peer is absent in the default install; a peer-present lane runs this
 // proof without a provider, CLI, credential, or network connection.
-import { mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { realTmpDir } from '../../helpers/tmp-dir.js';
 import { createRequire } from 'node:module';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
@@ -51,7 +51,7 @@ test.skipIf(!peerPresent)(
       tools: unknown[];
     }) => unknown;
 
-    const dir = await realpath(await mkdtemp(join(tmpdir(), 'cq-sdk-wrapper-')));
+    const dir = await realTmpDir('cq-sdk-wrapper-');
     const client = new Client({ name: 'sdk-wrapper-proof', version: 'test' });
     let server: McpServer | undefined;
     try {

@@ -1,7 +1,7 @@
 import { watch } from 'node:fs';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
+import { realTmpDir } from '../../helpers/tmp-dir.js';
 import { describe, expect, test, vi } from 'vitest';
 import { finding, fixture } from './addressWorker.helpers.js';
 
@@ -37,7 +37,7 @@ function observeRunningCheck(directory: string) {
 }
 
 test('missing child readiness fails on the actual completed worker result', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'cq-no-check-readiness-'));
+  const directory = await realTmpDir('cq-no-check-readiness-');
   const f = await fixture(undefined, 'process.exitCode=1;');
   const observer = observeRunningCheck(directory);
   let running: ReturnType<typeof f.engine.fix> | undefined;
@@ -58,7 +58,7 @@ test.each(['baseline', 'related', 'broader'] as const)(
   'parent cancellation terminates the actual running %s check before restore and FIFO release',
   async (phase) => {
     const parent = new AbortController();
-    const external = await mkdtemp(join(tmpdir(), 'cq-running-check-'));
+    const external = await realTmpDir('cq-running-check-');
     const marker = join(external, 'ready');
     // Count across the cached clean-parent preflight and the candidate checks.
     const wanted = { baseline: 1, related: 2, broader: 3 }[phase];

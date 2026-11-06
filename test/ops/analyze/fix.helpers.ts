@@ -12,9 +12,9 @@
 // fix.previewApply.test.ts, fix.ruleOverFiles.test.ts and
 // fix.selection.test.ts.
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { realTmpDirSync } from '../../helpers/tmp-dir.js';
 import { afterEach } from 'vitest';
 import type { DriverFactory } from '../../../src/driver/factory.js';
 import type { Driver, OpInvocation, WorkerResult } from '../../../src/driver/types.js';
@@ -78,7 +78,7 @@ export function scriptedRunner(
 
 export const repos: string[] = [];
 export async function fixture(options: { commit?: boolean; config?: boolean } = {}) {
-  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'cq-fix-')));
+  const dir = realTmpDirSync('cq-fix-');
   repos.push(dir);
   const git = (args: string[]) =>
     execFileSync('git', ['-C', dir, ...args], { encoding: 'utf8' }).trim();

@@ -1,9 +1,8 @@
 // Shared fixtures for the split of test/ops/review/queue.test.ts (round-2
 // pure-move split): the review-queue cases now live in the `queue.*.test.ts`
 // subject files beside this module.
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { rm } from 'node:fs/promises';
+import { realTmpDir } from '../../helpers/tmp-dir.js';
 import { expect } from 'vitest';
 import { sha256 } from '../../../src/ops/review/internal/queueEvidence.js';
 import type {
@@ -14,7 +13,7 @@ import type {
 const dirs: string[] = [];
 
 export async function directory() {
-  const dir = await mkdtemp(join(tmpdir(), 'cq-queue-'));
+  const dir = await realTmpDir('cq-queue-');
   dirs.push(dir);
   return dir;
 }

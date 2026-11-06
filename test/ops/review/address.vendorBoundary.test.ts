@@ -1,7 +1,6 @@
 // Split provenance: test/ops/review/address.test.ts was split into this file
 // plus address.{helpers.ts,composition,reviewRounds,admission,blockedRereview,lock,m5b3Correlation}.test.ts.
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { realTmpDir } from '../../helpers/tmp-dir.js';
 import { describe, expect, test, vi } from 'vitest';
@@ -77,7 +76,7 @@ async function vendorAddressFixture() {
         }),
       ],
     });
-  const shimDir = await mkdtemp(join(tmpdir(), 'cq-gh-shim-'));
+  const shimDir = await realTmpDir('cq-gh-shim-');
   await writeFile(
     join(shimDir, 'gh'),
     `#!${process.execPath}\nconst args = process.argv.slice(2);\nif (args[0] === 'repo') process.stdout.write('owner/repo\\n');\nelse if (args[0] === 'api') process.stdout.write('author\\n');\nelse process.exit(1);\n`,

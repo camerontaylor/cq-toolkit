@@ -3,17 +3,15 @@
 import { execFileSync } from 'node:child_process';
 import {
   linkSync,
-  mkdtempSync,
   mkdirSync,
   readFileSync,
-  realpathSync,
   rmSync,
   symlinkSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { realTmpDirSync } from '../../helpers/tmp-dir.js';
 import { describe, expect, test } from 'vitest';
 import type { ApprovalState, ApprovalStateReader } from '../../../src/ops/analyze/approval.js';
 import { makeInMemoryNonceLedger } from '../../../src/adapters/store/nonceLedger.js';
@@ -107,7 +105,7 @@ function makeOp(
 // only the codemod subprocess faked. No ignore rules or blanket exemptions.
 describe('rendered reports at the apply approval boundary (promotion F3)', () => {
   async function repoFixture() {
-    const repo = realpathSync(mkdtempSync(join(tmpdir(), 'cq-report-approval-')));
+    const repo = realTmpDirSync('cq-report-approval-');
     const git = (args: string[]) =>
       execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8' }).trim();
     git(['init', '-q']);

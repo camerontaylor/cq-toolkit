@@ -2,16 +2,10 @@
 // lives in withApprovedMutation.test.ts). Subject: the durable operator nonce
 // ledger (ADR-0003 §4c step 2 and §5) — makeFileNonceLedger.
 
-import {
-  existsSync,
-  mkdtempSync,
-  readFileSync,
-  realpathSync,
-  writeFileSync,
-  writeSync,
-} from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync, writeSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { realTmpDirSync } from '../../helpers/tmp-dir.js';
 import { describe, expect, test } from 'vitest';
 import type { ApprovalSubject } from '../../../src/ops/analyze/approval.js';
 import { makeFileNonceLedger } from '../../../src/adapters/store/nonceLedger.js';
@@ -33,7 +27,7 @@ import {
 
 describe('the durable operator ledger (ADR-0003 §5)', () => {
   test('an append-lock failure identifies the artifact and retains its filesystem cause', async () => {
-    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'cq-ledger-lock-error-')));
+    const dir = realTmpDirSync('cq-ledger-lock-error-');
     // The ledger name fits a normal filesystem component; adding the lock
     // suffix exceeds it and produces an immediate non-EEXIST mkdir failure.
     const ledgerPath = join(dir, 'a'.repeat(250));

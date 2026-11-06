@@ -11,9 +11,9 @@
 // and on a scripted runner (the engine's documented wire shape, computed from
 // the same bytes) otherwise — the compiler is always real.
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
+import { realTmpDirSync } from '../../helpers/tmp-dir.js';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, test } from 'vitest';
 import type { Op } from '../../../src/kernel/types.js';
@@ -65,7 +65,7 @@ const scriptedAstGrep: RunCheck = async (cmd: CheckCommand) => {
 };
 
 async function standaloneSlice(mode: 'real' | 'scripted'): Promise<void> {
-  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'cq-standalone-')));
+  const dir = realTmpDirSync('cq-standalone-');
   const git = (args: string[]) =>
     execFileSync('git', ['-C', dir, ...args], { encoding: 'utf8' }).trim();
   try {

@@ -1,6 +1,6 @@
-import { mkdtemp, readFile, writeFile, rm, mkdir } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readFile, writeFile, rm, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
+import { realTmpDir } from '../../helpers/tmp-dir.js';
 import { describe, expect, test, vi } from 'vitest';
 import * as checkRunner from '../../../src/ops/gates/checkRunner.js';
 import { makeRepoDiffScanner } from '../../../src/ops/dev/denylist.js';
@@ -10,7 +10,7 @@ describe('baseline failure scope and reuse', () => {
   test.each([75, null])(
     'transient baseline exit %s retries checks once, leaves siblings usable',
     async (exit) => {
-      const external = await mkdtemp(join(tmpdir(), 'cq-transient-baseline-'));
+      const external = await realTmpDir('cq-transient-baseline-');
       const count = join(external, 'count');
       const recovered = join(external, 'recovered');
       const timeoutCapture =
@@ -56,7 +56,7 @@ if (!fs.existsSync(${JSON.stringify(recovered)})) {
     },
   );
   test('a transient baseline can recover on its single check retry before model dispatch', async () => {
-    const external = await mkdtemp(join(tmpdir(), 'cq-recover-baseline-'));
+    const external = await realTmpDir('cq-recover-baseline-');
     const count = join(external, 'count');
     const f = await fixture(
       undefined,
@@ -142,7 +142,7 @@ console.log('test:narrow result="refused" exit=${exit} reason="${exit === 75 ? '
     }
   });
   test('baseline results are reused across retries at the same parent', async () => {
-    const external = await mkdtemp(join(tmpdir(), 'cq-cache-baseline-'));
+    const external = await realTmpDir('cq-cache-baseline-');
     const count = join(external, 'count');
     let closures = 0;
     const f = await fixture(
@@ -168,7 +168,7 @@ fs.writeFileSync(p, String(Number(fs.existsSync(p) ? fs.readFileSync(p, 'utf8') 
     }
   });
   test('baseline cache is invalidated by an engine sibling commit', async () => {
-    const external = await mkdtemp(join(tmpdir(), 'cq-parent-baseline-'));
+    const external = await realTmpDir('cq-parent-baseline-');
     const count = join(external, 'count');
     const f = await fixture(
       undefined,
