@@ -8,6 +8,7 @@ never own GitHub or queue mutation. See README.md and ops/CUTOVER.md.
 from __future__ import annotations
 
 import argparse
+import collections
 import contextlib
 import datetime as dt
 import fcntl
@@ -976,27 +977,31 @@ def current_paths(merge: str, target: str, *, pre: Optional[str] = None,
     names = sorted(set(git_z("diff", "--name-only", "--no-renames", "-z", pre, merge, cwd=clone)))
     if len(names) > CURRENT_PATH_CAP:
         return oversized_current_paths(names)
-    fields = git_z("diff", "--name-status", "-M50%", "-z", merge, target, cwd=clone)
+    # One raw diff carries both blob ids, so churn unrelated to the source
+    # costs no per-path git process (the removed/added lists have no cap).
+    fields = git_z("diff", "--raw", "--no-abbrev", "-M50%", "-z", merge, target, cwd=clone)
     renames = {}
-    removed = []
-    added = []
+    old_blob_by_path = {}
+    removed_blobs = []
+    added_blobs = []
     while fields:
-        status = fields.pop(0)
+        _old_mode, _new_mode, old_sha, new_sha, status = fields.pop(0).split()
         old = fields.pop(0)
         if status.startswith(("R", "C")):
             new = fields.pop(0)
             if status.startswith("R"):
                 renames[old] = new
-                removed.append(old)
-                added.append(new)
+                old_blob_by_path[old] = old_sha
+                removed_blobs.append(old_sha)
+                added_blobs.append(new_sha)
         elif status == "D":
-            removed.append(old)
+            removed_blobs.append(old_sha)
         elif status == "A":
-            added.append(old)
+            added_blobs.append(new_sha)
     # Git's rename heuristic can arbitrarily pair duplicate identical files.
     # Such lineage is not enough to claim current scope; retain ambiguity.
-    old_blobs = [git("rev-parse", merge + ":" + path, cwd=clone) for path in removed]
-    new_blobs = [git("rev-parse", target + ":" + path, cwd=clone) for path in added]
+    removed_counts = collections.Counter(removed_blobs)
+    added_counts = collections.Counter(added_blobs)
     result = []
     total = 0
     for original in names:
@@ -1007,9 +1012,9 @@ def current_paths(merge: str, target: str, *, pre: Optional[str] = None,
                            "disposition": "unsupported", "reason": NON_UTF8_PATH})
             continue
         if not path_exists(target, path, clone=clone) and path in renames:
-            blob = git("rev-parse", merge + ":" + path, cwd=clone)
+            blob = old_blob_by_path[path]
             path = renames[path]
-            if old_blobs.count(blob) > 1 or new_blobs.count(blob) > 1:
+            if removed_counts[blob] > 1 or added_counts[blob] > 1:
                 result.append({"source_path": original, "path": path, "resolution": "git-rename-M50",
                                "disposition": "ambiguous", "reason": "duplicate blobs make rename lineage ambiguous"})
                 continue
