@@ -272,9 +272,10 @@ class CoverageFallbackTargetTest(unittest.TestCase):
         with mock.patch.object(spool, "_ssh", side_effect=crq.SpoolUnreachable("connection lost")):
             with self.assertRaises(OSError):
                 spool.publish_ledger(base, head, b"bundle")
-        with mock.patch.object(spool, "_ssh", return_value=json.dumps({"published": base})):
-            with self.assertRaises(OSError):
-                spool.publish_ledger(base, head, b"bundle")
+        for reply in (json.dumps({"published": base}), "not json", ""):
+            with self.subTest(reply=reply), mock.patch.object(spool, "_ssh", return_value=reply):
+                with self.assertRaises(OSError):
+                    spool.publish_ledger(base, head, b"bundle")
 
     def test_measure_skips_repair_only_merged_item(self):
         repair = {"id": "repair-1", "kind": "merged", "pr": 0, "repair_runs": {"run": {}}, "state": "pending"}

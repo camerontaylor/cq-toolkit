@@ -237,7 +237,11 @@ class Spool:
             reply = self._ssh("ledger-publish " + base + " " + head, bundle, timeout=330)
         except SpoolUnreachable as exc:
             raise OSError("ledger signer transport unavailable; retain publication outbox") from exc
-        if json.loads(reply) != {"published": head}:
+        try:
+            acknowledgement = json.loads(reply)
+        except ValueError as exc:
+            raise OSError("signer reply unreadable; retain publication outbox") from exc
+        if acknowledgement != {"published": head}:
             raise OSError("signer did not acknowledge the exact ledger commit")
 
 
