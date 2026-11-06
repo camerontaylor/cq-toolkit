@@ -297,6 +297,12 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
                       "null"
                     ]
                   },
+                  "authorType": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
                   "body": {
                     "type": "string"
                   },
