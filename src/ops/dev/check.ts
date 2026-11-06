@@ -16,8 +16,10 @@
 //     with the reason. No import line is parsed: an unnecessary knip run is
 //     cheap, a skipped required run is a hole;
 //   - a gitleaks scan (the tree's own `.gitleaks.toml`) over the tracked
-//     content being checked — the HEAD archive with the staged/unstaged
-//     patch applied, so a green row means the CURRENT identity was scanned;
+//     content being checked — the HEAD tree with the staged/unstaged patch
+//     applied, so a green row means the CURRENT identity was scanned (paths
+//     `git archive` leaves out under `export-ignore` are materialized from
+//     their HEAD blobs, never silently skipped);
 //   - `git diff --check` ×3 — committed (against the pinned base or the
 //     range), staged, unstaged.
 //
@@ -26,8 +28,8 @@
 // whether the run passed or failed. A red run maps to `failed` (CLI exit 1);
 // green returns the report. The gates run in the live worktree; the record
 // is bound to the identity read before them (author tier, strategy §2.4).
-import { isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { readdir, readFile, readlink } from 'node:fs/promises';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { lstat, mkdir, readdir, readFile, readlink, symlink, writeFile } from 'node:fs/promises';
 import type { Op } from '../../kernel/types.js';
 import { adapterByName, parseCheckOutput } from '../gates/checkRunner.js';
 import type { AdapterName } from '../gates/checkRunner.js';
@@ -209,12 +211,54 @@ async function runGate(
 }
 
 /**
+ * `git archive` applies the archived tree's `.gitattributes`: every path
+ * marked `export-ignore` is omitted and every `export-subst` path is
+ * rewritten. A committed secret in an export-ignored file would therefore
+ * never reach the scan, and a patch touching one would fail against a missing
+ * path. Materialize each tracked blob the extraction left out from HEAD, so
+ * the scratch tree is the tracked tree verbatim; an ordinary checkout pays
+ * only one `lstat` per tracked path.
+ */
+async function materializeArchivedPaths(effects: DevEffects, tree: string): Promise<void> {
+  const listing = gitStdout(
+    await git(effects, ['ls-tree', '-r', '-z', '--full-tree', 'HEAD']),
+    'ls-tree HEAD',
+  );
+  for (const entry of zList(listing)) {
+    const tab = entry.indexOf('\t');
+    if (tab < 0) throw new Error(`denylist: unparsable tracked tree entry '${entry.slice(0, 80)}'`);
+    const [mode, type, sha] = entry.slice(0, tab).split(' ');
+    const path = entry.slice(tab + 1);
+    // A gitlink (submodule) has no blob; `git archive` emits no content for it
+    // either, so the scan sees the same empty slot.
+    if (type !== 'blob' || mode === undefined || sha === undefined) continue;
+    if (path.split('/').some((segment) => segment === '' || segment === '.' || segment === '..'))
+      throw new Error(`denylist: unsafe tracked path '${path}'`);
+    const destination = join(tree, path);
+    try {
+      await lstat(destination);
+      continue;
+    } catch (err) {
+      if ((err as { code?: unknown }).code !== 'ENOENT') throw err;
+    }
+    await mkdir(dirname(destination), { recursive: true });
+    const content = gitStdout(
+      await git(effects, ['cat-file', 'blob', sha]),
+      `cat-file blob '${path}'`,
+    );
+    if (mode === '120000') await symlink(content, destination);
+    else await writeFile(destination, content);
+  }
+}
+
+/**
  * The tracked-content secret scan: gitleaks, with the checked tree's own
  * `.gitleaks.toml`, over an extraction of `git archive HEAD` in a scratch
  * dir OUTSIDE the worktree with the exact staged+unstaged patch applied —
  * gitignored scratch is excluded by construction, and a newly staged file
- * is included. Any step failing faults the gate (never a silently green
- * scan).
+ * is included. Export-ignored paths are materialized from HEAD (see
+ * {@link materializeArchivedPaths}). Any step failing faults the gate (never
+ * a silently green scan).
  */
 async function treeComponents(
   tree: string,
@@ -281,6 +325,7 @@ async function denylistGate(
     if (extract.exitCode !== 0) {
       throw new Error(`archive extraction failed — ${extract.stderr.trim().slice(0, 200)}`);
     }
+    await materializeArchivedPaths(effects, tree);
     gitStdout(
       await git(effects, ['diff', ...IDENTITY_DIFF_FLAGS, `--output=${workPatch}`, 'HEAD']),
       'diff HEAD (staged+unstaged patch)',
