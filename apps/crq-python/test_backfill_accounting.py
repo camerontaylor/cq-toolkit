@@ -63,9 +63,9 @@ class Fixture:
 
 
 class ImmutableCacheTest(unittest.TestCase):
-    def test_long_lineage_reuses_parsed_trees_without_public_copies(self):
-        # Exceeds both former 128-tree and 100k-row eviction thresholds.
-        commits = [format(i + 1, "040x") for i in range(140)]
+    def test_long_lineage_only_reads_endpoint_trees_without_public_copies(self):
+        # Exceeds the tree-cache capacity. Unrelated history must not churn it.
+        commits = [format(i + 1, "040x") for i in range(1100)]
         raw = b"".join(("100644 blob " + "a" * 40 + "\tfile" + str(i) + "\0").encode() for i in range(800))
         repo = accounting.Repository("unused")
         repo.immutable_cache = {}
@@ -77,7 +77,7 @@ class ImmutableCacheTest(unittest.TestCase):
             if args[0] == "rev-parse":
                 return commits[commits.index(args[1][:-2]) - 1].encode()
             if args[0] == "diff":
-                return b""
+                return b"M\0file799\0"
             self.fail(str(args))
         with mock.patch.object(repo, "resolve", side_effect=lambda c: c), \
              mock.patch.object(repo, "git", side_effect=git), \
@@ -85,10 +85,44 @@ class ImmutableCacheTest(unittest.TestCase):
              mock.patch.object(ledger, "path", wraps=ledger.path) as parse:
             self.assertEqual(repo.lineage(commits[0], commits[-1], "file0"), "file0")
             parsed = parse.call_count
-            self.assertEqual(parsed, 140 * 800)
-            self.assertEqual(repo.lineage(commits[0], commits[-1], "file1"), "file1")
+            self.assertEqual(parsed, 2 * 800)
+            git_calls = repo.git.call_count
+            self.assertEqual(repo.lineage(commits[0], commits[-1], "file799"), "file799")
+            self.assertEqual(repo.git.call_count, git_calls + 1)  # Cached chain read only.
             self.assertEqual(parse.call_count, parsed)
-            self.assertEqual(len(repo._entry_cache), 140)
+            self.assertEqual(list(repo._entry_cache), [commits[0], commits[-1]])
+
+    def test_parsed_lineage_cache_is_bounded_and_resets_per_invocation(self):
+        with tempfile.TemporaryDirectory() as td:
+            fixture = Fixture(Path(td) / "repo")
+            old = fixture.commit({"a": b"one\n"})
+            target = fixture.commit({"a": b"two\n"})
+            repo = fixture.repo
+            repo.begin_invocation()
+            self.assertEqual(repo.lineage(old, target, "a"), "a")
+            self.assertIn(target, repo._lineage_steps)
+            repo.begin_invocation()
+            self.assertFalse(repo._lineage_steps)
+            self.assertEqual(repo._lineage_bytes, 0)
+            with mock.patch.object(accounting, "LINEAGE_CACHE_BYTES", 1):
+                self.assertEqual(repo.lineage(old, target, "a"), "a")
+                self.assertFalse(repo._lineage_steps)
+
+    def test_parsed_lineage_cache_evicts_on_overflow(self):
+        with tempfile.TemporaryDirectory() as td:
+            fixture = Fixture(Path(td) / "repo")
+            old = fixture.commit({"a": b"one\n"})
+            middle = fixture.commit({"a": b"two\n"})
+            target = fixture.commit({"a": b"six\n"})  # Same change shape, same step size.
+            repo = fixture.repo
+            repo.begin_invocation()
+            repo._lineage_step(middle)
+            one_step = repo._lineage_bytes
+            repo.begin_invocation()
+            with mock.patch.object(accounting, "LINEAGE_CACHE_BYTES", one_step):
+                self.assertEqual(repo.lineage(old, target, "a"), "a")
+                self.assertEqual(list(repo._lineage_steps), [target])
+                self.assertLessEqual(repo._lineage_bytes, one_step)
 
     def test_private_trees_are_immutable_and_lru_bounds_evict_one(self):
         with tempfile.TemporaryDirectory() as td:
@@ -216,6 +250,25 @@ class AccountingTest(unittest.TestCase):
         copied = self.f.commit({"copy": b"one\ntwo\n"})
         covered, _, _ = self.f.repo.coverage(copied, [value], self.f.store)
         self.assertNotIn("copy", covered)
+
+    def test_lineage_rejects_duplicate_blob_at_intermediate_rename(self):
+        old = self.f.commit({"a": b"unique\n"})
+        self.f.commit({"duplicate": b"unique\n"})
+        self.f.git("mv", "a", "renamed")
+        self.f.commit({})
+        target = self.f.commit({"duplicate": None})
+        # Endpoint trees alone are insufficient for rename uniqueness.
+        self.assertIsNone(self.f.repo.lineage(old, target, "a"))
+
+    def test_multiple_deletions_reuse_immutable_diff_results(self):
+        old = self.f.commit({"a": b"unique-a\n", "b": b"unique-b\n", "other": b"keep\n"})
+        target = self.f.commit({"a": None, "b": None})
+        self.f.repo.begin_invocation()
+        with mock.patch.object(accounting.subprocess, "run", wraps=subprocess.run) as calls:
+            self.assertTrue(self.f.repo.proven_deleted(old, target, "a"))
+            self.assertTrue(self.f.repo.proven_deleted(old, target, "b"))
+            diffs = [call for call in calls.call_args_list if call.args[0][1] == "diff"]
+            self.assertEqual(len(diffs), 2)  # One plain and one rename-aware diff.
 
     def test_delete_recreate_move_reformat_and_nonancestor_are_uncovered(self):
         t = self.f.commit({"a": b"one\ntwo\nthree\n"})

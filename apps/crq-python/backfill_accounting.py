@@ -12,6 +12,10 @@ import review_ledger as ledger
 
 ENTRY_CACHE_TREES = 1024
 ENTRY_CACHE_BYTES = 256 * 1024 * 1024
+LINEAGE_CACHE_BYTES = 32 * 1024 * 1024
+# Bump when lineage/proven_deleted result semantics change: persisted required-PR
+# mappings written under an older epoch must stop matching.
+LINEAGE_RESULT_EPOCH = 1
 
 BLAME_OPTIONS = ["--line-porcelain", "--encoding=UTF-8"]
 
@@ -37,6 +41,8 @@ class Repository:
         self._cache_bytes = 0
         self._entry_cache = collections.OrderedDict()
         self._entry_bytes = 0
+        self._lineage_steps = {}
+        self._lineage_bytes = 0
         self._verified = {}  # review digest -> verified credit or failure; immutable_cache invocations only
 
     def begin_invocation(self):
@@ -44,13 +50,18 @@ class Repository:
         outcomes, so a gap from a previous invocation is retried."""
         self.immutable_cache = {}
         self._verified = {}
+        self._lineage_steps = {}
+        self._lineage_bytes = 0
 
     def git(self, *args, check=True, env=None, input=None):
         cacheable = (self.immutable_cache is not None and check and env is None and input is None
                      and ((len(args) == 3 and args[:2] == ("rev-list", "--first-parent") and re.fullmatch(r"[0-9a-f]{40,64}", args[2]))
                           or (len(args) == 2 and args[0] == "rev-parse" and re.fullmatch(r"[0-9a-f]{40,64}(?:\^1|\^\{commit\}|\^\{tree\})", args[1]))
                           or (len(args) == 4 and args[:3] == ("ls-tree", "-r", "-z") and re.fullmatch(r"[0-9a-f]{40,64}", args[3]))
-                          or (len(args) == 6 and args[:4] == ("diff", "--name-status", "-z", "--find-renames=100%") and all(re.fullmatch(r"[0-9a-f]{40,64}", a) for a in args[4:]))))
+                          or (args[:-2] in (("diff", "--name-status", "-z", "--find-renames=100%"),
+                                               ("diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--name-status", "-z"),
+                                               ("diff", "--no-ext-diff", "--no-textconv", "--find-renames", "-l0", "--name-status", "-z"))
+                              and all(re.fullmatch(r"[0-9a-f]{40,64}", a) for a in args[-2:]))))
         if cacheable and args in self.immutable_cache:
             return self.immutable_cache[args]
         result = subprocess.run(["git", *args], cwd=self.root, capture_output=True,
@@ -245,8 +256,34 @@ class Repository:
                 result.append((origin, original_line, filename, line[1:]))
         return result
 
+    def _lineage_step(self, commit):
+        if self.immutable_cache is not None and commit in self._lineage_steps:
+            return self._lineage_steps[commit]
+        parent = self.git("rev-parse", commit + "^1").decode().strip()
+        raw = self.git("diff", "--name-status", "-z", "--find-renames=100%", parent, commit)
+        fields, changes, i = raw.split(b"\0"), [], 0
+        while i < len(fields) - 1:
+            status, source = fields[i].decode(), fields[i + 1].decode("utf-8", "replace")
+            i += 2
+            destination = None
+            if status.startswith(("R", "C")):
+                destination = fields[i].decode("utf-8", "replace"); i += 1
+            changes.append((status, source, destination))
+        result = parent, tuple(changes)
+        # Conservative bound for decoded strings, tuples and dictionary entries.
+        size = len(raw) * 4 + len(changes) * 256 + 256
+        if self.immutable_cache is not None and size <= LINEAGE_CACHE_BYTES:
+            if self._lineage_bytes + size > LINEAGE_CACHE_BYTES:
+                self._lineage_steps.clear()
+                self._lineage_bytes = 0
+            self._lineage_steps[commit] = result
+            self._lineage_bytes += size
+        return result
+
     def lineage(self, old, new, name):
         """Only first-parent ancestry and unique exact renames are evidenced v1.
+
+        Changing what this returns requires bumping LINEAGE_RESULT_EPOCH.
 
         Any intermediate deletion, copy, non-exact rename or duplicate source blob
         ends inherited coverage. Explicit verified nonancestor mappings may be
@@ -259,29 +296,25 @@ class Repository:
             return None
         current = name
         for commit in reversed(chain[:chain.index(old)]):
-            parent = self.git("rev-parse", commit + "^1").decode().strip()
-            entries = self._entries(commit)
-            before = self._entries(parent)
-            changes = self.git("diff", "--name-status", "-z", "--find-renames=100%", parent, commit).split(b"\0")
-            i = 0
-            while i < len(changes) - 1:
-                status, source = changes[i].decode(), changes[i + 1].decode("utf-8", "replace")
-                i += 2
-                destination = None
-                if status.startswith(("R", "C")):
-                    destination = changes[i].decode("utf-8", "replace"); i += 1
+            parent, changes = self._lineage_step(commit)
+            for status, source, destination in changes:
                 if source != current:
                     continue
                 if status == "D" or status.startswith("C"):
                     return None
                 if status.startswith("R"):
+                    # Ordinary edits and unrelated paths cannot remove current:
+                    # the complete name-status diff above witnesses every
+                    # deletion/rename. Only a rename needs whole-tree blob
+                    # counts to reject ambiguous copies. Scanning every tree
+                    # for every path thrashes the bounded tree cache.
+                    before = self._entries(parent)
+                    entries = self._entries(commit)
                     blob = before.get(current, {}).get("blob")
                     if status != "R100" or sum(e["blob"] == blob for e in before.values()) != 1 or sum(e["blob"] == blob for e in entries.values()) != 1:
                         return None
                     current = destination
-            if current not in entries:
-                return None
-        return current
+        return current if current in self._entries(new) else None
 
     def proven_deleted(self, old, new, name):
         """Recognize only an unambiguous deletion; other missing lineage is unknown."""
