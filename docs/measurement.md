@@ -15,12 +15,14 @@ renders already-computed panels and recomputes nothing:
   → fix and cost panels. Pass the reader's `totals.availability` as
   `evidenceAvailability`, or every cost total degrades to partial.
 - `computeOutcomePanels` ([scripts/measurement-outcomes.mjs](../scripts/measurement-outcomes.mjs))
-  → harm, missed and population panels. Its `acceptances` input comes from
-  `importAcceptance` ([scripts/measurement-acceptance.mjs](../scripts/measurement-acceptance.mjs),
+  → harm, missed and population panels. Its `acceptances` input comes from a
+  separate composition step, `importAcceptance`
+  ([scripts/measurement-acceptance.mjs](../scripts/measurement-acceptance.mjs),
   recipe: [docs/measurement/import-acceptance.md](measurement/import-acceptance.md)):
-  the importer's `unknown` entries join the outcome unknown bucket and are
-  never dropped. Its rows are self-declared reader artifacts — never an
-  authority for the engine, the merge bar or any check.
+  the caller merges the importer's `unknown` entries into the outcome bucket
+  (`unknown: [...outcome.unknown, ...imported.unknown]`) before rendering, so
+  they are never dropped. Its rows are self-declared reader artifacts — never
+  an authority for the engine, the merge bar or any check.
 - `readMeasurementInputs` ([scripts/measurement-inputs.mjs](../scripts/measurement-inputs.mjs))
   → reader totals and the unknown bucket.
 

@@ -1005,8 +1005,9 @@ describe('M4b1 acceptance import composed into the M10d readout', () => {
       { source: missingBaseUrl, kind: 'unavailable', reason: 'reviewed base not recorded' },
     ]);
     // Compose exactly like the real caller (docs/measurement.md Composition):
-    // the importer's acceptances feed computeOutcomePanels, and its unknown
-    // rows join the outcome unknown bucket — never dropped.
+    // the importer's acceptances feed computeOutcomePanels, and the CALLER
+    // merges its unknown rows into the outcome bucket before rendering —
+    // never dropped.
     const panels = computeOutcomePanels({
       reviews: [],
       dispositions: [],
