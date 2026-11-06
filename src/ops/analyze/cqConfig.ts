@@ -218,7 +218,7 @@ function editDistance(a: string, b: string): number {
 
 const MAX_SUGGESTION_DISTANCE = 3;
 
-function nearestKey(unknown: string, valid: readonly string[]): string | undefined {
+export function nearestKey(unknown: string, valid: readonly string[]): string | undefined {
   let best: string | undefined;
   // Short names tolerate fewer edits, otherwise "x" would match any 3-letter key.
   const limit = Math.min(MAX_SUGGESTION_DISTANCE, Math.max(1, Math.floor(unknown.length / 2)));

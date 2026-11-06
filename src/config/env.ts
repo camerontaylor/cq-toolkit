@@ -10,6 +10,7 @@
 //   - Secret values stay in `values` for use but never appear in diagnostics.
 //
 // This slice does not wire the function into entry points; slice C3 does.
+import { nearestKey } from '../ops/analyze/cqConfig.js';
 import { deepFreeze } from '../shared/deepFreeze.js';
 import { CQ_ENV_REGISTRY, type CqEnvEntry, type CqEnvRegistry } from './env-registry.js';
 
@@ -29,40 +30,15 @@ export interface CqEnv {
   readonly errors: readonly CqEnvDiagnostic[];
 }
 
-const MAX_SUGGEST_DISTANCE = 3;
-
-/** Levenshtein distance (small inputs; no dependency). */
-export function editDistance(a: string, b: string): number {
-  let prev = Array.from({ length: b.length + 1 }, (_, j) => j);
-  for (let i = 1; i <= a.length; i++) {
-    const row = [i];
-    for (let j = 1; j <= b.length; j++) {
-      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
-      row[j] = Math.min((prev[j] ?? 0) + 1, (row[j - 1] ?? 0) + 1, (prev[j - 1] ?? 0) + cost);
-    }
-    prev = row;
-  }
-  return prev[b.length] ?? 0;
-}
-
 /**
- * The nearest live or reserved name, or undefined. Distance is measured on the
- * part after `CQ_` and capped by length (`min(3, max(1, floor(len / 2)))`) so
- * short names do not get far-fetched suggestions.
+ * The nearest live or reserved name, or undefined. Measured on the part after
+ * `CQ_`, with the length-scaled cap of the cq.json helper (`nearestKey`).
  */
 function nearestName(name: string, entries: readonly CqEnvEntry[]): string | undefined {
   const stem = (n: string): string => (n.startsWith('CQ_') ? n.slice(3) : n);
-  const own = stem(name);
-  const limit = Math.min(MAX_SUGGEST_DISTANCE, Math.max(1, Math.floor(own.length / 2)));
-  let best: { name: string; distance: number } | undefined;
-  for (const candidate of entries) {
-    if (candidate.status === 'denied') continue;
-    const distance = editDistance(own, stem(candidate.name));
-    if (distance <= limit && (best === undefined || distance < best.distance)) {
-      best = { name: candidate.name, distance };
-    }
-  }
-  return best?.name;
+  const candidates = entries.filter((e) => e.status !== 'denied').map((e) => stem(e.name));
+  const near = nearestKey(stem(name), candidates);
+  return near === undefined ? undefined : `CQ_${near}`;
 }
 
 const isBlank = (raw: string | undefined): raw is undefined =>

@@ -5,7 +5,7 @@ import {
   FOREIGN_ENV_ENTRIES,
   type CqEnvRegistry,
 } from '../../src/config/env-registry.js';
-import { editDistance, formatCqEnvDiagnostics, readCqEnv } from '../../src/config/env.js';
+import { formatCqEnvDiagnostics, readCqEnv } from '../../src/config/env.js';
 import { SECRET_ENV_SUFFIXES, isSecretEnvName } from '../../src/config/secret.js';
 
 describe('readCqEnv', () => {
@@ -156,15 +156,6 @@ describe('readCqEnv', () => {
     readCqEnv(env);
     expect(env).toEqual({ CQ_SANDBOX: 'off' });
     expect(readCqEnv().values).toBeDefined();
-  });
-});
-
-describe('editDistance', () => {
-  test('basic distances', () => {
-    expect(editDistance('', '')).toBe(0);
-    expect(editDistance('abc', 'abc')).toBe(0);
-    expect(editDistance('CQ_SANBOX', 'CQ_SANDBOX')).toBe(1);
-    expect(editDistance('kitten', 'sitting')).toBe(3);
   });
 });
 
