@@ -1,5 +1,4 @@
 {
-  "test/scripts/publication-scan.test.ts": "process",
   "test/adapters/forge-github/forge.test.ts": "pure",
   "test/adversarial/a14-privileged-workflow.benign-edits.test.ts": "process",
   "test/adversarial/a14-privileged-workflow.classifier-postures.test.ts": "process",

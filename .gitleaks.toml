@@ -1,0 +1,75 @@
+# gitleaks configuration for cq-toolkit (gitleaks 8.30.x).
+#
+# gitleaks' default rules (provider tokens, private keys, generic API keys)
+# plus a few rules for content this public repository must not publish.
+# The `denylist` workflow scans the commits a push or pull request adds, and
+# their messages; pack-audit and dev.check scan a whole tree with this file.
+#
+# Custom rules are case-sensitive on purpose: capitalised ordinary words
+# (Phoenix, Flagstaff) do not match, and \b keeps substrings (phoenixes) out.
+#
+# A deliberate test fixture that looks like a secret: put `gitleaks:allow` in
+# a comment on that line, or add a narrow [[allowlists]] entry below.
+
+title = "cq-toolkit"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "client-names"
+description = "Client names from the private project this toolkit was extracted from"
+regex = '''\b(beedee|greenbooks|dahlsens|phoenix|flagstaff|map72|extrava|neutron)\b|\bmetal\.one\b'''
+keywords = [
+  "beedee",
+  "greenbooks",
+  "dahlsens",
+  "phoenix",
+  "flagstaff",
+  "map72",
+  "extrava",
+  "neutron",
+  "metal.one",
+]
+
+[[rules]]
+id = "webfront-names"
+description = "Private project domains, package scope and bundle id"
+regex = '''\b[a-z0-9-]+\.webfront\.app\b|@webfront/|\bcom\.webfront\.reap\b'''
+keywords = ["webfront"]
+
+[[rules]]
+id = "personal-paths"
+description = "Personal machine and deployment home directories"
+# The secret is the part after /home/. With useDefault = true, gitleaks'
+# default global allowlist silently drops any finding whose secret is a bare
+# /home/... (or /tmp, /usr, ...) path, so path-shaped rules need secretGroup.
+regex = '''/home/(ctaylor|app/webfront)\b'''
+secretGroup = 1
+keywords = ["ctaylor", "webfront"]
+
+[[rules]]
+id = "route-key-material"
+description = "Gateway route key values"
+regex = '''\bpk-[A-Za-z0-9_-]{16,}'''
+keywords = ["pk-"]
+
+[[rules]]
+id = "env-file"
+description = "A committed .env or .envrc file is treated as key material"
+path = '''(^|/)([^/]*\.env|\.env\.[^/]+|\.envrc)$'''
+
+[[rules]]
+id = "agent-local-state"
+description = "Agent credentials, local settings, session state and local databases"
+path = '''(^|/)\.claude/(\.credentials\.json|settings\.local\.json|scheduled_tasks\.lock|memory\.db(-wal|-shm)?|worktrees|history\.jsonl|paste-cache|shell-snapshots|session-env|file-history)(/|$)|(^|/)\.(zcode|paseo)/'''
+
+[[allowlists]]
+description = "Tooling directories, this file, and the legacy pattern corpus (intentionally dirty samples)"
+paths = [
+  '''(^|/)\.git/''',
+  '''(^|/)node_modules/''',
+  '''(^|/)\.env\.(example|sample|template)$''',
+  '''(^|/)\.gitleaks\.toml$''',
+  '''(^|/)policy/denylist/patterns\.yml$''',
+]

@@ -8,14 +8,10 @@
 #      allowlist roots of package.json (dist, policy, LICENSE, README.md —
 #      package.json itself always rides along). The shipped artifacts must
 #      include dist/index.js (the exports main) and policy/denylist/
-#      patterns.yml (the denylist config the scan consumes); test/, scripts/,
+#      patterns.yml (read by the review scanner); test/, scripts/,
 #      and src/ must appear NOWHERE in the tarball.
-#   2. DENYLIST SCAN over the unpacked tree: the repo's scripts/denylist-scan
-#      resolves its root from its own location (<root>/scripts/denylist-scan),
-#      so the audit copies it into the unpacked tree at that relative path
-#      and runs it FROM the unpacked root — the scan then consumes the
-#      TARBALL'S OWN policy/denylist/patterns.yml (its absence or corruption
-#      fails the audit too) and gitleaks-scans the shipped bytes.
+#   2. SECRET SCAN over the unpacked tree: gitleaks with the repository's
+#      .gitleaks.toml scans the shipped bytes, dist/ included.
 #   3. PACKED-CONSUMER SMOKE (#394, P4): the same tarball is installed into
 #      a fresh temporary consumer prefix (npm, from the exact file — no
 #      registry), the installed SDK root export is imported, and both bins
@@ -30,7 +26,7 @@
 # required check, so invariant I4 does not bind it; it is path-filtered to
 # the files that shape the tarball's path set or its scan — package.json and
 # the lockfile, the shipped policy/ tree, README.md and LICENSE, the build
-# configs, the scripts (denylist-scan, the build helpers), and this file —
+# configs, the scripts (the build helpers), .gitleaks.toml, and this file —
 # plus workflow_dispatch, which the release runbooks use on the exact
 # release SHA. The repository-tree denylist (required) still scans every PR.
 name: pack-audit
@@ -46,6 +42,7 @@ on:
       - LICENSE
       - 'tsconfig*.json'
       - 'scripts/**'
+      - .gitleaks.toml
       - .github/workflows/pack-audit.yml
   workflow_dispatch:
 
@@ -173,21 +170,7 @@ jobs:
           tar -xzf "${tarball}" gitleaks
           sudo install -m 0755 gitleaks /usr/local/bin/gitleaks
           gitleaks version
-      - name: Denylist scan over the unpacked tree (the tarball's own patterns.yml)
-        env:
-          # The scanner's tree allowlist exempts dist/ as repo-tree build
-          # output; here the unpacked dist/ IS the payload, so this opt-in
-          # drops that entry from the generated config and gitleaks-scans
-          # the shipped bytes — the audit's whole point.
-          DENYLIST_SCAN_NO_DIST_ALLOWLIST: '1'
+      - name: Secret scan over the unpacked tree
         run: |
-          set -euo pipefail
-          # The scanner resolves its root from its own location; the tarball
-          # does not ship scripts/, so the copy lands it at the expected
-          # relative path and the scan runs FROM the unpacked root. The
-          # `type: commonjs` marker rides along: the scanner is require-based,
-          # and the tarball root's own package.json is `type: module`.
-          mkdir -p "${RUNNER_TEMP}/unpacked/package/scripts"
-          cp scripts/denylist-scan scripts/package.json "${RUNNER_TEMP}/unpacked/package/scripts/"
-          cd "${RUNNER_TEMP}/unpacked/package"
-          ./scripts/denylist-scan --tree
+          gitleaks dir --no-banner --redact --config .gitleaks.toml \
+            "${RUNNER_TEMP}/unpacked/package"

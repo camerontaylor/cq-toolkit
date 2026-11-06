@@ -7,7 +7,7 @@
   types bump, `SEAM_VERSION = 2`.
 - **Annexes:** [approval token](0003-approval-token.md), [journal v2](0003-journal-migration.md).
 
-Post-acceptance notes N1, N6, N11 and N13 in the [ADR index](README.md#post-acceptance-notes) narrow parts of this record.
+Post-acceptance notes N1, N6, N11, N13 and N25 in the [ADR index](README.md#post-acceptance-notes) narrow parts of this record.
 
 ## 1. Context
 

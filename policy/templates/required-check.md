@@ -15,17 +15,10 @@ A filtered trigger means the workflow simply does not run for some PRs — a
 docs-only PR, say. The required check then never reports, GitHub waits
 forever, and the PR hangs unmergeable with no red check to point at: the
 check is silently absent, which is much worse than a failing check. The
-self-test in `scripts/denylist-scan` enforces this mechanically: every
-entry in `REQUIRED_WORKFLOW_CHECKS` (each pairing a required workflow file
-with the check name of the job that must produce it) must exist, declare a
-job with exactly that paired name, and carry both `push` and `pull_request`
-in its top-level `on:` block with zero filter keys inside that block
-(fail-closed on an empty or malformed list or a missing listed file). The
-leg also fails a required workflow whose paired job carries a job-level
-`name:` override that differs from the paired check name: GitHub reports a
-job's check run under the `name:` when one is set, so a rename there
-silently orphans the required context while every id-keyed check stays
-green. Checkouts in required-check jobs are pinned to immutable commit SHAs
+same happens if the required job is renamed, or given a job-level `name:`
+that differs from the required check name: GitHub reports the check run
+under the new name and the required context never arrives. Review catches
+both; nothing polices them mechanically. Checkouts in required-check jobs are pinned to immutable commit SHAs
 and set `persist-credentials: false` — they run repo code and never push.
 
 ## Worked example — this repo's static job plus its from-source companion
@@ -137,11 +130,9 @@ jobs:
   # FROM SOURCE — the built artifact drives a real governed plan (two jobs
   # through the subprocess driver and the fake agent CLI fixture) and the
   # script asserts the report shape, the journal evidence, and the I1 output
-  # contract. A companion job, not a required check: REQUIRED_WORKFLOW_CHECKS
-  # in scripts/denylist-scan stays {denylist.yml: denylist, ci.yml: static,
-  # ratchet.yml: ratchet} (review-debt #120: the enumeration was stale
-  # before the ratchet became a required check),
-  # so this job's presence cannot dangle a branch-protection wait.
+  # contract. A companion job, not a required check (the required checks
+  # are `static` here and `denylist` in denylist.yml), so this job's
+  # presence cannot dangle a branch-protection wait.
   from-source:
     runs-on: {{RUNNER}}
     # Same cq-state skip as the static job (review-debt #226): the ledger
@@ -177,9 +168,8 @@ When adopting for another repository: keep the `on:` block and the
 permissions shape exactly as shown, swap the tokens, and replace the
 `./.github/actions/static-gate` step with your own `{{COMMANDS...}}` —
 inline run-steps, or your own local composite action if a second venue
-must run the same gate — then add the resulting
-workflow's file name and job id (the check name) as a pair in
-`REQUIRED_WORKFLOW_CHECKS` so the I4 self-test polices it.
+must run the same gate — then make the resulting job id (the check name) a
+required status check on the default branch.
 
 A portable (macOS) venue is a separate, non-required workflow file that is
 NOT listed in the gate's verified workflows; keep it that way until a pilot

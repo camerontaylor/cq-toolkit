@@ -216,3 +216,45 @@ describe('verifiedClosuresOf', () => {
     expect(knownMetric.availability['/metric/fixesPerRun/numerator']?.state).toBe('known');
   });
 });
+
+describe('M2c baseline probe wiring', () => {
+  const PROBE_HEAD = 'b'.repeat(40);
+
+  it('M2c probe head carried', () => {
+    // A completed probe that knows its head writes it on the emitted row —
+    // through baselineFailuresOf and measureRun alike.
+    const probes = new Map([['unit-a', { completed: true, count: 4, probeHead: PROBE_HEAD }]]);
+    expect(baselineFailuresOf(['unit-a'], probes)).toEqual([
+      { unitId: 'unit-a', probeHead: PROBE_HEAD, completed: true, count: 4, unknownReason: null },
+    ]);
+    const metric = measureRun([], ['unit-a'], probes, messageOf);
+    expect(metric.baselineFailures[0]?.probeHead).toBe(PROBE_HEAD);
+    expect(metric.fixesPerRun).toEqual({ numerator: 0, denominator: 4 });
+  });
+
+  it('M2c unprobed unit stays unknown', () => {
+    // No map entry for a planned unit: the row stays unknown with the
+    // existing reason — never a zero — and a completed probe WITHOUT a head
+    // (the optional field) keeps the row's head null.
+    const probes = new Map([['unit-a', { completed: true, count: 0 }]]);
+    const rows = baselineFailuresOf(['unit-a', 'unit-b'], probes);
+    expect(rows[0]).toEqual({
+      unitId: 'unit-a',
+      probeHead: null,
+      completed: true,
+      count: 0,
+      unknownReason: null,
+    });
+    expect(rows[1]).toEqual({
+      unitId: 'unit-b',
+      probeHead: null,
+      completed: false,
+      count: null,
+      unknownReason: 'baseline probe did not complete for this unit',
+    });
+    const metric = measureRun([], ['unit-a', 'unit-b'], probes, messageOf);
+    expect(metric.fixesPerRun.denominator).toBeNull();
+    expect(metric.availability['/metric/fixesPerRun/denominator']?.state).toBe('not-collected');
+    expect(metric.availability['/metric/baselineFailures/1/count']?.state).toBe('not-collected');
+  });
+});
