@@ -77,11 +77,19 @@ class HostConfigTests(HostConfigFixture, unittest.TestCase):
         for listing in ('list-unit-files', 'list-units'):
             def unavailable(argv):
                 if argv[:3] == ['systemctl', '--user', listing]:
-                    raise subprocess.CalledProcessError(1, argv)
+                    raise subprocess.CalledProcessError(1, argv, '', 'Failed to connect to user scope bus')
                 return self.stopped(argv)
             with self.subTest(listing=listing), mock.patch.object(host, 'run', side_effect=unavailable):
                 with self.assertRaises(subprocess.CalledProcessError):
                     host.inactive(self.root)
+
+    def test_no_matching_unit_files_is_an_empty_listing(self):
+        def no_matches(argv):
+            if argv[:3] == ['systemctl', '--user', 'list-unit-files']:
+                raise subprocess.CalledProcessError(1, argv, '', '')
+            return self.stopped(argv)
+        with mock.patch.object(host, 'run', side_effect=no_matches):
+            host.inactive(self.root)  # a host with no CRQ units is not an error
 
     def test_rendered_units_use_monorepo_root(self):
         paths = host.render_units(self.root, self.base / 'units')
