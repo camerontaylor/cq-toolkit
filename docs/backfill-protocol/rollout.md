@@ -121,13 +121,23 @@ Inventory also keeps a disposable cross-run fact index at
 `state/backfill/inventory-cache/facts/<kind>/<key>.json`. Its kinds are
 first-parent lineage steps, path lineage, blame at a commit, carried line
 mappings, verified review credit, and gap-free coverage per target and review
-set. Every key includes only immutable object IDs, accounting options and
-`backfill_cache.VERSION`. Values live in the artifact store and are verified on
-read. A run after `main` moves therefore repeats only the work for the new
+set. Every key includes only immutable object IDs, accounting options,
+`backfill_cache.VERSION`, and a salt of the runner's `git --version` and
+`LINEAGE_RESULT_EPOCH`. Upgrading git therefore invalidates every fact. Values
+live in the artifact store and are verified on read: the index must point at an
+in-store object whose bytes match its digest and whose embedded key matches.
+Each kind's value shape is checked too, and a mismatch counts as a miss and is
+recomputed. A run after `main` moves therefore repeats only the work for the new
 target. Failed verifications and coverage with gaps are never stored. A cached
 credit hit restores the review's bundles again if its target commit is missing
 from the clone. Deleting the index is safe; bump `VERSION` when the meaning of
 a fact changes.
+Fact values are not collected (bounded prune not implemented here). One cold
+inventory on frozen production state stored about 6.5k facts: 2.5k blame,
+1.8k lineage, 1.6k carry, 0.6k lineage steps and 27 verified credits. Later
+runs add only facts for new commits and targets, so growth follows history
+churn rather than run count. Deleting the index frees no store bytes.
+Collection or relocation is tracked in #1064.
 The six-hour timer and 45-minute service timeout are unchanged.
 
 All findings enter triage, including threadless/unanchored occurrences. Use

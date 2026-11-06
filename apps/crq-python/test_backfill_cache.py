@@ -50,6 +50,22 @@ class CacheTest(unittest.TestCase):
         self.assertTrue(list((self.root / "artifacts/sha256").iterdir()))
         self.assertIsNone(self.cache.get("lineage", {"old": "x"}))
 
+    def test_index_pointing_at_another_valid_fact_is_a_miss(self):
+        self.cache.put("lineage", {"old": "x"}, {"path": "a"})
+        self.cache.put("lineage", {"old": "y"}, {"path": "b"})
+        index = self.root / "index/facts/lineage"
+        x = index / (self.cache._key("lineage", {"old": "x"}) + ".json")
+        y = index / (self.cache._key("lineage", {"old": "y"}) + ".json")
+        x.write_bytes(y.read_bytes())  # Intact, digest-valid artifact for another key.
+        self.assertIsNone(self.cache.get("lineage", {"old": "x"}))
+        self.assertEqual(self.cache.get("lineage", {"old": "y"}), {"path": "b"})
+
+    def test_salt_change_invalidates(self):
+        self.cache.put("blame", {"t": 1}, [])
+        self.assertEqual(self.cache.get("blame", {"t": 1}), [])
+        upgraded = backfill_cache.Cache(self.root / "index", self.store, salt={"git": "git version 9"})
+        self.assertIsNone(upgraded.get("blame", {"t": 1}))
+
     def test_namespace_must_be_an_identifier(self):
         with self.assertRaises(ValueError):
             self.cache.put("../escape", {}, 1)

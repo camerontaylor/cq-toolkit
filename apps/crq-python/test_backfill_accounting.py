@@ -251,10 +251,47 @@ class FactCacheTest(unittest.TestCase):
         self.assertEqual(len(reads), 2)
         self.assertNotIn("tier", second[0])
         self.assertEqual(second, accounting.Repository(self.f.root).inventory(t, 10))
+        second[0]["tier"] = "mutated"  # A memo hit must also hand out copies.
+        self.assertNotIn("tier", repo.inventory(t, 10)[0])
         uncached = accounting.Repository(self.f.root)
         with mock.patch.object(accounting.subprocess, "run", wraps=subprocess.run) as calls:
             uncached.inventory(t, 10); uncached.inventory(t, 10)
             self.assertEqual(len([c for c in calls.call_args_list if c.args[0][:2] == ["git", "cat-file"]]), 4)
+
+    def test_cached_coverage_hit_with_lost_evidence_becomes_a_gap(self):
+        t = self.f.commit({"a": b"one\n"})
+        value = self.f.full_review(t, "a", [[1, 1]])
+        self.assertEqual(self.fresh().coverage(t, [value], self.f.store)[0], {"a": {1}})
+        Path(value["payload"]["artifacts"][0]["location"]).unlink()
+        covered, _, gaps = self.fresh().coverage(t, [value], self.f.store)
+        self.assertFalse(covered)
+        self.assertEqual([g["review"] for g in gaps], [value["id"]])
+
+    def test_schema_mismatched_facts_are_misses_and_recomputed(self):
+        old, value, middle = self.history()
+        uncached = accounting.Repository(self.f.root)
+        expected = uncached.carry(old, middle, "a", [1, 3, 4])
+        coverage = uncached.coverage(middle, [value], self.f.store)
+        self.fresh().coverage(middle, [value], self.f.store)
+        bad = {
+            "carry": {"path": "renamed", "matches": [[1, 1, 1]], "old_lines": "4"},
+            "lineage": {"path": 7},
+            "lineage_step": {"parent": "x", "changes": [["M"]]},
+            "blame": [["origin", "1", "zz", ""]],
+            "coverage": {"covered": {"renamed": [[1, 4]]}, "evidence": {"renamed": "id"}},
+            "verified_review": {"a": [[0, 1]]},
+        }
+        for kind, forged in bad.items():
+            for index in (self.index / "facts" / kind).glob("*.json"):
+                key = index.stem
+                ref = self.f.store.put(ledger.canonical({"key": key, "value": forged}))
+                index.write_bytes(ledger.canonical(ref))
+        for kind, forged in bad.items():
+            with self.subTest(kind=kind):
+                self.assertFalse(accounting.FACT_SHAPES[kind](forged))
+        self.assertEqual(self.fresh().carry(old, middle, "a", [1, 3, 4]), expected)
+        self.assertEqual(self.fresh().coverage(middle, [value], self.f.store), coverage)
+        self.assertEqual(self.fresh().lineage(old, middle, "a"), "renamed")
 
     def test_failed_verification_is_never_persisted(self):
         t = self.f.commit({"a": b"one\n"})

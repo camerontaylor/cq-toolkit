@@ -35,6 +35,45 @@ def ranges(lines):
     return result
 
 
+def _int(v, low=0):
+    return type(v) is int and v >= low
+
+
+def _opt_str(v):
+    return v is None or isinstance(v, str)
+
+
+def _rows(v):
+    return isinstance(v, list) and all(isinstance(r, list) and len(r) == 2 and _int(r[0], 1) and _int(r[1], 1) for r in v)
+
+
+def _hexstr(v):
+    return isinstance(v, str) and re.fullmatch(r"(?:[0-9a-f]{2})*", v) is not None
+
+
+# Shape of every persisted fact kind. A digest-valid value of the wrong shape
+# (e.g. written by a same-VERSION code change) is a miss, never trusted.
+FACT_SHAPES = {
+    "blame": lambda v: isinstance(v, list) and all(
+        isinstance(r, list) and len(r) == 4 and isinstance(r[0], str) and _int(r[1]) and _hexstr(r[2]) and _hexstr(r[3])
+        for r in v),
+    "lineage_step": lambda v: isinstance(v, dict) and set(v) == {"parent", "changes"} and isinstance(v["parent"], str)
+        and isinstance(v["changes"], list) and all(
+            isinstance(r, list) and len(r) == 3 and isinstance(r[0], str) and isinstance(r[1], str) and _opt_str(r[2])
+            for r in v["changes"]),
+    "lineage": lambda v: isinstance(v, dict) and set(v) == {"path"} and _opt_str(v["path"]),
+    "carry": lambda v: isinstance(v, dict) and set(v) == {"path", "matches", "old_lines"} and _opt_str(v["path"])
+        and _int(v["old_lines"]) and isinstance(v["matches"], list) and all(
+            isinstance(r, list) and len(r) == 2 and _int(r[0], 1) and r[0] <= v["old_lines"] and _int(r[1], 1)
+            for r in v["matches"]),
+    "coverage": lambda v: isinstance(v, dict) and set(v) == {"covered", "evidence"}
+        and isinstance(v["covered"], dict) and all(_rows(r) for r in v["covered"].values())
+        and isinstance(v["evidence"], dict) and all(
+            isinstance(ids, list) and all(isinstance(i, str) for i in ids) for ids in v["evidence"].values()),
+    "verified_review": lambda v: isinstance(v, dict) and all(_rows(r) for r in v.values()),
+}
+
+
 class Repository:
     def __init__(self, root):
         self.root = Path(root)
@@ -62,7 +101,8 @@ class Repository:
         self._fact_bytes = 0
 
     def _cached(self, kind, identity):
-        return self.disk_cache.get(kind, identity) if self.disk_cache is not None else None
+        value = self.disk_cache.get(kind, identity) if self.disk_cache is not None else None
+        return value if value is not None and FACT_SHAPES[kind](value) else None
 
     def _persist(self, kind, identity, value):
         if self.disk_cache is not None:

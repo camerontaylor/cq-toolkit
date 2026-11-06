@@ -536,7 +536,8 @@ def run_inventory(c, queue, *, required_paths=None, members=None, fetch=True, en
     repo.immutable_cache = {}  # This invocation only; keys contain immutable object IDs.
     # Cross-run, disposable index of immutable Git-derived facts (lineage, blame,
     # carry, verified credit); content is verified against the artifact store.
-    repo.disk_cache = backfill_cache.Cache(c.STATE / "backfill/inventory-cache", store)
+    repo.disk_cache = backfill_cache.Cache(c.STATE / "backfill/inventory-cache", store, salt={
+        "git": repo.git("--version").decode().strip(), "lineage_epoch": accounting.LINEAGE_RESULT_EPOCH})
     event_items = []
     tiers, limits, required = policies()
     if fetch:

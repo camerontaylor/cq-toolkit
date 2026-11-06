@@ -12,13 +12,15 @@ VERSION = 1
 
 
 class Cache:
-    def __init__(self, root, store):
-        self.root, self.store = Path(root), store
+    def __init__(self, root, store, salt=None):
+        # salt names the tools and semantics facts depend on (e.g. `git --version`
+        # and the lineage epoch), so an upgrade of either invalidates every fact.
+        self.root, self.store, self.salt = Path(root), store, salt or {}
 
     def _key(self, kind, identity):
         if not kind.isidentifier():
             raise ValueError("invalid inventory cache namespace")
-        return ledger.digest({"version": VERSION, "kind": kind, "identity": identity})
+        return ledger.digest({"version": VERSION, "salt": self.salt, "kind": kind, "identity": identity})
 
     def get(self, kind, identity):
         key = self._key(kind, identity)
