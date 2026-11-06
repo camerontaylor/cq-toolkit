@@ -66,25 +66,33 @@ describe('captureBaseline', () => {
     expect(await readdir(join(ws, 'baselines'))).toEqual([basename(REL)]);
   });
 
-  test('a read-only baselines dir fails fast at the capture lock (indeterminate, no debris — review-debt #68)', async () => {
-    sourceRaw = { count: 3 };
-    await capture(captureInput());
-    // Make the dir read-only: the per-path capture lock (review-debt #68)
-    // is now the FIRST write attempted, so the failure surfaces at the
-    // lock acquire — a fast indeterminate (the short backoff never burns
-    // half a minute), never a mid-publish torn state. The temp-cleanup
-    // path itself is pinned by the seam-injected mid-write fault test
-    // (capture-temp-fault.test.ts).
-    const baselinesDir = join(ws, 'baselines');
-    await chmod(baselinesDir, 0o555);
-    sourceRaw = { count: 5 };
-    const result = await capture(captureInput({ capturedAt: CAPTURED_AT_2 }));
-    await chmod(baselinesDir, 0o755); // restore before cleanup assertions
-    expect(result.status).toBe('indeterminate');
-    if (result.status === 'indeterminate') {
-      expect(result.detail).toMatch(/could not acquire the capture lock/);
-    }
-    const names = await readdir(baselinesDir);
-    expect(names).toEqual([basename(REL)]); // original baseline, no *.tmp debris, no *.lock residue
-  });
+  // Root bypasses directory mode bits, and Windows does not enforce them on directories.
+  test.skipIf(process.getuid?.() === 0 || process.platform === 'win32')(
+    'a read-only baselines dir fails fast at the capture lock (indeterminate, no debris — review-debt #68)',
+    async () => {
+      sourceRaw = { count: 3 };
+      await capture(captureInput());
+      // Make the dir read-only: the per-path capture lock (review-debt #68)
+      // is now the FIRST write attempted, so the failure surfaces at the
+      // lock acquire — a fast indeterminate (the short backoff never burns
+      // half a minute), never a mid-publish torn state. The temp-cleanup
+      // path itself is pinned by the seam-injected mid-write fault test
+      // (capture-temp-fault.test.ts).
+      const baselinesDir = join(ws, 'baselines');
+      await chmod(baselinesDir, 0o555);
+      sourceRaw = { count: 5 };
+      let result: Awaited<ReturnType<typeof capture>>;
+      try {
+        result = await capture(captureInput({ capturedAt: CAPTURED_AT_2 }));
+      } finally {
+        await chmod(baselinesDir, 0o755); // restore before cleanup assertions
+      }
+      expect(result.status).toBe('indeterminate');
+      if (result.status === 'indeterminate') {
+        expect(result.detail).toMatch(/could not acquire the capture lock/);
+      }
+      const names = await readdir(baselinesDir);
+      expect(names).toEqual([basename(REL)]); // original baseline, no *.tmp debris, no *.lock residue
+    },
+  );
 });
