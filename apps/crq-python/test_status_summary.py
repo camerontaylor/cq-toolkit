@@ -60,6 +60,17 @@ class SummaryTest(unittest.TestCase):
                                  {"max_starts_per_hour": 5}, [], 0)
         self.assertEqual(data["backlog"]["open"], 2)
 
+    def test_reharvested_run_counts_once(self):
+        events = [{"event": "review_finished", "at": "2026-11-06T00:00:00Z", "run": "r1", "outcome": "error"},
+                  {"event": "review_finished", "at": "2026-11-06T00:01:00Z", "run": "r1", "outcome": "completed"},
+                  {"event": "review_finished", "at": "2026-11-06T00:02:00Z", "run": "r1", "outcome": "completed"},
+                  {"event": "review_finished", "at": "2026-11-06T00:03:00Z", "run": "r2", "outcome": "interrupted"},
+                  {"event": "review_finished", "at": "2026-11-06T00:04:00Z", "outcome": "completed"},
+                  {"event": "review_finished", "at": "2026-11-06T00:05:00Z", "outcome": "completed"}]
+        data = adapter.summarize({"generated_at": "2026-11-06T01:00:00Z"}, {"items": []}, {},
+                                 {"max_starts_per_hour": 5}, events, adapter.timestamp("2026-11-06T01:00:00Z"))
+        self.assertEqual(data["outcomes_24h"], {"completed": 3, "interrupted": 1, "error": 0})
+
     def test_backfill_and_merged_current_pending_are_backlog(self):
         queue = {"items": [
             {"kind": "backfill", "state": "pending"},

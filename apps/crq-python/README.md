@@ -113,9 +113,10 @@ promotion fields, and includes `systemd_timers` keyed by `crq-tick.timer`, `crq-
 or null when unavailable/never), with `error` when observation fails or the unit
 is not loaded. Watchdog monotonic deadlines are converted to UTC at observation.
 `systemd_services` is empty: `crq-records.service` served promotion records and
-was retired with promotion (2026-11-01). `backlog` counts pending primary-repo
+was retired with promotion (2026-11-01); its unit and script are removed. `backlog` counts pending primary-repo
 items for `open`, `delta`, `merged`, `coverage`, `merged-current` and `backfill`;
-`outcomes_24h` counts one `review_finished` event per harvested run of any kind.
+`outcomes_24h` counts each run id once (its last `review_finished` event in the
+window), so a re-harvest after a crash or a retained backfill run never inflates it.
 These observations are independent of `schedule.state`, which names the backend.
 Fleet readers must use that location after handover. Twenty-four-hour acceptance
 requires actual observations and is not implied by installation or static checks.

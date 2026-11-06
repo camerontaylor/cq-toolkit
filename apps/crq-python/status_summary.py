@@ -148,14 +148,19 @@ def summarize(status, queue, heartbeat, config, events, now):
                             review_receipt.KIND, "backfill")}
     outcomes = {key: 0 for key in ("completed", "interrupted", "error")}
     other = 0
-    for event in events:
+    # A run can be harvested more than once (crash recovery re-harvests; a backfill
+    # harvest that retains run ownership is retried every slot pass), so count each
+    # run id once, by its latest outcome. Events without a run id count individually.
+    finished = {}
+    for index, event in enumerate(events):
         at = timestamp(event.get("at"))
         if event.get("event") == "review_finished" and at is not None and now - 86400 <= at <= now:
-            outcome = event.get("outcome")
-            if outcome in outcomes:
-                outcomes[outcome] += 1
-            else:
-                other += 1
+            finished[event.get("run") or ("anonymous", index)] = event.get("outcome")
+    for outcome in finished.values():
+        if outcome in outcomes:
+            outcomes[outcome] += 1
+        else:
+            other += 1
     last_tick = heartbeat.get("last_tick") or queue.get("last_tick")
     # Freshness must follow completed ticks, never status-file writes or probes.
     timestamp(last_tick)
