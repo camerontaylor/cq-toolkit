@@ -95,6 +95,20 @@ class BodyTests(unittest.TestCase):
         self.assertTrue(text.rstrip("\n").endswith(finding_issues.FOOTER))
         self.assertIn("- something", text)
 
+    def test_body_exactly_at_the_limit_is_not_truncated(self):
+        room = finding_issues.MAX_BODY - len(finding_issues.body(META, ""))
+        text = finding_issues.body(META, "x" * room)
+        self.assertEqual(len(text), finding_issues.MAX_BODY)
+        self.assertNotIn(finding_issues.TRUNCATED.strip(), text)
+        self.assertTrue(text.rstrip("\n").endswith(finding_issues.FOOTER))
+
+    def test_oversized_findings_are_truncated_to_the_limit(self):
+        text = finding_issues.body(META, "x" * (finding_issues.MAX_BODY + 5000))
+        self.assertEqual(len(text), finding_issues.MAX_BODY)
+        self.assertIn(finding_issues.TRUNCATED.strip(), text)
+        self.assertIn(f"- Receipt: `{META['receipt_id']}`", text)
+        self.assertTrue(text.rstrip("\n").endswith(finding_issues.FOOTER))
+
 
 class FileIssueTests(unittest.TestCase):
     def test_disabled_repo_is_noop_without_gh_calls(self):

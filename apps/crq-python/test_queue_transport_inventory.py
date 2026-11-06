@@ -232,6 +232,18 @@ class QueueTransportTests(QueueTransportFixtureMixin, unittest.TestCase):
         self.assertIsNone(unsupported["reason"])
         self.assertEqual(self.inventory_call(states=["pending", "blocked"])["entries"], [])
 
+    def test_inventory_scan_block_matches_status(self):
+        self.inventory_fixture()
+        item = self.q["items"][0]
+        self.call("status")
+        doc = {"source": item["subject"], "counted": False, "outcome": "blocked-secret-scan",
+               "classification": {"counted": False, "outcome": "blocked-secret-scan"}}
+        item.update(state="blocked", receipt_id=receipts.write_receipt(self.tmp.name, doc))
+        row = self.inventory_call(states=["blocked"])["entries"][0]
+        scan_reason = {"source": "queue", "category": "scan", "code": "blocked-secret-scan"}
+        self.assertEqual((row["state"], row["reason"]), ("blocked", scan_reason))
+        self.assertEqual(self.call("status")["reason"], scan_reason)
+
     def test_inventory_real_wrapper_refuses_incomplete_dry_run_and_corruption(self):
         path = self.inventory_fixture()
         valid = json.loads(path.read_text())
