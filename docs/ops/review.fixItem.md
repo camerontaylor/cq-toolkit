@@ -24,6 +24,16 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
           "maximum": 9007199254740991,
           "type": "integer"
         },
+        "maxContextTokens": {
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991,
+          "type": "integer"
+        },
+        "maxOutputTokens": {
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991,
+          "type": "integer"
+        },
         "maxTokens": {
           "exclusiveMinimum": 0,
           "maximum": 9007199254740991,
