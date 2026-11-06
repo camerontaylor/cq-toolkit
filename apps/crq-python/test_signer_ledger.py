@@ -270,12 +270,19 @@ class LedgerSignerTest(unittest.TestCase):
                 signer.install_token("other/repo", ledger_write=True)
 
     def test_entrypoint_rejects_nonroot_and_oversized_frame_without_mint(self):
-        for uid, frame in ((1000, b"{}\n"), (0, b'{"base":"a","head":"b","bytes":67108865}\n')):
+        # Each frame would publish if only the other guard were missing, so the
+        # refusal identifies the guard rather than incidental malformed input.
+        valid = b'{"base":"' + b"a" * 40 + b'","head":"' + b"b" * 40 + b'","bytes":1}\nX'
+        oversized = b'{"base":"a","head":"b","bytes":5}\nXXXXX'
+        for uid, frame, limit in ((1000, valid, signer.LEDGER_BUNDLE_LIMIT), (0, oversized, 4)):
             with mock.patch.object(signer.os, "geteuid", return_value=uid), \
+                 mock.patch.object(signer, "LEDGER_BUNDLE_LIMIT", limit), \
                  mock.patch.object(signer.sys, "stdin", SimpleNamespace(buffer=io.BytesIO(frame))), \
                  mock.patch.object(signer.sys, "stdout", io.StringIO()) as output, \
+                 mock.patch.object(signer, "publish_ledger_commit") as publish, \
                  mock.patch.object(signer, "install_token") as mint:
                 self.assertEqual(signer.ledger_publish_entry(), 2)
+                publish.assert_not_called()
                 mint.assert_not_called()
                 self.assertNotIn("token", output.getvalue())
 

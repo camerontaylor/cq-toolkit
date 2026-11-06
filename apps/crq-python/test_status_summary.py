@@ -162,11 +162,6 @@ class SummaryTest(unittest.TestCase):
                              r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
 
 
-
-if __name__ == "__main__":
-    unittest.main()
-
-
 class MergedCurrentSummaryTest(unittest.TestCase):
     def test_discovery_and_legacy_done_do_not_count_as_current_review(self):
         q = {"items": [{"kind": "merged", "state": "done"},
@@ -295,3 +290,7 @@ class ReposSummaryTests(unittest.TestCase):
                                  {"max_starts_per_hour": 5}, [], 0)
         self.assertEqual(data["repos"], {})
         self.assertEqual(data["backlog"]["open"], 1)
+
+
+if __name__ == "__main__":
+    unittest.main()
