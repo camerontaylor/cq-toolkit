@@ -2500,19 +2500,24 @@ export function buildTools(
         const groups = [...byPath.values()].sort((left, right) =>
           left.file.lexicalRel.localeCompare(right.file.lexicalRel),
         );
-        const allMatches = groups.reduce((count, group) => count + group.lines.length, 0);
+        const contentMode =
+          parsed.data.output_mode === undefined || parsed.data.output_mode === 'content';
+        // content mode caps matching lines; files_with_matches/count cap files
+        // (rg's per-file --max-count already bounds each file's lines).
+        const allMatches = contentMode
+          ? groups.reduce((count, group) => count + group.lines.length, 0)
+          : groups.length;
         const keptGroups: { file: SearchFile; lines: string[]; raw: string[] }[] = [];
-        const matchLimit =
-          parsed.data.output_mode === undefined || parsed.data.output_mode === 'content'
-            ? Math.min(parsed.data.head_limit || SEARCH_MATCH_LIMIT, SEARCH_MATCH_LIMIT)
-            : SEARCH_MATCH_LIMIT;
+        const matchLimit = contentMode
+          ? Math.min(parsed.data.head_limit || SEARCH_MATCH_LIMIT, SEARCH_MATCH_LIMIT)
+          : SEARCH_MATCH_LIMIT;
         let remaining = matchLimit;
         for (const group of groups) {
           if (remaining <= 0) break;
-          const lines = group.lines.slice(0, remaining);
-          const raw = group.raw.slice(0, remaining);
+          const lines = contentMode ? group.lines.slice(0, remaining) : group.lines;
+          const raw = contentMode ? group.raw.slice(0, remaining) : group.raw;
           keptGroups.push({ file: group.file, lines, raw });
-          remaining -= lines.length;
+          remaining -= contentMode ? lines.length : 1;
         }
         if (allMatches > matchLimit) {
           markers.push(`[truncated: matches cap ${matchLimit}]`);
