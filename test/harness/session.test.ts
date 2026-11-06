@@ -86,7 +86,7 @@ test('create rejects an existing session id without touching the record', async 
     const record = await store.create(dir, 'fixed-id');
     await expect(store.create(dir, 'fixed-id')).rejects.toThrow(/already exists/);
     const loaded = await store.load(record.sessionId);
-    expect(loaded.sessionId).toBe('fixed-id');
+    expect(loaded?.sessionId).toBe('fixed-id');
   });
 });
 
