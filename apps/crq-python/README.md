@@ -165,9 +165,44 @@ verification before publication and scans the final publication range for secret
 Open PR repairs are replayed onto the current head only if it moved forward;
 normal pushes never force. Restacked heads become stale, awaiting a new review.
 Merged, post-merge delta, coverage fixes become one
-`crq/fix-<run>` PR into main containing the verdict table. No finding
-comments, reviews or issues are posted. PR creation is the only repair GitHub
+`crq/fix-<run>` PR into main containing the verdict table. The repair path
+posts no finding comments, reviews or issues; PR creation is its only GitHub
 write. The normal non-author I2 gate still applies to fix PRs.
+
+## Findings on open PRs
+
+A counted primary-repo `open` or `delta` review with findings also posts them
+on the PR as one pull-request review (`pr_review_findings.py`;
+`POST /repos/{repo}/pulls/{pr}/reviews`, event `COMMENT`, `commit_id` = the
+reviewed head). This is independent of the repair enqueue above, which still runs.
+
+- Each finding whose lines fall inside the PR diff for that commit (the
+  compare of the PR base and the reviewed head, context lines included)
+  becomes an inline comment, so it is its own resolvable review thread
+  (GraphQL `reviewThreads`, reply, `resolveReviewThread`). A range is clamped
+  to the first diff hunk it overlaps. Findings without a file or line, outside
+  the diff, or in files with no patch are listed in the review body. If
+  GitHub still rejects the review with HTTP 422 (an anchor, or a head that was
+  force-pushed away), crq posts it once more with every finding in the body
+  and no `commit_id`. At most 50 inline threads per review; exact duplicate
+  findings in one stream are posted once.
+- The review is labelled as crq output, not as a CodeRabbit PR review. The
+  body starts with `<!-- crq-findings run=<run_id> -->` and the header
+  `crq findings (CodeRabbit CLI, local run <run_id>, <base10>..<head10>)`.
+  HTML comments are stripped from finding text, and `suggestion` fences become
+  plain fences, so no vendor marker or committable suggestion is copied.
+- Delivery is debt, not an inline upload: harvest stores `pr_review_request`
+  and `pr_review_pending` on the item; the bounded post-harvest pass in
+  `tick()` delivers at most two per tick, least recently attempted first.
+  Before posting it skips a closed or merged PR and looks for an existing
+  review carrying the run's marker, so a crash after the POST never posts
+  twice. A failure records `pr_review_error` and retries on later ticks, up
+  to five attempts (`findings_review_abandoned` event); success stores
+  `pr_review` and emits `findings_review_delivered`. A newer run of the same
+  item replaces an undelivered older request.
+- Identity: the tick's `gh` uses the queue host's `gh` login (hosts.yml, no
+  token in the unit environment), so reviews appear under that account.
+  Non-primary repos keep issue delivery (docs/multi-repo.md).
 
 ## Drivers and deployment prerequisites
 
