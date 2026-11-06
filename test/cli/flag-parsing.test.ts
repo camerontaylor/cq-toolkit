@@ -143,6 +143,9 @@ describe('schema-aware op flags', () => {
     },
   );
   test('canonical numeric string reaches the op unchanged', async () => {
-    expect((await capture(['echo', '--msg=123'])).code).toBe(0);
+    const { code, out, err } = await capture(['echo', '--msg=123']);
+    expect(code).toBe(0);
+    expect(JSON.parse(out)).toEqual({ status: 'ok', value: { echo: '123' } });
+    expect(err).toBe('');
   });
 });
