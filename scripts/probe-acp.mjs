@@ -692,6 +692,9 @@ async function scenarioCancel() {
       },
       PROMPT_TIMEOUT_MS,
     );
+    // Mark as handled now: a child exit during the wait must not become an
+    // unhandled rejection; the real outcome is read at the later `await`.
+    promptPromise.catch(() => {});
     await new Promise((res) => setTimeout(res, CANCEL_AFTER_MS));
     const tCancelSent0 = elapsedMs();
     await probe.notify('session/cancel', { sessionId: session.sessionId });

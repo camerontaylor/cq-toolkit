@@ -86,7 +86,7 @@ const lint = spawnSync(
   ],
   { cwd: ROOT, encoding: 'utf8' },
 );
-if (lint.stdout) process.stdout.write(lint.stdout);
+if (lint.stdout) process.stderr.write(lint.stdout);
 if (lint.stderr) process.stderr.write(lint.stderr);
 if (lint.error || lint.status !== 0) {
   fail(

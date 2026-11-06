@@ -9,6 +9,10 @@
 // never a silent full run.
 export const EVAL_AXES_PROVIDER_KEYS = { zai: 'ZAI_API_KEY', deepseek: 'DEEPSEEK_API_KEY' };
 
+// Lanes whose vendor process authenticates itself (the acp agent uses its own
+// login), so the script supplies no provider key env for them.
+const AGENT_AUTH_LANES = new Set(['acp']);
+
 export function selectCells(cells, argv) {
   const onlyIndex = argv.indexOf('--only');
   if (onlyIndex === -1) return cells;
@@ -27,7 +31,8 @@ export function selectCells(cells, argv) {
 // selected cells actually touch are required. Fails closed on an unmapped
 // provider: a provider absent from neededKey would otherwise silently need
 // no key and run unauthenticated.
-export function requiredKeys(selected, neededKey, env) {
+export function requiredKeys(allSelected, neededKey, env) {
+  const selected = allSelected.filter((c) => !AGENT_AUTH_LANES.has(c.lane));
   const unmappedCell = selected.find((c) => neededKey[c.provider] === undefined);
   const missing = [
     ...new Set(
