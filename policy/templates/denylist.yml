@@ -57,9 +57,15 @@ jobs:
       - name: Scan added commits
         env:
           RANGE: ${{ steps.range.outputs.range }}
-        # --diff-merges=remerge: git log -p skips merge commits by default; this
-        # shows what each merge itself introduced beyond the automatic merge.
-        run: gitleaks git --no-banner --redact --config .gitleaks.toml --log-opts="$RANGE --diff-merges=remerge" .
+        # git log -p skips merge commits by default. --diff-merges=remerge shows
+        # what each merge introduced beyond the automatic merge, but git skips
+        # it for octopus merges, so those are scanned against their first parent.
+        run: |
+          set -euo pipefail
+          gitleaks git --no-banner --redact --config .gitleaks.toml --log-opts="$RANGE --diff-merges=remerge" .
+          for commit in $(git rev-list --min-parents=3 "$RANGE"); do
+            gitleaks git --no-banner --redact --config .gitleaks.toml --log-opts="-1 $commit --diff-merges=first-parent" .
+          done
       - name: Scan commit messages
         env:
           RANGE: ${{ steps.range.outputs.range }}

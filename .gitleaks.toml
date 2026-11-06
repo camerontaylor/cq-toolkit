@@ -61,8 +61,8 @@ path = '''(^|/)([^/]*\.env|\.env\.[^/]+|\.envrc)$'''
 
 [[rules]]
 id = "agent-local-state"
-description = "Agent credentials, local settings and session state (history, pastes, shell snapshots)"
-path = '''(^|/)\.claude/(\.credentials\.json|settings\.local\.json|history\.jsonl|paste-cache|shell-snapshots|session-env|file-history)(/|$)|(^|/)\.(zcode|paseo)/'''
+description = "Agent credentials, local settings, session state and local databases"
+path = '''(^|/)\.claude/(\.credentials\.json|settings\.local\.json|scheduled_tasks\.lock|memory\.db(-wal|-shm)?|worktrees|history\.jsonl|paste-cache|shell-snapshots|session-env|file-history)(/|$)|(^|/)\.(zcode|paseo)/'''
 
 [[allowlists]]
 description = "Tooling directories, this file, and the legacy pattern corpus (intentionally dirty samples)"
