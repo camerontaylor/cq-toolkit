@@ -94,8 +94,9 @@ export interface PrSearchResult {
   isCrossRepository: boolean;
   /**
    * The forge's draft flag, when the transport reported it (the production
-   * gh transport queries it; fakes may omit). The adopt path uses it to
-   * refuse riding a NON-draft PR with a not-ready branch (#472 seam).
+   * gh transport queries it; fakes may omit). This module does not read it;
+   * the not-ready adopt guard that refuses a NON-draft PR lives in
+   * src/ops/pr/open.ts (#472 seam).
    */
   isDraft?: boolean;
 }
@@ -438,7 +439,7 @@ export function makeAssemblePrs(
 }
 
 /** Scan the exact title/body pair immediately before a forge publication. */
-async function scanPublicationForUpload(
+export async function scanPublicationForUpload(
   scanner: DiffSecretScanner,
   title: string | undefined,
   body: string | undefined,
