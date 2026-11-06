@@ -1,4 +1,5 @@
 """Real fixture repositories exercise the explicit-line credit contract."""
+import collections
 import copy
 import os
 from pathlib import Path
@@ -8,6 +9,7 @@ import unittest
 from unittest import mock
 
 import backfill_accounting as accounting
+import backfill_cache
 import review_ledger as ledger
 from test_review_ledger import review, rehash
 
@@ -172,6 +174,132 @@ class ImmutableCacheTest(unittest.TestCase):
                 fresh.entries(old)
                 self.assertGreater(calls.call_count, count)
             self.assertEqual(repo.lineage(old, new, "a.py"), "a.py")
+
+
+class FactCacheTest(unittest.TestCase):
+    """Cross-run facts must reproduce uncached accounting and skip repeated Git work."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
+        self.f = Fixture(Path(self.tmp.name) / "repo")
+        self.index = Path(self.tmp.name) / "index"
+
+    def fresh(self):
+        repo = accounting.Repository(self.f.root)
+        repo.begin_invocation()
+        repo.disk_cache = backfill_cache.Cache(self.index, self.f.store)
+        return repo
+
+    def history(self):
+        old = self.f.commit({"a": b"one\ntwo\nthree\nfour\n", "other": b"x\n"})
+        value = self.f.full_review(old, "a", [[1, 4]])
+        self.f.commit({"a": b"one\nchanged\nthree\nfour\n"})
+        self.f.git("mv", "a", "renamed"); self.f.commit({})
+        middle = self.f.commit({"other": b"y\n"})
+        return old, value, middle
+
+    def test_cached_coverage_matches_uncached_across_runs_and_targets(self):
+        old, value, middle = self.history()
+        expected = accounting.Repository(self.f.root).coverage(middle, [value], self.f.store)
+        self.assertEqual(expected[0], {"renamed": {1, 3, 4}})
+        self.assertEqual(self.fresh().coverage(middle, [value], self.f.store), expected)
+        warm = self.fresh()
+        with mock.patch.object(accounting.subprocess, "run", wraps=subprocess.run) as calls:
+            self.assertEqual(warm.coverage(middle, [value], self.f.store), expected)
+            self.assertFalse([c for c in calls.call_args_list if c.args[0][:2] == ["git", "blame"]])
+        # A new target recomputes coverage but reuses old-side blame and parsed steps.
+        target = self.f.commit({"other": b"z\n"})
+        expected = accounting.Repository(self.f.root).coverage(target, [value], self.f.store)
+        later = self.fresh()
+        with mock.patch.object(accounting.subprocess, "run", wraps=subprocess.run) as calls:
+            self.assertEqual(later.coverage(target, [value], self.f.store), expected)
+            blamed = [c.args[0] for c in calls.call_args_list if c.args[0][:2] == ["git", "blame"]]
+            diffs = [c.args[0] for c in calls.call_args_list if c.args[0][:3] == ["git", "diff", "--name-status"]]
+        self.assertEqual([b[-3] for b in blamed], [target])
+        self.assertEqual(len(diffs), 1)  # Only the new first-parent step.
+
+    def test_cached_carry_keeps_python_index_semantics(self):
+        old, value, middle = self.history()
+        uncached = accounting.Repository(self.f.root)
+        for lines in ([1, 3, 4], [0, -1], [5, 9]):
+            expected = uncached.carry(old, middle, "a", lines)
+            self.assertEqual(self.fresh().carry(old, middle, "a", lines), expected)
+            self.assertEqual(self.fresh().carry(old, middle, "a", lines), expected)
+        with self.assertRaises(IndexError):
+            uncached.carry(old, middle, "a", [-4])
+        with self.assertRaises(IndexError):
+            self.fresh().carry(old, middle, "a", [-4])
+
+    def test_verified_credit_hit_restores_a_missing_review_target(self):
+        old, value, middle = self.history()
+        self.fresh().coverage(middle, [value], self.f.store)
+        warm = self.fresh()
+        with mock.patch.object(warm, "_has_commit", return_value=False), \
+             mock.patch.object(warm, "restore") as restore, \
+             mock.patch.object(warm, "verify_review", side_effect=AssertionError("re-verified")):
+            warm.fold(self.f.git("rev-parse", "HEAD"), [value], self.f.store, *([collections.defaultdict(set), collections.defaultdict(list), []]))
+        restore.assert_called_once()
+
+    def test_inventory_reads_each_blob_once_per_invocation_and_returns_copies(self):
+        t = self.f.commit({"a": b"one\n", "b": b"two\n"})
+        repo = self.fresh()
+        with mock.patch.object(accounting.subprocess, "run", wraps=subprocess.run) as calls:
+            first = repo.inventory(t, 10)
+            first[0]["tier"] = "mutated"
+            second = repo.inventory(t, 10)
+            reads = [c for c in calls.call_args_list if c.args[0][:2] == ["git", "cat-file"]]
+        self.assertEqual(len(reads), 2)
+        self.assertNotIn("tier", second[0])
+        self.assertEqual(second, accounting.Repository(self.f.root).inventory(t, 10))
+        second[0]["tier"] = "mutated"  # A memo hit must also hand out copies.
+        self.assertNotIn("tier", repo.inventory(t, 10)[0])
+        uncached = accounting.Repository(self.f.root)
+        with mock.patch.object(accounting.subprocess, "run", wraps=subprocess.run) as calls:
+            uncached.inventory(t, 10); uncached.inventory(t, 10)
+            self.assertEqual(len([c for c in calls.call_args_list if c.args[0][:2] == ["git", "cat-file"]]), 4)
+
+    def test_cached_coverage_hit_with_lost_evidence_becomes_a_gap(self):
+        t = self.f.commit({"a": b"one\n"})
+        value = self.f.full_review(t, "a", [[1, 1]])
+        self.assertEqual(self.fresh().coverage(t, [value], self.f.store)[0], {"a": {1}})
+        Path(value["payload"]["artifacts"][0]["location"]).unlink()
+        covered, _, gaps = self.fresh().coverage(t, [value], self.f.store)
+        self.assertFalse(covered)
+        self.assertEqual([g["review"] for g in gaps], [value["id"]])
+
+    def test_schema_mismatched_facts_are_misses_and_recomputed(self):
+        old, value, middle = self.history()
+        uncached = accounting.Repository(self.f.root)
+        expected = uncached.carry(old, middle, "a", [1, 3, 4])
+        coverage = uncached.coverage(middle, [value], self.f.store)
+        self.fresh().coverage(middle, [value], self.f.store)
+        bad = {
+            "carry": {"path": "renamed", "matches": [[1, 1, 1]], "old_lines": "4"},
+            "lineage": {"path": 7},
+            "lineage_step": {"parent": "x", "changes": [["M"]]},
+            "blame": [["origin", "1", "zz", ""]],
+            "coverage": {"covered": {"renamed": [[1, 4]]}, "evidence": {"renamed": "id"}},
+            "verified_review": {"a": [[0, 1]]},
+        }
+        for kind, forged in bad.items():
+            for index in (self.index / "facts" / kind).glob("*.json"):
+                key = index.stem
+                ref = self.f.store.put(ledger.canonical({"key": key, "value": forged}))
+                index.write_bytes(ledger.canonical(ref))
+        for kind, forged in bad.items():
+            with self.subTest(kind=kind):
+                self.assertFalse(accounting.FACT_SHAPES[kind](forged))
+        self.assertEqual(self.fresh().carry(old, middle, "a", [1, 3, 4]), expected)
+        self.assertEqual(self.fresh().coverage(middle, [value], self.f.store), coverage)
+        self.assertEqual(self.fresh().lineage(old, middle, "a"), "renamed")
+
+    def test_failed_verification_is_never_persisted(self):
+        t = self.f.commit({"a": b"one\n"})
+        value = self.f.full_review(t, "a", [[1, 1]])
+        Path(value["payload"]["artifacts"][0]["location"]).unlink()
+        self.assertEqual(len(self.fresh().coverage(t, [value], self.f.store)[2]), 1)
+        self.assertFalse((self.index / "facts/verified_review").exists())
+        self.assertFalse((self.index / "facts/coverage").exists())
 
 
 class AccountingTest(unittest.TestCase):
