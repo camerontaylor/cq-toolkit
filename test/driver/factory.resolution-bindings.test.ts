@@ -29,17 +29,16 @@ describe('driver factory — resolution', () => {
 
   test('a binding naming an unknown lane is a pre-dispatch config throw (exact and wildcard)', () => {
     // Decoded/JS config is plain data the compiler already trusted: a
-    // binding value outside the four lanes must fail at RESOLVE time as a
+    // binding value outside the four lanes must fail at CONSTRUCTION time as a
     // structured 'config' throw — never as a wrapper around an
     // unconstructable lane whose run() dies unclassified mid-goal (PR #238
     // review round 2).
     const decoded = {
       fixer: { zai: 'not-a-lane' },
     } as unknown as NonNullable<DriverFactoryConfig['bindings']>;
-    const exact = createDriverFactory({ bindings: decoded });
     const thrown = (): unknown => {
       try {
-        exact.resolve({ role: 'fixer', modelSpec: { provider: 'zai', model: 'glm-4.6' } });
+        createDriverFactory({ bindings: decoded });
         return undefined;
       } catch (err) {
         return err;
@@ -51,13 +50,12 @@ describe('driver factory — resolution', () => {
     expect((err as Error).message).toMatch(/unknown lane 'not-a-lane'/);
     expect((err as Error).message).toMatch(/role 'fixer' on provider 'zai'/);
     // The wildcard row flows through the same validation.
-    const wild = createDriverFactory({
-      bindings: {
-        classifier: { '*': 'vendor' },
-      } as unknown as NonNullable<DriverFactoryConfig['bindings']>,
-    });
     expect(() =>
-      wild.resolve({ role: 'classifier', modelSpec: { provider: 'anything', model: 'm' } }),
+      createDriverFactory({
+        bindings: {
+          classifier: { '*': 'vendor' },
+        } as unknown as NonNullable<DriverFactoryConfig['bindings']>,
+      }),
     ).toThrow(/unknown lane 'vendor'/);
   });
 
@@ -106,8 +104,7 @@ describe('aggregate config errors', () => {
   };
 
   test('two bad lane bindings give one error listing both, with suggestions', () => {
-    const f = bad({ fixer: { zai: 'claud-code' }, classifier: { '*': 'vendor' } });
-    const m = msg(() => f.resolve({ role: 'fixer', modelSpec: { provider: 'zai', model: 'm' } }));
+    const m = msg(() => bad({ fixer: { zai: 'claud-code' }, classifier: { '*': 'vendor' } }));
     expect(m).toContain('2 configuration problems');
     expect(m).toContain("role 'fixer' on provider 'zai' names unknown lane 'claud-code'");
     expect(m).toContain('did you mean `claude-code`?');
@@ -115,10 +112,19 @@ describe('aggregate config errors', () => {
     expect(m.split('\n').filter((l) => l.startsWith('- '))).toHaveLength(2);
   });
 
-  test('a bad binding plus an unbound request are reported together', () => {
-    const f = bad({ fixer: { zai: 'nope-lane-x' } });
+  test('a bad binding for role A fails at construction, whichever role is resolved later', () => {
+    expect(msg(() => bad({ fixer: { zai: 'nope-lane-x' } }))).toContain(
+      "unknown lane 'nope-lane-x'",
+    );
+    // Construction fails before any resolve() can name another role.
+    expect(() => bad({ fixer: { zai: 'nope-lane-x' }, classifier: { zai: 'acp' } })).toThrow(
+      DispatchError,
+    );
+  });
+
+  test('a valid table with an unbound request still fails per request at resolve', () => {
+    const f = bad({ fixer: { zai: 'acp' } });
     const m = msg(() => f.resolve({ role: 'fixer', modelSpec: { provider: 'nope', model: 'm' } }));
-    expect(m).toContain("unknown lane 'nope-lane-x'");
     expect(m).toContain("no lane binding for role 'fixer' on provider 'nope'");
   });
 

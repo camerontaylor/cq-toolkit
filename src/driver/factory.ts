@@ -291,30 +291,31 @@ function unboundProblem(
   return `no lane binding for role '${role}' on provider '${provider}' — bind it in DriverFactoryConfig.bindings ('${provider}' is not a default provider, and the factory never falls back)${hints.length > 0 ? ` — did you mean ${hints.join(' / ')}?` : ''}`;
 }
 
+/** One problem keeps the plain one-line message; several are listed, one per line. */
+function throwConfigProblems(problems: readonly string[]): never {
+  if (problems.length === 1) {
+    throw new DispatchError('config', `driver factory: ${problems[0]}`);
+  }
+  throw new DispatchError(
+    'config',
+    `driver factory: ${problems.length} configuration problems:\n${problems.map((p) => `- ${p}`).join('\n')}`,
+  );
+}
+
 /**
  * Resolve the lane for a (role, provider) pair: configured bindings win
  * (exact provider, then the '*' wildcard), then the conservative default.
- * Every construction-time problem (bad lane values anywhere in the bindings
- * table, plus this request's unbound pair) is collected into ONE
- * DispatchError('config'), one problem per line. Never a silent fallback.
+ * A request whose pair is unbound is a DispatchError('config'). Bad lane
+ * values are rejected earlier, once, at createDriverFactory. Never a silent
+ * fallback.
  */
 function laneForRole(
   role: WorkerRole,
   provider: string,
   bindings: DriverFactoryConfig['bindings'],
 ): LaneId {
-  const problems = bindingProblems(bindings);
   const unbound = unboundProblem(role, provider, bindings);
-  if (unbound !== undefined) problems.push(unbound);
-  if (problems.length === 1) {
-    throw new DispatchError('config', `driver factory: ${problems[0]}`);
-  }
-  if (problems.length > 1) {
-    throw new DispatchError(
-      'config',
-      `driver factory: ${problems.length} configuration problems:\n${problems.map((p) => `- ${p}`).join('\n')}`,
-    );
-  }
+  if (unbound !== undefined) throwConfigProblems([unbound]);
   const byRole = bindings?.[role];
   const configured =
     byRole !== undefined && Object.prototype.hasOwnProperty.call(byRole, provider)
@@ -509,6 +510,10 @@ export function createDriverFactory(config: DriverFactoryConfig = {}): DriverFac
   // that owns a narration contract injects it through the config; absent,
   // the library default keeps today's stderr line byte-for-byte.
   const onDeprecatedAlias = config.onDeprecatedAlias ?? stderrAliasNotice;
+  // Fail fast: the whole bindings table is known now, so every bad lane value
+  // is reported together at construction, whichever role is resolved later.
+  const tableProblems = bindingProblems(config.bindings);
+  if (tableProblems.length > 0) throwConfigProblems(tableProblems);
   return {
     resolve(request: DriverRequest): ResolvedDriver {
       // Deprecated provider alias (review-debt #186): normalise FIRST, so
