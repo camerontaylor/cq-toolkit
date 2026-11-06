@@ -62,12 +62,12 @@ function expectEveryJobGuarded(text: string, file: string): void {
 }
 
 describe('the cq-state skip guards (review-debt #226)', () => {
-  it.each([
-    '.github/workflows/ci.yml',
-    '.github/workflows/denylist.yml',
-  ])('every job in %s skips the cq-state ledger branch at the JOB level', (file) => {
-    expectEveryJobGuarded(read(file), file);
-  });
+  it.each(['.github/workflows/ci.yml', '.github/workflows/denylist.yml'])(
+    'every job in %s skips the cq-state ledger branch at the JOB level',
+    (file) => {
+      expectEveryJobGuarded(read(file), file);
+    },
+  );
 
   it('the required-check pattern carries the guard in its worked example', () => {
     const doc = read('policy/templates/required-check.md');

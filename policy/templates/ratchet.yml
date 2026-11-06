@@ -10,9 +10,9 @@ on:
 permissions:
   contents: read
 
-# Supersede older diagnostics for the same ref.
+# Supersede older diagnostics for the same event and ref.
 concurrency:
-  group: ratchet-${{ github.ref }}
+  group: ratchet-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 # pnpm-workspace.yaml's global virtual store is a local-worktree speedup
