@@ -1,10 +1,10 @@
-import { chmod, mkdtemp, readFile, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { chmod, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { realTmpDir } from './tmp-dir.js';
 
 /** Process-backed clean/fault gitleaks contract fixture, never a production scanner override. */
 export async function makeGitleaksFixture() {
-  const root = await mkdtemp(join(tmpdir(), 'cq-gitleaks-fixture-'));
+  const root = await realTmpDir('cq-gitleaks-fixture-');
   const log = join(root, 'calls.jsonl');
   await writeFile(
     join(root, 'gitleaks'),

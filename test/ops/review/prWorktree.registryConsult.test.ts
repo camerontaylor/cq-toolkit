@@ -8,9 +8,9 @@
 // Shared fixtures and the fake git model (with the full pinned-behavior
 // header) live in prWorktree.helpers.ts.
 import { describe, expect, test } from 'vitest';
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
+import { realTmpDir } from '../../helpers/tmp-dir.js';
 import { resolvePrWorktree } from '../../../src/adapters/git/prWorktree.js';
 import {
   NOW,
@@ -32,7 +32,7 @@ import {
 
 describe('registry consult', () => {
   test('a registry hit whose entry still points at truth (in-root, branch AND fetched sha) → reused=true, and NO worktree list/add ever runs', async () => {
-    const repoRoot = await mkdtemp(join(tmpdir(), 'cq-wt-hit-'));
+    const repoRoot = await realTmpDir('cq-wt-hit-');
     try {
       const calls: string[][] = [];
       // The entry lives INSIDE the worktreeRoot (ownership applies to the
@@ -95,7 +95,7 @@ describe('registry consult', () => {
   });
 
   test('a registry entry pointing OUTSIDE the current worktreeRoot is stale by definition — resolution recreates INSIDE', async () => {
-    const repoRoot = await mkdtemp(join(tmpdir(), 'cq-wt-outroot-'));
+    const repoRoot = await realTmpDir('cq-wt-outroot-');
     try {
       const calls: string[][] = [];
       // The entry's tree EXISTS, holds the right branch, even sits AT the
@@ -125,7 +125,7 @@ describe('registry consult', () => {
   });
 
   test('a STALE entry pointing at the WRONG branch is skipped, and a fresh tree is created (the register overwrites the stale entry)', async () => {
-    const repoRoot = await mkdtemp(join(tmpdir(), 'cq-wt-stale-'));
+    const repoRoot = await realTmpDir('cq-wt-stale-');
     try {
       const calls: string[][] = [];
       // The stale tree EXISTS on disk INSIDE the worktreeRoot but holds the
@@ -158,7 +158,7 @@ describe('registry consult', () => {
   });
 
   test('a STALE entry at the WRONG SHA — branch matches, tree lags origin — CONVERGES: the stale in-root tree is REMOVED non-forced and RE-CREATED at the fetched sha via add -B … <sha>', async () => {
-    const repoRoot = await mkdtemp(join(tmpdir(), 'cq-wt-stalesha-'));
+    const repoRoot = await realTmpDir('cq-wt-stalesha-');
     try {
       const calls: string[][] = [];
       // The round-1 tree still exists, still holds the branch — at sha A
@@ -212,7 +212,7 @@ describe('registry consult', () => {
   });
 
   test('a stale tree that is DIRTY cannot be refreshed away — the remove refuses, the throw carries git stderr, and the registry entry SURVIVES', async () => {
-    const repoRoot = await mkdtemp(join(tmpdir(), 'cq-wt-dirty-'));
+    const repoRoot = await realTmpDir('cq-wt-dirty-');
     try {
       const calls: string[][] = [];
       const stalePath = join(repoRoot, '.git', 'cq-review-worktrees', `pr-${PR}-${BRANCH}`);

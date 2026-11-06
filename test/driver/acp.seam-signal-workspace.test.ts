@@ -1,6 +1,6 @@
-import { mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { realTmpDir } from '../helpers/tmp-dir.js';
 import { describe, expect, test } from 'vitest';
 import { AcpDriver, ACP_SESSION_FILE } from '../../src/driver/acp/index.js';
 import { DispatchError, errorClassOf } from '../../src/driver/errors.js';
@@ -62,9 +62,9 @@ describe('acp driver seam v2: RunOptions.signal + workspace binding', () => {
   }, 20_000);
 
   test('workspace binding: the tool write lands in workspace.path; the record stays in sessionsDir recording the realpath', async () => {
-    // realpath the scratch parent so the bound dir IS its own realpath
-    // (macOS /var → /private/var) — the assertions then read literally.
-    const scratchDir = await realpath(await mkdtemp(join(tmpdir(), 'acpdrv-s2-')));
+    // Canonical scratch root (realTmpDir) so the bound dir IS its own
+    // realpath — the assertions then read literally.
+    const scratchDir = await realTmpDir('acpdrv-s2-');
     try {
       const workspaceDir = join(scratchDir, 'ws');
       await mkdir(workspaceDir);
@@ -109,8 +109,8 @@ describe('acp driver seam v2: RunOptions.signal + workspace binding', () => {
   });
 
   test('workspace + sessionRef: the same realpath resumes; a different one throws config PRE-DISPATCH', async () => {
-    // realpath the scratch parent so the bound dirs ARE their own realpaths.
-    const scratchDir = await realpath(await mkdtemp(join(tmpdir(), 'acpdrv-s2-')));
+    // Canonical scratch root (realTmpDir) so the bound dirs ARE their own realpaths.
+    const scratchDir = await realTmpDir('acpdrv-s2-');
     try {
       const workspaceDir = join(scratchDir, 'ws');
       const otherDir = join(scratchDir, 'other');

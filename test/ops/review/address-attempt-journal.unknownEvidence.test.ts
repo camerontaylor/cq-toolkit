@@ -8,9 +8,8 @@
 //     finishAttempt's strict schema are observation failures only; the fix
 //     (and its commit) is identical with and without a failing observation.
 import { randomUUID } from 'node:crypto';
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { rm } from 'node:fs/promises';
+import { realTmpDir } from '../../helpers/tmp-dir.js';
 import { describe, expect, test } from 'vitest';
 import { openObservationWriter } from '../../../src/kernel/observation.js';
 import {
@@ -73,7 +72,7 @@ describe('T14 address attempt journal', () => {
     // attempt event (a stream must open with its header). The refusal is
     // evidence, never a verdict, and the worker never manufactures a headerless
     // stream of its own.
-    const headerlessRoot = await mkdtemp(join(tmpdir(), 'cq-address-headerless-'));
+    const headerlessRoot = await realTmpDir('cq-address-headerless-');
     const unowned = await openObservationWriter({
       journalDir: headerlessRoot,
       workId: randomUUID(),

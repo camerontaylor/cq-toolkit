@@ -8,9 +8,9 @@
 // Shared fixtures and the fake git model (with the full pinned-behavior
 // header) live in prWorktree.helpers.ts.
 import { describe, expect, test } from 'vitest';
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { rm } from 'node:fs/promises';
 import { join } from 'node:path';
+import { realTmpDir } from '../../helpers/tmp-dir.js';
 import { resolvePrWorktree } from '../../../src/adapters/git/prWorktree.js';
 import {
   NOW,
@@ -84,7 +84,7 @@ describe('fetch-first — origin branch is truth', () => {
     const registry = memRegistry();
     // A tmpdir repoRoot: a full resolve reaches the real mkdir of the
     // worktree root, which must land somewhere writable.
-    const repoRoot = await mkdtemp(join(tmpdir(), 'cq-wt-fetchhead-'));
+    const repoRoot = await realTmpDir('cq-wt-fetchhead-');
     try {
       const model = mkModel();
       await resolvePrWorktree(baseOpts(model, registry, { repoRoot, run: fakeGit(model, calls) }));
@@ -103,7 +103,7 @@ describe('fetch-first — origin branch is truth', () => {
   });
 
   test('a FORKED PR: headRefName names a branch that does NOT exist on origin — the pull-ref fetch still resolves the true head', async () => {
-    const repoRoot = await mkdtemp(join(tmpdir(), 'cq-wt-fork-'));
+    const repoRoot = await realTmpDir('cq-wt-fork-');
     try {
       const calls: string[][] = [];
       const registry = memRegistry();

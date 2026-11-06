@@ -1,6 +1,7 @@
-import { mkdtemp, readFile, writeFile, rm, symlink } from 'node:fs/promises';
+import { readFile, writeFile, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { realTmpDir } from '../../helpers/tmp-dir.js';
 import { describe, expect, test } from 'vitest';
 import { finding, fixture } from './addressWorker.helpers.js';
 
@@ -253,7 +254,7 @@ describe('review.address candidate isolation', () => {
   });
 
   test('ten identical baseline failures run the check once without semantic attempts', async () => {
-    const external = await mkdtemp(join(tmpdir(), 'cq-baseline-refusal-'));
+    const external = await realTmpDir('cq-baseline-refusal-');
     const count = join(external, 'count');
     const f = await fixture(
       undefined,
@@ -323,7 +324,7 @@ console.error('deterministic baseline unavailable'); process.exitCode = 1;`,
   );
   test('outside symlink and missing files refuse before worker dispatch even through an aliased root', async () => {
     const f = await fixture(undefined, '', { aliasRoot: true });
-    const outside = await mkdtemp(join(tmpdir(), 'cq-address-outside-'));
+    const outside = await realTmpDir('cq-address-outside-');
     try {
       await writeFile(join(outside, 'private.ts'), 'PRIVATE\n');
       await symlink(join(outside, 'private.ts'), join(f.repo.root, 'src/outside.ts'));

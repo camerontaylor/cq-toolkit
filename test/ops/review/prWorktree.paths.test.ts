@@ -8,9 +8,9 @@
 // Shared fixtures and the fake git model (with the full pinned-behavior
 // header) live in prWorktree.helpers.ts.
 import { describe, expect, test } from 'vitest';
-import { mkdir, mkdtemp, realpath, rm, symlink } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, realpath, rm, symlink } from 'node:fs/promises';
 import { join, relative } from 'node:path';
+import { realTmpDir } from '../../helpers/tmp-dir.js';
 import { resolvePrWorktree } from '../../../src/adapters/git/prWorktree.js';
 import {
   NOW,
@@ -32,7 +32,7 @@ import {
 
 describe('path canonicalization — symlink-proof ownership', () => {
   test('a porcelain tree stored under the CANONICAL spelling is classified in-root (and refreshed) even when the caller spelled worktreeRoot through an alias', async () => {
-    const repoRoot = await mkdtemp(join(tmpdir(), 'cq-wt-sym-'));
+    const repoRoot = await realTmpDir('cq-wt-sym-');
     try {
       const calls: string[][] = [];
       const registry = memRegistry();
@@ -89,7 +89,7 @@ describe('path canonicalization — symlink-proof ownership', () => {
 
 describe('cwd independence — a RELATIVE repoRoot resolves everywhere', () => {
   test('a relative repoRoot produces ABSOLUTE -C args and an absolute worktree path (mkdir and git must not straddle two resolvers)', async () => {
-    const absRepo = await mkdtemp(join(tmpdir(), 'cq-wt-rel-'));
+    const absRepo = await realTmpDir('cq-wt-rel-');
     try {
       // The relative spelling of the absolute tmpdir repo: pathResolve(rel)
       // must land back on absRepo no matter which cwd the caller runs from.
@@ -121,7 +121,7 @@ describe('cwd independence — a RELATIVE repoRoot resolves everywhere', () => {
 
 describe('canonical reclaim — the target slot matches across spelling divergence', () => {
   test('a porcelain tree at the target slot under the CANONICAL root spelling is reclaimed even when the caller spelled worktreeRoot through an alias', async () => {
-    const repoRoot = await mkdtemp(join(tmpdir(), 'cq-wt-rc-'));
+    const repoRoot = await realTmpDir('cq-wt-rc-');
     try {
       const calls: string[][] = [];
       const canonicalRoot = join(repoRoot, '.git', 'cq-review-worktrees');

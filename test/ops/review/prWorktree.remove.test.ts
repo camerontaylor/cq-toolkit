@@ -8,9 +8,9 @@
 // Shared fixtures and the fake git model (with the full pinned-behavior
 // header) live in prWorktree.helpers.ts.
 import { describe, expect, test } from 'vitest';
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { rm } from 'node:fs/promises';
 import { join } from 'node:path';
+import { realTmpDir } from '../../helpers/tmp-dir.js';
 import { removePrWorktree, resolvePrWorktree } from '../../../src/adapters/git/prWorktree.js';
 import type {
   RegistryMap,
@@ -310,7 +310,7 @@ describe('removePrWorktree lock discipline (review-debt #121)', () => {
   });
 
   test('a remove racing a resolvePrWorktree for the SAME pr leaves the registry pointing at one consistent tree', async () => {
-    const repoRoot = await mkdtemp(join(tmpdir(), 'cq-wt-race-'));
+    const repoRoot = await realTmpDir('cq-wt-race-');
     try {
       const worktreeRoot = join(repoRoot, '.git', 'cq-review-worktrees');
       const oldPath = join(worktreeRoot, 'pr-7-old');

@@ -1,17 +1,8 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import {
-  mkdtemp,
-  mkdir,
-  rm,
-  symlink,
-  writeFile,
-  readFile,
-  readlink,
-  unlink,
-} from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, rm, symlink, writeFile, readFile, readlink, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
+import { realTmpDir } from '../../helpers/tmp-dir.js';
 import { expect, test } from 'vitest';
 import {
   assertAddressDependenciesIsolated,
@@ -28,7 +19,7 @@ test.each([
   'dangling',
   'root',
 ] as const)('dependency isolation inspection: %s', async (mode) => {
-  const root = await mkdtemp(join(tmpdir(), 'cq-dependency-isolation-'));
+  const root = await realTmpDir('cq-dependency-isolation-');
   try {
     const worker = join(root, 'worker');
     const installed = join(worker, 'node_modules');
@@ -68,7 +59,7 @@ test.each([
 test.each([1, 3])(
   'dependency traversal observes cancellation/budget at admission %i',
   async (at) => {
-    const root = await mkdtemp(join(tmpdir(), 'cq-dependency-stop-'));
+    const root = await realTmpDir('cq-dependency-stop-');
     try {
       const installed = join(root, 'node_modules');
       await mkdir(installed);
@@ -88,7 +79,7 @@ test.each([1, 3])(
 );
 
 test('candidate relinking and metadata writes leave caller dependencies intact', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'cq-dependency-snapshot-'));
+  const root = await realTmpDir('cq-dependency-snapshot-');
   try {
     const installed = join(root, 'caller', 'node_modules');
     const candidate = join(root, 'deep', 'candidate', 'node_modules');
@@ -115,7 +106,7 @@ test('candidate relinking and metadata writes leave caller dependencies intact',
 test.skipIf(process.platform === 'win32')(
   'relocated candidate keeps executable shims private',
   async () => {
-    const root = await mkdtemp(join(tmpdir(), 'cq-dependency-shim-'));
+    const root = await realTmpDir('cq-dependency-shim-');
     try {
       const installed = join(root, "caller'quoted", 'node_modules');
       const candidate = join(root, 'deeper', 'candidate', 'node_modules');

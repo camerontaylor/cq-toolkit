@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from 'vitest';
-import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readdir, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
+import { realTmpDir } from '../../helpers/tmp-dir.js';
 import { makeQueueClient } from '../../../src/ops/review/internal/queueClient.js';
 import { sha256 } from '../../../src/ops/review/internal/queueEvidence.js';
 import type {
@@ -25,7 +25,7 @@ afterEach(async () => {
   for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true });
 });
 async function directory() {
-  const dir = await mkdtemp(join(tmpdir(), 'cq-alias-'));
+  const dir = await realTmpDir('cq-alias-');
   dirs.push(dir);
   return dir;
 }

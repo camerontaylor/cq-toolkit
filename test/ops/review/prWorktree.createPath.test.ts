@@ -8,9 +8,9 @@
 // Shared fixtures and the fake git model (with the full pinned-behavior
 // header) live in prWorktree.helpers.ts.
 import { describe, expect, test } from 'vitest';
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { rm } from 'node:fs/promises';
 import { join } from 'node:path';
+import { realTmpDir } from '../../helpers/tmp-dir.js';
 import { resolvePrWorktree, reviewBranchFor } from '../../../src/adapters/git/prWorktree.js';
 import {
   NOW,
@@ -31,7 +31,7 @@ import {
 
 describe('create path', () => {
   test('no registry entry and no existing checkout → add -B … <expectedSha> under the DEFAULT worktreeRoot, registered, reused=false', async () => {
-    const repoRoot = await mkdtemp(join(tmpdir(), 'cq-wt-create-'));
+    const repoRoot = await realTmpDir('cq-wt-create-');
     try {
       const calls: string[][] = [];
       const registry = memRegistry();
@@ -64,7 +64,7 @@ describe('create path', () => {
   });
 
   test('an explicit worktreeRoot wins over the default', async () => {
-    const repoRoot = await mkdtemp(join(tmpdir(), 'cq-wt-root-'));
+    const repoRoot = await realTmpDir('cq-wt-root-');
     try {
       const calls: string[][] = [];
       const registry = memRegistry();
@@ -89,7 +89,7 @@ describe('create path', () => {
   });
 
   test('sanitize mapping: every character outside [A-Za-z0-9._-] becomes "-" — "/" can never smuggle a directory hop — and the pr-<pr>- prefix disambiguates sanitize collisions', async () => {
-    const repoRoot = await mkdtemp(join(tmpdir(), 'cq-wt-san-'));
+    const repoRoot = await realTmpDir('cq-wt-san-');
     try {
       const calls: string[][] = [];
       const registry = memRegistry();
@@ -127,7 +127,7 @@ describe('create path', () => {
   });
 
   test('an add FAILURE throws with git stderr and leaves the registry untouched', async () => {
-    const repoRoot = await mkdtemp(join(tmpdir(), 'cq-wt-addfail-'));
+    const repoRoot = await realTmpDir('cq-wt-addfail-');
     try {
       const calls: string[][] = [];
       const registry = memRegistry();
@@ -159,7 +159,7 @@ describe('create path', () => {
 
 describe('PR-keyed branch labels', () => {
   test('PR 7 and PR 9 both headRefName "main": distinct labels, distinct paths, no cross-claim', async () => {
-    const repoRoot = await mkdtemp(join(tmpdir(), 'cq-wt-two-'));
+    const repoRoot = await realTmpDir('cq-wt-two-');
     try {
       const registry = memRegistry();
       // PR 7 resolves first: its label is cq-review/pr-7, its path pr-7-main.
