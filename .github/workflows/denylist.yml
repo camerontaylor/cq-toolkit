@@ -2,7 +2,10 @@
 name: denylist
 
 # Required check. gitleaks scans the commits this push or pull request adds
-# (their diffs and their messages) with the repository's .gitleaks.toml.
+# (their diffs and their messages) with the DEFAULT BRANCH's .gitleaks.toml.
+# The policy comes from a trusted default-branch checkout, never from the
+# scanned revision: a required check that a pull request can re-configure
+# could allowlist its own findings and still pass.
 # Triggers stay unfiltered: a required check that a path filter skips never
 # reports, and the pull request can never merge.
 on:
@@ -18,7 +21,19 @@ jobs:
     # The `cq-state` settle ledger is machine-written; its pushes are not
     # reviewable changes (review-debt #226).
     if: ${{ github.ref != 'refs/heads/cq-state' }}
+    env:
+      # The scanner policy is the DEFAULT BRANCH's copy (see the header),
+      # never the scanned revision's.
+      GITLEAKS_CONFIG: ${{ github.workspace }}/trust/.gitleaks.toml
     steps:
+      - name: Check out the trusted scanner policy (default branch)
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (immutable commit pin; repo policy)
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.repository.default_branch }}
+          path: trust
+          sparse-checkout: .gitleaks.toml
+          sparse-checkout-cone-mode: false
       - name: Check out the repo
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (immutable commit pin; repo policy)
         with:
@@ -63,9 +78,9 @@ jobs:
         # it for octopus merges, so those are scanned against their first parent.
         run: |
           set -euo pipefail
-          gitleaks git --no-banner --redact --config .gitleaks.toml --log-opts="$RANGE --diff-merges=remerge" .
+          gitleaks git --no-banner --redact --config "$GITLEAKS_CONFIG" --log-opts="$RANGE --diff-merges=remerge" .
           for commit in $(git rev-list --min-parents=3 "$RANGE"); do
-            gitleaks git --no-banner --redact --config .gitleaks.toml --log-opts="-1 $commit --diff-merges=first-parent" .
+            gitleaks git --no-banner --redact --config "$GITLEAKS_CONFIG" --log-opts="-1 $commit --diff-merges=first-parent" .
           done
       - name: Scan commit messages
         env:
@@ -73,4 +88,4 @@ jobs:
         run: |
           set -euo pipefail
           git log --format='--- commit %h%n%B' "$RANGE" \
-            | gitleaks stdin --no-banner --redact --config .gitleaks.toml
+            | gitleaks stdin --no-banner --redact --config "$GITLEAKS_CONFIG"
