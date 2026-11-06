@@ -4,18 +4,28 @@
 // platform's certified backend probe result.  A missing probe is a missing
 // certification, never an invitation to run an unverified launcher.
 
-export type SandboxMode = 'off' | 'required';
-/**
- * The requested egress posture of a sandboxed run child.
- *
- * ADVISORY IN v1: nothing enforces this value. There is no transport
- * boundary — no proxy, netfilter, or loopback-only launcher — in front of a
- * `run` child, so 'model-only' records the INTENDED posture for a future
- * certified launcher; it is never a claim that egress is restricted today.
- * `run` is instead fail-closed outright while no launcher exists.
- */
-export type SandboxNetwork = 'model-only' | 'allow';
-export type SandboxBackend = 'landlock' | 'bwrap' | 'container' | 'seatbelt' | 'cc-native';
+import {
+  SANDBOX_POLICY_ENV_NAMES,
+  parseBackend,
+  parseMode,
+  parseNetwork,
+  parsePassthrough,
+  parseRunTool,
+  type SandboxBackend,
+  type SandboxMode,
+  type SandboxNetwork,
+} from '../config/parsers.js';
+
+export {
+  SANDBOX_POLICY_ENV_NAMES,
+  parseBackend,
+  parseMode,
+  parseNetwork,
+  parsePassthrough,
+  parseRunTool,
+};
+export type { SandboxBackend, SandboxMode, SandboxNetwork };
+
 export type SandboxPlatform = 'linux' | 'darwin' | 'other';
 
 export interface SandboxOptIn {
@@ -54,75 +64,10 @@ const AUTO_ORDER: Readonly<Record<'linux' | 'darwin', readonly SandboxBackend[]>
   darwin: ['seatbelt', 'container'],
 };
 
-const BACKENDS = new Set<SandboxBackend>([
-  'landlock',
-  'bwrap',
-  'container',
-  'seatbelt',
-  'cc-native',
-]);
-
-const ENV_NAMES = /^[A-Za-z_][A-Za-z0-9_]*$/;
-
-/** Policy controls must never be copied into a model-directed child. */
-export const SANDBOX_POLICY_ENV_NAMES: ReadonlySet<string> = new Set([
-  'CQ_SANDBOX',
-  'CQ_SANDBOX_BACKEND',
-  'CQ_SANDBOX_NETWORK',
-  'CQ_RUN_TOOL',
-  'CQ_RUN_ENV_PASSTHROUGH',
-]);
-
 function platformOf(platform: NodeJS.Platform): SandboxPlatform {
   if (platform === 'linux') return 'linux';
   if (platform === 'darwin') return 'darwin';
   return 'other';
-}
-
-function parseBackend(raw: string | undefined): SandboxBackend | 'auto' | undefined {
-  if (raw === undefined || raw.trim() === '') return undefined;
-  if (raw === 'auto') return 'auto';
-  if (!BACKENDS.has(raw as SandboxBackend)) {
-    throw new Error(
-      `sandbox: uncertified backend '${raw}' (use auto or a RS-13 certified backend)`,
-    );
-  }
-  return raw as SandboxBackend;
-}
-
-function parseMode(raw: string | undefined): SandboxMode {
-  if (raw === undefined || raw.trim() === '') return 'required';
-  if (raw === 'off' || raw === 'required') return raw;
-  throw new Error(`sandbox: CQ_SANDBOX must be 'off' or 'required', got '${raw}'`);
-}
-
-function parseNetwork(raw: string | undefined): SandboxNetwork {
-  if (raw === undefined || raw.trim() === '') return 'model-only';
-  if (raw === 'model-only' || raw === 'allow') return raw;
-  throw new Error(`sandbox: CQ_SANDBOX_NETWORK must be 'model-only' or 'allow', got '${raw}'`);
-}
-
-function parseRunTool(raw: string | undefined): 'on' | 'off' {
-  if (raw === undefined || raw.trim() === '') return 'on';
-  if (raw === 'on' || raw === 'off') return raw;
-  throw new Error(`sandbox: CQ_RUN_TOOL must be 'on' or 'off', got '${raw}'`);
-}
-
-function parsePassthrough(raw: string | undefined): readonly string[] {
-  if (raw === undefined || raw.trim() === '') return [];
-  const names = raw
-    .split(',')
-    .map((name) => name.trim())
-    .filter((name) => name !== '');
-  for (const name of names) {
-    if (!ENV_NAMES.test(name)) {
-      throw new Error(`sandbox: CQ_RUN_ENV_PASSTHROUGH contains invalid env name '${name}'`);
-    }
-    if (SANDBOX_POLICY_ENV_NAMES.has(name.toUpperCase())) {
-      throw new Error(`sandbox: CQ_RUN_ENV_PASSTHROUGH may not expose policy env '${name}'`);
-    }
-  }
-  return [...new Set(names)];
 }
 
 /**

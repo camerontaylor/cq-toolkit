@@ -1,12 +1,10 @@
 # instantiated from policy/templates/denylist.yml — edit the template, not this file
 name: denylist
 
-# Invariant I4: this workflow must never filter its triggers — no `paths`, no
-# `paths-ignore`, no branch or tag filters of any kind. The denylist scan runs
-# on every push and every pull_request, without exception — the one job-level
-# skip below (the `cq-state` settle-ledger branch, review-debt #226) keeps the
-# trigger surface unfiltered; a machine-written ledger push is not a tree the
-# scan needs to judge.
+# Required check. gitleaks scans the commits this push or pull request adds
+# (their diffs and their messages) with the repository's .gitleaks.toml.
+# Triggers stay unfiltered: a required check that a path filter skips never
+# reports, and the pull request can never merge.
 on:
   push:
   pull_request:
@@ -18,15 +16,12 @@ jobs:
   denylist:
     runs-on: ubuntu-latest
     # The `cq-state` settle ledger is machine-written; its pushes are not
-    # reviewable changes (review-debt #226). Job-level, never a trigger
-    # filter — I4 keeps the trigger surface intact.
+    # reviewable changes (review-debt #226).
     if: ${{ github.ref != 'refs/heads/cq-state' }}
     steps:
       - name: Check out the repo
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (immutable commit pin; repo policy)
         with:
-          # The scan runs repo code, so the checkout token must not
-          # survive checkout (persist-credentials: false).
           persist-credentials: false
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
@@ -35,9 +30,6 @@ jobs:
           set -euo pipefail
           cd "${RUNNER_TEMP:-/tmp}"
           tarball="gitleaks_8.30.1_linux_x64.tar.gz"
-          # sha256 of the v8.30.1 linux_x64 release tarball, pinned here so a
-          # replaced release asset cannot substitute a different binary; the
-          # version is pinned the same way.
           digest="551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
           curl -fsSL -o "${tarball}" \
             "https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/${tarball}"
@@ -45,28 +37,40 @@ jobs:
           tar -xzf "${tarball}" gitleaks
           sudo install -m 0755 gitleaks /usr/local/bin/gitleaks
           gitleaks version
-      - name: Denylist outgoing commit scan
+      - name: Choose the commit range
+        id: range
         env:
           SCAN_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
+          set -euo pipefail
           base="$SCAN_BASE"
-          if [[ -z "$base" || "$base" =~ ^0+$ ]]; then
-            if [[ "$GITHUB_REF" != "refs/heads/$DEFAULT_BRANCH" ]]; then
-              base=$(git merge-base HEAD "origin/$DEFAULT_BRANCH")
-            else
-              base=$(git hash-object -t tree /dev/null)
-              base=$(printf 'Publication root\n' | git -c user.name=scanner -c user.email=scanner@example.invalid commit-tree "$base")
-            fi
-          fi
-          if ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+          if [[ -z "$base" || "$base" =~ ^0+$ ]] || ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+            # New branch or unknown base: scan what the branch adds to the
+            # default branch; on the default branch itself, scan everything.
             if [[ "$GITHUB_REF" == "refs/heads/$DEFAULT_BRANCH" ]]; then
-              base=$(git hash-object -t tree /dev/null)
-              base=$(printf 'Publication root\n' | git -c user.name=scanner -c user.email=scanner@example.invalid commit-tree "$base")
+              base=""
             else
               base=$(git merge-base HEAD "origin/$DEFAULT_BRANCH")
             fi
           fi
-          ./scripts/denylist-scan --base "$base"
-      - name: Denylist self-test
-        run: ./scripts/denylist-scan --self-test
+          echo "range=${base:+$base..}HEAD" >> "$GITHUB_OUTPUT"
+      - name: Scan added commits
+        env:
+          RANGE: ${{ steps.range.outputs.range }}
+        # git log -p skips merge commits by default. --diff-merges=remerge shows
+        # what each merge introduced beyond the automatic merge, but git skips
+        # it for octopus merges, so those are scanned against their first parent.
+        run: |
+          set -euo pipefail
+          gitleaks git --no-banner --redact --config .gitleaks.toml --log-opts="$RANGE --diff-merges=remerge" .
+          for commit in $(git rev-list --min-parents=3 "$RANGE"); do
+            gitleaks git --no-banner --redact --config .gitleaks.toml --log-opts="-1 $commit --diff-merges=first-parent" .
+          done
+      - name: Scan commit messages
+        env:
+          RANGE: ${{ steps.range.outputs.range }}
+        run: |
+          set -euo pipefail
+          git log --format='--- commit %h%n%B' "$RANGE" \
+            | gitleaks stdin --no-banner --redact --config .gitleaks.toml

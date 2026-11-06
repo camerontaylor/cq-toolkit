@@ -57,7 +57,7 @@ const PATTERN_REPRESENTATIVES: Readonly<Record<string, readonly string[]>> = {
   '(?:^|\\/)\\.node-version$': ['.node-version'],
   '^\\.cq\\/tool(?:\\/|$)': ['.cq/tool/lint.sh'],
   '^src\\/ops\\/gates\\/protectedPaths\\.ts$': ['src/ops/gates/protectedPaths.ts'],
-  '^scripts\\/denylist-scan$': ['scripts/denylist-scan'],
+  '^\\.gitleaks\\.toml$': ['.gitleaks.toml'],
   '^scripts\\/ratchet-[^/]+\\.mjs$': ['scripts/ratchet-typecheck.mjs'],
   '^scripts\\/(?:build|gen-op-docs|copy-prompt-assets|lib\\/resource-scope)\\.mjs$': [
     'scripts/gen-op-docs.mjs',

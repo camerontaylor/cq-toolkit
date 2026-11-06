@@ -27,8 +27,6 @@ exit code as thrown. The phase-3 CLI (`src/cli`) maps arg errors to 2,
 escalations to 3. The CLI uses reportError, hasFailVerdict,
 exitCodeForOpResult and exitCodeForRunReport; test/cli/json-errors.test.ts and
 test/cli/verdict-exit.test.ts cover error artifacts and verdict exits.
-Known deviation today: `scripts/denylist-scan` exits 2 for
-thrown config errors and 127 for a missing binary — binding from phase 1.
 
 ## I2 — no-privileged-reviewer acceptance
 
@@ -80,13 +78,11 @@ only skip because it still reports a conclusion.
 
 **Enforcement (today).** The unfiltered `on: push / pull_request` triggers of
 `.github/workflows/ci.yml` (instantiated from `policy/templates/required-check.md`),
-and `.github/workflows/denylist.yml`, which predates the templates and carries
-only their trigger shape (its steps are the scan itself — not regenerable from
-the template; `policy/templates/README.md`), policed by the denylist-scan
-self-test's workflow-I4 leg over `REQUIRED_WORKFLOW_CHECKS` (each entry pairing
-a required workflow file with the check name of the job that must produce it),
-fail-closed on an empty or malformed list, a missing file, or a renamed job. Adopting repos: instantiate `required-check.md`
-and police triggers likewise.
+and `.github/workflows/denylist.yml` (instantiated from
+`policy/templates/denylist.yml`). Nothing polices the trigger shape
+mechanically: review does, and a filtered or renamed required check shows up
+as a pull request whose required check never reports. Adopting repos:
+instantiate `required-check.md` and keep its triggers unfiltered.
 
 ## I5 — baselines only tighten; missing evidence is non-passing
 
@@ -121,7 +117,14 @@ invisible in any single result.
 
 **Enforcement.** Lands in phase 1 with the harness (`src/harness`, the minimal tool
 surface and per-op allowlists) and the driver layer (`src/driver`): one worker, one
-process, no cross-worker handles; the run manifest records each worker as isolated.
+process, no cross-worker handles. Isolation is carried by facts that already exist,
+never by a manifest flag: each `attempt-finished` event's `tier` and `invocation`
+record what prior output the attempt was given (none for a worker edit, explicit check
+feedback for a feedback invocation, the failed attempt for a rescue); each
+`SweepUnitReport.worktree` records whether the tree was freshly created or reused, and
+which baseline caches were evicted; fix and review workers never send an
+`OpInvocation.sessionRef`, and a test pins it. The kernel `RunManifest` is written
+before execution and records no run-time facts.
 
 ## I7 — no baseline caching on worktree reuse
 
@@ -132,8 +135,12 @@ values are never carried over by cache.
 at; switches and fetches change it — regressions hide behind stale evidence.
 
 **Enforcement.** Lands with the worktree-managing ops (`src/ops/sweep`, phases 1–2):
-reuse may save setup, never measurement; every baseline in the run manifest is marked
-freshly probed.
+reuse may save setup, never measurement. Probes are never cached — the per-unit
+baseline snapshot is written outside the worktree and never read back — and each
+ADR-0008 baseline-evidence record carries the HEAD its probe ran at (`probeHead`)
+when its producer knows it: the fix run fills it from each collected unit's
+`worktree.headSha` (recorded on the create and reuse paths alike); the review
+producer's map carries no head, so its rows stay null.
 
 ## I8 — rescue and escalation live in the plan runner
 

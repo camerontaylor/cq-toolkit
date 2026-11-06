@@ -20,22 +20,21 @@
 // The per-call object shape follows W1.11's `SandboxOptIn` and plan §3.1; the
 // CLI `--opt-in` flag that would populate it is W3.6's.
 
+import {
+  POSTURE_LIST,
+  PROTECTED_PATHS_POSTURES,
+  isPosture,
+  type ProtectedPathsPosture,
+} from '../../config/values.js';
+
 /**
  * `human`: every finding needs a human. `diff-check`: plain protected-path
  * edits pass. `advisory`: only privileged-path, baseline-loosened,
  * target-removed and entry-removed findings need a human; the rest are
  * annotations.
  */
-export type ProtectedPathsPosture = 'human' | 'diff-check' | 'advisory';
-
-/** Every accepted posture value, in the error-message order. */
-export const PROTECTED_PATHS_POSTURES: readonly ProtectedPathsPosture[] = Object.freeze([
-  'human',
-  'diff-check',
-  'advisory',
-]);
-
-const POSTURE_LIST = "'human', 'diff-check' or 'advisory'";
+export type { ProtectedPathsPosture };
+export { PROTECTED_PATHS_POSTURES };
 
 /** The project env key selecting the posture. */
 export const PROTECTED_PATHS_ENV = 'CQ_MERGE_PROTECTED_PATHS';
@@ -53,9 +52,6 @@ export interface ProtectedPathsConfig {
   readonly posture: ProtectedPathsPosture;
   readonly layer: 'default' | 'env' | 'call';
 }
-
-const isPosture = (raw: string): raw is ProtectedPathsPosture =>
-  (PROTECTED_PATHS_POSTURES as readonly string[]).includes(raw);
 
 /**
  * Resolve the D11 posture: explicit per-call opt-in, then project env, over

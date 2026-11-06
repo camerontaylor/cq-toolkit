@@ -97,15 +97,22 @@ export interface SweepWorkspace {
   /** true when an existing strictly-clean tree was reused; false when freshly created. */
   reused: boolean;
   /**
-   * REVIEW-DEBT #176 item 3: on REUSE, the tree's actual HEAD sha and the
-   * resolved sha of `input.base`. Recorded — never silently assumed — so a
-   * re-invoke against a changed base is VISIBLE to the caller instead of
-   * surfacing later as a mergeability conflict. NOT a refusal: a completed
-   * unit's tree is legitimately one commit ahead of the base (the fixer's
-   * own commit), so `headSha !== baseSha` is expected there. Absent on a
-   * fresh create (its HEAD IS the base by construction).
+   * The tree's actual HEAD sha at acquisition, recorded on BOTH paths (M2c):
+   * a fresh create resolves the new tree's HEAD with the same revParse
+   * effect the reuse leg uses, and a reuse records the tree's carried HEAD
+   * (review-debt #176 item 3). Recorded — never silently assumed — so the
+   * baseline probe can name the exact head it ran at.
    */
   headSha?: string;
+  /**
+   * REVIEW-DEBT #176 item 3: on REUSE, the resolved sha of `input.base`,
+   * recorded next to `headSha` so a re-invoke against a changed base is
+   * VISIBLE to the caller instead of surfacing later as a mergeability
+   * conflict. NOT a refusal: a completed unit's tree is legitimately one
+   * commit ahead of the base (the fixer's own commit), so `headSha !==
+   * baseSha` is expected there. Absent on a fresh create (its HEAD IS the
+   * base by construction).
+   */
   baseSha?: string;
   /** I7: baseline cache dirs evicted from a reused tree (input-relative names). Empty on create. */
   clearedBaselineCaches: string[];
@@ -147,8 +154,9 @@ export interface WorktreeEffects {
    * `worktreePath` (`git rev-parse --verify <ref>^{commit}` — a path-shaped
    * ref fails rather than echoing the pathname, and the peel guarantees a
    * commit). The reuse leg records the tree's actual HEAD against the
-   * requested base with it (review-debt #176 item 3); a resolution fault is a
-   * `failed` result, never a fabricated match.
+   * requested base with it (review-debt #176 item 3) and the create leg
+   * resolves the new tree's HEAD with the same call (M2c); a resolution
+   * fault is a `failed` result, never a fabricated match.
    */
   revParse(worktreePath: string, ref: string): Promise<string>;
   /**
@@ -511,18 +519,34 @@ export function makeWorktreeFor(git: WorktreeEffects): Op<WorktreeForInput, Swee
         error: `sweep: could not create worktree '${path}' on branch '${branch}' at base '${input.base}' — ${messageOf(err)}`,
       };
     }
+    // M2c: resolve the new tree's HEAD exactly as the reuse leg does — the
+    // same revParse effect over the canonical path — so a created workspace
+    // carries its headSha too (the baseline probe names the head it ran at
+    // on BOTH paths). A resolution fault fails the create the same way it
+    // fails a reuse; a workspace without headSha is never returned.
+    const canonical = await realpathOf(path);
+    let createdHeadSha: string;
+    try {
+      createdHeadSha = await git.revParse(canonical, 'HEAD');
+    } catch (err) {
+      return {
+        status: 'failed',
+        error: `sweep: could not resolve HEAD in the created worktree '${canonical}' — ${messageOf(err)}`,
+      };
+    }
     return {
       status: 'ok',
       value: {
         // The canonical form of the created tree: git records the realpath,
         // so the reported path matches what the next call's porcelain list
         // will show (lexical fallback when the fs cannot resolve).
-        path: await realpathOf(path),
+        path: canonical,
         branch,
         requestedBase: input.base,
         reused: false,
         clearedBaselineCaches: [],
         refusedBaselineCaches: [],
+        headSha: createdHeadSha,
       },
     };
   };

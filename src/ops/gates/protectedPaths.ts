@@ -63,11 +63,11 @@ export const PROTECTED_CONFIG_PATH_PATTERNS: readonly RegExp[] = Object.freeze([
   /(?:^|\/)\.node-version$/i,
   // Base-owned tool shims the gates invoke (.cq/tool/**).
   /^\.cq\/tool(?:\/|$)/i,
-  // The gate's OWN taxonomy and the required-check list it parses: editing
+  // The gate's OWN taxonomy and the required denylist check's rules: editing
   // either is editing the rules that judge a worker commit (ADR-0004 D-C.4
   // puts both in the ratchet definition set for the same reason).
   /^src\/ops\/gates\/protectedPaths\.ts$/i,
-  /^scripts\/denylist-scan$/i,
+  /^\.gitleaks\.toml$/i,
   // What the required checks RUN (W1.9 H3, ADR-0004 D-C.4 measurement
   // config): the static gate's drivers and generators, and Knip's config.
   // The lint config (`.oxlintrc.json`/`.oxfmtrc.json`) is already an `rc`

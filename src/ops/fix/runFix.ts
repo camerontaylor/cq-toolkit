@@ -509,11 +509,13 @@ export function makeFixRun(deps: FixRunDeps = {}) {
       // THE COMPOSITION STREAM OPENS — one measurement-summary through the
       // composition writer, computed from this run's evidence alone (no
       // cross-run state). The exits before the writer opens print nothing:
-      // no stream exists, and that is correct. No baseline probe producer is
-      // wired yet, so every planned unit is honestly unprobed: the
-      // denominator is null, never a guessed zero, and a commit whose
-      // message cannot be read leaves the numerator unknown. An emission
-      // failure is evidence (indeterminate observation), never a verdict.
+      // no stream exists, and that is correct. M2c: each COLLECTED unit's
+      // baseline probe feeds the denominator (its own failure count at its
+      // own worktree HEAD); a planned unit with no collected report stays
+      // honestly unprobed — the denominator is then null, never a guessed
+      // zero — and a commit whose message cannot be read leaves the
+      // numerator unknown. An emission failure is evidence (indeterminate
+      // observation), never a verdict.
       if (observation?.writer !== undefined && !observationClosed) {
         try {
           const messages = new Map<string, string>();
@@ -535,10 +537,26 @@ export function makeFixRun(deps: FixRunDeps = {}) {
               // Unreadable message: that closure's trailer status is unknown.
             }
           }
+          // M2c: the probe map from this run's collected unit evidence —
+          // each report's baseline probe is the population the fixer worked
+          // on (its own failure count at its own worktree HEAD), keyed by
+          // the planned unit id `${package}/${fixer}` (the `collected` key
+          // `${package}\0${fixer}` maps over explicitly). A planned unit
+          // with no collected report stays unknown, never a zero.
+          const probeCounts = new Map(
+            [...collected.values()].map((unit) => [
+              `${unit.package}/${unit.fixer}`,
+              {
+                completed: true,
+                count: unit.baseline.failureSet.failures.length,
+                probeHead: unit.worktree.headSha ?? null,
+              },
+            ]),
+          );
           const { availability, ...metric } = measureRun(
             report.tasks,
             plannedUnitIds,
-            new Map(),
+            probeCounts,
             (sha) => messages.get(sha),
           );
           await observation.writer.append({

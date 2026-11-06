@@ -4,7 +4,7 @@
 // unfiltered push workflows (ci, denylist, ratchet) — wasted runner time on
 // a branch that carries no reviewable change. The I4-sanctioned fix is a
 // JOB-LEVEL `if:` (never a trigger filter: the `on:` block of a required
-// workflow stays unfiltered — that is the denylist-scan's I4 leg, unchanged
+// workflow stays unfiltered, or the required check never reports — unchanged
 // here), pinned per file in this test so a regeneration cannot drop it.
 import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';

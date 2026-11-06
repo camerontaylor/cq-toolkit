@@ -19,6 +19,7 @@
 // pretend to exist).
 import { join } from 'node:path';
 import type { ModelSpec } from '../driver/types.js';
+import { parseModelSpec } from '../config/parsers.js';
 import { deepFreeze } from '../shared/deepFreeze.js';
 
 /**
@@ -252,29 +253,7 @@ export const SELFHOST_PEAK_DRIVER_ENV = 'CQ_SELFHOST_PEAK_DRIVER';
  */
 export const SETTLE_STATE_PATH = '.cq/settle-state.json';
 
-/**
- * Parse a `provider/model` spec. Exactly one slash, both halves non-empty,
- * no whitespace: a malformed value THROWS with the offending env name so a
- * typo fails the run loud instead of silently dispatching the default model.
- */
-export function parseModelSpec(value: string, source: string): ModelSpec {
-  const parts = value.split('/');
-  const provider = parts[0];
-  const model = parts[1];
-  if (
-    parts.length !== 2 ||
-    provider === undefined ||
-    model === undefined ||
-    provider === '' ||
-    model === '' ||
-    /\s/.test(value)
-  ) {
-    throw new Error(
-      `selfhost: ${source} must be '<provider>/<model>' (got ${JSON.stringify(value)})`,
-    );
-  }
-  return { provider, model };
-}
+export { parseModelSpec };
 
 /** The off-peak and peak drivers: env overrides first, frozen defaults otherwise. */
 export interface SelfhostDrivers {
