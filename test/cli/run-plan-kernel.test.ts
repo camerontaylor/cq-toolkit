@@ -344,10 +344,11 @@ describe('run-plan through the governed kernel', () => {
     expect(err).toMatch(/invalid input for 'run-plan': runPlan: resume: true requires journalDir/);
   });
 
-  test('non-canonical decimal spellings coerce for numeric fields (--max-usd=5.0, --concurrency=1.0)', async () => {
-    // parseFlags runs schema-less for run-plan, so a trailing-zero decimal
-    // stays the raw string (#386); the run-plan normalizer converts it where
-    // the schema type is known, so a common dollar-cap spelling is accepted
+  test('non-canonical numeric spellings coerce for numeric fields', async () => {
+    // parseFlags runs schema-less for run-plan, so a trailing-zero decimal or
+    // exponent stays the raw string (#386); the run-plan normalizer converts
+    // it where the schema type is known, so common spellings (--max-usd=5.0,
+    // --max-usd=0.50, --max-tokens=1e6, --concurrency=1.0) are accepted
     // instead of rejected as invalid input (exit 2).
     const { planPath } = await writePlanFile(singleJobPlan('echo'));
     const base = [
@@ -359,6 +360,12 @@ describe('run-plan through the governed kernel', () => {
     const usd = await capture([...base, '--max-usd=5.0']);
     expect(usd.code).toBe(0);
     expect(RunReportSchema.parse(JSON.parse(usd.out)).counts.done).toBe(1);
+    const zeroCap = await capture([...base, '--max-usd=0.50']);
+    expect(zeroCap.code).toBe(0);
+    expect(RunReportSchema.parse(JSON.parse(zeroCap.out)).counts.done).toBe(1);
+    const exponent = await capture([...base, '--max-tokens=1e6']);
+    expect(exponent.code).toBe(0);
+    expect(RunReportSchema.parse(JSON.parse(exponent.out)).counts.done).toBe(1);
     const concurrency = await capture([...base, '--concurrency=1.0']);
     expect(concurrency.code).toBe(0);
     const garbage = await capture([...base, '--max-usd=abc']);
