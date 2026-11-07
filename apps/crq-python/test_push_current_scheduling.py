@@ -22,6 +22,22 @@ class PushTest(PushTestBase, unittest.TestCase):
         self.assertEqual([i["id"] for i in sorted([backfill, push, current], key=crq.sort_key)],
                          ["current-x", "push-infra-aaaaaaaaa0-bbbbbbbbb0", "bf-1"])
 
+    def test_foreign_open_prs_precede_older_push_items_at_every_repo_rank(self):
+        for tier in (2, 3, 4):
+            with self.subTest(rank_tier=tier):
+                self.repos[0] = self.cfg(rank_tier=tier)
+                push = {"id": "push", "kind": push_current.KIND, "pr": 0,
+                        "repo": FOREIGN, "state": "pending", "order": 1}
+                opened = {"id": "open", "kind": "open", "pr": 1, "tier": 1,
+                          "repo": FOREIGN, "state": "pending", "order": 3}
+                delta = {"id": "delta", "kind": "delta", "pr": 1, "followup": "open",
+                         "repo": FOREIGN, "state": "pending", "order": 2}
+                merged = dict(delta, id="merged", followup="merged")
+                self.assertEqual([i["id"] for i in sorted([push, delta, opened], key=crq.sort_key)],
+                                 ["open", "delta", "push"])
+                self.assertEqual(crq.rank(push), tier)
+                self.assertEqual(crq.rank(merged), tier)
+
     def test_harvest_advances_reviewed_tip_only_when_counted(self):
         self.repos[0] = self.cfg(floor=self.iso_of(self.ago(36)))
         self.commit(self.foreign_origin, "mid work", when=self.ago(2), files={"b.txt": "b\n"})

@@ -40,9 +40,11 @@ behavior; the checked-in config ships empty, host overlays add entries):
 - `include`/`exclude` — glob lists matched against repo-relative paths
   (default include `["**"]`, exclude `[]`). Excluded affected paths appear in
   the capture as `excluded-config` rows, never silently dropped.
-- `rank_tier` — scheduling rank for this repo's items (int 2–4, default 3).
-  cq-toolkit ordinary work is ranks 0–2, backfill/coverage/author are 4; new
-  repos sit between (3) by default.
+- `rank_tier` — scheduling rank for this repo's push and other post-merge
+  items (int 2–4, default 3). Open PRs use rank 0 and their open follow-up
+  reviews use rank 1 across all repositories, ahead of push reviews. Optional
+  additional cycles remain rank 5. Explicit operator priority still takes
+  precedence; eligible items at the same rank use queue insertion order.
 - `scan_extra_classes` — denylist class ids added to the universal
   secret-shape set (key material, tokens, inline secrets) for this repo's
   pre-upload scan (default `[]`). The primary repo's publish classes stay
