@@ -476,8 +476,9 @@ invariants.
 and `CQ_AUTOMATION_APP_CLIENT_ID` (variable) in
 [`github-settings.json`](../../policy/templates/github-settings.json), and
 the interim `CQ_AUTOMATION_TOKEN`/`GH_TOKEN` names stay in its
-`interimSecrets` allowlist (reported as drift notices) until the owner
-revokes them at C3/T7. This supersedes N20's `self-merge-prs` tail.
+`interimSecrets` allowlist (reported as drift notices) until they are removed
+from the repository at C3/T7 (the PATs themselves are not revoked — they
+remain in use elsewhere). This supersedes N20's `self-merge-prs` tail.
 
 ### N23 — ADR-0004 D-G.1/D-G.2 and Annex B §B.1: protected scope is the deployed system; the D-P revision window
 
