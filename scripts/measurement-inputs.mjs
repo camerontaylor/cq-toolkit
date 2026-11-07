@@ -159,6 +159,13 @@ function addLeaf(record, result) {
 // producer path is a legacy or broken artifact, never a silent skip.
 const FIX_RUN_REPORT_NAME =
   /^fix-run-report-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.json$/;
+/**
+ * The persisted operation-report envelope version (ADR-0005 decision 10).
+ * FixRunReport is the producer that writes it; the reader applies the rule to
+ * every reportV2 envelope it unwraps, because the envelope is recognised by
+ * its embedded payload, never by its filename.
+ */
+const OPERATION_REPORT_VERSION = 1;
 
 /** Is this artifact at a path a measurement producer writes (report or index)? */
 function producerPath(root, path) {
@@ -181,6 +188,18 @@ function ingestJson(parsed, source, result, atProducerPath) {
     parsed?.indexVersion === undefined &&
     parsed?.reportV2 !== undefined
   ) {
+    // ADR-0005 decision 10 — the ENVELOPE's own version, checked at the one
+    // point where this reader recognises an operation report (its reportV2
+    // payload), before the embedded evidence is read. The writer always
+    // writes version 1; an ABSENT version is legacy v1 (pre-version runner
+    // caches), and any other value is refused fail-closed. A renamed or
+    // copied envelope is governed by the version it declares, not by its
+    // path: a filename pattern is a recognition heuristic, never a licence
+    // to read past an unsupported format.
+    if (parsed.version !== undefined && parsed.version !== OPERATION_REPORT_VERSION)
+      return void result.unknown.push(
+        bad(source, 'unsupported', `operation report version ${String(parsed.version)}`),
+      );
     if (parsed.reportV2?.reportVersion === undefined)
       return void result.unknown.push(
         bad(source, 'corrupt', 'reportV2 is not a v2 report payload'),

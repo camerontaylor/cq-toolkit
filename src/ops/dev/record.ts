@@ -721,12 +721,24 @@ function recordIdOf(record: DevRecord): string | null {
   return null;
 }
 
+/** Render Zod issues as one bounded `path: message` list (shared by read and write). */
+function schemaIssues(error: z.ZodError): string {
+  return error.issues
+    .map((issue) => `${issue.path.map(String).join('.') || '(root)'}: ${issue.message}`)
+    .join('; ');
+}
+
 /**
  * Serialize deterministically: keys in schema order, 2-space indent, exactly
- * one trailing newline; records keep append order. The write side guards
- * only what its own output could not parse back — a duplicate record id
- * (cycleId/checkId) — and otherwise trusts the caller: parseDevLedger is the
- * strict entry for anything read back.
+ * one trailing newline; records keep append order. The caller's key insertion
+ * order never reaches the bytes: the value is re-parsed through the SAME
+ * strict schema the reader uses, and zod re-emits keys in schema order for
+ * every strict object and union. Parity is the point — the writer refuses
+ * anything parseDevLedger would reject (unknown key, missing required field,
+ * refinement violation), so it cannot author a file the next read cannot
+ * load. The duplicate-record-id guard (cycleId/checkId/reuseId) stays a write
+ * rule: the reader refuses it too, but the writer names the collapse before
+ * the bytes exist.
  */
 export function serializeDevLedger(file: DevLedgerFile): string {
   if (file.version !== DEV_LEDGER_VERSION) {
@@ -735,8 +747,14 @@ export function serializeDevLedger(file: DevLedgerFile): string {
         `this writer writes ${DEV_LEDGER_VERSION} only (reads still dual-read 2; ADR-0008 T38)`,
     );
   }
+  const parsed = DevLedgerFileSchema.safeParse(file);
+  if (!parsed.success) {
+    throw new Error(
+      `dev-record: refusing to write — schema violation — ${schemaIssues(parsed.error)}`,
+    );
+  }
   const ids = new Set<string>();
-  for (const record of file.records) {
+  for (const record of parsed.data.records) {
     const id = recordIdOf(record);
     if (id !== null) {
       if (ids.has(id)) {
@@ -747,7 +765,7 @@ export function serializeDevLedger(file: DevLedgerFile): string {
       ids.add(id);
     }
   }
-  return `${JSON.stringify(file, null, 2)}\n`;
+  return `${JSON.stringify(parsed.data, null, 2)}\n`;
 }
 
 /**
@@ -767,10 +785,7 @@ export function parseDevLedger(text: string): DevLedgerFile {
   }
   const parsed = DevLedgerFileSchema.safeParse(data);
   if (!parsed.success) {
-    const issues = parsed.error.issues
-      .map((issue) => `${issue.path.map(String).join('.') || '(root)'}: ${issue.message}`)
-      .join('; ');
-    throw new Error(`dev-record: schema violation — ${issues}`);
+    throw new Error(`dev-record: schema violation — ${schemaIssues(parsed.error)}`);
   }
   const ids = new Set<string>();
   for (const record of parsed.data.records) {

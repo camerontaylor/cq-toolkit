@@ -83,6 +83,8 @@ Record evidence a reader can check, never a flag a producer asserts; "fresh" and
 | review scope `baseSha: SHA`, `headSha: SHA`, `findingFingerprints: FindingFingerprint[]`, `coverage: string`                                                                              | review producer                                                 | re-review denominator, acceptance audit                           | J/R; legacy incomplete scope explicit, empty set only when known empty                                    |
 | metric `metric.fixesPerRun: {numerator: Count \| null, denominator: Count \| null}`, `metric.verifiedCommits: SHA[]`, `metric.baselineFailures: {unitId: string, count: Count \| null}[]` | run assembler using verifier + baseline probes                  | JSON report, human rendering, offline monthly roll-up             | R/J summary; old scalar retained only in legacy projection, never relabeled as this ratio                 |
 
+`provenance.config?` was added 2026-11-06 per ADR-0009 as a strictly additive optional field. The package is an unreleased 0.2.0-dev with no released v3 reader or writer, so no deployed reader can reject it; no journalVersion bump is made, as an explicit decision under ADR-0009.
+
 The measurement handoff adds the following nested payloads to the same J/R
 carriers, with the same strict-reader migration and version rules. Each legacy
 omission uses the availability record below; no historic evidence is invented.

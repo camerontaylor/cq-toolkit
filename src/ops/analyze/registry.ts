@@ -368,7 +368,13 @@ export const PlaybookDispatchInputSchema: z.ZodType<PlaybookDispatchInput> = z
     targets: z.array(z.string().min(1)).min(1),
     timeoutMs: z.number().int().positive().default(600_000),
   })
-  .strict();
+  .strict()
+  // Rendered into docs/ops/analyze.playbookDispatch.md by gen-op-docs.mjs: the
+  // v1 cut a dispatcher must know before relying on a quarantine as durable
+  // state (see playbooks/quarantine.ts and the family NOTES.md).
+  .describe(
+    'The playbook registry and the quarantine ledger are process-scoped in v1: a registered playbook and any quarantine live only for the life of the process. A quarantine does not survive a restart, so after one the playbook must be re-registered and re-approved before it can dispatch again; nothing re-dispatches it automatically.',
+  );
 
 /**
  * Registry-time mirror of {@link PlaybookQuarantineListInput}: the empty

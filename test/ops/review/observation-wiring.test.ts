@@ -327,6 +327,10 @@ describe('T31 round-trip through the address composition', () => {
 
   test('one stream across rounds and plans, runtime deps receive the writer, close before persistence', async () => {
     const f = await fixture();
+    // Built at runtime: the denylist scans committed text for token shapes.
+    const fakeToken = ['tok', 'en', '-', Math.random().toString(36).slice(2), 'zz'].join('');
+    vi.stubEnv('CQ_SANDBOX', 'off');
+    vi.stubEnv('CQ_AUTOMATION_TOKEN', fakeToken);
     try {
       const result = await invoke(f);
       expect(result.status, JSON.stringify(result)).toBe('ok');
@@ -364,6 +368,13 @@ describe('T31 round-trip through the address composition', () => {
           .update(await readFile(join(f.repo.root, 'cq.json'), 'utf8'), 'utf8')
           .digest('hex')}`,
       );
+      // C5: the resolved env config is recorded; secrets as 'set' only.
+      const recorded = header.payload.provenance.config;
+      expect(recorded?.env['CQ_SANDBOX']).toBe('off');
+      expect(recorded?.env['CQ_AUTOMATION_TOKEN']).toBe('set');
+      expect(recorded?.sources['CQ_SANDBOX']).toBe('env');
+      expect(JSON.stringify(stream.events)).not.toContain(fakeToken);
+      expect(JSON.stringify(report)).not.toContain(fakeToken);
       expect(report?.observation?.baseSha).toBe(header.payload.provenance.baseSha);
       // Explicit kernel-run links for every returned run; the linked ids are
       // the actual runs the report retained. P3-9: the count EQUALS the

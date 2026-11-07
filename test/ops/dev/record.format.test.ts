@@ -16,6 +16,19 @@ import type { DevLedgerFile } from '../../../src/ops/dev/record.js';
 import { BRANCH, checkRecord, cycleRecord, dispositionRecord } from './fakes.js';
 import { reuseRecord } from './record.helpers.js';
 
+/** Deep-copy `value` with every object's key insertion order reversed. */
+function reverseKeys<T>(value: T): T {
+  if (Array.isArray(value)) return value.map(reverseKeys) as T;
+  if (value !== null && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .reverse()
+        .map(([key, nested]) => [key, reverseKeys(nested)]),
+    ) as T;
+  }
+  return value;
+}
+
 describe('the dev-record format', () => {
   test('serialize is deterministic: schema key order, 2-space indent, one trailing newline', () => {
     const file: DevLedgerFile = {
@@ -33,6 +46,85 @@ describe('the dev-record format', () => {
     expect(once.endsWith('\n')).toBe(true);
     expect(once.endsWith('\n\n')).toBe(false);
     expect(JSON.parse(once)).toHaveProperty('version', DEV_LEDGER_VERSION);
+  });
+
+  test('serialize normalizes key order: a permuted ledger is byte-identical to the canonical one', () => {
+    const file: DevLedgerFile = {
+      version: DEV_LEDGER_VERSION,
+      branch: BRANCH,
+      records: [
+        cycleRecord({
+          findings: [
+            {
+              id: 'c001-aaaaaaaa#f1',
+              severity: 'major',
+              fileName: 'src/a.ts',
+              excerpt: 'x',
+              line: 3,
+            },
+          ],
+        }),
+        checkRecord(),
+        dispositionRecord(),
+        reuseRecord(),
+      ],
+    };
+    const canonical = serializeDevLedger(file);
+    const permutedInput = reverseKeys(file);
+    // The input really is in a different order (same JSON values, different bytes).
+    expect(JSON.stringify(permutedInput, null, 2)).not.toBe(JSON.stringify(file, null, 2));
+    expect(serializeDevLedger(permutedInput)).toBe(canonical);
+    // Top level and nested objects follow the schema, not insertion order.
+    const parsed = JSON.parse(canonical) as {
+      records: Record<string, unknown>[];
+    };
+    expect(Object.keys(parsed)).toEqual(['version', 'branch', 'records']);
+    expect(Object.keys(parsed.records[0]!)).toEqual([
+      'kind',
+      'cycleId',
+      'reviewer',
+      'scope',
+      'target',
+      'base',
+      'head',
+      'dirtySha256',
+      'completion',
+      'findings',
+      'logPath',
+      'untracked',
+      'at',
+    ]);
+    expect(Object.keys((parsed.records[0]!.findings as Record<string, unknown>[])[0]!)).toEqual([
+      'id',
+      'severity',
+      'fileName',
+      'excerpt',
+      'line',
+    ]);
+  });
+
+  test('serialize refuses anything the strict reader would reject (unknown key at any depth)', () => {
+    const canonical: DevLedgerFile = {
+      version: DEV_LEDGER_VERSION,
+      branch: BRANCH,
+      records: [cycleRecord()],
+    };
+    const smuggledTop = { ...canonical, mystery: true } as unknown as DevLedgerFile;
+    expect(() => serializeDevLedger(smuggledTop)).toThrow(/refusing to write.*schema violation/);
+    const smuggledNested = {
+      ...canonical,
+      records: [{ ...cycleRecord(), mystery: true }],
+    } as unknown as DevLedgerFile;
+    expect(() => serializeDevLedger(smuggledNested)).toThrow(/schema violation/);
+    // Write/read parity: the bytes the writer refuses are the bytes the reader refuses.
+    expect(() => parseDevLedger(JSON.stringify(smuggledTop))).toThrow(/schema violation/);
+    // A refinement the reader enforces is also a write refusal, not a bad file.
+    expect(() =>
+      serializeDevLedger({
+        ...canonical,
+        records: [{ ...reuseRecord(), resolvesCycleId: 'c002-aaaaaaaa' }],
+      }),
+    ).toThrow(/schema violation/);
   });
 
   test('serialize refuses duplicate record ids (the store never collapses)', () => {

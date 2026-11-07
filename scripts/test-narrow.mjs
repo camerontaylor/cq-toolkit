@@ -22,6 +22,7 @@ import {
   NICE_INCREMENT,
   RUN_TIMEOUT_MS,
   USAGE,
+  childEnv,
   loggedVitestArgs,
   missingManifestEntries,
   parseArgs,
@@ -38,6 +39,9 @@ import {
 
 const SCRIPT = fileURLToPath(import.meta.url);
 const ROOT = resolve(dirname(SCRIPT), '..');
+// Read before any child starts: this flag is stripped from every child env
+// (`childEnv`), so its own value must be captured here.
+const emitReport = process.env.CQ_TEST_NARROW_REPORT === '1';
 const REEXEC_MARK = 'CQ_TEST_NARROW_REEXEC';
 const POSIX = process.platform !== 'win32';
 const SIGNALS = ['SIGINT', 'SIGTERM', 'SIGHUP'];
@@ -82,6 +86,12 @@ if (getPriority() < NICE_INCREMENT) {
     await new Promise(() => {});
   }
 }
+
+// Internal test-narrow markers (the re-exec guard and the evidence flag) are
+// stripped from the Python, build and Vitest environments by `childEnv`, so a
+// spawned `cq` CLI does not warn about an unregistered CQ_* name on stderr.
+// CQ_DIST_PREPARED needs no stripping: it is a registered `test` entry in
+// src/config/env-registry.ts.
 
 // From here on this process runs niced. ------------------------------------
 // pnpm runs scripts from the package root and passes the caller's directory
@@ -327,7 +337,7 @@ if (pythonFiles.length > 0) {
     cwd: join(ROOT, 'apps/crq-python'),
     stdio: ['ignore', 'inherit', 'pipe'],
     captureStderr: true,
-    env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1', PYTHON_COLORS: '0' },
+    env: { ...childEnv(process.env), PYTHONDONTWRITEBYTECODE: '1', PYTHON_COLORS: '0' },
   });
   pythonCounts = readPythonReport(run.stderr);
   const verdict = pythonRunVerdict({ run, counts: pythonCounts, interruptedBy });
@@ -357,7 +367,7 @@ if (needsDist(tsFiles, ROOT) && !distIsFresh()) {
     label: 'dist build',
     timeoutMs: BUILD_TIMEOUT_MS,
     stdio: ['ignore', 2, 2], // stdout carries only the summary line
-    env: scrubbedBuildEnv(process.env), // live suites' credentials stay out of the build
+    env: childEnv(scrubbedBuildEnv(process.env)), // live suites' credentials stay out of the build
     shell: !POSIX, // pnpm is a .cmd shim on win32
   });
   if (interruptedBy !== null) {
@@ -408,7 +418,7 @@ const run = await runGroup(process.execPath, vitestArgs, {
   label: 'run',
   timeoutMs: RUN_TIMEOUT_MS,
   stdio: 'inherit',
-  env: { ...process.env, CQ_DIST_PREPARED: '1', NODE_OPTIONS: process.env.NODE_OPTIONS },
+  env: { ...childEnv(process.env), CQ_DIST_PREPARED: '1', NODE_OPTIONS: process.env.NODE_OPTIONS },
 });
 const durationMs = Date.now() - started;
 let report = null;
@@ -418,8 +428,7 @@ try {
   // Opt-in machine evidence for configured checks; does not alter selection,
   // execution or terminal verdicts. The adapter still requires the
   // final wrapper result (including class/run validation).
-  if (process.env.CQ_TEST_NARROW_REPORT === '1')
-    writeSync(1, `test:narrow report=${JSON.stringify(json)}\n`);
+  if (emitReport) writeSync(1, `test:narrow report=${JSON.stringify(json)}\n`);
 } catch {
   // no report (vitest died early, or never started): counts stay '-'
 }

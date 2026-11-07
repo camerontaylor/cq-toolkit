@@ -23,7 +23,9 @@
 //
 // FILE FORMAT (`<sessionsDir>/<sessionId>.jsonl`, one validated JSON object
 // per line, discriminated on `type`):
-//   line 1:   { type: 'session', sessionId, createdAt, workspace }  (header)
+//   line 1:   { type: 'session', version: 1, sessionId, createdAt, workspace }
+//             (header; `version` absent on a legacy v1 header, any other
+//              value refuses the file — ADR-0005 decision 10)
 //   lines 2+: { type: 'message', message: SessionMessage }
 //          or { type: 'tool-failure', kind, tool, reason, inputSummary, step, at }
 //          or { type: 'budget-stop', cause, detail, step, at }
@@ -114,6 +116,14 @@ export type SessionRecord = z.infer<typeof SessionRecordSchema>;
 export const SessionHeaderLineSchema = z
   .object({
     type: z.literal('session'),
+    /**
+     * The persisted header format version (ADR-0005 decision 10). The
+     * writer always writes 1; an ABSENT version is a legacy v1 header and
+     * reads (old session logs exist in the archive), while any other value
+     * fails the strict line schema and the file is refused. The header
+     * governs the file; message and diagnostic lines stay unchanged.
+     */
+    version: z.literal(1).optional(),
     sessionId: z.string(),
     createdAt: z.string(),
     workspace: z.string(),
@@ -229,6 +239,7 @@ export class SessionStore {
     // Validate BEFORE writing: the file only ever contains lines that parse.
     const line: SessionHeaderLine = SessionHeaderLineSchema.parse({
       type: 'session',
+      version: 1,
       sessionId,
       createdAt,
       workspace,

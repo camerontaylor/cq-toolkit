@@ -1,4 +1,6 @@
 import { reviewBranchKey } from './internal/branchKey.js';
+import { readCqEnv } from '../../config/env.js';
+import { provenanceConfig } from '../../config/provenance.js';
 import { makeGitMutex } from '../../shared/gitMutex.js';
 import { createHash, randomUUID } from 'node:crypto';
 import {
@@ -139,6 +141,14 @@ export interface ReviewAddressInput {
   verifyClosure?: boolean;
 }
 export interface ReviewAddressReport {
+  /**
+   * The persisted report format version (ADR-0005 decision 10). The writer
+   * always writes 1; a reader treats an absent version as legacy v1 (old
+   * runner caches hold pre-version reports) and refuses any other value
+   * fail-closed. The cross-process measurement reader enforces this on the
+   * reportV2 envelope; the in-process consumers receive the same object.
+   */
+  version: 1;
   source: string;
   /** Selected dependency source; prerequisite checks may still refuse it. */
   dependencySource?: { kind: 'caller' | 'prepared'; root: string };
@@ -327,6 +337,7 @@ async function captureAddressProvenance(
     journalLink: 'unavailable',
     reportLink: 'unavailable',
     witnesses: { base: baseSha, admitted: null, execution: null, reviewed: null, accepted: null },
+    config: provenanceConfig(readCqEnv()),
   };
   return sanitizeObservation({ provenance });
 }
@@ -415,6 +426,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
       input.journalDir ?? resolve(input.repoRoot, '..', '.cq-address-runs', randomUUID()),
     );
     const report: ReviewAddressReport = {
+      version: 1,
       source: input.source,
       dependencySource: {
         kind: input.dependencyRoot === undefined ? 'caller' : 'prepared',

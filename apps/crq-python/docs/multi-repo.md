@@ -40,17 +40,20 @@ behavior; the checked-in config ships empty, host overlays add entries):
 - `include`/`exclude` — glob lists matched against repo-relative paths
   (default include `["**"]`, exclude `[]`). Excluded affected paths appear in
   the capture as `excluded-config` rows, never silently dropped.
-- `rank_tier` — scheduling rank for this repo's items (int 2–4, default 3).
-  cq-toolkit ordinary work is ranks 0–2, backfill/coverage/author are 4; new
-  repos sit between (3) by default.
+- `rank_tier` — scheduling rank for this repo's push and other post-merge
+  items (int 2–4, default 3). Open PRs use rank 0 and their open follow-up
+  reviews use rank 1 across all repositories, ahead of push reviews. Optional
+  additional cycles remain rank 5. Explicit operator priority still takes
+  precedence; eligible items at the same rank use queue insertion order.
 - `scan_extra_classes` — denylist class ids added to the universal
   secret-shape set (key material, tokens, inline secrets) for this repo's
   pre-upload scan (default `[]`). The primary repo's publish classes stay
   primary-only: fleet vocabulary is the ordinary subject matter of the
   reviewed repos and must not block their reviews. Unknown class ids fail the
   scan closed.
-- `findings` — `"issue"` (file one GitHub issue per counted review with
-  findings, in that repo) or `"none"`. Repair drain is never enabled for
+- `findings` — `"issue"` (file one GitHub issue per counted push review with
+  findings, in that repo) or `"none"`. Open/delta PR reviews post findings
+  directly to their PR regardless of this push-only setting. Repair drain is never enabled for
   non-primary repos in this change.
 
 Validation lives in `repo_registry.py` (fail-closed like every other config
@@ -177,8 +180,15 @@ source range generalized:
 
 ## Findings delivery
 
+Open/delta PR reviews in every repo post findings as one PR review, with
+resolvable inline threads where possible and body findings otherwise. Delivery
+uses the reviewed head and repository, skips closed/merged PRs, and reuses the
+primary repo's durable retries and run-marker deduplication. Clean reviews
+post nothing. Pending legacy open/delta issue debt converts to PR-review debt;
+already delivered issues stay untouched. See [findings on open PRs](../README.md#findings-on-open-prs).
+
 For non-primary repos with `findings: "issue"`, harvesting a counted completed
-review with ≥1 finding files one issue in that repo: title
+push review with ≥1 finding files one issue in that repo: title
 `crq: <base10>..<head10> — N findings (M blocking)`, body = findings markdown
 plus run/receipt identity and a fixed "auto-filed by crq; no auto-fix" note.
 Idempotent: the issue URL is stored on the item before state settles; a failed

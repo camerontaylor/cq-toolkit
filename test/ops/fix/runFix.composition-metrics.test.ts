@@ -273,6 +273,8 @@ process.exitCode = failed ? 1 : 0;
       // The needs-human terminal path itself wrote the persisted report;
       // assert the metric on it.
       const report = reportOf(result);
+      // ADR-0005 decision 10: the persisted report writer always writes v1.
+      expect(report.version).toBe(1);
       expect(report.fixesPerRun).toBe(2);
     } finally {
       await rm(f.root, { recursive: true, force: true });

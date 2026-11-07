@@ -54,7 +54,9 @@ execution head, even when admission waits across a sibling commit. The engine
 returns that identity to the loop, which verifies its ancestry before validating
 citations or stamping replies. Git operations use literal pathspecs and path lists
 use NUL delimiters, retaining pathspec-like names, Unicode, whitespace, newlines
-and quotes as literal filenames. Parent cancellation reaches baseline, related and broader check
+and quotes as literal filenames. Terminal cancellation settlement is the
+exception: it refuses a name containing a glob character (`*?[]{}`) instead of
+treating it literally. Parent cancellation reaches baseline, related and broader check
 subprocesses; the engine awaits child termination before candidate cleanup,
 restoration or releasing its serial validation boundary.
 
@@ -92,9 +94,14 @@ including when later reviewers omit them. A fresh open finding cannot be
 silenced by an earlier fixed disposition. Exit 0 requires complete review
 sources and no open blocking findings; round, budget, environment and
 human stops return exit 3 with a report. Invalid CLI input returns the I1
-input error. The full report is written to the journal directory on every
-op exit, with usage, attempts, model identities, reasons, gates, evidence,
-open findings and distinct verified commit count (`fixesPerRun`). Unknown
+input error. Every op exit that reaches report persistence writes the full
+report to the journal directory, with usage, attempts, model identities, reasons,
+gates, evidence, open findings and distinct verified commit count (`fixesPerRun`).
+Exits that return a report object without persisting it are ownership admission
+refusal, lifetime finalization failure (including terminal bound refusals and
+terminal evidence-guard failures), a report-path storage failure, and
+cancellation before ownership. The admission, finalization and pre-ownership
+cancellation paths also strip the structured stop marker. Unknown
 USD prices remain absent. `rounds[]` contains one entry per recorded round:
 `{ round, record, runs }`. The record is that round's latest reviewed findings;
 `runs` lists all settled batch runs in order (or is empty if no work dispatched).
@@ -107,7 +114,13 @@ with required `rounds[].runs`; `rounds.length` counts rounds, not batches.
 `failed[]` lists retained branch/SHA pointers, finding,
 unit, tier/model, ordinal, outcome, gate, reason, parent and execution head. Each
 editing attempt and fix retains its failure history; unresolved findings carry
-an evidence pointer. Cancelled exits still write retained pointers to the report.
+an evidence pointer. Cancelled exits still write retained pointers to the report
+when terminal settlement succeeds. Settlement refuses rather than trusts any
+tracked entry other than the cancelled file whose path contains `*?[]{}`, starts
+with `-`, contains a `..` component, resolves through an alias or symlink, or has
+a link count above one, or whose index mode is not `100644`/`100755` or disagrees
+with the file (for example `pages/[id].tsx`); any settlement failure quarantines
+the ownership guard for attended recovery and persists no report.
 
 PR replies and thread resolution use the current authenticated identity,
 fresh head/round proof and verified publication. Successful dispatch receipts
@@ -216,18 +229,32 @@ final reply is not valid JSON, the driver's single schema-repair call runs on to
 of it and is reported as one extra step. Documentation/configuration changes
 ask for source-of-truth checks, and exported/schema changes ask for caller and
 contract checks even when small. A change above the medium tier, or a prompt
-above the session input limit, uses sequential tool-free partitions and emits an
-advisory about limited cross-file context. Partition payloads cover every
-nonexcluded component without truncation, with bounded preceding context and
-surrogate-safe UTF-16 boundaries. There are no area sessions or cross-session
-retries. A session that fails (for example a step timeout) does not stop the
+above the session input limit, uses partitions with a three-step allowance by
+default, capped by `review.session.maxSteps`, and read-only reference tools
+(`read`, and `grep`/`glob` unless `review.searchTools: false`); an effective
+one-step allowance or the SDK option `partitionTools: false` disables partition
+tools. It emits an advisory about limited cross-file context. Partition
+payloads cover every nonexcluded component without truncation, with bounded
+preceding context and surrogate-safe UTF-16 boundaries. `review.run --areas`
+opts into an area plan instead: nonexcluded components are grouped into bounded
+area sessions, and a required cross-area contract pass may follow; that pass
+carries contract context only and cannot substitute for primary coverage, while
+an unsafe grouping or an oversized cross-area prompt falls back to the standard
+plan with an advisory.
+Retries are per session, never across sessions; a failed review whose every
+failure was transient is flagged (`transient` on the agent report,
+`blockedTransient` on a blocked run) so a caller may retry it once. A
+session that fails (for example a step timeout) does not stop the
 remaining independent partitions; the result is still `needs-human` naming the
 first failure and the incomplete pieces, but carries every other session's
 findings. Two consecutive failed sessions stop dispatch. Independent partitions run
 concurrently (`review.session.concurrency`, default 4): coverage and findings
 merge in plan order and the token allowance is split across the slots. A session
-that fails with a transient driver error (step timeout, network) is retried
-once, both attempts' usage counted; other failures are not retried. Every
+that fails with a transient driver error (step timeout, network) or a
+rate-limit error is retried once, both attempts' usage counted; a rate-limit
+retry first waits the provider's retry-after (default 30 s), abortably, and is
+refused when the wait would exceed 120 s, the remaining wall time or the
+remaining token allowance. Auth/quota and other failures are not retried. Every
 review prompt lists head-file line anchors (added lines and the nearest
 surviving line of removed runs) ahead of the untouched diff bytes, and partition
 prompts start with a byte-identical prefix so provider prefix caches hit. Repeated findings are deduplicated.

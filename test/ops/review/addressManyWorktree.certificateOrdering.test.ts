@@ -3,6 +3,7 @@ import { constants } from 'node:fs';
 import { lstat, readFile, readdir, rename, unlink, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { expect, test, vi } from 'vitest';
+import * as addressModule from '../../../src/ops/review/address.js';
 import { makeAddressOwnership } from '../../../src/ops/review/internal/addressOwnership.js';
 
 import {
@@ -24,13 +25,28 @@ const fsFaults = vi.hoisted(() => ({
     | undefined
     | ((path: string, flags: string | number | undefined) => Promise<void>),
   sync: undefined as undefined | ((path: string) => Promise<void>),
+  rename: undefined as
+    | undefined
+    | ((phase: 'before' | 'after', source: string, target: string) => Promise<void>),
+  remove: undefined as undefined | ((path: string) => Promise<void>),
+  mkdir: undefined as undefined | ((path: string) => Promise<void>),
 }));
 vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
   return {
     ...actual,
+    rename: async (...args: Parameters<typeof actual.rename>) => {
+      await fsFaults.rename?.('before', String(args[0]), String(args[1]));
+      await actual.rename(...args);
+      await fsFaults.rename?.('after', String(args[0]), String(args[1]));
+    },
+    rm: async (...args: Parameters<typeof actual.rm>) => {
+      await fsFaults.remove?.(String(args[0]));
+      return actual.rm(...args);
+    },
     mkdir: async (...args: Parameters<typeof actual.mkdir>) => {
       fsFaults.effect?.();
+      await fsFaults.mkdir?.(String(args[0]));
       return actual.mkdir(...args);
     },
     writeFile: async (...args: Parameters<typeof actual.writeFile>) => {
@@ -340,7 +356,7 @@ test.each([
   try {
     await owner.withLock(async () => undefined);
     fsFaults.link = async (phase, _source, destination) => {
-      if (!destination.endsWith('/000003.json')) return;
+      if (!destination.endsWith('/000001.json')) return;
       if (phase === 'after') activeLinked = true;
       if (
         (fault === 'before-link' && phase === 'before') ||
@@ -352,7 +368,7 @@ test.each([
       if (
         (fault === 'certificate-sync' && path === join(store, '000002.json')) ||
         (fault === 'adoption-store-sync' && path === store) ||
-        (fault === 'prepare-sync' && path === join(store, 'pending-000003.json')) ||
+        (fault === 'prepare-sync' && path === join(store, 'pending-000001.json')) ||
         (fault === 'active-store-sync' && activeLinked && path === store)
       )
         throw new Error('fresh activation fault');
@@ -380,6 +396,287 @@ test.each([
     );
   } finally {
     fsFaults.link = fsFaults.sync = undefined;
+    await f.repo.cleanup();
+  }
+});
+
+test.each([
+  'store-rename-before',
+  'store-rename-after',
+  'guard-rename-before',
+  'guard-rename-after',
+  'rotation-dir-sync',
+  'bootstrap-mkdir',
+  'anchor-prepare',
+  'anchor-link-before',
+  'anchor-link-after',
+  'anchor-store-sync',
+  'bootstrap-dir-sync',
+] as const)('rotation/bootstrap fault dispatches zero work: %s', async (fault) => {
+  const f = await fixture();
+  let dispatched = 0,
+    hit = false;
+  try {
+    const owner = await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run });
+    await owner.withLock(async () => undefined);
+    // Establish a real older retired generation for the deletion failure.
+    await (
+      await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run })
+    ).withLock(async () => undefined);
+    const store = authorityStore(owner.guardPath);
+    const fail = () => {
+      hit = true;
+      throw new Error('rotation admission fault');
+    };
+    let rotated = false,
+      anchorLinked = false;
+    fsFaults.remove = async () => {
+      // Retention failures are covered separately: they must not reject admission.
+    };
+    fsFaults.rename = async (phase, source) => {
+      if (source === store && phase === 'after') rotated = true;
+      if (fault === `${source === store ? 'store' : 'guard'}-rename-${phase}`) fail();
+    };
+    fsFaults.mkdir = async (path) => {
+      if (fault === 'bootstrap-mkdir' && path === store) fail();
+    };
+    fsFaults.link = async (phase, _source, target) => {
+      if (target !== owner.guardPath) return;
+      if (phase === 'after') anchorLinked = true;
+      if (fault === `anchor-link-${phase}`) fail();
+    };
+    fsFaults.sync = async (path) => {
+      if (
+        (fault === 'rotation-dir-sync' && rotated && path === owner.commonDir) ||
+        (fault === 'anchor-prepare' && path === join(store, 'anchor.json')) ||
+        (fault === 'anchor-store-sync' && anchorLinked && path === store) ||
+        (fault === 'bootstrap-dir-sync' && anchorLinked && path === owner.commonDir)
+      )
+        fail();
+    };
+    await expect(
+      (await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run })).withLock(async () => {
+        dispatched++;
+      }),
+    ).rejects.toThrow('rotation admission fault');
+    expect(hit).toBe(true);
+    expect(dispatched).toBe(0);
+  } finally {
+    fsFaults.rename = fsFaults.remove = fsFaults.mkdir = fsFaults.link = fsFaults.sync = undefined;
+    await f.repo.cleanup();
+  }
+});
+
+test.each([
+  'store-rename',
+  'guard-rename',
+  'bootstrap-mkdir',
+  'anchor-open',
+  'anchor-partial',
+  'anchor-sync',
+  'guard-link-before',
+  'guard-link-after',
+] as const)('crash recovery across rotation/bootstrap: %s', async (point) => {
+  const f = await fixture();
+  let hit = false,
+    dispatched = 0;
+  try {
+    const owner = await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run });
+    await owner.withLock(async () => undefined);
+    const store = authorityStore(owner.guardPath),
+      anchorPath = join(store, 'anchor.json');
+    let created = false;
+    const crash = () => {
+      hit = true;
+      throw new Error('bootstrap crash');
+    };
+    fsFaults.rename = async (phase, source) => {
+      if (
+        phase === 'after' &&
+        source === (point === 'store-rename' ? store : owner.guardPath) &&
+        (point === 'store-rename' || point === 'guard-rename')
+      )
+        crash();
+    };
+    fsFaults.mkdir = async (path) => {
+      if (path === store) created = true;
+    };
+    fsFaults.open = async (path, flags) => {
+      if (path !== anchorPath || typeof flags !== 'number' || !(flags & constants.O_CREAT)) return;
+      if (point === 'anchor-open') crash();
+      if (point === 'anchor-partial') {
+        await writeFile(path, '{"version":');
+        crash();
+      }
+    };
+    fsFaults.sync = async (path) => {
+      if (
+        (point === 'bootstrap-mkdir' && created && path === owner.commonDir) ||
+        (point === 'anchor-sync' && path === anchorPath)
+      )
+        crash();
+    };
+    fsFaults.link = async (phase, _source, target) => {
+      if (target === owner.guardPath && point === `guard-link-${phase}`) crash();
+    };
+    await expect(
+      (await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run })).withLock(async () => {
+        dispatched++;
+      }),
+    ).rejects.toThrow('bootstrap crash');
+    expect(hit).toBe(true);
+    expect(dispatched).toBe(0);
+    fsFaults.rename = fsFaults.mkdir = fsFaults.open = fsFaults.sync = fsFaults.link = undefined;
+    await (
+      await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run })
+    ).withLock(async () => {
+      dispatched++;
+    });
+    expect(dispatched).toBe(1);
+  } finally {
+    fsFaults.rename = fsFaults.mkdir = fsFaults.open = fsFaults.sync = fsFaults.link = undefined;
+    await f.repo.cleanup();
+  }
+});
+
+test('retired deletion failure is reported and does not quarantine or block later rotations', async () => {
+  const f = await fixture();
+  const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+  try {
+    const owner = await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run });
+    await owner.withLock(async () => undefined);
+    await (
+      await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run })
+    ).withLock(async () => undefined);
+    const old = (await readdir(owner.commonDir)).find((name) =>
+      name.startsWith('cq-review-address-ownership.store.retired-'),
+    )!;
+    fsFaults.remove = async (path) => {
+      if (path.endsWith(old)) {
+        // Simulate partial removal: an optional forensic record disappears.
+        await unlink(join(path, '000002.json')).catch(() => undefined);
+        throw new Error('retired cleanup unavailable');
+      }
+    };
+    await (
+      await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run })
+    ).withLock(async () => undefined);
+    expect(warning).toHaveBeenCalled();
+    expect((await authorityState(owner.guardPath)).state).toBe('quiescent');
+    fsFaults.remove = undefined;
+    await (
+      await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run })
+    ).withLock(async () => undefined);
+    expect(
+      (await readdir(owner.commonDir)).filter((name) => name.includes('.retired-')),
+    ).toHaveLength(2);
+  } finally {
+    fsFaults.remove = undefined;
+    warning.mockRestore();
+    await f.repo.cleanup();
+  }
+});
+
+test('partially deleted older generation cannot confirm predecessor completion', async () => {
+  const f = await fixture();
+  const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+  try {
+    const owner = await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run });
+    let damaged = false;
+    fsFaults.link = async (phase, _source, target) => {
+      if (phase !== 'after' || !target.endsWith('/000002.json')) return;
+      fsFaults.link = undefined;
+      const anchor = JSON.parse(await readFile(owner.guardPath, 'utf8')) as { anchor: string };
+      fsFaults.remove = async (path) => {
+        if (!path.endsWith(`retired-${anchor.anchor}`)) return;
+        if (path.includes('.store.retired-')) {
+          await unlink(join(path, '000002.json'));
+          damaged = true;
+        }
+        throw new Error('partial deletion');
+      };
+      for (let i = 0; i < 2; i++)
+        await (
+          await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run })
+        ).withLock(async () => undefined);
+    };
+    await expect(owner.withLock(async () => undefined)).rejects.toThrow('lost owner');
+    expect(damaged).toBe(true);
+    expect((await authorityState(owner.guardPath)).state).toBe('quiescent');
+  } finally {
+    fsFaults.link = fsFaults.remove = undefined;
+    warning.mockRestore();
+    await f.repo.cleanup();
+  }
+});
+
+test('bootstrap debris retention is best-effort and reported to callers and journals', async () => {
+  const f = await fixture();
+  const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+  try {
+    const owner = await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run });
+    await owner.withLock(async () => undefined);
+    fsFaults.open = async (path, flags) => {
+      if (path.endsWith('/anchor.json') && typeof flags === 'number' && flags & constants.O_CREAT) {
+        await writeFile(path, '{"version":');
+        throw new Error('partial bootstrap');
+      }
+    };
+    await expect(
+      (await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run })).withLock(
+        async () => undefined,
+      ),
+    ).rejects.toThrow('partial bootstrap');
+    fsFaults.open = undefined;
+    await (
+      await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run })
+    ).withLock(async () => undefined);
+    const debris = (await readdir(owner.commonDir)).find((name) =>
+      name.includes('.bootstrap-incomplete-'),
+    )!;
+    expect(debris).toBeTruthy();
+    const bytes = await readFile(join(owner.commonDir, debris, 'anchor.json'), 'utf8');
+    expect(bytes).toBe('{"version":');
+    fsFaults.remove = async (path) => {
+      if (path.endsWith(debris)) throw new Error('debris busy');
+    };
+    const role = { provider: 'mock', model: 'mock' };
+    const result = await addressModule.makeReviewAddress({
+      config: {
+        schemaVersion: 2,
+        checks: [{ adapter: 'tsc-lines', command: { command: process.execPath, args: [] } }],
+        roles: { worker: role, reviewer: role },
+        budgets: { run: { maxTokens: 1000 } },
+        review: { reviewers: ['agent'] },
+      },
+      git: f.run,
+      initialRecord: {
+        schemaVersion: 1,
+        branch: 'feature/x',
+        reviewed: { base: f.repo.git('rev-parse', 'HEAD').trim(), scope: 'full' },
+        head: f.repo.git('rev-parse', 'HEAD').trim(),
+        sources: [{ kind: 'agent', status: 'terminal' }],
+        findings: [],
+      },
+    })({ repoRoot: f.repo.root, source: 'local', journalDir: join(f.root, 'retention-journal') });
+    const advisory = `address ownership: retention cleanup failed for ${debris}`;
+    expect(result.report?.advisories).toContain(advisory);
+    const stored = JSON.parse(await readFile(result.report!.reportPath, 'utf8')) as {
+      advisories: string[];
+    };
+    expect(stored.advisories).toContain(advisory);
+    expect(warning).toHaveBeenCalled();
+    expect(await readFile(join(owner.commonDir, debris, 'anchor.json'), 'utf8')).toBe(bytes);
+    fsFaults.remove = undefined;
+    await (
+      await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run })
+    ).withLock(async () => undefined);
+    expect(
+      (await readdir(owner.commonDir)).some((name) => name.includes('.bootstrap-incomplete-')),
+    ).toBe(false);
+  } finally {
+    fsFaults.open = fsFaults.remove = undefined;
+    warning.mockRestore();
     await f.repo.cleanup();
   }
 });

@@ -178,10 +178,12 @@ write. The normal non-author I2 gate still applies to fix PRs.
 
 ## Findings on open PRs
 
-A counted primary-repo `open` or `delta` review with findings also posts them
+A counted `open` or `delta` review with findings in any reviewed repository posts them
 on the PR as one pull-request review (`pr_review_findings.py`;
 `POST /repos/{repo}/pulls/{pr}/reviews`, event `COMMENT`, `commit_id` = the
-reviewed head). This is independent of the repair enqueue above, which still runs.
+reviewed head). Primary-repo repair enqueue still runs independently; other
+repos receive no repair enqueue or primary coverage credit. Clean reviews post
+nothing, consistently across repositories. No delivery configuration is required.
 
 - Each finding whose lines fall inside the PR diff for that commit (the
   compare of the PR base and the reviewed head, context lines included)
@@ -214,7 +216,11 @@ reviewed head). This is independent of the repair enqueue above, which still run
   item replaces an undelivered older request.
 - Identity: the tick's `gh` uses the queue host's `gh` login (hosts.yml, no
   token in the unit environment), so reviews appear under that account.
-  Non-primary repos keep issue delivery (docs/multi-repo.md).
+  The login needs pull-request review write access in each reviewed repo.
+- On upgrade, pending open/delta issue deliveries become PR-review debt using
+  their original run, artifacts and reviewed range. Already delivered issues
+  are left alone. Push/post-merge reviews keep issue delivery and its existing
+  `findings` setting (docs/multi-repo.md).
 
 ## Drivers and deployment prerequisites
 

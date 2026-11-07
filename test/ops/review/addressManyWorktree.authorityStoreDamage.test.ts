@@ -106,14 +106,21 @@ test.each(['EXDEV', 'EPERM', 'ENOSYS', 'nofollow', 'fsync'] as const)(
           dispatched = true;
         }),
       ).rejects.toThrow();
-      fsFaults.link = fsFaults.open = fsFaults.sync = undefined;
+      expect(dispatched).toBe(false);
       await expect(
         (await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run })).withLock(async () => {
           dispatched = true;
         }),
-      ).rejects.toThrow('attended recovery');
+      ).rejects.toThrow('unsupported fixture');
       expect(dispatched).toBe(false);
       await expect(lstat(owner.guardPath)).rejects.toMatchObject({ code: 'ENOENT' });
+      fsFaults.link = fsFaults.open = fsFaults.sync = undefined;
+      await (
+        await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run })
+      ).withLock(async () => {
+        dispatched = true;
+      });
+      expect(dispatched).toBe(true);
     } finally {
       fsFaults.link = fsFaults.open = fsFaults.sync = undefined;
       await f.repo.cleanup();
@@ -121,18 +128,26 @@ test.each(['EXDEV', 'EPERM', 'ENOSYS', 'nofollow', 'fsync'] as const)(
   },
 );
 test('bootstrap collision and partial history preserve evidence without repair', async () => {
-  for (const partial of [false, true]) {
+  for (const partial of ['foreign', 'empty', 'record']) {
     const f = await fixture();
     const owner = await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run });
     try {
-      if (partial) await mkdir(authorityStore(owner.guardPath));
-      else await writeFile(owner.guardPath, FOREIGN_GUARD);
+      if (partial !== 'foreign') {
+        await mkdir(authorityStore(owner.guardPath));
+        if (partial === 'record')
+          await writeFile(join(authorityStore(owner.guardPath), '000001.json'), 'partial history');
+      } else await writeFile(owner.guardPath, FOREIGN_GUARD);
+      if (partial === 'empty') {
+        await owner.withLock(async () => undefined);
+        continue;
+      }
       await expect(
         owner.withLock(async () => {
           throw new Error('must not enter');
         }),
       ).rejects.toThrow('attended recovery');
-      if (partial) await expect(lstat(owner.guardPath)).rejects.toMatchObject({ code: 'ENOENT' });
+      if (partial !== 'foreign')
+        await expect(lstat(owner.guardPath)).rejects.toMatchObject({ code: 'ENOENT' });
       else expect(await readFile(owner.guardPath, 'utf8')).toBe(FOREIGN_GUARD);
     } finally {
       await f.repo.cleanup();
