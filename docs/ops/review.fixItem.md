@@ -307,14 +307,9 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
                     "type": "string"
                   },
                   "createdAt": {
-                    "anyOf": [
-                      {
-                        "minLength": 1,
-                        "type": "string"
-                      },
-                      {
-                        "type": "null"
-                      }
+                    "type": [
+                      "string",
+                      "null"
                     ]
                   }
                 },
