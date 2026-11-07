@@ -697,7 +697,8 @@ export function makeRunMergePrsOp(
           }),
       ...(deps?.harnessConfig !== undefined ? { harnessConfig: deps.harnessConfig } : {}),
     });
-    const outcome = await runMergePrs(input, {
+    // The nested resolve calls see the RESOLVED protected branch, never the raw input.
+    const outcome = await runMergePrs({ ...input, protectedBranch }, {
       effects,
       resolve,
       ...(input.maxRetries !== undefined ? { maxRetries: input.maxRetries } : {}),

@@ -770,7 +770,7 @@ async function dispatchCli(
         }
       : undefined;
   try {
-    const op = await entry.importer(importerWiring);
+    const op = await entry.importer({ ...importerWiring, ...(cqEnv !== undefined ? { cqEnv } : {}) });
     // The op's TypeScript return type is no runtime guarantee: ops load from
     // RUNTIME registries, so the direct-dispatch path validates the returned
     // value with the kernel's own mirror before ANY stdout artifact or

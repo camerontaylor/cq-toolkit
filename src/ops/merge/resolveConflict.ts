@@ -306,8 +306,9 @@ export interface ResolveConflictInput {
   /** Per-invocation wall-clock budget; default DEFAULT_RESOLVE_WALL_CLOCK_MS
    * (UC row 44's 20-minute bound). */
   wallClockMs?: number;
-  /** The branch the agent may never push to (prompt constraint); default
-   * 'main'. */
+  /** The branch the agent may never push to (prompt constraint). Must equal the
+   * resolved CQ_MERGE_PROTECTED_BRANCH (default 'main') or be absent; a
+   * difference fails with `config`. */
   protectedBranch?: string;
 }
 
