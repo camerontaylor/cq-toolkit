@@ -2500,10 +2500,10 @@ export function buildTools(
         const groups = [...byPath.values()].sort((left, right) =>
           left.file.lexicalRel.localeCompare(right.file.lexicalRel),
         );
-        const contentMode =
-          parsed.data.output_mode === undefined || parsed.data.output_mode === 'content';
-        // content mode caps matching lines; files_with_matches/count cap files
-        // (rg's per-file --max-count already bounds each file's lines).
+        const mode = parsed.data.output_mode ?? 'content';
+        const contentMode = mode === 'content';
+        // content mode caps matching lines; files_with_matches/count charge one
+        // row per file (rg's per-file --max-count already bounds each file's lines).
         const allMatches = contentMode
           ? groups.reduce((count, group) => count + group.lines.length, 0)
           : groups.length;
@@ -2519,18 +2519,21 @@ export function buildTools(
           keptGroups.push({ file: group.file, lines, raw });
           remaining -= contentMode ? lines.length : 1;
         }
-        if (allMatches > matchLimit) {
+        // A count row stays a lower bound whenever its file reached rg's
+        // per-file --max-count: the row reports the cap, marked with '+'.
+        const cappedCount =
+          mode === 'count' && keptGroups.some((group) => group.lines.length > SEARCH_MATCH_LIMIT);
+        if (allMatches > matchLimit || cappedCount) {
           markers.push(`[truncated: matches cap ${matchLimit}]`);
         }
         if (truncatedLine) markers.push(`[truncated: per-line chars cap ${SEARCH_LINE_CHARS}]`);
 
-        const mode = parsed.data.output_mode ?? 'content';
         const rows =
           mode === 'content'
             ? keptGroups.flatMap(({ file, lines }) => [`--- ${file.lexicalRel} ---`, ...lines])
             : keptGroups.map(({ file, lines }) =>
                 mode === 'count'
-                  ? `${file.lexicalRel}:${lines.length}${markers.length > 0 ? '+' : ''}`
+                  ? `${file.lexicalRel}:${Math.min(lines.length, SEARCH_MATCH_LIMIT)}${markers.length > 0 ? '+' : ''}`
                   : file.lexicalRel,
               );
         if (mode === 'count' && markers.length > 0)
