@@ -16,6 +16,7 @@ import {
 } from '../../shared/knownUsage.js';
 import { parseCqConfig } from '../analyze/cqConfig.js';
 import { makeReviewAddress, type ReviewAddressInput, type ReviewAddressResult } from './address.js';
+import type { DriverFactory } from '../../driver/factory.js';
 import {
   selectAddressMany,
   resolveAddressManyConcurrency,
@@ -179,6 +180,8 @@ export function makeReviewAddressMany(
     coordinationRoot?: string;
     enqueue?: ReturnType<typeof makeQueueOps>['enqueue'];
     address?: (input: ReviewAddressInput) => Promise<ReviewAddressResult>;
+    /** Driver factory for the default address; carries the alias sink wiring. */
+    drivers?: DriverFactory;
   } = {},
 ) {
   return async (input: ReviewAddressManyInput): Promise<ReviewAddressManyResult> => {
@@ -217,6 +220,8 @@ function makeReviewAddressManyCore(
     coordinationRoot?: string;
     enqueue?: ReturnType<typeof makeQueueOps>['enqueue'];
     address?: (input: ReviewAddressInput) => Promise<ReviewAddressResult>;
+    /** Driver factory for the default address; carries the alias sink wiring. */
+    drivers?: DriverFactory;
   } = {},
   record: (id: string, observation: UsageObservation) => void = () => {},
 ) {
@@ -352,7 +357,11 @@ function makeReviewAddressManyCore(
         const config = parsed.config;
         // Bulk fixes use agent review and existing threads; vendor debt is advisory.
         config.review = { ...config.review, reviewers: ['agent'] };
-        address = makeReviewAddress({ config, coordinationRoot });
+        address = makeReviewAddress({
+          config,
+          coordinationRoot,
+          ...(deps.drivers === undefined ? {} : { drivers: deps.drivers }),
+        });
       }
       let budget = initialAddressManyBudget({ limitTokens: input.maxTokens });
       const outcomes: AddressManyOutcomeInput[] = [];

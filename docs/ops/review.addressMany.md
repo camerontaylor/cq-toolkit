@@ -38,6 +38,7 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
     },
     "enrollments": {
       "items": {
+        "additionalProperties": false,
         "properties": {
           "number": {
             "exclusiveMinimum": 0,
