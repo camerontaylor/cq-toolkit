@@ -1,8 +1,11 @@
 // M4b1: import self-declared acceptances from a recorded PR-comment
 // snapshot (ADR-0008 T20; docs/measurement/import-acceptance.md). Pure and
 // offline: no files, no network, no `gh`. Independence is self-declared —
-// every agent posts as the same GitHub account, so the comment's own header
-// is the only basis and /independent records exactly that. Rows feed M10e's
+// most agents post as the same GitHub account, so the comment's own header
+// is the only basis and /independent records exactly that. A review header
+// posted by the cq-review GitHub App (cq-review[bot], via the agents repo's
+// cq-review-post) is attested instead: its reviewerId is
+// `app:cq-review:<reviewer>` and /independent says so. Rows feed M10e's
 // acceptances input; near-miss headers, missing bases, corrupt or
 // conflicting rows are unknown entries with a reason, never a zero.
 const SHA40 = /^[0-9a-f]{40}$/;
@@ -14,6 +17,11 @@ const CARRY = /^\*\*Independent PASS carried to (?:rebased )?head `([0-9a-f]{40}
 const REFERENCED = /https?:\/\/\S*?issuecomment-\d+/g;
 const INDEPENDENT_REASON =
   'self-declared in review comment header; reviewer identity not verified (shared GitHub account)';
+// The comment author is recorded from GitHub's API (user.login), which only
+// the App's own token can produce for this login.
+const REVIEW_APP_LOGIN = 'cq-review[bot]';
+const ATTESTED_REASON =
+  'posted by the cq-review GitHub App (cq-review[bot]), an identity separate from the owner account; reviewer name self-declared in the header';
 const text = (v) => typeof v === 'string' && v.length > 0;
 const map_ = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 const bad = (source, kind, reason) => ({ source, kind, reason });
@@ -78,7 +86,12 @@ export function importAcceptance(snapshot) {
       unknown.push(bad(source, 'unavailable', 'reviewed base not recorded'));
       continue;
     }
-    const reviewerId = review === null ? 'self-declared:coordinator' : `self-declared:${review[1]}`;
+    // Carry-overs stay self-declared: the coordinator posts them by hand.
+    const attested = review !== null && comment.user?.login === REVIEW_APP_LOGIN;
+    const reviewerId =
+      review === null
+        ? 'self-declared:coordinator'
+        : `${attested ? 'app:cq-review' : 'self-declared'}:${review[1]}`;
     const refs = carry === null ? [] : (comment.body.match(REFERENCED) ?? []);
     rows.push({
       key: `${headSha}\u0000${base}\u0000${reviewerId}`,
@@ -93,7 +106,11 @@ export function importAcceptance(snapshot) {
         verdict: review === null || review[2] === 'PASS' ? 'PASS' : 'HOLD',
         evidence: [comment.html_url, ...refs],
         availability: {
-          '/independent': { state: 'known', reason: INDEPENDENT_REASON, source: comment.html_url },
+          '/independent': {
+            state: 'known',
+            reason: attested ? ATTESTED_REASON : INDEPENDENT_REASON,
+            source: comment.html_url,
+          },
         },
       },
     });

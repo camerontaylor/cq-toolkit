@@ -5,10 +5,18 @@ Open PRs directly against `main`. Merge with a merge commit when `static` and
 posted a PASS comment for that head, with no unresolved P0/P1 findings.
 
 The reviewer comment names the reviewer agent, the full head SHA and `PASS`.
-Author and reviewer agents may share the owner's GitHub account; no native
-approval, HTML marker, opt-in or separate GitHub identity is required.
-Automation ignores Bot authors and logins ending in `[bot]`. The merging agent
-reads the review and judges independence and the verdict.
+Reviewers post it with `cq-review-post` (agents repo), which posts as the
+**cq-review** GitHub App (`cq-review[bot]`, Pull requests: write only), so
+the PASS comes from an identity the PR author's lane did not use. When the App
+path is unavailable it falls back to the owner account and reports
+`unattested`. The App key is on every agent host, so this separates the
+reviewer's posting path from an author's ordinary owner-account posts; it does
+not stop an agent that deliberately runs the reviewer tool. An unattested PASS
+still counts; no native approval, HTML marker, opt-in
+or separate identity is required. Automation ignores Bot authors and logins
+ending in `[bot]`, except `cq-review[bot]` review comments. The merging agent
+reads the review and judges independence and the verdict, and prefers a
+`cq-review[bot]` PASS when both exist.
 
 Use the ordinary merge command, pinned to the reviewed head:
 

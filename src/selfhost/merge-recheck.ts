@@ -30,7 +30,8 @@
 // TRUST (plan D3, conservative blanks per RS-15 Annex B): users count only
 // with an association in {OWNER, MEMBER, COLLABORATOR}; bots never count
 // unless allowlisted (`authorAssociation` is NONE for bots, so the allowlist
-// is the ONLY bot trust path); an author that is neither Bot nor User
+// is the only bot trust path for reviews; the one exception is an exact-head
+// PASS comment from the cq-review App, see isIgnoredBotAuthor); an author that is neither Bot nor User
 // (Organization, Mannequin, deleted) never counts; the PR author ordinarily
 // does not count, with an explicitly enabled structured agent attestation as
 // the same-account exception; every
@@ -85,7 +86,7 @@ import { observeWithChange, pruneToOpen, settleStatus } from '../policy/queue/se
 import type { SettleTuple } from '../policy/queue/settle-state.js';
 import { readSettleState, writeSettleState } from './state-branch.js';
 import type { StateBranchSnapshot, StateBranchWriteResult } from './state-branch.js';
-import { parseIndependentReview } from '../shared/independent-review.js';
+import { isIgnoredBotAuthor, parseIndependentReview } from '../shared/independent-review.js';
 import type { IndependentReviewAttestation } from '../shared/independent-review.js';
 import { defaultClassifyPrConfig } from '../ops/merge/classify.config.js';
 
@@ -908,8 +909,7 @@ const sameAccountAgentAccepted = (
   _policy: TrustPolicy,
 ): AuthenticatedR4Evidence | null => {
   for (const review of [...snapshot.reviews, ...(snapshot.allClear?.comments ?? [])]) {
-    if (review.authorType === 'Bot' || review.authorLogin?.toLowerCase().endsWith('[bot]'))
-      continue;
+    if (isIgnoredBotAuthor(review.authorType, review.authorLogin)) continue;
     const parsed = parseIndependentReview(review.body, headSha);
     if (parsed.kind !== 'valid') continue;
     return Object.freeze({

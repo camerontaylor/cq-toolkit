@@ -9,11 +9,27 @@ engine inputs; a re-capture is not byte-for-byte reproducible.
 
 ## Independence is self-declared
 
-Every agent posts to GitHub as the same account, so the comment author
+Most agents post to GitHub as the same account, so the comment author
 cannot tell a reviewer from a PR author. The importer believes the comment's
 own header and records that the header is the only basis (the
 `/independent` availability). That is accepted for the measurement readout
 only: nothing in the engine, the merge bar or any check may use these rows.
+
+The exception is a review posted by the **cq-review** GitHub App
+(`user.login` exactly `cq-review[bot]`), which reviewers do with the agents
+repo's `cq-review-post`. Its identity is separate from the owner account, so
+its row is **attested**: `reviewerId` is `app:cq-review:<reviewer>` and
+`/independent` records the App as the basis. The reviewer name in the header
+is still self-declared, and the App key is on every agent host, so this
+attests the posting path rather than proving a different agent. Counting `app:` against `self-declared:` review rows
+gives the attested share of PASSes. Carry-overs stay self-declared.
+
+Two counting notes. `app:` reflects the snapshot's recorded `user.login`,
+captured by the recipe from GitHub's REST API; like every other field, the
+importer trusts the recording rather than re-reading GitHub. And a reviewer
+who posts the same verdict both ways (an `unattested` fallback, then an
+attested repost) yields two rows with different `reviewerId`s, so count the
+attested share per head (attested when any `app:` row exists), not per row.
 
 ## Recipe
 
@@ -34,7 +50,8 @@ env -u GITHUB_TOKEN gh api repos/{owner}/{repo}/compare/{base.ref}...{headSha}
 Only the comment's first line (one trailing `\r` trimmed), anchored exact:
 
 - **Review** — ``**Independent review (<reviewer>): PASS|ITERATE for
-`<40-hex sha>`**``: `reviewerId` is `self-declared:<reviewer>`; ITERATE
+`<40-hex sha>`**``: `reviewerId` is `self-declared:<reviewer>`, or
+  `app:cq-review:<reviewer>` when posted by `cq-review[bot]`; ITERATE
   maps to HOLD.
 - **Coordinator carry-over** — ``**Independent PASS carried to [rebased ]
 head `<40-hex sha>`.**``: `self-declared:coordinator`, PASS; any
