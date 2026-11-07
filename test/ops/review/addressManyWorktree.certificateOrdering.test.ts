@@ -561,7 +561,7 @@ test('retired deletion failure is reported and does not quarantine or block late
     await (
       await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run })
     ).withLock(async () => undefined);
-    expect(warning).toHaveBeenCalled();
+    expect(warning).not.toHaveBeenCalled();
     expect((await authorityState(owner.guardPath)).state).toBe('quiescent');
     fsFaults.remove = undefined;
     await (
@@ -610,7 +610,7 @@ test('partially deleted older generation cannot confirm predecessor completion',
   }
 });
 
-test('bootstrap debris retention is best-effort and reported to callers and journals', async () => {
+test('bootstrap debris retention reports advisories to callers and journals without stderr', async () => {
   const f = await fixture();
   const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
   try {
@@ -665,7 +665,7 @@ test('bootstrap debris retention is best-effort and reported to callers and jour
       advisories: string[];
     };
     expect(stored.advisories).toContain(advisory);
-    expect(warning).toHaveBeenCalled();
+    expect(warning).not.toHaveBeenCalled();
     expect(await readFile(join(owner.commonDir, debris, 'anchor.json'), 'utf8')).toBe(bytes);
     fsFaults.remove = undefined;
     await (

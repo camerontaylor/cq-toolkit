@@ -551,11 +551,10 @@ export class AddressOwnership {
         obsolete.push(resolve(this.commonDir, entry.name));
     }
     for (const path of obsolete) {
-      await rm(path, { recursive: true, force: true }).catch((error: unknown) => {
+      await rm(path, { recursive: true, force: true }).catch(() => {
         this.retentionAdvisories.push(
           `address ownership: retention cleanup failed for ${basename(path)}`,
         );
-        console.warn('address ownership: retired generation cleanup failed', path, error);
       });
     }
     await rename(this.storePath, retired.store);

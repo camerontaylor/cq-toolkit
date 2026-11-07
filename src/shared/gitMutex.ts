@@ -222,6 +222,7 @@ export function makeGitMutex(config: GitMutexConfig): GitMutex {
           }
         }
       } catch (err) {
+        if (signal?.aborted) throw signal.reason;
         throw new Error(
           `git-mutex: could not acquire '${config.lockPath}' — still held after the waiter budget (${String(retries)} retries, ~${String(budgetMs)} ms backoff floor at ${String(retryBaseMs)} ms base, stale window ${String(staleMs)} ms) — ${err instanceof Error ? err.message : String(err)}`,
           { cause: err },
