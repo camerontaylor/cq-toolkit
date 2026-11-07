@@ -65,12 +65,13 @@ description = "Agent credentials, local settings, session state and local databa
 path = '''(^|/)\.claude/(\.credentials\.json|settings\.local\.json|scheduled_tasks\.lock|memory\.db(-wal|-shm)?|worktrees|history\.jsonl|paste-cache|shell-snapshots|session-env|file-history)(/|$)|(^|/)\.(zcode|paseo)/'''
 
 # The workflow also scans commit messages, and pushed history is immutable.
-# One commit subject ends "... reasoning tokens, paginate+slurp PR discovery
-# ..."; the default generic-api-key rule reads "tokens, <compound>" as an
-# assignment. It is prose, not a credential, so that line is excused.
+# One commit subject on this repository reads "... reasoning tokens,
+# paginate+slurp PR discovery ..."; the generic-api-key rule reads
+# "tokens, <compound>" as an assignment there. It is prose, not a credential.
 [[allowlists]]
 description = "Commit-subject prose the generic-api-key rule reads as a key assignment"
 regexTarget = "line"
+targetRules = ["generic-api-key"]
 regexes = ['''Settle reasoning tokens, paginate\+slurp''']
 
 [[allowlists]]
