@@ -20,6 +20,7 @@
 // The per-call object shape follows W1.11's `SandboxOptIn` and plan §3.1; the
 // CLI `--opt-in` flag that would populate it is W3.6's.
 
+import type { CqEnv } from '../../config/env.js';
 import {
   POSTURE_LIST,
   PROTECTED_PATHS_POSTURES,
@@ -68,10 +69,15 @@ export interface ProtectedPathsConfig {
 export function resolveProtectedPathsConfig(
   options: {
     env?: Readonly<Record<string, string | undefined>>;
+    /** The entry point's resolved snapshot; wins over `env` so nothing re-reads the process env. */
+    cqEnv?: CqEnv;
     optIn?: ProtectedPathsOptIn;
   } = {},
 ): ProtectedPathsConfig {
-  const env = options.env ?? processEnv();
+  const env =
+    options.cqEnv !== undefined
+      ? { [PROTECTED_PATHS_ENV]: options.cqEnv.values[PROTECTED_PATHS_ENV] as string | undefined }
+      : (options.env ?? processEnv());
   const optIn = options.optIn ?? {};
 
   const call = optIn[PROTECTED_PATHS_OPT_IN];

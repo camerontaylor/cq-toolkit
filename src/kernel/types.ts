@@ -1097,6 +1097,8 @@ export interface OpRegistryEntry<I = unknown, R = unknown> {
   importer: (wiring?: {
     /** Sink for the driver factory's deprecated-alias notice (review-debt #186). */
     onDeprecatedAlias?: (message: string) => void;
+    /** The entry point's frozen CQ_* snapshot, so an op never re-reads the process env. */
+    cqEnv?: CqEnv;
   }) => Promise<Op<I, R>>;
 }
 
