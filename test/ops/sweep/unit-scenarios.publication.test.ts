@@ -66,7 +66,7 @@ describe('sweep unit in-process scenarios', () => {
     }
   });
 
-  test('a local-only sweep (no push binding) never publishes a failed attempt', async () => {
+  test('a unit without a failed-attempt upload capability never publishes one', async () => {
     const world = await makeWorld([{ failing: true }, { failing: true }]);
     const scanPrompt = vi.fn(async (_text: string) => {});
     try {
@@ -81,9 +81,11 @@ describe('sweep unit in-process scenarios', () => {
         },
         scanPrompt,
       });
-      // `push: false` in a dispatch omits this binding: the failed-attempt
-      // publication path must follow the same opt-in as the main push.
+      // The upload capability is its own explicit opt-in (bindingsFromDispatch
+      // grants it only from `taskLoop.pushFailed`): absent it, a failed
+      // attempt is neither scanned nor pushed, whatever the push binding says.
       delete local.pushBranch;
+      delete local.publishFailedAttempts;
       const result = await makeSweepUnitOp(local)(UNIT);
       expect(result.status).toBe('ok');
       if (result.status === 'ok') expect(result.value.tasks?.[0]?.failedAttempt).toBeDefined();

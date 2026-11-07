@@ -999,7 +999,7 @@ async function runTaskLoopInner(
         // whole unit (and its verified, publishable commits).
         if (
           config.pushFailed &&
-          bindings.pushBranch !== undefined &&
+          bindings.publishFailedAttempts === true &&
           row.failedAttempt !== undefined &&
           !unsafeRefusal
         ) {

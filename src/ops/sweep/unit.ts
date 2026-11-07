@@ -367,6 +367,15 @@ export interface SweepUnitBindings {
    */
   pushBranch?: (repoRoot: string, branch: string) => Promise<void>;
   /**
+   * Remote publication of FAILED-ATTEMPT branches (taskLoop `pushFailed`).
+   * DISTINCT from {@link pushBranch}: a fix run opts into uploading failed
+   * attempts (`pushFailed: true`) without opting into pushing its own fix
+   * branch (`push: false`), while a local-only unit (`push: false` and no
+   * `pushFailed`) must never upload worker output. Absent = no failed attempt
+   * ever reaches the remote.
+   */
+  publishFailedAttempts?: boolean;
+  /**
    * The staged-path allowlist: regex SOURCES (hackDetector's pattern
    * precedent, compiled with `new RegExp`, `g`/`y` stripped) every staged
    * path must match. AFTER staging, any staged path matching none of the
@@ -2017,6 +2026,10 @@ export function bindingsFromDispatch(
             input.gitTimeoutMs === undefined ? undefined : { timeoutMs: input.gitTimeoutMs },
           ),
         }),
+    // A failed-attempt upload is its OWN explicit opt-in (`taskLoop.pushFailed`),
+    // never implied by the fix-branch push: fix.run sets `push: false` (its fix
+    // branch stays local) yet still asks for failed attempts to be published.
+    ...(input.taskLoop?.pushFailed === true ? { publishFailedAttempts: true } : {}),
     ...(input.stagePathAllowlist !== undefined
       ? { stagePathAllowlist: input.stagePathAllowlist }
       : {}),
