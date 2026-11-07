@@ -293,17 +293,18 @@ export function buildRunInput(
   },
   nowMs: number,
 ): RunMergePrsInput {
+  const cqEnv = cfg.cqEnv ?? readCqEnv();
   const classifyConfig = cfg.classifyConfig;
   return {
     baseBranch: cfg.baseBranch ?? SelfhostDefaults.baseBranch,
     repoRoot: cfg.repoRoot,
     prs: candidates,
     // Same source as the op's mirror check: cfg.cqEnv, else the process env.
-    protectedBranch: resolvedProtectedBranch(cfg.cqEnv ?? readCqEnv()),
+    protectedBranch: resolvedProtectedBranch(cqEnv),
     wallClockMs: SelfhostDefaults.perJobWallClockMs,
     ...(cfg.disableConflictResolution === true
       ? { conflictResolutionDisabled: true }
-      : { modelSpec: resolveSelfhostDriver(nowMs, cfg.cqEnv) }),
+      : { modelSpec: resolveSelfhostDriver(nowMs, cqEnv) }),
     sessionsDir: join(cfg.journalRoot ?? defaultJournalRoot(cfg.repoRoot), 'sessions'),
     nowMs,
     ...(classifyConfig === undefined
@@ -401,6 +402,7 @@ export async function runSelfMergePrs(
   deps: SelfMergePrsDeps,
   cfg: SelfMergePrsCfg,
 ): Promise<SelfMergePrsResult> {
+  cfg = { ...cfg, cqEnv: cfg.cqEnv ?? readCqEnv() };
   // The LIVE clock: the observation pass and every recheck read it per call
   // (settle is measured at the actual merge instant). The classify reading
   // below is taken ONCE.
