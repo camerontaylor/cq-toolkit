@@ -3,6 +3,12 @@ export const NICE_INCREMENT: number;
 export const RUN_TIMEOUT_MS: number;
 export const DEFAULT_BASE: string;
 export const GATED_CLASSES: readonly string[];
+/** Markers private to the runner and its gate launcher; never for children. */
+export const INTERNAL_TEST_ENV: readonly string[];
+/** Copy an environment without the internal markers; the input is not mutated. */
+export function childEnv(
+  env: Readonly<Record<string, string | undefined>>,
+): Record<string, string | undefined>;
 export const USAGE: string;
 export interface NarrowOptions {
   files: string[];

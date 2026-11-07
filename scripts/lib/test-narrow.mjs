@@ -20,6 +20,25 @@ export const RUN_TIMEOUT_MS = 20 * 60 * 1000;
 export const DEFAULT_BASE = 'origin/main';
 export const GATED_CLASSES = ['integration', 'live'];
 
+/**
+ * Environment markers private to the local test runner and the gate launcher
+ * that invokes it: the re-exec guard and the opt-in machine-evidence flag.
+ * They are deliberately absent from the cq env registry, so a child `cq`
+ * process would warn "unknown name CQ_*" on stderr. Every child environment
+ * goes through {@link childEnv}; the runner still reads its own copies.
+ */
+export const INTERNAL_TEST_ENV = Object.freeze(['CQ_TEST_NARROW_REEXEC', 'CQ_TEST_NARROW_REPORT']);
+
+/**
+ * Copy `env` without the runner's internal markers. Pure: the input object is
+ * not mutated, and registered names such as `CQ_DIST_PREPARED` are kept.
+ */
+export function childEnv(env) {
+  const copy = { ...env };
+  for (const name of INTERNAL_TEST_ENV) delete copy[name];
+  return copy;
+}
+
 export const USAGE = `usage: pnpm test:narrow [options] [<file>...]
 
 Runs a narrow, host-safe subset of the test suite. The full suite is CI-only.
