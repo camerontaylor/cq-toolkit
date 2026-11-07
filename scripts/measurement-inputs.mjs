@@ -159,6 +159,8 @@ function addLeaf(record, result) {
 // producer path is a legacy or broken artifact, never a silent skip.
 const FIX_RUN_REPORT_NAME =
   /^fix-run-report-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.json$/;
+/** The fix-run report's persisted format version (ADR-0005 decision 10). */
+const FIX_RUN_REPORT_VERSION = 1;
 
 /** Is this artifact at a path a measurement producer writes (report or index)? */
 function producerPath(root, path) {
@@ -168,7 +170,17 @@ function producerPath(root, path) {
   return name === 'review-address-report.json' || FIX_RUN_REPORT_NAME.test(name);
 }
 
-function ingestJson(parsed, source, result, atProducerPath) {
+function ingestJson(parsed, source, result, atProducerPath, artifactName) {
+  // The fix-run report's OWN persisted version (ADR-0005 decision 10): the
+  // writer always writes version 1; an ABSENT version is a legacy v1 report
+  // (pre-version runner caches), and any other value is refused fail-closed —
+  // a format this reader cannot truthfully interpret is never read past.
+  if (artifactName !== undefined && FIX_RUN_REPORT_NAME.test(artifactName)) {
+    if (parsed?.version !== undefined && parsed.version !== FIX_RUN_REPORT_VERSION)
+      return void result.unknown.push(
+        bad(source, 'unsupported', `fix-run report version ${String(parsed.version)}`),
+      );
+  }
   // Persisted operation reports (fix runs, review-address) carry the v2
   // payload embedded at reportV2: runFix and review.address assign the
   // assembled payload to the outer report and persist that, and no writer
@@ -396,6 +408,7 @@ async function readBundle(dir, result) {
           source,
           result,
           producerPath(entry.root, entry.path),
+          typeof entry.path === 'string' ? basename(entry.path) : undefined,
         );
       } catch {
         result.unknown.push(bad(source, 'corrupt', 'artifact is not JSON'));

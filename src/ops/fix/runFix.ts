@@ -74,6 +74,13 @@ import { makeSubprocessDevEffects } from '../dev/effects.js';
 
 export type FixRunInput = z.input<typeof FixRunInputSchema>;
 export interface FixRunReport {
+  /**
+   * The persisted report format version (ADR-0005 decision 10). The writer
+   * always writes 1; a reader treats an absent version as legacy v1 (old
+   * runner caches hold pre-version reports) and refuses any other value
+   * fail-closed.
+   */
+  version: 1;
   source: 'tests' | 'static';
   runPrefix: string;
   reportPath: string;
@@ -316,6 +323,7 @@ export function makeFixRun(deps: FixRunDeps = {}) {
       input.journalDir ?? resolve(repoRoot, '..', '.cq-fix-runs', randomUUID()),
     );
     const report: FixRunReport = {
+      version: 1,
       source: input.source,
       runPrefix,
       reportPath: resolve(journalDir, `fix-run-report-${randomUUID()}.json`),

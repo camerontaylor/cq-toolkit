@@ -7,7 +7,30 @@
 import { appendFile, open, readFile } from 'node:fs/promises';
 import type { FileHandle } from 'node:fs/promises';
 import { lock } from 'proper-lockfile';
+import { DISPATCH_RECORD_VERSION } from '../../ops/review/replyAndResolve.js';
 import type { DispatchLog, DispatchRecord } from '../../ops/review/replyAndResolve.js';
+
+/**
+ * Validate one parsed line (ADR-0005 decision 10): an ABSENT version is a
+ * legacy v1 line and reads as v1, `version: 1` is accepted, and any other
+ * value is refused fail-closed. A non-object line is refused too: it can
+ * never be a dispatch record.
+ */
+function parseDispatchLine(value: unknown, path: string, where: string): DispatchRecord {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(
+      `fileDispatchLog: dispatch log at ${JSON.stringify(path)} ${where} is not a record object — refusing to dispatch on top of an unreadable log; fix or remove the file and re-run`,
+    );
+  }
+  const version = (value as { version?: unknown }).version;
+  if (version !== undefined && version !== DISPATCH_RECORD_VERSION) {
+    throw new Error(
+      `fileDispatchLog: dispatch log at ${JSON.stringify(path)} ${where} has unsupported record version ${JSON.stringify(version)} — this reader accepts ${DISPATCH_RECORD_VERSION} or a legacy record with no version; refusing to dispatch on top of an unreadable log; fix or remove the file and re-run`,
+    );
+  }
+  // Return the normalized record: legacy v1 gains its explicit version.
+  return { ...(value as Omit<DispatchRecord, 'version'>), version: DISPATCH_RECORD_VERSION };
+}
 
 /**
  * The file-backed DispatchLog: one JSON record per line (JSON-lines-ish).
@@ -26,6 +49,11 @@ import type { DispatchLog, DispatchRecord } from '../../ops/review/replyAndResol
  * record is KEPT (load() counts it dispatched) and only its newline
  * boundary is added — the retry never discards a landed dispatch nor
  * concatenates onto junk.
+ *
+ * VERSION (ADR-0005 decision 10): every new line carries `version: 1`; a
+ * line without one is a legacy v1 record (old logs exist in runner caches)
+ * and reads as v1, while any other version is refused fail-closed — a
+ * format this reader cannot truthfully interpret is never dispatched past.
  */
 export function fileDispatchLog(path: string): DispatchLog {
   const load = async (): Promise<DispatchRecord[]> => {
@@ -48,8 +76,9 @@ export function fileDispatchLog(path: string): DispatchLog {
     for (let i = 0; i <= lastContent; i++) {
       const line = (lines[i] ?? '').trim();
       if (line === '') continue;
+      let parsed: unknown;
       try {
-        records.push(JSON.parse(line) as DispatchRecord);
+        parsed = JSON.parse(line);
       } catch {
         if (i === lastContent) {
           // Truncated FINAL line — a crash mid-append. Drop it: the record
@@ -60,10 +89,20 @@ export function fileDispatchLog(path: string): DispatchLog {
           `fileDispatchLog: dispatch log at ${JSON.stringify(path)} is corrupt (line ${i + 1} does not parse as JSON, and later lines follow it) — refusing to dispatch on top of an unreadable log; fix or remove the file and re-run`,
         );
       }
+      // A line that PARSES is not a truncated tail, whatever its position:
+      // an unsupported version or a non-record value is refused loudly.
+      records.push(parseDispatchLine(parsed, path, `line ${i + 1}`));
     }
     return records;
   };
   const record = async (entry: DispatchRecord): Promise<void> => {
+    // The writer writes version 1 only (ADR-0005 decision 10): a caller that
+    // hands over any other version gets a refusal, never a mixed-format log.
+    if (entry.version !== DISPATCH_RECORD_VERSION) {
+      throw new Error(
+        `fileDispatchLog: refusing to record a dispatch with version ${JSON.stringify(entry.version)} — this writer writes ${DISPATCH_RECORD_VERSION} only`,
+      );
+    }
     // A discarded partial tail is truncated before the retry appends, so a
     // crash mid-append can never poison the next record — BUT not every
     // unterminated tail is garbage: a crash AFTER the record's closing '}'
@@ -72,6 +111,8 @@ export function fileDispatchLog(path: string): DispatchLog {
     // an unterminated tail that parses as JSON is KEPT (only its '\n'
     // boundary is added — truncating it would discard a landed dispatch
     // and cause a repost), while a tail that does not parse is truncated.
+    // A tail that parses but the reader would REFUSE (wrong version, not a
+    // record object) is never silently accepted as a boundary either.
     // Either way the new record lands on a clean newline boundary.
     let handle: FileHandle | null = null;
     let boundaryNeeded = false;
@@ -81,13 +122,17 @@ export function fileDispatchLog(path: string): DispatchLog {
       const keep = bytes.lastIndexOf(0x0a) + 1; // through the last COMPLETE line
       if (keep < bytes.length) {
         const tail = bytes.subarray(keep).toString('utf8');
+        let parsedTail: unknown;
         try {
-          JSON.parse(tail);
-          // The tail IS a complete record — keep it byte-for-byte; only
-          // the newline boundary is missing.
-          boundaryNeeded = true;
+          parsedTail = JSON.parse(tail);
         } catch {
           await handle.truncate(keep); // junk tail: cut it
+        }
+        if (parsedTail !== undefined) {
+          // The tail IS a complete record — keep it byte-for-byte; only
+          // the newline boundary is missing.
+          parseDispatchLine(parsedTail, path, 'unterminated tail');
+          boundaryNeeded = true;
         }
       }
     } catch (err) {

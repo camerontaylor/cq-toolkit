@@ -26,12 +26,14 @@ describe('fileDispatchLog', () => {
       const log = fileDispatchLog(path);
       expect(await log.load()).toEqual([]);
       const first: DispatchRecord = {
+        version: 1,
         actionId: 'r1',
         kind: 'review_reply',
         resultRef: '8001',
         at: NOW,
       };
       const second: DispatchRecord = {
+        version: 1,
         actionId: 's1',
         kind: 'resolve_thread',
         resultRef: 'PRRT_1',
@@ -50,6 +52,84 @@ describe('fileDispatchLog', () => {
     }
   });
 
+  test('version rule: an absent version is legacy v1, accepted; writers always write version 1', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'cq-dispatch-'));
+    try {
+      const path = join(dir, 'dispatch.jsonl');
+      // Exactly the pre-version line shape.
+      const legacy = { actionId: 'r-legacy', kind: 'review_reply', resultRef: '8000', at: NOW };
+      await writeFile(path, `${JSON.stringify(legacy)}\n`, 'utf8');
+      const log = fileDispatchLog(path);
+      // Legacy lines read as v1; the normalisation is in memory, the bytes are untouched.
+      expect(await log.load()).toEqual([{ version: 1, ...legacy }]);
+      const fresh: DispatchRecord = {
+        version: 1,
+        actionId: 'r-new',
+        kind: 'issue_comment',
+        resultRef: '8001',
+        at: NOW + 1,
+      };
+      await log.record(fresh);
+      const lines = (await readFile(path, 'utf8')).trimEnd().split('\n');
+      expect(JSON.parse(lines[0]!)).toEqual(legacy);
+      expect(JSON.parse(lines[1]!)).toEqual(fresh);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('version rule: an unsupported version is refused fail-closed, in the tail and mid-file', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'cq-dispatch-'));
+    try {
+      const path = join(dir, 'dispatch.jsonl');
+      const v2 = { version: 2, actionId: 'r1', kind: 'review_reply', resultRef: '8001', at: NOW };
+      // TERMINATED final line: parses, so it is not a truncated tail.
+      await writeFile(path, `${JSON.stringify(v2)}\n`, 'utf8');
+      await expect(fileDispatchLog(path).load()).rejects.toThrow(/unsupported record version 2/);
+      // UNTERMINATED final line: still parses, so still refused (never dropped as junk).
+      await writeFile(path, JSON.stringify(v2), 'utf8');
+      await expect(fileDispatchLog(path).load()).rejects.toThrow(/unsupported record version 2/);
+      // record() refuses to widen the log past a wrong-version tail.
+      await expect(
+        fileDispatchLog(path).record({
+          version: 1,
+          actionId: 'r2',
+          kind: 'issue_comment',
+          resultRef: '8002',
+          at: NOW,
+        }),
+      ).rejects.toThrow(/unsupported record version 2/);
+      // A MID-FILE unsupported version is loud too.
+      await writeFile(path, `${JSON.stringify(v2)}\n${JSON.stringify(v2)}\n`, 'utf8');
+      await expect(fileDispatchLog(path).load()).rejects.toThrow(
+        /line 1.*unsupported record version/,
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('version rule: record() refuses to write any version but 1', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'cq-dispatch-'));
+    try {
+      const path = join(dir, 'dispatch.jsonl');
+      const log = fileDispatchLog(path);
+      await expect(
+        log.record({
+          version: 2,
+          actionId: 'r1',
+          kind: 'review_reply',
+          resultRef: '8001',
+          at: NOW,
+        } as unknown as DispatchRecord),
+      ).rejects.toThrow(/this writer writes 1 only/);
+      // Nothing landed.
+      expect(await log.load()).toEqual([]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   test('MID-FILE corruption throws a CLEAR error — dispatching on an unreadable log would duplicate posts', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'cq-dispatch-'));
     try {
@@ -57,12 +137,14 @@ describe('fileDispatchLog', () => {
       // A broken line with MORE records after it is not a truncated tail —
       // it is real corruption: load must refuse loudly.
       const first: DispatchRecord = {
+        version: 1,
         actionId: 'r1',
         kind: 'review_reply',
         resultRef: '8001',
         at: NOW,
       };
       const third: DispatchRecord = {
+        version: 1,
         actionId: 's1',
         kind: 'resolve_thread',
         resultRef: 'PRRT_1',
@@ -85,6 +167,7 @@ describe('fileDispatchLog', () => {
     try {
       const path = join(dir, 'dispatch.jsonl');
       const first: DispatchRecord = {
+        version: 1,
         actionId: 'r1',
         kind: 'review_reply',
         resultRef: '8001',
@@ -108,12 +191,14 @@ describe('fileDispatchLog', () => {
     try {
       const path = join(dir, 'dispatch.jsonl');
       const first: DispatchRecord = {
+        version: 1,
         actionId: 'r1',
         kind: 'review_reply',
         resultRef: '8001',
         at: NOW,
       };
       const second: DispatchRecord = {
+        version: 1,
         actionId: 'r2',
         kind: 'issue_comment',
         resultRef: '8002',
@@ -140,18 +225,21 @@ describe('fileDispatchLog', () => {
     try {
       const path = join(dir, 'dispatch.jsonl');
       const first: DispatchRecord = {
+        version: 1,
         actionId: 'r1',
         kind: 'review_reply',
         resultRef: '8001',
         at: NOW,
       };
       const second: DispatchRecord = {
+        version: 1,
         actionId: 'r2',
         kind: 'issue_comment',
         resultRef: '8002',
         at: NOW + 1,
       };
       const third: DispatchRecord = {
+        version: 1,
         actionId: 's1',
         kind: 'resolve_thread',
         resultRef: 'PRRT_1',
@@ -190,6 +278,7 @@ describe('fileDispatchLog', () => {
         await Promise.all([
           log.load(),
           log.record({
+            version: 1,
             actionId: `r${cycle}`,
             kind: 'issue_comment',
             resultRef: String(cycle),

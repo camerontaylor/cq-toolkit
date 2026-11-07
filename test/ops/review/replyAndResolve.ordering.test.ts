@@ -54,11 +54,11 @@ describe('reply-before-resolve ordering and record-before-next', () => {
     // Result records: created comment ids in dispatch order, thread ids for
     // resolves, the INJECTED clock (never Date.now).
     expect(result.posted).toEqual([
-      { actionId: 'r1', kind: 'review_reply', resultRef: '8001', at: NOW },
-      { actionId: 'i1', kind: 'issue_comment', resultRef: '8002', at: NOW },
-      { actionId: 'r2', kind: 'review_reply', resultRef: '8003', at: NOW },
-      { actionId: 's1', kind: 'resolve_thread', resultRef: 'PRRT_1', at: NOW },
-      { actionId: 's2', kind: 'resolve_thread', resultRef: 'PRRT_2', at: NOW },
+      { version: 1, actionId: 'r1', kind: 'review_reply', resultRef: '8001', at: NOW },
+      { version: 1, actionId: 'i1', kind: 'issue_comment', resultRef: '8002', at: NOW },
+      { version: 1, actionId: 'r2', kind: 'review_reply', resultRef: '8003', at: NOW },
+      { version: 1, actionId: 's1', kind: 'resolve_thread', resultRef: 'PRRT_1', at: NOW },
+      { version: 1, actionId: 's2', kind: 'resolve_thread', resultRef: 'PRRT_2', at: NOW },
     ]);
   });
 });
@@ -71,8 +71,8 @@ describe('dedupe via the dispatch log', () => {
   test('a pre-recorded actionId is skipped entirely — no invocation, counted in skippedAlreadyDispatched', async () => {
     const calls: GhCall[] = [];
     const log = memLog([
-      { actionId: 'r1', kind: 'review_reply', resultRef: '7001', at: NOW - 1000 },
-      { actionId: 's1', kind: 'resolve_thread', resultRef: 'PRRT_1', at: NOW - 1000 },
+      { version: 1, actionId: 'r1', kind: 'review_reply', resultRef: '7001', at: NOW - 1000 },
+      { version: 1, actionId: 's1', kind: 'resolve_thread', resultRef: 'PRRT_1', at: NOW - 1000 },
     ]);
     const result = await replyAndResolve(
       [mkReply('r1', 1201), mkIssue('i1'), mkResolve('s1', 'PRRT_1')],

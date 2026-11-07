@@ -147,14 +147,15 @@ describe('per-action failure isolation', () => {
     // Recorded exactly like a landed success — resultRef is the thread id.
     expect(result.posted.map((r) => r.actionId)).toEqual(['r1', 's1']);
     expect(result.posted[1]).toEqual({
+      version: 1,
       actionId: 's1',
       kind: 'resolve_thread',
       resultRef: 'PRRT_1',
       at: NOW,
     });
     expect(await log.load()).toEqual([
-      { actionId: 'r1', kind: 'review_reply', resultRef: '8001', at: NOW },
-      { actionId: 's1', kind: 'resolve_thread', resultRef: 'PRRT_1', at: NOW },
+      { version: 1, actionId: 'r1', kind: 'review_reply', resultRef: '8001', at: NOW },
+      { version: 1, actionId: 's1', kind: 'resolve_thread', resultRef: 'PRRT_1', at: NOW },
     ]);
     // The reply sibling ran normally.
     expect(calls.map((c) => c.label)).toEqual(['reply:1201', 'resolve:PRRT_1']);
