@@ -274,12 +274,14 @@ export const registry: OpRegistryEntry[] = [
     // The D11 policy check (W1.9). The posture is resolved ONCE per dispatch
     // from the project env (the per-call opt-in is W3.6's CLI flag) and bound
     // into the op; an invalid posture value is `failed`, never a fallback.
-    importer: () =>
+    importer: (wiring) =>
       Promise.all([import('./policyDiff.js'), import('./policyConfig.js')]).then(([m, cfg]) => {
         const op: Op<PolicyDiffInput, PolicyDiffOutcome> = async (input) => {
           let config;
           try {
-            config = cfg.resolveProtectedPathsConfig({ env: processEnv() });
+            config = cfg.resolveProtectedPathsConfig(
+              wiring?.cqEnv !== undefined ? { cqEnv: wiring.cqEnv } : { env: processEnv() },
+            );
           } catch (err) {
             return { status: 'failed', error: err instanceof Error ? err.message : String(err) };
           }

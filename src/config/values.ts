@@ -24,5 +24,5 @@ export const isPosture = (raw: string): raw is ProtectedPathsPosture =>
 
 /** A GitHub login, optionally `[bot]`-suffixed: the only bot entry shape accepted. */
 export const BOT_ENTRY_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\[bot\])?$/;
-export const ACCEPT_STATES: readonly string[] = ['APPROVED', 'COMMENTED'];
-export const ASSOCIATIONS: readonly string[] = ['OWNER', 'MEMBER', 'COLLABORATOR'];
+export const ACCEPT_STATES: readonly string[] = Object.freeze(['APPROVED', 'COMMENTED']);
+export const ASSOCIATIONS: readonly string[] = Object.freeze(['OWNER', 'MEMBER', 'COLLABORATOR']);

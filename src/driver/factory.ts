@@ -286,6 +286,17 @@ function bindingFor(
 /** Every malformed row and every non-lane value, across the WHOLE table. */
 function bindingProblems(bindings: DriverFactoryConfig['bindings']): string[] {
   const problems: string[] = [];
+  // Decoded/JS config is plain data the compiler already trusted: only an
+  // absent (undefined) table means "no bindings"; null, 42, true, 'x' and an
+  // array are config errors, not absence.
+  const table: unknown = bindings;
+  if (
+    table !== undefined &&
+    (typeof table !== 'object' || table === null || Array.isArray(table))
+  ) {
+    const got = table === null ? 'null' : Array.isArray(table) ? 'an array' : typeof table;
+    return [`bindings must be an object mapping role → provider → lane (got ${got})`];
+  }
   for (const [role, byProvider] of Object.entries(bindings ?? {})) {
     const row: unknown = byProvider;
     if (typeof row !== 'object' || row === null || Array.isArray(row)) {

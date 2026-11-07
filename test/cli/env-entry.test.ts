@@ -13,6 +13,26 @@ afterEach(() => {
 const warningLines = (err: string): string[] =>
   err.split('\n').filter((line) => line.startsWith('cq: warning:'));
 
+describe('cq config exit codes', () => {
+  test('invalid values and denied names exit 2 with the report on stdout', async () => {
+    vi.stubEnv('CQ_SANDBOX', 'of');
+    vi.stubEnv('CQ_RUN_TOOL', 'maybe');
+    const run = await capture(['config']);
+    expect(run.code).toBe(2);
+    expect(JSON.parse(run.out)).toHaveProperty('value.errors');
+    expect(run.err.match(/cq: error:/g)).toHaveLength(2);
+    vi.unstubAllEnvs();
+    vi.stubEnv('CQ_APPROVAL_KEY_X', 'x');
+    expect((await capture(['config', '--strict'])).code).toBe(2);
+  });
+
+  test('--strict with only warnings exits 1; without --strict exits 0', async () => {
+    vi.stubEnv('CQ_SANBOX', 'off');
+    expect((await capture(['config', '--strict'])).code).toBe(1);
+    expect((await capture(['config'])).code).toBe(0);
+  });
+});
+
 describe('CLI env entry', () => {
   test('a misspelled CQ_SANDBOX keeps the sandbox required and warns exactly once', async () => {
     vi.stubEnv('CQ_SANBOX', 'off');

@@ -499,13 +499,13 @@ The window source was retired 2026-10-20 and its implementation removed
 2026-11-03 (#385); Annex B §B.1 is back to the project env and the per-call
 opt-in.
 
-### N24 — Annex B §B.1, §B.2.5 and the resolver rules: superseded by ADR-0009
+### N24 — Annex B §B.1, §B.2.5, §B.4.1 and the resolver rules: superseded by ADR-0009
 
 Owner acceptance of 2026-11-06. [ADR-0009](0009-config-contract-v2.md) replaces
 the strictness and reserved-key refusal (§B.2.5) with "names warn, values
-fail", lets `cq.json` carry non-trust keys (§B.1 "never workspace files"),
+fail", retires `CQ_PROFILE` profile seeding (§B.4.1), lets `cq.json` carry non-trust keys (§B.1 "never workspace files"),
 and retires closed-domain enforcement, the `optIn` relaxation machinery and
-the hand-written key tables, which are generated from `src/config/env.ts`.
+the hand-written key tables, which are generated from `src/config/env-registry.ts`.
 Secret-by-suffix and env-only secrets (N4), the CI variable mapping (N15,
 N21) and the ADR-0004 trust boundaries stay in force. This closes ADR-0005's
 Phase 1.7 pointer.

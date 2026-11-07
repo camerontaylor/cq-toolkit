@@ -21,6 +21,7 @@
 // OUTPUT: the same OpResult the CLI printed, as one JSON line, so the judge
 // step's validation and check-run steps are unchanged; exit codes follow I1
 // (./trusted-entry.ts).
+import type { CqEnv } from '../config/env.js';
 import { pathToFileURL } from 'node:url';
 import { resolveProtectedPathsConfig } from '../ops/gates/policyConfig.js';
 import {
@@ -53,7 +54,9 @@ export interface PolicyDiffMainDeps {
 
 /** Parse, judge, write ONE JSON line; return the I1 exit code. */
 export function mainWith(argv: readonly string[], deps: PolicyDiffMainDeps): Promise<number> {
-  return runEntry<PolicyDiffOutcome>(async () => {
+  // `_cqEnv` is deliberately unused: the posture comes from `deps.env` (the explicit
+  // seam), and no other CQ_* name is read by this entry.
+  return runEntry<PolicyDiffOutcome>(async (_cqEnv: CqEnv) => {
     const input = parsePolicyDiffArgs(argv);
     let config;
     try {
