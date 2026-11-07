@@ -482,14 +482,15 @@ export const registry: OpRegistryEntry[] = [
       const { realMergeEffects } = await import('../../adapters/forge-github/mergeEffects.js');
       const { assertProtectedBranchMirror } = await import('./trustMirrors.js');
       const op: Op<ExecuteMergesInput, ExecutionReport> = async (input) => {
-        assertProtectedBranchMirror('merge.executeMerges', input.protectedBranch);
+        const protectedBranch = assertProtectedBranchMirror(
+          'merge.executeMerges',
+          input.protectedBranch,
+        );
         // The effects seam binds PER DISPATCH from the input's plain-JSON
         // repo config — the entry carries no repo state.
         const effects = realMergeEffects({
           repoRoot: input.repoRoot,
-          ...(input.protectedBranch !== undefined
-            ? { protectedBranch: input.protectedBranch }
-            : {}),
+          protectedBranch,
         });
         return {
           status: 'ok',

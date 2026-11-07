@@ -103,7 +103,6 @@
 // provider/role binding, a missing key env) or an UNCLASSIFIED throw —
 // is a misconfiguration or a lane bug the human arranges → 'needs-human'
 // (review-debt #186). The op never rethrows a dispatch outcome.
-import { assertProtectedBranchMirror } from './trustMirrors.js';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
@@ -125,6 +124,8 @@ import {
   withPreparedWorktree,
 } from '../../adapters/forge-github/mergeEffects.js';
 import type { MergeEffects } from '../../adapters/forge-github/mergeEffects.js';
+import type { CqEnv } from '../../config/env.js';
+import { assertProtectedBranchMirror } from './trustMirrors.js';
 
 // ---------------------------------------------------------------------------
 // The decision contract — pure, heavily tested
@@ -385,6 +386,8 @@ export interface ConflictResolutionValue {
 /** Injectable seams — every default is production-real; every override is
  * a test seam (fakes give the whole flow zero real I/O). */
 export interface ResolveConflictDeps {
+  /** The resolved config snapshot the protectedBranch mirror is checked against. Default: readCqEnv(). */
+  cqEnv?: CqEnv;
   /** Default: realMergeEffects({ repoRoot: input.repoRoot, protectedBranch? })
    * built lazily per call. */
   effects?: MergeEffects;
@@ -450,7 +453,11 @@ export function makeResolveConflictOp(
     // (a) The registry owns schema validation; the op enforces only the
     // RUNTIME requirement: dispatch without a ModelSpec fails — a vendor
     // default is never fabricated.
-    assertProtectedBranchMirror('merge.resolveConflict', input.protectedBranch);
+    const resolvedProtected = assertProtectedBranchMirror(
+      'merge.resolveConflict',
+      input.protectedBranch,
+      deps.cqEnv,
+    );
     const { modelSpec } = input;
     if (modelSpec === undefined) {
       return {
@@ -468,9 +475,7 @@ export function makeResolveConflictOp(
     // verbatim — `HEAD:refs/heads/main` would target the protected branch
     // through a bare-name-only comparison.
     const bareBranch = (ref: string): string => ref.replace(/^refs\/heads\//, '');
-    if (
-      bareBranch(input.headBranch) === bareBranch(input.protectedBranch ?? DEFAULT_PROTECTED_BRANCH)
-    ) {
+    if (bareBranch(input.headBranch) === bareBranch(resolvedProtected)) {
       return {
         status: 'failed',
         error: 'headBranch equals the protected branch — refusing to dispatch a push-capable agent',
@@ -478,7 +483,7 @@ export function makeResolveConflictOp(
     }
 
     const wallClockMs = input.wallClockMs ?? DEFAULT_RESOLVE_WALL_CLOCK_MS;
-    const protectedBranch = input.protectedBranch ?? DEFAULT_PROTECTED_BRANCH;
+    const protectedBranch = resolvedProtected;
     const parse = deps.parse ?? parseMergeConflictDecision;
     const loadPrompt = deps.loadPrompt ?? defaultLoadPrompt;
     // RESOLVE ONCE, BEFORE ANY EFFECT (ADR-0002 §2.5): role + provider →
@@ -526,7 +531,7 @@ export function makeResolveConflictOp(
       deps.effects ??
       realMergeEffects({
         repoRoot: input.repoRoot,
-        ...(input.protectedBranch !== undefined ? { protectedBranch: input.protectedBranch } : {}),
+        protectedBranch: resolvedProtected,
       });
     let fetched: GhResult;
     try {

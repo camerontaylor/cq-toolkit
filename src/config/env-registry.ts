@@ -15,6 +15,15 @@ import {
 import { isSecretEnvName } from './secret.js';
 import { ACCEPT_STATES, ASSOCIATIONS, BOT_ENTRY_RE, POSTURE_LIST, isPosture } from './values.js';
 
+/** A non-empty git branch name (no whitespace or control characters). */
+function parseBranchName(raw: string): string {
+  const v = raw.trim();
+  if (v === '' || /[\s\x00-\x1f]/.test(v)) {
+    throw new Error(`CQ_MERGE_PROTECTED_BRANCH must be a branch name, got '${raw}'`);
+  }
+  return v;
+}
+
 export type CqEnvKind = 'config' | 'identity' | 'test';
 /**
  * What a blank (unset, empty or whitespace) value means. `conservative`: the
@@ -191,6 +200,14 @@ export const CQ_ENV_ENTRIES: readonly CqEnvEntry[] = [
     'conservative',
     true,
     'Base branch the self-merge flow targets.',
+  ),
+  entry(
+    'CQ_MERGE_PROTECTED_BRANCH',
+    'config',
+    parseBranchName,
+    'conservative',
+    true,
+    'Branch merge pushes may never target; plan data cannot override it (blank: main).',
   ),
   entry(
     'CQ_MERGE_PROTECTED_PATHS',
