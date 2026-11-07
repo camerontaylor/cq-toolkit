@@ -98,8 +98,18 @@ export interface ResolveThreadAction {
 /** One dispatchable responder action. */
 export type ReviewAction = ReviewReplyAction | IssueCommentAction | ResolveThreadAction;
 
+/**
+ * The persisted dispatch record format version (ADR-0005 decision 10: one
+ * rule for every persisted format). Writers always write `version: 1`; a
+ * reader treats an ABSENT version as legacy v1 (old logs exist in runner
+ * caches) and refuses any other value fail-closed.
+ */
+export const DISPATCH_RECORD_VERSION = 1;
+
 /** One recorded successful dispatch — the dedupe memory's unit. */
 export interface DispatchRecord {
+  /** The persisted format version; absent on a legacy line reads as v1. */
+  version: typeof DISPATCH_RECORD_VERSION;
   /** The action's stable id (the dedupe key). */
   actionId: string;
   /** Which action kind produced the record. */
@@ -428,6 +438,7 @@ export async function replyAndResolve(
         return;
       }
       const record: DispatchRecord = {
+        version: DISPATCH_RECORD_VERSION,
         actionId: action.actionId,
         kind: action.kind,
         resultRef: minedCommentRef(result.stdout),
@@ -515,6 +526,7 @@ export async function replyAndResolve(
         // recorded as converged.
         if (messages.every((message) => /already resolved/i.test(message))) {
           const record: DispatchRecord = {
+            version: DISPATCH_RECORD_VERSION,
             actionId: action.actionId,
             kind: action.kind,
             resultRef: action.threadId,
@@ -545,6 +557,7 @@ export async function replyAndResolve(
         return;
       }
       const record: DispatchRecord = {
+        version: DISPATCH_RECORD_VERSION,
         actionId: action.actionId,
         kind: action.kind,
         resultRef: action.threadId,

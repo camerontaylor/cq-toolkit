@@ -41,7 +41,7 @@ describe('non-conforming gh outcomes', () => {
     // NOT recorded — the next run retries it (recording an unknown outcome
     // could swallow a mutation that never landed).
     expect(await log.load()).toEqual([
-      { actionId: 'r1', kind: 'review_reply', resultRef: '8001', at: NOW },
+      { version: 1, actionId: 'r1', kind: 'review_reply', resultRef: '8001', at: NOW },
     ]);
   });
 
@@ -77,7 +77,7 @@ describe('non-conforming gh outcomes', () => {
       expect(result.failed[0]?.error).toContain('resolve mutation did not land');
       // NOT recorded — the next run retries it.
       expect(await log.load()).toEqual([
-        { actionId: 'r1', kind: 'review_reply', resultRef: '8001', at: NOW },
+        { version: 1, actionId: 'r1', kind: 'review_reply', resultRef: '8001', at: NOW },
       ]);
     },
   );
@@ -104,10 +104,10 @@ describe('non-conforming gh outcomes', () => {
     );
     expect(result.failed).toEqual([]);
     expect(result.posted).toEqual([
-      { actionId: 's1', kind: 'resolve_thread', resultRef: 'PRRT_1', at: NOW },
+      { version: 1, actionId: 's1', kind: 'resolve_thread', resultRef: 'PRRT_1', at: NOW },
     ]);
     expect(await log.load()).toEqual([
-      { actionId: 's1', kind: 'resolve_thread', resultRef: 'PRRT_1', at: NOW },
+      { version: 1, actionId: 's1', kind: 'resolve_thread', resultRef: 'PRRT_1', at: NOW },
     ]);
   });
 

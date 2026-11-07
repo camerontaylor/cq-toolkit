@@ -29,6 +29,7 @@ describe('two-job convergence on a late-recorded resolve (review-debt #122)', ()
     const calls: GhCall[] = [];
     let loads = 0;
     const aRecord: DispatchRecord = {
+      version: 1,
       actionId: 's-x',
       kind: 'resolve_thread',
       resultRef: 'PRRT_X',
@@ -85,6 +86,7 @@ describe('resolve dedupe decision under the log lock (round-1 restructure)', () 
         if (!landed) {
           landed = true;
           records.push({
+            version: 1,
             actionId: 's-x',
             kind: 'resolve_thread',
             resultRef: 'PRRT_X',
