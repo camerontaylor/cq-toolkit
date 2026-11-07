@@ -77,6 +77,34 @@ describe('readCqEnv', () => {
     expect(readCqEnv({ CQ_FUTURE: '  ' }, registry).warnings).toEqual([]);
   });
 
+  test('a registry entry with status denied is an error, not a live value', () => {
+    const registry: CqEnvRegistry = {
+      entries: [
+        {
+          name: 'CQ_X',
+          kind: 'config',
+          parse: (raw) => raw,
+          secret: false,
+          blank: 'conservative',
+          trust: false,
+          status: 'denied',
+          description: 'never from env',
+        },
+      ],
+      denied: [],
+    };
+    const result = readCqEnv({ CQ_X: 'value' }, registry);
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0]?.message).toContain('not accepted');
+    expect(result.values['CQ_X']).toBeUndefined();
+    expect(result.warnings).toEqual([]);
+  });
+
+  test('a blank denied-prefix name is still an error (the denial is a name rule)', () => {
+    expect(readCqEnv({ CQ_APPROVAL_KEY: '' }).errors).toHaveLength(1);
+    expect(readCqEnv({ CQ_APPROVAL_KEY_X: '   ' }).errors).toHaveLength(1);
+  });
+
   test('blank means unset, with the default source', () => {
     const result = readCqEnv({ CQ_SANDBOX: '   ', CQ_RUN_TOOL: '' });
     expect(result.errors).toEqual([]);
@@ -223,27 +251,64 @@ describe('value parsers match the runtime', () => {
 });
 
 describe('registry invariants', () => {
-  test('the CQ_ string literals in src are exactly the registry (plus an explicit allowlist)', () => {
-    // Denied prefix and non-env constants that look like env names.
-    const allowlist = new Set(['CQ_APPROVAL_KEY', 'CQ_CONFIG_FILE']);
+  // Denied prefix and non-env constants that look like env names.
+  const ALLOWLIST = new Set(['CQ_APPROVAL_KEY', 'CQ_CONFIG_FILE']);
+  const root = join(import.meta.dirname, '..', '..');
+  const REGISTRY_FILE = join(root, 'src', 'config', 'env-registry.ts');
+
+  function literals(dirs: readonly string[], exclude: readonly string[]): Set<string> {
     const found = new Set<string>();
     const walk = (dir: string): void => {
       for (const dirent of readdirSync(dir, { withFileTypes: true })) {
         const full = join(dir, dirent.name);
-        if (dirent.isDirectory()) walk(full);
-        else if (dirent.name.endsWith('.ts')) {
+        if (dirent.isDirectory()) {
+          if (dirent.name !== 'node_modules' && dirent.name !== 'fixtures') walk(full);
+        } else if (/\.(ts|mjs)$/.test(dirent.name) && !exclude.includes(full)) {
           for (const m of readFileSync(full, 'utf8').matchAll(/['"`](CQ_[A-Z0-9_]+)['"`]/g)) {
             if (m[1] !== undefined) found.add(m[1]);
           }
         }
       }
     };
-    walk(join(import.meta.dirname, '..', '..', 'src'));
-    for (const name of allowlist) found.delete(name);
+    for (const d of dirs) walk(join(root, d));
+    return found;
+  }
+
+  /** Names read in `found` but not registered, and registered names no reader mentions. */
+  function diffRegistry(
+    found: ReadonlySet<string>,
+    registered: ReadonlySet<string>,
+  ): { unregistered: string[]; unread: string[] } {
+    return {
+      unregistered: [...found].filter((n) => !registered.has(n) && !ALLOWLIST.has(n)),
+      unread: [...registered].filter((n) => !found.has(n)),
+    };
+  }
+
+  test('the registry matches the CQ_ names the code reads, in both directions', () => {
     const registered = new Set(CQ_ENV_ENTRIES.map((e) => e.name));
-    expect([...found].filter((n) => !registered.has(n))).toEqual([]);
-    expect([...registered].filter((n) => !found.has(n))).toEqual([]);
+    // Forward: every literal in src (the registry file itself excluded) is registered.
+    const inSrc = literals(['src'], [REGISTRY_FILE]);
+    expect(diffRegistry(inSrc, registered).unregistered).toEqual([]);
+    // Reverse: every registered name has a real reader in src, scripts or test; the
+    // registry file does not count as its own reader.
+    const readers = literals(['src', 'scripts', 'test'], [REGISTRY_FILE]);
+    expect(diffRegistry(readers, registered).unread).toEqual([]);
     for (const e of CQ_ENV_ENTRIES) expect(e.name).toMatch(/^CQ_[A-Z0-9_]+$/);
+  });
+
+  test('the completeness check fails when a name is missing or unread (mutation check)', () => {
+    const registered = new Set(CQ_ENV_ENTRIES.map((e) => e.name));
+    const readers = literals(['src', 'scripts', 'test'], [REGISTRY_FILE]);
+    const withoutReader = new Set(readers);
+    withoutReader.delete('CQ_GH_BIN');
+    expect(diffRegistry(withoutReader, registered).unread).toEqual(['CQ_GH_BIN']);
+    const withoutEntry = new Set(registered);
+    withoutEntry.delete('CQ_GH_BIN');
+    expect(diffRegistry(readers, withoutEntry).unregistered).toContain('CQ_GH_BIN');
+    expect(diffRegistry(new Set([...readers, 'CQ_NEW_KNOB']), registered).unregistered).toContain(
+      'CQ_NEW_KNOB',
+    );
   });
 
   test('every config entry declares blank, and blank is never anything but conservative or neutral', () => {
