@@ -41,6 +41,13 @@ input). Trust-boundary keys (sandbox, merge trust set, protected branch and path
 and per-call layers: they never come from `cq.json`, plan JSON or op input. The list is examples: the `trust`
 flag in the registry (`src/config/env-registry.ts`) is authoritative for which keys are trust-boundary keys.
 
+**The one per-call route for a trust key** is an explicit in-process SDK `optIn` (ADR-0003 named authorization),
+built with `trustedOptIn()` (`src/config/optin.ts`). It must never be fed from plan JSON, op input or the CLI: the
+brand is a module-private `WeakSet` entry, so a JSON-derived object cannot carry it. The resolvers
+(`resolveSandboxConfig`, `resolveProtectedPathsConfig`) call `assertOptInAuthority`, which consults the `trust`
+flag: a per-call value for a `trust: true` key from anything but a `trustedOptIn()` object is refused with a
+`config` error. Keys with `trust: false` are unaffected.
+
 `CQ_PROFILE` profile seeding (Annex B §B.4.1) is retired. Nothing in `src` reads `CQ_PROFILE`.
 
 **Secrets** come from env only. A key is secret by name suffix. The list is `SECRET_ENV_SUFFIXES` in

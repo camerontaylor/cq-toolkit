@@ -263,6 +263,7 @@ export type {
   SandboxOptIn,
   SandboxPlatform,
 } from './sandbox/index.js';
+export { trustedOptIn } from './config/optin.js';
 export {
   assertRunToolAvailable,
   buildSandboxLauncherEnv,
