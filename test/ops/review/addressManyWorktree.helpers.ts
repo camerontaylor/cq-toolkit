@@ -112,6 +112,7 @@ export function errorChain(error: unknown): string {
 }
 export function terminalReport(path: string): ReviewAddressReport {
   return {
+    version: 1,
     source: 'local',
     reportPath: path,
     rounds: [],

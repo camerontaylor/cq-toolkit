@@ -133,6 +133,14 @@ export interface ReviewAddressInput {
   verifyClosure?: boolean;
 }
 export interface ReviewAddressReport {
+  /**
+   * The persisted report format version (ADR-0005 decision 10). The writer
+   * always writes 1; a reader treats an absent version as legacy v1 (old
+   * runner caches hold pre-version reports) and refuses any other value
+   * fail-closed. The cross-process measurement reader enforces this on the
+   * reportV2 envelope; the in-process consumers receive the same object.
+   */
+  version: 1;
   source: string;
   /** Selected dependency source; prerequisite checks may still refuse it. */
   dependencySource?: { kind: 'caller' | 'prepared'; root: string };
@@ -406,6 +414,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
       input.journalDir ?? resolve(input.repoRoot, '..', '.cq-address-runs', randomUUID()),
     );
     const report: ReviewAddressReport = {
+      version: 1,
       source: input.source,
       dependencySource: {
         kind: input.dependencyRoot === undefined ? 'caller' : 'prepared',

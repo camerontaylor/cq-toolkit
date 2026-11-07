@@ -246,6 +246,7 @@ export async function run(repo: TestRepo, scenario: Scenario) {
         observed = commit;
       }
       const report: ReviewAddressReport = {
+        version: 1,
         source: 'local',
         reportPath: '/tmp/green-prefix-fixture/review-address-report.json',
         rounds: [

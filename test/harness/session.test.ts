@@ -83,15 +83,29 @@ async function withScratch(body: (scratchDir: string) => Promise<void>): Promise
 test('new reader resumes old rows, while an old reader rejects additive diagnostics', async () => {
   await withScratch(async (dir) => {
     const store = new SessionStore(dir);
-    const record = await store.create(dir);
-    const path = join(dir, `${record.sessionId}.jsonl`);
-    await store.appendMessage(record.sessionId, {
+    // A LEGACY header (no version): the new reader resumes it as v1, while
+    // the frozen old-reader schema below still parses it. A NEW header would
+    // be rejected by that old strict reader — the accepted forward-compat
+    // cost of versioning the header.
+    const sessionId = 'ses-legacy-header';
+    const path = join(dir, `${sessionId}.jsonl`);
+    await writeFile(
+      path,
+      `${JSON.stringify({
+        type: 'session',
+        sessionId,
+        createdAt: '2026-09-30T00:00:00.000Z',
+        workspace: dir,
+      })}\n`,
+      'utf8',
+    );
+    await store.appendMessage(sessionId, {
       role: 'user',
       content: 'old conversation',
       at: '2026-10-01T00:00:00Z',
     });
-    expect((await store.load(record.sessionId))?.messages[0]?.content).toBe('old conversation');
-    await store.appendToolFailure(record.sessionId, {
+    expect((await store.load(sessionId))?.messages[0]?.content).toBe('old conversation');
+    await store.appendToolFailure(sessionId, {
       type: 'tool-failure',
       kind: 'INPUT_INVALID',
       tool: 'read',
@@ -100,7 +114,7 @@ test('new reader resumes old rows, while an old reader rejects additive diagnost
       step: 0,
       at: '2026-10-28T00:00:00Z',
     });
-    expect((await store.load(record.sessionId))?.messages).toHaveLength(1);
+    expect((await store.load(sessionId))?.messages).toHaveLength(1);
     const lines = (await readFile(path, 'utf8'))
       .trim()
       .split('\n')
@@ -124,6 +138,68 @@ test('new reader resumes old rows, while an old reader rejects additive diagnost
     ]);
     expect(lines.slice(0, 2).every((line) => oldReaderLine.safeParse(line).success)).toBe(true);
     expect(oldReaderLine.safeParse(lines.at(-1)).success).toBe(false);
+  });
+});
+
+describe('session header version (ADR-0005 decision 10)', () => {
+  test('a new header writes version 1 immediately after type', async () => {
+    await withScratch(async (dir) => {
+      const store = new SessionStore(dir);
+      const record = await store.create(dir);
+      const header = JSON.parse(
+        (await readFile(join(dir, `${record.sessionId}.jsonl`), 'utf8')).split('\n')[0]!,
+      ) as Record<string, unknown>;
+      expect(Object.keys(header).slice(0, 2)).toEqual(['type', 'version']);
+      expect(header.version).toBe(1);
+      expect(await store.load(record.sessionId)).toMatchObject({
+        sessionId: record.sessionId,
+        messages: [],
+      });
+    });
+  });
+
+  test('a legacy header without version reads as v1', async () => {
+    await withScratch(async (dir) => {
+      const store = new SessionStore(dir);
+      const sessionId = 'ses-legacy-version';
+      await writeFile(
+        join(dir, `${sessionId}.jsonl`),
+        `${JSON.stringify({
+          type: 'session',
+          sessionId,
+          createdAt: '2026-01-01T00:00:00.000Z',
+          workspace: dir,
+        })}\n`,
+        'utf8',
+      );
+      await store.appendMessage(sessionId, {
+        role: 'user',
+        content: 'legacy body',
+        at: '2026-01-01T00:00:01.000Z',
+      });
+      const loaded = await store.load(sessionId);
+      expect(loaded?.createdAt).toBe('2026-01-01T00:00:00.000Z');
+      expect(loaded?.messages.map((message) => message.content)).toEqual(['legacy body']);
+    });
+  });
+
+  test('a header with any other version refuses the file fail-closed', async () => {
+    await withScratch(async (dir) => {
+      const store = new SessionStore(dir);
+      const sessionId = 'ses-v2';
+      await writeFile(
+        join(dir, `${sessionId}.jsonl`),
+        `${JSON.stringify({
+          type: 'session',
+          version: 2,
+          sessionId,
+          createdAt: '2026-01-01T00:00:00.000Z',
+          workspace: dir,
+        })}\n`,
+        'utf8',
+      );
+      await expect(store.load(sessionId)).rejects.toThrow(/corrupt line 1/);
+    });
   });
 });
 

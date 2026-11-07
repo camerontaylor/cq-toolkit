@@ -96,6 +96,7 @@ export function addressReport(
   attempts: ReviewAddressReport['attempts'],
 ): ReviewAddressReport {
   return {
+    version: 1,
     source: 'local',
     verifiedHead: state.head,
     reportPath: '/tmp/dev-cycle-fixture/review-address-report.json',
