@@ -206,7 +206,7 @@ describe('tracker-body read-modify-write lock (review-debt #171)', () => {
     const forge = sharedForge();
     forge.armGate();
     const assemble = makeAssemblePrs(forge.effects);
-    const report = makeRunReport(forge.effects);
+    const report = makeRunReport(forge.effects, undefined, cleanScanner);
 
     const assembling = assemble(assembleInput());
     // The assembler is parked INSIDE its locked span (holding the lock).
@@ -249,7 +249,7 @@ describe('tracker-body read-modify-write lock (review-debt #171)', () => {
     const forge = sharedForge();
     forge.armGate();
     const assemble = makeAssemblePrs(forge.effects);
-    const report = makeRunReport(forge.effects);
+    const report = makeRunReport(forge.effects, undefined, cleanScanner);
 
     const assembling = assemble(assembleInput());
     await waitFor(() => forge.calls.includes(`get:${TRACKER}`));
@@ -268,7 +268,7 @@ describe('tracker-body read-modify-write lock (review-debt #171)', () => {
     // The pre-check sees OPEN; the in-lock re-check sees CLOSED (a transition
     // while the writer waited for the lock).
     forge.closeTrackerAfterFirstRead();
-    const report = makeRunReport(forge.effects);
+    const report = makeRunReport(forge.effects, undefined, cleanScanner);
     const result = await report(reportInput());
     expect(result.status).toBe('failed');
     if (result.status === 'failed') {
@@ -302,7 +302,7 @@ describe('tracker-body read-modify-write lock (review-debt #171)', () => {
     }
 
     // The lock was released: the report on the SAME tracker proceeds.
-    const report = makeRunReport(forge.effects);
+    const report = makeRunReport(forge.effects, undefined, cleanScanner);
     const reported = await report(reportInput());
     expect(reported.status).toBe('ok');
     expect(forge.bodies.get(TRACKER)).toContain('#11');

@@ -45,10 +45,13 @@ describe('sweep.cleanup mutex wrap (UC row 32)', () => {
       seedAgedClean(repoA);
       const repoB = fakeRepo();
       seedAgedClean(repoB, '/runs/wt/fix/cli', 'cq/09-16a/fix/cli');
-      await Promise.all([
+      const results = await Promise.all([
         makeCleanup(slowEffects(repoA))({ ...INPUT, mutex, dryRun: false }),
         makeCleanup(slowEffects(repoB))({ ...INPUT, mutex, dryRun: false }),
       ]);
+      expect(results.map((r) => r.status)).toEqual(['ok', 'ok']);
+      expect(repoA.removes).toHaveLength(1);
+      expect(repoB.removes).toHaveLength(1);
       expect(overlapped).toBe(false);
       expect(maxInside).toBe(1);
     } finally {

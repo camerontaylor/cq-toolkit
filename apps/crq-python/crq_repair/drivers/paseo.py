@@ -2,6 +2,7 @@
 import json
 import os
 from pathlib import Path
+import sys
 import time
 from crq_repair import atomic, command
 
@@ -38,10 +39,18 @@ def invoke(config, role, job, wt, directory):
                  '--provider', role['model'], '--mode', mode, '--cwd', str(wt), prompt])
     if p.returncode:
         raise RuntimeError('Paseo guarded judge creation failed')
-    data = json.loads(p.stdout[p.stdout.index('{'):])
-    agent = data['agentId']
-    atomic(Path(directory) / 'agent.json', {'agentId': agent, 'endpoint': endpoint})
+    # The launcher may print more than the JSON object (the inspect path below
+    # already uses raw_decode for that reason); a trailing or malformed payload
+    # must not leave a created agent unreachable.
     try:
+        data, _ = json.JSONDecoder().raw_decode(p.stdout[p.stdout.index('{'):])
+        agent = data['agentId']
+    except (ValueError, KeyError):
+        raise RuntimeError('Paseo guarded judge creation returned no agent id') from None
+    try:
+        # Inside the try: if this write fails, the finally below still stops
+        # the agent the launcher already created.
+        atomic(Path(directory) / 'agent.json', {'agentId': agent, 'endpoint': endpoint})
         deadline = time.monotonic() + repair['budget']['wall_clock_min'] * 60
         while time.monotonic() < deadline:
             status = command(['paseo', '--host', endpoint, 'inspect', agent, '--json'])
@@ -62,6 +71,19 @@ def invoke(config, role, job, wt, directory):
             time.sleep(5)
         return {'stop': 'budget', 'verdict': 'unsure', 'reason': 'judge timeout'}
     finally:
-        # Stop the exact owned agent before archival; never leave timed-out spend.
-        command(['paseo', '--host', endpoint, 'stop', agent])
-        command(['paseo', '--host', endpoint, 'archive', agent])
+        # Stop the exact owned agent before archival; never leave timed-out
+        # spend. A failed stop must be visible and must not archive the agent
+        # out of the normal listing, and neither call may replace the verdict.
+        try:
+            stopped = command(['paseo', '--host', endpoint, 'stop', agent]).returncode == 0
+        except Exception as exc:
+            stopped = False
+            print('paseo stop failed for ' + str(agent) + ': ' + str(exc), file=sys.stderr)
+        if stopped:
+            try:
+                if command(['paseo', '--host', endpoint, 'archive', agent]).returncode:
+                    print('paseo archive failed for ' + str(agent), file=sys.stderr)
+            except Exception as exc:
+                print('paseo archive failed for ' + str(agent) + ': ' + str(exc), file=sys.stderr)
+        else:
+            print('paseo agent ' + str(agent) + ' may still be running; not archived', file=sys.stderr)

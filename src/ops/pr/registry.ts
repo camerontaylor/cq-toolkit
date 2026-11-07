@@ -25,6 +25,7 @@
 // entry never touches env, the network, or the filesystem.
 import { z } from 'zod';
 import type { Op, OpRegistryEntry } from '../../kernel/types.js';
+import type { DiffSecretScanner } from '../dev/denylist.js';
 import type { AssemblePrsInput } from './assemblePrs.js';
 import type { EnsureTrackerBranchInput } from './ensureTrackerBranch.js';
 import type { PrOpenInput } from './open.js';
@@ -43,6 +44,55 @@ const AssemblePrsPackageSchema = z
     body: z.string().exactOptional(),
   })
   .strict();
+
+/**
+ * Build the mandatory portable publication scanner for a repo root. Imports
+ * stay dynamic (this module's top level is import-light by rule); the scanner
+ * itself is inert until a forge publication boundary calls it.
+ */
+async function loadPublicationScanner(
+  repoRoot: string,
+  opName: string,
+): Promise<{ scanner: DiffSecretScanner } | { status: 'failed'; error: string }> {
+  const [denylist, devEffects, fs] = await Promise.all([
+    import('../dev/denylist.js'),
+    import('../dev/effects.js'),
+    import('node:fs/promises'),
+  ]);
+  const dev = devEffects.makeSubprocessDevEffects(repoRoot);
+  let configText: string | null;
+  try {
+    configText = await fs.readFile(`${repoRoot}/cq.json`, 'utf8');
+  } catch (err) {
+    const code =
+      typeof err === 'object' && err !== null && 'code' in err
+        ? (err as { code?: unknown }).code
+        : undefined;
+    if (code === 'ENOENT') configText = null;
+    else {
+      return {
+        status: 'failed',
+        error: `${opName}: unable to read cq.json${typeof code === 'string' ? ` (${code})` : ''}; refusing PR publication`,
+      };
+    }
+  }
+  const packageText = await fs.readFile(`${repoRoot}/package.json`, 'utf8').catch(() => '{}');
+  let packageName = 'repository';
+  try {
+    const value: unknown = JSON.parse(packageText);
+    if (
+      typeof value === 'object' &&
+      value !== null &&
+      'name' in value &&
+      typeof value.name === 'string'
+    )
+      packageName = value.name;
+  } catch {
+    /* package name is descriptive; scanning remains mandatory */
+  }
+  const scanner = denylist.makePortableReviewScanner(repoRoot, dev, configText, packageName);
+  return { scanner };
+}
 
 export const AssemblePrsInputSchema: z.ZodType<AssemblePrsInput> = z
   .object({
@@ -128,51 +178,12 @@ export const registry: OpRegistryEntry[] = [
       Promise.all([
         import('./assemblePrs.js'),
         import('../../adapters/forge-github/ghEffects.js'),
-        import('../dev/denylist.js'),
-        import('../dev/effects.js'),
-        import('node:fs/promises'),
       ]).then(
-        ([m, ghEffects, denylist, devEffects, fs]) =>
+        ([m, ghEffects]) =>
           (async (input: AssemblePrsInput) => {
-            const dev = devEffects.makeSubprocessDevEffects(input.repoRoot);
-            let configText: string | null;
-            try {
-              configText = await fs.readFile(`${input.repoRoot}/cq.json`, 'utf8');
-            } catch (err) {
-              const code =
-                typeof err === 'object' && err !== null && 'code' in err
-                  ? (err as { code?: unknown }).code
-                  : undefined;
-              if (code === 'ENOENT') configText = null;
-              else {
-                return {
-                  status: 'failed',
-                  error: `pr.assemblePrs: unable to read cq.json${typeof code === 'string' ? ` (${code})` : ''}; refusing PR publication`,
-                };
-              }
-            }
-            const packageText = await fs
-              .readFile(`${input.repoRoot}/package.json`, 'utf8')
-              .catch(() => '{}');
-            let packageName = 'repository';
-            try {
-              const value: unknown = JSON.parse(packageText);
-              if (
-                typeof value === 'object' &&
-                value !== null &&
-                'name' in value &&
-                typeof value.name === 'string'
-              )
-                packageName = value.name;
-            } catch {
-              /* package name is descriptive; scanning remains mandatory */
-            }
-            const scanner = denylist.makePortableReviewScanner(
-              input.repoRoot,
-              dev,
-              configText,
-              packageName,
-            );
+            const loaded = await loadPublicationScanner(input.repoRoot, 'pr.assemblePrs');
+            if ('status' in loaded) return loaded;
+            const scanner = loaded.scanner;
             return m.makeAssemblePrs(
               ghEffects.makeSubprocessPrEffects(input.repoRoot),
               undefined,
@@ -193,11 +204,21 @@ export const registry: OpRegistryEntry[] = [
         import('../../adapters/forge-github/ghEffects.js'),
       ]).then(
         ([m, effects]) =>
-          (async (input: RunReportInput) =>
-            m.makeRunReport(effects.makeSubprocessPrEffects(input.repoRoot))(input)) as Op<
-            unknown,
-            unknown
-          >,
+          (async (input: RunReportInput) => {
+            // A tracker write publishes to the forge, so it needs the same
+            // mandatory scanner as the assembler; no tracker, no publication.
+            let scanner: DiffSecretScanner | undefined;
+            if (input.tracker !== undefined) {
+              const loaded = await loadPublicationScanner(input.repoRoot, 'pr.runReport');
+              if ('status' in loaded) return loaded;
+              scanner = loaded.scanner;
+            }
+            return m.makeRunReport(
+              effects.makeSubprocessPrEffects(input.repoRoot),
+              undefined,
+              scanner,
+            )(input);
+          }) as Op<unknown, unknown>,
       ),
   },
   {

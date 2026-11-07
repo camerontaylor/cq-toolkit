@@ -103,6 +103,17 @@ describe('executeMerges — (e) bounded retry on "base branch was modified"', ()
     expect(report.failed).toEqual([{ pr: 7, error: match.any(String) }]);
   });
 
+  test.each([Number.NaN, Number.POSITIVE_INFINITY, -1, 1.5])(
+    'rejects an invalid maxRetries (%s) before any effect',
+    async (maxRetries) => {
+      const fake = new FakeMergeEffects();
+      await expect(
+        executeMerges({ plan: handPlan([entry(7)]), effects: fake, maxRetries }),
+      ).rejects.toThrow(RangeError);
+      expect(fake.calls).toEqual([]);
+    },
+  );
+
   test('a non-retryable failure is recorded immediately, never retried', async () => {
     const fake = new FakeMergeEffects();
     fake.heads.set(7, sha('a'));

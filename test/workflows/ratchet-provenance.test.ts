@@ -16,8 +16,9 @@
 //      only its signing job (judge) runs in environment `cq-verdict`.
 //   4. ratchet-propose targets main through the script, consumes the
 //      measure leg's artifact, and holds its token behind `environment:`.
-//   5. The legacy ratchet.yml's target/metric pairs are exactly the trust
-//      manifest's (baselines/ratchets.json), and its guard runs in ref mode.
+//   5. ratchet.yml runs no test suite and no ratchet check (cq-measure and
+//      cq-verify measure and judge the manifest ratchets); it keeps only the
+//      baseline monotonicity guard, in ref mode, on pull requests.
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -280,8 +281,8 @@ describe('deciding legs run trusted code over head data (ADR-0004 D-B, D-C, D-E)
         base: { ref: base },
       });
       for (const pulls of [
-        [pull('main'), pull('main')],
-        [pull('main'), pull('main')],
+        [pull('main'), pull('merge-queue')],
+        [pull('merge-queue'), pull('main')],
       ]) {
         const result = spawnSync(
           'jq',
@@ -302,6 +303,28 @@ describe('deciding legs run trusted code over head data (ADR-0004 D-B, D-C, D-E)
         );
         expect(result.status, result.stderr).toBe(0);
         expect(result.stdout.trim()).toBe('main');
+      }
+      // A non-main-only association must produce empty output (nothing to judge).
+      {
+        const result = spawnSync(
+          'jq',
+          [
+            '-r',
+            '--arg',
+            'sha',
+            '0123456789abcdef0123456789abcdef01234567',
+            '--argjson',
+            'repo',
+            '42',
+            filter ?? '',
+          ],
+          {
+            input: JSON.stringify([pull('merge-queue')]),
+            encoding: 'utf8',
+          },
+        );
+        expect(result.status, result.stderr).toBe(0);
+        expect(result.stdout.trim()).toBe('');
       }
     },
   );
@@ -385,7 +408,7 @@ ${shellLines.join('\n')}`;
       const sha = '0123456789abcdef0123456789abcdef01234567';
       const valid = {
         path: '.github/workflows/ratchet-propose-measure.yml',
-        event: 'push',
+        event: 'schedule',
         head_branch: 'main',
         head_repository: { id: 42 },
         conclusion: 'success',
@@ -420,6 +443,7 @@ ${shellLines.join('\n')}`;
         for (const [label, data] of [
           ['path', { ...valid, path: '.github/workflows/other.yml' }],
           ['event', { ...valid, event: 'pull_request' }],
+          ['event-push', { ...valid, event: 'push' }],
           ['branch', { ...valid, head_branch: 'other' }],
           ['repo', { ...valid, head_repository: { id: 43 } }],
           ['conclusion', { ...valid, conclusion: 'failure' }],
@@ -441,19 +465,13 @@ ${shellLines.join('\n')}`;
   );
 });
 
-describe('legacy ratchet.yml agrees with the trust manifest', () => {
-  const manifest = JSON.parse(readFileSync(join(ROOT, 'baselines/ratchets.json'), 'utf8')) as {
-    ratchets: Array<{ target: string; metric: string }>;
-  };
-
+describe('ratchet.yml is the baseline guard only', () => {
   it.each(bothCopies('ratchet.yml'))(
-    '%s checks exactly the manifest ratchets and guards in ref mode',
+    '%s runs no suite or ratchet check and guards in ref mode on PRs',
     (_label, text) => {
       const body = code(text);
-      const pairs = [...body.matchAll(/--target=(\S+) \\\n\s+--metric=(\S+) \\/g)]
-        .map((m) => `${m[1]}/${m[2]}`)
-        .sort();
-      expect(pairs).toEqual(manifest.ratchets.map((r) => `${r.target}/${r.metric}`).sort());
+      expect(onBlock(text)).toBe('  pull_request:\n\n');
+      expect(body).not.toMatch(/vitest|--coverage|ratchet\.checkRatchet/);
       expect(body).toMatch(
         /ratchet\.monotonicGuard --repo=\. --base="origin\/\$\{PR_BASE\}" --head=HEAD/,
       );

@@ -86,10 +86,17 @@ export async function settleFixtureWork(): Promise<void> {
 const directories: string[] = [];
 export function registerJournalFixtureCleanup(hooks: JournalHooks): void {
   afterEach(async () => {
-    await settleFixtureWork();
-    hooks.before = undefined;
-    hooks.after = undefined;
-    hooks.beforePublication = undefined;
+    // Reset the per-file hooks even when settling fails: a leaked `before` that
+    // throws `injected` would fail unrelated tests. A failed settle propagates
+    // after the resets, so the directories stay in place for a live writer
+    // (and the error's "journal retained" text stays true).
+    try {
+      await settleFixtureWork();
+    } finally {
+      hooks.before = undefined;
+      hooks.after = undefined;
+      hooks.beforePublication = undefined;
+    }
     await Promise.all(
       directories.splice(0).map((dir) => rm(dir, { recursive: true, force: true })),
     );

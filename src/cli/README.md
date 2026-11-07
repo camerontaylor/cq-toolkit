@@ -19,8 +19,12 @@ THE I1 CLI CONTRACT (landed):
   2; embedders inject an ops root through the runCli DI).
   Op names win on a name collision (the op registry is consulted first).
 - stdout = one JSON artifact: the OpResult, optionally with a `report` field
-  carrying the op's run report on any status (or a RunReport for run-plan).
-  The report must be JSON-lossless; other extension keys are rejected.
+  carrying the op's run report on any status (or a RunReport for run-plan),
+  and optionally with a `usageSummary` field carrying the op's typed usage
+  rollup (`usage`, `costUSD`, `knownCount`, `unknownCount`, `unpricedCount`;
+  see `KnownUsageSummarySchema` in `src/kernel/schema.ts`). Both envelopes
+  must be JSON-lossless; other extension keys are rejected. An invalid
+  `usageSummary` value is an `invalid-result` error (exit 1).
   The plain-text `--help` surface is the one
   sanctioned exception. In human mode an invocation that fails before any
   result exists (usage error, invalid input, thrown) leaves stdout empty.

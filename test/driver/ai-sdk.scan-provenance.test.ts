@@ -9,6 +9,11 @@ import { describe, expect, test } from 'vitest';
 import { MockLanguageModelV4 } from 'ai/test';
 import { invocation, offeredToolCount, textResult, toolCallResult } from './ai-sdk.helpers.js';
 import { AiSdkDriver } from '../../src/driver/ai-sdk/index.js';
+import { probeRgVersion } from '../../src/harness/tools.js';
+
+// grep needs a runnable rg >= RG_MINIMUM_VERSION; the driver withholds grep
+// otherwise, so this leg can only exercise the raw-scan path where rg works.
+const rgUsable = (await probeRgVersion()).ok === true;
 
 describe('ai-sdk driver specifics (mock model)', () => {
   test('read upload scanning uses normalized executor provenance for file_path', async () => {
@@ -184,43 +189,46 @@ describe('read/grep raw scan provenance + persist stripping', () => {
     }
   });
 
-  test('grep: guard receives RAW matched lines (anchors intact), display stays numbered', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'aidrv-rawgrep-'));
-    try {
-      await writeFile(join(root, 'secret.txt'), 'CONFIDENTIAL: grep-secret-value\n', 'utf8');
-      const guarded: { text: string; path?: string }[] = [];
-      let modelCalls = 0;
-      const model = new MockLanguageModelV4({
-        modelId: 'mock-1',
-        doGenerate: async (options) => {
-          modelCalls++;
-          if (modelCalls === 1 && offeredToolCount(options) > 0) {
-            return toolCallResult('grep', { pattern: 'grep-secret-value' });
-          }
-          return textResult('done');
-        },
-      });
-      const driver = new AiSdkDriver({
-        providers: { mock: () => model },
-        sessionsDir: join(root, 'sessions'),
-        beforeRequest: async (_text, contents = []) => {
-          guarded.push(...contents);
-        },
-      });
-      const result = await driver.run(
-        invocation({
-          workspace: { path: root },
-          toolPolicy: { allow: ['grep'], mode: 'allowlist' },
-          sandboxPolicy: { level: 'read-only' },
-        }),
-      );
-      expect(result.stopReason).toBe('complete');
-      const raw = guarded.find((c) => c.path === 'secret.txt');
-      expect(raw).toBeDefined();
-      expect(raw?.text).toBe('CONFIDENTIAL: grep-secret-value');
-      expect(raw?.text).not.toContain('     1:');
-    } finally {
-      await rm(root, { recursive: true, force: true });
-    }
-  });
+  test.skipIf(!rgUsable)(
+    'grep: guard receives RAW matched lines (anchors intact), display stays numbered',
+    async () => {
+      const root = await mkdtemp(join(tmpdir(), 'aidrv-rawgrep-'));
+      try {
+        await writeFile(join(root, 'secret.txt'), 'CONFIDENTIAL: grep-secret-value\n', 'utf8');
+        const guarded: { text: string; path?: string }[] = [];
+        let modelCalls = 0;
+        const model = new MockLanguageModelV4({
+          modelId: 'mock-1',
+          doGenerate: async (options) => {
+            modelCalls++;
+            if (modelCalls === 1 && offeredToolCount(options) > 0) {
+              return toolCallResult('grep', { pattern: 'grep-secret-value' });
+            }
+            return textResult('done');
+          },
+        });
+        const driver = new AiSdkDriver({
+          providers: { mock: () => model },
+          sessionsDir: join(root, 'sessions'),
+          beforeRequest: async (_text, contents = []) => {
+            guarded.push(...contents);
+          },
+        });
+        const result = await driver.run(
+          invocation({
+            workspace: { path: root },
+            toolPolicy: { allow: ['grep'], mode: 'allowlist' },
+            sandboxPolicy: { level: 'read-only' },
+          }),
+        );
+        expect(result.stopReason).toBe('complete');
+        const raw = guarded.find((c) => c.path === 'secret.txt');
+        expect(raw).toBeDefined();
+        expect(raw?.text).toBe('CONFIDENTIAL: grep-secret-value');
+        expect(raw?.text).not.toContain('     1:');
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
 });

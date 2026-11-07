@@ -19,7 +19,7 @@
 // Failure coordinates are FIXTURE-STABLE (4,9).
 import { execFile } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { scrubbedGitEnv } from '../../helpers/git-env.js';
 
 /** The seeded alpha failure message — stable across every probe of any run. */
@@ -151,7 +151,8 @@ async function resilient<T>(step: () => Promise<T>): Promise<T> {
  * packages, the probe check, the ignore rules, then git init -b main +
  * one seed commit. Deterministic content; runs offline.
  */
-export async function generateScratchRepo(root: string): Promise<void> {
+export async function generateScratchRepo(repoRoot: string): Promise<void> {
+  const root = resolve(repoRoot);
   mkdirSync(join(root, 'scripts'), { recursive: true });
   writeFileSync(join(root, 'package.json'), ROOT_PACKAGE_JSON);
   writeFileSync(join(root, '.gitignore'), GITIGNORE);

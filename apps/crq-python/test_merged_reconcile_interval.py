@@ -10,8 +10,12 @@ from test_merged_reconcile_fixtures import A, B, mr
 
 class IntervalTests(unittest.TestCase):
     def test_interval_shape_and_order_refused(self):
+        # Non-ASCII decimal digits pass `\d` and strptime but sort after every
+        # ASCII digit, so they must be refused as malformed timestamps.
         for after, before in [("bad", B), (A, "2026-10-27 00:00:00"),
-                              (A, A), (B, A), (None, B), (A, 17)]:
+                              (A, A), (B, A), (None, B), (A, 17),
+                              ("\u0662\u0660\u0662\u0666-10-01T00:00:00Z", B),
+                              (A, "\u0662026-10-27T00:00:00Z")]:
             with self.subTest(after=after, before=before):
                 with self.assertRaises(mr.ReconcileRefused):
                     mr.normalize_interval(after, before)

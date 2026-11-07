@@ -91,13 +91,12 @@ const MODEL = 'glm-4.6'; // priced in src/driver/pricing/data.ts (zai row)
 process.env.ANTHROPIC_API_KEY = '';
 // The login shell exports the Z.AI key as Z_AI_API_KEY; the routes consume
 // the name ZAI_API_KEY. Map in-process, silently.
-if (process.env.ZAI_API_KEY === undefined || process.env.ZAI_API_KEY === '') {
-  process.env.ZAI_API_KEY = process.env.Z_AI_API_KEY;
-}
-if (process.env.ZAI_API_KEY === undefined || process.env.ZAI_API_KEY === '') {
+const zaiKey = process.env.ZAI_API_KEY || process.env.Z_AI_API_KEY;
+if (zaiKey === undefined || zaiKey === '') {
   console.error('dd1-abort-spike: Z_AI_API_KEY is not set in the environment — refusing to run');
   process.exit(1);
 }
+process.env.ZAI_API_KEY = zaiKey;
 
 // The fixture prompt: a deliberately LONG multi-part output so the run is
 // still mid-flight when the governed signal fires at 5s.

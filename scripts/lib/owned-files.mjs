@@ -9,6 +9,16 @@ const inside = (path) => {
   return rel !== '' && rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel);
 };
 
+/** A missing path is a deletion only when HEAD still tracks that exact file. */
+function deletedAtHead(path) {
+  const rel = relative(ROOT, path).split(sep).join('/');
+  const result = spawnSync('git', ['ls-tree', '--name-only', 'HEAD', '--', rel], {
+    cwd: ROOT,
+    encoding: 'utf8',
+  });
+  return result.status === 0 && result.stdout.split('\n').includes(rel);
+}
+
 /** Validate the whole list before either tool can mutate any file. */
 export function ownedFiles(args) {
   if (args.length === 0) throw new Error('provide an explicit owned-file list');
@@ -38,6 +48,9 @@ export function ownedFiles(args) {
           if (error.code !== 'ENOENT') throw error;
           parent = dirname(parent);
         }
+      }
+      if (!deletedAtHead(path)) {
+        throw new Error(`no such file, and not a deletion tracked at HEAD: ${arg}`);
       }
       continue;
     }

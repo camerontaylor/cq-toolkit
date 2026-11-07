@@ -1,9 +1,9 @@
 # ratchet-propose-measure — the CREDENTIAL-FREE half of baseline-tightening
 # proposals (ADR-0004 D-B "ratchet-propose"; W1.7).
 #
-# After a promotion lands on main, this leg measures the live ratchets and
-# provides a numbers-only artifact to the proposer. A read-only fetch job
-# bundles the promoted commit without running it. The measurement job
+# Nightly (and on dispatch), this leg measures the live ratchets on main's
+# tip and provides a numbers-only artifact to the proposer. A read-only fetch
+# job bundles that commit without running it. The measurement job
 # installs dependencies and runs the test suite with NO credential:
 # `permissions: {}`, no `secrets.*`,
 # no `environment:`. The proposer (`ratchet-propose.yml`, `workflow_run`, env
@@ -19,10 +19,12 @@
 # count the same thing.
 name: ratchet-propose-measure
 
+# Nightly rather than on every main push: each push cancelled the run in
+# progress, so frequent merges left almost no run to finish, and a
+# baseline only needs tightening occasionally.
 on:
-  push:
-    branches:
-      - main
+  schedule:
+    - cron: '17 19 * * *'
   workflow_dispatch:
 
 permissions: {}
@@ -69,7 +71,8 @@ jobs:
     name: measure
     needs: fetch
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # The whole suite runs serially (~14-17 min); see cq-measure.
+    timeout-minutes: 30
     steps:
       - name: Download the promoted git objects
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1 (immutable commit pin; repo policy)

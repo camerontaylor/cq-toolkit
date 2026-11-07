@@ -103,10 +103,23 @@ export function makeDevDisposition(
         await git(effects, ['rev-parse', '--show-toplevel']),
         'repository root',
       ).trim();
-      const evidence = await readQueueEvidence(
-        join(root, '.cq', 'queue-evidence'),
-        imported.debt.completion.receiptId,
-      );
+      // A receipt that cannot be re-read and verified is a DATA-INTEGRITY
+      // failure of the imported debt, not an environment fault: the throw
+      // would otherwise reach the guard and surface as needs-human. Map it
+      // onto the frozen taxonomy as failed, like the deep-equality mismatch
+      // below.
+      let evidence: Awaited<ReturnType<typeof readQueueEvidence>>;
+      try {
+        evidence = await readQueueEvidence(
+          join(root, '.cq', 'queue-evidence'),
+          imported.debt.completion.receiptId,
+        );
+      } catch (err) {
+        return {
+          status: 'failed',
+          error: `dev.disposition: imported receipt failed verification — ${faultText(err)}`,
+        };
+      }
       if (!isDeepStrictEqual(evidence, imported.debt.completion))
         return {
           status: 'failed',

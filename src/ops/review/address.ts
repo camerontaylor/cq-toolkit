@@ -12,6 +12,7 @@ import {
   unlink,
 } from 'node:fs/promises';
 import { resolve, join, posix, relative } from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 import { createDriverFactory, type DriverFactory } from '../../driver/factory.js';
 import { correlationInvocation } from '../../driver/correlationInvocation.js';
 import type { Usage, WorkerResult } from '../../driver/types.js';
@@ -26,7 +27,7 @@ import { loopReplyVerdict, replySignature } from '../../plans/review-loop.js';
 import { DEFAULT_REVIEW_WALL_MS, parseCqConfig, type CqConfig } from '../analyze/cqConfig.js';
 import { resolveCqConfigDefaults, requireAgenticTokenBudget } from '../analyze/cqConfigDefaults.js';
 import { makeDevDisposition } from '../dev/disposition.js';
-import { makeSubprocessDevEffects } from '../dev/effects.js';
+import { makeSubprocessDevEffects, type DevEffects } from '../dev/effects.js';
 import {
   FindingsRecordSchema,
   findingDispositionView,
@@ -85,7 +86,12 @@ import {
   withAddressOwnership,
   type AddressLease,
 } from './internal/addressOwnership.js';
-import { DEV_LEDGER_VERSION, devLedgerPath, type DevCycleRecord } from '../dev/record.js';
+import {
+  DEV_LEDGER_VERSION,
+  devLedgerPath,
+  type DevCycleRecord,
+  type DevLedgerFile,
+} from '../dev/record.js';
 import {
   createKnownUsageLedger,
   normalizeUsageObservation,
@@ -294,24 +300,20 @@ async function captureAddressProvenance(
   configJsonText: string,
   gitText: (args: string[]) => Promise<string>,
 ): Promise<{ provenance: ProvenanceRecord }> {
-  const [remote, packageText] = await Promise.all([
+  const [remote, packageVersion] = await Promise.all([
     // The composition's git transport answers this like every other read; a
     // missing remote is repoId null/unavailable (ADR-0008), never a failure.
     gitText(['config', '--get', 'remote.origin.url']).catch(() => ''),
-    // The emitting package version: the toolkit's own package.json. Like the
-    // remote, this is an optional observation: an unreadable file is
-    // 'unavailable', never a refusal.
-    readFile(new URL('../../../package.json', import.meta.url), 'utf8').catch(() => undefined),
+    // The emitting package version: the toolkit's own package.json. The env
+    // override never reads the file, and a read or parse failure degrades to
+    // 'unavailable' — an observation PRE-FLIGHT failure never fails the run.
+    process.env.CQ_PRODUCER_VERSION !== undefined
+      ? Promise.resolve(process.env.CQ_PRODUCER_VERSION)
+      : readFile(new URL('../../../package.json', import.meta.url), 'utf8')
+          .then((text) => (JSON.parse(text) as { version?: string }).version)
+          .catch(() => undefined),
   ]);
-  let packageVersion: string | undefined;
-  if (packageText !== undefined) {
-    try {
-      packageVersion = (JSON.parse(packageText) as { version?: string }).version;
-    } catch {
-      // Invalid JSON: the emitting version is simply unavailable.
-    }
-  }
-  const version = process.env.CQ_PRODUCER_VERSION ?? packageVersion ?? 'unavailable';
+  const version = packageVersion ?? 'unavailable';
   const provenance: ProvenanceRecord = {
     cqVersion: version,
     producerVersion: version,
@@ -1021,21 +1023,31 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
         // with; the correlation record joins its streams on that same workId.
         ...(injectedWriter === undefined ? {} : { workId: injectedWriter.workId }),
       };
+      // ADR-0008 T31: a provenance rejection is an observation failure, never
+      // a run failure — the surface records the sanitized reason and the run
+      // proceeds with no header.
+      let provenanceFailure: string | undefined;
       const sanitizedProvenance =
         baseSha === null
           ? null
-          : (
-              await captureAddressProvenance(
-                input.source,
-                new Date(start).toISOString(),
-                baseSha,
-                configText ?? JSON.stringify(config),
-                async (args) => {
-                  const probe = await rawGit(['-C', input.repoRoot, ...args]);
-                  return probe.stdout.trim();
-                },
-              )
-            ).provenance;
+          : await captureAddressProvenance(
+              input.source,
+              new Date(start).toISOString(),
+              baseSha,
+              configText ?? JSON.stringify(config),
+              async (args) => {
+                const probe = await rawGit(['-C', input.repoRoot, ...args]);
+                return probe.stdout.trim();
+              },
+            ).then(
+              (captured) => captured.provenance,
+              (error: unknown) => {
+                provenanceFailure = sanitizeObservation(
+                  `observation: provenance unavailable: ${String(error)}`,
+                );
+                return null;
+              },
+            );
       // ADR-0008 T31: DECLARE the observation surface here, but open nothing
       // yet. Opening the writer creates the journal directory (mkdir -p) and
       // the composition header append is journal IO; a run refused before it
@@ -1054,9 +1066,10 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
         workId: correlationRecord.workId,
         baseSha,
         failure:
-          baseSha === null
+          provenanceFailure ??
+          (baseSha === null
             ? 'observation: base witness unavailable'
-            : 'observation: ownership not held',
+            : 'observation: ownership not held'),
         kernelRuns: [],
         ...(sanitizedProvenance === null
           ? {}
@@ -1793,18 +1806,56 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
               if (!policy.review.reviewers.includes('coderabbit')) return complete;
               return withBookkeepingAccess(root, async () => {
                 if (stop()) return false;
-                const context = await (
-                  deps.resolveDeferredVendorContext ?? resolveDeferredVendorContext
-                )({
+                const request: DeferredVendorContextRequest = {
                   repoRoot: root,
                   target: input.target ?? 'main',
                   base: reviewedBase,
                   record,
                   onEvidenceImported: (evidence) => noteQueueEvidence(root, evidence),
+                  remainingMs: remainingWallMs,
                   ...(parent ? { signal: parent } : {}),
-                });
-                if (!deps.resolveDeferredVendorContext && context)
-                  await noteBookkeeping(devLedgerPath(root, record.branch));
+                };
+                // Correlate durable ledger bytes with the mutation the loader
+                // itself requested: never bless bytes the engine did not write
+                // (an external append stays unowned and fails closed at the
+                // next bookkeeping fingerprint check).
+                let requestedLedger: DevLedgerFile | undefined;
+                let provisionalLedger: DevLedgerFile | undefined;
+                const context = deps.resolveDeferredVendorContext
+                  ? await deps.resolveDeferredVendorContext(request)
+                  : await resolveDeferredVendorContext(request, {
+                      ...(deps.queueClient ? { queueClient: deps.queueClient } : {}),
+                      effectsFactory: (effectRoot): DevEffects => {
+                        const effects = makeSubprocessDevEffects(effectRoot);
+                        return {
+                          ...effects,
+                          openLedger: (branch) => {
+                            const store = effects.openLedger(branch);
+                            return {
+                              ...store,
+                              mutate: (update) =>
+                                store
+                                  .mutate((latest) => {
+                                    const change = update(latest);
+                                    provisionalLedger = structuredClone(change.ledger);
+                                    return change;
+                                  })
+                                  .then((result) => {
+                                    // Promote only once the store durably
+                                    // accepted the requested state.
+                                    requestedLedger = provisionalLedger;
+                                    return result;
+                                  }),
+                            };
+                          },
+                        };
+                      },
+                    });
+                if (!deps.resolveDeferredVendorContext && context) {
+                  const after = makeSubprocessDevEffects(root).openLedger(record.branch).load();
+                  if (requestedLedger !== undefined && isDeepStrictEqual(requestedLedger, after))
+                    await noteBookkeeping(devLedgerPath(root, record.branch));
+                }
                 if (stop()) return false;
                 if (!context) {
                   if (complete) delete report.deferredVendorDebt;
@@ -2838,6 +2889,11 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                     return { status: 'ok', value };
                   },
                 };
+                // The head check is admission-only: from round 2 on the
+                // previous round's commit has legitimately moved the worktree
+                // HEAD, so no expected head is passed.
+                const roundOneExpectedHead =
+                  round === 1 ? (lease.expectedHead ?? input.expectedHead) : undefined;
                 const loop = await runAddressReviewLoop(lease, {
                   owner: meta.owner,
                   repo: meta.repo,
@@ -2845,16 +2901,13 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                   headRefName: meta.headRefName,
                   ...(meta.headRepo ? { headRepo: meta.headRepo } : {}),
                   repoRoot: input.repoRoot,
-                  ...(round === 1 && input.expectedHead
-                    ? { expectedHead: input.expectedHead }
-                    : {}),
+                  ...(roundOneExpectedHead ? { expectedHead: roundOneExpectedHead } : {}),
                   gh,
                   git,
                   registry:
                     deps.worktreeRegistry ??
                     lease.registry ??
                     fileWorktreeRegistry(resolve(journalDir, 'worktrees.json')),
-                  ...(lease.expectedHead ? { expectedHead: lease.expectedHead } : {}),
                   beforeWorktreeResolve: () =>
                     lease.assertSelection({
                       pr: meta.pr,
@@ -2938,7 +2991,11 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                     // and exact bytes re-validated by the receipt's own
                     // machinery); any other dirt keeps the strict refusal.
                     // onCreated still performs the receipt rotation afterwards.
-                    if (!persistedBookkeeping) return false;
+                    // Once bookkeeping fingerprints exist, deleting receipt-owned
+                    // files would leave the in-memory map pointing at deleted
+                    // paths, so the next check would (wrongly) declare the run
+                    // tampered: keep the strict refusal instead.
+                    if (!persistedBookkeeping || bookkeeping.size > 0) return false;
                     const owned = await persistedBookkeeping.ownedFiles();
                     for (const path of owned) await unlink(path);
                     return true;
@@ -2994,6 +3051,16 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                   }
                   return await finish('needs-human', closureRefused);
                 }
+                // A failed after-snapshot leaves the loop's replies/resolves
+                // published but the round unverified. Stop BEFORE the
+                // re-review: that pass would replace the retained settled
+                // run's record with the re-reviewed population and lose the
+                // history of what the fixes did.
+                if (loop.verifyFailure !== undefined)
+                  return await finish(
+                    'needs-human',
+                    `verify snapshot failed: ${loop.verifyFailure}`,
+                  );
                 const fetched = await fetchReviewState(
                   { owner: meta.owner, repo: meta.repo, pr: meta.pr },
                   undefined,
@@ -3203,15 +3270,14 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                   let path = input.record;
                   if (!path) {
                     const folder = resolve(root, '.cq', 'review', reviewBranchKey(branch));
+                    // A branch with no review.run yet has no folder: that is the
+                    // documented "no findings record" guidance, not a raw ENOENT.
                     let names: string[];
                     try {
                       names = await readdir(folder);
                     } catch (error) {
-                      // No review has run on this branch yet: the absent
-                      // folder is the empty population, not a failure.
-                      if (error instanceof Error && 'code' in error && error.code === 'ENOENT')
-                        names = [];
-                      else throw error;
+                      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+                      names = [];
                     }
                     const files = names
                       .filter((name) => /^\d+\.json$/.test(name))

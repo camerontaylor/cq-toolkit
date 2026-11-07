@@ -42,7 +42,7 @@ test('a caller abort during the post-report identity read prevents the ancestor 
   };
   await expect(
     loadCurrentDeferredVendorDebt(effects, 'main', read.state, before, client, controller.signal),
-  ).rejects.toThrow(reason);
+  ).rejects.toBe(reason);
   // No late settlement write: the ledger is exactly as before.
   expect(f.effects.openLedger(f.state.branch).load()).toEqual(before);
 });
@@ -73,7 +73,7 @@ test('a caller abort after the final ancestor settlement still propagates from l
   };
   await expect(
     loadCurrentDeferredVendorDebt(effects, 'main', read.state, before, client, controller.signal),
-  ).rejects.toThrow(reason);
+  ).rejects.toBe(reason);
 });
 test('the post-report identity read is clamped to the remaining budget and carries the signal', async () => {
   const { f, predecessor, terminal, successorStatus, successor, read } =
@@ -159,7 +159,7 @@ test('cancellation during the post-report identity read keeps the caller reason'
   };
   await expect(
     loadCurrentDeferredVendorDebt(effects, 'main', read.state, before, client, controller.signal),
-  ).rejects.toThrow(reason);
+  ).rejects.toBe(reason);
   expect(f.effects.openLedger(f.state.branch).load()).toEqual(before);
 });
 test('budget exhaustion during the post-report identity read truncates nonfatally', async () => {
@@ -236,7 +236,7 @@ test('an in-flight caller abort resolved by the adapter keeps the exact caller r
   };
   await expect(
     loadCurrentDeferredVendorDebt(effects, 'main', read.state, before, client, controller.signal),
-  ).rejects.toThrow(reason);
+  ).rejects.toBe(reason);
   expect(f.effects.openLedger(f.state.branch).load()).toEqual(before);
 });
 test('an in-flight invocation deadline resolved as a timeout truncates nonfatally', async () => {

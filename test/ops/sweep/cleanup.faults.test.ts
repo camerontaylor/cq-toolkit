@@ -106,6 +106,9 @@ describe('sweep.cleanup fault paths', () => {
     expect(error).toContain('cq/09-16a/fix/gone');
     // The aged clean candidate WAS removed before the fault (earlier
     // candidate, same real run); the faulting branch itself is not deleted.
+    expect(error).toMatch(/completed before the fault/);
+    expect(error).toContain(WT_PATH);
+    expect(repo.removes).toEqual([{ repoRoot: '/repo', path: WT_PATH, force: false }]);
     expect(repo.branchDeletes.some((d) => d.branch === 'cq/09-16a/fix/gone')).toBe(false);
   });
 

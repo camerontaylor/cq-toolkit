@@ -2,6 +2,7 @@
 // fixReviewItem.*.test.ts siblings in this directory; the shared fixtures live
 // in fixReviewItem.helpers.ts and the original suite header sits there.
 import { describe, expect, test } from 'vitest';
+import { HarnessConfigSchema } from '../../../src/harness/config.js';
 import { MAX_COMMENT_CHARS, reviewFixHarness } from '../../../src/ops/review/fixReviewItem.js';
 import { defaultFixPrompt } from '../../../src/ops/review/prompts/defaultFixPrompt.js';
 import {
@@ -118,6 +119,6 @@ describe('reviewFixHarness (round-3 item 9)', () => {
     expect(Object.isFrozen(reviewFixHarness)).toBe(true);
     expect(Object.isFrozen(reviewFixHarness.tools.bash)).toBe(true);
     // Schema-parsed: reparsing the shipped value is a no-op.
-    expect(reviewFixHarness).toEqual(reviewFixHarness);
+    expect(HarnessConfigSchema.parse(reviewFixHarness)).toEqual(reviewFixHarness);
   });
 });
