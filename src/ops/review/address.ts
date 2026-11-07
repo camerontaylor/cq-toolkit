@@ -2002,9 +2002,11 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                   target: input.target ?? 'main',
                   ...(input.base
                     ? { base: input.base }
-                    : reviewedBasePinned
-                      ? { base: await reviewedBasePinned() }
-                      : {}),
+                    : reviewedBase
+                      ? { base: reviewedBase }
+                      : reviewedBasePinned
+                        ? { base: await reviewedBasePinned() }
+                        : {}),
                 });
                 if (!read.ok) throw new Error(read.reason);
                 const state = read.state;
