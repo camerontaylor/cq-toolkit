@@ -2190,10 +2190,9 @@ def refresh_slot_deadline(q, usage, remaining, gate, at=None):
 def _deliver_push_findings(q: Dict[str, Any], item: Dict[str, Any]) -> Optional[str]:
     """File the findings issue for a counted review; idempotent, retried.
 
-    Called at harvest and again by later ticks while `issue_pending` holds.
-    The range identity comes from `issue_request` (both call sites — the push
-    harvest and the foreign open/delta harvest — store base/head there), so the
-    helper works for open items that carry no push subject. The findings stay
+    Called by later ticks while `issue_pending` holds for push reviews.
+    The range identity comes from `issue_request` (legacy requests fall back
+    to the push subject). The findings stay
     in the receipt regardless: a delivery failure records `issue_error` and
     never revisits the review's terminal state (docs/multi-repo.md findings
     delivery)."""
@@ -2243,7 +2242,7 @@ PR_REVIEWS_PER_TICK = 2
 
 def _request_pr_review(item: Dict[str, Any], run_id: str, meta: Dict[str, Any], rdir: Path,
                        cls: Dict[str, Any]) -> None:
-    """Persist PR-review delivery debt for a counted primary open/delta review.
+    """Persist PR-review delivery debt for a counted open/delta review.
 
     Deliberate (owner ruling, PR #1069): a newer run of the same item replaces
     an older request that was never delivered, and the older run's findings are
@@ -2254,6 +2253,8 @@ def _request_pr_review(item: Dict[str, Any], run_id: str, meta: Dict[str, Any], 
                                  "severity_counts": cls["severity_counts"]}
     item["pr_review_pending"] = True
     item["pr_review_attempts"] = 0
+    if item.get("issue_pending"):
+        item["issue_pending"] = False  # a newer PR run supersedes old issue debt
     for key in ("pr_review", "pr_review_error"):
         item.pop(key, None)
 
@@ -2269,7 +2270,7 @@ def _settle_pr_review(item: Dict[str, Any], error: str) -> str:
 
 
 def _deliver_pr_review(item: Dict[str, Any]) -> Optional[str]:
-    """Post the findings of one counted primary open/delta review on its PR as
+    """Post the findings of one counted open/delta review on its PR as
     a pull-request review (pr_review_findings). Idempotent by the run marker,
     skipped for a closed or merged PR, retried by later ticks up to
     PR_REVIEW_MAX_ATTEMPTS. Never touches the item's review or repair state,
@@ -2306,8 +2307,28 @@ def _deliver_pr_review(item: Dict[str, Any]) -> Optional[str]:
 def deliver_pending_pr_reviews(q: Dict[str, Any]) -> List[str]:
     """Bounded post-harvest pass: at most PR_REVIEWS_PER_TICK deliveries, least
     recently attempted first, so a failing one never starves the rest."""
+    # Upgrade only undelivered open-PR issue debt from older runners. Keep the
+    # original run/range/artifacts, never the item's possibly refreshed head.
+    for item in live_items(q):
+        if item.get("kind") not in ("open", "delta") or not item.get("issue_pending"):
+            continue
+        if not item.get("issue") and not item.get("pr_review_request"):
+            request = item.get("issue_request")
+            request = request if isinstance(request, dict) else {}
+            try:
+                ndjson = str(Path(request["findings_md"]).with_name("review.ndjson"))
+            except (KeyError, TypeError, ValueError):
+                ndjson = None  # malformed debt settles through the existing delivery path
+            item["pr_review_request"] = {
+                "run_id": request.get("run_id"), "pr": item.get("pr"),
+                "base": request.get("base"), "head": request.get("head"),
+                "ndjson": ndjson,
+                "severity_counts": request.get("severity_counts", {})}
+            item["pr_review_pending"] = True
+            item["pr_review_attempts"] = 0
+        item["issue_pending"] = False
     candidates = sorted((i for i in live_items(q) if i.get("pr_review_pending") and
-                         i.get("kind") in ("open", "delta") and item_repo(i) == REPO),
+                         i.get("kind") in ("open", "delta")),
                         key=lambda i: i.get("pr_review_attempt_at") or "")
     log = []
     for pending in candidates[:PR_REVIEWS_PER_TICK]:
@@ -2485,16 +2506,11 @@ def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
             item["state"] = "done"
             return f"{item['id']}: completed ({cls['findings']} findings) [author: no repair/coverage credit]"
         item.setdefault("cycles", []).append(record)
+        if item["kind"] in ("open", "delta") and item.get("pr") and cls["findings"]:
+            # All repos use the same durable, bounded PR-review delivery.
+            _request_pr_review(item, r["run_id"], meta, rdir, cls)
         if item["kind"] in ("open", "delta") and item_repo(item) != REPO:
-            # Foreign open/delta review (docs/multi-repo.md): the cycle is real
-            # evidence, but coverage credit and repair enqueue stay primary-only;
-            # findings are delivered as one issue in the repo instead.
-            if cls["findings"]:
-                # Debt only: the bounded post-harvest pass performs the upload.
-                item["issue_request"] = {"run_id": r["run_id"], "severity_counts": cls["severity_counts"],
-                                         "findings_md": str(rdir / "findings.md"),
-                                         "base": meta["base"], "head": meta["head"]}
-                item["issue_pending"] = True
+            # Foreign cycles are real evidence; coverage and repair stay primary-only.
             item["state"] = "done"
             return f"{item['id']}: completed ({cls['findings']} findings)"
         terminal_paths = []
@@ -2516,9 +2532,6 @@ def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
             counted=True, outcome="completed", focus_paths=meta.get("coverage_paths") or meta.get("planned_paths"))
         if item["kind"] == "coverage" and item.get("coverage_source"):
             coverage.record_legacy_success(q, item, terminal_paths)
-        if item["kind"] in ("open", "delta") and item.get("pr") and cls["findings"]:
-            # Debt only: the bounded post-harvest pass posts the PR review.
-            _request_pr_review(item, r["run_id"], meta, rdir, cls)
         repair_pending = repair_tick.enqueue(sys.modules[__name__], q, item, meta, rdir)
         item["state"] = "repairing" if repair_pending else "done"
         return f"{item['id']}: completed ({cls['findings']} findings)"
@@ -3140,15 +3153,14 @@ def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = Fal
         # delivery from starving later ones.
         candidates = sorted(
             (i for i in live_items(q) if i.get("issue_pending") and
-             (i.get("kind") == push_current.KIND or
-              (i.get("kind") in ("open", "delta") and item_repo(i) != REPO))),
+             i.get("kind") == push_current.KIND),
             key=lambda i: i.get("issue_attempt_at") or "")
         for pending in candidates[:2]:
             pending["issue_attempt_at"] = iso()
             msg = _deliver_push_findings(q, pending)
             if msg:
                 log.append(msg)
-        # Primary open/delta findings: one PR review each, same bounded shape.
+        # Open/delta findings in every repo: one PR review each, same bounded shape.
         log += deliver_pending_pr_reviews(q)
         repair_tick.backfill(sys.modules[__name__], q)
         repair_tick.archive_legacy(sys.modules[__name__], q)
