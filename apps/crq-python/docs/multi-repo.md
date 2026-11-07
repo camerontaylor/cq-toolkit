@@ -51,8 +51,9 @@ behavior; the checked-in config ships empty, host overlays add entries):
   primary-only: fleet vocabulary is the ordinary subject matter of the
   reviewed repos and must not block their reviews. Unknown class ids fail the
   scan closed.
-- `findings` — `"issue"` (file one GitHub issue per counted review with
-  findings, in that repo) or `"none"`. Repair drain is never enabled for
+- `findings` — `"issue"` (file one GitHub issue per counted push review with
+  findings, in that repo) or `"none"`. Open/delta PR reviews post findings
+  directly to their PR regardless of this push-only setting. Repair drain is never enabled for
   non-primary repos in this change.
 
 Validation lives in `repo_registry.py` (fail-closed like every other config
@@ -178,8 +179,15 @@ source range generalized:
 
 ## Findings delivery
 
+Open/delta PR reviews in every repo post findings as one PR review, with
+resolvable inline threads where possible and body findings otherwise. Delivery
+uses the reviewed head and repository, skips closed/merged PRs, and reuses the
+primary repo's durable retries and run-marker deduplication. Clean reviews
+post nothing. Pending legacy open/delta issue debt converts to PR-review debt;
+already delivered issues stay untouched. See [findings on open PRs](../README.md#findings-on-open-prs).
+
 For non-primary repos with `findings: "issue"`, harvesting a counted completed
-review with ≥1 finding files one issue in that repo: title
+push review with ≥1 finding files one issue in that repo: title
 `crq: <base10>..<head10> — N findings (M blocking)`, body = findings markdown
 plus run/receipt identity and a fixed "auto-filed by crq; no auto-fix" note.
 Idempotent: the issue URL is stored on the item before state settles; a failed

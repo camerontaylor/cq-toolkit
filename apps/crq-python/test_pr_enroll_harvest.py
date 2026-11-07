@@ -1,4 +1,4 @@
-"""Counted foreign harvest: issue delivery (never coverage/repair), the debt
+"""Counted foreign harvest: PR-review delivery (never coverage/repair), the debt
 record and the bounded post-harvest upload, plus the legacy issue-request
 fallback.
 
@@ -13,7 +13,7 @@ from test_pr_enroll_fixtures import COMPLETE, FOREIGN, PrTestBase, crq
 
 
 class PrTest(PrTestBase, unittest.TestCase):
-    def test_counted_foreign_open_harvest_files_issue_without_coverage_or_repair(self):
+    def test_counted_foreign_open_harvest_posts_review_without_coverage_or_repair(self):
         h1 = self.foreign_commit("pr work", {"a.txt": "a\n"})
         self.enroll([self.pr_row(5, h1)])
         item = self.q["items"][0]
@@ -22,13 +22,13 @@ class PrTest(PrTestBase, unittest.TestCase):
         self.assertEqual(item["state"], "reviewing")
         finding = {"type": "finding", "severity": "major", "fileName": "a.txt", "comment": "fix this"}
         self.terminal_artifacts(item, [finding, COMPLETE])
-        filed = {"issue_url": f"https://github.com/{FOREIGN}/issues/3", "issue_number": 3, "created": True}
+        posted = {"state": "created", "review_id": 3, "review_url": f"https://github.com/{FOREIGN}/pull/5#review-3"}
         with mock.patch.object(crq, "pid_alive", return_value=False), \
              mock.patch.object(crq, "group_alive", return_value=False), \
              mock.patch.object(crq, "remove_worktree") as remove, \
              mock.patch.object(crq.repair_tick, "enqueue") as repair, \
              mock.patch.object(crq.coverage, "record_review") as record, \
-             mock.patch.object(crq.finding_issues, "file_issue", return_value=filed) as file_issue:
+             mock.patch.object(crq.finding_issues, "file_issue") as file_issue:
             result = crq.harvest_review(self.q, item, False)
         # NO cq coverage and NO repair enqueue for a foreign open review.
         repair.assert_not_called()
@@ -39,27 +39,27 @@ class PrTest(PrTestBase, unittest.TestCase):
         self.assertEqual((cycle["base"], cycle["head"]), (self.base, h1))
         self.assertEqual(cycle["range_policy"], "full-range-once-v1")
         # Debt only at harvest: the bounded post-harvest pass performs the upload.
-        self.assertEqual(item["issue_request"]["base"], self.base)
-        self.assertEqual(item["issue_request"]["head"], h1)
-        self.assertTrue(item["issue_pending"])
+        self.assertEqual(item["pr_review_request"]["base"], self.base)
+        self.assertEqual(item["pr_review_request"]["head"], h1)
+        self.assertTrue(item["pr_review_pending"])
         self.assertNotIn("issue", item)
         self.assertEqual(file_issue.call_args, None)
         self.assertEqual(result, f"{item['id']}: completed (1 findings)")
         crq.save_queue(self.q)
         with self.fake_gh(), \
-             mock.patch.object(crq.finding_issues, "file_issue", return_value=filed) as file_issue:
+             mock.patch.object(crq.pr_review_findings, "deliver", return_value=posted) as deliver, \
+             mock.patch.object(crq.finding_issues, "file_issue") as file_issue:
             _, _, log = self.tick()
             item = crq.load_queue()["items"][0]
-        self.assertEqual([message for message in log if message.startswith("findings issue")],
-                         ["findings issue #3 (created)"])
-        self.assertEqual(item["issue"], filed)
-        self.assertFalse(item["issue_pending"])
-        file_issue.assert_called_once()
-        self.assertIn("issue_attempt_at", item)
-        self.assertEqual(file_issue.call_args.kwargs["base"], self.base)
-        self.assertEqual(file_issue.call_args.kwargs["head"], h1)
-        self.assertEqual(file_issue.call_args.kwargs["meta"]["repo"], FOREIGN)
-        self.assertEqual(file_issue.call_args.kwargs["meta"]["base"], self.base)
+        self.assertIn("findings review on PR #5 (created)", log)
+        self.assertEqual(item["pr_review"], posted)
+        self.assertFalse(item["pr_review_pending"])
+        file_issue.assert_not_called()
+        deliver.assert_called_once()
+        repo, pr, meta, ndjson = deliver.call_args.args
+        self.assertEqual((repo, pr, meta["base"], meta["head"]), (FOREIGN, 5, self.base, h1))
+        self.assertEqual(ndjson.name, "review.ndjson")
+        self.assertIn("pr_review_attempt_at", item)
         remove.assert_called_once()
         self.assertEqual(remove.call_args.kwargs["clone"], Path(self.foreign))
 

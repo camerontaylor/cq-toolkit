@@ -1,4 +1,4 @@
-"""Post crq findings on an open primary-repo PR as one GitHub pull-request review.
+"""Post crq findings on an open PR in any reviewed repository as one GitHub pull-request review.
 
 A counted open/delta review with findings becomes ONE review
 (`POST /repos/{repo}/pulls/{pr}/reviews`, event COMMENT, `commit_id` = the

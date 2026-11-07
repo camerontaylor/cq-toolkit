@@ -1,4 +1,4 @@
-"""crq findings posted on open primary-repo PRs as one pull-request review.
+"""crq findings posted on open PRs across repositories as one pull-request review.
 
 Covers the pure module (anchoring, payload, idempotent delivery with a fake
 gh) and the crq integration (debt at harvest, bounded post-harvest pass,
@@ -250,9 +250,11 @@ class CrqIntegrationTest(unittest.TestCase):
         deliver.assert_not_called()  # debt only at harvest
         return item, rdir, repair
 
-    def test_counted_primary_open_and_delta_findings_persist_review_debt(self):
-        for kind, item_id in (("open", "pr7"), ("delta", f"pr7-range-{BASE[:10]}-{HEAD[:10]}")):
-            item = {"id": item_id, "kind": kind, "pr": 7, "state": "reviewing",
+    def test_counted_open_and_delta_findings_persist_review_debt(self):
+        for kind, item_id, repo in (("open", "pr7", REPO), ("delta", "pr7-range", REPO),
+                                    ("open", "infra-pr7", "camerontaylor/infra"),
+                                    ("delta", "infra-pr7-range", "camerontaylor/infra")):
+            item = {"id": item_id, "repo": repo, "kind": kind, "pr": 7, "state": "reviewing",
                     "run": {"run_id": f"{item_id}-20261106T000000Z"}}
             item, rdir, repair = self.harvest(item, [ANCHORED, {"type": "complete"}], 1)
             self.assertEqual(item["pr_review_request"],
@@ -260,13 +262,20 @@ class CrqIntegrationTest(unittest.TestCase):
                               "ndjson": str(rdir / "review.ndjson"), "severity_counts": {"major": 1}})
             self.assertTrue(item["pr_review_pending"])
             self.assertEqual(item["pr_review_attempts"], 0)
-            repair.assert_called_once()  # the repair enqueue still runs
+            self.assertNotIn("issue_pending", item)
+            if repo == REPO:
+                repair.assert_called_once()
+            else:
+                repair.assert_not_called()
             self.assertEqual(item["state"], "done")
 
-    def test_clean_review_records_no_debt(self):
-        item = {"id": "pr8", "kind": "open", "pr": 8, "state": "reviewing", "run": {"run_id": "pr8-r"}}
-        item, _, _ = self.harvest(item, [{"type": "complete"}], 0)
-        self.assertNotIn("pr_review_request", item)
+    def test_clean_review_records_no_debt_in_any_repo(self):
+        for repo in (REPO, "camerontaylor/infra"):
+            item = {"id": "pr8", "repo": repo, "kind": "open", "pr": 8,
+                    "state": "reviewing", "run": {"run_id": "pr8-r"}}
+            item, _, _ = self.harvest(item, [{"type": "complete"}], 0)
+            self.assertNotIn("pr_review_request", item)
+            self.assertNotIn("issue_request", item)
 
     def pending(self, item_id, stamp=None, repo=None):
         item = {"id": item_id, "kind": "open", "pr": 7, "state": "done", "pr_review_pending": True,
@@ -279,18 +288,71 @@ class CrqIntegrationTest(unittest.TestCase):
             item["repo"] = repo
         return item
 
-    def test_post_harvest_pass_is_capped_rotating_and_primary_only(self):
+    def test_post_harvest_pass_is_capped_rotating_across_repos(self):
         q = {"items": [self.pending("pr1", "2026-11-06T02:00:00Z"), self.pending("pr2", "2026-11-06T01:00:00Z"),
                        self.pending("pr3"), self.pending("pr4", repo="camerontaylor/infra")]}
         done = {"state": "created", "review_id": 1, "review_url": "u", "inline": 1, "body_only": 0}
         with mock.patch.object(crq.pr_review_findings, "deliver", return_value=done) as deliver, \
              mock.patch.object(crq, "event"):
             log = crq.deliver_pending_pr_reviews(q)
-        self.assertEqual([c.args[2]["item_id"] for c in deliver.call_args_list], ["pr3", "pr2"])
+        self.assertEqual([c.args[2]["item_id"] for c in deliver.call_args_list], ["pr3", "pr4"])
+        self.assertEqual([c.args[0] for c in deliver.call_args_list], [REPO, "camerontaylor/infra"])
         self.assertEqual(log, ["findings review on PR #7 (created)"] * 2)
         self.assertEqual(q["items"][2]["pr_review"], done)
         self.assertFalse(q["items"][2]["pr_review_pending"])
         self.assertTrue(q["items"][0]["pr_review_pending"])
+
+    def test_legacy_foreign_issue_debt_migrates_with_pinned_range_and_no_duplicate(self):
+        item = {"id": "infra-pr7", "kind": "delta", "repo": "camerontaylor/infra", "pr": 7,
+                "state": "done", "head": "c" * 40, "issue_pending": True,
+                "issue_request": {"run_id": "old-run", "base": BASE, "head": HEAD,
+                                  "findings_md": "/runs/old-run/findings.md", "severity_counts": {"major": 1}}}
+        q = {"items": [item]}
+        with mock.patch.object(crq.pr_review_findings, "deliver", return_value={"state": "existing"}) as deliver, \
+             mock.patch.object(crq, "event"):
+            crq.deliver_pending_pr_reviews(q)
+            crq.deliver_pending_pr_reviews(q)
+        deliver.assert_called_once_with("camerontaylor/infra", 7,
+            {"run_id": "old-run", "item_id": "infra-pr7", "base": BASE, "head": HEAD},
+            Path("/runs/old-run/review.ndjson"))
+        self.assertFalse(item["issue_pending"])
+        self.assertFalse(item["pr_review_pending"])
+
+    def test_issue_migration_preserves_newer_review_debt_and_push_debt(self):
+        newer = self.pending("infra-pr7", repo="camerontaylor/infra")
+        newer.update(issue_pending=True, issue_request={"run_id": "older"})
+        posted = {**newer, "id": "infra-pr8", "pr_review_request": None,
+                  "pr_review_pending": False, "issue": {"issue_number": 9}}
+        push = {"id": "push-infra", "kind": "push-current", "issue_pending": True}
+        with mock.patch.object(crq.pr_review_findings, "deliver", return_value={"state": "created"}) as deliver, \
+             mock.patch.object(crq, "event"):
+            crq.deliver_pending_pr_reviews({"items": [newer, posted, push]})
+        self.assertEqual(deliver.call_count, 1)
+        self.assertEqual(deliver.call_args.args[2]["run_id"], "infra-pr7-r")
+        self.assertTrue(push["issue_pending"])
+        self.assertFalse(posted["issue_pending"])
+
+    def test_foreign_delivery_retries_skips_closed_and_deduplicates_on_pinned_head(self):
+        for state, existing, expected in (("closed", None, "skipped-closed"),
+                                          ("open", {"id": 9, "url": "u"}, "existing"),
+                                          ("open", None, "created")):
+            with self.subTest(expected=expected), tempfile.TemporaryDirectory() as root:
+                item = self.pending("infra-pr7", repo="camerontaylor/infra")
+                item["head"] = "c" * 40  # refreshed queue head must never replace reviewed head
+                item["pr_review_request"]["ndjson"] = str(write_ndjson(root, [ANCHORED]))
+                gh = FakeGh(state=state, existing=existing)
+                with mock.patch.object(prf, "_gh", side_effect=RuntimeError("HTTP 502")), \
+                     mock.patch.object(crq, "event"):
+                    crq.deliver_pending_pr_reviews({"items": [item]})
+                self.assertTrue(item["pr_review_pending"])
+                with mock.patch.object(prf, "_gh", gh), mock.patch.object(crq, "event"):
+                    crq.deliver_pending_pr_reviews({"items": [item]})
+                self.assertEqual(item["pr_review"]["state"], expected)
+                self.assertFalse(item["pr_review_pending"])
+                targets = [x for argv, _ in gh.calls for x in argv if x.startswith("repos/")]
+                self.assertTrue(all(x.startswith("repos/camerontaylor/infra/") for x in targets))
+                if expected == "created":
+                    self.assertEqual(gh.posts()[0]["commit_id"], HEAD)
 
     def test_failures_retry_then_abandon_after_the_attempt_cap(self):
         item = self.pending("pr5")
