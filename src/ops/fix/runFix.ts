@@ -5,6 +5,8 @@ import {
   rescueAllocation,
   type EscalationState,
 } from './escalation.js';
+import { readCqEnv } from '../../config/env.js';
+import { provenanceConfig } from '../../config/provenance.js';
 import type { z } from 'zod';
 import { createHash, randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
@@ -251,6 +253,7 @@ async function captureProvenance(
     journalLink: 'unavailable',
     reportLink: 'unavailable',
     witnesses: { base: baseSha, admitted: null, execution: null, reviewed: null, accepted: null },
+    config: provenanceConfig(readCqEnv()),
   };
   // parentWorkId is a UUID per CorrelationRecordSchema: only a genuinely
   // UUID-shaped inbound id persists; the paseo:<id> link form (and any other

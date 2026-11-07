@@ -44,6 +44,7 @@ import type {
   OpResult,
   OpResultArtifact,
   Plan,
+  ProvenanceConfig,
   ProvenanceRecord,
   RunCounts,
   RunEarlyStopReason,
@@ -664,6 +665,17 @@ export const WitnessesRecordSchema: z.ZodType<WitnessesRecord> = z
   })
   .strict();
 
+export const ProvenanceConfigSchema: z.ZodType<ProvenanceConfig> = z
+  .object({
+    env: z.record(
+      z.string(),
+      z.union([z.string(), z.number(), z.boolean(), z.array(z.string()), z.null()]),
+    ),
+    sources: z.record(z.string(), z.literal('env')),
+    warnings: z.array(z.string()),
+  })
+  .strict();
+
 export const ProvenanceRecordSchema: z.ZodType<ProvenanceRecord> = z
   .object({
     cqVersion: z.string(),
@@ -677,6 +689,7 @@ export const ProvenanceRecordSchema: z.ZodType<ProvenanceRecord> = z
     journalLink: z.string(),
     reportLink: z.string(),
     witnesses: WitnessesRecordSchema,
+    config: ProvenanceConfigSchema.optional(),
   })
   .strict();
 
