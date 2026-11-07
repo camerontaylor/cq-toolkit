@@ -302,18 +302,24 @@ const isAcceptableReview = (review: ReviewSummary, ctx: ReviewContext): boolean 
 const hasSameAccountAgentAcceptance = (candidate: PrCandidate, ctx: ReviewContext): boolean => {
   const head = candidate.headRefOid;
   if (head == null || !/^[0-9a-f]{40}$/i.test(head)) return false;
-  // Only the PR author's own shared agent account may attest this way; the
-  // automation identity is never trusted, and DISMISSED reviews are void.
+  // The shared-account alternative trusts only the PR author's own account, and
+  // never the automation identity or an excluded login. Those guards bind THAT
+  // alternative only: the cq-review App's PASS is independent acceptance, so an
+  // automation-authored or excluded-author PR must still be able to earn it.
+  // DISMISSED evidence is void on both paths.
   const prAuthor = candidate.authorLogin;
-  if (prAuthor === null || prAuthor === ctx.config.automationLogin) return false;
-  if (ctx.config.excludedLogins?.includes(prAuthor)) return false;
+  const authorSharesAccount =
+    prAuthor !== null &&
+    prAuthor !== ctx.config.automationLogin &&
+    ctx.config.excludedLogins?.includes(prAuthor) !== true;
   return [
     ...candidate.reviews.filter((review) => review.state !== 'DISMISSED'),
     ...candidate.issueComments,
   ].some(
     (comment) =>
       (isReviewAppAuthor(comment.authorType, comment.authorLogin) ||
-        (comment.authorLogin === prAuthor &&
+        (authorSharesAccount &&
+          comment.authorLogin === prAuthor &&
           !isIgnoredBotAuthor(comment.authorType, comment.authorLogin))) &&
       parseIndependentReview(comment.body, head).kind === 'valid',
   );
