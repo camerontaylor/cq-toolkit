@@ -43,6 +43,7 @@ import usage_slots
 import backfill_runtime
 import backfill_jobs
 import admission_history
+import local_review_runtime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -1722,7 +1723,7 @@ class NotReady(Exception):
     pass
 
 
-def plan_open(item: Dict[str, Any], info: Dict[str, Any], dry: bool) -> Dict[str, Any]:
+def plan_open(item: Dict[str, Any], info: Dict[str, Any], dry: bool, q=None) -> Dict[str, Any]:
     if info["state"] != "OPEN":
         raise NotReady(f"PR is {info['state']}")
     if info["isDraft"]:
@@ -1748,9 +1749,10 @@ def plan_open(item: Dict[str, Any], info: Dict[str, Any], dry: bool) -> Dict[str
         item["pinned_base"] = pin
         item["target_ref"] = target
     cycle = len(item.get("cycles", [])) + 1
-    return {"base": pin, "head": head, "target": target, "label": "one review of captured range", "cycle": cycle,
+    plan = {"base": pin, "head": head, "target": target, "label": "one review of captured range", "cycle": cycle,
             "notes": notes, "branch": info["headRefName"], "review_pin": pin,
             "range_policy": "full-range-once-v1"}
+    return local_review_runtime.reconcile_pr(sys.modules[__name__], q, item, plan, dry) if q is not None else plan
 
 
 class NothingToReview(Exception):
@@ -1766,7 +1768,7 @@ def ensure_commit(pr: int, sha: str, *, clone: Optional[Path] = None) -> bool:
     return have()
 
 
-def plan_delta(item: Dict[str, Any], info: Dict[str, Any], dry: bool) -> Dict[str, Any]:
+def plan_delta(item: Dict[str, Any], info: Dict[str, Any], dry: bool, q=None) -> Dict[str, Any]:
     """Conservative full-range fallback when equivalent scope is unproven."""
     if info["state"] not in ("OPEN", "MERGED"):
         raise NotReady(f"PR is {info['state']}")
@@ -1784,10 +1786,11 @@ def plan_delta(item: Dict[str, Any], info: Dict[str, Any], dry: bool) -> Dict[st
         if (record.get("base") == pin and record.get("head") == head and
                 record.get("range_policy") == "full-range-once-v1" and record.get("run_id")):
             raise NothingToReview("equivalent captured full range already reviewed")
-    return {"base": pin, "head": head, "pr_head": head, "target": target,
+    plan = {"base": pin, "head": head, "pr_head": head, "target": target,
             "label": "one full-range review (prior equivalent scope unproven)", "cycle": None,
             "notes": [], "branch": info.get("headRefName") if info["state"] == "OPEN" else None,
             "review_pin": pin, "range_policy": "full-range-once-v1"}
+    return local_review_runtime.reconcile_pr(sys.modules[__name__], q, item, plan, dry) if q is not None else plan
 
 
 def plan_merged(item: Dict[str, Any], dry: bool) -> Dict[str, Any]:
@@ -1933,6 +1936,12 @@ def launch(q: Dict[str, Any], item: Dict[str, Any], plan: Dict[str, Any]) -> str
             "target": plan["target"], "pr_branch": plan["branch"], "worktree": str(wt), "wt_branch": wbranch,
             "dirty_diff": "clean tree", "range_policy": plan.get("range_policy"), "started_at": iso(),
             "cmd": [*cli_cmd, "--base-commit", plan["base"]]}
+    if plan.get("profile"):
+        meta.update(profile=plan["profile"], config_digest=plan["config_digest"])
+        meta["cmd"] = ["coderabbit", "review", *plan["profile"]["flags"]]
+    if item["kind"] == local_review_runtime.KIND:
+        meta["profile"] = item["profile"]
+        meta["cmd"] = ["coderabbit", "review", *item["profile"]["flags"]]
     if item["kind"] == backfill_jobs.KIND:
         meta["backfill"] = {k: item[k] for k in ("subject_id", "job_id", "attempt_id", "target", "scope_digest")}
     if item["kind"] == review_receipt.KIND:
@@ -1991,14 +2000,14 @@ def launch(q: Dict[str, Any], item: Dict[str, Any], plan: Dict[str, Any]) -> str
     except OSError as exc:
         # A failed spawn is a CONSUMED, DISTINCT terminal admission: the start
         # was already persisted above, so no automatic retry can double-spend it.
-        # Only author items get this terminal here; every other kind keeps the
-        # previous (raise) behaviour.
-        if item["kind"] != author_quota.AUTHOR_KIND:
+        # Author and local-review items consume this failed attempt; neither
+        # silently returns to pending after a failed spawn.
+        if item["kind"] not in (author_quota.AUTHOR_KIND, local_review_runtime.KIND):
             raise
         item["run"] = {"run_id": run_id, "pid": None, "started_at": meta["started_at"],
                        "launch_pending": False, "spawn_failed_at": iso(), "error": str(exc)[:200]}
-        item["state"] = author_quota.AUTHOR_FAILED
-        item["last_error"] = f"author spawn failed (no retry): {exc}"[:300]
+        item["state"] = "failed" if item["kind"] == local_review_runtime.KIND else author_quota.AUTHOR_FAILED
+        item["last_error"] = f"{item['kind']} spawn failed (no retry): {exc}"[:300]
         event("spawn_failed", item=item["id"], run=run_id, error=str(exc)[:200])
         save_queue(q)
         return run_id
@@ -2395,6 +2404,15 @@ def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
     # so status outcomes count every review that review_started counted.
     event("review_finished", item=item["id"], run=r["run_id"], outcome=cls["outcome"],
           findings=cls["findings"], severity=cls["severity_counts"])
+    if item["kind"] == local_review_runtime.KIND:
+        if cls["outcome"] == "rate_limited":
+            set_rate_cooldown(q, cls, rdir)
+        if cls["outcome"] in ("auth", "action_required"):
+            q.update(paused=True, pause_reason=f"{cls['outcome']} on {r['run_id']}; owner action needed")
+        result = local_review_runtime.complete(sys.modules[__name__], q, item, rdir, r["run_id"], cls,
+                    json.loads(exitf.read_text())["ended_at"], exit_code)
+        remove_worktree(Path(meta["worktree"]), meta["wt_branch"])
+        return result
     if item["kind"] == review_receipt.KIND:
         # Receipt before queue mutation: a crash here is recovered by re-harvest.
         partial = any(p["disposition"] in ("unsupported", "ambiguous") for p in item["capture"]["paths"])
@@ -2517,6 +2535,8 @@ def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
                   "pr_head": meta.get("pr_head", meta["head"]),
                   "dirty_diff": "clean tree", "range_policy": meta.get("range_policy"), "ndjson": str(rdir / "review.ndjson"),
                   "findings": cls["findings"], "severity_counts": cls["severity_counts"], "completed_at": iso()}
+        if meta.get("profile"):
+            record.update(profile=meta["profile"], config_digest=meta["config_digest"])
         if item["kind"] == author_quota.AUTHOR_KIND:
             # Genuine cycle evidence, but NEVER repair debt and NEVER promoted
             # coverage credit: author_cycles is not scanned by repair_tick.backfill,
@@ -2898,7 +2918,11 @@ def start_one(q, log, dry, only, ignore_quiet, capture_current=True):
             item["wait_reason"] = f"waiting for {item['depends_on']}"
             continue
         try:
-            if item["kind"] == author_quota.AUTHOR_KIND:
+            if item["kind"] == local_review_runtime.KIND:
+                plan = local_review_runtime.prepare(sys.modules[__name__], q, item, dry)
+                if plan is None:
+                    continue
+            elif item["kind"] == author_quota.AUTHOR_KIND:
                 # Author items bind their own base/head/target: no PR, no
                 # active-agent quiet gate. Global pause/cooldown/hourly/
                 # inflight gates and the pre-upload secret scan still apply.
@@ -2929,7 +2953,7 @@ def start_one(q, log, dry, only, ignore_quiet, capture_current=True):
                 if qr:
                     item["wait_reason"] = qr
                     continue
-                plan = (plan_open if item["kind"] == "open" else plan_delta)(item, info, dry)
+                plan = (plan_open if item["kind"] == "open" else plan_delta)(item, info, dry, q)
         except NotReady as exc:
             item["wait_reason"] = str(exc)
             if len(q.get("starts", [])) > reservations_before:
@@ -3010,6 +3034,8 @@ def read_slot_usage(q):
 def collect_finished(q, log):
     """Terminal detached reviews only; no enrollment, repairs or promotion audits."""
     for item in list(live_items(q)):
+        if item.get("kind") == local_review_runtime.KIND and item.get("publication_pending"):
+            local_review_runtime.republish(sys.modules[__name__], q, item)
         if item["state"] != "reviewing" or not item.get("run"):
             continue
         run = item["run"]
@@ -3021,6 +3047,8 @@ def collect_finished(q, log):
         msg = harvest_review(q, item, False)
         if msg:
             log.append(msg)
+
+    local_review_runtime.reconcile_completed(sys.modules[__name__], q)
 
 
 def refresh_backfill_usage(q):
@@ -3151,6 +3179,8 @@ def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = Fal
         log += push_current.discover(sys.modules[__name__], q, dry)
     starts_before = len(q.get("starts", []))
     for item in list(live_items(q)):
+        if not dry and item.get("kind") == local_review_runtime.KIND and item.get("publication_pending"):
+            local_review_runtime.republish(sys.modules[__name__], q, item)
         if item["state"] == "reviewing":
             msg = harvest_review(q, item, dry)
             if msg:
@@ -3170,6 +3200,7 @@ def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = Fal
         # can still be outstanding) run after the harvest pass and are capped, so
         # no gh call delays harvesting. Rotation by last attempt keeps a failing
         # delivery from starving later ones.
+        local_review_runtime.reconcile_completed(sys.modules[__name__], q)
         candidates = sorted(
             (i for i in live_items(q) if i.get("issue_pending") and
              i.get("kind") == push_current.KIND),
