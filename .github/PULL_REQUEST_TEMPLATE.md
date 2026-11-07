@@ -17,4 +17,4 @@
 
 Merge with `gh pr merge <number> --merge --match-head-commit <sha>`.
 CRQ reviews after merge. Bot threads are reported, not a merge condition.
-See [merge policy](../docs/promotion-policy.md).
+See [merge policy](docs/promotion-policy.md).

@@ -2,7 +2,7 @@
 // checkRatchet.helpers.ts (shared fixtures) and six subject files; this file
 // carries the containment subject — throwing sources, adapters and
 // adapter-owned getters, plus the baselines-dir escape refusal.
-import { mkdtemp, readFile, rm, symlink } from 'node:fs/promises';
+import { mkdtemp, readdir, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { match } from '../../helpers/matchers.js';
@@ -147,7 +147,7 @@ describe('checkRatchet', () => {
         },
       });
       // Nothing outside was read as evidence and nothing was written there.
-      await expect(readFile(join(outside, 'anything.json'), 'utf8')).rejects.toThrow();
+      await expect(readdir(outside)).resolves.toEqual([]);
     } finally {
       await rm(outside, { recursive: true, force: true });
     }

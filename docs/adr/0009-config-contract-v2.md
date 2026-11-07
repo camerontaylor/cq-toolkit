@@ -23,7 +23,8 @@
 **Names warn, values fail.**
 
 - An unknown or reserved `CQ_*` name produces one stderr warning, with the nearest known name, and is recorded at
-  run start. The run continues.
+  run start. In machine mode (`--json`) stderr stays empty (I1) and the warning rides the run-start record
+  instead. The run continues.
 - A recognised key with an invalid value, or a denied name (`CQ_APPROVAL_KEY*`), fails before dispatch. All such
   errors are reported together, with exit 2.
 - This is safe because of one invariant: **blank means conservative.** Every env-sourced key's blank value is its

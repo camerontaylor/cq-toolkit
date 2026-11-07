@@ -53,7 +53,7 @@ it('fails closed when any original, prompt, serialized request, or decoded reque
     };
     const fake = fakeDrivers({ scanner });
     const outcome = await runAgentReviewer(fake.drivers, baseInput({ scanSecrets: scanner }));
-    expect(outcome.status).not.toBe('ok');
+    expect(outcome.status).toBe('needs-human');
     expect(fake.sends()).toBe(0);
     expect(requestScans).toBeGreaterThan(0);
   }

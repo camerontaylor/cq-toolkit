@@ -17,6 +17,12 @@ from typing import Any, Callable, Dict, List, Optional
 DEFAULT_FINDINGS = "issue"
 GH_TIMEOUT = 120  # seconds, the same ceiling every other gh call in crq gets
 FOOTER = "Auto-filed by crq (CodeRabbit review queue). No auto-fix runs for this repository; triage manually."
+# GitHub rejects an issue body over this many characters, and a rejected create
+# leaves issue_pending set, so every tick would retry the identical oversized
+# body. Truncation keeps the review deliverable and points at the receipt.
+MAX_BODY = 65536
+TRUNCATED = ("\n\n_… findings truncated to fit GitHub's issue body limit; see the receipt "
+             "for the full list._")
 ISSUE_URL = re.compile(r"https://github\.com/[^/\s]+/[^/\s]+/issues/(\d+)")
 
 # gh(argv, *, input_text=None) -> object with returncode/stdout/stderr.
@@ -40,7 +46,10 @@ def title(base: str, head: str, severity_counts: Dict[str, int], item_id: str = 
 
 
 def body(meta: Dict[str, Any], findings_md: str) -> str:
-    """Identity block + findings markdown + fixed footer; every field via .get."""
+    """Identity block + findings markdown + fixed footer; every field via .get.
+
+    The findings section is truncated to the remaining budget of GitHub's
+    ``MAX_BODY`` characters; the identity block and footer are always kept."""
     lines = ["## Review identity",
              f"- Repo: `{meta.get('repo', '')}`",
              f"- Item: `{meta.get('item_id', '')}`",
@@ -48,7 +57,11 @@ def body(meta: Dict[str, Any], findings_md: str) -> str:
              f"- Range: `{meta.get('base', '')}..{meta.get('head', '')}`"]
     if meta.get("receipt_id"):
         lines.append(f"- Receipt: `{meta['receipt_id']}`")
-    return "\n".join([*lines, "", "---", "", findings_md.rstrip("\n"), "", FOOTER, ""])
+    findings = findings_md.rstrip("\n")
+    budget = MAX_BODY - len("\n".join(lines)) - len("\n\n---\n\n") - len("\n\n" + FOOTER + "\n")
+    if len(findings) > budget:
+        findings = findings[:max(0, budget - len(TRUNCATED))] + TRUNCATED
+    return "\n".join([*lines, "", "---", "", findings, "", FOOTER, ""])
 
 
 def _gh(argv: List[str], *, input_text: Optional[str] = None) -> subprocess.CompletedProcess:

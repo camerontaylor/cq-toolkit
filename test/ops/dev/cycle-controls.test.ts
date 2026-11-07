@@ -243,16 +243,25 @@ describe('dev.cycle', () => {
     repoEffects(repo)
       .openLedger(state2.branch)
       .save({ version: seedLedgerVersion, branch: state2.branch, records });
+    const pushes: string[][] = [];
     const op = makeDevCycle({
       effects: effects(),
       check: greenCheck(),
       review: cleanReview(state2),
       address: cleanAddress(state2),
       open: openFake(opens, 46),
-      git: async () => ({ code: 0, stdout: `${state2.head}\trefs/heads/feature/x\n`, stderr: '' }),
+      git: async (args) => {
+        if (args.includes('push')) pushes.push([...args]);
+        return { code: 0, stdout: `${state2.head}\trefs/heads/feature/x\n`, stderr: '' };
+      },
     });
     const result = await op({ repoRoot: repo.root, target: 'release' });
     expect(result.status).toBe('ok');
+    // The publication names the EXACT head readiness read, never the branch
+    // ref: a branch moving between the read and the push uploads nothing else.
+    expect(pushes).toEqual([
+      ['-C', repo.root, 'push', 'origin', `${state2.head}:refs/heads/feature/x`],
+    ]);
     if (result.status === 'ok') {
       expect(opens[0]?.target).toBe('release');
       expect(result.value.followUp).toBe(followUpCommand(46, repo.root, 'release'));

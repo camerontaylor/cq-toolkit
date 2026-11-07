@@ -62,6 +62,28 @@ function fixture(realTools = true): string {
     );
   return root;
 }
+/** Commit `file`, then delete it: the only kind of missing path the tools accept. */
+function trackedDeletion(root: string, file: string): void {
+  const git = (...args: string[]) =>
+    spawnSync(
+      'git',
+      [
+        '-c',
+        'user.name=t',
+        '-c',
+        'user.email=t@example.com',
+        '-c',
+        'commit.gpgsign=false',
+        ...args,
+      ],
+      { cwd: root, encoding: 'utf8' },
+    );
+  git('init', '-q');
+  writeFileSync(join(root, file), 'export {};\n');
+  git('add', file);
+  git('commit', '-q', '-m', 'seed');
+  rmSync(join(root, file));
+}
 function command(
   root: string,
   script: string,
@@ -167,6 +189,7 @@ describe('owned-file command contract', { timeout: 60_000 }, () => {
     writeFileSync(join(root, file), 'export const owned="ok"');
     writeFileSync(join(root, 'src/other.ts'), 'export const other: string = 42;\n');
     const original = readFileSync(join(root, 'src/other.ts'), 'utf8');
+    trackedDeletion(root, 'src/deleted.ts');
     const result = command(root, 'fix', [file, 'src/deleted.ts']);
     expect(result.status).toBe(0);
     expect(result.stdout + result.stderr).not.toContain('error TS2322');
@@ -179,7 +202,13 @@ describe('owned-file command contract', { timeout: 60_000 }, () => {
     const file = join(root, 'src/owned.ts');
     const original = 'export const x="x"';
     writeFileSync(file, original);
-    for (const args of [[], ['src/owned.ts', 'src'], ['src/owned.ts', '../outside.ts']]) {
+    trackedDeletion(root, 'src/deleted.ts');
+    for (const args of [
+      [],
+      ['src/owned.ts', 'src'],
+      ['src/owned.ts', '../outside.ts'],
+      ['src/owned.ts', 'src/typo.ts'],
+    ]) {
       const result = command(root, 'fix', args);
       expect(result.status).toBe(1);
       expect(readFileSync(file, 'utf8')).toBe(original);
@@ -239,6 +268,7 @@ describe('owned-file command contract', { timeout: 60_000 }, () => {
     ).toBe(1);
     expect(readFileSync(log, 'utf8')).not.toContain('static');
     rmSync(log);
+    trackedDeletion(root, 'src/deleted.ts');
     // deleted-only input and a clean file: still zero full-gate spawns.
     expect(command(root, 'fix', ['src/deleted.ts']).status).toBe(0);
     expect(command(root, 'fix', ['src/owned space.ts']).status).toBe(0);

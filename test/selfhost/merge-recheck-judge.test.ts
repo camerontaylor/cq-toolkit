@@ -90,6 +90,31 @@ describe('judgeAtHead', () => {
     expect(judgeAtHead(snap, SHA_A, CONSERVATIVE_TRUST_POLICY)).toMatchObject({ accepted: false });
   });
 
+  test.each([
+    { name: 'CONTRIBUTOR', login: 'eve', association: 'CONTRIBUTOR' },
+    { name: 'NONE', login: 'mallory', association: 'NONE' },
+    { name: 'excluded login', login: 'carol', association: 'OWNER' },
+  ])('refuses a plain exact-head PASS comment from an untrusted actor: $name', async (who) => {
+    const snap = await snapshotOf(
+      prSpec({
+        author: 'alice',
+        reviews: [
+          review({
+            login: who.login,
+            association: who.association,
+            state: 'COMMENTED',
+            body: `opus ${SHA_B} PASS`,
+          }),
+        ],
+      }),
+    );
+    const policy: TrustPolicy = {
+      ...CONSERVATIVE_TRUST_POLICY,
+      excludedLogins: new Set([...CONSERVATIVE_TRUST_POLICY.excludedLogins, 'carol']),
+    };
+    expect(judgeAtHead(snap, SHA_B, policy)).toMatchObject({ accepted: false });
+  });
+
   test('marker evidence is a fresh frozen copy bound to the selected review', async () => {
     const snapshot = await snapshotOf(
       prSpec({

@@ -11,8 +11,9 @@
 //      it names a directory under .github/actions/ that carries an
 //      action.yml. Every such local action file is itself scanned here, so
 //      its own `uses:` steps must be SHA-pinned like any workflow's.
-//   2. The persist-credentials split: generated ci.yml, denylist.yml, and
-//      install-matrix.yml run repo code, so their checkouts must drop
+//   2. The persist-credentials split: generated ci.yml, denylist.yml,
+//      install-matrix.yml, live-merge.yml, and macos-venue.yml
+//      run repo code, so their checkouts must drop
 //      the token (`persist-credentials: false`); the queue-mechanics
 //      workflow (init-merge-queue.yml) keeps the
 //      promote PAT by design and must not declare the key at all — their
@@ -141,8 +142,14 @@ describe('action pins: every uses: is an immutable commit SHA', () => {
     expect(failures, 'mutable or missing action pins').toEqual([]);
   });
 
-  it('generated ci.yml, denylist.yml, and install-matrix.yml drop the token on EVERY checkout step', () => {
-    for (const name of ['ci.yml', 'denylist.yml', 'install-matrix.yml', 'live-merge.yml']) {
+  it('generated ci.yml, denylist.yml, install-matrix.yml, live-merge.yml, and macos-venue.yml drop the token on EVERY checkout step', () => {
+    for (const name of [
+      'ci.yml',
+      'denylist.yml',
+      'install-matrix.yml',
+      'live-merge.yml',
+      'macos-venue.yml',
+    ]) {
       const text = readFileSync(join(WORKFLOWS_DIR, name), 'utf8');
       const checkoutBlocks = stepBlocks(text).filter((block) =>
         block.includes('actions/checkout@'),
@@ -191,6 +198,12 @@ describe('action pins: every uses: is an immutable commit SHA', () => {
     expect(text).not.toMatch(/^ {2}schedule:/m);
     expect(text).not.toMatch(/^\s*- cron:/m);
     expect(text).toMatch(/^ {2}workflow_dispatch:$/m);
+    // The `on:` mapping must declare exactly one trigger: a `push:` or
+    // `pull_request:` trigger would run the loop without a dispatch.
+    const onMatch = /^on:\n((?: .*\n|\n)*)/m.exec(text);
+    if (onMatch === null || onMatch[1] === undefined) throw new Error('no on: block');
+    const triggers = [...onMatch[1].matchAll(/^ {2}([A-Za-z0-9_-]+):/gm)].map((m) => m[1]);
+    expect(triggers).toEqual(['workflow_dispatch']);
     expect(text).toMatch(/ {6}dry_run:\n(?: {8}.*\n)*? {8}default: true\n/);
     // The three exclusion crons and the headroom guard are gone.
     expect(text).not.toContain("cron: '*/15 0-4,10-23 * * 1-5'");

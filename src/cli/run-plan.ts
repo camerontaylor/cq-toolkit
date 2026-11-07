@@ -235,6 +235,21 @@ export function inputDefect(
 }
 
 /**
+ * The camelCase run-plan keys whose schema fields are numeric, and the
+ * numeric spellings the normalizer converts for them. parseFlags runs
+ * schema-less for run-plan/plan subcommands, so a non-canonical token
+ * (`--max-usd=0.50`, `--max-usd=5.0`, `--max-tokens=1e6`) arrives as the
+ * raw string — #386 keeps such text verbatim so string-typed ids (hex
+ * cluster ids, leading-zero ids) round-trip — and would fail the
+ * `z.number()` schema with a usage error (exit 2). Only this schema knows
+ * these fields are numeric, so the conversion lives here: parseFlags stays
+ * unchanged and string fields (the plan path) keep their raw text. Hex and
+ * leading-zero spellings stay strings, the #386 posture.
+ */
+const NUMERIC_RUN_KEYS: ReadonlySet<string> = new Set(['concurrency', 'maxUsd', 'maxTokens']);
+const NUMERIC_FLAG = /^(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?$/;
+
+/**
  * The flag normalization + schema parse shared by run-plan and the plan
  * subcommands: kebab-case keys are normalized (--stop-on-error → stopOnError),
  * the reserved mode flags are ignored, a post-normalization duplicate is a
@@ -247,6 +262,7 @@ export function inputDefect(
  * schema would silently stop seeing it) and the parsed value would re-point
  * the record's prototype instead.
  */
+
 export function parseRunPlanInput<T>(
   commandName: string,
   flags: Record<string, unknown>,
@@ -275,6 +291,16 @@ export function parseRunPlanInput<T>(
       };
     }
     normalizedFlags[key] = value;
+  }
+  // Numeric spellings on the known numeric keys become numbers before the
+  // schema sees them (`--max-usd=0.50` → 0.5, `--max-tokens=1e6` → 1000000);
+  // every other value rides through untouched, so unknown keys still fail
+  // strictly as before.
+  for (const key of NUMERIC_RUN_KEYS) {
+    const value = normalizedFlags[key];
+    if (typeof value === 'string' && NUMERIC_FLAG.test(value)) {
+      normalizedFlags[key] = Number(value);
+    }
   }
   const check = schema.safeParse(normalizedFlags);
   if (!check.success) {

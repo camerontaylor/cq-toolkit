@@ -462,7 +462,8 @@ describe('M6c availability discipline (review r2)', () => {
     expect(row.wallMs).toBeNull();
     expect(row.availability['/tokens']).toMatchObject({ state: 'not-collected' });
     expect(row.availability['/wallMs']).toMatchObject({ state: 'not-collected' });
-    expect(row.availability['/tokens']!.reason).not.toContain('some attempts carried');
+    expect(row.availability['/tokens']!.reason).not.toContain('some attempts');
+    expect(row.availability['/tokens']!.reason).toContain('no attempt reported a token count');
   });
 
   it('genuine observed zero over fully-known attempts is known-zero, not partial', () => {

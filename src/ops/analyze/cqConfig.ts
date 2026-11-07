@@ -266,8 +266,21 @@ export function migrateCqConfig(
   } catch {
     return { ok: false, reason: 'not valid JSON' };
   }
-  if (CqConfigSchema.safeParse(raw).success) {
+  const current = CqConfigSchema.safeParse(raw);
+  if (current.success) {
     return { ok: true, config: raw as CqConfig, changed: false };
+  }
+  // Only a v1-shaped document falls through to the legacy migration check.
+  // Any other failure (a v2 key typo, an unsupported version) is a v2 schema
+  // error, and reporting the strict v1 parse instead would describe the wrong
+  // schema and hide the real cause.
+  if (
+    typeof raw !== 'object' ||
+    raw === null ||
+    !('schemaVersion' in raw) ||
+    raw.schemaVersion !== 1
+  ) {
+    return { ok: false, reason: schemaReason(current.error) };
   }
   const legacy = z
     .object({ schemaVersion: z.literal(1), checks: z.array(CheckRunnerInputObject).min(1) })

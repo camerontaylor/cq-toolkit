@@ -157,3 +157,70 @@ it.each([undefined, true])(
     else expect(optionsSeen[0]).toHaveProperty('reviewerStepCountdown', true);
   },
 );
+
+it('binds a context-only hash to the planned prompt across evidence repair', async () => {
+  const root = await scratch();
+  const calls: WireCall[] = [];
+  const plan = { ...planFor(), contextOnly: true, placements: [] };
+  const finding = {
+    file: 'src/a.ts',
+    line: 2,
+    rule: 'wire',
+    severity: 'high',
+    text: 'grounded',
+  };
+  let turn = 0;
+  const model = new MockLanguageModelV4({
+    modelId: 'mock-1',
+    doGenerate: async () => {
+      turn++;
+      return textResult(
+        JSON.stringify({
+          findings: [
+            turn === 1
+              ? finding
+              : {
+                  ...finding,
+                  evidenceV1: {
+                    version: 1,
+                    failureScenario: 'the value stays zero',
+                    primary: {
+                      file: 'src/a.ts',
+                      side: 'head',
+                      start: 1,
+                      end: 1,
+                      quote: 'export const value = 1;',
+                    },
+                    supporting: [],
+                  },
+                },
+          ],
+        }),
+      );
+    },
+  });
+  const evidence = evidenceFor();
+  const result = await runReviewSession(wireFactory(root, model, calls), {
+    ...runInput(root, plan, evidence),
+    scanSecrets: recordingScanner([]),
+    onUsage: () => {},
+    evidenceContext: {
+      blobs: new Map([
+        [
+          'src/a.ts',
+          {
+            base: undefined,
+            head: 'export const value = 1;\n',
+            baseHunks: [],
+            headHunks: [{ start: 1, end: 2 }],
+          },
+        ],
+      ]),
+      renames: new Map(),
+    },
+  });
+  expect(result.status).toBe('ok');
+  expect(calls).toHaveLength(2);
+  expect(evidence.requests).toHaveLength(2);
+  expect(evidence.contextSha256).toBe(sha(plan.prompt));
+});
