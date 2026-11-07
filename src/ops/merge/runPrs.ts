@@ -80,6 +80,8 @@
 // read ONCE, here (the composition is the one place the ambient clock is
 // allowed — tests inject `nowMs`). Same input + same nowMs → deep-equal
 // outcome, always.
+import { assertBaseBranchMirror, assertProtectedBranchMirror } from './trustMirrors.js';
+import type { CqEnv } from '../../config/env.js';
 import pLimit from 'p-limit';
 import { createDriverFactory } from '../../driver/factory.js';
 import type { DriverFactory } from '../../driver/factory.js';
@@ -602,6 +604,8 @@ export async function runMergePrs(
 /** Construction-time seams for the DEFAULT op — everything optional; a
  * test injects fakes here, production builds real ones per call. */
 export interface MakeRunMergePrsOpDeps {
+  /** The resolved config snapshot the baseBranch mirror is checked against. Default: readCqEnv(). */
+  cqEnv?: CqEnv;
   /** Default: realMergeEffects built lazily per call from
    * input.repoRoot (+ input.protectedBranch). */
   effects?: MergeEffects;
@@ -662,6 +666,8 @@ export function makeRunMergePrsOp(
   deps?: MakeRunMergePrsOpDeps,
 ): Op<RunMergePrsInput, MergePrsOutcome> {
   return async (input): Promise<OpResult<MergePrsOutcome>> => {
+    assertProtectedBranchMirror('merge.runPrs', input.protectedBranch);
+    assertBaseBranchMirror('merge.runPrs', input.baseBranch, deps?.cqEnv);
     const effects =
       deps?.effects ??
       realMergeEffects({
