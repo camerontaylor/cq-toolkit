@@ -318,22 +318,27 @@ test.each(['records', 'per-record', 'total-bytes', 'resource-count', 'resource-b
                   : bound === 'resource-bytes'
                     ? 2100
                     : 10;
-            await owner.address(
-              {
-                pr: unique ? index + 1 : 7,
-                head: f.prs[0].headRefOid,
-                headRepo: 'fixture/base',
-                headRefName: `${'x'.repeat(length)}${unique ? index : ''}`,
-              },
-              { repoRoot: f.repo.root, source: `pr:${unique ? index + 1 : 7}` },
-            );
+            try {
+              await owner.address(
+                {
+                  pr: unique ? index + 1 : 7,
+                  head: f.prs[0].headRefOid,
+                  headRepo: 'fixture/base',
+                  headRefName: `${'x'.repeat(length)}${index}`,
+                },
+                { repoRoot: f.repo.root, source: `pr:${unique ? index + 1 : 7}` },
+              );
+            } catch (error) {
+              if (bound !== 'records') throw error;
+              failure = error;
+              break;
+            }
           }
         });
       } catch (error) {
         failure = error;
       }
-      if (bound === 'records') expect(failure).toBeUndefined();
-      else expect(errorChain(failure)).toContain('mid-lifetime authority bound reached');
+      expect(errorChain(failure)).toContain('mid-lifetime authority bound reached');
       const names = (await readdir(authorityStore(owner.guardPath)))
         .filter((name) => /^[0-9]{6}\.json$/.test(name))
         .sort();
@@ -346,7 +351,10 @@ test.each(['records', 'per-record', 'total-bytes', 'resource-count', 'resource-b
       const last = JSON.parse(records.at(-1)!.toString()) as { resources: string[] };
       expect(last.resources.length).toBeLessThanOrEqual(64);
       expect(last.resources.every((key) => Buffer.byteLength(key) <= 2048)).toBe(true);
-      if (bound === 'records') expect(names.length).toBe(3);
+      if (bound === 'records') {
+        expect(names.length).toBe(64);
+        expect(last.resources).toHaveLength(63);
+      }
       if (bound === 'resource-count') expect(last.resources.length).toBe(64);
       if (bound === 'resource-bytes') expect(dispatched).toBe(0);
       if (bound === 'per-record') {
@@ -361,7 +369,7 @@ test.each(['records', 'per-record', 'total-bytes', 'resource-count', 'resource-b
         expect(total).toBeGreaterThan(90_000);
       }
       if (bound === 'records') {
-        expect(dispatched).toBe(65);
+        expect(dispatched).toBe(62);
         await (
           await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run })
         ).withLock(async () => undefined);
@@ -432,7 +440,7 @@ test.each(['anchor-bytes', 'record-bytes', 'total-bytes', 'enumeration'] as cons
       } catch (error) {
         failure = error;
       }
-      expect(errorChain(failure)).toContain('mid-lifetime authority bound reached');
+      expect(errorChain(failure)).toContain('authority store bound reached');
       expect(errorChain(failure)).not.toContain('SyntaxError');
     } finally {
       await f.repo.cleanup();

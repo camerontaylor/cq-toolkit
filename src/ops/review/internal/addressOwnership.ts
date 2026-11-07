@@ -43,7 +43,8 @@ const MAX_ANCHOR_BYTES = 256;
 const UUID = /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/;
 const digest = (bytes: Uint8Array) => createHash('sha256').update(bytes).digest('hex');
 const slot = (sequence: number) => `${String(sequence).padStart(6, '0')}.json`;
-const bounded = () => new Error('address ownership: mid-lifetime authority bound reached');
+const bounded = () => new Error('address ownership: authority store bound reached');
+const lifetimeBound = () => new Error('address ownership: mid-lifetime authority bound reached');
 type Identity = { ino: number; dev: number };
 const same = (a: Identity, b: Identity) => a.ino === b.ino && a.dev === b.dev;
 
@@ -121,9 +122,10 @@ interface Participant {
 
 // Only validated pre-entry guard barriers can mint this classification.
 const admissionRefusals = new WeakSet<object>();
-function admissionRefusal(): Error {
+function admissionRefusal(cause?: unknown): Error {
   const error = new Error(
     'could not acquire address ownership: active or quarantined guard; attended recovery required',
+    { cause },
   );
   admissionRefusals.add(error);
   return error;
@@ -276,7 +278,7 @@ function resourceKeys(selection: AddressSelection): string[] {
  * Active guard files are NEVER reclaimed using time or process liveness. Recovery
  * requires attended positive quiescence evidence, outside this API.
  * Quiescent generations rotate under the admission mutex after durable adoption.
- * Completion tolerates one rotation; two overlapping rotations fail closed with
+ * Completion tolerates one rotation; two subsequent rotations fail closed with
  * unconfirmed completion if the older forensic generation has been removed.
  * Old binaries which ignore the guard must not overlap deployment of this coordinator.
  */
@@ -381,7 +383,6 @@ export class AddressOwnership {
   private snapshot?: Snapshot;
   private pending: number | undefined;
 
-  /** Only durably adopted quiescence under admission exclusion permits rotation. */
   private async readSnapshot(
     allowEmpty = false,
     storePath = this.storePath,
@@ -506,6 +507,7 @@ export class AddressOwnership {
     };
   }
 
+  /** Under exclusion, finish only a quiescent generation whose anchor is still the live guard. */
   private async finishRotation(): Promise<void> {
     try {
       await lstat(this.storePath);
@@ -531,10 +533,12 @@ export class AddressOwnership {
     await syncDirectory(this.commonDir);
   }
 
+  /** Adopt and fsync quiescence before retiring authority paths under admission exclusion. */
   private async rotate(previous: Snapshot): Promise<void> {
     if (previous.guard?.state !== 'quiescent') throw admissionRefusal();
     const retired = this.retiredPaths(previous.anchor);
     const directory = await opendir(this.commonDir);
+    const obsolete: string[] = [];
     for await (const entry of directory) {
       if (
         /^cq-review-address-ownership\.(?:store|owner\.json)\.retired-[a-f0-9-]{36}$/.test(
@@ -543,7 +547,12 @@ export class AddressOwnership {
         entry.name !== basename(retired.store) &&
         entry.name !== basename(retired.guard)
       )
-        await rm(resolve(this.commonDir, entry.name), { recursive: true, force: true });
+        obsolete.push(resolve(this.commonDir, entry.name));
+    }
+    for (const path of obsolete) {
+      await rm(path, { recursive: true, force: true }).catch((error: unknown) => {
+        console.warn('address ownership: retired generation cleanup failed', path, error);
+      });
     }
     await rename(this.storePath, retired.store);
     await syncDirectory(this.commonDir);
@@ -551,8 +560,37 @@ export class AddressOwnership {
     await syncDirectory(this.commonDir);
   }
 
+  /** No guard means no admitted owner. Preserve only uncommitted bootstrap debris;
+   * records, extra links, aliases and foreign entries remain refusal barriers. */
+  private async finishBootstrap(): Promise<void> {
+    try {
+      await lstat(this.guardPath);
+      return;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+    let store;
+    try {
+      store = await lstat(this.storePath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+      throw error;
+    }
+    if (!store.isDirectory() || store.isSymbolicLink()) throw admissionRefusal();
+    const directory = await opendir(this.storePath);
+    let count = 0;
+    for await (const entry of directory) {
+      if (++count > 1 || entry.name !== 'anchor.json' || !entry.isFile()) throw admissionRefusal();
+      // Unlinked preparation is never authority, even if interrupted mid-write.
+      await boundedFile(resolve(this.storePath, entry.name), MAX_ANCHOR_BYTES, 1);
+    }
+    // Preserve bytes rather than adopting, repairing or deleting a partial anchor.
+    await rename(this.storePath, `${this.storePath}.bootstrap-incomplete-${randomUUID()}`);
+    await syncDirectory(this.commonDir);
+  }
+
   private async bootstrap(): Promise<Snapshot> {
-    // An existing/partial directory is a durable refusal barrier, never recovery.
+    // Called only after in-lock bootstrap recovery has cleared uncommitted debris.
     await mkdir(this.storePath, { mode: 0o700 });
     await syncDirectory(this.commonDir);
     const path = resolve(this.storePath, 'anchor.json');
@@ -599,7 +637,7 @@ export class AddressOwnership {
     if (current.guard && current.guard.state !== 'quiescent' && current.guard.epoch !== this.epoch)
       throw new Error('foreign active epoch');
     const sequence = current.sequence + 1;
-    if (sequence > MAX_RECORDS || !resourcesValid(resources)) throw bounded();
+    if (sequence > MAX_RECORDS || !resourcesValid(resources)) throw lifetimeBound();
     const bytes = Buffer.from(
       JSON.stringify({
         version: 3,
@@ -612,7 +650,7 @@ export class AddressOwnership {
       } satisfies Guard),
     );
     if (bytes.length > MAX_RECORD_BYTES || bytes.length + current.total > MAX_TOTAL_BYTES)
-      throw bounded();
+      throw lifetimeBound();
     return { sequence, bytes, staging: resolve(this.storePath, `pending-${slot(sequence)}`) };
   }
 
@@ -739,6 +777,8 @@ export class AddressOwnership {
         const stat = await directory.stat();
         if (!stat.isDirectory() || !same(stat, prepared.predecessor.store))
           throw new Error('completion directory changed');
+        // Path resolution is fenced by the still-ACTIVE tail: no legitimate
+        // successor can rotate until this link publishes positive quiescence.
         await link(prepared.staging, resolve(this.storePath, slot(prepared.sequence)));
         // After accepting link, NEVER append an old-epoch marker or record. A
         // legitimate successor may already be active. Failure is unconfirmed
@@ -1140,7 +1180,7 @@ export class AddressOwnership {
     }
     if (hasStore) {
       try {
-        const before = await this.readSnapshot();
+        const before = await this.readSnapshot(true);
         if (before?.guard && before.guard.state !== 'quiescent') throw admissionRefusal();
       } catch (error) {
         // A rotation can race this advisory read. Missing live paths are
@@ -1151,83 +1191,111 @@ export class AddressOwnership {
           if ((missing as NodeJS.ErrnoException).code === 'ENOENT') hasStore = false;
           else throw missing;
         }
-        if (hasStore) throw error;
+        if (hasStore) {
+          try {
+            await lstat(this.guardPath);
+          } catch (missing) {
+            if ((missing as NodeJS.ErrnoException).code === 'ENOENT') hasStore = false;
+            else throw missing;
+          }
+          if (hasStore) throw admissionRefusal(error);
+        }
       }
     }
+    let enteredMutex = false;
     const completed = await makeGitMutex({
       lockPath: resolve(this.commonDir, 'cq-review-address-ownership'),
       failFast: true,
-    }).withLock(async () => {
-      await this.finishRotation().catch((error: unknown) => {
-        throw new Error(
-          'address ownership: active or quarantined guard; attended recovery required',
-          { cause: error },
-        );
-      });
-      const previous = await this.readSnapshot();
-      if (previous?.guard && previous.guard.state !== 'quiescent') throw admissionRefusal();
-      this.signal.throwIfAborted();
-      if (this.used) throw new Error('address ownership: owner lifetime already consumed');
-      this.used = true;
-      this.artifact = await lstat(resolve(this.commonDir, 'cq-review-address-ownership.lock'));
-      this.snapshot = previous ?? (await this.bootstrap());
-      if (previous) {
-        await this.adoptQuiescence(previous);
-        // A lifetime can consume the entire bounded store (including completion).
-        // Therefore every nonempty predecessor has insufficient worst-case headroom.
-        await this.rotate(previous);
-        this.snapshot = await this.bootstrap();
-      }
-      // Must be durable BEFORE a driver, worktree mutation, or child can start.
-      await this.persist('active');
-      this.signal.throwIfAborted();
-      this.active = this.admitting = true;
-      terminalAuthorities.set(this.terminalToken, this);
-      this.signal.addEventListener('abort', this.stopAdmissions, { once: true });
-      if (this.signal.aborted) this.stopAdmissions();
-      let checking: Promise<void> | undefined;
-      const timer = setInterval(() => {
-        if (checking) return;
-        checking = (this.stopping ? this.validateTerminal() : this.assertOwned())
-          .then(() => undefined)
-          .catch(() => undefined)
-          .finally(() => {
-            checking = undefined;
-          });
-      }, 250);
-      timer.unref();
-      try {
-        const result = await fn(this);
-        this.admitting = false;
-        if (this.terminalAdmissionRefusal) throw this.terminalAdmissionRefusal;
-        if (this.terminalFailure) throw this.terminalFailure;
-        if (
-          this.children.size ||
-          this.tasks.size ||
-          this.terminalProcesses.size ||
-          this.terminalOperations.size
-        )
-          throw new Error('address ownership: detached work requires quarantine');
-        clearInterval(timer);
-        await checking;
-        // Parent cancellation stops dispatch; it is never evidence of quiescence.
-        const prepared = await this.enqueue(() => this.prepareCompletion());
-        const proof = Object.freeze({});
-        completionProofs.set(proof, prepared);
-        return { result, proof };
-      } catch (error) {
-        this.admitting = false;
-        this.controller.abort(error);
-        // ACTIVE/partial already refuses. Best-effort quarantine earns no claim
-        // of durable quarantine if storage is unavailable.
-        if (!this.compromised) await this.persist('quarantined').catch(() => undefined);
+    })
+      .withLock(async () => {
+        enteredMutex = true;
+        await this.finishRotation().catch((error: unknown) => {
+          throw admissionRefusal(error);
+        });
+        await this.finishBootstrap().catch((error: unknown) => {
+          throw admissionRefusal(error);
+        });
+        const previous = await this.readSnapshot(true);
+        if (previous?.guard && previous.guard.state !== 'quiescent') throw admissionRefusal();
+        this.signal.throwIfAborted();
+        if (this.used) throw new Error('address ownership: owner lifetime already consumed');
+        this.used = true;
+        this.artifact = await lstat(resolve(this.commonDir, 'cq-review-address-ownership.lock'));
+        this.snapshot = previous ?? (await this.bootstrap());
+        if (previous?.guard) {
+          await this.adoptQuiescence(previous);
+          // A lifetime can consume the entire bounded store (including completion).
+          // Therefore every nonempty predecessor has insufficient worst-case headroom.
+          await this.rotate(previous);
+          this.snapshot = await this.bootstrap();
+        }
+        if (previous && !previous.guard) {
+          // A crash after the bootstrap guard link can leave an empty chain.
+          // Re-establish all anchor/link durability before publishing ACTIVE.
+          const anchor = await open(this.guardPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+          try {
+            if (!same(await anchor.stat(), previous.identity)) throw admissionRefusal();
+            await anchor.sync();
+          } finally {
+            await anchor.close();
+          }
+          await syncDirectory(this.storePath);
+          await syncDirectory(this.commonDir);
+        }
+        // Must be durable BEFORE a driver, worktree mutation, or child can start.
+        await this.persist('active');
+        this.signal.throwIfAborted();
+        this.active = this.admitting = true;
+        terminalAuthorities.set(this.terminalToken, this);
+        this.signal.addEventListener('abort', this.stopAdmissions, { once: true });
+        if (this.signal.aborted) this.stopAdmissions();
+        let checking: Promise<void> | undefined;
+        const timer = setInterval(() => {
+          if (checking) return;
+          checking = (this.stopping ? this.validateTerminal() : this.assertOwned())
+            .then(() => undefined)
+            .catch(() => undefined)
+            .finally(() => {
+              checking = undefined;
+            });
+        }, 250);
+        timer.unref();
+        try {
+          const result = await fn(this);
+          this.admitting = false;
+          if (this.terminalAdmissionRefusal) throw this.terminalAdmissionRefusal;
+          if (this.terminalFailure) throw this.terminalFailure;
+          if (
+            this.children.size ||
+            this.tasks.size ||
+            this.terminalProcesses.size ||
+            this.terminalOperations.size
+          )
+            throw new Error('address ownership: detached work requires quarantine');
+          clearInterval(timer);
+          await checking;
+          // Parent cancellation stops dispatch; it is never evidence of quiescence.
+          const prepared = await this.enqueue(() => this.prepareCompletion());
+          const proof = Object.freeze({});
+          completionProofs.set(proof, prepared);
+          return { result, proof };
+        } catch (error) {
+          this.admitting = false;
+          this.controller.abort(error);
+          // ACTIVE/partial already refuses. Best-effort quarantine earns no claim
+          // of durable quarantine if storage is unavailable.
+          if (!this.compromised) await this.persist('quarantined').catch(() => undefined);
+          throw error;
+        } finally {
+          clearInterval(timer);
+          this.signal.removeEventListener('abort', this.stopAdmissions);
+          this.active = false; // Retired forever, including the cleanup interval.
+        }
+      }, this.signal)
+      .catch((error: unknown) => {
+        if (!enteredMutex) throw admissionRefusal(error);
         throw error;
-      } finally {
-        clearInterval(timer);
-        this.signal.removeEventListener('abort', this.stopAdmissions);
-        this.active = false; // Retired forever, including the cleanup interval.
-      }
-    }, this.signal);
+      });
     // No certificate is installed on callback, cleanup or observed compromise
     // rejection. No further write is needed to retain that refusal barrier.
     await this.publishCompletion(completed.proof);
@@ -1294,7 +1362,7 @@ export class AddressOwnership {
           next.sequence >= MAX_RECORDS ||
           current.total + next.bytes.length + MAX_RECORD_BYTES > MAX_TOTAL_BYTES
         )
-          throw bounded();
+          throw lifetimeBound();
         // Quarantined is the longest terminal state name. Check its individual
         // record bound too, so a near-limit ACTIVE cannot strand settlement.
         this.transition(

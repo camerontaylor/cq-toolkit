@@ -400,7 +400,6 @@ test.each([
 });
 
 test.each([
-  'retired-delete',
   'store-rename-before',
   'store-rename-after',
   'guard-rename-before',
@@ -431,7 +430,7 @@ test.each([
     let rotated = false,
       anchorLinked = false;
     fsFaults.remove = async () => {
-      if (fault === 'retired-delete') fail();
+      // Retention failures are covered separately: they must not reject admission.
     };
     fsFaults.rename = async (phase, source) => {
       if (source === store && phase === 'after') rotated = true;
@@ -463,6 +462,151 @@ test.each([
     expect(dispatched).toBe(0);
   } finally {
     fsFaults.rename = fsFaults.remove = fsFaults.mkdir = fsFaults.link = fsFaults.sync = undefined;
+    await f.repo.cleanup();
+  }
+});
+
+test.each([
+  'store-rename',
+  'guard-rename',
+  'bootstrap-mkdir',
+  'bootstrap-parent-sync',
+  'anchor-open',
+  'anchor-partial',
+  'anchor-sync',
+  'guard-link-before',
+  'guard-link-after',
+] as const)('crash recovery across rotation/bootstrap: %s', async (point) => {
+  const f = await fixture();
+  let hit = false,
+    dispatched = 0;
+  try {
+    const owner = await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run });
+    await owner.withLock(async () => undefined);
+    const store = authorityStore(owner.guardPath),
+      anchorPath = join(store, 'anchor.json');
+    let created = false;
+    const crash = () => {
+      hit = true;
+      throw new Error('bootstrap crash');
+    };
+    fsFaults.rename = async (phase, source) => {
+      if (
+        phase === 'after' &&
+        source === (point === 'store-rename' ? store : owner.guardPath) &&
+        (point === 'store-rename' || point === 'guard-rename')
+      )
+        crash();
+    };
+    fsFaults.mkdir = async (path) => {
+      if (path === store) created = true;
+    };
+    fsFaults.open = async (path, flags) => {
+      if (path !== anchorPath || typeof flags !== 'number' || !(flags & constants.O_CREAT)) return;
+      if (point === 'anchor-open') crash();
+      if (point === 'anchor-partial') {
+        await writeFile(path, '{"version":');
+        crash();
+      }
+    };
+    fsFaults.sync = async (path) => {
+      if (
+        (point === 'bootstrap-mkdir' && created && path === owner.commonDir) ||
+        (point === 'bootstrap-parent-sync' && created && path === owner.commonDir) ||
+        (point === 'anchor-sync' && path === anchorPath)
+      )
+        crash();
+    };
+    fsFaults.link = async (phase, _source, target) => {
+      if (target === owner.guardPath && point === `guard-link-${phase}`) crash();
+    };
+    await expect(
+      (await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run })).withLock(async () => {
+        dispatched++;
+      }),
+    ).rejects.toThrow('bootstrap crash');
+    expect(hit).toBe(true);
+    expect(dispatched).toBe(0);
+    fsFaults.rename = fsFaults.mkdir = fsFaults.open = fsFaults.sync = fsFaults.link = undefined;
+    await (
+      await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run })
+    ).withLock(async () => {
+      dispatched++;
+    });
+    expect(dispatched).toBe(1);
+  } finally {
+    fsFaults.rename = fsFaults.mkdir = fsFaults.open = fsFaults.sync = fsFaults.link = undefined;
+    await f.repo.cleanup();
+  }
+});
+
+test('retired deletion failure is reported and does not quarantine or block later rotations', async () => {
+  const f = await fixture();
+  const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+  try {
+    const owner = await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run });
+    await owner.withLock(async () => undefined);
+    await (
+      await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run })
+    ).withLock(async () => undefined);
+    const old = (await readdir(owner.commonDir)).find((name) =>
+      name.startsWith('cq-review-address-ownership.store.retired-'),
+    )!;
+    fsFaults.remove = async (path) => {
+      if (path.endsWith(old)) {
+        // Simulate partial removal: an optional forensic record disappears.
+        await unlink(join(path, '000002.json')).catch(() => undefined);
+        throw new Error('retired cleanup unavailable');
+      }
+    };
+    await (
+      await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run })
+    ).withLock(async () => undefined);
+    expect(warning).toHaveBeenCalled();
+    expect((await authorityState(owner.guardPath)).state).toBe('quiescent');
+    fsFaults.remove = undefined;
+    await (
+      await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run })
+    ).withLock(async () => undefined);
+    expect(
+      (await readdir(owner.commonDir)).filter((name) => name.includes('.retired-')),
+    ).toHaveLength(2);
+  } finally {
+    fsFaults.remove = undefined;
+    warning.mockRestore();
+    await f.repo.cleanup();
+  }
+});
+
+test('partially deleted older generation cannot confirm predecessor completion', async () => {
+  const f = await fixture();
+  const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+  try {
+    const owner = await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run });
+    let damaged = false;
+    fsFaults.link = async (phase, _source, target) => {
+      if (phase !== 'after' || !target.endsWith('/000002.json')) return;
+      fsFaults.link = undefined;
+      const anchor = JSON.parse(await readFile(owner.guardPath, 'utf8')) as { anchor: string };
+      fsFaults.remove = async (path) => {
+        if (!path.endsWith(`retired-${anchor.anchor}`)) return;
+        if (path.includes('.store.retired-')) {
+          await unlink(join(path, '000002.json'));
+          damaged = true;
+        }
+        throw new Error('partial deletion');
+      };
+      for (let i = 0; i < 2; i++)
+        await (
+          await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run })
+        ).withLock(async () => undefined);
+    };
+    await expect(owner.withLock(async () => undefined)).rejects.toThrow('lost owner');
+    expect(damaged).toBe(true);
+    expect((await authorityState(owner.guardPath)).state).toBe('quiescent');
+  } finally {
+    fsFaults.link = fsFaults.remove = undefined;
+    warning.mockRestore();
     await f.repo.cleanup();
   }
 });

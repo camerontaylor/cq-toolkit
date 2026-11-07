@@ -198,3 +198,46 @@ test('immutable write loss with detached work refuses again after late settlemen
     await f.repo.cleanup();
   }
 });
+
+test.each(['foreign', 'bootstrap-window'])(
+  'admission refusal maps to needs-human: %s',
+  async (mode) => {
+    const f = await fixture();
+    const role = { provider: 'mock', model: 'mock' };
+    try {
+      const owner = await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run });
+      const invoke = async () => {
+        const result = await addressModule.makeReviewAddress({
+          config: {
+            schemaVersion: 2,
+            checks: [{ adapter: 'tsc-lines', command: { command: process.execPath, args: [] } }],
+            roles: { worker: role, reviewer: role },
+            budgets: { run: { maxTokens: 1000 } },
+            review: { reviewers: ['agent'] },
+          },
+          git: f.run,
+          review: async () => {
+            throw new Error('must not dispatch');
+          },
+        })({ repoRoot: f.repo.root, source: 'local', journalDir: join(f.root, 'refusal-journal') });
+        expect(result.status).toBe('needs-human');
+        if (result.status === 'needs-human') expect(result.reason).toContain('could not acquire');
+      };
+      if (mode === 'foreign') {
+        await writeFile(owner.guardPath, 'foreign evidence');
+        await invoke();
+      } else {
+        fsFaults.link = async (phase, _source, target) => {
+          if (phase === 'after' && target === owner.guardPath) {
+            fsFaults.link = undefined;
+            await invoke();
+          }
+        };
+        await owner.withLock(async () => undefined);
+      }
+    } finally {
+      fsFaults.link = undefined;
+      await f.repo.cleanup();
+    }
+  },
+);

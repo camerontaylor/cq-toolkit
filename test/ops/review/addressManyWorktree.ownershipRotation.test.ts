@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { link, lstat, readFile, readdir, rename, writeFile } from 'node:fs/promises';
+import { cp, link, lstat, readFile, readdir, rename, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { expect, test, vi } from 'vitest';
 import * as addressModule from '../../../src/ops/review/address.js';
@@ -264,16 +264,30 @@ test('redundant claims detect authority loss before installing claims', async ()
     await expect(
       owner.withLock(async () => {
         await owner.address(selection, input);
-        let reads = 0;
-        faults.afterStat = async (path) => {
-          if (path !== authorityStore(owner.guardPath) || ++reads !== 5) return;
-          faults.afterStat = undefined;
-          // Two reads fence address admission, two fence claim entry; the fifth
-          // begins the redundant-claim post-check, before any claims are installed.
+        // Isolate claim validation from address admission and timer reads.
+        // The first identity check fences entry; the second is the redundant
+        // claim's post-check and must run before any claims are installed.
+        const identity = Reflect.get(owner, 'identityNow') as () => Promise<unknown>;
+        const checks = vi.spyOn(
+          owner as unknown as { identityNow(): Promise<unknown> },
+          'identityNow',
+        );
+        checks.mockImplementationOnce(() => identity.call(owner));
+        checks.mockImplementationOnce(async () => {
           claimsAtFailure = (Reflect.get(owner, 'claims') as Map<string, unknown>).size;
           throw new Error('injected identity loss');
-        };
-        await owner.address(selection, input);
+        });
+        try {
+          const claim = Reflect.get(owner, 'claim') as (
+            child: { keys: Set<string> },
+            keys: string[],
+          ) => Promise<void>;
+          await claim.call(owner, { keys: new Set<string>() }, [
+            ...(Reflect.get(owner, 'recorded') as Set<string>),
+          ]);
+        } finally {
+          checks.mockRestore();
+        }
       }),
     ).rejects.toThrow('lost owner');
     expect(claimsAtFailure).toBe(0);
@@ -347,6 +361,35 @@ test('completion verifies retired store with live guard between rotation renames
     release.resolve();
     await successor;
     faults.afterLink = faults.afterRename = undefined;
+    await f.repo.cleanup();
+  }
+});
+
+test('a planted retired directory with matching bytes and hardlinks is not authority', async () => {
+  const f = await fixture();
+  try {
+    const owner = await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run });
+    faults.afterLink = async (_source, target) => {
+      if (!target.endsWith('/000002.json')) return;
+      faults.afterLink = undefined;
+      const anchor = JSON.parse(await readFile(owner.guardPath, 'utf8')) as { anchor: string };
+      await (
+        await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run })
+      ).withLock(async () => undefined);
+      const store = `${authorityStore(owner.guardPath)}.retired-${anchor.anchor}`;
+      const guard = `${owner.guardPath}.retired-${anchor.anchor}`;
+      await rename(store, `${store}.preserved`);
+      await cp(`${store}.preserved`, store, { recursive: true });
+      for (const name of ['000001.json', '000002.json']) {
+        await unlink(join(store, `pending-${name}`));
+        await link(join(store, name), join(store, `pending-${name}`));
+      }
+      await unlink(guard);
+      await link(join(store, 'anchor.json'), guard);
+    };
+    await expect(owner.withLock(async () => undefined)).rejects.toThrow('lost owner');
+  } finally {
+    faults.afterLink = undefined;
     await f.repo.cleanup();
   }
 });
