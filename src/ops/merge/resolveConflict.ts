@@ -103,6 +103,7 @@
 // provider/role binding, a missing key env) or an UNCLASSIFIED throw —
 // is a misconfiguration or a lane bug the human arranges → 'needs-human'
 // (review-debt #186). The op never rethrows a dispatch outcome.
+import { assertProtectedBranchMirror } from './trustMirrors.js';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
@@ -449,6 +450,7 @@ export function makeResolveConflictOp(
     // (a) The registry owns schema validation; the op enforces only the
     // RUNTIME requirement: dispatch without a ModelSpec fails — a vendor
     // default is never fabricated.
+    assertProtectedBranchMirror('merge.resolveConflict', input.protectedBranch);
     const { modelSpec } = input;
     if (modelSpec === undefined) {
       return {
