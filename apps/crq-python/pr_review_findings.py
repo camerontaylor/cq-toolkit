@@ -15,7 +15,9 @@ is safe to retry and one run is never posted twice.
 
 Pure module: plain data in, `gh` injected (the same shape as finding_issues).
 """
+import argparse
 import json
+import sys
 import re
 import subprocess
 from pathlib import Path
@@ -223,13 +225,15 @@ def build_review(meta: Dict[str, Any], findings: List[Dict[str, Any]],
         severity = one_line(finding["severity"])
         counts[severity] = counts.get(severity, 0) + 1
     summary = ", ".join(f"{n} {s}" for s, n in sorted(counts.items()))
-    lines = [marker(run_id),
-             f"### crq findings (CodeRabbit CLI, local run {run_id}, {base[:10]}..{head[:10]})", "",
+    label = one_line(meta.get("label") or f"crq findings (CodeRabbit CLI, local run {run_id}, {base[:10]}..{head[:10]})")
+    lines = [marker(run_id), clean_text(meta.get("summary", "")),
+             f"### {label}", "",
              f"{len(findings)} finding(s) ({summary}): {len(comments)} as inline threads, "
              f"{len(unanchored)} listed below.", "",
              f"Queue item `{meta.get('item_id', '')}`, reviewed range `{base}..{head}`. "
-             "Posted by crq, the local review queue that runs the CodeRabbit CLI on this host. "
-             "This is not a CodeRabbit PR review. Reply on a thread or resolve it once addressed."]
+             + (f"{label}. Reply on a thread or resolve it after an explicit disposition." if meta.get("label") else
+              "Posted by crq, the local review queue that runs the CodeRabbit CLI on this host. "
+              "This is not a CodeRabbit PR review. Reply on a thread or resolve it once addressed.")]
     if unanchored:
         lines += ["", "#### Not anchored to the PR diff", ""]
         for number, finding, heading, text in unanchored:
@@ -333,7 +337,7 @@ def _post(gh: Gh, repo: str, pr: int, review: Dict[str, Any]) -> Any:
 
 
 def deliver(repo: str, pr: int, meta: Dict[str, Any], ndjson: Path,
-            gh: Optional[Gh] = None) -> Dict[str, Any]:
+            gh: Optional[Gh] = None, login: Optional[str] = None) -> Dict[str, Any]:
     """Post this run's findings review on the PR, at most once.
 
     Returns {"state": "created"|"existing"|"skipped-closed"|"skipped-empty",
@@ -348,15 +352,17 @@ def deliver(repo: str, pr: int, meta: Dict[str, Any], ndjson: Path,
         raise ValueError("invalid PR review delivery identity")
     result = {"review_id": None, "review_url": None, "inline": 0, "body_only": 0}
     findings = load_findings(ndjson)
-    if not findings:
+    if login is not None and not LOGIN.fullmatch(login):
+        raise ValueError("invalid posting login")
+    if not findings and not meta.get("summary"):
         return {**result, "state": "skipped-empty"}
     state = pr_state(gh, repo, pr)
     if state["state"] != "open" or state.get("merged"):
         return {**result, "state": "skipped-closed"}
-    found = existing_review(gh, repo, pr, run_id, authenticated_login(gh))
+    found = existing_review(gh, repo, pr, run_id, login or authenticated_login(gh))
     if found:
         return {**result, "state": "existing", "review_id": found["id"], "review_url": found["url"]}
-    hunks = diff_hunks(gh, repo, state["base"], head) if state.get("base") else None
+    hunks = diff_hunks(gh, repo, meta["base"], head)
     review = build_review(meta, findings, hunks)
     argv, p = _post(gh, repo, pr, review)
     if getattr(p, "returncode", 0) != 0 and "HTTP 422" in (getattr(p, "stderr", "") or "") \
@@ -372,3 +378,47 @@ def deliver(repo: str, pr: int, meta: Dict[str, Any], ndjson: Path,
         posted = {}
     return {"state": "created", "review_id": posted.get("id"), "review_url": posted.get("html_url"),
             "inline": len(review["comments"]), "body_only": len(findings) - len(review["comments"])}
+
+
+def main(argv=None, gh=None):
+    parser = argparse.ArgumentParser(description="Publish findings and an independent-review summary as one review")
+    parser.add_argument("--repo", required=True)
+    parser.add_argument("--pr", required=True, type=int)
+    for name in ("head", "base", "run-id"):
+        parser.add_argument("--" + name, required=True)
+    parser.add_argument("--findings", required=True, type=Path)
+    parser.add_argument("--body-file", required=True, type=Path)
+    parser.add_argument("--login")
+    parser.add_argument("--reviewer", default="independent reviewer")
+    args = parser.parse_args(argv)
+    try:
+        if not SHA.fullmatch(args.base):
+            raise ValueError("--base must be a full SHA")
+        for number, line in enumerate(args.findings.read_text(encoding="utf-8").splitlines(), 1):
+            if not line.strip():
+                continue
+            event = json.loads(line)
+            if not isinstance(event, dict) or event.get("type") != "finding":
+                raise ValueError(f"findings line {number} must be a finding event")
+            for field in ("severity", "title", "comment"):
+                if not isinstance(event.get(field), str) or not event[field].strip():
+                    raise ValueError(f"findings line {number} requires nonempty {field}")
+            if "fileName" in event and (not isinstance(event["fileName"], str) or not event["fileName"].strip()):
+                raise ValueError(f"findings line {number} has invalid fileName")
+            for field in ("startLine", "endLine"):
+                if field in event and (_line(event[field]) is None or "fileName" not in event):
+                    raise ValueError(f"findings line {number} has invalid {field} or missing fileName")
+        summary = args.body_file.read_text(encoding="utf-8")
+        if not summary.strip() or len(summary) > 20000:
+            raise ValueError("summary must contain 1..20000 characters")
+        meta = {"head": args.head, "base": args.base, "run_id": args.run_id,
+                "summary": summary, "label": f"Independent review by {args.reviewer} for {args.head}"}
+        print(json.dumps(deliver(args.repo, args.pr, meta, args.findings, gh=gh, login=args.login)))
+        return 0
+    except (OSError, ValueError, RuntimeError) as exc:
+        print(f"pr_review_findings: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
