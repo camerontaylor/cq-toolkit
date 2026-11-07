@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
-import { link, lstat, mkdir, open, opendir, realpath } from 'node:fs/promises';
+import { link, lstat, mkdir, open, opendir, realpath, rename, rm } from 'node:fs/promises';
 import { basename, dirname, resolve } from 'node:path';
 import type { GhFn } from '../../../adapters/forge-github/gh.js';
 import { fileWorktreeRegistry, reviewBranchFor } from '../../../adapters/git/prWorktree.js';
@@ -43,7 +43,7 @@ const MAX_ANCHOR_BYTES = 256;
 const UUID = /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/;
 const digest = (bytes: Uint8Array) => createHash('sha256').update(bytes).digest('hex');
 const slot = (sequence: number) => `${String(sequence).padStart(6, '0')}.json`;
-const bounded = () => new Error('address ownership: bound reached; attended compaction required');
+const bounded = () => new Error('address ownership: mid-lifetime authority bound reached');
 type Identity = { ino: number; dev: number };
 const same = (a: Identity, b: Identity) => a.ino === b.ino && a.dev === b.dev;
 
@@ -274,8 +274,11 @@ function resourceKeys(selection: AddressSelection): string[] {
 /**
  * One common-dir lifetime owner. Lock order: owner -> resource set -> registry.
  * Active guard files are NEVER reclaimed using time or process liveness. Recovery
- * requires attended positive quiescence evidence, outside this API. Old binaries
- * which ignore the guard must not overlap deployment of this coordinator.
+ * requires attended positive quiescence evidence, outside this API.
+ * Quiescent generations rotate under the admission mutex after durable adoption.
+ * Completion tolerates one rotation; two overlapping rotations fail closed with
+ * unconfirmed completion if the older forensic generation has been removed.
+ * Old binaries which ignore the guard must not overlap deployment of this coordinator.
  */
 export class AddressOwnership {
   readonly registry;
@@ -378,16 +381,20 @@ export class AddressOwnership {
   private snapshot?: Snapshot;
   private pending: number | undefined;
 
-  /** No authority pathname is ever replaced, repaired or recreated. */
-  private async readSnapshot(allowEmpty = false): Promise<Snapshot | undefined> {
+  /** Only durably adopted quiescence under admission exclusion permits rotation. */
+  private async readSnapshot(
+    allowEmpty = false,
+    storePath = this.storePath,
+    guardPath = this.guardPath,
+  ): Promise<Snapshot | undefined> {
     try {
       let store;
       try {
-        store = await lstat(this.storePath);
+        store = await lstat(storePath);
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
         try {
-          await lstat(this.guardPath);
+          await lstat(guardPath);
         } catch (missing) {
           if ((missing as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
           throw missing;
@@ -397,15 +404,15 @@ export class AddressOwnership {
       if (!store.isDirectory() || store.isSymbolicLink()) throw new Error('unsafe authority store');
       const names = new Set<string>();
       // Bound enumeration before a readdir array or file-content allocation.
-      const directory = await opendir(this.storePath);
+      const directory = await opendir(storePath);
       for await (const entry of directory) {
         if (names.size >= MAX_RECORDS * 2 + 1) throw bounded();
         if (!entry.isFile() || !/^(?:anchor|(?:pending-)?[0-9]{6})\.json$/.test(entry.name))
           throw new Error('unknown authority entry');
         names.add(entry.name);
       }
-      const anchor = await boundedFile(this.guardPath, MAX_ANCHOR_BYTES, 2);
-      const staged = await boundedFile(resolve(this.storePath, 'anchor.json'), MAX_ANCHOR_BYTES, 2);
+      const anchor = await boundedFile(guardPath, MAX_ANCHOR_BYTES, 2);
+      const staged = await boundedFile(resolve(storePath, 'anchor.json'), MAX_ANCHOR_BYTES, 2);
       if (!same(anchor.identity, staged.identity) || !anchor.bytes.equals(staged.bytes))
         throw new Error('anchor link changed');
       const value = JSON.parse(anchor.bytes.toString('utf8')) as {
@@ -431,11 +438,11 @@ export class AddressOwnership {
           pending = `pending-${name}`;
         if (!names.has(pending)) throw new Error('missing retained staging link');
         const record = await boundedFile(
-          resolve(this.storePath, name),
+          resolve(storePath, name),
           Math.min(MAX_RECORD_BYTES, MAX_TOTAL_BYTES - total),
           2,
         );
-        const staging = await boundedFile(resolve(this.storePath, pending), MAX_RECORD_BYTES, 2);
+        const staging = await boundedFile(resolve(storePath, pending), MAX_RECORD_BYTES, 2);
         if (!same(record.identity, staging.identity) || !record.bytes.equals(staging.bytes))
           throw new Error('record staging link changed');
         total += record.bytes.length;
@@ -471,7 +478,7 @@ export class AddressOwnership {
       // Only this live owner's uncommitted next staging file may be in flight.
       if (this.pending === sequence + 1) names.delete(`pending-${slot(this.pending)}`);
       if (names.size || (!guard && !allowEmpty)) throw new Error('partial authority history');
-      const namedStore = await lstat(this.storePath);
+      const namedStore = await lstat(storePath);
       if (!namedStore.isDirectory() || !same(store, namedStore))
         throw new Error('authority store changed');
       return {
@@ -490,6 +497,58 @@ export class AddressOwnership {
         { cause: error },
       );
     }
+  }
+
+  private retiredPaths(anchor: string) {
+    return {
+      store: `${this.storePath}.retired-${anchor}`,
+      guard: `${this.guardPath}.retired-${anchor}`,
+    };
+  }
+
+  private async finishRotation(): Promise<void> {
+    try {
+      await lstat(this.storePath);
+      return;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+    let guard;
+    try {
+      guard = await boundedFile(this.guardPath, MAX_ANCHOR_BYTES, 2);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+      throw error;
+    }
+    const value = JSON.parse(guard.bytes.toString('utf8')) as { anchor: string };
+    if (!UUID.test(value.anchor)) throw admissionRefusal();
+    const retired = this.retiredPaths(value.anchor);
+    // Full validation also proves quiescence and the live guard/retired anchor hardlink.
+    const previous = await this.readSnapshot(false, retired.store, this.guardPath);
+    if (!previous || previous.guard?.state !== 'quiescent') throw admissionRefusal();
+    await syncDirectory(retired.store);
+    await rename(this.guardPath, retired.guard);
+    await syncDirectory(this.commonDir);
+  }
+
+  private async rotate(previous: Snapshot): Promise<void> {
+    if (previous.guard?.state !== 'quiescent') throw admissionRefusal();
+    const retired = this.retiredPaths(previous.anchor);
+    const directory = await opendir(this.commonDir);
+    for await (const entry of directory) {
+      if (
+        /^cq-review-address-ownership\.(?:store|owner\.json)\.retired-[a-f0-9-]{36}$/.test(
+          entry.name,
+        ) &&
+        entry.name !== basename(retired.store) &&
+        entry.name !== basename(retired.guard)
+      )
+        await rm(resolve(this.commonDir, entry.name), { recursive: true, force: true });
+    }
+    await rename(this.storePath, retired.store);
+    await syncDirectory(this.commonDir);
+    await rename(this.guardPath, retired.guard);
+    await syncDirectory(this.commonDir);
   }
 
   private async bootstrap(): Promise<Snapshot> {
@@ -589,17 +648,27 @@ export class AddressOwnership {
     receipt: string,
     identity?: Identity,
   ) {
-    const installed = await this.readSnapshot();
-    if (
-      !installed ||
-      !same(installed.identity, expected.identity) ||
-      !same(installed.store, expected.store) ||
-      installed.anchor !== expected.anchor ||
-      installed.receipts.get(sequence)?.digest !== receipt ||
-      (identity !== undefined && !same(installed.receipts.get(sequence)!.identity, identity))
-    )
-      throw new Error('address ownership: lost owner; authority prefix changed');
-    return installed;
+    const matches = (installed: Snapshot | undefined) =>
+      installed &&
+      same(installed.identity, expected.identity) &&
+      same(installed.store, expected.store) &&
+      installed.anchor === expected.anchor &&
+      installed.receipts.get(sequence)?.digest === receipt &&
+      (identity === undefined || same(installed.receipts.get(sequence)!.identity, identity));
+    try {
+      const installed = await this.readSnapshot();
+      if (matches(installed)) return installed!;
+    } catch {
+      /* A successor may have renamed the generation. */
+    }
+    const retired = this.retiredPaths(expected.anchor);
+    try {
+      const installed = await this.readSnapshot(false, retired.store, retired.guard);
+      if (matches(installed)) return installed!;
+    } catch {
+      /* Missing or damaged retired evidence fails closed. */
+    }
+    throw new Error('address ownership: lost owner; authority prefix changed');
   }
 
   private async prepareCompletion(): Promise<Completion> {
@@ -659,17 +728,25 @@ export class AddressOwnership {
         if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
       }
       this.controller.signal.throwIfAborted();
-      await link(prepared.staging, resolve(this.storePath, slot(prepared.sequence)));
-      // After accepting link, NEVER append an old-epoch marker or record. A
-      // legitimate successor may already be active. Failure is unconfirmed
-      // invocation completion, not confirmed durable quarantine.
-      await syncDirectory(this.storePath);
-      await this.identityAfter(
-        prepared.predecessor,
-        prepared.sequence,
-        digest(prepared.bytes),
-        prepared.stagingIdentity,
-      );
+      const directory = await open(this.storePath, constants.O_RDONLY | constants.O_NOFOLLOW);
+      try {
+        const stat = await directory.stat();
+        if (!stat.isDirectory() || !same(stat, prepared.predecessor.store))
+          throw new Error('completion directory changed');
+        await link(prepared.staging, resolve(this.storePath, slot(prepared.sequence)));
+        // After accepting link, NEVER append an old-epoch marker or record. A
+        // legitimate successor may already be active. Failure is unconfirmed
+        // invocation completion, not confirmed durable quarantine.
+        await directory.sync();
+        await this.identityAfter(
+          prepared.predecessor,
+          prepared.sequence,
+          digest(prepared.bytes),
+          prepared.stagingIdentity,
+        );
+      } finally {
+        await directory.close();
+      }
     } finally {
       this.pending = undefined;
     }
@@ -1046,12 +1123,36 @@ export class AddressOwnership {
 
   async withLock<T>(fn: (owner: AddressOwnership) => Promise<T>): Promise<T> {
     if (this.used) throw new Error('address ownership: owner lifetime already consumed');
-    const before = await this.readSnapshot();
-    if (before?.guard && before.guard.state !== 'quiescent') throw admissionRefusal();
+    // Preserve the read-only fast refusal for active/damaged live stores. A
+    // missing store needs the in-mutex interrupted-rotation check instead.
+    let hasStore = true;
+    try {
+      await lstat(this.storePath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      hasStore = false;
+    }
+    if (hasStore) {
+      try {
+        const before = await this.readSnapshot();
+        if (before?.guard && before.guard.state !== 'quiescent') throw admissionRefusal();
+      } catch (error) {
+        // A rotation can race this advisory read. Missing live paths are
+        // classified under the mutex, never as legacy/foreign authority here.
+        try {
+          await lstat(this.storePath);
+        } catch (missing) {
+          if ((missing as NodeJS.ErrnoException).code === 'ENOENT') hasStore = false;
+          else throw missing;
+        }
+        if (hasStore) throw error;
+      }
+    }
     const completed = await makeGitMutex({
       lockPath: resolve(this.commonDir, 'cq-review-address-ownership'),
       failFast: true,
     }).withLock(async () => {
+      await this.finishRotation();
       const previous = await this.readSnapshot();
       if (previous?.guard && previous.guard.state !== 'quiescent') throw admissionRefusal();
       this.signal.throwIfAborted();
@@ -1059,7 +1160,13 @@ export class AddressOwnership {
       this.used = true;
       this.artifact = await lstat(resolve(this.commonDir, 'cq-review-address-ownership.lock'));
       this.snapshot = previous ?? (await this.bootstrap());
-      if (previous) await this.adoptQuiescence(previous);
+      if (previous) {
+        await this.adoptQuiescence(previous);
+        // A lifetime can consume the entire bounded store (including completion).
+        // Therefore every nonempty predecessor has insufficient worst-case headroom.
+        await this.rotate(previous);
+        this.snapshot = await this.bootstrap();
+      }
       // Must be durable BEFORE a driver, worktree mutation, or child can start.
       await this.persist('active');
       this.signal.throwIfAborted();
@@ -1167,7 +1274,32 @@ export class AddressOwnership {
       if (complete.some((key) => this.claims.has(key) && this.claims.get(key) !== child))
         throw new Error('address ownership: conflicting child resource');
       const recorded = [...new Set([...this.recorded, ...complete])].sort();
-      await this.writeTransition('active', recorded);
+      if (recorded.length !== this.recorded.size) {
+        // Reserve one maximum-sized terminal record before accepting a claim.
+        // Repeated claims add no authority facts and consume no record budget.
+        const current = this.snapshot!;
+        const next = this.transition(current, 'active', recorded);
+        if (
+          next.sequence >= MAX_RECORDS ||
+          current.total + next.bytes.length + MAX_RECORD_BYTES > MAX_TOTAL_BYTES
+        )
+          throw bounded();
+        // Quarantined is the longest terminal state name. Check its individual
+        // record bound too, so a near-limit ACTIVE cannot strand settlement.
+        this.transition(
+          {
+            ...current,
+            sequence: next.sequence,
+            total: current.total + next.bytes.length,
+            tail: digest(next.bytes),
+          },
+          'quarantined',
+          recorded,
+        );
+        await this.writeTransition('active', recorded);
+      } else {
+        await this.identityNow().catch((error: unknown) => this.lose(error));
+      }
       this.signal.throwIfAborted();
       // Install claims only after durable publication and identity post-check.
       for (const key of complete) {
