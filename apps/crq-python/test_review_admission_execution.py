@@ -195,6 +195,11 @@ class ExecutionTests(SnapshotGitFixture, unittest.TestCase):
 
     def test_third_generation_really_launches_stored_flags(self):
         saved = []
+        legacy = crq.author_quota.enroll(self.q, request_id="legacy-author", base=self.base,
+            head=self.head, target="main", cycle=1, at=self.c.iso())["item"]
+        self.q["items"].remove(legacy)
+        self.q["items"].insert(0, legacy)
+        legacy_binding = copy.deepcopy(self.q["author_requests"])
         worktree = self.repo / "wt"
         worktree.mkdir()
         self.c.CONFIG = {"local_review_profile": {"revision": "changed-while-queued", "flags": ["--new"]}}
@@ -224,6 +229,12 @@ class ExecutionTests(SnapshotGitFixture, unittest.TestCase):
             open_id = crq.launch(self.q, pr, open_plan)
             open_meta = json.loads((self.runs / open_id / "meta.json").read_text())
             self.assertEqual(open_meta["cmd"], meta["cmd"])
+            legacy_id = crq.launch(self.q, legacy, crq.author_quota.plan(legacy))
+            legacy_meta = json.loads((self.runs / legacy_id / "meta.json").read_text())
+            self.assertEqual(legacy_meta["cmd"], meta["cmd"])
+            self.assertEqual(legacy_meta["kind"], "author")
+            self.assertNotIn("profile", legacy_meta)
+            self.assertEqual(self.q["author_requests"], legacy_binding)
 
     def test_reservation_and_pid_persist_crashes_never_blindly_launch_twice(self):
         baseline = copy.deepcopy(self.q)
