@@ -303,7 +303,46 @@
                   "type": "boolean"
                 },
                 "snapshot": {
-                  "type": "object"
+                  "type": "object",
+                  "required": ["v", "tree", "objects", "sha256"],
+                  "properties": {
+                    "v": {
+                      "type": "integer",
+                      "const": 1
+                    },
+                    "tree": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{40}$"
+                    },
+                    "objects": {
+                      "type": "array",
+                      "minItems": 1,
+                      "maxItems": 4096,
+                      "items": {
+                        "type": "object",
+                        "required": ["oid", "type", "data"],
+                        "properties": {
+                          "oid": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{40}$"
+                          },
+                          "type": {
+                            "enum": ["blob", "tree", "commit"]
+                          },
+                          "data": {
+                            "type": "string",
+                            "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$"
+                          }
+                        },
+                        "additionalProperties": false
+                      }
+                    },
+                    "sha256": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    }
+                  },
+                  "additionalProperties": false
                 },
                 "notify": {
                   "type": "object",
@@ -360,7 +399,7 @@
                   "type": "string",
                   "minLength": 1
                 },
-                "offset": {
+                "index": {
                   "type": "integer",
                   "minimum": 0
                 }
@@ -398,48 +437,201 @@
           "const": "response"
         },
         "value": {
-          "type": "object",
-          "required": ["v", "action", "state"],
-          "properties": {
-            "v": {
-              "type": "integer",
-              "const": 1
+          "oneOf": [
+            {
+              "type": "object",
+              "required": ["v", "action", "state"],
+              "properties": {
+                "v": {
+                  "type": "integer",
+                  "const": 1
+                },
+                "request_id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "action": {
+                  "enum": ["created", "joined", "reused", "observed", "no-changes"]
+                },
+                "state": {
+                  "enum": ["queued", "running", "completed", "failed", "cancelled", "unsupported"]
+                },
+                "identity": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                "item": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "generation": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "receipt_id": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                "next_action": {
+                  "enum": ["resubmit"]
+                },
+                "reason": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "additionalProperties": false
             },
-            "request_id": {
-              "type": "string",
-              "minLength": 1
+            {
+              "type": "object",
+              "required": ["v", "command", "operations", "features", "limits"],
+              "properties": {
+                "v": {
+                  "type": "integer",
+                  "const": 1
+                },
+                "command": {
+                  "const": "review-v1"
+                },
+                "operations": {
+                  "type": "array",
+                  "items": {
+                    "enum": ["capabilities", "submit", "status", "result", "cancel"]
+                  }
+                },
+                "features": {
+                  "type": "array",
+                  "items": {
+                    "enum": [
+                      "original-commit-snapshot-v1",
+                      "chunked-result-v1",
+                      "repeat-generations-v1"
+                    ]
+                  }
+                },
+                "limits": {
+                  "type": "object",
+                  "required": [
+                    "max_request_bytes",
+                    "max_snapshot_bytes",
+                    "max_content_bytes",
+                    "max_objects",
+                    "chunk_bytes"
+                  ],
+                  "properties": {
+                    "max_request_bytes": {
+                      "type": "integer",
+                      "const": 6291456
+                    },
+                    "max_snapshot_bytes": {
+                      "type": "integer",
+                      "const": 6291456
+                    },
+                    "max_content_bytes": {
+                      "type": "integer",
+                      "const": 4194304
+                    },
+                    "max_objects": {
+                      "type": "integer",
+                      "const": 4096
+                    },
+                    "chunk_bytes": {
+                      "type": "integer",
+                      "const": 3072
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              },
+              "additionalProperties": false
             },
-            "action": {
-              "enum": ["created", "joined", "reused", "observed", "no-changes"]
+            {
+              "type": "object",
+              "required": [
+                "v",
+                "receipt_id",
+                "index",
+                "chunks",
+                "bytes",
+                "sha256",
+                "encoding",
+                "data",
+                "chunk_sha256",
+                "next_index"
+              ],
+              "properties": {
+                "v": {
+                  "type": "integer",
+                  "const": 1
+                },
+                "receipt_id": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                "index": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "chunks": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "bytes": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "sha256": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                "encoding": {
+                  "const": "base64-utf8-json"
+                },
+                "data": {
+                  "type": "string",
+                  "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$"
+                },
+                "chunk_sha256": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                "next_index": {
+                  "type": ["integer", "null"],
+                  "minimum": 0
+                }
+              },
+              "additionalProperties": false
             },
-            "state": {
-              "enum": ["queued", "running", "completed", "failed", "cancelled", "unsupported"]
-            },
-            "identity": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{64}$"
-            },
-            "item": {
-              "type": "string",
-              "minLength": 1
-            },
-            "generation": {
-              "type": "integer",
-              "minimum": 1
-            },
-            "receipt_id": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{64}$"
-            },
-            "next_action": {
-              "enum": ["resubmit"]
-            },
-            "reason": {
-              "type": "string",
-              "minLength": 1
+            {
+              "type": "object",
+              "required": ["v", "error"],
+              "properties": {
+                "v": {
+                  "type": "integer",
+                  "const": 1
+                },
+                "error": {
+                  "type": "object",
+                  "required": ["code", "message", "retryable"],
+                  "properties": {
+                    "code": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "message": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "retryable": {
+                      "type": "boolean"
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              },
+              "additionalProperties": false
             }
-          },
-          "additionalProperties": false
+          ]
         }
       },
       "additionalProperties": false
@@ -640,6 +832,58 @@
               "enum": ["pending", "sent", "error"]
             },
             "receipt_id": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": ["type", "value"],
+      "properties": {
+        "type": {
+          "const": "snapshot"
+        },
+        "value": {
+          "type": "object",
+          "required": ["v", "tree", "objects", "sha256"],
+          "properties": {
+            "v": {
+              "type": "integer",
+              "const": 1
+            },
+            "tree": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}$"
+            },
+            "objects": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 4096,
+              "items": {
+                "type": "object",
+                "required": ["oid", "type", "data"],
+                "properties": {
+                  "oid": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{40}$"
+                  },
+                  "type": {
+                    "enum": ["blob", "tree", "commit"]
+                  },
+                  "data": {
+                    "type": "string",
+                    "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$"
+                  }
+                },
+                "additionalProperties": false
+              }
+            },
+            "sha256": {
               "type": "string",
               "pattern": "^[0-9a-f]{64}$"
             }
