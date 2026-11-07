@@ -25,7 +25,8 @@ jobs:
   ratchet:
     name: ratchet
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # Runaway guard, not a speed limit: healthy runs take 15–19 min (2026-11-07 job data).
+    timeout-minutes: 35
     # The `cq-state` settle ledger is machine-written; its pushes are not
     # reviewable changes (review-debt #226). Job-level, never a trigger
     # filter — I4 keeps the trigger surface intact.
