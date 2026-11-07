@@ -13,16 +13,34 @@ import {
   parseRunTool,
 } from './parsers.js';
 import { isSecretEnvName } from './secret.js';
-import { ACCEPT_STATES, ASSOCIATIONS, BOT_ENTRY_RE, POSTURE_LIST, isPosture } from './values.js';
+import {
+  ACCEPT_STATES,
+  ASSOCIATIONS,
+  BOT_ENTRY_RE,
+  POSTURE_LIST,
+  bareBranch,
+  isPosture,
+} from './values.js';
 
-/** A non-empty git branch name (no whitespace or control characters). */
-function parseBranchName(raw: string): string {
-  const v = raw.trim();
-  if (v === '' || /\s|\p{Cc}/u.test(v)) {
-    throw new Error(`CQ_MERGE_PROTECTED_BRANCH must be a branch name, got '${raw}'`);
-  }
-  return v;
-}
+/**
+ * A git branch name in the conservative refname grammar the merge op schemas
+ * use. A leading `refs/heads/` is stripped so the stored value is always the
+ * bare name and every comparison sees one spelling.
+ */
+const branchName =
+  (key: string) =>
+  (raw: string): string => {
+    const v = bareBranch(raw.trim());
+    if (
+      v === '' ||
+      v.length > 250 ||
+      !/^[A-Za-z0-9._][A-Za-z0-9._/-]*$/.test(v) ||
+      v.includes('..')
+    ) {
+      throw new Error(`${key} must be a branch name, got '${raw.slice(0, 80)}'`);
+    }
+    return v;
+  };
 
 export type CqEnvKind = 'config' | 'identity' | 'test';
 /**
@@ -196,7 +214,7 @@ export const CQ_ENV_ENTRIES: readonly CqEnvEntry[] = [
   entry(
     'CQ_MERGE_BASE_BRANCH',
     'config',
-    text,
+    branchName('CQ_MERGE_BASE_BRANCH'),
     'conservative',
     true,
     'Base branch the self-merge flow targets.',
@@ -204,7 +222,7 @@ export const CQ_ENV_ENTRIES: readonly CqEnvEntry[] = [
   entry(
     'CQ_MERGE_PROTECTED_BRANCH',
     'config',
-    parseBranchName,
+    branchName('CQ_MERGE_PROTECTED_BRANCH'),
     'conservative',
     true,
     'Branch merge pushes may never target; plan data cannot override it (blank: main).',

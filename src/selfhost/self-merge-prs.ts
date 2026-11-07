@@ -38,7 +38,7 @@
 // only from a trusted actor's CURRENT review whose commit.oid equals the
 // live headRefOid; open threads are advisory; the base branch name
 // the executor's readBaseRef saw right before the call must still be the
-// live base, and a live base of SelfhostDefaults.protectedBranch refuses.
+// live base, and a live base of the resolved CQ_MERGE_PROTECTED_BRANCH (default main) refuses.
 // Settle comes from >= 2 durable observations of the identical (head, base,
 // force-push epoch) tuple >= settleMs apart, recorded on the `cq-state`
 // branch through the git-data API with the run's GH_TOKEN (the automation

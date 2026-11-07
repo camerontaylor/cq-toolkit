@@ -1105,5 +1105,6 @@ export interface OpRegistryEntry<I = unknown, R = unknown> {
 /** Registry entry for one plan. Runtime-only: never persisted. */
 export interface PlanRegistryEntry {
   name: string;
-  importer: () => Promise<Plan>;
+  /** `cqEnv`: the host's resolved config, so a floor can mirror trust config by construction. */
+  importer: (wiring?: { cqEnv?: CqEnv }) => Promise<Plan>;
 }
