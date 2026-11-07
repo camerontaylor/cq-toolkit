@@ -23,7 +23,7 @@
 import { z } from 'zod';
 import { BudgetSchema, SandboxPolicySchema, ToolPolicySchema } from '../../kernel/schema.js';
 import { errorClassOf } from '../../driver/errors.js';
-import { createDriverFactory } from '../../driver/factory.js';
+import { createDriverFactory, type DriverFactoryConfig } from '../../driver/factory.js';
 import type { Op, OpRegistryEntry } from '../../kernel/types.js';
 import type { ObservationWriter } from '../../kernel/observation.js';
 import { LedgerThresholdsOverrideSchema } from '../ledger/registry.js';
@@ -437,6 +437,12 @@ export const registry: OpRegistryEntry[] = makeRegistry();
  * serialized into plan JSON or the dispatch input. The exported default
  * `registry` is `makeRegistry()`: existing callers retain their behavior
  * unchanged. The fix composition caller is makeFixRun (src/ops/fix/runFix.ts).
+ *
+ * A deployment may also pass its `DriverFactoryConfig` here (ADR-0002 §2.5):
+ * the lane bindings and per-lane construction knobs are DEPLOYMENT data, not
+ * plan JSON, so a sweep that wants the subprocess/claude-agent/acp lane binds
+ * it at this boundary. The dispatch-time alias-notice wiring still wins over
+ * the deployment's own sink (the host's narration contract is per dispatch).
  */
 export function makeRegistry(
   options: {
@@ -444,6 +450,12 @@ export function makeRegistry(
     observationWriter?: ObservationWriter;
     /** The observation `runId` the writer was opened with (required with a writer). */
     observationRunId?: string;
+    /**
+     * The deployment's driver factory configuration (role→provider→lane
+     * bindings plus per-lane construction knobs). Runtime-only deployment
+     * data — never plan JSON.
+     */
+    driverFactory?: DriverFactoryConfig;
   } = {},
 ): OpRegistryEntry[] {
   const observation = observationOf(options);
@@ -452,7 +464,7 @@ export function makeRegistry(
       ? entry
       : {
           ...entry,
-          importer: makeSweepUnitImporter(observation),
+          importer: makeSweepUnitImporter(observation, options.driverFactory),
         },
   );
 }
@@ -473,11 +485,12 @@ function observationOf(options: {
 }
 
 /**
- * The sweep.unit importer with the T30 observation closure bound. Split from
- * the array literal so makeRegistry rebuilds the entry with the writer
- * without duplicating the dynamic module load or touching any other entry.
+ * The sweep.unit importer with the T30 observation closure and the
+ * deployment's driver factory config bound. Split from the array literal so
+ * makeRegistry rebuilds the entry with the writer/config without duplicating
+ * the dynamic module load or touching any other entry.
  */
-function makeSweepUnitImporter(observation: SweepObservation) {
+function makeSweepUnitImporter(observation: SweepObservation, driverFactory?: DriverFactoryConfig) {
   return async (wiring?: {
     onDeprecatedAlias?: (message: string) => void;
   }): Promise<Op<unknown, unknown>> => {
@@ -486,11 +499,7 @@ function makeSweepUnitImporter(observation: SweepObservation) {
       try {
         const bindings = m.bindingsFromDispatch(
           input,
-          createDriverFactory(
-            wiring?.onDeprecatedAlias !== undefined
-              ? { onDeprecatedAlias: wiring.onDeprecatedAlias }
-              : {},
-          ),
+          createDriverFactory(factoryConfigOf(driverFactory, wiring?.onDeprecatedAlias)),
         );
         // ADR-0008 T30: the injected observation writer rides the RESOLVED
         // RUNTIME BINDINGS — never the serialized dispatch input (no
@@ -527,6 +536,21 @@ function makeSweepUnitImporter(observation: SweepObservation) {
       }
     }) as unknown as Op<unknown, unknown>;
   };
+}
+
+/**
+ * Compose the factory config at the registry boundary: the deployment's own
+ * config (bindings/lanes) with the dispatch-time alias-notice sink laid over
+ * it. The wiring sink is the host's per-dispatch narration contract, so it
+ * wins over a deployment-level `onDeprecatedAlias`; absent wiring keeps the
+ * deployment's sink (or the library default when there is no config at all).
+ */
+function factoryConfigOf(
+  driverFactory: DriverFactoryConfig | undefined,
+  onDeprecatedAlias: ((message: string) => void) | undefined,
+): DriverFactoryConfig {
+  if (onDeprecatedAlias === undefined) return driverFactory ?? {};
+  return { ...driverFactory, onDeprecatedAlias };
 }
 
 // Shared task and stage-path helpers: './tasks.js', './stagePaths.js', './taskLoop.js'.

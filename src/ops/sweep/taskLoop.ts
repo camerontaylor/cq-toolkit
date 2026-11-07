@@ -71,6 +71,8 @@ export interface FixTaskReport {
     reason: string;
     validation?: ValidationVerdict;
     failedAttempt?: { branch: string; sha: string };
+    /** This round's failed attempt was pushed to `origin` (per-round history). */
+    published?: boolean;
     gate?: FailedAttemptGate;
     outcome?: 'unfixed' | 'escalated-to-human';
   }>;
@@ -343,7 +345,9 @@ async function runTaskLoopInner(
         | undefined;
       delete row.validation;
       delete row.failedAttempt;
-      delete row.failedAttemptPublished;
+      // `row.failedAttemptPublished` is DERIVED from the rounds below (never
+      // deleted per attempt): an earlier attempt's pushed ref stays visible
+      // when a later attempt replaces its `failedAttempt`.
       let parent: string | undefined;
       let failedModel: ModelSpec = bindings.modelSpec;
       let finalTree: { final: UnitProbe; treeSha: string } | undefined;
@@ -374,6 +378,13 @@ async function runTaskLoopInner(
         });
         await git(['restore', '--source=HEAD', '--staged', '--worktree', '--', '.']);
         return failedAttempt;
+      };
+      // Task-level publication state, derived from the per-round history: any
+      // round whose failed attempt reached `origin` keeps the task published.
+      const deriveFailedAttemptPublished = (): void => {
+        if (row.rounds?.some((round) => round.published === true) === true)
+          row.failedAttemptPublished = true;
+        else delete row.failedAttemptPublished;
       };
       try {
         parent = await git(['rev-parse', 'HEAD']);
@@ -761,11 +772,19 @@ async function runTaskLoopInner(
         const earlyGate = classifyStagePaths(
           earlyPaths,
           bindings.stagePathAllowlist,
-          false,
+          bindings.proposeOnly === true,
           config.protectTests ?? false,
         );
         if (earlyGate.kind !== 'clean') {
-          const verdict = earlyGate.kind === 'protected' ? 'needs-human' : 'fail';
+          // A propose-only worker's non-empty staged set is escalated to a
+          // human (nothing is probed, committed or pushed), never an ordinary
+          // failure: the contract in SweepUnitBindings.proposeOnly and
+          // classifyStagePaths says so, and only `needs-human` reaches the
+          // escalation branch in the catch below.
+          const verdict =
+            earlyGate.kind === 'protected' || earlyGate.kind === 'propose-only'
+              ? 'needs-human'
+              : 'fail';
           row.validation = {
             verdict,
             gates: [{ gate: 'paths', verdict, wallMs: 0, detail: earlyGate.message }],
@@ -781,6 +800,11 @@ async function runTaskLoopInner(
         if ((await git(['rev-parse', 'HEAD'])) !== parent)
           throw new Error('worker moved HEAD; unscanned self-commit');
         await git(['add', '-A', '--', '.']);
+        // The tree THIS attempt's gates inspect. The related/broader checks
+        // below execute worker-controlled code and could stage more bytes in
+        // this same index; the commit is bound to this tree (see the compare
+        // after validation), never to whatever the index became.
+        const gatedTree = await git(['write-tree']);
         const paths = stagedPathsOf(
           await git(['diff', '--cached', ...SWEEP_DIFF_FLAGS, '--name-status', '-z']),
         );
@@ -903,6 +927,8 @@ async function runTaskLoopInner(
         row.validation = validation;
         if (validation.verdict !== 'pass' || finalTree === undefined)
           throw new Error('validation refused task');
+        if (finalTree.treeSha !== gatedTree)
+          throw new Error('index changed after path/tamper gating; refusing unscanned tree');
         if (bindings.cancelled?.()) {
           row.outcome = 'escalated-to-human';
           throw new Error('enclosing job cancelled');
@@ -957,13 +983,26 @@ async function runTaskLoopInner(
             gate,
             outcome: row.outcome,
           });
+          deriveFailedAttemptPublished();
         } catch (cleanupError) {
           indeterminate = `failed-task evidence recording failed: ${String(cleanupError)}`;
           row.reason += `; ${indeterminate}`;
           row.outcome = 'escalated-to-human';
           break taskLoop;
         }
-        if (config.pushFailed && row.failedAttempt !== undefined) {
+        const unsafeRefusal = row.validation?.gates.some(
+          (gate) => ['paths', 'tamper', 'commit'].includes(gate.gate) && gate.verdict !== 'pass',
+        );
+        // A gate that already refused this attempt means it will never be
+        // pushed: skip the publication scan entirely. Scanning it anyway ran
+        // the tamper detector on a rejected patch whose throw then stopped the
+        // whole unit (and its verified, publishable commits).
+        if (
+          config.pushFailed &&
+          bindings.publishFailedAttempts === true &&
+          row.failedAttempt !== undefined &&
+          !unsafeRefusal
+        ) {
           try {
             const uploadGate = await scanFailedAttempt(
               git,
@@ -974,10 +1013,6 @@ async function runTaskLoopInner(
             );
             if (bindings.cancelled?.() || currentJobContext()?.signal.aborted)
               throw new Error('parent job cancelled before failed-attempt publication');
-            const unsafeRefusal = row.validation?.gates.some(
-              (gate) =>
-                ['paths', 'tamper', 'commit'].includes(gate.gate) && gate.verdict !== 'pass',
-            );
             if (uploadGate.kind !== 'clean') {
               const detail = uploadGate.message;
               row.validation = {
@@ -995,13 +1030,16 @@ async function runTaskLoopInner(
                 recordedRound.outcome = row.outcome;
                 recordedRound.validation = row.validation;
               }
-            } else if (!unsafeRefusal) {
+            } else {
               await git([
                 'push',
                 'origin',
                 `${row.failedAttempt.sha}:refs/heads/${row.failedAttempt.branch}`,
               ]);
-              row.failedAttemptPublished = true;
+              const publishedRound = row.rounds?.at(-1);
+              if (publishedRound?.failedAttempt?.branch === row.failedAttempt.branch)
+                publishedRound.published = true;
+              deriveFailedAttemptPublished();
             }
           } catch (publishError) {
             indeterminate = `failed-attempt publication refused: ${String(publishError)}`;
@@ -1106,9 +1144,15 @@ async function scanFailedAttempt(
     throw new Error(`failed-attempt tamper scan could not complete: ${tamper.status}`);
   if (tamper.value.length > 0) {
     const finding = tamper.value[0];
-    throw new Error(
-      `failed-attempt tamper gate refused publication${finding === undefined ? '' : ` (${finding.kind} at ${finding.file}:${String(finding.line ?? '?')})`}`,
-    );
+    // A positive tamper finding is a REFUSAL OF THIS ATTEMPT, not an
+    // infrastructure fault: it is returned so the caller escalates this one
+    // task and keeps the unit's verified commits publishable. A scan that
+    // cannot complete (above) stays a throw — that one is uncertain.
+    return {
+      kind: 'protected',
+      paths: finding === undefined ? [] : [finding.file],
+      message: `failed-attempt tamper gate refused publication${finding === undefined ? '' : ` (${finding.kind} at ${finding.file}:${String(finding.line ?? '?')})`}`,
+    };
   }
   await bindings.scanPrompt(`Failed-attempt commit ${sha} publication scan`, contents);
   const paths = await failedAttemptPaths(git, parent, sha);
