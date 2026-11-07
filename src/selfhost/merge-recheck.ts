@@ -85,7 +85,7 @@ import { observeWithChange, pruneToOpen, settleStatus } from '../policy/queue/se
 import type { SettleTuple } from '../policy/queue/settle-state.js';
 import { readSettleState, writeSettleState } from './state-branch.js';
 import type { StateBranchSnapshot, StateBranchWriteResult } from './state-branch.js';
-import { parseIndependentReview } from '../shared/independent-review.js';
+import { isIgnoredBotAuthor, parseIndependentReview } from '../shared/independent-review.js';
 import type { IndependentReviewAttestation } from '../shared/independent-review.js';
 import { defaultClassifyPrConfig } from '../ops/merge/classify.config.js';
 
@@ -908,8 +908,7 @@ const sameAccountAgentAccepted = (
   _policy: TrustPolicy,
 ): AuthenticatedR4Evidence | null => {
   for (const review of [...snapshot.reviews, ...(snapshot.allClear?.comments ?? [])]) {
-    if (review.authorType === 'Bot' || review.authorLogin?.toLowerCase().endsWith('[bot]'))
-      continue;
+    if (isIgnoredBotAuthor(review.authorType, review.authorLogin)) continue;
     const parsed = parseIndependentReview(review.body, headSha);
     if (parsed.kind !== 'valid') continue;
     return Object.freeze({

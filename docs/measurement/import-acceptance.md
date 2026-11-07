@@ -24,6 +24,13 @@ is still self-declared, and the App key is on every agent host, so this
 attests the posting path rather than proving a different agent. Counting `app:` against `self-declared:` review rows
 gives the attested share of PASSes. Carry-overs stay self-declared.
 
+Two counting notes. `app:` reflects the snapshot's recorded `user.login`,
+captured by the recipe from GitHub's REST API; like every other field, the
+importer trusts the recording rather than re-reading GitHub. And a reviewer
+who posts the same verdict both ways (an `unattested` fallback, then an
+attested repost) yields two rows with different `reviewerId`s, so count the
+attested share per head (attested when any `app:` row exists), not per row.
+
 ## Recipe
 
 ```bash
