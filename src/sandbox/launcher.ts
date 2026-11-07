@@ -4,6 +4,7 @@ import { accessSync, constants, realpathSync } from 'node:fs';
 import { delimiter, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { buildSandboxLauncherEnv } from './index.js';
 import type { SandboxBackend, SandboxNetwork } from './config.js';
+import { processEnv } from '../config/process-env.js';
 
 /** A command to execute inside a backend boundary. */
 export interface SandboxLaunchRequest {
@@ -245,7 +246,7 @@ export function runChild(
 export function resolveLauncher(name: string): string | undefined {
   const absolute = (candidate: string): string => resolve(candidate);
   if (name.includes('/')) return absolute(name);
-  for (const dir of (process.env['PATH'] ?? '').split(delimiter)) {
+  for (const dir of (processEnv()['PATH'] ?? '').split(delimiter)) {
     if (dir === '') continue;
     const candidate = absolute(join(dir, name));
     try {
@@ -273,7 +274,7 @@ export function launcherEnv(request: {
   parentEnv?: Readonly<Record<string, string | undefined>>;
   envPassthrough?: readonly string[];
 }): Record<string, string> {
-  const scrubbed = buildSandboxLauncherEnv(request.parentEnv ?? process.env, {
+  const scrubbed = buildSandboxLauncherEnv(request.parentEnv ?? processEnv(), {
     envPassthrough: request.envPassthrough ?? [],
   });
   for (const name of Object.keys(scrubbed)) {

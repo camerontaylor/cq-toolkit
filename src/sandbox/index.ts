@@ -4,6 +4,7 @@
 import { resolveSandboxConfig, SANDBOX_POLICY_ENV_NAMES } from './config.js';
 import type { SandboxConfig } from './config.js';
 import type { CqEnv } from '../config/env.js';
+import { processEnv } from '../config/process-env.js';
 
 const SAFE_ENV = new Set([
   'HOME',
@@ -108,7 +109,7 @@ export function harnessRunGate(
     sandboxConfig?: SandboxConfig;
   } = {},
 ): HarnessRunGate {
-  const env = options.env ?? process.env;
+  const env = options.env ?? processEnv();
   if (options.sandboxConfig === undefined) {
     const expressed =
       options.cqEnv !== undefined

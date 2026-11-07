@@ -10,6 +10,7 @@ import {
 } from '../ops/ratchet/verifyRatchet.js';
 import { ghNameOk } from '../adapters/forge-github/gh.js';
 import { EntryUsageError, parseEntryArgs, runEntry } from './trusted-entry.js';
+import { processEnv } from '../config/process-env.js';
 
 /** The verifier's own input, as the CLI schema has it, plus the repository identity. */
 const ArgsSchema = z
@@ -78,7 +79,7 @@ export function mainWith(argv: readonly string[], deps: VerifyMainDeps): Promise
       {
         verify:
           deps.verify ??
-          createVerifyRatchet(resolveProtectedPathsConfig({ env: deps.env ?? process.env })),
+          createVerifyRatchet(resolveProtectedPathsConfig({ env: deps.env ?? processEnv() })),
       },
       args,
     );

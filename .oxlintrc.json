@@ -124,6 +124,73 @@
       }
     },
     {
+      "files": ["src/**"],
+      "rules": {
+        "cq/no-process-env": "error",
+        "cq/no-process-env-accessor": "error"
+      }
+    },
+    {
+      "files": [
+        "src/config/**",
+        "src/config/process-env.ts",
+        "src/driver/acp/binaries.ts",
+        "src/driver/claude-code/routing.ts",
+        "src/driver/factory.ts",
+        "src/driver/sessions-dir.ts",
+        "src/harness/surface.ts",
+        "src/ops/config/show.ts",
+        "src/ops/dev/review-transport.ts",
+        "src/ops/fix/runFix.ts",
+        "src/ops/gates/policyConfig.ts",
+        "src/ops/gates/registry.ts",
+        "src/ops/review/address.ts",
+        "src/ops/review/internal/addressEvidence.ts",
+        "src/ops/review/internal/queueClient.ts",
+        "src/ops/review/queue.ts",
+        "src/sandbox/config.ts",
+        "src/sandbox/index.ts",
+        "src/sandbox/launcher.ts",
+        "src/selfhost/acceptance.ts",
+        "src/selfhost/config.ts",
+        "src/selfhost/observe-prs.ts",
+        "src/selfhost/policy-diff.ts",
+        "src/selfhost/self-review-loop.ts",
+        "src/selfhost/verify-ratchet.ts"
+      ],
+      "rules": {
+        "cq/no-process-env-accessor": "off"
+      }
+    },
+    {
+      "files": [
+        "src/config/**",
+        "src/adapters/forge-github/gh.ts",
+        "src/adapters/forge-github/ghEffects.ts",
+        "src/adapters/forge-github/ratchetEffects.ts",
+        "src/adapters/git/ratchetGit.ts",
+        "src/driver/acp/index.ts",
+        "src/driver/ai-sdk/index.ts",
+        "src/driver/claude-code/cli.ts",
+        "src/driver/claude-code/sdk.ts",
+        "src/driver/error-text.ts",
+        "src/harness/mcp/startup.ts",
+        "src/harness/tools.ts",
+        "src/kernel/runner.ts",
+        "src/ops/analyze/approval.ts",
+        "src/ops/analyze/fix.ts",
+        "src/ops/dev/effects.ts",
+        "src/ops/dev/internal/snapshot.ts",
+        "src/ops/sweep/unit.ts",
+        "src/sandbox/launcher.ts",
+        "src/selfhost/self-merge-prs.ts",
+        "src/shared/proc.ts"
+      ],
+      "rules": {
+        "cq/no-process-env": "off"
+      }
+    },
+    {
       "files": ["src/harness/**"],
       "rules": {
         "cq/no-driver-import-in-harness": "error"

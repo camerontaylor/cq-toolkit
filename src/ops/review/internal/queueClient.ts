@@ -25,6 +25,7 @@ import {
   sha256,
   type QueueEvidence,
 } from './queueEvidence.js';
+import { processEnv } from '../../../config/process-env.js';
 
 const CommonPage = z.object({
   version: z.literal(1),
@@ -88,7 +89,7 @@ export class QueueConfigurationError extends Error {}
 
 /** Production factory shared by Q6; configuration never rides caller JSON. */
 export function makeConfiguredQueueClient() {
-  const alias = process.env['CQ_QUEUE_SSH_ALIAS'];
+  const alias = processEnv()['CQ_QUEUE_SSH_ALIAS'];
   if (!alias)
     throw new QueueConfigurationError(
       'Configure CQ_QUEUE_SSH_ALIAS for reviewed D1C queue-v1 capability',

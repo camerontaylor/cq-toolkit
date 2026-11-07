@@ -229,6 +229,14 @@ export const CQ_ENV_ENTRIES: readonly CqEnvEntry[] = [
     'Parent work id stamped into child environments.',
   ),
   entry(
+    'CQ_PRODUCER_VERSION',
+    'config',
+    text,
+    'neutral',
+    false,
+    'Producer version stamped into run provenance (default: the toolkit package version).',
+  ),
+  entry(
     'CQ_QUEUE_SSH_ALIAS',
     'config',
     text,

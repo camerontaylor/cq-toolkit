@@ -23,6 +23,7 @@ import { spawn } from 'node:child_process';
 import { z } from 'zod';
 import type { Op, OpResult } from '../../kernel/types.js';
 import { DevTransportInputSchema, type DevTransportInput } from './registry.js';
+import { processEnv } from '../../config/process-env.js';
 
 const DecisionSchema = z
   .object({
@@ -122,10 +123,10 @@ export function makeAuthorAdmission(
   transport: AuthorTransport,
   capture = (base: string, tree: string) =>
     captureSnapshot(
-      process.env['CQ_AUTHOR_REPO'] ?? process.cwd(),
+      processEnv()['CQ_AUTHOR_REPO'] ?? process.cwd(),
       base,
       tree,
-      process.env['CQ_AUTHOR_SNAPSHOT_SCANNER'],
+      processEnv()['CQ_AUTHOR_SNAPSHOT_SCANNER'],
     ),
 ): Op<DevTransportInput, AuthorDecision> {
   return async (input) => {
@@ -198,7 +199,7 @@ export function makeAuthorAdmission(
 export function envAuthorAdmission(
   input: DevTransportInput,
 ): Promise<OpResult<AuthorDecision> | { status: 'needs-human'; reason: string }> {
-  const alias = process.env['CQ_AUTHOR_SSH_ALIAS'];
+  const alias = processEnv()['CQ_AUTHOR_SSH_ALIAS'];
   if (!alias) return Promise.resolve({ status: 'needs-human', reason: AUTHOR_TRANSPORT_HINT });
   try {
     return makeAuthorAdmission(sshAuthorTransport(alias))(input);
