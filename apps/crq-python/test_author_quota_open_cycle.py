@@ -39,7 +39,10 @@ class OpenCyclePolicyTest(unittest.TestCase):
     def test_required_and_optional_labels(self):
         info = dict(state="OPEN", isDraft=False, headRefOid=HEAD,
                     baseRefName="merge-queue", headRefName="topic")
-        with mock.patch.object(crq, "git", return_value=BASE):
+        # plan_open first ensures the head exists in the clone, which is a Git
+        # effect this suite mocks away with the merge-base read below.
+        with mock.patch.object(crq, "ensure_commit", return_value=True), \
+             mock.patch.object(crq, "git", return_value=BASE):
             self.assertEqual(crq.plan_open(self.item(), info, False)["label"], "one review of captured range")
             self.assertEqual(crq.plan_open(self.item(cycles=[{}]), info, False)["label"],
                              "one review of captured range")

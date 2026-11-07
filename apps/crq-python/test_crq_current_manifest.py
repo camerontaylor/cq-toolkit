@@ -154,6 +154,25 @@ class CurrentTest(CurrentFixture, unittest.TestCase):
             {"source_path": "rename.py", "path": "rename.py", "resolution": "same-path-current",
              "blob": blob("rename.py"), "mode": "100644", "bytes": 160, "disposition": "included"}])
 
+    def test_unrelated_target_churn_needs_no_per_path_rev_parse(self):
+        for n in range(3):
+            self.write(f"moved-{n}.py", f"target churn {n}\n")
+        self.g("add", ".")
+        self.g("commit", "-qm", "target churn")
+        for n in range(3):
+            self.g("mv", f"moved-{n}.py", f"renamed-{n}.py")
+        (self.repo / "unrelated.py").unlink()
+        target = self.commit("target renames and a deletion")
+        self.g("update-ref", "refs/remotes/origin/main", target)
+        real_git = crq.git
+        def no_per_path(*args, **kw):
+            self.assertFalse(args[0] == "rev-parse" and ":" in args[-1], args)
+            return real_git(*args, **kw)
+        with mock.patch.object(crq, "git", side_effect=no_per_path):
+            rows = crq.current_paths(self.merge, target)
+        self.assertEqual([r["source_path"] for r in rows], ["affected.py", "gone.py", "rename.py"])
+        self.assertEqual([r["disposition"] for r in rows], ["included", "deleted", "included"])
+
     def test_ambiguous_rename_keeps_explicit_partial_scope(self):
         self.write("duplicate.py", "rename survives\n" * 10)
         self.merge = self.commit("source includes identical rename candidates")

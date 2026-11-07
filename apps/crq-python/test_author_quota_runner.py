@@ -34,6 +34,16 @@ class LockTest(unittest.TestCase):
                 self.assertIsNone(crq.with_lock(called))
                 called.assert_not_called()
 
+    def test_ran_locked_reports_whether_the_lock_was_held(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(crq, "LOCK", Path(tmp) / "tick.lock"):
+            self.assertTrue(crq.ran_locked(lambda: None))
+            holder = (Path(tmp) / "tick.lock").open("w")
+            self.addCleanup(holder.close)
+            fcntl.flock(holder, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            called = mock.Mock()
+            self.assertFalse(crq.ran_locked(called))
+            called.assert_not_called()
+
     def test_full_tick_waits_for_slot_lock_and_then_runs(self):
         with tempfile.TemporaryDirectory() as tmp, mock.patch.object(crq, "LOCK", Path(tmp) / "tick.lock"), \
              mock.patch.object(crq.fcntl, "flock", side_effect=[BlockingIOError(), None, None]), \
