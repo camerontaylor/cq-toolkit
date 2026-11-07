@@ -28,6 +28,7 @@ describe('review.address PR phase-one orchestration', () => {
         );
         expect(w.resolved.has('T1')).toBe(true);
         expect(w.resolved.has('T2')).toBe(false);
+        expect(w.actions).toContain('push');
         expect(w.actions.indexOf('push')).toBeLessThan(w.actions.indexOf('resolve:T1'));
         expect(result.report?.openBlocking).toMatchObject([
           {

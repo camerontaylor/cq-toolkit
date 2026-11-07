@@ -122,6 +122,53 @@ describe('governed journal v2 + resume', () => {
     journalEnclosure(2),
   );
 
+  test(
+    'an empty reported driver is treated as unknown, never journalled as an empty string',
+    async () => {
+      // validSessionLink promises non-empty strings only. A reported '' must
+      // not replace the result-derived 'unknown' in the merged link, and must
+      // not reach the journal (z.string() would accept it and persist it).
+      const blank = async (): Promise<OpResult<unknown>> => {
+        currentJobContext()?.reportSession?.({ driver: '', sessionId: 'store-blank' });
+        return { status: 'ok', value: { sessionId: 'store-blank' } };
+      };
+      const plan = independentPlan('plan-gov-session-blank-driver', 1, 'blank');
+      const report = await runPlan(
+        plan,
+        { concurrency: 1, stopOnError: false, journalDir: dir },
+        viewWith(entry('blank', blank)),
+        { governor: createGovernor({ maxUsd: 5 }), allowAdvisory: true },
+      );
+      const sessions = jobFinishes(await openRunLog(dir).read(report.runId))[0]?.sessions;
+      expect(sessions).toEqual([{ driver: 'unknown', sessionId: 'store-blank' }]);
+    },
+    journalEnclosure(1),
+  );
+
+  test(
+    'an empty job.op fails that one job instead of rejecting the run (role is omitted)',
+    async () => {
+      // PlanSchema accepts op '' (z.string()), but JobFinishedJournalEventSchema
+      // requires role.min(1). Journalling the empty role made the append throw
+      // and failed the whole run instead of giving the job its failed row.
+      const plan: Plan = {
+        id: 'plan-empty-op',
+        jobs: [{ id: 'j1', op: '', input: { jobId: 'j1' } }],
+      };
+      const report = await runPlan(
+        plan,
+        { concurrency: 1, stopOnError: false, journalDir: dir },
+        viewWith(),
+        { governor: createGovernor({ maxUsd: 1 }), allowAdvisory: true },
+      );
+      expect(report.jobs[0]?.result).toMatchObject({ status: 'failed', error: "unknown op ''" });
+      const finishes = jobFinishes(await openRunLog(dir).read(report.runId));
+      expect(finishes).toMatchObject([{ jobId: 'j1', opId: '', result: { status: 'failed' } }]);
+      expect(finishes[0]?.role).toBeUndefined();
+    },
+    journalEnclosure(1),
+  );
+
   test.each([false, true])(
     'resume preserves recorded parents and falls back for legacy journals (legacy=%s)',
     async (legacy) => {

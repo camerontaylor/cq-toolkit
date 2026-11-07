@@ -37,7 +37,7 @@ describe('subprocess worktree-effects (real git smoke)', () => {
     new Promise((resolve, reject) => {
       execFile(
         'git',
-        ['-c', 'gc.auto=0', '-c', 'maintenance.auto=false', ...args],
+        ['-c', 'gc.auto=0', '-c', 'maintenance.auto=false', '-c', 'commit.gpgsign=false', ...args],
         { cwd, timeout: GIT_CALL_TIMEOUT_MS, killSignal: 'SIGKILL' },
         (error, stdout, stderr) => {
           if (error !== null) {

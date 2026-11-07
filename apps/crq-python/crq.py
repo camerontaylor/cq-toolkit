@@ -419,15 +419,21 @@ def secret_scan_diff(diff: str, out: Path, *, base=None, head=None,
     allow = [re.compile(p) for p in ALLOWLIST_PATHS]
     hits: List[Dict[str, Any]] = []
     path = None
+    in_header = False  # ---/+++ are headers only between "diff --git" and the first "@@"
     for n, line in enumerate(diff.splitlines(), 1):
-        if line.startswith("+++ ") or line.startswith("--- "):
-            p = line[4:]
-            if p != "/dev/null":
-                path = p[2:] if p[:2] in ("a/", "b/") else p
-            continue
         if line.startswith("diff --git"):
             m = re.match(r"diff --git a/(.*) b/(.*)$", line)
             path = m.group(2) if m else None
+            in_header = True
+            continue
+        if line.startswith("@@"):
+            in_header = False
+            continue
+        if in_header:
+            if line.startswith("+++ ") or line.startswith("--- "):
+                p = line[4:]
+                if p != "/dev/null":
+                    path = p[2:] if p[:2] in ("a/", "b/") else p
             continue
         if not line or line[0] not in "+-" or path is None:
             continue
@@ -3331,12 +3337,14 @@ def cmd_measure() -> None:
     # Repair-only backfill items share the merged kind but have no PR merge.
     merged = [i for i in live_items(q) if i["kind"] == "merged"
               and not (i.get("pr") == 0 and i.get("repair_runs") and not i.get("merge_commit"))]
+    measured = []
     for i in merged:
         if i.get("source") == "followup" and i["state"] == "skipped" and not i.get("measure"):
             continue  # merged head already reviewed; not a supersession decision
         apply_measure(i)
+        measured.append(i)
     # rank: code before docs-only, then most surviving non-doc lines first
-    ranked = sorted(merged, key=lambda i: (i["measure"]["docs_only"], -i["measure"]["surviving_nondoc"],
+    ranked = sorted(measured, key=lambda i: (i["measure"]["docs_only"], -i["measure"]["surviving_nondoc"],
                                            -i["measure"]["surviving"]))
     for n, i in enumerate(ranked):
         i["order"] = n

@@ -15,6 +15,8 @@ export interface DeferredVendorContextRequest {
   base: string | undefined;
   record: FindingsRecord;
   signal?: AbortSignal;
+  /** Caller remaining lifetime in ms; bounds the loader's invocation cap. */
+  remainingMs?: () => number;
   onEvidenceImported?: (evidence: { receiptId: string; path: string }) => Promise<void>;
 }
 
@@ -49,7 +51,10 @@ export async function resolveDeferredVendorContext(
     effects.openLedger(state.branch).load(),
     deps.queueClient,
     request.signal,
-    { ...(request.onEvidenceImported ? { onEvidenceImported: request.onEvidenceImported } : {}) },
+    {
+      ...(request.onEvidenceImported ? { onEvidenceImported: request.onEvidenceImported } : {}),
+      ...(request.remainingMs ? { remainingMs: request.remainingMs } : {}),
+    },
   );
   if (!debt) return undefined;
   const binding = debt.reference.binding;

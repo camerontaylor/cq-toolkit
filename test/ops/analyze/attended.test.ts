@@ -246,7 +246,7 @@ describe('makeAttendedApprovalAuthority', () => {
 
 describe('makeGitApprovalStateReader exempt option', () => {
   test('escaping or absolute prefixes are refused at construction', () => {
-    for (const bad of ['../x', '/abs', '', '.', 'a/../../b']) {
+    for (const bad of ['../x', '/abs', '', '.', './.', './/.', 'a/../../b']) {
       expect(() => makeGitApprovalStateReader({ exempt: [bad] }), bad).toThrow(/exempt prefix/);
     }
   });

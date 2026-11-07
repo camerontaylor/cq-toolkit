@@ -420,6 +420,24 @@ class RepairDrainTest(unittest.TestCase):
                              else (self.root / 'state/repair/inbox' / ('crq-' + run + '-F1.json')).exists(),
                              queued)
 
+    def test_enqueue_adopts_base_of_orphan_inbox_job(self):
+        rdir = self.root / 'runs/x'
+        rdir.mkdir(parents=True)
+        finding = {'type': 'finding', 'severity': 'major', 'fileName': 'src/kept.ts', 'comment': 'x'}
+        (rdir / 'review.ndjson').write_text(json.dumps(finding) + '\n')
+        c = SimpleNamespace(REPO='o/r', item_repo=lambda item: 'o/r', CONFIG=self.config,
+                            STATE=self.root / 'state', git=lambda *a, **k: '' if a[0] == 'rev-list' else self.tip)
+        item = {'id': 'pr9', 'pr': 9, 'kind': 'merged', 'state': 'reviewing'}
+        meta = {'run_id': 'pr9-20261106T000000Z', 'base': self.pin, 'head': self.tip}
+        self.assertTrue(repair_tick.enqueue(c, {'items': []}, item, meta, rdir))
+        path = self.root / 'state/repair/inbox/crq-pr9-20261106T000000Z-F1.json'
+        job = json.loads(path.read_text())
+        job['repair_base'] = 'orphan-base'
+        path.write_text(json.dumps(job))
+        item = {'id': 'pr9', 'pr': 9, 'kind': 'merged', 'state': 'reviewing'}
+        self.assertTrue(repair_tick.enqueue(c, {'items': []}, item, meta, rdir))
+        self.assertEqual(item['repair_runs'][meta['run_id']]['base'], 'orphan-base')
+
     def test_judge_deferred_by_blackout_resumes_without_repeating_fixer(self):
         self.job('crq-run1-F1', 'pr1-merged', 'run1', 'src/kept.ts', severity='critical')
         wt = self.worktree()

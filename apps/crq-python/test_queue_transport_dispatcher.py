@@ -83,7 +83,7 @@ class QueueTransportTests(QueueTransportFixtureMixin, unittest.TestCase):
         policy_path.write_text(json.dumps(self.policy))
         request = receipts.canonical({"v": 1, "op": "status", "requestId": "request-1", "binding": self.b})
         self.call("enqueue")
-        fake = SimpleNamespace(REPO="owner/repo", STATE=Path(self.tmp.name), enqueue_merged=lambda: None,
+        fake = SimpleNamespace(REPO="owner/repo", STATE=Path(self.tmp.name), enqueue_merged=lambda: None, verify_deferred_source=lambda repo, pr: {},
                                load_queue=self.runner.load_queue)
         for principal in ("developer", "stranger"):
             output = io.BytesIO()

@@ -133,6 +133,12 @@ describe('resolveConflict op', () => {
     expect(failedError(fullRef)).toBe(
       'headBranch equals the protected branch — refusing to dispatch a push-capable agent',
     );
+    // git also expands the short `heads/main` destination to refs/heads/main.
+    const shortRef = await op({ ...baseInput(), headBranch: 'heads/main' });
+    expect(shortRef.status).toBe('failed');
+    expect(failedError(shortRef)).toBe(
+      'headBranch equals the protected branch — refusing to dispatch a push-capable agent',
+    );
     // The prefixed form of a DIFFERENT branch is untouched by the
     // normalization: it is not the protected branch and dispatch proceeds.
     const fullRefOther = await op({ ...baseInput(), headBranch: 'refs/heads/feature' });

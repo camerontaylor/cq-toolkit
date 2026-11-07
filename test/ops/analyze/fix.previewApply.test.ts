@@ -57,6 +57,34 @@ describe('analyze.fix — cluster + rule', () => {
     expect(git(['status', '--porcelain', '--untracked-files=no'])).toBe('M src/index.ts');
   });
 
+  test('apply: a recheck whose checks cannot see the cluster does not report resolved', async () => {
+    const { dir, clusterId } = await fixture();
+    const scripted = scriptedRunner();
+    // A different check COMMAND for the same adapter (what --checks or a
+    // different --configPath can select): it observes no failures, so the
+    // targeted cluster is absent from the before snapshot as well as after.
+    const run = ((cmd: Parameters<typeof scripted>[0]) =>
+      cmd.command === 'quiet-check'
+        ? { stdout: '', stderr: '', exitCode: 0 }
+        : scripted(cmd)) as typeof scripted;
+    const fix = makeAnalyzeFix({ run });
+    const preview = await fix({ dir, clusterId, rule: RULE });
+    if (preview.status !== 'ok') throw new Error('preview failed');
+    const result = await fix({
+      dir,
+      clusterId,
+      rule: RULE,
+      checks: [{ adapter: 'tsc-lines', command: { command: 'quiet-check', args: [] } }],
+      apply: true,
+      previewDigest: preview.value.preview.digest,
+    });
+    expect(result.status).toBe('ok');
+    if (result.status !== 'ok') return;
+    expect(result.value.recheck).toMatchObject({ before: 0, after: 0, resolved: false });
+    expect(result.value.recheck?.detail).toContain('absent from the before-check');
+    expect(result.value.next).not.toContain('then commit');
+  });
+
   test('a reviewed digest that no longer matches → needs-human, nothing written', async () => {
     const { dir, clusterId } = await fixture();
     const result = await makeAnalyzeFix({ run: scriptedRunner() })({

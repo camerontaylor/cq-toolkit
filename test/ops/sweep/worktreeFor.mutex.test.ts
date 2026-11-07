@@ -41,9 +41,16 @@ describe('sweep.worktreeFor mutex wrap (UC row 32)', () => {
         },
       });
       const mutex = { lockPath, staleMs: 2_000, retries: 50, retryBaseMs: 10 };
-      const opA = makeWorktreeFor(slowEffects(fakeRepo()));
-      const opB = makeWorktreeFor(slowEffects(fakeRepo()));
-      await Promise.all([opA({ ...INPUT, mutex }), opB({ ...INPUT, slug: 'cli', mutex })]);
+      const repoA = fakeRepo();
+      const repoB = fakeRepo();
+      const opA = makeWorktreeFor(slowEffects(repoA));
+      const opB = makeWorktreeFor(slowEffects(repoB));
+      await Promise.all([
+        okWorkspace(opA, { ...INPUT, mutex }),
+        okWorkspace(opB, { ...INPUT, slug: 'cli', mutex }),
+      ]);
+      expect(repoA.addCalls).toHaveLength(1);
+      expect(repoB.addCalls).toHaveLength(1);
       expect(overlapped).toBe(false);
       expect(maxInside).toBe(1);
     } finally {

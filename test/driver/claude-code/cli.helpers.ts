@@ -318,8 +318,9 @@ export function makeDriver(spec: ConformanceSpec): Driver {
     ...(spec.pricedModel !== undefined
       ? {
           pricing: (modelSpec: { provider: string; model: string }) =>
-            modelSpec.provider === spec.pricedModel?.provider
-              ? { input: 3, output: 15, cacheRead: 0, cacheWrite: 0 }
+            modelSpec.provider === spec.pricedModel?.provider &&
+            modelSpec.model === spec.pricedModel?.model
+              ? (spec.pricedModel?.rates ?? { input: 3, output: 15, cacheRead: 0, cacheWrite: 0 })
               : undefined,
         }
       : {}),
