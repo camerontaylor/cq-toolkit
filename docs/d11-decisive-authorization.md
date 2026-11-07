@@ -143,19 +143,19 @@ it still runs no head code and writes only `checks`.
 Each of these leaves the affected path unauthorized (needs-human) and is
 named in the report:
 
-| Case                                                                                        | Mechanism                                         |
-| ------------------------------------------------------------------------------------------- | ------------------------------------------------- |
-| Settle ledger absent or unreadable, a history barrier (discarded content), a history page budget exhausted (`limited`), or the PR not within `SETTLE_HISTORY_MAX_PAGES` pages | no epoch → record `invalid` |
-| Attestation absent, unreadable, or schema-invalid at the trust ref                          | `attested: false` → record `dormant`              |
-| Label applied at or before the epoch                                                        | `invalid` (strictly after)                        |
-| Label applied at or before the C3 attestation's `attestedAt` (attested)                     | `invalid` (strictly after; never retroactive)     |
-| Label applied via a GitHub App, or by anyone but the owner's `User`                         | `invalid`                                         |
-| Owner id unreadable                                                                         | every record `invalid`                            |
-| Label events unreadable                                                                     | that PR's record `invalid`                        |
-| Path changed by no admitted contribution (PR not in the closure)                            | `not contributed by any admitted PR`              |
-| Two contributions claim the same merge, or one PR twice (ambiguous)                         | both records `invalid`                            |
-| Closure violation, ambiguous merge PR, evil merge                                           | the gate refuses before any authorization (D-K.3) |
-| `lint` finding                                                                              | `fail`, never authorizable                        |
+| Case                                                                                                                                                                          | Mechanism                                         |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------- |
+| Settle ledger absent or unreadable, a history barrier (discarded content), a history page budget exhausted (`limited`), or the PR not within `SETTLE_HISTORY_MAX_PAGES` pages | no epoch → record `invalid`                       |
+| Attestation absent, unreadable, or schema-invalid at the trust ref                                                                                                            | `attested: false` → record `dormant`              |
+| Label applied at or before the epoch                                                                                                                                          | `invalid` (strictly after)                        |
+| Label applied at or before the C3 attestation's `attestedAt` (attested)                                                                                                       | `invalid` (strictly after; never retroactive)     |
+| Label applied via a GitHub App, or by anyone but the owner's `User`                                                                                                           | `invalid`                                         |
+| Owner id unreadable                                                                                                                                                           | every record `invalid`                            |
+| Label events unreadable                                                                                                                                                       | that PR's record `invalid`                        |
+| Path changed by no admitted contribution (PR not in the closure)                                                                                                              | `not contributed by any admitted PR`              |
+| Two contributions claim the same merge, or one PR twice (ambiguous)                                                                                                           | both records `invalid`                            |
+| Closure violation, ambiguous merge PR, evil merge                                                                                                                             | the gate refuses before any authorization (D-K.3) |
+| `lint` finding                                                                                                                                                                | `fail`, never authorizable                        |
 
 The `absent` and `dormant` cases keep today's behaviour exactly.
 
