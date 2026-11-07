@@ -2,6 +2,7 @@
 import datetime as dt
 import coverage
 import review_receipt
+import repo_registry
 import repair_tick
 import json
 import os
@@ -147,6 +148,15 @@ def summarize(status, queue, heartbeat, config, events, now):
                for kind in ("open", "delta", "merged", "coverage",
                             review_receipt.KIND, "backfill")}
     outcomes = {key: 0 for key in ("completed", "interrupted", "error")}
+    completed = dict(open=0, recent_merge=0, backfill=0, other=0)
+    by_id = {i.get("id"): i for i in items if i.get("id")}
+    def category(item):
+        kind = item.get("kind") or item.get("work_kind")
+        if kind == "open" or kind == "delta" and item.get("followup") != "merged":
+            return "open"
+        if kind == "merged-current" or kind == "delta" and item.get("followup") == "merged" or item.get("source") == "followup":
+            return "recent_merge"
+        return "backfill" if kind in ("merged", "coverage", "backfill") else "other"
     other = 0
     # A run can be harvested more than once (crash recovery re-harvests; a backfill
     # harvest that retains run ownership is retried every slot pass), so count each
@@ -155,10 +165,13 @@ def summarize(status, queue, heartbeat, config, events, now):
     for index, event in enumerate(events):
         at = timestamp(event.get("at"))
         if event.get("event") == "review_finished" and at is not None and now - 86400 <= at <= now:
-            finished[event.get("run") or ("anonymous", index)] = event.get("outcome")
-    for outcome in finished.values():
+            finished[event.get("run") or ("anonymous", index)] = event
+    for event in finished.values():
+        outcome = event.get("outcome")
         if outcome in outcomes:
             outcomes[outcome] += 1
+            if outcome == "completed":
+                completed[category(by_id.get(event.get("item"), event))] += 1
         else:
             other += 1
     last_tick = heartbeat.get("last_tick") or queue.get("last_tick")
@@ -168,7 +181,28 @@ def summarize(status, queue, heartbeat, config, events, now):
     usage = queue.get("usage") or {}
     limit = usage.get("limit") if isinstance(usage, dict) else None
     starts_cap = limit if type(limit) is int and limit > 0 else config["max_starts_per_hour"]
+    ranks = [{**entry, "rank_tier": entry.get("rank_tier", repo_registry.DEFAULT_RANK)}
+             for entry in config.get("repos", [])]
+    def pending_key(item):
+        rank = {"open": 0, "recent_merge": 2, "backfill": 3, "other": 4}[category(item)]
+        if item.get("kind") in ("coverage", "backfill"):
+            rank = 4
+        elif item.get("kind") == "delta" and category(item) == "open":
+            rank = 1
+        repo_rank = repo_registry.rank_for(item, primary, ranks)
+        # Open PRs/deltas now outrank repository tiers across all repos (#1177).
+        if repo_rank is not None and category(item) != "open":
+            rank = repo_rank
+        return (not item.get("operator_priority", False), rank, item.get("order", 999))
+    pending = [i for i in items if i.get("state") == "pending"
+               and not (i.get("kind") == "open" and i.get("cycles"))]
     return {
+        "backfill_reserved_slots": 1,
+        "completed_24h_by_work": completed,
+        "pending_items": [{"repo": i.get("repo") or (i.get("subject") or {}).get("repo") or config.get("repo"),
+                           "pr": i.get("pr") or (i.get("subject") or {}).get("pr"),
+                           "title": i.get("title"), "kind": i.get("kind")}
+                          for i in sorted(pending, key=pending_key)[:10]],
         "merged_current": merged_current(queue),
         "last_tick": last_tick, "status_as_of": status["generated_at"],
         "paused": bool(queue.get("paused")), "cooldown_until": queue.get("cooldown_until"),
@@ -272,6 +306,21 @@ def publish(root, queue, config, schedule, home=None, now=None):
                      config, read_events(root / "state/events.jsonl"), now)
     if not data["last_tick"]:
         raise ValueError("no completed tick to publish")
+    # Only the bounded public preview is resolved; queue internals stay private.
+    target = Path(os.environ.get("XDG_STATE_HOME", str(home / ".local/state"))) / "crq/summary.json"
+    try:
+        titles = {(i["repo"], i["pr"]): i.get("title") for i in read(target).get("pending_items", [])}
+    except (OSError, ValueError, KeyError, TypeError):
+        titles = {}
+    for item in data["pending_items"]:
+        repo, pr = item["repo"], item["pr"]
+        item["title"] = item["title"] or titles.get((repo, pr))
+        if not item["title"] and repo and type(pr) is int and pr > 0:
+            try:
+                item["title"] = command(["gh", "api", f"repos/{repo}/pulls/{pr}",
+                                         "--jq", ".title"], 3).strip() or None
+            except (OSError, RuntimeError, subprocess.TimeoutExpired):
+                pass
     data.update(schema_version=2, generated_at=generated)
     data["systemd_timers"], data["systemd_services"] = systemd_activity()
     data["merged_current"] = merged_current(queue, root / "state/receipts")
