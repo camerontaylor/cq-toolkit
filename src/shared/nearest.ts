@@ -17,12 +17,17 @@ const MAX_SUGGESTION_DISTANCE = 3;
 
 export function nearestKey(unknown: string, valid: readonly string[]): string | undefined {
   let best: string | undefined;
-  // Short names tolerate fewer edits, otherwise "x" would match any 3-letter key.
-  const limit = Math.min(MAX_SUGGESTION_DISTANCE, Math.max(1, Math.floor(unknown.length / 2)));
-  let bestDistance = limit + 1;
+  let bestDistance = Number.POSITIVE_INFINITY;
+  const typo = unknown.toLowerCase();
   for (const candidate of valid) {
-    const distance = editDistance(unknown.toLowerCase(), candidate.toLowerCase());
-    if (distance < bestDistance) {
+    // The cap scales with the longer of the two names, so "hi" can reach
+    // "high"; short-vs-short ("x" vs "run") still needs a near match.
+    const limit = Math.min(
+      MAX_SUGGESTION_DISTANCE,
+      Math.max(1, Math.floor(Math.max(unknown.length, candidate.length) / 2)),
+    );
+    const distance = editDistance(typo, candidate.toLowerCase());
+    if (distance <= limit && distance < bestDistance) {
       best = candidate;
       bestDistance = distance;
     }

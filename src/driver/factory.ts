@@ -254,16 +254,51 @@ const didYouMean = (name: string, valid: readonly string[]): string => {
   return near === undefined ? '' : ` — did you mean \`${near}\`?`;
 };
 
-/** Every binding whose value is not a lane id, across the WHOLE table. */
+const hasOwn = (o: object, k: string): boolean => Object.prototype.hasOwnProperty.call(o, k);
+
+/** A bindings row (provider → lane) for the role, by OWN key only. */
+function rowFor(
+  role: string,
+  bindings: DriverFactoryConfig['bindings'],
+): Readonly<Record<string, LaneId>> | undefined {
+  if (bindings === undefined || !hasOwn(bindings, role)) return undefined;
+  const row: unknown = bindings[role];
+  return typeof row === 'object' && row !== null && !Array.isArray(row)
+    ? (row as Readonly<Record<string, LaneId>>)
+    : undefined;
+}
+
+/**
+ * The ONE binding lookup: exact own provider, then own '*'. Inherited keys
+ * (`constructor`, `__proto__`, …) never count as bound.
+ */
+function bindingFor(
+  role: string,
+  provider: string,
+  bindings: DriverFactoryConfig['bindings'],
+): LaneId | undefined {
+  const row = rowFor(role, bindings);
+  if (row === undefined) return undefined;
+  if (hasOwn(row, provider)) return row[provider];
+  return hasOwn(row, '*') ? row['*'] : undefined;
+}
+
+/** Every malformed row and every non-lane value, across the WHOLE table. */
 function bindingProblems(bindings: DriverFactoryConfig['bindings']): string[] {
   const problems: string[] = [];
   for (const [role, byProvider] of Object.entries(bindings ?? {})) {
-    for (const [provider, configured] of Object.entries(byProvider)) {
+    const row: unknown = byProvider;
+    if (typeof row !== 'object' || row === null || Array.isArray(row)) {
+      const got = row === null ? 'null' : Array.isArray(row) ? 'an array' : typeof row;
+      problems.push(`binding table for role '${role}' must map provider → lane (got ${got})`);
+      continue;
+    }
+    for (const [provider, configured] of Object.entries(row)) {
       // Runtime binding validation (PR #238 review round 2): decoded/JS config
       // is plain data the compiler already trusted — a value outside the four
       // lanes must fail as a structured pre-dispatch 'config' throw, never as
       // a wrapper around an unconstructable lane whose run() dies later.
-      if (!LANE_IDS.includes(configured)) {
+      if (!LANE_IDS.includes(configured as LaneId)) {
         problems.push(
           `binding for role '${role}' on provider '${provider}' names unknown lane '${String(configured)}' — expected one of: ${LANE_IDS.join(', ')}${didYouMean(String(configured), LANE_IDS)}`,
         );
@@ -279,13 +314,13 @@ function unboundProblem(
   provider: string,
   bindings: DriverFactoryConfig['bindings'],
 ): string | undefined {
-  const byRole = bindings?.[role];
-  if (byRole?.[provider] !== undefined || byRole?.['*'] !== undefined) return undefined;
+  if (bindingFor(role, provider, bindings) !== undefined) return undefined;
   if (DEFAULT_PROVIDERS.includes(provider)) return undefined;
+  const row = rowFor(role, bindings);
   const hints: string[] = [];
-  const nearProvider = nearestKey(provider, [...DEFAULT_PROVIDERS, ...Object.keys(byRole ?? {})]);
+  const nearProvider = nearestKey(provider, [...DEFAULT_PROVIDERS, ...Object.keys(row ?? {})]);
   if (nearProvider !== undefined) hints.push(`provider \`${nearProvider}\``);
-  if (byRole === undefined) {
+  if (row === undefined) {
     const nearRole = nearestKey(role, [...KNOWN_ROLES, ...Object.keys(bindings ?? {})]);
     if (nearRole !== undefined && nearRole !== role) hints.push(`role \`${nearRole}\``);
   }
@@ -317,11 +352,7 @@ function laneForRole(
 ): LaneId {
   const unbound = unboundProblem(role, provider, bindings);
   if (unbound !== undefined) throwConfigProblems([unbound]);
-  const byRole = bindings?.[role];
-  const configured =
-    byRole !== undefined && Object.prototype.hasOwnProperty.call(byRole, provider)
-      ? byRole[provider]
-      : byRole?.['*'];
+  const configured = bindingFor(role, provider, bindings);
   return configured ?? DEFAULT_LANE;
 }
 
