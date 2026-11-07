@@ -520,7 +520,7 @@ async function dispatchCli(
   let cqEnv: CqEnv | undefined;
   // `cq config` still runs when the snapshot carries errors (the report must reach
   // stdout so the operator sees what failed); it then exits 2 like every other entry.
-  let configErrorLines: string[] = [];
+  let configErrorLines: readonly string[] = [];
   if (sub === 'config') configErrorLines = checkEntryEnv().errorLines;
   if (sub !== 'config') {
     const check = checkEntryEnv();
@@ -762,7 +762,13 @@ async function dispatchCli(
   // sink rides the importer into the ops registries' DriverFactoryConfig.
   // Human mode passes none: the library default is byte-identical narration
   // (one `cq:`-prefixed stderr line).
-  const importerWiring = mode === 'json' ? { onDeprecatedAlias: (): void => {} } : undefined;
+  const importerWiring =
+    mode === 'json' || cqEnv !== undefined
+      ? {
+          ...(mode === 'json' ? { onDeprecatedAlias: (): void => {} } : {}),
+          ...(cqEnv !== undefined ? { cqEnv } : {}),
+        }
+      : undefined;
   try {
     const op = await entry.importer(importerWiring);
     // The op's TypeScript return type is no runtime guarantee: ops load from

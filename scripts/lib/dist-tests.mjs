@@ -19,6 +19,9 @@ const INDIRECT_DIST_TESTS = new Set([
   // Same indirect shape: measurement-inputs.test.ts reaches dist only through
   // scripts/measurement-inputs.mjs (the v2 report schema import).
   'test/measurement-inputs.test.ts',
+  // gen-config-docs.test.ts spawns scripts/gen-config-docs.mjs, which imports
+  // dist/config/env-registry.js; the test text never names dist.
+  'test/config/gen-config-docs.test.ts',
 ]);
 export function needsDist(files, root) {
   return files.some((file) => {

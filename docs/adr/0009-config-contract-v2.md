@@ -2,7 +2,7 @@
 
 - **Status:** accepted by the owner on 2026-11-06
 - **Date:** 2026-11-06
-- **Supersedes in part:** [ADR-0002 Annex B](0002-annex-b-config.md): §B.2.5 strictness and reserved-key refusal, the "never workspace files" clause for non-trust keys, closed-domain enforcement, and the `optIn` relaxation machinery
+- **Supersedes in part:** [ADR-0002 Annex B](0002-annex-b-config.md): §B.2.5 strictness and reserved-key refusal, §B.4.1 `CQ_PROFILE` profile seeding, the "never workspace files" clause for non-trust keys, closed-domain enforcement, and the `optIn` relaxation machinery
 - **Closes:** the Phase 1.7 "separate domain configurations" pointer in [ADR-0005](0005-architecture-revision.md)
 - **Related:** [ADR-0004](0004-policy-check-trust-boundaries.md), [ADR-0008](0008-journal-v3-report-v2.md)
 
@@ -26,7 +26,9 @@
   run start. In machine mode (`--json`) stderr stays empty (I1) and the warning rides the run-start record
   instead. The run continues.
 - A recognised key with an invalid value, or a denied name (`CQ_APPROVAL_KEY*`), fails before dispatch. All such
-  errors are reported together, with exit 2.
+  errors are reported together, with exit 2. The one exception is the MCP harness (`src/harness/mcp/bin.ts`): it
+  keeps its documented startup protocol and exits 78 (`EX_CONFIG`, sysexits) with one stderr line, which the
+  driver's init-surface assertion relies on.
 - This is safe because of one invariant: **blank means conservative.** Every env-sourced key's blank value is its
   conservative value (for example `CQ_SANDBOX` blank means `required`). A mistyped name therefore falls back to
   stricter behaviour, never looser. A key whose blank is not conservative (a limit, such as a budget cap) must not
@@ -37,11 +39,15 @@
 **Precedence.** built-in → `cq.json` (committed, schema-strict) → env (`CQ_*`) → per call (CLI flag or op
 input). Trust-boundary keys (sandbox, merge trust set, protected branch and paths, approval) skip the `cq.json`
 and per-call layers: they never come from `cq.json`, plan JSON or op input. The list is examples: the `trust`
-flag in the registry (`src/config/env.ts`) is authoritative for which keys are trust-boundary keys.
+flag in the registry (`src/config/env-registry.ts`) is authoritative for which keys are trust-boundary keys.
 
 `CQ_PROFILE` profile seeding (Annex B §B.4.1) is retired. Nothing in `src` reads `CQ_PROFILE`.
 
-**Secrets** come from env only. A key is secret by name suffix, as in Annex B.
+**Secrets** come from env only. A key is secret by name suffix. The list is `SECRET_ENV_SUFFIXES` in
+`src/config/secret.ts`, matched case-insensitively by `isSecretEnvName`, and the registry derives each entry's
+`secret` flag from it. Today the list includes `_URL`, which Annex B's own list omits, so vendor `*_BASE_URL` names
+(for example `ANTHROPIC_BASE_URL`) are classified secret and recorded as present or absent only. Whether `_URL`
+should stay a secret suffix is pending an owner decision and is not decided here.
 
 **`CQ_APPROVAL_KEY*` is denied.** Approval is the attended preview-digest authority, not an env key.
 
@@ -60,8 +66,9 @@ Neutral keys such as `sessionsDir` may be set per call and are recorded as the `
 [`docs/config.md`](../config.md); the static gate fails when that table is stale. Annex B's hand-written key
 tables are retired; where they differ from the registry, the registry is current.
 
-**Inspection.** `cq config` prints each resolved key, its source layer and the warnings. `cq config --strict`
-exits 1 on any warning. It is opt-in, not a required check.
+**Inspection.** `cq config` prints each resolved key, its source layer, the warnings and the errors. It exits 2
+when the environment has errors (after printing the report), like every other subcommand. `cq config --strict`
+exits 1 on any warning when there are no errors. It is opt-in, not a required check.
 
 ## What changes in Annex B
 
