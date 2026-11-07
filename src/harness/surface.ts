@@ -40,6 +40,7 @@
 import { realpath, stat } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { z } from 'zod';
+import { ENV_NAME_PATTERN } from '../config/parsers.js';
 import type { SandboxLevel, ToolPolicy } from '../driver/types.js';
 import { TOOL_FAILURE_KINDS } from './failures.js';
 import { HarnessConfigSchema } from './config.js';
@@ -128,7 +129,7 @@ export function selectHarnessSurface(
 // ---------------------------------------------------------------------------
 
 /** The env-var NAME shape (POSIX/Windows standard) — names only, never values. */
-const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const ENV_NAME = ENV_NAME_PATTERN;
 
 /**
  * The whole binding of one harness surface, as strict plain data (Annex

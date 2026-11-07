@@ -71,6 +71,13 @@ config (call-layer recording is out of scope for C5 and would need a schema and 
 [`docs/config.md`](../config.md); the static gate fails when that table is stale. Annex B's hand-written key
 tables are retired; where they differ from the registry, the registry is current.
 
+**`CQ_RUN_ENV_PASSTHROUGH` grammar and deny set.** One parser (`parsePassthrough`, `src/config/parsers.ts`) owns both,
+and the registry, `resolveSandboxConfig`, `buildChildEnv` and the launcher env all use it. Names are separated by
+commas and/or whitespace. Annex B §B.5 stays in force: secret-suffixed names, the `AWS_*` family, `NPM_TOKEN`,
+`SSH_AUTH_SOCK`, `GOOGLE_APPLICATION_CREDENTIALS`, `DATABASE_URL`, `NODE_OPTIONS`, `NODE_PATH` and the sandbox policy
+knobs are refused with a config error that names the offending name (never a value). Other `CQ_*` names are not
+blanket-refused today.
+
 **Inspection.** `cq config` prints each resolved key, its source layer, the warnings and the errors. It exits 2
 when the environment has errors (after printing the report), like every other subcommand. `cq config --strict`
 exits 1 on any warning when there are no errors. It is opt-in, not a required check.

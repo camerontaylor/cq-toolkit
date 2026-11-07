@@ -94,14 +94,8 @@ const epochMs: CqEnvParser = (raw) => {
   return value;
 };
 
-/** Runtime (shared/proc.ts, harness/surface.ts) splits on commas and whitespace. */
-const passthrough: CqEnvParser = (raw) =>
-  parsePassthrough(
-    raw
-      .split(/[,\s]+/)
-      .filter(Boolean)
-      .join(','),
-  );
+/** One grammar and deny set for every path: see `parsePassthrough`. */
+const passthrough: CqEnvParser = (raw) => parsePassthrough(raw);
 
 function entry(
   name: string,

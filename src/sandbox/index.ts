@@ -4,6 +4,7 @@
 import { resolveSandboxConfig, SANDBOX_POLICY_ENV_NAMES } from './config.js';
 import type { SandboxConfig } from './config.js';
 import type { CqEnv } from '../config/env.js';
+import { ENV_NAME_PATTERN, passthroughRefusal } from '../config/parsers.js';
 import { processEnv } from '../config/process-env.js';
 
 const SAFE_ENV = new Set([
@@ -26,8 +27,6 @@ const SAFE_ENV = new Set([
   'CQ_RUN_ID',
   'CQ_SESSIONS_DIR',
 ]);
-
-const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 /**
  * Build a launcher environment from a parent environment.  The default
@@ -52,8 +51,14 @@ export function buildSandboxLauncherEnv(
     ...config.envPassthrough.map((name) => [name, 'passthrough'] as const),
     ...(config.declaredEnvNames ?? []).map((name) => [name, 'declared'] as const),
   ]) {
-    if (!ENV_NAME.test(name) || SANDBOX_POLICY_ENV_NAMES.has(name.toUpperCase())) {
+    if (!ENV_NAME_PATTERN.test(name) || SANDBOX_POLICY_ENV_NAMES.has(name.toUpperCase())) {
       throw new Error(`sandbox: launcher env ${origin} name '${name}' is not permitted`);
+    }
+    // The operator passthrough additionally refuses credential-shaped names
+    // (Annex B §B.5), the same check parsePassthrough applies at parse time.
+    if (origin === 'passthrough') {
+      const refusal = passthroughRefusal(name);
+      if (refusal !== undefined) throw new Error(`sandbox: launcher env passthrough ${refusal}`);
     }
     const value = parent[name];
     if (value !== undefined) out[name] = value;
