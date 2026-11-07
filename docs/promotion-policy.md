@@ -2,7 +2,7 @@
 
 Open PRs directly against `main`. Merge with a merge commit when `static` and
 `denylist` are green on the exact PR head and one independent reviewer has
-posted a PASS comment for that head, with no unresolved P0/P1 findings.
+posted a PASS review body or comment for that head, with no unresolved P0/P1 findings.
 
 The reviewer comment names the reviewer agent, the full head SHA and `PASS`.
 Reviewers post it with `cq-review-post` (agents repo), which posts as the
@@ -17,6 +17,30 @@ or separate identity is required. Automation ignores Bot authors and logins
 ending in `[bot]`, except `cq-review[bot]` review comments. The merging agent
 reads the review and judges independence and the verdict, and prefers a
 `cq-review[bot]` PASS when both exist.
+
+Reviewers write every actionable finding, including minor and nonblocking ones,
+as one ndjson `finding` event: `type: "finding"`, original `severity`, `title`,
+and `comment` describing the failure scenario and fix guidance. Include
+`fileName`, `startLine`, `endLine` only when the code was actually located.
+Never invent a location. Write a summary file containing
+`Independent review: PASS|CHANGES REQUESTED for <full head SHA>`, reviewer name,
+and an evidence line. From the reviewed cq-toolkit worktree, run:
+
+```sh
+cq-review-post --repo OWNER/NAME --pr N --head SHA --base BASE_SHA \
+  --reviewer NAME --findings findings.ndjson --body-file summary.md
+```
+
+Pass the base SHA actually reviewed. The default run ID is `N-head10-NAME`;
+keep it stable across retries. Findings become native review threads, while
+unanchored findings (including deleted code) are listed with their locations in
+the body. The body carries verdict and coverage, even when there are no findings.
+Findings mode prints JSON; fallback diagnostics go to stderr. Minor threads are
+not merge blockers. The merging agent still judges independence. Reply to or
+resolve threads through the existing reply/resolve path after an explicit
+disposition, never just because a later summary says PASS. Concurrent reviewers
+produce separate reviews; the run marker prevents duplicates for each posting
+account. A PASS for an older head does not count for the current head.
 
 Use the ordinary merge command, pinned to the reviewed head:
 

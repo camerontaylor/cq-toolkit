@@ -75,6 +75,44 @@ class ModuleTest(unittest.TestCase):
         self.td = tempfile.TemporaryDirectory()
         self.addCleanup(self.td.cleanup)
 
+    def test_independent_summary_explicit_login_and_base(self):
+        meta = {**META, "base": "c" * 40, "label": "Independent reviewer", "summary": "PASS for " + HEAD}
+        gh = FakeGh()
+        result = prf.deliver(REPO, 7, meta, write_ndjson(self.td.name,
+            [{**ANCHORED, "severity": "nonblocking"}, OUTSIDE]), gh=gh, login="cq-review[bot]")
+        self.assertEqual(result["inline"], 1)
+        payload = gh.posts()[0]
+        self.assertTrue(payload["body"].startswith(prf.marker(META["run_id"]) + "\nPASS"))
+        self.assertIn("Independent reviewer", payload["body"])
+        self.assertIn("nonblocking", payload["comments"][0]["body"])
+        self.assertIn("lines 20-22", payload["body"])
+        self.assertFalse(any(argv[2:3] == ["user"] for argv, _ in gh.calls))
+        self.assertTrue(any("repos/" + REPO + "/compare/" + "c" * 40 + "..." + HEAD in argv for argv, _ in gh.calls))
+
+    def test_summary_survives_422_and_empty_findings(self):
+        meta = {**META, "summary": "Independent review: PASS for " + HEAD}
+        gh = FakeGh(post=[(1, "", "HTTP 422"), (0, '{"id":77}', "")])
+        result = prf.deliver(REPO, 7, meta, write_ndjson(self.td.name, [ANCHORED]), gh=gh)
+        self.assertEqual(result["body_only"], 1)
+        self.assertIn(meta["summary"], gh.posts()[-1]["body"])
+        gh = FakeGh()
+        self.assertEqual(prf.deliver(REPO, 7, meta, write_ndjson(self.td.name, []), gh=gh)["state"], "created")
+
+    def test_cli_json(self):
+        import contextlib
+        import io
+        body = Path(self.td.name) / "summary.md"
+        body.write_text("Independent review: PASS for " + HEAD)
+        findings = write_ndjson(self.td.name, [ANCHORED])
+        argv = ["--repo", REPO, "--pr", "7", "--head", HEAD, "--base", BASE,
+                "--run-id", "review-cli", "--findings", str(findings), "--body-file", str(body)]
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(prf.main(argv, gh=FakeGh()), 0)
+        self.assertEqual(json.loads(output.getvalue())["inline"], 1)
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(prf.main(argv + ["--base", "bad"], gh=FakeGh()), 1)
+
     def test_right_ranges_cover_each_hunk_including_context(self):
         self.assertEqual(prf.right_ranges(PATCH), [(1, 4), (41, 46)])
         self.assertEqual(prf.right_ranges("@@ -3 +3 @@\n-x\n+y\n@@ -9,2 +8,0 @@\n-a\n-b\n"), [(3, 3)])
