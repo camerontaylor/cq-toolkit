@@ -49,6 +49,31 @@ describe('trust mirrors', () => {
     expect(report.jobs[0]?.result.status).toBe('ok');
   });
 
+  test('self-host queue defaults to snapshot and ambient base config', () => {
+    vi.stubEnv('CQ_MERGE_BASE_BRANCH', 'deliver');
+    expect(
+      buildRunInput(
+        [],
+        {
+          repoRoot: '.',
+          disableConflictResolution: true,
+          cqEnv: env({ CQ_MERGE_BASE_BRANCH: 'trunk' }),
+        },
+        NOW_MS,
+      ).baseBranch,
+    ).toBe('trunk');
+    expect(
+      buildRunInput(
+        [],
+        {
+          repoRoot: '.',
+          disableConflictResolution: true,
+        },
+        NOW_MS,
+      ).baseBranch,
+    ).toBe('deliver');
+  });
+
   test('self-host input resolves ambient protected branch without a supplied snapshot', () => {
     vi.stubEnv('CQ_MERGE_PROTECTED_BRANCH', 'release');
     const input = buildRunInput([], { repoRoot: '.', disableConflictResolution: true }, NOW_MS);
