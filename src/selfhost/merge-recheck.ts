@@ -921,11 +921,12 @@ const sameAccountAgentAccepted = (
     const login = review.authorLogin;
     if (login === null || login === '') continue;
     const name = bareName(login);
-    if ([...policy.excludedLogins].some((entry) => bareName(entry) === name)) continue;
-    // The cq-review App is the reviewer's own posting path; a plain comment
-    // counts only from the PR author (shared-account design) or a User holding
-    // a trusted association.
+    // The cq-review App is the reviewer's own posting path and is independent
+    // acceptance, so the exclusion and author guards bind only the plain-comment
+    // alternative: a plain comment counts from the PR author (shared-account
+    // design) or a User holding a trusted association, never from an excluded login.
     if (!isReviewAppAuthor(review.authorType, login)) {
+      if ([...policy.excludedLogins].some((entry) => bareName(entry) === name)) continue;
       if (review.authorType !== 'User') continue;
       const isAuthor = snapshot.authorLogin !== null && bareName(snapshot.authorLogin) === name;
       if (!isAuthor && !policy.trustedAssociations.has(review.association)) continue;

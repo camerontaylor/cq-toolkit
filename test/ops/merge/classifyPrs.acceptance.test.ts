@@ -53,6 +53,50 @@ describe('plain independent review acceptance', () => {
     ).toBe('settle_window_pending');
   });
 
+  test.each([{ automationLogin: 'cq-automation[bot]' }, { excludedLogins: ['automation-author'] }])(
+    'still accepts the cq-review App PASS when the PR author itself is automation or excluded: %j',
+    (config) => {
+      const authorLogin = 'automationLogin' in config ? 'cq-automation[bot]' : 'automation-author';
+      expect(
+        classifyPr(
+          candidate({
+            headRefOid: 'a'.repeat(40),
+            authorLogin,
+            issueComments: [
+              comment({
+                authorType: 'Bot',
+                authorLogin: 'cq-review[bot]',
+                body: `${'a'.repeat(40)} PASS`,
+              }),
+            ],
+          }),
+          PENDING_MS,
+          { ...defaultClassifyPrConfig, ...config },
+        ).reason,
+      ).toBe('settle_window_pending');
+    },
+  );
+
+  test('the excluded PR author cannot accept through the shared-account path', () => {
+    expect(
+      classifyPr(
+        candidate({
+          headRefOid: 'a'.repeat(40),
+          authorLogin: 'automation-author',
+          issueComments: [
+            comment({
+              authorType: 'User',
+              authorLogin: 'automation-author',
+              body: `${'a'.repeat(40)} PASS`,
+            }),
+          ],
+        }),
+        PENDING_MS,
+        { ...defaultClassifyPrConfig, excludedLogins: ['automation-author'] },
+      ).reason,
+    ).toBe('no_acceptable_review');
+  });
+
   test('accepts a plain top-level PR-author comment with the exact head and PASS', () => {
     expect(
       classifyPr(
