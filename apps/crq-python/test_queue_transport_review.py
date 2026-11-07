@@ -187,3 +187,23 @@ class ReviewTransportTests(SnapshotTransportFixture, unittest.TestCase):
         self.review["inputs"].update(head_commit=head, head_tree=self.base_tree)
         self.review["snapshot"] = dict(v=1, tree=self.base_tree, objects=[obj], sha256=checksum)
         self.assertEqual(self.call_review(self.review)["action"], "no-changes")
+
+    def test_historical_secret_deleted_before_head_is_scanned_before_install(self):
+        blob = self.git("hash-object", "-w", "--stdin", data=b"historical-secret-marker\n")
+        tree = self.git("mktree", data=f"100644 blob {blob}\tsecret.env\n".encode())
+        intermediate = self.commit(tree, self.base)
+        head = self.commit(self.changed_tree, intermediate)
+        ids = sorted(self.git("rev-list", "--objects", "--no-object-names", head, "^" + self.base).split())
+        objects, digest = [], hashlib.sha256()
+        for oid in ids:
+            kind = self.git("cat-file", "-t", oid)
+            data = base64.b64encode(author_snapshot.git(self.repo, "cat-file", kind, oid)).decode()
+            objects.append(dict(oid=oid, type=kind, data=data))
+            digest.update((oid + "\0" + kind + "\0" + data + "\n").encode())
+        self.review["inputs"]["head_commit"] = head
+        self.review["snapshot"] = dict(v=1, tree=self.changed_tree, objects=objects, sha256=digest.hexdigest())
+        self.runner.denylist_rules = lambda: [{"regex": "historical-secret-marker", "path": "^secret\\.env$"}]
+        with self.assertRaisesRegex(author_snapshot.AuthorRefused, "snapshot secret scan refused"):
+            self.call_review(self.review)
+        self.assertEqual(self.saved["items"], [])
+        self.assertEqual(author_snapshot.git(self.destination, "for-each-ref", "refs/crq/"), b"")

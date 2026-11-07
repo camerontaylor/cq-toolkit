@@ -179,11 +179,27 @@ def install(snapshot, binding, runner, *, original=False):
         # Only entries that differ from base are checked: unchanged entries already exist in the
         # review clone, and walking the whole tree would bound-fail on large repositories.
         raw = git(quarantine, "diff-tree", "-r", "-z", "--no-renames", binding["base"], binding["head"]).split(b"\0")
+        if original:
+            # The vendor can inspect original history, including blobs removed
+            # before HEAD. Scan each transferred commit's changes against every
+            # parent; -m includes merge introductions, --root includes roots.
+            history_bytes = sum(len(part) + 1 for part in raw)
+            for oid, kind, _ in objects:
+                if kind == "commit":
+                    history = git(quarantine, "diff-tree", "-r", "-m", "-z", "--no-renames",
+                                  "--no-commit-id", "--root", oid).split(b"\0")
+                    history_bytes += sum(len(part) + 1 for part in history)
+                    if history_bytes > MAX_WIRE:
+                        raise AuthorRefused("snapshot history scan exceeds bound; reduce the commit range")
+                    raw.extend(history)
+            raw = [part for part in raw if part]
         entries = []  # (mode, oid, raw_path) for every added or modified path
         for meta, raw_path in zip(raw[0::2], raw[1::2]):
             _, new_mode, _, new_oid, _ = meta.split(b" ")
             if new_mode != b"000000":
                 entries.append((new_mode, new_oid.decode(), raw_path))
+        if original:
+            entries = sorted(set(entries))
         if any(mode not in (b"100644", b"100755", b"120000") for mode, _, _ in entries):
             raise AuthorRefused("snapshot gitlinks or unsupported modes refused")
         # Tree entries are typed by mode, not by object: a 100644 entry may name a tree.
