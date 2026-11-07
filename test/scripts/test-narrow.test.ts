@@ -19,6 +19,8 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
+  INTERNAL_TEST_ENV,
+  childEnv,
   classOf,
   loggedVitestArgs,
   missingManifestEntries,
@@ -646,5 +648,37 @@ describe('Python narrow selection and evidence', () => {
     ).toBe(1);
     expect(readPythonReport('Ran 0 tests in 0.01s\n\nOK\n')).toBeNull();
     expect(readPythonReport('no summary')).toBeNull();
+  });
+});
+
+describe('childEnv (internal runner markers never reach a child)', () => {
+  it('removes every internal marker and keeps registered names', () => {
+    const input = {
+      PATH: '/usr/bin',
+      CQ_DIST_PREPARED: '1',
+      CQ_RUN_ID: 'run-1',
+      CQ_TEST_NARROW_REEXEC: '1',
+      CQ_TEST_NARROW_REPORT: '1',
+    };
+    const env = childEnv(input);
+    expect(env).toEqual({
+      PATH: '/usr/bin',
+      CQ_DIST_PREPARED: '1',
+      CQ_RUN_ID: 'run-1',
+    });
+    for (const name of INTERNAL_TEST_ENV) expect(env).not.toHaveProperty(name);
+  });
+  it('does not mutate the input environment', () => {
+    const input = {
+      KEEP: 'yes',
+      CQ_TEST_NARROW_REEXEC: '1',
+      CQ_TEST_NARROW_REPORT: '1',
+    };
+    childEnv(input);
+    expect(input).toEqual({
+      KEEP: 'yes',
+      CQ_TEST_NARROW_REEXEC: '1',
+      CQ_TEST_NARROW_REPORT: '1',
+    });
   });
 });
