@@ -433,7 +433,8 @@ export class ClaudeCodeCliTransport implements Driver {
       budget.maxTokens !== undefined &&
       (!Number.isFinite(budget.maxTokens) || budget.maxTokens <= 0)
     ) {
-      throw new Error(
+      throw new DispatchError(
+        'config',
         `claude-code driver: budget.maxTokens must be a finite number > 0, got ${String(budget.maxTokens)}`,
       );
     }

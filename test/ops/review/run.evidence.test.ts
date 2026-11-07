@@ -232,6 +232,91 @@ describe('review.run', () => {
     }
   });
 
+  it('maps a thrown evidence blob read to a failed result', async () => {
+    const repo = await makeTestRepo();
+    try {
+      await configureAgentRepo(repo);
+      await repo.write('src/evidence.ts', 'export const value = 1;\n');
+      repo.commitAll('evidence fixture');
+      const effects = repoEffects(repo, (command, args) => {
+        // A spawn fault or an oversized blob rejects instead of exiting non-zero.
+        if (command === 'git' && args[0] === 'show') throw new Error('git show buffer exceeded');
+        return undefined;
+      });
+      const requested: string[] = [];
+      const result = await makeReviewRun({
+        drivers: scriptedDrivers((input) => requested.push(input.prompt)),
+        effectsFactory: () => effects,
+        scannerFactory: () => async (components) =>
+          components.map((component) => ({ component: component.component, hits: [] })),
+      })({ repoRoot: repo.root, prepareEvidence: true, maxTokens: 5000 });
+      expect(result.status).toBe('failed');
+      if (result.status === 'failed')
+        expect(result.error).toContain('could not read evidence background');
+      expect(requested).toHaveLength(0);
+    } finally {
+      await repo.cleanup();
+    }
+  });
+
+  it('maps a supporting-evidence load fault to needs-human instead of rejecting', async () => {
+    const repo = await makeTestRepo();
+    try {
+      await configureAgentRepo(repo);
+      await repo.write('src/dependency.ts', 'export const dependency = 1;\n');
+      repo.commitAll('dependency baseline');
+      const base = repo.git('rev-parse', 'HEAD').trim();
+      await repo.write('src/evidence.ts', 'export const value = 1;\n');
+      repo.commitAll('evidence fixture');
+      const effects = repoEffects(repo, (command, args) => {
+        if (command === 'git' && args[0] === 'show' && args[1] === `${base}:src/dependency.ts`)
+          throw new Error('git show buffer exceeded');
+        return undefined;
+      });
+      const result = await makeReviewRun({
+        drivers: scriptedDrivers(undefined, 0, () => [
+          {
+            file: 'src/evidence.ts',
+            line: 1,
+            severity: 'high',
+            text: 'seeded',
+            evidenceV1: {
+              version: 1,
+              failureScenario: 'seeded scenario',
+              primary: {
+                file: 'src/evidence.ts',
+                side: 'head',
+                start: 1,
+                end: 1,
+                quote: 'export const value = 1;',
+              },
+              supporting: [
+                {
+                  file: 'src/dependency.ts',
+                  side: 'head',
+                  start: 1,
+                  end: 1,
+                  quote: 'export const dependency = 1;',
+                  relevance: 'caller dependency',
+                },
+              ],
+            },
+          },
+        ]),
+        effectsFactory: () => effects,
+        scannerFactory: () => async (components) =>
+          components.map((component) => ({ component: component.component, hits: [] })),
+      })({ repoRoot: repo.root, base, prepareEvidence: true, maxTokens: 5000 });
+      expect(result.status).toBe('needs-human');
+      const report = result.status === 'ok' ? result.value : result.report;
+      expect(report?.sources.find((source) => source.kind === 'agent')?.reason).toContain(
+        'git show buffer exceeded',
+      );
+    } finally {
+      await repo.cleanup();
+    }
+  });
+
   it('stops all repair dispatch after a provider refusal and retains both findings', async () => {
     const repo = await makeTestRepo();
     try {

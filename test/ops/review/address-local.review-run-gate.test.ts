@@ -110,3 +110,23 @@ test.each([
     await f.cleanup();
   }
 });
+
+test('a branch with no review.run folder returns the documented no-record guidance', async () => {
+  const f = await fixture();
+  try {
+    // No initialRecord and no input record: the branch has never run
+    // review.run, so .cq/review/<branch> does not exist at all. A raw ENOENT
+    // must not replace the documented guidance.
+    const result = await makeReviewAddress({ drivers: f.drivers })({
+      repoRoot: f.repo.root,
+      source: 'local',
+      journalDir: f.journalDir,
+    });
+    expect(result.status).toBe('needs-human');
+    const reason = result.status === 'needs-human' ? result.reason : '';
+    expect(reason).toContain('no findings record; run review.run or pass --record');
+    expect(reason).not.toContain('ENOENT');
+  } finally {
+    await f.cleanup();
+  }
+});

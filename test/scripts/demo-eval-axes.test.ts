@@ -61,20 +61,21 @@ function runDemo(args: string[], keys: Record<string, string> = {}): SpawnSyncRe
   return res;
 }
 
-// Mirror of the script's cell table (same lane/provider/model quadruple).
+// Mirror of the script's cell table (same lane/provider/model).
 const CELLS = [
-  { lane: 'ai-sdk', provider: 'zai', model: 'ai-sdk/glm-5.3-flash' },
-  { lane: 'ai-sdk', provider: 'deepseek', model: 'deepseek-chat' },
-  { lane: 'claude-code', provider: 'zai', model: 'ai-sdk/glm-5.3-flash' },
+  { lane: 'ai-sdk', provider: 'zai', model: 'glm-5.3-flash' },
+  { lane: 'ai-sdk', provider: 'deepseek', model: 'deepseek-flash' },
+  { lane: 'claude-code', provider: 'zai', model: 'glm-4.6' },
+  { lane: 'acp', provider: 'zai', model: 'glm-5.3-flash' },
 ];
 
 describe('eval-axes-select module: --only selection and the credential gate (pure, dist-free)', () => {
-  it('selectCells returns all 3 cells with no --only', () => {
+  it('selectCells returns all 4 cells with no --only', () => {
     expect(selectCells(CELLS, ['node', 'scripts/demo-eval-axes.mjs'])).toEqual(CELLS);
   });
 
   it('selectCells filters by substring', () => {
-    expect(selectCells(CELLS, ['node', 'x', '--only', 'ai-sdk/glm-5.3-flash'])).toHaveLength(2);
+    expect(selectCells(CELLS, ['node', 'x', '--only', 'ai-sdk/glm-5.3-flash'])).toHaveLength(1);
     expect(selectCells(CELLS, ['node', 'x', '--only', 'deepseek'])).toHaveLength(1);
   });
 

@@ -3,6 +3,7 @@ import importlib.util
 from importlib.machinery import SourceFileLoader
 import hashlib
 import io
+import os
 import resource
 import struct
 import zlib
@@ -270,12 +271,19 @@ class LedgerSignerTest(unittest.TestCase):
                 signer.install_token("other/repo", ledger_write=True)
 
     def test_entrypoint_rejects_nonroot_and_oversized_frame_without_mint(self):
-        for uid, frame in ((1000, b"{}\n"), (0, b'{"base":"a","head":"b","bytes":67108865}\n')):
+        # Each frame would publish if only the other guard were missing, so the
+        # refusal identifies the guard rather than incidental malformed input.
+        valid = b'{"base":"' + b"a" * 40 + b'","head":"' + b"b" * 40 + b'","bytes":1}\nX'
+        oversized = b'{"base":"a","head":"b","bytes":5}\nXXXXX'
+        for uid, frame, limit in ((1000, valid, signer.LEDGER_BUNDLE_LIMIT), (0, oversized, 4)):
             with mock.patch.object(signer.os, "geteuid", return_value=uid), \
+                 mock.patch.object(signer, "LEDGER_BUNDLE_LIMIT", limit), \
                  mock.patch.object(signer.sys, "stdin", SimpleNamespace(buffer=io.BytesIO(frame))), \
                  mock.patch.object(signer.sys, "stdout", io.StringIO()) as output, \
+                 mock.patch.object(signer, "publish_ledger_commit") as publish, \
                  mock.patch.object(signer, "install_token") as mint:
                 self.assertEqual(signer.ledger_publish_entry(), 2)
+                publish.assert_not_called()
                 mint.assert_not_called()
                 self.assertNotIn("token", output.getvalue())
 
@@ -288,3 +296,42 @@ class LedgerSignerTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "outside transport capability"):
                     spool.main()
                 connect.assert_not_called()
+
+    def test_read_bundle_returns_complete_frame_within_deadline(self):
+        read_fd, write_fd = os.pipe()
+        try:
+            os.write(write_fd, b"bundle-bytes")
+            os.close(write_fd); write_fd = -1
+            self.assertEqual(spool.read_bundle(read_fd, limit=16, deadline_s=5), b"bundle-bytes")
+        finally:
+            os.close(read_fd)
+            if write_fd >= 0:
+                os.close(write_fd)
+
+    def test_read_bundle_refuses_stalled_input_and_oversized_body(self):
+        read_fd, write_fd = os.pipe()
+        try:
+            # Writer stays open with nothing to send: select reports no data,
+            # so the stalled upload is refused instead of blocking.
+            with self.assertRaisesRegex(ValueError, "deadline exceeded"):
+                spool.read_bundle(read_fd, limit=16, deadline_s=0.1)
+            os.write(write_fd, b"x" * 17)
+            os.close(write_fd); write_fd = -1
+            body = spool.read_bundle(read_fd, limit=16, deadline_s=5)
+            self.assertEqual(len(body), 17)
+            self.assertGreater(len(body), 16)
+        finally:
+            os.close(read_fd)
+            if write_fd >= 0:
+                os.close(write_fd)
+
+    def test_read_bundle_size_cap_kept_by_caller(self):
+        # read_bundle returns limit + 1 so main() can still apply its size check.
+        read_fd, write_fd = os.pipe()
+        os.close(write_fd)
+        try:
+            self.assertEqual(spool.read_bundle(read_fd, limit=3, deadline_s=5), b"")
+        finally:
+            os.close(read_fd)
+        self.assertLessEqual(spool.BUNDLE_LIMIT, 64 * 1024 * 1024)
+        self.assertLess(spool.INPUT_DEADLINE_S, 330)

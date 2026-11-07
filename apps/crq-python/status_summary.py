@@ -3,6 +3,7 @@ import datetime as dt
 import coverage
 import review_receipt
 import repair_tick
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -18,8 +19,18 @@ def timestamp(value):
     return dt.datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
 
 
-def read(path):
-    return json.loads(Path(path).read_text())
+def read_receipt_document(root, receipt_id):
+    """Parse the receipt bytes the digest covers, from a single snapshot.
+
+    read_receipt verifies one snapshot but returns only a manifest, so a
+    second read here could parse different bytes than the ones verified.
+    """
+    if not isinstance(receipt_id, str) or not re.fullmatch(r"[0-9a-f]{64}", receipt_id):
+        raise ValueError("invalid receipt id")
+    data = (Path(root) / (receipt_id + ".json")).read_bytes()
+    if hashlib.sha256(data).hexdigest() != receipt_id:
+        raise ValueError("receipt digest mismatch")
+    return json.loads(data)
 
 
 def command(argv, timeout):
@@ -46,8 +57,7 @@ def merged_current(queue, receipt_root=None):
             receipt_id = item["receipt_id"]
             if receipt_root is None:
                 raise ValueError("receipt bytes unavailable")
-            review_receipt.read_receipt(receipt_root, receipt_id)
-            document = read(Path(receipt_root) / (receipt_id + ".json"))
+            document = read_receipt_document(receipt_root, receipt_id)
             capture = document["capture"]
             # Follow only retained queue lineage with matching receipt/state;
             # reject dangling/cyclic links and verify the original source binding.
@@ -91,7 +101,7 @@ def merged_current(queue, receipt_root=None):
                 disposition = path.get("disposition", "unknown")
                 if disposition not in ("included", "renamed"):
                     exclusions[disposition] = exclusions.get(disposition, 0) + 1
-        except (KeyError, TypeError, ValueError, OSError):
+        except (KeyError, TypeError, ValueError, AttributeError, OSError):
             counts["unverified"] += 1
     discovery = queue.get("merged_reconcile") or {}
     allowed = ("after", "before", "complete", "complete_through", "next_cursor", "represented",
@@ -226,10 +236,11 @@ def systemd_activity():
     def monotonic_time(value):
         if not value or value in ("0", "infinity", "n/a"):
             return None
-        scales = {"w": 604800, "d": 86400, "h": 3600, "min": 60,
-                  "s": 1, "ms": .001, "us": .000001, "µs": .000001}
-        parts = re.findall(r"(\d+(?:\.\d+)?)(min|ms|us|µs|w|d|h|s)", value)
-        if not parts or re.sub(r"\d+(?:\.\d+)?(?:min|ms|us|µs|w|d|h|s)\s*", "", value).strip():
+        scales = {"y": 31557600, "month": 2629800, "w": 604800, "d": 86400, "h": 3600,
+                  "min": 60, "s": 1, "ms": .001, "us": .000001, "µs": .000001}
+        units = "y|month|min|ms|us|µs|w|d|h|s"
+        parts = re.findall(rf"(\d+(?:\.\d+)?)({units})", value)
+        if not parts or re.sub(rf"\d+(?:\.\d+)?(?:{units})\s*", "", value).strip():
             raise ValueError("unexpected systemd timespan")
         return realtime + sum(float(n) * scales[unit] for n, unit in parts) - monotonic
 

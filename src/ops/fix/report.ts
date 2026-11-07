@@ -213,17 +213,20 @@ export function plannedTaskRowOf(task: FixTaskReport): PlannedTaskRow {
  * The accounting row of a planned unit that never ran: its task list was
  * never derived (the baseline probe never completed), so the row names the
  * unit, its planned branch and the stop reason, and carries no fabricated
- * tasks. The row counts as planned and unresolved.
+ * tasks. The row counts as planned and unresolved. `outcome` is the unit's
+ * stop refinement: a budget stop is `exhausted`, anything else (or a caller
+ * that does not distinguish) is `not-started`.
  */
 export function neverStartedRow(
   segments: { kind: string; slug: string; branch: string },
   task: string,
   reason: string,
+  outcome: 'not-started' | 'exhausted' = 'not-started',
 ): PlannedTaskRow {
   return {
     unit: `${segments.kind}/${segments.slug}`,
     task: { id: task, files: [] },
-    outcome: 'not-started',
+    outcome,
     attempts: [],
     reason,
     branch: segments.branch,
@@ -232,7 +235,7 @@ export function neverStartedRow(
       {
         unit: `${segments.kind}/${segments.slug}`,
         task,
-        outcome: 'not-started',
+        outcome,
         gate: 'none',
         reason,
       },

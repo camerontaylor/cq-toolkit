@@ -26,6 +26,8 @@ describe('parseSelfhostArgs', () => {
     expect(() => parseSelfhostArgs(['stray-positional'])).toThrow(/usage:/);
     expect(() => parseSelfhostArgs(['--max-usd'])).toThrow(/requires a value/);
     expect(() => parseSelfhostArgs(['--journal-root', ''])).toThrow(/non-empty/);
+    expect(() => parseSelfhostArgs(['--journal-root', '--dry-run'])).toThrow(/flag-like/);
+    expect(() => parseSelfhostArgs(['--responder-login', '--dry-run'])).toThrow(/flag-like/);
   });
 
   test('--max-usd rejects negative and non-finite values fail-loud', () => {

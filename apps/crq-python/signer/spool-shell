@@ -3,8 +3,41 @@
 import json
 import os
 import re
+import select
 import socket
 import sys
+import time
+
+BUNDLE_LIMIT = 64 * 1024 * 1024
+# Total time allowed for the client to deliver its bundle. Below the 330 s
+# client SSH and ledger-socket timeouts, so a stalled upload is refused here
+# instead of holding a forced-command process until the client finishes.
+INPUT_DEADLINE_S = 300
+_READ_CHUNK = 1024 * 1024
+
+
+def read_bundle(fd, limit=BUNDLE_LIMIT, deadline_s=INPUT_DEADLINE_S):
+    """Read at most limit + 1 bytes from fd before the total input deadline.
+
+    select(2) reports readability on pipes, so a client that sends a short
+    bundle and keeps stdin open cannot hold this process past deadline_s.
+    Returns the bytes read; callers enforce the size cap from the length.
+    """
+    body = bytearray()
+    end = time.monotonic() + deadline_s
+    while len(body) <= limit:
+        remaining = end - time.monotonic()
+        if remaining <= 0:
+            raise ValueError('ledger bundle input deadline exceeded')
+        ready, _, _ = select.select([fd], [], [], remaining)
+        if not ready:
+            raise ValueError('ledger bundle input deadline exceeded')
+        piece = os.read(fd, min(_READ_CHUNK, limit + 1 - len(body)))
+        if not piece:
+            break
+        body += piece
+    return bytes(body)
+
 
 def main():
     if sys.argv[1:] not in ([], ['ledger-only']):
@@ -18,8 +51,8 @@ def main():
     if verb == 'ledger-publish':
         if len(args) != 2 or any(not re.fullmatch(r'[0-9a-f]{40}', value) for value in args):
             raise ValueError('ledger base and head required')
-        body = sys.stdin.buffer.read(64 * 1024 * 1024 + 1)
-        if not body or len(body) > 64 * 1024 * 1024:
+        body = read_bundle(sys.stdin.fileno())
+        if not body or len(body) > BUNDLE_LIMIT:
             raise ValueError('invalid ledger bundle size')
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
             connection.settimeout(330)

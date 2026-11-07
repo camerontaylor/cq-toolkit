@@ -284,8 +284,18 @@ export function makeReviewRun(
       }
       // Retained receipt findings are obligations, not a current review source.
       // Include them even when settling an old head requires a fresh vendor run.
-      const retainedLedger = effects.openLedger(state.branch).load();
-      const retainedFindings = retainedReceiptFindings(retainedLedger);
+      let retainedLedger: DevLedgerFile;
+      let retainedFindings: Finding[];
+      try {
+        retainedLedger = effects.openLedger(state.branch).load();
+        retainedFindings = retainedReceiptFindings(retainedLedger);
+      } catch (error) {
+        // Corrupt persisted ledger state is a taxonomy failure, never a rejection.
+        return {
+          status: 'failed',
+          error: `review.run: retained vendor debt could not be read (${error instanceof Error ? error.message : String(error)})`,
+        };
+      }
       if (retainedFindings.length > 0)
         records.push({
           schemaVersion: 1,
@@ -330,6 +340,10 @@ export function makeReviewRun(
                     severity: finding.severity,
                     text: finding.excerpt ?? '',
                     ...(finding.fileName !== undefined ? { file: finding.fileName } : {}),
+                    ...(finding.line !== undefined ? { line: finding.line } : {}),
+                    ...(finding.rule !== undefined ? { rule: finding.rule } : {}),
+                    ...(finding.evidence !== undefined ? { evidence: finding.evidence } : {}),
+                    ...(finding.evidenceV1 !== undefined ? { evidenceV1: finding.evidenceV1 } : {}),
                     status: disposition?.action ?? 'open',
                     ...(disposition ? { reason: disposition.why } : {}),
                   };
@@ -620,40 +634,54 @@ export function makeReviewRun(
                   if (input.prepareEvidence) {
                     const blobs = new Map<string, AnchorBlobInput>();
                     for (const component of components) {
-                      const readBlob = async (revision: string) => {
-                        const result = await effects.runCommand(
-                          'git',
-                          ['show', `${revision}:${component.path}`],
-                          {
-                            timeoutMs: Math.max(1, Math.min(60_000, remainingWallMs())),
-                            ...(deadline.signal ? { signal: deadline.signal } : {}),
-                          },
-                        );
-                        return result.exitCode === 0 ? result.stdout : undefined;
-                      };
-                      const base = await readBlob(reviewedBase);
-                      const captured = component.component.startsWith('untracked:')
-                        ? { ok: true as const, text: component.text }
-                        : await effects.readWorktreeFile(component.path, 4 * 1024 * 1024);
-                      const head = captured.ok ? captured.text : undefined;
-                      const baseHunks: { start: number; end: number }[] = [];
-                      const headHunks: { start: number; end: number }[] = [];
-                      for (const match of component.text.matchAll(
-                        /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/gm,
-                      )) {
-                        baseHunks.push({
-                          start: Number(match[1]),
-                          end: Number(match[1]) + Number(match[2] ?? 1),
-                        });
-                        headHunks.push({
-                          start: Number(match[3]),
-                          end: Number(match[3]) + Number(match[4] ?? 1),
-                        });
+                      try {
+                        const readBlob = async (revision: string) => {
+                          const result = await effects.runCommand(
+                            'git',
+                            ['show', `${revision}:${component.path}`],
+                            {
+                              timeoutMs: Math.max(1, Math.min(60_000, remainingWallMs())),
+                              ...(deadline.signal ? { signal: deadline.signal } : {}),
+                            },
+                          );
+                          return result.exitCode === 0 ? result.stdout : undefined;
+                        };
+                        const base = await readBlob(reviewedBase);
+                        const captured = component.component.startsWith('untracked:')
+                          ? { ok: true as const, text: component.text }
+                          : await effects.readWorktreeFile(component.path, 4 * 1024 * 1024);
+                        const head = captured.ok ? captured.text : undefined;
+                        const baseHunks: { start: number; end: number }[] = [];
+                        const headHunks: { start: number; end: number }[] = [];
+                        for (const match of component.text.matchAll(
+                          /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/gm,
+                        )) {
+                          baseHunks.push({
+                            start: Number(match[1]),
+                            end: Number(match[1]) + Number(match[2] ?? 1),
+                          });
+                          headHunks.push({
+                            start: Number(match[3]),
+                            end: Number(match[3]) + Number(match[4] ?? 1),
+                          });
+                        }
+                        if (component.component.startsWith('untracked:') && head !== undefined)
+                          headHunks.push({ start: 1, end: head.split('\n').length + 1 });
+                        blobs.set(component.path, { base, head, baseHunks, headHunks });
+                      } catch (error) {
+                        // Cancellation keeps its meaning; any other read fault (a spawn
+                        // fault or an oversized blob) is a public-op failure, never a
+                        // rejection out of review.run. A normal non-zero `git show` exit
+                        // stays missing content and never reaches here.
+                        deadline.signal?.throwIfAborted();
+                        return {
+                          status: 'failed',
+                          error: `review.run: could not read evidence background for '${component.path}' (${error instanceof Error ? error.message : String(error)})`,
+                        };
                       }
-                      if (component.component.startsWith('untracked:') && head !== undefined)
-                        headHunks.push({ start: 1, end: head.split('\n').length + 1 });
-                      blobs.set(component.path, { base, head, baseHunks, headHunks });
                     }
+                    // Called from inside the agent engine, whose boundary maps a
+                    // fault here to needs-human, so it cannot reject review.run.
                     loadEvidencePaths = async (paths) => {
                       for (const path of new Set(paths)) {
                         if (
@@ -1101,11 +1129,22 @@ export function makeReviewRun(
         base: state.base,
         dirtySha256: state.dirtySha256,
       };
-      const ancestry = readCurrentEnrollment(
-        effects.openLedger(state.branch).load(),
-        currentIdentity,
-        target,
-      );
+      let ancestry: ReturnType<typeof readCurrentEnrollment>;
+      try {
+        ancestry = readCurrentEnrollment(
+          effects.openLedger(state.branch).load(),
+          currentIdentity,
+          target,
+        );
+      } catch (error) {
+        // The findings record was already persisted: return the taxonomy failure
+        // with that record rather than rejecting with no result at all.
+        return {
+          status: 'failed',
+          error: `review.run: current enrollment lineage could not be read (${error instanceof Error ? error.message : String(error)})`,
+          report: record,
+        };
+      }
       const pendingAtThisIdentity =
         ancestry.kind === 'ambiguous'
           ? ancestry.requestIds

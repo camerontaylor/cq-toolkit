@@ -25,7 +25,7 @@ export function needsDist(files, root) {
     const absolute = resolve(root, file);
     const name = relative(root, absolute).split(sep).join('/');
     return (
-      INDIRECT_DIST_TESTS.has(name) || /\bdist(?:\/|['"])/.test(readFileSync(absolute, 'utf8'))
+      INDIRECT_DIST_TESTS.has(name) || /\bdist(?:\/|['"`])/.test(readFileSync(absolute, 'utf8'))
     );
   });
 }

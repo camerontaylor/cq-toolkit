@@ -11,6 +11,7 @@ repair_tick/backfill_runtime receive `c` — no import cycle, tests pass fakes.
 from pathlib import Path
 import json
 import re
+import subprocess
 from typing import Any, Dict, List, Optional, Tuple
 
 import repo_registry
@@ -241,6 +242,28 @@ def _discover_repo(runner, q: Dict[str, Any], cfg: Dict[str, Any], dry: bool) ->
     return log
 
 
+def _rescueable(row: Dict[str, Any]) -> bool:
+    """A row current_paths stopped at the cumulative scope cap.
+
+    current_paths decides the cap before reading the blob, so such a row never
+    had the UTF-8/NUL content check; a size at or below the per-file cap
+    distinguishes it from a per-file over-cap row."""
+    return (row.get("disposition") == "unsupported" and row.get("reason") == SCOPE_CAP_REASON
+            and isinstance(row.get("blob"), str)
+            and type(row.get("bytes")) is int and row["bytes"] <= FILE_BYTES)
+
+
+def _text_blob(clone: Path, blob: str) -> bool:
+    """The content exclusion current_paths applies to in-scope blobs."""
+    data = subprocess.run(["git", "cat-file", "blob", blob], cwd=str(clone),
+                          capture_output=True, check=True).stdout
+    try:
+        data.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    return b"\0" not in data
+
+
 def _split_scope(rows: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """First sorted candidate rows that fit the 2 MiB review scope, then overflow.
 
@@ -252,8 +275,7 @@ def _split_scope(rows: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List
     for row in rows:
         if row.get("disposition") in ("included", "renamed"):
             candidates.append(row)
-        elif (row.get("disposition") == "unsupported" and row.get("reason") == SCOPE_CAP_REASON
-                and type(row.get("bytes")) is int and row["bytes"] <= FILE_BYTES):
+        elif _rescueable(row):
             candidates.append(row)
     candidates.sort(key=lambda r: (r["path"], r["source_path"]))
     kept: List[Dict[str, Any]] = []
@@ -298,6 +320,12 @@ def prepare(runner, q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Optio
             if not repo_registry.in_scope(cfg, row["path"]):
                 row["disposition"] = "excluded-config"
                 row["reason"] = f"excluded by repos config for {cfg['repo']}"
+            elif _rescueable(row) and not _text_blob(clone, row["blob"]):
+                # current_paths caps before reading the blob, so a rescued row
+                # was never content-checked; never let binary or non-UTF-8
+                # content into the projection through the split path.
+                row["disposition"] = "unsupported"
+                row["reason"] = "binary or non-UTF8 current blob"
         kept, overflow = _split_scope(rows)
         for row in kept:
             if row["disposition"] not in ("included", "renamed"):

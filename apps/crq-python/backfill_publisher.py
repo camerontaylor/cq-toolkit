@@ -30,16 +30,16 @@ def run(c):
     failure = c.STATE / "backfill/publication-failure.json"
     # Independent of tick.lock. Every worker/manual invocation shares this lock.
     with ledger.locked(c.STATE / "backfill/publisher.lock"):
-        _, _, outbox, publisher = worker_services(c, config)
-        requested = request.read_bytes() if request.exists() else None
-        if requested is None and not outbox.pending() and not failure.exists():
-            return {"publication": "idle"}
-        if requested is None:
-            # Persist reconciliation intent even when only the periodic pending
-            # scan woke us: remote acknowledgements can precede a process crash.
-            requested = ledger.canonical({"request": uuid.uuid4().hex})
-            ledger.atomic(request, requested)
         try:
+            _, _, outbox, publisher = worker_services(c, config)
+            requested = request.read_bytes() if request.exists() else None
+            if requested is None and not outbox.pending() and not failure.exists():
+                return {"publication": "idle"}
+            if requested is None:
+                # Persist reconciliation intent even when only the periodic pending
+                # scan woke us: remote acknowledgements can precede a process crash.
+                requested = ledger.canonical({"request": uuid.uuid4().hex})
+                ledger.atomic(request, requested)
             publisher.publish(outbox)
             head, events = publisher.fetch()
             ids = ledger.validate_sequence(events)

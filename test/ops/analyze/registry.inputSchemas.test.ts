@@ -48,6 +48,26 @@ describe('CollectFailuresInputSchema (full input, and only it)', () => {
     expect(CollectFailuresInputSchema.parse({ sets: [] })).toEqual({ sets: [] });
   });
 
+  test('accepts the vitest adapter optional test-count and advisory keys', () => {
+    const withOptional = {
+      sets: [
+        {
+          tool: 'vitest',
+          failures: [],
+          exitCode: 1,
+          numTotalTests: 3,
+          advisories: ['slow test'],
+          numPassedTests: 1,
+          numPassed: 1,
+          numSkippedTests: 1,
+          numPendingTests: 0,
+          numTodoTests: 0,
+        },
+      ],
+    };
+    expect(CollectFailuresInputSchema.parse(withOptional)).toEqual(withOptional);
+  });
+
   test('rejects sets that do not mirror the gates FailureSet, and smuggled keys', () => {
     expect(CollectFailuresInputSchema.safeParse({ sets: [{ tool: 5 }] }).success).toBe(false);
     expect(

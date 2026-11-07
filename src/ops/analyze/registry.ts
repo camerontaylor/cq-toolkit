@@ -151,6 +151,17 @@ const AnalyzeFailureSetSchema: z.ZodType<FailureSet> = z
     tool: EncodedBoundedIdentifier,
     failures: z.array(AnalyzeCheckFailureSchema),
     exitCode: z.number().nullable(),
+    // The optional test-count and advisory keys the vitest adapter emits
+    // (src/ops/gates/registry.ts FailureSetSchema); mirroring them keeps a
+    // gates-produced set acceptable at this boundary instead of rejecting it
+    // as unrecognized keys.
+    numTotalTests: z.number().int().nonnegative().exactOptional(),
+    advisories: z.array(z.string()).exactOptional(),
+    numPassedTests: z.number().int().nonnegative().exactOptional(),
+    numPassed: z.number().int().nonnegative().exactOptional(),
+    numSkippedTests: z.number().int().nonnegative().exactOptional(),
+    numPendingTests: z.number().int().nonnegative().exactOptional(),
+    numTodoTests: z.number().int().nonnegative().exactOptional(),
   })
   .strict();
 
@@ -422,12 +433,18 @@ export const AnalyzeRunInputSchema: z.ZodType<AnalyzeRunInput> = z
  * The CLI parses flag values as JSON when they parse, so an all-digit
  * cluster id (`--clusterId=12345678`) arrives as a NUMBER. Ids never start
  * with a zero that JSON would drop (JSON rejects leading zeros, so such ids
- * stay strings), which makes the integer form recoverable exactly.
+ * stay strings), which makes the integer form recoverable exactly — but only
+ * when the number ALREADY has all eight digits. A shorter number is left as
+ * a number and fails the regex rather than being zero-padded into some other
+ * cluster's id.
  */
 const ClusterIdInput = z.preprocess(
   (value) =>
-    typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 && value <= 99_999_999
-      ? String(value).padStart(8, '0')
+    typeof value === 'number' &&
+    Number.isSafeInteger(value) &&
+    value >= 10_000_000 &&
+    value <= 99_999_999
+      ? String(value)
       : value,
   z.string().regex(/^[0-9a-f]{8}$/, 'expected the 8-hex-digit cluster id from analyze.run'),
 );

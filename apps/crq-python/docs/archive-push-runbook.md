@@ -26,7 +26,13 @@ Everything under crq's `state/`:
   `agent.json`, `judge-result.json` per job, plus the cq runner's
   `sessions/` store under each job dir once the SDK half ships)
 
-Append-only: `rclone copy` (never `sync`/`--delete`), under `nice`/`ionice`.
+Append-only in the `rclone copy` sense: it never deletes remote objects
+(never `sync`/`--delete`), under `nice`/`ionice`. Changed files are still
+re-copied as superset overwrites, so the growing `state/events.jsonl` and
+`state/work.jsonl` replace their previous archive objects on every pass and
+those remote objects are not immutable. Only per-run files under
+`state/runs/` (and per-job files under `state/repair/`, once written) stay
+effectively immutable after their first push.
 
 ## Prerequisites (owner)
 
@@ -92,9 +98,14 @@ units depend on it; do not change it here).
 ```sh
 systemctl --user start crq-archive-push.service   # one manual pass
 journalctl --user -u crq-archive-push.service -n 20
-rclone lsl session-archive:session-log-archive/crq/runs | head
+rclone lsl session-archive:session-log-archive/crq/runs
+rclone lsl session-archive:session-log-archive/crq/events.jsonl
+rclone lsl session-archive:session-log-archive/crq/work.jsonl
+rclone lsl session-archive:session-log-archive/crq/repair
 ```
 
-First push is O(runs on disk); every later push moves only new files.
+First push is O(runs on disk); every later push moves only new files plus
+re-copies changed ones (the growing `events.jsonl`/`work.jsonl` are
+re-uploaded whole on each pass).
 The telemetry-ingest `crq-run` adapter reads the ARCHIVE copy once the
 Phase 4 `archive` source is pointed at it.

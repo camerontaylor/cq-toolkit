@@ -95,10 +95,12 @@ const DECLARATION_LINE = new RegExp(
   '^\\s*(?:export\\s+)?(?:default\\s+)?(?:declare\\s+)?(?:abstract\\s+)?(?:async\\s+)?' +
     '(?:function\\*?|class|interface|type|enum|const|let|var)\\s+([A-Za-z_$][\\w$]*)',
 );
-const QUOTED_SPAN = /"([^"\n]{3,200})"|'([^'\n]{3,200})'|`([^`\n]{3,200})`/g;
+// Quotes must sit on non-word boundaries so apostrophes in contractions
+// ("don't", "finding's") do not open or close a span.
+const QUOTED_SPAN = /(?<!\w)(?:"([^"\n]{3,200})"|'([^'\n]{3,200})'|`([^`\n]{3,200})`)(?!\w)/g;
 const DECLARATION_SURVIVAL = (symbol: string): RegExp =>
   new RegExp(
-    `(?:function\\*?|class|interface|type|enum|const|let|var)\\s+${escapeRegExp(symbol)}(?![A-Za-z0-9_$])`,
+    `(?<![A-Za-z0-9_$])(?:function\\*?|class|interface|type|enum|const|let|var)\\s+${escapeRegExp(symbol)}(?![A-Za-z0-9_$])`,
   );
 const MAX_SPANS = 8;
 const MAX_DECLARATIONS = 16;
@@ -124,12 +126,17 @@ function oneLine(text: string): string {
   return text.replace(/\s+/g, ' ').trim();
 }
 
-/** Quoted spans from the finding text: the defect's citable trigger fragments. */
-function quotedSpans(text: string): string[] | undefined {
+/**
+ * Quoted spans from the finding text that exist in the pre-fix content: the
+ * defect's citable trigger fragments. A trigger can only survive a fix if it
+ * existed before, so suggested replacements and prose are dropped here, before
+ * the scan cap counts them.
+ */
+function quotedSpans(text: string, before: string): string[] | undefined {
   const spans: string[] = [];
   for (const match of text.matchAll(QUOTED_SPAN)) {
     const span = match[1] ?? match[2] ?? match[3];
-    if (span !== undefined) spans.push(span);
+    if (span !== undefined && before.includes(span)) spans.push(span);
     if (spans.length > MAX_SPANS) return undefined;
   }
   return spans;
@@ -465,7 +472,7 @@ export function verifyClosureEvidence(
   };
 
   const trigger = (): VerificationCheck => {
-    const spans = quotedSpans(packet.finding.text);
+    const spans = quotedSpans(packet.finding.text, packet.before);
     const symbols = removedDeclarations(removedLines);
     if (spans === undefined || symbols === undefined)
       return {

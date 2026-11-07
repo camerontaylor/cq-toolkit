@@ -228,4 +228,46 @@ describe('W1.3 path anchoring and untrusted input', () => {
     });
     expect(result.items[0]).toMatchObject({ verdict: 'blocked', reason: 'untrusted_reviewer' });
   });
+
+  test('an untrusted DISMISSED review is skipped, not blocked', () => {
+    const dismissed = state([]);
+    dismissed.reviews = [
+      {
+        id: 'R-dismissed',
+        authorLogin: 'outsider',
+        authorType: 'User',
+        state: 'DISMISSED',
+        body: 'superseded by a newer review',
+        submittedAt: '2026-09-26T00:05:00Z',
+        commitOid: HEAD,
+      },
+    ];
+    const result = classifyThreads(dismissed, NOW, {
+      ...defaultClassifyConfig,
+      trustedAuthors: ['member'],
+      automationLogin: 'cq-automation[bot]',
+    });
+    expect(result.items[0]).toMatchObject({ verdict: 'skip', reason: 'review_dismissed' });
+  });
+
+  test('a null author never issues a bot skip notice (blocked, not skipped)', () => {
+    const anonymous = state([]);
+    anonymous.restIssueComments = [
+      {
+        id: 701,
+        nodeId: null,
+        authorLogin: null,
+        authorType: null,
+        body: 'CodeRabbit skipped this run',
+        createdAt: '2026-09-26T00:05:00Z',
+        inReplyToId: null,
+      },
+    ];
+    const result = classifyThreads(anonymous, NOW, {
+      ...defaultClassifyConfig,
+      trustedAuthors: [],
+      automationLogin: null,
+    });
+    expect(result.items[0]).toMatchObject({ verdict: 'blocked', reason: 'untrusted_reviewer' });
+  });
 });
