@@ -539,7 +539,7 @@ test.each([
   }
 });
 
-test('retired deletion failure is reported and does not quarantine or block later rotations', async () => {
+test('retired deletion failure stays off stderr and does not quarantine or block later rotations', async () => {
   const f = await fixture();
   const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
   try {
@@ -638,8 +638,10 @@ test('bootstrap debris retention reports advisories to callers and journals with
     const bytes = await readFile(join(owner.commonDir, debris, 'anchor.json'), 'utf8');
     expect(bytes).toBe('{"version":');
     fsFaults.remove = async (path) => {
-      if (path.endsWith(debris)) throw new Error('debris busy');
+      if (path.endsWith(debris))
+        throw new Error(`debris busy fixture-cleanup-secret\n${'x'.repeat(600)}`);
     };
+    vi.stubEnv('OWNERSHIP_CLEANUP_API_KEY', 'fixture-cleanup-secret');
     const role = { provider: 'mock', model: 'mock' };
     const result = await addressModule.makeReviewAddress({
       config: {
@@ -659,8 +661,13 @@ test('bootstrap debris retention reports advisories to callers and journals with
         findings: [],
       },
     })({ repoRoot: f.repo.root, source: 'local', journalDir: join(f.root, 'retention-journal') });
-    const advisory = `address ownership: retention cleanup failed for ${debris}`;
-    expect(result.report?.advisories).toContain(advisory);
+    const prefix = `address ownership: retention cleanup failed for ${debris}: `;
+    const advisory = result.report?.advisories?.find((text) => text.startsWith(prefix));
+    expect(advisory).toContain('debris busy [redacted] ');
+    expect(advisory).not.toContain('fixture-cleanup-secret');
+    expect(advisory).not.toContain('\n');
+    expect(advisory).toMatch(/… \[truncated\]$/);
+    expect(advisory!.length).toBeLessThanOrEqual(prefix.length + 520);
     const stored = JSON.parse(await readFile(result.report!.reportPath, 'utf8')) as {
       advisories: string[];
     };
@@ -677,6 +684,7 @@ test('bootstrap debris retention reports advisories to callers and journals with
   } finally {
     fsFaults.open = fsFaults.remove = undefined;
     warning.mockRestore();
+    vi.unstubAllEnvs();
     await f.repo.cleanup();
   }
 });

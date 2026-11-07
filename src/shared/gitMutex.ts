@@ -98,7 +98,8 @@ export interface GitMutex {
    * callers — in this process or another — serialize on the artifact; a
    * caller whose retries run out is REJECTED, never run unlocked. fn
    * throwing releases best-effort and rethrows the fn fault as-is. An optional
-   * signal cancels queued acquisition or admission, never mandatory cleanup.
+   * signal cancels queued acquisition or admission, rejecting with its exact
+   * `signal.reason` unwrapped; it never cancels mandatory cleanup.
    */
   withLock<T>(fn: () => T | Promise<T>, signal?: AbortSignal): Promise<T>;
 }
