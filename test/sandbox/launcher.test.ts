@@ -100,7 +100,7 @@ describe('the launcher env scrub reaches the actual run child', () => {
     const scratch = await mkdtemp(join(tmpdir(), 'cq-sandbox-env-'));
     const names = {
       secret: 'CQ_TEST_SECRET',
-      keep: 'CQ_TEST_KEEP',
+      keep: 'TEST_PASSTHROUGH_KEEP',
       knob: 'CQ_SANDBOX',
     } as const;
     const prior = Object.fromEntries(Object.values(names).map((name) => [name, process.env[name]]));
