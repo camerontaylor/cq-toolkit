@@ -139,8 +139,10 @@
 // the requested model (the silent-remap defence).
 //
 // STOP REASON (frozen DriverStopReason) — mapping table, checked in order:
-//   1. the run signal fired (already-aborted at entry, mid-run through the
-//      SDK's abortSignal, or an abort-shaped throw) → 'aborted'
+//   1. the governed run signal fired (already-aborted at entry, or mid-run
+//      through the SDK's abortSignal) → 'aborted'. Only that signal is
+//      cancellation (I8): an SDK-internal AbortError (the step timeout
+//      during retry backoff) is a run failure, not a governor decision.
 //   2. token budget tripped (the Usage token fold — input+output+cache+
 //      cacheWrite, reasoning counted once via output — >= Budget.maxTokens)
 //      or SDK finishReason 'length'   → 'budget'
@@ -241,7 +243,7 @@ import type { SessionMessage, SessionRecord } from '../../harness/session.js';
 import { invalidToolInput, toolFailureKind } from '../../harness/failures.js';
 import type { ToolFailureKind } from '../../harness/failures.js';
 import { boundedErrorText, describeError } from '../error-text.js';
-import { DispatchError } from '../errors.js';
+import { DispatchError, SessionBoundError } from '../errors.js';
 import { boundWorkspacePath, resumedRecordOrThrow } from '../common/workspace.js';
 import {
   compileOutputSchema,
@@ -473,14 +475,28 @@ export class AiSdkDriver implements Driver {
   /** The frozen seam (v2): run one invocation to completion. */
   async run(opInvocation: OpInvocation, options?: RunOptions): Promise<WorkerResult> {
     const failures = { count: 0 };
-    const result = await this.runObserved(opInvocation, options, failures);
-    return { ...result, toolFailures: failures.count };
+    let sessionId: string | undefined;
+    try {
+      const result = await this.runObserved(opInvocation, options, failures, (id) => {
+        sessionId = id;
+      });
+      return { ...result, toolFailures: failures.count };
+    } catch (error) {
+      // A throw AFTER the record was created (prompt append, tool surface
+      // build, any other setup before the generateText try) must still name
+      // the freshest record: withReapOnSettle reaps only a rejection that
+      // carries `sessionId`, so a bare rethrow would leave the fresh record
+      // on disk (the claude-code lane binds the same way).
+      if (sessionId !== undefined) throw new SessionBoundError(error, sessionId);
+      throw error;
+    }
   }
 
   private async runObserved(
     opInvocation: OpInvocation,
     options: RunOptions | undefined,
     failures: { count: number },
+    onSessionCreated: (sessionId: string) => void,
   ): Promise<WorkerResult> {
     const { prompt, modelSpec, toolPolicy, sandboxPolicy, sessionRef, budget } = opInvocation;
     const strictBudget = budget.strictTokenBudget;
@@ -667,6 +683,7 @@ export class AiSdkDriver implements Driver {
             sessionId,
           )
         : await resumedRecordOrThrow(store, sessionRef, boundWorkspace, 'ai-sdk driver');
+    onSessionCreated(record.sessionId);
     // A FAILED prior attempt persists its prompt with no verdict after it:
     // when the resumed record's LAST message is already this exact user
     // prompt, re-appending would compose two CONSECUTIVE identical user
@@ -1368,14 +1385,17 @@ export class AiSdkDriver implements Driver {
         ...(signals !== undefined ? { providerSignals: signals } : {}),
       };
     } catch (err) {
-      // Cancellation OUTRANKS every other corridor (I8 / V1GX): a live run
-      // signal — or an abort-shaped throw from the ceiling's abort-aware
-      // durable hook — settles 'aborted' FIRST, never a budget/infra refusal.
+      // Cancellation OUTRANKS every other corridor (I8 / V1GX), but the ONLY
+      // cancellation source is the GOVERNED run signal: `abortRefusal` and the
+      // abort-aware durable hook are emitted only after that signal fires, so
+      // they are already seen here. An abort-shaped error while the signal is
+      // live (the SDK step timeout during its retry backoff rejects with a
+      // generic AbortError and drops `signal.reason`) is a RUN failure, never
+      // a cancellation the governor did not issue.
       // Provider limit observations ride ANY verdict (RS-14): the caught
       // chain's APICallError headers, when present.
       const signals = providerSignalsFromError(err);
-      const aborted =
-        signalAborted(abortSignal) || (err instanceof Error && err.name === 'AbortError');
+      const aborted = signalAborted(abortSignal);
       if (aborted) {
         return {
           usage: stepUsage,
@@ -1863,13 +1883,12 @@ export class AiSdkDriver implements Driver {
       // — the repair's text is not the object) is STILL the model outcome the
       // §2.3 table names: 'output-invalid'. Any other failure (network,
       // provider, abort) is the run's terminal cause, classified by the
-      // structured cuts; an abort-shaped failure is the caller's
-      // cancellation, not an error.
+      // structured cuts; only the GOVERNED signal is the caller's
+      // cancellation — an SDK-internal AbortError is a run failure.
       const totalUsage = addUsage(mainUsage, repairUsage);
       // Seam v3: partial evidence from either call still counts as measured.
       const totalEvidence = mainUsageEvidence || repairUsageEvidence;
-      const aborted =
-        signalAborted(abortSignal) || (err instanceof Error && err.name === 'AbortError');
+      const aborted = signalAborted(abortSignal);
       const signals = providerSignalsFromError(err);
       // The ceiling refused the REPAIR request before the wire send. Cancellation
       // still outranks (the `!aborted` gate below); a REAL cap settles the honest
@@ -2000,7 +2019,11 @@ export class AiSdkDriver implements Driver {
   private validatePromptBudget(prompt: string): void {
     const maxChars = this.harnessConfig.promptBudget.maxSystemPromptChars;
     if (prompt.length > maxChars) {
-      throw new Error(
+      // Caller-data refusal before dispatch: a STRUCTURED config class, like
+      // every other pre-dispatch validation on this lane (errorClassOf reads
+      // it), never an unclassified plain Error.
+      throw new DispatchError(
+        'config',
         `ai-sdk driver: op prompt is ${prompt.length} chars, over the harness prompt budget of ${maxChars} — refusing (not truncating caller data)`,
       );
     }
@@ -2522,7 +2545,8 @@ export function stopReasonOf(inputs: StopReasonInputs): WorkerResult['stopReason
  *   5. 408/5xx → 'transient'.
  *   6. No HTTP status: the SDK's retryable class IS the transient signal
  *      (network failure / endpoint header timeout); the SDK step-timeout
- *      DOMException (name 'TimeoutError') is 'transient' for the same
+ *      DOMException (name 'TimeoutError'), and the generic `AbortError`
+ *      its retry delay substitutes for one, are 'transient' for the same
  *      reason.
  *
  * Anything unresolved is 'unknown' — NEVER a guessed 'transient' (the old
@@ -2573,6 +2597,12 @@ export function classifyRunFailure(err: unknown): WorkerErrorClass {
     return 'provider-error';
   }
   if (err instanceof Error && err.name === 'TimeoutError') return 'transient';
+  // The SDK step timeout can also surface as a bare AbortError: its retry
+  // delay rejects with a new generic AbortError and discards
+  // `signal.reason`. Reaching here means the GOVERNED run signal did not
+  // fire (the caller checks it first), so the step bound is the only
+  // abort-shaped signal this lane produces — a transient run failure.
+  if (err instanceof Error && err.name === 'AbortError') return 'transient';
   return 'unknown';
 }
 

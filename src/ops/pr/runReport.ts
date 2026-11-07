@@ -38,6 +38,7 @@
 //   - No throws across the op seam; counts include zeros; the report is
 //     plain JSON.
 import type { Op } from '../../kernel/types.js';
+import type { DiffSecretScanner } from '../dev/denylist.js';
 import { messageOf } from '../../shared/messageOf.js';
 import {
   composeSection,
@@ -45,6 +46,7 @@ import {
   READINESS_SECTION_END_MARKER,
   READINESS_SECTION_MARKER,
   runPrefixFault,
+  scanPublicationForUpload,
   type PrChecks,
   type PrEffects,
   type PrReviewState,
@@ -120,10 +122,20 @@ const CONTROL_CHARS_RE = /[\p{Cc}]/u;
 export function makeRunReport(
   gh: PrEffects,
   trackerLock?: TrackerBodyLock,
+  publicationScanner?: DiffSecretScanner,
 ): Op<RunReportInput, PrRunReport> {
   return async (input) => {
     const fault = inputFaultOf(input);
     if (fault !== null) return { status: 'failed', error: fault };
+    // Same fail-closed rule as the assembler: the readiness section carries
+    // raw gh fault text and caller-supplied names, so a tracker write needs a
+    // denylist scanner.
+    if (input.tracker !== undefined && publicationScanner === undefined) {
+      return {
+        status: 'failed',
+        error: 'pr: refusing publication because no PR payload denylist scanner is configured',
+      };
+    }
 
     const rows: RunReportRow[] = [];
     for (const pkg of input.packages) {
@@ -295,10 +307,10 @@ export function makeRunReport(
             );
           }
           const current = await gh.getPrBody(trackerNumber);
-          await gh.editPrBody(
-            trackerNumber,
-            composeSection(current, reportSection(input.runPrefix, rows)),
-          );
+          const body = composeSection(current, reportSection(input.runPrefix, rows));
+          if (publicationScanner === undefined) throw new Error('no denylist scanner configured');
+          await scanPublicationForUpload(publicationScanner, undefined, body);
+          await gh.editPrBody(trackerNumber, body);
         });
         trackerUpdated = true;
       } catch (err) {

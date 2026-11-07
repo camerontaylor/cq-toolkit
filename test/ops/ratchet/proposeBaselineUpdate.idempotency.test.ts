@@ -246,7 +246,7 @@ test('a later non-tightening reading withdraws only the exact proposal head', as
     proposeInput({ improvements: [{ target: TARGET, metric: METRIC, value: 8 }] }),
   );
   expect(first.status).toBe('ok');
-  if (first.status !== 'ok' || first.value.head === null) return;
+  if (first.status !== 'ok' || first.value.head === null) throw new Error('proposal missing');
   const existing = effects.prs.get(first.value.head);
   if (existing === undefined) throw new Error('proposal missing');
   effects.prs.set('unrelated-head', { ...existing, head: 'unrelated-head' });

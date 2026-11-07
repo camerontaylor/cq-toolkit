@@ -441,6 +441,16 @@ function projectFromReportV2(reportV2: ReportV2): LegacyReportProjection {
       ),
     };
   }
+  // A matching numerator is still only as trustworthy as its carriers: a torn
+  // stream marks /metric and the report root partial, which withholds the
+  // scalar (the documented absent/partial/inconsistent rule) instead of
+  // reporting partial evidence as measured.
+  for (const pointer of ['', '/metric', '/metric/fixesPerRun/numerator']) {
+    const recorded = report.availability[pointer];
+    if (recorded !== undefined && recorded.state !== 'known' && recorded.state !== 'known-zero') {
+      return { lossy: true, fixesPerRun: null, availability: recorded };
+    }
+  }
   return {
     lossy: true,
     fixesPerRun: numerator,

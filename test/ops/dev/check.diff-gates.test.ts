@@ -64,6 +64,24 @@ describe('dev.check', () => {
     expect(seen).toEqual(['export const staged = true;\n', '# unstaged edit\n']);
   });
 
+  test('the denylist scan sees export-ignored tracked files, which git archive omits', async () => {
+    await repo.write('.gitattributes', 'secret.env export-ignore\n');
+    await repo.write('secret.env', 'TOKEN=committed\n');
+    repo.commitAll('export-ignored fixture');
+    // A working patch on an export-ignored path must apply to the materialized
+    // HEAD blob (an omitted path would fault the gate instead).
+    await repo.write('secret.env', 'TOKEN=working\n');
+    const seen: string[] = [];
+    const effects = effectsFor(async (command, args) => {
+      if (command !== 'gitleaks') return undefined;
+      seen.push(await readFile(`${args.at(-1) ?? ''}/secret.env`, 'utf8'));
+      return 'clean\n';
+    });
+    const result = await makeDevCheck(effects)({ repoRoot: repo.root });
+    expect(result.status).toBe('ok');
+    expect(seen).toEqual(['TOKEN=working\n']);
+  });
+
   test('a failed patch apply faults the denylist gate (never silently green)', async () => {
     await repo.write('README.md', '# unstaged edit\n');
     const effects = effectsFor((command, args) =>

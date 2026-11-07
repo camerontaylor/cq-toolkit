@@ -200,6 +200,14 @@ describe('cq.json v2', () => {
     }
   });
 
+  test('a v2 file that fails the v2 schema reports the v2 error, not a v1 mismatch', () => {
+    const result = migrateCqConfig(JSON.stringify({ ...minimal, cheks: [check] }));
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toContain('unrecognized key "cheks"');
+    expect(result.reason).not.toContain('schemaVersion');
+  });
+
   describe('schema error text', () => {
     const reasonOf = (value: unknown): string => {
       const result = parseCqConfig(JSON.stringify(value));

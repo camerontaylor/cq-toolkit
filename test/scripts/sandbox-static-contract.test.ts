@@ -120,4 +120,42 @@ describe('experimental sandbox static contract', () => {
       rmSync(fixture, { recursive: true, force: true });
     }
   });
+
+  it('sandbox-certify emits a JSON error object on stdout in --json mode', () => {
+    const script = join(ROOT, 'experimental/sandbox-host/sandbox-certify.mjs');
+    const check = (args: string[], kinds: string[]) => {
+      const run = spawnSync(process.execPath, [script, ...args], {
+        encoding: 'utf8',
+        timeout: 20_000,
+      });
+      expect(run.status, `${run.stdout}${run.stderr}`).toBe(2);
+      expect(run.stderr).toBe('');
+      const artifact = JSON.parse(run.stdout) as {
+        error: { kind: string; subcommand: string; message: string; exitCode: number };
+      };
+      expect(kinds).toContain(artifact.error.kind);
+      expect(artifact).toEqual({
+        error: {
+          kind: artifact.error.kind,
+          subcommand: 'sandbox-certify',
+          message: expect.any(String) as unknown,
+          exitCode: 2,
+        },
+      });
+    };
+    // The strict-parse usage error fires before the dist probe load, so no
+    // build is needed. The --network validation sits after the load: without
+    // a built probe it surfaces the load error, with one built the usage
+    // error — either way one JSON object on stdout through the same helper.
+    check(['--json', '--bogus'], ['usage']);
+    check(['--json', '--network', 'bogus'], ['load', 'usage']);
+    // Plain mode keeps the historical stderr text and empty stdout.
+    const plain = spawnSync(process.execPath, [script, '--bogus'], {
+      encoding: 'utf8',
+      timeout: 20_000,
+    });
+    expect(plain.status).toBe(2);
+    expect(plain.stdout).toBe('');
+    expect(plain.stderr).toContain('sandbox-certify:');
+  });
 });

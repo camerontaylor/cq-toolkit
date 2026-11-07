@@ -9,6 +9,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, test } from 'vitest';
 import {
+  checkScannerFor,
   composeScanners,
   decodePolicyUtf8,
   makeRepoDiffScanner,
@@ -360,6 +361,43 @@ describe('makeGitleaksDefaultsScanner', () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+});
+
+describe('checkScannerFor', () => {
+  const effects = {
+    runCommand: async () => ({ exitCode: 0, stdout: '', stderr: '', timedOut: false }),
+    makeScratchDir: async () => mkdtempSync(join(tmpdir(), 'fake-check-scanner-')),
+    removeScratchDir: async () => undefined,
+  };
+  const files =
+    (cq: string | null, pkg = '{}') =>
+    async (path: string) => {
+      if (path.endsWith('/cq.json')) {
+        if (cq === null) throw new Error('ENOENT');
+        return cq;
+      }
+      if (path.endsWith('/package.json')) return pkg;
+      throw new Error(`unexpected read ${path}`);
+    };
+  const checksConfig = JSON.stringify({
+    schemaVersion: 2,
+    checks: [{ adapter: 'tsc-lines', command: { command: 'tsc', args: [] } }],
+  });
+
+  test('a missing, malformed or check-less cq.json binds no project scanner', async () => {
+    const root = '/repo';
+    expect(await checkScannerFor(root, effects, files(null))).toBeUndefined();
+    expect(await checkScannerFor(root, effects, files('not json'))).toBeUndefined();
+    expect(
+      await checkScannerFor(root, effects, files(JSON.stringify({ schemaVersion: 2, checks: [] }))),
+    ).toBeUndefined();
+  });
+
+  test('a configured cq.json binds the two-layer scanner (dev.check/dev.cycle parity)', async () => {
+    const scanner = await checkScannerFor('/repo', effects, files(checksConfig));
+    expect(scanner).toBeDefined();
+    expect(await scanner!([{ component: 'a', text: 'clean\n', path: 'a.txt' }])).toHaveLength(1);
   });
 });
 

@@ -141,22 +141,29 @@ export interface MeasuredUsage {
  * ride inside `outputTokens` (never lifted into `reasoning` — the flat
  * channel's rule) and the vendor's per-model `costUSD` is deliberately
  * ignored (DD-2: cost stays derived over the token fold). Returns
- * undefined for an unshaped entry (no recognizable token field at all).
+ * undefined for an unshaped entry (no valid token field at all).
  */
 export function modelUsageEntryFromWire(raw: unknown): Usage | undefined {
   const rec = asRecord(raw);
   if (rec === undefined) return undefined;
-  const shaped =
-    rec['inputTokens'] !== undefined ||
-    rec['outputTokens'] !== undefined ||
-    rec['cacheReadInputTokens'] !== undefined ||
-    rec['cacheCreationInputTokens'] !== undefined;
-  if (!shaped) return undefined;
+  const input = asWireInt(rec['inputTokens']);
+  const output = asWireInt(rec['outputTokens']);
+  const cacheRead = asWireInt(rec['cacheReadInputTokens']);
+  const cacheWrite = asWireInt(rec['cacheCreationInputTokens']);
+  // Like usageFromWire: an entry with no VALID token field is unshaped, so a
+  // malformed entry cannot masquerade as measured zero usage.
+  if (
+    input === undefined &&
+    output === undefined &&
+    cacheRead === undefined &&
+    cacheWrite === undefined
+  )
+    return undefined;
   return {
-    input: asWireInt(rec['inputTokens']) ?? 0,
-    output: asWireInt(rec['outputTokens']) ?? 0,
-    cacheRead: asWireInt(rec['cacheReadInputTokens']) ?? 0,
-    cacheWrite: asWireInt(rec['cacheCreationInputTokens']) ?? 0,
+    input: input ?? 0,
+    output: output ?? 0,
+    cacheRead: cacheRead ?? 0,
+    cacheWrite: cacheWrite ?? 0,
   };
 }
 
@@ -311,7 +318,15 @@ export function computeDerivedCost(
   );
 }
 
-/** Per-model derived pricing; unknown ids use the served rate and are observable. */
+/**
+ * Per-model derived pricing. An unpriced contributing model yields NO cost
+ * (DD-9 §4 fail-loud), never a borrowed rate. Its id is reported in
+ * `fallbackModels` only when the fold was PARTIALLY priced: a fold with no
+ * priced contributor at all simply has no modeled cost (the ordinary
+ * unpriced baseline), so nothing is surprising to narrate — routine
+ * bookkeeping must not widen the record's role-'tool' contract (the
+ * conformance mode-none leg pins that record shape).
+ */
 export function modelUsageCost(
   pricing: ((modelSpec: ModelSpec) => PerMillionRates | undefined) | undefined,
   served: ModelSpec,
@@ -322,20 +337,22 @@ export function modelUsageCost(
     return { ...(costUSD === undefined ? {} : { costUSD }), fallbackModels: [] };
   }
   let total = 0;
-  const fallbackModels: string[] = [];
+  let pricedContributors = 0;
+  const unpriced: string[] = [];
   for (const [model, usage] of Object.entries(measured.perModel)) {
-    let cost = computeDerivedCost(pricing, { ...served, model }, usage);
+    const cost = computeDerivedCost(pricing, { ...served, model }, usage);
     if (cost === undefined) {
-      cost = computeDerivedCost(pricing, served, usage);
-      if (cost !== undefined) fallbackModels.push(model);
+      unpriced.push(model);
+      continue;
     }
-    if (cost === undefined) return { fallbackModels };
     total += cost;
+    pricedContributors += 1;
   }
-  return { costUSD: total, fallbackModels };
+  if (unpriced.length > 0) return { fallbackModels: pricedContributors > 0 ? unpriced : [] };
+  return { costUSD: total, fallbackModels: [] };
 }
 
-/** Measure and price the settled result once, recording any applied rate fallback. */
+/** Measure and price the settled result once, narrating a partially priced fold. */
 export function prepareResultUsage(
   result: Record<string, unknown> | undefined,
   pricing: ((modelSpec: ModelSpec) => PerMillionRates | undefined) | undefined,
@@ -349,7 +366,7 @@ export function prepareResultUsage(
       JSON.stringify({
         cq: 'pricing-fallback',
         models: priced.fallbackModels,
-        rate: 'served-model',
+        rate: 'none',
       }),
     );
   }

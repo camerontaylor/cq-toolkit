@@ -2,24 +2,28 @@
 // Gate launcher: no raw vitest, no truncation of oversize selections.
 import { readdirSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { isAbsolute, relative, resolve } from 'node:path';
+import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { isTest } from './lib/affected-tests.mjs';
 import { selectRelatedTests } from './lib/related-tests.mjs';
+
+const toPosix = (path) => path.split(sep).join('/');
 
 try {
   const changed = process.argv.slice(2).map((file) => {
     if (isAbsolute(file) || file.startsWith('-'))
       throw new Error('expected repository-relative changed files');
-    return relative(process.cwd(), resolve(file));
+    return toPosix(relative(process.cwd(), resolve(file)));
   });
   if (changed.length === 0) throw new Error('explicit changed files required');
   for (const file of changed) {
-    const rel = relative(process.cwd(), resolve(file));
+    const rel = toPosix(relative(process.cwd(), resolve(file)));
     if (!rel || rel === '..' || rel.startsWith('../') || isAbsolute(rel) || file.startsWith('-'))
       throw new Error('expected repository-relative changed files');
   }
   const allTests = ['test', 'lint']
-    .flatMap((dir) => readdirSync(dir, { recursive: true }).map((file) => `${dir}/${file}`))
+    .flatMap((dir) =>
+      readdirSync(dir, { recursive: true }).map((file) => `${dir}/${toPosix(String(file))}`),
+    )
     .filter(isTest);
   const selection = selectRelatedTests(changed, allTests);
   if (selection.advisory) {

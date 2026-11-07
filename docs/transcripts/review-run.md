@@ -32,19 +32,22 @@ with `ai/test` mock models, real temporary session persistence and the actual
 pre-request upload gate. It first submits the original 474,651-character
 (527,381 UTF-8-byte) component in one invocation. The unchanged harness refuses
 it before any mock provider call. The bounded path then covers the identical
-component in 28 validated partition calls, with 140 deliberately scripted
-tokens of total usage. Reconstruction from the non-overlapping ranges equals
-the original text, including surrogate pairs. No provider, credentials or
+component; the capture observed 28 partition calls with 140 deliberately
+scripted tokens of total usage. Coverage and reconstruction from the
+non-overlapping ranges, including surrogate pairs, are asserted in
+`agentReviewer-partitions.coverage.test.ts`; the wire test itself asserts only
+generic session fields. No provider, credentials or
 network are used; scripted usage is not a live cost estimate.
 
-The largest operation prompt is 19,993 characters, including instructions,
-identity, receipt and repeated context. The driver's composed system prompt
-fits the unchanged 20,000-character system limit. The largest complete serialized
-request is 43,308 characters: the supported driver repeats the task in a user
-message, so whole-wire size is a separate measurement, not the system cap unit.
-Every actual send scans that full envelope and its decoded leaves.
+The capture's largest operation prompt is 19,993 characters, including
+instructions, identity, receipt and repeated context. The driver's composed
+system prompt fits the unchanged 20,000-character system limit. The capture's
+largest complete serialized request is 43,308 characters: the supported driver
+repeats the task in a user message, so whole-wire size is a separate
+measurement, not the system cap unit. Every actual send scans that full
+envelope and its decoded leaves.
 
-A boundary control places paired evidence on opposite sides of the first
+In the capture, a boundary control places paired evidence on opposite sides of the first
 partition boundary. Only the next partition sees both pieces through its
 explicitly repeated context, and its finding retains the original file and
 added-line number. Missing/replayed/malformed receipts, scanner hits, incomplete

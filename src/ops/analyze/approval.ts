@@ -461,18 +461,19 @@ export interface GitApprovalStateReaderOptions {
 /** Validate and normalize exempt prefixes to workspace-relative POSIX directory forms. */
 function normalizeExemptPrefixes(prefixes: readonly string[]): string[] {
   return prefixes.map((prefix) => {
-    const trimmed = prefix.replace(/\\/g, '/').replace(/\/+$/, '');
-    if (
-      trimmed === '' ||
-      trimmed === '.' ||
-      isAbsolute(trimmed) ||
-      trimmed.split('/').some((part) => part === '..')
-    ) {
+    const unix = prefix.replace(/\\/g, '/');
+    // Normalize dot segments BEFORE validation: `./.` and `.//.` are
+    // non-empty as strings but resolve to the workspace root, and an exempt
+    // prefix of the root would exempt every dirty path. Dropping empty and
+    // `.` parts makes both spellings empty here (refused), and keeps `a/./b`
+    // a directory rather than a root.
+    const parts = unix.split('/').filter((part) => part !== '' && part !== '.');
+    if (parts.length === 0 || isAbsolute(unix) || parts.some((part) => part === '..')) {
       throw new Error(
         `approval state: exempt prefix '${prefix}' must be a non-empty workspace-relative directory that does not escape the workspace`,
       );
     }
-    return trimmed;
+    return parts.join('/');
   });
 }
 

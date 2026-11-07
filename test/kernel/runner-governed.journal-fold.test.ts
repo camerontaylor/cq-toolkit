@@ -302,7 +302,9 @@ describe('governed journal v2 + resume', () => {
       expect(v3bCalls).toEqual(['j1']);
       expect(v3bReport.counts).toMatchObject({ done: 1, failed: 0, 'budget-exhausted': 0 });
     },
-    journalEnclosure(3),
+    // Six journalled runPlan calls (two refusals + four runs), each acquiring
+    // the plan lock: the helper's model needs one step per acquisition.
+    journalEnclosure(6),
   );
 
   test(

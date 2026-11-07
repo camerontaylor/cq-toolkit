@@ -110,7 +110,9 @@ describe('T29 unknown evidence', () => {
         `${JSON.stringify(header({ runId: 'cr-oob-foreign', correlationWorkId: WORK_ID_2 }))}\n`,
         'utf8',
       );
-      await expect(readObservations(dirFk)).rejects.toThrow(/does not match this stream's workId/);
+      await expect(readObservations(dirFk)).rejects.toThrow(
+        /invalid stream [^\n]*cr-oob-foreign\.ndjson/,
+      );
     } finally {
       await rm(dirFk, { recursive: true, force: true });
     }
