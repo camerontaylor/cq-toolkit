@@ -515,8 +515,12 @@ async function dispatchCli(
   // --json mode, where stdout still carries exactly one JSON artifact (the
   // op/run result shapes have no `warnings` slot, so stderr is the only
   // channel). `cq config` reports the same diagnostics itself, so it is the
-  // one subcommand that skips the gate.
+  // one subcommand that skips the gate (it exits 2 after printing its report).
   let cqEnv: CqEnv | undefined;
+  // `cq config` still runs when the snapshot carries errors (the report must reach
+  // stdout so the operator sees what failed); it then exits 2 like every other entry.
+  let configErrorLines: string[] = [];
+  if (sub === 'config') configErrorLines = checkEntryEnv().errorLines;
   if (sub !== 'config') {
     const check = checkEntryEnv();
     if (check.errorLines.length > 0) {
@@ -846,6 +850,10 @@ async function dispatchCli(
     }
     writeResultJson(io, raw); // the ONE stdout artifact, including optional report
     narrateOpResult(io, sub, checked.data, mode); // failures-only; silent in json mode
+    if (configErrorLines.length > 0) {
+      if (mode !== 'json') for (const line of configErrorLines) io.stderr(`${line}\n`);
+      return EXIT_CODES.usage;
+    }
     return exitCodeForOpResult(checked.data, { failOnVerdict });
   } catch (err) {
     // Thrown (uncaught exception) → 1, decided HERE (the caller of the

@@ -60,11 +60,13 @@ describe('config op', () => {
     );
   });
 
-  test('errors fail with every error listed', async () => {
+  test('errors are reported in full (ok result; the CLI maps them to exit 2)', async () => {
     vi.stubEnv('CQ_SANDBOX', 'of');
     vi.stubEnv('CQ_RUN_TOOL', 'maybe');
-    const result = (await run({})) as { status: string; error: string };
-    expect(result.status).toBe('failed');
-    expect(result.error.match(/cq: error:/g)).toHaveLength(2);
+    for (const input of [{}, { strict: true }]) {
+      const result = (await run(input)) as { status: string; value: { errors: unknown[] } };
+      expect(result.status).toBe('ok');
+      expect(result.value.errors).toHaveLength(2);
+    }
   });
 });
