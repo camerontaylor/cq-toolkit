@@ -10,7 +10,9 @@ import { SelfhostDefaults } from '../../selfhost/config.js';
 
 /** The resolved base branch: CQ_MERGE_BASE_BRANCH, else the built-in default. */
 export function resolvedBaseBranch(cqEnv: CqEnv): string {
-  return (cqEnv.values['CQ_MERGE_BASE_BRANCH'] as string | undefined) ?? SelfhostDefaults.baseBranch;
+  return (
+    (cqEnv.values['CQ_MERGE_BASE_BRANCH'] as string | undefined) ?? SelfhostDefaults.baseBranch
+  );
 }
 
 /**
