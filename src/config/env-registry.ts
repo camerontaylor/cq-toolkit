@@ -18,7 +18,7 @@ import { ACCEPT_STATES, ASSOCIATIONS, BOT_ENTRY_RE, POSTURE_LIST, isPosture } fr
 /** A non-empty git branch name (no whitespace or control characters). */
 function parseBranchName(raw: string): string {
   const v = raw.trim();
-  if (v === '' || /[\s\x00-\x1f]/.test(v)) {
+  if (v === '' || /\s|\p{Cc}/u.test(v)) {
     throw new Error(`CQ_MERGE_PROTECTED_BRANCH must be a branch name, got '${raw}'`);
   }
   return v;
