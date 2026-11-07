@@ -293,7 +293,7 @@ test.each([
   }
 });
 test.each(['records', 'per-record', 'total-bytes', 'resource-count', 'resource-bytes'] as const)(
-  'authority writer bound requires attended compaction: %s',
+  'authority writer budget and redundant claims: %s',
   async (bound) => {
     const f = await fixture();
     const owner = await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run });
@@ -309,13 +309,15 @@ test.each(['records', 'per-record', 'total-bytes', 'resource-count', 'resource-b
       try {
         await owner.withLock(async () => {
           for (let index = 0; index < 65; index++) {
-            const unique = bound === 'resource-count' || bound === 'per-record';
+            const unique = bound !== 'records';
             const length =
-              bound === 'per-record' || bound === 'total-bytes'
+              bound === 'per-record'
                 ? 1900
-                : bound === 'resource-bytes'
-                  ? 2100
-                  : 10;
+                : bound === 'total-bytes'
+                  ? 150
+                  : bound === 'resource-bytes'
+                    ? 2100
+                    : 10;
             await owner.address(
               {
                 pr: unique ? index + 1 : 7,
@@ -330,7 +332,8 @@ test.each(['records', 'per-record', 'total-bytes', 'resource-count', 'resource-b
       } catch (error) {
         failure = error;
       }
-      expect(errorChain(failure)).toContain('bound reached; attended compaction required');
+      if (bound === 'records') expect(failure).toBeUndefined();
+      else expect(errorChain(failure)).toContain('mid-lifetime authority bound reached');
       const names = (await readdir(authorityStore(owner.guardPath)))
         .filter((name) => /^[0-9]{6}\.json$/.test(name))
         .sort();
@@ -343,7 +346,7 @@ test.each(['records', 'per-record', 'total-bytes', 'resource-count', 'resource-b
       const last = JSON.parse(records.at(-1)!.toString()) as { resources: string[] };
       expect(last.resources.length).toBeLessThanOrEqual(64);
       expect(last.resources.every((key) => Buffer.byteLength(key) <= 2048)).toBe(true);
-      if (bound === 'records') expect(names.length).toBe(64);
+      if (bound === 'records') expect(names.length).toBe(3);
       if (bound === 'resource-count') expect(last.resources.length).toBe(64);
       if (bound === 'resource-bytes') expect(dispatched).toBe(0);
       if (bound === 'per-record') {
@@ -355,14 +358,21 @@ test.each(['records', 'per-record', 'total-bytes', 'resource-count', 'resource-b
           records.reduce((sum, record) => sum + record.length, 0) +
           (await readFile(owner.guardPath)).length;
         expect(total).toBeLessThanOrEqual(131_072);
-        expect(total + records.at(-1)!.length).toBeGreaterThan(131_072);
+        expect(total).toBeGreaterThan(90_000);
       }
-      expect(dispatched).toBeLessThan(65);
-      await expect(
-        (await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run })).withLock(
-          async () => undefined,
-        ),
-      ).rejects.toThrow('attended recovery');
+      if (bound === 'records') {
+        expect(dispatched).toBe(65);
+        await (
+          await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run })
+        ).withLock(async () => undefined);
+      } else {
+        expect(dispatched).toBeLessThan(65);
+        await expect(
+          (await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run })).withLock(
+            async () => undefined,
+          ),
+        ).rejects.toThrow('attended recovery');
+      }
     } finally {
       factory.mockRestore();
       await f.repo.cleanup();
@@ -422,7 +432,7 @@ test.each(['anchor-bytes', 'record-bytes', 'total-bytes', 'enumeration'] as cons
       } catch (error) {
         failure = error;
       }
-      expect(errorChain(failure)).toContain('bound reached; attended compaction required');
+      expect(errorChain(failure)).toContain('mid-lifetime authority bound reached');
       expect(errorChain(failure)).not.toContain('SyntaxError');
     } finally {
       await f.repo.cleanup();

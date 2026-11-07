@@ -283,3 +283,70 @@ test('redundant claims detect authority loss before installing claims', async ()
     await f.repo.cleanup();
   }
 });
+
+test.each(['record', 'guard-link', 'active-tail'])(
+  'interrupted rotation preserves damaged evidence: %s',
+  async (damage) => {
+    const f = await fixture();
+    try {
+      const owner = await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run });
+      await owner.withLock(async () => undefined);
+      const anchor = JSON.parse(await readFile(owner.guardPath, 'utf8')) as { anchor: string };
+      const store = authorityStore(owner.guardPath),
+        retired = `${store}.retired-${anchor.anchor}`;
+      await rename(store, retired);
+      const path = damage === 'guard-link' ? owner.guardPath : join(retired, '000002.json');
+      if (damage === 'active-tail') {
+        const value = JSON.parse(await readFile(path, 'utf8')) as { state: string };
+        value.state = 'active';
+        await writeFile(path, JSON.stringify(value));
+      } else await writeFile(path, 'damaged evidence');
+      const evidence = await readFile(path);
+      const next = await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run });
+      await expect(
+        next.withLock(async () => {
+          throw new Error('must not dispatch');
+        }),
+      ).rejects.toThrow('attended recovery');
+      expect(await readFile(path)).toEqual(evidence);
+      await expect(lstat(store)).rejects.toMatchObject({ code: 'ENOENT' });
+      expect((await lstat(retired)).isDirectory()).toBe(true);
+    } finally {
+      await f.repo.cleanup();
+    }
+  },
+);
+
+test('completion verifies retired store with live guard between rotation renames', async () => {
+  const f = await fixture();
+  const entered = deferred(),
+    release = deferred();
+  let successor: Promise<unknown> | undefined;
+  try {
+    const owner = await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run });
+    faults.afterLink = async (_source, target) => {
+      if (!target.endsWith('/000002.json')) return;
+      faults.afterLink = undefined;
+      faults.afterRename = async (source) => {
+        if (source !== authorityStore(owner.guardPath)) return;
+        faults.afterRename = undefined;
+        entered.resolve();
+        await release.promise;
+      };
+      successor = (await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run })).withLock(
+        async () => undefined,
+      );
+      await entered.promise;
+    };
+    await owner.withLock(async () => 'confirmed');
+    const contender = await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run });
+    await expect(contender.withLock(async () => undefined)).rejects.toThrow('could not acquire');
+    release.resolve();
+    await successor;
+  } finally {
+    release.resolve();
+    await successor;
+    faults.afterLink = faults.afterRename = undefined;
+    await f.repo.cleanup();
+  }
+});

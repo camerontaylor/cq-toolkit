@@ -662,11 +662,17 @@ export class AddressOwnership {
       /* A successor may have renamed the generation. */
     }
     const retired = this.retiredPaths(expected.anchor);
-    try {
-      const installed = await this.readSnapshot(false, retired.store, retired.guard);
-      if (matches(installed)) return installed!;
-    } catch {
-      /* Missing or damaged retired evidence fails closed. */
+    // The guard rename follows the store rename. During that intermediate
+    // state the live guard still authenticates the retired directory's anchor.
+    // Try paths in rename order so a concurrent guard rename cannot pass
+    // between a failed retired-path read and a later failed live-path read.
+    for (const guard of [this.guardPath, retired.guard]) {
+      try {
+        const installed = await this.readSnapshot(false, retired.store, guard);
+        if (matches(installed)) return installed!;
+      } catch {
+        /* Missing or damaged retired evidence fails closed. */
+      }
     }
     throw new Error('address ownership: lost owner; authority prefix changed');
   }
@@ -1152,7 +1158,12 @@ export class AddressOwnership {
       lockPath: resolve(this.commonDir, 'cq-review-address-ownership'),
       failFast: true,
     }).withLock(async () => {
-      await this.finishRotation();
+      await this.finishRotation().catch((error: unknown) => {
+        throw new Error(
+          'address ownership: active or quarantined guard; attended recovery required',
+          { cause: error },
+        );
+      });
       const previous = await this.readSnapshot();
       if (previous?.guard && previous.guard.state !== 'quiescent') throw admissionRefusal();
       this.signal.throwIfAborted();

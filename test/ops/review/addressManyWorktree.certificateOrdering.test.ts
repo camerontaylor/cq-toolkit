@@ -24,13 +24,28 @@ const fsFaults = vi.hoisted(() => ({
     | undefined
     | ((path: string, flags: string | number | undefined) => Promise<void>),
   sync: undefined as undefined | ((path: string) => Promise<void>),
+  rename: undefined as
+    | undefined
+    | ((phase: 'before' | 'after', source: string, target: string) => Promise<void>),
+  remove: undefined as undefined | ((path: string) => Promise<void>),
+  mkdir: undefined as undefined | ((path: string) => Promise<void>),
 }));
 vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
   return {
     ...actual,
+    rename: async (...args: Parameters<typeof actual.rename>) => {
+      await fsFaults.rename?.('before', String(args[0]), String(args[1]));
+      await actual.rename(...args);
+      await fsFaults.rename?.('after', String(args[0]), String(args[1]));
+    },
+    rm: async (...args: Parameters<typeof actual.rm>) => {
+      await fsFaults.remove?.(String(args[0]));
+      return actual.rm(...args);
+    },
     mkdir: async (...args: Parameters<typeof actual.mkdir>) => {
       fsFaults.effect?.();
+      await fsFaults.mkdir?.(String(args[0]));
       return actual.mkdir(...args);
     },
     writeFile: async (...args: Parameters<typeof actual.writeFile>) => {
@@ -340,7 +355,7 @@ test.each([
   try {
     await owner.withLock(async () => undefined);
     fsFaults.link = async (phase, _source, destination) => {
-      if (!destination.endsWith('/000003.json')) return;
+      if (!destination.endsWith('/000001.json')) return;
       if (phase === 'after') activeLinked = true;
       if (
         (fault === 'before-link' && phase === 'before') ||
@@ -352,7 +367,7 @@ test.each([
       if (
         (fault === 'certificate-sync' && path === join(store, '000002.json')) ||
         (fault === 'adoption-store-sync' && path === store) ||
-        (fault === 'prepare-sync' && path === join(store, 'pending-000003.json')) ||
+        (fault === 'prepare-sync' && path === join(store, 'pending-000001.json')) ||
         (fault === 'active-store-sync' && activeLinked && path === store)
       )
         throw new Error('fresh activation fault');
@@ -380,6 +395,74 @@ test.each([
     );
   } finally {
     fsFaults.link = fsFaults.sync = undefined;
+    await f.repo.cleanup();
+  }
+});
+
+test.each([
+  'retired-delete',
+  'store-rename-before',
+  'store-rename-after',
+  'guard-rename-before',
+  'guard-rename-after',
+  'rotation-dir-sync',
+  'bootstrap-mkdir',
+  'anchor-prepare',
+  'anchor-link-before',
+  'anchor-link-after',
+  'anchor-store-sync',
+  'bootstrap-dir-sync',
+] as const)('rotation/bootstrap fault dispatches zero work: %s', async (fault) => {
+  const f = await fixture();
+  let dispatched = 0,
+    hit = false;
+  try {
+    const owner = await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run });
+    await owner.withLock(async () => undefined);
+    // Establish a real older retired generation for the deletion failure.
+    await (
+      await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run })
+    ).withLock(async () => undefined);
+    const store = authorityStore(owner.guardPath);
+    const fail = () => {
+      hit = true;
+      throw new Error('rotation admission fault');
+    };
+    let rotated = false,
+      anchorLinked = false;
+    fsFaults.remove = async () => {
+      if (fault === 'retired-delete') fail();
+    };
+    fsFaults.rename = async (phase, source) => {
+      if (source === store && phase === 'after') rotated = true;
+      if (fault === `${source === store ? 'store' : 'guard'}-rename-${phase}`) fail();
+    };
+    fsFaults.mkdir = async (path) => {
+      if (fault === 'bootstrap-mkdir' && path === store) fail();
+    };
+    fsFaults.link = async (phase, _source, target) => {
+      if (target !== owner.guardPath) return;
+      if (phase === 'after') anchorLinked = true;
+      if (fault === `anchor-link-${phase}`) fail();
+    };
+    fsFaults.sync = async (path) => {
+      if (
+        (fault === 'rotation-dir-sync' && rotated && path === owner.commonDir) ||
+        (fault === 'anchor-prepare' && path === join(store, 'anchor.json')) ||
+        (fault === 'anchor-store-sync' && anchorLinked && path === store) ||
+        (fault === 'bootstrap-dir-sync' && anchorLinked && path === owner.commonDir)
+      )
+        fail();
+    };
+    await expect(
+      (await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run })).withLock(async () => {
+        dispatched++;
+      }),
+    ).rejects.toThrow('rotation admission fault');
+    expect(hit).toBe(true);
+    expect(dispatched).toBe(0);
+  } finally {
+    fsFaults.rename = fsFaults.remove = fsFaults.mkdir = fsFaults.link = fsFaults.sync = undefined;
     await f.repo.cleanup();
   }
 });
