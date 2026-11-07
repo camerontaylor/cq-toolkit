@@ -20,6 +20,15 @@ def timestamp(value):
     return dt.datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
 
 
+def read(path):
+    """Plain JSON read for documents with no digest of their own.
+
+    Receipts go through read_receipt_document: their digest covers the exact
+    bytes that get parsed.
+    """
+    return json.loads(Path(path).read_text())
+
+
 def read_receipt_document(root, receipt_id):
     """Parse the receipt bytes the digest covers, from a single snapshot.
 

@@ -64,7 +64,7 @@ describe('non-conforming gh outcomes', () => {
     expect(result.failed[0]?.error).toContain('non-object JSON payload');
     expect(result.posted.map((r) => r.actionId)).toEqual(['s2']);
     expect(await log.load()).toEqual([
-      { actionId: 's2', kind: 'resolve_thread', resultRef: 'PRRT_2', at: NOW },
+      { version: 1, actionId: 's2', kind: 'resolve_thread', resultRef: 'PRRT_2', at: NOW },
     ]);
   });
 
@@ -96,7 +96,7 @@ describe('non-conforming gh outcomes', () => {
     expect(result.failed[0]?.error).toContain('non-array errors value');
     expect(result.posted.map((r) => r.actionId)).toEqual(['s2']);
     expect(await log.load()).toEqual([
-      { actionId: 's2', kind: 'resolve_thread', resultRef: 'PRRT_2', at: NOW },
+      { version: 1, actionId: 's2', kind: 'resolve_thread', resultRef: 'PRRT_2', at: NOW },
     ]);
   });
 
