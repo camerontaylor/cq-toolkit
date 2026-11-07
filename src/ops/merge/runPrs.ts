@@ -698,11 +698,14 @@ export function makeRunMergePrsOp(
       ...(deps?.harnessConfig !== undefined ? { harnessConfig: deps.harnessConfig } : {}),
     });
     // The nested resolve calls see the RESOLVED protected branch, never the raw input.
-    const outcome = await runMergePrs({ ...input, protectedBranch }, {
-      effects,
-      resolve,
-      ...(input.maxRetries !== undefined ? { maxRetries: input.maxRetries } : {}),
-    });
+    const outcome = await runMergePrs(
+      { ...input, protectedBranch },
+      {
+        effects,
+        resolve,
+        ...(input.maxRetries !== undefined ? { maxRetries: input.maxRetries } : {}),
+      },
+    );
     // The pipeline is total — every not-done pr is DATA in the outcome —
     // so a completed composition is exactly an 'ok' result.
     return { status: 'ok', value: outcome };
