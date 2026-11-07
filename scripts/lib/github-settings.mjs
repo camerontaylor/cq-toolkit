@@ -576,12 +576,12 @@ export function compareSettings(expected, actual, { c3Attested = false } = {}) {
   const expEnvs = expected.environments ?? {};
   const actEnvs = actual.environments ?? {};
   for (const name of Object.keys(expEnvs).sort(byString)) {
-    const live = actEnvs[name];
+    const live = Object.hasOwn(actEnvs, name) ? actEnvs[name] : undefined;
     if (live === undefined) drift.push(`environment ${name}: missing`);
     else compareEnvironment(name, expEnvs[name], live, drift, notices, c3Attested);
   }
   for (const name of Object.keys(actEnvs).sort(byString)) {
-    if (!(name in expEnvs))
+    if (!Object.hasOwn(expEnvs, name))
       drift.push(`environment ${name}: present live but not in the settings file`);
   }
 

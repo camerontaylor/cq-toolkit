@@ -110,11 +110,6 @@ def execute(c, args):
         for value in events:
             outbox.spool(value)
         return {"previous_ledger_head": head, "imports": report, "publication_pending": len(events)}
-    if args.command == "collect-history":
-        from backfill_history import collect_sources, github_sources
-        value = collect_sources(queue, c.STATE, store, github=(lambda: github_sources(store)) if args.github else None)
-        ledger.atomic(args.output, ledger.canonical(value))
-        return {"catalog": args.output, "sources": len(value["sources"]), "acquisition": value["acquisition"]}
     inbox = finding_delivery.Inbox(c.STATE / "backfill/findings", outbox)
     if args.command == "triage":
         repo.git("fetch", "--no-tags", "origin", DEFAULT_FETCH_REFSPEC)
@@ -197,6 +192,21 @@ def inventory_unlocked(c, args, clock=time.monotonic):
     return merged
 
 
+def collect_history_unlocked(c, args):
+    """Snapshot the queue under the lock; run the slow GitHub collection outside it."""
+    taken = c.with_lock(lambda: (copy.deepcopy(c.load_queue()), runtime.settings(c.STATE)), lock_wait=30)
+    if taken is None:
+        return None
+    queue, config = taken
+    if not config:
+        raise ledger.IntegrityError("owner-provisioned rollout configuration is absent")
+    _, store, _, _ = runtime.services(c, config)
+    from backfill_history import collect_sources, github_sources
+    value = collect_sources(queue, c.STATE, store, github=(lambda: github_sources(store)) if args.github else None)
+    ledger.atomic(args.output, ledger.canonical(value))
+    return {"catalog": args.output, "sources": len(value["sources"]), "acquisition": value["acquisition"]}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -227,8 +237,12 @@ def main():
                 print(json.dumps(result, sort_keys=True))
                 raise SystemExit(1)  # same as crq-publisher.service
         else:
-            result = (inventory_unlocked(crq, args) if args.command == "inventory"
-                      else crq.with_lock(execute, crq, args, lock_wait=30))
+            if args.command == "inventory":
+                result = inventory_unlocked(crq, args)
+            elif args.command == "collect-history":
+                result = collect_history_unlocked(crq, args)
+            else:
+                result = crq.with_lock(execute, crq, args, lock_wait=30)
             if result is None:
                 # with_lock returns None only when the queue lock stayed busy.
                 print(json.dumps({"error": "queue lock busy; retry"}))

@@ -38,7 +38,10 @@ test('M5b4 nominal evidence', async () => {
 test('M5b4 missing evidence', async () => {
   const invocations: OpInvocation[] = [];
   const outcome = await runLoop(invocations);
-  expect(['ok', 'failed']).toContain(outcome.status);
+  // The fixture deterministically fixes its one baseline failure: a status
+  // regression would be invisible behind a permissive ['ok','failed'].
+  expect(outcome.status).toBe('ok');
+  if (outcome.status === 'ok') expect(outcome.value.tasks?.[0]?.outcome).toBe('fixed');
   // Discriminating, not vacuous: the loop must actually have built driver
   // invocations to inspect, and every one of them must carry NO correlation
   // (a forwarded correlation key here would fail the loop below).
@@ -104,7 +107,7 @@ test('M5b4 failure evidence', async () => {
     const invocations: OpInvocation[] = [];
     // A governed correlation carrying the OUTER job's identity fields: the
     // invocation forwards them verbatim and invents NO new role.
-    await runLadder(
+    const outcome = await runLadder(
       () => runLoop(invocations),
       { wallClockMs: 5000 },
       {
@@ -114,6 +117,11 @@ test('M5b4 failure evidence', async () => {
         correlation: correlation as never,
       },
     );
+    // Completion alone does not exclude a resolved failed task loop.
+    expect(outcome.outcome, name).toBe('completed');
+    if (outcome.outcome === 'completed') {
+      expect(outcome.value.status, name).toBe('ok');
+    }
     expect(invocations.length, name).toBeGreaterThan(0);
     for (const invocation of invocations) {
       expect(invocation.correlation, name).toEqual(expected);

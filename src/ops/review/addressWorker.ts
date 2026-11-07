@@ -207,6 +207,10 @@ class AddressRefusal extends Error {
   constructor(
     message: string,
     readonly fatal = false,
+    /** The failed-attempt gate this typed refusal settles. Absent means the
+     * attempt had no semantic gate of its own (the validator's failing gate
+     * or a plain `none` describes it). */
+    readonly gate?: FailedAttemptGate,
   ) {
     super(message);
   }
@@ -389,9 +393,9 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
   const stop = () => {
     if (fatal) throw new AddressRefusal(fatal, true);
     if (deps.parentSignal?.aborted || currentJobContext()?.signal?.aborted)
-      throw new AddressRefusal('parent cancelled');
+      throw new AddressRefusal('parent cancelled', false, 'budget');
     if (deps.remainingTokens() <= 0 || deps.remainingWallMs() <= 0)
-      throw new AddressRefusal('token or wall budget exhausted');
+      throw new AddressRefusal('token or wall budget exhausted', false, 'budget');
   };
   // Long candidate gates must not spend the cross-process retry budget
   // waiting for a healthy sibling in this worker. Rejections release the
@@ -614,7 +618,8 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
     let driverThrew = false;
     try {
       admitAttempt();
-      if (remainingUnit(finding) <= 0) throw new AddressRefusal('unit wall budget exhausted');
+      if (remainingUnit(finding) <= 0)
+        throw new AddressRefusal('unit wall budget exhausted', false, 'budget');
       if (prior)
         prompt += `\nPrior failed-attempt patch (engine-owned feedback; do not repeat rejected changes):\n${prior.patch}`;
       const attributed = diagnosticSources(diagnostics);
@@ -768,7 +773,8 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
             budgetStopCode: 'wall-cap',
             stopReason: 'address fixer wallClockMs deadline expired',
           });
-        if (attemptDeadline.expired()) throw new AddressRefusal('step wall budget exhausted');
+        if (attemptDeadline.expired())
+          throw new AddressRefusal('step wall budget exhausted', false, 'budget');
         if (result.stopReason !== 'complete') {
           // A worker-reported budget stop without a named cap keeps the raw code:
           // finishAttempt's unknown branch preserves it (never a guessed cap).
@@ -777,7 +783,7 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
             stopReason: `worker stopped: ${result.stopReason}`,
           });
           if (result.stopReason === 'budget' || result.stopReason === 'aborted')
-            throw new AddressRefusal(`worker stopped: ${result.stopReason}`);
+            throw new AddressRefusal(`worker stopped: ${result.stopReason}`, false, 'budget');
           throw new Error(`worker stopped: ${result.stopReason}`);
         }
         if (!stopSet) setStop({ completed: true });
@@ -925,7 +931,8 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
       if (scope !== 'all' && findingScoped(check) !== (scope === 'finding')) continue;
       try {
         stop();
-        if (remainingUnit(finding) <= 0) throw new AddressRefusal('unit wall budget exhausted');
+        if (remainingUnit(finding) <= 0)
+          throw new AddressRefusal('unit wall budget exhausted', false, 'budget');
         const checkRoot = resolve(cwd, check.command.cwd ?? '.');
         const rel = relative(await realpath(cwd), await realpath(checkRoot));
         if (rel === '..' || rel.startsWith('../') || isAbsolute(rel))
@@ -956,7 +963,8 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
         const signal = signals.length ? AbortSignal.any(signals) : undefined;
         for (let attempt = 0; ; attempt++) {
           stop();
-          if (remainingUnit(finding) <= 0) throw new AddressRefusal('unit wall budget exhausted');
+          if (remainingUnit(finding) <= 0)
+            throw new AddressRefusal('unit wall budget exhausted', false, 'budget');
           command.timeoutMs = Math.min(
             command.timeoutMs,
             deps.remainingWallMs(),
@@ -1118,10 +1126,15 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
     if (refusal.fatal) preconditionFailure = refusal.message;
     throw refusal;
   };
-  const prepareDependencies = async (cwd: string, finding: Finding, admit: () => void) => {
+  const prepareDependencies = async (
+    cwd: string,
+    finding: Finding,
+    admit: () => void,
+    snapshot = true,
+  ) => {
     try {
       const dependencies = await dependencyDirectory(admit, cwd);
-      if (dependencies)
+      if (dependencies && snapshot)
         await snapshotAddressDependencies(dependencies, resolve(cwd, 'node_modules'), admit);
       return dependencies;
     } catch (error) {
@@ -1135,9 +1148,19 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
     admit: () => void,
     includeFinding = false,
   ) => {
-    const dependencies = await prepareDependencies(cwd, finding, admit);
+    // A cached leg baseline still needs dependency VALIDATION, but the
+    // preflight worktree is discarded without running checks, so its
+    // node_modules copy is waste. Fixed candidates (includeFinding) always
+    // take their own snapshot.
+    const cached = baselineCache.get(parent);
+    const dependencies = await prepareDependencies(
+      cwd,
+      finding,
+      admit,
+      cached === undefined || includeFinding,
+    );
     try {
-      let leg = baselineCache.get(parent);
+      let leg = cached;
       if (!leg) {
         leg = await runChecks(cwd, finding, false, 'leg', true);
         baselineCache.set(parent, leg);
@@ -1268,7 +1291,8 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
           | undefined;
         const admitMutation = () => {
           stop();
-          if (remainingUnit(finding) <= 0) throw new AddressRefusal('unit wall budget exhausted');
+          if (remainingUnit(finding) <= 0)
+            throw new AddressRefusal('unit wall budget exhausted', false, 'budget');
         };
         const restore = async () => {
           if (terminalDeferred) return;
@@ -1304,15 +1328,14 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
               const lastGate = validations
                 .at(-1)
                 ?.gates.find((gate) => gate.verdict !== 'pass')?.gate;
-              const gate: FailedAttemptGate = /budget|cancel|aborted/.test(reason)
-                ? 'budget'
-                : fatal || /index|HEAD|snapshot|mutated/.test(reason)
-                  ? 'tamper'
-                  : /scope|protected/.test(reason)
-                    ? 'path-policy'
-                    : lastGate === 'paths'
-                      ? 'path-policy'
-                      : (lastGate ?? 'none');
+              // Typed failure sites name their gate; `reason` is free-form
+              // (provider/model prose, closure and feedback reasons), so it
+              // never decides the retained classification. A fatal refusal is
+              // an engine tamper observation, and otherwise the validator's
+              // failing gate is authoritative.
+              const gate: FailedAttemptGate =
+                attemptRefusal?.gate ??
+                (fatal ? 'tamper' : lastGate === 'paths' ? 'path-policy' : (lastGate ?? 'none'));
               const outcome = gate === 'budget' || fatal ? 'escalated-to-human' : 'unfixed';
               const pinned = await pinAddressFailure((args) => git(candidate, args), {
                 runPrefix,
@@ -1379,6 +1402,17 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
           rescueUsed = 0,
           regression = false;
         let reason = 'initial finding';
+        // The typed refusal that ended the current attempt, if any. Function
+        // scoped because restore() runs from catches that precede the
+        // per-iteration `refusal` declaration; the gate it carries is what
+        // the retained failed attempt records.
+        let attemptRefusal: AddressRefusal | undefined;
+        // Set once `git commit` has created a commit: from then on ANY error
+        // is terminal for this unit (a retry would re-dispatch work whose
+        // commit already landed). `committedFix` carries the result to return
+        // when verification succeeded and only later bookkeeping failed.
+        let commitCreated = false;
+        let committedFix: AddressFix | undefined;
         try {
           await initialize(admitMutation);
           await safeFile(root, file);
@@ -1426,6 +1460,7 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
             if (failure) throw failure.error;
           }, admitMutation).catch((error: unknown) => refusePrecondition(error, 'setup', finding));
           while (true) {
+            attemptRefusal = undefined;
             stop();
             if (Date.now() - unitStart >= policy.budgets.unit.wallMs)
               return failed('unit wall budget exhausted');
@@ -1513,6 +1548,7 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
               );
             } catch (error) {
               reason = error instanceof Error ? error.message : String(error);
+              if (error instanceof AddressRefusal) attemptRefusal = error;
               await restore();
               if (error instanceof AddressRefusal) {
                 if (error.fatal) fatal = reason;
@@ -1738,6 +1774,7 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
                 )
                   throw new AddressRefusal('staging absorbed sibling paths', true);
                 await git(root, ['commit', '-m', message]);
+                commitCreated = true;
                 // Verification is bookkeeping for an already-created commit. It
                 // must settle even when cancellation has stopped new admissions.
                 const commit = deps.terminalBinding
@@ -1754,13 +1791,7 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
                   throw new AddressRefusal('commit does not match gated parent/tree', true);
                 verifiedHeads.add(commit);
                 touched = false;
-                if (deps.terminalBinding && terminalAttempt) {
-                  releaseAddressTerminalAttempt(deps.terminalBinding, terminalAttempt);
-                  terminalAttempt = undefined;
-                }
-                for (let i = 0; i < baseline.length; i++)
-                  state = recordFixedFailures(state, baseline[i]!, broader[i]!);
-                return {
+                const accepted: AddressFix = {
                   finding: {
                     ...finding,
                     status: 'fixed',
@@ -1774,6 +1805,16 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
                   validation: gates,
                   failedAttempts: history,
                 };
+                // The fix is complete and its commit verified; a later
+                // bookkeeping fault must not hide it or re-dispatch the unit.
+                committedFix = accepted;
+                for (let i = 0; i < baseline.length; i++)
+                  state = recordFixedFailures(state, baseline[i]!, broader[i]!);
+                if (deps.terminalBinding && terminalAttempt) {
+                  releaseAddressTerminalAttempt(deps.terminalBinding, terminalAttempt);
+                  terminalAttempt = undefined;
+                }
+                return accepted;
               } finally {
                 await (deps.terminalBinding
                   ? addressTerminalCandidate(deps.terminalBinding, root, candidate, true)
@@ -1781,9 +1822,30 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
               }
             }, admitMutation).catch(async (error: unknown) => {
               reason = error instanceof Error ? error.message : String(error);
+              if (committedFix !== undefined) {
+                // The verified commit landed; report it instead of a deferred
+                // row that hides the commit and invites a paid retry.
+                const annotated = `${committedFix.reason}; post-commit bookkeeping failed: ${reason}`;
+                return {
+                  ...committedFix,
+                  reason: annotated,
+                  finding: { ...committedFix.finding, reason: annotated },
+                };
+              }
               if (error instanceof AddressRefusal) {
                 refusal = error;
+                attemptRefusal = error;
                 if (error.fatal) fatal = reason;
+              } else if (commitCreated) {
+                // A commit exists but its verification did not settle: fail the
+                // unit as terminal rather than re-dispatching it.
+                refusal = new AddressRefusal(
+                  `post-commit bookkeeping failed: ${reason}`,
+                  true,
+                  'tamper',
+                );
+                attemptRefusal = refusal;
+                fatal = refusal.message;
               }
               await restore();
               return undefined;

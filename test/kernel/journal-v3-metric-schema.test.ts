@@ -426,6 +426,9 @@ describe('journal v3 metric + report v2 schemas (T28)', () => {
         report({ verifiedCommits: [HEAD], closures: [closure({ todo: true })] }),
       ).success,
     ).toBe(false);
+    // The projection is set-equal: a non-todo closure missing from
+    // verifiedCommits fails too (both directions).
+    expect(ReportV2Schema.safeParse(report({ verifiedCommits: [] })).success).toBe(false);
 
     // P3-3: a null value cannot carry availability state 'known' or
     // 'known-zero' (contradiction — a known zero is not null).

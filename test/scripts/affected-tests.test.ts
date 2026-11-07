@@ -225,7 +225,7 @@ describe('selectAffected', () => {
   it('maps filesystem-read consumers that have no import-graph edge', () => {
     const consumers = [
       'test/cli/plans.smoke.test.ts',
-      'test/cli/registry.test.ts',
+      'test/cli/registry.family-scan.test.ts',
       'test/kernel/driver-hygiene.test.ts',
       'test/scripts/static-conformance.test.ts',
       'test/cli/conformance.test.ts',
@@ -237,7 +237,7 @@ describe('selectAffected', () => {
     expect(pick('src/driver/new/x.ts')).toEqual(
       expect.arrayContaining([consumers[2], consumers[3]]),
     );
-    expect(pick('src/ops/new/x.ts')).toContain('test/cli/registry.test.ts');
+    expect(pick('src/ops/new/x.ts')).toContain('test/cli/registry.family-scan.test.ts');
     expect(pick('src/ops/new/x.ts')).toContain('test/cli/conformance.test.ts');
   });
 
@@ -271,7 +271,7 @@ describe('selectAffected', () => {
     const readers = [
       'test/ops/gates/policyDiff.test.ts',
       'test/ops/gates/protectedPaths.closure.test.ts',
-      'test/ops/gates/workflowScan.test.ts',
+      'test/ops/gates/workflowScan.scan.test.ts',
       'test/ops/ratchet/definitions.test.ts',
       'test/scripts/github-settings.target.test.ts',
     ];
@@ -333,6 +333,7 @@ describe('bounded per-fix related mapping', () => {
   const tests = [
     'test/ops/dev/check.test.ts',
     'test/ops/dev/check-affected.test.ts',
+    'test/ops/dev/checker.test.ts',
     'test/ops/review/run.deadline.test.ts',
   ];
   it('maps source prefixes and touched tests, deduplicated', () => {
@@ -340,6 +341,9 @@ describe('bounded per-fix related mapping', () => {
       files: tests.slice(0, 2).sort(),
       advisory: undefined,
     });
+    expect(selectRelatedTests(['src/ops/dev/check.ts'], tests).files).not.toContain(
+      'test/ops/dev/checker.test.ts',
+    );
   });
   it('records an advisory when none map', () => {
     expect(selectRelatedTests(['README.md'], tests)).toEqual({
@@ -348,7 +352,7 @@ describe('bounded per-fix related mapping', () => {
     });
   });
   it('keeps all mapped files without a file-count cap', () => {
-    const files = Array.from({ length: 12 }, (_, i) => `test/a${i}.test.ts`);
+    const files = Array.from({ length: 12 }, (_, i) => `test/a.${i}.test.ts`);
     expect(selectRelatedTests(['src/a.ts'], files).files).toHaveLength(12);
   });
   it('reuses non-import mappings', () => {

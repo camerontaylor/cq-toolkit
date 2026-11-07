@@ -63,12 +63,29 @@ describe('ai-sdk driver seam v2: RunOptions.signal + workspace binding', () => {
     try {
       // No runLadder: the ambient governed context is UNDEFINED here, so the
       // only cancellation source is options.signal — the seam-v2 wiring.
+      // The model aborts itself AFTER dispatch starts, so a pre-dispatch
+      // abort can never satisfy this test; `dispatched` proves it was in
+      // flight when the signal fired.
+      const controller = new AbortController();
+      let dispatched = 0;
       const driver = new AiSdkDriver({
-        providers: { mock: (modelId) => modelFor({ kind: 'block-until-abort' }, modelId) },
+        providers: {
+          mock: (modelId) =>
+            new MockLanguageModelV4({
+              modelId,
+              doGenerate: (options) =>
+                new Promise<never>((_, reject) => {
+                  dispatched += 1;
+                  const abortError = Object.assign(new Error('aborted'), { name: 'AbortError' });
+                  options.abortSignal?.addEventListener('abort', () => reject(abortError), {
+                    once: true,
+                  });
+                  queueMicrotask(() => controller.abort());
+                }),
+            }),
+        },
         sessionsDir: join(scratchDir, 'sessions'),
       });
-      const controller = new AbortController();
-      setTimeout(() => controller.abort(), 10);
       const result = await driver.run(invocation({ toolPolicy: { allow: [], mode: 'none' } }), {
         signal: controller.signal,
       });
@@ -76,6 +93,7 @@ describe('ai-sdk driver seam v2: RunOptions.signal + workspace binding', () => {
       expect(result.error).toBeUndefined(); // the cancellation is not a failure
       // Usage observed so far: no step completed before the abort → zeros.
       expect(result.usage).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+      expect(dispatched).toBe(1); // the abort landed while doGenerate was in flight
     } finally {
       await rm(scratchDir, { recursive: true, force: true });
     }

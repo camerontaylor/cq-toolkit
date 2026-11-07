@@ -107,5 +107,13 @@ class QueueTransportTests(QueueTransportFixtureMixin, unittest.TestCase):
         self.assertEqual(self.q, before)
 
     def test_strict_decode_wire_and_author_protocol_separation(self):
-        for raw in [b'{"v":1,"v":1}', b"x" * 8193, b'{"v":2}', b'{"v":1,"op":"fallback"}']:
+        for raw in [b'{"v":1,"v":1}', b"x" * 8193, b'{"v":2}', b'{"v":1,"op":"fallback"}',
+                    b'{"v":1,"op":[],"requestId":"request-1","binding":{}}',
+                    b'{"v":1,"op":{"kind":"status"}}',
+                    b"[" * 4000 + b"]" * 4000]:  # nesting, not a caller-visible RecursionError
             with self.assertRaises(ValueError): transport.decode(raw)
+        for binding in ({"kind": "merged-current", "repo": "owner/repo", "targetSelector": [],
+                         "pr": 1, "mergeSha": "b" * 40},
+                        {"kind": [], "repo": "owner/repo", "targetSelector": "promoted-main",
+                         "pr": 1, "mergeSha": "b" * 40}):
+            with self.assertRaises(ValueError): transport.binding(binding)

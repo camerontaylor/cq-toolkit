@@ -34,6 +34,7 @@ export function decimalFlag<T extends z.ZodType<number, number>>(
   return z
     .string()
     .regex(/^(?:0|[1-9][0-9]*)$/, 'must be a decimal integer')
+    .refine((v) => Number.isSafeInteger(Number(v)), 'must be a safe integer')
     .transform(Number)
     .pipe(target);
 }

@@ -1,5 +1,5 @@
 import { constants } from 'node:fs';
-import { lstat, readFile, rename, writeFile } from 'node:fs/promises';
+import { lstat, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { expect, test, vi } from 'vitest';
 import * as addressModule from '../../../src/ops/review/address.js';
@@ -287,3 +287,85 @@ test.each([
     }
   },
 );
+
+test('a drained terminal lifetime removes its private session directory', async () => {
+  const f = await fixture();
+  const parent = new AbortController();
+  const commonDir = f.repo.git('rev-parse', '--path-format=absolute', '--git-common-dir').trim();
+  const before = new Set(await readdir(commonDir));
+  const report = terminalReport(join(f.root, 'terminal-disposal-report.json'));
+  try {
+    const result = await withAddressOwnership(
+      {
+        repoRoot: f.repo.root,
+        git: f.run,
+        source: 'local',
+        production: false,
+        signal: parent.signal,
+      },
+      async (lease) => {
+        await ownershipModule.bindAddressTerminalReport(lease, report);
+        const binding = ownershipModule.addressTerminalWorkerBinding(lease);
+        const attempt = await ownershipModule.recordAddressTerminalAttempt(
+          binding,
+          terminalInput(f.repo),
+        );
+        await writeFile(join(f.repo.root, 'src/a.ts'), 'RAW CANCELLED PARTIAL\n');
+        parent.abort();
+        expect(ownershipModule.deferAddressTerminalAttempt(binding, attempt)).toBe(true);
+        return ownershipModule.addressCancelledResult(lease);
+      },
+    );
+    expect(result.status).toBe('needs-human');
+    const created = (await readdir(commonDir)).filter((name) => !before.has(name));
+    expect(created.filter((name) => name.startsWith('cq-address-terminal-'))).toEqual([]);
+  } finally {
+    await f.repo.cleanup();
+  }
+});
+
+test('a vanished journal directory ends the terminal attempt without quarantine', async () => {
+  const f = await fixture();
+  const parent = new AbortController();
+  const reportDir = join(f.root, 'vanished-journal');
+  const report = terminalReport(join(reportDir, 'terminal-report.json'));
+  try {
+    const result = await withAddressOwnership(
+      {
+        repoRoot: f.repo.root,
+        git: f.run,
+        source: 'local',
+        production: false,
+        signal: parent.signal,
+      },
+      async (lease) => {
+        await ownershipModule.bindAddressTerminalReport(lease, report);
+        const binding = ownershipModule.addressTerminalWorkerBinding(lease);
+        const attempt = await ownershipModule.recordAddressTerminalAttempt(
+          binding,
+          terminalInput(f.repo),
+        );
+        await writeFile(join(f.repo.root, 'src/a.ts'), 'RAW CANCELLED PARTIAL\n');
+        parent.abort();
+        // The whole journal tree (whose missing tail bind deliberately did
+        // not create) disappears before the terminal run: ordinary parent
+        // cancellation timing, not evidence of tampering.
+        await rm(reportDir, { recursive: true, force: true });
+        expect(ownershipModule.deferAddressTerminalAttempt(binding, attempt)).toBe(true);
+        const outcome = await ownershipModule.addressCancelledResult(lease);
+        expect(outcome.status).toBe('needs-human');
+        expect(outcome.report).toBe(report);
+        return outcome;
+      },
+    );
+    expect(result.status).toBe('needs-human');
+    // A fresh lifetime admits immediately: no attended recovery is required.
+    const probe = await withAddressOwnership(
+      { repoRoot: f.repo.root, git: f.run, source: 'local', production: false },
+      async () => 'admitted',
+    );
+    expect(probe).toBe('admitted');
+  } finally {
+    await f.repo.cleanup();
+  }
+});
