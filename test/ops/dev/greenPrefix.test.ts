@@ -32,6 +32,7 @@ function fix(commit: string | undefined, observedHead: string): AddressFix {
 
 function report(fixes: AddressFix[]): ReviewAddressReport {
   return {
+    version: 1,
     source: 'local',
     reportPath: '/tmp/r.json',
     rounds: [],

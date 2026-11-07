@@ -133,6 +133,7 @@ describe('dev.cycle red final gates: newest green verified-fix commit (#536)', (
 
 test('renderFindingsSection without a selection is unchanged by #536', () => {
   const report = {
+    version: 1,
     source: 'local',
     reportPath: '/tmp/x.json',
     rounds: [],

@@ -82,6 +82,7 @@ export function makeReport(over: Partial<ReviewAddressReport> = {}): ReviewAddre
   const rounds = over.rounds ?? [{ round: 1, record: record(HEAD_A), runs: [] }];
   const firstHead = rounds[0]?.record.head;
   return {
+    version: 1,
     source: 'review',
     reportPath: 'review-address-report.json',
     rounds,

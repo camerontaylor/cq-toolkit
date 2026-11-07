@@ -34,6 +34,7 @@ export const gh = vi.fn(async (args: string[]) => ({
       : JSON.stringify(metadata(Number(args[1]!.split('/').at(-1)))),
 }));
 export const report = (): ReviewAddressReport => ({
+  version: 1,
   source: 'pr:1',
   reportPath: '/report',
   rounds: [],

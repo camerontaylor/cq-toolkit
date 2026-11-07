@@ -48,7 +48,12 @@ describe('review.address PR phase-one orchestration', () => {
           expect(jobs[0]?.result.status).toBe('ok');
           if (mode === 'sibling-refusal') expect(jobs[1]?.result.status).toBe('failed');
         }
-        expect(JSON.parse(await readFile(report.reportPath, 'utf8'))).toEqual(report);
+        const persisted = JSON.parse(await readFile(report.reportPath, 'utf8')) as {
+          version?: unknown;
+        };
+        // ADR-0005 decision 10: the persisted report envelope always declares v1.
+        expect(persisted.version).toBe(1);
+        expect(persisted).toEqual(report);
       } finally {
         await w.cleanup();
       }
