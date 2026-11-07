@@ -190,7 +190,8 @@ def summarize(status, queue, heartbeat, config, events, now):
         elif item.get("kind") == "delta" and category(item) == "open":
             rank = 1
         repo_rank = repo_registry.rank_for(item, primary, ranks)
-        if repo_rank is not None:
+        # Open PRs/deltas now outrank repository tiers across all repos (#1177).
+        if repo_rank is not None and category(item) != "open":
             rank = repo_rank
         return (not item.get("operator_priority", False), rank, item.get("order", 999))
     pending = [i for i in items if i.get("state") == "pending"
