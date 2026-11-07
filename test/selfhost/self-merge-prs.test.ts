@@ -35,7 +35,8 @@
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, test } from 'vitest';
+import { afterEach, describe, expect, test, vi } from 'vitest';
+import { readCqEnv } from '../../src/config/env.js';
 import { currentJobContext } from '../../src/kernel/governor.js';
 import type { OpRegistryView } from '../../src/kernel/runner.js';
 import type { OpRegistryEntry, OpResult } from '../../src/kernel/types.js';
@@ -200,6 +201,21 @@ describe('buildRunInput (the pure input builder)', () => {
     expect(buildRunInput([], { repoRoot: '/checkout' }, 0).sessionsDir).toBe(
       '/checkout/.selfhost/journal/sessions',
     );
+  });
+
+  test('protectedBranch resolves from cfg.cqEnv, else the process env (same source as the op)', () => {
+    const fromCfg = buildRunInput(
+      [],
+      { repoRoot: '/c', cqEnv: readCqEnv({ CQ_MERGE_PROTECTED_BRANCH: 'release' }) },
+      0,
+    );
+    expect(fromCfg.protectedBranch).toBe('release');
+    vi.stubEnv('CQ_MERGE_PROTECTED_BRANCH', 'staging');
+    try {
+      expect(buildRunInput([], { repoRoot: '/c' }, 0).protectedBranch).toBe('staging');
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   test('the resolved trust policy rides the strict JSON twin, not RegExp config', () => {
