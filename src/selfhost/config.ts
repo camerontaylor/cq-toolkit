@@ -444,6 +444,11 @@ export function parseSelfhostArgs(argv: readonly string[]): ParsedSelfhostArgs {
       if (value === '') {
         throw new Error(`selfhost: ${arg} requires a non-empty value. ${USAGE}`);
       }
+      if (value.startsWith('--')) {
+        throw new Error(
+          `selfhost: ${arg} requires a value, got flag-like ${JSON.stringify(value)}. ${USAGE}`,
+        );
+      }
       i++;
       if (arg === '--journal-root') {
         parsed.journalRoot = value;

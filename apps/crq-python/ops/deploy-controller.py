@@ -1195,6 +1195,12 @@ def rollback_plan(effects: Effects, helper_module, prior: dict,
 # --------------------------------------------------------------------- main
 
 
+def _error_artifact(kind: str, subcommand: str, message: str, exit_code: int) -> dict:
+    """The one JSON artifact for an error with no result (doctrine I1)."""
+    return {"error": {"kind": kind, "subcommand": subcommand,
+                      "message": message, "exitCode": exit_code}}
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", required=True, type=Path,
@@ -1218,8 +1224,10 @@ def main(argv=None) -> int:
                           help="a controller journal entry naming the prior target")
     health = sub.add_parser("health",
                             help="two advancing completed-tick observations")
-    health.add_argument("--interval-seconds", type=int, default=0,
-                        help="seconds between observations (caller-timed)")
+    health.add_argument("--interval-seconds", type=int, required=True,
+                        help="required delay before each later observation; choose at "
+                             "least one runner cadence plus slack (the first observation "
+                             "polls --first-tick-timeout-seconds instead)")
     health.add_argument("--first-tick-timeout-seconds", type=int, default=1500,
                         help="first completed-tick wait (default: 20-minute cadence plus 5-minute slack)")
     args = parser.parse_args(argv)
@@ -1274,7 +1282,19 @@ def main(argv=None) -> int:
         print("refused: " + str(exc), file=sys.stderr)
         return 2
     except Refused as exc:
+        print(json.dumps(_error_artifact("refused", args.operation, str(exc), 2),
+                         indent=2, sort_keys=True))
         print("refused: " + str(exc), file=sys.stderr)
+        return 2
+    except (ValueError, OSError, subprocess.CalledProcessError) as exc:
+        if args.operation == "health":
+            raise  # keep the health observation exit-1 contract
+        # Escaped outside mutation_record: the helper was never entered, so the
+        # deployment surfaces are unchanged and this is a refusal (exit 2).
+        message = str(exc)[:400] or type(exc).__name__
+        print(json.dumps(_error_artifact("refused", args.operation, message, 2),
+                         indent=2, sort_keys=True))
+        print("refused: " + message, file=sys.stderr)
         return 2
     return 0
 

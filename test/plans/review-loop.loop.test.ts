@@ -94,6 +94,10 @@ describe('review-loop happy path', () => {
     expect(job.input.item.comments).toEqual([
       {
         authorLogin: 'reviewer',
+        // The REST fetch supplied no actor type for this reply, so the thread
+        // vocabulary carries an explicit null — the same "fetched, unknown"
+        // value the GraphQL reply mapping produces, never an omitted key.
+        authorType: null,
         body: 'See the timeout path too.',
         createdAt: iso(REPLY_AGE),
       },

@@ -23,6 +23,8 @@ async function stub(
   cleanup = 'exit 0',
   create = "printf '%064d\\n' 1",
   state = 'false 0',
+  imageInspect = 'exit 0',
+  pull = 'exit 0',
 ) {
   // The launcher lives OUTSIDE the workspace: a launcher inside the
   // model-writable workspace is refused by the adapter.
@@ -36,6 +38,8 @@ async function stub(
     `#!/bin/sh
 printf '%s\\n' "$*" >> '${log}'
 case "$1" in
+  image) shift; ${imageInspect} ;;
+  pull) ${pull} ;;
   create) ${create} ;;
   start) ${start} ;;
   inspect) echo '${state}' ;;
@@ -66,9 +70,10 @@ describe('daemon-owned container lifetime', () => {
     expect(result.timedOut).toBe(true);
     expect(result.spawnError).toBeUndefined();
     const calls = (await readFile(log, 'utf8')).trim().split('\n');
-    expect(calls[0]).toMatch(/^create --name cq-sandbox-/);
-    expect(calls[0]).not.toContain('--rm');
-    expect(calls.slice(1)).toEqual([`start --attach ${id}`, `rm --force --volumes ${id}`]);
+    expect(calls[0]).toMatch(/^image inspect /);
+    expect(calls[1]).toMatch(/^create --pull never --name cq-sandbox-/);
+    expect(calls[1]).not.toContain('--rm');
+    expect(calls.slice(2)).toEqual([`start --attach ${id}`, `rm --force --volumes ${id}`]);
   });
 
   test('failed cleanup cannot return a successful child outcome', async () => {
@@ -139,6 +144,50 @@ describe('daemon-owned container lifetime', () => {
     expect(calls).toMatch(/rm --force --volumes cq-sandbox-/);
   });
 
+  test('a cache miss pulls before create --pull never', async () => {
+    // Cold first launch: `image inspect` misses, so the image is pulled in
+    // its own step and `create` cannot pull inside the 15 s control budget.
+    const { adapter, dir, log } = await stub(
+      'echo attached',
+      'exit 0',
+      "printf '%064d\\n' 1",
+      'false 0',
+      'exit 1',
+    );
+    const result = await adapter.launch({
+      workspace: dir,
+      argv: ['/usr/bin/true'],
+      network: 'model-only',
+    });
+    expect(result.ok).toBe(true);
+    const calls = (await readFile(log, 'utf8')).trim().split('\n');
+    expect(calls[0]).toMatch(/^image inspect /);
+    expect(calls[1]).toMatch(/^pull /);
+    expect(calls[2]).toMatch(/^create --pull never --name cq-sandbox-/);
+    expect(calls[3]).toBe(`start --attach ${id}`);
+  });
+
+  test('a failed pull fails the launch before create', async () => {
+    const { adapter, dir, log } = await stub(
+      'exit 0',
+      'exit 0',
+      "printf '%064d\\n' 1",
+      'false 0',
+      'exit 1',
+      'echo no-registry >&2; exit 1',
+    );
+    const result = await adapter.launch({
+      workspace: dir,
+      argv: ['/usr/bin/true'],
+      network: 'model-only',
+    });
+    expect(result.ok).toBe(false);
+    const calls = await readFile(log, 'utf8');
+    expect(calls).toContain('pull ');
+    expect(calls).not.toContain('create ');
+    expect(calls).not.toContain('start --attach');
+  });
+
   test('a slow create is not cut off by a short attach budget', async () => {
     // Rationing P0: `create` ran under the request (attach) budget, so a
     // short child deadline could kill the control-plane call before any ID
@@ -155,8 +204,9 @@ describe('daemon-owned container lifetime', () => {
       timeoutMs: 100,
     });
     const calls = (await readFile(log, 'utf8')).trim().split('\n');
-    expect(calls[0]).toMatch(/^create --name cq-sandbox-/);
-    expect(calls[1]).toBe(`start --attach ${id}`);
+    expect(calls[0]).toMatch(/^image inspect /);
+    expect(calls[1]).toMatch(/^create --pull never --name cq-sandbox-/);
+    expect(calls[2]).toBe(`start --attach ${id}`);
     expect(result.spawnError).toBeUndefined();
   });
 

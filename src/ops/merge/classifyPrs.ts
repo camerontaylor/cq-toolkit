@@ -295,11 +295,20 @@ const isAcceptableReview = (review: ReviewSummary, ctx: ReviewContext): boolean 
   isReviewableEvidence(review, ctx) && stateCounts(review.state, ctx.config);
 
 /** Review independence is judged by the merging agent, including shared accounts. */
-const hasSameAccountAgentAcceptance = (candidate: PrCandidate, _ctx: ReviewContext): boolean => {
+const hasSameAccountAgentAcceptance = (candidate: PrCandidate, ctx: ReviewContext): boolean => {
   const head = candidate.headRefOid;
   if (head == null || !/^[0-9a-f]{40}$/i.test(head)) return false;
-  return [...candidate.reviews, ...candidate.issueComments].some(
+  // Only the PR author's own shared agent account may attest this way; the
+  // automation identity is never trusted, and DISMISSED reviews are void.
+  const prAuthor = candidate.authorLogin;
+  if (prAuthor === null || prAuthor === ctx.config.automationLogin) return false;
+  if (ctx.config.excludedLogins?.includes(prAuthor)) return false;
+  return [
+    ...candidate.reviews.filter((review) => review.state !== 'DISMISSED'),
+    ...candidate.issueComments,
+  ].some(
     (comment) =>
+      comment.authorLogin === prAuthor &&
       comment.authorType !== 'Bot' &&
       !comment.authorLogin?.toLowerCase().endsWith('[bot]') &&
       parseIndependentReview(comment.body, head).kind === 'valid',

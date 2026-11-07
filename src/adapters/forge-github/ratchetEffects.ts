@@ -31,7 +31,7 @@ import { tmpdir } from 'node:os';
 import { messageOf } from '../../shared/messageOf.js';
 import { execFile } from 'node:child_process';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve as pathResolve } from 'node:path';
 import type { CqEnv } from '../../config/env.js';
 import { resolveGhBin } from './ghBin.js';
 import type { BaselinePrEffects } from '../../ops/ratchet/proposeBaselineUpdate.js';
@@ -48,6 +48,19 @@ interface ExecResult {
   timedOut: boolean;
   stdout: string;
   stderr: string;
+  /** The spawn/exit error's message, when the child failed (fallback cause). */
+  errorMessage: string;
+  /** The spawn/exit error's `code` (e.g. ENOENT, ERR_CHILD_PROCESS_STDIO_MAXBUFFER). */
+  errorCode: string;
+}
+
+/** The failure cause for a thrown message: output first, then the error itself. */
+function causeOf(res: ExecResult): string {
+  return (
+    res.stderr.trim() ||
+    res.stdout.trim() ||
+    [res.errorCode, res.errorMessage].filter((part) => part !== '').join(': ')
+  );
 }
 
 /**
@@ -93,8 +106,16 @@ function exec(
         killSignal: 'SIGKILL',
       },
       (error, stdout, stderr) => {
-        const timedOut = error !== null && (error as { killed?: unknown }).killed === true;
-        resolve({ ok: error === null, timedOut, stdout, stderr });
+        const failure = error as { killed?: unknown; code?: unknown; message?: unknown } | null;
+        const errorCode = failure !== null && typeof failure.code === 'string' ? failure.code : '';
+        // Node also kills the child on maxBuffer exhaustion; that is not a timeout.
+        const timedOut =
+          failure !== null &&
+          failure.killed === true &&
+          errorCode !== 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER';
+        const errorMessage =
+          failure !== null && typeof failure.message === 'string' ? failure.message : '';
+        resolve({ ok: error === null, timedOut, stdout, stderr, errorMessage, errorCode });
       },
     );
   });
@@ -121,6 +142,15 @@ function ghEnv(): NodeJS.ProcessEnv {
   return env;
 }
 
+/** The git child env: the automation and ambient tokens never reach hooks or filters. */
+function gitEnv(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  delete env['CQ_AUTOMATION_TOKEN'];
+  delete env['GITHUB_TOKEN'];
+  delete env['GH_TOKEN'];
+  return env;
+}
+
 /** One `gh` invocation, throwing on a timeout or a non-zero exit (the op contains the throw). */
 async function runGhWith(
   repoRoot: string,
@@ -132,7 +162,7 @@ async function runGhWith(
     throw new Error(`gh ${args[0] ?? ''} timed out after ${EXEC_TIMEOUT_MS}ms`);
   }
   if (!res.ok) {
-    throw new Error(`gh ${args[0] ?? ''} failed: ${res.stderr.trim() || res.stdout.trim()}`);
+    throw new Error(`gh ${args[0] ?? ''} failed: ${causeOf(res)}`);
   }
   return res.stdout;
 }
@@ -143,12 +173,17 @@ async function runGit(
   args: readonly string[],
   allowFail = false,
 ): Promise<ExecResult> {
-  const res = await exec('git', args, { cwd: repoRoot });
+  // Hooks are disabled and the automation token is scrubbed: git runs local
+  // hooks and filters during checkout/commit/push.
+  const res = await exec('git', ['-c', 'core.hooksPath=/dev/null', ...args], {
+    cwd: repoRoot,
+    env: gitEnv(),
+  });
   if (res.timedOut) {
     throw new Error(`git ${args[0] ?? ''} timed out after ${EXEC_TIMEOUT_MS}ms`);
   }
   if (!res.ok && !allowFail) {
-    throw new Error(`git ${args[0] ?? ''} failed: ${res.stderr.trim() || res.stdout.trim()}`);
+    throw new Error(`git ${args[0] ?? ''} failed: ${causeOf(res)}`);
   }
   return res;
 }
@@ -192,7 +227,9 @@ export function makeSubprocessBaselinePrEffects(
       'number,url,baseRefName,headRefName',
     ]);
     const parsed: unknown = JSON.parse(out);
-    if (!Array.isArray(parsed)) return null;
+    if (!Array.isArray(parsed)) {
+      throw new Error('gh pr list returned a non-array JSON payload');
+    }
     // The (head, base) PAIR is the identity: GitHub allows one head with
     // several open PRs against DIFFERENT bases, so the base request is
     // filtered locally too (belt) on top of the server-side `--base` (braces).
@@ -216,17 +253,25 @@ export function makeSubprocessBaselinePrEffects(
   const commitAndUpsertPr: BaselinePrEffects['commitAndUpsertPr'] = async (input) => {
     assertArgSafeRef(input.head, 'head');
     assertArgSafeRef(input.base, 'base');
+    if (input.base !== base) {
+      throw new Error(
+        `ratchet: commitAndUpsertPr base '${input.base}' differs from the effects base '${base}'`,
+      );
+    }
     const original = (await runGit(repoRoot, ['rev-parse', '--abbrev-ref', 'HEAD'])).stdout.trim();
+    const originalSha = (await runGit(repoRoot, ['rev-parse', 'HEAD'])).stdout.trim();
     // Restore the original checkout on success AND on fault. A restore
     // failure is NEVER silent (K): it throws, and when a primary fault is
     // already in flight the restore failure is named alongside it rather
     // than masking it.
     const restoreOriginal = async (primary?: unknown): Promise<void> => {
-      if (original === '' || original === 'HEAD' || original === input.head) return;
+      if (original === input.head) return;
+      const detached = original === '' || original === 'HEAD';
+      const target = detached ? originalSha : original;
       try {
-        await runGit(repoRoot, ['checkout', original]);
+        await runGit(repoRoot, detached ? ['checkout', '--detach', target] : ['checkout', target]);
       } catch (restoreErr) {
-        const restoreMessage = `git checkout '${original}' (branch restore) failed: ${messageOf(restoreErr)}`;
+        const restoreMessage = `git checkout '${target}' (${detached ? 'detached' : 'branch'} restore) failed: ${messageOf(restoreErr)}`;
         if (primary === undefined) throw new Error(restoreMessage);
         throw new Error(`${messageOf(primary)}; additionally ${restoreMessage}`, {
           cause: primary,
@@ -249,7 +294,11 @@ export function makeSubprocessBaselinePrEffects(
       const start = remoteHead.ok ? `refs/remotes/origin/${input.head}` : `origin/${input.base}`;
       await runGit(repoRoot, ['checkout', '-B', input.head, start]);
       for (const file of input.files) {
-        const path = join(repoRoot, file.path);
+        const path = pathResolve(repoRoot, file.path);
+        const rel = relative(repoRoot, path);
+        if (isAbsolute(file.path) || rel === '' || rel.startsWith('..') || isAbsolute(rel)) {
+          throw new Error(`ratchet: refusing to write outside the checkout: '${file.path}'`);
+        }
         await mkdir(dirname(path), { recursive: true });
         await writeFile(path, file.content, 'utf8');
       }

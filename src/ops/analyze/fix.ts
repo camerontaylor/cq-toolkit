@@ -967,18 +967,32 @@ async function recheckAfter(
     return { before: before.failureCount, after: null, resolved: false, detail };
   }
   const report: AnalyzeRunReport = after.value;
-  const resolved =
+  // The recheck re-runs the checks RESOLVED for this apply, which can differ
+  // from the ones that produced the sidecar (--checks, --configPath). A
+  // cluster absent from BOTH snapshots proves nothing about the edit, so the
+  // targeted cluster must be observed before as well as gone after.
+  const targeted =
     preview.kind === 'rule-codemod'
+      ? undefined
+      : (cluster: { id: string; signature: string }): boolean =>
+          cluster.id === preview.clusterId && cluster.signature === preview.signature;
+  const observedBefore = targeted === undefined || before.report.clusters.some(targeted);
+  const resolved =
+    targeted === undefined
       ? report.failureCount < before.failureCount
-      : !report.clusters.some(
-          (cluster) => cluster.id === preview.clusterId && cluster.signature === preview.signature,
-        );
+      : observedBefore && !report.clusters.some(targeted);
   return {
     before: before.failureCount,
     after: report.failureCount,
     resolved,
     sidecarPath: report.sidecarPath,
     markdownPath: report.markdownPath,
+    ...(observedBefore
+      ? {}
+      : {
+          detail:
+            'the targeted cluster was absent from the before-check, so the recheck checks cannot confirm the fix',
+        }),
   };
 }
 

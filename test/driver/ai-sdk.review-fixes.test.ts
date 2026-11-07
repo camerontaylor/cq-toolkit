@@ -1,7 +1,7 @@
 // RD-B review debt (#18/#24) — usage evidence on failure, budget folds,
 // config isolation, the always-on tool loop, resume dedupe, and served-id
 // pricing (the former ai-sdk.test.ts review-fixes describe).
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test, vi } from 'vitest';
@@ -18,6 +18,8 @@ import {
   usageModel,
 } from './ai-sdk.helpers.js';
 import { AiSdkDriver, DEFAULT_MAX_STEPS } from '../../src/driver/ai-sdk/index.js';
+import { SessionBoundError, errorClassOf } from '../../src/driver/errors.js';
+import { withReapOnSettle } from '../../src/driver/factory.js';
 import { defaultHarnessConfig } from '../../src/harness/config.js';
 import { SessionStore } from '../../src/harness/session.js';
 
@@ -168,9 +170,58 @@ describe('ai-sdk driver review fixes (#18/#24)', () => {
       expect(
         args.messages?.filter((message) => message.role === 'user' && message.content === prompt),
       ).toHaveLength(1);
-      await expect(
-        driver.run(invocation({ prompt: 'p'.repeat(51), toolPolicy: { mode: 'none', allow: [] } })),
-      ).rejects.toThrow(/51 chars, over the harness prompt budget of 50/);
+      // The over-budget refusal is pre-dispatch CALLER-DATA validation: it
+      // carries the structured 'config' class like every other pre-dispatch
+      // throw on this lane.
+      const overBudget = await driver
+        .run(invocation({ prompt: 'p'.repeat(51), toolPolicy: { mode: 'none', allow: [] } }))
+        .catch((err: unknown) => err);
+      expect(errorClassOf(overBudget)).toBe('config');
+      expect((overBudget as Error).message).toContain(
+        '51 chars, over the harness prompt budget of 50',
+      );
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
+  test('a throw after the record is created is bound to its session (reap-on-settle removes it)', async () => {
+    const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-session-bound-'));
+    try {
+      const sessionsDir = join(scratchDir, 'sessions');
+      const driver = new AiSdkDriver({
+        providers: { mock: () => modelFor({ kind: 'reply', text: 'never dispatched' }) },
+        sessionsDir,
+        // `buildTools` re-parses the harness config AFTER the fresh record
+        // exists. maxTools 0 is invalid to the schema (so that parse throws
+        // post-creation) and irrelevant to the driver's own prompt-length
+        // check, which is what makes this a post-creation throw.
+        harnessConfig: {
+          ...defaultHarnessConfig,
+          promptBudget: { ...defaultHarnessConfig.promptBudget, maxTools: 0 },
+        },
+      });
+      const plainError = await driver.run(invocation()).catch((err: unknown) => err);
+      expect(plainError).toBeInstanceOf(SessionBoundError);
+      const plainId = (plainError as SessionBoundError).sessionId;
+      // The rejection names the record that really exists on disk.
+      await expect(new SessionStore(sessionsDir).load(plainId)).resolves.toBeDefined();
+      expect((await readdir(sessionsDir)).filter((name) => name.endsWith('.jsonl'))).toHaveLength(
+        1,
+      );
+
+      // The reap-on-settle wrapper (what CQ_SESSION_LOGS=off composes) sees
+      // the same session-bound rejection and removes exactly that record.
+      const reapedError = await withReapOnSettle(driver, sessionsDir)
+        .run(invocation())
+        .catch((err: unknown) => err);
+      expect(reapedError).toBeInstanceOf(SessionBoundError);
+      const reapedId = (reapedError as SessionBoundError).sessionId;
+      expect(reapedId).not.toBe(plainId);
+      await expect(new SessionStore(sessionsDir).load(reapedId)).resolves.toBeUndefined();
+      expect((await readdir(sessionsDir)).filter((name) => name.endsWith('.jsonl'))).toHaveLength(
+        1,
+      );
     } finally {
       await rm(scratchDir, { recursive: true, force: true });
     }

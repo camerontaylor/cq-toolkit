@@ -575,7 +575,8 @@ function valueText(lines: readonly Line[], span: Span): string {
  * A scalar value's literal: unquoted inline value, or `null` if it is not a
  * literal. With `wholeValue`, a plain value that continues onto more-indented
  * content lines is not a literal either (GitHub reads `a` + `x` as `a x`);
- * only `uses` tracing opts in, so other keys keep their single-line reading.
+ * `uses` tracing and the job `name:` opt in (a split name is a phantom
+ * producer otherwise), so other keys keep their single-line reading.
  */
 function literalOf(
   lines: readonly Line[],
@@ -964,7 +965,7 @@ function readJob(
   let dynamicName = false;
   const nameSpan = children.get('name');
   if (nameSpan) {
-    const literal = literalOf(lines, nameSpan);
+    const literal = literalOf(lines, nameSpan, true);
     if (literal === null || literal === '' || literal.includes('${{')) dynamicName = true;
     else name = literal;
   }

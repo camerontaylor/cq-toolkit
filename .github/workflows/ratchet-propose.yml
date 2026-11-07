@@ -82,7 +82,7 @@ jobs:
           conclusion="$(jq -r '.conclusion' <<<"$run")"
           measured_sha="$(jq -r '.head_sha' <<<"$run")"
           [ "$path" = ".github/workflows/ratchet-propose-measure.yml" ] || { echo "refusing: run path '$path'"; exit 1; }
-          [ "$event" = "push" ] || [ "$event" = "workflow_dispatch" ] || { echo "refusing: event '$event'"; exit 1; }
+          [ "$event" = "schedule" ] || [ "$event" = "workflow_dispatch" ] || { echo "refusing: event '$event'"; exit 1; }
           [ "$branch" = "main" ] || { echo "refusing: branch '$branch'"; exit 1; }
           [ "$head_repo" = "$REPO_ID" ] || { echo "refusing: foreign run"; exit 1; }
           [ "$conclusion" = "success" ] || { echo "refusing: conclusion '$conclusion'"; exit 1; }

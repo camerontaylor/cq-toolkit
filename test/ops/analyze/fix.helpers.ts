@@ -45,6 +45,14 @@ export function scriptedRunner(
     if (cmd.command === 'ast-grep') {
       const rule = JSON.parse(cmd.args[3] ?? '{}') as { rule?: { pattern?: string }; fix?: string };
       const pattern = Buffer.from(rule.rule?.pattern ?? '', 'utf8');
+      if (pattern.length === 0) {
+        // An empty needle makes `Buffer.indexOf` return the offset instead of
+        // -1, so the loop below would never terminate. Fail fast instead, and
+        // name the layout assumption this scripted runner depends on.
+        throw new Error(
+          `scriptedRunner: no rule.pattern in ast-grep args[3] (${String(cmd.args[3])})`,
+        );
+      }
       const targets = cmd.args.slice(cmd.args.indexOf('--') + 1);
       const matches: object[] = [];
       for (const file of targets) {

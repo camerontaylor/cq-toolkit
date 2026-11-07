@@ -25,6 +25,7 @@ import { ClaudeCodeDriver } from '../../../src/driver/claude-code/index.js';
 import {
   measureResultUsage,
   modelUsageCost,
+  modelUsageEntryFromWire,
   usageFromWire,
   zeroUsage,
 } from '../../../src/driver/claude-code/usage.js';
@@ -341,7 +342,7 @@ describe('driver-level accounting — provenance and resume semantics', () => {
   });
 });
 
-test('mixed-model pricing uses each rate and flags served-rate fallback', () => {
+test('mixed-model pricing uses each rate and yields no cost for an unpriced model', () => {
   const measured = measureResultUsage({
     modelUsage: {
       'claude-sonnet-4-5': { inputTokens: 1_000_000 },
@@ -354,8 +355,33 @@ test('mixed-model pricing uses each rate and flags served-rate fallback', () => 
     { provider: 'anthropic', model: 'claude-sonnet-4-5' },
     measured,
   );
-  expect(cost.costUSD).toBe(7);
+  expect(cost.costUSD).toBeUndefined();
   expect(cost.fallbackModels).toEqual(['unknown']);
+});
+
+test('a fold with no priced contributor stays silent — the unpriced baseline', () => {
+  const measured = measureResultUsage({
+    modelUsage: { 'conformance-1': { inputTokens: 1_000_000 } },
+  })!;
+  const cost = modelUsageCost(
+    undefined,
+    { provider: 'anthropic', model: 'conformance-1' },
+    measured,
+  );
+  expect(cost.costUSD).toBeUndefined();
+  // Nothing was priced, so nothing surprising happened: no marker means the
+  // record keeps its role-'tool' contract (the conformance mode-none leg).
+  expect(cost.fallbackModels).toEqual([]);
+});
+
+test('a malformed per-model entry is unshaped and yields to the flat usage', () => {
+  expect(modelUsageEntryFromWire({ inputTokens: 'invalid' })).toBeUndefined();
+  expect(
+    measureResultUsage({
+      modelUsage: { m: { inputTokens: 'invalid' } },
+      usage: { input_tokens: 10, output_tokens: 2 },
+    }),
+  ).toEqual({ channel: 'result', usage: { input: 10, output: 2, cacheRead: 0, cacheWrite: 0 } });
 });
 
 test('partially shaped modelUsage falls back to flat usage', () => {
@@ -374,7 +400,7 @@ test('invalid transport is a pre-dispatch config error', () => {
 });
 
 test.each(['cli', 'sdk'] as const)(
-  '%s prices mixed-model usage and records served-rate fallback',
+  '%s omits cost for an unpriced model and records the fallback',
   async (transport) => {
     await withScratch(async (scratchDir) => {
       const frames: JsonLineFrame[] = [
@@ -424,8 +450,8 @@ test.each(['cli', 'sdk'] as const)(
       });
       const result = await driver.run(invocation());
       expect(result.stopReason).toBe('complete');
-      expect(result.costUSD).toBe(7);
-      expect(result.costBasis).toBe('modeled');
+      expect(result).not.toHaveProperty('costUSD');
+      expect(result).not.toHaveProperty('costBasis');
       const record = await new SessionStore(join(scratchDir, 'sessions')).load(result.sessionId!);
       const markers = record!.messages
         .filter((message) => message.role === 'tool')
@@ -434,7 +460,7 @@ test.each(['cli', 'sdk'] as const)(
       expect(markers).toContainEqual({
         cq: 'pricing-fallback',
         models: ['unknown'],
-        rate: 'served-model',
+        rate: 'none',
       });
     });
   },

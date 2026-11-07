@@ -465,7 +465,7 @@ export function makeResolveConflictOp(
     // same ref, and the prompt's push refspec takes the headBranch
     // verbatim — `HEAD:refs/heads/main` would target the protected branch
     // through a bare-name-only comparison.
-    const bareBranch = (ref: string): string => ref.replace(/^refs\/heads\//, '');
+    const bareBranch = (ref: string): string => ref.replace(/^(?:refs\/)?heads\//, '');
     if (
       bareBranch(input.headBranch) === bareBranch(input.protectedBranch ?? DEFAULT_PROTECTED_BRANCH)
     ) {
