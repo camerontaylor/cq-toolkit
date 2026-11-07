@@ -100,9 +100,10 @@ through `createCheckRatchet` against the committed per-(target, metric) baseline
 under `baselines/` — a missing baseline fails with the I5 message, a count above
 baseline fails with "only tightening passes", and a nonzero-exit run with no
 parsable diagnostics is refused before the engine ever sees a reading. The same
-rule now covers every wired summary: the advisory ratchet workflow
-(`policy/templates/ratchet.yml`) drives the shipped CLI ops —
-`ratchet.checkRatchet` over the typecheck and coverage summaries and
+rule now covers every wired summary: `cq-measure` measures coverage once per
+PR and `cq-verify` judges it with typecheck-count against the trust ref's
+baselines (`cq/ratchet`), and the advisory ratchet workflow
+(`policy/templates/ratchet.yml`) drives the shipped CLI op
 `ratchet.monotonicGuard` over a PR's baseline diff
 (the former local driver `scripts/ratchet-check.mjs` was deleted in Phase 0.2).
 
