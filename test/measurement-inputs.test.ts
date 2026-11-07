@@ -514,37 +514,51 @@ describe('M10b nominal evidence', () => {
     expect(result.totals.availability['/tokens']?.state).toBe('known');
   });
 
-  test('fix-run report version: 1 is read, absent is legacy v1, anything else is refused', async () => {
+  test('operation-report envelope version: 1 is read, absent is legacy v1, anything else is refused at ANY path', async () => {
     const base = await workspace();
     const uuid = '9f2b7c4d-8e1a-4b3c-9d5e-6a7f8b9c0d1e';
     const embedded = report([attempt('inv-a', 100, 400)]);
-    const atProducer = `fix-journal/fix-run-report-${uuid}.json`;
-    const v1 = await bundle(base, 'fix-run-v1', {
-      [atProducer]: JSON.stringify({ version: 1, verdict: 'ok', reportV2: embedded }),
-    });
-    const legacy = await bundle(base, 'fix-run-legacy', {
-      [atProducer]: JSON.stringify({ verdict: 'ok', reportV2: embedded }),
-    });
-    // v1 is the current format; an absent version is legacy v1. Both read.
-    for (const dir of [v1, legacy]) {
-      const result = await readMeasurementInputs({ dirs: [dir] });
-      expect(result.unknown).toEqual([]);
-      expect(result.inputs).toHaveLength(1);
-      expect(result.totals.tokens).toBe(100);
-      expect(result.totals.availability['/tokens']?.state).toBe('known');
+    // The envelope is recognised by its reportV2 payload, not by its name:
+    // the production UUID name, the pre-existing non-UUID fixture name, a
+    // renamed report, and the sibling review-address location are all
+    // governed by the version the envelope declares.
+    const paths = [
+      `fix-journal/fix-run-report-${uuid}.json`,
+      'fix/state/fix-run-report-9f2c.json',
+      'fix/state/report.json',
+      'review-journal/w/review-address-report.json',
+    ];
+    for (const [index, path] of paths.entries()) {
+      for (const [label, version] of [
+        ['v1', 1],
+        ['legacy', undefined],
+      ] as const) {
+        const envelope =
+          version === undefined
+            ? { verdict: 'ok', reportV2: embedded }
+            : { version, verdict: 'ok', reportV2: embedded };
+        const dir = await bundle(base, `report-${label}-${index}`, {
+          [path]: JSON.stringify(envelope),
+        });
+        const result = await readMeasurementInputs({ dirs: [dir] });
+        expect(result.unknown).toEqual([]);
+        expect(result.inputs).toHaveLength(1);
+        expect(result.totals.tokens).toBe(100);
+        expect(result.totals.availability['/tokens']?.state).toBe('known');
+      }
+      // Any other version is refused fail-closed BEFORE the embedded payload
+      // is read, whatever path the envelope sits at.
+      const future = await bundle(base, `report-v2-${index}`, {
+        [path]: JSON.stringify({ version: 2, verdict: 'ok', reportV2: embedded }),
+      });
+      const refused = await readMeasurementInputs({ dirs: [future] });
+      expect(refused.inputs).toEqual([]);
+      expect(refused.unknown).toHaveLength(1);
+      expect(refused.unknown[0]).toMatchObject({ kind: 'unsupported' });
+      expect(refused.unknown[0]?.reason).toContain('operation report version 2');
+      expect(refused.totals.tokens).toBeNull();
+      expect(refused.totals.availability['/tokens']?.state).toBe('unavailable');
     }
-    // Any other version is refused fail-closed: the embedded payload is
-    // never read past a report this reader cannot truthfully interpret.
-    const future = await bundle(base, 'fix-run-v2', {
-      [atProducer]: JSON.stringify({ version: 2, verdict: 'ok', reportV2: embedded }),
-    });
-    const refused = await readMeasurementInputs({ dirs: [future] });
-    expect(refused.inputs).toEqual([]);
-    expect(refused.unknown).toHaveLength(1);
-    expect(refused.unknown[0]).toMatchObject({ kind: 'unsupported' });
-    expect(refused.unknown[0]?.reason).toContain('fix-run report version 2');
-    expect(refused.totals.tokens).toBeNull();
-    expect(refused.totals.availability['/tokens']?.state).toBe('unavailable');
   });
 
   test('unmirrored session rows contribute attempts, never across works', async () => {
