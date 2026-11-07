@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { trustedOptIn } from '../../src/config/optin.js';
 import {
   assertRunToolAvailable,
   buildSandboxLauncherEnv,
@@ -18,7 +19,7 @@ describe('CQ sandbox policy', () => {
   it('resolves explicit per-call opt-ins over project env', () => {
     const config = resolveSandboxConfig({
       env: { CQ_SANDBOX: 'off', CQ_SANDBOX_NETWORK: 'allow', CQ_RUN_TOOL: 'on' },
-      optIn: { sandbox: 'required', 'sandbox.network': 'model-only', run: 'off' },
+      optIn: trustedOptIn({ sandbox: 'required', 'sandbox.network': 'model-only', run: 'off' }),
       platform: 'darwin',
       certifiedBackends: ['seatbelt'],
     });
