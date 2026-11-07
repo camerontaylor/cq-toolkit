@@ -247,7 +247,13 @@ test('malformed persisted failure never becomes a stale-attempt fallback', async
     head: 'a'.repeat(40),
     vendorFailure: { ...f.origin.vendorFailure!, codes: ['scan'] },
   };
-  f.save(malformed);
+  // The guarded writer refuses this record (write/read parity: the strict
+  // reader rejects the mismatched vendor category), so model a hand-edited
+  // persisted ledger that bypassed the writer — the read path is the subject.
+  await writeFile(
+    devLedgerPath(f.repo.root, f.state.branch),
+    JSON.stringify({ version: 2, branch: f.state.branch, records: [malformed] }),
+  );
   const result = await f.run();
   expect(result.status).toBe('indeterminate');
   expect(f.effects.calls.some((call) => call.command === 'coderabbit')).toBe(false);
