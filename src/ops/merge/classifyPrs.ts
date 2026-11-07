@@ -314,8 +314,7 @@ const hasSameAccountAgentAcceptance = (candidate: PrCandidate, ctx: ReviewContex
     (comment) =>
       (isReviewAppAuthor(comment.authorType, comment.authorLogin) ||
         (comment.authorLogin === prAuthor &&
-          comment.authorType !== 'Bot' &&
-          !comment.authorLogin?.toLowerCase().endsWith('[bot]'))) &&
+          !isIgnoredBotAuthor(comment.authorType, comment.authorLogin))) &&
       parseIndependentReview(comment.body, head).kind === 'valid',
   );
 };

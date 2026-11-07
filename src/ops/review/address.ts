@@ -311,6 +311,7 @@ async function captureAddressProvenance(
   configJsonText: string,
   gitText: (args: string[]) => Promise<string>,
 ): Promise<{ provenance: ProvenanceRecord }> {
+  const envVersion = processEnv().CQ_PRODUCER_VERSION;
   const [remote, packageVersion] = await Promise.all([
     // The composition's git transport answers this like every other read; a
     // missing remote is repoId null/unavailable (ADR-0008), never a failure.
@@ -318,8 +319,8 @@ async function captureAddressProvenance(
     // The emitting package version: the toolkit's own package.json. The env
     // override never reads the file, and a read or parse failure degrades to
     // 'unavailable' — an observation PRE-FLIGHT failure never fails the run.
-    process.env.CQ_PRODUCER_VERSION !== undefined
-      ? Promise.resolve(process.env.CQ_PRODUCER_VERSION)
+    envVersion !== undefined
+      ? Promise.resolve(envVersion)
       : readFile(new URL('../../../package.json', import.meta.url), 'utf8')
           .then((text) => (JSON.parse(text) as { version?: string }).version)
           .catch(() => undefined),
