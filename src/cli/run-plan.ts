@@ -355,7 +355,7 @@ export async function runPlanThroughKernel(
   // cast adapts (never touch kernel files for this).
   //
   // The WRAP also carries the dispatch wiring (PR #238 review P2): the runner
-  // calls importer() bare — plan data never carries a narration contract —
+  // supplies the config snapshot — plan data never carries a narration contract —
   // so the view closes over it the same way the direct path passes it
   // (src/cli/main.ts): machine mode suppresses the driver factory's
   // deprecated-alias notice with all narration; human mode passes none.
@@ -365,10 +365,10 @@ export async function runPlanThroughKernel(
       const entry = entryByName.get(name) as OpRegistryEntry<never, never> | undefined;
       return entry === undefined
         ? undefined
-        : ({ ...entry, importer: () => entry.importer(importerWiring) } as OpRegistryEntry<
-            never,
-            never
-          >);
+        : ({
+            ...entry,
+            importer: (wiring) => entry.importer({ ...wiring, ...importerWiring }),
+          } as OpRegistryEntry<never, never>);
     },
   };
 

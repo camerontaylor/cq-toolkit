@@ -477,7 +477,7 @@ export const registry: OpRegistryEntry[] = [
   {
     name: 'merge.executeMerges',
     inputSchema: ExecuteMergesInputSchema,
-    importer: async () => {
+    importer: async (wiring) => {
       const { executeMerges } = await import('./executeMerges.js');
       const { realMergeEffects } = await import('../../adapters/forge-github/mergeEffects.js');
       const { assertProtectedBranchMirror } = await import('./trustMirrors.js');
@@ -485,6 +485,7 @@ export const registry: OpRegistryEntry[] = [
         const protectedBranch = assertProtectedBranchMirror(
           'merge.executeMerges',
           input.protectedBranch,
+          wiring?.cqEnv,
         );
         // The effects seam binds PER DISPATCH from the input's plain-JSON
         // repo config — the entry carries no repo state.
@@ -512,9 +513,12 @@ export const registry: OpRegistryEntry[] = [
         // Dispatch wiring (PR #238 review P2): the host's alias-notice sink
         // rides the default factory's config; absent (every library
         // caller), the library default — one stderr line — is unchanged.
-        wiring?.onDeprecatedAlias !== undefined
-          ? { onDeprecatedAlias: wiring.onDeprecatedAlias }
-          : {},
+        {
+          ...(wiring?.onDeprecatedAlias !== undefined
+            ? { onDeprecatedAlias: wiring.onDeprecatedAlias }
+            : {}),
+          ...(wiring?.cqEnv !== undefined ? { cqEnv: wiring.cqEnv } : {}),
+        },
       ) as Op<unknown, unknown>,
   },
   {
@@ -535,9 +539,12 @@ export const registry: OpRegistryEntry[] = [
         // Dispatch wiring (PR #238 review P2): the host's alias-notice sink
         // rides the default factory's config; absent (every library
         // caller), the library default — one stderr line — is unchanged.
-        wiring?.onDeprecatedAlias !== undefined
-          ? { onDeprecatedAlias: wiring.onDeprecatedAlias }
-          : {},
+        {
+          ...(wiring?.onDeprecatedAlias !== undefined
+            ? { onDeprecatedAlias: wiring.onDeprecatedAlias }
+            : {}),
+          ...(wiring?.cqEnv !== undefined ? { cqEnv: wiring.cqEnv } : {}),
+        },
       ) as Op<unknown, unknown>,
   },
 ];

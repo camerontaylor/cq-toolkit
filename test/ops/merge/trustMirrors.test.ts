@@ -1,19 +1,60 @@
 // Op-input mirrors of trust config (ADR-0009): a differing protectedBranch or
 // baseBranch fails with a `config` error before any effect; equal or absent passes.
-import { describe, expect, test } from 'vitest';
+import { afterEach, describe, expect, test, vi } from 'vitest';
+import { runPlan } from '../../../src/kernel/runner.js';
 import type { OpRegistryEntry } from '../../../src/kernel/types.js';
 import { errorClassOf } from '../../../src/driver/errors.js';
 import { readCqEnv } from '../../../src/config/env.js';
 import { makeRunMergePrsOp } from '../../../src/ops/merge/runPrs.js';
 import { makeResolveConflictOp } from '../../../src/ops/merge/resolveConflict.js';
 import { registry } from '../../../src/ops/merge/registry.js';
-import { recheckedRegistryView } from '../../../src/selfhost/self-merge-prs.js';
+import { buildRunInput, recheckedRegistryView } from '../../../src/selfhost/self-merge-prs.js';
 import { FakeMergeEffects, NOW_MS } from './runPrs.helpers.js';
 
 const env = (v: Record<string, string> = {}) => readCqEnv(v);
 const runInput = { repoRoot: '.', prs: [], nowMs: NOW_MS };
 
+afterEach(() => vi.unstubAllEnvs());
+
 describe('trust mirrors', () => {
+  test('runPlan forwards its snapshot to the production merge importer', async () => {
+    vi.stubEnv('CQ_MERGE_BASE_BRANCH', 'main');
+    vi.stubEnv('CQ_MERGE_PROTECTED_BRANCH', 'main');
+    const entry = registry.find((e) => e.name === 'merge.runPrs')!;
+    const report = await runPlan(
+      {
+        id: 'trust-snapshot',
+        jobs: [
+          {
+            id: 'merge',
+            op: entry.name,
+            input: {
+              ...runInput,
+              baseBranch: 'trunk',
+              protectedBranch: 'release',
+            },
+          },
+        ],
+      },
+      {
+        concurrency: 1,
+        stopOnError: false,
+        cqEnv: env({
+          CQ_MERGE_BASE_BRANCH: 'trunk',
+          CQ_MERGE_PROTECTED_BRANCH: 'release',
+        }),
+      },
+      { get: () => entry as unknown as OpRegistryEntry<never, never> },
+    );
+    expect(report.jobs[0]?.result.status).toBe('ok');
+  });
+
+  test('self-host input resolves ambient protected branch without a supplied snapshot', () => {
+    vi.stubEnv('CQ_MERGE_PROTECTED_BRANCH', 'release');
+    const input = buildRunInput([], { repoRoot: '.', disableConflictResolution: true }, NOW_MS);
+    expect(input.protectedBranch).toBe('release');
+  });
+
   test('runPrs: differing protectedBranch fails (config) before any effect', async () => {
     const effects = new FakeMergeEffects();
     const op = makeRunMergePrsOp({ effects, cqEnv: env() });
