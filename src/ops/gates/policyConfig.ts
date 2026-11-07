@@ -27,6 +27,8 @@ import {
   type ProtectedPathsPosture,
 } from '../../config/values.js';
 import { processEnv } from '../../config/process-env.js';
+import type { CqEnvRegistry } from '../../config/env-registry.js';
+import { assertOptInAuthority } from '../../config/optin.js';
 
 /**
  * `human`: every finding needs a human. `diff-check`: plain protected-path
@@ -69,10 +71,18 @@ export function resolveProtectedPathsConfig(
   options: {
     env?: Readonly<Record<string, string | undefined>>;
     optIn?: ProtectedPathsOptIn;
+    /** Registry consulted for the `trust` flag; default the shipped registry (a test seam). */
+    registry?: CqEnvRegistry;
   } = {},
 ): ProtectedPathsConfig {
   const env = options.env ?? processEnv();
   const optIn = options.optIn ?? {};
+  assertOptInAuthority(
+    'policy',
+    optIn,
+    { [PROTECTED_PATHS_OPT_IN]: PROTECTED_PATHS_ENV },
+    options.registry,
+  );
 
   const call = optIn[PROTECTED_PATHS_OPT_IN];
   if (call !== undefined) {

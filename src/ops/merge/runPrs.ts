@@ -94,6 +94,8 @@ import { executeMerges } from './executeMerges.js';
 import type { ExecutionReport } from './executeMerges.js';
 import { realMergeEffects } from '../../adapters/forge-github/mergeEffects.js';
 import type { MergeEffects } from '../../adapters/forge-github/mergeEffects.js';
+import type { CqEnv } from '../../config/env.js';
+import { assertBaseBranchMirror, assertProtectedBranchMirror } from './trustMirrors.js';
 import { diagnoseMergeFailure } from './diagnoseMergeFailure.js';
 import type { MergeFailureDiagnosis } from './diagnoseMergeFailure.js';
 import { planMergeOrder } from './planMergeOrder.js';
@@ -602,6 +604,8 @@ export async function runMergePrs(
 /** Construction-time seams for the DEFAULT op — everything optional; a
  * test injects fakes here, production builds real ones per call. */
 export interface MakeRunMergePrsOpDeps {
+  /** The resolved config snapshot the baseBranch mirror is checked against. Default: readCqEnv(). */
+  cqEnv?: CqEnv;
   /** Default: realMergeEffects built lazily per call from
    * input.repoRoot (+ input.protectedBranch). */
   effects?: MergeEffects;
@@ -662,15 +666,22 @@ export function makeRunMergePrsOp(
   deps?: MakeRunMergePrsOpDeps,
 ): Op<RunMergePrsInput, MergePrsOutcome> {
   return async (input): Promise<OpResult<MergePrsOutcome>> => {
+    const protectedBranch = assertProtectedBranchMirror(
+      'merge.runPrs',
+      input.protectedBranch,
+      deps?.cqEnv,
+    );
+    assertBaseBranchMirror('merge.runPrs', input.baseBranch, deps?.cqEnv);
     const effects =
       deps?.effects ??
       realMergeEffects({
         repoRoot: input.repoRoot,
-        ...(input.protectedBranch !== undefined ? { protectedBranch: input.protectedBranch } : {}),
+        protectedBranch,
       });
     const sessionsDir = deps?.sessionsDir ?? input.sessionsDir;
     const resolve = makeResolveConflictOp({
       effects,
+      ...(deps?.cqEnv !== undefined ? { cqEnv: deps.cqEnv } : {}),
       ...(deps?.drivers !== undefined
         ? { drivers: deps.drivers }
         : {
@@ -686,11 +697,15 @@ export function makeRunMergePrsOp(
           }),
       ...(deps?.harnessConfig !== undefined ? { harnessConfig: deps.harnessConfig } : {}),
     });
-    const outcome = await runMergePrs(input, {
-      effects,
-      resolve,
-      ...(input.maxRetries !== undefined ? { maxRetries: input.maxRetries } : {}),
-    });
+    // The nested resolve calls see the RESOLVED protected branch, never the raw input.
+    const outcome = await runMergePrs(
+      { ...input, protectedBranch },
+      {
+        effects,
+        resolve,
+        ...(input.maxRetries !== undefined ? { maxRetries: input.maxRetries } : {}),
+      },
+    );
     // The pipeline is total — every not-done pr is DATA in the outcome —
     // so a completed composition is exactly an 'ok' result.
     return { status: 'ok', value: outcome };
