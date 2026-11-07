@@ -136,4 +136,23 @@ describe('review.address closure evidence verifier', () => {
       ).verdict,
     ).toBe('resolved');
   });
+
+  test('a declaration keyword inside a longer word is not a redeclaration', () => {
+    const before = 'const foo = 1;';
+    const after = 'myconst foo = 2;';
+    const result = verifyClosureEvidence(
+      makePacket({
+        finding: {
+          id: 'F3',
+          text: 'foo is declared with a stale value',
+          file: 'src/config.ts',
+          line: 1,
+        },
+        before,
+        after,
+        patch: replacementPatch(before, after),
+      }),
+    );
+    expect(result.reason).not.toBe('deleted-trigger-survives');
+  });
 });

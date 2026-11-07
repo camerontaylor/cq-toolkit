@@ -3,6 +3,7 @@
 // plus task-evidence.helpers.ts (shared fixtures). This file carries failed
 // attempt commits: independent run branches, collision increments, and the
 // push opt-in skip-CI marker.
+import { createHash } from 'node:crypto';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -101,8 +102,31 @@ test('failed-attempt branch collisions increment and push opt-in marks commits t
     await git(root)(['add', 'file.ts']);
     await git(root)(['commit', '-m', 'base']);
     const parent = await git(root)(['rev-parse', 'HEAD']);
-    const collision = 'run/failed/tests/pkg/file-ts/a1';
-    await git(root)(['update-ref', `refs/heads/${collision}`, parent]);
+    // Seed the REAL collision ref commitFailedAttempt enumerates: its hashed
+    // base plus an `a1` suffix, pointed at a commit carrying the matching
+    // identity trailer. A ref outside the hashed base would never collide.
+    const identity = Buffer.from(JSON.stringify(['tests', 'pkg', 'file.ts'])).toString('base64url');
+    const component = (raw: string): string => {
+      const readable = raw.replace(/[^A-Za-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'id';
+      const digest = createHash('sha256').update(raw).digest('hex').slice(0, 16);
+      return `${readable.slice(0, 79 - 16)}-${digest}`;
+    };
+    const base = `run/failed/${component('tests')}/${component('pkg')}/${component('file.ts')}`;
+    const collision = `${base}/a1`;
+    const tree = await git(root)(['rev-parse', `${parent}^{tree}`]);
+    const seeded = await git(root)([
+      '-c',
+      'user.name=Fixture',
+      '-c',
+      'user.email=fixture@invalid',
+      'commit-tree',
+      tree,
+      '-p',
+      parent,
+      '-m',
+      `seeded collision\n\nCq-Ref-Identity: ${identity}`,
+    ]);
+    await git(root)(['update-ref', `refs/heads/${collision}`, seeded]);
     await writeFile(join(root, 'file.ts'), 'changed');
     await git(root)(['add', '-A', '--', '.']);
     const input = {
@@ -120,17 +144,16 @@ test('failed-attempt branch collisions increment and push opt-in marks commits t
       pushFailed: true,
     } as const;
     const attempt = await commitFailedAttempt(git(root), input);
-    expect(attempt.branch).toMatch(
-      /^run\/failed\/tests-[0-9a-f]{16}\/pkg-[0-9a-f]{16}\/file-ts-[0-9a-f]{16}\/a1$/,
-    );
+    // The seeded a1 is a real, same-identity collision: it is consumed.
+    expect(attempt.branch).toBe(`${base}/a2`);
     const retry = await commitFailedAttempt(git(root), input);
-    expect(retry.branch).toBe(attempt.branch.replace(/\/a1$/, '/a2'));
-    expect(await git(root)(['rev-parse', `refs/heads/${collision}`])).toBe(parent);
+    expect(retry.branch).toBe(`${base}/a3`);
+    expect(await git(root)(['rev-parse', `refs/heads/${collision}`])).toBe(seeded);
     expect(await git(root)(['rev-parse', `refs/heads/${attempt.branch}`])).toBe(attempt.sha);
     const message = await git(root)(['show', '-s', '--format=%B', attempt.sha]);
     expect(message.split('\n')[0]).toBe('cq-failed(escalated-to-human): file.ts [skip ci]');
-    expect(message).toContain('Cq-Attempt: 1');
-    expect(await git(root)(['show', '-s', '--format=%B', retry.sha])).toContain('Cq-Attempt: 2');
+    expect(message).toContain('Cq-Attempt: 2');
+    expect(await git(root)(['show', '-s', '--format=%B', retry.sha])).toContain('Cq-Attempt: 3');
     expect(message).toContain('Cq-Tier: rescue');
     expect(message).toContain('Cq-Gate: budget');
     expect(message).toContain('Cq-Outcome: escalated-to-human');

@@ -76,24 +76,62 @@ export function hashInputs(op: string, input: unknown): string {
 }
 
 /**
+ * Reject op inputs the canonical hash cannot represent losslessly, naming the
+ * job that owns them. A non-finite number (a plan file's `1e400` parses to
+ * `Infinity`) survives the `structuredClone` snapshot but hashes as `null`,
+ * so a resume could reuse a result for a different input; non-plain objects
+ * (Date, Map, class instances) are outside the op-input contract and would
+ * hash by their enumerable members alone. `undefined` object values (dropped)
+ * and sparse-array holes (read as `undefined`) stay allowed — both are
+ * documented canonical forms.
+ */
+function assertHashableInput(jobId: string, value: unknown, path = 'input'): void {
+  if (value === null) return;
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) {
+      throw new Error(`manifest: job '${jobId}' ${path} is a non-finite number (${String(value)})`);
+    }
+    return;
+  }
+  if (typeof value !== 'object') return;
+  if (Array.isArray(value)) {
+    for (let i = 0; i < value.length; i++) assertHashableInput(jobId, value[i], `${path}[${i}]`);
+    return;
+  }
+  const proto: unknown = Object.getPrototypeOf(value);
+  if (proto !== Object.prototype && proto !== null) {
+    throw new Error(`manifest: job '${jobId}' ${path} is not plain JSON data`);
+  }
+  for (const [key, member] of Object.entries(value)) {
+    if (member === undefined) continue;
+    assertHashableInput(jobId, member, `${path}.${key}`);
+  }
+}
+
+/**
  * Commit a plan to its manifest: same jobs, same order, with `dependsOn`
  * normalized to `[]` when absent and each job's `inputsHash` computed over
  * its {op, input}. The manifest never aliases plan-owned data — `dependsOn`
  * is copied AND `input` is deep-copied (inputs are contractually plain JSON,
  * so a structuredClone snapshot is lossless) — meaning a committed run cannot
  * be changed by mutating the plan afterwards, and the hash committed at
- * manifest time stays the hash of the input that will be dispatched.
+ * manifest time stays the hash of the input that will be dispatched. Inputs
+ * the canonical hash cannot represent losslessly are rejected here, before
+ * the snapshot is taken (see {@link assertHashableInput}).
  */
 export function makeManifest(plan: Plan): RunManifest {
   return {
     planId: plan.id,
-    jobs: plan.jobs.map((job) => ({
-      id: job.id,
-      op: job.op,
-      input: structuredClone(job.input),
-      inputsHash: hashInputs(job.op, job.input),
-      dependsOn: [...(job.dependsOn ?? [])],
-    })),
+    jobs: plan.jobs.map((job) => {
+      assertHashableInput(job.id, job.input);
+      return {
+        id: job.id,
+        op: job.op,
+        input: structuredClone(job.input),
+        inputsHash: hashInputs(job.op, job.input),
+        dependsOn: [...(job.dependsOn ?? [])],
+      };
+    }),
   };
 }
 

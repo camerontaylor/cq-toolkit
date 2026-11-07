@@ -26,10 +26,9 @@
 //                    delete_repo scope and the drill NEVER attempts
 //                    deletion: the repo is LEFT IN PLACE for the owner to
 //                    delete, and the evidence line records its URL.
-//                    process.env.GH_REPO is pointed at the scratch repo so
-//                    the effects layer's repo-less `gh pr merge/edit` argv
-//                    (spawned without a repo cwd) hit the SCRATCH repo and
-//                    never this repository.
+//                    realMergeEffects runs gh with cwd = the scratch clone and
+//                    strips GH_REPO, so the clone's remote targets the SCRATCH
+//                    repo for gh pr merge/edit and never this repository.
 //   2. SEED        — a throwaway local clone (mkdtemp), local identity +
 //                    a gh-backed credential helper (the token rides
 //                    GH_TOKEN at push time; it never appears in argv or
@@ -230,10 +229,9 @@ import type { DrillPr } from './live.helpers.js';
             .map((line) => line.trim())
             .findLast((line) => line.includes('github.com')) ?? `https://github.com/${repo}`;
         log(`step 1 scratch repo created (LEFT IN PLACE for the owner to delete): ${repoUrl}`);
-        // The effects layer's gh argv (`gh pr merge <n> --merge`,
-        // `gh pr edit <n> --base <b>`) carries no repo and spawns without a
-        // repo cwd — GH_REPO is the only honest way to aim them at the
-        // scratch repo (and never at this repository).
+        // realMergeEffects runs gh with cwd = the scratch clone and strips
+        // GH_REPO, so the clone, not this assignment, selects the repo for
+        // `gh pr merge` and `gh pr edit`.
         process.env.GH_REPO = repo;
 
         // --- STEP 2: LOCAL CLONE + SEED ----------------------------------------

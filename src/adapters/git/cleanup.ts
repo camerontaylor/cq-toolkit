@@ -276,13 +276,38 @@ export function makeCleanup(git: CleanupEffects): Op<CleanupInput, CleanupReport
           // pruned. The branch is NOT deleted here — it stays
           // branch-only-sweep eligible. Never a whole-op failure.
           if (!dryRun) {
+            // REVALIDATION under the lock, mirroring the removal path: the
+            // absence probe above ran OUTSIDE the mutex, and worktreePrune
+            // unlocks before it prunes. A concurrent worktreeFor may have
+            // pruned the stale registration and recreated a LIVE (locked)
+            // worktree at the same path in between — pruning on the stale
+            // probe would then strip the live tree's lock and misreport the
+            // row as pruned. Recheck absence inside the guard first.
+            let stillAbsent = true;
             try {
-              await inGuard(() => git.worktreePrune(input.repoRoot, worktree.path));
+              await inGuard(async () => {
+                try {
+                  await git.modifiedTimeMs(real);
+                  stillAbsent = false;
+                  return;
+                } catch (rerr) {
+                  if (!isAbsence(rerr)) throw rerr;
+                }
+                await git.worktreePrune(input.repoRoot, worktree.path);
+              });
             } catch (pruneErr) {
               return {
                 status: 'failed',
                 error: `sweep: could not prune the stale registration for missing worktree '${real}' — ${messageOf(pruneErr)}${progressNote()}`,
               };
+            }
+            if (!stillAbsent) {
+              kept.push({
+                path: real,
+                reason:
+                  'revalidated inside the mutex: the worktree dir reappeared before the prune — a live tree may now hold the path, never pruned on stale evidence',
+              });
+              continue;
             }
           }
           // Post-cap doc truth: the row asserts a removal git may silently
@@ -718,12 +743,20 @@ const CLEANUP_GIT_TIMEOUT_MS = 600_000;
  * non-zero exit, a spawn failure, or a run exceeding {@link timeoutMs}
  * (SIGKILL) rejects with the captured stderr text.
  */
-/** `git worktree unlock`, tolerating a registration that was never locked. */
-async function unlockWorktree(root: string, path: string, timeoutMs: number): Promise<void> {
-  await runCleanupGit(['worktree', 'unlock', path], root, timeoutMs).catch((err: unknown) => {
-    if (err instanceof Error && /not locked/.test(err.message)) return;
+/**
+ * `git worktree unlock`, tolerating a registration that was never locked.
+ * Returns true when a lock was actually removed — the caller restores the
+ * sweep lock (with its reason) only in that case, so a failed removal never
+ * locks a tree that was never locked and never drops a sweep reason.
+ */
+async function unlockWorktree(root: string, path: string, timeoutMs: number): Promise<boolean> {
+  try {
+    await runCleanupGit(['worktree', 'unlock', path], root, timeoutMs);
+    return true;
+  } catch (err: unknown) {
+    if (err instanceof Error && /not locked/.test(err.message)) return false;
     throw err;
-  });
+  }
 }
 
 function runCleanupGit(args: string[], cwd: string, timeoutMs: number): Promise<string> {
@@ -791,7 +824,7 @@ export function makeSubprocessCleanupEffects(
     worktreeRemove: async (root, path, opts) => {
       // Sweep locks active worktrees against Git's automatic pruning. An
       // explicit cleanup has already revalidated this tree under the mutex.
-      await unlockWorktree(root, path, timeoutMs);
+      const wasLocked = await unlockWorktree(root, path, timeoutMs);
       const args =
         opts?.force === true
           ? ['worktree', 'remove', '--force', path]
@@ -800,8 +833,16 @@ export function makeSubprocessCleanupEffects(
         await runCleanupGit(args, root, timeoutMs);
       } catch (err) {
         // Removal failed: the checkout is still registered, so restore the
-        // prune protection the unlock above dropped.
-        await runCleanupGit(['worktree', 'lock', path], root, timeoutMs).catch(() => undefined);
+        // sweep lock the unlock above dropped — but ONLY when one existed,
+        // and with the sweep reason intact (a tree that was never locked must
+        // stay unlocked; a worktreeFor lock means an active sweep worktree).
+        if (wasLocked) {
+          await runCleanupGit(
+            ['worktree', 'lock', '--reason', 'cq sweep active', path],
+            root,
+            timeoutMs,
+          ).catch(() => undefined);
+        }
         throw err;
       }
     },

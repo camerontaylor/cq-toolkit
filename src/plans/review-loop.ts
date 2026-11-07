@@ -542,11 +542,20 @@ export interface ReviewLoopOutcome {
   fixReport?: RunReport;
   /**
    * The before/after verdict — present exactly when at least one fix job
-   * ran. OBSERVABILITY ONLY: it rides the payload for humans; resolve
-   * gating is per-item commit verification, and this verdict never feeds
-   * `reasons`.
+   * ran AND the after-snapshot succeeded. OBSERVABILITY ONLY: it rides the
+   * payload for humans; resolve gating is per-item commit verification, and
+   * this verdict never feeds `reasons`.
    */
   verify?: VerifyOutcome;
+  /**
+   * The after-snapshot's failure text when that post-fix PR-state read threw.
+   * The failure is already recorded in `reasons` and never hides the
+   * published replies/resolves — but the caller must not continue into a PR
+   * re-review: the round's retained settled run is the record of what the
+   * fixes did, and an unverified continuation overwrites it with a
+   * re-reviewed (often empty) population.
+   */
+  verifyFailure?: string;
   /** The reply/resolve dispatch result — present when any action was dispatched. */
   reply?: ReplyAndResolveResult;
   /** How many actions replyAndResolve actually posted (its `posted` length). */
@@ -575,11 +584,13 @@ export interface EnrichedFixItem {
 
 /**
  * Σ of the frozen Usage fields — the governor's token-rollup fold (DD-9
- * totalTokensOf), so a sweep decrements its token budget by exactly what the
+ * totalTokensOf, including additive `reasoning`), so a sweep decrements its token budget by exactly what the
  * governor counted against the cap. Absent usage is 0.
  */
 export const totalTokens = (usage: Usage | undefined): number =>
-  usage === undefined ? 0 : usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
+  usage === undefined
+    ? 0
+    : usage.input + usage.output + usage.cacheRead + usage.cacheWrite + (usage.reasoning ?? 0);
 
 /**
  * Correlate one ClassifiedItem against the fetched state and build the
@@ -1586,15 +1597,25 @@ async function runOwnedReviewLoop(
   if (opts.signal?.aborted) return cancelledOutcome();
   const fixJobsRan = plan.jobs.length > 0;
   let verify: VerifyOutcome | undefined;
+  let verifyFailure: string | undefined;
   if (fixJobsRan) {
-    const after = await snapshotPrState({
-      owner: opts.owner,
-      repo: opts.repo,
-      pr: opts.pr,
-      run: opts.gh,
-      nowMs: opts.nowMs,
-    });
-    verify = verifyPrOutcome(before, after, { responderLogin: opts.responderLogin ?? null });
+    try {
+      const after = await snapshotPrState({
+        owner: opts.owner,
+        repo: opts.repo,
+        pr: opts.pr,
+        run: opts.gh,
+        nowMs: opts.nowMs,
+      });
+      verify = verifyPrOutcome(before, after, { responderLogin: opts.responderLogin ?? null });
+    } catch (err) {
+      // Observability only: a failed after-snapshot is recorded, never hidden
+      // (I5), but must not strand replies/resolves for a fix already pushed.
+      // The caller stops before any PR re-review on `verifyFailure` — the
+      // retained settled run is this round's record and stays it.
+      verifyFailure = String(err);
+      reasons.push(`verify snapshot failed: ${verifyFailure.slice(0, PUSH_REASON_MAX)}`);
+    }
     // VerifyOutcome is OBSERVABILITY ONLY (round-2 finding 6): it rides the
     // outcome payload and never feeds hasFailures — resolve gating is the
     // per-item commit verification, and one thread's missing PR-wide signal
@@ -1766,6 +1787,10 @@ async function runOwnedReviewLoop(
   // already published when the reply recorded, and the resolve mutation
   // pushes nothing.
   actions.push(...carriedResolves);
+  if (opts.publish === false && carriedResolves.length > 0)
+    reasons.push(
+      `${String(carriedResolves.length)} carried resolve(s) withheld; publication requires --push`,
+    );
 
   // (7) Reply + resolve over the gh seam — push-before-post (the same
   // composed worktree push: an idempotent re-assertion against origin races
@@ -1817,6 +1842,7 @@ async function runOwnedReviewLoop(
     plan,
     fixReport,
     ...(verify !== undefined ? { verify } : {}),
+    ...(verifyFailure !== undefined ? { verifyFailure } : {}),
     ...(reply !== undefined ? { reply } : {}),
     actionsPosted: reply === undefined ? 0 : reply.posted.length,
   };

@@ -43,6 +43,27 @@ describe('dev.review cycle', () => {
     expect(effects.openLedger('feature/x').load().records).toEqual([]);
   });
 
+  test('refuses agent uploads when the configured corpus is a new untracked file', async () => {
+    await repo.write('policy/denylist/patterns.yml', 'rules: []\n');
+    const effects = repoEffects(repo);
+    const runAgentReviewer = vi.fn(async () => ({
+      status: 'needs-human' as const,
+      reason: 'fixture runner must not be called',
+    }));
+    const op = makeDevReview({
+      effects,
+      scanSecrets: stubScanner(),
+      runAgentReviewer,
+      patternsFile: 'policy/denylist/patterns.yml',
+    }) as Op<DevCycleInput, DevReviewReport>;
+    const result = await op({ repoRoot: repo.root, reviewer: 'agent:reviewer' });
+    expect(result.status).toBe('needs-human');
+    if (result.status === 'needs-human')
+      expect(result.reason).toContain('excluded from the pre-upload scan');
+    expect(runAgentReviewer).not.toHaveBeenCalled();
+    expect(effects.openLedger('feature/x').load().records).toEqual([]);
+  });
+
   test('refuses CodeRabbit uploads when the configured corpus itself changed', async () => {
     await repo.write('custom/rules.yml', 'rules:\n');
     repo.commitAll('change configured scanner corpus');
