@@ -279,6 +279,9 @@ export async function terminateAcpProcess(
   if (await closesWithin(termGraceMs)) {
     return 'terminated';
   }
+  if (isAcpProcessExited(child)) {
+    return 'terminated'; // exited in the window; only the stdio close is pending
+  }
 
   // Rung 2: SIGKILL — the unconditional rung.
   fireRung(onRung, 'sigkill');

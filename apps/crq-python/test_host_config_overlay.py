@@ -93,6 +93,14 @@ class HostConfigTests(HostConfigFixture, unittest.TestCase):
                 with self.assertRaises(ValueError):
                     host.validate(bad)
 
+    def test_per_repo_clone_must_be_separate_from_deployment(self):
+        for clone in (str(self.root), str(self.root / 'runtime'), str(self.base)):
+            with self.subTest(clone=clone):
+                overlay = copy.deepcopy(self.overlay)
+                overlay['config']['repos'] = [{'repo': 'camerontaylor/infra', 'clone': clone}]
+                with self.assertRaisesRegex(ValueError, 'repos clone must be separate'):
+                    host.validate(overlay)
+
     def test_spool_alias_matches_runtime_client_format(self):
         import crq
 

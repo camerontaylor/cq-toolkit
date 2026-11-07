@@ -3,6 +3,8 @@
 Split provenance: moved verbatim from test_crq.py;
 test_crq_fixtures.py holds the shared offline fixtures.
 """
+import contextlib
+import io
 import os
 import subprocess
 import tempfile
@@ -21,10 +23,15 @@ class OfflineBoundaryTest(unittest.TestCase):
     def test_process_capabilities_refused_before_captured_launcher(self):
         with tempfile.TemporaryDirectory() as td:
             repo = Path(td).resolve()
+            (repo / ".git").mkdir()
             OFFLINE_REPOS.add(repo)
             self.addCleanup(OFFLINE_REPOS.discard, repo)
-            launcher = mock.Mock()
+            launcher = mock.Mock(return_value=mock.sentinel.child)
             boundary = offline_git_boundary(launcher, repo, [])
+            # Positive control: with this setup a clean call is accepted, so
+            # only the keyword validators can refuse the cases below.
+            self.assertIs(boundary(["git", "rev-parse", "HEAD"], cwd=repo), mock.sentinel.child)
+            launcher.reset_mock()
             callback = mock.Mock()
             forbidden = [{"preexec_fn": callback}, {"pass_fds": (3,)},
                          {"executable": "/bin/sh"}, {"shell": True},
@@ -35,8 +42,10 @@ class OfflineBoundaryTest(unittest.TestCase):
                          {"text": "yes"}, {"env": {"X": object()}}]
             for options in forbidden:
                 with self.subTest(option=next(iter(options))):
-                    with self.assertRaises(AssertionError):
+                    with contextlib.redirect_stderr(io.StringIO()) as err, \
+                         self.assertRaises(AssertionError):
                         boundary(["git", "rev-parse", "HEAD"], cwd=repo, **options)
+                    self.assertIn("stage=keyword-value", err.getvalue())
             launcher.assert_not_called()
             callback.assert_not_called()
 

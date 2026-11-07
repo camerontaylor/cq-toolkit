@@ -455,15 +455,22 @@ export const createVerifyRatchet =
     for (const r of results) {
       if (r.verdict === 'skipped')
         reasons.push(
-          `${r.target}/${r.metric}: skipped — ${r.reason ?? 'trusted recompute skipped'}`,
+          `${r.target}/${r.metric}: skipped — ${r.reason ?? 'trusted recompute skipped'}${
+            dependencyChange ? '' : ' (rejected: no dependency or lockfile path changed)'
+          }`,
         );
       if (r.verdict === 'fail')
         reasons.push(
           `${advisoryRecompute(r) ? 'advisory (dependency universe): ' : ''}${r.target}/${r.metric}: ${r.reason ?? 'failed'}`,
         );
     }
+    // A claimed skip is evidence only when the changed set really holds a
+    // dependency/lockfile path; otherwise it is missing evidence (I5), never a pass.
+    const unjustifiedSkip = (r: RatchetResult): boolean =>
+      r.verdict === 'skipped' && !dependencyChange;
     const failing =
-      guard.ok === false || results.some((r) => r.verdict === 'fail' && !advisoryRecompute(r));
+      guard.ok === false ||
+      results.some((r) => (r.verdict === 'fail' && !advisoryRecompute(r)) || unjustifiedSkip(r));
     const verdict = unauthorized ? 'needs-human' : failing ? 'fail' : 'pass';
     if (verdict === 'pass') {
       for (const r of results.filter((result) => result.verdict !== 'skipped'))

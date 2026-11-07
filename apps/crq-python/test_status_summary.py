@@ -147,10 +147,19 @@ class SummaryTest(unittest.TestCase):
             self.assertEqual(unknown["schedule"]["state"], "unknown")
             self.assertEqual(unknown["schedule"]["error"], "schedule probe unavailable")
 
-
-
-if __name__ == "__main__":
-    unittest.main()
+    def test_monotonic_timer_timespans_accept_month_and_year_units(self):
+        # systemd renders long monotonic values with month/y units; a healthy
+        # timer must stay observable after about 30 days of host uptime.
+        blocks = [f"Id={unit}\nLoadState=loaded\nActiveState=active\n"
+                  f"LastTriggerUSec=@1700000000\nNextElapseUSecMonotonic={value}"
+                  for unit, value in (("crq-watchdog.timer", "1month 2d 3h"),
+                                      ("crq-tick.timer", "1y 2month 13h 30min"))]
+        with mock.patch.object(adapter, "command", return_value="\n\n".join(blocks)):
+            timers, _ = adapter.systemd_activity()
+        for unit in ("crq-watchdog.timer", "crq-tick.timer"):
+            self.assertNotIn("error", timers[unit])
+            self.assertRegex(timers[unit]["next_elapse"],
+                             r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
 
 
 class MergedCurrentSummaryTest(unittest.TestCase):
@@ -281,3 +290,7 @@ class ReposSummaryTests(unittest.TestCase):
                                  {"max_starts_per_hour": 5}, [], 0)
         self.assertEqual(data["repos"], {})
         self.assertEqual(data["backlog"]["open"], 1)
+
+
+if __name__ == "__main__":
+    unittest.main()

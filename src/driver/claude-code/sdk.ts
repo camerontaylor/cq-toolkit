@@ -339,7 +339,8 @@ export class ClaudeCodeSdkTransport implements Driver {
       budget.maxTokens !== undefined &&
       (!Number.isFinite(budget.maxTokens) || budget.maxTokens <= 0)
     ) {
-      throw new Error(
+      throw new DispatchError(
+        'config',
         `claude-code driver: budget.maxTokens must be a finite number > 0, got ${String(budget.maxTokens)}`,
       );
     }
@@ -347,7 +348,8 @@ export class ClaudeCodeSdkTransport implements Driver {
       budget.maxSteps !== undefined &&
       (!Number.isInteger(budget.maxSteps) || budget.maxSteps <= 0)
     ) {
-      throw new Error(
+      throw new DispatchError(
+        'config',
         `claude-code driver: budget.maxSteps must be a positive integer, got ${String(budget.maxSteps)}`,
       );
     }

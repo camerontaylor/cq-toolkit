@@ -317,7 +317,9 @@ describe('W2.3 reserve-then-settle', () => {
         }
       }
     },
-    journalEnclosure(2),
+    // Three escape variants, three journalled runPlan calls (one acquisition
+    // each): budget one step per call.
+    journalEnclosure(3),
   );
 
   test(

@@ -1,7 +1,7 @@
 // The `cq-state` settle-ledger skip guards (review-debt #226).
 //
 // Pushes to the machine-written `cq-state` branch used to fire the
-// unfiltered push workflows (ci, denylist, ratchet) — wasted runner time on
+// unfiltered push workflows (ci, denylist) — wasted runner time on
 // a branch that carries no reviewable change. The I4-sanctioned fix is a
 // JOB-LEVEL `if:` (never a trigger filter: the `on:` block of a required
 // workflow stays unfiltered, or the required check never reports — unchanged
@@ -54,13 +54,6 @@ function expectEveryJobGuarded(text: string, file: string): void {
     const idLine = lines.findIndex((line, i) => i >= start && line === `  ${id}:`);
     const next = lines.findIndex((line, i) => i > idLine && /^ {2}[A-Za-z0-9_-]+:\s*$/.test(line));
     const blockLines = lines.slice(idLine, next === -1 ? lines.length : next);
-    if (id === 'propose-drop') {
-      // This reporter runs only for main PRs, never for any branch push.
-      expect(blockLines).toContain(
-        "    if: github.event_name == 'pull_request' && github.base_ref == 'main' && needs.ratchet.outputs.drop == 'true'",
-      );
-      continue;
-    }
     expect(
       blockLines,
       `${file} job ${id} carries the cq-state skip at JOB-KEY indentation`,
@@ -69,13 +62,12 @@ function expectEveryJobGuarded(text: string, file: string): void {
 }
 
 describe('the cq-state skip guards (review-debt #226)', () => {
-  it.each([
-    '.github/workflows/ci.yml',
-    '.github/workflows/denylist.yml',
-    '.github/workflows/ratchet.yml',
-  ])('every job in %s skips the cq-state ledger branch at the JOB level', (file) => {
-    expectEveryJobGuarded(read(file), file);
-  });
+  it.each(['.github/workflows/ci.yml', '.github/workflows/denylist.yml'])(
+    'every job in %s skips the cq-state ledger branch at the JOB level',
+    (file) => {
+      expectEveryJobGuarded(read(file), file);
+    },
+  );
 
   it('the required-check pattern carries the guard in its worked example', () => {
     const doc = read('policy/templates/required-check.md');
@@ -88,9 +80,5 @@ describe('the cq-state skip guards (review-debt #226)', () => {
     // The template teaches the rule the guard obeys: the `on:` block of the
     // worked example stays filter-free.
     expect(yaml).toMatch(/on:\n {2}push:\n {2}pull_request:\n/);
-  });
-
-  it('the ratchet TEMPLATE carries the guard too (the instance is generated from it)', () => {
-    expectEveryJobGuarded(read('policy/templates/ratchet.yml'), 'policy/templates/ratchet.yml');
   });
 });

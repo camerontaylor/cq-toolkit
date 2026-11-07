@@ -228,9 +228,17 @@ describe('authenticated same-item receipt aliases', () => {
   });
   test('status proof is bound to full caller reference before fetching pages', async () => {
     const f = fixture();
-    await expect(
-      makeQueueClient(f.transport()).status({ ...reference, requestId: 'different' }),
-    ).rejects.toThrow();
+    const base = f.transport();
+    const other = { ...reference, requestId: 'different' };
+    // Echo the caller's reference so the envelope check passes and only the
+    // alias proof binding can refuse.
+    const echoing: QueueTransport = async (wire) => {
+      const raw = JSON.parse(await base(wire)) as Record<string, unknown>;
+      return JSON.stringify({ ...raw, requestId: other.requestId });
+    };
+    await expect(makeQueueClient(echoing).status(other)).rejects.toThrow(
+      'queue alias status binding mismatch',
+    );
     expect(f.calls).toEqual(['status']);
   });
   test('alias cannot masquerade as cross-item reuse', async () => {

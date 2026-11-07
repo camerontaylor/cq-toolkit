@@ -1,4 +1,4 @@
-// THE LIVE CONFORMANCE LEG (A10) — W1.4 subprocess closed tool surface.
+// THE LIVE CONFORMANCE LEG (A10) — the claude-code lane closed tool surface.
 //
 // Opt-in only: runs when CQ_LIVE_CLI=1, against the REAL `claude` CLI on
 // PATH and a real provider, through the BUILT package (`dist/index.js` —
@@ -41,9 +41,10 @@ const MODEL = process.env['CQ_LIVE_MODEL'] ?? 'glm-4.5-air';
 const TIMEOUT = 240_000;
 
 interface LiveDriverModule {
-  SubprocessDriver: new (options: Record<string, unknown>) => {
+  ClaudeCodeDriver: new (options: Record<string, unknown>) => {
     run(invocation: Record<string, unknown>): Promise<Record<string, unknown>>;
   };
+  toOutputSchema: (name: string, schema: unknown) => Record<string, unknown>;
   SessionStore: new (sessionsDir: string) => {
     load(
       sessionId: string,
@@ -73,7 +74,12 @@ function harnessConfig(commandPatterns: string[]): Record<string, unknown> {
   };
 }
 
-function invocation(prompt: string, toolPolicy: Record<string, unknown>, sessionRef?: string) {
+function invocation(
+  prompt: string,
+  toolPolicy: Record<string, unknown>,
+  sessionRef?: string,
+  outputSchema?: Record<string, unknown>,
+) {
   return {
     prompt,
     modelSpec: { provider: 'zai', model: MODEL },
@@ -81,6 +87,7 @@ function invocation(prompt: string, toolPolicy: Record<string, unknown>, session
     sandboxPolicy: { level: 'workspace-write' },
     budget: {},
     ...(sessionRef !== undefined ? { sessionRef } : {}),
+    ...(outputSchema !== undefined ? { outputSchema } : {}),
   };
 }
 
@@ -103,15 +110,15 @@ function narrationOf(result: Record<string, unknown>): string {
 }
 
 describe.skipIf(!LIVE)(
-  'A10 live conformance leg — subprocess closed surface (real claude CLI)',
+  'A10 live conformance leg — claude-code lane closed surface (real claude CLI)',
   () => {
     test(
       "mode 'none': builtins absent — nothing executes, the empty surface verifies",
       async () => {
-        const { SubprocessDriver } = await loadDist();
+        const { ClaudeCodeDriver } = await loadDist();
         await withScratch(async (dir) => {
           const sessionsDir = join(dir, 'sessions');
-          const driver = new SubprocessDriver({
+          const driver = new ClaudeCodeDriver({
             sessionsDir,
             harnessConfig: { ...harnessConfig(['whoami']), workspaceRoot: dir },
           });
@@ -133,10 +140,10 @@ describe.skipIf(!LIVE)(
     test(
       'Read/Bash-style attempts through the harness are denied with harness-classified reasons',
       async () => {
-        const { SubprocessDriver } = await loadDist();
+        const { ClaudeCodeDriver } = await loadDist();
         await withScratch(async (dir) => {
           const sessionsDir = join(dir, 'sessions');
-          const driver = new SubprocessDriver({
+          const driver = new ClaudeCodeDriver({
             sessionsDir,
             harnessConfig: { ...harnessConfig([]), workspaceRoot: dir },
           });
@@ -170,19 +177,23 @@ describe.skipIf(!LIVE)(
     test(
       'A.5a + A.5k: structured output survives --tools "", and run children never see the route token',
       async () => {
-        const { SubprocessDriver } = await loadDist();
+        const { ClaudeCodeDriver, toOutputSchema } = await loadDist();
         await withScratch(async (dir) => {
           const sessionsDir = join(dir, 'sessions');
-          const driver = new SubprocessDriver({
+          const driver = new ClaudeCodeDriver({
             sessionsDir,
             harnessConfig: { ...harnessConfig(['env']), workspaceRoot: dir },
-            outputSchema: z.object({ tokenVisible: z.boolean() }).strict(),
           });
           const result = await driver.run(
             invocation(
               'Call the run tool with command "env". Set tokenVisible to true if its output contains ' +
                 'the text ANTHROPIC_AUTH_TOKEN or ANTHROPIC_API_KEY, else false.',
               { allow: ['run'], mode: 'allowlist' },
+              undefined,
+              toOutputSchema(
+                'live.tokenVisible/v1',
+                z.object({ tokenVisible: z.boolean() }).strict(),
+              ),
             ),
           );
           expect(result['stopReason']).toBe('complete');
@@ -207,16 +218,24 @@ describe.skipIf(!LIVE)(
     test(
       'A.5g: a sessionRef resume re-spawns the server on the same workspace',
       async () => {
-        const { SubprocessDriver } = await loadDist();
+        const { ClaudeCodeDriver, toOutputSchema } = await loadDist();
         await withScratch(async (dir) => {
           const sessionsDir = join(dir, 'sessions');
-          const driver = new SubprocessDriver({
+          const driver = new ClaudeCodeDriver({
             sessionsDir,
             harnessConfig: { ...harnessConfig([]), workspaceRoot: dir },
-            outputSchema: z.object({ marker: z.string() }).strict(),
           });
+          const outputSchema = toOutputSchema(
+            'live.marker/v1',
+            z.object({ marker: z.string() }).strict(),
+          );
           const first = await driver.run(
-            invocation('Reply with marker "none".', { allow: ['read'], mode: 'allowlist' }),
+            invocation(
+              'Reply with marker "none".',
+              { allow: ['read'], mode: 'allowlist' },
+              undefined,
+              outputSchema,
+            ),
           );
           expect(first['stopReason']).toBe('complete');
           const sessionId = first['sessionId'] as string;
@@ -228,6 +247,7 @@ describe.skipIf(!LIVE)(
               'Call the read tool with path "resume.txt" and set marker to its exact first line.',
               { allow: ['read'], mode: 'allowlist' },
               sessionId,
+              outputSchema,
             ),
           );
           expect(second['stopReason']).toBe('complete');

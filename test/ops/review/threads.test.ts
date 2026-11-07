@@ -129,7 +129,12 @@ describe('attachRestReplies', () => {
       [t],
       [
         rootComment(),
-        reply({ id: 101, createdAt: '2026-01-01T01:00:00Z', inReplyToId: 100 }),
+        reply({
+          id: 101,
+          createdAt: '2026-01-01T01:00:00Z',
+          inReplyToId: 100,
+          authorType: 'Bot',
+        }),
         reply({
           id: 102,
           createdAt: '2026-01-01T02:00:00Z',
@@ -146,9 +151,12 @@ describe('attachRestReplies', () => {
     // Only the ThreadComment surface survives the mapping.
     expect(t.replies[0]).toEqual({
       authorLogin: 'bob',
+      authorType: 'Bot',
       body: 'a reply',
       createdAt: '2026-01-01T01:00:00Z',
     });
+    // An actor type the REST fetch did not supply is never invented.
+    expect(t.replies[1]).not.toHaveProperty('authorType');
   });
 
   test('a branched chain (two replies on one root) sorts by createdAt regardless of REST order', () => {

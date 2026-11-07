@@ -2,7 +2,7 @@
 // fixtures in runReport.helpers.ts, which carries the suite header).
 import { describe, expect, test } from 'vitest';
 import { makeRunReport } from '../../../src/ops/pr/runReport.js';
-import { makeReportHarness } from './runReport.helpers.js';
+import { cleanScanner, makeReportHarness } from './runReport.helpers.js';
 
 const { fakeGh, inputOf, okReport } = makeReportHarness();
 
@@ -26,7 +26,7 @@ describe('counts and shape', () => {
   test('an empty fleet reports zero rows and zero counts (tracker optionally still updated)', async () => {
     const fake = fakeGh();
     const report = await okReport(
-      makeRunReport(fake.gh),
+      makeRunReport(fake.gh, undefined, cleanScanner),
       inputOf({ packages: [], tracker: { number: 7 } }),
     );
     expect(report.rows).toEqual([]);

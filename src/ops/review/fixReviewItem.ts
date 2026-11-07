@@ -8,7 +8,7 @@
 // frozen OpResult taxonomy.
 //
 // Invariants honored here:
-//   - I1 (vendor-neutral): prompts and the output contract speak only our
+//   - I10 (vendor-neutral): prompts and the output contract speak only our
 //     vocabulary — repo/pr, worktree, tool names read/edit/write/bash. No vendor
 //     CLI or SDK words anywhere in composed text.
 //   - R4 (harness policy is DATA): the tool allowlist and the prompt budget
@@ -302,15 +302,16 @@ export interface FixEvidence {
 
 /**
  * A worktree-relative path the loop can resolve through git: no absolute
- * path, no `..` or `.` segment, no backslash, no control character.
+ * path, no `..` or `.` segment, no backslash, no control character. The same
+ * rule renders into the invocation contract (JSON Schema `pattern`), so the
+ * lane and {@link parseFixOutput} agree on it.
  */
+const RELATIVE_REPO_PATH_RE =
+  // eslint-disable-next-line no-control-regex -- rejecting control characters is the rule's point
+  /^(?!\/)(?!.*\\)(?!.*[\u0000-\u001f])(?!\.{1,2}(?:\/|$))(?!.*\/\.{1,2}(?:\/|$))[^/]+(?:\/[^/]+)*$/;
+
 const isRelativeRepoPath = (path: string): boolean =>
-  path.length > 0 &&
-  path.length <= MAX_EVIDENCE_PATH_CHARS &&
-  !path.startsWith('/') &&
-  !path.includes('\\') &&
-  [...path].every((char) => char.charCodeAt(0) >= 0x20) &&
-  path.split('/').every((segment) => segment !== '' && segment !== '.' && segment !== '..');
+  path.length <= MAX_EVIDENCE_PATH_CHARS && RELATIVE_REPO_PATH_RE.test(path);
 
 /**
  * The commits array's dispatch-boundary bounds (round-3 item 2): at most
@@ -329,14 +330,27 @@ export const COMMIT_SHA_RE = /^[0-9a-f]{40}$/i;
  * settle a schema-valid contract object or an 'output-invalid' error,
  * Codex 2j). parseFixOutput stays as defense in depth (exact keys,
  * disposition↔evidence requirements, bounds) — the schema is the
- * vendor-boundary contract, the parse is the loop's own gate.
+ * vendor-boundary contract, the parse is the loop's own gate. The schema
+ * carries the SAME bounds the parse enforces (blank summary, full shas and
+ * MAX_FIX_COMMITS, MAX_EVIDENCE of git-resolvable paths with a positive
+ * line), so a repairable answer is caught at the lane instead of becoming a
+ * terminal contract violation.
  */
 export const FixReviewItemOutputSchema = z
   .object({
     disposition: z.enum(FIX_DISPOSITIONS),
-    summary: z.string(),
-    commits: z.array(z.string()),
-    evidence: z.array(z.object({ path: z.string(), line: z.number().int() }).strict()),
+    summary: z.string().regex(/\S/),
+    commits: z.array(z.string().regex(COMMIT_SHA_RE)).max(MAX_FIX_COMMITS),
+    evidence: z
+      .array(
+        z
+          .object({
+            path: z.string().max(MAX_EVIDENCE_PATH_CHARS).regex(RELATIVE_REPO_PATH_RE),
+            line: z.number().int().positive(),
+          })
+          .strict(),
+      )
+      .max(MAX_EVIDENCE),
   })
   .strict();
 

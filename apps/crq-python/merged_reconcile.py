@@ -31,7 +31,10 @@ from typing import Any, Callable, Dict, List, Optional
 VERSION = 1
 CHECKPOINT_SCHEMA = 2
 CHECKPOINT_NAME = "reconcile-checkpoint.json"
-TS_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
+# ASCII digits only: `\d` (and strptime) accept Unicode decimal digits, which
+# would pass validation and then sort after every ASCII digit in the
+# lexicographic window comparisons (a malformed mergedAt must be unsupported).
+TS_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z")
 SHA_RE = re.compile(r"[0-9a-f]{40}")
 MAX_PAGE_BUDGET = 200
 MAX_PAGE_RECORDS = 100

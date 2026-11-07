@@ -88,7 +88,10 @@ describe('TOCTOU — the state moves between admission and the write', () => {
   });
 
   test('a workspace that was dirty at approval and is clean now is still refused', async () => {
-    const readState = scriptedStateReader([{ ...CLEAN_STATE, treeClean: false }, CLEAN_STATE]);
+    // The signed state is dirty while ADMISSION reads a clean tree: the
+    // "clean again" direction of the drift, which the dirty-at-admission
+    // check cannot catch. The approval is refused at the state comparison.
+    const readState = scriptedStateReader([CLEAN_STATE]);
     const fixture = grantingAuthority({
       op: OP,
       workspace: WORKSPACE,
@@ -102,6 +105,9 @@ describe('TOCTOU — the state moves between admission and the write', () => {
       writeSpy().run,
     );
     expect(outcome.status).toBe('needs-human');
+    const reason = outcome.status === 'needs-human' ? outcome.reason : '';
+    expect(reason).toContain('the tree is clean again');
+    expect(readState.reads).toBe(1);
     expect(fixture.ledger.spent()).toBe(0);
   });
 
@@ -172,12 +178,7 @@ describe('TOCTOU — the state moves between admission and the write', () => {
       'never treated as unchanged',
     );
 
-    const exerciseFixture = grantingAuthority({
-      op: OP,
-      workspace: WORKSPACE,
-      targets: TARGETS,
-      readState: scriptedStateReader([CLEAN_STATE, CLEAN_STATE]),
-    });
+    const ledger = makeInMemoryNonceLedger();
     // Swap in a reader that succeeds at admission and fails at exercise.
     let calls = 0;
     const flaky = {
@@ -196,13 +197,19 @@ describe('TOCTOU — the state moves between admission and the write', () => {
             state: { ...CLEAN_STATE, workspace: candidate.workspace },
           }),
       },
-      ledger: exerciseFixture.ledger,
+      ledger,
       locks: makeProcessLocalMutationLocks(),
       readState: flaky,
     });
     const outcome = await withApprovedMutation(flakyAuthority, subject(), writeSpy().run);
     expect(outcome.status).toBe('needs-human');
-    expect(exerciseFixture.ledger.spent()).toBe(0);
+    // The refusal came from the RE-READ under the mutation lock, not from an
+    // admission refusal: admission read once, exercise read again and failed.
+    expect(outcome.status === 'needs-human' ? outcome.reason : '').toContain(
+      'could not be re-read',
+    );
+    expect(calls).toBe(2);
+    expect(ledger.spent()).toBe(0);
   });
 
   test('an unreadable ledger denies the write and spends nothing', async () => {

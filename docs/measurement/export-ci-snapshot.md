@@ -5,7 +5,7 @@ Actions runs, per-attempt jobs, check runs and combined status for exactly
 one commit head, taken by hand with the `gh api` recipe below. A later re-run
 does not reproduce it byte for byte — runs get re-run and `filter=latest`
 moves — so the manifest records enough provenance (repo, head, fetch
-instant, pagination cursors) to re-query the same views. Nothing here
+instant, per-invocation page counts) to re-query the same views. Nothing here
 interprets a verdict; consumers decide. No mutation, and no credentials
 beyond the caller's existing `gh` auth.
 
@@ -58,8 +58,11 @@ GitHub caps some lists silently; see Coverage.
 Each manifest attempt entry is the recorded subset of the fetched object:
 `id`, `run_attempt`, `conclusion`, `head_sha`, `created_at`. A failed job or
 check run — any non-success `conclusion` such as `failure`, `timed_out`,
-`cancelled`, `startup_failure` — is recorded verbatim with its `details_url`.
-An attempt with zero jobs is recorded as an empty list, never omitted.
+`cancelled`, `startup_failure` — is recorded verbatim with its own link
+fields: a job with its `html_url` (and `check_run_url`), a check run with
+its `details_url` (workflow-job responses carry no `details_url`).
+An attempt with zero jobs keeps its object entry with its `jobs` field set
+to `[]`, never omitted.
 
 ## Manifest
 
@@ -94,8 +97,10 @@ jobs, so probe the attempt archive
 `repos/{owner}/{repo}/actions/runs/{run_id}/attempts/{n}/logs` for each
 recorded attempt. Probe with `gh api --method GET …`; this downloads the
 zip — both log endpoints answer `405` to a HEAD request, so there is no
-lighter probe. A `404` or `410` response means that attempt's log expired:
-the run keeps its metadata, `logs_expired` is set to `true`, and its
+lighter probe. The attempt-logs download documents only a `302 Found`
+redirect for a live archive, so no documented status code signals expiry:
+treat any non-`302` response as a distinct probe failure recorded with its
+status code, never as expired logs. The run keeps its metadata, and its
 `log_evidence` is `"unknown"`.
 
 ## Coverage
@@ -122,4 +127,4 @@ Unknown is never zero:
   the export cannot distinguish "not yet reported" from "never will be".
   Absence is unknown evidence only: never write a `CiRedObservation` for an
   absent check; an observation records an actual red.
-- An expired log (see Log probe) is `unknown` evidence.
+- A failed log probe (see Log probe) is `unknown` evidence.

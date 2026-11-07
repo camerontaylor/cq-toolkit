@@ -192,9 +192,12 @@ def binding(value):
         raise ValueError("invalid binding")
     common = {"kind", "repo", "targetSelector"}
     fields = {"producer", "head", "target"} if value.get("kind") == "deferred-author" else {"pr", "mergeSha"}
-    if set(value) != common | fields or value.get("kind") not in {"deferred-author", "merged-current"}:
+    if (set(value) != common | fields or type(value.get("kind")) is not str
+            or value.get("kind") not in {"deferred-author", "merged-current"}):
         raise ValueError("invalid binding fields")
-    if not _match(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,99}/[A-Za-z0-9][A-Za-z0-9_.-]{0,99}", value["repo"]) or value["targetSelector"] not in receipts.SELECTORS:
+    if (not _match(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,99}/[A-Za-z0-9][A-Za-z0-9_.-]{0,99}", value["repo"])
+            or not isinstance(value["targetSelector"], str)
+            or value["targetSelector"] not in receipts.SELECTORS):
         raise ValueError("invalid repository or target selector")
     if value["kind"] == "deferred-author":
         if (not _match(TOKEN, value["producer"]) or not _match(SHA, value["head"])
@@ -209,6 +212,7 @@ def binding(value):
 def _health_binding(value):
     if (type(value) is not dict or set(value) != {"repo", "targetSelector"}
             or not _match(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,99}/[A-Za-z0-9][A-Za-z0-9_.-]{0,99}", value.get("repo"))
+            or not isinstance(value.get("targetSelector"), str)
             or value.get("targetSelector") not in receipts.SELECTORS):
         raise ValueError("invalid health binding")
     return value
@@ -218,6 +222,7 @@ def _inventory_binding(value):
     if type(value) is not dict or set(value) != {"repo", "targetSelector", "after", "before"}:
         raise ValueError("invalid inventory binding")
     if (not _match(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,99}/[A-Za-z0-9][A-Za-z0-9_.-]{0,99}", value["repo"])
+            or not isinstance(value["targetSelector"], str)
             or value["targetSelector"] not in receipts.SELECTORS):
         raise ValueError("invalid inventory repository/selector")
     reconcile.normalize_interval(value["after"], value["before"])
@@ -310,6 +315,11 @@ def _inventory(req, runner, q, principal, receipt_root, *, project_fixed=False):
                                 row["state"] = "fixed"
                 elif doc.get("outcome") in {"no-current-code", "partial-scope", "unsupported"}:
                     row["state"] = doc["outcome"]
+                elif doc.get("outcome") == "blocked-secret-scan":
+                    # Same row facts as status: a scan block outranks the
+                    # vendor/unclassified fallback below.
+                    row.update(state="blocked", reason={"source": "queue", "category": "scan",
+                                                        "code": "blocked-secret-scan"})
                 else:
                     row.update(state="blocked", reason={"source": "vendor", "category": "vendor-rate-limited", "code": "rate_limit"}
                                if _vendor_rate_limit(doc) else {"source": "queue", "category": "unknown", "code": "unclassified"})
@@ -341,10 +351,18 @@ def _inventory(req, runner, q, principal, receipt_root, *, project_fixed=False):
 def decode(raw):
     if not isinstance(raw, bytes) or len(raw) > MAX_BYTES:
         raise ValueError("queue request exceeds bound")
-    request = json.loads(raw.decode("utf-8"), object_pairs_hook=_pairs)
+    try:
+        request = json.loads(raw.decode("utf-8"), object_pairs_hook=_pairs)
+    except RecursionError:
+        # Deeply nested JSON: a malformed request, not a caller-visible crash.
+        raise ValueError("queue request nesting exceeds bound") from None
     if not isinstance(request, dict) or type(request.get("v")) is not int or request["v"] != 1:
         raise ValueError("unsupported queue protocol")
     op = request.get("op")
+    if type(op) is not str:
+        # An unhashable op would otherwise reach the `extra` dict lookup as a
+        # TypeError; direct callers see one exception type for malformed input.
+        raise ValueError("invalid queue operation/fields")
     if op == "health":
         if set(request) != {"v", "op", "requestId", "binding"} or not _match(TOKEN, request["requestId"]):
             raise ValueError("invalid health fields")
