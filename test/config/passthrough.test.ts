@@ -7,7 +7,7 @@ import {
   parsePassthrough,
   passthroughRefusal,
 } from '../../src/config/parsers.js';
-import { FOREIGN_ENV_ENTRIES } from '../../src/config/env-registry.js';
+import { CQ_ENV_ENTRIES, FOREIGN_ENV_ENTRIES } from '../../src/config/env-registry.js';
 import { readCqEnv } from '../../src/config/env.js';
 import { resolveSandboxConfig } from '../../src/sandbox/config.js';
 import { buildSandboxLauncherEnv } from '../../src/sandbox/index.js';
@@ -22,6 +22,10 @@ const REFUSED = [
   'GITHUB_TOKEN',
   'MY_SERVICE_SECRET',
   'CQ_AUTOMATION_TOKEN',
+  'CQ_WORK_ID',
+  'cq_work_id',
+  'CQ_MERGE_PROTECTED_BRANCH',
+  'CQ_NOT_A_REAL_NAME',
   'CQ_SANDBOX',
   'AWS_SECRET_ACCESS_KEY',
   'AWS_REGION',
@@ -92,6 +96,21 @@ describe('passthrough deny set', () => {
   test('no allowlisted default name is itself refused as credential-shaped', () => {
     for (const name of DEFAULT_CHILD_ENV_ALLOWLIST) {
       expect(PASSTHROUGH_DENIED_NAMES.has(name)).toBe(false);
+    }
+  });
+
+  test('every registry CQ_* name and an unknown CQ_* name are refused, naming the variable only', () => {
+    for (const name of [...CQ_ENV_ENTRIES.map((e) => e.name), 'CQ_UNKNOWN_TO_THE_REGISTRY']) {
+      expect(() => parsePassthrough(name), name).toThrow(name);
+      const parent = { [name]: dummySecret, CQ_RUN_ENV_PASSTHROUGH: name };
+      if (name === 'CQ_SANDBOX') continue; // that key's own parser quotes its value
+      const snapshot = readCqEnv(parent);
+      const passthroughErrors = snapshot.errors.filter((e) => e.name === 'CQ_RUN_ENV_PASSTHROUGH');
+      expect(passthroughErrors, name).toHaveLength(1);
+      expect(passthroughErrors[0]?.message).toContain(name);
+      expect(JSON.stringify(passthroughErrors)).not.toContain(dummySecret);
+      expect(() => buildChildEnv(parent)).toThrow(name);
+      expect(() => buildSandboxLauncherEnv(parent, { envPassthrough: [name] })).toThrow(name);
     }
   });
 

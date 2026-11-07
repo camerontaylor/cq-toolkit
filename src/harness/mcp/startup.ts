@@ -63,7 +63,10 @@ export function scrubEnvironment(envNames: readonly string[], cqEnv?: CqEnv): vo
   // Validate the final run-child names through the sandbox scrub. This rejects
   // CQ_* policy knobs before process.env is replaced; otherwise a manifest
   // could smuggle one through and only fail later when the run tool executes.
-  buildSandboxLauncherEnv(process.env, { envPassthrough: explicitNames });
+  buildSandboxLauncherEnv(process.env, {
+    envPassthrough: gate.envPassthrough,
+    declaredEnvNames: envNames,
+  });
 
   // buildChildEnv also reads CQ_RUN_ENV_PASSTHROUGH implicitly. Remove that
   // knob first so the MCP scrub uses ONLY the names resolved and validated

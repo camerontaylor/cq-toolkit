@@ -72,9 +72,9 @@ export const ENV_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
  * §B.5): credential-shaped names the subprocess allowlist excludes by design,
  * plus `DATABASE_URL`. Registry data: test/config/passthrough.test.ts checks it
  * against `DEFAULT_CHILD_ENV_ALLOWLIST` and the vendor names the registry
- * lists. Secret-suffixed names (`isSecretEnvName`, which covers
- * `CQ_AUTOMATION_TOKEN`), the `AWS_*` family and the sandbox policy knobs are
- * refused on top of this set.
+ * lists. Secret-suffixed names (`isSecretEnvName`), the `AWS_*` family and every
+ * `CQ_*` name (a nested cq could read trust config from one) are refused on top
+ * of this set.
  */
 export const PASSTHROUGH_DENIED_NAMES: ReadonlySet<string> = new Set([
   'NPM_TOKEN',
@@ -93,6 +93,7 @@ export function passthroughRefusal(name: string): string | undefined {
   if (!ENV_NAME_PATTERN.test(name)) return `invalid env name '${name}'`;
   const folded = name.toUpperCase();
   if (SANDBOX_POLICY_ENV_NAMES.has(folded)) return `may not expose policy env '${name}'`;
+  if (folded.startsWith('CQ_')) return `may not expose CQ_* name '${name}'`;
   if (isSecretEnvName(name)) return `may not expose credential-shaped name '${name}'`;
   if (folded.startsWith('AWS_') || PASSTHROUGH_DENIED_NAMES.has(folded)) {
     return `may not expose credential-shaped name '${name}'`;
