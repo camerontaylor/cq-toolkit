@@ -284,7 +284,7 @@
       ],
       "limits": {
         "max_request_bytes": 6291456,
-        "max_snapshot_bytes": 6291456,
+        "max_snapshot_bytes": 5242880,
         "max_content_bytes": 4194304,
         "max_objects": 4096,
         "chunk_bytes": 3072
@@ -575,5 +575,88 @@
       "sha256": "e99817dd4fea9eb75c9edb5d47a753104b1444d3c7b58a645a28b0f83b8a5c5b"
     },
     "valid": false
+  },
+  {
+    "name": "submit-invalid-request-id",
+    "type": "wire",
+    "value": {
+      "v": 1,
+      "op": "submit",
+      "request_id": "a/b",
+      "inputs": {
+        "repo": "camerontaylor/cq-toolkit",
+        "base_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "base_tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "head_commit": "cccccccccccccccccccccccccccccccccccccccc",
+        "head_tree": "dddddddddddddddddddddddddddddddddddddddd",
+        "projection": "full-diff",
+        "target": "main"
+      }
+    },
+    "valid": false
+  },
+  {
+    "name": "status-invalid-request-id",
+    "type": "wire",
+    "value": {
+      "v": 1,
+      "op": "status",
+      "request_id": "a/b"
+    },
+    "valid": false
+  },
+  {
+    "name": "result-invalid-request-id",
+    "type": "wire",
+    "value": {
+      "v": 1,
+      "op": "result",
+      "request_id": "a/b",
+      "index": 0
+    },
+    "valid": false
+  },
+  {
+    "name": "cancel-invalid-request-id",
+    "type": "wire",
+    "value": {
+      "v": 1,
+      "op": "cancel",
+      "request_id": "a/b"
+    },
+    "valid": false
+  },
+  {
+    "name": "invalid-supersedes",
+    "type": "wire",
+    "value": {
+      "v": 1,
+      "op": "submit",
+      "request_id": "request-1",
+      "inputs": {
+        "repo": "camerontaylor/cq-toolkit",
+        "base_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "base_tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "head_commit": "cccccccccccccccccccccccccccccccccccccccc",
+        "head_tree": "dddddddddddddddddddddddddddddddddddddddd",
+        "projection": "full-diff",
+        "target": "main"
+      },
+      "supersedes": "a/b"
+    },
+    "valid": false
+  },
+  {
+    "name": "busy-response",
+    "type": "response",
+    "value": {
+      "v": 1,
+      "error": {
+        "code": "busy",
+        "message": "review queue lock busy; retry the same request id",
+        "retryable": true
+      }
+    },
+    "valid": true
   }
 ]

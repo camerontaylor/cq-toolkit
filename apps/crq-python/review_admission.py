@@ -59,7 +59,7 @@ def status(q, request_id):
 
 
 def admit(q, *, request_id, inputs, resolved, profile, at, repeat=False,
-          supersedes=None, notify=None):
+          supersedes=None, notify=None, verify_receipt=lambda item: True):
     key = key_digest(inputs, repeat=repeat)
     old = retry(q, request_id, key)
     if old is not None:
@@ -78,7 +78,7 @@ def admit(q, *, request_id, inputs, resolved, profile, at, repeat=False,
     operation.validate("request", {**binding, "item": "not-yet-assigned"})
     item, action = None, "created"
     if not repeat:
-        item = next((i for i in reversed(candidates) if adequate(i)), None)
+        item = next((i for i in reversed(candidates) if adequate(i) and verify_receipt(i)), None)
         if item:
             action = "reused"
         else:
@@ -103,6 +103,8 @@ def admit(q, *, request_id, inputs, resolved, profile, at, repeat=False,
     if item["state"] in ACTIVE:
         item["observers"].append(request_id)
     result = status(q, request_id)
+    if action == "observed" and adequate(item) and not verify_receipt(item):
+        result.update(next_action="resubmit", reason="receipt-unavailable")
     return result if result["action"] == "no-changes" else {**result, "action": action}
 
 

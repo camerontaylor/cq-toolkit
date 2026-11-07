@@ -194,7 +194,7 @@ def install(snapshot, binding, runner, *, original=False):
             raise AuthorRefused("snapshot entry mode disagrees with object type")
         diff = git(quarantine, "diff", "--no-ext-diff", "--no-textconv", "--no-color", "--unified=0",
                    binding["base"], binding["head"]).decode("utf-8", errors="replace")
-        if not diff:
+        if not diff and not original:
             raise AuthorRefused("empty snapshot diff")
         # Attributes/binary diff suppression must not hide incoming blob bytes.
         # Feed every incoming blob through the existing path-aware scan policy,

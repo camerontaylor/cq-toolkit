@@ -195,7 +195,8 @@
             },
             "supersedes": {
               "type": "string",
-              "minLength": 1
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$"
             },
             "notify": {
               "type": "object",
@@ -254,7 +255,8 @@
                 },
                 "request_id": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$"
                 },
                 "inputs": {
                   "type": "object",
@@ -361,7 +363,8 @@
                 },
                 "supersedes": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$"
                 }
               },
               "additionalProperties": false
@@ -379,7 +382,8 @@
                 },
                 "request_id": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$"
                 }
               },
               "additionalProperties": false
@@ -397,7 +401,8 @@
                 },
                 "request_id": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$"
                 },
                 "index": {
                   "type": "integer",
@@ -419,7 +424,8 @@
                 },
                 "request_id": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$"
                 }
               },
               "additionalProperties": false
@@ -448,7 +454,8 @@
                 },
                 "request_id": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$"
                 },
                 "action": {
                   "enum": ["created", "joined", "reused", "observed", "no-changes"]
@@ -525,7 +532,7 @@
                     },
                     "max_snapshot_bytes": {
                       "type": "integer",
-                      "const": 6291456
+                      "const": 5242880
                     },
                     "max_content_bytes": {
                       "type": "integer",
@@ -807,7 +814,8 @@
             },
             "request_id": {
               "type": "string",
-              "minLength": 1
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$"
             },
             "event_id": {
               "type": "string",

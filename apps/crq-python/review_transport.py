@@ -14,6 +14,7 @@ import review_operation as operation
 import review_receipt
 
 MAX_BYTES = 6 * 1024 * 1024
+MAX_SNAPSHOT_BYTES = 5 * 1024 * 1024
 DEADLINE_S = 120
 OPERATIONS = ["capabilities", "submit", "status", "result", "cancel"]
 
@@ -22,13 +23,16 @@ def decode(raw):
     if not isinstance(raw, bytes) or len(raw) > MAX_BYTES:
         raise ValueError("review request exceeds 6 MiB; reduce the commit range")
     request = json.loads(raw, object_pairs_hook=queue_transport._pairs)
-    return operation.validate("wire", request)
+    operation.validate("wire", request)
+    if "snapshot" in request and len(review_receipt.canonical(request["snapshot"])) > MAX_SNAPSHOT_BYTES:
+        raise ValueError("snapshot exceeds 5 MiB; reduce the commit range or use reachable objects")
+    return request
 
 
 def capabilities():
     return dict(v=1, command="review-v1", operations=OPERATIONS,
                 features=["original-commit-snapshot-v1", "chunked-result-v1", "repeat-generations-v1"],
-                limits=dict(max_request_bytes=MAX_BYTES, max_snapshot_bytes=MAX_BYTES,
+                limits=dict(max_request_bytes=MAX_BYTES, max_snapshot_bytes=MAX_SNAPSHOT_BYTES,
                             max_content_bytes=author_snapshot.MAX_CONTENT,
                             max_objects=author_snapshot.MAX_OBJECTS, chunk_bytes=review_receipt.CHUNK_BYTES))
 
@@ -61,6 +65,18 @@ def resolve(runner, inputs, stored):
     return facts
 
 
+def retained(runner, item):
+    """Disk bytes, not queue metadata, authorize completed-result reuse."""
+    try:
+        doc = queue_transport._ReceiptSnapshot(runner.STATE / "receipts", item["receipt_id"]).document
+        operation.validate("receipt", doc)
+        return (doc["kind"] == operation.RECEIPT_KIND and doc["identity"] == item["identity"]
+                and doc["identity_inputs"] == item["identity_inputs"] and doc["scope_adequate"] is True
+                and doc["outcome"] in ("clean", "findings"))
+    except (OSError, ValueError, KeyError):
+        return False
+
+
 def handle(raw, runner, *, principal, policy):
     req = decode(raw)
     policy = queue_transport.validate_policy(policy)
@@ -89,7 +105,8 @@ def handle(raw, runner, *, principal, policy):
             facts = resolve(runner, inputs, stored)
             result = admission.admit(q, request_id=req["request_id"], inputs=inputs,
                                      resolved=facts, profile=stored, at=runner.iso(),
-                                     repeat=req.get("repeat", False), supersedes=req.get("supersedes"))
+                                     repeat=req.get("repeat", False), supersedes=req.get("supersedes"),
+                                     notify=req.get("notify"), verify_receipt=lambda item: retained(runner, item))
             runner.save_queue(q)
     elif op == "cancel":
         result = admission.cancel(q, req["request_id"])
@@ -111,6 +128,25 @@ def handle(raw, runner, *, principal, policy):
     return review_receipt.canonical(result)
 
 
+def error(code, message, retryable=False):
+    document = dict(v=1, error=dict(code=code, message=message, retryable=retryable))
+    operation.validate("response", document)
+    return review_receipt.canonical(document)
+
+
+def safe_handle(raw, runner, *, principal, policy):
+    # Runs inside supervision for writes: typed failures must cross its pipe.
+    from author_quota import AuthorRefused
+    try:
+        return handle(raw, runner, principal=principal, policy=policy)
+    except AuthorRefused as exc:
+        return error("snapshot-refused", str(exc) + "; check required objects and snapshot limits")
+    except ValueError as exc:
+        return error("invalid-input", str(exc))
+    except FileNotFoundError:
+        return error("result-unavailable", "retained result unavailable; submit an explicit repeat")
+
+
 def main():
     from author_transport import supervised
     def expired(signum, frame):
@@ -119,13 +155,18 @@ def main():
     try:
         signal.alarm(DEADLINE_S)
         raw = sys.stdin.buffer.read(MAX_BYTES + 1)
-        decode(raw)
+        try:
+            req = decode(raw)
+        except ValueError as exc:
+            sys.stdout.buffer.write(error("invalid-input", str(exc)))
+            return 0
         policy = json.loads(Path(os.environ["CRQ_QUEUE_POLICY"]).read_text())
         principal = os.environ["CRQ_QUEUE_PRINCIPAL"]
         import crq
-        result = supervised(lambda runner: handle(raw, runner, principal=principal, policy=policy), crq)
+        work = lambda runner: safe_handle(raw, runner, principal=principal, policy=policy)
+        result = work(crq) if req["op"] in ("capabilities", "status", "result") else supervised(work, crq)
         if result is None:
-            raise ValueError("review queue lock busy")
+            result = error("busy", "review queue lock busy; retry the same request id", True)
         sys.stdout.buffer.write(result)
         return 0
     finally:

@@ -20,10 +20,11 @@ concatenation of `oid + NUL + type + NUL + data + LF` for every sorted object.
 `tree` equals the original head tree. The snapshot fixture's base is a placeholder
 `aaaaaaaa…`; installation tests must supply a real reachable base.
 
-The full JSON request is bounded at 6 MiB, decoded object contents at 4 MiB,
+The full JSON request is bounded at 6 MiB, the canonical snapshot JSON at 5 MiB,
+decoded object contents at 4 MiB,
 and objects at 4096. Oversize or incomplete snapshots fail with actionable limits;
-objects are never truncated. A six-MiB snapshot body still needs room for its
-surrounding request under the full request limit.
+objects are never truncated. The snapshot cap leaves 1 MiB for the surrounding request. All bounds apply
+together; content/object maxima do not waive the encoded snapshot byte cap.
 
 ## Results
 

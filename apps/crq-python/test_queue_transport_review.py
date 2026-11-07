@@ -3,9 +3,11 @@ import base64
 import copy
 import hashlib
 import json
+import io
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
+from unittest import mock
 
 import author_snapshot
 import capability_dispatcher
@@ -92,3 +94,96 @@ class ReviewTransportTests(SnapshotTransportFixture, unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "different inputs"):
             self.call_review(self.review)
         self.assertEqual(before, self.saved)
+
+    def test_notify_is_persisted_before_response(self):
+        destination = dict(paseo_agent_id="08e32e05-647c-4bbf-be31-2a6aeaec0654", paseo_host="triton")
+        self.review["notify"] = destination
+        self.call_review(self.review)
+        self.assertEqual(self.saved["review_requests"]["local-1"]["notify"], destination)
+
+    def test_fresh_claimed_tree_mismatches_refuse_without_mutation(self):
+        self.call_review(self.review)  # install objects first
+        before = copy.deepcopy(self.saved)
+        self.review.pop("snapshot")
+        for end in ("base", "head"):
+            req = copy.deepcopy(self.review)
+            req["request_id"] = "wrong-" + end
+            req["inputs"][end + "_tree"] = "f" * 40
+            with self.assertRaisesRegex(ValueError, "claimed commit/tree mismatch"):
+                self.call_review(req)
+            self.assertEqual(self.saved, before)
+
+    def test_missing_corrupt_or_wrong_identity_receipts_offer_resubmit(self):
+        self.call_review(self.review)
+        vectors = json.loads((Path(__file__).parent / "fixtures/review-operation/vectors.json").read_text())
+        doc = copy.deepcopy(next(r["value"] for r in vectors if r["name"] == "full-diff-receipt"))
+        item = self.saved["items"][0]
+        doc.update(identity=item["identity"], identity_inputs=item["identity_inputs"], profile=item["profile"])
+        item.update(state="done", scope_adequate=True)
+        for case in ("valid", "missing", "corrupt", "wrong-identity"):
+            item = self.saved["items"][0]
+            value = copy.deepcopy(doc)
+            if case == "wrong-identity": value["identity"] = "f" * 64
+            item["receipt_id"] = review_receipt.write_receipt(self.state / "receipts", value)
+            path = self.state / "receipts" / (item["receipt_id"] + ".json")
+            if case == "missing": path.unlink()
+            if case == "corrupt": path.write_text("{}")
+            req = copy.deepcopy(self.review)
+            req.update(request_id="reuse-" + case)
+            req.pop("snapshot")
+            result = self.call_review(req)
+            if case == "valid": self.assertEqual(result["action"], "reused")
+            else:
+                self.assertEqual(result["action"], "observed")
+                self.assertEqual(result["next_action"], "resubmit")
+            # Restore bytes for the next independently exercised corruption.
+            if path.exists(): path.unlink()
+
+    def invoke_main(self, req, supervision):
+        raw = req if isinstance(req, bytes) else json.dumps(req).encode()
+        out = io.BytesIO()
+        policy = self.state / "queue-policy.json"
+        policy.write_text(json.dumps(self.policy))
+        with mock.patch.dict("os.environ", CRQ_QUEUE_POLICY=str(policy), CRQ_QUEUE_PRINCIPAL="queue-client"), \
+             mock.patch.dict("sys.modules", crq=self.runner), \
+             mock.patch.object(transport.sys, "stdin", SimpleNamespace(buffer=io.BytesIO(raw))), \
+             mock.patch.object(transport.sys, "stdout", SimpleNamespace(buffer=out)), \
+             mock.patch("author_transport.supervised", side_effect=supervision):
+            self.assertEqual(transport.main(), 0)
+        return json.loads(out.getvalue())
+
+    def test_main_returns_typed_errors_and_reads_without_lock(self):
+        def no_lock(*a): raise AssertionError("read acquired tick.lock")
+        cap = self.invoke_main(dict(v=1, op="capabilities"), no_lock)
+        self.assertLess(cap["limits"]["max_snapshot_bytes"], cap["limits"]["max_request_bytes"])
+        busy = self.invoke_main(self.review, lambda *a: None)
+        self.assertEqual(busy["error"]["code"], "busy")
+        self.assertTrue(busy["error"]["retryable"])
+        oversized = self.invoke_main(b" " * (transport.MAX_BYTES + 1), no_lock)
+        self.assertIn("6 MiB", oversized["error"]["message"])
+        invalid = copy.deepcopy(self.review)
+        invalid["snapshot"]["sha256"] = "f" * 64
+        refused = self.invoke_main(invalid, lambda work, runner: work(runner))
+        self.assertEqual(refused["error"]["code"], "snapshot-refused")
+        self.call_review(self.review)
+        self.invoke_main(dict(v=1, op="status", request_id="local-1"), no_lock)
+        item = self.saved["items"][0]
+        item["receipt_id"] = review_receipt.write_receipt(self.state / "receipts", {"report": "clean"})
+        self.assertIn("data", self.invoke_main(dict(v=1, op="result", request_id="local-1"), no_lock))
+
+    def test_snapshot_cap_is_enforced_inside_request_bound(self):
+        req = copy.deepcopy(self.review)
+        req["snapshot"]["objects"][0]["data"] = "A" * transport.MAX_SNAPSHOT_BYTES
+        raw = json.dumps(req).encode()
+        self.assertLess(len(raw), transport.MAX_BYTES)
+        with self.assertRaisesRegex(ValueError, "5 MiB"):
+            transport.decode(raw)
+
+    def test_empty_original_commit_reaches_no_changes(self):
+        head = self.commit(self.base_tree, self.base)
+        data = base64.b64encode(author_snapshot.git(self.repo, "cat-file", "commit", head)).decode()
+        obj = dict(oid=head, type="commit", data=data)
+        checksum = hashlib.sha256((head + "\0commit\0" + data + "\n").encode()).hexdigest()
+        self.review["inputs"].update(head_commit=head, head_tree=self.base_tree)
+        self.review["snapshot"] = dict(v=1, tree=self.base_tree, objects=[obj], sha256=checksum)
+        self.assertEqual(self.call_review(self.review)["action"], "no-changes")
