@@ -1,0 +1,653 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "oneOf": [
+    {
+      "type": "object",
+      "required": ["type", "value"],
+      "properties": {
+        "type": {
+          "const": "identity"
+        },
+        "value": {
+          "type": "object",
+          "required": [
+            "v",
+            "repo",
+            "base_commit",
+            "base_tree",
+            "head_commit",
+            "head_tree",
+            "scope",
+            "projection",
+            "config_digest",
+            "profile"
+          ],
+          "properties": {
+            "v": {
+              "type": "integer",
+              "const": 1
+            },
+            "repo": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+            },
+            "base_commit": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}$"
+            },
+            "base_tree": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}$"
+            },
+            "head_commit": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}$"
+            },
+            "head_tree": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}$"
+            },
+            "scope": {
+              "const": "full-diff"
+            },
+            "projection": {
+              "type": "string",
+              "minLength": 1
+            },
+            "config_digest": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "profile": {
+              "type": "object",
+              "required": ["adapter", "revision"],
+              "properties": {
+                "adapter": {
+                  "const": "coderabbit-cli"
+                },
+                "revision": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": ["type", "value"],
+      "properties": {
+        "type": {
+          "const": "submit_inputs"
+        },
+        "value": {
+          "type": "object",
+          "required": [
+            "repo",
+            "base_commit",
+            "base_tree",
+            "head_commit",
+            "head_tree",
+            "projection",
+            "target"
+          ],
+          "properties": {
+            "repo": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+            },
+            "base_commit": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}$"
+            },
+            "base_tree": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}$"
+            },
+            "head_commit": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}$"
+            },
+            "head_tree": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}$"
+            },
+            "projection": {
+              "type": "string",
+              "minLength": 1
+            },
+            "target": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": ["type", "value"],
+      "properties": {
+        "type": {
+          "const": "profile"
+        },
+        "value": {
+          "type": "object",
+          "required": ["adapter", "revision", "flags"],
+          "properties": {
+            "adapter": {
+              "const": "coderabbit-cli"
+            },
+            "revision": {
+              "type": "string",
+              "minLength": 1
+            },
+            "flags": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": ["type", "value"],
+      "properties": {
+        "type": {
+          "const": "request"
+        },
+        "value": {
+          "type": "object",
+          "required": ["v", "key_digest", "identity", "item", "created_at"],
+          "properties": {
+            "v": {
+              "type": "integer",
+              "const": 1
+            },
+            "key_digest": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "identity": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "item": {
+              "type": "string",
+              "minLength": 1
+            },
+            "created_at": {
+              "type": "string",
+              "minLength": 1
+            },
+            "supersedes": {
+              "type": "string",
+              "minLength": 1
+            },
+            "notify": {
+              "type": "object",
+              "required": ["paseo_agent_id", "paseo_host"],
+              "properties": {
+                "paseo_agent_id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "paseo_host": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": ["type", "value"],
+      "properties": {
+        "type": {
+          "const": "wire"
+        },
+        "value": {
+          "oneOf": [
+            {
+              "type": "object",
+              "required": ["v", "op"],
+              "properties": {
+                "v": {
+                  "type": "integer",
+                  "const": 1
+                },
+                "op": {
+                  "const": "capabilities"
+                }
+              },
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "required": ["v", "op", "request_id", "inputs"],
+              "properties": {
+                "v": {
+                  "type": "integer",
+                  "const": 1
+                },
+                "op": {
+                  "const": "submit"
+                },
+                "request_id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "inputs": {
+                  "type": "object",
+                  "required": [
+                    "repo",
+                    "base_commit",
+                    "base_tree",
+                    "head_commit",
+                    "head_tree",
+                    "projection",
+                    "target"
+                  ],
+                  "properties": {
+                    "repo": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+                    },
+                    "base_commit": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{40}$"
+                    },
+                    "base_tree": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{40}$"
+                    },
+                    "head_commit": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{40}$"
+                    },
+                    "head_tree": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{40}$"
+                    },
+                    "projection": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "target": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "repeat": {
+                  "type": "boolean"
+                },
+                "snapshot": {
+                  "type": "object"
+                },
+                "notify": {
+                  "type": "object",
+                  "required": ["paseo_agent_id", "paseo_host"],
+                  "properties": {
+                    "paseo_agent_id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "paseo_host": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "supersedes": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "required": ["v", "op", "request_id"],
+              "properties": {
+                "v": {
+                  "type": "integer",
+                  "const": 1
+                },
+                "op": {
+                  "const": "status"
+                },
+                "request_id": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "required": ["v", "op", "request_id"],
+              "properties": {
+                "v": {
+                  "type": "integer",
+                  "const": 1
+                },
+                "op": {
+                  "const": "result"
+                },
+                "request_id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "offset": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              },
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "required": ["v", "op", "request_id"],
+              "properties": {
+                "v": {
+                  "type": "integer",
+                  "const": 1
+                },
+                "op": {
+                  "const": "cancel"
+                },
+                "request_id": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "additionalProperties": false
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": ["type", "value"],
+      "properties": {
+        "type": {
+          "const": "response"
+        },
+        "value": {
+          "type": "object",
+          "required": ["v", "action", "state"],
+          "properties": {
+            "v": {
+              "type": "integer",
+              "const": 1
+            },
+            "request_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "action": {
+              "enum": ["created", "joined", "reused", "observed", "no-changes"]
+            },
+            "state": {
+              "enum": ["queued", "running", "completed", "failed", "cancelled", "unsupported"]
+            },
+            "identity": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "item": {
+              "type": "string",
+              "minLength": 1
+            },
+            "generation": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "receipt_id": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "next_action": {
+              "enum": ["resubmit"]
+            },
+            "reason": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": ["type", "value"],
+      "properties": {
+        "type": {
+          "const": "receipt"
+        },
+        "value": {
+          "type": "object",
+          "required": [
+            "v",
+            "kind",
+            "identity",
+            "identity_inputs",
+            "profile",
+            "run_id",
+            "outcome",
+            "scope_adequate",
+            "findings",
+            "report",
+            "observed",
+            "independent_acceptance"
+          ],
+          "properties": {
+            "v": {
+              "type": "integer",
+              "const": 1
+            },
+            "kind": {
+              "const": "local-review-full-diff"
+            },
+            "identity": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "identity_inputs": {
+              "type": "object",
+              "required": [
+                "v",
+                "repo",
+                "base_commit",
+                "base_tree",
+                "head_commit",
+                "head_tree",
+                "scope",
+                "projection",
+                "config_digest",
+                "profile"
+              ],
+              "properties": {
+                "v": {
+                  "type": "integer",
+                  "const": 1
+                },
+                "repo": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+                },
+                "base_commit": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{40}$"
+                },
+                "base_tree": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{40}$"
+                },
+                "head_commit": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{40}$"
+                },
+                "head_tree": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{40}$"
+                },
+                "scope": {
+                  "const": "full-diff"
+                },
+                "projection": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "config_digest": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                "profile": {
+                  "type": "object",
+                  "required": ["adapter", "revision"],
+                  "properties": {
+                    "adapter": {
+                      "const": "coderabbit-cli"
+                    },
+                    "revision": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              },
+              "additionalProperties": false
+            },
+            "profile": {
+              "type": "object",
+              "required": ["adapter", "revision", "flags"],
+              "properties": {
+                "adapter": {
+                  "const": "coderabbit-cli"
+                },
+                "revision": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "flags": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              },
+              "additionalProperties": false
+            },
+            "run_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "outcome": {
+              "enum": ["clean", "findings", "no-verdict", "unknown"]
+            },
+            "scope_adequate": {
+              "type": "boolean"
+            },
+            "findings": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            },
+            "report": {
+              "type": "string"
+            },
+            "observed": {
+              "type": "object"
+            },
+            "independent_acceptance": {
+              "const": false
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": ["type", "value"],
+      "properties": {
+        "type": {
+          "const": "outbox"
+        },
+        "value": {
+          "type": "object",
+          "required": ["v", "request_id", "event_id", "destination", "state"],
+          "properties": {
+            "v": {
+              "type": "integer",
+              "const": 1
+            },
+            "request_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "event_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "destination": {
+              "type": "object",
+              "required": ["paseo_agent_id", "paseo_host"],
+              "properties": {
+                "paseo_agent_id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "paseo_host": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "additionalProperties": false
+            },
+            "state": {
+              "enum": ["pending", "sent", "error"]
+            },
+            "receipt_id": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  ]
+}
