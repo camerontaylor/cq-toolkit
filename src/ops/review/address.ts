@@ -3049,6 +3049,16 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                   }
                   return await finish('needs-human', closureRefused);
                 }
+                // A failed after-snapshot leaves the loop's replies/resolves
+                // published but the round unverified. Stop BEFORE the
+                // re-review: that pass would replace the retained settled
+                // run's record with the re-reviewed population and lose the
+                // history of what the fixes did.
+                if (loop.verifyFailure !== undefined)
+                  return await finish(
+                    'needs-human',
+                    `verify snapshot failed: ${loop.verifyFailure}`,
+                  );
                 const fetched = await fetchReviewState(
                   { owner: meta.owner, repo: meta.repo, pr: meta.pr },
                   undefined,
