@@ -21,6 +21,7 @@ op input. `secret` values are never printed.
 | `CQ_GH_BIN` | config | no | neutral | live | no | Path or name of the gh binary (default gh). |
 | `CQ_MERGE_ACCEPT_REVIEW_STATES` | config | yes | conservative | live | no | Review states that count as acceptance (blank: APPROVED only). |
 | `CQ_MERGE_BASE_BRANCH` | config | yes | conservative | live | no | Base branch the self-merge flow targets. |
+| `CQ_MERGE_PROTECTED_BRANCH` | config | yes | conservative | live | no | Branch merge pushes may never target; plan data cannot override it (blank: main). |
 | `CQ_MERGE_PROTECTED_PATHS` | config | yes | conservative | live | no | Protected-paths posture: human, diff-check or advisory (blank: human). |
 | `CQ_MERGE_TRUSTED_ASSOCIATIONS` | config | yes | conservative | live | no | Trusted author associations (blank: OWNER, MEMBER, COLLABORATOR). |
 | `CQ_MERGE_TRUSTED_BOTS` | config | yes | conservative | live | no | Trusted bot logins (blank: none). |
