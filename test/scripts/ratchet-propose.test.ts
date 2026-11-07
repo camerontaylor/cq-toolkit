@@ -325,7 +325,10 @@ describe('ratchet-propose: happy path against a local main origin', () => {
     { timeout: 240_000 },
     async () => {
       const ctx = await setup('happy');
-      const measuredSha = git(ctx.repo, ['rev-parse', 'HEAD']);
+      // The measurement is of the main tip, not of this fixture's `trust`
+      // working checkout: the proposer refuses a measurement whose SHA is not
+      // the origin/main tip it compares against.
+      const measuredSha = ctx.mqTip;
       const res = propose(ctx, { coverage: 95.04 }, measuredSha);
       expect(res.status, `${res.stdout}${res.stderr}`).toBe(0);
       expect(res.stdout.trim()).toBe('https://github.com/owner/repo/pull/7');
@@ -391,7 +394,7 @@ describe('ratchet-propose: happy path against a local main origin', () => {
       ]);
       expect(refsAfterAbsorbed).not.toContain('ratchet/propose-');
       // The floor still tightens on real headroom: raw 94.31 → exactly 94.3.
-      const res = propose(ctx, { coverage: 94.31 }, git(ctx.repo, ['rev-parse', 'HEAD']));
+      const res = propose(ctx, { coverage: 94.31 }, ctx.mqTip);
       expect(res.status, `${res.stdout}${res.stderr}`).toBe(0);
       expect(res.stdout.trim()).toBe('https://github.com/owner/repo/pull/7');
       const heads = git(ctx.origin, ['for-each-ref', '--format=%(refname:short)', 'refs/heads/']);
@@ -401,6 +404,24 @@ describe('ratchet-propose: happy path against a local main origin', () => {
         value: number;
       };
       expect(proposed.value).toBe(94.3);
+    },
+  );
+
+  it(
+    'a measurement of a tip other than origin/main proposes nothing',
+    { timeout: 240_000 },
+    async () => {
+      const ctx = await setup('stale');
+      const staleSha = git(ctx.repo, ['rev-parse', 'HEAD']);
+      expect(staleSha).not.toBe(ctx.mqTip);
+      const res = propose(ctx, { coverage: 95.04 }, staleSha);
+      expect(res.status, `${res.stdout}${res.stderr}`).toBe(0);
+      expect(res.stdout.trim()).toBe('');
+      expect(res.stderr).toContain('stale measurement, nothing proposed');
+      // Nothing is proposed and gh is never consulted.
+      expect(existsSync(ctx.ghLog) ? readFileSync(ctx.ghLog, 'utf8') : '').not.toContain(
+        'pr create',
+      );
     },
   );
 });
