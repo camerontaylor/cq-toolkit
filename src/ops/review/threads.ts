@@ -236,6 +236,7 @@ export function attachRestReplies(
     thread.replies.push(
       ...chain.map((reply) => ({
         authorLogin: reply.authorLogin,
+        ...(reply.authorType !== undefined ? { authorType: reply.authorType } : {}),
         body: reply.body,
         createdAt: reply.createdAt,
       })),
