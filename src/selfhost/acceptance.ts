@@ -31,7 +31,8 @@
 // to narrow ordinary review trust. An unrecognised entry fails loudly with
 // the key name; a typo must never silently narrow or widen that trust.
 // An exact-head SHA + PASS comment counts without an opt-in, including for
-// same-account agents. Bot authors and logins ending in [bot] are excluded.
+// same-account agents. Bot authors and logins ending in [bot] are excluded,
+// except the cq-review App (isIgnoredBotAuthor), which reviewers post as.
 // The merging agent checks reviewer independence.
 //
 // NEVER THROWS (judgeAcceptance): every throw becomes verdict 'fail' with a
@@ -56,6 +57,7 @@ import type {
   SnapshotThread,
   TrustPolicy,
 } from './merge-recheck.js';
+import { processEnv } from '../config/process-env.js';
 
 /** The check-run name the verdict posts under. */
 export const ACCEPTANCE_CHECK_NAME = 'cq/acceptance';
@@ -436,7 +438,7 @@ async function main(): Promise<void> {
   let line: string;
   try {
     const args = parseAcceptanceArgs(process.argv.slice(2));
-    const trust = resolveAcceptanceTrust(process.env);
+    const trust = resolveAcceptanceTrust(processEnv());
     const result = await judgeAcceptance(
       { gh: makeGhRunner({ cqEnv }), owner: args.owner, repo: args.repo, policy: trust.policy },
       args.input,

@@ -31,6 +31,7 @@ import {
 import { PolicyDiffInputObject as OpSchema } from '../ops/gates/policyDiffInput.js';
 import { decimalFlag, parseEntryArgs, runEntry } from './trusted-entry.js';
 import { SETTLE_STATE_PATH } from './config.js';
+import { processEnv } from '../config/process-env.js';
 
 /** `gates.policyDiff`'s own input schema, as `--name=value` flags. */
 export const PolicyDiffArgsSchema = OpSchema.extend({
@@ -69,7 +70,7 @@ const invokedDirectly =
   process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href;
 if (invokedDirectly) {
   const code = await mainWith(process.argv.slice(2), {
-    env: process.env,
+    env: processEnv(),
     write: (line) => process.stdout.write(line),
   });
   if (code !== 0) process.exitCode = code;

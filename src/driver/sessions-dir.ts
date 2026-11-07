@@ -17,16 +17,17 @@
 
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { processEnv } from '../config/process-env.js';
 
 /**
  * The default sessions directory: durable, XDG-respecting, one copy.
  */
 export function defaultSessionsDir(): string {
-  const override = process.env['CQ_SESSIONS_DIR'];
+  const override = processEnv()['CQ_SESSIONS_DIR'];
   if (override !== undefined && override.trim() !== '') {
     return override.trim();
   }
-  const stateHome = process.env['XDG_STATE_HOME'];
+  const stateHome = processEnv()['XDG_STATE_HOME'];
   const base =
     stateHome !== undefined && stateHome.trim() !== ''
       ? stateHome

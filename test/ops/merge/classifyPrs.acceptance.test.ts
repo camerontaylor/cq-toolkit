@@ -38,6 +38,21 @@ describe('plain independent review acceptance', () => {
     },
   );
 
+  test.each([
+    { authorType: 'Bot', authorLogin: 'cq-review[bot]' },
+    { authorType: 'Bot', authorLogin: 'cq-review' },
+  ])('accepts a cq-review App PASS (REST and GraphQL login forms): %j', (author) => {
+    expect(
+      classifyPr(
+        candidate({
+          headRefOid: 'a'.repeat(40),
+          issueComments: [comment({ body: `${'a'.repeat(40)} PASS`, ...author })],
+        }),
+        PENDING_MS,
+      ).reason,
+    ).toBe('settle_window_pending');
+  });
+
   test('accepts a plain top-level PR-author comment with the exact head and PASS', () => {
     expect(
       classifyPr(

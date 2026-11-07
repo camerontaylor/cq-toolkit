@@ -22,6 +22,7 @@ import type { ModelSpec } from '../driver/types.js';
 import { parseModelSpec } from '../config/parsers.js';
 import type { CqEnv } from '../config/env.js';
 import { deepFreeze } from '../shared/deepFreeze.js';
+import { processEnv } from '../config/process-env.js';
 
 /**
  * The shape of the frozen self-hosting defaults. Plain data only — the
@@ -270,7 +271,7 @@ export interface SelfhostDrivers {
  * (the entry modules), never inside an op.
  */
 export function resolveSelfhostDrivers(
-  env: CqEnv | Readonly<Record<string, string | undefined>> = process.env,
+  env: CqEnv | Readonly<Record<string, string | undefined>> = processEnv(),
 ): SelfhostDrivers {
   if (isCqEnv(env)) {
     // The snapshot already parsed (and, at the entry, validated) both specs.
@@ -299,7 +300,7 @@ function isCqEnv(env: CqEnv | Readonly<Record<string, string | undefined>>): env
 
 export function resolveSelfhostDriver(
   nowMs: number,
-  env: CqEnv | Readonly<Record<string, string | undefined>> = process.env,
+  env: CqEnv | Readonly<Record<string, string | undefined>> = processEnv(),
 ): ModelSpec {
   const drivers = resolveSelfhostDrivers(env);
   return isSelfhostPeak(nowMs) || isSelfhostPeakHeadroom(nowMs) ? drivers.peak : drivers.offPeak;

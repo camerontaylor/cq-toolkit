@@ -17,7 +17,8 @@ export interface ImportedAcceptanceMeta {
 }
 
 export interface ImportAcceptanceResult {
-  /** Self-declared acceptance rows; M10e's acceptances input, unchanged. */
+  /** Self-declared or cq-review App-attested acceptance rows; M10e's
+   * acceptances input, unchanged. */
   acceptances: AcceptancePayload[];
   /** Beside the rows: the payload schema is strict, so an inline `at`
    * field would fail parsing (the parallel-array choice). */

@@ -6,6 +6,7 @@ import { basename, dirname, resolve } from 'node:path';
 import type { GhFn } from '../../../adapters/forge-github/gh.js';
 import { fileWorktreeRegistry, reviewBranchFor } from '../../../adapters/git/prWorktree.js';
 import { makeGitMutex } from '../../../shared/gitMutex.js';
+import { boundedErrorText, describeError } from '../../../driver/error-text.js';
 import type { ReviewAddressInput, ReviewAddressResult, ReviewAddressReport } from '../address.js';
 import {
   disposeAddressTerminalSession,
@@ -553,10 +554,15 @@ export class AddressOwnership {
     }
     for (const path of obsolete) {
       await rm(path, { recursive: true, force: true }).catch((error: unknown) => {
+        let detail = 'unprintable cleanup error';
+        try {
+          detail = boundedErrorText(describeError(error)).replace(/\p{Cc}/gu, ' ');
+        } catch {
+          /* Diagnostic rendering must not make cleanup fatal. */
+        }
         this.retentionAdvisories.push(
-          `address ownership: retention cleanup failed for ${basename(path)}`,
+          `address ownership: retention cleanup failed for ${basename(path)}: ${detail}`,
         );
-        console.warn('address ownership: retired generation cleanup failed', path, error);
       });
     }
     await rename(this.storePath, retired.store);

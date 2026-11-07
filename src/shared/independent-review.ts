@@ -11,6 +11,38 @@ export type ParsedIndependentReview =
   | { kind: 'invalid' }
   | { kind: 'valid'; attestation: IndependentReviewAttestation };
 
+/**
+ * The cq-review GitHub App's login. Reviewer agents post verdicts as this bot
+ * (the agents repo's `cq-review-post`); it is the one bot author whose PASS
+ * comments count as review evidence.
+ */
+export const REVIEW_APP_LOGIN = 'cq-review[bot]';
+
+/**
+ * The cq-review App as a comment author. REST reports it as `cq-review[bot]`
+ * (only Apps can hold a `[bot]` login); GraphQL reports a `Bot` actor whose
+ * login is `cq-review`, which a User could also register, so that form needs
+ * the Bot type too.
+ */
+export function isReviewAppAuthor(
+  authorType: string | null | undefined,
+  authorLogin: string | null | undefined,
+): boolean {
+  return (
+    authorLogin === REVIEW_APP_LOGIN ||
+    (authorType === 'Bot' && authorLogin === REVIEW_APP_LOGIN.slice(0, -'[bot]'.length))
+  );
+}
+
+/** An author skipped as automation: any Bot or `[bot]` login except cq-review. */
+export function isIgnoredBotAuthor(
+  authorType: string | null | undefined,
+  authorLogin: string | null | undefined,
+): boolean {
+  if (isReviewAppAuthor(authorType, authorLogin)) return false;
+  return authorType === 'Bot' || (authorLogin?.toLowerCase().endsWith('[bot]') ?? false);
+}
+
 /** A word-bounded PASS, with no HOLD/FAIL verdict word and no negation ("not PASS", "isn't PASS"). */
 function hasPassVerdict(body: string): boolean {
   if (!/\bPASS\b/.test(body)) return false;

@@ -121,6 +121,7 @@ import { repoIdFromRemote, sanitizeObservation } from '../fix/attemptRecord.js';
 import { resolveCorrelation } from '../fix/correlation.js';
 import { assembleReportV2 } from '../fix/reportFold.js';
 import { measureRun, reviewPlannedUnitsOf } from '../fix/measurement.js';
+import { processEnv } from '../../config/process-env.js';
 
 export interface ReviewAddressInput {
   repoRoot: string;

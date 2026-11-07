@@ -25,6 +25,7 @@ op input. `secret` values are never printed.
 | `CQ_MERGE_TRUSTED_ASSOCIATIONS` | config | yes | conservative | live | no | Trusted author associations (blank: OWNER, MEMBER, COLLABORATOR). |
 | `CQ_MERGE_TRUSTED_BOTS` | config | yes | conservative | live | no | Trusted bot logins (blank: none). |
 | `CQ_PARENT_WORK_ID` | identity | no | neutral | live | no | Parent work id stamped into child environments. |
+| `CQ_PRODUCER_VERSION` | config | no | neutral | live | no | Producer version stamped into run provenance (default: the toolkit package version). |
 | `CQ_QUEUE_SSH_ALIAS` | config | no | neutral | live | no | SSH alias of the review queue host. |
 | `CQ_RESOURCE_SCOPED` | test | no | neutral | live | no | Set to 1 by the repo scripts once they run inside a memory scope (scripts/lib/resource-scope.mjs). |
 | `CQ_ROLE` | identity | no | neutral | live | no | Role label stamped into child environments. |

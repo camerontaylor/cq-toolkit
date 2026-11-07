@@ -46,6 +46,7 @@
 import { z } from 'zod';
 import { DispatchError } from '../errors.js';
 import type { ModelSpec } from '../types.js';
+import { processEnv } from '../../config/process-env.js';
 
 // ---------------------------------------------------------------------------
 // The routing table — plain data, schema-validated (invalid tables throw loudly)
@@ -189,7 +190,7 @@ export function authEnvPlan(keyEnv: string): Record<string, string> {
 export function resolveRoute(
   modelSpec: ModelSpec,
   table: RoutingTable = defaultRoutingTable(),
-  env: Readonly<Record<string, string | undefined>> = process.env,
+  env: Readonly<Record<string, string | undefined>> = processEnv(),
 ): Route {
   const parsed: RoutingTable = RoutingTableSchema.parse(table);
   const endpointName = modelSpec.provider;

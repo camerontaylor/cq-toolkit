@@ -30,7 +30,8 @@
 // TRUST (plan D3, conservative blanks per RS-15 Annex B): users count only
 // with an association in {OWNER, MEMBER, COLLABORATOR}; bots never count
 // unless allowlisted (`authorAssociation` is NONE for bots, so the allowlist
-// is the ONLY bot trust path); an author that is neither Bot nor User
+// is the only bot trust path for reviews; the one exception is an exact-head
+// PASS comment from the cq-review App, see isIgnoredBotAuthor); an author that is neither Bot nor User
 // (Organization, Mannequin, deleted) never counts; the PR author ordinarily
 // does not count, with an explicitly enabled structured agent attestation as
 // the same-account exception; every
@@ -85,7 +86,11 @@ import { observeWithChange, pruneToOpen, settleStatus } from '../policy/queue/se
 import type { SettleTuple } from '../policy/queue/settle-state.js';
 import { readSettleState, writeSettleState } from './state-branch.js';
 import type { StateBranchSnapshot, StateBranchWriteResult } from './state-branch.js';
-import { parseIndependentReview } from '../shared/independent-review.js';
+import {
+  isIgnoredBotAuthor,
+  isReviewAppAuthor,
+  parseIndependentReview,
+} from '../shared/independent-review.js';
 import type { IndependentReviewAttestation } from '../shared/independent-review.js';
 import { defaultClassifyPrConfig } from '../ops/merge/classify.config.js';
 
@@ -912,15 +917,19 @@ const sameAccountAgentAccepted = (
   policy: TrustPolicy,
 ): AuthenticatedR4Evidence | null => {
   for (const review of [...snapshot.reviews, ...(snapshot.allClear?.comments ?? [])]) {
+    if (isIgnoredBotAuthor(review.authorType, review.authorLogin)) continue;
     const login = review.authorLogin;
-    if (login === null || login === '' || review.authorType !== 'User') continue;
-    if (/\[bot\]$/i.test(login)) continue;
+    if (login === null || login === '') continue;
     const name = bareName(login);
     if ([...policy.excludedLogins].some((entry) => bareName(entry) === name)) continue;
-    // The PR author may accept as themselves (shared-account design); anyone
-    // else must hold a trusted association.
-    const isAuthor = snapshot.authorLogin !== null && bareName(snapshot.authorLogin) === name;
-    if (!isAuthor && !policy.trustedAssociations.has(review.association)) continue;
+    // The cq-review App is the reviewer's own posting path; a plain comment
+    // counts only from the PR author (shared-account design) or a User holding
+    // a trusted association.
+    if (!isReviewAppAuthor(review.authorType, login)) {
+      if (review.authorType !== 'User') continue;
+      const isAuthor = snapshot.authorLogin !== null && bareName(snapshot.authorLogin) === name;
+      if (!isAuthor && !policy.trustedAssociations.has(review.association)) continue;
+    }
     const parsed = parseIndependentReview(review.body, headSha);
     if (parsed.kind !== 'valid') continue;
     return Object.freeze({

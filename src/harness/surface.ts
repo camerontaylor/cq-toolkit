@@ -53,6 +53,7 @@ import type {
   ToolkitToolName,
   ToolkitToolResult,
 } from './tools.js';
+import { processEnv } from '../config/process-env.js';
 
 // ---------------------------------------------------------------------------
 // Naming
@@ -203,7 +204,7 @@ export async function buildManifest(inputs: ManifestInputs): Promise<HarnessMani
     envNames: [
       ...new Set([
         ...(inputs.envNames ?? []),
-        ...(process.env['CQ_RUN_ENV_PASSTHROUGH'] ?? '').split(/[,\s]+/).filter(Boolean),
+        ...(processEnv()['CQ_RUN_ENV_PASSTHROUGH'] ?? '').split(/[,\s]+/).filter(Boolean),
       ]),
     ],
   });

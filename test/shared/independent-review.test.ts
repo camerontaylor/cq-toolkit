@@ -1,5 +1,32 @@
 import { describe, expect, test } from 'vitest';
-import { parseIndependentReview } from '../../src/shared/independent-review.js';
+import {
+  isIgnoredBotAuthor,
+  isReviewAppAuthor,
+  parseIndependentReview,
+} from '../../src/shared/independent-review.js';
+
+describe('cq-review App author', () => {
+  test.each([
+    ['Bot', 'cq-review[bot]', true],
+    ['Bot', 'cq-review', true],
+    ['User', 'cq-review[bot]', true],
+    ['User', 'cq-review', false],
+    ['Bot', 'CQ-REVIEW[bot]', false],
+    ['Bot', 'cq-reviewer[bot]', false],
+    [null, null, false],
+  ] as const)('isReviewAppAuthor(%s, %s) is %s', (type, login, expected) => {
+    expect(isReviewAppAuthor(type, login)).toBe(expected);
+  });
+  test('every other bot stays ignored; users are never ignored', () => {
+    expect(isIgnoredBotAuthor('Bot', 'cq-review')).toBe(false);
+    expect(isIgnoredBotAuthor('Bot', 'cq-review[bot]')).toBe(false);
+    expect(isIgnoredBotAuthor('Bot', 'coderabbitai')).toBe(true);
+    expect(isIgnoredBotAuthor('User', 'coderabbitai[bot]')).toBe(true);
+    expect(isIgnoredBotAuthor('Bot', null)).toBe(true);
+    expect(isIgnoredBotAuthor('User', 'cq-review')).toBe(false);
+    expect(isIgnoredBotAuthor('User', 'alice')).toBe(false);
+  });
+});
 
 const marker = (over: Record<string, unknown> = {}): string =>
   `<!-- cq-agent-review: ${JSON.stringify({

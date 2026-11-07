@@ -51,6 +51,7 @@ import { LANE_IDS, type LaneId, type ServedModelPolicy } from './served-model.js
 import type { Driver, ModelSpec, WorkerResult } from './types.js';
 import type { HarnessConfig } from '../harness/config.js';
 import { SessionStore } from '../harness/session.js';
+import { processEnv } from '../config/process-env.js';
 
 // ---------------------------------------------------------------------------
 // Public surface
@@ -233,7 +234,7 @@ const DEFAULT_SESSIONS_DIR = () => defaultSessionsDir();
  */
 function sessionLogsOff(config: DriverFactoryConfig): boolean {
   if (config.sessionLogs?.enabled === false) return true;
-  const env = process.env['CQ_SESSION_LOGS'];
+  const env = processEnv()['CQ_SESSION_LOGS'];
   return env !== undefined && env.trim().toLowerCase() === 'off';
 }
 

@@ -73,7 +73,11 @@ import { countUnresolvedThreads } from '../review/threads.js';
 import type { RestComment, ReviewSummary, ReviewThread } from '../review/threads.js';
 import type { ClassifyPrConfig } from './classify.config.js';
 import { defaultClassifyPrConfig } from './classify.config.js';
-import { parseIndependentReview } from '../../shared/independent-review.js';
+import {
+  isIgnoredBotAuthor,
+  isReviewAppAuthor,
+  parseIndependentReview,
+} from '../../shared/independent-review.js';
 
 /**
  * The frozen I2 vocabulary — the ONLY four things that can be said about a
@@ -308,9 +312,10 @@ const hasSameAccountAgentAcceptance = (candidate: PrCandidate, ctx: ReviewContex
     ...candidate.issueComments,
   ].some(
     (comment) =>
-      comment.authorLogin === prAuthor &&
-      comment.authorType !== 'Bot' &&
-      !comment.authorLogin?.toLowerCase().endsWith('[bot]') &&
+      (isReviewAppAuthor(comment.authorType, comment.authorLogin) ||
+        (comment.authorLogin === prAuthor &&
+          comment.authorType !== 'Bot' &&
+          !comment.authorLogin?.toLowerCase().endsWith('[bot]'))) &&
       parseIndependentReview(comment.body, head).kind === 'valid',
   );
 };

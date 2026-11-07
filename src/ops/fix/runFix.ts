@@ -74,6 +74,7 @@ import {
 } from './report.js';
 import { makePortableReviewScanner, type DiffSecretScanner } from '../dev/denylist.js';
 import { makeSubprocessDevEffects } from '../dev/effects.js';
+import { processEnv } from '../../config/process-env.js';
 
 export type FixRunInput = z.input<typeof FixRunInputSchema>;
 export interface FixRunReport {
@@ -239,7 +240,7 @@ async function captureProvenance(
     readFile(new URL('../../../package.json', import.meta.url), 'utf8').catch(() => '{}'),
   ]);
   const version =
-    process.env.CQ_PRODUCER_VERSION ??
+    processEnv().CQ_PRODUCER_VERSION ??
     (JSON.parse(packageText) as { version?: string }).version ??
     'unavailable';
   const provenance: ProvenanceRecord = {
@@ -259,7 +260,7 @@ async function captureProvenance(
   // parentWorkId is a UUID per CorrelationRecordSchema: only a genuinely
   // UUID-shaped inbound id persists; the paseo:<id> link form (and any other
   // non-UUID evidence) stays null rather than failing the header.
-  const inboundParent = inboundParentWorkId(process.env) ?? null;
+  const inboundParent = inboundParentWorkId(processEnv()) ?? null;
   const correlation: CorrelationRecord = {
     workId: randomUUID(),
     parentWorkId: inboundParent !== null && UUID_PATTERN.test(inboundParent) ? inboundParent : null,

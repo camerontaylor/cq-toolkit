@@ -101,6 +101,7 @@ import {
   resolveSelfhostDriver,
   SelfhostDefaults,
 } from './config.js';
+import { processEnv } from '../config/process-env.js';
 
 /**
  * Cap for a recorded failure message — an error (a GhError with its argv and
@@ -854,7 +855,7 @@ function runStartInstant(deps: SelfReviewLoopDeps, cqEnv?: CqEnv): number {
     const pinned = cqEnv.values[STARTED_AT_ENV];
     return typeof pinned === 'number' ? pinned : deps.nowMs();
   }
-  const raw = process.env[STARTED_AT_ENV];
+  const raw = processEnv()[STARTED_AT_ENV];
   if (raw === undefined || raw === '') return deps.nowMs();
   const value = Number(raw);
   if (!Number.isSafeInteger(value) || value < 0) {
@@ -911,7 +912,7 @@ export async function main(
   let runError: string | undefined;
   try {
     const parsed = parseSelfhostArgs(process.argv.slice(2));
-    const repoSpec = parsed.repo ?? process.env['GH_REPOSITORY'] ?? '';
+    const repoSpec = parsed.repo ?? processEnv()['GH_REPOSITORY'] ?? '';
     const parts = repoSpec.split('/');
     const owner = parts[0];
     const repo = parts[1];
@@ -947,7 +948,7 @@ export async function main(
     if (!parsed.dryRun) {
       const driver = resolveSelfhostDriver(startedAtMs, cqEnv);
       const required = driverRequiredEnv(driver);
-      const missing = required?.filter((name) => (process.env[name] ?? '').trim() === '');
+      const missing = required?.filter((name) => (processEnv()[name] ?? '').trim() === '');
       if (missing === undefined || missing.length > 0) {
         throw new Error(
           `selfhost-review-loop: the selected driver ${driver.provider}/${driver.model} requires ${missing?.join(', ') ?? 'a known provider key'} in the environment; refusing to start`,
@@ -1028,7 +1029,7 @@ export async function main(
     // asynchronous 'error' event to kill the process after finished work.
     // A failed diagnostic (step summary, per-PR failure echo) must not
     // record a whole-run error against that finished work.
-    appendStepSummaryTable(process.env['GITHUB_STEP_SUMMARY'], summary.usage);
+    appendStepSummaryTable(processEnv()['GITHUB_STEP_SUMMARY'], summary.usage);
     // Prominent, not buried: every failure is echoed as its own stderr line —
     // a human scanning the workflow log must not parse JSON to find them.
     for (const failure of summary.failures) {
@@ -1038,7 +1039,7 @@ export async function main(
     runError = oneLine(error instanceof Error ? error.message : String(error));
     throw error;
   } finally {
-    writeSweepUsageFile(process.env['SWEEP_USAGE_OUT'], usage, runError);
+    writeSweepUsageFile(processEnv()['SWEEP_USAGE_OUT'], usage, runError);
   }
 }
 

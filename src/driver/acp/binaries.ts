@@ -32,6 +32,7 @@ import { access, constants } from 'node:fs/promises';
 import { delimiter, isAbsolute, join, resolve, sep } from 'node:path';
 import { z } from 'zod';
 import { DispatchError } from '../errors.js';
+import { processEnv } from '../../config/process-env.js';
 
 // ---------------------------------------------------------------------------
 // The endpoint table — plain data, schema-validated (invalid tables throw loudly)
@@ -144,7 +145,7 @@ export async function resolveAcpCommand(
   explicitCommand: readonly string[] | undefined,
   endpointName: string,
   table: AcpEndpointTable = defaultAcpEndpointTable(),
-  env: Readonly<Record<string, string | undefined>> = process.env,
+  env: Readonly<Record<string, string | undefined>> = processEnv(),
   probe: ExecutableProbe = probeExecutable,
 ): Promise<ResolvedAcpCommand> {
   const parsed: AcpEndpointTable = AcpEndpointTableSchema.parse(table);

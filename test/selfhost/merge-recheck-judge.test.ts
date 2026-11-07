@@ -58,6 +58,16 @@ describe('judgeAtHead', () => {
     },
   );
 
+  test.each([
+    { typename: 'Bot', login: 'cq-review' },
+    { typename: 'Bot', login: 'cq-review[bot]' },
+  ])('accepts a cq-review App PASS comment: %j', async (author) => {
+    const snap = await snapshotOf(
+      prSpec({ reviews: [review({ state: 'COMMENTED', body: `${SHA_B} PASS`, ...author })] }),
+    );
+    expect(judgeAtHead(snap, SHA_B, CONSERVATIVE_TRUST_POLICY)).toMatchObject({ accepted: true });
+  });
+
   test('accepts a top-level plain SHA/PASS PR comment', async () => {
     const snap = await snapshotOf(
       prSpec({ reviews: [review({ state: 'COMMENTED', body: `opus ${SHA_B} PASS` })] }),
