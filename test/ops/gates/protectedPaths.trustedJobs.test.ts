@@ -44,6 +44,9 @@ describe('every trusted job runs a selfhost entry point with a classified closur
       'cq-policy.yml:judge': ['policy-diff'],
       'cq-verify.yml:compute': ['recompute-typecheck'],
       'cq-verify.yml:judge': ['verify-ratchet'],
+      // Checks out the default branch's scanner policy at `trust/` but runs
+      // no code from it, so it contributes no entry.
+      'denylist.yml:denylist': [],
     });
   });
 
