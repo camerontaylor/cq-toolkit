@@ -208,3 +208,101 @@ for (const action of ['created', 'joined'])
       value: { action, state: 'completed', waitOutcome: 'terminal' },
     });
   });
+
+for (const options of [
+  { repeat: true },
+  { supersedes: 'prior-request' },
+  { repeat: true, supersedes: 'prior-request' },
+])
+  test(`lost response restores omitted admission options ${JSON.stringify(options)}`, async () => {
+    await writeFile(join(cwd, 'file'), 'head');
+    await git('add', 'file');
+    await git('commit', '-qm', 'head');
+    const input = {
+      cwd,
+      repo: 'owner/repo',
+      target: 'target',
+      requestId: 'recover-options',
+      reachable: true,
+    };
+    let lost = true;
+    const submissions: string[] = [];
+    const op = makeSubmit(async (raw) => {
+      if ((JSON.parse(raw) as { op: string }).op === 'capabilities') return JSON.stringify(caps);
+      submissions.push(raw);
+      if (lost) throw new Error('response lost');
+      return JSON.stringify({
+        v: 1,
+        action: 'joined',
+        state: 'queued',
+        request_id: input.requestId,
+      });
+    });
+    const first = await op({ ...input, ...options });
+    expect(first.status).toBe('indeterminate');
+    lost = false;
+    expect(
+      await op({ cwd, repo: input.repo, target: input.target, requestId: input.requestId }),
+    ).toMatchObject({ status: 'ok', value: { action: 'joined' } });
+    expect(submissions).toHaveLength(2);
+    expect(submissions[1]).toBe(submissions[0]);
+    expect(await readdir(join(cwd, '.cq/queue-evidence/requests'))).toEqual([
+      'recover-options.json',
+    ]);
+  });
+for (const [original, conflict] of [
+  [{ repeat: true }, { repeat: false }],
+  [{ supersedes: 'prior-request' }, { supersedes: 'different-request' }],
+  [{}, { repeat: true }],
+  [{}, { supersedes: 'new-predecessor' }],
+] as const)
+  test(`explicitly conflicting retry options are refused ${JSON.stringify(original)} -> ${JSON.stringify(conflict)}`, async () => {
+    await writeFile(join(cwd, 'file'), 'head');
+    await git('add', 'file');
+    await git('commit', '-qm', 'head');
+    const input = {
+      cwd,
+      repo: 'owner/repo',
+      target: 'target',
+      requestId: 'conflict-options',
+      reachable: true,
+    };
+    let calls = 0;
+    const op = makeSubmit(async (raw) => {
+      calls++;
+      return JSON.stringify(
+        (JSON.parse(raw) as { op: string }).op === 'capabilities'
+          ? caps
+          : { v: 1, action: 'created', state: 'queued' },
+      );
+    });
+    expect((await op({ ...input, ...original })).status).toBe('ok');
+    const before = calls;
+    expect(await op({ ...input, ...conflict })).toMatchObject({
+      status: 'failed',
+      error: 'requestId is already bound to different inputs',
+    });
+    expect(calls).toBe(before);
+  });
+test('explicit repeat=false on retry matches an omitted persisted repeat default', async () => {
+  await writeFile(join(cwd, 'file'), 'head');
+  await git('add', 'file');
+  await git('commit', '-qm', 'head');
+  const submissions: string[] = [];
+  const op = makeSubmit(async (raw) => {
+    if ((JSON.parse(raw) as { op: string }).op === 'capabilities') return JSON.stringify(caps);
+    submissions.push(raw);
+    return JSON.stringify({ v: 1, action: 'joined', state: 'queued' });
+  });
+  const input = {
+    cwd,
+    repo: 'owner/repo',
+    target: 'target',
+    requestId: 'default-options',
+    reachable: true,
+  };
+  expect((await op(input)).status).toBe('ok');
+  expect((await op({ ...input, repeat: false })).status).toBe('ok');
+  expect(submissions).toHaveLength(2);
+  expect(submissions[1]).toBe(submissions[0]);
+});

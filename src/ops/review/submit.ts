@@ -44,13 +44,15 @@ export const makeSubmit = (transport?: QueueTransport) =>
         wire = WireSchema.parse(saved.wire);
         snapshotPolicy =
           saved.snapshotPolicy ?? ('snapshot' in wire && wire.snapshot ? 'snapshot' : 'reachable');
+        // Required selectors must still match. Omitted optional admission fields
+        // reuse the saved wire; an explicit repeat=false equals its wire default.
         if (
           wire.op !== 'submit' ||
           wire.request_id !== requestId ||
           wire.inputs.repo !== i.repo ||
           wire.inputs.target !== i.target ||
-          Boolean(wire.repeat) !== Boolean(i.repeat) ||
-          wire.supersedes !== i.supersedes
+          (i.repeat !== undefined && (wire.repeat ?? false) !== i.repeat) ||
+          (i.supersedes !== undefined && wire.supersedes !== i.supersedes)
         )
           throw new Error('requestId is already bound to different inputs');
       } else {
