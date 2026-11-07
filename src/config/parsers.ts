@@ -3,6 +3,8 @@
 // and a later value-import of readCqEnv by sandbox/selfhost cannot form a cycle.
 // The original modules re-export these, so existing callers are unchanged.
 
+import { isSecretEnvName } from './secret.js';
+
 export type SandboxMode = 'off' | 'required';
 /**
  * The requested egress posture of a sandboxed run child.
@@ -23,8 +25,6 @@ const BACKENDS = new Set<SandboxBackend>([
   'seatbelt',
   'cc-native',
 ]);
-
-const ENV_NAMES = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 /** Policy controls must never be copied into a model-directed child. */
 export const SANDBOX_POLICY_ENV_NAMES: ReadonlySet<string> = new Set([
@@ -64,19 +64,55 @@ export function parseRunTool(raw: string | undefined): 'on' | 'off' {
   throw new Error(`sandbox: CQ_RUN_TOOL must be 'on' or 'off', got '${raw}'`);
 }
 
+/** The POSIX/Windows-standard environment variable NAME shape. */
+export const ENV_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/**
+ * Names `CQ_RUN_ENV_PASSTHROUGH` may never copy into a run child (Annex B
+ * §B.5): credential-shaped names the subprocess allowlist excludes by design,
+ * plus `DATABASE_URL`. Registry data: test/config/passthrough.test.ts checks it
+ * against `DEFAULT_CHILD_ENV_ALLOWLIST` and the vendor names the registry
+ * lists. Secret-suffixed names (`isSecretEnvName`, which covers
+ * `CQ_AUTOMATION_TOKEN`), the `AWS_*` family and the sandbox policy knobs are
+ * refused on top of this set.
+ */
+export const PASSTHROUGH_DENIED_NAMES: ReadonlySet<string> = new Set([
+  'NPM_TOKEN',
+  'SSH_AUTH_SOCK',
+  'GOOGLE_APPLICATION_CREDENTIALS',
+  'DATABASE_URL',
+  'NODE_OPTIONS',
+  'NODE_PATH',
+]);
+
+/**
+ * Why `name` may not be passed through to a run child, or `undefined` when it
+ * may. The reason names the NAME only; a value never reaches this function.
+ */
+export function passthroughRefusal(name: string): string | undefined {
+  if (!ENV_NAME_PATTERN.test(name)) return `invalid env name '${name}'`;
+  const folded = name.toUpperCase();
+  if (SANDBOX_POLICY_ENV_NAMES.has(folded)) return `may not expose policy env '${name}'`;
+  if (isSecretEnvName(name)) return `may not expose credential-shaped name '${name}'`;
+  if (folded.startsWith('AWS_') || PASSTHROUGH_DENIED_NAMES.has(folded)) {
+    return `may not expose credential-shaped name '${name}'`;
+  }
+  return undefined;
+}
+
+/**
+ * The ONE grammar and deny check for `CQ_RUN_ENV_PASSTHROUGH`: names separated
+ * by commas and/or whitespace; blank means none. Every path (registry
+ * snapshot, sandbox config, child-env builder, launcher) goes through here, so
+ * a value is accepted or refused identically everywhere. Throws a config error
+ * naming the first offending name.
+ */
 export function parsePassthrough(raw: string | undefined): readonly string[] {
   if (raw === undefined || raw.trim() === '') return [];
-  const names = raw
-    .split(',')
-    .map((name) => name.trim())
-    .filter((name) => name !== '');
+  const names = raw.split(/[,\s]+/).filter((name) => name !== '');
   for (const name of names) {
-    if (!ENV_NAMES.test(name)) {
-      throw new Error(`sandbox: CQ_RUN_ENV_PASSTHROUGH contains invalid env name '${name}'`);
-    }
-    if (SANDBOX_POLICY_ENV_NAMES.has(name.toUpperCase())) {
-      throw new Error(`sandbox: CQ_RUN_ENV_PASSTHROUGH may not expose policy env '${name}'`);
-    }
+    const refusal = passthroughRefusal(name);
+    if (refusal !== undefined) throw new Error(`sandbox: CQ_RUN_ENV_PASSTHROUGH ${refusal}`);
   }
   return [...new Set(names)];
 }
