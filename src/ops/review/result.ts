@@ -2,7 +2,7 @@ import { ReferenceSchema } from './internal/reviewOperation.js';
 import { createHash } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { headMessage, reviewOp } from './internal/localReview.js';
+import { headMessage, reviewOp, evidenceRoot } from './internal/localReview.js';
 import { ReceiptSchema, reviewDigest } from './internal/reviewOperation.js';
 import type { QueueTransport } from './internal/queueProtocol.js';
 const digest = (data: Buffer) => createHash('sha256').update(data).digest('hex');
@@ -10,6 +10,7 @@ export const makeResult = (transport?: QueueTransport) =>
   reviewOp(
     ReferenceSchema,
     async (i, getClient) => {
+      const root = await evidenceRoot(i.cwd);
       const client = getClient();
       await client.capabilities();
       const buffers: Buffer[] = [];
@@ -49,7 +50,7 @@ export const makeResult = (transport?: QueueTransport) =>
       const receipt = ReceiptSchema.parse(JSON.parse(data.toString('utf8')));
       if (reviewDigest(receipt.identity_inputs) !== receipt.identity)
         throw new Error('receipt identity mismatch');
-      const directory = join(i.cwd, '.cq/queue-evidence/results', first.receipt_id);
+      const directory = join(root, '.cq/queue-evidence/results', first.receipt_id);
       await mkdir(directory, { recursive: true });
       await writeFile(join(directory, 'receipt.json'), data, { mode: 0o600 });
       await writeFile(join(directory, 'report.md'), receipt.report, { mode: 0o600 });

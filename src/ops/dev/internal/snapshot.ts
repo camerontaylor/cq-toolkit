@@ -131,7 +131,10 @@ export async function captureSnapshot(
     });
   });
   const snapshot = { v: 1 as const, tree, objects, sha256: digest.digest('hex') };
-  if (Buffer.byteLength(JSON.stringify(snapshot)) > MAX_WIRE - 8192)
+  if (
+    Buffer.byteLength(JSON.stringify(snapshot)) >
+    (originalHead === undefined ? MAX_WIRE - 8192 : 5 * 1024 * 1024)
+  )
     throw new Error('snapshot wire exceeds bound');
   return { head, snapshot };
 }

@@ -1,6 +1,15 @@
 // Mirrors policy/review-operation.schema.json; shared vectors pin parity.
 import { z } from 'zod';
 import { createHash } from 'node:crypto';
+// Match the contract's quartet/padding grammar without recursive regex groups:
+// V8 exhausts its regex stack on valid snapshot-sized strings with that pattern.
+const Base64Schema = z.string().refine((value) => {
+  if (value.length % 4 !== 0) return false;
+  let end = value.length;
+  if (value[end - 1] === '=') end--;
+  if (value[end - 1] === '=') end--;
+  return !/[^A-Za-z0-9+/]/.test(value.slice(0, end));
+}, 'invalid base64');
 export const IdentitySchema = z
   .object({
     v: z.literal(1),
@@ -42,7 +51,11 @@ export const RequestSchema = z
     identity: z.string().regex(new RegExp('^[0-9a-f]{64}$')),
     item: z.string().min(1),
     created_at: z.string().min(1),
-    supersedes: z.string().min(1).optional(),
+    supersedes: z
+      .string()
+      .min(1)
+      .regex(/^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$/)
+      .optional(),
     notify: z
       .object({ paseo_agent_id: z.string().min(1), paseo_host: z.string().min(1) })
       .strict()
@@ -55,7 +68,10 @@ export const WireSchema = z.union([
     .object({
       v: z.literal(1),
       op: z.literal('submit'),
-      request_id: z.string().min(1),
+      request_id: z
+        .string()
+        .min(1)
+        .regex(/^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$/),
       inputs: z
         .object({
           repo: z.string().regex(new RegExp('^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$')),
@@ -78,13 +94,7 @@ export const WireSchema = z.union([
                 .object({
                   oid: z.string().regex(new RegExp('^[0-9a-f]{40}$')),
                   type: z.enum(['blob', 'tree', 'commit']),
-                  data: z
-                    .string()
-                    .regex(
-                      new RegExp(
-                        '^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$',
-                      ),
-                    ),
+                  data: Base64Schema,
                 })
                 .strict(),
             )
@@ -98,25 +108,54 @@ export const WireSchema = z.union([
         .object({ paseo_agent_id: z.string().min(1), paseo_host: z.string().min(1) })
         .strict()
         .optional(),
-      supersedes: z.string().min(1).optional(),
+      supersedes: z
+        .string()
+        .min(1)
+        .regex(/^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$/)
+        .optional(),
     })
     .strict(),
-  z.object({ v: z.literal(1), op: z.literal('status'), request_id: z.string().min(1) }).strict(),
+  z
+    .object({
+      v: z.literal(1),
+      op: z.literal('status'),
+      request_id: z
+        .string()
+        .min(1)
+        .regex(/^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$/),
+    })
+    .strict(),
   z
     .object({
       v: z.literal(1),
       op: z.literal('result'),
-      request_id: z.string().min(1),
+      request_id: z
+        .string()
+        .min(1)
+        .regex(/^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$/),
       index: z.number().int().min(0).optional(),
     })
     .strict(),
-  z.object({ v: z.literal(1), op: z.literal('cancel'), request_id: z.string().min(1) }).strict(),
+  z
+    .object({
+      v: z.literal(1),
+      op: z.literal('cancel'),
+      request_id: z
+        .string()
+        .min(1)
+        .regex(/^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$/),
+    })
+    .strict(),
 ]);
 export const ResponseSchema = z.union([
   z
     .object({
       v: z.literal(1),
-      request_id: z.string().min(1).optional(),
+      request_id: z
+        .string()
+        .min(1)
+        .regex(/^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$/)
+        .optional(),
       action: z.enum(['created', 'joined', 'reused', 'observed', 'no-changes']),
       state: z.enum(['queued', 'running', 'completed', 'failed', 'cancelled', 'unsupported']),
       identity: z.string().regex(new RegExp('^[0-9a-f]{64}$')).optional(),
@@ -138,7 +177,7 @@ export const ResponseSchema = z.union([
       limits: z
         .object({
           max_request_bytes: z.literal(6291456),
-          max_snapshot_bytes: z.literal(6291456),
+          max_snapshot_bytes: z.literal(5242880),
           max_content_bytes: z.literal(4194304),
           max_objects: z.literal(4096),
           chunk_bytes: z.literal(3072),
@@ -155,9 +194,7 @@ export const ResponseSchema = z.union([
       bytes: z.number().int().min(0),
       sha256: z.string().regex(new RegExp('^[0-9a-f]{64}$')),
       encoding: z.literal('base64-utf8-json'),
-      data: z
-        .string()
-        .regex(new RegExp('^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$')),
+      data: Base64Schema,
       chunk_sha256: z.string().regex(new RegExp('^[0-9a-f]{64}$')),
       next_index: z.union([z.number().int().min(0), z.null()]),
     })
@@ -211,7 +248,10 @@ export const ReceiptSchema = z
 export const OutboxSchema = z
   .object({
     v: z.literal(1),
-    request_id: z.string().min(1),
+    request_id: z
+      .string()
+      .min(1)
+      .regex(/^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$/),
     event_id: z.string().min(1),
     destination: z
       .object({ paseo_agent_id: z.string().min(1), paseo_host: z.string().min(1) })
@@ -230,11 +270,7 @@ export const SnapshotSchema = z
           .object({
             oid: z.string().regex(new RegExp('^[0-9a-f]{40}$')),
             type: z.enum(['blob', 'tree', 'commit']),
-            data: z
-              .string()
-              .regex(
-                new RegExp('^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$'),
-              ),
+            data: Base64Schema,
           })
           .strict(),
       )
@@ -276,7 +312,10 @@ export function reviewDigest(value: unknown): string {
 
 // Local operation inputs; these fields never expand the wire contract.
 export const ReferenceSchema = z
-  .object({ requestId: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/), cwd: z.string().default('.') })
+  .object({
+    requestId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$/),
+    cwd: z.string().default('.'),
+  })
   .strict();
 export const WaitInputSchema = ReferenceSchema.extend({
   waitMs: z.number().int().nonnegative().default(600000),
@@ -288,12 +327,16 @@ export const SubmitInputSchema = z
     target: z.string().min(1),
     requestId: z
       .string()
-      .regex(/^[A-Za-z0-9_-]{1,128}$/)
+      .regex(/^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$/)
       .optional(),
     reachable: z.boolean().default(false),
     scanner: z.string().optional(),
     repeat: z.boolean().optional(),
-    supersedes: z.string().min(1).optional(),
+    supersedes: z
+      .string()
+      .min(1)
+      .regex(/^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$/)
+      .optional(),
     waitMs: z.number().int().nonnegative().optional(),
   })
   .strict();

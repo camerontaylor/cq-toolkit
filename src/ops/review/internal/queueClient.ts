@@ -438,8 +438,20 @@ export function makeQueueClient(transport: QueueTransport): DeferredQueueClient 
 /** review-v1 uses the queue identity; no author or vendor fallback exists. */
 export function makeReviewClient(transport: QueueTransport) {
   async function request(input: z.infer<typeof ReviewWireSchema>, options?: QueueLifetimeOptions) {
-    const wire = JSON.stringify(ReviewWireSchema.parse(input)) + '\n';
-    if (Buffer.byteLength(wire) > 6 * 1024 * 1024) throw new Error('oversized review request');
+    let wire: string;
+    try {
+      const parsed = ReviewWireSchema.parse(input);
+      if (
+        parsed.op === 'submit' &&
+        parsed.snapshot &&
+        Buffer.byteLength(JSON.stringify(parsed.snapshot)) > 5 * 1024 * 1024
+      )
+        throw new Error('snapshot wire exceeds 5 MiB bound');
+      wire = JSON.stringify(parsed) + '\n';
+      if (Buffer.byteLength(wire) > 6 * 1024 * 1024) throw new Error('oversized review request');
+    } catch (error) {
+      throw new ReviewInputError(error instanceof Error ? error.message : String(error));
+    }
     const raw = await transport(wire, options);
     if (Buffer.byteLength(raw) > QUEUE_WIRE_BYTES) throw new Error('oversized review response');
     const result = ReviewResponseSchema.parse(JSON.parse(raw));
@@ -456,9 +468,9 @@ export function makeReviewClient(transport: QueueTransport) {
   }
   return {
     request,
-    async capabilities() {
+    async capabilities(options?: QueueLifetimeOptions) {
       try {
-        const result = await request({ v: 1, op: 'capabilities' });
+        const result = await request({ v: 1, op: 'capabilities' }, options);
         if (
           'command' in result &&
           (['submit', 'status', 'result', 'cancel'] as const).every((op) =>
@@ -492,3 +504,6 @@ export function makeConfiguredReviewClient(env: CqEnv = readCqEnv()) {
     throw new QueueConfigurationError('Configure CQ_QUEUE_SSH_ALIAS for review-v1');
   return makeReviewClient(sshQueueTransport(alias, 'review-v1'));
 }
+
+/** A definite local refusal before transport dispatch. */
+export class ReviewInputError extends Error {}

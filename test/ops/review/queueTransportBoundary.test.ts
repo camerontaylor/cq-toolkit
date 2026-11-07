@@ -213,3 +213,42 @@ test('old dispatcher refusal is unsupported for review-v1', async () => {
   child.emit('close', 2);
   await expect(pending).rejects.toThrow('review-v1 capability unavailable');
 });
+
+test('review client enforces the 5 MiB snapshot limit before transport while preserving 6 MiB request space', async () => {
+  const { makeReviewClient, ReviewInputError } =
+    await import('../../../src/ops/review/internal/queueClient.js');
+  const snapshot = {
+    v: 1 as const,
+    tree: 'b'.repeat(40),
+    objects: [{ oid: 'c'.repeat(40), type: 'blob' as const, data: '' }],
+    sha256: 'd'.repeat(64),
+  };
+  const overhead = Buffer.byteLength(JSON.stringify(snapshot));
+  snapshot.objects[0]!.data = 'A'.repeat(Math.floor((5 * 1024 * 1024 - overhead) / 4) * 4);
+  const request = {
+    v: 1 as const,
+    op: 'submit' as const,
+    request_id: 'limit-test',
+    inputs: {
+      repo: 'owner/repo',
+      target: 'main',
+      base_commit: 'a'.repeat(40),
+      base_tree: 'b'.repeat(40),
+      head_commit: 'c'.repeat(40),
+      head_tree: 'd'.repeat(40),
+      projection: 'full-diff',
+    },
+    snapshot,
+  };
+  let calls = 0;
+  const client = makeReviewClient(async (raw) => {
+    calls++;
+    expect(Buffer.byteLength(raw)).toBeLessThan(6 * 1024 * 1024);
+    return JSON.stringify({ v: 1, action: 'created', state: 'queued' });
+  });
+  await client.request(request);
+  expect(calls).toBe(1);
+  snapshot.objects[0]!.data += 'AAAA';
+  await expect(client.request(request)).rejects.toBeInstanceOf(ReviewInputError);
+  expect(calls).toBe(1);
+});

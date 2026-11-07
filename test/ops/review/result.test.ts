@@ -1,4 +1,6 @@
-import { mkdtemp, readFile, access } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { mkdtemp, readFile, access, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
@@ -15,7 +17,10 @@ const caps = vectors.find((x) => x.name === 'capabilities-response')!.value;
 const hash = (data: Buffer) => createHash('sha256').update(data).digest('hex');
 for (const corrupt of ['none', 'chunk', 'whole', 'manifest'])
   test(`result verifies chunk and whole digests: ${corrupt}`, async () => {
-    const cwd = await mkdtemp(join(tmpdir(), 'cq-result-'));
+    const root = await mkdtemp(join(tmpdir(), 'cq-result-'));
+    await promisify(execFile)('git', ['init', '-q', '--template=', root]);
+    const cwd = join(root, 'pkg');
+    await mkdir(cwd);
     const receipt = ReceiptSchema.parse(
       vectors.find((x) => x.type === 'receipt' && x.valid)!.value,
     );
@@ -43,17 +48,18 @@ for (const corrupt of ['none', 'chunk', 'whole', 'manifest'])
       });
     });
     const result = await op({ cwd, requestId: 'result-one' });
-    const path = join(cwd, '.cq/queue-evidence/results', id, 'receipt.json');
+    const path = join(root, '.cq/queue-evidence/results', id, 'receipt.json');
     if (corrupt !== 'none') {
       expect(result.status).toBe('indeterminate');
       await expect(access(path)).rejects.toThrow();
     } else {
       expect(result.status).toBe('ok');
-      // A detached checkout must not prevent verified evidence being saved.
+      // A subdirectory invocation must cache only at the repository root.
+      await expect(access(join(cwd, '.cq'))).rejects.toThrow();
       expect(await readFile(path, 'utf8')).toBe(bytes.toString());
-      expect(await readFile(join(cwd, '.cq/queue-evidence/results', id, 'report.md'), 'utf8')).toBe(
-        receipt.report,
-      );
+      expect(
+        await readFile(join(root, '.cq/queue-evidence/results', id, 'report.md'), 'utf8'),
+      ).toBe(receipt.report);
     }
   });
 test('unsupported server is explicit and never falls back', async () => {

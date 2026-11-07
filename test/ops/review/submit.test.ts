@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdtemp, readFile, writeFile, readdir } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile, readdir, mkdir, access } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { beforeEach, expect, test } from 'vitest';
@@ -16,7 +16,7 @@ const caps = {
   features: ['original-commit-snapshot-v1', 'chunked-result-v1'],
   limits: {
     max_request_bytes: 6291456,
-    max_snapshot_bytes: 6291456,
+    max_snapshot_bytes: 5242880,
     max_content_bytes: 4194304,
     max_objects: 4096,
     chunk_bytes: 3072,
@@ -27,8 +27,9 @@ beforeEach(async () => {
   await git('init', '-q', '--template=');
   await git('config', 'user.email', 'fixture@example.invalid');
   await git('config', 'user.name', 'Fixture');
+  await writeFile(join(cwd, '.gitignore'), '/.cq/\n');
   await writeFile(join(cwd, 'file'), 'base');
-  await git('add', 'file');
+  await git('add', 'file', '.gitignore');
   await git('commit', '-qm', 'base');
   await git('branch', 'target');
 });
@@ -75,7 +76,8 @@ test('A-2 lost response retries the durable original request despite checkout mo
   });
   await git('commit', '--allow-empty', '-qm', 'moved');
   lost = false;
-  expect(await op(input)).toMatchObject({
+  const retry = { cwd, repo: input.repo, target: input.target, requestId: input.requestId };
+  expect(await op(retry)).toMatchObject({
     status: 'ok',
     value: { reviewedHead: head, message: expect.stringContaining(head) as unknown },
   });
@@ -116,9 +118,21 @@ test('snapshot contains the original commit, its parents and complete outgoing o
     expect(snapshot.objects.map((x) => x.oid)).not.toContain(base);
     return JSON.stringify({ v: 1, action: 'created', state: 'queued' });
   });
-  expect(await op({ cwd, repo: 'owner/repo', target: 'target', scanner })).toMatchObject({
+  const subdir = join(cwd, 'pkg');
+  await mkdir(subdir);
+  expect(
+    await op({ cwd: subdir, repo: 'owner/repo', target: 'target', scanner, requestId: 'nested' }),
+  ).toMatchObject({
     status: 'ok',
   });
+  await expect(
+    access(join(cwd, '.cq/queue-evidence/requests/nested.json')),
+  ).resolves.toBeUndefined();
+  await expect(access(join(subdir, '.cq'))).rejects.toThrow();
+  expect(await git('status', '--porcelain', '--untracked-files=all')).not.toContain('.cq');
+  expect(
+    await op({ cwd, repo: 'owner/repo', target: 'target', requestId: 'nested' }),
+  ).toMatchObject({ status: 'ok' });
 });
 
 test('persisted request exists before discovery, and conflicting key reuse makes no network call', async () => {
@@ -149,3 +163,48 @@ test('persisted request exists before discovery, and conflicting key reuse makes
     })({ ...input, repo: 'other/repo' }),
   ).toMatchObject({ status: 'failed' });
 });
+
+for (const refusal of ['oversize', 'scanner'])
+  test(`local snapshot ${refusal} refusal is failed without reconciliation advice`, async () => {
+    await writeFile(
+      join(cwd, 'file'),
+      refusal === 'oversize' ? Buffer.alloc(5 * 1024 * 1024, 120) : 'changed',
+    );
+    await git('add', 'file');
+    await git('commit', '-qm', 'head');
+    const calls: string[] = [];
+    const result = await makeSubmit(async (raw) => {
+      calls.push((JSON.parse(raw) as { op: string }).op);
+      return JSON.stringify(caps);
+    })({ cwd, repo: 'owner/repo', target: 'target', scanner: '/bin/false' });
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed') {
+      expect(result.error).toContain(
+        refusal === 'oversize'
+          ? 'snapshot content exceeds bound'
+          : 'snapshot pre-upload scan refused',
+      );
+      expect(result.error).not.toContain('reconcile');
+    }
+    expect(calls).toEqual(['capabilities']);
+  });
+for (const action of ['created', 'joined'])
+  test(`submit wait preserves ${action} admission action and returns observed state`, async () => {
+    await writeFile(join(cwd, 'file'), 'head');
+    await git('add', 'file');
+    await git('commit', '-qm', 'head');
+    const result = await makeSubmit(async (raw) => {
+      const req = JSON.parse(raw) as { op: string };
+      return JSON.stringify(
+        req.op === 'capabilities'
+          ? caps
+          : req.op === 'submit'
+            ? { v: 1, action, state: 'queued' }
+            : { v: 1, action: 'observed', state: 'completed' },
+      );
+    })({ cwd, repo: 'owner/repo', target: 'target', reachable: true, waitMs: 100 });
+    expect(result).toMatchObject({
+      status: 'ok',
+      value: { action, state: 'completed', waitOutcome: 'terminal' },
+    });
+  });

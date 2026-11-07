@@ -21,7 +21,7 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
       "type": "string"
     },
     "requestId": {
-      "pattern": "^[A-Za-z0-9_-]{1,128}$",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$",
       "type": "string"
     },
     "waitMs": {

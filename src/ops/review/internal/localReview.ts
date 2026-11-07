@@ -9,6 +9,7 @@ import {
   QueueUnsupported,
   QueueConfigurationError,
   ReviewRemoteError,
+  ReviewInputError,
   makeConfiguredReviewClient,
 } from './queueClient.js';
 import type { QueueTransport } from './queueProtocol.js';
@@ -51,7 +52,11 @@ export function reviewOp<S extends z.ZodType, O>(
         return { status: 'ok', value: { state: 'unsupported', reason: error.message } };
       if (error instanceof QueueConfigurationError || error instanceof SnapshotConfigError)
         return { status: 'needs-human', reason: error.message };
-      if (!client || (error instanceof ReviewRemoteError && !error.remote.retryable))
+      if (
+        error instanceof ReviewInputError ||
+        !client ||
+        (error instanceof ReviewRemoteError && !error.remote.retryable)
+      )
         return { status: 'failed', error: messageOf(error) };
       return { status: 'indeterminate', detail: messageOf(error) };
     }
@@ -68,3 +73,5 @@ export async function headMessage(cwd: string, reviewed: string) {
     ? undefined
     : `Reviewed head ${reviewed}; current HEAD is ${current}.`;
 }
+
+export const evidenceRoot = async (cwd: string) => git(cwd, 'rev-parse', '--show-toplevel');
