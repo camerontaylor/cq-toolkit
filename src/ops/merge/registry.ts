@@ -483,7 +483,8 @@ export const registry: OpRegistryEntry[] = [
     importer: async (wiring) => {
       const { executeMerges } = await import('./executeMerges.js');
       const { realMergeEffects } = await import('../../adapters/forge-github/mergeEffects.js');
-      const { assertBaseBranchMirror, assertProtectedBranchMirror } = await import('./trustMirrors.js');
+      const { assertBaseBranchMirror, assertProtectedBranchMirror } =
+        await import('./trustMirrors.js');
       const op: Op<ExecuteMergesInput, ExecutionReport> = async (input) => {
         // The plan's baseBranch defaults every entry's expected forge base: a mirror of the queue base.
         assertBaseBranchMirror('merge.executeMerges', input.plan.baseBranch, wiring?.cqEnv);
