@@ -395,9 +395,13 @@ export async function runAgentReviewer(
           reserved -= allowance;
         }
         if (result.status !== 'ok' && result.status !== 'budget-exhausted') nonBudgetFailure = true;
+        // Retire the settled session BEFORE the wall check: a session that
+        // finished after the deadline but before the timer fired has an
+        // accurate status, and the outer catch must not rewrite it to
+        // error/aborted.
+        active.delete(evidence);
         ensureActive();
         updatePieces(report!.coverage);
-        active.delete(evidence);
         if (result.status === 'budget-exhausted') {
           budgetStop ??= 'during';
           halted = true;

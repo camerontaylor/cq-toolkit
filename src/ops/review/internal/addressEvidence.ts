@@ -1,6 +1,16 @@
 import { spawn } from 'node:child_process';
 import { constants } from 'node:fs';
-import { access, lstat, realpath, mkdir, open, writeFile, unlink, readdir } from 'node:fs/promises';
+import {
+  access,
+  lstat,
+  realpath,
+  mkdir,
+  open,
+  writeFile,
+  unlink,
+  readdir,
+  rmdir,
+} from 'node:fs/promises';
 import { delimiter, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { GIT_HARDEN, HARDENED_DIFF_FLAGS } from '../../../shared/gitHarden.js';
@@ -543,6 +553,42 @@ export function releaseAddressTerminalEvidence(attempt: object): void {
   if (!release) return;
   terminalReservations.delete(attempt);
   release();
+}
+
+// Remove the private terminal environment once no Git child can still use it.
+// Re-checks the recorded identities and only removes exact matches: a replaced
+// directory, config or hooks entry is left in place for forensics.
+export async function disposeAddressTerminalSession(token: object): Promise<void> {
+  const pending = terminalSessions.get(token);
+  if (!pending) return;
+  const session = await pending;
+  const matches = async (path: string, identity: { dev: number; ino: number }) => {
+    try {
+      return sameFile(await lstat(path), identity) && (await realpath(path)) === path;
+    } catch {
+      return false;
+    }
+  };
+  if (!(await matches(session.directory, session.directoryIdentity))) return;
+  if (!(await matches(session.hooks, session.hooksIdentity))) return;
+  if (!(await matches(session.config, session.configIdentity))) return;
+  try {
+    await unlink(session.index);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+  delete session.indexIdentity;
+  try {
+    await unlink(session.config);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+  try {
+    await rmdir(session.hooks);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+  await rmdir(session.directory);
 }
 
 export async function recordAddressTerminalEvidence(

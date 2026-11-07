@@ -192,6 +192,9 @@ export function bindingsOf(
     pushBranch: async (repoRoot, branch) => {
       world.pushCalls.push({ repoRoot, branch });
     },
+    // The failed-attempt upload capability a dispatch grants through
+    // `taskLoop.pushFailed` (unit.ts bindingsFromDispatch).
+    publishFailedAttempts: true,
     ...extra,
   };
 }

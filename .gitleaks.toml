@@ -71,6 +71,7 @@ path = '''(^|/)\.claude/(\.credentials\.json|settings\.local\.json|scheduled_tas
 [[allowlists]]
 description = "Commit-subject prose the generic-api-key rule reads as a key assignment"
 regexTarget = "line"
+targetRules = ["generic-api-key"]
 regexes = ['''Settle reasoning tokens, paginate\+slurp''']
 
 [[allowlists]]

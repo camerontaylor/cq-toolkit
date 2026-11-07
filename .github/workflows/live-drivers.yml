@@ -10,6 +10,11 @@
 #   3. The DD-1 abort spike's ai-sdk lane (scripts/dd1-abort-spike.mjs
 #      --lane ai-sdk — the measured abort-vs-spend evidence run).
 #
+# PROVENANCE: a repo-owned CI workflow — NOT instantiated from
+# policy/templates (that set owns the merge-queue doctrine workflows; this
+# repo's other CI workflows — ci.yml, denylist.yml, pack-audit.yml,
+# install-matrix.yml, live-review.yml — are likewise repo-owned).
+#
 # SECRETS: this file carries NAMES only. The values arrive as `drill`
 # environment secrets (Z_AI_API_KEY). A missing selected-provider key fails
 # loudly at the scripts' credential gates, never a
@@ -26,12 +31,15 @@ name: live-drivers
 on:
   workflow_dispatch:
 
-# One live run at a time: a second dispatch queues behind the in-flight one
-# (cancel-in-progress: false — cancelling a live run still spends its
-# tokens; queueing avoids duplicated paid work). Fixed group, not per-ref:
-# this workflow never fires on PRs, so there is nothing per-ref to isolate.
+# One live run at a time, EVERY dispatch queued: a second dispatch waits
+# behind the in-flight one (cancel-in-progress: false — cancelling a live run
+# still spends its tokens; queue: max — without it GitHub replaces a
+# previously PENDING run, so a third dispatch would silently cancel the
+# second queued drill). Fixed group, not per-ref: this workflow never fires
+# on PRs, so there is nothing per-ref to isolate.
 concurrency:
   group: live-drivers
+  queue: max
   cancel-in-progress: false
 
 permissions:
@@ -53,9 +61,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment: drill
-    env:
-      # Names only — the values live in the `drill` environment's secrets.
-      Z_AI_API_KEY: ${{ secrets.Z_AI_API_KEY }}
     steps:
       - name: Check out the repo
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (immutable commit pin; repo policy)
@@ -79,7 +84,13 @@ jobs:
       - name: Build
         run: pnpm run build
       # Native DeepSeek is opt-in locally; no deleted secret is required here.
+      # The provider key is scoped to the LIVE legs only: checkout, install and
+      # build never see it. Names only — the value is a `drill` secret.
       - name: Eval-axes demo — the Z.ai ai-sdk cell
+        env:
+          Z_AI_API_KEY: ${{ secrets.Z_AI_API_KEY }}
         run: node scripts/demo-eval-axes.mjs --only ai-sdk/glm
       - name: DD-1 abort spike — the ai-sdk lane
+        env:
+          Z_AI_API_KEY: ${{ secrets.Z_AI_API_KEY }}
         run: node scripts/dd1-abort-spike.mjs --lane ai-sdk

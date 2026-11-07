@@ -353,6 +353,15 @@ try {
 if (/^[0-9a-f]{40,64}$/.test(baseSha ?? '') === false) {
   fail(`origin/${BASE} did not resolve to a commit`);
 }
+if (measuredSha !== undefined && baseSha !== measuredSha) {
+  // The measurement is of an older tip: proposing from it would compare a stale
+  // reading against newer baselines. Fail closed with nothing proposed.
+  console.error(
+    `ratchet-propose: ${BASE} moved from measured ${measuredSha} to ${baseSha}; ` +
+      'stale measurement, nothing proposed',
+  );
+  process.exit(0);
+}
 
 // ---- committed baselines AT THE MERGE-QUEUE TIP, parsed by the engine ----
 const committed = [];
@@ -605,7 +614,10 @@ const effects = {
             .filter((l) => l.startsWith('http'))
             .pop() ?? null;
         const m = /\/pull\/(\d+)/.exec(url ?? '');
-        fresh = { number: m === null ? null : Number(m[1]), url };
+        if (url === null || m === null) {
+          throw new Error(`gh pr create returned no PR identity: '${redact(out.trim())}'`);
+        }
+        fresh = { number: Number(m[1]), url };
       },
     });
     if (upsert.recovered) {

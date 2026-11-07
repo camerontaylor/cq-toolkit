@@ -749,6 +749,13 @@ export const RunStartedV3JournalEventSchema: z.ZodType<RunStartedV3JournalEvent>
         path: ['provenance'],
       });
     }
+    if (event.provenance.endedAt !== null) {
+      ctx.addIssue({
+        code: 'custom',
+        message: 'a journal header carries provenance.endedAt: null',
+        path: ['provenance', 'endedAt'],
+      });
+    }
   });
 
 export const AttemptStopClassSchema: z.ZodType<AttemptStopClass> = z.enum([
@@ -983,7 +990,13 @@ export const AcceptancePayloadSchema: z.ZodType<AcceptancePayload> = z
     evidence: z.array(z.string()),
     availability: AvailabilityMapSchema,
   })
-  .strict();
+  .strict()
+  // Author closure is never independent acceptance (types.ts: the payload
+  // coupling), encoded as a refinement rather than prose.
+  .refine((payload) => !payload.independent || payload.reviewerId !== payload.authorId, {
+    message: 'author closure is never independent acceptance',
+    path: ['independent'],
+  });
 
 export const HeadAcceptanceJournalEventSchema: z.ZodType<HeadAcceptanceJournalEvent> = z
   .object({
@@ -1139,6 +1152,15 @@ function checkMetric(
       });
     }
   });
+  for (const sha of closureCommits) {
+    if (!seen.has(sha)) {
+      ctx.addIssue({
+        code: 'custom',
+        message: 'every non-todo closure commitSha must appear in verifiedCommits',
+        path: ['metric', 'verifiedCommits'],
+      });
+    }
+  }
 }
 
 export const MeasurementSummaryPayloadSchema: z.ZodType<MeasurementSummaryPayload> = z

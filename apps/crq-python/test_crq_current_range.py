@@ -74,6 +74,19 @@ class CurrentTest(CurrentFixture, unittest.TestCase):
         self.assertEqual(meta["range_policy"], "full-range-once-v1")
 
 
+    def test_missing_foreign_head_is_ensured_before_local_git_reads(self):
+        item = {"id": "open", "kind": "open", "pr": 42, "state": "pending", "cycles": []}
+        info = {"state": "OPEN", "isDraft": False, "headRefOid": self.merge,
+                "baseRefName": "merge-queue", "headRefName": "fixture"}
+        with mock.patch.object(crq, "ensure_commit", return_value=False) as ensure, \
+             mock.patch.object(crq, "git", side_effect=AssertionError("read before ensure")):
+            with self.assertRaisesRegex(crq.NotReady, "source head unavailable"):
+                crq.plan_open(item, info, False)
+            ensure.assert_called_once_with(42, self.merge, clone=None)
+            with mock.patch.object(crq, "active_agents_for", return_value=[]):
+                self.assertEqual(crq.quiet_reason(item, info),
+                                 "source head unavailable in repository clone")
+
     def test_range_enrollment_recovers_heads_and_isolates_unavailable_prs(self):
         opened = [{"number": n, "headRefOid": self.merge, "baseRefName": "merge-queue",
                    "headRefName": f"fixture-{n}", "isDraft": False} for n in (42, 43, 44, 45)]

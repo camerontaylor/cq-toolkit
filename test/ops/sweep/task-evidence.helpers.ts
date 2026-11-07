@@ -55,7 +55,13 @@ export function loopBindings(invocations: OpInvocation[]): Parameters<typeof run
       },
     },
     prompt: () => 'fix it',
-    git: async () => ({ code: 0, stdout: '', stderr: '' }),
+    // The gated tree and the broader probe's tree are the same 'b' tree: the
+    // loop binds the commit to what the path/tamper gates inspected.
+    git: async (args: string[]) => ({
+      code: 0,
+      stdout: args.includes('write-tree') ? `${'b'.repeat(40)}\n` : '',
+      stderr: '',
+    }),
     runCheck: async () => ({
       stdout: JSON.stringify({
         success: true,

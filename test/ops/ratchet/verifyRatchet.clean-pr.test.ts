@@ -58,6 +58,15 @@ describe('verifyRatchet: a clean PR', SLOW, () => {
     );
   });
 
+  test('a typecheck skip without any dependency or lockfile change is not a pass (I5)', async () => {
+    const head = prBranch('pr-skip-nodep', 'merge-queue', () =>
+      write('src/skip.ts', 'export const s = 1;\n'),
+    );
+    const v = await verify(head, { typecheckSkipped: 'claimed skip' });
+    expect(v.verdict).toBe('fail');
+    expect(v.reasons.join('\n')).toContain('no dependency or lockfile path changed');
+  });
+
   test('coverage is judged at one decimal place (89.96 → 90.0 passes, 89.94 → 89.9 fails)', async () => {
     const head = prBranch('pr-cov', 'merge-queue', () =>
       write('src/c.ts', 'export const c = 3;\n'),

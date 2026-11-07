@@ -429,7 +429,10 @@ describe('T31 round-trip through the address composition', () => {
       const report = reportOf(result);
       expect(report?.observation?.persistence).toBe('unavailable');
       expect(report?.observation?.kernelRuns).toEqual([]);
-      const streams = await readObservations(f.journalDir);
+      // Read the directory THIS run resolved (the report's own journal dir),
+      // not the fixture's unused one: a regression that wrote a stream during
+      // a memory-only run must fail here.
+      const streams = await readObservations(dirname(report!.reportPath));
       expect(streams).toHaveLength(0);
     } finally {
       await f.cleanup();
@@ -682,12 +685,18 @@ describe('T31 unknown evidence: unreturned runs stay unlinked', () => {
   test('a pre-dispatch refusal leaves no kernel-run link and no guessed id', async () => {
     const f = await fixture();
     try {
-      // A missing findings record refuses before any dispatch; only the
-      // stream boundaries (header) may exist — never a kernel-run link.
-      await rm(join(f.repo.root, 'cq.json'), { force: true });
-      const result = await invoke(f);
+      // A missing findings record refuses AFTER the stream opens (ownership
+      // is held, the header lands), before any dispatch: only the stream
+      // boundaries may exist — never a kernel-run link.
+      const result = await makeReviewAddress({
+        drivers: f.drivers,
+        review: f.review,
+      })({ repoRoot: f.repo.root, source: 'local' as const, journalDir: f.journalDir });
       expect(result.status).not.toBe('ok');
       const streams = await readObservations(f.journalDir);
+      expect(streams).toHaveLength(1);
+      expect(streams[0]?.complete).toBe(true);
+      expect(streams[0]?.events[0]?.type).toBe('composition-started');
       const links = streams.flatMap((stream) =>
         stream.events.filter((event) => event.type === 'kernel-run-linked'),
       );

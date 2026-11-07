@@ -141,6 +141,7 @@ test.each(['ack-interrupted', 'persist-refused', 'changed-known'] as const)(
         throw new Error('unexpected offline forge operation');
       };
       let resumedAfterObserver = false;
+      let changedEvidenceError: unknown;
       let evidenceRoot: string | undefined;
       let evidencePath: string | undefined;
       const result = await makeReviewAddress({
@@ -188,7 +189,9 @@ test.each(['ack-interrupted', 'persist-refused', 'changed-known'] as const)(
           resumedAfterObserver = true;
           if (mode === 'changed-known') {
             await writeFile(evidencePath, bytes + '\n');
-            await request.onEvidenceImported({ receiptId: id, path: evidencePath });
+            changedEvidenceError = await request
+              .onEvidenceImported({ receiptId: id, path: evidencePath })
+              .catch((error: unknown) => error);
           }
           // Simulate an ack transport failure before context/outer FIFO return.
           throw new Error('ack interrupted');
@@ -196,6 +199,13 @@ test.each(['ack-interrupted', 'persist-refused', 'changed-known'] as const)(
       })({ repoRoot: f.repo.root, source: 'pr:7', journalDir: f.journalDir });
       expect(result.status, JSON.stringify(result)).toBe('needs-human');
       expect(resumedAfterObserver).toBe(mode !== 'persist-refused');
+      // A refusal must leave the external ownership change in place rather
+      // than rewriting it; a later reader failing would also look refused.
+      if (mode === 'persist-refused')
+        expect(await readFile(ownershipPath, 'utf8')).toBe('external change');
+      // The second import of a modified receipt is rejected on its own terms,
+      // not merely masked by the unconditional acknowledgement failure below.
+      if (mode === 'changed-known') expect(changedEvidenceError).toBeInstanceOf(Error);
       if (mode === 'ack-interrupted') {
         const bytes = JSON.parse(await readFile(ownershipPath, 'utf8')) as {
           files: Array<{ path: string; sha256: string }>;

@@ -386,7 +386,10 @@ function sessionsDirFor(lane: LaneId, config: DriverFactoryConfig): string {
  */
 function constructLane(lane: LaneId, request: DriverRequest, config: DriverFactoryConfig): Driver {
   if (request.beforeRequest !== undefined && lane !== 'ai-sdk')
-    throw new Error('upload scanning requires the ai-sdk request gate');
+    throw new DispatchError(
+      'config',
+      `driver factory: upload scanning requires the ai-sdk request gate, but role '${request.role}' resolved to lane '${lane}'`,
+    );
   const sessionsDir = sessionsDirFor(lane, config);
   const harness = request.harness !== undefined ? { harnessConfig: request.harness } : {};
   const pricing = config.pricing !== undefined ? { pricing: config.pricing } : {};

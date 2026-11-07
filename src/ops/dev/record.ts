@@ -552,6 +552,12 @@ const isAffirmativeNoFreshAttempt = (cycle: DevCycleRecord): boolean =>
 export interface ReuseSelectionInput {
   /** Configured families; agent admits agent:<role> identities. */
   configuredReviewers?: readonly string[];
+  /**
+   * Whether deferred vendor debt is currently valid. When true the
+   * readiness anchor admits agent cycles only, so the anchor-stale guard
+   * below inspects only later agent terminals. Defaults to false.
+   */
+  debtValid?: boolean;
   /** The intended PR target of the review request. */
   target: string;
   /** The pinned immutable base of the review request. */
@@ -600,6 +606,10 @@ export type ReuseSelection =
  *
  * Later configured blocked attempts at any scope/head refuse reuse, except
  * same-identity affirmative no-fresh attempts resolved by the tail below.
+ * A later configured terminal full cycle eligible for the current readiness
+ * mode (agent-only while deferred vendor debt is valid) at a differing
+ * identity also refuses reuse: readiness anchors on the latest such cycle,
+ * so reusing the older one would report stale-review-identity forever.
  * Configuration defaults match the readiness core;
  * the cycle op additionally re-checks its own scope emptiness before
  * selecting, so this function deliberately reads ONLY identity and
@@ -649,6 +659,35 @@ export function findReusableCycle(
         ),
   );
   if (laterBlocker) return null;
+  // Readiness anchors on the LATEST configured full-scope terminal cycle
+  // (agent-only while deferred vendor debt is valid). Reusing an older
+  // terminal behind a newer different-identity terminal would report ok
+  // here and stale-review-identity in dev.ready, with no way to dispatch a
+  // fresh cycle at the current identity — every later review reuses the
+  // older cycle with zero vendor calls. Refuse when the latest later
+  // terminal cycle eligible for the current readiness mode carries a
+  // differing identity (target, base, head, dirtySha256 — reviewer excluded,
+  // so a same-identity agent/coderabbit pair still resolves).
+  const debtValid = input.debtValid ?? false;
+  const laterAnchor = [...laterCycles]
+    .reverse()
+    .find(
+      (record) =>
+        record.scope === 'full' &&
+        record.completion.kind === 'terminal' &&
+        record.vendorFailure === undefined &&
+        (!debtValid || record.reviewer.startsWith('agent:')) &&
+        (configured.has(record.reviewer) ||
+          (record.reviewer.startsWith('agent:') && configured.has('agent'))),
+    );
+  if (
+    laterAnchor !== undefined &&
+    (laterAnchor.target !== input.target ||
+      laterAnchor.base !== input.base ||
+      laterAnchor.head !== input.head ||
+      laterAnchor.dirtySha256 !== input.dirtySha256)
+  )
+    return null;
   const tail = cycles.slice(cycles.lastIndexOf(selected) + 1);
   const latest = tail.at(-1);
   if (latest === undefined) return { cycle: selected, basis: 'exact-terminal' };

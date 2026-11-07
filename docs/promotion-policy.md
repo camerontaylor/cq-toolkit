@@ -2,7 +2,9 @@
 
 Open PRs directly against `main`. Merge with a merge commit when `static` and
 `denylist` are green on the exact PR head and one independent reviewer has
-posted a PASS comment for that head, with no unresolved P0/P1 findings.
+posted a PASS comment for that head, with no unresolved P0/P1 findings raised
+by that independent review. Bot and CodeRabbit findings stay advisory and are
+not part of this condition (see [review guidance](coderabbit-review.md)).
 
 The reviewer comment names the reviewer agent, the full head SHA and `PASS`.
 Reviewers post it with `cq-review-post` (agents repo), which posts as the

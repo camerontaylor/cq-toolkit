@@ -367,6 +367,15 @@ export interface SweepUnitBindings {
    */
   pushBranch?: (repoRoot: string, branch: string) => Promise<void>;
   /**
+   * Remote publication of FAILED-ATTEMPT branches (taskLoop `pushFailed`).
+   * DISTINCT from {@link pushBranch}: a fix run opts into uploading failed
+   * attempts (`pushFailed: true`) without opting into pushing its own fix
+   * branch (`push: false`), while a local-only unit (`push: false` and no
+   * `pushFailed`) must never upload worker output. Absent = no failed attempt
+   * ever reaches the remote.
+   */
+  publishFailedAttempts?: boolean;
+  /**
    * The staged-path allowlist: regex SOURCES (hackDetector's pattern
    * precedent, compiled with `new RegExp`, `g`/`y` stripped) every staged
    * path must match. AFTER staging, any staged path matching none of the
@@ -1197,8 +1206,18 @@ async function withBaseOwnedFinalTree(
     };
   }
   const worktreesRoot = resolve(bindings.repoRoot, bindings.worktreesDir);
-  await mkdir(worktreesRoot, { recursive: true });
-  const tempDir = await mkdtemp(join(worktreesRoot, '.cq-sweep-final-'));
+  let tempDir: string;
+  try {
+    await mkdir(worktreesRoot, { recursive: true });
+    tempDir = await mkdtemp(join(worktreesRoot, '.cq-sweep-final-'));
+  } catch (err) {
+    return {
+      fault: tagged(
+        'infra',
+        `sweep.unit ${unit.package}: could not create the final-probe scratch dir — ${messageOf(err)}`,
+      ),
+    };
+  }
   const cleanPath = join(tempDir, 'checkout');
   try {
     const added = await bindings.git([
@@ -1234,7 +1253,9 @@ async function withBaseOwnedFinalTree(
     };
   } finally {
     await bindings.git(['-C', worktree.path, 'worktree', 'remove', '--force', cleanPath]);
-    await rm(tempDir, { recursive: true, force: true });
+    // Cleanup is best-effort: a busy scratch dir must not replace the probe's
+    // computed result with its own failure.
+    await rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
   }
 }
 
@@ -1360,17 +1381,31 @@ async function probeLeg(
     };
   }
   // NARROWED past the guards: clean/failing with a FailureSet present.
-  const narrowed: UnitProbe = {
-    verdict: probed.value.verdict,
-    attempts: probed.value.attempts,
-    failureSet:
+  // Task-loop normalization can reject reported paths that resolve outside the
+  // checkout; that is ungateable evidence, never an escaping rejection.
+  let failureSet: FailureSet;
+  try {
+    failureSet =
       bindings.taskLoop === undefined
         ? probed.value.failureSet
         : normalizeFailurePaths(
             probed.value.failureSet,
             worktree.path,
             bindings.checkCommand(unit, worktree.path).cwd ?? worktree.path,
-          ),
+          );
+  } catch (err) {
+    return {
+      worktree,
+      fault: tagged(
+        'probe',
+        `sweep.unit ${unit.package}: the ${leg} probe reported ungateable paths — ${messageOf(err)}`,
+      ),
+    };
+  }
+  const narrowed: UnitProbe = {
+    verdict: probed.value.verdict,
+    attempts: probed.value.attempts,
+    failureSet,
   };
   return { worktree, probe: narrowed };
 }
@@ -1991,6 +2026,10 @@ export function bindingsFromDispatch(
             input.gitTimeoutMs === undefined ? undefined : { timeoutMs: input.gitTimeoutMs },
           ),
         }),
+    // A failed-attempt upload is its OWN explicit opt-in (`taskLoop.pushFailed`),
+    // never implied by the fix-branch push: fix.run sets `push: false` (its fix
+    // branch stays local) yet still asks for failed attempts to be published.
+    ...(input.taskLoop?.pushFailed === true ? { publishFailedAttempts: true } : {}),
     ...(input.stagePathAllowlist !== undefined
       ? { stagePathAllowlist: input.stagePathAllowlist }
       : {}),

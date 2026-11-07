@@ -174,7 +174,8 @@ through the driver-authored manifest's `envNames`; the shared surface
 passes those names to `buildTools`. The manifest also captures the
 comma- or whitespace-separated names in `CQ_RUN_ENV_PASSTHROUGH`, so
 deployment opt-ins survive the stdio startup scrub. Direct callers may
-pass names as `buildTools`' fourth argument. The stdio server also scrubs
+supply names through the `HarnessRunGate` passed as `buildTools`' fourth
+argument (`envPassthrough` / `declaredEnvNames`). The stdio server also scrubs
 its own environment at startup. None of these filters provide OS confinement:
 commands retain host privileges, inherited `HOME` exposes config paths,
 proxy variables may contain credentials, and same-uid ancestor-environment

@@ -245,10 +245,19 @@ export class SessionStore {
       workspace,
     });
     await mkdir(this.sessionsDir, { recursive: true, mode: 0o700 });
-    await appendFile(this.pathFor(sessionId), `${JSON.stringify(line)}\n`, {
-      encoding: 'utf8',
-      mode: 0o600,
-    });
+    try {
+      // 'wx': exclusive create, so an existing record is never appended to.
+      await appendFile(this.pathFor(sessionId), `${JSON.stringify(line)}\n`, {
+        encoding: 'utf8',
+        mode: 0o600,
+        flag: 'wx',
+      });
+    } catch (err) {
+      if ((err as { code?: unknown }).code === 'EEXIST') {
+        throw new Error(`session: sessionId '${sessionId}' already exists`, { cause: err });
+      }
+      throw err;
+    }
     return { sessionId, createdAt, workspace, messages: [] };
   }
 

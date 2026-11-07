@@ -216,13 +216,15 @@ async function runCell({ lane, provider, model, expectedServed, budget }) {
   const attempts = [];
   try {
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-      // The factory resolution carries the invocation's modelSpec (the
-      // normalised spec — ADR-0002 §2.5: ops/scripts put resolved.modelSpec
-      // on the invocation, never the raw input spec).
-      const resolved = await makeResolved(lane, provider, model, scratchDir);
-      const driver = resolved.driver;
       const startedAt = Date.now();
       try {
+        // The factory resolution carries the invocation's modelSpec (the
+        // normalised spec — ADR-0002 §2.5: ops/scripts put resolved.modelSpec
+        // on the invocation, never the raw input spec). It runs INSIDE the
+        // try so a resolve() throw is recorded as this attempt's evidence
+        // instead of rejecting runCell and aborting the remaining cells.
+        const resolved = await makeResolved(lane, provider, model, scratchDir);
+        const driver = resolved.driver;
         // GOVERNED DISPATCH (the kernel's own channel): every live call runs
         // inside runLadder so the escalation ladder owns WHEN to abort — the
         // driver only obeys. A governed outcome other than 'completed' (or a
@@ -290,7 +292,8 @@ async function runCell({ lane, provider, model, expectedServed, budget }) {
             fixtureResponseInvalid: `assistant transcript lacks '${FIXTURE_PHRASE}'`,
             transcriptChars: assistantText.length,
           });
-          continue;
+          // A completed result is never re-paid, even when it fails the fixture.
+          break;
         }
         // The DD-2 fold check runs BEFORE the identity rejections: a remap
         // corrupts exactly the cost datum, so the mismatch evidence must

@@ -307,7 +307,13 @@ export function computeOutcomePanels({
   // disagreeing declarations conflict out.
   const keptPopulation = admit(
     population,
-    (row) => row !== null && typeof row === 'object' && sha(row.headSha) && instant(row.mergedAt),
+    (row) =>
+      row !== null &&
+      typeof row === 'object' &&
+      sha(row.headSha) &&
+      instant(row.mergedAt) &&
+      // A merge after the observation snapshot is inconsistent evidence.
+      Date.parse(row.mergedAt) <= Date.parse(observedAt),
     (row) => row.headSha,
     'population',
     unknown,

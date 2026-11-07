@@ -55,7 +55,7 @@ subject and enroll a new immutable request rather than clearing the marker.
 Success is one JSON line with exactly the v1 response fields:
 
 ```json
-{"binding":{"base":"<sha40>","cycle":1,"head":"<sha40>","request_id":"<stable-id>","target":"origin/merge-queue"},"deadline_at":"2026-10-16T06:25:00Z","decided_at":"2026-10-16T06:25:00Z","dispatch":true,"issuer":"agent","request_id":"<stable-id>","reviewer":"<configured-agent-identity>","v":1}
+{"binding":{"base":"<sha40>","cycle":1,"head":"<sha40>","request_id":"<stable-id>","target":"origin/main"},"deadline_at":"2026-10-16T06:25:00Z","decided_at":"2026-10-16T06:25:00Z","dispatch":true,"issuer":"agent","request_id":"<stable-id>","reviewer":"<configured-agent-identity>","v":1}
 ```
 
 `issuer` is `waiting`, `queue`, or `agent`. `reviewer` is null unless assigned

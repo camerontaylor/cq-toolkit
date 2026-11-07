@@ -357,20 +357,24 @@ describe('hackDetector: Python skip/xfail markers (#774)', () => {
     ]);
   });
 
-  test('a line matched by both the JS/TS regex and a Python marker yields one finding', async () => {
-    // `model.fit(` matches the shipped JS/TS `fit(` focus marker and
-    // `pytest.skip(` the Python recognition: the regex finding stands alone.
+  test('a line matched by both the JS/TS regex and a Python marker reports the Python marker', async () => {
+    // `model.fit(` matches the shipped JS/TS `fit(` focus marker, but the
+    // Python scanner owns the default taxonomy for Python test paths.
     const line = '    pytest.skip("x"); model.fit(data)';
     expect(await findingsOf(pyDiff([line]))).toEqual([
       {
         kind: 'new-skip-only',
         file: PY,
         line: 1,
-        pattern: DEFAULT_SKIP_ONLY_PATTERN,
+        pattern: 'pytest.skip',
         snippet: line.trim(),
-        message: 'added line marks a test as skipped or focused',
+        message: 'added line marks a Python test as skipped or expected to fail',
       },
     ]);
+  });
+
+  test('an ordinary added model.fit( in a Python test is not a skip/only finding', async () => {
+    expect(await markersOf(pyDiff(['    model.fit(X, y)', '    clf.fit(X, y)']))).toEqual([]);
   });
 
   test('detectNewSkipOnly: false mutes Python markers', async () => {

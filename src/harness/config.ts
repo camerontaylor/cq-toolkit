@@ -9,7 +9,7 @@
 //   - read + edit + write enabled over the whole workspace (pattern '**/*'),
 //   - bash enabled with an EMPTY command allowlist — every `bash` call is
 //     denied until a caller configures explicit command patterns,
-//   - modest prompt caps (4 tools, 20k-char system prompt, 1k-char per-tool
+//   - modest prompt caps (6 tools, 20k-char system prompt, 1k-char per-tool
 //     description cap),
 //   - the tool set is designed to pair with SandboxPolicy 'workspace-write'
 //     (driver seam): the harness enforces the workspace boundary + allowlists

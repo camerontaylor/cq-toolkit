@@ -4,7 +4,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { makeQueueOps } from './queue.js';
 import type { QueueEnqueueInput } from './internal/queueProtocol.js';
-import { resolve, dirname } from 'node:path';
+import { resolve, dirname, basename } from 'node:path';
 import { makeGhRunner, type GhFn } from '../../adapters/forge-github/gh.js';
 import { ReviewAddressManyInputSchema } from './registry.js';
 import type { OpResult } from '../../kernel/types.js';
@@ -16,6 +16,7 @@ import {
 } from '../../shared/knownUsage.js';
 import { parseCqConfig } from '../analyze/cqConfig.js';
 import { makeReviewAddress, type ReviewAddressInput, type ReviewAddressResult } from './address.js';
+import type { DriverFactory } from '../../driver/factory.js';
 import {
   selectAddressMany,
   resolveAddressManyConcurrency,
@@ -179,6 +180,8 @@ export function makeReviewAddressMany(
     coordinationRoot?: string;
     enqueue?: ReturnType<typeof makeQueueOps>['enqueue'];
     address?: (input: ReviewAddressInput) => Promise<ReviewAddressResult>;
+    /** Driver factory for the default address; carries the alias sink wiring. */
+    drivers?: DriverFactory;
   } = {},
 ) {
   return async (input: ReviewAddressManyInput): Promise<ReviewAddressManyResult> => {
@@ -217,6 +220,8 @@ function makeReviewAddressManyCore(
     coordinationRoot?: string;
     enqueue?: ReturnType<typeof makeQueueOps>['enqueue'];
     address?: (input: ReviewAddressInput) => Promise<ReviewAddressResult>;
+    /** Driver factory for the default address; carries the alias sink wiring. */
+    drivers?: DriverFactory;
   } = {},
   record: (id: string, observation: UsageObservation) => void = () => {},
 ) {
@@ -253,24 +258,22 @@ function makeReviewAddressManyCore(
       if (input.query !== undefined) {
         try {
           numbers = [];
-          let total: number | undefined;
-          for (let page = 1; ; page++) {
-            const response = await gh([
-              'api',
-              '-X',
-              'GET',
-              'search/issues',
-              '-f',
-              `q=repo:${input.repo} is:pr ${input.query}`,
-              '-f',
-              'per_page=100',
-              '-f',
-              `page=${page}`,
-            ]);
-            if (response.code !== 0)
-              return { status: 'needs-human', reason: 'PR discovery failed' };
-            const parsed = z
-              .object({
+          const response = await gh([
+            'api',
+            '--paginate',
+            '--slurp',
+            '-X',
+            'GET',
+            'search/issues',
+            '-f',
+            `q=repo:${input.repo} is:pr ${input.query}`,
+            '-f',
+            'per_page=100',
+          ]);
+          if (response.code !== 0) return { status: 'needs-human', reason: 'PR discovery failed' };
+          const parsed = z
+            .array(
+              z.object({
                 total_count: z.number().int().nonnegative(),
                 incomplete_results: z.boolean(),
                 items: z.array(
@@ -280,18 +283,16 @@ function makeReviewAddressManyCore(
                     pull_request: z.object({ url: z.string() }),
                   }),
                 ),
-              })
-              .safeParse(JSON.parse(response.stdout) as unknown);
-            if (!parsed.success)
-              return { status: 'needs-human', reason: 'Invalid PR discovery response' };
-            const data = parsed.data;
-            if (
-              data.incomplete_results ||
-              data.total_count > 1000 ||
-              (total !== undefined && total !== data.total_count)
+              }),
             )
+            .min(1)
+            .safeParse(JSON.parse(response.stdout) as unknown);
+          if (!parsed.success)
+            return { status: 'needs-human', reason: 'Invalid PR discovery response' };
+          const total = parsed.data[0]!.total_count;
+          for (const data of parsed.data) {
+            if (data.incomplete_results || data.total_count > 1000 || data.total_count !== total)
               return { status: 'needs-human', reason: 'Incomplete or truncated PR discovery' };
-            total = data.total_count;
             if (
               data.items.some(
                 (item) =>
@@ -301,10 +302,9 @@ function makeReviewAddressManyCore(
             )
               return { status: 'needs-human', reason: 'Query returned another repository' };
             numbers.push(...data.items.map((item) => item.number));
-            if (numbers.length === total && new Set(numbers).size === total) break;
-            if (data.items.length < 100 || page >= 10 || numbers.length >= total)
-              return { status: 'needs-human', reason: 'Incomplete PR discovery pagination' };
           }
+          if (numbers.length !== total || new Set(numbers).size !== total)
+            return { status: 'needs-human', reason: 'Incomplete PR discovery pagination' };
         } catch (error) {
           return { status: 'needs-human', reason: `PR discovery failed: ${String(error)}` };
         }
@@ -357,7 +357,11 @@ function makeReviewAddressManyCore(
         const config = parsed.config;
         // Bulk fixes use agent review and existing threads; vendor debt is advisory.
         config.review = { ...config.review, reviewers: ['agent'] };
-        address = makeReviewAddress({ config, coordinationRoot });
+        address = makeReviewAddress({
+          config,
+          coordinationRoot,
+          ...(deps.drivers === undefined ? {} : { drivers: deps.drivers }),
+        });
       }
       let budget = initialAddressManyBudget({ limitTokens: input.maxTokens });
       const outcomes: AddressManyOutcomeInput[] = [];
@@ -477,7 +481,7 @@ function makeReviewAddressManyCore(
                 journalDir: resolve(
                   coordinationRoot,
                   'cq-address-many-reports',
-                  root.split('/').at(-2)!,
+                  basename(dirname(root)),
                   String(candidate.number),
                 ),
               });
@@ -554,7 +558,12 @@ function makeReviewAddressManyCore(
                   ...identity,
                   usage: {
                     kind: 'known',
-                    tokens: usage.input + usage.output + usage.cacheRead + usage.cacheWrite,
+                    tokens:
+                      usage.input +
+                      usage.output +
+                      usage.cacheRead +
+                      usage.cacheWrite +
+                      (usage.reasoning ?? 0),
                   },
                 })
               : dispatched

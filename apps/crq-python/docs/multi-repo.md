@@ -24,7 +24,7 @@ behavior; the checked-in config ships empty, host overlays add entries):
     "floor": "2026-11-10T00:00:00Z",
     "quiet_minutes": 30,
     "include": ["**"],
-    "exclude": ["**/*.lock", "vendored/**"],
+    "exclude": ["*.lock", "vendored/**"],
     "rank_tier": 3,
     "findings": "issue"}
  ]}
@@ -75,7 +75,8 @@ refuse the config).
   open PRs `<name>-pr<n>`, deltas `<name>-pr<n>-range-<pin>-<head>`.
   `<name>` is the repo's suffix after `/`.
 - Push items: kind `push-current`, `pr: 0`, subject binding
-  `{"type": "push-range", "repo", "base", "head", "target_selector", "policy"}`.
+  `{"type": "push-range", "repo", "base", "head", "policy"}`, plus optional
+  `paths_filter` and `pin` (the parent capture target) on split follow-up parts.
   Merged-current bindings already carry `repo` and stay as they are.
 - Run records (`meta.json`), work records and status.json items gain `repo`.
 

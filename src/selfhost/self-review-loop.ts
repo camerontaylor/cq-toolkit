@@ -201,7 +201,12 @@ const pruneAuditDirs = (journalRoot: string): void => {
     return; // no journal root yet — nothing to prune
   }
   const stampOf = (name: string): number => Number(name.slice(name.indexOf('-') + 1));
-  for (const name of dirs.sort((a, b) => stampOf(b) - stampOf(a)).slice(AUDIT_DIRS_KEPT)) {
+  // Keep the newest N RUNS (distinct stamps), not N folders: every PR in a
+  // sweep shares the run-start stamp, so the current run is never pruned.
+  const keptStamps = new Set(
+    [...new Set(dirs.map(stampOf))].sort((a, b) => b - a).slice(0, AUDIT_DIRS_KEPT),
+  );
+  for (const name of dirs.filter((n) => !keptStamps.has(stampOf(n)))) {
     try {
       rmSync(join(journalRoot, name), { recursive: true, force: true });
     } catch {

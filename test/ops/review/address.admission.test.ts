@@ -6,7 +6,8 @@ import { expect, test } from 'vitest';
 import { makeReviewAddress } from '../../../src/ops/review/address.js';
 import type { Finding } from '../../../src/ops/review/findings.js';
 import { createEscalationState } from '../../../src/ops/fix/escalation.js';
-import { fixture, reportOf } from './address.helpers.js';
+import { devLedgerPath } from '../../../src/ops/dev/record.js';
+import { finding, fixture, reportOf } from './address.helpers.js';
 
 test.each(['clean', 'tracked', 'staged', 'untracked'] as const)(
   'head-only clean findings cannot certify %s content',
@@ -283,6 +284,82 @@ test('re-review keeps the original full comparison when a mutable target ref mov
     expect(result.status).toBe('ok');
     expect(reviewedBase).toBe(originalBase);
     expect(f.repo.git('merge-base', 'origin/main', 'HEAD').trim()).not.toBe(originalBase);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('a local first run with no review folder reports the review.run guidance', async () => {
+  const f = await fixture([]);
+  try {
+    const deps = { ...f.deps };
+    delete deps.initialRecord;
+    const result = await makeReviewAddress(deps)(f.input);
+    expect(result.status).toBe('needs-human');
+    expect(reportOf(result).reasons.join(' ')).toContain(
+      'no findings record; run review.run or pass --record',
+    );
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('admission pins a local run to its captured base when the target ref moves', async () => {
+  const f = await fixture();
+  // The real ledger the admission writes lives under the ignored .cq tree.
+  await f.repo.write('.git/info/exclude', '.cq/\n');
+  const originalBase = f.record().reviewed!.base;
+  const deps = { ...f.deps };
+  // The injected disposition bypasses admission; this test inspects the real
+  // ledger the admission writes.
+  delete deps.disposition;
+  let reviews = 0;
+  try {
+    const result = await makeReviewAddress({
+      ...deps,
+      workerFactory: () => ({
+        escalation: createEscalationState,
+        fix: async (item) => {
+          const observedHead = f.repo.git('rev-parse', 'HEAD').trim();
+          if (item.id === 'b')
+            return {
+              finding: { ...item, status: 'rejected' as const, reason: 'not a defect' },
+              reason: 'not a defect',
+              observedHead,
+              validation: [],
+            };
+          await f.repo.write('src/a.ts', 'verified fixture fix\n');
+          const commit = f.repo.commitAll('scripted verified fix');
+          f.repo.git('update-ref', 'refs/remotes/origin/main', commit);
+          return {
+            finding: { ...item, status: 'fixed' as const },
+            commit,
+            reason: 'fixed',
+            observedHead,
+            validation: [],
+          };
+        },
+      }),
+      review: async (input) => {
+        reviews += 1;
+        return {
+          status: 'ok',
+          value: {
+            ...f.record(),
+            reviewed: { base: input.base!, scope: 'full' },
+            findings: reviews === 1 ? [finding('b')] : [],
+          },
+        };
+      },
+    })(f.input);
+    expect(result.status).toBe('ok');
+    expect(f.repo.git('merge-base', 'origin/main', 'HEAD').trim()).not.toBe(originalBase);
+    const ledger = JSON.parse(await readFile(devLedgerPath(f.repo.root, 'feature/x'), 'utf8')) as {
+      records: Array<{ kind: string; base?: string }>;
+    };
+    const cycles = ledger.records.filter((record) => record.kind === 'cycle');
+    expect(cycles.length).toBeGreaterThanOrEqual(2);
+    expect(cycles.map((cycle) => cycle.base)).toEqual(cycles.map(() => originalBase));
   } finally {
     await f.cleanup();
   }

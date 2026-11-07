@@ -9,6 +9,7 @@ import { makeGitMutex } from '../../../shared/gitMutex.js';
 import { boundedErrorText, describeError } from '../../../driver/error-text.js';
 import type { ReviewAddressInput, ReviewAddressResult, ReviewAddressReport } from '../address.js';
 import {
+  disposeAddressTerminalSession,
   recordAddressTerminalEvidence,
   releaseAddressTerminalEvidence,
   checkpointAddressTerminalEvidence,
@@ -1071,10 +1072,17 @@ export class AddressOwnership {
       const targets = new Set<string>();
       for (const participant of open)
         if (participant.report) {
-          const target = resolve(
-            await realpath(dirname(participant.report.reportPath)),
-            basename(participant.report.reportPath),
-          );
+          let parent: string;
+          try {
+            parent = await realpath(dirname(participant.report.reportPath));
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+            // The journal directory vanished after binding (ordinary parent
+            // cancellation timing). End the attempt without a report rather
+            // than failing with ENOENT and quarantining the owner.
+            continue;
+          }
+          const target = resolve(parent, basename(participant.report.reportPath));
           const ancestor = participant.reportAncestor;
           if (
             !ancestor ||
@@ -1114,6 +1122,7 @@ export class AddressOwnership {
           }
           for (const participant of open)
             if (participant.report) {
+              if (!participant.reportDirectory) continue;
               const report = participant.report;
               delete report.stop;
               if (!report.reasons.includes('parent cancelled'))
@@ -1315,6 +1324,13 @@ export class AddressOwnership {
     // No certificate is installed on callback, cleanup or observed compromise
     // rejection. No further write is needed to retain that refusal barrier.
     await this.publishCompletion(completed.proof);
+    // The terminal Git environment is private to this owner lifetime: every
+    // terminal process and terminal operation has settled (runTerminal joined
+    // them before cancelledResult returned) and no Git child can still use
+    // it. Best effort; a replaced entry stays for forensics and storage loss
+    // must not mask the outcome.
+    if (!this.terminalProcesses.size && !this.terminalOperations.size)
+      await disposeAddressTerminalSession(this.terminalToken).catch(() => undefined);
     return completed.result;
   }
 

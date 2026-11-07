@@ -821,16 +821,40 @@ export function createPolicyDiff(
     }
 
     // Local `uses: ./` targets of privileged jobs, at either end.
+    // Nested local actions are followed and non-literal `uses:` values and
+    // unresolvable targets fail closed, as in the required-check branch.
     const localTargets = new Map<string, string>();
-    for (const flows of [baseFlows, subjectFlows]) {
+    for (const [rev, side, flows] of [
+      [rangeBase, 'range base', baseFlows],
+      [subject, 'subject', subjectFlows],
+    ] as const) {
+      const roots = new Map<string, string>();
       for (const [wf, { scan }] of flows) {
         if (!scan.ok) continue;
         for (const job of scan.jobs.values()) {
           if (!job.privileged) continue;
+          if (hasNonLiteralUses(job)) {
+            add(
+              'privileged-job',
+              wf,
+              `local action of privileged job ${wf}:${job.id} unresolvable at the ${side} (a uses: value is not a literal)`,
+            );
+          }
           for (const target of job.localUses) {
-            if (!localTargets.has(target)) localTargets.set(target, `${wf}:${job.id}`);
+            if (!roots.has(target)) roots.set(target, `${wf}:${job.id}`);
           }
         }
+      }
+      const resolved = await localActionsAt(input.repo, rev, roots);
+      for (const [target, user] of resolved.targets) {
+        if (!localTargets.has(target)) localTargets.set(target, user);
+      }
+      for (const { target, why } of resolved.undecidable) {
+        add(
+          'privileged-job',
+          `./${target}`,
+          `local action of a privileged job unresolvable at the ${side} (${why})`,
+        );
       }
     }
     for (const path of safe) {

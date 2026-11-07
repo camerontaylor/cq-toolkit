@@ -102,6 +102,8 @@ export function sshQueueTransport(alias: string): QueueTransport {
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/.test(alias)) throw new Error('invalid queue SSH alias');
   return (request, options) =>
     new Promise((resolve, reject) => {
+      const signal = options?.signal;
+      signal?.throwIfAborted();
       if (Buffer.byteLength(request) > QUEUE_WIRE_BYTES) {
         reject(new Error('oversized queue request'));
         return;
@@ -134,11 +136,22 @@ export function sshQueueTransport(alias: string): QueueTransport {
       let size = 0;
       const timer = setTimeout(
         () => {
+          signal?.removeEventListener('abort', onAbort);
           child.kill('SIGKILL');
           reject(new Error('queue delivery unknown: timeout'));
         },
         Math.max(1, Math.min(45000, lifetimeRemaining(options) ?? 45000)),
       );
+      // An abort during the in-flight call kills the child and keeps the caller's exact reason;
+      // delivery stays unknown because the remote side may already have applied the request.
+      const onAbort = () => {
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', onAbort);
+        child.kill('SIGKILL');
+        reject(signal?.reason ?? new Error('queue delivery unknown: aborted'));
+      };
+      signal?.addEventListener('abort', onAbort, { once: true });
+      if (signal?.aborted) onAbort();
       child.stdout.on('data', (chunk: Buffer) => {
         size += chunk.length;
         if (size > QUEUE_WIRE_BYTES) {
@@ -150,10 +163,12 @@ export function sshQueueTransport(alias: string): QueueTransport {
       child.stdin.on('error', () => undefined);
       child.on('error', () => {
         clearTimeout(timer);
+        signal?.removeEventListener('abort', onAbort);
         reject(new Error('queue transport unavailable'));
       });
       child.on('close', (code) => {
         clearTimeout(timer);
+        signal?.removeEventListener('abort', onAbort);
         if (code === 0 && size <= QUEUE_WIRE_BYTES) resolve(Buffer.concat(chunks).toString('utf8'));
         else if (
           code === 2 &&

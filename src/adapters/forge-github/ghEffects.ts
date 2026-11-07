@@ -316,7 +316,8 @@ export function reviewStateOfDecision(decision: unknown): PrReviewState {
   if (decision === 'APPROVED') return { state: 'approved' };
   if (decision === 'CHANGES_REQUESTED') return { state: 'changes-requested' };
   if (decision === 'REVIEW_REQUIRED') return { state: 'required' };
-  if (decision === null) return { state: 'none' };
+  // gh serializes an absent decision as "" (a Go string); null covers raw GraphQL shapes.
+  if (decision === null || decision === '') return { state: 'none' };
   return { state: 'unknown' };
 }
 

@@ -128,4 +128,52 @@ describe('subprocess cleanup effects (real git smoke)', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   }, 120_000);
+
+  test('a FAILED removal restores the sweep lock with its reason; an UNLOCKED tree stays unlocked', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cleanup-relock-'));
+    try {
+      await resilient(() => run(['init', '-q', '-b', 'main', dir], dir));
+      await resilient(() => run(['-C', dir, 'config', 'user.email', 't@example.invalid'], dir));
+      await resilient(() => run(['-C', dir, 'config', 'user.name', 'T'], dir));
+      writeFileSync(join(dir, 'seed.txt'), 'seed');
+      await resilient(() => run(['-C', dir, 'add', '.'], dir));
+      await resilient(() => run(['-C', dir, 'commit', '-q', '-m', 'seed'], dir));
+      const lockedPath = join(dir, 'wt', 'locked');
+      const plainPath = join(dir, 'wt', 'plain');
+      await resilient(() =>
+        run(['-C', dir, 'worktree', 'add', '-b', 'cq/x/locked', lockedPath, 'main'], dir),
+      );
+      await resilient(() =>
+        run(['-C', dir, 'worktree', 'add', '-b', 'cq/x/plain', plainPath, 'main'], dir),
+      );
+      await resilient(() =>
+        run(['-C', dir, 'worktree', 'lock', '--reason', 'cq sweep active', lockedPath], dir),
+      );
+      // Dirty both so plain `remove` is refused by git (the refusal path).
+      writeFileSync(join(lockedPath, 'dirty.txt'), 'dirty');
+      writeFileSync(join(plainPath, 'dirty.txt'), 'dirty');
+
+      const effects = makeSubprocessCleanupEffects(dir, { timeoutMs: GIT_CALL_TIMEOUT_MS });
+      await expect(resilient(() => effects.worktreeRemove(dir, lockedPath))).rejects.toThrow(
+        /contains modified or untracked/,
+      );
+      await expect(resilient(() => effects.worktreeRemove(dir, plainPath))).rejects.toThrow(
+        /contains modified or untracked/,
+      );
+      const porcelain = await resilient(() =>
+        run(['-C', dir, 'worktree', 'list', '--porcelain'], dir),
+      );
+      // Porcelain entries are blank-line-separated blocks; find each tree's block.
+      const blockOf = (wtPath: string): string[] =>
+        porcelain
+          .split('\n\n')
+          .map((block) => block.split('\n'))
+          .find((lines) => lines[0] === `worktree ${wtPath}`) ?? [];
+      // The sweep lock is back WITH its reason; the never-locked tree gained none.
+      expect(blockOf(lockedPath)).toContain('locked cq sweep active');
+      expect(blockOf(plainPath).some((line) => line.startsWith('locked'))).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 120_000);
 });

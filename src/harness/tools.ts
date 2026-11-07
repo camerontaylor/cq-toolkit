@@ -2500,32 +2500,40 @@ export function buildTools(
         const groups = [...byPath.values()].sort((left, right) =>
           left.file.lexicalRel.localeCompare(right.file.lexicalRel),
         );
-        const allMatches = groups.reduce((count, group) => count + group.lines.length, 0);
+        const mode = parsed.data.output_mode ?? 'content';
+        const contentMode = mode === 'content';
+        // content mode caps matching lines; files_with_matches/count charge one
+        // row per file (rg's per-file --max-count already bounds each file's lines).
+        const allMatches = contentMode
+          ? groups.reduce((count, group) => count + group.lines.length, 0)
+          : groups.length;
         const keptGroups: { file: SearchFile; lines: string[]; raw: string[] }[] = [];
-        const matchLimit =
-          parsed.data.output_mode === undefined || parsed.data.output_mode === 'content'
-            ? Math.min(parsed.data.head_limit || SEARCH_MATCH_LIMIT, SEARCH_MATCH_LIMIT)
-            : SEARCH_MATCH_LIMIT;
+        const matchLimit = contentMode
+          ? Math.min(parsed.data.head_limit || SEARCH_MATCH_LIMIT, SEARCH_MATCH_LIMIT)
+          : SEARCH_MATCH_LIMIT;
         let remaining = matchLimit;
         for (const group of groups) {
           if (remaining <= 0) break;
-          const lines = group.lines.slice(0, remaining);
-          const raw = group.raw.slice(0, remaining);
+          const lines = contentMode ? group.lines.slice(0, remaining) : group.lines;
+          const raw = contentMode ? group.raw.slice(0, remaining) : group.raw;
           keptGroups.push({ file: group.file, lines, raw });
-          remaining -= lines.length;
+          remaining -= contentMode ? lines.length : 1;
         }
-        if (allMatches > matchLimit) {
+        // A count row stays a lower bound whenever its file reached rg's
+        // per-file --max-count: the row reports the cap, marked with '+'.
+        const cappedCount =
+          mode === 'count' && keptGroups.some((group) => group.lines.length > SEARCH_MATCH_LIMIT);
+        if (allMatches > matchLimit || cappedCount) {
           markers.push(`[truncated: matches cap ${matchLimit}]`);
         }
         if (truncatedLine) markers.push(`[truncated: per-line chars cap ${SEARCH_LINE_CHARS}]`);
 
-        const mode = parsed.data.output_mode ?? 'content';
         const rows =
           mode === 'content'
             ? keptGroups.flatMap(({ file, lines }) => [`--- ${file.lexicalRel} ---`, ...lines])
             : keptGroups.map(({ file, lines }) =>
                 mode === 'count'
-                  ? `${file.lexicalRel}:${lines.length}${markers.length > 0 ? '+' : ''}`
+                  ? `${file.lexicalRel}:${Math.min(lines.length, SEARCH_MATCH_LIMIT)}${markers.length > 0 ? '+' : ''}`
                   : file.lexicalRel,
               );
         if (mode === 'count' && markers.length > 0)

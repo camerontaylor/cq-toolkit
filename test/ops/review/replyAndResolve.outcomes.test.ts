@@ -45,6 +45,61 @@ describe('non-conforming gh outcomes', () => {
     ]);
   });
 
+  test('a resolve printing a non-object JSON payload (null) fails only that action and the batch continues', async () => {
+    const calls: GhCall[] = [];
+    const log = memLog();
+    const result = await replyAndResolve(
+      [mkResolve('s1', 'PRRT_1'), mkResolve('s2', 'PRRT_2')],
+      baseOpts(
+        recordingGh(calls, undefined, (label) =>
+          label === 'resolve:PRRT_1' ? { code: 0, stdout: 'null', stderr: '' } : undefined,
+        ),
+        log,
+      ),
+    );
+    // A non-object payload cannot carry the mutation's effect: that ONE
+    // action fails, unrecorded — and its sibling still resolves.
+    expect(result.failed).toHaveLength(1);
+    expect(result.failed[0]?.action.actionId).toBe('s1');
+    expect(result.failed[0]?.error).toContain('non-object JSON payload');
+    expect(result.posted.map((r) => r.actionId)).toEqual(['s2']);
+    expect(await log.load()).toEqual([
+      { version: 1, actionId: 's2', kind: 'resolve_thread', resultRef: 'PRRT_2', at: NOW },
+    ]);
+  });
+
+  test('a resolve whose errors value is not an array fails closed, unrecorded, and never reaches the success check', async () => {
+    const calls: GhCall[] = [];
+    const log = memLog();
+    const result = await replyAndResolve(
+      [mkResolve('s1', 'PRRT_1'), mkResolve('s2', 'PRRT_2')],
+      baseOpts(
+        recordingGh(calls, undefined, (label) =>
+          label === 'resolve:PRRT_1'
+            ? {
+                code: 0,
+                // The data payload CONFIRMS the resolve; the malformed errors
+                // value must still fail closed rather than fall through.
+                stdout: JSON.stringify({
+                  errors: 'boom',
+                  data: { resolveReviewThread: { thread: { id: 'PRRT_1', isResolved: true } } },
+                }),
+                stderr: '',
+              }
+            : undefined,
+        ),
+        log,
+      ),
+    );
+    expect(result.failed).toHaveLength(1);
+    expect(result.failed[0]?.action.actionId).toBe('s1');
+    expect(result.failed[0]?.error).toContain('non-array errors value');
+    expect(result.posted.map((r) => r.actionId)).toEqual(['s2']);
+    expect(await log.load()).toEqual([
+      { version: 1, actionId: 's2', kind: 'resolve_thread', resultRef: 'PRRT_2', at: NOW },
+    ]);
+  });
+
   test.each([
     ['an EMPTY response object', {}],
     ['a null data payload', { data: null }],

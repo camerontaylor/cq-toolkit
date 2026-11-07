@@ -44,6 +44,9 @@ describe('every trusted job runs a selfhost entry point with a classified closur
       'cq-policy.yml:judge': ['policy-diff'],
       'cq-verify.yml:compute': ['recompute-typecheck'],
       'cq-verify.yml:judge': ['verify-ratchet'],
+      // Checks out the default branch's scanner policy at `trust/` but runs
+      // no code from it, so it contributes no entry.
+      'denylist.yml:denylist': [],
     });
   });
 
@@ -52,6 +55,10 @@ describe('every trusted job runs a selfhost entry point with a classified closur
       classifyTrustedJob({ key: 'w:j', code, head, localUses }).unclassified;
     expect(TRUST_PATH.test('        working-directory: trust')).toBe(true);
     expect(TRUST_PATH.test('          git init trust')).toBe(true);
+    expect(TRUST_PATH.test('          path: trust')).toBe(true);
+    expect(TRUST_PATH.test('          path: "trust"')).toBe(true);
+    expect(TRUST_PATH.test('          run: cd trust && node dist/x.js')).toBe(true);
+    expect(TRUST_PATH.test('          run: git -C trust fetch --no-tags origin x')).toBe(true);
     expect(TRUST_PATH.test('      trusted: yes')).toBe(false);
     expect(refused('node trust/dist/selfhost/acceptance.js \\')).toEqual([]);
     expect(refused('pnpm install --frozen-lockfile --ignore-scripts\npnpm run build')).toEqual([]);

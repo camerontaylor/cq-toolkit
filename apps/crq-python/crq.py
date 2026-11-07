@@ -8,6 +8,7 @@ never own GitHub or queue mutation. See README.md and ops/CUTOVER.md.
 from __future__ import annotations
 
 import argparse
+import collections
 import contextlib
 import datetime as dt
 import fcntl
@@ -237,7 +238,11 @@ class Spool:
             reply = self._ssh("ledger-publish " + base + " " + head, bundle, timeout=330)
         except SpoolUnreachable as exc:
             raise OSError("ledger signer transport unavailable; retain publication outbox") from exc
-        if json.loads(reply) != {"published": head}:
+        try:
+            acknowledgement = json.loads(reply)
+        except ValueError as exc:
+            raise OSError("signer reply unreadable; retain publication outbox") from exc
+        if acknowledgement != {"published": head}:
             raise OSError("signer did not acknowledge the exact ledger commit")
 
 
@@ -419,15 +424,21 @@ def secret_scan_diff(diff: str, out: Path, *, base=None, head=None,
     allow = [re.compile(p) for p in ALLOWLIST_PATHS]
     hits: List[Dict[str, Any]] = []
     path = None
+    in_header = False  # ---/+++ are headers only between "diff --git" and the first "@@"
     for n, line in enumerate(diff.splitlines(), 1):
-        if line.startswith("+++ ") or line.startswith("--- "):
-            p = line[4:]
-            if p != "/dev/null":
-                path = p[2:] if p[:2] in ("a/", "b/") else p
-            continue
         if line.startswith("diff --git"):
             m = re.match(r"diff --git a/(.*) b/(.*)$", line)
             path = m.group(2) if m else None
+            in_header = True
+            continue
+        if line.startswith("@@"):
+            in_header = False
+            continue
+        if in_header:
+            if line.startswith("+++ ") or line.startswith("--- "):
+                p = line[4:]
+                if p != "/dev/null":
+                    path = p[2:] if p[:2] in ("a/", "b/") else p
             continue
         if not line or line[0] not in "+-" or path is None:
             continue
@@ -775,6 +786,8 @@ def quiet_reason(item: Dict[str, Any], info: Dict[str, Any], ignore_age: bool = 
     ours = (item.get("last_push") or {}).get("sha") == info["headRefOid"]
     if ours:
         return None  # head is our own addressing push and nobody else is running on it
+    if not ensure_commit(item["pr"], info["headRefOid"], clone=clone):
+        return "source head unavailable in repository clone"
     ct = int(git("log", "-1", "--format=%ct", info["headRefOid"], cwd=clone))
     last = max(ct, parse_iso(info["updatedAt"]).timestamp())
     age = (time.time() - last) / 60
@@ -966,27 +979,31 @@ def current_paths(merge: str, target: str, *, pre: Optional[str] = None,
     names = sorted(set(git_z("diff", "--name-only", "--no-renames", "-z", pre, merge, cwd=clone)))
     if len(names) > CURRENT_PATH_CAP:
         return oversized_current_paths(names)
-    fields = git_z("diff", "--name-status", "-M50%", "-z", merge, target, cwd=clone)
+    # One raw diff carries both blob ids, so churn unrelated to the source
+    # costs no per-path git process (the removed/added lists have no cap).
+    fields = git_z("diff", "--raw", "--no-abbrev", "-M50%", "-z", merge, target, cwd=clone)
     renames = {}
-    removed = []
-    added = []
+    old_blob_by_path = {}
+    removed_blobs = []
+    added_blobs = []
     while fields:
-        status = fields.pop(0)
+        _old_mode, _new_mode, old_sha, new_sha, status = fields.pop(0).split()
         old = fields.pop(0)
         if status.startswith(("R", "C")):
             new = fields.pop(0)
             if status.startswith("R"):
                 renames[old] = new
-                removed.append(old)
-                added.append(new)
+                old_blob_by_path[old] = old_sha
+                removed_blobs.append(old_sha)
+                added_blobs.append(new_sha)
         elif status == "D":
-            removed.append(old)
+            removed_blobs.append(old_sha)
         elif status == "A":
-            added.append(old)
+            added_blobs.append(new_sha)
     # Git's rename heuristic can arbitrarily pair duplicate identical files.
     # Such lineage is not enough to claim current scope; retain ambiguity.
-    old_blobs = [git("rev-parse", merge + ":" + path, cwd=clone) for path in removed]
-    new_blobs = [git("rev-parse", target + ":" + path, cwd=clone) for path in added]
+    removed_counts = collections.Counter(removed_blobs)
+    added_counts = collections.Counter(added_blobs)
     result = []
     total = 0
     for original in names:
@@ -997,9 +1014,9 @@ def current_paths(merge: str, target: str, *, pre: Optional[str] = None,
                            "disposition": "unsupported", "reason": NON_UTF8_PATH})
             continue
         if not path_exists(target, path, clone=clone) and path in renames:
-            blob = git("rev-parse", merge + ":" + path, cwd=clone)
+            blob = old_blob_by_path[path]
             path = renames[path]
-            if old_blobs.count(blob) > 1 or new_blobs.count(blob) > 1:
+            if removed_counts[blob] > 1 or added_counts[blob] > 1:
                 result.append({"source_path": original, "path": path, "resolution": "git-rename-M50",
                                "disposition": "ambiguous", "reason": "duplicate blobs make rename lineage ambiguous"})
                 continue
@@ -1715,6 +1732,8 @@ def plan_open(item: Dict[str, Any], info: Dict[str, Any], dry: bool) -> Dict[str
     # default branch (docs/multi-repo.md); the primary repo keeps today's path.
     cfg = repo_registry.by_repo(REPOS, item_repo(item))
     clone = Path(cfg["clone"]) if cfg else None
+    if not ensure_commit(item["pr"], head, clone=clone):
+        raise NotReady("source head unavailable")
     target = f"origin/{cfg['default_branch']}" if cfg else f"origin/{info['baseRefName']}"
     pin = git("merge-base", target, head, cwd=clone)
     notes = []
@@ -3345,12 +3364,14 @@ def cmd_measure() -> None:
     # Repair-only backfill items share the merged kind but have no PR merge.
     merged = [i for i in live_items(q) if i["kind"] == "merged"
               and not (i.get("pr") == 0 and i.get("repair_runs") and not i.get("merge_commit"))]
+    measured = []
     for i in merged:
         if i.get("source") == "followup" and i["state"] == "skipped" and not i.get("measure"):
             continue  # merged head already reviewed; not a supersession decision
         apply_measure(i)
+        measured.append(i)
     # rank: code before docs-only, then most surviving non-doc lines first
-    ranked = sorted(merged, key=lambda i: (i["measure"]["docs_only"], -i["measure"]["surviving_nondoc"],
+    ranked = sorted(measured, key=lambda i: (i["measure"]["docs_only"], -i["measure"]["surviving_nondoc"],
                                            -i["measure"]["surviving"]))
     for n, i in enumerate(ranked):
         i["order"] = n
@@ -3382,8 +3403,19 @@ def write_heartbeat(q: Dict[str, Any]) -> None:
         event("heartbeat_failed", error=str(exc)[:200])
 
 
+# The third-party App identity wrongly pinned on 2026-10-04 must never reappear
+# in config; `selfcheck` is the independent negative check for it.
+BANNED_BOT_IDS = {202921479}
+BANNED_BOT_LOGINS = {"cq-reviewer[bot]"}
+
+
 def cmd_selfcheck() -> int:
-    print("ok: post-merge review queue")
+    raw = (ROOT / "config.json").read_text()
+    bad = [str(x) for x in BANNED_BOT_IDS if str(x) in raw] + [x for x in BANNED_BOT_LOGINS if x in raw]
+    if bad:
+        print(f"FAIL: config.json contains banned third-party identity {bad}")
+        return 1
+    print("ok: post-merge review queue; no banned third-party reviewer identity")
     return 0
 
 
@@ -3407,6 +3439,18 @@ def with_lock(fn, *a, lock_wait=0, **kw):
     finally:
         fcntl.flock(fh, fcntl.LOCK_UN)
         fh.close()
+
+
+def ran_locked(fn, *a, lock_wait: int = 0) -> bool:
+    """True when fn ran under the tick lock; False when the lock was busy.
+
+    The mutating commands return None on success, so with_lock's None cannot
+    tell a completed run from a lock-busy no-op; this wrapper makes it explicit.
+    """
+    def run():
+        fn(*a)
+        return True
+    return with_lock(run, lock_wait=lock_wait) is not None
 
 
 def admin(action: str, item_id: Optional[str], reason: Optional[str], *,
@@ -3621,9 +3665,11 @@ def main() -> int:
     if args.cmd == "selfcheck":
         return cmd_selfcheck()
     if args.cmd == "init":
-        with_lock(cmd_init, args.force)
+        if not ran_locked(cmd_init, args.force):
+            return 3
     elif args.cmd == "measure":
-        with_lock(cmd_measure)
+        if not ran_locked(cmd_measure):
+            return 3
     elif args.cmd == "repair-prepare":
         def prepare():
             evidence = json.loads(Path(args.revalidation).read_text())
@@ -3631,7 +3677,8 @@ def main() -> int:
                                                     args.job, args.source_sha, evidence)
             event("repair_prepared", origin_job=args.job, job=job_id, source_sha=args.source_sha)
             print(job_id)
-        with_lock(prepare)
+        if not ran_locked(prepare):
+            return 3
     elif args.cmd in ("tick", "start"):
         only = getattr(args, "item", None)
         out = with_lock(tick, args.dry_run, only, getattr(args, "ignore_quiet", False), lock_wait=90)
@@ -3661,8 +3708,9 @@ def main() -> int:
         print(f"PR #{args.pr}: {n} paths; base {base} head {head}")
         print(git("diff", "--shortstat", base, head))
     elif args.cmd == "author-enroll":
-        with_lock(enroll_author, args.request_id, args.base, args.head, args.target, args.cycle,
-                  args.review_policy, args.fallback_reviewer)
+        if not ran_locked(enroll_author, args.request_id, args.base, args.head, args.target, args.cycle,
+                          args.review_policy, args.fallback_reviewer):
+            return 3
     elif args.cmd in ("author-lease", "author-fallback"):
         try:
             result = with_lock(author_lease_command, args.request_id, args.cmd == "author-fallback")
@@ -3673,10 +3721,12 @@ def main() -> int:
             return 3
         print(json.dumps(result, sort_keys=True))
     elif args.cmd == "author-observe":
-        with_lock(author_observe, args.manifest)
+        if not ran_locked(author_observe, args.manifest):
+            return 3
     else:
         try:
-            with_lock(admin, args.cmd, getattr(args, "item", None), getattr(args, "reason", None))
+            if not ran_locked(admin, args.cmd, getattr(args, "item", None), getattr(args, "reason", None)):
+                return 3
         except AdminRefused as exc:
             print(f"{args.cmd} refused: {exc}", file=sys.stderr)
             return 3

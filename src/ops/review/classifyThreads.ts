@@ -231,7 +231,8 @@ const isTrusted = (
 
 /** Skip notices are privileged automation data, never generic author text. */
 const isAutomation = (authorLogin: string | null, config: ClassifyConfig): boolean =>
-  config.automationLogin === undefined || authorLogin === config.automationLogin;
+  config.automationLogin === undefined ||
+  (authorLogin !== null && authorLogin === config.automationLogin);
 
 /** True when the body matches any configured bot skip/failure pattern (I2).
  * Each pattern is evaluated via a FRESH expression with any `g`/`y` flag
@@ -467,14 +468,18 @@ const approvalNoBodyRow: RowFn<ReviewSummary> = (review, ctx) => {
 const reviewNeedsResponseRow: TotalRowFn<ReviewSummary> = (review) =>
   reviewItem(review, 'actionable', 'review_summary_needs_response');
 
-/** The REVIEW table (rows 7–11; row 12 is the fallback passed to decide). */
+/** The REVIEW table (rows 7–11; row 12 is the fallback passed to decide).
+ * The trust row sits AFTER the voided/contentless skip rows: a DISMISSED or
+ * empty review is not outstanding feedback whatever its author, and it never
+ * reaches a fixer, so no untrusted text is exposed. A non-empty review from
+ * an untrusted author still hits the trust row before the fallback. */
 const REVIEW_ROWS: readonly RowFn<ReviewSummary>[] = [
   responderAuthoredReviewRow,
   botSkipReviewRow,
-  trustReviewRow,
   reviewDismissedRow,
   reviewAlreadyAnsweredRow,
   approvalNoBodyRow,
+  trustReviewRow,
 ];
 
 // ---------------------------------------------------------------------------

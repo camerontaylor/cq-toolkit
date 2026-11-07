@@ -23,11 +23,13 @@
 #
 # Trigger note (development posture, 2026-10-20): this workflow is not a
 # required check, so invariant I4 does not bind it; it is path-filtered to
-# the files that shape the tarball's path set or its scan — package.json and
-# the lockfile, the shipped policy/ tree, README.md and LICENSE, the build
-# configs, the scripts (the build helpers), .gitleaks.toml, and this file —
-# plus workflow_dispatch, which the release runbooks use on the exact
-# release SHA. The repository-tree denylist (required) still scans every PR.
+# the files that shape the install, the tarball's path set or its scan —
+# package.json, the lockfile and pnpm's other install inputs
+# (pnpm-workspace.yaml, .pnpmfile.*), the shipped policy/ tree, README.md and
+# LICENSE, the build configs, the scripts (the build helpers), .gitleaks.toml,
+# and this file — plus workflow_dispatch, which the release runbooks use on
+# the exact release SHA. The repository-tree denylist (required) still scans
+# every PR.
 name: pack-audit
 
 on:
@@ -35,6 +37,10 @@ on:
     paths:
       - package.json
       - pnpm-lock.yaml
+      - pnpm-workspace.yaml
+      - .pnpmfile.js
+      - .pnpmfile.cjs
+      - .pnpmfile.mjs
       - 'policy/**'
       - 'src/**'
       - README.md

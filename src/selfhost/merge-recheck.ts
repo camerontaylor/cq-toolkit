@@ -86,7 +86,11 @@ import { observeWithChange, pruneToOpen, settleStatus } from '../policy/queue/se
 import type { SettleTuple } from '../policy/queue/settle-state.js';
 import { readSettleState, writeSettleState } from './state-branch.js';
 import type { StateBranchSnapshot, StateBranchWriteResult } from './state-branch.js';
-import { isIgnoredBotAuthor, parseIndependentReview } from '../shared/independent-review.js';
+import {
+  isIgnoredBotAuthor,
+  isReviewAppAuthor,
+  parseIndependentReview,
+} from '../shared/independent-review.js';
 import type { IndependentReviewAttestation } from '../shared/independent-review.js';
 import { defaultClassifyPrConfig } from '../ops/merge/classify.config.js';
 
@@ -902,18 +906,34 @@ const isTrusted = (
   return review.authorType === 'User' && policy.trustedAssociations.has(review.association);
 };
 
-/** Match plain exact-head PASS comments, including shared-account reviewers. */
+/**
+ * Match plain exact-head PASS comments, including shared-account reviewers.
+ * Trusted actors only: the PR author, or a User with a trusted association;
+ * excluded and null logins never count.
+ */
 const sameAccountAgentAccepted = (
   snapshot: PrSnapshot,
   headSha: string,
-  _policy: TrustPolicy,
+  policy: TrustPolicy,
 ): AuthenticatedR4Evidence | null => {
   for (const review of [...snapshot.reviews, ...(snapshot.allClear?.comments ?? [])]) {
     if (isIgnoredBotAuthor(review.authorType, review.authorLogin)) continue;
+    const login = review.authorLogin;
+    if (login === null || login === '') continue;
+    const name = bareName(login);
+    if ([...policy.excludedLogins].some((entry) => bareName(entry) === name)) continue;
+    // The cq-review App is the reviewer's own posting path; a plain comment
+    // counts only from the PR author (shared-account design) or a User holding
+    // a trusted association.
+    if (!isReviewAppAuthor(review.authorType, login)) {
+      if (review.authorType !== 'User') continue;
+      const isAuthor = snapshot.authorLogin !== null && bareName(snapshot.authorLogin) === name;
+      if (!isAuthor && !policy.trustedAssociations.has(review.association)) continue;
+    }
     const parsed = parseIndependentReview(review.body, headSha);
     if (parsed.kind !== 'valid') continue;
     return Object.freeze({
-      actorKey: `user:${review.authorLogin ?? 'reviewer'}`,
+      actorKey: review.actorKey,
       reviewNodeId: review.nodeId,
       reviewCommitOid: headSha,
       submittedAt: review.submittedAt ?? '',
