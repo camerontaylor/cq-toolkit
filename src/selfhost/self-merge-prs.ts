@@ -70,6 +70,7 @@ import { createGovernor, governorConfig } from '../kernel/governor.js';
 import { runPlan, type OpRegistryView } from '../kernel/runner.js';
 import type { OpRegistryEntry, RunOptions, RunReport } from '../kernel/types.js';
 import { enterWithCqEnv } from '../config/entry.js';
+import { readCqEnv } from '../config/env.js';
 import type { CqEnv } from '../config/env.js';
 import { defaultClassifyPrConfig } from '../ops/merge/classify.config.js';
 import { classifyPr } from '../ops/merge/classifyPrs.js';
@@ -297,10 +298,8 @@ export function buildRunInput(
     baseBranch: cfg.baseBranch ?? SelfhostDefaults.baseBranch,
     repoRoot: cfg.repoRoot,
     prs: candidates,
-    protectedBranch:
-      cfg.cqEnv !== undefined
-        ? resolvedProtectedBranch(cfg.cqEnv)
-        : SelfhostDefaults.protectedBranch,
+    // Same source as the op's mirror check: cfg.cqEnv, else the process env.
+    protectedBranch: resolvedProtectedBranch(cfg.cqEnv ?? readCqEnv()),
     wallClockMs: SelfhostDefaults.perJobWallClockMs,
     ...(cfg.disableConflictResolution === true
       ? { conflictResolutionDisabled: true }
@@ -488,8 +487,9 @@ export async function runSelfMergePrs(
   // merge-time recheck over the real (or seam-injected) inner effects. An
   // injected driverRegistryView is used verbatim (its scripted op owns its
   // merge path).
-  const protectedBranch =
-    cfg.cqEnv !== undefined ? resolvedProtectedBranch(cfg.cqEnv) : SelfhostDefaults.protectedBranch;
+  const resolvedEnv = cfg.cqEnv ?? readCqEnv();
+  const protectedBranch = resolvedProtectedBranch(resolvedEnv);
+  const baseBranchResolved = cfg.baseBranch ?? SelfhostDefaults.baseBranch;
   const basePolicy = cfg.trustPolicy ?? CONSERVATIVE_TRUST_POLICY;
   const policy: TrustPolicy = {
     ...basePolicy,
@@ -514,7 +514,7 @@ export async function runSelfMergePrs(
           repoRoot: cfg.repoRoot,
           protectedBranch,
         }),
-      ...(cfg.cqEnv !== undefined ? { cqEnv: cfg.cqEnv } : {}),
+      cqEnv: resolvedEnv,
       recheck: (pr, head, base) =>
         identityRefusal !== null
           ? Promise.resolve<RecheckResult>({
@@ -529,9 +529,9 @@ export async function runSelfMergePrs(
                 nowMs: clock,
                 settleMs,
                 policy,
-                ...((cfg.baseBranch ?? SelfhostDefaults.baseBranch) === 'main'
-                  ? {}
-                  : { protectedBranch }),
+                // The queue target itself is never refused as a base; any other
+                // PR base equal to the resolved protected branch is.
+                ...(baseBranchResolved === protectedBranch ? {} : { protectedBranch }),
               },
               pr,
               head,
