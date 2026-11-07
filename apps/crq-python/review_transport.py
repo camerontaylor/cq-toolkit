@@ -103,11 +103,20 @@ def handle(raw, runner, *, principal, policy):
                 author_snapshot.install(req["snapshot"], dict(base=inputs["base_commit"], head=inputs["head_commit"]), runner, original=True)
             stored = profile(runner.CONFIG, inputs["base_commit"])
             facts = resolve(runner, inputs, stored)
+            import local_review_runtime
             result = admission.admit(q, request_id=req["request_id"], inputs=inputs,
                                      resolved=facts, profile=stored, at=runner.iso(),
                                      repeat=req.get("repeat", False), supersedes=req.get("supersedes"),
                                      notify=req.get("notify"), verify_receipt=lambda item: retained(runner, item))
             runner.save_queue(q)
+            if result["action"] == "created" and any(i.get("kind") in ("open", "delta") and i.get("cycles") for i in q["items"]):
+                item = next(i for i in q["items"] if i["id"] == result["item"])
+                try:
+                    reused = local_review_runtime.prepare(runner, q, item, False) is None
+                except runner.NotReady:
+                    reused = False
+                if reused:
+                    result = {**admission.status(q, req["request_id"]), "action": "reused"}
     elif op == "cancel":
         result = admission.cancel(q, req["request_id"])
         runner.save_queue(q)
