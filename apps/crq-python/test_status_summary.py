@@ -25,6 +25,24 @@ def setUpModule():
 
 
 class SummaryTest(unittest.TestCase):
+    def test_completion_groups_and_bounded_priority_preview(self):
+        kinds = ["open", "delta", "merged-current", "merged", "coverage", "backfill"]
+        items = [{"id": str(n), "kind": k, "state": "pending", "pr": n + 1,
+                  "order": n} for n, k in enumerate(kinds)]
+        items += [{"id": str(n), "kind": "backfill", "state": "pending"}
+                  for n in range(6, 20)]
+        events = [{"event": "review_finished", "item": str(n), "outcome": "completed",
+                   "at": "1970-01-01T00:00:01Z"} for n in range(6)]
+        data = adapter.summarize({"generated_at": "1970-01-01T00:00:02Z"},
+            {"items": items}, {}, {"max_starts_per_hour": 8, "repo": "owner/repo"}, events, 2)
+        self.assertEqual(data["completed_24h_by_work"],
+                         dict(open=2, recent_merge=1, backfill=3, other=0))
+        self.assertEqual(sum(data["completed_24h_by_work"].values()), data["outcomes_24h"]["completed"])
+        self.assertEqual(data["backfill_reserved_slots"], 1)
+        self.assertEqual(len(data["pending_items"]), 10)
+        self.assertEqual([i["kind"] for i in data["pending_items"][:3]], kinds[:3])
+        self.assertEqual(data["pending_items"][0]["repo"], "owner/repo")
+
     def test_discovery_budget_reason_visible(self):
         result = adapter.merged_current({"items": [], "merged_reconcile": {
             "reason": "budget-exhausted", "pages_read": 0, "transient_failures": 0}})
