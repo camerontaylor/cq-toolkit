@@ -25,6 +25,17 @@ def setUpModule():
 
 
 class SummaryTest(unittest.TestCase):
+    def test_preview_uses_configured_foreign_repo_rank(self):
+        queue = {"items": [
+            {"id": "foreign", "repo": "owner/foreign", "kind": "open", "state": "pending", "order": 0},
+            {"id": "primary", "kind": "merged-current", "state": "pending", "order": 1},
+            {"id": "push", "repo": "owner/foreign", "kind": "push-current", "state": "pending", "order": 2}]}
+        data = adapter.summarize({"generated_at": "1970-01-01T00:00:02Z"}, queue, {},
+            {"repo": "owner/primary", "max_starts_per_hour": 8,
+             "repos": [{"repo": "owner/foreign", "rank_tier": 3}]}, [], 2)
+        self.assertEqual([i["kind"] for i in data["pending_items"]],
+                         ["merged-current", "open", "push-current"])
+
     def test_completion_groups_and_bounded_priority_preview(self):
         kinds = ["open", "delta", "merged-current", "merged", "coverage", "backfill"]
         items = [{"id": str(n), "kind": k, "state": "pending", "pr": n + 1,

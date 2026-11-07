@@ -2,6 +2,7 @@
 import datetime as dt
 import coverage
 import review_receipt
+import repo_registry
 import repair_tick
 import json
 import os
@@ -180,12 +181,17 @@ def summarize(status, queue, heartbeat, config, events, now):
     usage = queue.get("usage") or {}
     limit = usage.get("limit") if isinstance(usage, dict) else None
     starts_cap = limit if type(limit) is int and limit > 0 else config["max_starts_per_hour"]
+    ranks = [{**entry, "rank_tier": entry.get("rank_tier", repo_registry.DEFAULT_RANK)}
+             for entry in config.get("repos", [])]
     def pending_key(item):
         rank = {"open": 0, "recent_merge": 2, "backfill": 3, "other": 4}[category(item)]
         if item.get("kind") in ("coverage", "backfill"):
             rank = 4
         elif item.get("kind") == "delta" and category(item) == "open":
             rank = 1
+        repo_rank = repo_registry.rank_for(item, primary, ranks)
+        if repo_rank is not None:
+            rank = repo_rank
         return (not item.get("operator_priority", False), rank, item.get("order", 999))
     pending = [i for i in items if i.get("state") == "pending"
                and not (i.get("kind") == "open" and i.get("cycles"))]
