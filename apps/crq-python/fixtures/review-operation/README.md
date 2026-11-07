@@ -21,10 +21,15 @@ concatenation of `oid + NUL + type + NUL + data + LF` for every sorted object.
 `aaaaaaaa…`; installation tests must supply a real reachable base.
 
 The full JSON request is bounded at 6 MiB, the canonical snapshot JSON at 5 MiB,
-decoded object contents at 4 MiB,
+decoded object contents at 3 MiB for original snapshots,
 and objects at 4096. Oversize or incomplete snapshots fail with actionable limits;
 objects are never truncated. The snapshot cap leaves 1 MiB for the surrounding request. All bounds apply
-together; content/object maxima do not waive the encoded snapshot byte cap.
+together. Three MiB expands to at most 4 MiB of base64 plus padding;
+4096 fixed-shape object envelopes leave the total below the 5 MiB snapshot cap.
+The legacy synthetic author protocol retains its separate 4 MiB content cap.
+Original history is secret-scanned, including removed blobs and complete commit
+metadata. Checkout mode, path and symlink constraints apply only at the head;
+historical gitlinks contain no blob bytes to scan.
 
 ## Results
 

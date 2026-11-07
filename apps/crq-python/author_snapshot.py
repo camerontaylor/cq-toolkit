@@ -12,6 +12,7 @@ import time
 from author_quota import AuthorRefused
 
 MAX_CONTENT = 4 * 1024 * 1024
+MAX_ORIGINAL_CONTENT = 3 * 1024 * 1024
 MAX_OBJECTS = 4096
 MAX_WIRE = 6 * 1024 * 1024
 OID = re.compile(r"^[0-9a-f]{40}$")
@@ -132,8 +133,9 @@ def decode(snapshot, binding, *, original=False):
         if base64.b64encode(data).decode() != encoded:
             raise AuthorRefused("noncanonical snapshot object encoding")
         total += len(data)
-        if total > MAX_CONTENT:
-            raise AuthorRefused("snapshot content exceeds bound")
+        content_limit = MAX_ORIGINAL_CONTENT if original else MAX_CONTENT
+        if total > content_limit:
+            raise AuthorRefused(f"snapshot content exceeds {content_limit} decoded bytes; reduce the commit range")
         actual = hashlib.sha1(kind.encode() + b" " + str(len(data)).encode() + b"\0" + data).hexdigest()
         if actual != oid or (not original and kind == "commit" and (oid != binding["head"] or data != commit_bytes(binding["base"], tree))):
             raise AuthorRefused("snapshot object identity mismatch")
@@ -179,6 +181,15 @@ def install(snapshot, binding, runner, *, original=False):
         # Only entries that differ from base are checked: unchanged entries already exist in the
         # review clone, and walking the whole tree would bound-fail on large repositories.
         raw = git(quarantine, "diff-tree", "-r", "-z", "--no-renames", binding["base"], binding["head"]).split(b"\0")
+        def entries_from(parts):
+            result = []
+            for meta, raw_path in zip(parts[0::2], parts[1::2]):
+                _, mode, _, oid, _ = meta.split(b" ")
+                if mode != b"000000":
+                    result.append((mode, oid.decode(), raw_path))
+            return result
+        head_entries = entries_from(raw)
+        history_entries = []
         if original:
             # The vendor can inspect original history, including blobs removed
             # before HEAD. Scan each transferred commit's changes against every
@@ -191,17 +202,12 @@ def install(snapshot, binding, runner, *, original=False):
                     history_bytes += sum(len(part) + 1 for part in history)
                     if history_bytes > MAX_WIRE:
                         raise AuthorRefused("snapshot history scan exceeds bound; reduce the commit range")
-                    raw.extend(history)
-            raw = [part for part in raw if part]
-        entries = []  # (mode, oid, raw_path) for every added or modified path
-        for meta, raw_path in zip(raw[0::2], raw[1::2]):
-            _, new_mode, _, new_oid, _ = meta.split(b" ")
-            if new_mode != b"000000":
-                entries.append((new_mode, new_oid.decode(), raw_path))
-        if original:
-            entries = sorted(set(entries))
-        if any(mode not in (b"100644", b"100755", b"120000") for mode, _, _ in entries):
+                    history_entries.extend(entry for entry in entries_from(history)
+                                           if entry[0] != b"160000")  # gitlinks have no blob bytes
+        if any(mode not in (b"100644", b"100755", b"120000") for mode, _, _ in head_entries):
             raise AuthorRefused("snapshot gitlinks or unsupported modes refused")
+        entries = sorted(set(head_entries + history_entries)) if original else head_entries
+        head_entries = set(head_entries)
         # Tree entries are typed by mode, not by object: a 100644 entry may name a tree.
         # Require every entry to resolve to a real blob so it can be scanned and checked out.
         kinds = git(quarantine, "cat-file", "--batch-check=%(objecttype)",
@@ -231,16 +237,32 @@ def install(snapshot, binding, runner, *, original=False):
         allow = [re.compile(pattern) for pattern in runner.ALLOWLIST_PATHS]
         scan_parts = [diff]
         scan_size = len(diff.encode())
+        if original:
+            # Original commit messages, author/committer names and extra
+            # headers are uploaded context too. They have no file-path scope
+            # or allowlist exemption; scan all text, not just the message tail.
+            for oid, kind, data in objects:
+                if kind != "commit":
+                    continue
+                text = data.decode("utf-8", errors="replace")
+                if any(regex.search(line) for regex, _ in compiled for line in text.splitlines()):
+                    raise AuthorRefused("snapshot commit metadata secret scan refused")
+                part = "commit " + oid + "\n" + text
+                scan_size += len(part.encode()) + 1
+                if scan_size > MAX_WIRE:
+                    raise AuthorRefused("snapshot scan exceeds bound")
+                scan_parts.append(part)
         for mode, oid, raw_path in entries:
-            path = raw_path.decode("utf-8", errors="strict")
-            if any(ord(c) < 32 or ord(c) == 127 for c in path) or any(
-                    part in (".", "..") or part.lower() == ".git" for part in path.split("/")):
+            materialized = (mode, oid, raw_path) in head_entries
+            path = raw_path.decode("utf-8", errors="strict" if materialized else "replace")
+            if materialized and (any(ord(c) < 32 or ord(c) == 127 for c in path) or any(
+                    part in (".", "..") or part.lower() == ".git" for part in path.split("/"))):
                 raise AuthorRefused("unsafe snapshot path")
             # A later `git worktree add` must be able to create every path on the runner filesystem.
-            if len(raw_path) > path_max or any(len(part) > name_max for part in raw_path.split(b"/")):
+            if materialized and (len(raw_path) > path_max or any(len(part) > name_max for part in raw_path.split(b"/"))):
                 raise AuthorRefused("snapshot path too long to check out")
             # A symlink must be materializable exactly: non-empty target, no NUL truncation.
-            if mode == b"120000" and (
+            if materialized and mode == b"120000" and (
                     not blobs[oid] or b"\0" in blobs[oid] or len(blobs[oid]) >= fs_path_max):
                 raise AuthorRefused("snapshot symlink target is not representable")
             contents = blobs[oid].decode("utf-8", errors="replace")

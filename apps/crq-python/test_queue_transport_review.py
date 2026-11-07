@@ -241,3 +241,58 @@ class ReviewTransportTests(SnapshotTransportFixture, unittest.TestCase):
         result = json.loads(transport.handle(raw, self.runner, principal="queue-client", policy=self.policy))
         self.assertEqual(result["action"], "created")
         self.assertEqual(self.saved["items"][0]["identity_inputs"]["head_commit"], head)
+
+    def original_range(self, head, tree, request_id="range"):
+        req = copy.deepcopy(self.review)
+        objects, digest = [], hashlib.sha256()
+        for oid in sorted(self.git("rev-list", "--objects", "--no-object-names", head, "^" + self.base).split()):
+            kind = self.git("cat-file", "-t", oid)
+            data = base64.b64encode(author_snapshot.git(self.repo, "cat-file", kind, oid)).decode()
+            objects.append(dict(oid=oid, type=kind, data=data))
+            digest.update((oid + "\0" + kind + "\0" + data + "\n").encode())
+        req.update(request_id=request_id, snapshot=dict(v=1, tree=tree, objects=objects, sha256=digest.hexdigest()))
+        req["inputs"].update(head_commit=head, head_tree=tree)
+        return req
+
+    def test_historical_submodule_and_long_path_do_not_block_clean_head(self):
+        blob = self.git("rev-parse", self.base + ":file.txt")
+        for name, entry in (("submodule", f"160000 commit {self.base}\tsubmodule\n"),
+                            ("long-path", f"100644 blob {blob}\t{'a' * 300}\n")):
+            tree = self.git("mktree", data=entry.encode())
+            intermediate = self.commit(tree, self.base)
+            head = self.commit(self.changed_tree, intermediate)
+            self.assertEqual(self.call_review(self.original_range(head, self.changed_tree, name))["action"], "created")
+            # The same materialization constraint still applies at HEAD.
+            with self.assertRaises(author_snapshot.AuthorRefused):
+                self.call_review(self.original_range(intermediate, tree, name + "-head"))
+
+    def test_commit_messages_and_identity_metadata_are_secret_scanned(self):
+        self.runner.denylist_rules = lambda: [{"regex": "commit-secret-marker", "path": "^not-a-file$"}]
+        for field in ("message", "author", "committer"):
+            body = author_snapshot.git(self.repo, "cat-file", "commit", self.head)
+            if field == "message":
+                body += b"commit-secret-marker\n"
+            else:
+                body = body.replace((field + " ").encode(), (field + " commit-secret-marker ").encode(), 1)
+            head = self.git("hash-object", "-w", "-t", "commit", "--stdin", data=body)
+            with self.assertRaisesRegex(author_snapshot.AuthorRefused, "commit metadata secret scan"):
+                self.call_review(self.original_range(head, self.changed_tree, field))
+        self.assertEqual(self.saved["items"], [])
+
+    def test_original_decoded_content_limit_is_reachable_and_enforced(self):
+        limit = transport.capabilities()["limits"]["max_content_bytes"]
+        self.assertEqual(limit, 3 * 1024 * 1024)
+        self.assertEqual(author_snapshot.MAX_CONTENT, 4 * 1024 * 1024)
+        prefix = (f"tree {self.base_tree}\nparent {self.base}\n"
+                  "author Fixture <fixture@example.test> 0 +0000\n"
+                  "committer Fixture <fixture@example.test> 0 +0000\n\n").encode()
+        for size in (limit, limit + 1):
+            head = self.git("hash-object", "-w", "-t", "commit", "--stdin", data=prefix + b"x" * (size - len(prefix)))
+            req = self.original_range(head, self.base_tree, "limit-" + str(size))
+            self.assertLess(len(review_receipt.canonical(req["snapshot"])), transport.MAX_SNAPSHOT_BYTES)
+            self.assertLess(len(json.dumps(req).encode()), transport.MAX_BYTES)
+            if size == limit:
+                self.assertEqual(self.call_review(req)["action"], "no-changes")
+            else:
+                with self.assertRaisesRegex(author_snapshot.AuthorRefused, "3145728 decoded bytes"):
+                    self.call_review(req)

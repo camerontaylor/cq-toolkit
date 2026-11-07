@@ -33,7 +33,7 @@ def capabilities():
     return dict(v=1, command="review-v1", operations=OPERATIONS,
                 features=["original-commit-snapshot-v1", "chunked-result-v1", "repeat-generations-v1"],
                 limits=dict(max_request_bytes=MAX_BYTES, max_snapshot_bytes=MAX_SNAPSHOT_BYTES,
-                            max_content_bytes=author_snapshot.MAX_CONTENT,
+                            max_content_bytes=author_snapshot.MAX_ORIGINAL_CONTENT,
                             max_objects=author_snapshot.MAX_OBJECTS, chunk_bytes=review_receipt.CHUNK_BYTES))
 
 
