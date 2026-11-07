@@ -200,8 +200,8 @@ export type GovernanceOptIn =
 
 /**
  * `run-started.governance` — present iff the run is governed (ADR-0003
- * annex §2). Plain data; the provenance `config` field (RS-15/W3.6) is not
- * part of v1.1's W2 slices.
+ * annex §2). Plain data. The provenance `config` field (RS-15/W3.6) is
+ * {@link ProvenanceConfig}, added to the v3 provenance record by config contract C5.
  */
 export interface GovernanceRecord {
   /** The run's USD cap, when one is configured (the ledger's C for this run). */
@@ -514,6 +514,14 @@ export interface WitnessesRecord {
  * the report carries the observed completion time. Links are repo-relative
  * artifact paths, never absolute host paths.
  */
+export interface ProvenanceConfig {
+  /** Resolved `source: 'env'` values; secrets and foreign secrets are the literal 'set'. */
+  env: Record<string, string | number | boolean | string[] | null>;
+  sources: Record<string, 'env'>;
+  /** Env diagnostics as message text (never a value). */
+  warnings: string[];
+}
+
 export interface ProvenanceRecord {
   cqVersion: string;
   producerVersion: string;
@@ -527,6 +535,8 @@ export interface ProvenanceRecord {
   journalLink: string;
   reportLink: string;
   witnesses: WitnessesRecord;
+  /** Resolved env config at run start (ADR-0009); optional, absent on older records. */
+  config?: ProvenanceConfig | undefined;
 }
 
 /** Shared run correlation (ADR-0008); work IDs are persisted UUIDs, restored on resume. */

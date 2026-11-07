@@ -1,4 +1,6 @@
 import { reviewBranchKey } from './internal/branchKey.js';
+import { readCqEnv } from '../../config/env.js';
+import { provenanceConfig } from '../../config/provenance.js';
 import { makeGitMutex } from '../../shared/gitMutex.js';
 import { createHash, randomUUID } from 'node:crypto';
 import {
@@ -326,6 +328,7 @@ async function captureAddressProvenance(
     journalLink: 'unavailable',
     reportLink: 'unavailable',
     witnesses: { base: baseSha, admitted: null, execution: null, reviewed: null, accepted: null },
+    config: provenanceConfig(readCqEnv()),
   };
   return sanitizeObservation({ provenance });
 }
