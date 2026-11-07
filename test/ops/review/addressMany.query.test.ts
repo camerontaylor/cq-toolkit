@@ -17,17 +17,19 @@ test.each([true, false])(
         ? {
             code: 0,
             stderr: '',
-            stdout: JSON.stringify({
-              total_count: 101,
-              incomplete_results: incomplete,
-              items: [
-                {
-                  number: 1,
-                  repository_url: 'https://api.github.com/repos/owner/repo',
-                  pull_request: { url: 'url' },
-                },
-              ],
-            }),
+            stdout: JSON.stringify([
+              {
+                total_count: 101,
+                incomplete_results: incomplete,
+                items: [
+                  {
+                    number: 1,
+                    repository_url: 'https://api.github.com/repos/owner/repo',
+                    pull_request: { url: 'url' },
+                  },
+                ],
+              },
+            ]),
           }
         : gh(args);
     const { pulls: _, ...queryInput } = input;
@@ -51,17 +53,19 @@ test('complete query dispatches eligible PRs', async () => {
       ? {
           code: 0,
           stderr: '',
-          stdout: JSON.stringify({
-            total_count: 1,
-            incomplete_results: false,
-            items: [
-              {
-                number: 1,
-                repository_url: 'https://api.github.com/repos/owner/repo',
-                pull_request: { url: 'url' },
-              },
-            ],
-          }),
+          stdout: JSON.stringify([
+            {
+              total_count: 1,
+              incomplete_results: false,
+              items: [
+                {
+                  number: 1,
+                  repository_url: 'https://api.github.com/repos/owner/repo',
+                  pull_request: { url: 'url' },
+                },
+              ],
+            },
+          ]),
         }
       : gh(args);
   const { pulls: _, ...queryInput } = input;
@@ -75,25 +79,26 @@ test('complete query dispatches eligible PRs', async () => {
   expect(address).toHaveBeenCalledTimes(1);
 });
 
-test('query walks every page before dispatching', async () => {
-  const pages: number[] = [];
+test('query requests every page through one paginate+slurp call before dispatching', async () => {
+  const searches: string[][] = [];
   const address = vi.fn(async () => ({ status: 'ok' as const, value: report() }));
   const pagedGh = async (args: string[]) => {
     if (args.includes('search/issues')) {
-      const page = Number(args.at(-1)!.split('=')[1]);
-      pages.push(page);
+      searches.push(args);
       return {
         code: 0,
         stderr: '',
-        stdout: JSON.stringify({
-          total_count: 101,
-          incomplete_results: false,
-          items: Array.from({ length: page === 1 ? 100 : 1 }, (_, i) => ({
-            number: (page - 1) * 100 + i + 1,
-            repository_url: 'https://api.github.com/repos/owner/repo',
-            pull_request: { url: 'url' },
+        stdout: JSON.stringify(
+          [1, 2].map((page) => ({
+            total_count: 101,
+            incomplete_results: false,
+            items: Array.from({ length: page === 1 ? 100 : 1 }, (_, i) => ({
+              number: (page - 1) * 100 + i + 1,
+              repository_url: 'https://api.github.com/repos/owner/repo',
+              pull_request: { url: 'url' },
+            })),
           })),
-        }),
+        ),
       };
     }
     if (args[0] === 'repo') return gh(args);
@@ -111,7 +116,9 @@ test('query walks every page before dispatching', async () => {
     address,
     isolate: async (root) => root,
   })({ ...queryInput, query: 'label:fix' });
-  expect(pages).toEqual([1, 2]);
+  expect(searches).toHaveLength(1);
+  expect(searches[0]).toEqual(expect.arrayContaining(['--paginate', '--slurp']));
+  expect(searches[0]).not.toContain('page=1');
   expect(result.status).toBe('ok');
   expect(address).toHaveBeenCalledTimes(1);
 });
@@ -120,25 +127,21 @@ test.each(['cap', 'changing-total', 'foreign', 'duplicate', 'exit', 'facts'])(
   'discovery refuses %s before dispatch',
   async (mode) => {
     const address = vi.fn();
-    let page = 0;
     const queryGh = async (args: string[]) => {
       if (args[0] === 'repo') return gh(args);
       if (!args.includes('search/issues'))
         return { code: 1, stderr: 'facts unavailable', stdout: '' };
-      page++;
-      const total =
-        mode === 'cap'
-          ? 1001
-          : mode === 'facts'
-            ? 1
-            : mode === 'changing-total' && page === 2
-              ? 102
-              : 101;
-      const count = mode === 'facts' || page === 2 ? 1 : 100;
-      return {
-        code: mode === 'exit' ? 1 : 0,
-        stderr: '',
-        stdout: JSON.stringify({
+      const pages = [1, 2].map((page) => {
+        const total =
+          mode === 'cap'
+            ? 1001
+            : mode === 'facts'
+              ? 1
+              : mode === 'changing-total' && page === 2
+                ? 102
+                : 101;
+        const count = mode === 'facts' || page === 2 ? 1 : 100;
+        return {
           total_count: total,
           incomplete_results: false,
           items: Array.from({ length: count }, (_, i) => ({
@@ -146,7 +149,12 @@ test.each(['cap', 'changing-total', 'foreign', 'duplicate', 'exit', 'facts'])(
             repository_url: `https://api.github.com/repos/${mode === 'foreign' ? 'other/repo' : input.repo}`,
             pull_request: { url: 'url' },
           })),
-        }),
+        };
+      });
+      return {
+        code: mode === 'exit' ? 1 : 0,
+        stderr: '',
+        stdout: JSON.stringify(mode === 'facts' ? pages.slice(0, 1) : pages),
       };
     };
     const { pulls: _, ...rest } = input;
