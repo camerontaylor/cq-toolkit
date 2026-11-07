@@ -84,3 +84,55 @@ variable mapping (N15 and N21); the ADR-0004 trust boundaries; P8 (conservative 
   registry, snapshot and run-start record describe.
 - Changing what `cq.json` trusts (for example a PR editing its own `checks`) is an ADR-0004 question and is not
   decided here.
+
+## Appendix: process.env confinement (C7)
+
+The lint rule `cq/no-process-env` bans `process.env` in `src/**`. The files below are switched off in `.oxlintrc.json`, each for one reason:
+
+- `src/adapters/forge-github/gh.ts`: gh child env composition
+- `src/adapters/forge-github/ghEffects.ts`: gh child env composition
+- `src/adapters/forge-github/ratchetEffects.ts`: gh child env composition; CQ_AUTOMATION_TOKEN becomes GH_TOKEN there
+- `src/adapters/git/ratchetGit.ts`: git child env composition
+- `src/driver/acp/index.ts`: ACP child env builder (foreign names)
+- `src/driver/ai-sdk/index.ts`: provider key and base-URL lookup (foreign names)
+- `src/driver/claude-code/cli.ts`: claude child env builder (foreign host vars)
+- `src/driver/claude-code/sdk.ts`: claude SDK child env builder and provider key lookup
+- `src/driver/error-text.ts`: redacts ambient secret values from error text (whole-env scan)
+- `src/harness/mcp/startup.ts`: MCP startup env scrub; replaces process.env in place
+- `src/harness/tools.ts`: tool child env builders
+- `src/kernel/runner.ts`: C5 in flight; migrate after
+- `src/ops/analyze/approval.ts`: git child env composition
+- `src/ops/analyze/fix.ts`: git child env composition
+- `src/ops/dev/effects.ts`: git child env composition
+- `src/ops/dev/internal/snapshot.ts`: git child env composition (strips GIT_*)
+- `src/ops/sweep/unit.ts`: redacts ambient secret values from sweep output (whole-env scan)
+- `src/sandbox/launcher.ts`: PATH lookup for the sandbox launcher binary
+- `src/selfhost/self-merge-prs.ts`: C6 in flight; migrate after
+- `src/shared/proc.ts`: the shared child env builder
+
+The rule `cq/no-process-env-accessor` bans importing or calling `processEnv()` (`src/config/process-env.ts`) outside `src/config/**` and the debt list below. These readers have no `CqEnv` snapshot from their caller yet (debt: thread CqEnv; see issue #1185). Remove a file from the list in `.oxlintrc.json` as it is migrated; when the list is empty, delete `processEnv()` and the rule.
+
+- `src/config/process-env.ts`
+- `src/driver/acp/binaries.ts`
+- `src/driver/claude-code/routing.ts`
+- `src/driver/factory.ts`
+- `src/driver/sessions-dir.ts`
+- `src/harness/surface.ts`
+- `src/ops/config/show.ts`
+- `src/ops/dev/review-transport.ts`
+- `src/ops/fix/runFix.ts`
+- `src/ops/gates/policyConfig.ts`
+- `src/ops/gates/registry.ts`
+- `src/ops/review/address.ts`
+- `src/ops/review/internal/addressEvidence.ts`
+- `src/ops/review/internal/queueClient.ts`
+- `src/ops/review/queue.ts`
+- `src/sandbox/config.ts`
+- `src/sandbox/index.ts`
+- `src/sandbox/launcher.ts`
+- `src/selfhost/acceptance.ts`
+- `src/selfhost/config.ts`
+- `src/selfhost/observe-prs.ts`
+- `src/selfhost/policy-diff.ts`
+- `src/selfhost/self-review-loop.ts`
+- `src/selfhost/verify-ratchet.ts`

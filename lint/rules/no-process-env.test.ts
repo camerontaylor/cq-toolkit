@@ -28,6 +28,10 @@ ruleTester.run('no-process-env', rule, {
     ok('const x = other.process.env;'),
     ok('const { argv } = process;'),
     ok('const e = process.environment;'),
+    ok("import { argv } from 'node:process'; argv.slice(2);"),
+    ok("import proc from 'node:process'; proc.cwd();"),
+    ok('function f({ argv } = process) { return argv; }'),
+    ok('let a; ({ argv: a } = process);'),
   ],
   invalid: [
     bad("const v = process.env['A'];"),
@@ -37,5 +41,12 @@ ruleTester.run('no-process-env', rule, {
     bad('const v = globalThis.process.env.A;'),
     bad('const { env } = process;'),
     bad('function f(env = process.env) { return env; }'),
+    bad("import { env } from 'node:process';"),
+    bad("import { env as e } from 'process';"),
+    bad("import proc from 'node:process'; const v = proc.env.A;"),
+    bad("import * as proc from 'node:process'; const v = proc.env.A;"),
+    bad("import { default as proc } from 'node:process'; const v = proc.env;"),
+    bad('let env; ({ env } = process);'),
+    bad('function f({ env } = process) { return env; }'),
   ],
 });
