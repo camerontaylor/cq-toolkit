@@ -113,6 +113,21 @@ class ModuleTest(unittest.TestCase):
         with contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(prf.main(argv + ["--base", "bad"], gh=FakeGh()), 1)
 
+    def test_cli_rejects_malformed_findings_before_network(self):
+        import contextlib
+        import io
+        body = Path(self.td.name) / "summary.md"
+        body.write_text("PASS for " + HEAD)
+        for event in ({"type": "finding"}, {**ANCHORED, "startLine": "2"},
+                      {**ANCHORED, "endLine": True}, {**ANCHORED, "fileName": ""}):
+            findings = write_ndjson(self.td.name, [event])
+            gh = FakeGh()
+            with contextlib.redirect_stderr(io.StringIO()):
+                result = prf.main(["--repo", REPO, "--pr", "7", "--head", HEAD, "--base", BASE,
+                    "--run-id", "invalid-finding", "--findings", str(findings), "--body-file", str(body)], gh=gh)
+            self.assertEqual(result, 1)
+            self.assertEqual(gh.calls, [])
+
     def test_right_ranges_cover_each_hunk_including_context(self):
         self.assertEqual(prf.right_ranges(PATCH), [(1, 4), (41, 46)])
         self.assertEqual(prf.right_ranges("@@ -3 +3 @@\n-x\n+y\n@@ -9,2 +8,0 @@\n-a\n-b\n"), [(3, 3)])

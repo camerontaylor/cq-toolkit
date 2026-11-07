@@ -400,6 +400,14 @@ def main(argv=None, gh=None):
             event = json.loads(line)
             if not isinstance(event, dict) or event.get("type") != "finding":
                 raise ValueError(f"findings line {number} must be a finding event")
+            for field in ("severity", "title", "comment"):
+                if not isinstance(event.get(field), str) or not event[field].strip():
+                    raise ValueError(f"findings line {number} requires nonempty {field}")
+            if "fileName" in event and (not isinstance(event["fileName"], str) or not event["fileName"].strip()):
+                raise ValueError(f"findings line {number} has invalid fileName")
+            for field in ("startLine", "endLine"):
+                if field in event and (_line(event[field]) is None or "fileName" not in event):
+                    raise ValueError(f"findings line {number} has invalid {field} or missing fileName")
         summary = args.body_file.read_text(encoding="utf-8")
         if not summary.strip() or len(summary) > 20000:
             raise ValueError("summary must contain 1..20000 characters")
