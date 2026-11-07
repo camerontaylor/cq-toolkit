@@ -83,6 +83,14 @@ if (getPriority() < NICE_INCREMENT) {
   }
 }
 
+// The re-exec marker has served its purpose (the nice attempt above reads it).
+// Strip it before this process hands its environment to Python, the build or
+// Vitest: it is internal to this runner, and a spawned `cq` CLI treats an
+// unregistered CQ_* name as a warning on stderr (test/cli/op-subcommands
+// asserts a silent stderr in --json mode). CQ_DIST_PREPARED needs no such
+// stripping: it is a registered `test` entry in src/config/env-registry.ts.
+if (process.env[REEXEC_MARK] !== undefined) delete process.env[REEXEC_MARK];
+
 // From here on this process runs niced. ------------------------------------
 // pnpm runs scripts from the package root and passes the caller's directory
 // as INIT_CWD; explicit relative paths resolve against the caller's.
