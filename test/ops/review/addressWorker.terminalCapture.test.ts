@@ -108,8 +108,8 @@ test.each(['rejected', 'deferred'] as const)(
   180_000,
 );
 
-test('a capture release failure after commit does not restore or retain a failed commit', async () => {
-  const f = await fixture();
+test('a capture release failure after commit does not restore, retain or retry', async () => {
+  const f = await fixture(undefined, '', { workerAttempts: 2, rescueBase: 1 });
   const release = vi
     .spyOn(addressOwnership, 'releaseAddressTerminalAttempt')
     .mockImplementation(() => {
@@ -124,6 +124,11 @@ test('a capture release failure after commit does not restore or retain a failed
         const engine = makeAddressWorker({ ...f.engineDeps, terminalBinding: binding });
         const result = await engine.fix(finding(), 1);
         expect(result.reason).toContain('synthetic release failure');
+        // The commit landed and was verified: it is reported, not hidden behind
+        // a deferred row whose retry would re-dispatch committed work.
+        expect(result.finding.status, result.reason).toBe('fixed');
+        expect(result.commit).toBeTruthy();
+        expect(f.attempts.filter((row) => row.invocation === 'edit')).toHaveLength(1);
         expect(result.failedAttempts).toEqual([]);
         expect(f.repo.git('rev-parse', 'HEAD').trim()).not.toBe(f.initial);
         expect(await readFile(join(f.repo.root, 'src/a.ts'), 'utf8')).toBe('GOOD\n');

@@ -27,10 +27,17 @@ describe('findReusableCycle', () => {
       head: 'd'.repeat(40),
       completion: { kind: 'blocked', reason: 'failed' },
     });
-    const terminal = cycleRecord({ cycleId: 'c003', head: blocked.head });
-    expect(findReusableCycle([cycleRecord(), blocked, terminal], REQUEST)?.basis).toBe(
-      'exact-terminal',
-    );
+    // A newer SAME-identity terminal supersedes the anchor: it both resolves
+    // the blocker and becomes the selection.
+    const terminal = cycleRecord({ cycleId: 'c003' });
+    expect(findReusableCycle([cycleRecord(), blocked, terminal], REQUEST)).toMatchObject({
+      basis: 'exact-terminal',
+      cycle: { cycleId: 'c003' },
+    });
+    // A newer terminal at a DIFFERENT identity refuses reuse: readiness
+    // anchors on it and reports stale-review-identity at this tree.
+    const moved = cycleRecord({ cycleId: 'c003', head: blocked.head });
+    expect(findReusableCycle([cycleRecord(), blocked, moved], REQUEST)).toBeNull();
     expect(
       findReusableCycle(
         [cycleRecord(), blocked, { ...terminal, dirtySha256: 'different' }],
@@ -59,9 +66,14 @@ describe('findReusableCycle', () => {
     ).toBeNull();
   });
 
-  test('different-head terminal cycles and unconfigured blockers do not prevent reuse', () => {
+  test('unconfigured later attempts do not prevent reuse', () => {
     for (const later of [
-      cycleRecord({ cycleId: 'c002-aaaaaaaa', head: 'd'.repeat(40) }),
+      cycleRecord({
+        cycleId: 'c002-aaaaaaaa',
+        reviewer: 'other',
+        head: 'd'.repeat(40),
+        completion: { kind: 'terminal' },
+      }),
       cycleRecord({
         cycleId: 'c002-aaaaaaaa',
         reviewer: 'other',
@@ -295,22 +307,19 @@ describe('findReusableCycle', () => {
     ).toBeNull();
   });
 
-  test('a terminal cycle at a DIFFERENT head neither blocks nor supersedes this identity (adjudicated)', () => {
-    // Contract adjudication (the selector answers one question): does exact
-    // terminal evidence exist for THIS request identity, and is the latest
-    // SAME-IDENTITY attempt consistent with it? A newer terminal at another
-    // head reviewed different content: it cannot be fresher evidence for
-    // this tree, and it is not a blocker (a blocker is a BLOCKED attempt).
-    // Nothing unsafe hides behind the selection: findings from ANY cycle
-    // still block readiness through open-blocking-findings.
-    const selection = findReusableCycle(
-      [cycleRecord(), cycleRecord({ cycleId: 'c002-aaaaaaaa', head: 'newer-head' })],
-      REQUEST,
-    );
-    expect(selection).toMatchObject({
-      basis: 'exact-terminal',
-      cycle: { cycleId: 'c001-aaaaaaaa' },
-    });
+  test('a terminal cycle at a DIFFERENT head refuses this identity (readiness would anchor on it)', () => {
+    // A newer terminal at another head reviewed different content, so the
+    // readiness anchor settles on it and reports stale-review-identity at
+    // this tree. Reuse must refuse and let a fresh cycle run instead of
+    // returning exact-terminal evidence the anchor will never accept.
+    // (Findings from ANY cycle still block readiness through
+    // open-blocking-findings; this refusal is about the reuse selection.)
+    expect(
+      findReusableCycle(
+        [cycleRecord(), cycleRecord({ cycleId: 'c002-aaaaaaaa', head: 'newer-head' })],
+        REQUEST,
+      ),
+    ).toBeNull();
   });
 
   test('an earlier no-fresh tail that a newer same-identity terminal supersedes selects exact-terminal', () => {
@@ -350,5 +359,57 @@ describe('findReusableCycle', () => {
       cycle: { cycleId: 'c001-aaaaaaaa' },
       resolvesCycleId: 'c003-aaaaaaaa',
     });
+  });
+
+  test('a later different-identity terminal refuses reuse (readiness would anchor on it)', () => {
+    // c001 is an exact-terminal candidate, but c002 is a newer terminal full
+    // cycle at a different head: readiness anchors on c002 and reports
+    // stale-review-identity, so reuse must refuse and let a fresh cycle run.
+    expect(
+      findReusableCycle(
+        [cycleRecord(), cycleRecord({ cycleId: 'c002-aaaaaaaa', head: 'd'.repeat(40) })],
+        REQUEST,
+      ),
+    ).toBeNull();
+  });
+
+  test('a later unconfigured terminal at a different identity does not refuse reuse', () => {
+    expect(
+      findReusableCycle(
+        [
+          cycleRecord(),
+          cycleRecord({
+            cycleId: 'c002-aaaaaaaa',
+            reviewer: 'other',
+            head: 'd'.repeat(40),
+            completion: { kind: 'terminal' },
+          }),
+        ],
+        REQUEST,
+      ),
+    ).toMatchObject({ basis: 'exact-terminal' });
+  });
+
+  test('debtValid: only a later agent terminal at a differing identity refuses reuse', () => {
+    const debt = { ...REQUEST, debtValid: true };
+    expect(
+      findReusableCycle(
+        [cycleRecord(), cycleRecord({ cycleId: 'c002-aaaaaaaa', head: 'd'.repeat(40) })],
+        debt,
+      ),
+    ).toMatchObject({ basis: 'exact-terminal' });
+    expect(
+      findReusableCycle(
+        [
+          cycleRecord(),
+          cycleRecord({
+            cycleId: 'c002-aaaaaaaa',
+            reviewer: 'agent:reviewer',
+            head: 'd'.repeat(40),
+          }),
+        ],
+        debt,
+      ),
+    ).toBeNull();
   });
 });

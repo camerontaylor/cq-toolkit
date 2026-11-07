@@ -32,6 +32,14 @@ describe('compareSettings', () => {
     ]);
   });
 
+  it('reports an unlisted live environment named like an Object.prototype key', () => {
+    const live = liveFrom(target());
+    live.environments['constructor'] = { ...live.environments['promote']! };
+    expect(driftOf(live)).toEqual([
+      'environment constructor: present live but not in the settings file',
+    ]);
+  });
+
   it('reports protected_branches: true with the D-D.1 reason', () => {
     const live = liveFrom(target());
     const env = live.environments['cq-verdict'];

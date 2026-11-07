@@ -46,6 +46,32 @@ describe('W2.3 reserve-then-settle', () => {
     expect(governor.outstandingUsd).toBe(0.75);
   });
 
+  test('an in-flight fold frees capacity before settle — a hold counts only beyond its folds', async () => {
+    const governor = createGovernor({ maxUsd: 1.0 });
+    const first = await governor.reserve('j1', 1, 0.6, 'advisory');
+    if (first.outcome !== 'reserved') throw new Error('expected reservation');
+    // Mid-flight evidence lands in S, and the hold's unconsumed part is
+    // r − folded = 0.3. Real capacity is 1.0 − 0.3 − 0.3 = 0.4; subtracting
+    // the FULL hold again would leave 0.1 and park this grant until j1
+    // settles (a temporary loss of admitted parallelism).
+    governor.observeCost('j1', 0.3);
+    let second: Awaited<ReturnType<BudgetGovernor['reserve']>> | undefined;
+    const pending = governor.reserve('j2', 1, 0.4, 'advisory').then((r) => {
+      second = r;
+    });
+    await Promise.race([pending, new Promise<void>((resolve) => setImmediate(resolve))]);
+    expect(second?.outcome).toBe('reserved');
+    if (second?.outcome !== 'reserved') return;
+    expect(second.reservation.usd).toBeCloseTo(0.4);
+    expect(governor.usdSpent).toBe(0.3);
+    expect(governor.outstandingUsd).toBeCloseTo(1.0);
+    // Settling j1 at its folded evidence adds no remainder: the fold was
+    // already in the ledger, and the consumed hold is not charged twice.
+    const settled = governor.settle(first.reservation, { basis: 'observed' });
+    expect(settled.charged).toBe(0.3);
+    expect(governor.usdSpent).toBe(0.3);
+  });
+
   test('a proposal within capacity grants in full; zero capacity with outstanding parks FIFO', async () => {
     const governor = createGovernor({ maxUsd: 1.0 });
     const first = await governor.reserve('j1', 1, 0.25, 'advisory');

@@ -18,6 +18,9 @@ import unittest
 
 from test_deploy_controller_fixtures import OPS, ROOT, ControllerFixture, dc, host
 
+# Generous bound: far above any first-tick wait plus interval the CLI tests use.
+CLI_TIMEOUT_SECONDS = 120
+
 
 class CliTests(ControllerFixture):
     """End-to-end CLI invocations with faked systemctl; JSON on stdout."""
@@ -34,7 +37,8 @@ class CliTests(ControllerFixture):
             ["python3", "-B", str(OPS / "deploy-controller.py"),
              "--root", str(self.root), "--overlay", str(self.overlay_path),
              "--record-dir", str(self.record_dir), *args],
-            capture_output=True, text=True, env=merged)
+            capture_output=True, text=True, env=merged,
+            timeout=CLI_TIMEOUT_SECONDS)
 
     def test_switch_cli_succeeds_with_fake_systemctl_and_emits_json(self):
         self.switch_cli_fixture()
@@ -58,7 +62,10 @@ class CliTests(ControllerFixture):
                 self.assertIn("refused:", result.stderr)
                 self.assertIn("helper", result.stderr)
                 self.assertNotIn("--sha", result.stderr)
-                self.assertEqual(result.stdout, "")
+                error = json.loads(result.stdout)["error"]
+                self.assertEqual(error["kind"], "refused")
+                self.assertEqual(error["subcommand"], "switch")
+                self.assertEqual(error["exitCode"], 2)
                 self.assertFalse(lock.exists())
                 self.assertEqual(list(self.record_dir.iterdir()), [])
                 self.assertEqual(self.command("rev-parse", "HEAD").strip(), self.before)
@@ -95,9 +102,10 @@ class CliTests(ControllerFixture):
         self.command("restore", "--", host.CONFIG)
         helper = self.runner / "ops/prepare-host.py"
         original = helper.read_text()
-        helper.write_text(original.replace(
-            "POLICY_FLOOR = 'f748fd43e75505f4e89098a4ffe28fa2a179a50c'",
-            "POLICY_FLOOR = '" + self.before + "'"))
+        pin = "POLICY_FLOOR = 'f748fd43e75505f4e89098a4ffe28fa2a179a50c'"
+        self.assertEqual(original.count(pin), 1,
+                         "prepare-host.py POLICY_FLOOR literal changed; update fixture pin")
+        helper.write_text(original.replace(pin, "POLICY_FLOOR = '" + self.before + "'"))
         # The edited helper bytes must not look like checkout drift: commit the
         # pinned copy into the fixture clone (same content, new commit).
         self.command("add", "apps/crq-python")
@@ -150,12 +158,15 @@ class CliTests(ControllerFixture):
         # an isolated XDG_STATE_HOME means the actual user heartbeat is never
         # consulted, and no queue tick can substitute for it.
         self.write_state("queue.json", {"last_tick": "2026-10-28T00:00:00Z"})
-        result = self.run_cli("health",
+        result = self.run_cli("health", "--interval-seconds", "0",
                               env={"XDG_STATE_HOME": str(self.base / "cli-xdg")})
         self.assertEqual(result.returncode, 2)
         self.assertIn("refused:", result.stderr)
         self.assertIn("completion heartbeat", result.stderr)
-        self.assertEqual(result.stdout, "")
+        error = json.loads(result.stdout)["error"]
+        self.assertEqual(error["kind"], "refused")
+        self.assertEqual(error["subcommand"], "health")
+        self.assertEqual(error["exitCode"], 2)
 
     def test_health_cli_stale_heartbeat_is_unhealthy_with_unchanged_shape(self):
         xdg = self.base / "cli-xdg"
@@ -166,7 +177,9 @@ class CliTests(ControllerFixture):
         (xdg / "crq/heartbeat.json").write_text(json.dumps(payload) + "\n")
         # An advancing queue save must not mask the stale completion slot.
         self.write_state("queue.json", {"last_tick": "2026-10-28T00:20:00Z"})
-        result = self.run_cli("health", "--first-tick-timeout-seconds", "0", env={"XDG_STATE_HOME": str(xdg)})
+        result = self.run_cli("health", "--interval-seconds", "0",
+                              "--first-tick-timeout-seconds", "0",
+                              env={"XDG_STATE_HOME": str(xdg)})
         self.assertEqual(result.returncode, 1)
         artifact = json.loads(result.stdout)
         self.assertEqual(artifact["operation"], "health")
@@ -177,11 +190,36 @@ class CliTests(ControllerFixture):
         self.assertFalse(first["advanced"])
         self.assertIn("receipts", first)
 
-    def test_refusal_exits_2_with_stderr_reason_and_no_stdout_artifact(self):
+    def test_refusal_exits_2_with_json_error_artifact_and_stderr_reason(self):
         result = self.run_cli("switch", "--sha", "nothex", "--tag", self.tag)
         self.assertEqual(result.returncode, 2)
         self.assertIn("refused:", result.stderr)
-        self.assertEqual(result.stdout, "")
+        error = json.loads(result.stdout)["error"]
+        self.assertEqual(error["kind"], "refused")
+        self.assertEqual(error["subcommand"], "switch")
+        self.assertEqual(error["message"], result.stderr.split("refused: ", 1)[1].strip())
+        self.assertEqual(error["exitCode"], 2)
+
+    def test_pre_helper_failure_exits_2_with_refused_artifact(self):
+        # A malformed prior record fails before helper entry: the helper made no
+        # change, so this is a refusal (exit 2), never a health failure (exit 1).
+        record = self.base / "prior.json"
+        record.write_text("{not json")
+        result = self.run_cli("rollback", "--prior-record", str(record))
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("refused:", result.stderr)
+        error = json.loads(result.stdout)["error"]
+        self.assertEqual(error["kind"], "refused")
+        self.assertEqual(error["subcommand"], "rollback")
+        self.assertEqual(error["exitCode"], 2)
+
+    def test_health_requires_interval_seconds(self):
+        # The default 0 could never observe a second advancing tick; the caller
+        # must choose the later-observation delay instead.
+        result = self.run_cli("health",
+                              env={"XDG_STATE_HOME": str(self.base / "cli-xdg")})
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("--interval-seconds", result.stderr)
 
 
 if __name__ == "__main__":

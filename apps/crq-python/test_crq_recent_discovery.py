@@ -264,13 +264,31 @@ class RecentKeysetDiscoveryTest(unittest.TestCase):
                          "merged_at": "2026-10-02T00:10:00Z", "merge_commit_sha": f"{n % 10 ** 9:040x}",
                          "head": {"sha": f"{n % 10 ** 9:040x}"}} for n in range(base, base + 250)}
         self.merged = set(self.rows)
+        page_fn = crq.recent_merged_page
         dumps = crq.json.dumps
-        sizes = []
-        with mock.patch.object(crq.json, "dumps", side_effect=lambda *a, **k: (
-                lambda out: sizes.append(len(out)) or out)(dumps(*a, **k))):
+        naive, cursors = [], []
+
+        def record(*a, **k):
+            # Only cursor encodings use compact separators; queue and wrapper
+            # serialization elsewhere in the tick must not count.
+            def spy(*x, **y):
+                out = dumps(*x, **y)
+                if y.get("separators") == (",", ":"):
+                    naive.append(len(out.encode()))
+                return out
+            with mock.patch.object(crq.json, "dumps", side_effect=spy):
+                page = page_fn(*a, **k)
+            if page["next_cursor"] is not None:
+                cursors.append(len(page["next_cursor"].encode()))
+            return page
+
+        with mock.patch.object(crq, "recent_merged_page", side_effect=record):
             self.until_complete()
         self.assertEqual(self.enrolled(), self.merged)
-        self.assertTrue(any(size > crq.merged_reconcile.MAX_CURSOR_BYTES for size in sizes))
+        cap = crq.merged_reconcile.MAX_CURSOR_BYTES
+        self.assertTrue(any(size > cap for size in naive), "fixture never forced trimming")
+        self.assertTrue(cursors)
+        self.assertTrue(all(n <= cap for n in cursors))
 
 
 class RecentWrapperRetentionTest(unittest.TestCase):

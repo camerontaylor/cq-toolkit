@@ -155,12 +155,10 @@ Selective starts for author and merged-current items remain refused. Explicit
 author cycle-2 requests also rank last and wait for rank 0–3 demand to clear.
 
 Every job records FIXED, NOT-FIXED or FAILED, a reason, attempts and judge evidence.
-A0 uses the window's fixer. A mechanical failure retries the same model at A1,
+A0 uses the fixer. A mechanical failure retries the same model at A1,
 then escalation at A2; three fixer attempts and one judge are the ceiling.
-Provider rate limits defer without consuming an attempt. The job's window stays
-pinned across attempts. Weekday 14:00–18:00 Asia/Singapore uses Luna fixers and
-Muse judges; default workers/judges use GLM Flash (D9 configurable). Critical
-judgements use Sol in both windows. Recurring NOT-FIXED majors and configured
+Provider rate limits defer without consuming an attempt. Critical findings use
+the critical judge. Recurring NOT-FIXED majors and configured
 sampling trigger a read-only judge; valid findings receive one A2 refix.
 
 Tests and probes are suspended. No worker or mechanical stage runs them.

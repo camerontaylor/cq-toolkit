@@ -251,13 +251,14 @@ describe('fix-run report accounting', () => {
       { kind: 'tests-1', slug: 'other-repo', branch: 'cq/run/tests-1/other-repo' },
       'other-repo',
       'unit halted on a budget bound',
+      'exhausted',
     );
-    expect(row.outcome).toBe('not-started');
+    expect(row.outcome).toBe('exhausted');
     expect(row.branch).toBe('cq/run/tests-1/other-repo');
     expect(row.failures[0]).toEqual({
       unit: 'tests-1/other-repo',
       task: 'other-repo',
-      outcome: 'not-started',
+      outcome: 'exhausted',
       gate: 'none',
       reason: 'unit halted on a budget bound',
     });

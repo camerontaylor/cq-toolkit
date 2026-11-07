@@ -53,8 +53,9 @@ debt like any other: it ships reviewed or it does not ship.
   than throwing. Fold rules:
   real usage (any nonzero token count) rolls the token cap; a present
   `costUSD` rolls the USD cap; real usage with NO `costUSD` under a
-  configured `maxUsd` TRIPS the budget (see §4); a zero-usage result folds
-  nothing (nothing was measured — I9).
+  configured `maxUsd` TRIPS the budget (see §4); a zero-usage result with no
+  cost evidence folds nothing (nothing was measured — I9). A present, valid
+  `costUSD` still folds the USD cap even when the usage counts are zero.
 - Tripping gates admission exactly as before: refused dispatches return
   `{ status: 'budget-exhausted' }`, and the governed runner re-marks the
   never-run rows honestly (I9) — its own return IS the final report.
@@ -94,8 +95,10 @@ real-usage result folds with NO `costUSD` while `config.maxUsd` is set, the
 governor TRIPS the budget (honest stop — remaining jobs `budget-exhausted`,
 I9) rather than run past an unenforceable cap. There is no opt-out knob in
 v1; the escapes are the documented ones — price the model (the `pricing`
-override exists on both drivers), or cap the run with `maxTokens`, which
-binds regardless of any price. Without a USD cap the same fold is not a
+override exists on both drivers), or replace the USD cap with `maxTokens`,
+which binds regardless of any price. Adding `maxTokens` while `maxUsd`
+stays configured does NOT suppress this trip: the effective USD cap is
+checked independently. Without a USD cap the same fold is not a
 budget event (the usage still rolls; `maxTokens` binds it).
 
 ## 5. Deliberate v1 omissions, and what triggers adding them
@@ -122,15 +125,16 @@ budget event (the usage still rolls; `maxTokens` binds it).
 - `test/kernel/governor-usage.test.ts`, describe `DD-9 (T1.6b): parallel token
 rollup + api-equivalent USD` — six cases:
   1. `maxTokens` trips independently of `maxUsd` (reason names the token
-     rollup; admission refuses with reason `budget`; the governed dispatch
-     returns `budget-exhausted`; a control governor under the cap never
-     trips; the at-cap boundary fold does not trip — exceeds semantics).
+     rollup; admission refuses with reason `budget`; a control governor
+     under the cap never trips; the at-cap boundary fold does not trip —
+     exceeds semantics). The case calls `admit` on a bare governor; it does
+     not run a governed dispatch.
   2. THE d02a107 acceptance check, full-run shape: three jobs reporting
      real usage and no cost under `maxTokens: 150` — the run stops at the
-     cap (`stoppedEarly: true`, `earlyStopReason: 'budget'` via the
-     governed runner's honest stop), remaining jobs `budget-exhausted`,
-     done rows keep real results, and the budget-tripped event carries the
-     token reason.
+     cap: the job queued behind the trip is refused `budget-while-queued`
+     (a real `budget-exhausted` row), done rows keep real results, nothing
+     is re-marked so no `stoppedEarly` is claimed (I9), and the
+     budget-tripped event carries the token reason.
   3. `maxUsd` stays PRIMARY and trips on MODELED cost (the
      subscription-shaped run that previously failed open).
   4. Unpriced usage under a USD cap trips loud; the same fold without a

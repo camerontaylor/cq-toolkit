@@ -129,7 +129,7 @@ class Repository:
             self._facts[key] = (value, size)
             self._fact_bytes += size
 
-    def git(self, *args, check=True, env=None, input=None):
+    def git(self, *args, check=True, env=None, input=None, timeout=300):
         cacheable = (self.immutable_cache is not None and check and env is None and input is None
                      and ((len(args) == 3 and args[:2] == ("rev-list", "--first-parent") and re.fullmatch(r"[0-9a-f]{40,64}", args[2]))
                           or (len(args) == 2 and args[0] == "rev-parse" and re.fullmatch(r"[0-9a-f]{40,64}(?:\^1|\^\{commit\}|\^\{tree\})", args[1]))
@@ -141,7 +141,7 @@ class Repository:
         if cacheable and args in self.immutable_cache:
             return self.immutable_cache[args]
         result = subprocess.run(["git", *args], cwd=self.root, capture_output=True,
-                                check=check, env=env, input=input).stdout
+                                check=check, env=env, input=input, timeout=timeout).stdout
         if cacheable and len(result) <= 256 * 1024 * 1024:
             if self._cache_bytes + len(result) > 256 * 1024 * 1024 or len(self.immutable_cache) >= 100000:
                 self.immutable_cache.clear()
@@ -267,8 +267,11 @@ class Repository:
     def changed_intervals(self, base, head):
         result, current = {}, None
         # --no-ext-diff/--no-textconv ensure repository configuration cannot run
-        # helpers. Literal path/blob mapping comes from raw name-status + hunks.
-        patch = self.git("diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--unified=0", base, head).decode("utf-8", "replace")
+        # helpers; --no-color and explicit prefixes pin the header format the
+        # parser expects against user/global diff.* and color.* config.
+        # Literal path/blob mapping comes from raw name-status + hunks.
+        patch = self.git("diff", "--no-ext-diff", "--no-textconv", "--no-color", "--src-prefix=a/", "--dst-prefix=b/",
+                         "--no-renames", "--unified=0", base, head).decode("utf-8", "replace")
         old_left = new_left = 0
         for line in patch.split("\n"):
             if old_left or new_left:

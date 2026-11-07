@@ -351,7 +351,9 @@ export async function acquirePlanLock(
     guard.assertHeld();
     await guard.release();
   } catch (error) {
-    await acquired.release();
+    // The fence failure is the root cause; a release that fails too must not
+    // replace it.
+    await acquired.release().catch(() => undefined);
     throw error;
   }
   return acquired;
@@ -511,10 +513,11 @@ async function acquirePlanLockRecord(
     try {
       if (listening) await closeServer(server);
       // Publication and owner setup are one rollback scope; markReleased
-      // only ever replaces a record that is provably ours.
-      await markReleased();
+      // only ever replaces a record that is provably ours. The acquisition
+      // error is the root cause: a rollback that fails too must not replace it.
+      await markReleased().catch(() => undefined);
     } finally {
-      await handle?.close();
+      await handle?.close().catch(() => undefined);
     }
     throw error;
   }
@@ -807,7 +810,8 @@ export interface RunLog {
   /**
    * Append one event as a JSON line to `<journalDir>/<runId>.ndjson`,
    * creating `journalDir` recursively if needed. Validates the event against
-   * JournalEventSchema (throws on invalid events) and requires
+   * the v1/v2 kernel union JournalEventV1V2Schema (throws on invalid events,
+   * including every v3 shape until the T04/T29 writers land) and requires
    * `event.runId === runId`. Appends are serialized through an internal
    * write chain, so lines from concurrent jobs never interleave and land in
    * append-call order. With `{ durable: true }` the line is written through
@@ -880,8 +884,11 @@ export function openRunLog(journalDir: string): RunLog {
           await appendFile(pathFor(runId), line, 'utf8');
         }
         if (isNew) {
-          dirSynced.add(runId);
+          // Only a SUCCESSFUL directory fsync makes the entry durable; a
+          // non-ignored syncDir error (EIO) leaves the run unmarked so the
+          // next append retries the fsync the contract promises.
           await syncDir(journalDir);
+          dirSynced.add(runId);
         }
       };
       const next = tail.then(write, write);

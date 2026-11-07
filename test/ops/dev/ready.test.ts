@@ -1,6 +1,8 @@
 // dev.ready and dev.disposition over a REAL git repo: readiness is computed
 // from the CURRENT state (the identity the ledger records must match), and
 // dispositions append only for findings a cycle recorded.
+import { mkdir } from 'node:fs/promises';
+import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import { makeDevDisposition } from '../../../src/ops/dev/disposition.js';
 import { makeDevReady, readReadinessWithGaps } from '../../../src/ops/dev/ready.js';
@@ -110,6 +112,18 @@ describe('dev.ready', () => {
     const result = await makeDevReady(repoEffects(repo))({ repoRoot: repo.root });
     expect(result.status).toBe('needs-human');
     if (result.status === 'needs-human') expect(result.reason).toContain('cq.json');
+  });
+
+  test('an unreadable cq.json refuses readiness instead of falling back to defaults', async () => {
+    // EISDIR is a present-but-unreadable config; only ENOENT means "no config".
+    await mkdir(join(repo.root, 'cq.json'));
+    await seed(repo);
+    const result = await makeDevReady(repoEffects(repo))({ repoRoot: repo.root });
+    expect(result.status).toBe('needs-human');
+    if (result.status === 'needs-human') {
+      expect(result.reason).toContain('cq.json could not be read');
+      expect(result.reason).not.toContain('NOT READY');
+    }
   });
 
   test('an edit after the records makes both stale; every gap lands in one reason', async () => {

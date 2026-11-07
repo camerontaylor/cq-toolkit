@@ -96,13 +96,17 @@ def parse(config: Dict[str, Any]) -> List[Dict[str, Any]]:
         raise ValueError("repos must be a list of per-repo objects")
     repos: List[Dict[str, Any]] = []
     seen = set()
+    names = set()
     for entry in entries:
         parsed = parse_entry(entry)
         if parsed["repo"] in seen:
             raise ValueError(f"repos entry duplicated: {parsed['repo']}")
+        if parsed["name"] in names:
+            raise ValueError(f"repos entry name collides with another repo: {parsed['name']}")
         if parsed["repo"] == config.get("repo"):
             raise ValueError("repos must not repeat the primary repo (top-level config owns it)")
         seen.add(parsed["repo"])
+        names.add(parsed["name"])
         repos.append(parsed)
     return repos
 

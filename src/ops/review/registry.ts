@@ -453,7 +453,10 @@ type VerifyReviewOutcomeOpInput = z.infer<typeof VerifyReviewOutcomeOpInputSchem
  * boundary). The comments array's `.max(100)` is the dispatch boundary's
  * deliberate cap, riding this schema alone (the FixableReviewItem type
  * itself is unbounded): a comment flood is a fetch/classification bug, not
- * a fixer prompt.
+ * a fixer prompt. `authorType` mirrors {@link ThreadComment} exactly: the
+ * thread vocabulary carries the actor type when the fetch supplied it, so
+ * a reply forwarded into the fixer prompt must stay dispatchable through
+ * the strict comment mirror.
  */
 const FixableReviewItemSchema: z.ZodType<FixableReviewItem> = z
   .object({

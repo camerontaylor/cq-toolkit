@@ -140,7 +140,7 @@ export const restPullComment = (
   overrides?: { inReplyTo?: number; nodeId?: string | null; login?: string | null },
 ) => ({
   id,
-  node_id: overrides?.nodeId ?? `N${id}`,
+  node_id: overrides?.nodeId === undefined ? `N${id}` : overrides.nodeId,
   user:
     overrides?.login === undefined
       ? { login: 'reviewer' }
