@@ -118,7 +118,6 @@ import { ModelSpecSchema } from '../../kernel/schema.js';
 import type { Op, OpResult } from '../../kernel/types.js';
 import type { GhResult } from '../../adapters/forge-github/gh.js';
 import {
-  DEFAULT_PROTECTED_BRANCH,
   headRefFor,
   realMergeEffects,
   withPreparedWorktree,
