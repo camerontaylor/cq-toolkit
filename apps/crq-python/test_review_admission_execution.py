@@ -1,5 +1,6 @@
 """Offline launch, reconciliation and durable local completion."""
 import copy
+import contextlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -67,6 +68,125 @@ class ExecutionTests(SnapshotGitFixture, unittest.TestCase):
         self.assertEqual(pr["cycles"][0]["run_id"], "run-1")
         self.assertEqual(pr["cycles"][0]["profile"], self.profile)
         self.assertNotIn("coverage", self.q)
+
+    def full_tick(self, opened, *, remaining=0):
+        """Real tick, enrollment and repair backfill; replace external I/O."""
+        config = copy.deepcopy(crq.CONFIG)
+        config["merged_discovery"] = None
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.multiple(crq, CLONE=self.repo, STATE=self.state,
+                RUNS=self.runs, REPOS=[], CONFIG=config))
+            for name in ("fetch", "save_queue", "event", "notify_owner", "write_status", "refresh_slot_deadline"):
+                stack.enter_context(mock.patch.object(crq, name))
+            stack.enter_context(mock.patch.object(crq, "load_queue", return_value=self.q))
+            stack.enter_context(mock.patch.object(crq, "gh_json", return_value=opened))
+            stack.enter_context(mock.patch.object(crq, "ensure_commit", return_value=True))
+            stack.enter_context(mock.patch.object(crq, "read_slot_usage", return_value=({"remaining": remaining}, [])))
+            for module, name, result in ((backfill_runtime, "settings", None),
+                (crq.push_current, "discover", []), (crq.pr_enroll, "enroll", []),
+                (crq.deferred_refresh, "refresh_deferred", []), (crq.client_health, "record", []),
+                (crq.repair_tick, "archive_legacy", None), (crq.repair_tick, "reconcile_fix_prs", None)):
+                stack.enter_context(mock.patch.object(module, name, return_value=result))
+            enrolled = stack.enter_context(mock.patch.object(crq, "enroll", wraps=crq.enroll))
+            heartbeat = stack.enter_context(mock.patch.object(crq, "write_heartbeat"))
+            request = stack.enter_context(mock.patch.object(crq, "_request_pr_review"))
+            launched = stack.enter_context(mock.patch.object(crq, "launch"))
+            crq.tick()
+            enrolled.assert_called_once()
+            heartbeat.assert_called_once()
+            launched.assert_not_called()
+            request.assert_not_called()
+
+    def test_reconciled_cycle_survives_full_tick_enrollment_without_repair_or_delivery(self):
+        self.finish()
+        pr = self.pr()
+        self.git("update-ref", "refs/remotes/origin/main", self.base)
+        with self.assertRaises(crq.NothingToReview):
+            runtime.reconcile_pr(self.c, self.q, pr, self.plan(), False)
+        pr["state"] = "skipped"
+        record = pr["cycles"][0]
+        self.assertEqual(record["completed_at"], self.item["completed_at"])
+        self.assertEqual(record["pr_head"], self.head)
+        self.assertEqual(record["findings"], 1)
+        self.assertEqual(record["source"], "local-review")
+        (self.rdir / "meta.json").write_text(json.dumps(dict(kind="local-review", run_id="run-1")))
+        self.full_tick([dict(number=1, isDraft=False, baseRefName="main", headRefName="feature", headRefOid=self.head)])
+        self.assertEqual(crq.last_reviewed(self.q, 1), record)
+        self.assertEqual(crq.reviewed_head(record), self.head)
+        self.assertEqual(len(self.q["items"]), 2)
+        self.assertNotIn("repair_runs", pr)
+        self.assertNotIn("pr_review_pending", pr)
+        self.assertIsNotNone(self.q.get("last_tick"))
+
+    def test_repair_debt_paths_skip_marked_cycles_and_original_local_meta(self):
+        self.finish()
+        pr = self.pr()
+        with self.assertRaises(crq.NothingToReview):
+            runtime.reconcile_pr(self.c, self.q, pr, self.plan(), False)
+        meta = dict(kind="local-review", run_id="run-1")
+        (self.rdir / "meta.json").write_text(json.dumps(meta))
+        with mock.patch.multiple(crq, STATE=self.state, RUNS=self.runs), \
+             mock.patch.object(crq.repair_tick, "findings", side_effect=AssertionError("local evidence reached repair")):
+            crq.repair_tick.backfill(crq, self.q)
+            self.assertFalse(crq.repair_tick.enqueue(crq, self.q, pr, meta, self.rdir))
+            self.assertFalse(crq.repair_tick.enqueue(crq, self.q, pr, dict(meta, kind="open"), self.rdir))
+            self.q.pop("legacy_repair_backfilled", None)
+            pr["cycles"][0].pop("source")  # older reconciled cycle still protected by run metadata
+            crq.repair_tick.backfill(crq, self.q)
+        self.assertNotIn("repair_runs", pr)
+        self.assertEqual(self.q["legacy_repair_missing"], [])
+
+    def test_broken_earlier_receipt_does_not_block_valid_repeat_or_normal_plan(self):
+        self.finish()
+        old = self.item
+        receipt = self.state / "receipts" / (old["receipt_id"] + ".json")
+        receipt.unlink()
+        pr = self.pr()
+        self.assertEqual(runtime.reconcile_pr(self.c, self.q, pr, self.plan(), False)["head"], self.head)
+        self.admit("repeat", repeat=True)
+        self.item = self.q["items"][-1]
+        self.finish()
+        old["receipt_id"] = "f" * 64
+        with self.assertRaises(crq.NothingToReview):
+            runtime.reconcile_pr(self.c, self.q, pr, self.plan(), False)
+        self.assertEqual(pr["cycles"][0]["receipt_id"], self.item["receipt_id"])
+
+    def test_completed_pr_reconciles_on_full_tick_while_paused_and_without_slots(self):
+        pr = self.pr()
+        pr.update(state="done", cycles=[dict(base=self.base, head=self.head,
+            profile=self.profile, range_policy="full-range-once-v1", run_id="run-1",
+            completed_at="2026-11-08T00:01:00Z", ndjson=str(self.rdir / "review.ndjson"))])
+        self.q["paused"] = True
+        with mock.patch.object(crq, "classify", return_value=self.cls):
+            self.full_tick([])
+        self.assertEqual(self.item["state"], "done")
+        self.assertIsNotNone(self.item.get("receipt_id"))
+
+    def test_missing_pinned_objects_do_not_abort_completion_reconciliation(self):
+        with mock.patch.object(self.c, "git", side_effect=crq.author_quota.AuthorRefused("missing pinned objects")):
+            runtime.reconcile_completed(self.c, self.q)
+        self.assertEqual(self.item["state"], "pending")
+        self.assertIn("missing pinned objects", self.item["wait_reason"])
+        self.assertEqual(self.q["starts"], [])
+
+    def test_local_harvest_retains_global_auth_and_rate_gates(self):
+        for outcome in ("auth", "action_required", "rate_limited"):
+            with self.subTest(outcome):
+                self.item.update(state="reviewing", run=dict(run_id="run-1"))
+                self.q.pop("paused", None)
+                self.q.pop("cooldown_until", None)
+                (self.rdir / "exit.json").write_text(json.dumps(dict(exit=1, ended_at="2026-11-08T00:01:00Z")))
+                (self.rdir / "meta.json").write_text(json.dumps(dict(worktree=str(self.repo), wt_branch="fixture")))
+                cls = dict(self.cls, outcome=outcome, counted=False)
+                with mock.patch.multiple(crq, STATE=self.state, RUNS=self.runs), \
+                     mock.patch.object(crq, "run_liveness", return_value="harvest"), \
+                     mock.patch.object(crq, "classify", return_value=cls), \
+                     mock.patch.object(crq, "findings_md", return_value=outcome), \
+                     mock.patch.object(crq, "event"), mock.patch.object(crq, "remove_worktree"), \
+                     mock.patch.object(crq, "save_queue"), mock.patch.object(backfill_runtime, "settings", return_value=None):
+                    crq.harvest_review(self.q, self.item, False)
+                self.assertEqual(self.item["state"], "failed")
+                self.assertTrue(self.q.get("cooldown_until") if outcome == "rate_limited" else self.q.get("paused"))
 
     def test_running_pr_wait_then_reuse_complete_with_event_and_outbox(self):
         pr = self.pr()

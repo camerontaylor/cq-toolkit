@@ -13,6 +13,7 @@ import review_receipt as receipts
 import review_transport as transport
 import review_ledger as ledger
 from queue_transport import _ReceiptSnapshot
+from author_quota import AuthorRefused
 
 KIND = operation.KIND
 
@@ -27,8 +28,11 @@ def facts(c, base, head, profile):
 def retained(c, item):
     if not admission.adequate(item):
         return None
-    doc = _ReceiptSnapshot(c.STATE / "receipts", item["receipt_id"]).document
-    operation.validate("receipt", doc)
+    try:
+        doc = _ReceiptSnapshot(c.STATE / "receipts", item["receipt_id"]).document
+        operation.validate("receipt", doc)
+    except (OSError, ValueError, KeyError):
+        return None
     if (doc["identity"] != item["identity"] or doc["identity_inputs"] != item["identity_inputs"]
             or not doc["scope_adequate"] or doc["outcome"] not in ("clean", "findings")):
         return None
@@ -59,7 +63,10 @@ def reconcile_pr(c, q, item, plan, dry):
                               range_policy="full-range-once-v1", dirty_diff="clean tree",
                               run_id=doc["run_id"], ndjson=str(c.RUNS / doc["run_id"] / "review.ndjson"),
                               config_digest=doc["identity_inputs"]["config_digest"],
-                              profile=doc["profile"], receipt_id=local["receipt_id"])
+                              profile=doc["profile"], receipt_id=local["receipt_id"],
+                              source=KIND, completed_at=local["completed_at"], cycle=plan.get("cycle"),
+                              findings=len(doc["findings"]),
+                              severity_counts=doc["observed"].get("classification", {}).get("severity_counts", {}))
                 if not any(r.get("receipt_id") == local["receipt_id"] for r in item.get("cycles", [])):
                     item.setdefault("cycles", []).append(record)
             raise c.NothingToReview("equivalent local full-diff receipt already reviewed")
@@ -68,7 +75,7 @@ def reconcile_pr(c, q, item, plan, dry):
     return plan
 
 
-def prepare(c, q, item, dry):
+def prepare(c, q, item, dry, *, completed_only=False):
     wanted = item["identity_inputs"]
     # Re-resolve pinned objects/config but never today's profile flags.
     if facts(c, wanted["base_commit"], wanted["head_commit"], item["profile"]) != wanted:
@@ -88,7 +95,7 @@ def prepare(c, q, item, dry):
                     complete(c, q, item, rdir, record["run_id"], cls,
                              record.get("completed_at") or c.iso(), 0)
                 return None
-        run = pr.get("run")
+        run = None if completed_only else pr.get("run")
         if run:
             meta = json.loads((c.RUNS / run["run_id"] / "meta.json").read_text())
             if operation.equivalent(cycle_facts(c, pr, meta), wanted):
@@ -98,6 +105,17 @@ def prepare(c, q, item, dry):
                 cycle=item["generation"], branch=None, notes=[],
                 review_pin=wanted["base_commit"], range_policy="full-range-once-v1",
                 profile=item["profile"], config_digest=wanted["config_digest"])
+
+
+def reconcile_completed(c, q):
+    """Receipt-only completion spends no quota, even during pause or cooldown."""
+    for item in list(q["items"]):
+        if item.get("kind") != KIND or item.get("state") != "pending":
+            continue
+        try:
+            prepare(c, q, item, False, completed_only=True)
+        except (OSError, ValueError, KeyError, c.NotReady, AuthorRefused) as exc:
+            item["wait_reason"] = f"completed-evidence reconciliation: {exc}"[:300]
 
 
 def complete(c, q, item, rdir, run_id, cls, ended_at, exit_code):

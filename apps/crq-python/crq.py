@@ -2405,6 +2405,10 @@ def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
     event("review_finished", item=item["id"], run=r["run_id"], outcome=cls["outcome"],
           findings=cls["findings"], severity=cls["severity_counts"])
     if item["kind"] == local_review_runtime.KIND:
+        if cls["outcome"] == "rate_limited":
+            set_rate_cooldown(q, cls, rdir)
+        if cls["outcome"] in ("auth", "action_required"):
+            q.update(paused=True, pause_reason=f"{cls['outcome']} on {r['run_id']}; owner action needed")
         result = local_review_runtime.complete(sys.modules[__name__], q, item, rdir, r["run_id"], cls,
                     json.loads(exitf.read_text())["ended_at"], exit_code)
         remove_worktree(Path(meta["worktree"]), meta["wt_branch"])
@@ -3044,6 +3048,8 @@ def collect_finished(q, log):
         if msg:
             log.append(msg)
 
+    local_review_runtime.reconcile_completed(sys.modules[__name__], q)
+
 
 def refresh_backfill_usage(q):
     """Re-read usage for the rank-4 gate; keep the older observation on failure."""
@@ -3194,6 +3200,7 @@ def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = Fal
         # can still be outstanding) run after the harvest pass and are capped, so
         # no gh call delays harvesting. Rotation by last attempt keeps a failing
         # delivery from starving later ones.
+        local_review_runtime.reconcile_completed(sys.modules[__name__], q)
         candidates = sorted(
             (i for i in live_items(q) if i.get("issue_pending") and
              i.get("kind") == push_current.KIND),

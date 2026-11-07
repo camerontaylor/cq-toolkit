@@ -69,6 +69,10 @@ def merged_current_enabled(c):
 
 
 def enqueue(c, q, item, meta, rdir):
+    if (item.get('kind') == 'local-review' or meta.get('kind') == 'local-review'
+            or any(cycle.get('source') == 'local-review' and cycle.get('run_id') == meta.get('run_id')
+                   for cycle in item.get('cycles', []))):
+        return False
     if c.item_repo(item) != c.REPO:
         # The repair drain never runs for non-primary repositories.
         return False
@@ -372,6 +376,8 @@ def backfill(c, q):
             # Foreign cycles are review evidence, never legacy repair debt.
             continue
         for cycle in item.get('cycles', []):
+            if cycle.get('source') == 'local-review':
+                continue
             run = cycle['run_id']
             path = c.RUNS / run
             if not (path / 'meta.json').exists() or not (path / 'review.ndjson').exists():
@@ -380,6 +386,8 @@ def backfill(c, q):
                     missing.append({'item': item['id'], 'run': run})
                 continue
             meta = json.loads((path / 'meta.json').read_text())
+            if meta.get('kind') == 'local-review':
+                continue
             queued = enqueue(c, q, item, meta, path)
             if not queued and run not in item.get('repair_runs', {}) and findings(path / 'review.ndjson'):
                 if not own_range(c, q, meta['base'], meta.get('pr_head', meta['head'])):
