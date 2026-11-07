@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { cp, link, lstat, readFile, readdir, rename, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { expect, test, vi } from 'vitest';
+import { makeGitMutex } from '../../../src/shared/gitMutex.js';
 import * as addressModule from '../../../src/ops/review/address.js';
 import {
   makeAddressOwnership,
@@ -10,10 +11,21 @@ import {
 import { authorityStore, deferred, fixture } from './addressManyWorktree.helpers.js';
 
 const faults = vi.hoisted(() => ({
+  beforeAcquire: undefined as undefined | (() => Promise<void>),
   afterStat: undefined as undefined | ((path: string) => Promise<void>),
   afterLink: undefined as undefined | ((source: string, target: string) => Promise<void>),
   afterRename: undefined as undefined | ((source: string, target: string) => Promise<void>),
 }));
+vi.mock('proper-lockfile', async (original) => {
+  const actual = await original<typeof import('proper-lockfile')>();
+  return {
+    ...actual,
+    lock: async (...args: Parameters<typeof actual.lock>) => {
+      await faults.beforeAcquire?.();
+      return actual.lock(...args);
+    },
+  };
+});
 vi.mock('node:fs/promises', async (original) => {
   const actual = await original<typeof import('node:fs/promises')>();
   return {
@@ -443,6 +455,52 @@ test('cancellation before mutex entry is not wrapped as an authority refusal', a
     expect(isAddressOwnershipAdmissionRefusal(reason)).toBe(false);
   } finally {
     faults.afterStat = undefined;
+    await f.repo.cleanup();
+  }
+});
+
+test('ownership admission cancelled during a pending mutex acquire preserves its exact reason', async () => {
+  const f = await fixture();
+  const held = deferred(),
+    releaseHolder = deferred(),
+    waiting = deferred(),
+    releaseAcquire = deferred();
+  let holder: Promise<unknown> | undefined;
+  try {
+    const controller = new AbortController(),
+      reason = new Error('cancelled while ownership mutex pending');
+    const owner = await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run, controller });
+    const lockPath = join(owner.commonDir, 'cq-review-address-ownership');
+    holder = makeGitMutex({ lockPath }).withLock(async () => {
+      held.resolve();
+      await releaseHolder.promise;
+    });
+    await held.promise;
+    const before = await lstat(`${lockPath}.lock`);
+    // Ownership deliberately fails fast. Gate its in-flight library attempt
+    // while a real peer holds the mutex, without enabling queued retries.
+    faults.beforeAcquire = async () => {
+      waiting.resolve();
+      await releaseAcquire.promise;
+    };
+    let dispatched = false;
+    const admission = owner.withLock(async () => {
+      dispatched = true;
+    });
+    const rejected = expect(admission).rejects.toBe(reason);
+    await waiting.promise;
+    controller.abort(reason);
+    releaseAcquire.resolve();
+    await rejected;
+    expect(dispatched).toBe(false);
+    expect(isAddressOwnershipAdmissionRefusal(reason)).toBe(false);
+    expect((await lstat(`${lockPath}.lock`)).ino).toBe(before.ino);
+    await expect(lstat(owner.guardPath)).rejects.toMatchObject({ code: 'ENOENT' });
+  } finally {
+    faults.beforeAcquire = undefined;
+    releaseAcquire.resolve();
+    releaseHolder.resolve();
+    await holder;
     await f.repo.cleanup();
   }
 });

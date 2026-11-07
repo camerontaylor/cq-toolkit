@@ -539,7 +539,7 @@ test.each([
   }
 });
 
-test('retired deletion failure is reported and does not quarantine or block later rotations', async () => {
+test('retired deletion failure stays off stderr and does not quarantine or block later rotations', async () => {
   const f = await fixture();
   const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
   try {
@@ -561,7 +561,7 @@ test('retired deletion failure is reported and does not quarantine or block late
     await (
       await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run })
     ).withLock(async () => undefined);
-    expect(warning).toHaveBeenCalled();
+    expect(warning).not.toHaveBeenCalled();
     expect((await authorityState(owner.guardPath)).state).toBe('quiescent');
     fsFaults.remove = undefined;
     await (
@@ -610,7 +610,7 @@ test('partially deleted older generation cannot confirm predecessor completion',
   }
 });
 
-test('bootstrap debris retention is best-effort and reported to callers and journals', async () => {
+test('bootstrap debris retention reports advisories to callers and journals without stderr', async () => {
   const f = await fixture();
   const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
   try {
@@ -638,8 +638,10 @@ test('bootstrap debris retention is best-effort and reported to callers and jour
     const bytes = await readFile(join(owner.commonDir, debris, 'anchor.json'), 'utf8');
     expect(bytes).toBe('{"version":');
     fsFaults.remove = async (path) => {
-      if (path.endsWith(debris)) throw new Error('debris busy');
+      if (path.endsWith(debris))
+        throw new Error(`debris busy fixture-cleanup-secret\n${'x'.repeat(600)}`);
     };
+    vi.stubEnv('OWNERSHIP_CLEANUP_API_KEY', 'fixture-cleanup-secret');
     const role = { provider: 'mock', model: 'mock' };
     const result = await addressModule.makeReviewAddress({
       config: {
@@ -659,13 +661,18 @@ test('bootstrap debris retention is best-effort and reported to callers and jour
         findings: [],
       },
     })({ repoRoot: f.repo.root, source: 'local', journalDir: join(f.root, 'retention-journal') });
-    const advisory = `address ownership: retention cleanup failed for ${debris}`;
-    expect(result.report?.advisories).toContain(advisory);
+    const prefix = `address ownership: retention cleanup failed for ${debris}: `;
+    const advisory = result.report?.advisories?.find((text) => text.startsWith(prefix));
+    expect(advisory).toContain('debris busy [redacted] ');
+    expect(advisory).not.toContain('fixture-cleanup-secret');
+    expect(advisory).not.toContain('\n');
+    expect(advisory).toMatch(/… \[truncated\]$/);
+    expect(advisory!.length).toBeLessThanOrEqual(prefix.length + 520);
     const stored = JSON.parse(await readFile(result.report!.reportPath, 'utf8')) as {
       advisories: string[];
     };
     expect(stored.advisories).toContain(advisory);
-    expect(warning).toHaveBeenCalled();
+    expect(warning).not.toHaveBeenCalled();
     expect(await readFile(join(owner.commonDir, debris, 'anchor.json'), 'utf8')).toBe(bytes);
     fsFaults.remove = undefined;
     await (
@@ -677,6 +684,7 @@ test('bootstrap debris retention is best-effort and reported to callers and jour
   } finally {
     fsFaults.open = fsFaults.remove = undefined;
     warning.mockRestore();
+    vi.unstubAllEnvs();
     await f.repo.cleanup();
   }
 });

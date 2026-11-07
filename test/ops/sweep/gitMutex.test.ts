@@ -339,9 +339,10 @@ test('queued cancellation stops acquisition and never releases the active holder
   const queued = mutex.withLock(() => {
     called = true;
   }, controller.signal);
-  const rejected = expect(queued).rejects.toThrow(/abort|cancel/i);
+  const reason = new Error('queued cancellation');
+  const rejected = expect(queued).rejects.toBe(reason);
   await retryWait;
-  controller.abort(new Error('queued cancellation'));
+  controller.abort(reason);
   listener.mockRestore();
   await rejected;
   expect(called).toBe(false);
