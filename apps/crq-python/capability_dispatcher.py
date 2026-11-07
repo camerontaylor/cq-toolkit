@@ -10,11 +10,15 @@ import signal
 import sys
 
 
-def dispatch(command, author, queue):
+def dispatch(command, author, queue, review=None):
     if command == "author-v1":
         return author()
     if command == "queue-v1":
         return queue()
+    if command == "review-v1":
+        if review is None:
+            from review_transport import main as review
+        return review()
     raise ValueError("unsupported forced command")
 
 

@@ -1,0 +1,662 @@
+[
+  {
+    "name": "canonical-identity",
+    "type": "identity",
+    "value": {
+      "v": 1,
+      "repo": "camerontaylor/cq-toolkit",
+      "base_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "base_tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "head_commit": "cccccccccccccccccccccccccccccccccccccccc",
+      "head_tree": "dddddddddddddddddddddddddddddddddddddddd",
+      "scope": "full-diff",
+      "projection": "full-diff",
+      "config_digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "profile": {
+        "adapter": "coderabbit-cli",
+        "revision": "committed-full-diff-v1"
+      }
+    },
+    "valid": true,
+    "canonical": "{\"base_commit\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"base_tree\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"config_digest\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"head_commit\":\"cccccccccccccccccccccccccccccccccccccccc\",\"head_tree\":\"dddddddddddddddddddddddddddddddddddddddd\",\"profile\":{\"adapter\":\"coderabbit-cli\",\"revision\":\"committed-full-diff-v1\"},\"projection\":\"full-diff\",\"repo\":\"camerontaylor/cq-toolkit\",\"scope\":\"full-diff\",\"v\":1}",
+    "sha256": "b22dae7e85e6f611386640b1529771c003d51545b876641c124f07620da4afa0"
+  },
+  {
+    "name": "unicode-canonical-identity",
+    "type": "identity",
+    "value": {
+      "v": 1,
+      "repo": "camerontaylor/cq-toolkit",
+      "base_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "base_tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "head_commit": "cccccccccccccccccccccccccccccccccccccccc",
+      "head_tree": "dddddddddddddddddddddddddddddddddddddddd",
+      "scope": "full-diff",
+      "projection": "full-diff/\u96ea",
+      "config_digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "profile": {
+        "adapter": "coderabbit-cli",
+        "revision": "committed-full-diff-v1"
+      }
+    },
+    "valid": true,
+    "canonical": "{\"base_commit\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"base_tree\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"config_digest\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"head_commit\":\"cccccccccccccccccccccccccccccccccccccccc\",\"head_tree\":\"dddddddddddddddddddddddddddddddddddddddd\",\"profile\":{\"adapter\":\"coderabbit-cli\",\"revision\":\"committed-full-diff-v1\"},\"projection\":\"full-diff/\\u96ea\",\"repo\":\"camerontaylor/cq-toolkit\",\"scope\":\"full-diff\",\"v\":1}",
+    "sha256": "ef7f84cc6a33737551bf6b7e7e1d15191c597b5bdb68ce073f94196eba607153"
+  },
+  {
+    "name": "extra-context-refused",
+    "type": "identity",
+    "value": {
+      "v": 1,
+      "repo": "camerontaylor/cq-toolkit",
+      "base_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "base_tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "head_commit": "cccccccccccccccccccccccccccccccccccccccc",
+      "head_tree": "dddddddddddddddddddddddddddddddddddddddd",
+      "scope": "full-diff",
+      "projection": "full-diff",
+      "config_digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "profile": {
+        "adapter": "coderabbit-cli",
+        "revision": "committed-full-diff-v1"
+      },
+      "context": "extra"
+    },
+    "valid": false
+  },
+  {
+    "name": "unknown-profile",
+    "type": "identity",
+    "value": {
+      "v": 1,
+      "repo": "camerontaylor/cq-toolkit",
+      "base_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "base_tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "head_commit": "cccccccccccccccccccccccccccccccccccccccc",
+      "head_tree": "dddddddddddddddddddddddddddddddddddddddd",
+      "scope": "full-diff",
+      "projection": "full-diff",
+      "config_digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    },
+    "valid": false
+  },
+  {
+    "name": "boolean-version-refused",
+    "type": "identity",
+    "value": {
+      "v": true,
+      "repo": "camerontaylor/cq-toolkit",
+      "base_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "base_tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "head_commit": "cccccccccccccccccccccccccccccccccccccccc",
+      "head_tree": "dddddddddddddddddddddddddddddddddddddddd",
+      "scope": "full-diff",
+      "projection": "full-diff",
+      "config_digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "profile": {
+        "adapter": "coderabbit-cli",
+        "revision": "committed-full-diff-v1"
+      }
+    },
+    "valid": false
+  },
+  {
+    "name": "pinned-profile",
+    "type": "profile",
+    "value": {
+      "adapter": "coderabbit-cli",
+      "revision": "committed-full-diff-v1",
+      "flags": [
+        "--agent",
+        "--deep",
+        "--committed",
+        "--base-commit",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      ]
+    },
+    "valid": true
+  },
+  {
+    "name": "request-binding",
+    "type": "request",
+    "value": {
+      "v": 1,
+      "key_digest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "identity": "b22dae7e85e6f611386640b1529771c003d51545b876641c124f07620da4afa0",
+      "item": "lr-b22dae7e85e6-g1",
+      "created_at": "2026-11-08T00:00:00Z"
+    },
+    "valid": true
+  },
+  {
+    "name": "capabilities",
+    "type": "wire",
+    "value": {
+      "v": 1,
+      "op": "capabilities"
+    },
+    "valid": true
+  },
+  {
+    "name": "submit",
+    "type": "wire",
+    "value": {
+      "v": 1,
+      "op": "submit",
+      "request_id": "request-1",
+      "inputs": {
+        "repo": "camerontaylor/cq-toolkit",
+        "base_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "base_tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "head_commit": "cccccccccccccccccccccccccccccccccccccccc",
+        "head_tree": "dddddddddddddddddddddddddddddddddddddddd",
+        "projection": "full-diff",
+        "target": "main"
+      }
+    },
+    "valid": true
+  },
+  {
+    "name": "status",
+    "type": "wire",
+    "value": {
+      "v": 1,
+      "op": "status",
+      "request_id": "request-1"
+    },
+    "valid": true
+  },
+  {
+    "name": "result",
+    "type": "wire",
+    "value": {
+      "v": 1,
+      "op": "result",
+      "request_id": "request-1",
+      "index": 0
+    },
+    "valid": true
+  },
+  {
+    "name": "cancel",
+    "type": "wire",
+    "value": {
+      "v": 1,
+      "op": "cancel",
+      "request_id": "request-1"
+    },
+    "valid": true
+  },
+  {
+    "name": "completed-response",
+    "type": "response",
+    "value": {
+      "v": 1,
+      "request_id": "request-1",
+      "action": "reused",
+      "state": "completed",
+      "identity": "b22dae7e85e6f611386640b1529771c003d51545b876641c124f07620da4afa0",
+      "item": "lr-b22dae7e85e6-g1",
+      "generation": 1,
+      "receipt_id": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    },
+    "valid": true
+  },
+  {
+    "name": "full-diff-receipt",
+    "type": "receipt",
+    "value": {
+      "v": 1,
+      "kind": "local-review-full-diff",
+      "identity": "b22dae7e85e6f611386640b1529771c003d51545b876641c124f07620da4afa0",
+      "identity_inputs": {
+        "v": 1,
+        "repo": "camerontaylor/cq-toolkit",
+        "base_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "base_tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "head_commit": "cccccccccccccccccccccccccccccccccccccccc",
+        "head_tree": "dddddddddddddddddddddddddddddddddddddddd",
+        "scope": "full-diff",
+        "projection": "full-diff",
+        "config_digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "profile": {
+          "adapter": "coderabbit-cli",
+          "revision": "committed-full-diff-v1"
+        }
+      },
+      "profile": {
+        "adapter": "coderabbit-cli",
+        "revision": "committed-full-diff-v1",
+        "flags": [
+          "--agent",
+          "--deep",
+          "--committed",
+          "--base-commit",
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ]
+      },
+      "run_id": "run-1",
+      "outcome": "clean",
+      "scope_adequate": true,
+      "findings": [],
+      "report": "No findings.",
+      "observed": {
+        "cli_version": null,
+        "reason": "not-observed"
+      },
+      "independent_acceptance": false
+    },
+    "valid": true
+  },
+  {
+    "name": "terminal-outbox",
+    "type": "outbox",
+    "value": {
+      "v": 1,
+      "request_id": "request-1",
+      "event_id": "terminal-1",
+      "destination": {
+        "paseo_agent_id": "08e32e05-647c-4bbf-be31-2a6aeaec0654",
+        "paseo_host": "triton"
+      },
+      "state": "pending",
+      "receipt_id": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    },
+    "valid": true
+  },
+  {
+    "name": "capabilities-response",
+    "type": "response",
+    "value": {
+      "v": 1,
+      "command": "review-v1",
+      "operations": [
+        "capabilities",
+        "submit",
+        "status",
+        "result",
+        "cancel"
+      ],
+      "features": [
+        "original-commit-snapshot-v1",
+        "chunked-result-v1",
+        "repeat-generations-v1"
+      ],
+      "limits": {
+        "max_request_bytes": 6291456,
+        "max_snapshot_bytes": 5242880,
+        "max_content_bytes": 4194304,
+        "max_objects": 4096,
+        "chunk_bytes": 3072
+      }
+    },
+    "valid": true
+  },
+  {
+    "name": "wrong-review-reader-limit",
+    "type": "response",
+    "value": {
+      "v": 1,
+      "command": "review-v1",
+      "operations": [
+        "capabilities",
+        "submit",
+        "status",
+        "result",
+        "cancel"
+      ],
+      "features": [
+        "original-commit-snapshot-v1",
+        "chunked-result-v1",
+        "repeat-generations-v1"
+      ],
+      "limits": {
+        "max_request_bytes": 8192,
+        "max_snapshot_bytes": 6291456,
+        "max_content_bytes": 4194304,
+        "max_objects": 4096,
+        "chunk_bytes": 3072
+      }
+    },
+    "valid": false
+  },
+  {
+    "name": "unknown-snapshot-feature",
+    "type": "response",
+    "value": {
+      "v": 1,
+      "command": "review-v1",
+      "operations": [
+        "capabilities",
+        "submit",
+        "status",
+        "result",
+        "cancel"
+      ],
+      "features": [
+        "synthetic-head-as-original"
+      ],
+      "limits": {
+        "max_request_bytes": 6291456,
+        "max_snapshot_bytes": 6291456,
+        "max_content_bytes": 4194304,
+        "max_objects": 4096,
+        "chunk_bytes": 3072
+      }
+    },
+    "valid": false
+  },
+  {
+    "name": "result-chunk",
+    "type": "response",
+    "value": {
+      "v": 1,
+      "receipt_id": "11667ae9651a31ff9602c421fa4175bd640bd0a3dc2b93562b10747fb838e87f",
+      "index": 0,
+      "chunks": 1,
+      "bytes": 18,
+      "sha256": "11667ae9651a31ff9602c421fa4175bd640bd0a3dc2b93562b10747fb838e87f",
+      "encoding": "base64-utf8-json",
+      "data": "eyJyZXBvcnQiOiJjbGVhbiJ9",
+      "chunk_sha256": "11667ae9651a31ff9602c421fa4175bd640bd0a3dc2b93562b10747fb838e87f",
+      "next_index": null
+    },
+    "valid": true
+  },
+  {
+    "name": "negative-chunk-index",
+    "type": "response",
+    "value": {
+      "v": 1,
+      "receipt_id": "11667ae9651a31ff9602c421fa4175bd640bd0a3dc2b93562b10747fb838e87f",
+      "index": -1,
+      "chunks": 1,
+      "bytes": 18,
+      "sha256": "11667ae9651a31ff9602c421fa4175bd640bd0a3dc2b93562b10747fb838e87f",
+      "encoding": "base64-utf8-json",
+      "data": "eyJyZXBvcnQiOiJjbGVhbiJ9",
+      "chunk_sha256": "11667ae9651a31ff9602c421fa4175bd640bd0a3dc2b93562b10747fb838e87f",
+      "next_index": null
+    },
+    "valid": false
+  },
+  {
+    "name": "invalid-chunk-base64",
+    "type": "response",
+    "value": {
+      "v": 1,
+      "receipt_id": "11667ae9651a31ff9602c421fa4175bd640bd0a3dc2b93562b10747fb838e87f",
+      "index": 0,
+      "chunks": 1,
+      "bytes": 18,
+      "sha256": "11667ae9651a31ff9602c421fa4175bd640bd0a3dc2b93562b10747fb838e87f",
+      "encoding": "base64-utf8-json",
+      "data": "not base64",
+      "chunk_sha256": "11667ae9651a31ff9602c421fa4175bd640bd0a3dc2b93562b10747fb838e87f",
+      "next_index": null
+    },
+    "valid": false
+  },
+  {
+    "name": "chunk-missing-whole-digest",
+    "type": "response",
+    "value": {
+      "v": 1,
+      "receipt_id": "11667ae9651a31ff9602c421fa4175bd640bd0a3dc2b93562b10747fb838e87f",
+      "index": 0,
+      "chunks": 1,
+      "bytes": 18,
+      "encoding": "base64-utf8-json",
+      "data": "eyJyZXBvcnQiOiJjbGVhbiJ9",
+      "chunk_sha256": "11667ae9651a31ff9602c421fa4175bd640bd0a3dc2b93562b10747fb838e87f",
+      "next_index": null
+    },
+    "valid": false
+  },
+  {
+    "name": "input-error-response",
+    "type": "response",
+    "value": {
+      "v": 1,
+      "error": {
+        "code": "invalid-input",
+        "message": "extra context refused",
+        "retryable": false
+      }
+    },
+    "valid": true
+  },
+  {
+    "name": "original-commit-snapshot",
+    "type": "snapshot",
+    "value": {
+      "v": 1,
+      "tree": "b22ca19038e9eea54bdff358d23a087574bf06b3",
+      "objects": [
+        {
+          "oid": "681dcaf4384a4f0359a2be6598521327c596c2f2",
+          "type": "blob",
+          "data": "b3JpZ2luYWwgY29tbWl0IGZpeHR1cmUK"
+        },
+        {
+          "oid": "b22ca19038e9eea54bdff358d23a087574bf06b3",
+          "type": "tree",
+          "data": "MTAwNjQ0IGV4YW1wbGUudHh0AGgdyvQ4Sk8DWaK+ZZhSEyfFlsLy"
+        },
+        {
+          "oid": "c8966ae03720240e45f30ea36a2f7d80903d35d9",
+          "type": "commit",
+          "data": "dHJlZSBiMjJjYTE5MDM4ZTllZWE1NGJkZmYzNThkMjNhMDg3NTc0YmYwNmIzCnBhcmVudCBhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhCmF1dGhvciBPcmlnaW5hbCBBdXRob3IgPGF1dGhvckBleGFtcGxlLnRlc3Q+IDE3OTQwOTYwMDAgKzAwMDAKY29tbWl0dGVyIE9yaWdpbmFsIEF1dGhvciA8YXV0aG9yQGV4YW1wbGUudGVzdD4gMTc5NDA5NjAwMCArMDAwMAoKT3JpZ2luYWwgdW5wdWJsaXNoZWQgY29tbWl0Cg=="
+        }
+      ],
+      "sha256": "e99817dd4fea9eb75c9edb5d47a753104b1444d3c7b58a645a28b0f83b8a5c5b"
+    },
+    "valid": true
+  },
+  {
+    "name": "unpublished-original-submit",
+    "type": "wire",
+    "value": {
+      "v": 1,
+      "op": "submit",
+      "request_id": "request-1",
+      "inputs": {
+        "repo": "camerontaylor/cq-toolkit",
+        "base_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "base_tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "head_commit": "c8966ae03720240e45f30ea36a2f7d80903d35d9",
+        "head_tree": "b22ca19038e9eea54bdff358d23a087574bf06b3",
+        "projection": "full-diff",
+        "target": "main"
+      },
+      "snapshot": {
+        "v": 1,
+        "tree": "b22ca19038e9eea54bdff358d23a087574bf06b3",
+        "objects": [
+          {
+            "oid": "681dcaf4384a4f0359a2be6598521327c596c2f2",
+            "type": "blob",
+            "data": "b3JpZ2luYWwgY29tbWl0IGZpeHR1cmUK"
+          },
+          {
+            "oid": "b22ca19038e9eea54bdff358d23a087574bf06b3",
+            "type": "tree",
+            "data": "MTAwNjQ0IGV4YW1wbGUudHh0AGgdyvQ4Sk8DWaK+ZZhSEyfFlsLy"
+          },
+          {
+            "oid": "c8966ae03720240e45f30ea36a2f7d80903d35d9",
+            "type": "commit",
+            "data": "dHJlZSBiMjJjYTE5MDM4ZTllZWE1NGJkZmYzNThkMjNhMDg3NTc0YmYwNmIzCnBhcmVudCBhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhCmF1dGhvciBPcmlnaW5hbCBBdXRob3IgPGF1dGhvckBleGFtcGxlLnRlc3Q+IDE3OTQwOTYwMDAgKzAwMDAKY29tbWl0dGVyIE9yaWdpbmFsIEF1dGhvciA8YXV0aG9yQGV4YW1wbGUudGVzdD4gMTc5NDA5NjAwMCArMDAwMAoKT3JpZ2luYWwgdW5wdWJsaXNoZWQgY29tbWl0Cg=="
+          }
+        ],
+        "sha256": "e99817dd4fea9eb75c9edb5d47a753104b1444d3c7b58a645a28b0f83b8a5c5b"
+      }
+    },
+    "valid": true
+  },
+  {
+    "name": "snapshot-unknown-field",
+    "type": "snapshot",
+    "value": {
+      "v": 1,
+      "tree": "b22ca19038e9eea54bdff358d23a087574bf06b3",
+      "objects": [
+        {
+          "oid": "681dcaf4384a4f0359a2be6598521327c596c2f2",
+          "type": "blob",
+          "data": "b3JpZ2luYWwgY29tbWl0IGZpeHR1cmUK"
+        },
+        {
+          "oid": "b22ca19038e9eea54bdff358d23a087574bf06b3",
+          "type": "tree",
+          "data": "MTAwNjQ0IGV4YW1wbGUudHh0AGgdyvQ4Sk8DWaK+ZZhSEyfFlsLy"
+        },
+        {
+          "oid": "c8966ae03720240e45f30ea36a2f7d80903d35d9",
+          "type": "commit",
+          "data": "dHJlZSBiMjJjYTE5MDM4ZTllZWE1NGJkZmYzNThkMjNhMDg3NTc0YmYwNmIzCnBhcmVudCBhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhCmF1dGhvciBPcmlnaW5hbCBBdXRob3IgPGF1dGhvckBleGFtcGxlLnRlc3Q+IDE3OTQwOTYwMDAgKzAwMDAKY29tbWl0dGVyIE9yaWdpbmFsIEF1dGhvciA8YXV0aG9yQGV4YW1wbGUudGVzdD4gMTc5NDA5NjAwMCArMDAwMAoKT3JpZ2luYWwgdW5wdWJsaXNoZWQgY29tbWl0Cg=="
+        }
+      ],
+      "sha256": "e99817dd4fea9eb75c9edb5d47a753104b1444d3c7b58a645a28b0f83b8a5c5b",
+      "original_head_commit": "c8966ae03720240e45f30ea36a2f7d80903d35d9"
+    },
+    "valid": false
+  },
+  {
+    "name": "snapshot-tag-refused",
+    "type": "snapshot",
+    "value": {
+      "v": 1,
+      "tree": "b22ca19038e9eea54bdff358d23a087574bf06b3",
+      "objects": [
+        {
+          "oid": "681dcaf4384a4f0359a2be6598521327c596c2f2",
+          "type": "tag",
+          "data": "b3JpZ2luYWwgY29tbWl0IGZpeHR1cmUK"
+        },
+        {
+          "oid": "b22ca19038e9eea54bdff358d23a087574bf06b3",
+          "type": "tree",
+          "data": "MTAwNjQ0IGV4YW1wbGUudHh0AGgdyvQ4Sk8DWaK+ZZhSEyfFlsLy"
+        },
+        {
+          "oid": "c8966ae03720240e45f30ea36a2f7d80903d35d9",
+          "type": "commit",
+          "data": "dHJlZSBiMjJjYTE5MDM4ZTllZWE1NGJkZmYzNThkMjNhMDg3NTc0YmYwNmIzCnBhcmVudCBhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhCmF1dGhvciBPcmlnaW5hbCBBdXRob3IgPGF1dGhvckBleGFtcGxlLnRlc3Q+IDE3OTQwOTYwMDAgKzAwMDAKY29tbWl0dGVyIE9yaWdpbmFsIEF1dGhvciA8YXV0aG9yQGV4YW1wbGUudGVzdD4gMTc5NDA5NjAwMCArMDAwMAoKT3JpZ2luYWwgdW5wdWJsaXNoZWQgY29tbWl0Cg=="
+        }
+      ],
+      "sha256": "e99817dd4fea9eb75c9edb5d47a753104b1444d3c7b58a645a28b0f83b8a5c5b"
+    },
+    "valid": false
+  },
+  {
+    "name": "snapshot-invalid-base64",
+    "type": "snapshot",
+    "value": {
+      "v": 1,
+      "tree": "b22ca19038e9eea54bdff358d23a087574bf06b3",
+      "objects": [
+        {
+          "oid": "681dcaf4384a4f0359a2be6598521327c596c2f2",
+          "type": "blob",
+          "data": "bad!"
+        },
+        {
+          "oid": "b22ca19038e9eea54bdff358d23a087574bf06b3",
+          "type": "tree",
+          "data": "MTAwNjQ0IGV4YW1wbGUudHh0AGgdyvQ4Sk8DWaK+ZZhSEyfFlsLy"
+        },
+        {
+          "oid": "c8966ae03720240e45f30ea36a2f7d80903d35d9",
+          "type": "commit",
+          "data": "dHJlZSBiMjJjYTE5MDM4ZTllZWE1NGJkZmYzNThkMjNhMDg3NTc0YmYwNmIzCnBhcmVudCBhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhCmF1dGhvciBPcmlnaW5hbCBBdXRob3IgPGF1dGhvckBleGFtcGxlLnRlc3Q+IDE3OTQwOTYwMDAgKzAwMDAKY29tbWl0dGVyIE9yaWdpbmFsIEF1dGhvciA8YXV0aG9yQGV4YW1wbGUudGVzdD4gMTc5NDA5NjAwMCArMDAwMAoKT3JpZ2luYWwgdW5wdWJsaXNoZWQgY29tbWl0Cg=="
+        }
+      ],
+      "sha256": "e99817dd4fea9eb75c9edb5d47a753104b1444d3c7b58a645a28b0f83b8a5c5b"
+    },
+    "valid": false
+  },
+  {
+    "name": "submit-invalid-request-id",
+    "type": "wire",
+    "value": {
+      "v": 1,
+      "op": "submit",
+      "request_id": "a/b",
+      "inputs": {
+        "repo": "camerontaylor/cq-toolkit",
+        "base_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "base_tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "head_commit": "cccccccccccccccccccccccccccccccccccccccc",
+        "head_tree": "dddddddddddddddddddddddddddddddddddddddd",
+        "projection": "full-diff",
+        "target": "main"
+      }
+    },
+    "valid": false
+  },
+  {
+    "name": "status-invalid-request-id",
+    "type": "wire",
+    "value": {
+      "v": 1,
+      "op": "status",
+      "request_id": "a/b"
+    },
+    "valid": false
+  },
+  {
+    "name": "result-invalid-request-id",
+    "type": "wire",
+    "value": {
+      "v": 1,
+      "op": "result",
+      "request_id": "a/b",
+      "index": 0
+    },
+    "valid": false
+  },
+  {
+    "name": "cancel-invalid-request-id",
+    "type": "wire",
+    "value": {
+      "v": 1,
+      "op": "cancel",
+      "request_id": "a/b"
+    },
+    "valid": false
+  },
+  {
+    "name": "invalid-supersedes",
+    "type": "wire",
+    "value": {
+      "v": 1,
+      "op": "submit",
+      "request_id": "request-1",
+      "inputs": {
+        "repo": "camerontaylor/cq-toolkit",
+        "base_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "base_tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "head_commit": "cccccccccccccccccccccccccccccccccccccccc",
+        "head_tree": "dddddddddddddddddddddddddddddddddddddddd",
+        "projection": "full-diff",
+        "target": "main"
+      },
+      "supersedes": "a/b"
+    },
+    "valid": false
+  },
+  {
+    "name": "busy-response",
+    "type": "response",
+    "value": {
+      "v": 1,
+      "error": {
+        "code": "busy",
+        "message": "review queue lock busy; retry the same request id",
+        "retryable": true
+      }
+    },
+    "valid": true
+  }
+]

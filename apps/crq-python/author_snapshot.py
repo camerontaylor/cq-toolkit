@@ -105,7 +105,7 @@ def read_blobs(repo, oids):
     return blobs
 
 
-def decode(snapshot, binding):
+def decode(snapshot, binding, *, original=False):
     if not isinstance(snapshot, dict) or set(snapshot) != {"v", "tree", "objects", "sha256"}:
         raise AuthorRefused("invalid snapshot fields")
     if type(snapshot["v"]) is not int or snapshot["v"] != 1:
@@ -135,13 +135,19 @@ def decode(snapshot, binding):
         if total > MAX_CONTENT:
             raise AuthorRefused("snapshot content exceeds bound")
         actual = hashlib.sha1(kind.encode() + b" " + str(len(data)).encode() + b"\0" + data).hexdigest()
-        if actual != oid or (kind == "commit" and (oid != binding["head"] or data != commit_bytes(binding["base"], tree))):
+        if actual != oid or (not original and kind == "commit" and (oid != binding["head"] or data != commit_bytes(binding["base"], tree))):
             raise AuthorRefused("snapshot object identity mismatch")
         digest.update((oid + "\0" + kind + "\0" + encoded + "\n").encode())
         decoded.append((oid, kind, data))
         previous = oid
     if digest.hexdigest() != snapshot["sha256"]:
         raise AuthorRefused("snapshot digest mismatch")
+    if original:
+        head = next((data for oid, kind, data in decoded
+                     if oid == binding["head"] and kind == "commit"), None)
+        if head is None or not head.startswith(("tree " + tree + "\n").encode()):
+            raise AuthorRefused("original snapshot head/tree mismatch")
+        return decoded
     expected = commit_bytes(binding["base"], tree)
     head = hashlib.sha1(b"commit " + str(len(expected)).encode() + b"\0" + expected).hexdigest()
     if head != binding["head"]:
@@ -149,13 +155,13 @@ def decode(snapshot, binding):
     return decoded
 
 
-def install(snapshot, binding, runner):
+def install(snapshot, binding, runner, *, original=False):
     """Caller holds tick.lock. Validate/scan in quarantine, then pin before enrollment.
 
     Pins intentionally survive interrupted enrollment and rollback. They can only
     be collected by a future operator GC after queue/recovery retention expires.
     """
-    objects = decode(snapshot, binding)
+    objects = decode(snapshot, binding, original=original)
     clone = Path(runner.CLONE).resolve()
     if git(clone, "cat-file", "-t", binding["base"]).strip() != b"commit":
         raise AuthorRefused("snapshot base must already be available")
@@ -173,11 +179,27 @@ def install(snapshot, binding, runner):
         # Only entries that differ from base are checked: unchanged entries already exist in the
         # review clone, and walking the whole tree would bound-fail on large repositories.
         raw = git(quarantine, "diff-tree", "-r", "-z", "--no-renames", binding["base"], binding["head"]).split(b"\0")
+        if original:
+            # The vendor can inspect original history, including blobs removed
+            # before HEAD. Scan each transferred commit's changes against every
+            # parent; -m includes merge introductions, --root includes roots.
+            history_bytes = sum(len(part) + 1 for part in raw)
+            for oid, kind, _ in objects:
+                if kind == "commit":
+                    history = git(quarantine, "diff-tree", "-r", "-m", "-z", "--no-renames",
+                                  "--no-commit-id", "--root", oid).split(b"\0")
+                    history_bytes += sum(len(part) + 1 for part in history)
+                    if history_bytes > MAX_WIRE:
+                        raise AuthorRefused("snapshot history scan exceeds bound; reduce the commit range")
+                    raw.extend(history)
+            raw = [part for part in raw if part]
         entries = []  # (mode, oid, raw_path) for every added or modified path
         for meta, raw_path in zip(raw[0::2], raw[1::2]):
             _, new_mode, _, new_oid, _ = meta.split(b" ")
             if new_mode != b"000000":
                 entries.append((new_mode, new_oid.decode(), raw_path))
+        if original:
+            entries = sorted(set(entries))
         if any(mode not in (b"100644", b"100755", b"120000") for mode, _, _ in entries):
             raise AuthorRefused("snapshot gitlinks or unsupported modes refused")
         # Tree entries are typed by mode, not by object: a 100644 entry may name a tree.
@@ -188,7 +210,7 @@ def install(snapshot, binding, runner):
             raise AuthorRefused("snapshot entry mode disagrees with object type")
         diff = git(quarantine, "diff", "--no-ext-diff", "--no-textconv", "--no-color", "--unified=0",
                    binding["base"], binding["head"]).decode("utf-8", errors="replace")
-        if not diff:
+        if not diff and not original:
             raise AuthorRefused("empty snapshot diff")
         # Attributes/binary diff suppression must not hide incoming blob bytes.
         # Feed every incoming blob through the existing path-aware scan policy,
