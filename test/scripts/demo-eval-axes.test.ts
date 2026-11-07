@@ -112,6 +112,14 @@ describe('eval-axes-select module: --only selection and the credential gate (pur
     });
   });
 
+  it('requiredKeys: an acp-only selection needs no provider key (agent-side auth)', () => {
+    const selected = [{ lane: 'acp', provider: 'zai', model: 'glm-5.3-flash' }];
+    expect(requiredKeys(selected, EVAL_AXES_PROVIDER_KEYS, {})).toEqual({
+      missing: [],
+      unmapped: null,
+    });
+  });
+
   it('requiredKeys: an unmapped provider is named (first offender)', () => {
     const selected = [{ lane: 'ai-sdk', provider: 'acme', model: 'acme-model' }];
     const { missing, unmapped } = requiredKeys(selected, EVAL_AXES_PROVIDER_KEYS, {});
