@@ -63,4 +63,23 @@ describe('runSelfMergePrs — merge-time recheck through the real registry', () 
     expect(effects.merges).toEqual([]);
     expect(JSON.stringify(result)).toContain('protected branch release');
   });
+
+  test('run level: cfg.baseBranch omitted and a trunk snapshot reaches the gated op and merges', async () => {
+    const forge = new StateForge();
+    forge.seed(seededState(7, T0 - REVIEW_ACCEPT_SETTLE_MS - 60_000));
+    const effects = new RecordingMergeEffects('trunk');
+    await runSelfMergePrs(
+      {
+        gh: forgeGh(
+          forge,
+          [{ pr: 7, approvedOid: HEAD(7), liveBaseName: 'trunk', baseName: 'trunk' }],
+          [],
+        ),
+        mergeEffects: effects,
+        nowMs: () => T0,
+      },
+      { ...cfg(tmpJournalRoot()), cqEnv: readCqEnv({ CQ_MERGE_BASE_BRANCH: 'trunk' }) },
+    );
+    expect(effects.merges).toEqual([{ pr: 7, matchHeadCommit: HEAD(7) }]);
+  });
 });

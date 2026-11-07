@@ -7,6 +7,7 @@ import { errorClassOf } from '../../../src/driver/errors.js';
 import { readCqEnv } from '../../../src/config/env.js';
 import { makeRunMergePrsOp } from '../../../src/ops/merge/runPrs.js';
 import { makeResolveConflictOp } from '../../../src/ops/merge/resolveConflict.js';
+import { safeArgs } from '../../../src/adapters/forge-github/mergeEffects.js';
 import { registry } from '../../../src/ops/merge/registry.js';
 import { buildRunInput, recheckedRegistryView } from '../../../src/selfhost/self-merge-prs.js';
 import { FakeMergeEffects, NOW_MS } from './runPrs.helpers.js';
@@ -182,5 +183,120 @@ describe('trust mirrors', () => {
     await expect(op({ ...runInput, baseBranch: 'main' })).rejects.toThrow(/CQ_MERGE_BASE_BRANCH/);
     expect(effects.calls).toEqual([]);
     expect((await op({ ...runInput, baseBranch: 'trunk' })).status).toBe('ok');
+  });
+
+  test('an invalid CQ_MERGE_PROTECTED_BRANCH snapshot is refused, never defaulted to main', async () => {
+    const cqEnv = env({ CQ_MERGE_PROTECTED_BRANCH: 'release branch' });
+    const effects = new FakeMergeEffects();
+    const err = await makeRunMergePrsOp({ effects, cqEnv })({
+      ...runInput,
+      baseBranch: 'main',
+    }).catch((e: unknown) => e);
+    expect(errorClassOf(err)).toBe('config');
+    expect(effects.calls).toEqual([]);
+    const err2 = await makeResolveConflictOp({ effects, cqEnv })({
+      pr: 1,
+      repoRoot: '.',
+      headBranch: 'feat/x',
+      baseBranch: 'main',
+    }).catch((e: unknown) => e);
+    expect(errorClassOf(err2)).toBe('config');
+    const badBase = env({ CQ_MERGE_BASE_BRANCH: 'a..b' });
+    const err3 = await makeRunMergePrsOp({ effects, cqEnv: badBase })({
+      ...runInput,
+      baseBranch: 'main',
+    }).catch((e: unknown) => e);
+    expect(errorClassOf(err3)).toBe('config');
+  });
+
+  test('refs/heads/ spellings normalise to the bare name everywhere', async () => {
+    const cqEnv = env({
+      CQ_MERGE_PROTECTED_BRANCH: 'refs/heads/release',
+      CQ_MERGE_BASE_BRANCH: 'refs/heads/trunk',
+    });
+    expect(cqEnv.errors).toEqual([]);
+    expect(cqEnv.values['CQ_MERGE_PROTECTED_BRANCH']).toBe('release');
+    expect(cqEnv.values['CQ_MERGE_BASE_BRANCH']).toBe('trunk');
+    const op = makeRunMergePrsOp({ effects: new FakeMergeEffects(), cqEnv });
+    for (const protectedBranch of ['release', 'refs/heads/release']) {
+      for (const baseBranch of ['trunk', 'refs/heads/trunk']) {
+        expect((await op({ ...runInput, baseBranch, protectedBranch })).status).toBe('ok');
+      }
+    }
+    await expect(
+      op({ ...runInput, baseBranch: 'trunk', protectedBranch: 'main' }),
+    ).rejects.toThrow();
+    expect(env({ CQ_MERGE_PROTECTED_BRANCH: 'refs/heads/' }).errors).toHaveLength(1);
+    // the bare destination spelling is refused once the resolved (bare) value is bound
+    const resolved = cqEnv.values['CQ_MERGE_PROTECTED_BRANCH'] as string;
+    expect(() =>
+      safeArgs(['push', 'origin', 'HEAD:release'], { protectedBranch: resolved }),
+    ).toThrow();
+    expect(() =>
+      safeArgs(['push', 'origin', 'HEAD:refs/heads/release'], { protectedBranch: resolved }),
+    ).toThrow();
+  });
+
+  test('planMergeOrder / executeMerges dispatch: differing baseBranch fails, same or default passes', async () => {
+    const plan = registry.find((e) => e.name === 'merge.planMergeOrder')!;
+    const planOp = await plan.importer({ cqEnv: env({ CQ_MERGE_BASE_BRANCH: 'trunk' }) });
+    expect(
+      errorClassOf(await planOp({ baseBranch: 'main', prs: [] }).catch((e: unknown) => e)),
+    ).toBe('config');
+    expect(((await planOp({ baseBranch: 'trunk', prs: [] })) as { status: string }).status).toBe(
+      'ok',
+    );
+    const exec = registry.find((e) => e.name === 'merge.executeMerges')!;
+    const execOp = await exec.importer({ cqEnv: env({ CQ_MERGE_BASE_BRANCH: 'trunk' }) });
+    const bad = await execOp({
+      plan: { order: [], needsHuman: [], baseBranch: 'main' },
+      repoRoot: '.',
+    }).catch((e: unknown) => e);
+    expect(errorClassOf(bad)).toBe('config');
+    const good = (await execOp({
+      plan: { order: [], needsHuman: [], baseBranch: 'trunk' },
+      repoRoot: '.',
+    })) as { status: string };
+    expect(good.status).toBe('ok');
+  });
+
+  test('executeMerges / resolveConflict: protectedBranch same or absent passes, different fails before effects', async () => {
+    const exec = registry.find((e) => e.name === 'merge.executeMerges')!;
+    const op = await exec.importer({ cqEnv: env() });
+    const plan = { order: [], needsHuman: [], baseBranch: 'main' };
+    for (const protectedBranch of [undefined, 'main', 'refs/heads/main']) {
+      const r = (await op({
+        plan,
+        repoRoot: '.',
+        ...(protectedBranch !== undefined ? { protectedBranch } : {}),
+      })) as { status: string };
+      expect(r.status).toBe('ok');
+    }
+    expect(
+      errorClassOf(
+        await op({ plan, repoRoot: '.', protectedBranch: 'dev' }).catch((e: unknown) => e),
+      ),
+    ).toBe('config');
+    const effects = new FakeMergeEffects();
+    const resolve = makeResolveConflictOp({ effects, cqEnv: env() });
+    const base = { pr: 1, repoRoot: '.', headBranch: 'feat/x', baseBranch: 'main' };
+    // same value / absent pass the mirror (then stop at the missing modelSpec, a normal failed result)
+    expect((await resolve({ ...base, protectedBranch: 'main' })).status).toBe('failed');
+    expect((await resolve(base)).status).toBe('failed');
+    expect(effects.calls).toEqual([]);
+  });
+
+  test('the cq merge-prs floor mirrors the host snapshot, so it passes under a non-main base', async () => {
+    const { plan: floor } = await import('../../../src/plans/merge-prs.js');
+    const imported = await floor.importer({
+      cqEnv: env({ CQ_MERGE_BASE_BRANCH: 'trunk', CQ_MERGE_PROTECTED_BRANCH: 'release' }),
+    });
+    const input = imported.jobs[0]!.input as { baseBranch: string };
+    expect(input.baseBranch).toBe('trunk');
+    const op = makeRunMergePrsOp({
+      effects: new FakeMergeEffects(),
+      cqEnv: env({ CQ_MERGE_BASE_BRANCH: 'trunk', CQ_MERGE_PROTECTED_BRANCH: 'release' }),
+    });
+    expect((await op({ ...runInput, ...(input as object) } as never)).status).toBe('ok');
   });
 });
