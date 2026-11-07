@@ -1,7 +1,9 @@
 """Offline launch, reconciliation and durable local completion."""
 import copy
 import contextlib
+import datetime as dt
 import json
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
@@ -69,12 +71,12 @@ class ExecutionTests(SnapshotGitFixture, unittest.TestCase):
         self.assertEqual(pr["cycles"][0]["profile"], self.profile)
         self.assertNotIn("coverage", self.q)
 
-    def full_tick(self, opened, *, remaining=0):
+    def full_tick(self, opened, *, remaining=0, clone=None):
         """Real tick, enrollment and repair backfill; replace external I/O."""
         config = copy.deepcopy(crq.CONFIG)
         config["merged_discovery"] = None
         with contextlib.ExitStack() as stack:
-            stack.enter_context(mock.patch.multiple(crq, CLONE=self.repo, STATE=self.state,
+            stack.enter_context(mock.patch.multiple(crq, CLONE=clone or self.repo, STATE=self.state,
                 RUNS=self.runs, REPOS=[], CONFIG=config))
             for name in ("fetch", "save_queue", "event", "notify_owner", "write_status", "refresh_slot_deadline"):
                 stack.enter_context(mock.patch.object(crq, name))
@@ -163,11 +165,83 @@ class ExecutionTests(SnapshotGitFixture, unittest.TestCase):
         self.assertIsNotNone(self.item.get("receipt_id"))
 
     def test_missing_pinned_objects_do_not_abort_completion_reconciliation(self):
-        with mock.patch.object(self.c, "git", side_effect=crq.author_quota.AuthorRefused("missing pinned objects")):
+        partial = self.partial_clone()
+        with mock.patch.object(crq, "CLONE", partial), mock.patch.object(self.c, "git", crq.git):
+            with self.assertRaises(RuntimeError):
+                crq.git("rev-parse", self.head + "^{tree}")
             runtime.reconcile_completed(self.c, self.q)
         self.assertEqual(self.item["state"], "pending")
-        self.assertIn("missing pinned objects", self.item["wait_reason"])
+        self.assertIn("RuntimeError", self.item["wait_reason"])
+        self.assertEqual(self.item["reconcile_failures"], 1)
         self.assertEqual(self.q["starts"], [])
+
+    def partial_clone(self):
+        partial = self.repo / "partial"
+        partial.mkdir()
+        transport.author_snapshot.git(partial, "init", "-q")
+        transport.author_snapshot.git(partial, "fetch", "--no-tags", str(self.repo), self.base)
+        return partial
+
+    def test_real_git_errors_do_not_stop_tick_or_slot_and_recover_after_backoff(self):
+        partial = self.partial_clone()
+        initial = copy.deepcopy(self.q)
+        real_run = subprocess.run
+        for failure in ("missing", "timeout"):
+            with self.subTest(failure):
+                self.q = copy.deepcopy(initial)
+                self.item = self.q["items"][0]
+                pr = self.pr()
+                pr.update(state="done", cycles=[dict(base=self.base, head=self.head,
+                    profile=self.profile, range_policy="full-range-once-v1", run_id="run-1",
+                    completed_at="2026-11-08T00:01:00Z", ndjson=str(self.rdir / "review.ndjson"),
+                    source="local-review")])
+                def git_process(cmd, *args, **kw):
+                    if failure == "timeout" and cmd[:2] == ["git", "rev-parse"]:
+                        raise subprocess.TimeoutExpired(cmd, kw.get("timeout", 600))
+                    return real_run(cmd, *args, **kw)
+                with mock.patch.object(subprocess, "run", side_effect=git_process):
+                    self.full_tick([dict(number=2, isDraft=False, baseRefName="main",
+                        headRefName="unrelated", headRefOid=self.head)], clone=partial)
+                self.assertTrue(any(i["id"] == "pr2" for i in self.q["items"]))
+                self.assertEqual(self.item["state"], "pending")
+                self.assertIn("RuntimeError" if failure == "missing" else "TimeoutExpired", self.item["wait_reason"])
+                with mock.patch.object(crq, "CLONE", partial), mock.patch.object(crq, "git", wraps=crq.git) as git:
+                    runtime.reconcile_completed(crq, self.q)
+                    git.assert_not_called()  # repeated ticks honor the existing not_before gate
+                # The minute lane still admits unrelated work while this item backs off.
+                def launch(q, item, plan):
+                    item["state"] = "reviewing"
+                    item["run"] = dict(run_id="unrelated-run")
+                    q["starts"].append(crq.iso())
+                    return "unrelated-run"
+                self.item.pop("not_before")  # exercise the same real error inside slot itself
+                with mock.patch.multiple(crq, CLONE=partial, STATE=self.state, RUNS=self.runs), \
+                     mock.patch.object(crq, "load_queue", return_value=self.q), \
+                     mock.patch.object(crq, "read_slot_usage", return_value=({"remaining": 1}, [])), \
+                     mock.patch.object(crq, "refresh_slot_deadline", side_effect=lambda *a, **kw: crq.now()), \
+                     mock.patch.object(crq, "save_queue"), \
+                     mock.patch.object(crq, "pr_info", return_value=dict(state="OPEN")), \
+                     mock.patch.object(crq, "quiet_reason", return_value=None), \
+                     mock.patch.object(crq, "plan_open", return_value=dict(notes=[], label="unrelated")), \
+                     mock.patch.object(crq, "launch", side_effect=launch) as launched, \
+                     mock.patch.object(subprocess, "run", side_effect=git_process):
+                    crq.slot()
+                self.assertEqual(launched.call_count, 1)
+                self.assertEqual(self.item["reconcile_failures"], 2)
+                # Import the same pinned object; do not change the submitted identity.
+                transport.author_snapshot.git(partial, "fetch", "--no-tags", str(self.repo), self.head)
+                until = crq.parse_iso(self.item["not_before"])
+                with mock.patch.object(crq, "now", return_value=until + dt.timedelta(seconds=1)), \
+                     mock.patch.object(crq, "classify", return_value=self.cls), \
+                     mock.patch.object(crq, "run_liveness", return_value="alive"):
+                    self.full_tick([], clone=partial)
+                self.assertEqual(self.item["state"], "done")
+                self.assertNotIn("not_before", self.item)
+                self.assertNotIn("reconcile_failures", self.item)
+                if failure == "missing":
+                    # For timeout case the object exists: only the real process
+                    # timeout wrapper fails, rather than a missing-object mock.
+                    self.assertEqual(self.item["identity_inputs"], self.facts)
 
     def test_local_harvest_retains_global_auth_and_rate_gates(self):
         for outcome in ("auth", "action_required", "rate_limited"):

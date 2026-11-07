@@ -4,7 +4,9 @@ Exact reuse is receipt-based. Ledger line-scope credit is deliberately separate:
 the full-range CLI adapter cannot prove per-line coverage.
 """
 import copy
+import datetime as dt
 import json
+import subprocess
 from pathlib import Path
 
 import review_admission as admission
@@ -112,10 +114,21 @@ def reconcile_completed(c, q):
     for item in list(q["items"]):
         if item.get("kind") != KIND or item.get("state") != "pending":
             continue
+        at = dt.datetime.fromisoformat(c.iso().replace("Z", "+00:00"))
         try:
+            if item.get("not_before") and dt.datetime.fromisoformat(item["not_before"].replace("Z", "+00:00")) > at:
+                continue
             prepare(c, q, item, False, completed_only=True)
-        except (OSError, ValueError, KeyError, c.NotReady, AuthorRefused) as exc:
-            item["wait_reason"] = f"completed-evidence reconciliation: {exc}"[:300]
+            item.pop("reconcile_failures", None)
+            item.pop("not_before", None)
+            if (item.get("wait_reason") or "").startswith("completed-evidence-unavailable:"):
+                item["wait_reason"] = None
+        except (OSError, RuntimeError, subprocess.SubprocessError, ValueError, KeyError, c.NotReady, AuthorRefused) as exc:
+            failures = item.get("reconcile_failures", 0) + 1
+            minutes = min(240, c.CONFIG.get("error_backoff_min", 5) * 2 ** min(failures - 1, 8))
+            item["reconcile_failures"] = failures
+            item["not_before"] = (at + dt.timedelta(minutes=minutes)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            item["wait_reason"] = f"completed-evidence-unavailable: {type(exc).__name__}: {exc}"[:300]
 
 
 def complete(c, q, item, rdir, run_id, cls, ended_at, exit_code):
