@@ -39,7 +39,10 @@ interface FixtureComment {
 
 let seq = 6600000000;
 /** A synthetic recorded comment; ids ascend so each html_url is distinct. */
-const comment = (body: string, init: { id?: number; created_at?: string } = {}): FixtureComment => {
+const comment = (
+  body: string,
+  init: { id?: number; created_at?: string; login?: string } = {},
+): FixtureComment => {
   const id = init.id ?? ++seq;
   const at = init.created_at ?? AT_A;
   return {
@@ -47,7 +50,7 @@ const comment = (body: string, init: { id?: number; created_at?: string } = {}):
     html_url: `https://github.com/synthetic-org/synthetic-repo/issues/7#issuecomment-${id}`,
     created_at: at,
     updated_at: at,
-    user: { login: LOGIN },
+    user: { login: init.login ?? LOGIN },
     body,
   };
 };
@@ -119,6 +122,37 @@ describe('M4b1 nominal evidence', () => {
     });
     // The capture instant rides in the parallel meta array, ms-normalised.
     expect(result.meta).toEqual([{ at: AT_A_MS }]);
+  });
+
+  test('a review posted by cq-review[bot] is attested; the same header from the owner account is not', () => {
+    const app = comment(pass(HEAD_A), { login: 'cq-review[bot]' });
+    const owner = comment(pass(HEAD_A));
+    const result = importAcceptance(snapshot([app, owner]));
+
+    expect(result.unknown).toEqual([]);
+    expect(result.acceptances).toHaveLength(2);
+    for (const row of result.acceptances)
+      expect(AcceptancePayloadSchema.safeParse(row).success).toBe(true);
+    const byId = new Map(result.acceptances.map((r) => [r.reviewerId, r]));
+    expect(byId.get('app:cq-review:DeepSeek')?.availability['/independent']).toEqual({
+      state: 'known',
+      reason:
+        'posted by the cq-review GitHub App (cq-review[bot]), an identity separate from the owner account; reviewer name self-declared in the header',
+      source: app.html_url,
+    });
+    expect(byId.get('self-declared:DeepSeek')?.availability['/independent']).toEqual({
+      state: 'known',
+      reason: INDEPENDENT_REASON,
+      source: owner.html_url,
+    });
+    // A look-alike login is not the App.
+    const lookalike = importAcceptance(snapshot([comment(pass(HEAD_A), { login: 'cq-review' })]));
+    expect(lookalike.acceptances[0]?.reviewerId).toBe('self-declared:DeepSeek');
+    // Carry-overs stay self-declared whoever posts them.
+    const carried = importAcceptance(
+      snapshot([comment(carry(HEAD_A), { login: 'cq-review[bot]' })]),
+    );
+    expect(carried.acceptances[0]?.reviewerId).toBe('self-declared:coordinator');
   });
 
   test('ITERATE maps to HOLD', () => {
