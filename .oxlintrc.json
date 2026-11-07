@@ -124,6 +124,40 @@
       }
     },
     {
+      "files": ["src/**"],
+      "rules": {
+        "cq/no-process-env": "error"
+      }
+    },
+    {
+      "files": [
+        "src/config/**",
+        "src/adapters/forge-github/gh.ts",
+        "src/adapters/forge-github/ghEffects.ts",
+        "src/adapters/forge-github/ratchetEffects.ts",
+        "src/adapters/git/ratchetGit.ts",
+        "src/driver/acp/index.ts",
+        "src/driver/ai-sdk/index.ts",
+        "src/driver/claude-code/cli.ts",
+        "src/driver/claude-code/sdk.ts",
+        "src/driver/error-text.ts",
+        "src/harness/mcp/startup.ts",
+        "src/harness/tools.ts",
+        "src/kernel/runner.ts",
+        "src/ops/analyze/approval.ts",
+        "src/ops/analyze/fix.ts",
+        "src/ops/dev/effects.ts",
+        "src/ops/dev/internal/snapshot.ts",
+        "src/ops/sweep/unit.ts",
+        "src/sandbox/launcher.ts",
+        "src/selfhost/self-merge-prs.ts",
+        "src/shared/proc.ts"
+      ],
+      "rules": {
+        "cq/no-process-env": "off"
+      }
+    },
+    {
       "files": ["src/harness/**"],
       "rules": {
         "cq/no-driver-import-in-harness": "error"

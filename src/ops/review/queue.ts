@@ -48,6 +48,7 @@ export type {
   QueueTransport,
   QueueReason,
 } from './internal/queueProtocol.js';
+import { processEnv } from '../../config/process-env.js';
 
 type Unsupported = { state: 'unsupported'; reason: string };
 export function makeQueueOps(transport?: QueueTransport): {
@@ -95,7 +96,7 @@ export function makeQueueOps(transport?: QueueTransport): {
       } catch (error) {
         return { status: 'failed', error: messageOf(error) };
       }
-      const alias = process.env['CQ_QUEUE_SSH_ALIAS'];
+      const alias = processEnv()['CQ_QUEUE_SSH_ALIAS'];
       if (!transport && !alias)
         return {
           status: 'needs-human',

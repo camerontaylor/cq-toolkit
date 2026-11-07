@@ -56,6 +56,7 @@ import type {
   SnapshotThread,
   TrustPolicy,
 } from './merge-recheck.js';
+import { processEnv } from '../config/process-env.js';
 
 /** The check-run name the verdict posts under. */
 export const ACCEPTANCE_CHECK_NAME = 'cq/acceptance';
@@ -436,7 +437,7 @@ async function main(): Promise<void> {
   let line: string;
   try {
     const args = parseAcceptanceArgs(process.argv.slice(2));
-    const trust = resolveAcceptanceTrust(process.env);
+    const trust = resolveAcceptanceTrust(processEnv());
     const result = await judgeAcceptance(
       { gh: makeGhRunner({ cqEnv }), owner: args.owner, repo: args.repo, policy: trust.policy },
       args.input,

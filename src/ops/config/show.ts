@@ -13,6 +13,7 @@ import {
 } from '../../config/env.js';
 import { CQ_ENV_ENTRIES } from '../../config/env-registry.js';
 import type { Op } from '../../kernel/types.js';
+import { processEnv } from '../../config/process-env.js';
 
 export interface ConfigShowInput {
   /** Fail (not just report) when there are warnings. */
@@ -34,7 +35,7 @@ export interface ConfigShowReport {
 
 /** Build the report from an environment (exported for tests). */
 export function buildConfigShowReport(
-  env: Readonly<Record<string, string | undefined>> = process.env,
+  env: Readonly<Record<string, string | undefined>> = processEnv(),
 ): ConfigShowReport {
   const snapshot = readCqEnv(env);
   const keys = CQ_ENV_ENTRIES.filter((e) => e.status === 'live').map((e) => {

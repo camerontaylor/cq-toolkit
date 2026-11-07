@@ -26,6 +26,7 @@ import {
   isPosture,
   type ProtectedPathsPosture,
 } from '../../config/values.js';
+import { processEnv } from '../../config/process-env.js';
 
 /**
  * `human`: every finding needs a human. `diff-check`: plain protected-path
@@ -70,7 +71,7 @@ export function resolveProtectedPathsConfig(
     optIn?: ProtectedPathsOptIn;
   } = {},
 ): ProtectedPathsConfig {
-  const env = options.env ?? process.env;
+  const env = options.env ?? processEnv();
   const optIn = options.optIn ?? {};
 
   const call = optIn[PROTECTED_PATHS_OPT_IN];

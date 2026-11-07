@@ -3,6 +3,7 @@ import { enterWithCqEnv } from '../config/entry.js';
 import { pathToFileURL } from 'node:url';
 import { ghJson, ghNameOk, makeGhRunner, type GhFn } from '../adapters/forge-github/gh.js';
 import { observeOpenPrs, type ObserveOpenPrsResult } from './merge-recheck.js';
+import { processEnv } from '../config/process-env.js';
 
 export async function observeRepository(
   gh: GhFn,
@@ -46,7 +47,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     } else {
       const result = await observeRepository(
         makeGhRunner({ cqEnv }),
-        process.env['GITHUB_REPOSITORY'] ?? '',
+        processEnv()['GITHUB_REPOSITORY'] ?? '',
       );
       console.log(JSON.stringify(result));
       // An observation failure must be visible even though no merge was attempted.

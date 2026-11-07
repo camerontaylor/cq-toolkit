@@ -1,4 +1,5 @@
 import cli from './rules/no-cli-beyond-registry-kernel.mjs';
+import noProcessEnv from './rules/no-process-env.mjs';
 import harnessDriver from './rules/no-driver-import-in-harness.mjs';
 import vendor from './rules/no-vendor-sdk-in-kernel.mjs';
 
@@ -7,6 +8,7 @@ export default {
   rules: {
     'no-cli-beyond-registry-kernel': cli,
     'no-driver-import-in-harness': harnessDriver,
+    'no-process-env': noProcessEnv,
     'no-vendor-sdk-in-kernel': vendor,
   },
 };

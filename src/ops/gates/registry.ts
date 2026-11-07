@@ -20,6 +20,7 @@ import type { HackDetectorInput } from './hackDetector.js';
 import type { PolicyDiffInput, PolicyDiffOutcome } from './policyDiff.js';
 import { PolicyDiffInputObject } from './policyDiffInput.js';
 import type { RegressionGateInput } from './regressionGate.js';
+import { processEnv } from '../../config/process-env.js';
 // Shared protected-path taxonomy helper: './protectedPaths.js'.
 // gates.hackDetector helper, reached through './hackDetector.js': the Python
 // skip/xfail marker scanner './pythonSkipMarkers.js' (#774).
@@ -278,7 +279,7 @@ export const registry: OpRegistryEntry[] = [
         const op: Op<PolicyDiffInput, PolicyDiffOutcome> = async (input) => {
           let config;
           try {
-            config = cfg.resolveProtectedPathsConfig({ env: process.env });
+            config = cfg.resolveProtectedPathsConfig({ env: processEnv() });
           } catch (err) {
             return { status: 'failed', error: err instanceof Error ? err.message : String(err) };
           }

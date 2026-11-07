@@ -16,6 +16,7 @@ import {
   type SandboxNetwork,
 } from '../config/parsers.js';
 import type { CqEnv } from '../config/env.js';
+import { processEnv } from '../config/process-env.js';
 
 export {
   SANDBOX_POLICY_ENV_NAMES,
@@ -83,7 +84,7 @@ function platformOf(platform: NodeJS.Platform): SandboxPlatform {
  * for a driver-scoped tightened configuration, never as a shipped default.
  */
 export function resolveSandboxConfig(options: ResolveSandboxOptions = {}): SandboxConfig {
-  const env = options.env ?? process.env;
+  const env = options.env ?? processEnv();
   const typed = options.cqEnv?.values;
   const optIn = options.optIn ?? {};
   // optIn beats the env layer; the env layer is the snapshot's parsed value
