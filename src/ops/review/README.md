@@ -1,10 +1,31 @@
 # Review addressing
 
-Queue submission and current-scope report consumption use `review.enqueue`,
-`review.queueStatus`, and `review.report`. See [queue client protocol](../../../docs/queue-client.md)
-for the separate queue-v1 capability, deferred pre-PR binding, deployment
-prerequisites, and queue-evidence import. These reports grant no full-branch
-readiness or independent acceptance credit.
+`review.submit` requests a committed full-diff review against an explicit local
+`target`. Configure `CQ_QUEUE_SSH_ALIAS` for a server supporting `review-v1`.
+For unpublished commits supply an absolute `scanner` executable; it receives
+repository, base and original head arguments and must exit zero after scanning
+all outgoing objects. For commits already reachable on the authorized remote,
+`reachable=true` omits the snapshot; the server still verifies the Git objects.
+Staged, unstaged and untracked exclusions are reported without prompting.
+
+Submission persists its request under `.cq/queue-evidence/requests/` before
+network discovery. If delivery is unknown, retry with the reported `requestId`:
+the saved inputs and original head are reused even if the checkout has moved.
+Use a fresh request ID for a new submission. The server assigns identity and
+generation; `repeat=true` requests another generation explicitly.
+
+`review.status` observes, `review.wait` polls at 15 seconds with jitter for ten
+minutes by default, and `review.cancel` withdraws request interest. Wait expiry
+returns `waitOutcome=deadline`; resume with the same request ID. `review.result`
+verifies chunk and whole-receipt digests and saves `receipt.json` and `report.md`
+under `.cq/queue-evidence/results/<receipt_id>/`. Inspect `reviewOutcome` and
+`scopeAdequate`; an operation-level success grants no independent acceptance
+credit. Unsupported deployments return `state=unsupported`.
+
+The earlier `review.enqueue`, `review.queueStatus`, `review.drain` and
+`review.report` operations remain available. See the
+[queue client protocol](../../../docs/queue-client.md) for queue-v1 and deferred
+pre-PR bindings.
 
 `review.address` fixes or records a disposition for local findings or PR
 threads, then re-runs review until clean or the configured round cap. Run

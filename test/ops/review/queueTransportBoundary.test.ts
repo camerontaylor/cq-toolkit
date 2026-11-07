@@ -196,3 +196,20 @@ test('old runner refusal is unsupported only for the pre-write capability probe'
     await refused;
   }
 });
+
+test('review-v1 uses the queue identity with snapshot-sized input and bounded output', async () => {
+  const child = childProcess();
+  const request = JSON.stringify({ snapshot: 'x'.repeat(10000) });
+  const pending = sshQueueTransport('reviewed-queue', 'review-v1')(request);
+  expect(mocks.spawn.mock.calls[0]?.[1]).toContain('review-v1');
+  expect(child.stdin.read()).toEqual(Buffer.from(request));
+  child.stdout.emit('data', Buffer.from('{}'));
+  child.emit('close', 0);
+  expect(await pending).toBe('{}');
+});
+test('old dispatcher refusal is unsupported for review-v1', async () => {
+  const child = childProcess();
+  const pending = sshQueueTransport('reviewed-queue', 'review-v1')('{"v":1,"op":"capabilities"}');
+  child.emit('close', 2);
+  await expect(pending).rejects.toThrow('review-v1 capability unavailable');
+});

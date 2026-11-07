@@ -228,3 +228,32 @@ test('denied probe reports no-permission and sends no retry write', async () => 
   });
   expect(calls).toEqual(['retry-capability']);
 });
+
+test('A-12 review wait deadline detaches and resumes with status reads only', async () => {
+  vi.useFakeTimers();
+  const { makeWait } = await import('../../../src/ops/review/wait.js');
+  const vectors = await import('../../../apps/crq-python/fixtures/review-operation/vectors.json');
+  const capability = vectors.default.find((row) => row.name === 'capabilities-response');
+  expect(capability).toBeDefined();
+  let state = 'queued';
+  const calls: string[] = [];
+  const op = makeWait(async (raw) => {
+    const req = JSON.parse(raw) as { op: string };
+    calls.push(req.op);
+    return JSON.stringify(
+      req.op === 'capabilities' ? capability!.value : { v: 1, action: 'observed', state },
+    );
+  });
+  const first = op({ requestId: 'resume', waitMs: 50 });
+  await vi.advanceTimersByTimeAsync(50);
+  expect(await first).toMatchObject({
+    status: 'ok',
+    value: { waitOutcome: 'deadline', state: 'queued' },
+  });
+  state = 'completed';
+  expect(await op({ requestId: 'resume', waitMs: 50 })).toMatchObject({
+    status: 'ok',
+    value: { waitOutcome: 'terminal', state: 'completed' },
+  });
+  expect(new Set(calls)).toEqual(new Set(['capabilities', 'status']));
+});
