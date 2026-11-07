@@ -1,5 +1,5 @@
 """PR planning: the merge-base pin computed in the repo's own clone and the
-foreign item's repo-tier rank.
+foreign item's open-PR rank.
 
 Split provenance: moved verbatim from apps/crq-python/test_pr_enroll.py.
 Fixtures live in test_pr_enroll_fixtures.py.
@@ -34,12 +34,12 @@ class PrTest(PrTestBase, unittest.TestCase):
         self.assertEqual(dplan["target"], "origin/main")
         self.assertEqual(dplan["head"], h2)
 
-    def test_foreign_open_item_ranks_at_repo_tier(self):
+    def test_foreign_open_item_shares_primary_open_priority(self):
         primary_open = {"id": "pr1", "pr": 1, "kind": "open", "state": "pending", "order": 2}
         foreign_open = {"id": "infra-pr1", "pr": 1, "kind": "open", "repo": FOREIGN,
                         "state": "pending", "order": 3}
         self.assertEqual(crq.rank(primary_open), 0)
-        self.assertEqual(crq.rank(foreign_open), 3)
+        self.assertEqual(crq.rank(foreign_open), 0)
         self.assertEqual([i["id"] for i in sorted([foreign_open, primary_open], key=crq.sort_key)],
                          ["pr1", "infra-pr1"])
 

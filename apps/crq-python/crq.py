@@ -2613,12 +2613,16 @@ def rank(item: Dict[str, Any]) -> int:
     """Required open 0, open delta 1, merged follow-ups/current 2, backlog 3,
     author/coverage 4, optional additional cycles 5.
 
-    A non-primary repo's items use its configured rank_tier (default 3:
-    between primary ordinary work and backfill); the primary repo's items
-    keep their kind-specific rank (docs/multi-repo.md).
+    Open PRs and open deltas share ranks 0 and 1 across repositories.
+    Other non-primary items use their configured rank_tier (default 3:
+    between primary ordinary work and backfill; docs/multi-repo.md).
     """
     if additional_cycle(item):
         return 5
+    if item["kind"] == "open":
+        return 0
+    if item["kind"] == "delta" and item.get("followup") != "merged":
+        return 1
     repo_rank = repo_registry.rank_for(item, REPO, REPOS)
     if repo_rank is not None:
         return repo_rank
@@ -2628,10 +2632,8 @@ def rank(item: Dict[str, Any]) -> int:
         return coverage.COVERAGE_RANK
     if item["kind"] == author_quota.AUTHOR_KIND:
         return author_quota.AUTHOR_RANK
-    if item["kind"] in ("open",):
-        return 0
     if item["kind"] == "delta":
-        return 2 if item.get("followup") == "merged" else 1
+        return 2
     return 2 if item.get("source") == "followup" else 3
 
 
