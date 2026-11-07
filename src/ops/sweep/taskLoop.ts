@@ -77,6 +77,22 @@ export interface FixTaskReport {
     outcome?: 'unfixed' | 'escalated-to-human';
   }>;
 }
+/**
+ * The failed-attempt branch this task actually pushed to `origin`, if any.
+ *
+ * `failedAttemptPublished` is the task-level aggregate of the per-round history:
+ * an earlier round can have been published while the CURRENT `failedAttempt`
+ * was refused publication (path or tamper gate, failed push). Consumers that
+ * render a ref — the report's `publishedBranch` and the fix run's compare link —
+ * must read the round that belongs to the current attempt, never the aggregate,
+ * or they name a branch that was never pushed.
+ */
+export function publishedFailedAttemptBranch(task: FixTaskReport): string | undefined {
+  const branch = task.failedAttempt?.branch;
+  if (branch === undefined) return undefined;
+  const round = task.rounds?.find((entry) => entry.failedAttempt?.branch === branch);
+  return round?.published === true ? branch : undefined;
+}
 /** Prompt-only projection; durable rounds retain complete failure evidence. */
 export function promptRound(
   round: NonNullable<FixTaskReport['rounds']>[number] | undefined,

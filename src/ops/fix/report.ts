@@ -1,5 +1,6 @@
 import type { FixTask } from '../sweep/tasks.js';
 import type { FailedAttemptGate, FixTaskReport, TaskAttempt } from '../sweep/taskLoop.js';
+import { publishedFailedAttemptBranch } from '../sweep/taskLoop.js';
 
 /**
  * A fix-run task outcome: the sweep task loop's own three outcomes plus the
@@ -193,6 +194,7 @@ export function plannedTaskRowOf(task: FixTaskReport): PlannedTaskRow {
   // in the failed evidence), while retained attempt rows keep their recorded
   // history verbatim.
   for (const failure of failures) if (!('branch' in failure)) failure.outcome = outcome;
+  const publishedBranch = publishedFailedAttemptBranch(task);
   return {
     unit,
     task: { id: task.task.id, files: task.task.files },
@@ -203,9 +205,7 @@ export function plannedTaskRowOf(task: FixTaskReport): PlannedTaskRow {
     branch: task.branch,
     commits: task.commits,
     failures,
-    ...(task.failedAttemptPublished && task.failedAttempt !== undefined
-      ? { publishedBranch: task.failedAttempt.branch }
-      : {}),
+    ...(publishedBranch === undefined ? {} : { publishedBranch }),
   };
 }
 

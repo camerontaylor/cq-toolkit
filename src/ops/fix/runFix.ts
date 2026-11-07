@@ -58,6 +58,7 @@ import {
 } from '../sweep/unit.js';
 import type { AssemblePrsInput } from '../pr/assemblePrs.js';
 import type { FixTaskReport, TaskAttempt } from '../sweep/taskLoop.js';
+import { publishedFailedAttemptBranch } from '../sweep/taskLoop.js';
 import type { FixRunInputSchema } from './registry.js';
 import {
   fixRunCounters,
@@ -1062,7 +1063,12 @@ export function makeFixRun(deps: FixRunDeps = {}) {
         if (template && tracker && markers.length) {
           const assembly = template.input as AssemblePrsInput;
           if (prBase !== undefined) assembly.base = prBase;
-          const compareBase = report.tasks.some((task) => task.failedAttemptPublished)
+          // Only a failed attempt that was actually pushed earns a remote link: the
+          // task-level `failedAttemptPublished` aggregate can be true while the
+          // current attempt's round was refused publication.
+          const compareBase = report.tasks.some(
+            (task) => publishedFailedAttemptBranch(task) !== undefined,
+          )
             ? await githubCompareBase(repoRoot, `refs/remotes/origin/${assembly.base}`)
             : undefined;
           const packages: typeof assembly.packages = [];
@@ -1083,7 +1089,7 @@ export function makeFixRun(deps: FixRunDeps = {}) {
               );
               const branch = task.failedAttempt!.branch;
               const branchRef =
-                task.failedAttemptPublished && compareBase !== undefined
+                publishedFailedAttemptBranch(task) !== undefined && compareBase !== undefined
                   ? `[compare](${compareBase}${encodeURIComponent(branch).replaceAll('%2F', '/')})`
                   : `local branch \`${branch}\``;
               return `- \`${task.task.id}\` — ${task.outcome}; ${failed?.gate ?? 'none'}: diagnostic retained in local report; ${branchRef}`;
