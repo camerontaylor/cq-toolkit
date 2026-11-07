@@ -292,6 +292,7 @@ export class AddressOwnership {
   private readonly children = new Set<Promise<unknown>>();
   private readonly tasks = new Set<Promise<unknown>>();
   private readonly recorded = new Set<string>();
+  private readonly retentionAdvisories: string[] = [];
   private readonly terminalToken = Object.freeze({});
   private readonly participants = new Set<Participant>();
   private readonly terminalProcesses = new Set<Promise<void>>();
@@ -541,7 +542,7 @@ export class AddressOwnership {
     const obsolete: string[] = [];
     for await (const entry of directory) {
       if (
-        /^cq-review-address-ownership\.(?:store|owner\.json)\.retired-[a-f0-9-]{36}$/.test(
+        /^cq-review-address-ownership\.(?:store\.(?:retired-|bootstrap-incomplete-)|owner\.json\.retired-)[a-f0-9-]{36}$/.test(
           entry.name,
         ) &&
         entry.name !== basename(retired.store) &&
@@ -551,6 +552,9 @@ export class AddressOwnership {
     }
     for (const path of obsolete) {
       await rm(path, { recursive: true, force: true }).catch((error: unknown) => {
+        this.retentionAdvisories.push(
+          `address ownership: retention cleanup failed for ${basename(path)}`,
+        );
         console.warn('address ownership: retired generation cleanup failed', path, error);
       });
     }
@@ -561,7 +565,8 @@ export class AddressOwnership {
   }
 
   /** No guard means no admitted owner. Preserve only uncommitted bootstrap debris;
-   * records, extra links, aliases and foreign entries remain refusal barriers. */
+   * later rotations collect it best-effort, never as authority or proof.
+   * Records, extra links, aliases and foreign entries remain refusal barriers. */
   private async finishBootstrap(): Promise<void> {
     try {
       await lstat(this.guardPath);
@@ -924,6 +929,9 @@ export class AddressOwnership {
       !this.participants.has(participant)
     )
       throw new Error('address terminal: report binding refused');
+    if (this.retentionAdvisories.length) {
+      report.advisories = [...new Set([...(report.advisories ?? []), ...this.retentionAdvisories])];
+    }
     // Resolve aliases without creating a missing journal directory. Remember
     // the existing ancestor inode, so a later replacement is not adopted.
     let ancestor = dirname(resolve(report.reportPath));
@@ -1169,6 +1177,7 @@ export class AddressOwnership {
 
   async withLock<T>(fn: (owner: AddressOwnership) => Promise<T>): Promise<T> {
     if (this.used) throw new Error('address ownership: owner lifetime already consumed');
+    this.signal.throwIfAborted();
     // Preserve the read-only fast refusal for active/damaged live stores. A
     // missing store needs the in-mutex interrupted-rotation check instead.
     let hasStore = true;
@@ -1293,7 +1302,8 @@ export class AddressOwnership {
         }
       }, this.signal)
       .catch((error: unknown) => {
-        if (!enteredMutex) throw admissionRefusal(error);
+        if (!enteredMutex && !(this.signal.aborted && error === this.signal.reason))
+          throw admissionRefusal(error);
         throw error;
       });
     // No certificate is installed on callback, cleanup or observed compromise

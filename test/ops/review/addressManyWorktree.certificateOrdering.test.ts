@@ -3,6 +3,7 @@ import { constants } from 'node:fs';
 import { lstat, readFile, readdir, rename, unlink, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { expect, test, vi } from 'vitest';
+import * as addressModule from '../../../src/ops/review/address.js';
 import { makeAddressOwnership } from '../../../src/ops/review/internal/addressOwnership.js';
 
 import {
@@ -470,7 +471,6 @@ test.each([
   'store-rename',
   'guard-rename',
   'bootstrap-mkdir',
-  'bootstrap-parent-sync',
   'anchor-open',
   'anchor-partial',
   'anchor-sync',
@@ -512,7 +512,6 @@ test.each([
     fsFaults.sync = async (path) => {
       if (
         (point === 'bootstrap-mkdir' && created && path === owner.commonDir) ||
-        (point === 'bootstrap-parent-sync' && created && path === owner.commonDir) ||
         (point === 'anchor-sync' && path === anchorPath)
       )
         crash();
@@ -606,6 +605,77 @@ test('partially deleted older generation cannot confirm predecessor completion',
     expect((await authorityState(owner.guardPath)).state).toBe('quiescent');
   } finally {
     fsFaults.link = fsFaults.remove = undefined;
+    warning.mockRestore();
+    await f.repo.cleanup();
+  }
+});
+
+test('bootstrap debris retention is best-effort and reported to callers and journals', async () => {
+  const f = await fixture();
+  const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+  try {
+    const owner = await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run });
+    await owner.withLock(async () => undefined);
+    fsFaults.open = async (path, flags) => {
+      if (path.endsWith('/anchor.json') && typeof flags === 'number' && flags & constants.O_CREAT) {
+        await writeFile(path, '{"version":');
+        throw new Error('partial bootstrap');
+      }
+    };
+    await expect(
+      (await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run })).withLock(
+        async () => undefined,
+      ),
+    ).rejects.toThrow('partial bootstrap');
+    fsFaults.open = undefined;
+    await (
+      await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run })
+    ).withLock(async () => undefined);
+    const debris = (await readdir(owner.commonDir)).find((name) =>
+      name.includes('.bootstrap-incomplete-'),
+    )!;
+    expect(debris).toBeTruthy();
+    const bytes = await readFile(join(owner.commonDir, debris, 'anchor.json'), 'utf8');
+    expect(bytes).toBe('{"version":');
+    fsFaults.remove = async (path) => {
+      if (path.endsWith(debris)) throw new Error('debris busy');
+    };
+    const role = { provider: 'mock', model: 'mock' };
+    const result = await addressModule.makeReviewAddress({
+      config: {
+        schemaVersion: 2,
+        checks: [{ adapter: 'tsc-lines', command: { command: process.execPath, args: [] } }],
+        roles: { worker: role, reviewer: role },
+        budgets: { run: { maxTokens: 1000 } },
+        review: { reviewers: ['agent'] },
+      },
+      git: f.run,
+      initialRecord: {
+        schemaVersion: 1,
+        branch: 'feature/x',
+        reviewed: { base: f.repo.git('rev-parse', 'HEAD').trim(), scope: 'full' },
+        head: f.repo.git('rev-parse', 'HEAD').trim(),
+        sources: [{ kind: 'agent', status: 'terminal' }],
+        findings: [],
+      },
+    })({ repoRoot: f.repo.root, source: 'local', journalDir: join(f.root, 'retention-journal') });
+    const advisory = `address ownership: retention cleanup failed for ${debris}`;
+    expect(result.report?.advisories).toContain(advisory);
+    const stored = JSON.parse(await readFile(result.report!.reportPath, 'utf8')) as {
+      advisories: string[];
+    };
+    expect(stored.advisories).toContain(advisory);
+    expect(warning).toHaveBeenCalled();
+    expect(await readFile(join(owner.commonDir, debris, 'anchor.json'), 'utf8')).toBe(bytes);
+    fsFaults.remove = undefined;
+    await (
+      await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run })
+    ).withLock(async () => undefined);
+    expect(
+      (await readdir(owner.commonDir)).some((name) => name.includes('.bootstrap-incomplete-')),
+    ).toBe(false);
+  } finally {
+    fsFaults.open = fsFaults.remove = undefined;
     warning.mockRestore();
     await f.repo.cleanup();
   }

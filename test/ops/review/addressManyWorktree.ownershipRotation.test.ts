@@ -3,7 +3,10 @@ import { cp, link, lstat, readFile, readdir, rename, unlink, writeFile } from 'n
 import { join } from 'node:path';
 import { expect, test, vi } from 'vitest';
 import * as addressModule from '../../../src/ops/review/address.js';
-import { makeAddressOwnership } from '../../../src/ops/review/internal/addressOwnership.js';
+import {
+  makeAddressOwnership,
+  isAddressOwnershipAdmissionRefusal,
+} from '../../../src/ops/review/internal/addressOwnership.js';
 import { authorityStore, deferred, fixture } from './addressManyWorktree.helpers.js';
 
 const faults = vi.hoisted(() => ({
@@ -390,6 +393,56 @@ test('a planted retired directory with matching bytes and hardlinks is not autho
     await expect(owner.withLock(async () => undefined)).rejects.toThrow('lost owner');
   } finally {
     faults.afterLink = undefined;
+    await f.repo.cleanup();
+  }
+});
+
+test('pre-admission cancellation preserves its reason without an authority refusal', async () => {
+  const f = await fixture();
+  try {
+    const controller = new AbortController();
+    const reason = new Error('cancelled before admission');
+    controller.abort(reason);
+    const owner = await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run, controller });
+    let dispatched = false,
+      failure: unknown;
+    try {
+      await owner.withLock(async () => {
+        dispatched = true;
+      });
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toBe(reason);
+    expect(isAddressOwnershipAdmissionRefusal(failure)).toBe(false);
+    expect(dispatched).toBe(false);
+    await expect(lstat(owner.guardPath)).rejects.toMatchObject({ code: 'ENOENT' });
+  } finally {
+    await f.repo.cleanup();
+  }
+});
+
+test('cancellation before mutex entry is not wrapped as an authority refusal', async () => {
+  const f = await fixture();
+  try {
+    const first = await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run });
+    await first.withLock(async () => undefined);
+    const controller = new AbortController(),
+      reason = new Error('cancelled at mutex admission');
+    const owner = await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run, controller });
+    faults.afterStat = async (path) => {
+      if (path !== authorityStore(owner.guardPath)) return;
+      faults.afterStat = undefined;
+      controller.abort(reason);
+    };
+    await expect(
+      owner.withLock(async () => {
+        throw new Error('must not dispatch');
+      }),
+    ).rejects.toBe(reason);
+    expect(isAddressOwnershipAdmissionRefusal(reason)).toBe(false);
+  } finally {
+    faults.afterStat = undefined;
     await f.repo.cleanup();
   }
 });

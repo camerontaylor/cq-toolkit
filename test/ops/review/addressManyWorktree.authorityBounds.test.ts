@@ -366,7 +366,7 @@ test.each(['records', 'per-record', 'total-bytes', 'resource-count', 'resource-b
           records.reduce((sum, record) => sum + record.length, 0) +
           (await readFile(owner.guardPath)).length;
         expect(total).toBeLessThanOrEqual(131_072);
-        expect(total).toBeGreaterThan(90_000);
+        expect(total).toBeGreaterThan(114_000);
       }
       if (bound === 'records') {
         expect(dispatched).toBe(62);
