@@ -4,11 +4,20 @@
 import { describe, expect, test } from 'vitest';
 import { plannedTaskRowOf } from '../../../src/ops/fix/report.js';
 import { publishedFailedAttemptBranch } from '../../../src/ops/sweep/taskLoop.js';
-import type { FixTaskReport } from '../../../src/ops/sweep/taskLoop.js';
+import type { FixTaskReport, TaskAttempt } from '../../../src/ops/sweep/taskLoop.js';
+
+const attempt: TaskAttempt = {
+  tier: 'worker',
+  attempt: 1,
+  invocation: 'edit',
+  model: { provider: 'stub', model: 'stub-model' } as unknown as TaskAttempt['model'],
+  wallMs: 1,
+  reason: 'attempt failed',
+};
 
 const report = (overrides: Partial<FixTaskReport> = {}): FixTaskReport => ({
-  task: { id: 't1', files: ['a.ts'] },
-  attempts: [{ tier: 'worker', attempt: 1, outcome: 'code-bug' }],
+  task: { id: 't1', files: ['a.ts'] } as unknown as FixTaskReport['task'],
+  attempts: [attempt],
   outcome: 'unfixed',
   branch: 'fix/unit',
   commits: [],
@@ -53,8 +62,8 @@ describe('publishedFailedAttemptBranch', () => {
   });
 
   test('withholds the branch for a task with no recorded rounds or attempt', () => {
-    expect(publishedFailedAttemptBranch(report({ failedAttemptPublished: true }))).toBeUndefined();
-    expect(publishedFailedAttemptBranch(report({ failedAttempt: undefined }))).toBeUndefined();
+    const { failedAttempt: _dropped, ...withoutAttempt } = report({ failedAttemptPublished: true });
+    expect(publishedFailedAttemptBranch(withoutAttempt as FixTaskReport)).toBeUndefined();
   });
 });
 
