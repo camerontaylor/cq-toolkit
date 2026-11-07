@@ -229,16 +229,18 @@ final reply is not valid JSON, the driver's single schema-repair call runs on to
 of it and is reported as one extra step. Documentation/configuration changes
 ask for source-of-truth checks, and exported/schema changes ask for caller and
 contract checks even when small. A change above the medium tier, or a prompt
-above the session input limit, uses partitions that keep the read-only reference
-tools (`read`, and `grep`/`glob` unless `review.searchTools: false`) under a
-three-step allowance by default, capped by `review.session.maxSteps`, and emits an
-advisory about limited cross-file context. Partition payloads cover every
-nonexcluded component without truncation, with bounded preceding context and
-surrogate-safe UTF-16 boundaries. `review.run --areas` opts into an area plan
-instead: nonexcluded components are grouped into bounded area sessions, and a
-required cross-area contract pass may follow; that pass carries contract context
-only and cannot substitute for primary coverage, while an unsafe grouping or an
-oversized cross-area prompt falls back to the standard plan with an advisory.
+above the session input limit, uses partitions with a three-step allowance by
+default, capped by `review.session.maxSteps`, and read-only reference tools
+(`read`, and `grep`/`glob` unless `review.searchTools: false`); an effective
+one-step allowance or the SDK option `partitionTools: false` disables partition
+tools. It emits an advisory about limited cross-file context. Partition
+payloads cover every nonexcluded component without truncation, with bounded
+preceding context and surrogate-safe UTF-16 boundaries. `review.run --areas`
+opts into an area plan instead: nonexcluded components are grouped into bounded
+area sessions, and a required cross-area contract pass may follow; that pass
+carries contract context only and cannot substitute for primary coverage, while
+an unsafe grouping or an oversized cross-area prompt falls back to the standard
+plan with an advisory.
 Retries are per session, never across sessions; a failed review whose every
 failure was transient is flagged (`transient` on the agent report,
 `blockedTransient` on a blocked run) so a caller may retry it once. A
