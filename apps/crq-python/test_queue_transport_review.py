@@ -92,3 +92,38 @@ class ReviewTransportTests(SnapshotTransportFixture, unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "different inputs"):
             self.call_review(self.review)
         self.assertEqual(before, self.saved)
+
+    def test_lost_response_after_admission_persist_retries_without_reinstall(self):
+        real_save = self.runner.save_queue
+        def crash(q):
+            real_save(q)
+            raise OSError("response lost after persist")
+        self.runner.save_queue = crash
+        with self.assertRaisesRegex(OSError, "response lost"):
+            self.call_review(self.review)
+        self.runner.save_queue = real_save
+        self.runner.CONFIG = {"local_review_profile": {"revision": "changed"}}
+        # The replay must return before any new object validation or profile.
+        self.review["snapshot"]["sha256"] = "f" * 64
+        result = self.call_review(self.review)
+        self.assertEqual(result["item"], self.saved["items"][0]["id"])
+        self.assertEqual(len(self.saved["items"]), 1)
+
+    def test_real_original_snapshot_through_six_mib_request(self):
+        tree = self.tree(b"large fixture line\n" * 100000)
+        head = self.commit(tree, self.base)
+        ids = sorted(self.git("rev-list", "--objects", "--no-object-names", head, "^" + self.base).split())
+        objects, digest = [], hashlib.sha256()
+        for oid in ids:
+            kind = self.git("cat-file", "-t", oid)
+            data = base64.b64encode(author_snapshot.git(self.repo, "cat-file", kind, oid)).decode()
+            objects.append(dict(oid=oid, type=kind, data=data))
+            digest.update((oid + "\0" + kind + "\0" + data + "\n").encode())
+        self.review["inputs"].update(head_commit=head, head_tree=tree)
+        self.review["snapshot"] = dict(v=1, tree=tree, objects=objects, sha256=digest.hexdigest())
+        raw = json.dumps(self.review).encode()
+        self.assertLess(len(raw), transport.MAX_BYTES)
+        raw += b" " * (transport.MAX_BYTES - len(raw))
+        result = json.loads(transport.handle(raw, self.runner, principal="queue-client", policy=self.policy))
+        self.assertEqual(result["action"], "created")
+        self.assertEqual(self.saved["items"][0]["identity_inputs"]["head_commit"], head)

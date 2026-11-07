@@ -87,10 +87,24 @@ def handle(raw, runner, *, principal, policy):
                 author_snapshot.install(req["snapshot"], dict(base=inputs["base_commit"], head=inputs["head_commit"]), runner, original=True)
             stored = profile(runner.CONFIG, inputs["base_commit"])
             facts = resolve(runner, inputs, stored)
+            import local_review_runtime
+            for item in q.get("items", []):
+                if (item.get("kind") == operation.KIND and admission.adequate(item)
+                        and operation.equivalent(item.get("identity_inputs"), facts)
+                        and local_review_runtime.retained(runner, item) is None):
+                    raise ValueError("retained local review receipt is inadequate")
             result = admission.admit(q, request_id=req["request_id"], inputs=inputs,
                                      resolved=facts, profile=stored, at=runner.iso(),
                                      repeat=req.get("repeat", False), supersedes=req.get("supersedes"))
             runner.save_queue(q)
+            if result["action"] == "created" and any(i.get("kind") in ("open", "delta") and i.get("cycles") for i in q["items"]):
+                item = next(i for i in q["items"] if i["id"] == result["item"])
+                try:
+                    reused = local_review_runtime.prepare(runner, q, item, False) is None
+                except runner.NotReady:
+                    reused = False
+                if reused:
+                    result = {**admission.status(q, req["request_id"]), "action": "reused"}
     elif op == "cancel":
         result = admission.cancel(q, req["request_id"])
         runner.save_queue(q)
