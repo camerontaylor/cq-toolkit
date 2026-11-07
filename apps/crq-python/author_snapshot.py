@@ -105,7 +105,7 @@ def read_blobs(repo, oids):
     return blobs
 
 
-def decode(snapshot, binding):
+def decode(snapshot, binding, *, original=False):
     if not isinstance(snapshot, dict) or set(snapshot) != {"v", "tree", "objects", "sha256"}:
         raise AuthorRefused("invalid snapshot fields")
     if type(snapshot["v"]) is not int or snapshot["v"] != 1:
@@ -135,13 +135,19 @@ def decode(snapshot, binding):
         if total > MAX_CONTENT:
             raise AuthorRefused("snapshot content exceeds bound")
         actual = hashlib.sha1(kind.encode() + b" " + str(len(data)).encode() + b"\0" + data).hexdigest()
-        if actual != oid or (kind == "commit" and (oid != binding["head"] or data != commit_bytes(binding["base"], tree))):
+        if actual != oid or (not original and kind == "commit" and (oid != binding["head"] or data != commit_bytes(binding["base"], tree))):
             raise AuthorRefused("snapshot object identity mismatch")
         digest.update((oid + "\0" + kind + "\0" + encoded + "\n").encode())
         decoded.append((oid, kind, data))
         previous = oid
     if digest.hexdigest() != snapshot["sha256"]:
         raise AuthorRefused("snapshot digest mismatch")
+    if original:
+        head = next((data for oid, kind, data in decoded
+                     if oid == binding["head"] and kind == "commit"), None)
+        if head is None or not head.startswith(("tree " + tree + "\n").encode()):
+            raise AuthorRefused("original snapshot head/tree mismatch")
+        return decoded
     expected = commit_bytes(binding["base"], tree)
     head = hashlib.sha1(b"commit " + str(len(expected)).encode() + b"\0" + expected).hexdigest()
     if head != binding["head"]:
@@ -149,13 +155,13 @@ def decode(snapshot, binding):
     return decoded
 
 
-def install(snapshot, binding, runner):
+def install(snapshot, binding, runner, *, original=False):
     """Caller holds tick.lock. Validate/scan in quarantine, then pin before enrollment.
 
     Pins intentionally survive interrupted enrollment and rollback. They can only
     be collected by a future operator GC after queue/recovery retention expires.
     """
-    objects = decode(snapshot, binding)
+    objects = decode(snapshot, binding, original=original)
     clone = Path(runner.CLONE).resolve()
     if git(clone, "cat-file", "-t", binding["base"]).strip() != b"commit":
         raise AuthorRefused("snapshot base must already be available")
