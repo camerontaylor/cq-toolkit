@@ -54,6 +54,12 @@ export function makeInMemoryNonceLedger(): InspectableNonceLedger {
  * the P1-trusted layer, one nonce per line, re-read on every consume so a
  * nonce spent by an earlier run — or by a concurrent process — is refused.
  *
+ * NO VERSION FIELD, by decision (ADR-0005 decision 10's carve-out). Every
+ * line is a bare nonce checked against the strict NONCE_SHAPE grammar, and
+ * the reader is fail-closed (see "malformed records" below). The format is
+ * therefore self-discriminating: anything else, a later JSON-lines record
+ * included, fails the grammar and is refused without needing a field.
+ *
  * DURABILITY, matched to the journal's own idiom (src/kernel/journal.ts,
  * `durable: true`) rather than to a hand-rolled idea: the line is written
  * through an append-mode handle and `fdatasync`ed BEFORE `consume` resolves,
