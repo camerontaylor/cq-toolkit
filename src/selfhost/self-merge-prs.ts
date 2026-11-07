@@ -73,6 +73,7 @@ import { enterWithCqEnv } from '../config/entry.js';
 import type { CqEnv } from '../config/env.js';
 import { defaultClassifyPrConfig } from '../ops/merge/classify.config.js';
 import { classifyPr } from '../ops/merge/classifyPrs.js';
+import { resolvedProtectedBranch } from '../ops/merge/trustMirrors.js';
 import type { PrClassification } from '../ops/merge/classifyPrs.js';
 import type { ClassifyPrConfig } from '../ops/merge/classify.config.js';
 import { realMergeEffects, type MergeEffects } from '../adapters/forge-github/mergeEffects.js';
@@ -296,7 +297,10 @@ export function buildRunInput(
     baseBranch: cfg.baseBranch ?? SelfhostDefaults.baseBranch,
     repoRoot: cfg.repoRoot,
     prs: candidates,
-    protectedBranch: SelfhostDefaults.protectedBranch,
+    protectedBranch:
+      cfg.cqEnv !== undefined
+        ? resolvedProtectedBranch(cfg.cqEnv)
+        : SelfhostDefaults.protectedBranch,
     wallClockMs: SelfhostDefaults.perJobWallClockMs,
     ...(cfg.disableConflictResolution === true
       ? { conflictResolutionDisabled: true }
@@ -356,18 +360,23 @@ const centralRegistryView = async (): Promise<OpRegistryView> => {
 export function recheckedRegistryView(opts: {
   baseView: OpRegistryView;
   innerEffects: MergeEffects;
+  /** The resolved config snapshot the gated merge.runPrs checks its mirrors against. */
+  cqEnv?: CqEnv;
   recheck: (
     pr: number,
     expectedHead: string | undefined,
     expectedBase: string | undefined,
   ) => Promise<RecheckResult>;
 }): OpRegistryView {
-  const { baseView, innerEffects, recheck } = opts;
+  const { baseView, innerEffects, recheck, cqEnv } = opts;
   return {
     get: (name) => {
       const entry = baseView.get(name);
       if (name !== MERGE_RUN_PRS_OP || entry === undefined) return entry;
-      const gated = makeRunMergePrsOp({ effects: gateMergeEffects(innerEffects, recheck) });
+      const gated = makeRunMergePrsOp({
+        effects: gateMergeEffects(innerEffects, recheck),
+        ...(cqEnv !== undefined ? { cqEnv } : {}),
+      });
       return {
         name: entry.name,
         inputSchema: entry.inputSchema,
@@ -479,6 +488,8 @@ export async function runSelfMergePrs(
   // merge-time recheck over the real (or seam-injected) inner effects. An
   // injected driverRegistryView is used verbatim (its scripted op owns its
   // merge path).
+  const protectedBranch =
+    cfg.cqEnv !== undefined ? resolvedProtectedBranch(cfg.cqEnv) : SelfhostDefaults.protectedBranch;
   const basePolicy = cfg.trustPolicy ?? CONSERVATIVE_TRUST_POLICY;
   const policy: TrustPolicy = {
     ...basePolicy,
@@ -501,8 +512,9 @@ export async function runSelfMergePrs(
         deps.mergeEffects ??
         realMergeEffects({
           repoRoot: cfg.repoRoot,
-          protectedBranch: SelfhostDefaults.protectedBranch,
+          protectedBranch,
         }),
+      ...(cfg.cqEnv !== undefined ? { cqEnv: cfg.cqEnv } : {}),
       recheck: (pr, head, base) =>
         identityRefusal !== null
           ? Promise.resolve<RecheckResult>({
@@ -519,7 +531,7 @@ export async function runSelfMergePrs(
                 policy,
                 ...((cfg.baseBranch ?? SelfhostDefaults.baseBranch) === 'main'
                   ? {}
-                  : { protectedBranch: SelfhostDefaults.protectedBranch }),
+                  : { protectedBranch }),
               },
               pr,
               head,

@@ -80,8 +80,6 @@
 // read ONCE, here (the composition is the one place the ambient clock is
 // allowed — tests inject `nowMs`). Same input + same nowMs → deep-equal
 // outcome, always.
-import { assertBaseBranchMirror, assertProtectedBranchMirror } from './trustMirrors.js';
-import type { CqEnv } from '../../config/env.js';
 import pLimit from 'p-limit';
 import { createDriverFactory } from '../../driver/factory.js';
 import type { DriverFactory } from '../../driver/factory.js';
@@ -96,6 +94,8 @@ import { executeMerges } from './executeMerges.js';
 import type { ExecutionReport } from './executeMerges.js';
 import { realMergeEffects } from '../../adapters/forge-github/mergeEffects.js';
 import type { MergeEffects } from '../../adapters/forge-github/mergeEffects.js';
+import type { CqEnv } from '../../config/env.js';
+import { assertBaseBranchMirror, assertProtectedBranchMirror } from './trustMirrors.js';
 import { diagnoseMergeFailure } from './diagnoseMergeFailure.js';
 import type { MergeFailureDiagnosis } from './diagnoseMergeFailure.js';
 import { planMergeOrder } from './planMergeOrder.js';
@@ -666,17 +666,22 @@ export function makeRunMergePrsOp(
   deps?: MakeRunMergePrsOpDeps,
 ): Op<RunMergePrsInput, MergePrsOutcome> {
   return async (input): Promise<OpResult<MergePrsOutcome>> => {
-    assertProtectedBranchMirror('merge.runPrs', input.protectedBranch);
+    const protectedBranch = assertProtectedBranchMirror(
+      'merge.runPrs',
+      input.protectedBranch,
+      deps?.cqEnv,
+    );
     assertBaseBranchMirror('merge.runPrs', input.baseBranch, deps?.cqEnv);
     const effects =
       deps?.effects ??
       realMergeEffects({
         repoRoot: input.repoRoot,
-        ...(input.protectedBranch !== undefined ? { protectedBranch: input.protectedBranch } : {}),
+        protectedBranch,
       });
     const sessionsDir = deps?.sessionsDir ?? input.sessionsDir;
     const resolve = makeResolveConflictOp({
       effects,
+      ...(deps?.cqEnv !== undefined ? { cqEnv: deps.cqEnv } : {}),
       ...(deps?.drivers !== undefined
         ? { drivers: deps.drivers }
         : {
