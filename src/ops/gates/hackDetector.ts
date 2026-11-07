@@ -381,13 +381,13 @@ function scanDiff(diff: string, config: CompiledConfig): TamperFinding[] {
         sectionPath = newPath === '/dev/null' ? oldPath : newPath;
         python =
           config.pythonMarkers && isPythonTestPath(newPath) ? new PythonSectionScanner() : null;
-        if (sectionPath !== null && isProtectedConfigPathInDiff(sectionPath)) {
-          reportProtectedConfig(findings, sectionPath);
-        }
-        if (oldPath !== null && oldPath !== sectionPath && isProtectedConfigPathInDiff(oldPath)) {
-          reportProtectedConfig(findings, oldPath);
-        }
         if (renameTo === null) {
+          if (sectionPath !== null && isProtectedConfigPathInDiff(sectionPath)) {
+            reportProtectedConfig(findings, sectionPath);
+          }
+          if (oldPath !== null && oldPath !== sectionPath && isProtectedConfigPathInDiff(oldPath)) {
+            reportProtectedConfig(findings, oldPath);
+          }
           reportTestFileRemoval(findings, config, oldPath, oldHeader, newPath);
         }
         continue;
@@ -546,7 +546,15 @@ function scanAddedLine(
         : `added suppression "${suppression.name}"`,
     });
   }
-  if (newPath !== null && isProtectedTestPath(newPath) && config.skipOnly?.test(content)) {
+  // With pythonMarkers on, the Python scanner owns the default taxonomy for
+  // Python test paths; the shipped JS/TS regex would false-flag `model.fit(`.
+  const pythonOwnsDefault = config.pythonMarkers && newPath !== null && isPythonTestPath(newPath);
+  if (
+    newPath !== null &&
+    !pythonOwnsDefault &&
+    isProtectedTestPath(newPath) &&
+    config.skipOnly?.test(content)
+  ) {
     findings.push({
       kind: 'new-skip-only',
       file,

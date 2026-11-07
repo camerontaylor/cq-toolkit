@@ -16,7 +16,7 @@ import { join } from 'node:path';
 import { parseCqConfig } from '../analyze/cqConfig.js';
 import { resolveCqConfigDefaults } from '../analyze/cqConfigDefaults.js';
 import type { DevEffects } from './effects.js';
-import { guardDevOp } from './effects.js';
+import { faultText, guardDevOp } from './effects.js';
 import type { DevLedgerFile, DevReadinessRecord, ReadinessGap } from './record.js';
 import { DEFAULT_DEV_TARGET, assembleReadiness } from './record.js';
 import { DevReadyInputSchema } from './registry.js';
@@ -119,7 +119,21 @@ export async function readReadinessWithGaps(
 /** Build the `dev.ready` op over injected effects. */
 export function makeDevReady(effects: DevEffects): Op<DevReadyInput, DevReadinessRecord> {
   return guardDevOp('dev.ready', DevReadyInputSchema, async (input) => {
-    const configText = await readFile(join(input.repoRoot, 'cq.json'), 'utf8').catch(() => null);
+    // Only an ABSENT cq.json means "no config". Any other read error
+    // (EACCES, EISDIR, EIO, …) must not silently fall back to the default
+    // policy: a repository that configured stricter reviewers or blocking
+    // severities would then get a READY verdict under looser rules.
+    let configText: string | null;
+    try {
+      configText = await readFile(join(input.repoRoot, 'cq.json'), 'utf8');
+    } catch (err) {
+      if ((err as { code?: unknown }).code === 'ENOENT') configText = null;
+      else
+        return {
+          status: 'needs-human',
+          reason: `dev.ready: cq.json could not be read — ${faultText(err)}`,
+        };
+    }
     let policy: { reviewers: readonly string[]; blockingSeverities: readonly string[] } | undefined;
     if (configText !== null) {
       const parsed = parseCqConfig(configText, input.repoRoot);

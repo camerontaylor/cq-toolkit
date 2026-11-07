@@ -27,7 +27,7 @@ export function trustedJobsFixture() {
       .join('\n');
 
   /** A job builds or runs the trust checkout when its commands name `trust` as a path. */
-  const TRUST_PATH = /(?:^|[\s"'=:])trust(?:\/|[ \t]*$)/m;
+  const TRUST_PATH = /(?:^|[\s"'=:])trust(?:[\/"'\s]|$)/m;
 
   /** Every job that builds or runs the trust checkout, with its workflow's head (env, defaults). */
   const trustedJobs = workflows.flatMap(({ file, text }) => {

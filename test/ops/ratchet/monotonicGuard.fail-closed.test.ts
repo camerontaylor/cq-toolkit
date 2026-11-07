@@ -4,7 +4,13 @@
 
 import { describe, expect, test } from 'vitest';
 import { checkDiffMonotonicity } from '../../../src/ops/ratchet/monotonicGuard.js';
-import { REL, modifiedSection } from './monotonicGuard.helpers.js';
+import {
+  REL,
+  addedSection,
+  body,
+  deletedSection,
+  modifiedSection,
+} from './monotonicGuard.helpers.js';
 
 describe('checkDiffMonotonicity', () => {
   test.each([
@@ -35,6 +41,29 @@ describe('checkDiffMonotonicity', () => {
       });
     },
   );
+
+  test.each([
+    ['val\\u0075e', '"metric": "typecheck-count", "val\\u0075e": 50'],
+    ['dir\\u0065ction', '"metric": "typecheck-count", "dir\\u0065ction": "lower-is-better"'],
+  ])('an escaped property key (%s) on the modified path fails closed', (_key, injected) => {
+    const diff = modifiedSection(
+      REL,
+      ['  "direction": "higher-is-better",', '  "value": 80,', '  "metric": "typecheck-count",'],
+      ['  "direction": "higher-is-better",', '  "value": 80,', `  ${injected},`],
+    );
+    expect(checkDiffMonotonicity(diff)).toMatchObject({ ok: false });
+  });
+
+  test('an escaped property key on the delete+add path fails closed', () => {
+    const old = body('higher-is-better', 80);
+    const injected = body('higher-is-better', 80).replace(
+      '"value": 80',
+      '"value": 80, "val\\u0075e": 50',
+    );
+    expect(injected).not.toBe(old);
+    const diff = deletedSection(REL, old) + addedSection(REL, injected);
+    expect(checkDiffMonotonicity(diff)).toMatchObject({ ok: false });
+  });
 
   test('a non-finite reconstructed value (1e999 → Infinity) fails closed — parseBaseline would reject the committed file', () => {
     // `1e999` is valid JSON parsing to Infinity, and higher-is-better is the

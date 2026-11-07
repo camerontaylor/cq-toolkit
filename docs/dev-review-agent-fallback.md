@@ -1,8 +1,9 @@
 # Explicit configured agent review
 
 > Owner ruling 2026-11-03: CodeRabbit is advisory; no outage enrollment is required.
-> The deferred queue protocol below remains for deployed CRQ compatibility and
-> existing deployed debt. New CLI attempts no longer create outage authority.
+> The [deferred queue protocol](queue-client.md) remains for deployed CRQ
+> compatibility and existing deployed debt. New CLI attempts no longer create
+> outage authority.
 
 `cq dev.review --reviewer=agent:reviewer` selects `roles.reviewer` from
 `cq.json`. The suffix is a configured role, not a provider/model address.

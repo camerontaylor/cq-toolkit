@@ -1,8 +1,8 @@
 # Bulk address worktree scaffolding
 
 This package proves only the existing PR worktree resolver's offline composition
-boundary for the planned `review.addressMany` operation. It does not add that
-operation or establish runtime acceptance.
+boundary for the `review.addressMany` operation. That operation is registered in
+`src/ops/review/registry.ts`. These fixtures do not establish runtime acceptance.
 
 The source baseline is `8fc58c222a6ef018e64427a4509c38f5d96ec8e4`, targeting
 `main`. The fixtures in the `test/ops/review/addressManyWorktree.*.test.ts` suites (shared fixtures in `addressManyWorktree.helpers.ts`) reuse

@@ -38,7 +38,7 @@ describe('hackDetector: suppression config', () => {
     ]);
   });
 
-  test('requiresReason: a bare match flags, whitespace-only and reasoned matches do not', async () => {
+  test('requiresReason: a bare and a whitespace-only match flag, a reasoned match does not', async () => {
     const diff = [
       'diff --git a/src/b.ts b/src/b.ts',
       'index 3333333..4444444 100644',

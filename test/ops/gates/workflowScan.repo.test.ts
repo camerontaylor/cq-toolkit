@@ -37,3 +37,21 @@ describe('the repository workflows', () => {
     }
   });
 });
+
+describe('producersOf with a wrapped job name', () => {
+  test('a name: continued on a more-indented line is not a literal producer', () => {
+    const text = [
+      'on: push',
+      'jobs:',
+      '  build:',
+      '    name: ci',
+      '      extra',
+      '    runs-on: x',
+      '    steps:',
+      '      - run: true',
+      '',
+    ].join('\n');
+    const scan = ok(text);
+    expect(producersOf(scan, 'ci')).toEqual([]);
+  });
+});

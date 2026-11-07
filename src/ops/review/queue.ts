@@ -153,21 +153,31 @@ export function makeQueueOps(transport?: QueueTransport): {
         let pending = [...i.requests];
         const observations: Record<string, QueueStatus> = {};
         const errors: Record<string, string> = {};
-        while (pending.length && Date.now() < deadline) {
+        // `waitMs` bounds waiting between reads, not the read itself: the first
+        // pass observes every request even at zero wait, so an empty result
+        // never hides "not observed" behind "not yet reviewed".
+        let observeAlways = true;
+        while (pending.length && (observeAlways || Date.now() < deadline)) {
+          const firstPass = observeAlways;
+          observeAlways = false;
           const unfinished: QueueReference[] = [];
           for (const ref of pending) {
-            if (Date.now() >= deadline) {
+            const remaining = deadline - Date.now();
+            if (remaining <= 0 && !firstPass) {
               unfinished.push(ref);
               continue;
             }
             try {
               let timer: ReturnType<typeof setTimeout> | undefined;
-              const current = await Promise.race([
-                client.status(ref, { remainingMs: () => deadline - Date.now() }),
-                new Promise<null>((resolve) => {
-                  timer = setTimeout(() => resolve(null), Math.max(0, deadline - Date.now()));
-                }),
-              ]).finally(() => clearTimeout(timer));
+              const current =
+                remaining <= 0
+                  ? await client.status(ref)
+                  : await Promise.race([
+                      client.status(ref, { remainingMs: () => deadline - Date.now() }),
+                      new Promise<null>((resolve) => {
+                        timer = setTimeout(() => resolve(null), Math.max(0, remaining));
+                      }),
+                    ]).finally(() => clearTimeout(timer));
               if (current) {
                 observations[ref.requestId] = current;
                 delete errors[ref.requestId];

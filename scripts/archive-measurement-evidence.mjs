@@ -27,14 +27,22 @@ import { parse } from 'yaml';
 const policy = parse(
   await readFile(new URL('../policy/denylist/patterns.yml', import.meta.url), 'utf8'),
 );
+const POLICY_SECRET_IDS = [
+  'class:route-key-material',
+  'class:token-ssh-plumbing',
+  'class:inline-secret-assignments',
+];
+// Fail closed: a renamed or dropped rule would silently weaken redaction.
+// Check presence per id, not the count, so a duplicate cannot hide a gap.
+const missingSecretIds = POLICY_SECRET_IDS.filter(
+  (id) => !policy.rules.some((rule) => rule.id === id),
+);
+if (missingSecretIds.length > 0)
+  throw new Error(
+    `measurement-bundle: policy/denylist/patterns.yml lacks required rule(s): ${missingSecretIds.join(', ')}`,
+  );
 const POLICY_SECRETS = policy.rules
-  .filter((rule) =>
-    [
-      'class:route-key-material',
-      'class:token-ssh-plumbing',
-      'class:inline-secret-assignments',
-    ].includes(rule.id),
-  )
+  .filter((rule) => POLICY_SECRET_IDS.includes(rule.id))
   .map((rule) => new RegExp(rule.regex, 'g'));
 const MAX_FILE_BYTES = 8 * 1024 * 1024;
 const compare = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
@@ -57,7 +65,7 @@ const TOKEN_SHAPES = [
   /\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g,
   /\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{16,})\b/g,
   /\bBearer\s+[A-Za-z0-9._~+/-]{16,}=*/gi,
-  /\b[a-z][a-z0-9+.-]*:\/\/[^\s/@?#"']+@/gi,
+  /\b[a-z][a-z0-9+.-]{0,31}:\/\/[^\s/@?#"']+@/gi,
 ];
 
 function scanEvidenceText(text) {
@@ -319,9 +327,24 @@ async function resolveStored(bundleDir, entry) {
   const target = resolve(bundleDir, entry.pointer);
   if (!inside(resolve(bundleDir), target))
     return { state: 'unavailable', reason: 'bundle pointer escapes the bundle' };
+  let real;
+  try {
+    real = await realpath(target);
+  } catch (error) {
+    return {
+      state: 'unavailable',
+      reason:
+        error?.code === 'ENOENT'
+          ? 'the bundle pointer is absent on disk'
+          : `the bundle pointer could not be read: ${reasonOf(error)}`,
+    };
+  }
+  // A symlinked pointer can pass the lexical check but resolve outside the bundle.
+  if (!inside(await realpath(resolve(bundleDir)), real))
+    return { state: 'unavailable', reason: 'bundle pointer escapes the bundle' };
   let bytes;
   try {
-    bytes = await readFile(target);
+    bytes = await readFile(real);
   } catch (error) {
     return {
       state: 'unavailable',

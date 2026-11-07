@@ -36,7 +36,9 @@ const inventoryFiles: InventoryFiles = {
 
 async function processBackedTestFiles(io: InventoryFiles = inventoryFiles): Promise<string[]> {
   const root = join(REPOSITORY_ROOT, 'test');
-  const entries = (await io.entries(root)).filter((entry) => entry.endsWith('.test.ts'));
+  const entries = (await io.entries(root)).filter(
+    (entry) => entry.endsWith('.test.ts') || entry.endsWith('.test.mjs'),
+  );
   const files: string[] = [];
   // Bound concurrent I/O without omitting any file or retaining a cached scan.
   for (let offset = 0; offset < entries.length; offset += READ_BATCH_SIZE) {
@@ -59,6 +61,11 @@ async function suiteClasses(): Promise<Record<string, string>> {
   return JSON.parse(manifest) as Record<string, string>;
 }
 
+/** Process-backed files the manifest still classifies `pure` (the misclassification check). */
+function misclassifiedAsPure(files: string[], classes: Record<string, string>): string[] {
+  return files.filter((file) => classes[file] === 'pure');
+}
+
 describe('real-process inventory', () => {
   test('the entry-point scan still finds the known process-backed suites', async () => {
     // A scan that silently matched nothing would make the check below vacuous.
@@ -66,6 +73,8 @@ describe('real-process inventory', () => {
       expect.arrayContaining([
         'test/driver/claude-code/cli.child-process.test.ts',
         'test/ops/ratchet/git.test.ts',
+        // `.test.mjs` suites are process-backed too — the manifest registers seven.
+        'test/api-report.cli.test.mjs',
       ]),
     );
   });
@@ -74,10 +83,20 @@ describe('real-process inventory', () => {
     // Unlisted files default to `process` in vitest.config.ts, so only an
     // explicit `pure` entry can put a process-backed file under pure budgets.
     const classes = await suiteClasses();
-    const misclassified = (await processBackedTestFiles()).filter(
-      (file) => classes[file] === 'pure',
-    );
-    expect(misclassified).toEqual([]);
+    expect(misclassifiedAsPure(await processBackedTestFiles(), classes)).toEqual([]);
+  });
+
+  test('a process-backed .test.mjs classified pure is caught', async () => {
+    // The failure mode the extension filter used to miss: an .mjs suite that
+    // spawns a process but is marked `pure` in the manifest.
+    const files = await processBackedTestFiles({
+      entries: async () => ['fixture.test.mjs'],
+      source: async () => ['import { spawnSync }', "from 'node:child_process';"].join(' '),
+    });
+    expect(files).toEqual(['test/fixture.test.mjs']);
+    expect(misclassifiedAsPure(files, { 'test/fixture.test.mjs': 'pure' })).toEqual([
+      'test/fixture.test.mjs',
+    ]);
   });
 });
 
@@ -111,6 +130,7 @@ describe('inventory read batches', () => {
       ['node-import.test.ts', ['import { spawn }', "from 'node:child_process';"].join(' ')],
       ['bare-import.test.ts', ['import { spawn }', "from 'child_process';"].join(' ')],
       ['nested\\windows.test.ts', [callNames[0], '()'].join('')],
+      ['nested/deeper/8.test.mjs', [callNames[1], '()'].join('')],
       ['type-only.test.ts', ['import type { ChildProcess }', "from 'child_process';"].join(' ')],
       ...Array.from({ length: 7 }, (_, index): [string, string] => [
         `plain/${index}.test.ts`,
@@ -121,7 +141,9 @@ describe('inventory read batches', () => {
       ['ignored.test.tsx', [callNames[0], '()'].join('')],
     ]);
     const entries = [...contents.keys()].reverse();
-    const testEntries = entries.filter((entry) => entry.endsWith('.test.ts'));
+    const testEntries = entries.filter(
+      (entry) => entry.endsWith('.test.ts') || entry.endsWith('.test.mjs'),
+    );
     const root = join(REPOSITORY_ROOT, 'test');
     const releases = testEntries.map(() => signal());
     const batchesStarted = Array.from({ length: Math.ceil(testEntries.length / 8) }, () =>
@@ -167,6 +189,7 @@ describe('inventory read batches', () => {
         'test/node-import.test.ts',
         'test/bare-import.test.ts',
         'test/nested/windows.test.ts',
+        'test/nested/deeper/8.test.mjs',
       ].sort(),
     );
     expect(reads).toEqual(testEntries.map((entry) => relative(root, join(root, entry))));

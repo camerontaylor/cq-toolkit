@@ -34,14 +34,14 @@ test('in-flight deadline expiry during an ancestor RPC truncates nonfatally', as
   if (!successor) throw new Error('missing successor');
   // A wide margin keeps this deterministic: the budget survives the current work and is exhausted
   // while the ancestor status is still in flight.
-  const budget = 400;
+  const budget = 2_000;
   const remainingMs = () => budget;
   const before = f.effects.openLedger(f.state.branch).load();
   const client = {
     ...terminal.client,
     status: async (ref: QueueReference): Promise<QueueStatus> => {
       if (ref.requestId !== predecessor.reference.requestId) return successorStatus;
-      await new Promise((resolve) => setTimeout(resolve, 2_000));
+      await new Promise((resolve) => setTimeout(resolve, 6_000));
       return successorStatus;
     },
   };
