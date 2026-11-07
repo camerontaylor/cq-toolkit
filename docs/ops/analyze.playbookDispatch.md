@@ -15,6 +15,7 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
+  "description": "The playbook registry and the quarantine ledger are process-scoped in v1: a registered playbook and any quarantine live only for the life of the process. A quarantine does not survive a restart, so after one the playbook must be re-registered and re-approved before it can dispatch again; nothing re-dispatches it automatically.",
   "properties": {
     "dir": {
       "minLength": 1,
