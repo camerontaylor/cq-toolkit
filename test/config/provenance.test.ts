@@ -36,6 +36,14 @@ describe('provenanceConfig', () => {
     expect(text).not.toContain(fakeForeign);
   });
 
+  test('caps a long non-secret value with a marker and the original length', () => {
+    const long = 'x'.repeat(500);
+    const capped = provenanceConfig(readCqEnv({ CQ_GH_BIN: long }), {}).env['CQ_GH_BIN'];
+    expect(capped).toBe(`${'x'.repeat(200)}… (500 chars)`);
+    const short = provenanceConfig(readCqEnv({ CQ_GH_BIN: 'gh' }), {}).env['CQ_GH_BIN'];
+    expect(short).toBe('gh');
+  });
+
   test('an empty environment records nothing', () => {
     expect(provenanceConfig(readCqEnv({}), {})).toEqual({ env: {}, sources: {}, warnings: [] });
   });

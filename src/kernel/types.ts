@@ -535,7 +535,10 @@ export interface ProvenanceRecord {
   journalLink: string;
   reportLink: string;
   witnesses: WitnessesRecord;
-  /** Resolved env config at run start (ADR-0009); optional, absent on older records. */
+  /**
+   * Resolved env config at run start (ADR-0009). Strictly additive and optional: absent on older
+   * records. No version bump (unreleased 0.2.0-dev, no released v3 reader or writer).
+   */
   config?: ProvenanceConfig | undefined;
 }
 
