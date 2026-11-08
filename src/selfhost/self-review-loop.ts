@@ -80,7 +80,6 @@
 // workflow) for the artifact upload. The 2,000,000-token placeholder cap
 // (`SelfhostDefaults.maxTokens`) exists to be tuned from this evidence.
 import { enterWithCqEnv } from '../config/entry.js';
-import { readCqEnv } from '../config/env.js';
 import type { CqEnv } from '../config/env.js';
 import { stripRefsHeads } from '../config/values.js';
 import { checkedProtectedBranch } from '../ops/merge/trustMirrors.js';
