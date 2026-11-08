@@ -5,6 +5,7 @@ the full-range CLI adapter cannot prove per-line coverage.
 """
 import copy
 import datetime as dt
+import hashlib
 import json
 import subprocess
 from pathlib import Path
@@ -134,7 +135,8 @@ def reconcile_completed(c, q):
 def complete(c, q, item, rdir, run_id, cls, ended_at, exit_code):
     """Content-stable publication before terminal queue mutation; safe to replay."""
     findings = []
-    raw = (rdir / "review.ndjson").read_text()
+    raw_bytes = (rdir / "review.ndjson").read_bytes()
+    raw = raw_bytes.decode("utf-8", errors="replace")
     for line in raw.splitlines():
         try:
             value = json.loads(line)
@@ -147,9 +149,11 @@ def complete(c, q, item, rdir, run_id, cls, ended_at, exit_code):
                     identity_inputs=item["identity_inputs"], profile=item["profile"], run_id=run_id,
                     outcome=("findings" if findings else "clean") if adequate else "no-verdict",
                     scope_adequate=adequate, findings=findings,
-                    report=(rdir / "findings.md").read_text() if (rdir / "findings.md").exists() else raw,
+                    report=(rdir / "findings.md").read_text(errors="replace") if (rdir / "findings.md").exists() else raw,
                     observed={"cli_version": None, "model_version": None, "reason": "not-observed",
-                              "classification": cls, "exit_code": exit_code}, independent_acceptance=False)
+                              "classification": cls, "exit_code": exit_code,
+                              "artifacts": {"review.ndjson": hashlib.sha256(raw_bytes).hexdigest()}},
+                    independent_acceptance=False)
     operation.validate("receipt", document)
     receipt_id = receipts.write_receipt(c.STATE / "receipts", document)
     event_id = receipts.digest(dict(item=item["id"], run=run_id, receipt=receipt_id))

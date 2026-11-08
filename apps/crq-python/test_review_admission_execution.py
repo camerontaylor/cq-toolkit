@@ -2,6 +2,7 @@
 import copy
 import contextlib
 import datetime as dt
+import hashlib
 import json
 import subprocess
 from pathlib import Path
@@ -250,6 +251,37 @@ class ExecutionTests(SnapshotGitFixture, unittest.TestCase):
                     # For timeout case the object exists: only the real process
                     # timeout wrapper fails, rather than a missing-object mock.
                     self.assertEqual(self.item["identity_inputs"], self.facts)
+
+    def test_invalid_utf8_output_finishes_failed_and_completed_runs_with_raw_digest(self):
+        initial = copy.deepcopy(self.q)
+        for completed in (False, True):
+            with self.subTest(completed=completed):
+                self.q = copy.deepcopy(initial)
+                self.item = self.q["items"][0]
+                self.item.update(state="reviewing", run=dict(run_id="run-1"))
+                raw = b'{"type":"finding","severity":"info","comment":"bad \xff byte"}\n'
+                raw += (b'{"type":"complete","status":"review_completed"}\n' if completed else
+                        b'{"type":"error","errorType":"unknown","message":"bad \xff"}\n')
+                if not completed:
+                    raw += b"\xff\xe2\x82"  # malformed/truncated trailing event from a terminated process
+                (self.rdir / "review.ndjson").write_bytes(raw)
+                exit_code = 0 if completed else 1
+                (self.rdir / "exit.json").write_text(json.dumps(dict(exit=exit_code, ended_at=self.c.iso())))
+                (self.rdir / "meta.json").write_text(json.dumps(dict(worktree=str(self.repo),
+                    wt_branch="fixture", item_id=self.item["id"], label="fixture", run_id="run-1",
+                    base=self.base, head=self.head)))
+                with mock.patch.multiple(crq, STATE=self.state, RUNS=self.runs), \
+                     mock.patch.object(crq, "run_liveness", return_value="harvest"), \
+                     mock.patch.object(crq, "event"), mock.patch.object(crq, "remove_worktree"), \
+                     mock.patch.object(crq, "save_queue"), mock.patch.object(backfill_runtime, "settings", return_value=None):
+                    crq.harvest_review(self.q, self.item, False)
+                self.assertEqual(self.item["state"], "done" if completed else "failed")
+                review_receipt.read_receipt(self.state / "receipts", self.item["receipt_id"])  # verifies receipt bytes
+                document = json.loads((self.state / "receipts" / (self.item["receipt_id"] + ".json")).read_text())
+                self.assertEqual(document["observed"]["artifacts"]["review.ndjson"], hashlib.sha256(raw).hexdigest())
+                self.assertIn("\ufffd", document["findings"][0]["comment"])
+                self.assertEqual((self.rdir / "review.ndjson").read_bytes(), raw)
+                self.assertEqual(len(self.q["review_events"]), 1)
 
     def test_local_harvest_retains_global_auth_and_rate_gates(self):
         for outcome in ("auth", "action_required", "rate_limited"):
