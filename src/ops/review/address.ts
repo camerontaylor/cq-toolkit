@@ -710,7 +710,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
         if (worker) report.escalation = worker.escalation();
         return addressCancelledResult(addressLease);
       }
-      if (reason) report.reasons.push(reason);
+      if (reason && !report.reasons.includes(reason)) report.reasons.push(reason);
       let publicationFailed = false;
       if (publishOnExit && !parent?.aborted) {
         try {
@@ -2390,6 +2390,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                 }
               } catch {
                 const reason = 'publication remote head unavailable; fixes withheld';
+                report.reasons.push(reason);
                 return reason;
               }
 

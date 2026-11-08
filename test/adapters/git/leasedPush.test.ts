@@ -1,5 +1,5 @@
 import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { tmpdir, homedir, userInfo } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, expect, test } from 'vitest';
 import { makeGhRunner, type GhFn } from '../../../src/adapters/forge-github/gh.js';
@@ -184,7 +184,7 @@ test('a single-component relative pushurl stays concrete across resolve and leas
   await f.git('init', '--bare', remote);
   await f.local('config', 'remote.origin.pushurl', 'push.git');
   const destination = await resolvePushDestination(f.run, f.checkout, 'origin');
-  expect(destination.url).toBe(remote);
+  expect(destination.url).toBe('push.git');
   expect((await leasedPush(f.run, f.checkout, destination, 'topic', '', f.tip)).code).toBe(0);
   expect(await f.git('ls-remote', '--refs', remote, 'refs/heads/topic')).toBe(
     `${f.tip}\trefs/heads/topic`,
@@ -202,3 +202,49 @@ test('multiple configured pushurls refuse resolution rather than publishing to a
   );
   expect(await f.git('ls-remote', f.base)).toBe('');
 });
+
+test('home-relative pushurl uses Git expansion with a temporary HOME', async () => {
+  const f = await fixture();
+  const home = await mkdtemp(join(tmpdir(), 'leased-push-home-'));
+  roots.push(home);
+  const remote = join(home, 'home.git');
+  await f.git('init', '--bare', remote);
+  await f.local('config', 'remote.origin.pushurl', '~/home.git');
+  const run = makeGhRunner({ bin: 'git', env: { HOME: home } });
+  const plain = await run(['-C', f.checkout, 'push', 'origin', `${f.expected}:refs/heads/topic`]);
+  expect(plain.code, plain.stderr).toBe(0);
+  const destination = await resolvePushDestination(run, f.checkout, 'origin');
+  expect(destination.url).toBe('~/home.git');
+  expect((await leasedPush(run, f.checkout, destination, 'topic', f.expected, f.tip)).code).toBe(0);
+  expect(await f.git('ls-remote', '--refs', remote, 'refs/heads/topic')).toBe(
+    `${f.tip}\trefs/heads/topic`,
+  );
+});
+test.each(['file', 'parent-relative', 'named-home', 'scp'] as const)(
+  'Git pushurl shape %s is preserved',
+  async (shape) => {
+    const f = await fixture();
+    let remote = f.base;
+    let url = `file://${remote}`;
+    if (shape === 'parent-relative') url = '../base.git';
+    if (shape === 'named-home') {
+      const directory = await mkdtemp(join(homedir(), '.cq-pushurl-check-'));
+      roots.push(directory);
+      remote = join(directory, 'push.git');
+      await f.git('init', '--bare', remote);
+      url = `~${userInfo().username}/${directory.split('/').at(-1)}/push.git`;
+    }
+    if (shape === 'scp') url = 'git@example.invalid:owner/repository.git';
+    await f.local('config', 'remote.origin.pushurl', url);
+    const destination = await resolvePushDestination(f.run, f.checkout, 'origin');
+    expect(destination.url).toBe(url);
+    // --get-url exercises Git's URL parsing without contacting an SSH host.
+    expect(await f.local('ls-remote', '--get-url', destination.url)).toBe(url);
+    if (shape !== 'scp') {
+      expect((await leasedPush(f.run, f.checkout, destination, 'topic', '', f.tip)).code).toBe(0);
+      expect(await f.git('ls-remote', '--refs', remote, 'refs/heads/topic')).toBe(
+        `${f.tip}\trefs/heads/topic`,
+      );
+    }
+  },
+);

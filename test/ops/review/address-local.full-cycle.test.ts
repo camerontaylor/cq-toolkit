@@ -3,7 +3,7 @@
 // review.address local full-cycle suite.
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { describe, expect, test } from 'vitest';
+import { describe, expect, test, vi } from 'vitest';
 import type { ReviewAddressReport } from '../../../src/ops/review/address.js';
 import type { Finding } from '../../../src/ops/review/findings.js';
 import { makeSubprocessDevEffects } from '../../../src/ops/dev/effects.js';
@@ -258,10 +258,13 @@ test('local exit publication leases the observed destination separately from the
   }
 });
 
-test.each(['nonzero', 'throw', 'multiple-pushurls'] as const)(
+test.each(['nonzero', 'throw', 'multiple-pushurls', 'stop-wins'] as const)(
   'remote observation %s yields a needs-human report before edits',
   async (fault) => {
     const f = await fixture();
+    const realNow = Date.now.bind(Date);
+    let elapsed = 0;
+    const clock = vi.spyOn(Date, 'now').mockImplementation(() => realNow() + elapsed);
     try {
       const git = makeGhRunner({ bin: 'git' });
       const op = makeReviewAddress({
@@ -271,6 +274,7 @@ test.each(['nonzero', 'throw', 'multiple-pushurls'] as const)(
           if (fault === 'multiple-pushurls' && args.includes('get-url'))
             return { code: 0, stdout: '/first.git\n/second.git\n', stderr: '' };
           if (args.includes('ls-remote')) {
+            if (fault === 'stop-wins') elapsed = 60_000;
             if (fault === 'throw') throw new Error('transient remote failure');
             return { code: 128, stdout: '', stderr: 'transient remote failure' };
           }
@@ -285,7 +289,11 @@ test.each(['nonzero', 'throw', 'multiple-pushurls'] as const)(
       });
       expect(result.status).toBe('needs-human');
       if (result.status !== 'needs-human') return;
-      expect(result.reason).toContain('publication remote head unavailable');
+      expect(result.reason).toContain(
+        fault === 'stop-wins'
+          ? 'token or wall budget exhausted'
+          : 'publication remote head unavailable',
+      );
       expect(result.report?.reasons).toContain(
         'publication remote head unavailable; fixes withheld',
       );
@@ -297,6 +305,7 @@ test.each(['nonzero', 'throw', 'multiple-pushurls'] as const)(
       expect(f.models).toEqual([]);
       expect(JSON.parse(await readFile(result.report!.reportPath, 'utf8'))).toEqual(result.report);
     } finally {
+      clock.mockRestore();
       await f.cleanup();
     }
   },

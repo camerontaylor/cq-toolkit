@@ -1,4 +1,3 @@
-import { resolve } from 'node:path';
 import type { GhFn, GhResult } from '../forge-github/gh.js';
 
 /** A concrete destination, resolved once by the composition and never reinterpreted as a remote. */
@@ -20,7 +19,7 @@ export async function resolvePushDestination(
       throw new Error('publication requires exactly one push destination');
     destination = destinations[0]!;
   }
-  return { url: destination.includes(':') ? destination : resolve(path, destination) };
+  return { url: destination };
 }
 
 /** Compare the explicit remote tip without granting permission to rewrite history. */
