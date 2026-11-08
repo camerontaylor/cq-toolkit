@@ -112,7 +112,10 @@ class CqDriverTest(unittest.TestCase):
         return report, command.call_args.args[0]
 
     def test_invalid_fixer_output_returns_structured_error(self):
-        for stdout in ('not json', '', 'null', '[]', '[1]', '"text"', '42', 'true',
+        invalid_results = [json.dumps({'status': 'ok', key: value})
+                           for key in ('value', 'result')
+                           for value in ([], 0, '', False)]
+        for stdout in (*invalid_results, 'not json', '', 'null', '[]', '[1]', '"text"', '42', 'true',
                        '{"status":"ok","value":[1]}',
                        '{"status":"ok","result":"text"}'):
             with self.subTest(stdout=stdout):
@@ -120,6 +123,14 @@ class CqDriverTest(unittest.TestCase):
                 self.assertEqual(report, {'stop': 'error', 'changed': False,
                                          'summary': 'invalid cq output', 'commits': []})
                 self.assertIn(stdout, (self.directory / 'driver.log').read_text())
+
+    def test_missing_or_null_fixer_result_defaults_to_object(self):
+        for data in ({'status': 'ok'}, {'status': 'ok', 'value': None},
+                     {'status': 'ok', 'result': None}, {'status': 'ok', 'value': {}},
+                     {'status': 'ok', 'value': None, 'result': {'changed': False}}):
+            with self.subTest(data=data):
+                report, _ = self.invoke(json.dumps(data), returncode=0)
+                self.assertEqual(report['stop'], 'ok')
 
     def test_judge_output_failures_return_unsure(self):
         config = {'repair': {'cq_bin': '/unused/cli.js',
