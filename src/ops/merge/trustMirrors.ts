@@ -152,6 +152,13 @@ export function resolveClassifyTrust(
   for (const field of fields) {
     const given = supplied?.[field];
     if (given === undefined) continue;
+    // Shape first: a wrong-shape list is a `config` error, never a TypeError below.
+    if (!isStringArray(given)) {
+      throw new DispatchError(
+        'config',
+        `${op}: input.config.${field} has the wrong shape (value not echoed)`,
+      );
+    }
     // With no key set, a restated list is accepted only if it equals the documented default
     // (stricter than the built-in legacy behaviour, so it supplies no authority).
     const want = effective[field] ?? CLASSIFY_TRUST_DEFAULTS[field];
@@ -286,20 +293,4 @@ export function mergeClassifyConfig<H extends object>(
     }
   }
   return merged as unknown as H;
-}
-
-/**
- * A plan/op-input clock must be a finite, non-negative number no later than
- * the real clock; anything else fails with `config` (the value is never
- * echoed). Rejecting, not clamping, keeps the dispatched ops deterministic: a
- * later clock would shorten the settle wait, an earlier one only lengthens it.
- */
-export function assertPlanClock(op: string, nowMs: unknown): number {
-  if (typeof nowMs !== 'number' || !Number.isFinite(nowMs) || nowMs < 0 || nowMs > Date.now()) {
-    throw new DispatchError(
-      'config',
-      `${op}: input.nowMs must be a finite, non-negative clock reading no later than the current time (value not echoed)`,
-    );
-  }
-  return nowMs;
 }

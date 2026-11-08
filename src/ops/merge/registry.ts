@@ -450,8 +450,8 @@ export const registry: OpRegistryEntry[] = [
     importer: async (wiring) => {
       const { classifyPr } = await import('./classifyPrs.js');
       const { defaultClassifyPrConfig } = await import('./classify.config.js');
-      const { assertPlanClock, mergeClassifyConfig, resolveClassifyTrust } =
-        await import('./trustMirrors.js');
+      const { mergeClassifyConfig, resolveClassifyTrust } = await import('./trustMirrors.js');
+      const { assertPlanClock } = await import('../../shared/planClock.js');
       const op: Op<ClassifyPrsInput, PrClassification> = async (input) => {
         // Who counts as a reviewer is a trust input: resolved from config only.
         const trust = resolveClassifyTrust('merge.classifyPrs', input.config, wiring?.cqEnv);
