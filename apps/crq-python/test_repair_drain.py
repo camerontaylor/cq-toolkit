@@ -105,6 +105,16 @@ class RepairDrainTest(unittest.TestCase):
             repair_tick.reconcile_fix_prs(c, self.queue)
             self.assertEqual(mark.call_count, 1)
 
+    def test_merge_head_mismatch_cannot_mark_prepared_finding_fixed(self):
+        record = self.queue['items'][0]['repair_runs']['run1']
+        record.update(fix_pr={'number': 99}, publication={'head': self.pin})
+        c = SimpleNamespace(pr_info=lambda n: {'state': 'MERGED', 'headRefOid': self.tip,
+                                              'mergeCommit': {'oid': self.tip}})
+        with mock.patch.object(repair_tick, 'mark_finding_outcome') as mark:
+            repair_tick.reconcile_fix_prs(c, self.queue)
+            mark.assert_not_called()
+        self.assertNotIn('fix_merged', record)
+
     def test_fix_pr_provenance_includes_threadless_and_pr_sources(self):
         path = self.root / 'state/repair/inbox/crq-run1-F1.json'
         job = json.loads(path.read_text())
