@@ -1,3 +1,5 @@
+import { checkoutWriterContext } from '../../shared/checkoutWriterContext.js';
+import { checkoutWriterCommand } from '../../shared/checkoutWriterCommand.js';
 import { z } from 'zod';
 import { mkdtemp, symlink, access, readFile, mkdir, rm, realpath } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
@@ -77,7 +79,7 @@ export async function isolateAddressMany(
   number: number,
   options: { cloneRoot: string; target?: string },
 ): Promise<string> {
-  const git = promisify(execFile);
+  const git = checkoutWriterContext() ? checkoutWriterCommand : promisify(execFile);
   // Inspect key names only: helpers, HTTP headers and signing values may contain credentials.
   const scopes = ['--local'];
   try {

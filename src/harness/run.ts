@@ -1,3 +1,4 @@
+import { checkoutWriterStdio, trackCheckoutWriter } from '../shared/checkoutWriterContext.js';
 import { spawn } from 'node:child_process';
 import { registerProcessSignalCleanup } from '../shared/process-signals.js';
 
@@ -67,13 +68,14 @@ function spawnAndCollect(
         cwd: opts.cwd,
         shell,
         env: opts.env,
-        stdio: ['ignore', 'pipe', 'pipe'],
+        stdio: checkoutWriterStdio(['ignore', 'pipe', 'pipe']),
         ...(POSIX ? { detached: true } : {}),
       });
     } catch (err) {
       settle({ kind: 'spawn-error', error: err });
       return;
     }
+    trackCheckoutWriter(child);
     const collect = (): { chunks: Buffer[]; bytes: number } => ({ chunks: [], bytes: 0 });
     const out = collect();
     const err = collect();

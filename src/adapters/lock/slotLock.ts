@@ -148,29 +148,47 @@ export async function acquireSlot(commonDir: string, key: number | { checkoutGit
     }
   }
   const lock = await acquireFileLock(join(await realpath(directory), `${name}.lock`));
-  const metadataPath = join(dirname(lock.path), `${name}.json`);
+  return attachSlotMetadata(lock);
+}
+
+/** Bounded, no-follow discovery reader. Missing metadata is a fresh hint only. */
+export async function readSlotMetadata(metadataPath: string): Promise<SlotMetadata | undefined> {
+  try {
+    const input = await open(
+      metadataPath,
+      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+    );
+    try {
+      const info = await input.stat();
+      if (!info.isFile()) throw new Error('Slot metadata must be a regular file');
+      if (info.size > 16_384) throw new Error('Oversized slot metadata');
+      const bytes = Buffer.alloc(16_385);
+      let bytesRead = 0;
+      while (bytesRead < bytes.length) {
+        const part = await input.read(bytes, bytesRead, bytes.length - bytesRead, bytesRead);
+        if (!part.bytesRead) break;
+        bytesRead += part.bytesRead;
+      }
+      if (bytesRead > 16_384) throw new Error('Oversized slot metadata');
+      return parseMetadata(bytes.subarray(0, bytesRead).toString('utf8'));
+    } finally {
+      await input.close();
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+    throw error;
+  }
+}
+
+/** Attach the one metadata protocol to an already-held persistent lock inode. */
+export function attachSlotMetadata(lock: Awaited<ReturnType<typeof acquireFileLock>>) {
+  const metadataPath = lock.path.replace(/\.lock$/, '.json');
   const slot = {
     ...lock,
     metadataPath,
     async readMetadata(): Promise<SlotMetadata | undefined> {
       await lock.assertIdentity();
-      try {
-        // NONBLOCK prevents opening a planted FIFO from waiting for a writer.
-        const input = await open(
-          metadataPath,
-          constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
-        );
-        try {
-          if (!(await input.stat()).isFile())
-            throw new Error('Slot metadata must be a regular file');
-          return parseMetadata(await input.readFile('utf8'));
-        } finally {
-          await input.close();
-        }
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
-        throw error;
-      }
+      return readSlotMetadata(metadataPath);
     },
     // Call before checkout reuse/dispatch, after acquiring the slot. Acquisition alone
     // permits inspection/reconciliation; it does not authorize reuse of incomplete work.
