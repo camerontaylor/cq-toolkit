@@ -116,7 +116,13 @@ class Inbox:
             if request_file.exists():
                 saved = ledger.loads(request_file.read_bytes())
                 if saved != request:
-                    raise ledger.IntegrityError("canonical repair request changed; reconcile")
+                    # A prior transport may have accepted a task before its receipt
+                    # was saved. Preserve that request; re-confirmation gets a new task.
+                    delivery_key = ledger.digest({"canonical": row["canonical_id"], "confirmation": row["previous_event_id"]})
+                    request_file = self.root / "delivery" / (delivery_key + ".json")
+                    if request_file.exists() and ledger.loads(request_file.read_bytes()) != request:
+                        raise ledger.IntegrityError("repair generation request changed; reconcile")
+                    ledger.atomic(request_file, ledger.canonical(request))
             else:
                 ledger.atomic(request_file, ledger.canonical(request))
             receipt_file = self.root / "receipts" / (delivery_key + ".json")

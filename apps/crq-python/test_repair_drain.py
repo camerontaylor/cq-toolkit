@@ -116,6 +116,8 @@ class RepairDrainTest(unittest.TestCase):
             repair_tick.reconcile_fix_prs(c, self.queue)
         self.assertEqual(record['source_publication_error'], 'forge exhausted')
         self.assertNotIn('fix_merged', record)
+        errors = repair_tick.digest(self.root, self.queue)['source_publication_errors']
+        self.assertEqual(errors, [{'item': item['id'], 'run': 'run1', 'error': 'forge exhausted'}])
         with mock.patch.object(repair_tick, 'publish_source_resolution'):
             repair_tick.reconcile_fix_prs(c, self.queue)
         self.assertEqual(record['fix_merged'], 'now')
@@ -176,9 +178,14 @@ class RepairDrainTest(unittest.TestCase):
         self.assertTrue(repair_tick.enqueue(c, {'items': []}, item, meta, rdir))
         job = json.loads((self.root / 'state/repair/inbox/crq-source-run-F1.json').read_text())
         self.assertEqual(job['source'], {'id': 'vendor-id', 'source_id': 'source-id',
-                                         'review_id': 'review-id', 'thread_id': 'thread-node', 'finding_number': 2})
+                                         'review_id': 'review-id', 'thread_id': 'thread-node', 'finding_number': 2, 'run': 'source-run'})
         self.assertNotIn('_source', job['finding'])
         self.assertEqual(repair_tick.source_thread(c, job), 'thread-node')
+        job.pop('source')
+        job_path = self.root / 'state/repair/inbox/crq-source-run-F1.json'
+        atomic(job_path, job)
+        self.assertTrue(repair_tick.enqueue(c, {'items': []}, item, meta, rdir))
+        self.assertEqual(json.loads(job_path.read_text())['source']['thread_id'], 'thread-node')
 
     def test_source_thread_lookup_pages_and_refuses_ambiguous_matches(self):
         job = {'pr': 9, 'run': 'run1', 'finding': {'path': 'src/kept.ts'}, 'source': {'finding_number': 2}}
@@ -189,6 +196,8 @@ class RepairDrainTest(unittest.TestCase):
                     'body': '**crq finding F2 [major]** issue\n<sub>crq run `' + run + '`, line 1</sub>'}]}}
         c = SimpleNamespace(REPO='o/r', gh_json=mock.Mock(return_value=[page([thread('wrong', run='run2')]), page([thread('right')])]))
         self.assertEqual(repair_tick.source_thread(c, job), 'right')
+        revalidated = {**job, 'run': 'new-run', 'source': {**job['source'], 'run': 'run1'}}
+        self.assertEqual(repair_tick.source_thread(c, revalidated), 'right')
         self.assertIn('--paginate', c.gh_json.call_args.args[0])
         c.gh_json.return_value = [page([thread('right'), thread('duplicate')])]
         with self.assertRaisesRegex(ValueError, 'ambiguous'):

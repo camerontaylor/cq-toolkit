@@ -57,6 +57,7 @@ class BoundedRepairTest(unittest.TestCase):
         job_id, job = self.prepare()
         self.assertNotEqual(job_id, OLD)
         self.assertEqual(job['origin_job'], OLD)
+        self.assertEqual(job['source']['run'], 'old-run')
         self.assertEqual(job['source_sha'], SOURCE)
         self.assertEqual(job['repair_base'], SOURCE)
         self.assertIsNone(job['cycle'])

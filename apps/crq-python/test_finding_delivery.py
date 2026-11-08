@@ -59,6 +59,24 @@ class FindingTest(unittest.TestCase):
         self.assertEqual(job["canonical_finding_id"], self.fid)
         self.assertEqual(len(queue["items"]), 2)
 
+    def test_changed_request_without_receipt_preserves_possibly_accepted_task(self):
+        self.inbox.triage(self.fid, self.f.repo, self.t, "confirmed", "judge", "valid", AT)
+        queue = {"items": []}
+        transport = delivery.repair_transport(self.root, queue, lambda q: None, lambda *_: True)
+        def interrupted(key, request):
+            transport(key, request)
+            raise OSError("crash after durable task before receipt")
+        with self.assertRaises(OSError):
+            self.inbox.deliver(self.fid, interrupted, AT)
+        original = (self.root / "findings/delivery" / (self.fid + ".json")).read_bytes()
+        tip = self.f.commit({"a": b"one\ntwo\n", "b": b"new tip\n"})
+        self.inbox.triage(self.fid, self.f.repo, tip, "confirmed", "judge", "still valid at new tip", AT)
+        receipt = self.inbox.deliver(self.fid, transport, AT)
+        self.assertNotEqual(receipt["repair_task"], "crq-backfill-" + self.fid)
+        self.assertEqual((self.root / "findings/delivery" / (self.fid + ".json")).read_bytes(), original)
+        self.assertEqual(len(queue["items"]), 2)
+        self.assertEqual(self.inbox.deliver(self.fid, transport, AT), receipt)
+
     def test_confirmed_cannot_override_canonical_identity(self):
         self.inbox.triage(self.fid, self.f.repo, self.t, "confirmed", "reviewer", "valid", AT, canonical_id="foreign")
         row = ledger.loads((self.root / "findings/triage" / (self.fid + ".json")).read_bytes())

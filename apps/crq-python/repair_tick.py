@@ -48,7 +48,8 @@ def prepare_current_job(c, q, old_job_id, source_sha, evidence):
            'repair_base': source_sha, 'branch': None, 'repair_round': count + 1,
            'origin_job': old_job_id, 'source_sha': source_sha,
            'finding_sha256': identity(old['finding']), 'revalidation': evidence,
-           'prior': None, 'recurrence': False}
+           'prior': None, 'recurrence': False,
+           'source': {**old.get('source', {}), 'run': old.get('source', {}).get('run', old['run'])}}
     atomic(job_path(c.ROOT, job_id), job)
     item.setdefault('repair_runs', {})[run] = {
         'jobs': [job_id], 'pin': source_sha, 'base': source_sha, 'branch': None,
@@ -85,11 +86,22 @@ def enqueue(c, q, item, meta, rdir):
                 or any(f.get('severity') not in ('critical', 'major') for f in doc['findings'])):
             return False
     existing = item.setdefault('repair_runs', {}).get(meta['run_id'])
-    if existing:
-        return existing['state'] in ('queued', 'ready', 'publish_failed')
     sourced = findings(rdir / 'review.ndjson', provenance=True)
     sources = [f.pop('_source', {}) for f in sourced]
     actionable = sourced
+    for source in sources:
+        source['run'] = meta['run_id']
+    if existing:
+        for job_id in existing.get('jobs', []):
+            path = c.STATE / 'repair/inbox' / (job_id + '.json')
+            if not path.exists():
+                continue
+            job = json.loads(path.read_text())
+            matches = [source for finding, source in zip(actionable, sources) if finding == job.get('finding')]
+            if len(matches) == 1 and not job.get('source'):
+                job['source'] = matches[0]
+                atomic(path, job)
+        return existing['state'] in ('queued', 'ready', 'publish_failed')
     if not actionable:
         return False
     if own_range(c, q, meta['base'], meta.get('pr_head', meta['head'])):
@@ -137,6 +149,9 @@ def enqueue(c, q, item, meta, rdir):
             atomic(path, job)
         else:
             prev = json.loads(path.read_text())
+            if not prev.get('source') and prev.get('finding') == finding:
+                prev['source'] = sources[n - 1]
+                atomic(path, prev)
             if ((prev.get('repair_base') != base or prev.get('finding') != finding)
                     and not (c.STATE / 'repair' / job_id / 'result.json').exists()):
                 # Stale orphan that never ran: rebind to this record.
@@ -548,7 +563,7 @@ def source_thread(c, job):
             for comment in thread['comments']['nodes']:
                 if (comment.get('path') == job['finding'].get('path') and
                         comment.get('body', '').startswith('**crq finding F' + str(number) + ' [') and
-                        '<sub>crq run `' + job['run'] + '`' in comment.get('body', '')):
+                        '<sub>crq run `' + source.get('run', job['run']) + '`' in comment.get('body', '')):
                     matches.add(thread['id'])
     if len(matches) > 1:
         raise ValueError('ambiguous source thread; retain publication for retry')
@@ -574,7 +589,7 @@ def publish_source_resolution(c, record, merge):
         comments = [comment for page in pages for comment in page]
         if not any(marker in comment.get('body', '') for comment in comments):
             body = journal.parent / ('source-' + job['job'] + '.md')
-            body.write_text(marker + '\nFixed by ' + record['fix_pr']['url'] + ' (merge `' + merge + '`).\n')
+            body.write_text(marker + '\nFixed in [' + merge + '](https://github.com/' + c.REPO + '/commit/' + merge + ').\n')
             c.run(['env', '-u', 'GITHUB_TOKEN', 'gh', 'pr', 'comment', str(job['pr']), '--repo', c.REPO, '--body-file', str(body)])
         thread = source_thread(c, job)
         if thread:
@@ -639,9 +654,12 @@ def digest(root, queue):
     import datetime as dt
     counts = {k: 0 for k in ('fixed@A0', 'fixed@A1', 'fixed@A2', 'not-fixed', 'stale', 'judged-valid', 'judged-invalid', 'failed')}
     fix_prs = []
+    source_publication_errors = []
     consumed = set()
     for item in queue['items']:
-        for record in item.get('repair_runs', {}).values():
+        for run, record in item.get('repair_runs', {}).items():
+            if record.get('source_publication_error'):
+                source_publication_errors.append({'item': item['id'], 'run': run, 'error': record['source_publication_error']})
             if record.get('fix_pr'):
                 fix_prs.append(record['fix_pr'])
             for value in record.get('verdicts', []):
@@ -686,4 +704,4 @@ def digest(root, queue):
     return {'verdicts': counts, 'inbox': len(pending), 'oldest_age_minutes':
             max(0, (dt.datetime.now(dt.timezone.utc).timestamp() - min(pending)) / 60) if pending else 0,
             'jobs_in_flight': running, 'rate_limit_deferred': deferred, 'orphaned': orphaned,
-            'fix_prs': fix_prs}
+            'fix_prs': fix_prs, 'source_publication_errors': source_publication_errors}
