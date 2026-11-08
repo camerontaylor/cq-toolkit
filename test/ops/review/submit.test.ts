@@ -202,11 +202,13 @@ for (const refusal of ['oversize', 'scanner'])
     );
     await git('add', 'file');
     await git('commit', '-qm', 'head');
+    const scanner = join(cwd, 'refusing-scanner');
+    await writeFile(scanner, '#!/bin/sh\nexit 1\n', { mode: 0o755 });
     const calls: string[] = [];
     const result = await makeSubmit(async (raw) => {
       calls.push((JSON.parse(raw) as { op: string }).op);
       return JSON.stringify(caps);
-    })({ cwd, repo: 'owner/repo', target: 'target', scanner: '/bin/false' });
+    })({ cwd, repo: 'owner/repo', target: 'target', scanner });
     expect(result.status).toBe('failed');
     if (result.status === 'failed') {
       expect(result.error).toContain(
