@@ -29,7 +29,7 @@ test('status accepts replacement and explicit withdrawal and dispatches notify-u
         limits: {
           max_request_bytes: 6291456,
           max_snapshot_bytes: 5242880,
-          max_content_bytes: 4194304,
+          max_content_bytes: 3145728,
           max_objects: 4096,
           chunk_bytes: 3072,
         },
