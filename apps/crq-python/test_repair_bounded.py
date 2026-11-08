@@ -43,7 +43,7 @@ class BoundedRepairTest(unittest.TestCase):
                                      SOURCE if args == ('rev-parse', 'origin/main') else BLOB).start()
         self.addCleanup(mock.patch.stopall)
         self.c = SimpleNamespace(ROOT=self.root, STATE=self.root / 'state', CONFIG=self.config,
-                                 CLONE=Path('/unused'), run=mock.Mock(return_value=SimpleNamespace(stdout='\nfirst\nsecond\n')),
+                                 CLONE=Path('/unused'), iso=lambda: 'now', run=mock.Mock(return_value=SimpleNamespace(stdout='\nfirst\nsecond\n')),
                                  secret_scan_diff=mock.Mock(return_value=(True, {})),
                                  save_queue=lambda q: atomic(self.root / 'state/queue.json', q))
 
@@ -57,6 +57,7 @@ class BoundedRepairTest(unittest.TestCase):
         job_id, job = self.prepare()
         self.assertNotEqual(job_id, OLD)
         self.assertEqual(job['origin_job'], OLD)
+        self.assertEqual(job['source']['run'], 'old-run')
         self.assertEqual(job['source_sha'], SOURCE)
         self.assertEqual(job['repair_base'], SOURCE)
         self.assertIsNone(job['cycle'])
@@ -66,6 +67,21 @@ class BoundedRepairTest(unittest.TestCase):
         self.assertFalse(self.config['repair']['enabled'])
         self.assertEqual(self.prepare()[0], job_id)
         self.assertEqual(self.c.secret_scan_diff.call_count, 1)
+
+    def test_prepared_canonical_retry_transfers_durable_delivery_ownership(self):
+        self.old['canonical_finding_id'] = 'canonical'
+        atomic(bounded.job_path(self.root, OLD), self.old)
+        self.c.iso = lambda: 'now'
+        inbox = mock.Mock()
+        def handoff(fid, previous, job, at):
+            self.assertEqual((fid, previous, at), ('canonical', OLD, 'now'))
+            self.assertEqual(json.loads(bounded.job_path(self.root, job['job']).read_text()), job)
+        inbox.handoff.side_effect = handoff
+        with mock.patch.object(repair_tick, 'finding_inbox', return_value=inbox):
+            job_id, job = self.prepare()
+            self.assertEqual(self.prepare()[0], job_id)
+        self.assertEqual(inbox.handoff.call_count, 2)
+        self.assertEqual(self.queue['items'][0]['repair_runs']['old-run']['state'], 'stale')
 
     def test_preparation_scans_full_source_at_real_path(self):
         self.prepare()
@@ -101,7 +117,8 @@ class BoundedRepairTest(unittest.TestCase):
         self.queue['items'].append({'id': 'backfill-finding-b', 'pr': 0, 'repair_runs': {
             'b1': {'pin': SOURCE}, 'b2': {'pin': SOURCE}}})
         atomic(bounded.job_path(self.root, OLD), self.old)
-        self.prepare()
+        with mock.patch.object(repair_tick, 'finding_inbox'):
+            self.prepare()
         new_evidence = {**self.evidence, 'reason': 'Independent revalidation of the same finding.'}
         with self.assertRaisesRegex(ValueError, 'ceiling'):
             repair_tick.prepare_current_job(self.c, self.queue, OLD, SOURCE, new_evidence)
