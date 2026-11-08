@@ -17,7 +17,7 @@ import { GIT_HARDEN, HARDENED_DIFF_FLAGS } from '../../../shared/gitHarden.js';
 import {
   validateAddressTerminalAuthority,
   trackAddressTerminalProcess,
-} from './addressOwnership.js';
+} from './addressRunLifecycle.js';
 import {
   commitFailedAttempt,
   type FailedAttempt,
