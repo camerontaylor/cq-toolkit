@@ -10,6 +10,19 @@ import { captureSnapshot, SnapshotConfigError } from '../dev/internal/snapshot.j
 import { observeReview } from './wait.js';
 import { QueueUnsupported, ReviewInputError } from './internal/queueClient.js';
 import type { QueueTransport } from './internal/queueProtocol.js';
+import { currentCqEnv } from '../../config/run-env.js';
+
+/**
+ * An explicit `scanner` input always wins (even an invalid one, which then fails
+ * closed). Only when it is absent does the operator's documented
+ * CQ_AUTHOR_SNAPSHOT_SCANNER apply. Validation stays in captureSnapshot: a
+ * missing, relative or unexecutable value is a configuration error, never a skip.
+ */
+function snapshotScanner(explicit: string | undefined): string | undefined {
+  if (explicit !== undefined) return explicit;
+  const configured = currentCqEnv().values['CQ_AUTHOR_SNAPSHOT_SCANNER'];
+  return typeof configured === 'string' ? configured : undefined;
+}
 
 export const makeSubmit = (transport?: QueueTransport) =>
   reviewOp(
@@ -115,7 +128,7 @@ export const makeSubmit = (transport?: QueueTransport) =>
             root,
             wire.inputs.base_commit,
             wire.inputs.head_tree,
-            i.scanner,
+            snapshotScanner(i.scanner),
             30000,
             wire.inputs.head_commit,
           ).catch((error: unknown) => {
