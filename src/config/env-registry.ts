@@ -140,7 +140,7 @@ export const CQ_ENV_ENTRIES: readonly CqEnvEntry[] = [
     text,
     'neutral',
     false,
-    'Snapshot scanner command for the review transport.',
+    'Snapshot scanner command for the review transport and review.submit (an explicit scanner input wins).',
   ),
   entry(
     'CQ_AUTHOR_SSH_ALIAS',
