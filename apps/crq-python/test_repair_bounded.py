@@ -139,6 +139,32 @@ class BoundedRepairTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'historical jobs'):
             bounded.select_job(self.root, self.config, OLD, SOURCE, self.evidence['finding_sha256'])
 
+    def test_prepared_selector_requires_current_delivered_canonical_owner(self):
+        job_id, job = self.prepare()
+        fid = 'd' * 64
+        job['canonical_finding_id'] = fid
+        atomic(bounded.job_path(self.root, job_id), job)
+        row_path = self.root / 'state/backfill/findings/triage' / (fid + '.json')
+        row = {'status': 'delivered', 'receipt': {'repair_task': job_id}}
+        atomic(row_path, row)
+        self.assertEqual(bounded.select_job(self.root, self.config, job_id, SOURCE,
+                                           self.evidence['finding_sha256'])['job'], job_id)
+        for status in ('superseded', 'dismissed', 'confirmed', 'needs-human', 'fixed'):
+            with self.subTest(status=status):
+                atomic(row_path, {**row, 'status': status})
+                with self.assertRaisesRegex(ValueError, 'canonical'):
+                    bounded.select_job(self.root, self.config, job_id, SOURCE, self.evidence['finding_sha256'])
+        atomic(row_path, {**row, 'receipt': {'repair_task': 'newer-job'}})
+        with self.assertRaisesRegex(ValueError, 'canonical'):
+            bounded.select_job(self.root, self.config, job_id, SOURCE, self.evidence['finding_sha256'])
+        atomic(self.root / 'state/repair' / job_id / 'progress.json', {'attempts': ['historical']})
+        self.assertEqual(bounded.drain_job(self.root, self.config, self.queue, job_id)[0], 'skip')
+        for content in ('[]', '{"status":"delivered","receipt":null}', 'broken'):
+            row_path.write_text(content)
+            self.assertEqual(bounded.drain_job(self.root, self.config, self.queue, job_id)[0], 'skip')
+        row_path.unlink()
+        self.assertEqual(bounded.drain_job(self.root, self.config, self.queue, job_id)[0], 'skip')
+
     def test_wrong_digest_and_orphan_prepared_job_refuse(self):
         job_id, _ = self.prepare()
         with self.assertRaisesRegex(ValueError, 'digest'):

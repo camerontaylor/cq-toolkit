@@ -176,8 +176,8 @@ class Inbox:
             filename = self.root / "triage" / (fid + ".json")
             row = ledger.loads(filename.read_bytes())
             current = row.get("receipt", {}).get("repair_task")
-            if current and current != job:
-                return  # A replaced generation cannot overwrite the latest disposition.
+            if current and (current != job or row.get("status") != "delivered"):
+                return  # Preserve newer generations and operator dispositions.
             evidence = {"repair_task": job, "reason": reason, "fix_pr": fix_pr}
             if fixing_commit:
                 evidence.update(fixing_commit=fixing_commit, verification=reason)

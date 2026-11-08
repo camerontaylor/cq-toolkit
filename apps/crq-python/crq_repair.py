@@ -14,7 +14,7 @@ import time
 from zoneinfo import ZoneInfo
 from crq_repair import atomic, command, git, hack_detector, utc, verify
 from crq_repair.drivers import cq, codex, paseo
-from crq_repair.bounded import drain_job, drain_order, select_job, source_snapshot
+from crq_repair.bounded import drain_job, drain_order, require_canonical_delivery, select_job, source_snapshot
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_RATE_LIMIT_PAUSE = dt.timedelta(minutes=30)
@@ -215,6 +215,7 @@ def _dispatch(config, role, job, wt, directory, judge=False):
     job = copy.deepcopy(job)
     if job.get('triage_context') is not None:
         return cq.judge(config, role, job, wt, directory)
+    require_canonical_delivery(ROOT, job)
     job['source_snapshot'] = source_snapshot(config, job)
     atomic(directory / 'source-snapshot.json', job['source_snapshot'])
     if role['driver'] == 'cq':
@@ -581,6 +582,11 @@ def process_item(config, jobs):
             break  # never start a new finding inside the GLM peak window
         if dispatch_paused(config):
             return 'rate-limit'  # no model call anywhere while the pause marker is live
+        try:
+            require_canonical_delivery(ROOT, job)
+        except ValueError as exc:
+            print('repair ' + job['job'] + ': skipped: ' + str(exc))
+            continue
         if job['run'] != last_run:
             base = job['repair_base']
             last_run = job['run']

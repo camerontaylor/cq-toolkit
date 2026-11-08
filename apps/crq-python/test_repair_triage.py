@@ -67,8 +67,13 @@ class PhaseTest(FindingTest):
         self.assertEqual(status, 'skip')
         self.assertIn('canonical', reason)
         self.assertEqual(record['state'], 'queued')  # Eligibility must honor the ledger itself.
+        before = self.out.retained()
+        self.inbox.repair_outcome(self.fid, job_id, 'needs-human', 'late result', AT)
+        self.assertEqual(self.out.retained(), before)
 
     def test_delivered_pr_zero_job_is_consumed_and_harvested(self):
+        self.inbox = delivery.Inbox(self.root / 'state/backfill/findings', self.out)
+        self.inbox.ingest(self.value)
         _, queue, _ = self.run_phase()
         item = queue['items'][0]
         run = next(iter(item['repair_runs']))
