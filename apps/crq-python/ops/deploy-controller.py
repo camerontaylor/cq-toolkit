@@ -562,7 +562,9 @@ RECEIPT_DISPOSITIONS = ("included", "renamed", "deleted", "unsupported",
 FAMILY_MERGED = "merged-current"
 FAMILY_PUSH = "push-range"
 FAMILY_LOCAL = "local-review-full-diff"
-PUSH_DISPOSITIONS = RECEIPT_DISPOSITIONS + ("deferred-split",)
+# push_current.prepare: out-of-repo-scope rows stay in the manifest as
+# excluded-config; scope-cap overflow is deferred-split to a follow-up part.
+PUSH_DISPOSITIONS = RECEIPT_DISPOSITIONS + ("excluded-config", "deferred-split")
 LOCAL_REVIEW_SCHEMA = "policy/review-operation.schema.json"
 _REPO_RE = re.compile(r"[\w.-]+/[\w.-]+")
 _HEX40 = re.compile(r"[0-9a-f]{40}")

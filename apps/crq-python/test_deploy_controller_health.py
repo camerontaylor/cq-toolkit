@@ -290,7 +290,10 @@ class HealthTests(ControllerFixture):
                   "reason": "current content exceeds scope byte cap"},
                  {"source_path": "src/b.rs", "path": "src/b.rs",
                   "resolution": "same-path-current", "disposition": "deferred-split",
-                  "reason": "deferred to follow-up review push-x-p2 (review scope cap)"}]
+                  "reason": "deferred to follow-up review push-x-p2 (review scope cap)"},
+                 {"source_path": "vendor/x.rs", "path": "vendor/x.rs",
+                  "resolution": "same-path-current", "disposition": "excluded-config",
+                  "reason": "excluded by repos config for o/jcode"}]
         document = self.receipt_document(
             item_id="push-jcode-ae0f09de39-a047a0c07b", outcome="partial-scope",
             run_id="push-jcode-ae0f09de39-a047a0c07b-20261108T053626Z",
@@ -324,10 +327,21 @@ class HealthTests(ControllerFixture):
             # Shared checks still apply to the push family.
             "scope-digest": (self.push_document(
                 capture={**valid["capture"], "scope_digest": "e" * 64}), "scope digest"),
-            # deferred-split is a push-only disposition, never a merged one.
+            # deferred-split and excluded-config are push-only dispositions.
             "merged-deferred-split": (self.receipt_document(capture={
-                **merged["capture"], "paths": valid["capture"]["paths"],
-                "scope_digest": valid["capture"]["scope_digest"]}), "path manifest"),
+                **merged["capture"], "paths": valid["capture"]["paths"][:3],
+                "scope_digest": review_receipt.digest(valid["capture"]["paths"][:3])}),
+                "path manifest"),
+            "merged-excluded-config": (self.receipt_document(capture={
+                **merged["capture"], "paths": valid["capture"]["paths"][3:],
+                "scope_digest": review_receipt.digest(valid["capture"]["paths"][3:])}),
+                "path manifest"),
+            "unknown-disposition": (self.push_document(capture={
+                **valid["capture"],
+                "paths": [{**valid["capture"]["paths"][0], "disposition": "skipped"}],
+                "scope_digest": review_receipt.digest(
+                    [{**valid["capture"]["paths"][0], "disposition": "skipped"}])}),
+                "path manifest"),
             # A merged subject missing its PR is still not a push receipt.
             "merged-no-pr": (self.receipt_document(source={**merged["source"], "pr": 0}),
                              "merged-current subject"),
