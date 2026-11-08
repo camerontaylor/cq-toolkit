@@ -239,7 +239,7 @@ test.each([
           ),
         ),
       ).rejects.toMatchObject({ code });
-      expect(f.context.pendingChildren).toBe(0);
+      await expect.poll(() => f.context.pendingChildren).toBe(0);
     } finally {
       await f.context.close().catch(() => undefined);
     }

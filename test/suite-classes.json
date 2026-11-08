@@ -78,6 +78,7 @@
   "test/driver/ai-sdk.seam-signal.test.ts": "process",
   "test/driver/ai-sdk.structured-output.test.ts": "process",
   "test/driver/ai-sdk.upload-gate.test.ts": "process",
+  "test/driver/checkoutWriterCommand.test.ts": "process",
   "test/driver/checkoutWriterContext.test.ts": "process",
   "test/driver/claude-code/cli.abort-grace.test.ts": "process",
   "test/driver/claude-code/cli.argv-options.test.ts": "process",
