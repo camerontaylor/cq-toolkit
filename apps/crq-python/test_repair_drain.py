@@ -123,15 +123,106 @@ class RepairDrainTest(unittest.TestCase):
         self.assertEqual(record['fix_merged'], 'now')
         self.assertNotIn('source_publication_error', record)
 
-    def test_merge_head_mismatch_cannot_mark_prepared_finding_fixed(self):
+    def test_unverifiable_head_mismatch_cannot_mark_prepared_finding_fixed(self):
         record = self.queue['items'][0]['repair_runs']['run1']
         record.update(fix_pr={'number': 99}, publication={'head': self.pin})
         c = SimpleNamespace(pr_info=lambda n: {'state': 'MERGED', 'headRefOid': self.tip,
-                                              'mergeCommit': {'oid': self.tip}})
+                                              'mergeCommit': {'oid': self.tip}},
+                            git=lambda *args: self.tip, is_ancestor=lambda *args: True)
         with mock.patch.object(repair_tick, 'mark_finding_outcome') as mark:
             repair_tick.reconcile_fix_prs(c, self.queue)
             mark.assert_not_called()
         self.assertNotIn('fix_merged', record)
+
+    def test_review_descendant_requires_unchanged_repaired_source_blobs(self):
+        def commit_files(base, files):
+            self.git('checkout', '-q', '--detach', base)
+            for name, text in files.items():
+                path = self.clone / name
+                if text is None:
+                    path.unlink()
+                else:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text(text)
+            self.git('add', '-A')
+            self.git('commit', '-qm', 'review evidence fixture')
+            return self.git('rev-parse', 'HEAD')
+        test_path = 'test/scripts/fix.test.ts'
+        base = commit_files(self.tip, {'src/helper.ts': 'old helper\n', test_path: 'old test\n',
+                                      'settings.json': 'old config\n', 'docs/fix.md': 'old docs\n',
+                                      'src/obsolete.ts': 'obsolete implementation\n'})
+        published = commit_files(base, {'src/kept.ts': 'fixed implementation\n', 'src/helper.ts': 'fixed helper\n',
+                                        test_path: 'new regression test\n', 'settings.json': 'fixed config\n',
+                                        'docs/fix.md': 'fixed docs\n', 'src/added.ts': 'new helper\n', 'src/obsolete.ts': None})
+        formatted = commit_files(published, {test_path: ' new regression test \n'})
+        extra_file = commit_files(published, {'review-format.txt': 'format-only unrelated file\n'})
+        reverted = commit_files(published, {'src/kept.ts': 'one\ntwo\n'})
+        helper_reverted = commit_files(published, {'src/helper.ts': 'old helper\n'})
+        other_changed = commit_files(published, {'src/moved.ts': 'changed second finding source\n'})
+        config_changed = commit_files(published, {'settings.json': 'review config change\n'})
+        docs_changed = commit_files(published, {'docs/fix.md': 'review docs change\n'})
+        restored = commit_files(published, {'src/obsolete.ts': 'obsolete implementation\n'})
+        removed_added = commit_files(published, {'src/added.ts': None})
+        first_job = self.root / 'state/repair/inbox/crq-run1-F1.json'
+        job = json.loads(first_job.read_text())
+        job['canonical_finding_id'] = 'd' * 64
+        item = self.queue['items'][0]
+        jobs = ['crq-run1-F1', 'crq-run1-F2']
+        publication = {'head': published, 'commits': [published]}
+        journal = self.root / 'state/repair' / jobs[0] / 'publication.json'
+        atomic(journal, publication)
+        original = journal.read_bytes()
+        c = SimpleNamespace(STATE=self.root / 'state', iso=lambda: 'now', git=self.git,
+                            is_ancestor=lambda a, b: subprocess.run(
+                                ['git', '-C', str(self.clone), 'merge-base', '--is-ancestor', a, b],
+                                capture_output=True).returncode == 0)
+        cases = [(formatted, True, 'src/kept.ts'), (extra_file, True, 'src/kept.ts')]
+        cases += [(head, False, 'src/kept.ts') for head in
+                  (reverted, helper_reverted, other_changed, config_changed, docs_changed, restored, removed_added, self.tip)]
+        cases.append((formatted, False, test_path))  # A test-file anchor is never exempt.
+        for actual, allowed, anchor in cases:
+            with self.subTest(actual=actual, anchor=anchor):
+                job['finding']['path'] = anchor
+                atomic(first_job, job)
+                self.git('update-ref', 'refs/remotes/origin/main', actual)
+                record = {'jobs': jobs, 'fix_pr': {'number': 99}, 'publication': dict(publication),
+                          'verdicts': [{'job': j, 'verdict': 'FIXED'} for j in jobs]}
+                item['repair_runs'] = {'run1': record}
+                c.pr_info = lambda n: {'state': 'MERGED', 'headRefOid': actual, 'mergeCommit': {'oid': actual}}
+                with mock.patch.object(repair_tick, 'mark_finding_outcome') as mark, \
+                     mock.patch.object(repair_tick, 'publish_source_resolution') as source:
+                    repair_tick.reconcile_fix_prs(c, self.queue)
+                self.assertEqual(mark.call_count, 2 if allowed else 0)
+                self.assertEqual(source.call_count, 1 if allowed else 0)
+                self.assertEqual('fix_merged' in record, allowed)
+                self.assertEqual(record['publication']['head'], published)
+                self.assertEqual(journal.read_bytes(), original)
+                if allowed:
+                    proof = record['validated_merge_head']
+                    expected = {'src/kept.ts', 'src/moved.ts', 'src/helper.ts', 'settings.json',
+                                'docs/fix.md', 'src/added.ts', 'src/obsolete.ts'}
+                    self.assertEqual((proof['published_head'], proof['actual_head'], proof['merge_commit']),
+                                     (published, actual, actual))
+                    self.assertEqual(set(proof['source_blobs']), expected)
+                    self.assertEqual(proof['compared_paths'], sorted(expected))
+                    self.assertEqual(proof['excluded_test_paths'], [test_path])
+                    self.assertIsNone(proof['source_blobs']['src/obsolete.ts'])
+                    self.assertEqual(proof['source_blobs']['src/helper.ts'], self.git('rev-parse', published + ':src/helper.ts'))
+                else:
+                    self.assertIn('source_publication_error', record)
+
+    def test_descendant_without_published_commit_metadata_requires_revalidation(self):
+        record = {'publication': {'head': self.pin}, 'verdicts': [{'job': 'crq-run1-F1', 'verdict': 'FIXED'}]}
+        c = SimpleNamespace(is_ancestor=lambda *args: True)
+        with self.assertRaisesRegex(ValueError, 'commits unavailable'):
+            repair_tick.merge_head_evidence(c, record, self.tip)
+
+    def test_exact_publication_head_retains_shortcut(self):
+        c = SimpleNamespace(git=mock.Mock(), is_ancestor=mock.Mock())
+        proof = repair_tick.merge_head_evidence(c, {'publication': {'head': self.tip}}, self.tip)
+        self.assertEqual(proof['actual_head'], self.tip)
+        c.git.assert_not_called()
+        c.is_ancestor.assert_not_called()
 
     def test_fix_pr_provenance_includes_threadless_and_pr_sources(self):
         path = self.root / 'state/repair/inbox/crq-run1-F1.json'
