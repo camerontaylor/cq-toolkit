@@ -96,3 +96,27 @@ test('a store-free lifetime supplies identity checks and tracks actual process c
   await Promise.resolve();
   expect(run.pending).toBe(0);
 });
+
+test('no lifecycle export or backend context returns an accepted terminal token', async () => {
+  expect(lifecycle).not.toHaveProperty('createAddressRunContext');
+  class Probe extends lifecycle.AddressRunLifecycle {
+    readonly commonDir = '/unowned-checkout';
+    constructor() {
+      super({});
+    }
+    async assertOwned() {}
+    protected async assertIdentity() {}
+    activateAndInspect() {
+      this.active = true;
+      this.runContext.activate();
+      return [this, this.runContext, ...Object.values(this), ...Object.values(this.runContext)];
+    }
+  }
+  const probe = new Probe();
+  expect(probe).not.toHaveProperty('terminalToken');
+  for (const candidate of [...Object.values(lifecycle), ...probe.activateAndInspect()]) {
+    if (candidate && (typeof candidate === 'object' || typeof candidate === 'function')) {
+      await expect(lifecycle.validateAddressTerminalAuthority(candidate)).rejects.toThrow('forged');
+    }
+  }
+});

@@ -1,8 +1,4 @@
-import {
-  createAddressRunContext,
-  addressRunLeaseAuthority,
-  AddressRunLifecycle,
-} from './addressRunLifecycle.js';
+import { addressRunLeaseAuthority, AddressRunLifecycle } from './addressRunLifecycle.js';
 export {
   validateAddressTerminalAuthority,
   trackAddressTerminalProcess,
@@ -28,15 +24,6 @@ import { fileWorktreeRegistry, reviewBranchFor } from '../../../adapters/git/prW
 import { makeGitMutex } from '../../../shared/gitMutex.js';
 import { boundedErrorText, describeError } from '../../../driver/error-text.js';
 import type { ReviewAddressInput, ReviewAddressResult } from '../address.js';
-import {
-  disposeAddressTerminalSession,
-  releaseAddressTerminalEvidence,
-  checkpointAddressTerminalEvidence,
-  noteAddressTerminalBookkeeping,
-  noteAddressOrdinaryReport,
-  removeAddressTerminalCandidate,
-  type AddressTerminalAttempt,
-} from './addressEvidence.js';
 import type { ReviewLoopOpts, ReviewLoopOutcome } from '../../../plans/review-loop.js';
 
 /** No capability is serialized or accepted from an op input or dependency object. */
@@ -277,62 +264,6 @@ export class AddressOwnership extends AddressRunLifecycle {
     super(opts);
     this.guardPath = resolve(commonDir, 'cq-review-address-ownership.owner.json');
     this.registry = fileWorktreeRegistry(resolve(commonDir, 'cq-review-address-worktrees.json'));
-    const candidates = new Map<
-      string,
-      { root: string; directory: Identity; entry: Identity; link: string }
-    >();
-    this.runContext = createAddressRunContext(this, {
-      checkpoint: (root, head, expected) =>
-        checkpointAddressTerminalEvidence(this.terminalToken, root, head, expected),
-      bookkeeping: (root, entries) =>
-        noteAddressTerminalBookkeeping(this.terminalToken, root, entries),
-      ordinaryReport: (path, bytes) => noteAddressOrdinaryReport(this.terminalToken, path, bytes),
-      candidate: async (root, path, remove) => {
-        await this.validateTerminal();
-        if (!remove) {
-          if ((await realpath(path)) !== path) throw new Error('address terminal: candidate alias');
-          const entry = await boundedFile(resolve(path, '.git'), 4096, 1);
-          candidates.set(path, {
-            root,
-            directory: await lstat(path),
-            entry: entry.identity,
-            link: entry.bytes.toString('base64'),
-          });
-          return;
-        }
-        const expected = candidates.get(path);
-        const entry = await boundedFile(resolve(path, '.git'), 4096, 1);
-        if (
-          !expected ||
-          expected.root !== root ||
-          (await realpath(path)) !== path ||
-          !same(expected.directory, await lstat(path)) ||
-          !same(expected.entry, entry.identity) ||
-          expected.link !== entry.bytes.toString('base64')
-        )
-          throw new Error('address terminal: unknown/replaced candidate');
-        await removeAddressTerminalCandidate(this.terminalToken, root, path);
-        candidates.delete(path);
-      },
-      participant: (lease, action) => this.participant(lease, action),
-      bindReport: (lease, report) => this.bindReport(lease, report),
-      workerBinding: (lease) => this.workerBinding(lease),
-      opaque: (lease) => this.noteOpaqueInvocation(lease),
-      cancelledResult: (lease) => this.cancelledResult(lease),
-      validate: () => this.validateTerminal(),
-      track: (promise) => this.registerTerminalProcess(promise),
-      record: (participant, input) => this.recordAttempt(participant, input),
-      defer: (participant, attempt) => this.deferAttempt(participant, attempt),
-      release: (participant, attempt) => {
-        if (!this.active || participant.closed || !this.participants.has(participant))
-          throw new Error('address terminal: release after close');
-        const index = participant.attempts.indexOf(attempt as AddressTerminalAttempt);
-        if (index < 0 || participant.attempts[index]!.cancelled)
-          throw new Error('address terminal: forged/stale or cancelled release');
-        participant.attempts.splice(index, 1);
-        releaseAddressTerminalEvidence(attempt);
-      },
-    });
   }
 
   runParticipant<T>(lease: AddressLease, action: () => Promise<T>): Promise<T> {
@@ -985,7 +916,7 @@ export class AddressOwnership extends AddressRunLifecycle {
     // it. Best effort; a replaced entry stays for forensics and storage loss
     // must not mask the outcome.
     if (!this.terminalProcesses.size && !this.terminalOperations.size)
-      await disposeAddressTerminalSession(this.terminalToken).catch(() => undefined);
+      await this.disposeTerminalSession().catch(() => undefined);
     return completed.result;
   }
 

@@ -1,5 +1,11 @@
+import { constants } from 'node:fs';
 import type { ReviewAddressResult, ReviewAddressReport } from '../address.js';
 import {
+  disposeAddressTerminalSession,
+  checkpointAddressTerminalEvidence,
+  noteAddressTerminalBookkeeping,
+  noteAddressOrdinaryReport,
+  removeAddressTerminalCandidate,
   recordAddressTerminalEvidence,
   releaseAddressTerminalEvidence,
   settleAddressTerminalEvidence,
@@ -7,9 +13,42 @@ import {
   type AddressTerminalAttempt,
   type AddressTerminalAttemptInput,
 } from './addressEvidence.js';
-import { lstat, realpath } from 'node:fs/promises';
+import { lstat, realpath, open } from 'node:fs/promises';
 import { basename, dirname, resolve } from 'node:path';
 const same = (a: Identity, b: Identity) => a.ino === b.ino && a.dev === b.dev;
+async function boundedCandidateFile(path: string, limit: number, links: number) {
+  if (!constants.O_NOFOLLOW) throw new Error('address ownership: no-follow unavailable');
+  const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const before = await file.stat();
+    if (!before.isFile() || before.nlink !== links) throw new Error('unsafe authority file');
+    if (before.size > limit) throw new Error('address ownership: authority store bound reached');
+    const bytes = Buffer.alloc(before.size);
+    let offset = 0;
+    while (offset < bytes.length) {
+      const read = await file.read(bytes, offset, bytes.length - offset, offset);
+      if (!read.bytesRead) throw new Error('short authority read');
+      offset += read.bytesRead;
+    }
+    const after = await file.stat();
+    const named = await lstat(path);
+    if (
+      !same(before, after) ||
+      !same(before, named) ||
+      !named.isFile() ||
+      after.size !== before.size ||
+      named.size !== before.size ||
+      after.mtimeMs !== before.mtimeMs ||
+      after.ctimeMs !== before.ctimeMs ||
+      named.nlink !== links
+    )
+      throw new Error('authority changed during read');
+    return { bytes, identity: before };
+  } finally {
+    await file.close();
+  }
+}
+
 /** Minimal capability surface; checkout registry and durable claims stay with the owner. */
 export interface AddressRunLease {
   readonly signal: AbortSignal;
@@ -44,6 +83,12 @@ export interface TerminalInternals {
   candidate(root: string, path: string, remove: boolean): Promise<void>;
 }
 const terminalInternals = new WeakMap<AddressRunAuthority, TerminalInternals>();
+const runTokens = new WeakMap<AddressRunAuthority, object>();
+function terminalToken(owner: AddressRunAuthority): object {
+  const token = runTokens.get(owner);
+  if (!token) throw new Error('address terminal: unknown run authority');
+  return token;
+}
 const terminalAuthorities = new WeakMap<object, AddressRunAuthority>();
 const terminalWorkers = new WeakMap<
   object,
@@ -64,12 +109,12 @@ export interface Participant {
 }
 
 /** A fresh context mints its own token; callers cannot install or replace global capabilities. */
-export function createAddressRunContext(owner: AddressRunAuthority, internals: TerminalInternals) {
+function createAddressRunContext(owner: AddressRunAuthority, internals: TerminalInternals) {
   const token = Object.freeze({});
   if (terminalInternals.has(owner)) throw new Error('address terminal: reused run authority');
   terminalInternals.set(owner, internals);
+  runTokens.set(owner, token);
   return Object.freeze({
-    token,
     activate() {
       terminalAuthorities.set(token, owner);
     },
@@ -115,10 +160,7 @@ export abstract class AddressRunLifecycle implements AddressRunAuthority {
   protected readonly controller: AbortController;
   protected readonly tasks = new Set<Promise<unknown>>();
   protected readonly retentionAdvisories: string[] = [];
-  protected runContext!: ReturnType<typeof createAddressRunContext>;
-  protected get terminalToken(): object {
-    return this.runContext.token;
-  }
+  protected readonly runContext;
   protected readonly participants = new Set<Participant>();
   protected readonly terminalProcesses = new Set<Promise<void>>();
   protected readonly terminalOperations = new Set<Promise<void>>();
@@ -136,7 +178,67 @@ export abstract class AddressRunLifecycle implements AddressRunAuthority {
     this.signal = opts.signal
       ? AbortSignal.any([opts.signal, this.controller.signal])
       : this.controller.signal;
+    const candidates = new Map<
+      string,
+      { root: string; directory: Identity; entry: Identity; link: string }
+    >();
+    this.runContext = createAddressRunContext(this, {
+      checkpoint: (root, head, expected) =>
+        checkpointAddressTerminalEvidence(terminalToken(this), root, head, expected),
+      bookkeeping: (root, entries) =>
+        noteAddressTerminalBookkeeping(terminalToken(this), root, entries),
+      ordinaryReport: (path, bytes) => noteAddressOrdinaryReport(terminalToken(this), path, bytes),
+      candidate: async (root, path, remove) => {
+        await this.validateTerminal();
+        if (!remove) {
+          if ((await realpath(path)) !== path) throw new Error('address terminal: candidate alias');
+          const entry = await boundedCandidateFile(resolve(path, '.git'), 4096, 1);
+          candidates.set(path, {
+            root,
+            directory: await lstat(path),
+            entry: entry.identity,
+            link: entry.bytes.toString('base64'),
+          });
+          return;
+        }
+        const expected = candidates.get(path);
+        const entry = await boundedCandidateFile(resolve(path, '.git'), 4096, 1);
+        if (
+          !expected ||
+          expected.root !== root ||
+          (await realpath(path)) !== path ||
+          !same(expected.directory, await lstat(path)) ||
+          !same(expected.entry, entry.identity) ||
+          expected.link !== entry.bytes.toString('base64')
+        )
+          throw new Error('address terminal: unknown/replaced candidate');
+        await removeAddressTerminalCandidate(terminalToken(this), root, path);
+        candidates.delete(path);
+      },
+      participant: (lease, action) => this.participant(lease, action),
+      bindReport: (lease, report) => this.bindReport(lease, report),
+      workerBinding: (lease) => this.workerBinding(lease),
+      opaque: (lease) => this.noteOpaqueInvocation(lease),
+      cancelledResult: (lease) => this.cancelledResult(lease),
+      validate: () => this.validateTerminal(),
+      track: (promise) => this.registerTerminalProcess(promise),
+      record: (participant, input) => this.recordAttempt(participant, input),
+      defer: (participant, attempt) => this.deferAttempt(participant, attempt),
+      release: (participant, attempt) => {
+        if (!this.active || participant.closed || !this.participants.has(participant))
+          throw new Error('address terminal: release after close');
+        const index = participant.attempts.indexOf(attempt as AddressTerminalAttempt);
+        if (index < 0 || participant.attempts[index]!.cancelled)
+          throw new Error('address terminal: forged/stale or cancelled release');
+        participant.attempts.splice(index, 1);
+        releaseAddressTerminalEvidence(attempt);
+      },
+    });
   }
+  protected async disposeTerminalSession(): Promise<void> {
+    await disposeAddressTerminalSession(terminalToken(this));
+  }
+
   protected stopAdmissions = () => {
     this.stopping = true;
     this.admitting = false;
@@ -262,7 +364,7 @@ export abstract class AddressRunLifecycle implements AddressRunAuthority {
     if (participant.closed || this.stopping)
       throw new Error('address terminal: attempt after close');
     await this.assertOwned();
-    const attempt = await recordAddressTerminalEvidence(this.terminalToken, input);
+    const attempt = await recordAddressTerminalEvidence(terminalToken(this), input);
     try {
       await this.assertOwned();
       if (participant.closed) {
@@ -358,7 +460,7 @@ export abstract class AddressRunLifecycle implements AddressRunAuthority {
       try {
         const work = (async () => {
           try {
-            await settleAddressTerminalEvidence(this.terminalToken, attempts);
+            await settleAddressTerminalEvidence(terminalToken(this), attempts);
           } finally {
             // Real local ref effects survive a later restore/report failure.
             for (const participant of open)
@@ -394,7 +496,7 @@ export abstract class AddressRunLifecycle implements AddressRunAuthority {
                 report.fixes.flatMap((fix) => (fix.commit ? [fix.commit] : [])),
               ).size;
               await persistAddressTerminalReport(
-                this.terminalToken,
+                terminalToken(this),
                 participant.reportTarget!,
                 report,
                 participant.reportDirectory!,
