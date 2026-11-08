@@ -47,7 +47,9 @@ function expectEveryJobGuarded(text: string, file: string): void {
     if (file.includes('denylist')) expect(blockLines).toContain(jobLevelGuard);
     else {
       expect(guard).toContain("github.event_name == 'pull_request'");
-      expect(guard).toContain("github.ref == format('refs/heads/{0}', github.event.repository.default_branch)");
+      expect(guard).toContain(
+        "github.ref == format('refs/heads/{0}', github.event.repository.default_branch)",
+      );
       expect(guard).toContain("github.event_name == 'schedule'");
     }
   }
