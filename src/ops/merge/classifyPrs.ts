@@ -310,8 +310,9 @@ const hasSameAccountAgentAcceptance = (candidate: PrCandidate, ctx: ReviewContex
   const prAuthor = candidate.authorLogin;
   const authorSharesAccount =
     prAuthor !== null &&
-    prAuthor !== ctx.config.automationLogin &&
-    ctx.config.excludedLogins?.includes(prAuthor) !== true;
+    prAuthor.toLowerCase() !== ctx.config.automationLogin?.toLowerCase() &&
+    ctx.config.excludedLogins?.some((login) => login.toLowerCase() === prAuthor.toLowerCase()) !==
+      true;
   return [
     ...candidate.reviews.filter((review) => review.state !== 'DISMISSED'),
     ...candidate.issueComments,
