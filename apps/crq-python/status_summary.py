@@ -1,5 +1,6 @@
 """Atomic, allow-listed fleet summary; no review launches or git fetches."""
 import datetime as dt
+from queue_time import parse_utc
 import coverage
 import review_receipt
 import repo_registry
@@ -15,9 +16,8 @@ import time
 
 
 def timestamp(value):
-    if not value:
-        return None
-    return dt.datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    parsed = parse_utc(value)
+    return parsed.timestamp() if parsed is not None else None
 
 
 def read(path):
@@ -204,10 +204,9 @@ def summarize(status, queue, heartbeat, config, events, now):
              for entry in config.get("repos", [])]
     def aging_deadline(item):
         if item.get("kind") == "local-review" and (item.get("generation", 1) > 1 or item.get("repeat_requested") is True) and item.get("created_at"):
-            try:
-                return timestamp(item["created_at"]) + config.get("local_review_aging_minutes", 60) * 60
-            except (ValueError, TypeError, AttributeError):
-                return None
+            created = timestamp(item["created_at"])
+            if created is not None:
+                return created + config.get("local_review_aging_minutes", 60) * 60
         return None
     def pending_key(item):
         rank = {"open": 0, "recent_merge": 2, "backfill": 3, "other": 4}[category(item)]
@@ -239,7 +238,8 @@ def summarize(status, queue, heartbeat, config, events, now):
         "merged_current": merged_current(queue),
         "last_tick": last_tick, "status_as_of": status["generated_at"],
         "paused": bool(queue.get("paused")), "cooldown_until": queue.get("cooldown_until"),
-        "starts_60m": sum(now - 3600 <= timestamp(s) <= now for s in queue.get("starts", [])),
+        "starts_60m": sum(at is not None and now - 3600 <= at <= now
+                          for at in (timestamp(s) for s in queue.get("starts", []))),
         "starts_cap": starts_cap,
         "in_flight": sum(i["state"] == "reviewing" for i in items),
         "outcomes_24h": outcomes, "other_outcomes_24h": other, "backlog": backlog,

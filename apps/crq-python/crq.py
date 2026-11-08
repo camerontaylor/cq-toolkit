@@ -26,6 +26,7 @@ import time
 from runtime_target import DEFAULT_REF, DISCOVERY_BRANCHES, DISCOVERY_SELECTOR
 import client_health
 import status_summary
+from queue_time import parse_utc
 import repair_tick
 import coverage
 import author_quota
@@ -2684,11 +2685,8 @@ def rank(item: Dict[str, Any]) -> int:
     if item["kind"] == local_review_runtime.KIND:
         if item.get("generation", 1) == 1 and item.get("repeat_requested") is not True:
             return 0
-        created = item.get("created_at")
-        try:
-            aged = created and (now() - parse_iso(created)).total_seconds() >= CONFIG.get("local_review_aging_minutes", 60) * 60
-        except (ValueError, TypeError, AttributeError):
-            aged = False
+        created = parse_utc(item.get("created_at"))
+        aged = created is not None and (now() - created).total_seconds() >= CONFIG.get("local_review_aging_minutes", 60) * 60
         return 0 if aged else 1
     repo_rank = repo_registry.rank_for(item, REPO, REPOS)
     if repo_rank is not None:
@@ -2713,12 +2711,25 @@ def background_turn(q):
     records = {}
     for item in q["items"]:
         for record in [*item.get("attempts", []), item.get("run")]:
-            if record and record.get("run_id"):
-                records[record["run_id"]] = record
-    def started(record):
-        return record.get("started_at") or record["run_id"].rsplit("-", 1)[-1]
-    latest = sorted(records.values(), key=lambda r: (started(r).replace("-", "").replace(":", ""), r["run_id"]))[-2:]
-    return len(latest) == 2 and all(r.get("band", "background") == "interactive" for r in latest)
+            if record and isinstance(record.get("run_id"), str):
+                old = records.get(record["run_id"])
+                # Receipt-only reuse must not replace the original reservation.
+                if old is None or parse_utc(record.get("started_at")) is not None:
+                    records[record["run_id"]] = record
+    launches = []
+    for run_id, record in records.items():
+        started = parse_utc(record.get("started_at"))
+        band = record.get("band", "background")
+        if started is None:
+            started = parse_utc(run_id.rsplit("-", 1)[-1])
+            if record.get("started_at") is not None:
+                band = "background"  # malformed launch metadata never extends a streak
+        if started is None:
+            # Skip unknown chronology; it supplies no interactive launch credit.
+            continue
+        launches.append((started, run_id, band))
+    latest = sorted(launches)[-2:]
+    return len(latest) == 2 and all(band == "interactive" for _, _, band in latest)
 
 
 def sort_key(item: Dict[str, Any]) -> Tuple:
