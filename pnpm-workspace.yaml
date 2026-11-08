@@ -12,3 +12,6 @@ virtualStoreType: global
 # @anthropic-ai/claude-agent-sdk peer must stay absent from the lockfile so
 # install-matrix's without-peer leg proves the package works without it.
 autoInstallPeers: false
+
+allowBuilds:
+  fs-ext: true
