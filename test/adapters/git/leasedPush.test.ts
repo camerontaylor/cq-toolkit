@@ -43,16 +43,38 @@ async function fixture() {
 }
 test('fork publication uses the head repository and advances the second lease', async () => {
   const f = await fixture();
-  expect((await leasedPush(f.run, f.checkout, f.remote, 'topic', f.expected)).code).toBe(0);
+  expect((await leasedPush(f.run, f.checkout, f.remote, 'topic', f.expected, f.tip)).code).toBe(0);
   await f.local('commit', '--allow-empty', '-m', 'second');
-  expect((await leasedPush(f.run, f.checkout, f.remote, 'topic', f.tip)).code).toBe(0);
+  expect(
+    (
+      await leasedPush(
+        f.run,
+        f.checkout,
+        f.remote,
+        'topic',
+        f.tip,
+        await f.local('rev-parse', 'HEAD'),
+      )
+    ).code,
+  ).toBe(0);
   expect(await f.git('ls-remote', f.base)).toBe('');
 });
 test('raced remote refuses stale work even when it would fast-forward', async () => {
   const f = await fixture();
   await f.local('push', f.remote, `${f.tip}:refs/heads/topic`);
   await f.local('commit', '--allow-empty', '-m', 'stale computation');
-  expect((await leasedPush(f.run, f.checkout, f.remote, 'topic', f.expected)).code).not.toBe(0);
+  expect(
+    (
+      await leasedPush(
+        f.run,
+        f.checkout,
+        f.remote,
+        'topic',
+        f.expected,
+        await f.local('rev-parse', 'HEAD'),
+      )
+    ).code,
+  ).not.toBe(0);
   expect(await f.git('ls-remote', '--refs', f.remote, 'refs/heads/topic')).toBe(
     `${f.tip}\trefs/heads/topic`,
   );
@@ -67,11 +89,40 @@ test('lost acknowledgement reconciles before reporting success', async () => {
     }
     return result;
   };
-  expect((await leasedPush(uncertain, f.checkout, f.remote, 'topic', f.expected)).code).toBe(0);
+  expect((await leasedPush(uncertain, f.checkout, f.remote, 'topic', f.expected, f.tip)).code).toBe(
+    0,
+  );
 });
 test('a lease never authorizes non-fast-forward publication', async () => {
   const f = await fixture();
   await f.local('checkout', '--orphan', 'unrelated');
   await f.local('commit', '--allow-empty', '-m', 'unrelated');
-  expect((await leasedPush(f.run, f.checkout, f.remote, 'topic', f.expected)).code).not.toBe(0);
+  expect(
+    (
+      await leasedPush(
+        f.run,
+        f.checkout,
+        f.remote,
+        'topic',
+        f.expected,
+        await f.local('rev-parse', 'HEAD'),
+      )
+    ).code,
+  ).not.toBe(0);
+});
+
+test('publication pins the verified SHA even when HEAD has moved', async () => {
+  const f = await fixture();
+  await f.local('commit', '--allow-empty', '-m', 'unverified later work');
+  expect((await leasedPush(f.run, f.checkout, f.remote, 'topic', f.expected, f.tip)).code).toBe(0);
+  expect(await f.git('ls-remote', '--refs', f.remote, 'refs/heads/topic')).toBe(
+    `${f.tip}\trefs/heads/topic`,
+  );
+});
+test('empty expectation creates an absent destination and refuses a raced creation', async () => {
+  const f = await fixture();
+  expect((await leasedPush(f.run, f.checkout, f.base, 'topic', '', f.tip)).code).toBe(0);
+  await f.local('commit', '--allow-empty', '-m', 'later');
+  const tip = await f.local('rev-parse', 'HEAD');
+  expect((await leasedPush(f.run, f.checkout, f.base, 'topic', '', tip)).code).not.toBe(0);
 });

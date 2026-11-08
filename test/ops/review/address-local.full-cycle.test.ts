@@ -11,6 +11,8 @@ import { runPlan } from '../../../src/kernel/runner.js';
 import { createGovernor } from '../../../src/kernel/governor.js';
 import type { OpRegistryEntry } from '../../../src/kernel/types.js';
 import { z } from 'zod';
+import { makeReviewAddress } from '../../../src/ops/review/address.js';
+import { makeGhRunner } from '../../../src/adapters/forge-github/gh.js';
 import { fixture, gitleaksCalls, useGitleaksPath } from './address-local.helpers.js';
 
 useGitleaksPath();
@@ -209,4 +211,38 @@ describe('review.address local full cycle', () => {
       }
     },
   );
+});
+
+test('local exit publication leases the observed destination separately from the local baseline', async () => {
+  const f = await fixture();
+  try {
+    const expected = f.repo.git('rev-parse', 'HEAD').trim();
+    f.repo.git('push', 'origin', 'HEAD:refs/heads/feature/x');
+    f.repo.git('commit', '--allow-empty', '-m', 'prior local work');
+    f.record.head = f.repo.git('rev-parse', 'HEAD').trim();
+    const pushes: string[][] = [];
+    const git = makeGhRunner({ bin: 'git' });
+    const op = makeReviewAddress({
+      drivers: f.drivers,
+      initialRecord: f.record,
+      git: async (args) => {
+        if (args.includes('push')) pushes.push(args);
+        return git(args);
+      },
+    });
+    const result = await op({
+      repoRoot: f.repo.root,
+      source: 'local',
+      journalDir: f.journalDir,
+      push: true,
+    });
+    expect(result.status, JSON.stringify(result)).toBe('ok');
+    expect(pushes).toHaveLength(1);
+    expect(pushes[0]).toContain(`--force-with-lease=refs/heads/feature/x:${expected}`);
+    expect(pushes[0]?.at(-1)).toBe(
+      `${f.repo.git('rev-parse', 'HEAD').trim()}:refs/heads/feature/x`,
+    );
+  } finally {
+    await f.cleanup();
+  }
 });

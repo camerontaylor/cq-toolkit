@@ -1732,6 +1732,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
             let publishBranch: string | undefined;
             let publishRemote = 'origin';
             let publishedBase: string | undefined;
+            let expectedRemoteHead: string | undefined;
             let workerRoot = resolve(input.repoRoot);
             noteEvidenceImportedImpl = (evidence) => noteQueueEvidence(workerRoot, evidence);
             const remember = (fix: AddressFix) => {
@@ -1751,8 +1752,12 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
             };
             const publishOnExitInner = async (): Promise<void> => {
               if (!input.push || unpublished.size === 0 || parent?.aborted) return;
-              if (!publishedBase) throw new Error('publication baseline unavailable');
-              const range = (await gitText(workerRoot, ['rev-list', `${publishedBase}..HEAD`]))
+              if (!publishedBase || expectedRemoteHead === undefined)
+                throw new Error('publication baseline unavailable');
+              const verifiedTip = await gitText(workerRoot, ['rev-parse', 'HEAD']);
+              const range = (
+                await gitText(workerRoot, ['rev-list', `${publishedBase}..${verifiedTip}`])
+              )
                 .split('\n')
                 .filter(Boolean);
               if (
@@ -1761,7 +1766,12 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                 [...unpublished].some((sha) => !range.includes(sha))
               )
                 throw new Error('publication contains an unverified commit or changed ancestry');
-              await gitText(workerRoot, ['merge-base', '--is-ancestor', publishedBase, 'HEAD']);
+              await gitText(workerRoot, [
+                'merge-base',
+                '--is-ancestor',
+                publishedBase,
+                verifiedTip,
+              ]);
               if (!(await publicationTreeClean(workerRoot)))
                 throw new Error('worker tree/index is dirty; verified commits retained');
               const branch = publishBranch ?? (await branchName(workerRoot));
@@ -1771,7 +1781,8 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                 workerRoot,
                 publishRemote,
                 branch,
-                publishedBase,
+                expectedRemoteHead,
+                verifiedTip,
               );
               if (pushed.code !== 0)
                 throw new Error(`publication failed: ${pushed.stderr.slice(0, 500)}`);
@@ -1798,7 +1809,8 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
               settleWithholdRows(
                 "; exit-published — the engine's exit publication pushed the exact verified range; only this item's reply and resolve remain withheld",
               );
-              publishedBase = await gitText(workerRoot, ['rev-parse', 'HEAD']);
+              publishedBase = verifiedTip;
+              expectedRemoteHead = verifiedTip;
               unpublished.clear();
             };
             // The engine witnesses its own exit publication so the report can
@@ -2346,6 +2358,21 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
               await admitRecord(root, record);
               report.verifiedHead ??= record.head;
               publishedBase ??= await gitText(root, ['rev-parse', 'HEAD']);
+              if (input.push && expectedRemoteHead === undefined) {
+                const branch = publishBranch ?? (await branchName(root));
+                const ref = `refs/heads/${branch}`;
+                const remote = await gitText(root, ['ls-remote', '--refs', publishRemote, ref]);
+                const [sha, destination, extra] = remote.split('\t');
+                if (
+                  remote !== '' &&
+                  (!/^[0-9a-f]{40,64}$/i.test(sha ?? '') ||
+                    destination !== ref ||
+                    extra !== undefined)
+                )
+                  throw new Error('publication remote head unavailable');
+                expectedRemoteHead = remote === '' ? '' : sha!;
+              }
+
               const unresolvedReason = 'unresolved: finding has no file path';
               const pathless = record.findings.filter(
                 (finding) => finding.status === 'open' && finding.file === '',
@@ -2534,6 +2561,12 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                 headRepo: `${meta.headRepositoryOwner.login}/${meta.headRepository.name}`,
                 login: loginResult.stdout.trim(),
               };
+              publishBranch = prMetadata.headRefName;
+              publishRemote =
+                prMetadata.headRepo === name
+                  ? 'origin'
+                  : `https://github.com/${prMetadata.headRepo}.git`;
+
               // Publication receipts outlive run-specific reports. A changed target,
               // fork/branch or authenticated actor cannot borrow another run's log.
               // The loop still requires fetched authenticated current-head/round proof;
@@ -2937,11 +2970,19 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                       headRepo: meta.headRepo ?? `${meta.owner}/${meta.repo}`,
                       headRefName: meta.headRefName,
                     }),
-                  onWorktreeResolved: async (info) =>
-                    lease.claimCheckout({
+                  onWorktreeResolved: async (info) => {
+                    expectedRemoteHead ??= await gitText(info.path, ['rev-parse', 'HEAD']);
+                    publishedBase ??= expectedRemoteHead;
+                    await lease.claimCheckout({
                       ...info,
                       head: await gitText(info.path, ['rev-parse', 'HEAD']),
-                    }),
+                    });
+                  },
+                  onPublished: (sha) => {
+                    unpublished.clear();
+                    publishedBase = sha;
+                    expectedRemoteHead = sha;
+                  },
                   driver: policy.roles.worker!,
                   driverRegistryView: {
                     get: (name) => (name === 'review.fixItem' ? entry : undefined),
@@ -3048,10 +3089,6 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                 root = loop.worktree.path;
                 workerRoot = root;
                 publishBranch = meta.headRefName;
-                if (input.push && loop.status === 'ok') {
-                  unpublished.clear();
-                  publishedBase = await gitText(root, ['rev-parse', 'HEAD']);
-                }
                 if (loop.status !== 'ok') report.reasons.push(...loop.reasons);
                 if (loop.headRefused)
                   return await finish('needs-human', 'PR head changed before dispatch');

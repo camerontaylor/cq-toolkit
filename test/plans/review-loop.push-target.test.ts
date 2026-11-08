@@ -108,3 +108,21 @@ test('rejected publication is reconciled and withholds all replies without retry
   expect(gitLog.some((args) => args[2] === 'ls-remote')).toBe(true);
   expect(outcome.actionsPosted).toBe(0);
 });
+
+test('a lost acknowledgement is reconciled before the reply-stage push and replies', async () => {
+  const world = defaultWorld();
+  world.worktreeAdvancesAt = 2;
+  world.worktreeAdvancesTo = NEW_SHA;
+  world.loseFirstPushAcknowledgement = true;
+  const { gitLog, outcome } = await runLoop(world, {
+    driverResults: [completeWorker(fixLine(true, 'fix', [NEW_SHA]))],
+  });
+  expect(outcome.status).toBe('ok');
+  expect(outcome.actionsPosted).toBeGreaterThan(0);
+  const publication = gitLog.findIndex((args) => args[2] === 'push');
+  const reconciliation = gitLog.findIndex((args) => args[2] === 'ls-remote');
+  const replyPush = gitLog.findLastIndex((args) => args[2] === 'push');
+  expect(reconciliation).toBeGreaterThan(publication);
+  expect(replyPush).toBeGreaterThan(reconciliation);
+  expect(gitLog[replyPush]?.[3]).toBe(`--force-with-lease=refs/heads/${HEAD_REF}:${NEW_SHA}`);
+});

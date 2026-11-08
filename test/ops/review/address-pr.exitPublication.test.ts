@@ -146,3 +146,32 @@ describe('review.address PR phase-one orchestration', () => {
     }
   });
 });
+
+test('exit publication uses a lease against the head repository without thread fix jobs', async () => {
+  const w = await world(false, {
+    fork: true,
+    settledLoopReplies: true,
+    reviewOutcome: 'open-finding',
+  });
+  try {
+    const result = await w.run();
+    expect(w.prompts.length).toBeGreaterThan(0);
+    expect(w.pushes).toHaveLength(1);
+    expect(w.pushes[0]?.[1]).toBe(`--force-with-lease=refs/heads/feature:${'a'.repeat(40)}`);
+    expect(w.pushes[0]?.[2]).toBe('https://github.com/fork-owner/widget.git');
+    expect(JSON.stringify(result)).not.toContain('verified publication failed');
+  } finally {
+    await w.cleanup();
+  }
+});
+test('confirmed loop publication is retained after reply-stage needs-human', async () => {
+  const w = await world(false, { recoverResolution: true });
+  try {
+    const result = await w.run();
+    expect(result.status).toBe('needs-human');
+    expect(w.pushes).toHaveLength(2);
+    expect(JSON.stringify(result)).not.toContain('verified publication failed');
+  } finally {
+    await w.cleanup();
+  }
+});

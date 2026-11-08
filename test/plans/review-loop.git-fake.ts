@@ -31,6 +31,7 @@ export const fakeGit = (world: LoopWorld, log: string[][], worktreePath: string)
   const treeAt = (object: string): Record<string, number> =>
     world.filesAt?.[object.slice(0, 40)] ?? world.files ?? DEFAULT_WORLD_FILES;
   let pushCount = 0;
+  let publishedTip: string | undefined;
   let worktreeHeadReads = 0;
   return async (args) => {
     log.push(args);
@@ -172,6 +173,8 @@ export const fakeGit = (world: LoopWorld, log: string[][], worktreePath: string)
           ? ok('')
           : ok(Array.from({ length: lines }, (_, i) => `line ${String(i + 1)}`).join('\n') + '\n');
     }
+    if (rest[0] === 'ls-remote' && world.loseFirstPushAcknowledgement && publishedTip)
+      return ok(`${publishedTip}\trefs/heads/${HEAD_REF}\n`);
     if (rest[0] === 'push') {
       pushCount += 1;
       if (world.pushFailAt !== undefined && pushCount >= world.pushFailAt) {
@@ -185,7 +188,10 @@ export const fakeGit = (world: LoopWorld, log: string[][], worktreePath: string)
         (rest.at(-1) === `HEAD:${HEAD_REF}` || rest.at(-1)?.endsWith(`:refs/heads/${HEAD_REF}`))
       ) {
         world.sha = AFTER_SHA;
+        publishedTip = rest.at(-1)?.split(':')[0];
       }
+      if (world.loseFirstPushAcknowledgement && pushCount === 1)
+        return { code: 124, stdout: '', stderr: 'push acknowledgement lost' };
       return ok('');
     }
     return { code: 1, stdout: '', stderr: `unexpected git argv: ${args.join(' ')}` };

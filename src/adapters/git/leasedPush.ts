@@ -7,15 +7,15 @@ export async function leasedPush(
   target: string,
   branch: string,
   expected: string,
+  sha: string,
 ): Promise<GhResult> {
   const fail = (stderr: string): GhResult => ({ code: 1, stdout: '', stderr });
   const ref = `refs/heads/${branch}`;
-  const tip = await run(['-C', path, 'rev-parse', 'HEAD']);
-  if (tip.code !== 0 || !/^[0-9a-f]{40,64}$/i.test(tip.stdout.trim()))
-    return fail('publication HEAD unavailable');
-  const sha = tip.stdout.trim();
-  const ancestor = await run(['-C', path, 'merge-base', '--is-ancestor', expected, sha]);
-  if (ancestor.code !== 0) return fail('publication would not fast-forward expected head');
+  if (!/^[0-9a-f]{40,64}$/i.test(sha)) return fail('publication SHA unavailable');
+  if (expected !== '') {
+    const ancestor = await run(['-C', path, 'merge-base', '--is-ancestor', expected, sha]);
+    if (ancestor.code !== 0) return fail('publication would not fast-forward expected head');
+  }
   let result: GhResult;
   try {
     result = await run([

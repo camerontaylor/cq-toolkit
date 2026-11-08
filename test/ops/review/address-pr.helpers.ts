@@ -29,6 +29,7 @@ export async function world(
   human = false,
   options: {
     runBudget?: number;
+    fork?: boolean;
     verifyClosure?: boolean;
     refuseAdmissionAt?: number;
     admissionPrecondition?: string;
@@ -120,6 +121,7 @@ export async function world(
     created_at: string;
   }> = [];
   const actions: string[] = [];
+  const pushes: string[][] = [];
   const prompts: string[] = [];
   const reviewInputs: ReviewRunInput[] = [];
   let pushFault: (() => string) | undefined;
@@ -179,7 +181,7 @@ export async function world(
     if (args[0] === 'pr')
       return ok({
         headRefName: 'feature',
-        headRepositoryOwner: { login: 'octo' },
+        headRepositoryOwner: { login: options.fork ? 'fork-owner' : 'octo' },
         headRepository: { name: 'widget' },
       });
     if (args.includes('user')) return ok(login);
@@ -461,7 +463,19 @@ export async function world(
     }
     if (a[0] === 'log') return ok(commits.get(a[3]!)?.message ?? '');
     if (a[0] === 'diff' && a[1] === '--quiet') return { code: 1, stdout: '', stderr: '' };
+    if (a[0] === 'ls-remote') return ok(`${remote}\trefs/heads/feature\n`);
     if (a[0] === 'push') {
+      pushes.push(a);
+      if (a[1] !== `--force-with-lease=refs/heads/feature:${remote}`)
+        return { code: 1, stdout: '', stderr: 'stale or missing explicit lease' };
+      if (
+        a[2] !==
+          (options.fork
+            ? 'https://github.com/fork-owner/widget.git'
+            : 'https://github.com/octo/widget.git') &&
+        a[2] !== (options.fork ? '' : 'origin')
+      )
+        return { code: 1, stdout: '', stderr: 'wrong head repository' };
       pushOrdinal += 1;
       if (pushFault !== undefined) {
         const stderr = pushFault();
@@ -616,6 +630,7 @@ export async function world(
   return {
     root,
     actions,
+    pushes,
     prompts,
     reviewInputs,
     resolved,
