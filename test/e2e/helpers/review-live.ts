@@ -168,9 +168,9 @@ interface ThreadsPayload {
  * is visible over GraphQL (GitHub's two indexes converge eventually; the
  * loop's first fetch must see both or it would refuse on lag).
  *
- * The scratch repo is LEFT BEHIND on purpose (the run token holds no
- * delete_repo scope; the drill doc records the URL) — the tmp ROOT is the
- * caller's to clean up.
+ * The scratch repo is LEFT BEHIND on purpose (the drill makes no repository
+ * delete call; the drill doc records the URL). Token permissions are described
+ * in live-review.yml. The tmp ROOT is the caller's to clean up.
  */
 export async function setupScratchRepo(opts: { runId: string }): Promise<LiveScratchRepo> {
   const gh = makeGhRunner();

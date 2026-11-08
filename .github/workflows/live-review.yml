@@ -15,15 +15,19 @@
 # cq-scratch-e5-<run_id> (POST user/repos), then pushes and posts in it. A
 # fine-grained PAT cannot be pre-scoped to that repository, because
 # selected-repository tokens require the repository to exist when the token
-# is created. The credential therefore needs repository creation at the
-# account level (Administration: write) plus contents and pull-request write
-# on the scratch repo it creates, and nothing else. A token scoped to just
-# the scratch repo works only if creation moves out of the drill (pre-create
-# the repo and drop the create call). The names-only rule is unchanged; this
-# note is about the secret's SCOPE.
-# The scratch repo is LEFT
-# BEHIND on purpose (the token holds no delete_repo scope); use a FRESH
-# run_id per drill so the seeded fixtures are unambiguous.
+# is created. Prefer Repository creation: write for POST /user/repos, plus
+# Contents: write and Pull requests: write for the subsequent push/PR work.
+# The new repository must also be accessible to that token; pre-create it
+# and remove the create call if using a selected-repository credential.
+# Administration: write is a broader creation alternative: it also permits
+# repository deletion on repositories the token can administer, potentially
+# beyond this scratch repo. Absence of the classic delete_repo scope does
+# not prevent deletion by a fine-grained token with Administration: write.
+# Sources (verified 2026-11-08):
+# https://docs.github.com/en/rest/repos/repos#create-a-repository-for-the-authenticated-user
+# https://docs.github.com/en/rest/repos/repos#delete-a-repository
+# The scratch repo is LEFT BEHIND by the drill (it makes no delete call);
+# use a FRESH run_id per drill so the seeded fixtures are unambiguous.
 #
 # ENVIRONMENT (W1.10 Decision 8; closes #170): the job runs in environment
 # `drill` (main-only branch policy, owner review allowed), which holds
