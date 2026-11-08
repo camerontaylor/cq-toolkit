@@ -1,6 +1,6 @@
 # Acceptance import recipe (M4b1)
 
-A **recorded snapshot** of one PR's comments is captured by hand, read-only,
+A **recorded snapshot** of one PR's comments and reviews is captured by hand, read-only,
 with the recipe below (always `env -u GITHUB_TOKEN gh api`). The importer
 (`importAcceptance` in `scripts/measurement-acceptance.mjs`) is a pure
 function over the recorded JSON: no `gh`, no network, no journal writes.
