@@ -202,8 +202,8 @@ def repair_transport(root, queue, save_queue, scan):
                                                          "branch": None, "open_pr": False, "round": 1, "state": "queued"}}})
         for old_item in queue["items"]:
             for old_run in old_item.get("repair_runs", {}).values():
-                if old_run.get("state") not in ("queued", "ready", "publish_failed") or old_run.get("publication"):
-                    continue  # Published fixes retain their existing PR lifecycle.
+                if old_run.get("state") not in ("queued", "ready", "publish_failed") or old_run.get("fix_pr") or old_run.get("fix_merged"):
+                    continue  # Only a recorded fix PR retains its publication lifecycle.
                 for old_id in old_run.get("jobs", []):
                     if old_id == job_id:
                         continue

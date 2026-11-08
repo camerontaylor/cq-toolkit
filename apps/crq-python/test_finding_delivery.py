@@ -83,6 +83,35 @@ class FindingTest(unittest.TestCase):
         self.assertEqual(queue["items"][0]["state"], "done")
         self.assertEqual(self.inbox.deliver(self.fid, transport, AT), receipt)
 
+    def test_replacement_retires_prepared_publication_but_preserves_known_pr(self):
+        import repair_tick
+        from types import SimpleNamespace
+        queue = {"items": []}
+        transport = delivery.repair_transport(self.root, queue, lambda q: None, lambda *_: True)
+        request = {"canonical_id": self.fid, "target": self.t, "path": "a", "intervals": [[1, 1]],
+                   "finding": self.value["payload"]["findings"][0], "review_id": self.value["id"]}
+        receipt = transport("old-generation", request)
+        old_item = queue["items"][0]
+        old_run = next(iter(old_item["repair_runs"].values()))
+        publication = {"head": self.t, "open_pr": False}
+        old_run.update(state="publish_failed", publication=publication)
+        journal = self.root / "state/repair" / receipt["repair_task"] / "publication.json"
+        ledger.atomic(journal, ledger.canonical(publication))
+        before = journal.read_bytes()
+        transport("new-generation", request)
+        self.assertEqual(old_run["state"], "stale")
+        self.assertEqual(old_item["state"], "done")
+        self.assertEqual(journal.read_bytes(), before)
+        self.assertEqual(next(iter(queue["items"][1]["repair_runs"].values()))["state"], "queued")
+        with mock.patch.object(repair_tick, "publish") as publish:
+            repair_tick.harvest(SimpleNamespace(STATE=self.root / "state"), queue, old_item)
+            publish.assert_not_called()
+        old_run.update(state="publish_failed", fix_pr={"number": 9})
+        old_item["state"] = "repairing"
+        transport("new-generation", request)
+        self.assertEqual(old_run["state"], "publish_failed")
+        self.assertEqual(old_item["state"], "repairing")
+
     def test_confirmed_cannot_override_canonical_identity(self):
         self.inbox.triage(self.fid, self.f.repo, self.t, "confirmed", "reviewer", "valid", AT, canonical_id="foreign")
         row = ledger.loads((self.root / "findings/triage" / (self.fid + ".json")).read_bytes())
