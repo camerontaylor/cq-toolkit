@@ -1,6 +1,6 @@
 import { reviewBranchKey } from './internal/branchKey.js';
-import { readCqEnv } from '../../config/env.js';
 import { provenanceConfig } from '../../config/provenance.js';
+import { currentCqEnv } from '../../config/run-env.js';
 import { makeGitMutex } from '../../shared/gitMutex.js';
 import { createHash, randomUUID } from 'node:crypto';
 import {
@@ -121,7 +121,6 @@ import { repoIdFromRemote, sanitizeObservation } from '../fix/attemptRecord.js';
 import { resolveCorrelation } from '../fix/correlation.js';
 import { assembleReportV2 } from '../fix/reportFold.js';
 import { measureRun, reviewPlannedUnitsOf } from '../fix/measurement.js';
-import { processEnv } from '../../config/process-env.js';
 
 export interface ReviewAddressInput {
   repoRoot: string;
@@ -311,7 +310,10 @@ async function captureAddressProvenance(
   configJsonText: string,
   gitText: (args: string[]) => Promise<string>,
 ): Promise<{ provenance: ProvenanceRecord }> {
-  const envVersion = processEnv().CQ_PRODUCER_VERSION;
+  // The resolved snapshot: a blank CQ_PRODUCER_VERSION is unset (registry contract).
+  const cqEnv = currentCqEnv();
+  const resolved = cqEnv.values['CQ_PRODUCER_VERSION'];
+  const envVersion = typeof resolved === 'string' ? resolved : undefined;
   const [remote, packageVersion] = await Promise.all([
     // The composition's git transport answers this like every other read; a
     // missing remote is repoId null/unavailable (ADR-0008), never a failure.
@@ -339,7 +341,7 @@ async function captureAddressProvenance(
     journalLink: 'unavailable',
     reportLink: 'unavailable',
     witnesses: { base: baseSha, admitted: null, execution: null, reviewed: null, accepted: null },
-    config: provenanceConfig(readCqEnv()),
+    config: provenanceConfig(cqEnv),
   };
   return sanitizeObservation({ provenance });
 }

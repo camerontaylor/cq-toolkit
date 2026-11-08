@@ -34,6 +34,9 @@ ruleTester.run('no-process-env', rule, {
     ok('let a; ({ argv: a } = process);'),
   ],
   invalid: [
+    bad('const p = process; p.env.A;'),
+    bad('const v = (process as any).env.A;'),
+    bad('const p = process as NodeJS.Process; const v = p.env.A;'),
     bad("const v = process.env['A'];"),
     bad('const v = process.env.A;'),
     bad('const copy = { ...process.env };'),

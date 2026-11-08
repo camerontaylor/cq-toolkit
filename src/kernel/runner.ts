@@ -147,6 +147,7 @@ import pLimit from 'p-limit';
 import { randomBytes } from 'node:crypto';
 import { messageOf } from '../shared/messageOf.js';
 import { assertCqEnv } from '../config/entry.js';
+import { runWithCqEnv } from '../config/run-env.js';
 import { readCqEnv } from '../config/env.js';
 import { GovernanceOptInRefusedError } from './errors.js';
 import {
@@ -509,7 +510,11 @@ export async function runPlan(
   const lease: LeaseState = {};
   let report: RunReport;
   try {
-    report = await runPlanUnderLease(plan, opts, registry, gov, lease);
+    // Resolve the CQ_* snapshot once and carry it to the ops (ADR-0009).
+    const cqEnv = opts.cqEnv ?? readCqEnv();
+    report = await runWithCqEnv(cqEnv, () =>
+      runPlanUnderLease(plan, { ...opts, cqEnv }, registry, gov, lease),
+    );
   } catch (error) {
     // The run's own failure is the root cause: a release that fails too
     // (often the same disk fault) must not replace it. An unreleased record

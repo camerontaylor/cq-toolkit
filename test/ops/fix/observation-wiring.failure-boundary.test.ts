@@ -228,6 +228,23 @@ describe('T30 failure boundary', () => {
     expect(JSON.stringify(reportOf(result).run)).toContain('planner fan-out changed');
   });
 
+  test('a blank CQ_PRODUCER_VERSION is unset: the header carries the package version', async () => {
+    const f = await fixture();
+    vi.stubEnv('CQ_PRODUCER_VERSION', '   ');
+    try {
+      await makeFixRun({
+        registry: { get: stubSweepRegistries(fixedUnitReport()) },
+      })(input(f));
+      const streams = await readObservations(f.journalDir);
+      const header = streams[0]?.events[0];
+      if (header?.type !== 'composition-started') throw new Error('header missing');
+      expect(header.payload.provenance.cqVersion.trim()).not.toBe('');
+      expect(header.payload.provenance.producerVersion).toBe(header.payload.provenance.cqVersion);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   test('header sanitizes producer version and correlation', async () => {
     const f = await fixture();
     vi.stubEnv('CQ_PRODUCER_VERSION', 'https://u:tok@h/x?k=v');

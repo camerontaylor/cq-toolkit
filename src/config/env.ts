@@ -14,7 +14,12 @@
 // Entry points call it once through src/config/entry.ts.
 import { nearestKey } from '../shared/nearest.js';
 import { deepFreeze } from '../shared/deepFreeze.js';
-import { CQ_ENV_REGISTRY, type CqEnvEntry, type CqEnvRegistry } from './env-registry.js';
+import {
+  CQ_ENV_REGISTRY,
+  FOREIGN_ENV_ENTRIES,
+  type CqEnvEntry,
+  type CqEnvRegistry,
+} from './env-registry.js';
 
 export type CqEnvSource = 'default' | 'env';
 
@@ -34,6 +39,11 @@ export interface CqEnv {
    * all, which `values`/`sources` cannot say once blank means unset.
    */
   readonly present: readonly string[];
+  /**
+   * Registered foreign secret names (vendor/forge keys and tokens) the environment carries with a
+   * non-blank value (sorted). Presence only, never a value; resolved once with the rest.
+   */
+  readonly foreignSecretsPresent: readonly string[];
   readonly warnings: readonly CqEnvDiagnostic[];
   readonly errors: readonly CqEnvDiagnostic[];
 }
@@ -109,7 +119,11 @@ export function readCqEnv(
     }
   }
 
-  return deepFreeze({ values, sources, present, warnings, errors });
+  const foreignSecretsPresent = FOREIGN_ENV_ENTRIES.filter((f) => f.secret && !isBlank(env[f.name]))
+    .map((f) => f.name)
+    .sort();
+
+  return deepFreeze({ values, sources, present, foreignSecretsPresent, warnings, errors });
 }
 
 /** `cq: warning: …` / `cq: error: …` lines, errors first; never contains a value. */
