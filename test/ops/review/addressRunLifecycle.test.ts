@@ -76,7 +76,7 @@ test('a store-free lifetime supplies identity checks and tracks actual process c
       this.stopAdmissions();
     }
     get pending() {
-      return this.tasks.size + this.terminalProcesses.size;
+      return { writers: this.tasks.size, terminalProcesses: this.terminalProcesses.size };
     }
   }
   const run = new Lifetime();
@@ -86,15 +86,25 @@ test('a store-free lifetime supplies identity checks and tracks actual process c
       close = done;
     }),
   );
-  expect(run.pending).toBe(1);
+  expect(run.pending).toEqual({ writers: 1, terminalProcesses: 0 });
   expect(await run.validate()).toEqual({ commonDir: '/checkout', terminal: false });
   run.stop();
-  expect(run.pending).toBe(1);
+  expect(run.pending).toEqual({ writers: 1, terminalProcesses: 0 });
   expect(await run.validate()).toEqual({ commonDir: '/checkout', terminal: true });
   expect(run.checks).toBe(2);
+  let terminalClose!: () => void;
+  run.track(
+    new Promise<void>((done) => {
+      terminalClose = done;
+    }),
+  );
+  expect(run.pending).toEqual({ writers: 1, terminalProcesses: 1 });
   close();
   await Promise.resolve();
-  expect(run.pending).toBe(0);
+  expect(run.pending).toEqual({ writers: 0, terminalProcesses: 1 });
+  terminalClose();
+  await Promise.resolve();
+  expect(run.pending).toEqual({ writers: 0, terminalProcesses: 0 });
 });
 
 test('no lifecycle export or backend context returns an accepted terminal token', async () => {

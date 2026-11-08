@@ -1,3 +1,4 @@
+import { boundedFile, same, type Identity } from './addressFileIdentity.js';
 import { addressRunLeaseAuthority, AddressRunLifecycle } from './addressRunLifecycle.js';
 export {
   validateAddressTerminalAuthority,
@@ -49,8 +50,6 @@ const digest = (bytes: Uint8Array) => createHash('sha256').update(bytes).digest(
 const slot = (sequence: number) => `${String(sequence).padStart(6, '0')}.json`;
 const bounded = () => new Error('address ownership: authority store bound reached');
 const lifetimeBound = () => new Error('address ownership: mid-lifetime authority bound reached');
-type Identity = { ino: number; dev: number };
-const same = (a: Identity, b: Identity) => a.ino === b.ino && a.dev === b.dev;
 
 interface Guard {
   version: 3;
@@ -105,40 +104,6 @@ function resourcesValid(value: unknown): value is string[] {
     value.every((key) => typeof key === 'string' && Buffer.byteLength(key) <= MAX_RESOURCE_BYTES) &&
     value.every((key, index) => index === 0 || value[index - 1]! < key)
   );
-}
-
-/** Open the actual inode, bound allocation, then verify the pathname still names it. */
-async function boundedFile(path: string, limit: number, links: number) {
-  if (!constants.O_NOFOLLOW) throw new Error('address ownership: no-follow unavailable');
-  const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
-  try {
-    const before = await file.stat();
-    if (!before.isFile() || before.nlink !== links) throw new Error('unsafe authority file');
-    if (before.size > limit) throw bounded();
-    const bytes = Buffer.alloc(before.size);
-    let offset = 0;
-    while (offset < bytes.length) {
-      const read = await file.read(bytes, offset, bytes.length - offset, offset);
-      if (!read.bytesRead) throw new Error('short authority read');
-      offset += read.bytesRead;
-    }
-    const after = await file.stat();
-    const named = await lstat(path);
-    if (
-      !same(before, after) ||
-      !same(before, named) ||
-      !named.isFile() ||
-      after.size !== before.size ||
-      named.size !== before.size ||
-      after.mtimeMs !== before.mtimeMs ||
-      after.ctimeMs !== before.ctimeMs ||
-      named.nlink !== links
-    )
-      throw new Error('authority changed during read');
-    return { bytes, identity: before };
-  } finally {
-    await file.close();
-  }
 }
 
 async function syncDirectory(path: string): Promise<void> {
