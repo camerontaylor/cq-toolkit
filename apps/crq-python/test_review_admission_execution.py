@@ -96,6 +96,7 @@ class ExecutionTests(SnapshotGitFixture, unittest.TestCase):
                 (crq.repair_tick, "archive_legacy", None), (crq.repair_tick, "reconcile_fix_prs", None)):
                 stack.enter_context(mock.patch.object(module, name, return_value=result))
             enrolled = stack.enter_context(mock.patch.object(crq, "enroll", wraps=crq.enroll))
+            stack.enter_context(mock.patch.object(crq.local_review_pr, "publish"))
             heartbeat = stack.enter_context(mock.patch.object(crq, "write_heartbeat"))
             request = stack.enter_context(mock.patch.object(crq, "_request_pr_review"))
             launched = stack.enter_context(mock.patch.object(crq, "launch"))

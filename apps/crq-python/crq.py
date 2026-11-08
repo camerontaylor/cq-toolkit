@@ -35,6 +35,7 @@ import author_lease
 import review_receipt
 import finding_issues
 import pr_review_findings
+import local_review_pr
 import deferred_refresh
 import merged_reconcile
 import push_current
@@ -2800,6 +2801,15 @@ def enroll(q: Dict[str, Any], dry: bool) -> List[str]:
             continue
         mine = [i for i in live_items(q) if i["pr"] == n and i["kind"] in ("open", "delta")
                 and item_repo(i) == REPO]
+        pin = None
+        try:
+            if not ensure_commit(n, head):
+                raise NotReady("source head unavailable")
+            pin = git("merge-base", f"origin/{p['baseRefName']}", head)
+        except (NotReady, OSError, RuntimeError, subprocess.TimeoutExpired):
+            pass  # preserve the original first-enrollment fallback
+        if pin and local_review_pr.associate(sys.modules[__name__], q, REPO, n, pin, head, dry):
+            continue
         if not mine:
             stacked = "" if p["baseRefName"] in DISCOVERY_BRANCHES else f", stacked on {p['baseRefName']}"
             new_item(q, log, dry, id=f"pr{n}", pr=n, kind="open", tier=1, prior_cycles=0,
@@ -2807,11 +2817,7 @@ def enroll(q: Dict[str, Any], dry: bool) -> List[str]:
             continue
         if any(i["state"] in ("pending", "reviewing", "repairing", "blocked") and not optional_open(i) for i in mine):
             continue
-        try:
-            if not ensure_commit(n, head):
-                raise NotReady("source head unavailable")
-            pin = git("merge-base", f"origin/{p['baseRefName']}", head)
-        except (NotReady, OSError, RuntimeError, subprocess.TimeoutExpired):
+        if pin is None:
             log.append(f"PR #{n}: range identity unavailable; enrollment deferred")
             continue
         last = last_reviewed(q, n)
@@ -3311,6 +3317,7 @@ def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = Fal
         refresh_slot_deadline(q, usage, remaining, global_gate)
         write_status(q)
         write_heartbeat(q)
+        local_review_pr.publish(sys.modules[__name__], q)
         log.extend(client_health.record(sys.modules[__name__], q, discovery_enabled=(not only and
             isinstance(CONFIG.get("merged_discovery"), dict) and
             CONFIG["merged_discovery"].get("enabled") is True)))
