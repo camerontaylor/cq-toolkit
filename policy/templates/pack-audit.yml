@@ -86,7 +86,9 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - name: Native lock process smoke
-        run: pnpm test:narrow test/adapters/lock/slotLock.test.ts
+        # CI may invoke Vitest directly. test:narrow is the local resource-policy
+        # wrapper; hosted macOS starts at a negative nice value it refuses.
+        run: pnpm exec vitest run --project process test/adapters/lock/slotLock.test.ts
   pack-audit:
     runs-on: ubuntu-latest
     steps:
