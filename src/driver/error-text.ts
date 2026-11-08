@@ -11,7 +11,7 @@
 // substring replace would shred unrelated words that merely contain the
 // value — a match is bounded by non-identifier characters instead.
 import { isSecretEnvName } from '../config/secret.js';
-import { isUrlEnvName, stripCredentialText } from '../shared/urlRedact.js';
+import { isUrlEnvName, redactUrlUserinfo, stripCredentialText } from '../shared/urlRedact.js';
 
 const MAX_ERROR_CHARS = 500;
 
@@ -41,7 +41,9 @@ export function redactSensitiveText(text: string): string {
       );
     }
   }
-  return out;
+  // Every URL in the text loses its userinfo, with or without an environment
+  // value to match (the one shared scanner, src/shared/urlRedact.ts).
+  return redactUrlUserinfo(out);
 }
 
 /** Bound a diagnostic string and redact environment secrets before persistence. */

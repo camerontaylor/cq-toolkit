@@ -6,6 +6,113 @@
 // attacker-controlled text). `urlValueHasUserinfo` is the matching detector
 // used to REFUSE (not redact) a credential-bearing URL in passthrough.
 
+/** An authority start found in a whitespace-free run: where its scheme begins and where its authority does. */
+interface SchemeHit {
+  start: number;
+  authority: number;
+}
+
+const SPECIAL_SCHEME_TAIL = /(?:https?|wss?|ftp)$/;
+const isSlash = (ch: string | undefined): boolean => ch === '/' || ch === '\\';
+
+/**
+ * ONE scheme scanner for both modes. Strict (default): `scheme://` at a word
+ * start. Lenient (diagnostic text): also `scheme:` + any run of `/` or `\\`
+ * (JSON-escaped and WHATWG separators), the fixed-length special schemes
+ * (http, https, ws, wss, ftp) with no slashes at all even glued to preceding
+ * text, and a bare scheme-relative `//`. Single forward pass, constant work per
+ * character (the special-scheme test looks at a bounded tail).
+ */
+function discoverSchemes(run: string, lenient: boolean): SchemeHit[] {
+  const hits: SchemeHit[] = [];
+  let wordStart = 0;
+  for (let j = 0; j < run.length; j++) {
+    const ch = run[j] ?? '';
+    if (ch === ':') {
+      let k = 0;
+      while (isSlash(run[j + 1 + k])) k++;
+      if (!lenient) {
+        if (
+          run[j + 1] === '/' &&
+          run[j + 2] === '/' &&
+          j > wordStart &&
+          /[a-z]/i.test(run[wordStart] ?? '')
+        ) {
+          hits.push({ start: wordStart, authority: j + 3 });
+          j += 2;
+          wordStart = j + 1;
+          continue;
+        }
+      } else {
+        const tail = run.slice(Math.max(wordStart, j - 5), j).toLowerCase();
+        const special = SPECIAL_SCHEME_TAIL.test(tail);
+        const generic = k >= 2 && j > wordStart && /[a-z]/i.test(run[wordStart] ?? '');
+        if (special || generic) {
+          hits.push({ start: wordStart, authority: j + 1 + k });
+          j += k;
+          wordStart = j + 1;
+          continue;
+        }
+      }
+    }
+    if (
+      lenient &&
+      isSlash(ch) &&
+      isSlash(run[j + 1]) &&
+      (j === 0 || !/[a-z0-9+.:-]/i.test(run[j - 1] ?? ''))
+    ) {
+      let k = 0;
+      while (isSlash(run[j + k])) k++;
+      hits.push({ start: j, authority: j + k });
+      j += k - 1;
+      wordStart = j + 1;
+      continue;
+    }
+    if (!/[a-z0-9+.-]/i.test(ch)) wordStart = j + 1;
+  }
+  return hits;
+}
+
+/**
+ * Redact URL userinfo wherever a URL authority appears in free text, leaving
+ * everything else byte-for-byte (query, fragment, path, bare `name@host` prose
+ * and package specs are untouched): `https://u:p@host/x` becomes
+ * `https://[redacted]@host/x`. Same scanner as {@link stripCredentialText}
+ * (lenient mode); the authority ends at the first `/`, `\\`, `?` or `#`, and
+ * the userinfo is cut at its LAST `@`. Linear in the text length.
+ */
+export function redactUrlUserinfo(text: string): string {
+  const out: string[] = [];
+  let i = 0;
+  while (i < text.length) {
+    if (/\s/.test(text[i] ?? '')) {
+      out.push(text[i] ?? '');
+      i++;
+      continue;
+    }
+    const start = i;
+    while (i < text.length && !/\s/.test(text[i] ?? '')) i++;
+    const run = text.slice(start, i);
+    const hits = discoverSchemes(run, true);
+    let cursor = 0;
+    for (let k = 0; k < hits.length; k++) {
+      const hit = hits[k];
+      if (hit === undefined) continue;
+      const limit = hits[k + 1]?.start ?? run.length;
+      const token = run.slice(hit.authority, limit);
+      let authorityEnd = 0;
+      while (authorityEnd < token.length && !'/\\?#'.includes(token[authorityEnd] ?? ''))
+        authorityEnd++;
+      const at = token.lastIndexOf('@', authorityEnd - 1);
+      out.push(run.slice(cursor, hit.authority));
+      out.push(at < 0 ? token : `[redacted]${token.slice(at)}`);
+      cursor = limit;
+    }
+    out.push(run.slice(cursor));
+  }
+  return out.join('');
+}
+
 /**
  * Strip URL userinfo/query/fragment and SCP-style (or bare email-like)
  * `user[:secret]@host` prefixes from a text fragment.
@@ -55,24 +162,7 @@ export function stripCredentialText(text: string): string {
       text.slice(i, nextStart).includes('\n') && text.slice(nextStart, next).includes('@');
     // Discover all schemes in one forward pass. Never search the remaining
     // suffix again for each URL (many adjacent URLs must also stay linear).
-    const schemes: Array<{ start: number; authority: number }> = [];
-    let wordStart = 0;
-    for (let j = 0; j < run.length; j++) {
-      const ch = run[j] ?? '';
-      if (
-        ch === ':' &&
-        run[j + 1] === '/' &&
-        run[j + 2] === '/' &&
-        j > wordStart &&
-        /[a-z]/i.test(run[wordStart] ?? '')
-      ) {
-        schemes.push({ start: wordStart, authority: j + 3 });
-        j += 2;
-        wordStart = j + 1;
-      } else if (!/[a-z0-9+.-]/i.test(ch)) {
-        wordStart = j + 1;
-      }
-    }
+    const schemes = discoverSchemes(run, false);
     let cursor = 0;
     let droppingQuery = false;
     let terminator = '';
