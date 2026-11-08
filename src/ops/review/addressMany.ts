@@ -400,10 +400,12 @@ function makeReviewAddressManyCore(
             continue;
           }
           budget = admission.state;
+          let enteredCheckout = false;
           try {
             await withAddressManyCheckout(
               { commonDir: coordinationRoot, pr: candidate.number },
               async (lifetime) => {
+                enteredCheckout = true;
                 let result: ReviewAddressResult | undefined;
                 let dispatched = false;
                 let enrollment: AddressManyEnrollment = requestedEnrollment(candidate.number);
@@ -681,6 +683,14 @@ function makeReviewAddressManyCore(
               },
             );
           } catch (error) {
+            if (!enteredCheckout) {
+              // A refused slot never dispatched a provider. Release its reserved
+              // allocation so an unrelated PR can use the same sweep budget.
+              budget = settleAddressMany(budget, {
+                ...identity,
+                usage: { kind: 'known', tokens: 0 },
+              }).state;
+            }
             faults.push(`PR #${candidate.number} slot lifetime refused: ${String(error)}`);
             if (!outcomes.some((row) => row.number === candidate.number))
               outcomes.push({

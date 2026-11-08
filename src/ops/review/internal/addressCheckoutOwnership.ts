@@ -1,6 +1,6 @@
 import { acquireSlot } from '../../../adapters/lock/slotLock.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { lstat, realpath } from 'node:fs/promises';
+import { lstat, realpath, mkdir } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import {
   AddressRunLifecycle,
@@ -53,6 +53,11 @@ async function commonDirectory(opts: Options, root = opts.repoRoot): Promise<str
       await gitText(opts, root, ['rev-parse', '--path-format=absolute', '--git-common-dir']),
     ),
   );
+}
+
+async function coordinationDirectory(path: string): Promise<string> {
+  await mkdir(path, { recursive: true });
+  return realpath(path);
 }
 
 export class AddressCheckoutOwnership extends AddressRunLifecycle {
@@ -205,7 +210,9 @@ export class AddressCheckoutOwnership extends AddressRunLifecycle {
       await this.activateCheckout({ path: this.opts.repoRoot, gitDir: this.opts.bootstrapGitDir });
     } else {
       const pr = Number(source.slice(3));
-      const original = await realpath(this.opts.coordinationRoot ?? this.resolverCommon);
+      const original = await coordinationDirectory(
+        this.opts.coordinationRoot ?? this.resolverCommon,
+      );
       const originalSlot = await this.context.acquire(original, pr);
       if (!(await originalSlot.readMetadata())) {
         try {
@@ -373,9 +380,6 @@ export async function withAddressOwnership<T>(
   if (parent) parent.settled = await owner.context.isComplete();
   return result;
 }
-export function addressChildSignal(): AbortSignal | undefined {
-  return undefined;
-}
 export async function runAddressReviewLoop(
   lease: AddressLease,
   opts: ReviewLoopOpts,
@@ -426,7 +430,7 @@ export async function withAddressManyCheckout<T>(
     retained: [] as CheckoutWriterContext[],
   };
   return context.run(async () => {
-    const slot = await context.acquire(await realpath(opts.commonDir), opts.pr);
+    const slot = await context.acquire(await coordinationDirectory(opts.commonDir), opts.pr);
     try {
       if (!(await slot.readMetadata())) {
         const path = resolve(opts.commonDir, 'cq-review-address-worktrees.json');

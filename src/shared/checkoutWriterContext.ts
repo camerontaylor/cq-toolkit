@@ -82,6 +82,7 @@ export class CheckoutWriterContext {
           : { version: 1, state: 'bound', incomplete: false, ...key });
       this.assertLive();
       const entry: Entry = { slot, metadata };
+      if (metadata.state === 'bound') entry.binding = await this.captureBinding(metadata);
       this.slots.set(name, entry);
       return this.methods(entry);
     } catch (error) {
@@ -96,29 +97,26 @@ export class CheckoutWriterContext {
   private get hasMutated(): boolean {
     return this.mutated || Boolean(this.parent?.hasMutated);
   }
+  private async captureBinding(metadata: Extract<SlotMetadata, { state: 'bound' }>) {
+    const [path, gitDir] = await Promise.all([
+      realpath(metadata.checkoutPath),
+      realpath(metadata.checkoutGitDir),
+    ]);
+    if (path !== metadata.checkoutPath || gitDir !== metadata.checkoutGitDir)
+      throw new Error('bound checkout alias refused');
+    const [tree, git] = await Promise.all([lstat(path), lstat(gitDir)]);
+    if (!tree.isDirectory() || !git.isDirectory())
+      throw new Error('bound checkout identity unavailable');
+    return { path, gitDir, dev: tree.dev, ino: tree.ino, gitDev: git.dev, gitIno: git.ino };
+  }
   private methods(entry: Entry): Omit<Slot, 'fd' | 'close'> {
     const { fd: _fd, close: _close, ...methods } = entry.slot;
     return {
       ...methods,
       writeMetadata: async (metadata) => {
         this.assertLive();
-        if (metadata.state === 'bound') {
-          const [path, gitDir] = await Promise.all([
-            realpath(metadata.checkoutPath),
-            realpath(metadata.checkoutGitDir),
-          ]);
-          if (path !== metadata.checkoutPath || gitDir !== metadata.checkoutGitDir)
-            throw new Error('bound checkout alias refused');
-          const [tree, git] = await Promise.all([lstat(path), lstat(gitDir)]);
-          entry.binding = {
-            path,
-            gitDir,
-            dev: tree.dev,
-            ino: tree.ino,
-            gitDev: git.dev,
-            gitIno: git.ino,
-          };
-        } else delete entry.binding;
+        if (metadata.state === 'bound') entry.binding = await this.captureBinding(metadata);
+        else delete entry.binding;
         await entry.slot.writeMetadata(metadata);
       },
     };

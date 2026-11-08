@@ -266,7 +266,7 @@ export interface PrWorktreeOpts {
   run: GhFn;
   /** The PR → worktree registry (persistence seam). */
   registry: SlotWorktreeRegistry;
-  isBookkeepingPath?: (path: string) => Promise<boolean>;
+  isBookkeepingPath?: (path: string, root: string) => Promise<boolean>;
   /** Caller clock retained for resolver API compatibility. */
   nowMs: number;
   /** Root for created worktrees; defaults to `<repoRoot>/.git/cq-review-worktrees`. */
@@ -634,7 +634,8 @@ async function resolveLockedPrWorktree(opts: PrWorktreeOpts) {
           unpushedArgs,
         );
       }
-      await bindCheckout(opts, candidate.path);
+      const canonicalPath = await realpath(candidate.path);
+      await bindCheckout(opts, canonicalPath);
       const removeArgs = ['-C', repoRoot, 'worktree', 'remove', candidate.path];
       let remove = await opts.run(removeArgs);
       if (remove.code !== 0 && opts.onStaleRefresh) {
@@ -658,7 +659,7 @@ async function resolveLockedPrWorktree(opts: PrWorktreeOpts) {
           removeArgs,
         );
       }
-      await checkoutWriterContext()!.removed(candidate.path);
+      await checkoutWriterContext()!.removed(canonicalPath);
       await opts.registry.update(opts.pr, { version: 1, state: 'unbound', incomplete: true });
     }
     if (existing !== null) {
@@ -746,7 +747,8 @@ async function removeLockedPrWorktree(opts: PrWorktreeOpts & { path: string }): 
       `removePrWorktree: refusing to remove ${JSON.stringify(opts.path)} — it is outside the review worktreeRoot ${JSON.stringify(worktreeRoot)}; review ops removes only trees it created under its own root`,
     );
   }
-  await bindCheckout(opts, opts.path, false);
+  const canonicalPath = await realpath(opts.path);
+  await bindCheckout(opts, canonicalPath, false);
   const removeArgs = ['-C', repoRoot, 'worktree', 'remove', opts.path];
   const result = await opts.run(removeArgs);
   if (result.code !== 0) {
@@ -757,9 +759,9 @@ async function removeLockedPrWorktree(opts: PrWorktreeOpts & { path: string }): 
       removeArgs,
     );
   }
-  await checkoutWriterContext()!.removed(opts.path);
+  await checkoutWriterContext()!.removed(canonicalPath);
   const metadata = await opts.registry.read(opts.pr);
-  if (metadata?.state === 'bound' && metadata.checkoutPath === (await canonicalize(opts.path))) {
+  if (metadata?.state === 'bound' && metadata.checkoutPath === canonicalPath) {
     await opts.registry.update(opts.pr, { version: 1, state: 'unbound', incomplete: true });
   }
 }
@@ -804,7 +806,7 @@ async function assertCleanCheckout(opts: PrWorktreeOpts, path: string): Promise<
   const files = await opts.run(['-C', path, 'ls-files', '--others', '-z']);
   if (files.code !== 0) throw new Error('checkout untracked/ignored state unavailable');
   for (const file of files.stdout.split('\0').filter(Boolean)) {
-    if (!(await opts.isBookkeepingPath?.(file)))
+    if (!(await opts.isBookkeepingPath?.(file, await realpath(path))))
       throw new Error(`unowned untracked/ignored checkout path: ${file}`);
   }
 }

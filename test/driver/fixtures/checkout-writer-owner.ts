@@ -141,7 +141,9 @@ if (boundary === 'bulk') {
       else if (boundary === 'argv') await runArgvCommand(process.execPath, args, opts);
       else if (boundary === 'shell') {
         const quote = (s: string) => "'" + s.replace(/'/g, "'\\''") + "'";
-        await runShellCommand([process.execPath, ...args].map(quote).join(' '), opts);
+        // Replace the fixture shell so the probe's close-all-fds IPC ack is
+        // the last inherited reference, not a race with an intermediate shell.
+        await runShellCommand('exec ' + [process.execPath, ...args].map(quote).join(' '), opts);
       } else throw new Error('unknown boundary');
     },
   });

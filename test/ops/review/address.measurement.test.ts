@@ -1,3 +1,5 @@
+import { join } from 'node:path';
+import { expectOpaqueIncomplete } from './slotOwnership.helpers.js';
 // Split provenance: the ADR-0008 T35 round-1 baseline tests written in
 // feat/measurement-m2-review against test/ops/review/address.test.ts moved
 // here when main split that file by subject; they form one subject — the
@@ -42,7 +44,7 @@ describe('review.address round-1 baseline', () => {
         }),
       })({ ...f.input, rounds: 1 });
       const report = reportOf(result);
-      expect(result.status, report.reasons.join(' | ')).toBe('ok');
+      await expectOpaqueIncomplete(result, join(f.repo.root, '.git'));
       // The successful re-review replaced the record and emptied the
       // recomputed population…
       expect(report.findings).toEqual([]);
@@ -113,7 +115,7 @@ describe('review.address round-1 baseline', () => {
         }),
       })({ ...f.input, rounds: 1 });
       const report = reportOf(result);
-      expect(result.status, report.reasons.join(' | ')).toBe('ok');
+      await expectOpaqueIncomplete(result, join(f.repo.root, '.git'));
       // The cached-fixed row was restored to open before dispatch…
       expect(fixedIds).toEqual(['a', 'b']);
       // …so the round-1 baseline holds both blockers the run worked, not just

@@ -1,7 +1,7 @@
 import { expect, test } from 'vitest';
-import { readFile, writeFile, mkdir, stat } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, stat, symlink, readdir, realpath } from 'node:fs/promises';
 import { join } from 'node:path';
-import { resolvePrWorktree } from '../../../src/adapters/git/prWorktree.js';
+import { resolvePrWorktree, removePrWorktree } from '../../../src/adapters/git/prWorktree.js';
 import { slotWorktreeRegistry } from '../../../src/adapters/git/slotWorktreeRegistry.js';
 import { readSlotMetadata } from '../../../src/adapters/lock/slotLock.js';
 import type { GhFn } from '../../../src/adapters/forge-github/gh.js';
@@ -209,3 +209,72 @@ test.each(['common', 'address-journal', 'selfhost-journal'])(
     }
   },
 );
+
+test('alias-spelled removal unbinds every deleted checkout pointer (mutation: notify removal with raw alias)', async () => {
+  const f = await fixture();
+  try {
+    await mkdir(f.opts.worktreeRoot, { recursive: true });
+    const alias = join(f.common, 'tree-alias');
+    await symlink(f.opts.worktreeRoot, alias, 'dir');
+    const opts = { ...f.opts, worktreeRoot: alias };
+    const first = await resolvePrWorktree(opts);
+    const canonical = await realpath(first.path);
+    expect(first.path).not.toBe(canonical);
+    const removed = await removePrWorktree({ ...opts, path: first.path }).then(
+      () => true,
+      () => false,
+    );
+    expect(removed, 'verified alias removal must complete').toBe(true);
+    const directory = join(f.common, 'cq-review/slots');
+    for (const name of (await readdir(directory)).filter((name) => name.endsWith('.json')))
+      expect(await readSlotMetadata(join(directory, name))).toMatchObject({
+        state: 'unbound',
+        incomplete: false,
+      });
+    expect((await resolvePrWorktree(opts)).path).toBe(first.path);
+  } finally {
+    await f.repo.cleanup();
+  }
+});
+
+test('removing an older checkout preserves a different bound PR pointer (mutation: omit admission binding capture)', async () => {
+  const f = await fixture();
+  try {
+    const current = await resolvePrWorktree(f.opts);
+    const old = join(f.opts.worktreeRoot, 'older');
+    f.repo.git('worktree', 'add', '-qb', 'older-fixture', old, 'HEAD');
+    const removed = await removePrWorktree({ ...f.opts, path: old }).then(
+      () => true,
+      () => false,
+    );
+    expect(removed, 'removal must preserve the surviving binding').toBe(true);
+    expect(await readSlotMetadata(f.metadataPath)).toMatchObject({
+      state: 'bound',
+      checkoutPath: current.path,
+      incomplete: false,
+    });
+    expect((await resolvePrWorktree(f.opts)).reused).toBe(true);
+  } finally {
+    await f.repo.cleanup();
+  }
+});
+
+test('standalone slot facade completes each successful callback (mutation: omit standalone completion)', async () => {
+  const f = await fixture();
+  try {
+    for (let round = 0; round < 2; round++) {
+      const value = await f.opts.registry.withPrLock(7, async () => {
+        expect((await f.opts.registry.read(7))?.incomplete).toBe(true);
+        return round;
+      });
+      expect(value).toBe(round);
+      expect(await readSlotMetadata(f.metadataPath)).toEqual({
+        version: 1,
+        state: 'unbound',
+        incomplete: false,
+      });
+    }
+  } finally {
+    await f.repo.cleanup();
+  }
+});

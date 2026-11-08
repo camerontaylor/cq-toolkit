@@ -1,4 +1,6 @@
 import { expect, test } from 'vitest';
+import { readSlotMetadata } from '../../src/adapters/lock/slotLock.js';
+import * as checkoutOwner from '../../src/ops/review/internal/addressCheckoutOwnership.js';
 import { symlink } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { runReviewLoop } from '../../src/plans/review-loop.js';
@@ -107,4 +109,32 @@ test('nested loop does not reacquire its live slot (regression)', async () => {
   } finally {
     await f.repo.cleanup();
   }
+});
+
+test('head refusal preserves complete bound metadata and permits the next run (mutation: omit admission binding capture)', async () => {
+  const f = await slotFixture();
+  try {
+    const first = await runReviewLoop(f.opts());
+    expect(first.status).toBe('ok');
+    const refusal = await runReviewLoop({ ...f.opts(), expectedHead: 'f'.repeat(40) }).then(
+      (value) => ({ value }),
+      (error: unknown) => ({ error }),
+    );
+    expect('value' in refusal, 'early head refusal must retain needs-human result').toBe(true);
+    if (!('value' in refusal)) return;
+    expect(refusal.value.status).toBe('needs-human');
+    expect(refusal.value.headRefused).toBe(true);
+    expect(await readSlotMetadata(join(f.common, 'cq-review/slots/pr-7.json'))).toMatchObject({
+      state: 'bound',
+      checkoutPath: first.worktree.path,
+      incomplete: false,
+    });
+    expect((await runReviewLoop(f.opts())).status).toBe('ok');
+  } finally {
+    await f.repo.cleanup();
+  }
+});
+
+test('owner API removes the obsolete child-signal stub (mutation: restore undefined child-signal export)', () => {
+  expect(checkoutOwner).not.toHaveProperty('addressChildSignal');
 });

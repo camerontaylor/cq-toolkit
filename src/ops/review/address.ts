@@ -80,7 +80,6 @@ import {
 } from './fixReviewItem.js';
 import { readWorkState } from '../dev/internal/workState.js';
 import {
-  addressChildSignal,
   addressCancelledResult,
   noteAddressOpaqueInvocation,
   bindAddressTerminalReport,
@@ -426,7 +425,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
     const enclosingContext = currentJobContext();
     const ownershipAbort = new AbortController();
     const parent = AbortSignal.any(
-      [enclosingContext?.signal, addressChildSignal(), ownershipAbort.signal].filter(
+      [enclosingContext?.signal, ownershipAbort.signal].filter(
         (signal): signal is AbortSignal => signal !== undefined,
       ),
     );
@@ -714,8 +713,13 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
       }
       const incomplete = addressLease?.incompleteReason?.();
       if (incomplete) {
-        status = 'needs-human';
-        reason = incomplete;
+        if (!report.reasons.includes(incomplete)) report.reasons.push(incomplete);
+        // Incomplete ownership cannot erase an already observed gate/budget
+        // refusal. It changes a successful surface to needs-human only.
+        if (status === 'ok') {
+          status = 'needs-human';
+          reason = incomplete;
+        }
       }
       if (reason && !report.reasons.includes(reason)) report.reasons.push(reason);
       let publicationFailed = false;
@@ -2996,8 +3000,13 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                   gh,
                   git,
                   registry: deps.worktreeRegistry ?? lease.registry!,
-                  isBookkeepingPath: (path) =>
-                    withBookkeepingAccess(workerRoot, () => untrackedAllowed(workerRoot, path)),
+                  isBookkeepingPath: (path, resolvedRoot) =>
+                    withBookkeepingAccess(resolvedRoot, async () => {
+                      // Resolution already holds this checkout's slot. Import only
+                      // exact receipt-authenticated bytes before its reuse gate.
+                      await persistedBookkeeping?.prepare(resolvedRoot);
+                      return untrackedAllowed(resolvedRoot, path);
+                    }),
                   beforeWorktreeResolve: () =>
                     lease.assertSelection({
                       pr: meta.pr,

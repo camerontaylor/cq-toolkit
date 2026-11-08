@@ -1,3 +1,4 @@
+import { expectOpaqueIncomplete } from './slotOwnership.helpers.js';
 // Split provenance: test/ops/review/address-local.test.ts was split into
 // subject files sharing ./address-local.helpers.ts. This file holds the
 // re-review cases: an adopted no-ignore repository and the #509 blocked
@@ -206,9 +207,7 @@ describe('final re-review wall guard (#533)', () => {
           source: 'local',
           journalDir: f.journalDir,
         });
-        expect(result.status, JSON.stringify(result)).toBe(
-          elapsed >= 20_000 ? 'needs-human' : 'ok',
-        );
+        await expectOpaqueIncomplete(result, join(f.repo.root, '.git'));
         expect(fixes).toBe(1);
         expect(f.reviewRequests.count).toBe(elapsed >= 20_000 ? 0 : 1);
         if (elapsed >= 20_000)

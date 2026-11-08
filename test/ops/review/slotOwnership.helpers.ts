@@ -1,3 +1,7 @@
+import { expect } from 'vitest';
+import { readdir } from 'node:fs/promises';
+import { readSlotMetadata } from '../../../src/adapters/lock/slotLock.js';
+import type { ReviewAddressResult } from '../../../src/ops/review/address.js';
 import { join } from 'node:path';
 import { fixture, deferred } from './addressManyWorktree.helpers.js';
 import { slotWorktreeRegistry } from '../../../src/adapters/git/slotWorktreeRegistry.js';
@@ -60,4 +64,19 @@ export async function pausedLoop(opts: ReviewLoopOpts) {
   void pending.catch(() => undefined);
   await reached(entered.promise, pending);
   return { path, pending, release: release.resolve };
+}
+
+/** D4(c)/D5.4: opaque callbacks cannot prove completion, even when their result is ok. */
+export async function expectOpaqueIncomplete(result: ReviewAddressResult, commonDir: string) {
+  expect(result.status, JSON.stringify(result)).toBe('needs-human');
+  if (result.status !== 'needs-human')
+    throw new Error('opaque completion must need human recovery');
+  expect(result.report?.reasons).toContain(
+    'opaque invocation write-set unconfirmed; checkout retained incomplete',
+  );
+  const directory = join(commonDir, 'cq-review/slots');
+  const names = (await readdir(directory)).filter((name) => name.endsWith('.json'));
+  expect(names.length).toBeGreaterThan(0);
+  for (const name of names)
+    expect((await readSlotMetadata(join(directory, name)))?.incomplete).toBe(true);
 }

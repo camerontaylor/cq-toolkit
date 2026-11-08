@@ -1,7 +1,11 @@
 import { expect, test } from 'vitest';
 import { join } from 'node:path';
-import { readFile } from 'node:fs/promises';
+import { readFile, writeFile, lstat } from 'node:fs/promises';
 import { runReviewLoop } from '../../../src/plans/review-loop.js';
+import {
+  withAddressOwnership,
+  runAddressReviewLoop,
+} from '../../../src/ops/review/internal/addressCheckoutOwnership.js';
 import { makeReviewAddress } from '../../../src/ops/review/address.js';
 import type { DriverFactory } from '../../../src/driver/factory.js';
 import { readSlotMetadata } from '../../../src/adapters/lock/slotLock.js';
@@ -151,5 +155,47 @@ test('two distinct worktrees progress (mutation: add source-repo checkout slot)'
     await first.pending.catch(() => undefined);
     await f.repo.cleanup();
     await configured.cleanup();
+  }
+});
+
+test('missing coordination namespace is created before slot admission without replacing files (mutation: omit coordination mkdir)', async () => {
+  const f = await slotFixture();
+  const coordinationRoot = join(f.root, 'not-created', 'coordination');
+  try {
+    await expect(lstat(coordinationRoot)).rejects.toMatchObject({ code: 'ENOENT' });
+    const result = await withAddressOwnership(
+      { repoRoot: f.repo.root, git: f.run, source: 'pr:7', production: true, coordinationRoot },
+      (lease) => runAddressReviewLoop(lease, f.opts()),
+    ).then(
+      (value) => ({ value }),
+      (error: unknown) => ({ error }),
+    );
+    expect('value' in result, 'fresh coordination namespace must admit the run').toBe(true);
+    if (!('value' in result)) return;
+    expect(result.value.status).toBe('ok');
+    expect(
+      await readSlotMetadata(join(coordinationRoot, 'cq-review/slots/pr-7.json')),
+    ).toMatchObject({
+      state: 'bound',
+      incomplete: false,
+      checkoutPath: result.value.worktree.path,
+    });
+    const file = join(f.root, 'not-a-directory');
+    await writeFile(file, 'preserved namespace obstruction');
+    await expect(
+      withAddressOwnership(
+        {
+          repoRoot: f.repo.root,
+          git: f.run,
+          source: 'pr:7',
+          production: true,
+          coordinationRoot: file,
+        },
+        async () => {},
+      ),
+    ).rejects.toMatchObject({ code: 'EEXIST' });
+    expect(await readFile(file, 'utf8')).toBe('preserved namespace obstruction');
+  } finally {
+    await f.repo.cleanup();
   }
 });

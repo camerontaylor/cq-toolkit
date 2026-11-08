@@ -399,3 +399,23 @@ test('bulk terminal evidence stays in clone (mutation: bind terminal commonDir t
     await f.repo.cleanup();
   }
 });
+
+test('opaque completion preserves an existing review refusal reason (mutation: overwrite refusal with opaque reason)', async () => {
+  const f = await localFixture();
+  try {
+    const result = await makeReviewAddress({
+      drivers: f.drivers,
+      initialRecord: f.record,
+      review: async () => ({ status: 'needs-human', reason: 'fixture review service unavailable' }),
+    })({ repoRoot: f.repo.root, source: 'local', journalDir: f.journalDir });
+    expect(result.status).toBe('needs-human');
+    if (result.status !== 'needs-human') return;
+    expect(result.reason).toContain('fixture review service unavailable');
+    expect(result.report?.reasons).toContain(
+      'opaque invocation write-set unconfirmed; checkout retained incomplete',
+    );
+    expect((await checkoutMetadata(join(f.repo.root, '.git')))?.incomplete).toBe(true);
+  } finally {
+    await f.cleanup();
+  }
+});

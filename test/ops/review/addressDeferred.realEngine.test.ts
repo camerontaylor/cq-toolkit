@@ -1,3 +1,5 @@
+import { join } from 'node:path';
+import { expectOpaqueIncomplete } from './slotOwnership.helpers.js';
 // Split provenance: test/ops/review/addressDeferred.test.ts was split into
 // addressDeferred.{admission,fixLoop,cachedFindings,realEngine,queueOwnership,
 // importProvenance,emptyFileAdmission}.test.ts. This file drives the real
@@ -95,7 +97,7 @@ test.each([false, true])(
           },
         }),
       })({ repoRoot: f.repo.root, source: 'local', journalDir: f.journalDir });
-      expect(result.status, JSON.stringify(result)).toBe(secret ? 'needs-human' : 'ok');
+      await expectOpaqueIncomplete(result, join(f.repo.root, '.git'));
       expect(uploads).toBe(secret ? 1 : 2);
       expect(f.effects.calls.filter((call) => call.command === 'coderabbit')).toHaveLength(0);
       const ledger = f.effects.openLedger(f.state.branch).load();

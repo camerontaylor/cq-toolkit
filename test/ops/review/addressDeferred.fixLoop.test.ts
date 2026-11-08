@@ -1,3 +1,5 @@
+import { join } from 'node:path';
+import { expectOpaqueIncomplete } from './slotOwnership.helpers.js';
 // Split provenance: test/ops/review/addressDeferred.test.ts was split into
 // addressDeferred.{admission,fixLoop,cachedFindings,realEngine,queueOwnership,
 // importProvenance,emptyFileAdmission}.test.ts. This file holds the fix-loop
@@ -66,7 +68,7 @@ test('known substantive finding reaches fixing; changed head requires durable su
         };
       },
     })({ repoRoot: f.repo.root, source: 'local', journalDir: f.journalDir });
-    expect(result.status, JSON.stringify(result)).toBe('ok');
+    await expectOpaqueIncomplete(result, join(f.repo.root, '.git'));
     expect(fixes).toBe(1);
     expect(reviews).toBe(1);
     const debts = f.effects

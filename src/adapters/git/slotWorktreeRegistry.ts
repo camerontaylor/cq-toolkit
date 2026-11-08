@@ -82,6 +82,7 @@ export function slotWorktreeRegistry(
           }
           await context.begin();
           const result = await action();
+          if (!inherited) await context.complete();
           return result;
         } finally {
           if (!inherited) await context.close();

@@ -1,3 +1,5 @@
+import { join } from 'node:path';
+import { expectOpaqueIncomplete } from './slotOwnership.helpers.js';
 // Split provenance: test/ops/review/address.test.ts was split into this file
 // plus address.{helpers.ts,composition,admission,blockedRereview,vendorBoundary,lock,m5b3Correlation}.test.ts.
 import { readFile } from 'node:fs/promises';
@@ -120,7 +122,7 @@ describe('review.address composition', () => {
           };
         },
       })({ ...f.input, rounds: 1 });
-      expect(result.status).toBe('ok');
+      await expectOpaqueIncomplete(result, join(f.repo.root, '.git'));
       expect(priorFindings).toEqual([
         expect.objectContaining({
           id: 'a',
@@ -244,7 +246,7 @@ describe('review.address composition', () => {
       };
       const result = await makeReviewAddress(deps)({ ...f.input, rounds: 1 });
       const report = reportOf(result);
-      expect(result.status, report.reasons.join(' | ')).toBe('ok');
+      await expectOpaqueIncomplete(result, join(f.repo.root, '.git'));
       expect(fixedHead).not.toBe(admittedHead);
       // The mutable producer view really was refreshed to the verified fix head…
       expect(report.rounds[0]?.record.head).toBe(fixedHead);
@@ -288,7 +290,7 @@ describe('review.address composition', () => {
           }),
         })({ ...f.input, rounds: 1 });
         const report = reportOf(result);
-        expect(result.status, report.reasons.join(' | ')).toBe('ok');
+        await expectOpaqueIncomplete(result, join(f.repo.root, '.git'));
         const ledger = JSON.parse(
           await readFile(devLedgerPath(f.repo.root, 'feature/x'), 'utf8'),
         ) as { records: { kind: string; findingId?: string; evidence?: unknown }[] };

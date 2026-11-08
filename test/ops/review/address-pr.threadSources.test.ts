@@ -1,3 +1,5 @@
+import { join } from 'node:path';
+import { expectOpaqueIncomplete } from './slotOwnership.helpers.js';
 // Split provenance: test/ops/review/address-pr.test.ts was split by subject;
 // this file holds its review-thread source tests (follow-up discussion and
 // bot advisory evidence). The shared phase-one orchestration world lives in
@@ -10,7 +12,7 @@ describe('review.address PR phase-one orchestration', () => {
     const w = await world(false, { discussion: true });
     try {
       const result = await w.run();
-      expect(result.status, JSON.stringify(result)).toBe('ok');
+      await expectOpaqueIncomplete(result, join(w.root, 'git'));
       expect(w.prompts).toHaveLength(3);
       for (const prompt of w.prompts) {
         expect(prompt).toContain('FOLLOWUP-REQUIREMENT');
@@ -26,13 +28,11 @@ describe('review.address PR phase-one orchestration', () => {
     const w = await world(false, { bot: true });
     try {
       const result = await w.run();
-      expect(result.status, JSON.stringify(result)).toBe('ok');
+      await expectOpaqueIncomplete(result, join(w.root, 'git'));
       expect(w.resolved.has('T1')).toBe(true);
       expect(w.actions).not.toContain('rerequest');
-      if (result.status === 'ok')
-        expect(result.value.reasons).toContainEqual(
-          expect.stringContaining('no bot re-request performed'),
-        );
+      const report = result.status === 'ok' ? result.value : result.report!;
+      expect(report.reasons).toContainEqual(expect.stringContaining('no bot re-request performed'));
     } finally {
       await w.cleanup();
     }

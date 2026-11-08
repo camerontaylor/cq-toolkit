@@ -403,7 +403,7 @@ export interface ReviewLoopOpts {
   git: GhFn;
   /** The PR → worktree registry (persistence seam behind the worktree stage). */
   registry: SlotWorktreeRegistry;
-  isBookkeepingPath?: (path: string) => Promise<boolean>;
+  isBookkeepingPath?: (path: string, root: string) => Promise<boolean>;
   legacySources?: readonly string[];
   /**
    * Model identity for the fix workers (ModelSpec data on every fix input).
