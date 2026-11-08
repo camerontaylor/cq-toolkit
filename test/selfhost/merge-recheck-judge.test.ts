@@ -79,6 +79,26 @@ describe('judgeAtHead', () => {
     expect(judgeAtHead(snap, SHA_B, CONSERVATIVE_TRUST_POLICY)).toMatchObject({ accepted: true });
   });
 
+  test.each(['review', 'comment'])(
+    'refuses PASS %s evidence when the PR author is unknown',
+    async (source) => {
+      const snap = await snapshotOf(
+        prSpec({
+          author: null,
+          reviews: [review({ state: 'COMMENTED', body: `opus ${SHA_B} PASS` })],
+        }),
+      );
+      if (source === 'comment') {
+        snap.allClear = { committedAt: null, complete: true, comments: snap.reviews };
+        snap.reviews = [];
+      }
+      expect(judgeAtHead(snap, SHA_B, CONSERVATIVE_TRUST_POLICY)).toMatchObject({
+        accepted: false,
+      });
+      expect(judgeAtHead(snap, SHA_B, CONSERVATIVE_TRUST_POLICY).authenticatedR4).toBeUndefined();
+    },
+  );
+
   test('plain exact-head PASS accepts shared accounts without opt-in', async () => {
     const snap = await snapshotOf(
       prSpec({

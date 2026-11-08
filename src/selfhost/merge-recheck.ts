@@ -916,6 +916,8 @@ const sameAccountAgentAccepted = (
   headSha: string,
   policy: TrustPolicy,
 ): AuthenticatedR4Evidence | null => {
+  // Without the PR author, the actor's relationship to the PR is unknown.
+  if (snapshot.authorLogin === null || snapshot.authorLogin === '') return null;
   for (const review of [...snapshot.reviews, ...(snapshot.allClear?.comments ?? [])]) {
     if (isIgnoredBotAuthor(review.authorType, review.authorLogin)) continue;
     const login = review.authorLogin;
