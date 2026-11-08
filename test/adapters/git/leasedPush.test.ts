@@ -220,15 +220,22 @@ test('home-relative pushurl uses Git expansion with a temporary HOME', async () 
     `${f.tip}\trefs/heads/topic`,
   );
 });
-test.each(['file', 'parent-relative', 'named-home', 'scp'] as const)(
+test.for(['file', 'parent-relative', 'named-home', 'scp'] as const)(
   'Git pushurl shape %s is preserved',
-  async (shape) => {
+  async (shape, context) => {
     const f = await fixture();
     let remote = f.base;
     let url = `file://${remote}`;
     if (shape === 'parent-relative') url = '../base.git';
     if (shape === 'named-home') {
-      const directory = await mkdtemp(join(homedir(), '.cq-pushurl-check-'));
+      let directory: string;
+      try {
+        directory = await mkdtemp(join(homedir(), '.cq-pushurl-check-'));
+      } catch (error) {
+        if (['EACCES', 'EPERM', 'EROFS'].includes((error as NodeJS.ErrnoException).code ?? ''))
+          return context.skip('~user publication needs a writable real home directory');
+        throw error;
+      }
       roots.push(directory);
       remote = join(directory, 'push.git');
       await f.git('init', '--bare', remote);
