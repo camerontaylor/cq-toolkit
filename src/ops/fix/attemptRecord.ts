@@ -67,19 +67,22 @@ function capSanitized(text: string): string {
 }
 
 /**
- * Sanitize a structured identifier: redact environment secrets and cap it.
+ * Sanitize a structured identifier: redact environment secrets and URLs, then cap it.
  * Identifier fields skip credential-prefix stripping because an `@`-versioned
  * handle (for example a Vertex model id) is identity, not the free-text
  * `user@host` shape {@link sanitizeObservation} fails closed on.
  */
 function sanitizeIdentifier(text: string): string {
-  return capSanitized(redactEnvSecrets(text));
+  return capSanitized(redactUrlUserinfo(redactEnvSecrets(text)));
 }
 
 /**
  * Recursively sanitize a persisted observation: redact environment secrets,
  * strip credential URL/SCP prefixes, then redact again so a secret the
- * stripping mangled cannot survive as a partial value; the result is capped at
+ * stripping mangled cannot survive as a partial value. The strict stripper
+ * deliberately treats a path at-sign as credential-like too (`https://h/a@b`
+ * becomes `https://b`); observations prefer over-redaction to missed secrets.
+ * The result is capped at
  * {@link MAX_SANITIZED_CHARS} per string. Sanitized objects and arrays use
  * null prototypes so `__proto__`-style keys pass through as data. Non-JSON
  * values are outside the observation contract and pass through.

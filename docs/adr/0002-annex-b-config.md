@@ -249,7 +249,7 @@ through an unredacted name.
 - `CQ_RUN_ENV_PASSTHROUGH` may not name any `CQ_*`, any secret-suffixed name, or any credential-shaped name.
   Credential-shaped names are the set the subprocess allowlist already excludes by design (`AWS_*`, `NPM_TOKEN`,
   `SSH_AUTH_SOCK`, `GOOGLE_APPLICATION_CREDENTIALS`, `NODE_OPTIONS`, `NODE_PATH`;
-  see [src/shared/proc.ts](../../src/shared/proc.ts)). A `*_URL` name is allowed, but a value that is not a clean URL (any `@`, whitespace, backslash, or credentials) is refused. A worker can
+  see [src/shared/proc.ts](../../src/shared/proc.ts)). A `*_URL` name is allowed, but a value that is not a clean URL (raw `@` or encoded `%40`, whitespace, backslash, or credentials) is refused. Non-`*_URL` values containing `://` are refused on raw `@` or encoded `%40` (case-insensitive). A worker can
   exfiltrate whatever it can read (D14). The deny set is registry data, drift-tested against that file's list.
 - `CQ_DRIVER_ACP_ENV_NAMES` may name secret-suffixed vendor keys. That is its purpose (the acp child is the model
   harness). It may not name `CQ_*`.

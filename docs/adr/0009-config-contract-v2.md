@@ -47,7 +47,7 @@ flag in the registry (`src/config/env-registry.ts`) is authoritative for which k
 `src/config/secret.ts`, matched case-insensitively by `isSecretEnvName`, and the registry derives each entry's
 `secret` flag from it. `_URL` is NOT a secret suffix (owner ruling 2026-10-11, re-confirmed 2026-11-09; post-acceptance
 note N21). Vendor `*_BASE_URL` names (for example `ANTHROPIC_BASE_URL`) are non-secret: their values are shown and
-recorded in provenance, always through the one shared URL redactor (`stripCredentialText`, `src/shared/urlRedact.ts`),
+recorded in provenance, always through the shared URL module (`showUrl` and `redactUrlUserinfo`, `src/shared/urlRedact.ts`),
 which strips userinfo, query and fragment. There are three display forms, all produced by `src/shared/urlRedact.ts`:
 
 - **Structured value** (a config value: `cq config` text and `--json`, v3 provenance, the env snapshot): if the value
@@ -57,7 +57,9 @@ which strips userinfo, query and fragment. There are three display forms, all pr
 - **Free text** (persisted error text, config diagnostics, attempt records; `redactUrlUserinfo`): every URL authority
   the scanner finds has its userinfo replaced by `[redacted]@` and its query and fragment dropped and marked
   (`https://u:p@host/x?t=1` becomes `https://[redacted]@host/x?[redacted]`). The path, other text, bare `name@host`
-  prose and package specs are untouched. The scanner is linear.
+  prose and package specs are untouched. The scanner is linear. Attempt observations and parser error details additionally apply the strict
+  `stripCredentialText` pass: it strips bare credential-like prefixes and deliberately over-matches path at-signs
+  (`https://host/path@seg` becomes `https://seg`) to fail closed on credential-shaped evidence.
 - **A known env value inside free text:** when the exact value of a `*_URL` environment variable appears in text, it is
   replaced by its structured form (`showUrl`), then the free-text pass runs over the result.
 
@@ -95,8 +97,9 @@ passable by name, but its VALUE must pass a fail-closed acceptance rule on every
 value (the operator key, the launcher env, `buildChildEnv`, a manifest's declared names, trusted code and a driver's
 `envAllowlist`): it contains no `@` anywhere (raw or `%40`, either case), no whitespace and no backslash, and the whole
 value parses with WHATWG `new URL()` with an empty username and password. Anything else is refused. An `@` in a path is
-rare enough in env URLs to refuse. A non-`*_URL` variable is screened only when its value has a `://` separator, and is
-then refused on any `@`. The refusal names the variable, never the value. Not screened, by design, because they are
+rare enough in env URLs to refuse. Hostless values such as `file:///tmp`, `mailto:foo` and `data:...` may satisfy
+this acceptance rule, but their structured display is intentionally `[redacted-url]` because there is no host to show. A non-`*_URL` variable is screened only when its value has a `://` separator, and is
+then refused on any raw `@` or encoded `%40` (case-insensitive). The refusal names the variable, never the value. Not screened, by design, because they are
 trusted code-owned inputs: the proxy variables of the default child allowlist (for example `HTTPS_PROXY`, which may
 legitimately carry proxy credentials) and `SpawnOptions.env` overrides (per-route endpoint and auth values composed by
 the driver).

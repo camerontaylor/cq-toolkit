@@ -1,10 +1,7 @@
-// The ONE URL-value redactor. Every place that shows or records a URL-valued
-// config/env value (cq config text and --json, v3 provenance, diagnostics,
-// attempt records, persisted error text) calls `stripCredentialText`; there is
-// no second implementation (test/config/url-redactor.test.ts scans for it).
-// It is a linear, ReDoS-safe procedural scan (no backtracking regex over
-// attacker-controlled text). `urlValueHasUserinfo` is the matching detector
-// used to REFUSE (not redact) a credential-bearing URL in passthrough.
+// Shared URL handling: showUrl for structured values, redactUrlUserinfo for
+// free-text display, stripCredentialText for strict persisted observations,
+// and urlValueRefused for fail-closed child-environment acceptance. All URL
+// scanning stays in this module (test/config/url-redactor.test.ts pins it).
 
 /** An authority start found in a whitespace-free run: where its scheme begins and where its authority does. */
 interface SchemeHit {
@@ -112,7 +109,34 @@ export function redactUrlUserinfo(text: string): string {
       const authorityAndPath = token.slice(0, q);
       const shown = at < 0 ? authorityAndPath : `[redacted]${authorityAndPath.slice(at)}`;
       out.push(run.slice(cursor, hit.authority));
-      out.push(q < token.length ? `${shown}${token[q]}[redacted]` : shown);
+      let queryEnd = token.length;
+      if (q < token.length) {
+        const opener = run[hit.start - 1];
+        const closer =
+          opener === '"' || opener === "'"
+            ? opener
+            : opener === '('
+              ? ')'
+              : opener === '<'
+                ? '>'
+                : opener === '['
+                  ? ']'
+                  : '';
+        for (let j = q + 1; closer !== '' && j < token.length; j++) {
+          if (token[j] !== closer) continue;
+          let backslashes = 0;
+          if (closer === '"' || closer === "'") {
+            for (let b = j - 1; b >= 0 && token[b] === '\\'; b--) backslashes++;
+          }
+          if (backslashes % 2 === 0) {
+            queryEnd = j;
+            break;
+          }
+        }
+        // A final comma or period belongs to the surrounding prose.
+        while (queryEnd > q + 1 && ',.'.includes(token[queryEnd - 1] ?? '')) queryEnd--;
+      }
+      out.push(q < token.length ? `${shown}${token[q]}[redacted]${token.slice(queryEnd)}` : shown);
       cursor = limit;
     }
     out.push(run.slice(cursor));

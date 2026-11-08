@@ -33,6 +33,10 @@ const ADR_STOP_TABLE: ReadonlyArray<readonly [string, string]> = [
 ];
 
 describe('sanitizeObservation', () => {
+  it('pins the strict observation over-match for an at-sign in a URL path', () => {
+    expect(sanitizeObservation('https://host/path@seg')).toBe('https://seg');
+  });
+
   it('T12 round-trip', () => {
     process.env.FAKE_TEST_API_KEY = 'sup3rs3cretvalue';
     try {
@@ -537,5 +541,20 @@ describe('finishAttempt', () => {
     expect(record.requestedModel).toEqual('claude-3-5-sonnet-v2@20241022');
     expect(record.servedModel).toEqual('claude-3-5-sonnet-v2@20241023');
     expect(record.priceTableRevision).toEqual('rev@7');
+  });
+
+  it('redacts URL-shaped attempt identifiers without relying on env values', () => {
+    const value = 'https://u:IdentifierCanary@host/x?token=IdentifierCanary';
+    const record = finishAttempt({
+      ...base,
+      completed: true,
+      invocation: value,
+      requestedModel: value,
+      servedModel: value,
+    });
+    for (const shown of [record.invocation, record.requestedModel, record.servedModel]) {
+      expect(shown).toBe('https://[redacted]@host/x?[redacted]');
+      expect(shown).not.toContain('IdentifierCanary');
+    }
   });
 });

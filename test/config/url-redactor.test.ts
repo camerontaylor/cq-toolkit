@@ -308,7 +308,9 @@ describe('exactly one redactor implementation', () => {
   });
 
   test('the free-text userinfo marker is produced only by the shared module', () => {
-    const users = files.filter((f) => /\[redacted\]\$\{|\[redacted\]@/.test(text.get(f) ?? ''));
+    const users = files.filter((f) =>
+      /\[redacted\]\$\{|\[redacted\]@|\?\[redacted\]|#\[redacted\]/.test(text.get(f) ?? ''),
+    );
     expect(users.map(rel)).toEqual(['/shared/urlRedact.ts']);
   });
 
@@ -399,6 +401,18 @@ describe('redactUrlUserinfo (cases from PR #1235)', () => {
     expect(boundedErrorText(`GET https://u:p@api.example/v1?token=${tok}#f failed`)).toBe(
       'GET https://[redacted]@api.example/v1?[redacted] failed',
     );
+  });
+
+  test.each([
+    ['see "https://host/path?q=TOKEN" now', 'see "https://host/path?[redacted]" now'],
+    ["see 'https://host/path#TOKEN' now", "see 'https://host/path#[redacted]' now"],
+    ['(https://host/path?q=TOKEN)', '(https://host/path?[redacted])'],
+    ['<https://host/path?q=TOKEN>', '<https://host/path?[redacted]>'],
+    ['[https://host/path?q=TOKEN]', '[https://host/path?[redacted]]'],
+    ['https://host/path?q=TOKEN, next', 'https://host/path?[redacted], next'],
+    ['https://host/path#TOKEN. Next', 'https://host/path#[redacted]. Next'],
+  ])('preserves prose delimiters around %s', (input, expected) => {
+    expect(redactUrlUserinfo(input)).toBe(expected);
   });
 
   test('redacts multiple credential-bearing URLs before truncation', () => {
