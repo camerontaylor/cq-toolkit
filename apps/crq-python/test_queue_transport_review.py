@@ -327,6 +327,27 @@ class ReviewTransportTests(SnapshotTransportFixture, unittest.TestCase):
         commit_text = author_snapshot.git(self.repo, "cat-file", "commit", self.head).decode()
         self.assertIn(commit_text, scan.call_args.args[0])
 
+    def test_scanner_tool_error_refuses_as_unavailable_not_as_secret(self):
+        # A gitleaks that cannot run (e.g. an unresolvable mise shim on the forced-command
+        # PATH) must still fail closed, but must not be reported as a secret finding.
+        failed = (False, {"denylist_hits": [], "gitleaks": "exit 1",
+                          "gitleaks_hits": [{"rule": "gitleaks-error", "diff_line": None}]})
+        with mock.patch.object(self.runner, "secret_scan_diff", return_value=failed):
+            with self.assertRaisesRegex(author_snapshot.AuthorRefused, "scanner unavailable") as caught:
+                self.call_review(self.review)
+        self.assertNotIn("scan refused", str(caught.exception))
+        self.assertEqual(self.saved["items"], [])
+        self.assertEqual(author_snapshot.git(self.destination, "for-each-ref", "refs/crq/"), b"")
+
+    def test_gitleaks_finding_still_refuses_as_secret(self):
+        found = (False, {"denylist_hits": [], "gitleaks": "exit 0",
+                         "gitleaks_hits": [{"rule": "generic-api-key", "diff_line": 3},
+                                           {"rule": "gitleaks-error", "diff_line": None}]})
+        with mock.patch.object(self.runner, "secret_scan_diff", return_value=found):
+            with self.assertRaisesRegex(author_snapshot.AuthorRefused, "snapshot secret scan refused"):
+                self.call_review(self.review)
+        self.assertEqual(self.saved["items"], [])
+
     def test_live_pathless_secret_rule_refuses_original_commit_message(self):
         ref = self.seed_live_denylist()
         self.runner.denylist_rules = crq.denylist_rules

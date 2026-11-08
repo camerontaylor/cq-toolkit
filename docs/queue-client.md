@@ -134,7 +134,13 @@ calling principal:
    Do not run the dispatcher with `python3 -I`: it imports its sibling transport
    modules. Never accept these variables from the client (`PermitUserEnvironment`
    stays off). Do not add `CRQ_AUTHOR_*` settings to this queue identity.
-   `PATH` must resolve `git` and `gh`; authenticate `gh` as the queue account.
+   `PATH` must resolve `git`, `gh` and `gitleaks`; authenticate `gh` as the queue account.
+   review-v1 runs the runner's snapshot secret scan (including gitleaks) inside
+   this forced command, so a `gitleaks` that cannot run refuses every
+   unpublished-commit submission with "snapshot secret scanner unavailable".
+   Check it with the forced command's exact `PATH` under `env -i`, not from a
+   login shell. A mise shim with no global version only works when a real binary
+   follows it on `PATH` (e.g. `~/.local/bin`, as the crq systemd units include).
 
 3. Create the policy file (mode 0600) disabled, owned by the queue-state account
    that runs the dispatcher. Verify that account can read it before enabling it.
