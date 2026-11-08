@@ -267,9 +267,11 @@ describe('runSelfMergePrs — real run', () => {
       {
         ...baseCfg,
         journalRoot: tmpJournalRoot(),
+        // The reviewer trust set resolves from config only.
+        cqEnv: readCqEnv({ CQ_MERGE_TRUSTED_ASSOCIATIONS: 'OWNER' }),
         classifyConfig: {
           ...defaultClassifyPrConfig,
-          trustedAssociations: [],
+          trustedAssociations: ['OWNER'],
           automationLogin: 'cq-automation[bot]',
         },
       },
@@ -277,7 +279,7 @@ describe('runSelfMergePrs — real run', () => {
     expect(result).toMatchObject({ outcome: cannedOutcome });
     expect(seen[0]?.config).toEqual({
       settleWindowMs: defaultClassifyPrConfig.settleWindowMs,
-      trustedAssociations: [],
+      trustedAssociations: ['OWNER'],
       automationLogin: 'cq-automation[bot]',
     });
   });

@@ -63,10 +63,15 @@ describe('trust flag enforcement', () => {
       id: 'p',
       jobs: [{ id: 'j', op: 'merge.runPrs', input: {}, optIn: { sandbox: 'off' } }],
     };
-    expect(PlanSchema.safeParse(plan).success).toBe(false);
+    const unrecognised = (r: {
+      success: boolean;
+      error?: { issues: readonly unknown[] };
+    }): boolean =>
+      JSON.stringify(r.error?.issues ?? []).includes('unrecognized_keys') &&
+      JSON.stringify(r.error?.issues ?? []).includes('optIn');
+    expect(unrecognised(PlanSchema.safeParse(plan))).toBe(true);
     for (const entry of mergeRegistry) {
-      const r = entry.inputSchema.safeParse({ optIn: { sandbox: 'off' } });
-      expect(r.success).toBe(false);
+      expect(unrecognised(entry.inputSchema.safeParse({ optIn: { sandbox: 'off' } }))).toBe(true);
     }
   });
 

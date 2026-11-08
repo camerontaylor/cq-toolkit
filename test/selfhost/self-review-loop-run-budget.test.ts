@@ -166,6 +166,28 @@ describe('runSelfReviewLoop — real run', () => {
     expect(summary.results.map((row) => row.pr)).toEqual([8]);
   });
 
+  test('an invalid CQ_MERGE_PROTECTED_BRANCH snapshot fails config before any gh call', async () => {
+    const calls: RecordedCall[] = [];
+    const gh = fakeGh([pullRow(7)]);
+    let listed = 0;
+    const counting = ((...args: Parameters<typeof gh>) => {
+      listed += 1;
+      return gh(...args);
+    }) as typeof gh;
+    const err = await runSelfReviewLoop(
+      baseDeps(
+        counting,
+        fakeLoop(calls, async (pr) => fakeOutcome(pr)),
+      ),
+      {
+        ...baseCfg({ journalRoot: tempJournalRoot() }),
+        cqEnv: readCqEnv({ CQ_MERGE_PROTECTED_BRANCH: 'release branch' }),
+      },
+    ).catch((e: unknown) => e);
+    expect((err as { dispatchClass?: string }).dispatchClass).toBe('config');
+    expect(listed).toBe(0);
+  });
+
   test('the bounded prune keeps the newest 5 audit dirs and never touches the dispatch logs', async () => {
     const calls: RecordedCall[] = [];
     const journalRoot = mkdtempSync(join(tmpdir(), 'self-review-loop-'));
