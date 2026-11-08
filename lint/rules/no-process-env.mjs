@@ -13,7 +13,8 @@
 // destructuring `{ env } = process` in declarations, assignments and
 // parameters, `import { env } from 'node:process'`, and `.env` on a default
 // or namespace import of `node:process` / `process`, a local alias
-// (`const p = process`), and TS assertions around any of these.
+// (`const p = process`), and TS assertions around any of these. Not caught: an
+// assignment alias (`let p; p = process`).
 
 const WRAPPERS = new Set([
   'TSAsExpression',

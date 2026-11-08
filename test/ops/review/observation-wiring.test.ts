@@ -40,6 +40,13 @@ import type { Finding, FindingsRecord } from '../../../src/ops/review/findings.j
 import { makeTestRepo } from '../dev/repo.js';
 import type { ReviewRunInput, ReviewRunResult } from '../../../src/ops/review/run.js';
 import { makeGitleaksFixture } from '../../helpers/gitleaks-fixture.js';
+import { readFileSync } from 'node:fs';
+
+const packageVersion = (
+  JSON.parse(readFileSync(new URL('../../../package.json', import.meta.url), 'utf8')) as {
+    version: string;
+  }
+).version;
 
 let scanner: Awaited<ReturnType<typeof makeGitleaksFixture>>;
 beforeEach(async () => {
@@ -378,8 +385,7 @@ describe('T31 round-trip through the address composition', () => {
       expect(recorded?.env['CQ_AUTOMATION_TOKEN']).toBe('set');
       expect(recorded?.sources['CQ_SANDBOX']).toBe('env');
       expect(recorded?.env['CQ_SELFHOST_DRIVER']).toBe('zai/glm-5');
-      expect(header.payload.provenance.cqVersion).not.toBe('');
-      expect(header.payload.provenance.cqVersion.trim()).toBe(header.payload.provenance.cqVersion);
+      expect(header.payload.provenance.cqVersion).toBe(packageVersion);
       expect(report?.observation?.status).not.toBe('indeterminate');
       expect(JSON.stringify(stream.events)).not.toContain(fakeToken);
       expect(JSON.stringify(report)).not.toContain(fakeToken);

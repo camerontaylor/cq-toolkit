@@ -48,6 +48,10 @@ describe('provenanceConfig', () => {
     expect(short).toBe('gh');
   });
 
+  test('an errored snapshot is refused, never recorded as absent', () => {
+    expect(() => provenanceConfig(readCqEnv({ CQ_SANDBOX: 'of' }))).toThrow(/CQ_SANDBOX/);
+  });
+
   test('an empty environment records nothing', () => {
     expect(provenanceConfig(readCqEnv({}))).toEqual({ env: {}, sources: {}, warnings: [] });
   });
@@ -115,12 +119,14 @@ describe('provenanceConfig is schema-valid for every registry entry', () => {
     const snapshot = readCqEnv({ CQ_SANDBOX: 'off' });
     const before = JSON.stringify(provenanceConfig(snapshot));
     const saved = process.env['ZAI_API_KEY'];
+    const savedSandbox = process.env['CQ_SANDBOX'];
     process.env['ZAI_API_KEY'] = fakeForeign;
     process.env['CQ_SANDBOX'] = 'required';
     try {
       expect(JSON.stringify(provenanceConfig(snapshot))).toBe(before);
     } finally {
-      delete process.env['CQ_SANDBOX'];
+      if (savedSandbox === undefined) delete process.env['CQ_SANDBOX'];
+      else process.env['CQ_SANDBOX'] = savedSandbox;
       if (saved === undefined) delete process.env['ZAI_API_KEY'];
       else process.env['ZAI_API_KEY'] = saved;
     }
@@ -162,6 +168,9 @@ describe('provenance schema config', () => {
 
   test('rejects unknown keys inside config and at the record', () => {
     expect(ProvenanceConfigSchema.safeParse({ ...config, extra: 1 }).success).toBe(false);
+    expect(ProvenanceConfigSchema.safeParse({ ...config, env: { CQ_SANDBOX: 1 } }).success).toBe(
+      false,
+    );
     expect(ProvenanceRecordSchema.safeParse({ ...base, config, extra: 1 }).success).toBe(false);
   });
 });
