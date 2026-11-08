@@ -146,6 +146,8 @@ def invoke(config, role, job, wt, directory):
     _log_invocation(directory, p.stdout, p.stderr)
     try:
         data = json.loads(p.stdout)
+        if not isinstance(data, dict):
+            raise ValueError('cq output must be an object')
     except ValueError:
         return {'stop': 'error', 'changed': False, 'summary': 'invalid cq output', 'commits': []}
     # The session link (item 2.3), written even on a non-ok verdict: the
@@ -154,6 +156,8 @@ def invoke(config, role, job, wt, directory):
     # one `<sessionId>.jsonl` per session this job's runner created. A
     # value-level sessionId (if a later runner returns one) wins.
     result = data.get('value') or data.get('result') or {}
+    if not isinstance(result, dict):
+        return {'stop': 'error', 'changed': False, 'summary': 'invalid cq output', 'commits': []}
     from crq_repair import atomic as _atomic
     try:  # best-effort: the session link never outranks the verdict
         stored = sorted(f.stem for f in sessions_dir.glob('*.jsonl')) if sessions_dir.is_dir() else []
@@ -208,4 +212,10 @@ def judge(config, role, job, wt, directory):
     _log_invocation(directory, p.stdout, p.stderr)
     if p.returncode:
         return {'stop': 'error', 'verdict': 'unsure', 'reason': 'cq read-only judge failed'}
-    return json.loads(p.stdout)
+    try:
+        result = json.loads(p.stdout)
+    except ValueError:
+        result = None
+    if not isinstance(result, dict):
+        return {'stop': 'error', 'verdict': 'unsure', 'reason': 'invalid cq read-only judge output'}
+    return result
