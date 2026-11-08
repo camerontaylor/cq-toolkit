@@ -94,6 +94,14 @@ export default {
     };
     const isProcessNode = (raw) => {
       const node = unwrap(raw);
+      // These expressions can return process on either path. For && only
+      // the right operand can be the result when the value is process (truthy).
+      if (node.type === 'LogicalExpression') {
+        return (node.operator !== '&&' && isProcessNode(node.left)) || isProcessNode(node.right);
+      }
+      if (node.type === 'ConditionalExpression') {
+        return isProcessNode(node.consequent) || isProcessNode(node.alternate);
+      }
       if (node.type !== 'Identifier') return isProcess(node);
       const binding = bindingOf(node);
       if (!binding || binding.defs.length === 0) return isProcess(node);
@@ -170,7 +178,11 @@ export default {
         checkPattern(node.id, node.init, node);
       },
       AssignmentExpression(node) {
-        if (node.operator === '=' && node.left.type === 'Identifier' && isProcessNode(node.right)) {
+        if (
+          node.left.type === 'Identifier' &&
+          ((['=', '||=', '??=', '&&='].includes(node.operator) && isProcessNode(node.right)) ||
+            (['||=', '??='].includes(node.operator) && isProcessNode(node.left)))
+        ) {
           addAlias(node.left);
         }
         checkPattern(node.left, node.right, node);

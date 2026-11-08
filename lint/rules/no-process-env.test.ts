@@ -20,6 +20,10 @@ const ok = (code: string) => ({ code, filename: 'src/ops/x.ts' });
 
 ruleTester.run('no-process-env', rule, {
   valid: [
+    ok('let p = process; p &&= {}; p.env;'),
+    ok('let p = process; p = p && other; p.env;'),
+    ok('let p = process; p ||= {}; p = {}; p.env;'),
+    ok('let p = process; p = cond ? other : {}; p.env;'),
     ok('let p = process; if (useFallback) { p = {}; p.env; }'),
     ok('let p = process; if (useFallback) { p = {}; } p = {}; p.env;'),
     ok('let p; function reset() { p = process; } p.env;'),
@@ -49,6 +53,17 @@ ruleTester.run('no-process-env', rule, {
     ok('let a; ({ argv: a } = process);'),
   ],
   invalid: [
+    bad('let p = process; p ||= {}; p.env;'),
+    bad('let p = process; p ??= {}; p.env;'),
+    bad('let p = process; p ||= process; p.env;'),
+    bad('let p = process; p ??= process; p.env;'),
+    bad('let p = process; p &&= process; p.env;'),
+    bad('let p = process; p = p || other; p.env;'),
+    bad('let p = process; p = p ?? other; p.env;'),
+    bad('let p = process; p = cond ? p : other; p.env;'),
+    bad('let p = process; p = other || p; p.env;'),
+    bad('const p = cond ? process : other; p.env;'),
+    bad('const p = other && process; p.env;'),
     bad('let p = process; if (useFallback) { p = { env: {} }; } p.env;'),
     bad('let p = process; useFallback && (p = {}); p.env;'),
     bad('let p = process; useFallback ? p = {} : null; p.env;'),
