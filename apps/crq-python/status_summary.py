@@ -204,7 +204,10 @@ def summarize(status, queue, heartbeat, config, events, now):
              for entry in config.get("repos", [])]
     def aging_deadline(item):
         if item.get("kind") == "local-review" and (item.get("generation", 1) > 1 or item.get("repeat_requested") is True) and item.get("created_at"):
-            return timestamp(item["created_at"]) + config.get("local_review_aging_minutes", 60) * 60
+            try:
+                return timestamp(item["created_at"]) + config.get("local_review_aging_minutes", 60) * 60
+            except (ValueError, TypeError, AttributeError):
+                return None
         return None
     def pending_key(item):
         rank = {"open": 0, "recent_merge": 2, "backfill": 3, "other": 4}[category(item)]

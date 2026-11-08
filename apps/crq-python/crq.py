@@ -1986,7 +1986,7 @@ def launch(q: Dict[str, Any], item: Dict[str, Any], plan: Dict[str, Any]) -> str
         "head": plan["head"],
     })
     item["state"] = "reviewing"
-    item["run"] = {"run_id": run_id, "pid": None, "started_at": meta["started_at"], "band": launch_band(item), "launch_pending": True}
+    item["run"] = {"run_id": run_id, "pid": None, "started_at": meta["started_at"], "band": meta["band"], "launch_pending": True}
     item["wait_reason"] = None
     q.setdefault("starts", []).append(meta["started_at"])
     # Reserve identity/quota BEFORE any child or remote status mutation. A
@@ -2004,7 +2004,7 @@ def launch(q: Dict[str, Any], item: Dict[str, Any], plan: Dict[str, Any]) -> str
         # silently returns to pending after a failed spawn.
         if item["kind"] not in (author_quota.AUTHOR_KIND, local_review_runtime.KIND):
             raise
-        item["run"] = {"run_id": run_id, "pid": None, "started_at": meta["started_at"], "band": launch_band(item),
+        item["run"] = {"run_id": run_id, "pid": None, "started_at": meta["started_at"], "band": meta["band"],
                        "launch_pending": False, "spawn_failed_at": iso(), "error": str(exc)[:200]}
         item["state"] = "failed" if item["kind"] == local_review_runtime.KIND else author_quota.AUTHOR_FAILED
         item["last_error"] = f"{item['kind']} spawn failed (no retry): {exc}"[:300]
@@ -2685,7 +2685,10 @@ def rank(item: Dict[str, Any]) -> int:
         if item.get("generation", 1) == 1 and item.get("repeat_requested") is not True:
             return 0
         created = item.get("created_at")
-        aged = created and (now() - parse_iso(created)).total_seconds() >= CONFIG.get("local_review_aging_minutes", 60) * 60
+        try:
+            aged = created and (now() - parse_iso(created)).total_seconds() >= CONFIG.get("local_review_aging_minutes", 60) * 60
+        except (ValueError, TypeError, AttributeError):
+            aged = False
         return 0 if aged else 1
     repo_rank = repo_registry.rank_for(item, REPO, REPOS)
     if repo_rank is not None:

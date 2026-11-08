@@ -40,6 +40,14 @@ class SummaryTest(unittest.TestCase):
             self.assertEqual(repeat["aging_deadline"], 3600)
             self.assertEqual(repeat["approximate_position"], 2 if clock < 3600 else 1)
 
+    def test_invalid_local_review_age_does_not_break_preview(self):
+        queue = {"items": [dict(kind="local-review", generation=2, created_at="invalid",
+            state="pending", order=1), dict(kind="local-review", generation=1, state="pending", order=2)]}
+        result = adapter.summarize({"generated_at": "1970-01-01T01:00:00Z"}, queue, {},
+            dict(repo="owner/repo", max_starts_per_hour=8), [], 3600)
+        self.assertEqual([i["generation"] for i in result["pending_items"]], [1, 2])
+        self.assertIsNone(result["pending_items"][1]["aging_deadline"])
+
     def test_preview_prioritizes_foreign_open_pr_before_repository_rank(self):
         queue = {"items": [
             {"id": "foreign", "repo": "owner/foreign", "kind": "open", "state": "pending", "order": 0},

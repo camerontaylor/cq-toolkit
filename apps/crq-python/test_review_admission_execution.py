@@ -417,7 +417,13 @@ class ExecutionTests(SnapshotGitFixture, unittest.TestCase):
                 self.assertIn("--committed", meta["cmd"])
                 self.assertEqual(meta["cmd"][-2:], ["--base-commit", self.base])
                 self.assertTrue(any(q["items"][-1].get("run", {}).get("launch_pending") for q in saved if q["items"][-1].get("run")))
-                item.update(state="done", run=None, scope_adequate=True, receipt_id="f" * 64)
+                reserved_band = item["run"]["band"]
+                (self.runs / run_id / "review.ndjson").write_text(self.raw)
+                with mock.patch.object(backfill_runtime, "settings", return_value=None):
+                    runtime.complete(self.c, self.q, item, self.runs / run_id, run_id,
+                        self.cls, "2026-11-08T00:01:00Z", 0)
+                self.assertIsNone(item["run"])
+                self.assertEqual(item["attempts"][-1]["band"], reserved_band)
             self.assertEqual(processes.Popen.call_count, 3)
             self.assertEqual(self.q["items"][-1]["generation"], 3)
             pr = self.pr()
@@ -477,6 +483,20 @@ class SchedulingTests(unittest.TestCase):
             self.assertEqual(crq.rank(repeat), 1)
             self.assertEqual(crq.rank(dict(first, repeat_requested=True)), 1)
             self.assertEqual(crq.rank(dict(kind="open", repo="other/repo")), 0)
+
+    def test_foreign_local_reviews_bypass_repository_rank_and_invalid_age(self):
+        clock = dt.datetime(2026, 11, 8, 1, tzinfo=dt.timezone.utc)
+        repos = [dict(repo="other/repo", rank_tier=3)]
+        with mock.patch.object(crq, "REPOS", repos), mock.patch.object(crq, "now", return_value=clock):
+            for generation, explicit, created, expected in (
+                    (1, False, None, 0), (2, False, "2026-11-08T00:00:01Z", 1),
+                    (1, True, "2026-11-08T00:00:01Z", 1), (2, False, "2026-11-08T00:00:00Z", 0),
+                    (2, False, "invalid", 1)):
+                with self.subTest(generation=generation, explicit=explicit, created=created):
+                    item = dict(kind="local-review", repo="other/repo", generation=generation,
+                        repeat_requested=explicit, created_at=created)
+                    self.assertEqual(crq.repo_registry.rank_for(item, crq.REPO, repos), 3)
+                    self.assertEqual(crq.rank(item), expected)
 
     def test_running_restart_reverse_harvest_and_legacy(self):
         a = dict(run_id="a-20261108T000000Z", band="interactive", started_at="2026-11-08T00:00:00Z")
