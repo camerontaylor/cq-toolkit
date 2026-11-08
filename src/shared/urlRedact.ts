@@ -251,11 +251,9 @@ export function isUrlEnvName(name: string): boolean {
  * into a child. The value passes only if ALL hold: it has no `@` anywhere (raw
  * or `%40`, either case), no whitespace and no backslash, and the whole value
  * parses with WHATWG `new URL()` with an empty username and password. Anything
- * else is refused. (An `@` in a path is rare enough in env URLs to refuse.) A
- * blank value carries nothing and passes.
+ * else is refused. (An `@` in a path is rare enough in env URLs to refuse.)
  */
 function urlValueAcceptable(value: string): boolean {
-  if (value.trim() === '') return true;
   if (/[@\s\\]/.test(value) || /%40/i.test(value)) return false;
   try {
     const parsed = new URL(value);

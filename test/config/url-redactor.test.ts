@@ -45,6 +45,9 @@ describe('_URL is not a secret suffix', () => {
 });
 
 const refusedValues = [
+  '',
+  ' ',
+  '\t\n',
   withCreds,
   'https://user@host.example',
   String.raw`https:\/\/u:${tok}@host/db`,
@@ -140,7 +143,6 @@ describe('fail-closed URL acceptance for copied values', () => {
     'https://api.example.test',
     'https://api.example.test/v1?x=1#f',
     'postgres://db:5432/app',
-    '',
   ])('%j is accepted for a *_URL variable', (value) => {
     expect(urlValueRefused('DATABASE_URL', value)).toBe(false);
   });
@@ -168,7 +170,7 @@ describe('passthrough of URL variables', () => {
     expect(parsePassthrough('DATABASE_URL')).toEqual(['DATABASE_URL']);
   });
 
-  test.each(refusedValues.filter((value) => value.trim() !== ''))(
+  test.each(refusedValues)(
     'a credential-bearing or unacceptable value (%j) is refused on every origin and path, naming only the variable',
     (value) => {
       const parent = { ANTHROPIC_BASE_URL: value, DATABASE_URL: value };
