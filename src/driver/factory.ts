@@ -283,6 +283,13 @@ function bindingFor(
   return hasOwn(row, '*') ? row['*'] : undefined;
 }
 
+/** Decoded-JSON shape only: prototype Object.prototype or null (not Map, Date, Set, a class instance). */
+function isPlainObject(value: unknown): boolean {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const proto: unknown = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+}
+
 /** Every malformed row and every non-lane value, across the WHOLE table. */
 function bindingProblems(bindings: DriverFactoryConfig['bindings']): string[] {
   const problems: string[] = [];
@@ -290,11 +297,15 @@ function bindingProblems(bindings: DriverFactoryConfig['bindings']): string[] {
   // absent (undefined) table means "no bindings"; null, 42, true, 'x' and an
   // array are config errors, not absence.
   const table: unknown = bindings;
-  if (
-    table !== undefined &&
-    (typeof table !== 'object' || table === null || Array.isArray(table))
-  ) {
-    const got = table === null ? 'null' : Array.isArray(table) ? 'an array' : typeof table;
+  if (table !== undefined && !isPlainObject(table)) {
+    const got =
+      table === null
+        ? 'null'
+        : Array.isArray(table)
+          ? 'an array'
+          : typeof table === 'object'
+            ? 'a non-plain object'
+            : typeof table;
     return [`bindings must be an object mapping role → provider → lane (got ${got})`];
   }
   for (const [role, byProvider] of Object.entries(bindings ?? {})) {

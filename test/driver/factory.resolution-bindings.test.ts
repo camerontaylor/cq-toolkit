@@ -9,20 +9,35 @@ import type { DriverFactoryConfig } from '../../src/driver/factory.js';
 import { probe } from './factory.helpers.js';
 
 describe('driver factory — bindings container validation', () => {
-  test.each([[42], [true], ['x'], [[]], [null]])(
-    'bindings = %j is a config error at construction',
-    (bad) => {
-      let err: unknown;
-      try {
-        createDriverFactory({ bindings: bad } as unknown as DriverFactoryConfig);
-      } catch (e) {
-        err = e;
-      }
-      expect(err).toBeInstanceOf(DispatchError);
-      expect(errorClassOf(err)).toBe('config');
-      expect((err as Error).message).toMatch(/bindings must be an object/);
-    },
-  );
+  test.each([
+    [42],
+    [true],
+    ['x'],
+    [[]],
+    [null],
+    [new Map()],
+    [new Date(0)],
+    [new Set()],
+    [new (class Table {})()],
+  ])('bindings = %j is a config error at construction', (bad) => {
+    let err: unknown;
+    try {
+      createDriverFactory({ bindings: bad } as unknown as DriverFactoryConfig);
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(DispatchError);
+    expect(errorClassOf(err)).toBe('config');
+    expect((err as Error).message).toMatch(/bindings must be an object/);
+  });
+
+  test('a null-prototype table is plain and still constructs', () => {
+    expect(() =>
+      createDriverFactory({
+        bindings: Object.create(null) as NonNullable<DriverFactoryConfig['bindings']>,
+      }),
+    ).not.toThrow();
+  });
 
   test('undefined (absent) and a valid object still construct', () => {
     expect(() => createDriverFactory({})).not.toThrow();

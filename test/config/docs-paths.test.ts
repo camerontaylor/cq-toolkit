@@ -11,7 +11,8 @@ const srcPaths = (text: string): string[] =>
 test('ADR-0009 and note N24 name only source files that exist', () => {
   const adr = readFileSync(join(root, 'docs/adr/0009-config-contract-v2.md'), 'utf8');
   const readme = readFileSync(join(root, 'docs/adr/README.md'), 'utf8');
-  const n24 = readme.slice(readme.indexOf('### N24'), readme.indexOf('### N25'));
+  const end = readme.indexOf('### N25');
+  const n24 = readme.slice(readme.indexOf('### N24'), end === -1 ? undefined : end);
   const paths = [...srcPaths(adr), ...srcPaths(n24)];
   expect(paths).toContain('src/config/env-registry.ts');
   expect(paths.filter((p) => !existsSync(join(root, p)))).toEqual([]);
