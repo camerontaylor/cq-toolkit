@@ -23,7 +23,15 @@ under `.cq/queue-evidence/results/<receipt_id>/`. Inspect `reviewOutcome` and
 credit. Unsupported deployments return `state=unsupported`.
 
 When `PASEO_AGENT_ID` is present, submission captures it with the configured
-`CQ_REVIEW_NOTIFY_HOST` label (or null for the local daemon). An explicit
+`CQ_REVIEW_NOTIFY_HOST` host:port override. When unset or blank, the SDK reads
+`os.hostname()`, lowercases it, takes the part before the first dot, and appends
+`:6767` (Paseo's default daemon port). For example, `TRITON.example.invalid`
+becomes `triton:6767`. An unusable or unavailable hostname leaves the host null.
+Null means the runner's local daemon if explicitly allowlisted; the supported
+host:port-only deployment overlay cannot allow null, so it reports
+`notify.state=error, reason=unsupported-destination` while review submission
+still succeeds. Configure the override to route such callers to a reachable daemon.
+An explicit
 `notify={paseo_agent_id,paseo_host}` overrides that destination, including for a
 joiner. The runner's `notify.hosts` allowlist must contain each allowed label;
 the supported deployment overlay accepts host:port strings only. Invalid destinations report
