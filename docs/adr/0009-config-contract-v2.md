@@ -76,8 +76,16 @@ and the registry, `resolveSandboxConfig`, `buildChildEnv` and the launcher env a
 commas and/or whitespace. Annex B §B.5 stays in force: secret-suffixed names, the `AWS_*` family, `NPM_TOKEN`,
 `SSH_AUTH_SOCK`, `GOOGLE_APPLICATION_CREDENTIALS`, `DATABASE_URL`, `NODE_OPTIONS` and `NODE_PATH` are refused (and
 so is every `*_URL` name, via the secret-suffix rule, pending the owner's decision on that suffix), and
-so is every `CQ_*` name (a nested cq could read trust config from one). A harness manifest's declared `envNames` get the same credential refusal (not the `CQ_*` one). The refusal is a
+so is every `CQ_*` name (a nested cq could read trust config from one). The refusal is a
 config error that names the offending name, or the position of a malformed entry (never any part of the raw value).
+
+**Origin of env names.** Trusted code that sets a value in-process (the SDK `optIn` ruling above, a driver's
+`envAllowlist`) is a trusted origin; names from a manifest file, a plan, op input or the env/CLI are untrusted data.
+A harness manifest's `envNames` from a file get the credential refusal (not the `CQ_*` one); a name that trusted code
+passed to `buildManifest` (for example `SSH_AUTH_SOCK`) keeps working in-process, but a policy knob never does. The
+origin is not a manifest field: it is remembered against the object `buildManifest` returned (module-private, keyed by
+identity), so JSON, a clone or any input cannot claim it, and the strict manifest schema rejects an extra key. A
+manifest serialized to the MCP bin loses it and is fully checked there.
 
 **Inspection.** `cq config` prints each resolved key, its source layer, the warnings and the errors. It exits 2
 when the environment has errors (after printing the report), like every other subcommand. `cq config --strict`

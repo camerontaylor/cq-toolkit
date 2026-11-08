@@ -192,7 +192,7 @@ export async function buildManifest(inputs: ManifestInputs): Promise<HarnessMani
   if (!(await stat(workspace)).isDirectory()) {
     throw new Error(`harness manifest: workspace '${workspace}' is not a directory`);
   }
-  return HarnessManifestSchema.parse({
+  const manifest = HarnessManifestSchema.parse({
     v: 1,
     workspace,
     sandbox: inputs.sandbox,
@@ -209,7 +209,25 @@ export async function buildManifest(inputs: ManifestInputs): Promise<HarnessMani
       ]),
     ],
   });
+  // The caller's own code-level names are a TRUSTED origin (see below).
+  TRUSTED_ENV_NAMES.set(manifest, Object.freeze([...(inputs.envNames ?? [])]));
+  return manifest;
 }
+
+/**
+ * ORIGIN of manifest env names. `envNames` in the manifest is plain data: it
+ * is JSON on the MCP bin's argv and anyone can author it, so every name in it
+ * gets the full credential refusal when it arrives from a file. The names
+ * trusted CODE passed to `buildManifest` (a driver's `envAllowlist`, which may
+ * carry e.g. SSH_AUTH_SOCK) are remembered here against the manifest OBJECT
+ * identity. The map is module-private and keyed by identity, so there is no
+ * field a JSON manifest, a plan or op input could set: a parsed or cloned
+ * manifest is a new object and has no entry, and the strict schema rejects any
+ * extra key. Only `createHarnessSurface` on the very object `buildManifest`
+ * returned honours it (in-process transports); a manifest serialized to the
+ * MCP bin loses it and is fully checked there.
+ */
+const TRUSTED_ENV_NAMES = new WeakMap<object, readonly string[]>();
 
 // ---------------------------------------------------------------------------
 // Execution — the surface
@@ -264,11 +282,17 @@ export function toCallToolResult(outcome: ToolkitToolResult): McpCallToolResult 
  * silently smaller surface).
  */
 export function createHarnessSurface(input: HarnessManifest): HarnessSurface {
+  const trusted = TRUSTED_ENV_NAMES.get(input) ?? [];
   const manifest = HarnessManifestSchema.parse(input);
   // The manifest's declared envNames ride the SHARED run gate (src/sandbox):
   // they are still a default-deny allowlist, merged after the launcher scrub,
-  // and a policy knob name among them is refused there.
-  const gate: HarnessRunGate = { ...harnessRunGate(), declaredEnvNames: manifest.envNames };
+  // and a policy knob or credential-shaped name among them is refused there,
+  // except names trusted code supplied in-process (TRUSTED_ENV_NAMES).
+  const gate: HarnessRunGate = {
+    ...harnessRunGate(),
+    declaredEnvNames: manifest.envNames.filter((name) => !trusted.includes(name)),
+    trustedEnvNames: trusted,
+  };
   const built = buildTools(manifest.harness, manifest.workspace, manifest.sandbox, gate);
   const byName = new Map(built.map((tool) => [tool.name, tool] as const));
   // Normalise one-release aliases (`run` → `bash`) and de-duplicate: a

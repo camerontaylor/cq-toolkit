@@ -41,6 +41,7 @@ export function buildSandboxLauncherEnv(
   config: {
     envPassthrough: readonly string[];
     declaredEnvNames?: readonly string[] | undefined;
+    trustedEnvNames?: readonly string[] | undefined;
   },
 ): Record<string, string> {
   const out: Record<string, string> = {};
@@ -50,6 +51,7 @@ export function buildSandboxLauncherEnv(
   for (const [name, origin] of [
     ...config.envPassthrough.map((name) => [name, 'passthrough'] as const),
     ...(config.declaredEnvNames ?? []).map((name) => [name, 'declared'] as const),
+    ...(config.trustedEnvNames ?? []).map((name) => [name, 'trusted'] as const),
   ]) {
     if (!isEnvName(name)) {
       throw new Error(`sandbox: launcher env ${origin} name is not a valid env var name`);
@@ -59,7 +61,11 @@ export function buildSandboxLauncherEnv(
     }
     // A credential-shaped name (Annex B §B.5) never reaches a run child from
     // ANY origin: a manifest's declared names are plain data too.
-    const credential = credentialRefusal(name);
+    // The one exception is the TRUSTED origin: names set in-process by trusted
+    // code (a driver's `envAllowlist`), which Annex B and proc.ts let carry
+    // e.g. SSH_AUTH_SOCK. That origin is never reachable from JSON, a manifest
+    // file, a plan or op input (see harness/surface.ts).
+    const credential = origin === 'trusted' ? undefined : credentialRefusal(name);
     if (credential !== undefined) throw new Error(`sandbox: launcher env ${origin} ${credential}`);
     // The operator passthrough additionally refuses every CQ_* name, the same
     // check parsePassthrough applies at parse time.
@@ -88,12 +94,17 @@ export function buildSandboxLauncherEnv(
  *   - `declaredEnvNames` — extra names a harness MANIFEST declared for its run
  *     children (`HarnessManifest.envNames`, the pre-W1.11 default-deny
  *     allowlist on the MCP/subprocess surface). Merged after the launcher
- *     scrub; a policy knob name is still rejected rather than leaked.
+ *     scrub; a policy knob name is still rejected rather than leaked, and so
+ *     is a credential-shaped name (file-supplied names are untrusted data).
+ *   - `trustedEnvNames` — names trusted CODE declared in-process (a driver's
+ *     `envAllowlist`); exempt from the credential refusal only. Never set from
+ *     JSON, a manifest file, a plan or op input.
  */
 export interface HarnessRunGate {
   enabled: boolean;
   envPassthrough: readonly string[];
   declaredEnvNames?: readonly string[];
+  trustedEnvNames?: readonly string[];
   /** Stable, actionable text for a withheld gate; undefined when enabled. */
   configHint?: string;
 }
