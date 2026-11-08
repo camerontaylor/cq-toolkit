@@ -1,3 +1,4 @@
+import { checkoutWriterStdio, trackCheckoutWriter } from '../../../shared/checkoutWriterContext.js';
 import { spawn } from 'node:child_process';
 import { constants } from 'node:fs';
 import {
@@ -395,7 +396,7 @@ async function terminalGit(
       child = spawn(
         session.bin,
         [...GIT_HARDEN, ...overrides.flatMap((setting) => ['-c', setting]), ...args],
-        { cwd, env, shell: false, stdio: ['pipe', 'pipe', 'pipe'] },
+        { cwd, env, shell: false, stdio: checkoutWriterStdio(['pipe', 'pipe', 'pipe']) },
       );
     } catch (error) {
       clearTimeout(timer);
@@ -403,6 +404,7 @@ async function terminalGit(
       reject(error);
       return;
     }
+    trackCheckoutWriter(child);
     child.once('spawn', () => {
       spawned = true;
     });
