@@ -164,7 +164,9 @@ def complete(c, q, item, rdir, run_id, cls, ended_at, exit_code):
                 event_id=event_id, destination=copy.deepcopy(destination), state="pending", receipt_id=receipt_id))
     item.update(state="done" if adequate else "failed", scope_adequate=adequate,
                 receipt_id=receipt_id, run=None, publication_pending=True,
-                local_run_id=run_id, completed_at=ended_at, last_error=cls.get("message"))
+                local_run_id=run_id, completed_at=ended_at, last_error=cls.get("message"), wait_reason=None)
+    item.pop("not_before", None)
+    item.pop("reconcile_failures", None)
     if not any(a.get("run_id") == run_id for a in item.get("attempts", [])):
         item.setdefault("attempts", []).append(dict(run_id=run_id, outcome=cls["outcome"],
             counted=adequate, at=ended_at, receipt_id=receipt_id))

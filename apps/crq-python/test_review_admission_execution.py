@@ -61,7 +61,11 @@ class ExecutionTests(SnapshotGitFixture, unittest.TestCase):
         pr = self.pr()
         with self.assertRaisesRegex(crq.NotReady, "equivalent-local-review"):
             runtime.reconcile_pr(self.c, self.q, pr, self.plan(), False)
+        self.item.update(wait_reason="backoff until old time", not_before=self.c.iso(), reconcile_failures=2)
         self.finish()
+        self.assertIsNone(self.item["wait_reason"])
+        self.assertNotIn("not_before", self.item)
+        self.assertNotIn("reconcile_failures", self.item)
         self.assertTrue(self.item["publication_pending"])
         self.assertEqual(self.item["publication_reason"], "publication-disabled")
         self.assertIsNotNone(runtime.retained(self.c, self.item))
@@ -84,6 +88,7 @@ class ExecutionTests(SnapshotGitFixture, unittest.TestCase):
             stack.enter_context(mock.patch.object(crq, "gh_json", return_value=opened))
             stack.enter_context(mock.patch.object(crq, "ensure_commit", return_value=True))
             stack.enter_context(mock.patch.object(crq, "read_slot_usage", return_value=({"remaining": remaining}, [])))
+            stack.enter_context(mock.patch.object(crq, "coverage_fallback", return_value=(None, False)))
             for module, name, result in ((backfill_runtime, "settings", None),
                 (crq.push_current, "discover", []), (crq.pr_enroll, "enroll", []),
                 (crq.deferred_refresh, "refresh_deferred", []), (crq.client_health, "record", []),
@@ -201,10 +206,12 @@ class ExecutionTests(SnapshotGitFixture, unittest.TestCase):
                     return real_run(cmd, *args, **kw)
                 with mock.patch.object(subprocess, "run", side_effect=git_process):
                     self.full_tick([dict(number=2, isDraft=False, baseRefName="main",
-                        headRefName="unrelated", headRefOid=self.head)], clone=partial)
+                        headRefName="unrelated", headRefOid=self.head)], clone=partial, remaining=1)
                 self.assertTrue(any(i["id"] == "pr2" for i in self.q["items"]))
                 self.assertEqual(self.item["state"], "pending")
                 self.assertIn("RuntimeError" if failure == "missing" else "TimeoutExpired", self.item["wait_reason"])
+                status = admission.status(self.q, "one")
+                self.assertTrue(status["reason"].startswith("completed-evidence-unavailable:"))
                 with mock.patch.object(crq, "CLONE", partial), mock.patch.object(crq, "git", wraps=crq.git) as git:
                     runtime.reconcile_completed(crq, self.q)
                     git.assert_not_called()  # repeated ticks honor the existing not_before gate
@@ -236,6 +243,7 @@ class ExecutionTests(SnapshotGitFixture, unittest.TestCase):
                      mock.patch.object(crq, "run_liveness", return_value="alive"):
                     self.full_tick([], clone=partial)
                 self.assertEqual(self.item["state"], "done")
+                self.assertNotIn("reason", admission.status(self.q, "one"))
                 self.assertNotIn("not_before", self.item)
                 self.assertNotIn("reconcile_failures", self.item)
                 if failure == "missing":
