@@ -7,6 +7,11 @@ import { runPlan } from '../../../src/kernel/runner.js';
 import type { OpRegistryEntry } from '../../../src/kernel/types.js';
 import { registry } from '../../../src/ops/merge/registry.js';
 import { makeRunMergePrsOp } from '../../../src/ops/merge/runPrs.js';
+import { defaultClassifyPrConfig } from '../../../src/ops/merge/classify.config.js';
+import {
+  assertBaseBranchMirror,
+  resolveClassifyTrust,
+} from '../../../src/ops/merge/trustMirrors.js';
 import { buildRunInput } from '../../../src/selfhost/self-merge-prs.js';
 import { eligible, FakeMergeEffects, NOW_MS } from './runPrs.helpers.js';
 
@@ -171,12 +176,101 @@ describe('branch normalisation', () => {
     expect(await planned('refs/heads/main')).toBe(await planned('main'));
   });
 
-  test('executeMerges: an accepted refs/heads base is bound as the bare base', async () => {
-    const op = await entryOf('merge.executeMerges').importer({ cqEnv: env() });
-    const r = (await op({
-      plan: { order: [], needsHuman: [], baseBranch: 'refs/heads/main' },
+  test('the mirror returns the normalised base (fails if normalisation is removed)', () => {
+    const cqEnv = env();
+    expect(assertBaseBranchMirror('t', 'refs/heads/main', cqEnv)).toBe('main');
+    expect(assertBaseBranchMirror('t', 'main', cqEnv)).toBe('main');
+    const heads = env({ CQ_MERGE_BASE_BRANCH: 'refs/heads/heads/trunk' });
+    expect(assertBaseBranchMirror('t', 'refs/heads/heads/trunk', heads)).toBe('heads/trunk');
+    expect(() => assertBaseBranchMirror('t', 'trunk', heads)).toThrow();
+  });
+});
+
+describe('classify trust defaults are independent per key', () => {
+  const MEMBER_OBJECTS = eligible(3, {
+    reviews: [
+      {
+        id: 'bot',
+        authorLogin: 'good[bot]',
+        state: 'APPROVED',
+        body: 'approving the cache changes',
+        submittedAt: '2026-01-01T00:00:00.500Z',
+      },
+      {
+        id: 'm',
+        authorLogin: 'maintainer',
+        state: 'CHANGES_REQUESTED',
+        body: 'not yet',
+        submittedAt: '2026-01-01T00:00:00.700Z',
+        authorAssociation: 'MEMBER',
+      },
+    ],
+  });
+  const verdictOf = async (cqEnv: ReturnType<typeof env>, candidate = MEMBER_OBJECTS) => {
+    const op = await entryOf('merge.classifyPrs').importer({ cqEnv });
+    return ((await op({ candidate, nowMs: NOW_MS })) as { value: { verdict: string } }).value
+      .verdict;
+  };
+
+  test('reproduction: only CQ_MERGE_TRUSTED_BOTS set, a MEMBER objection still blocks the merge', async () => {
+    expect(await verdictOf(env({ CQ_MERGE_TRUSTED_BOTS: 'good[bot]' }))).not.toBe('eligible');
+  });
+
+  test('each key set alone leaves the other two at their documented defaults', () => {
+    const t = (v: Record<string, string>) => resolveClassifyTrust('t', undefined, env(v));
+    expect(t({ CQ_MERGE_TRUSTED_BOTS: 'good[bot]' })).toEqual({
+      trustedBots: ['good[bot]'],
+      trustedAssociations: ['OWNER', 'MEMBER', 'COLLABORATOR'],
+      acceptReviewStates: ['APPROVED'],
+    });
+    expect(t({ CQ_MERGE_TRUSTED_ASSOCIATIONS: 'owner' })).toEqual({
+      trustedBots: [],
+      trustedAssociations: ['OWNER'],
+      acceptReviewStates: ['APPROVED'],
+    });
+    expect(t({ CQ_MERGE_ACCEPT_REVIEW_STATES: 'approved,commented' })).toEqual({
+      trustedBots: [],
+      trustedAssociations: ['OWNER', 'MEMBER', 'COLLABORATOR'],
+      acceptReviewStates: ['APPROVED', 'COMMENTED'],
+    });
+  });
+
+  test('none set: nothing synthesised (built-in classifier behaviour unchanged)', () => {
+    expect(resolveClassifyTrust('t', undefined, env())).toEqual({});
+  });
+
+  test('runPrs: the env-synthesised trust merges into the caller classifyConfig; excluded reviewers cannot merge', async () => {
+    const effects = new FakeMergeEffects();
+    const cqEnv = env({
+      CQ_MERGE_TRUSTED_BOTS: 'good[bot]',
+      CQ_MERGE_TRUSTED_ASSOCIATIONS: 'MEMBER',
+    });
+    const excludedApproval = eligible(5, {
+      reviews: [
+        {
+          id: 'x',
+          authorLogin: 'excluded-member',
+          state: 'APPROVED',
+          body: 'approving the cache changes',
+          submittedAt: '2026-01-01T00:00:00.500Z',
+          authorAssociation: 'MEMBER',
+        },
+      ],
+    });
+    const op = makeRunMergePrsOp({ effects, cqEnv });
+    // the in-process classifyConfig (a library field) carries excludedLogins + automationLogin
+    const result = (await op({
+      baseBranch: 'main',
       repoRoot: '.',
-    })) as { status: string; value: { baseBranch?: string } };
-    expect(r.status).toBe('ok');
+      prs: [excludedApproval],
+      nowMs: NOW_MS,
+      classifyConfig: {
+        ...defaultClassifyPrConfig,
+        excludedLogins: ['excluded-member'],
+        automationLogin: 'cq-automation[bot]',
+      },
+    } as never)) as { value: { firstPass: { merged: unknown[] } } };
+    expect(result.value.firstPass.merged).toEqual([]);
+    expect(effects.calls.filter((c) => c.startsWith('merge'))).toEqual([]);
   });
 });

@@ -407,6 +407,11 @@ export async function runSelfMergePrs(
   cfg: SelfMergePrsCfg,
 ): Promise<SelfMergePrsResult> {
   cfg = { ...cfg, cqEnv: cfg.cqEnv ?? readCqEnv() };
+  // Validate the trust snapshot BEFORE any fetch or observation: an invalid
+  // protected/base branch or trust list fails `config` with nothing read.
+  const resolvedEnv = cfg.cqEnv ?? readCqEnv();
+  const protectedBranch = checkedProtectedBranch('selfhost.mergePrs', resolvedEnv);
+  const baseBranchResolved = cfg.baseBranch ?? checkedBaseBranch('selfhost.mergePrs', resolvedEnv);
   // The LIVE clock: the observation pass and every recheck read it per call
   // (settle is measured at the actual merge instant). The classify reading
   // below is taken ONCE.
@@ -495,9 +500,6 @@ export async function runSelfMergePrs(
   // merge-time recheck over the real (or seam-injected) inner effects. An
   // injected driverRegistryView is used verbatim (its scripted op owns its
   // merge path).
-  const resolvedEnv = cfg.cqEnv ?? readCqEnv();
-  const protectedBranch = checkedProtectedBranch('selfhost.mergePrs', resolvedEnv);
-  const baseBranchResolved = cfg.baseBranch ?? checkedBaseBranch('selfhost.mergePrs', resolvedEnv);
   const basePolicy = cfg.trustPolicy ?? CONSERVATIVE_TRUST_POLICY;
   const policy: TrustPolicy = {
     ...basePolicy,

@@ -317,10 +317,16 @@ export async function runMergePrs(
   // Stages 1–3: classify → plan → execute (pass 1). The planner's seven
   // fail-closed rules stand untouched; conflicting prs are withheld
   // 'not_eligible' by the planner — carried, never re-graded.
+  // `config` (the JSON twin, incl. the env-resolved trust fields) merges INTO the
+  // caller's classifyConfig: it overrides only the fields it names, so a
+  // caller's excludedLogins/automationLogin survive.
   const classifyConfig =
     input.config === undefined
       ? input.classifyConfig
-      : ({ ...defaultClassifyPrConfig, ...input.config } as ClassifyPrConfig);
+      : ({
+          ...(input.classifyConfig ?? defaultClassifyPrConfig),
+          ...input.config,
+        } as ClassifyPrConfig);
   const planned1 = classifyStage(input.prs, nowMs, classifyConfig);
   const plan1 = planMergeOrder({ baseBranch: input.baseBranch, prs: planned1 });
   const firstPass = await execute(plan1);

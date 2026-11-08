@@ -761,7 +761,8 @@ async function dispatchCli(
   // SUPPRESSED like every narration line in the header's matrix — a silent
   // sink rides the importer into the ops registries' DriverFactoryConfig.
   // Human mode passes none: the library default is byte-identical narration
-  // (one `cq:`-prefixed stderr line).
+  // (one `cq:`-prefixed stderr line). The entry's resolved CQ_* snapshot rides the
+  // same wiring in both modes, so an op never re-reads the process env.
   const importerWiring =
     mode === 'json' || cqEnv !== undefined
       ? {
@@ -770,10 +771,7 @@ async function dispatchCli(
         }
       : undefined;
   try {
-    const op = await entry.importer({
-      ...importerWiring,
-      ...(cqEnv !== undefined ? { cqEnv } : {}),
-    });
+    const op = await entry.importer(importerWiring);
     // The op's TypeScript return type is no runtime guarantee: ops load from
     // RUNTIME registries, so the direct-dispatch path validates the returned
     // value with the kernel's own mirror before ANY stdout artifact or

@@ -4,7 +4,7 @@
 // value (or is absent). A difference is a pre-effect `config` failure.
 import { DispatchError } from '../../driver/errors.js';
 import { readCqEnv } from '../../config/env.js';
-import { stripRefsHeads } from '../../config/values.js';
+import { ASSOCIATIONS, stripRefsHeads } from '../../config/values.js';
 import type { CqEnv } from '../../config/env.js';
 import { SelfhostDefaults } from '../../selfhost/config.js';
 
@@ -101,13 +101,16 @@ const sameSet = (a: readonly string[], b: readonly string[]): boolean => {
 };
 
 /**
- * Who counts as a reviewer (bots, associations, accepted review states) is a
- * TRUST input: it is resolved only from CQ_MERGE_TRUSTED_BOTS,
- * CQ_MERGE_TRUSTED_ASSOCIATIONS and CQ_MERGE_ACCEPT_REVIEW_STATES. A supplied
- * `config` carrying one of the fields is accepted only when it equals the
- * resolved value (the in-process self-host twin restates it); otherwise it
- * fails with `config`, naming the field and never echoing a value. Returns
- * the resolved fields (only those the environment sets) for the caller to apply.
+ * Who counts as a reviewer is a TRUST input: it is resolved only from
+ * CQ_MERGE_TRUSTED_BOTS, CQ_MERGE_TRUSTED_ASSOCIATIONS and
+ * CQ_MERGE_ACCEPT_REVIEW_STATES. When none is set the classifier keeps its
+ * built-in behaviour (nothing returned). When ANY is set, policy mode is on
+ * and each unset key INDEPENDENTLY takes its documented default (bots: none;
+ * associations: OWNER, MEMBER, COLLABORATOR; states: APPROVED), so setting one
+ * key never blanks another. A supplied `config` carrying a field is accepted
+ * only when it equals the effective value (the in-process self-host twin
+ * restates it); otherwise it fails with `config`, naming the field and never
+ * echoing a value.
  */
 export function resolveClassifyTrust(
   op: string,
@@ -115,8 +118,9 @@ export function resolveClassifyTrust(
   cqEnv?: CqEnv,
 ): ClassifyTrust {
   const snapshot = cqEnv ?? readCqEnv();
-  const out: ClassifyTrust = {};
-  for (const field of Object.keys(CLASSIFY_TRUST_KEYS) as ClassifyTrustField[]) {
+  const fields = Object.keys(CLASSIFY_TRUST_KEYS) as ClassifyTrustField[];
+  const raws: Partial<Record<ClassifyTrustField, readonly string[]>> = {};
+  for (const field of fields) {
     const key = CLASSIFY_TRUST_KEYS[field];
     const bad = snapshot.errors.filter((d) => d.name === key);
     if (bad.length > 0) {
@@ -126,25 +130,31 @@ export function resolveClassifyTrust(
       );
     }
     const raw = snapshot.values[key] as readonly string[] | undefined;
-    const resolved =
-      raw === undefined
-        ? undefined
-        : field === 'trustedBots'
-          ? [...raw]
-          : raw.map((v) => v.toUpperCase());
-    const given = supplied?.[field];
-    if (given !== undefined) {
-      const norm = field === 'trustedBots' ? given : given.map((v) => v.toUpperCase());
-      if (resolved === undefined || !sameSet(norm, resolved)) {
-        throw new DispatchError(
-          'config',
-          `${op}: input.config.${field} is a trust input and cannot be set by plan data or op input; configure ${key} instead (value not echoed)`,
-        );
-      }
-    }
-    if (resolved !== undefined) (out as Record<string, unknown>)[field] = resolved;
+    if (raw !== undefined) raws[field] = raw;
   }
-  return out;
+  const anySet = fields.some((f) => raws[f] !== undefined);
+  const effective: Partial<Record<ClassifyTrustField, string[]>> = {};
+  if (anySet) {
+    const up = (v: readonly string[]): string[] => v.map((x) => x.toUpperCase());
+    effective.trustedBots = [...(raws.trustedBots ?? [])];
+    effective.trustedAssociations =
+      raws.trustedAssociations !== undefined ? up(raws.trustedAssociations) : [...ASSOCIATIONS];
+    effective.acceptReviewStates =
+      raws.acceptReviewStates !== undefined ? up(raws.acceptReviewStates) : ['APPROVED'];
+  }
+  for (const field of fields) {
+    const given = supplied?.[field];
+    if (given === undefined) continue;
+    const want = effective[field];
+    const norm = field === 'trustedBots' ? given : given.map((v) => v.toUpperCase());
+    if (want === undefined || !sameSet(norm, want)) {
+      throw new DispatchError(
+        'config',
+        `${op}: input.config.${field} is a trust input and cannot be set by plan data or op input; configure ${CLASSIFY_TRUST_KEYS[field]} instead (value not echoed)`,
+      );
+    }
+  }
+  return effective as ClassifyTrust;
 }
 
 /** The resolved base branch, refusing an invalid CQ_MERGE_BASE_BRANCH snapshot (no silent default). */

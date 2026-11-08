@@ -82,4 +82,24 @@ describe('runSelfMergePrs — merge-time recheck through the real registry', () 
     );
     expect(effects.merges).toEqual([{ pr: 7, matchHeadCommit: HEAD(7) }]);
   });
+
+  test('an invalid trust snapshot fails config before any gh call (fetch/observe not reached)', async () => {
+    let ghCalls = 0;
+    const err = await runSelfMergePrs(
+      {
+        gh: (async () => {
+          ghCalls += 1;
+          throw new Error('gh must not be called');
+        }) as never,
+        mergeEffects: new RecordingMergeEffects('main'),
+        nowMs: () => T0,
+      },
+      {
+        ...cfg(tmpJournalRoot()),
+        cqEnv: readCqEnv({ CQ_MERGE_PROTECTED_BRANCH: 'release branch' }),
+      },
+    ).catch((e: unknown) => e);
+    expect((err as { dispatchClass?: string }).dispatchClass).toBe('config');
+    expect(ghCalls).toBe(0);
+  });
 });
