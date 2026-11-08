@@ -49,6 +49,40 @@ class AssociationTests(SnapshotGitFixture, unittest.TestCase):
         pr.observe(self.q)
         self.assertEqual(self.q["review_pr_outbox"][crq.REPO + "#7"]["state"], "superseded")
 
+    def test_superseded_shared_observer_still_delivers_completed_findings(self):
+        first = self.q["review_requests"]["first"]
+        self.q["review_requests"]["second"] = dict(first)
+        self.q["review_requests"]["third"] = dict(first, supersedes="first")
+        self.item["observers"] += ["second", "third"]
+        pr.associate(self.c, self.q, crq.REPO, 7, self.base, self.head, False)
+        pr.observe(self.q)
+        self.assertEqual(self.q["review_pr_outbox"][crq.REPO + "#7"]["state"], "in progress")
+        rdir = self.c.RUNS / "shared-run"
+        rdir.mkdir(parents=True)
+        write_ndjson(rdir, [ANCHORED])
+        with mock.patch("backfill_runtime.settings", return_value=None):
+            runtime.complete(self.c, self.q, self.item, rdir, "shared-run",
+                dict(counted=True, outcome="completed", findings=1), "2026-11-08T00:01:00Z", 0)
+        gh = FakeGh()
+        with mock.patch.object(findings, "pr_state", return_value=dict(state="open", head=self.head, base=self.base)), \
+             mock.patch.object(pr, "write_summary") as write:
+            pr.publish(self.c, self.q, gh)
+        self.assertIn("State: findings", write.call_args.args[1])
+        self.assertEqual(len(gh.posts()), 1)
+
+    def test_successful_pin_enrollment_associates_without_open_item(self):
+        opened = [dict(number=7, isDraft=False, baseRefName="main", headRefName="feature", headRefOid=self.head)]
+        self.git("update-ref", "refs/remotes/origin/main", self.base)
+        with mock.patch.multiple(crq, CLONE=self.repo, CONFIG={}), \
+             mock.patch.object(crq, "gh_json", return_value=opened), \
+             mock.patch.object(crq, "ensure_commit", return_value=True), \
+             mock.patch.object(crq, "event"):
+            crq.enroll(self.q, False)
+        self.assertEqual([i["kind"] for i in self.q["items"]], ["local-review"])
+        self.assertEqual(self.q["review_pr_links"][crq.REPO + "#7"]["item"], self.item["id"])
+        pr.observe(self.q)
+        self.assertEqual(self.q["review_pr_outbox"][crq.REPO + "#7"]["state"], "in progress")
+
     def test_summary_marker_recovers_create_then_edits_and_sanitizes(self):
         row = dict(repo=crq.REPO, pr=7, head=self.head, base=self.base, state="clean")
         body = pr.summary(row, dict(review_url="http://private-mesh/home/secret"))
@@ -139,11 +173,21 @@ class AssociationTests(SnapshotGitFixture, unittest.TestCase):
                 return super().__call__(argv, input_text=input_text)
         gh = StoredGh()
         path = write_ndjson(self.repo, [ANCHORED])
-        meta = dict(META, local_review=True)
+        meta = dict(META)  # first delivery is an ordinary open/delta run
         with mock.patch.object(findings, "pr_state", return_value=dict(state="open", head=HEAD, base=BASE)):
             self.assertEqual(findings.deliver(crq.REPO, 7, meta, path, gh)["state"], "created")
-            repeat = dict(meta, run_id="repeat-run")
+            repeat = dict(meta, run_id="repeat-run", local_review=True)
             self.assertEqual(findings.deliver(crq.REPO, 7, repeat, path, gh)["state"], "existing")
             write_ndjson(self.repo, [dict(ANCHORED, title="Different finding")])
             self.assertEqual(findings.deliver(crq.REPO, 7, repeat, path, gh)["state"], "created")
-        self.assertEqual(len(gh.bodies), 2)
+            for field, value in (("startLine", 41), ("comment", "A different explanation"), ("severity", "critical")):
+                write_ndjson(self.repo, [dict(ANCHORED, **{field: value})])
+                repeat["run_id"] = "repeat-" + field
+                self.assertEqual(findings.deliver(crq.REPO, 7, repeat, path, gh)["state"], "created")
+            write_ndjson(self.repo, [ANCHORED, dict(ANCHORED, startLine=41)])
+            repeat["run_id"] = "repeat-two-locations"
+            self.assertEqual(findings.deliver(crq.REPO, 7, repeat, path, gh)["state"], "created")
+            write_ndjson(self.repo, [ANCHORED, dict(ANCHORED, fileName=None)])
+            repeat["run_id"] = "repeat-fileless"
+            self.assertEqual(findings.deliver(crq.REPO, 7, repeat, path, gh)["state"], "created")
+        self.assertEqual(len(gh.bodies), 7)

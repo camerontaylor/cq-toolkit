@@ -55,7 +55,8 @@ def observe(q):
         state = "in progress" if item["state"] in admission.ACTIVE else item["state"]
         if link.get("stale"):
             state = "stale; prior coverage only"
-        elif any(q.get("review_requests", {}).get(r.get("supersedes"), {}).get("item") == item["id"]
+        elif item["state"] == "cancelled" and any(
+                 q.get("review_requests", {}).get(r.get("supersedes"), {}).get("item") == item["id"]
                  for r in q.get("review_requests", {}).values()):
             state = "superseded"
         elif item.get("scope_adequate"):
