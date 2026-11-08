@@ -411,6 +411,21 @@ describe('redactUrlUserinfo (cases from PR #1235)', () => {
     ['[https://host/path?q=TOKEN]', '[https://host/path?[redacted]]'],
     ['https://host/path?q=TOKEN, next', 'https://host/path?[redacted], next'],
     ['https://host/path#TOKEN. Next', 'https://host/path#[redacted]. Next'],
+    ['"fetch https://host/path?q=TOKEN" now', '"fetch https://host/path?[redacted]" now'],
+    ['{https://host/path?q=TOKEN}', '{https://host/path?[redacted]}'],
+    ['https://host/path?q=TOKEN"', 'https://host/path?[redacted]"'],
+    ['(fetch https://host/path?q=TOKEN) now', '(fetch https://host/path?[redacted]) now'],
+    ['{fetch https://host/path?q=TOKEN} now', '{fetch https://host/path?[redacted]} now'],
+    ['https://host/path?q="TOKEN"', 'https://host/path?[redacted]"'],
+    ['"fetch https://host/path?q="TOKEN"" now', '"fetch https://host/path?[redacted]"" now'],
+    [
+      'see "https://host/path" and https://host/path?q="TOKEN"&x=TOKEN',
+      'see "https://host/path" and https://host/path?[redacted]',
+    ],
+    [
+      String.raw`"fetch https://host/path?q=\"TOKEN\"" now`,
+      '"fetch https://host/path?[redacted]" now',
+    ],
   ])('preserves prose delimiters around %s', (input, expected) => {
     expect(redactUrlUserinfo(input)).toBe(expected);
   });

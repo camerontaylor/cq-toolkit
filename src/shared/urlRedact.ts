@@ -80,10 +80,35 @@ function discoverSchemes(run: string, lenient: boolean): SchemeHit[] {
  */
 export function redactUrlUserinfo(text: string): string {
   const out: string[] = [];
+  const closers: string[] = [];
+  let proseBackslashes = 0;
+  // Track delimiters across prose and whitespace, not just beside the scheme.
+  const rememberProse = (fragment: string): void => {
+    for (const ch of fragment) {
+      if (ch === '\\') {
+        proseBackslashes++;
+        continue;
+      }
+      const escaped = proseBackslashes % 2 !== 0;
+      proseBackslashes = 0;
+      if (escaped) continue;
+      const top = closers.at(-1);
+      if (top === '"' || top === "'") {
+        if (ch === top) closers.pop();
+      } else if (ch === top) {
+        closers.pop();
+      } else {
+        const close =
+          ch === '(' ? ')' : ch === '[' ? ']' : ch === '{' ? '}' : ch === '<' ? '>' : ch;
+        if ('\"\'([{<'.includes(ch)) closers.push(close);
+      }
+    }
+  };
   let i = 0;
   while (i < text.length) {
     if (/\s/.test(text[i] ?? '')) {
       out.push(text[i] ?? '');
+      rememberProse(text[i] ?? '');
       i++;
       continue;
     }
@@ -108,38 +133,41 @@ export function redactUrlUserinfo(text: string): string {
       while (q < token.length && token[q] !== '?' && token[q] !== '#') q++;
       const authorityAndPath = token.slice(0, q);
       const shown = at < 0 ? authorityAndPath : `[redacted]${authorityAndPath.slice(at)}`;
+      rememberProse(run.slice(cursor, hit.start));
       out.push(run.slice(cursor, hit.authority));
       let queryEnd = token.length;
       if (q < token.length) {
-        const opener = run[hit.start - 1];
-        const closer =
-          opener === '"' || opener === "'"
-            ? opener
-            : opener === '('
-              ? ')'
-              : opener === '<'
-                ? '>'
-                : opener === '['
-                  ? ']'
-                  : '';
-        for (let j = q + 1; closer !== '' && j < token.length; j++) {
-          if (token[j] !== closer) continue;
+        // Preserve only terminal prose punctuation when no matching opener exists.
+        while (queryEnd > q + 1 && ',.\"\')>]}'.includes(token[queryEnd - 1] ?? '')) {
+          const end = queryEnd - 1;
           let backslashes = 0;
-          if (closer === '"' || closer === "'") {
-            for (let b = j - 1; b >= 0 && token[b] === '\\'; b--) backslashes++;
-          }
-          if (backslashes % 2 === 0) {
+          for (let b = end - 1; b >= 0 && token[b] === '\\'; b--) backslashes++;
+          if (backslashes % 2 !== 0) break;
+          queryEnd--;
+        }
+        // Use the nearest unmatched opener to choose its closing delimiter,
+        // but only inside the terminal punctuation suffix. A quote inside a
+        // query value must not expose the remaining query as prose.
+        const closer = closers.at(-1);
+        for (let j = queryEnd; closer !== undefined && j < token.length; j++) {
+          if (token[j] === closer) {
             queryEnd = j;
             break;
           }
         }
-        // A final comma or period belongs to the surrounding prose.
-        while (queryEnd > q + 1 && ',.'.includes(token[queryEnd - 1] ?? '')) queryEnd--;
+        rememberProse(token.slice(queryEnd));
+      } else {
+        // A query-free URL can close the prose delimiter before a later URL.
+        let tail = token.length;
+        while (tail > 0 && '\"\')>]}'.includes(token[tail - 1] ?? '')) tail--;
+        while (tail > 0 && token[tail - 1] === '\\') tail--;
+        rememberProse(token.slice(tail));
       }
       out.push(q < token.length ? `${shown}${token[q]}[redacted]${token.slice(queryEnd)}` : shown);
       cursor = limit;
     }
     out.push(run.slice(cursor));
+    rememberProse(run.slice(cursor));
   }
   return out.join('');
 }
