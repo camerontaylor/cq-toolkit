@@ -1,9 +1,12 @@
 """Durable triage and delivery for CLI findings, including threadless findings."""
 import copy
+import json
+import hashlib
 from pathlib import Path
 
 import review_ledger as ledger
-from backfill_accounting import ranges
+import backfill_history as history
+from backfill_accounting import ranges, line_bytes
 
 
 def occurrence(producer, run_id, finding):
@@ -40,16 +43,79 @@ class Inbox:
                     continue
                 ledger.atomic(filename, ledger.canonical(value))
 
-    def triage(self, fid, repo, promoted, action, actor, reason, at, *, fixing_commit=None, canonical_id=None):
+    def recovered_anchor(self, row, repo, reviews):
+        """Recover only a unique exact occurrence in its verified retained raw run.
+
+        The original finding (and therefore its content-derived ID) stays immutable.
+        This accessor does not write local state or disposition events.
+        """
+        if row.get("recovered_anchor"):
+            return copy.deepcopy(row["recovered_anchor"])
+        finding = row["finding"]
+        matches = {v["id"]: v for v in reviews
+                   if v["event_type"] == "review" and v["id"] == row["review_id"]}
+        if not matches:
+            return None
+        review = matches[row["review_id"]]
+        ledger.validate(review)
+        payload = review["payload"]
+        if (payload["target"] != row["target"] or finding not in payload["findings"]
+                or payload["source"]["producer"] != "crq-runner-app" or not payload.get("artifacts")):
+            return None
+        reference = payload["artifacts"][0]  # completion_event retains raw terminal bytes first.
+        try:
+            self.publication.artifacts.verify(reference)
+            raw = Path(reference["location"]).read_bytes()
+            # Verify the bytes actually parsed, including a concurrent replacement.
+            if hashlib.sha256(raw).hexdigest() != reference["sha256"]:
+                return None
+            candidates = [v for v in history.vendor_events(raw) if v.get("type") == "finding"
+                          and (v.get("fileName") or v.get("path")) == finding["path"]
+                          and (v.get("title") or "Unverified vendor finding anchor") == finding["title"]
+                          and (v.get("comment") or v.get("body") or json.dumps(v)) == finding["body"]]
+            if len(candidates) != 1:
+                return None
+            intervals = history.finding_intervals(candidates[0])
+            entry = repo.entries(row["target"]).get(finding["path"])
+            if not intervals or not entry or entry["blob"] != finding["blob"]:
+                return None
+            maximum = len(line_bytes(repo.git("cat-file", "blob", entry["blob"])))
+            if any(end > maximum for _, end in intervals):
+                return None
+            return {"path": finding["path"], "blob": entry["blob"], "intervals": intervals,
+                    "anchor_recovered_from": reference["sha256"]}
+        except (OSError, ValueError, TypeError, KeyError, ledger.IntegrityError):
+            return None
+
+    def triage(self, fid, repo, promoted, action, actor, reason, at, *, fixing_commit=None, canonical_id=None, reviews=(), current_path=None, current_lines=None, quoted_text=None):
         """Mapping confirms the anchor only; actor must confirm substantive validity."""
-        self.recover(self.publication.retained())
+        retained = self.publication.retained()
+        self.recover(retained)
         with ledger.locked(self.root / "findings.lock"):
             filename = self.root / "triage" / (fid + ".json")
             row = ledger.loads(filename.read_bytes()); finding = row["finding"]
             repo.resolve(promoted)
-            name, lines = repo.carry(row["target"], promoted, finding["path"], ledger.intervals(finding["intervals"])) if finding["anchor_status"] == "verified" else (None, set())
-            evidence = {"target": promoted, "reason": reason, "anchor_verified": bool(name and lines and len(lines) == len(ledger.intervals(finding["intervals"]))) }
+            recovered = self.recovered_anchor(row, repo, [*retained, *reviews]) if finding["anchor_status"] != "verified" else None
+            anchor = recovered or finding
+            name, lines = repo.carry(row["target"], promoted, anchor["path"], ledger.intervals(anchor["intervals"])) if recovered or finding["anchor_status"] == "verified" else (None, set())
+            if action == "confirmed" and current_path is not None:
+                entries = repo.entries(promoted)
+                try:
+                    selected = ledger.intervals(current_lines)
+                    text = repo.git("cat-file", "blob", entries[current_path]["blob"]).decode().splitlines()
+                    quote = "\n".join(text[i - 1] for i in sorted(selected) if 1 <= i <= len(text))
+                    if (not selected or min(selected) < 1 or max(selected) > len(text)
+                            or not isinstance(quoted_text, str) or not quoted_text.strip() or quote != quoted_text):
+                        raise ValueError("quote mismatch")
+                    name, lines = current_path, selected
+                except (KeyError, TypeError, ValueError, UnicodeError, ledger.IntegrityError):
+                    name, lines = None, set()
+            evidence = {"target": promoted, "reason": reason, "anchor_verified": bool(name and lines and (current_path is not None or len(lines) == len(ledger.intervals(anchor["intervals"])))) }
             evidence.update(mapped_path=name, mapped_intervals=ranges(lines))
+            if current_path is not None and evidence["anchor_verified"]:
+                evidence["quoted_text"] = quoted_text
+            if recovered:
+                evidence.update(recovered_anchor=recovered, anchor_recovered_from=recovered["anchor_recovered_from"])
             if not actor or not reason:
                 raise ledger.IntegrityError("triage requires actor and reason")
             if action == "confirmed" and not evidence["anchor_verified"]:
@@ -59,6 +125,8 @@ class Inbox:
                     raise ledger.IntegrityError("fixing commit required")
                 repo.resolve(fixing_commit)
                 evidence.update(fixing_commit=fixing_commit, verification=reason)
+            if action == "superseded" and fixing_commit:
+                evidence["fixing_commit"] = repo.resolve(fixing_commit)
             if action == "duplicate":
                 if not canonical_id or canonical_id == fid or not (self.root / "triage" / (canonical_id + ".json")).exists():
                     raise ledger.IntegrityError("duplicate link requires existing canonical issue and evidence")
@@ -70,6 +138,8 @@ class Inbox:
             row.update(status=action, previous_event_id=value["id"], target_current=promoted,
                        mapped_path=name, mapped_intervals=ranges(lines),
                        canonical_id=canonical_id if action == "duplicate" else row["canonical_id"])
+            if recovered:
+                row["recovered_anchor"] = recovered
             ledger.atomic(filename, ledger.canonical(row))
             return value
 
@@ -165,10 +235,12 @@ class Inbox:
         if row["previous_event_id"] != p["previous_event_id"]:
             return False
         row.update(status=p["action"], previous_event_id=value["id"])
+        if p["evidence"].get("recovered_anchor"):
+            row["recovered_anchor"] = p["evidence"]["recovered_anchor"]
         if p["action"] == "delivered":
             row["receipt"] = p["evidence"]
         elif "target" in p["evidence"]:
-            row.update(target_current=p["evidence"].get("target", row.get("target_current")), mapped_path=p["evidence"].get("mapped_path"),
+            row.update(target_current=p["evidence"]["target"], mapped_path=p["evidence"].get("mapped_path"),
                        mapped_intervals=p["evidence"].get("mapped_intervals", []))
             if p["action"] == "duplicate":
                 row["canonical_id"] = p["evidence"]["canonical_id"]
