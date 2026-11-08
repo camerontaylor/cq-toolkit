@@ -16,6 +16,7 @@ is safe to retry and one run is never posted twice.
 Pure module: plain data in, `gh` injected (the same shape as finding_issues).
 """
 import json
+import hashlib
 import re
 import subprocess
 from pathlib import Path
@@ -277,7 +278,7 @@ def _json(gh: Gh, argv: List[str]) -> Any:
 
 def pr_state(gh: Gh, repo: str, pr: int) -> Dict[str, Any]:
     data = _json(gh, ["gh", "api", f"repos/{repo}/pulls/{pr}",
-                      "--jq", "{state: .state, merged: .merged, base: .base.sha}"])
+                      "--jq", "{state: .state, merged: .merged, base: .base.sha, head: .head.sha}"])
     if not isinstance(data, dict) or data.get("state") not in ("open", "closed"):
         raise RuntimeError(f"unexpected PR metadata for {repo}#{pr}")
     return data
@@ -348,22 +349,47 @@ def deliver(repo: str, pr: int, meta: Dict[str, Any], ndjson: Path,
         raise ValueError("invalid PR review delivery identity")
     result = {"review_id": None, "review_url": None, "inline": 0, "body_only": 0}
     findings = load_findings(ndjson)
-    if not findings:
+    if not findings and not meta.get("local_review"):
         return {**result, "state": "skipped-empty"}
     state = pr_state(gh, repo, pr)
     if state["state"] != "open" or state.get("merged"):
         return {**result, "state": "skipped-closed"}
-    found = existing_review(gh, repo, pr, run_id, authenticated_login(gh))
+    if meta.get("local_review") and state.get("head") != head:
+        return {**result, "state": "skipped-head"}
+    if not findings:
+        return {**result, "state": "skipped-empty"}
+    login = authenticated_login(gh)
+    # Hash complete normalized findings, independent of ordering and producer.
+    # Serializing each object also makes nullable paths/locations comparable.
+    normalized = sorted({json.dumps(f, sort_keys=True, ensure_ascii=True) for f in findings})
+    fingerprint = hashlib.sha256(json.dumps(normalized).encode()).hexdigest()
+    wanted = f"<!-- crq-local-findings head={head} set={fingerprint} -->"
+    argv = ["gh", "api", "--paginate", f"repos/{repo}/pulls/{pr}/reviews?per_page=100", "--jq",
+            f'.[] | select(.user.login == {json.dumps(login)} and ((.body // "") | contains({json.dumps(wanted)}))) | {{id: .id, url: .html_url}}']
+    out = _ok(argv, _call(gh, argv))
+    for line in (out.stdout or "").splitlines():
+        row = json.loads(line)
+        if type(row.get("id")) is int:
+            return {**result, "state": "existing", "review_id": row["id"], "review_url": row.get("url")}
+    found = existing_review(gh, repo, pr, run_id, login)
     if found:
         return {**result, "state": "existing", "review_id": found["id"], "review_url": found["url"]}
     hunks = diff_hunks(gh, repo, state["base"], head) if state.get("base") else None
     review = build_review(meta, findings, hunks)
+    if fingerprint:
+        review["body"] += "\n" + wanted
+        if meta.get("local_review") and pr_state(gh, repo, pr).get("head") != head:
+            return {**result, "state": "skipped-head"}
     argv, p = _post(gh, repo, pr, review)
     if getattr(p, "returncode", 0) != 0 and "HTTP 422" in (getattr(p, "stderr", "") or "") \
             and (review["comments"] or "commit_id" in review):
         # Validation rejected an anchor or the commit (e.g. force-pushed away):
         # nothing was created, so fall back once to a body-only review.
         review = build_review(meta, findings, None)
+        if fingerprint:
+            if meta.get("local_review") and pr_state(gh, repo, pr).get("head") != head:
+                return {**result, "state": "skipped-head"}
+            review["body"] += "\n" + wanted
         argv, p = _post(gh, repo, pr, review)
     out = _ok(argv, p)
     try:

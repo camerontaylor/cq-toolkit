@@ -12,6 +12,7 @@ an empty repos list — does nothing at all: no forge read, no queue change, so
 the primary repo's enrollment behavior stays byte-identical.
 """
 import subprocess
+import local_review_pr
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -61,6 +62,8 @@ def _enroll_repo(runner, q: Dict[str, Any], cfg: Dict[str, Any], opened: List[Di
             pin = runner.git("merge-base", f"origin/{branch}", head, cwd=clone)
         except (runner.NotReady, OSError, RuntimeError, subprocess.TimeoutExpired):
             log.append(f"pr discovery {repo}: PR #{n} range identity unavailable; enrollment deferred")
+            continue
+        if local_review_pr.associate(runner, q, repo, n, pin, head, dry):
             continue
         # PR numbers collide across repos: scope every lookup to this repo.
         mine = [i for i in runner.live_items(q) if i["pr"] == n and i["kind"] in ("open", "delta")
