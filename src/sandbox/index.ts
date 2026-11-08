@@ -41,6 +41,14 @@ const SAFE_ENV = new Set([
  * name is never copied on either path: a child that could read it could steer
  * its own boundary, so declaring one throws instead of leaking.
  */
+/** A launcher env name was refused (an env refusal, not a surface defect). */
+export class LauncherEnvError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'LauncherEnvError';
+  }
+}
+
 export function buildSandboxLauncherEnv(
   parent: Readonly<Record<string, string | undefined>>,
   config: {
@@ -59,10 +67,12 @@ export function buildSandboxLauncherEnv(
     ...(config.trustedEnvNames ?? []).map((name) => [name, 'trusted'] as const),
   ]) {
     if (!isEnvName(name)) {
-      throw new Error(`sandbox: launcher env ${origin} name is not a valid env var name`);
+      throw new LauncherEnvError(
+        `sandbox: launcher env ${origin} name is not a valid env var name`,
+      );
     }
     if (SANDBOX_POLICY_ENV_NAMES.has(name.toUpperCase())) {
-      throw new Error(`sandbox: launcher env ${origin} name '${name}' is not permitted`);
+      throw new LauncherEnvError(`sandbox: launcher env ${origin} name '${name}' is not permitted`);
     }
     // Every refusal applies to every origin: credential-shaped names and every
     // CQ_* name (the policy knobs were refused above). Each origin has ONE
@@ -80,14 +90,16 @@ export function buildSandboxLauncherEnv(
     if (!exempt.includes(name)) {
       const credential = credentialRefusal(name);
       if (credential !== undefined) {
-        throw new Error(
+        throw new LauncherEnvError(
           origin === 'declared'
-            ? `sandbox: launcher env declared name '${name}' is a credential; only the in-process SDK transport may pass code-declared credential names (the MCP stdio transport refuses them)`
+            ? `sandbox: launcher env declared name '${name}' is a credential; only SSH_AUTH_SOCK (the frozen code-level exemption) may pass, and only in-process; the MCP stdio transport refuses it as well`
             : `sandbox: launcher env ${origin} ${credential}`,
         );
       }
       if (name.toUpperCase().startsWith('CQ_')) {
-        throw new Error(`sandbox: launcher env ${origin} may not expose CQ_* name '${name}'`);
+        throw new LauncherEnvError(
+          `sandbox: launcher env ${origin} may not expose CQ_* name '${name}'`,
+        );
       }
     }
     const value = parent[name];

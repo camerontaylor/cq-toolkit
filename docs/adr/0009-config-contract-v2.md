@@ -90,9 +90,9 @@ the toolkit mints). A name is added only with a reason stated here and a change 
 The origin is not a manifest field: it is remembered against the object `buildManifest` returned (module-private,
 keyed by identity), so JSON, a clone, a prototype or proxy wrapper, a plan or any other input cannot claim it, and the
 strict manifest schema rejects an extra key. Only in-process code paths can carry it (`HarnessRunGate.trustedEnvNames`
-is a code-level field). A manifest serialized to the MCP stdio bin loses it, so over that transport code-declared
-credential names are refused (fail closed, exit 78): the message names the variable, says it is a credential and that
-only the in-process SDK transport may pass code-declared credential names, and never echoes a value.
+is a code-level field). A manifest serialized to the MCP stdio bin loses it, so over that transport even
+`SSH_AUTH_SOCK` is refused (fail closed, exit 78, prefix `invalid env:`): the message names the variable, says it is a
+credential, says only `SSH_AUTH_SOCK` may pass and only in-process, and never echoes a value.
 
 **Inspection.** `cq config` prints each resolved key, its source layer, the warnings and the errors. It exits 2
 when the environment has errors (after printing the report), like every other subcommand. `cq config --strict`

@@ -213,7 +213,11 @@ describe('manifest-declared credential names', () => {
       expect(code).toBe(78);
       expect(server.stdout()).toBe('');
       expect(server.stderr()).toContain(`'${name}' is a credential`);
-      expect(server.stderr()).toContain('only the in-process SDK transport may pass');
+      expect(server.stderr()).toContain(
+        'only SSH_AUTH_SOCK (the frozen code-level exemption) may pass',
+      );
+      expect(server.stderr()).toContain('invalid env:');
+      expect(server.stderr()).not.toContain('surface mismatch');
       expect(server.stderr()).not.toContain(dummy);
     },
     20_000,

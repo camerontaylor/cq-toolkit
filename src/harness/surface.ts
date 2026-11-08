@@ -157,6 +157,21 @@ export const HarnessManifestSchema = z
 
 export type HarnessManifest = z.infer<typeof HarnessManifestSchema>;
 
+/**
+ * Strictly parse a manifest, reporting a defect as ONE line that names the
+ * position and the reason, never any part of the offending value (the schema's
+ * raw multi-line ZodError is what this replaces).
+ */
+function parseManifest(raw: unknown): HarnessManifest {
+  const result = HarnessManifestSchema.safeParse(raw);
+  if (result.success) return result.data;
+  const [first] = result.error.issues;
+  const where = first === undefined || first.path.length === 0 ? 'manifest' : first.path.join('.');
+  const reason = (first?.message ?? 'invalid').split('\n')[0]?.slice(0, 120) ?? 'invalid';
+  const more = result.error.issues.length > 1 ? ` (+${result.error.issues.length - 1} more)` : '';
+  throw new Error(`harness manifest: invalid ${where}: ${reason}${more}`);
+}
+
 /** Inputs to `buildManifest` — everything the driver resolved, plain data. */
 export interface ManifestInputs {
   /** The workspace the driver resolved (ADR-0002 §2.4); realpathed here. */
@@ -188,11 +203,15 @@ export async function buildManifest(inputs: ManifestInputs): Promise<HarnessMani
     inputs.sandbox,
   );
   if (tools.length === 0) return undefined;
+  const rawEnvNames: unknown = inputs.envNames;
+  if (rawEnvNames !== undefined && !Array.isArray(rawEnvNames)) {
+    throw new Error('harness manifest: invalid envNames: expected an array of env var names');
+  }
   const workspace = await realpath(inputs.workspace);
   if (!(await stat(workspace)).isDirectory()) {
     throw new Error(`harness manifest: workspace '${workspace}' is not a directory`);
   }
-  const manifest = HarnessManifestSchema.parse({
+  const manifest = parseManifest({
     v: 1,
     workspace,
     sandbox: inputs.sandbox,
@@ -283,7 +302,7 @@ export function toCallToolResult(outcome: ToolkitToolResult): McpCallToolResult 
  */
 export function createHarnessSurface(input: HarnessManifest): HarnessSurface {
   const trusted = TRUSTED_ENV_NAMES.get(input) ?? [];
-  const manifest = HarnessManifestSchema.parse(input);
+  const manifest = parseManifest(input);
   // The manifest's declared envNames ride the SHARED run gate (src/sandbox):
   // they are still a default-deny allowlist, merged after the launcher scrub,
   // and a policy knob or credential-shaped name among them is refused there,

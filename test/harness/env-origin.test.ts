@@ -136,8 +136,49 @@ describe('manifest env name origin', () => {
     }
     expect(message).toContain("'ANTHROPIC_API_KEY' is a credential");
     expect(message).toContain(
-      'only the in-process SDK transport may pass code-declared credential names',
+      'only SSH_AUTH_SOCK (the frozen code-level exemption) may pass, and only in-process',
     );
+    expect(message).not.toContain(dummy);
+  });
+
+  test.each([
+    ['a non-array', 'FOO'],
+    ['a non-string entry', [42]],
+    ['an empty string', ['']],
+    ['an assignment shape', [`FOO=${dummy}`]],
+    ['a very long entry', [`${dummy}${'x'.repeat(5000)}`]],
+  ])(
+    'malformed code-level envNames (%s) is a one-line error without the value',
+    async (_l, bad) => {
+      let message = '';
+      try {
+        await buildManifest({
+          workspace: scratch(),
+          sandbox: 'workspace-write',
+          toolPolicy: { allow: ['bash'] },
+          harness: withRun(['env']),
+          envNames: bad as unknown as string[],
+        });
+      } catch (error) {
+        message = (error as Error).message;
+      }
+      expect(message).toMatch(/^harness manifest: invalid envNames/);
+      expect(message).not.toContain('\n');
+      expect(message).not.toContain(dummy);
+      expect(message.length).toBeLessThan(300);
+    },
+  );
+
+  test('a hand-made malformed manifest reaches createHarnessSurface as a one-line error too', async () => {
+    const built = JSON.parse(JSON.stringify(await codeManifest([]))) as Record<string, unknown>;
+    built['envNames'] = [`FOO=${dummy}`];
+    let message = '';
+    try {
+      createHarnessSurface(built as unknown as HarnessManifest);
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).toMatch(/^harness manifest: invalid envNames\.0/);
     expect(message).not.toContain(dummy);
   });
 

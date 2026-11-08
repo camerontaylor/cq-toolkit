@@ -4,7 +4,7 @@
 import { realpathSync, statSync } from 'node:fs';
 import type { CqEnv } from '../../config/env.js';
 import { buildChildEnv } from '../../shared/proc.js';
-import { buildSandboxLauncherEnv, harnessRunGate } from '../../sandbox/index.js';
+import { LauncherEnvError, buildSandboxLauncherEnv, harnessRunGate } from '../../sandbox/index.js';
 import { createHarnessSurface, HarnessManifestSchema } from '../surface.js';
 import type { HarnessManifest, HarnessSurface } from '../surface.js';
 
@@ -52,6 +52,9 @@ export function checkStartup(argv: readonly string[]): StartupResult {
   try {
     return { ok: true, manifest, surface: createHarnessSurface(manifest) };
   } catch (err) {
+    // An env-name refusal is not a surface defect: say what it is.
+    if (err instanceof LauncherEnvError)
+      return { ok: false, reason: `invalid env: ${oneLine(err)}` };
     return { ok: false, reason: `surface mismatch: ${oneLine(err)}` };
   }
 }
