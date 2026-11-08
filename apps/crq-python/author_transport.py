@@ -148,7 +148,7 @@ def _reap(pid, grace):
     return os.waitstatus_to_exitcode(status)
 
 
-def supervised(work, runner):
+def supervised(work, runner, *, lock_wait=0):
     """Run work(runner) in a child that leads its own process group, under tick.lock held here.
 
     Every exit (response, error or the deadline raising in this parent) SIGKILLs and reaps the
@@ -198,7 +198,7 @@ def supervised(work, runner):
 
     # crq.with_lock emits human diagnostics on stdout on contention; never mix them with wire JSON.
     with contextlib.redirect_stdout(io.StringIO()):
-        return runner.with_lock(locked)
+        return runner.with_lock(locked, **({"lock_wait": lock_wait} if lock_wait else {}))
 
 
 def main():

@@ -55,7 +55,8 @@ export function reviewOp<S extends z.ZodType, O>(
       if (
         error instanceof ReviewInputError ||
         !client ||
-        (error instanceof ReviewRemoteError && !error.remote.retryable)
+        (error instanceof ReviewRemoteError &&
+          (!error.remote.retryable || error.remote.code === 'busy'))
       )
         return { status: 'failed', error: messageOf(error) };
       return { status: 'indeterminate', detail: messageOf(error) };

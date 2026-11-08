@@ -3195,27 +3195,39 @@ def admit_available(q, usage, log, dry=False, only=None, ignore_quiet=False, res
     return has_coverage, global_gate, max(0, slots - spent)
 
 
-def slot():
-    """Collect terminal reviews and admit under the tick lock; no enrollment/audit."""
+def scheduled_slot():
+    """Probe quota without tick.lock; discard the observation if ANY queue state changed.
+
+    No reservation can be based on a stale snapshot: the comparison, collection,
+    admission and journal writes are one existing tick.lock transaction. A busy
+    scheduler simply retries on its next timer invocation.
+    """
     if (STATE / "runner-disabled").exists():
         return ["runner disabled for host handover"]
-    q = load_queue()
+    snapshot = with_lock(lambda: json.loads(json.dumps(load_queue())))
+    if snapshot is None:
+        return []
+    observed = json.loads(json.dumps(snapshot))
+    observation = read_slot_usage(observed)
+
+    def commit():
+        if load_queue() != snapshot:
+            return ["queue changed during quota probe; retry next slot tick"]
+        return slot(observed, observation)
+    return with_lock(commit) or []
+
+
+def slot(q=None, observation=None):
+    """One locked admission pass; the timer owns subsequent deadline retries."""
+    if (STATE / "runner-disabled").exists():
+        return ["runner disabled for host handover"]
+    q = load_queue() if q is None else q
     log = []
-    # One short wait at most, bounded to <60s; usage can be slow/unavailable.
-    # After an early local reservation expiry, the next minute retries rather
-    # than trusting fullCapacityInMs as the first available slot.
-    for attempt in range(2):
-        collect_finished(q, log)
-        usage, reserved = read_slot_usage(q)
-        _, gate, remaining = admit_available(q, usage, log, reserved=reserved, capture_current=False)
-        save_queue(q)
-        at = now()
-        deadline = refresh_slot_deadline(q, usage, remaining, gate, at=at)
-        delay = (deadline - at).total_seconds()
-        if attempt == 0 and 0 < delay < 60 and gate in ("slots", "cooldown"):
-            time.sleep(delay)
-            continue
-        break
+    collect_finished(q, log)
+    usage, reserved = read_slot_usage(q) if observation is None else observation
+    _, gate, remaining = admit_available(q, usage, log, reserved=reserved, capture_current=False)
+    save_queue(q)
+    refresh_slot_deadline(q, usage, remaining, gate, at=now())
     return log
 
 

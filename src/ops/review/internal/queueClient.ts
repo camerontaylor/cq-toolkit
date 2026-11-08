@@ -439,8 +439,9 @@ export function makeQueueClient(transport: QueueTransport): DeferredQueueClient 
 export function makeReviewClient(transport: QueueTransport) {
   async function request(input: z.infer<typeof ReviewWireSchema>, options?: QueueLifetimeOptions) {
     let wire: string;
+    let parsed: z.infer<typeof ReviewWireSchema>;
     try {
-      const parsed = ReviewWireSchema.parse(input);
+      parsed = ReviewWireSchema.parse(input);
       if (
         parsed.op === 'submit' &&
         parsed.snapshot &&
@@ -452,16 +453,46 @@ export function makeReviewClient(transport: QueueTransport) {
     } catch (error) {
       throw new ReviewInputError(error instanceof Error ? error.message : String(error));
     }
-    const raw = await transport(wire, options);
-    if (Buffer.byteLength(raw) > QUEUE_WIRE_BYTES) throw new Error('oversized review response');
-    const result = ReviewResponseSchema.parse(JSON.parse(raw));
-    if ('error' in result) throw new ReviewRemoteError(result.error);
+    // Only a typed busy reply proves that locked work did not run. Never retry
+    // a disconnect, malformed reply, or any other unknown-delivery failure.
+    const retryUntil = Date.now() + 35_000;
+    let result;
+    for (;;) {
+      refuseOnLifetime(options, 'review request');
+      const raw = await transport(wire, options);
+      if (Buffer.byteLength(raw) > QUEUE_WIRE_BYTES) throw new Error('oversized review response');
+      result = ReviewResponseSchema.parse(JSON.parse(raw));
+      if (!('error' in result)) break;
+      const fault = new ReviewRemoteError(result.error);
+      if (result.error.code !== 'busy' || !result.error.retryable) throw fault;
+      const remaining = Math.min(retryUntil - Date.now(), lifetimeRemaining(options) ?? Infinity);
+      if (remaining <= 0) throw fault;
+      await new Promise<void>((resolve, reject) => {
+        const signal = options?.signal;
+        const onAbort = () => {
+          clearTimeout(timer);
+          signal?.removeEventListener('abort', onAbort);
+          reject(signal?.reason);
+        };
+        const timer = setTimeout(
+          () => {
+            signal?.removeEventListener('abort', onAbort);
+            resolve();
+          },
+          Math.min(250, remaining),
+        );
+        signal?.addEventListener('abort', onAbort, { once: true });
+        if (signal?.aborted) onAbort();
+      });
+      options?.signal?.throwIfAborted();
+      if (Date.now() >= retryUntil || (lifetimeRemaining(options) ?? Infinity) <= 0) throw fault;
+    }
     if (
-      input.op !== 'capabilities' &&
-      ((!('state' in result) && !(input.op === 'result' && 'index' in result)) ||
+      parsed.op !== 'capabilities' &&
+      ((!('state' in result) && !(parsed.op === 'result' && 'index' in result)) ||
         ('request_id' in result &&
           result.request_id !== undefined &&
-          result.request_id !== input.request_id))
+          result.request_id !== parsed.request_id))
     )
       throw new Error('review response operation or request mismatch');
     return result;
