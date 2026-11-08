@@ -211,7 +211,7 @@ def repair_provenance(c, record, run):
         job = json.loads((c.STATE / 'repair/inbox' / (job_id + '.json')).read_text())
         finding = job.get('finding', {})
         fid = job.get('canonical_finding_id') or finding.get('id') or finding.get('source_id') or job.get('source', {}).get('id') or job.get('source', {}).get('source_id') or job_id
-        source = job.get('review_id') or job.get('source', {}).get('review_id') or job.get('run') or run
+        source = job.get('review_id') or job.get('source', {}).get('review_id') or job.get('source', {}).get('run') or job.get('run') or run
         link = ('https://github.com/' + c.REPO + '/pull/' + str(job['pr'])) if job.get('pr') else 'threadless; finding ledger is authoritative'
         lines.append('| `' + str(fid) + '` | `' + str(source) + '` | ' + link + ' |')
     return lines
