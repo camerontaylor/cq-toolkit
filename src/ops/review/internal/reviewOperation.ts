@@ -178,7 +178,7 @@ export const ResponseSchema = z.union([
         .object({
           max_request_bytes: z.literal(6291456),
           max_snapshot_bytes: z.literal(5242880),
-          max_content_bytes: z.literal(4194304),
+          max_content_bytes: z.literal(3145728),
           max_objects: z.literal(4096),
           chunk_bytes: z.literal(3072),
         })

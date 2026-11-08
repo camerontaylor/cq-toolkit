@@ -17,7 +17,7 @@ const caps = {
   limits: {
     max_request_bytes: 6291456,
     max_snapshot_bytes: 5242880,
-    max_content_bytes: 4194304,
+    max_content_bytes: 3145728,
     max_objects: 4096,
     chunk_bytes: 3072,
   },
@@ -305,4 +305,45 @@ test('explicit repeat=false on retry matches an omitted persisted repeat default
   expect((await op({ ...input, repeat: false })).status).toBe('ok');
   expect(submissions).toHaveLength(2);
   expect(submissions[1]).toBe(submissions[0]);
+});
+
+test('cached snapshots exceeding the decoded limit are refused before submit dispatch', async () => {
+  await writeFile(join(cwd, 'file'), 'head');
+  await git('add', 'file');
+  await git('commit', '-qm', 'head');
+  const calls: string[] = [];
+  const op = makeSubmit(async (raw) => {
+    const { op } = JSON.parse(raw) as { op: string };
+    calls.push(op);
+    return JSON.stringify(
+      op === 'capabilities' ? caps : { v: 1, action: 'created', state: 'queued' },
+    );
+  });
+  const input = {
+    cwd,
+    repo: 'owner/repo',
+    target: 'target',
+    requestId: 'cached-bound',
+    reachable: true,
+  };
+  expect(await op(input)).toMatchObject({ status: 'ok' });
+  const path = join(cwd, '.cq/queue-evidence/requests/cached-bound.json');
+  const record = JSON.parse(await readFile(path, 'utf8')) as { wire: { snapshot?: unknown } };
+  const snapshot = {
+    v: 1,
+    tree: 'a'.repeat(40),
+    sha256: 'b'.repeat(64),
+    objects: [
+      { oid: 'c'.repeat(40), type: 'blob', data: Buffer.alloc(3145729, 120).toString('base64') },
+    ],
+  };
+  expect(Buffer.byteLength(JSON.stringify(snapshot))).toBeLessThan(caps.limits.max_snapshot_bytes);
+  record.wire.snapshot = snapshot;
+  await writeFile(path, JSON.stringify(record));
+  calls.length = 0;
+  expect(await op(input)).toMatchObject({
+    status: 'failed',
+    error: 'snapshot content exceeds bound',
+  });
+  expect(calls).toEqual(['capabilities']);
 });
