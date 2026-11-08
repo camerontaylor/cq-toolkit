@@ -147,7 +147,9 @@ export const PrCandidateSchema: z.ZodType<PrCandidate> = PrCandidateObject;
 // ---------------------------------------------------------------------------
 
 /** The JSON-dispatch input of the pure classifier: one candidate + the
- * caller's clock reading (classifyPr steals no time of its own). */
+ * caller's clock reading. classifyPr itself steals no time; the dispatched op
+ * only compares the reading with the real clock and REJECTS (`config`) a
+ * reading later than it, so a verdict is deterministic for any accepted input. */
 const ClassifyPrConfigDataSchema = z
   .object({
     settleWindowMs: z.number().int().nonnegative().optional(),
@@ -448,7 +450,7 @@ export const registry: OpRegistryEntry[] = [
     importer: async (wiring) => {
       const { classifyPr } = await import('./classifyPrs.js');
       const { defaultClassifyPrConfig } = await import('./classify.config.js');
-      const { clampClock, mergeClassifyConfig, resolveClassifyTrust } =
+      const { assertPlanClock, mergeClassifyConfig, resolveClassifyTrust } =
         await import('./trustMirrors.js');
       const op: Op<ClassifyPrsInput, PrClassification> = async (input) => {
         // Who counts as a reviewer is a trust input: resolved from config only.
@@ -462,7 +464,11 @@ export const registry: OpRegistryEntry[] = [
               }) as ClassifyPrConfig);
         return {
           status: 'ok',
-          value: classifyPr(input.candidate, clampClock(input.nowMs), config),
+          value: classifyPr(
+            input.candidate,
+            assertPlanClock('merge.classifyPrs', input.nowMs),
+            config,
+          ),
         };
       };
       return op as Op<unknown, unknown>;

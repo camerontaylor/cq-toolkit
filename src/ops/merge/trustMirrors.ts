@@ -206,6 +206,25 @@ const CLASSIFY_FIELD_RULES = {
 /** The classify fields the rules table decides (a test pins this list). */
 export const CLASSIFY_RULE_FIELDS: readonly string[] = Object.keys(CLASSIFY_FIELD_RULES);
 
+const isStringArray = (v: unknown): v is string[] =>
+  Array.isArray(v) && v.every((x) => typeof x === 'string');
+
+/** Whether a plan value has the shape its rule expects (checked before any use). */
+function hasShape(rule: ClassifyFieldRule, value: unknown): boolean {
+  switch (rule) {
+    case 'max':
+      return typeof value === 'number' && Number.isFinite(value) && value >= 0;
+    case 'host-wins':
+      return typeof value === 'string' || value === null;
+    case 'union':
+    case 'trust-list':
+    case 'trust-list-upper':
+      return isStringArray(value);
+    case 'deny':
+      return false;
+  }
+}
+
 /**
  * Merge a plan/op-input classify `config` over the host's classify config so
  * that the plan can only NARROW trust (see CLASSIFY_FIELD_RULES). Everything
@@ -221,11 +240,19 @@ export function mergeClassifyConfig<H extends object>(
   const merged: Record<string, unknown> = { ...h };
   for (const [field, value] of Object.entries(plan)) {
     if (value === undefined) continue;
-    const rule = (CLASSIFY_FIELD_RULES as Record<string, ClassifyFieldRule | undefined>)[field];
+    const rule = Object.hasOwn(CLASSIFY_FIELD_RULES, field)
+      ? (CLASSIFY_FIELD_RULES as Record<string, ClassifyFieldRule>)[field]
+      : undefined;
     if (rule === undefined || rule === 'deny') {
       throw new DispatchError(
         'config',
         `${op}: input.config.${field} cannot be set by plan data or op input (value not echoed)`,
+      );
+    }
+    if (!hasShape(rule, value)) {
+      throw new DispatchError(
+        'config',
+        `${op}: input.config.${field} has the wrong shape (value not echoed)`,
       );
     }
     const hostValue = h[field];
@@ -262,10 +289,17 @@ export function mergeClassifyConfig<H extends object>(
 }
 
 /**
- * A plan/op-input clock can only STALL a merge, never skip a wait: the
- * dispatch ops never accept a `nowMs` later than the real clock (an earlier
- * clock means less elapsed time, so the settle wait only gets longer).
+ * A plan/op-input clock must be a finite, non-negative number no later than
+ * the real clock; anything else fails with `config` (the value is never
+ * echoed). Rejecting, not clamping, keeps the dispatched ops deterministic: a
+ * later clock would shorten the settle wait, an earlier one only lengthens it.
  */
-export function clampClock(nowMs: number): number {
-  return Math.min(nowMs, Date.now());
+export function assertPlanClock(op: string, nowMs: unknown): number {
+  if (typeof nowMs !== 'number' || !Number.isFinite(nowMs) || nowMs < 0 || nowMs > Date.now()) {
+    throw new DispatchError(
+      'config',
+      `${op}: input.nowMs must be a finite, non-negative clock reading no later than the current time (value not echoed)`,
+    );
+  }
+  return nowMs;
 }
