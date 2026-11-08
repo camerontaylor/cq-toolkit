@@ -82,7 +82,7 @@ describe('required workflow cancellation isolation', () => {
     '%s isolates each event and PR/ref',
     (file) => {
       const text = read(file);
-      const subject = file.includes('denylist') ? 'github.sha' : 'github.ref';
+      const subject = file.includes('denylist') ? 'github.run_id' : 'github.ref';
       expect(text).toContain(
         `group: \${{ github.workflow }}-\${{ github.event_name }}-\${{ github.event.pull_request.number || ${subject} }}`,
       );
