@@ -13,8 +13,8 @@
 // destructuring `{ env } = process` in declarations, assignments and
 // parameters, `import { env } from 'node:process'`, and `.env` on a default
 // or namespace import of `node:process` / `process`, a local alias
-// (`const p = process`), and TS assertions around any of these. Not caught: an
-// assignment alias (`let p; p = process`).
+// (`const p = process` or `p = process`), and TS assertions. Not tracked:
+// interprocedural control flow. Writes in unrelated functions are ignored.
 
 const WRAPPERS = new Set([
   'TSAsExpression',
@@ -72,23 +72,39 @@ export default {
     };
     const addAlias = (node) => {
       const binding = bindingOf(node);
-      if (binding) processBindings.set(binding, node.range[0]);
+      if (!binding) return;
+      let writes = processBindings.get(binding);
+      if (!writes) processBindings.set(binding, (writes = new Set()));
+      writes.add(node.range[0]);
     };
     const isProcessNode = (raw) => {
       const node = unwrap(raw);
       if (node.type !== 'Identifier') return isProcess(node);
       const binding = bindingOf(node);
       if (!binding || binding.defs.length === 0) return isProcess(node);
-      return (
-        processBindings.has(binding) &&
-        !binding.references.some(
-          (ref) =>
-            ref.isWrite() &&
-            ref.identifier.range[0] !== processBindings.get(binding) &&
-            (ref.writeExpr?.range[1] ?? ref.identifier.range[1]) <= node.range[0],
-        )
-      );
+      const aliases = processBindings.get(binding);
+      if (!aliases) return false;
+      // A function body can precede a read without ever executing. Only writes
+      // in this execution scope or an enclosing one can invalidate this read.
+      const readScope = context.sourceCode.getScope(node);
+      let latestWrite;
+      for (const ref of binding.references) {
+        if (!ref.isWrite()) continue;
+        if ((ref.writeExpr?.range[1] ?? ref.identifier.range[1]) > node.range[0]) continue;
+        const writeScope = ref.from.variableScope;
+        let scope = readScope;
+        while (scope && scope !== writeScope) scope = scope.upper;
+        if (!scope) continue;
+        if (!latestWrite || ref.identifier.range[0] > latestWrite.identifier.range[0]) {
+          latestWrite = ref;
+        }
+      }
+      // Imports have no initializing write reference.
+      return latestWrite
+        ? aliases.has(latestWrite.identifier.range[0])
+        : binding.defs.some((def) => def.type === 'ImportBinding');
     };
+
     const hasEnvKey = (pattern) =>
       pattern.properties.some(
         (p) =>
@@ -134,6 +150,9 @@ export default {
         checkPattern(node.id, node.init, node);
       },
       AssignmentExpression(node) {
+        if (node.operator === '=' && node.left.type === 'Identifier' && isProcessNode(node.right)) {
+          addAlias(node.left);
+        }
         checkPattern(node.left, node.right, node);
       },
       AssignmentPattern(node) {

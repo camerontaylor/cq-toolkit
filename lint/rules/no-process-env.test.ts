@@ -20,6 +20,10 @@ const ok = (code: string) => ({ code, filename: 'src/ops/x.ts' });
 
 ruleTester.run('no-process-env', rule, {
   valid: [
+    ok('let p; function reset() { p = process; } p.env;'),
+    ok('let p = process; function f() { p = {}; return p.env; }'),
+    ok('let p = process; p = {}; function f() { return p.env; }'),
+    ok('var p = process; { var p = other; } p.env;'),
     ok('const p = process; function f(p) { return p.env; }'),
     ok('const p = process; { const p = { env: {} }; p.env; }'),
     ok("import proc from 'node:process'; function f(proc) { return proc.env; }"),
@@ -43,6 +47,12 @@ ruleTester.run('no-process-env', rule, {
     ok('let a; ({ argv: a } = process);'),
   ],
   invalid: [
+    bad('let p = process; function reset() { p = {}; } p.env;'),
+    bad('let p = process; function reset() { p = {}; } function read() { return p.env; }'),
+    bad('var p = process; var p = process; p.env;'),
+    bad('var p = other; var p = process; p.env;'),
+    bad('let p = process; p = process; p.env;'),
+    bad('let p = process; p = p; p.env;'),
     {
       ...bad('process.env;'),
       languageOptions: { globals: { process: 'readonly' } },
