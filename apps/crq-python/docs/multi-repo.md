@@ -213,3 +213,16 @@ Creating the six clones and any keys on the queue host; GitHub App
 installations and repo permissions (issue creation via the existing `gh`
 auth); choosing floors and exclude lists per repo; the queue-host deploy
 itself (coordinator).
+
+## Local-first review authorization
+
+`review-v1` uses the configured repository clone for object resolution, snapshot
+installation, planning, scans, execution worktrees and cleanup. A clone entry in
+runner configuration does not authorize submissions. The queue policy's existing
+`repo` remains authorized; an optional `repos` array adds repository slugs, for
+example `"repos": ["example/secondary"]`. Existing policies without this field
+retain single-repository behavior. The principal and target branch must still
+match the policy's `write` and `branches` allowlists.
+
+D-1 must add `repos` to the live queue policy before enabling any non-primary
+repository. This source change does not update or activate that live policy.

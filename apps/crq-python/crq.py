@@ -1878,7 +1878,7 @@ def launch(q: Dict[str, Any], item: Dict[str, Any], plan: Dict[str, Any]) -> str
         # Universal secret shapes plus this repo's configured extra classes;
         # the primary repo's publish classes stay out of foreign scans.
         scan_classes = UNIVERSAL_SCAN_CLASSES | set(cfg["scan_extra_classes"])
-    elif item["kind"] in ("open", "delta") and item_repo(item) != REPO:
+    elif item["kind"] in ("open", "delta", local_review_runtime.KIND) and item_repo(item) != REPO:
         # Foreign open/delta review (docs/multi-repo.md discovery pr): scan and
         # worktree run in that repo's clone with the same universal secret-shape
         # set as push items. These reviews scan the raw base..head range — not a
@@ -1970,7 +1970,7 @@ def launch(q: Dict[str, Any], item: Dict[str, Any], plan: Dict[str, Any]) -> str
             # immediately before reservation, still under the same tick lock.
             author_lease.grant_queue(item, at=iso())
         except author_quota.AuthorRefused:
-            remove_worktree(wt, wbranch)
+            remove_worktree(wt, wbranch, clone=repo_clone)
             raise
     repair_tick.atomic(rdir / "meta.json", meta)
     # Session-log preservation (item 2.1): one work-started line per review,
@@ -2417,7 +2417,17 @@ def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
             q.update(paused=True, pause_reason=f"{cls['outcome']} on {r['run_id']}; owner action needed")
         result = local_review_runtime.complete(sys.modules[__name__], q, item, rdir, r["run_id"], cls,
                     json.loads(exitf.read_text())["ended_at"], exit_code)
-        remove_worktree(Path(meta["worktree"]), meta["wt_branch"])
+        try:
+            try:
+                clone = local_review_runtime.transport.clone_for(sys.modules[__name__], item_repo(item))
+            except ValueError:
+                # Resolve the owning git directory before removing a worktree
+                # whose repo was removed from REPOS. Never use the primary clone.
+                clone = Path(git("rev-parse", "--path-format=absolute", "--git-common-dir",
+                                 cwd=Path(meta["worktree"])))
+            remove_worktree(Path(meta["worktree"]), meta["wt_branch"], clone=clone)
+        except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+            event("local_review_cleanup_failed", item=item["id"], reason=str(exc)[:300])
         return result
     if item["kind"] == review_receipt.KIND:
         # Receipt before queue mutation: a crash here is recovered by re-harvest.

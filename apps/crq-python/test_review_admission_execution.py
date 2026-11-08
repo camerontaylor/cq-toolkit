@@ -321,6 +321,44 @@ class ExecutionTests(SnapshotGitFixture, unittest.TestCase):
         self.assertEqual(len(self.q["review_notify_outbox"]), 1)
         self.assertEqual(admission.status(self.q, "one")["state"], "completed")
 
+    def test_nonmatching_unavailable_pr_ranges_never_resolve_objects(self):
+        pr = self.pr()
+        missing = dict(base="a" * 40, head="b" * 40, profile=self.profile,
+                       range_policy="full-range-once-v1")
+        pr["cycles"] = [dict(missing, run_id="gone")]
+        pr["run"] = dict(run_id="run-1")
+        (self.rdir / "meta.json").write_text(json.dumps(missing))
+        with mock.patch.object(runtime, "cycle_facts", side_effect=AssertionError("resolved unrelated range")):
+            self.assertIsNotNone(runtime.prepare(self.c, self.q, self.item, False))
+        self.assertEqual(self.item["state"], "pending")
+
+    def test_same_shas_across_repos_keep_admission_and_reconciliation_separate(self):
+        self.finish()
+        foreign = "example/secondary"
+        inputs = dict(self.inputs, repo=foreign)
+        facts = dict(self.facts, repo=foreign)
+        result = admission.admit(self.q, request_id="foreign", inputs=inputs, resolved=facts,
+            profile=self.profile, at=self.c.iso(), verify_receipt=lambda i: runtime.retained(self.c, i))
+        item = self.q["items"][-1]
+        self.assertEqual(result["action"], "created")
+        self.assertNotEqual(item["identity"], self.item["identity"])
+        self.assertNotEqual(item["id"], self.item["id"])
+        pr = self.pr()
+        pr["cycles"] = [dict(base=self.base, head=self.head, profile=self.profile,
+            range_policy="full-range-once-v1", run_id="run-1", ndjson=str(self.rdir / "review.ndjson"))]
+        self.c.REPOS = [dict(repo=foreign, clone=str(self.repo))]
+        self.c.object_present = lambda *a, **kw: True
+        self.c.git = lambda *a, **kw: self.git(*a)
+        with mock.patch.object(runtime, "cycle_facts", side_effect=AssertionError("cross-repo reuse")):
+            self.assertIsNotNone(runtime.prepare(self.c, self.q, item, False))
+        self.assertEqual(item["state"], "pending")
+        with mock.patch.object(backfill_runtime, "services", side_effect=AssertionError("foreign artifact publication")):
+            runtime.complete(self.c, self.q, item, self.rdir, "run-1", self.cls, self.c.iso(), 0)
+            runtime.republish(self.c, self.q, item)
+        self.assertFalse(item["publication_pending"])
+        self.assertNotIn("publication_event_id", item)
+        self.assertIsNotNone(runtime.retained(self.c, item))
+
     def test_old_unknown_profile_cycle_and_moved_head_never_reuse(self):
         pr = self.pr()
         pr["cycles"] = [dict(base=self.base, head=self.head, range_policy="full-range-once-v1",

@@ -19,10 +19,8 @@ MARKER = "<!-- crq-local-review-summary-v1 -->"
 def associate(c, q, repo, pr, base, head, dry):
     if not any(i.get("kind") == operation.KIND for i in q["items"]):
         return False
-    if repo != c.REPO:
-        return False  # clone threading is added in the next slice
     try:
-        wanted = runtime.facts(c, base, head, runtime.transport.profile(c.CONFIG, base))
+        wanted = runtime.facts(c, base, head, runtime.transport.profile(c.CONFIG, base), repo)
     except (OSError, RuntimeError, ValueError, subprocess.SubprocessError):
         return False
     candidates = [i for i in q["items"] if i.get("kind") == operation.KIND
