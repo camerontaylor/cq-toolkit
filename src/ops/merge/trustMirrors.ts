@@ -7,6 +7,7 @@ import { readCqEnv } from '../../config/env.js';
 import { ASSOCIATIONS, stripRefsHeads } from '../../config/values.js';
 import type { CqEnv } from '../../config/env.js';
 import { SelfhostDefaults } from '../../selfhost/config.js';
+import type { ClassifyPrConfig } from './classify.config.js';
 
 const SHOWN = 80;
 /** A plan-supplied value echoed into an error: bounded, JSON-quoted. */
@@ -175,44 +176,96 @@ export function checkedProtectedBranch(op: string, cqEnv?: CqEnv): string {
   return assertProtectedBranchMirror(op, undefined, cqEnv);
 }
 
-interface ClassifyNarrowFields {
-  settleWindowMs?: number | undefined;
-  automationLogin?: string | null | undefined;
-  excludedLogins?: readonly string[] | undefined;
+/**
+ * How a plan/op-input classify `config` field combines with the host's value.
+ * DENY BY DEFAULT: every `ClassifyPrConfig` field needs a rule here (the
+ * `satisfies` below fails to compile when the type gains a field), and a plan
+ * field whose rule is `deny` or that has no rule fails with `config`, naming
+ * the field and never its value.
+ *
+ * - `max`: the larger of host and plan (a plan can only lengthen the wait).
+ * - `union`: set union (a plan can only add exclusions).
+ * - `host-wins`: a conflicting plan value is a `config` error; the host value is kept.
+ * - `trust-list`: a trust list already checked by `resolveClassifyTrust`
+ *   (equal to the resolved value); normalised to upper case when
+ *   case-insensitive, then taken from the plan side.
+ * - `deny`: not settable by plan data (code-owned patterns).
+ */
+type ClassifyFieldRule = 'max' | 'union' | 'host-wins' | 'trust-list' | 'trust-list-upper' | 'deny';
+const CLASSIFY_FIELD_RULES = {
+  settleWindowMs: 'max',
+  allClearPattern: 'deny',
+  skipPatterns: 'deny',
+  trustedBots: 'trust-list',
+  trustedAssociations: 'trust-list-upper',
+  automationLogin: 'host-wins',
+  excludedLogins: 'union',
+  acceptReviewStates: 'trust-list-upper',
+} as const satisfies Record<keyof ClassifyPrConfig, ClassifyFieldRule>;
+
+/** The classify fields the rules table decides (a test pins this list). */
+export const CLASSIFY_RULE_FIELDS: readonly string[] = Object.keys(CLASSIFY_FIELD_RULES);
+
+/**
+ * Merge a plan/op-input classify `config` over the host's classify config so
+ * that the plan can only NARROW trust (see CLASSIFY_FIELD_RULES). Everything
+ * the host set and the plan does not name survives.
+ */
+export function mergeClassifyConfig<H extends object>(
+  op: string,
+  host: H,
+  plan: Record<string, unknown> | undefined,
+): H {
+  if (plan === undefined) return host;
+  const h = host as Record<string, unknown>;
+  const merged: Record<string, unknown> = { ...h };
+  for (const [field, value] of Object.entries(plan)) {
+    if (value === undefined) continue;
+    const rule = (CLASSIFY_FIELD_RULES as Record<string, ClassifyFieldRule | undefined>)[field];
+    if (rule === undefined || rule === 'deny') {
+      throw new DispatchError(
+        'config',
+        `${op}: input.config.${field} cannot be set by plan data or op input (value not echoed)`,
+      );
+    }
+    const hostValue = h[field];
+    switch (rule) {
+      case 'max':
+        merged[field] =
+          typeof hostValue === 'number' && typeof value === 'number'
+            ? Math.max(hostValue, value)
+            : (hostValue ?? value);
+        break;
+      case 'union':
+        merged[field] = [
+          ...new Set([...((hostValue as string[] | undefined) ?? []), ...(value as string[])]),
+        ];
+        break;
+      case 'host-wins':
+        if (hostValue !== undefined && value !== hostValue) {
+          throw new DispatchError(
+            'config',
+            `${op}: input.config.${field} conflicts with the host's automation identity and cannot override it (value not echoed)`,
+          );
+        }
+        merged[field] = hostValue ?? value;
+        break;
+      case 'trust-list':
+        merged[field] = value;
+        break;
+      case 'trust-list-upper':
+        merged[field] = (value as string[]).map((v) => v.toUpperCase());
+        break;
+    }
+  }
+  return merged as unknown as H;
 }
 
 /**
- * Merge a plan/op-input classify `config` over the host's config so that the
- * plan can only NARROW trust: `excludedLogins` is the union of host and plan,
- * `settleWindowMs` is the larger of the two (a plan cannot shorten the wait),
- * and an `automationLogin` that conflicts with the host's is a `config`
- * error, never silently ignored. The trust lists were already checked by
- * `resolveClassifyTrust` and are taken from the plan side (equal to the
- * resolved values). Everything else the host set survives.
+ * A plan/op-input clock can only STALL a merge, never skip a wait: the
+ * dispatch ops never accept a `nowMs` later than the real clock (an earlier
+ * clock means less elapsed time, so the settle wait only gets longer).
  */
-export function mergeClassifyConfig<H extends ClassifyNarrowFields>(
-  op: string,
-  host: H,
-  plan: (ClassifyNarrowFields & Record<string, unknown>) | undefined,
-): H {
-  if (plan === undefined) return host;
-  const merged: Record<string, unknown> = { ...host, ...plan };
-  if (plan.automationLogin !== undefined && host.automationLogin !== undefined) {
-    if (plan.automationLogin !== host.automationLogin) {
-      throw new DispatchError(
-        'config',
-        `${op}: input.config.automationLogin conflicts with the host's automation identity and cannot override it (value not echoed)`,
-      );
-    }
-  }
-  if (host.automationLogin !== undefined) merged['automationLogin'] = host.automationLogin;
-  if (host.excludedLogins !== undefined || plan.excludedLogins !== undefined) {
-    merged['excludedLogins'] = [
-      ...new Set([...(host.excludedLogins ?? []), ...(plan.excludedLogins ?? [])]),
-    ];
-  }
-  if (host.settleWindowMs !== undefined && plan.settleWindowMs !== undefined) {
-    merged['settleWindowMs'] = Math.max(host.settleWindowMs, plan.settleWindowMs);
-  }
-  return merged as unknown as H;
+export function clampClock(nowMs: number): number {
+  return Math.min(nowMs, Date.now());
 }

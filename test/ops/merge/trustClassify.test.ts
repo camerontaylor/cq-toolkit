@@ -10,6 +10,7 @@ import { makeRunMergePrsOp } from '../../../src/ops/merge/runPrs.js';
 import { defaultClassifyPrConfig } from '../../../src/ops/merge/classify.config.js';
 import {
   assertBaseBranchMirror,
+  CLASSIFY_RULE_FIELDS,
   mergeClassifyConfig,
   resolveClassifyTrust,
 } from '../../../src/ops/merge/trustMirrors.js';
@@ -342,6 +343,79 @@ describe('classify trust defaults are independent per key', () => {
     );
     expect(errorClassOf(err)).toBe('config');
     expect(effects.calls).toEqual([]);
+  });
+
+  test('automationLogin:null from the plan cannot make a skip notice acceptance; a normal trusted COMMENTED review still is', async () => {
+    const cqEnv = env({
+      CQ_MERGE_TRUSTED_BOTS: 'coderabbitai[bot]',
+      CQ_MERGE_ACCEPT_REVIEW_STATES: 'COMMENTED',
+    });
+    const op = await entryOf('merge.classifyPrs').importer({ cqEnv });
+    const review = (body: string) => ({
+      id: 'r',
+      authorLogin: 'coderabbitai[bot]',
+      state: 'COMMENTED' as const,
+      body,
+      submittedAt: '2026-01-01T00:00:00.500Z',
+    });
+    const reason = async (body: string, config?: object) =>
+      (
+        (await op({
+          candidate: eligible(12, { reviews: [review(body)] }),
+          nowMs: NOW_MS,
+          ...(config ? { config } : {}),
+        })) as { value: { reason: string } }
+      ).value.reason;
+    expect(
+      await reason('CodeRabbit skipped this run because the PR is too large', {
+        automationLogin: null,
+      }),
+    ).toBe('no_acceptable_review');
+    expect(await reason('walked through the change, looks plausible')).not.toBe(
+      'no_acceptable_review',
+    );
+  });
+
+  test('the classify merge is deny-by-default: every ClassifyPrConfig field has a rule, unknown or pattern fields fail config', () => {
+    expect([...CLASSIFY_RULE_FIELDS].sort()).toEqual(
+      [
+        'acceptReviewStates',
+        'allClearPattern',
+        'automationLogin',
+        'excludedLogins',
+        'settleWindowMs',
+        'skipPatterns',
+        'trustedAssociations',
+        'trustedBots',
+      ].sort(),
+    );
+    for (const field of ['skipPatterns', 'allClearPattern', 'brandNewField']) {
+      let err: unknown;
+      try {
+        mergeClassifyConfig('t', defaultClassifyPrConfig, { [field]: 'x' });
+      } catch (e) {
+        err = e;
+      }
+      expect(errorClassOf(err)).toBe('config');
+      expect(String(err)).toContain(field);
+      expect(String(err)).not.toContain('"x"');
+    }
+    // a lowercase restated list is normalised, not applied verbatim
+    expect(
+      mergeClassifyConfig('t', defaultClassifyPrConfig, {
+        trustedAssociations: ['member'],
+        acceptReviewStates: ['approved'],
+      }),
+    ).toMatchObject({ trustedAssociations: ['MEMBER'], acceptReviewStates: ['APPROVED'] });
+  });
+
+  test('a plan-supplied clock can only stall: a future nowMs is clamped to the real clock', async () => {
+    const op = await entryOf('merge.classifyPrs').importer({ cqEnv: env() });
+    const young = eligible(13, { lastCommitAt: new Date(Date.now() - 1000).toISOString() });
+    const r = (await op({ candidate: young, nowMs: Date.now() + 30 * 24 * 3600 * 1000 })) as {
+      value: { reason: string };
+    };
+    expect(r.value.reason).not.toBe('settle_window_elapsed');
   });
 
   test('none set: nothing synthesised (built-in classifier behaviour unchanged); a restated documented default is accepted', () => {

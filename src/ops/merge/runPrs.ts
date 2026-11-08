@@ -98,6 +98,7 @@ import type { CqEnv } from '../../config/env.js';
 import {
   assertBaseBranchMirror,
   assertProtectedBranchMirror,
+  clampClock,
   mergeClassifyConfig,
   resolveClassifyTrust,
 } from './trustMirrors.js';
@@ -717,7 +718,14 @@ export function makeRunMergePrsOp(
     });
     // The nested resolve calls see the RESOLVED protected branch, never the raw input.
     const outcome = await runMergePrs(
-      { ...input, baseBranch, protectedBranch, ...(config !== undefined ? { config } : {}) },
+      {
+        ...input,
+        baseBranch,
+        protectedBranch,
+        // a plan-supplied clock can only stall, never skip a settle wait
+        ...(input.nowMs !== undefined ? { nowMs: clampClock(input.nowMs) } : {}),
+        ...(config !== undefined ? { config } : {}),
+      },
       {
         effects,
         resolve,
