@@ -82,7 +82,7 @@ env:
 jobs:
   crq-python:
     runs-on: {{RUNNER}}
-    if: ${{ github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    if: ${{ github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
     steps:
       - name: Check out the repo
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -97,10 +97,8 @@ jobs:
         run: python3 -m unittest discover -p 'test_*.py'
   static:
     runs-on: {{RUNNER}}
-    # The `cq-state` settle ledger is machine-written (selfhost settle-state);
-    # its pushes are not reviewable changes (review-debt #226). Job-level,
-    # never a trigger filter — I4 keeps the trigger surface intact.
-    if: ${{ github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    # Every PR and default-branch push; feature pushes carry no duplicate suite.
+    if: ${{ github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
     steps:
       - name: Check out the repo
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (immutable commit pin; repo policy)
@@ -135,9 +133,8 @@ jobs:
   # presence cannot dangle a branch-protection wait.
   from-source:
     runs-on: {{RUNNER}}
-    # Same cq-state skip as the static job (review-debt #226): the ledger
-    # push is not a reviewable change.
-    if: ${{ github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    # Match the static job's event selection.
+    if: ${{ github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
     steps:
       - name: Check out the repo
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (immutable commit pin; repo policy)

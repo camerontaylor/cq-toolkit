@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest';
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 
 // Required workflows select PR events and main pushes at job level.
-const SKIP = `if: \${{ github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}`;
+const SKIP = `if: \${{ github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}`;
 
 const read = (rel: string): string => readFileSync(join(ROOT, rel), 'utf8');
 
