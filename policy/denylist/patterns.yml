@@ -38,8 +38,8 @@ rules:
     regex: '\.om[cx]\b'
     sample: 'sync .omc/memory daily; skip .omx'
   - id: class:token-ssh-plumbing
-    description: token and ssh plumbing
-    regex: '-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----|\bssh-(rsa|ed25519|ecdsa|dsa) AAAA[A-Za-z0-9+/]{32,}|\bGH_FOR_FA\b|\bid_(rsa|ed25519)\b'
+    description: key material and token plumbing (SSH filenames alone are not key material)
+    regex: '-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----|\bssh-(rsa|ed25519|ecdsa|dsa) AAAA[A-Za-z0-9+/]{32,}|\bGH_FOR_FA\b'
     sample: 'key: -----BEGIN OPENSSH PRIVATE KEY-----'
   - id: class:webfront-package-names
     description: webfront package scope and vp CLI invocations

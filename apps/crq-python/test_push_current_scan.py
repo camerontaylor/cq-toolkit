@@ -12,6 +12,30 @@ from test_push_current_fixtures import (FOREIGN, PushTestBase, _FLEET_PROSE, crq
 
 
 class PushTest(PushTestBase, unittest.TestCase):
+    def test_shipped_ssh_rule_allows_path_examples_but_blocks_key_material(self):
+        corpus = crq.Path(__file__).resolve().parents[2] / "policy/denylist/patterns.yml"
+        comment = "/// off the wire and is interpolated into a path, so `../../.ssh/id_rsa`"
+        examples = [
+            (comment, True),
+            ("/// example: ~/.ssh/id_ed25519", True),
+            ("-----BEGIN " + "OPENSSH PRIVATE KEY-----", False),
+            ("ssh-ed25519 " + "AAAA" + "A" * 32, False),
+            (comment + " -----BEGIN " + "RSA PRIVATE KEY-----", False),
+        ]
+        for content, expected in examples:
+            for sign in ("+", "-"):
+                with self.subTest(content=content, sign=sign), \
+                     mock.patch.object(crq, "git", return_value=corpus.read_text()), \
+                     mock.patch.object(crq.shutil, "which", return_value=None):
+                    diff = ("diff --git a/src/translate.rs b/src/translate.rs\n"
+                            "--- a/src/translate.rs\n+++ b/src/translate.rs\n"
+                            "@@ -1 +1 @@\n" + sign + content + "\n")
+                    ok, scan = crq.secret_scan_diff(
+                        diff, self.root / "scan.json", classes=crq.UNIVERSAL_SCAN_CLASSES)
+                self.assertEqual(ok, expected)
+                self.assertEqual([h["rule"] for h in scan["denylist_hits"]],
+                                 [] if expected else ["class:token-ssh-plumbing"])
+
     def test_publish_classes_do_not_block_foreign_diff(self):
         self.commit(self.foreign_origin, "fleet prose", when=self.ago(2),
                     files={"notes.md": _FLEET_PROSE})
