@@ -98,6 +98,7 @@ jobs:
       - name: Set up Node {{NODE_VERSION}}
         uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
+          package-manager-cache: false
           node-version: {{NODE_VERSION}}
       - name: Select coarse checks (failure falls back to full)
         id: select
