@@ -12,8 +12,12 @@
 // form, never the hostname/path itself. No journal writes here — writers land
 // in T30/T31.
 import { createHash } from 'node:crypto';
-import { redactSensitiveText } from '../../driver/error-text.js';
-import { cutAuthorityUserinfo, stripCredentialText } from '../../shared/urlRedact.js';
+import { redactEnvSecrets } from '../../driver/error-text.js';
+import {
+  cutAuthorityUserinfo,
+  redactUrlUserinfo,
+  stripCredentialText,
+} from '../../shared/urlRedact.js';
 import type { ModelSpec } from '../../driver/types.js';
 import type {
   AttemptError,
@@ -69,7 +73,7 @@ function capSanitized(text: string): string {
  * `user@host` shape {@link sanitizeObservation} fails closed on.
  */
 function sanitizeIdentifier(text: string): string {
-  return capSanitized(redactSensitiveText(text));
+  return capSanitized(redactEnvSecrets(text));
 }
 
 /**
@@ -83,7 +87,7 @@ function sanitizeIdentifier(text: string): string {
 export function sanitizeObservation<T>(value: T): T {
   if (typeof value === 'string') {
     return capSanitized(
-      redactSensitiveText(stripCredentialText(redactSensitiveText(value))),
+      redactUrlUserinfo(redactEnvSecrets(stripCredentialText(redactEnvSecrets(value)))),
     ) as unknown as T;
   }
   if (Array.isArray(value)) {

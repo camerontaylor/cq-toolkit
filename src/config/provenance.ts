@@ -20,7 +20,7 @@
 import type { ProvenanceConfig } from '../kernel/types.js';
 import { assertCqEnv } from './entry.js';
 import type { CqEnv } from './env.js';
-import { redactIfUrl } from '../shared/urlRedact.js';
+import { redactIfUrl, redactUrlUserinfo } from '../shared/urlRedact.js';
 import { CQ_ENV_ENTRIES } from './env-registry.js';
 
 const MAX_VALUE_CHARS = 200;
@@ -72,5 +72,5 @@ export function provenanceConfig(cqEnv: CqEnv): ProvenanceConfig {
     env[name] = cap(redacted);
     sources[name] = 'env';
   }
-  return { env, sources, warnings: cqEnv.warnings.map((w) => show('warning', w.message)) };
+  return { env, sources, warnings: cqEnv.warnings.map((w) => redactUrlUserinfo(w.message)) };
 }

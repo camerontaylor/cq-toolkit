@@ -48,9 +48,21 @@ flag in the registry (`src/config/env-registry.ts`) is authoritative for which k
 `secret` flag from it. `_URL` is NOT a secret suffix (owner ruling 2026-10-11, re-confirmed 2026-11-09; post-acceptance
 note N21). Vendor `*_BASE_URL` names (for example `ANTHROPIC_BASE_URL`) are non-secret: their values are shown and
 recorded in provenance, always through the one shared URL redactor (`stripCredentialText`, `src/shared/urlRedact.ts`),
-which strips userinfo, query and fragment. That redactor is used at every place a URL-valued config or env value is
-shown or recorded: `cq config` (text and `--json`), v3 provenance, config diagnostics, attempt records and persisted
-error text. A credential-bearing URL is refused in passthrough (below), not redacted into a pass.
+which strips userinfo, query and fragment. There are three display forms, all produced by `src/shared/urlRedact.ts`:
+
+- **Structured value** (a config value: `cq config` text and `--json`, v3 provenance, the env snapshot): if the value
+  parses with WHATWG `new URL()` it is shown as `protocol//host` + pathname (`showUrl`); the host is `URL.host`, never a
+  last-`@` cut, and userinfo, query and fragment are gone. `https://user:TOKEN@host?x=1` is shown as `https://host/`.
+  A value that does not parse (or has no host) is shown as `[redacted-url]`, never as raw text.
+- **Free text** (persisted error text, config diagnostics, attempt records; `redactUrlUserinfo`): every URL authority
+  the scanner finds has its userinfo replaced by `[redacted]@` and its query and fragment dropped and marked
+  (`https://u:p@host/x?t=1` becomes `https://[redacted]@host/x?[redacted]`). The path, other text, bare `name@host`
+  prose and package specs are untouched. The scanner is linear.
+- **A known env value inside free text:** when the exact value of a `*_URL` environment variable appears in text, it is
+  replaced by its structured form (`showUrl`), then the free-text pass runs over the result.
+
+A credential-bearing URL is refused in passthrough (below), not redacted into a pass. The non-URL detectors in
+`scripts/*.mjs` (offline evidence scanner, build-env check) are standalone JavaScript and are not part of this contract.
 
 **`CQ_APPROVAL_KEY*` is denied.** Approval is the attended preview-digest authority, not an env key.
 
@@ -79,9 +91,16 @@ and the registry, `resolveSandboxConfig`, `buildChildEnv` and the launcher env a
 commas and/or whitespace. Annex B §B.5 stays in force: secret-suffixed names, the `AWS_*` family, `NPM_TOKEN`,
 `SSH_AUTH_SOCK`, `GOOGLE_APPLICATION_CREDENTIALS`, `NODE_OPTIONS` and `NODE_PATH` are refused, and
 so is every `CQ_*` name (a nested cq could read trust config from one). A `*_URL` name (including `DATABASE_URL`) is
-passable by name, but an entry whose VALUE carries URL userinfo (`user@host`, `user:pass@host`) is refused on every
-origin and every path that copies a value (the operator key, the launcher env, `buildChildEnv`), failing closed when
-the value does not parse as a URL but has an `@` before the host. The refusal names the variable, never the value. The refusal is a
+passable by name, but its VALUE must pass a fail-closed acceptance rule on every origin and every path that copies a
+value (the operator key, the launcher env, `buildChildEnv`, a manifest's declared names, trusted code and a driver's
+`envAllowlist`): it contains no `@` anywhere (raw or `%40`, either case), no whitespace and no backslash, and the whole
+value parses with WHATWG `new URL()` with an empty username and password. Anything else is refused. An `@` in a path is
+rare enough in env URLs to refuse. A non-`*_URL` variable is screened only when its value has a `://` separator, and is
+then refused on any `@`. The refusal names the variable, never the value. Not screened, by design, because they are
+trusted code-owned inputs: the proxy variables of the default child allowlist (for example `HTTPS_PROXY`, which may
+legitimately carry proxy credentials) and `SpawnOptions.env` overrides (per-route endpoint and auth values composed by
+the driver).
+The refusal for the other names above is a
 config error that names the offending name, or the position of a malformed entry (never any part of the raw value).
 
 **Origin of env names.** Trusted code that sets a value in-process (the SDK `optIn` ruling above, a driver's

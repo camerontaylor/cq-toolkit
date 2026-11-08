@@ -4,7 +4,7 @@
 // The original modules re-export these, so existing callers are unchanged.
 
 import { isSecretEnvName } from './secret.js';
-import { isUrlEnvName, urlValueHasUserinfo } from '../shared/urlRedact.js';
+import { urlValueRefused } from '../shared/urlRedact.js';
 
 export type SandboxMode = 'off' | 'required';
 /**
@@ -70,8 +70,10 @@ export const ENV_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 /**
  * Names `CQ_RUN_ENV_PASSTHROUGH` may never copy into a run child (Annex B
- * §B.5): credential-shaped names the subprocess allowlist excludes by design,
- * plus `DATABASE_URL`. Registry data: test/config/passthrough.test.ts checks it
+ * §B.5): credential-shaped names the subprocess allowlist excludes by design.
+ * `DATABASE_URL` and every other `*_URL` name are passable by NAME (`_URL` is
+ * not a secret suffix); their VALUE must pass the URL acceptance rule
+ * (`urlValueRefused`). Registry data: test/config/passthrough.test.ts checks it
  * against `DEFAULT_CHILD_ENV_ALLOWLIST` and the vendor names the registry
  * lists. Secret-suffixed names (`isSecretEnvName`), the `AWS_*` family and every
  * `CQ_*` name (a nested cq could read trust config from one) are refused on top
@@ -111,9 +113,8 @@ export const DECLARED_ENV_EXEMPT_NAMES: readonly string[] = Object.freeze([]);
  * reason text, or `undefined` when the value is fine.
  */
 export function urlValueRefusal(name: string, value: string): string | undefined {
-  if (!isUrlEnvName(name) && !value.includes('://')) return undefined;
-  return urlValueHasUserinfo(value)
-    ? `value of '${name}' carries URL credentials (userinfo); refused`
+  return urlValueRefused(name, value)
+    ? `value of '${name}' is not an acceptable URL (credentials, whitespace, backslash or unparseable); refused`
     : undefined;
 }
 

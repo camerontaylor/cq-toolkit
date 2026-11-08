@@ -74,10 +74,10 @@ function discoverSchemes(run: string, lenient: boolean): SchemeHit[] {
 }
 
 /**
- * Redact URL userinfo wherever a URL authority appears in free text, leaving
- * everything else byte-for-byte (query, fragment, path, bare `name@host` prose
- * and package specs are untouched): `https://u:p@host/x` becomes
- * `https://[redacted]@host/x`. Same scanner as {@link stripCredentialText}
+ * The FREE-TEXT form: wherever a URL authority appears in text, drop its
+ * userinfo (`https://u:p@host/x` becomes `https://[redacted]@host/x`) and its
+ * query and fragment (`?q=1#f` becomes `?[redacted]`); the path, other text,
+ * bare `name@host` prose and package specs are untouched. Same scanner as {@link stripCredentialText}
  * (lenient mode); the authority ends at the first `/`, `\\`, `?` or `#`, and
  * the userinfo is cut at its LAST `@`. Linear in the text length.
  */
@@ -104,8 +104,15 @@ export function redactUrlUserinfo(text: string): string {
       while (authorityEnd < token.length && !'/\\?#'.includes(token[authorityEnd] ?? ''))
         authorityEnd++;
       const at = token.lastIndexOf('@', authorityEnd - 1);
+      // Everything from the first `?` or `#` after the authority is a query or
+      // fragment: drop it and mark the cut (the authority is known, so this is
+      // not guesswork about prose).
+      let q = authorityEnd;
+      while (q < token.length && token[q] !== '?' && token[q] !== '#') q++;
+      const authorityAndPath = token.slice(0, q);
+      const shown = at < 0 ? authorityAndPath : `[redacted]${authorityAndPath.slice(at)}`;
       out.push(run.slice(cursor, hit.authority));
-      out.push(at < 0 ? token : `[redacted]${token.slice(at)}`);
+      out.push(q < token.length ? `${shown}${token[q]}[redacted]` : shown);
       cursor = limit;
     }
     out.push(run.slice(cursor));
@@ -240,29 +247,62 @@ export function isUrlEnvName(name: string): boolean {
 }
 
 /**
- * Does this URL-ish value carry credentials before the host (`user@host`,
- * `user:pass@host`)? Fails closed: any `@` in the authority part counts, even
- * when the value does not parse as a URL. An `@` only in the path, query or
- * fragment does not. A scheme-less value is its own authority up to the first
- * `/`, `?` or `#`. Linear time.
+ * Fail-closed ACCEPTANCE rule for a URL-valued variable that would be copied
+ * into a child. The value passes only if ALL hold: it has no `@` anywhere (raw
+ * or `%40`, either case), no whitespace and no backslash, and the whole value
+ * parses with WHATWG `new URL()` with an empty username and password. Anything
+ * else is refused. (An `@` in a path is rare enough in env URLs to refuse.) A
+ * blank value carries nothing and passes.
  */
-export function urlValueHasUserinfo(value: string): boolean {
-  const trimmed = value.trim();
-  const scheme = trimmed.indexOf('://');
-  let start = 0;
-  if (scheme >= 0) start = scheme + 3;
-  else if (trimmed.startsWith('//')) start = 2;
-  let end = start;
-  while (end < trimmed.length && !'/?#'.includes(trimmed[end] ?? '')) end++;
-  return trimmed.slice(start, end).includes('@');
+function urlValueAcceptable(value: string): boolean {
+  if (value.trim() === '') return true;
+  if (/[@\s\\]/.test(value) || /%40/i.test(value)) return false;
+  try {
+    const parsed = new URL(value);
+    return parsed.username === '' && parsed.password === '';
+  } catch {
+    return false;
+  }
 }
 
 /**
- * Show a value that may be a URL: the redactor applies when the NAME says URL
- * or the value carries a scheme separator; any other value is returned as is.
+ * Must a passthrough/declared/trusted/allowlisted VALUE be refused? A `*_URL`
+ * variable must satisfy {@link urlValueAcceptable}. Any other variable is
+ * screened only when its value carries a `://` separator, and is then refused
+ * on any `@` (raw or `%40`). Returns true to refuse; the caller names the
+ * VARIABLE only, never the value.
+ */
+export function urlValueRefused(name: string, value: string): boolean {
+  if (isUrlEnvName(name)) return !urlValueAcceptable(value);
+  return value.includes('://') && (value.includes('@') || /%40/i.test(value));
+}
+
+/**
+ * THE canonical display form of a structured URL value (a config value,
+ * provenance, `cq config`, a snapshot): `protocol//host/pathname`, with no
+ * userinfo, query or fragment. The host comes from the parsed URL, never from a
+ * last-`@` cut. A value that does not parse (or has no host) is shown as
+ * `[redacted-url]`, never as its raw text.
+ */
+export function showUrl(value: string): string {
+  try {
+    const parsed = new URL(value.trim());
+    if (parsed.host === '') return REDACTED_URL;
+    return `${parsed.protocol}//${parsed.host}${parsed.pathname}`;
+  } catch {
+    return REDACTED_URL;
+  }
+}
+
+const REDACTED_URL = '[redacted-url]';
+
+/**
+ * Show a value that may be a URL: the canonical display ({@link showUrl})
+ * applies when the NAME says URL or the value carries a scheme separator; any
+ * other value is returned as is.
  */
 export function redactIfUrl(name: string, value: string): string {
-  return isUrlEnvName(name) || value.includes('://') ? stripCredentialText(value) : value;
+  return isUrlEnvName(name) || value.includes('://') ? showUrl(value) : value;
 }
 
 /**

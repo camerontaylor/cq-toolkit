@@ -12,12 +12,14 @@ import { parsePassthrough, urlValueRefusal } from '../../src/config/parsers.js';
 import { buildConfigShowReport } from '../../src/ops/config/show.js';
 import { boundedErrorText, redactSensitiveText } from '../../src/driver/error-text.js';
 import { buildSandboxLauncherEnv } from '../../src/sandbox/index.js';
+import { sanitizeObservation } from '../../src/ops/fix/attemptRecord.js';
 import { buildChildEnv } from '../../src/shared/proc.js';
 import {
   redactIfUrl,
   redactUrlUserinfo,
+  showUrl,
   stripCredentialText,
-  urlValueHasUserinfo,
+  urlValueRefused,
 } from '../../src/shared/urlRedact.js';
 
 afterEach(() => {
@@ -42,9 +44,35 @@ describe('_URL is not a secret suffix', () => {
   });
 });
 
-describe('the shared redactor', () => {
+const refusedValues = [
+  withCreds,
+  'https://user@host.example',
+  String.raw`https:\/\/u:${tok}@host/db`,
+  `https:/u:${tok}@host/db`,
+  `https://clean.example https://u:${tok}@evil.example`,
+  `u:${tok}@host https://clean.example`,
+  `text //u:${tok}@host`,
+  `//clean //u:${tok}@host`,
+  `//user:${tok}@host`,
+  `user:${tok}@host.example`,
+  'https://us%40er@host',
+  'https://us%40er:p%40ss@host',
+  'https://host/path@seg',
+  'https://host/?email=a@b.c',
+  'https://host/#a@b',
+  'https://host/a%40b',
+  'https://host/a%40b'.toUpperCase().replace('HTTPS', 'https'),
+  'https://host/a b',
+  'https://host\\path',
+  'https://[bad',
+  'not a url',
+  'host.example',
+  ' https://u:p@host',
+];
+
+describe('the canonical structured display (showUrl)', () => {
   test.each([
-    [withCreds, 'https://api.example.test'],
+    [withCreds, 'https://api.example.test/'],
     [`https://api.example.test/v1?token=${tok}`, 'https://api.example.test/v1'],
     [`https://api.example.test/v1#${tok}`, 'https://api.example.test/v1'],
     [`https://u:p@api.example.test/v1?x=1#f`, 'https://api.example.test/v1'],
@@ -52,14 +80,44 @@ describe('the shared redactor', () => {
     [`https://us%40er:p@api.example.test/v1`, 'https://api.example.test/v1'],
     [`https://user:${tok}@[2001:db8::1]:8443/p`, 'https://[2001:db8::1]:8443/p'],
     ['https://api.example.test/clean', 'https://api.example.test/clean'],
+    ['https://host/path@seg', 'https://host/path@seg'],
+    ['https://u:p@host/path@seg', 'https://host/path@seg'],
+    [String.raw`https:\/\/host/path?token=` + tok, 'https://host/path'],
+    [`https:/host/path?token=${tok}`, 'https://host/path'],
+    [
+      `postgres://u:${tok}@db.example.test:5432/app?sslmode=x`,
+      'postgres://db.example.test:5432/app',
+    ],
   ])('%s -> %s', (input, expected) => {
-    const out = stripCredentialText(input);
+    const out = showUrl(input);
     expect(out).toBe(expected);
     expect(out).not.toContain(tok);
   });
 
-  test('a scheme-less user:pass@host never survives', () => {
-    expect(stripCredentialText(`user:${tok}@host.example`)).not.toContain(tok);
+  test.each([
+    `user:${tok}@host.example`,
+    `not a url ${tok}`,
+    `foo:user:${tok}@host`,
+    tok,
+    'https://',
+    '',
+  ])('an unparseable or hostless value (%#) is shown as [redacted-url], never raw', (value) => {
+    expect(showUrl(value)).toBe('[redacted-url]');
+  });
+
+  test('redactIfUrl applies to a URL-named variable or a scheme value only', () => {
+    expect(redactIfUrl('SOME_URL', `user:${tok}@host.example`)).toBe('[redacted-url]');
+    expect(redactIfUrl('CQ_AUTHOR_SSH_ALIAS', 'me@host')).toBe('me@host');
+    expect(redactIfUrl('X', withCreds)).toBe('https://api.example.test/');
+  });
+});
+
+describe('the attempt-record free-text stripper', () => {
+  test.each([
+    [withCreds, 'https://api.example.test'],
+    [`https://api.example.test/v1?token=${tok}`, 'https://api.example.test/v1'],
+  ])('%s -> %s', (input, expected) => {
+    expect(stripCredentialText(input)).toBe(expected);
   });
 
   test('very long and many-@ inputs are linear (no catastrophic backtracking)', () => {
@@ -70,29 +128,27 @@ describe('the shared redactor', () => {
     expect(out.startsWith('https://host/')).toBe(true);
     expect(out).not.toContain('?q=');
   });
-
-  test('redactIfUrl applies to a URL-named variable or a scheme value only', () => {
-    expect(redactIfUrl('SOME_URL', 'user:pw@host.example')).not.toContain('pw');
-    expect(redactIfUrl('CQ_AUTHOR_SSH_ALIAS', 'me@host')).toBe('me@host');
-    expect(redactIfUrl('X', withCreds)).toBe('https://api.example.test');
-  });
 });
 
-describe('credential-bearing URL detection', () => {
+describe('fail-closed URL acceptance for copied values', () => {
+  // Every bypass listed in the PR #1269 r1 review, plus the plain forms.
+  test.each(refusedValues)('%j is refused for a *_URL variable', (value) => {
+    expect(urlValueRefused('DATABASE_URL', value)).toBe(true);
+  });
+
   test.each([
-    [withCreds, true],
-    ['https://user@host.example', true],
-    ['https://host.example/path@seg', false],
-    ['https://host.example/?email=a@b.c', false],
-    ['https://host.example/#a@b', false],
-    ['https://[bad', false],
-    ['https://u@[bad', true],
-    ['//user:pw@host', true],
-    ['user:pw@host.example', true],
-    ['https://api.example.test', false],
-    ['https://us%40er@host', true],
-  ])('%s -> %s', (value, expected) => {
-    expect(urlValueHasUserinfo(value)).toBe(expected);
+    'https://api.example.test',
+    'https://api.example.test/v1?x=1#f',
+    'postgres://db:5432/app',
+    '',
+  ])('%j is accepted for a *_URL variable', (value) => {
+    expect(urlValueRefused('DATABASE_URL', value)).toBe(false);
+  });
+
+  test('a non-URL variable is screened only when its value has a scheme separator', () => {
+    expect(urlValueRefused('GIT_AUTHOR_EMAIL', 'me@example.test')).toBe(false);
+    expect(urlValueRefused('SOME_REMOTE', `https://u:${tok}@h/x`)).toBe(true);
+    expect(urlValueRefused('SOME_REMOTE', 'https://h/x')).toBe(false);
   });
 });
 
@@ -112,26 +168,28 @@ describe('passthrough of URL variables', () => {
     expect(parsePassthrough('DATABASE_URL')).toEqual(['DATABASE_URL']);
   });
 
-  test.each([withCreds, `//u:${tok}@h`, `user:${tok}@host`])(
-    'a credential-bearing value (%#) is refused on every path, naming only the variable',
+  test.each(refusedValues.filter((value) => value.trim() !== ''))(
+    'a credential-bearing or unacceptable value (%j) is refused on every origin and path, naming only the variable',
     (value) => {
       const parent = { ANTHROPIC_BASE_URL: value, DATABASE_URL: value };
       for (const name of ['ANTHROPIC_BASE_URL', 'DATABASE_URL']) {
-        const messages = [
-          () => buildChildEnv({ ...parent, CQ_RUN_ENV_PASSTHROUGH: name }),
-          () => buildSandboxLauncherEnv(parent, { envPassthrough: [name] }),
-          () => buildSandboxLauncherEnv(parent, { envPassthrough: [], declaredEnvNames: [name] }),
-          () => buildSandboxLauncherEnv(parent, { envPassthrough: [], trustedEnvNames: [name] }),
-        ].map((run) => {
+        const runs = {
+          operatorKey: () => buildChildEnv({ ...parent, CQ_RUN_ENV_PASSTHROUGH: name }),
+          envAllowlist: () => buildChildEnv(parent, undefined, [name]),
+          launcherOperator: () => buildSandboxLauncherEnv(parent, { envPassthrough: [name] }),
+          launcherDeclared: () =>
+            buildSandboxLauncherEnv(parent, { envPassthrough: [], declaredEnvNames: [name] }),
+          launcherTrusted: () =>
+            buildSandboxLauncherEnv(parent, { envPassthrough: [], trustedEnvNames: [name] }),
+        };
+        for (const [path, run] of Object.entries(runs)) {
+          let message = '';
           try {
             run();
-            return '';
           } catch (error) {
-            return (error as Error).message;
+            message = (error as Error).message;
           }
-        });
-        for (const message of messages) {
-          expect(message).toContain(name);
+          expect(message, `${path} refused ${name}`).toContain(name);
           expect(message).not.toContain(tok);
           expect(message).not.toContain('user:');
         }
@@ -155,13 +213,13 @@ describe('display sites show the redacted URL', () => {
     const json = JSON.stringify(report);
     expect(json).not.toContain(tok);
     const byName = Object.fromEntries(report.keys.map((k) => [k.name, k.value]));
-    expect(byName['ANTHROPIC_BASE_URL']).toBe('https://api.example.test');
+    expect(byName['ANTHROPIC_BASE_URL']).toBe('https://api.example.test/');
     expect(byName['ZAI_BASE_URL']).toBe('https://z.example.test/');
   });
 
   test('v3 provenance records the redacted value', () => {
     const config = provenanceConfig(readCqEnv(env));
-    expect(config.env['ANTHROPIC_BASE_URL']).toBe('https://api.example.test');
+    expect(config.env['ANTHROPIC_BASE_URL']).toBe('https://api.example.test/');
     expect(JSON.stringify(config)).not.toContain(tok);
   });
 
@@ -186,7 +244,35 @@ describe('the cq config CLI', () => {
     expect(code).toBe(0);
     const all = out.join('') + err.join('');
     expect(all).not.toContain(tok);
-    expect(out.join('')).toContain('https://api.example.test');
+    expect(out.join('')).toContain('https://api.example.test/');
+  });
+});
+
+describe('display-site tripwire: a site that returns the raw value fails here', () => {
+  // Semantic checks per known display site (a source scan cannot see a call
+  // whose result is thrown away). Each site is fed a credential-bearing URL
+  // with a query token and must not return any part of it.
+  const raw = `https://u:${tok}@api.example.test/v1?token=${tok}#${tok}`;
+  const escaped = String.raw`https:\/\/api.example.test/v1?token=` + tok;
+
+  test.each([raw, escaped])('every structured site hides the secret (%#)', (value) => {
+    const env = { ANTHROPIC_BASE_URL: value };
+    const snapshot = readCqEnv(env);
+    const outputs = [
+      JSON.stringify(snapshot),
+      JSON.stringify(buildConfigShowReport(env)),
+      JSON.stringify(provenanceConfig(snapshot)),
+    ];
+    for (const out of outputs) expect(out).not.toContain(tok);
+  });
+
+  test('persisted error text and attempt records hide the secret', () => {
+    vi.stubEnv('ANTHROPIC_BASE_URL', raw);
+    expect(boundedErrorText(`failed ${raw} now`)).not.toContain(tok);
+    expect(boundedErrorText(`failed ${escaped} now`)).not.toContain(tok);
+    expect(
+      JSON.stringify(sanitizeObservation({ stderr: `failed ${raw}`, url: raw })),
+    ).not.toContain(tok);
   });
 });
 
@@ -214,6 +300,11 @@ describe('exactly one redactor implementation', () => {
     expect(users.map(rel)).toEqual(['/shared/urlRedact.ts']);
   });
 
+  test('no other file implements an at-sign detector for URL values (`includes(@)`)', () => {
+    const users = files.filter((f) => /includes\('@'\)/.test(text.get(f) ?? ''));
+    expect(users.map(rel)).toEqual(['/shared/urlRedact.ts']);
+  });
+
   test('the free-text userinfo marker is produced only by the shared module', () => {
     const users = files.filter((f) => /\[redacted\]\$\{|\[redacted\]@/.test(text.get(f) ?? ''));
     expect(users.map(rel)).toEqual(['/shared/urlRedact.ts']);
@@ -228,7 +319,9 @@ describe('exactly one redactor implementation', () => {
   ])('%s calls the shared redactor', (file) => {
     const source = text.get(join(root, file)) ?? '';
     expect(source).toMatch(/shared\/urlRedact\.js/);
-    expect(source).toMatch(/stripCredentialText|redactIfUrl|cutAuthorityUserinfo/);
+    expect(source).toMatch(
+      /stripCredentialText|redactIfUrl|cutAuthorityUserinfo|showUrl|redactUrlUserinfo/,
+    );
   });
 });
 
@@ -286,10 +379,24 @@ describe('redactUrlUserinfo (cases from PR #1235)', () => {
     expect(performance.now() - start).toBeLessThan(1000);
   });
 
-  test('preserves URLs without userinfo, including at-signs outside the authority', () => {
-    const text =
-      'https://example.test/user@host https://example.test?q=user@host https://example.test#user@host';
-    expect(boundedErrorText(text)).toBe(text);
+  test('keeps the path (including an at-sign in it) and drops query and fragment', () => {
+    // #1235 preserved the query and fragment byte for byte; the owner ruling
+    // (ADR-0009) strips them in free text too, marking the cut.
+    expect(boundedErrorText('see https://example.test/user@host ok')).toBe(
+      'see https://example.test/user@host ok',
+    );
+    expect(boundedErrorText('see https://example.test?q=user@host ok')).toBe(
+      'see https://example.test?[redacted] ok',
+    );
+    expect(boundedErrorText('see https://example.test#user@host ok')).toBe(
+      'see https://example.test#[redacted] ok',
+    );
+    expect(boundedErrorText(`GET https://api.example/v1?token=${tok} failed`)).toBe(
+      'GET https://api.example/v1?[redacted] failed',
+    );
+    expect(boundedErrorText(`GET https://u:p@api.example/v1?token=${tok}#f failed`)).toBe(
+      'GET https://[redacted]@api.example/v1?[redacted] failed',
+    );
   });
 
   test('redacts multiple credential-bearing URLs before truncation', () => {

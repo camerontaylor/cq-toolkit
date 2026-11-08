@@ -12,7 +12,7 @@
 //   - Secret values stay in `values` for use but never appear in diagnostics.
 //
 // Entry points call it once through src/config/entry.ts.
-import { isUrlEnvName, stripCredentialText } from '../shared/urlRedact.js';
+import { isUrlEnvName, redactUrlUserinfo, showUrl } from '../shared/urlRedact.js';
 import { nearestKey } from '../shared/nearest.js';
 import { deepFreeze } from '../shared/deepFreeze.js';
 import {
@@ -123,7 +123,7 @@ export function readCqEnv(
           ? err.message
           : String(err);
       // A parser message may quote a URL value: show it through the one redactor.
-      errors.push({ name, message: `${name}: ${stripCredentialText(detail)}` });
+      errors.push({ name, message: `${name}: ${redactUrlUserinfo(detail)}` });
     }
   }
 
@@ -135,7 +135,7 @@ export function readCqEnv(
   for (const f of FOREIGN_ENV_ENTRIES) {
     const raw = env[f.name];
     if (f.secret || !isUrlEnvName(f.name) || raw === undefined || isBlank(raw)) continue;
-    foreignUrls[f.name] = stripCredentialText(raw);
+    foreignUrls[f.name] = showUrl(raw);
   }
 
   return deepFreeze({

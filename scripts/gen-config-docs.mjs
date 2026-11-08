@@ -57,7 +57,7 @@ export function render({ CQ_ENV_ENTRIES, CQ_ENV_DENIED_PREFIXES, FOREIGN_ENV_ENT
     '',
     'Read by drivers, forge adapters and selfhost entries. They are never warned on. A secret name records',
     'presence only. `_URL` is not a secret suffix: a URL value is shown and recorded with userinfo, query and',
-    'fragment stripped (ADR-0009).',
+    'fragment stripped, or `[redacted-url]` when it does not parse (ADR-0009).',
     '',
     '| Name | Secret | Description |',
     '| --- | --- | --- |',
