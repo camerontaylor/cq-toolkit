@@ -67,7 +67,10 @@ class FindingTest(unittest.TestCase):
     def test_missing_ambiguous_mismatched_or_out_of_bounds_anchor_needs_human(self):
         raw = self.raw_finding(startLine=1)
         for events in ([], [raw, raw], [dict(raw, comment="Different")],
-                       [dict(raw, startLine=3)], [dict(raw, startLine=True)]):
+                       [dict(raw, startLine=3)], [dict(raw, startLine=True)],
+                       [dict(raw, startLine="1", endLine=2)],
+                       [dict(raw, startLine=-1, endLine=2)],
+                       [dict(raw, startLine=1, endLine=None)]):
             with self.subTest(events=events):
                 filename, _ = self.legacy_finding(events)
                 event = self.inbox.triage(self.fid, self.f.repo, self.t, "confirmed", "reviewer", "valid", AT,
