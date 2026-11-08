@@ -432,11 +432,13 @@ describe('classify trust defaults are independent per key', () => {
     // the real clock: the window has not elapsed
     expect((await verdict(now)).value?.reason).toBe('settle_window_pending');
     // a later clock would skip the wait; it is rejected, never accepted or clamped
-    for (const bad of [now + 30 * 24 * 3600 * 1000, Number.NaN, -1, Infinity, 'x']) {
+    // 4102444800123 is a distinctive far-future reading: it must never appear in the message
+    for (const bad of [4102444800123, now + 30 * 24 * 3600 * 1000, Number.NaN, -1, Infinity, 'x']) {
       const err = await verdict(bad);
       expect(errorClassOf(err)).toBe('config');
       expect(String(err)).toContain('input.nowMs');
-      expect(String(err)).not.toContain('x"');
+      expect(String(err)).not.toContain('4102444800123');
+      expect(String(err)).not.toContain(String(bad));
     }
     // runPrs rejects the same before any effect
     const effects = new FakeMergeEffects();
@@ -492,6 +494,33 @@ describe('classify trust defaults are independent per key', () => {
       expect(errorClassOf(err)).toBe('config');
       expect(String(err)).toContain(field);
     }
+  });
+
+  test('wrong-shape trustedAssociations/acceptReviewStates fail config (not TypeError) through BOTH ops', async () => {
+    const shapes: unknown[] = ['MEMBER', [1], [null], { 0: 'MEMBER' }, 7, true, [['MEMBER']]];
+    const classify = await entryOf('merge.classifyPrs').importer({ cqEnv: env() });
+    const effects = new FakeMergeEffects();
+    const run = makeRunMergePrsOp({ effects, cqEnv: env() });
+    for (const field of ['trustedAssociations', 'acceptReviewStates', 'trustedBots']) {
+      for (const shape of shapes) {
+        const config = { [field]: shape };
+        const e1 = await classify({ candidate, nowMs: NOW_MS, config } as never).catch(
+          (e: unknown) => e,
+        );
+        expect(e1, `classify ${field}`).toBeInstanceOf(Error);
+        expect(errorClassOf(e1), `classify ${field}=${JSON.stringify(shape)}`).toBe('config');
+        const e2 = await run({
+          baseBranch: 'main',
+          repoRoot: '.',
+          prs: [],
+          nowMs: NOW_MS,
+          config,
+        } as never).catch((e: unknown) => e);
+        expect(errorClassOf(e2), `runPrs ${field}=${JSON.stringify(shape)}`).toBe('config');
+        expect(String(e2)).toContain(field);
+      }
+    }
+    expect(effects.calls).toEqual([]);
   });
 
   test('a conflicting automationLogin message never echoes either value', () => {

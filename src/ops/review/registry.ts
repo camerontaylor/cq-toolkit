@@ -106,6 +106,22 @@ const awaitOp =
     }
   };
 
+/**
+ * Refuse a plan-supplied `nowMs` later than the real clock (or invalid) with a
+ * thrown `config` error BEFORE the adapter runs, so it is not folded to `failed`
+ * and no effect can start.
+ */
+const guardClock =
+  <I extends { nowMs: number }, R>(
+    check: (op: string, nowMs: unknown) => number,
+    name: string,
+    inner: Op<I, R>,
+  ): Op<I, R> =>
+  async (input: I, ...rest: unknown[]) => {
+    check(name, input.nowMs);
+    return (inner as (i: I, ...r: unknown[]) => ReturnType<Op<I, R>>)(input, ...rest);
+  };
+
 // ---------------------------------------------------------------------------
 // Shared vocabulary mirrors — the threads.ts shapes, field-derived
 // ---------------------------------------------------------------------------
@@ -776,31 +792,35 @@ export const registry: OpRegistryEntry[] = [
     // throws SyntaxError inside the adapter → failed (the hackDetector
     // precedent for non-compiling regex config).
     importer: () =>
-      import('./classifyThreads.js').then(
-        (m) =>
-          awaitOp((input: ClassifyThreadsOpInput) => {
-            const config: ClassifyConfig | undefined =
-              input.config === undefined
-                ? undefined
-                : {
-                    skipPatterns: input.config.skipPatterns.map(
-                      (pattern) =>
-                        new RegExp(pattern.pattern, (pattern.flags ?? 'im').replace(/[gy]/g, '')),
-                    ),
-                    responderIs: input.config.responderIs,
-                    treatNullCreatedAtAs: input.config.treatNullCreatedAtAs,
-                    blockOnOutdatedThreads: input.config.blockOnOutdatedThreads,
-                    skipResponderAuthoredThreads: input.config.skipResponderAuthoredThreads,
-                    skipDismissedReviews: input.config.skipDismissedReviews,
-                    skipApprovalReviews: input.config.skipApprovalReviews,
-                    trustedAuthors: input.config.trustedAuthors,
-                    automationLogin: input.config.automationLogin,
-                    excludedLogins: input.config.excludedLogins,
-                    claimedPaths: input.config.claimedPaths,
-                  };
-            // An undefined config triggers the library's shipped default.
-            return m.classifyThreads(input.state, input.nowMs, config);
-          }) as Op<unknown, unknown>,
+      Promise.all([import('./classifyThreads.js'), import('../../shared/planClock.js')]).then(
+        ([m, clock]) =>
+          guardClock(
+            clock.assertPlanClock,
+            'review.classifyThreads',
+            awaitOp((input: ClassifyThreadsOpInput) => {
+              const config: ClassifyConfig | undefined =
+                input.config === undefined
+                  ? undefined
+                  : {
+                      skipPatterns: input.config.skipPatterns.map(
+                        (pattern) =>
+                          new RegExp(pattern.pattern, (pattern.flags ?? 'im').replace(/[gy]/g, '')),
+                      ),
+                      responderIs: input.config.responderIs,
+                      treatNullCreatedAtAs: input.config.treatNullCreatedAtAs,
+                      blockOnOutdatedThreads: input.config.blockOnOutdatedThreads,
+                      skipResponderAuthoredThreads: input.config.skipResponderAuthoredThreads,
+                      skipDismissedReviews: input.config.skipDismissedReviews,
+                      skipApprovalReviews: input.config.skipApprovalReviews,
+                      trustedAuthors: input.config.trustedAuthors,
+                      automationLogin: input.config.automationLogin,
+                      excludedLogins: input.config.excludedLogins,
+                      claimedPaths: input.config.claimedPaths,
+                    };
+              // An undefined config triggers the library's shipped default.
+              return m.classifyThreads(input.state, input.nowMs, config);
+            }),
+          ) as Op<unknown, unknown>,
       ),
   },
   {
@@ -833,24 +853,29 @@ export const registry: OpRegistryEntry[] = [
         import('./replyAndResolve.js'),
         import('../../adapters/store/dispatchLog.js'),
         import('../../adapters/forge-github/gh.js'),
-      ]).then(([m, log, gh]) => {
+        import('../../shared/planClock.js'),
+      ]).then(([m, log, gh, clock]) => {
         // TWO transports (round-2 finding 4): the gh API runner serves the
         // posts/mutations; the push is GIT — binding makeGhRunner() as the
         // push transport would hand git argv to a gh binary (it cannot
         // `git push`). Separate closures, same injected seam.
         const run = gh.makeGhRunner();
         const gitPush = gh.makeGhRunner({ bin: 'git' });
-        return awaitOp(async (input: ReplyAndResolveOpInput) => {
-          return m.replyAndResolve(input.actions, {
-            owner: input.owner,
-            repo: input.repo,
-            pr: input.pr,
-            run,
-            push: input.pushArgs === undefined ? null : { run: gitPush, args: input.pushArgs },
-            dispatchLog: log.fileDispatchLog(input.dispatchLogPath),
-            nowMs: input.nowMs,
-          });
-        }) as Op<unknown, unknown>;
+        return guardClock(
+          clock.assertPlanClock,
+          'review.replyAndResolve',
+          awaitOp(async (input: ReplyAndResolveOpInput) => {
+            return m.replyAndResolve(input.actions, {
+              owner: input.owner,
+              repo: input.repo,
+              pr: input.pr,
+              run,
+              push: input.pushArgs === undefined ? null : { run: gitPush, args: input.pushArgs },
+              dispatchLog: log.fileDispatchLog(input.dispatchLogPath),
+              nowMs: input.nowMs,
+            });
+          }),
+        ) as Op<unknown, unknown>;
       }),
   },
   {

@@ -79,9 +79,11 @@
 // DETERMINISM: classify and plan are pure and clock-free; Date.now() is
 // read ONCE, here (the composition is the one place the ambient clock is
 // allowed — tests inject `nowMs`). Same input + same nowMs → deep-equal
-// outcome, always. The dispatched op REJECTS (`config`) a plan-supplied
-// `nowMs` later than the real clock (a later clock would shorten the settle
-// wait), so the dispatch route stays deterministic for every accepted input.
+// outcome, always. With NO `nowMs` supplied the composition reads Date.now()
+// once, so its verdicts depend on the real clock. A plan-supplied `nowMs`
+// later than the real clock is REJECTED by the dispatched op (`config`; a
+// later clock would shorten the settle wait), so for an input that supplies
+// `nowMs` the dispatch route is deterministic.
 import pLimit from 'p-limit';
 import { createDriverFactory } from '../../driver/factory.js';
 import type { DriverFactory } from '../../driver/factory.js';
@@ -97,10 +99,10 @@ import type { ExecutionReport } from './executeMerges.js';
 import { realMergeEffects } from '../../adapters/forge-github/mergeEffects.js';
 import type { MergeEffects } from '../../adapters/forge-github/mergeEffects.js';
 import type { CqEnv } from '../../config/env.js';
+import { assertPlanClock } from '../../shared/planClock.js';
 import {
   assertBaseBranchMirror,
   assertProtectedBranchMirror,
-  assertPlanClock,
   mergeClassifyConfig,
   resolveClassifyTrust,
 } from './trustMirrors.js';
