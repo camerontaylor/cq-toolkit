@@ -5,11 +5,8 @@
 import { constants } from 'node:fs';
 import { mkdir, open, realpath, lstat, rename, unlink } from 'node:fs/promises';
 import type { FileHandle } from 'node:fs/promises';
-import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
-
-const require = createRequire(import.meta.url);
 
 // A numeric fd does not keep a FileHandle alive. Pin until explicit close so
 // a dropped slot cannot silently release exclusion through Node's GC finalizer.
@@ -25,16 +22,14 @@ export class IncompleteSlotError extends Error {
   override name = 'IncompleteSlotError';
 }
 
-function nativeFlock(): (fd: number, operation: string) => void {
+async function nativeFlock(): Promise<(fd: number, operation: string) => void> {
   if (process.platform !== 'linux' && process.platform !== 'darwin') {
     throw new UnsupportedLockError('Slot locks support local Linux/macOS disks only');
   }
   try {
-    return (
-      require('fs-ext') as {
-        flockSync: (fd: number, operation: string) => void;
-      }
-    ).flockSync;
+    // Keep loading lazy while making the native dependency explicit to the
+    // trusted selfhost closure walk now that its ops reach the slot owner.
+    return (await import('fs-ext')).default.flockSync;
   } catch (cause) {
     throw new UnsupportedLockError('fs-ext native flock addon unavailable', { cause });
   }
@@ -48,7 +43,7 @@ function nativeFlock(): (fd: number, operation: string) => void {
  * releasing it early. Inherited writer references survive our explicit close.
  */
 export async function acquireFileLock(path: string) {
-  const flock = nativeFlock();
+  const flock = await nativeFlock();
   let file: FileHandle;
   try {
     file = await open(path, constants.O_CREAT | constants.O_RDWR | constants.O_NOFOLLOW, 0o600);
@@ -127,7 +122,7 @@ function parseMetadata(text: string): SlotMetadata {
 
 /** PR keys ignore branch names and custom checkout roots; local keys use the Git admin dir. */
 export async function acquireSlot(commonDir: string, key: number | { checkoutGitDir: string }) {
-  nativeFlock(); // Refuse unsupported platforms/addons before creating the namespace.
+  await nativeFlock(); // Refuse unsupported platforms/addons before creating the namespace.
   const common = await realpath(commonDir);
   let name: string;
   if (typeof key === 'number') {

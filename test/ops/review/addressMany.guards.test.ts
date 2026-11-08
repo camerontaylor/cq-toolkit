@@ -1,3 +1,4 @@
+import { coordinationRoot } from './addressMany.helpers.js';
 // Split provenance: test/ops/review/addressMany.test.ts was split into this
 // file plus addressMany.helpers.ts, addressMany.registry.test.ts,
 // addressMany.dispatch.test.ts, addressMany.budget.test.ts,
@@ -23,7 +24,7 @@ test('changed head before dispatch refuses and never invokes the address engine'
   });
   const address = vi.fn(async () => ({ status: 'ok' as const, value: report() }));
   const result = await makeReviewAddressMany({
-    coordinationRoot: '/unused-test-coordination',
+    coordinationRoot: coordinationRoot(),
     isolate: async (root) => root,
     gh: changingGh,
     address,
@@ -44,7 +45,7 @@ test('refuses a repository mismatch without dispatching', async () => {
   });
   const address = vi.fn(async () => ({ status: 'ok' as const, value: report() }));
   const result = await makeReviewAddressMany({
-    coordinationRoot: '/unused-test-coordination',
+    coordinationRoot: coordinationRoot(),
     isolate: async (root) => root,
     gh: otherGh,
     address,
@@ -66,7 +67,7 @@ test('head movement during clone is refused after isolation', async () => {
   };
   const address = vi.fn();
   const result = await makeReviewAddressMany({
-    coordinationRoot: '/unused-test-coordination',
+    coordinationRoot: coordinationRoot(),
     gh: changingGh,
     address,
     isolate: async (root) => {
@@ -82,7 +83,7 @@ test('refuses prepared roots outside the PR selection before dispatch', async ()
   const address = vi.fn();
   const isolate = vi.fn();
   const result = await makeReviewAddressMany({
-    coordinationRoot: '/unused-test-coordination',
+    coordinationRoot: coordinationRoot(),
     isolate,
     gh,
     address,

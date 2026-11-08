@@ -1,3 +1,4 @@
+import { slotWorktreeRegistry } from '../../../src/adapters/git/slotWorktreeRegistry.js';
 // Split provenance: test/ops/review/address-pr-git.test.ts was split into
 // address-pr-git.pr-adapter.test.ts, address-pr-git.rejectionCarry.test.ts and
 // this shared helper module. The case bodies below are moved byte-identically;
@@ -25,7 +26,7 @@ import type { DriverFactory, DriverRequest } from '../../../src/driver/factory.j
 import { makeTestRepo } from '../dev/repo.js';
 import { makeGitleaksFixture } from '../../helpers/gitleaks-fixture.js';
 import { readWorkState } from '../../../src/ops/dev/internal/workState.js';
-import { fileWorktreeRegistry, resolvePrWorktree } from '../../../src/adapters/git/prWorktree.js';
+import { resolvePrWorktree } from '../../../src/adapters/git/prWorktree.js';
 import { makeGhRunner } from '../../../src/adapters/forge-github/gh.js';
 import {
   replySignature,
@@ -911,7 +912,9 @@ export async function runPersistedRejectionCase(mode: RejectionMode): Promise<vo
     repo.commitAll('ignore engine state');
     const head = repo.git('rev-parse', 'HEAD').trim();
     repo.git('push', '-q', 'origin', 'HEAD:refs/pull/7/head');
-    const registry = fileWorktreeRegistry(join(journal, 'worktrees.json'));
+    const registry = slotWorktreeRegistry(
+      repo.git('rev-parse', '--path-format=absolute', '--git-common-dir').trim(),
+    );
     const worktree = await resolvePrWorktree({
       repoRoot: repo.root,
       pr: 7,

@@ -1,3 +1,4 @@
+import { coordinationRoot } from './addressMany.helpers.js';
 // Split provenance: test/ops/review/addressMany.test.ts was split into this
 // file plus addressMany.helpers.ts, addressMany.registry.test.ts,
 // addressMany.dispatch.test.ts, addressMany.guards.test.ts,
@@ -23,7 +24,7 @@ test('bounded workers overlap and settle shared allocation without oversubscript
     return { status: 'ok' as const, value: report() };
   });
   const result = await makeReviewAddressMany({
-    coordinationRoot: '/unused-test-coordination',
+    coordinationRoot: coordinationRoot(),
     gh,
     address,
     isolate: async (root) => root,
@@ -49,7 +50,7 @@ test('facts reads are bounded', async () => {
   };
   const address = vi.fn(async () => ({ status: 'ok' as const, value: report() }));
   await makeReviewAddressMany({
-    coordinationRoot: '/unused-test-coordination',
+    coordinationRoot: coordinationRoot(),
     gh: boundedGh,
     address,
     isolate: async (root) => root,

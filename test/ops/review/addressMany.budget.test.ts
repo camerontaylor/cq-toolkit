@@ -1,3 +1,4 @@
+import { coordinationRoot } from './addressMany.helpers.js';
 // Split provenance: test/ops/review/addressMany.test.ts was split into this
 // file plus addressMany.helpers.ts, addressMany.registry.test.ts,
 // addressMany.dispatch.test.ts, addressMany.guards.test.ts,
@@ -11,7 +12,7 @@ import { enrollmentRequest, gh, input, report } from './addressMany.helpers.js';
 test('oversized reservation never dispatches either PR', async () => {
   const address = vi.fn(async () => ({ status: 'ok' as const, value: report() }));
   const result = await makeReviewAddressMany({
-    coordinationRoot: '/unused-test-coordination',
+    coordinationRoot: coordinationRoot(),
     isolate: async (root) => root,
     gh,
     address,
@@ -27,7 +28,7 @@ test('oversized reservation never dispatches either PR', async () => {
 test('temporary sibling reservations defer candidates until known usage releases allocation', async () => {
   const address = vi.fn(async () => ({ status: 'ok' as const, value: report() }));
   const result = await makeReviewAddressMany({
-    coordinationRoot: '/unused-test-coordination',
+    coordinationRoot: coordinationRoot(),
     gh,
     address,
     isolate: async (root) => root,
@@ -43,7 +44,7 @@ test('temporary sibling reservations defer candidates until known usage releases
 
 test('budget refusal retains the advisory request', async () => {
   const result = await makeReviewAddressMany({
-    coordinationRoot: '/unused-test-coordination',
+    coordinationRoot: coordinationRoot(),
     gh,
     address: vi.fn(),
   })({ ...input, maxTokens: 1, enrollments: [{ number: 1, request: enrollmentRequest }] });

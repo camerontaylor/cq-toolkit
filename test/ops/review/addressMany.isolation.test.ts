@@ -1,3 +1,4 @@
+import { coordinationRoot } from './addressMany.helpers.js';
 // Split provenance: test/ops/review/addressMany.test.ts was split into this
 // file plus addressMany.helpers.ts, addressMany.registry.test.ts,
 // addressMany.dispatch.test.ts, addressMany.guards.test.ts,
@@ -12,7 +13,7 @@ import { gh, input, report } from './addressMany.helpers.js';
 test('aggregate reports the preserved isolation path for each leg', async () => {
   const address = vi.fn(async () => ({ status: 'ok' as const, value: report() }));
   const result = await makeReviewAddressMany({
-    coordinationRoot: '/unused-test-coordination',
+    coordinationRoot: coordinationRoot(),
     gh,
     address,
     isolate: async (_root, number) => `/isolated/pr-${number}`,
@@ -28,7 +29,7 @@ test('aggregate reports the preserved isolation path for each leg', async () => 
 test('bulk caller forwards only the selected PR prepared dependency root', async () => {
   const address = vi.fn(async (_input: unknown) => ({ status: 'ok' as const, value: report() }));
   await makeReviewAddressMany({
-    coordinationRoot: '/unused-test-coordination',
+    coordinationRoot: coordinationRoot(),
     isolate: async () => '/isolated',
     gh,
     address,

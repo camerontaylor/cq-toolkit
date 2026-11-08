@@ -120,3 +120,6 @@ export { makeStatus } from './status.js';
 export { makeWait } from './wait.js';
 export { makeResult } from './result.js';
 export { makeCancel } from './cancel.js';
+
+export { slotWorktreeRegistry } from '../../adapters/git/slotWorktreeRegistry.js';
+export type { SlotWorktreeRegistry } from '../../adapters/git/slotWorktreeRegistry.js';

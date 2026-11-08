@@ -1,7 +1,11 @@
+import {
+  slotWorktreeRegistry,
+  discoverWorktreeSlots,
+} from '../../../src/adapters/git/slotWorktreeRegistry.js';
 import { readFile, realpath, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { expect, test, vi } from 'vitest';
-import { fileWorktreeRegistry, resolvePrWorktree } from '../../../src/adapters/git/prWorktree.js';
+import { resolvePrWorktree } from '../../../src/adapters/git/prWorktree.js';
 import * as addressModule from '../../../src/ops/review/address.js';
 import {
   makeAddressOwnership,
@@ -16,8 +20,10 @@ test('concurrent PRs sharing a head ref retain distinct exact-head worktrees and
     const results = await Promise.all(f.prs.map(f.resolve));
     expect(new Set(await Promise.all(results.map((result) => realpath(result.path)))).size).toBe(2);
     expect(new Set(results.map((result) => result.branch)).size).toBe(2);
-    const entries = await fileWorktreeRegistry(f.registryPath).load();
-    expect(Object.keys(entries).sort()).toEqual(['7', '9']);
+    const entries = await discoverWorktreeSlots(
+      f.repo.git('rev-parse', '--path-format=absolute', '--git-common-dir').trim(),
+    );
+    expect([...entries.keys()].map(String).sort()).toEqual(['7', '9']);
     for (const [index, pr] of f.prs.entries()) {
       const result = results[index]!;
       expect(result.reused).toBe(false);
@@ -25,10 +31,11 @@ test('concurrent PRs sharing a head ref retain distinct exact-head worktrees and
       expect(f.repo.git('-C', result.path, 'symbolic-ref', 'HEAD').trim()).toBe(
         `refs/heads/${result.branch}`,
       );
-      expect(entries[String(pr.number)]).toEqual({
-        path: result.path,
-        branch: result.branch,
-        createdAt: NOW + pr.number,
+      expect(entries.get(pr.number)).toMatchObject({
+        version: 1,
+        state: 'bound',
+        incomplete: false,
+        checkoutPath: result.path,
       });
     }
     expect(f.prs[0].headRefOid).not.toBe(f.prs[1].headRefOid);
@@ -52,12 +59,15 @@ test('concurrent PRs sharing a head ref retain distinct exact-head worktrees and
     await f.repo.cleanup();
   }
 });
-test('expected fetched-head fence preserves dirty stale checkout and registry byte for byte', async () => {
+test('expected fetched-head fence preserves dirty stale checkout and bound pointer', async () => {
   const f = await fixture();
   try {
     const checkout = await f.resolve(f.prs[0]);
     await writeFile(join(checkout.path, 'README.md'), 'private stale edit\n');
-    const before = await readFile(f.registryPath, 'utf8');
+    const before = await readFile(
+      join(f.repo.root, '.git', 'cq-review', 'slots', 'pr-7.json'),
+      'utf8',
+    );
     f.repo.git('push', '-q', 'origin', `${f.prs[1].headRefOid}:refs/pull/7/head`);
     await expect(
       resolvePrWorktree({
@@ -66,12 +76,18 @@ test('expected fetched-head fence preserves dirty stale checkout and registry by
         headRefName: 'feature/x',
         expectedHead: f.prs[0].headRefOid,
         run: f.run,
-        registry: fileWorktreeRegistry(f.registryPath),
+        registry: slotWorktreeRegistry(
+          f.repo.git('rev-parse', '--path-format=absolute', '--git-common-dir').trim(),
+        ),
         worktreeRoot: f.worktreeRoot,
         nowMs: NOW,
       }),
     ).rejects.toThrow('changed since admission');
-    expect(await readFile(f.registryPath, 'utf8')).toBe(before);
+    expect(
+      JSON.parse(
+        await readFile(join(f.repo.root, '.git', 'cq-review', 'slots', 'pr-7.json'), 'utf8'),
+      ),
+    ).toEqual({ ...JSON.parse(before), incomplete: true });
     expect(await readFile(join(checkout.path, 'README.md'), 'utf8')).toBe('private stale edit\n');
     expect(f.repo.git('-C', checkout.path, 'rev-parse', 'HEAD').trim()).toBe(f.prs[0].headRefOid);
   } finally {

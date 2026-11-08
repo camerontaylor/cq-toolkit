@@ -261,7 +261,7 @@ describe('review.address candidate isolation', () => {
   );
 
   test.each(['success', 'cancel', 'budget', 'unit'] as const)(
-    'queued candidate %s does not exhaust sibling mutex retries; cleanup stays serial',
+    'regression: queued candidate %s shares checkout lifetime and FIFO; cleanup stays serial',
     async (outcome) => {
       const parent = new AbortController();
       let wallRemaining = 20000;
@@ -277,30 +277,7 @@ describe('review.address candidate isolation', () => {
       const editsReady = new Promise<void>((r) => {
         bothEdited = r;
       });
-      let holding = 0,
-        maximum = 0,
-        contention = 0;
-      const actualMutex = gitMutex.makeGitMutex;
-      const spy = vi.spyOn(gitMutex, 'makeGitMutex').mockImplementation((config) => {
-        const real = actualMutex(config);
-        return {
-          withLock: async (fn) => {
-            // Model the old exhausted retry seam immediately, with no minute sleep.
-            // The real filesystem mutex still protects every admitted section.
-            if (holding) {
-              contention++;
-              throw new Error('simulated cross-process mutex waiter budget exhausted');
-            }
-            holding++;
-            maximum = Math.max(maximum, holding);
-            try {
-              return await real.withLock(fn);
-            } finally {
-              holding--;
-            }
-          },
-        };
-      });
+      const spy = vi.spyOn(gitMutex, 'makeGitMutex');
       const f = await fixture(
         async (input) => {
           if (input.outputSchema?.name === 'review.address.closure/v1')
@@ -336,8 +313,7 @@ describe('review.address candidate isolation', () => {
         );
         // Its invocation has settled; drain its promise continuations to the queue.
         await new Promise<void>((resolve) => setImmediate(resolve));
-        expect(contention).toBe(0);
-        expect(holding).toBe(1);
+        expect(spy).not.toHaveBeenCalled();
         expect(f.attempts.filter((row) => row.finding === 'src/b.ts')).toHaveLength(1);
         if (outcome === 'cancel') parent.abort();
         if (outcome === 'budget') wallRemaining = 0;
@@ -348,9 +324,7 @@ describe('review.address candidate isolation', () => {
         const callsBeforeRelease = f.calls();
         release();
         const results = await Promise.all([first, second]);
-        expect(contention).toBe(0);
-        expect(maximum).toBe(1);
-        expect(holding).toBe(0);
+        expect(spy).not.toHaveBeenCalled();
         expect(f.repo.git('diff', '--cached', '--name-only')).toBe('');
         expect(f.repo.git('diff', '--name-only', 'HEAD')).toBe('');
         expect(f.repo.git('worktree', 'list', '--porcelain')).not.toContain('candidate-');

@@ -220,7 +220,7 @@ export const fakeLoop =
 
 export const baseDeps = (gh: GhFn, loop: typeof runReviewLoop): SelfReviewLoopDeps => ({
   gh,
-  git: async (): Promise<GhResult> => ({ code: 0, stdout: '', stderr: '' }),
+  git: async (): Promise<GhResult> => ({ code: 0, stdout: tempJournalRoot(), stderr: '' }),
   nowMs: () => 1_700_000_000_000,
   loop,
 });

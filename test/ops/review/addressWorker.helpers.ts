@@ -5,6 +5,8 @@ import {
   type AddressWorkerDeps,
   type AddressAttempt,
 } from '../../../src/ops/review/addressWorker.js';
+import { withAddressOwnership } from '../../../src/ops/review/internal/addressCheckoutOwnership.js';
+import { checkoutWriterContext } from '../../../src/shared/checkoutWriterContext.js';
 import { resolveCqConfigDefaults } from '../../../src/ops/analyze/cqConfigDefaults.js';
 import type { CqConfig } from '../../../src/ops/analyze/cqConfig.js';
 import type { DriverFactory } from '../../../src/driver/factory.js';
@@ -212,7 +214,40 @@ export async function fixture(
       ? {}
       : { observationDrainMs: options.observationDrainMs }),
   };
-  const engine = makeAddressWorker(engineDeps);
+  const baseEngine = makeAddressWorker(engineDeps);
+  // Standalone worker fixtures enter the shipped checkout lifetime lazily, so
+  // sibling calls still share one FIFO and terminal-capture tests may supply
+  // their own lifetime without competing with an unused fixture engine.
+  let finish!: () => void, ready!: () => void;
+  const released = new Promise<void>((done) => {
+    finish = done;
+  });
+  const admitted = new Promise<void>((done) => {
+    ready = done;
+  });
+  let lifetime: Promise<void> | undefined;
+  let enteredLifetime = false;
+  let execute: <T>(action: () => Promise<T>) => Promise<T>;
+  async function owned<T>(action: () => Promise<T>): Promise<T> {
+    lifetime ??= withAddressOwnership(
+      { repoRoot: repo.root, git: engineDeps.git, source: 'local', production: false },
+      async (lease) => {
+        const context = checkoutWriterContext()!;
+        execute = (action) => context.run(() => lease.track(action));
+        enteredLifetime = true;
+        ready();
+        await released;
+      },
+    );
+    await Promise.race([admitted, lifetime]);
+    return execute(action);
+  }
+  const engine = {
+    ...baseEngine,
+    fix: (...args: Parameters<typeof baseEngine.fix>) => owned(() => baseEngine.fix(...args)),
+    withVerifiedHead: <T>(action: (head: string) => Promise<T>) =>
+      owned(() => baseEngine.withVerifiedHead!(action)),
+  };
   return {
     repo,
     engineDeps,
@@ -224,6 +259,9 @@ export async function fixture(
     dependencyCheckMarker,
     dependencyRoot,
     cleanup: async () => {
+      finish();
+      if (enteredLifetime) await lifetime;
+      else await lifetime?.catch(() => undefined);
       await repo.cleanup();
       await rm(journal, { recursive: true, force: true });
     },

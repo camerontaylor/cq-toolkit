@@ -82,7 +82,7 @@ import { posix } from 'node:path';
 import {
   withReviewLoopOwnership,
   type AddressLease,
-} from '../ops/review/internal/addressOwnership.js';
+} from '../ops/review/internal/addressCheckoutOwnership.js';
 import type { Budget, ModelSpec, Usage } from '../driver/types.js';
 import { deepFreeze } from '../shared/deepFreeze.js';
 import type { HarnessConfig } from '../harness/config.js';
@@ -114,7 +114,7 @@ import { NO_OUTCOME_REASON, reviewFixHarness } from '../ops/review/fixReviewItem
 import type { FixEvidence } from '../ops/review/fixReviewItem.js';
 import type { PlanBatchConfig, PlannedBatch } from '../ops/review/planReviewBatch.js';
 import { defaultPlanBatchConfig, planReviewBatch } from '../ops/review/planReviewBatch.js';
-import type { WorktreeRegistry } from '../adapters/git/prWorktree.js';
+import type { SlotWorktreeRegistry } from '../adapters/git/slotWorktreeRegistry.js';
 import { resolvePrWorktree } from '../adapters/git/prWorktree.js';
 import type { ReplyAndResolveResult, ReviewAction } from '../ops/review/replyAndResolve.js';
 import { fileDispatchLog } from '../adapters/store/dispatchLog.js';
@@ -402,7 +402,9 @@ export interface ReviewLoopOpts {
   /** The git transport — worktree resolution and pushes (makeGhRunner({bin:'git'})). */
   git: GhFn;
   /** The PR → worktree registry (persistence seam behind the worktree stage). */
-  registry: WorktreeRegistry;
+  registry: SlotWorktreeRegistry;
+  isBookkeepingPath?: (path: string) => Promise<boolean>;
+  legacySources?: readonly string[];
   /**
    * Model identity for the fix workers (ModelSpec data on every fix input).
    * Caller-chosen — the loop never bakes in a vendor choice (I1).
@@ -970,6 +972,7 @@ async function runOwnedReviewLoop(
       headRefName: opts.headRefName,
       run: opts.git,
       registry: opts.registry,
+      ...(opts.isBookkeepingPath ? { isBookkeepingPath: opts.isBookkeepingPath } : {}),
       nowMs: opts.nowMs,
       ...(opts.expectedHead !== undefined ? { expectedHead: opts.expectedHead } : {}),
       ...(opts.worktreeRoot !== undefined ? { worktreeRoot: opts.worktreeRoot } : {}),
@@ -994,6 +997,9 @@ async function runOwnedReviewLoop(
       actionsPosted: 0,
     };
   }
+  const resolvedHead = await opts.git(['-C', worktree.path, 'rev-parse', 'HEAD']);
+  if (resolvedHead.code !== 0) throw new Error('resolved checkout HEAD unavailable');
+  await lease.claimCheckout({ ...worktree, head: resolvedHead.stdout.trim() });
   await opts.onWorktreeResolved?.(worktree);
 
   if (opts.expectedHead) {

@@ -1,8 +1,14 @@
-import { lstat, readFile, writeFile } from 'node:fs/promises';
+import { lstat, readFile, readdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { expect, test, vi } from 'vitest';
 import * as addressModule from '../../../src/ops/review/address.js';
-import { makeAddressOwnership } from '../../../src/ops/review/internal/addressOwnership.js';
+import * as checkoutOwnership from '../../../src/ops/review/internal/addressCheckoutOwnership.js';
+import { withAddressOwnership } from '../../../src/ops/review/internal/addressCheckoutOwnership.js';
+import {
+  makeAddressOwnership,
+  withAddressOwnership as withLegacyOwnership,
+  isAddressOwnershipAdmissionRefusal as isLegacyAdmissionRefusal,
+} from '../../../src/ops/review/internal/addressOwnership.js';
 
 import {
   authorityState,
@@ -125,38 +131,45 @@ test('callback values cannot forge completion and retired lease/proof replay can
     await f.repo.cleanup();
   }
 });
-test('a genuine active-guard refusal preserves the owner and returns without report IO', async () => {
+test('regression: a genuine active-slot refusal preserves the owner and returns without report IO', async () => {
   const f = await fixture();
   const role = { provider: 'mock', model: 'mock' };
   const journalDir = join(f.root, 'admission-refusal-journal');
   let dispatches = 0;
   try {
-    const owner = await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run });
-    await owner.withLock(async () => {
-      const before = await authorityState(owner.guardPath);
-      const result = await addressModule.makeReviewAddress({
-        config: {
-          schemaVersion: 2,
-          checks: [{ adapter: 'tsc-lines', command: { command: process.execPath, args: [] } }],
-          roles: { worker: role, reviewer: role },
-          budgets: { run: { maxTokens: 1000 } },
-          review: { reviewers: ['agent'] },
-        },
-        git: f.run,
-        review: async () => {
-          dispatches++;
-          throw new Error('no review expected');
-        },
-      })({ repoRoot: f.repo.root, source: 'local', journalDir, push: true });
-      expect(result.status).toBe('needs-human');
-      if (result.status !== 'needs-human') throw new Error('admission was not refused');
-      expect(result.reason).toContain('could not acquire');
-      expect(result.report?.stop).toBeUndefined();
-      expect(dispatches).toBe(0);
-      await expect(lstat(journalDir)).rejects.toMatchObject({ code: 'ENOENT' });
-      expect(await authorityState(owner.guardPath)).toEqual(before);
+    const path = join(f.repo.root, '.git/cq-review/slots');
+    await withAddressOwnership(
+      { repoRoot: f.repo.root, git: f.run, source: 'local', production: false },
+      async () => {
+        const name = (await readdir(path)).find((name) => name.endsWith('.json'))!;
+        const before = await readFile(join(path, name), 'utf8');
+        const result = await addressModule.makeReviewAddress({
+          config: {
+            schemaVersion: 2,
+            checks: [{ adapter: 'tsc-lines', command: { command: process.execPath, args: [] } }],
+            roles: { worker: role, reviewer: role },
+            budgets: { run: { maxTokens: 1000 } },
+            review: { reviewers: ['agent'] },
+          },
+          git: f.run,
+          review: async () => {
+            dispatches++;
+            throw new Error('no review expected');
+          },
+        })({ repoRoot: f.repo.root, source: 'local', journalDir, push: true });
+        expect(result.status).toBe('needs-human');
+        if (result.status !== 'needs-human') throw new Error('admission was not refused');
+        expect(result.reason).toMatch(/busy/i);
+        expect(result.report?.stop).toBeUndefined();
+        expect(dispatches).toBe(0);
+        await expect(lstat(journalDir)).rejects.toMatchObject({ code: 'ENOENT' });
+        expect(await readFile(join(path, name), 'utf8')).toEqual(before);
+      },
+    );
+    const name = (await readdir(path)).find((name) => name.endsWith('.json'))!;
+    expect(JSON.parse(await readFile(join(path, name), 'utf8'))).toMatchObject({
+      incomplete: false,
     });
-    expect((await authorityState(owner.guardPath)).state).toBe('quiescent');
   } finally {
     await f.repo.cleanup();
   }
@@ -200,9 +213,16 @@ test('immutable write loss with detached work refuses again after late settlemen
 });
 
 test.each(['foreign', 'bootstrap-window'])(
-  'admission refusal maps to needs-human: %s',
+  'regression: legacy admission refusal maps to needs-human: %s',
   async (mode) => {
     const f = await fixture();
+    // Isolate the retained legacy mapper until E removes this store suite.
+    const legacy = vi
+      .spyOn(checkoutOwnership, 'withAddressOwnership')
+      .mockImplementation(withLegacyOwnership);
+    const legacyRefusal = vi
+      .spyOn(checkoutOwnership, 'isAddressOwnershipAdmissionRefusal')
+      .mockImplementation(isLegacyAdmissionRefusal);
     const role = { provider: 'mock', model: 'mock' };
     try {
       const owner = await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run });
@@ -236,6 +256,8 @@ test.each(['foreign', 'bootstrap-window'])(
         await owner.withLock(async () => undefined);
       }
     } finally {
+      legacyRefusal.mockRestore();
+      legacy.mockRestore();
       fsFaults.link = undefined;
       await f.repo.cleanup();
     }

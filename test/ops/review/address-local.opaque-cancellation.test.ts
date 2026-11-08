@@ -114,7 +114,7 @@ test('cancelled whole injected review drains finally writes but cannot claim ter
     await expect(readFile(result.report!.reportPath)).rejects.toHaveProperty('code', 'ENOENT');
     const retry = await f.op({ repoRoot: f.repo.root, source: 'local', journalDir: f.journalDir });
     expect(retry.status).toBe('needs-human');
-    expect(retry.report?.reasons.join(' ')).toContain('could not acquire');
+    expect(retry.report?.reasons.join(' ')).toMatch(/busy|incomplete/i);
     expect(f.models).toEqual([]);
     expect(f.repo.git('ls-remote', '--heads', 'origin', 'cq-address/*')).toBe('');
   } finally {

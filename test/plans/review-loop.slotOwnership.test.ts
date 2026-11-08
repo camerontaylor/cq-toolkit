@@ -1,0 +1,110 @@
+import { expect, test } from 'vitest';
+import { symlink } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
+import { runReviewLoop } from '../../src/plans/review-loop.js';
+import {
+  withAddressOwnership,
+  runAddressReviewLoop,
+} from '../../src/ops/review/internal/addressCheckoutOwnership.js';
+import { completeWorker, defaultWorld, fixLine, runLoop } from './review-loop.helpers.js';
+import { slotFixture, pausedLoop, deferred, reached } from '../ops/review/slotOwnership.helpers.js';
+
+test('standalone loop holds target checkout through final report (mutation: release checkout after worker close)', async () => {
+  const entered = deferred(),
+    release = deferred();
+  let snapshots = 0,
+    workerClosed = false;
+  const gitLog: string[][] = [];
+  const pending = runLoop(defaultWorld(), {
+    gitLog,
+    driverResults: [completeWorker(fixLine(false, 'needs human', []))],
+    onSpend: () => {
+      workerClosed = true;
+    },
+    ghHook: async (args, run) => {
+      if (args[1] === 'repos/octo/widget/pulls/7' && ++snapshots === 2) {
+        entered.resolve();
+        await release.promise;
+      }
+      return run(args);
+    },
+  });
+  try {
+    await reached(entered.promise, pending);
+    expect(workerClosed).toBe(true);
+    const path = gitLog.find((args) => args[1]?.endsWith('pr-7-pr-7-fix'))![1]!;
+    await expect(
+      withAddressOwnership(
+        {
+          repoRoot: path,
+          source: 'local',
+          production: true,
+          git: async (args) => ({
+            code: 0,
+            stderr: '',
+            stdout: args.includes('--git-common-dir') ? dirname(path) : join(path, '.git'),
+          }),
+        },
+        async () => {},
+      ),
+    ).rejects.toThrow(/busy/i);
+  } finally {
+    release.resolve();
+    await pending;
+  }
+});
+
+test.each(['alias', 'changed root and head'] as const)(
+  'same PR %s refuses before fetch (mutation: key slot by raw root or headRefName)',
+  async (kind) => {
+    const f = await slotFixture();
+    const first = await pausedLoop(f.opts());
+    try {
+      const alias = join(f.root, 'source-alias'),
+        trees = join(f.root, 'tree-alias');
+      await symlink(f.repo.root, alias, 'dir');
+      await symlink(f.worktreeRoot, trees, 'dir');
+      let fetch = false;
+      await expect(
+        runReviewLoop({
+          ...f.opts(),
+          repoRoot: alias,
+          worktreeRoot: kind === 'alias' ? trees : join(f.root, 'changed-root'),
+          headRefName: kind === 'alias' ? 'feature/x' : 'renamed',
+          git: async (args) => {
+            if (args.includes('fetch')) fetch = true;
+            return f.run(args);
+          },
+        }),
+      ).rejects.toThrow(/busy/i);
+      expect(fetch).toBe(false);
+    } finally {
+      first.release();
+      await first.pending;
+      await f.repo.cleanup();
+    }
+  },
+);
+
+test('nested loop does not reacquire its live slot (regression)', async () => {
+  const f = await slotFixture();
+  let resolved = false;
+  try {
+    await withAddressOwnership(
+      { repoRoot: f.repo.root, source: 'pr:7', git: f.run, production: true },
+      async (lease) => {
+        const opts = {
+          ...f.opts(),
+          onWorktreeResolved: async () => {
+            resolved = true;
+            await expect(runReviewLoop(f.opts())).rejects.toThrow('invalid loop permit');
+          },
+        };
+        expect((await runAddressReviewLoop(lease, opts)).status).toBe('ok');
+      },
+    );
+    expect(resolved).toBe(true);
+  } finally {
+    await f.repo.cleanup();
+  }
+});

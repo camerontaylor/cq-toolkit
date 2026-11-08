@@ -1,3 +1,4 @@
+import { coordinationRoot } from './addressMany.helpers.js';
 // Split provenance: test/ops/review/addressMany.test.ts was split into this
 // file plus addressMany.helpers.ts, addressMany.registry.test.ts,
 // addressMany.dispatch.test.ts, addressMany.guards.test.ts,
@@ -13,7 +14,7 @@ test('unknown usage stops admission and retains held allocation', async () => {
     throw new Error('worker lost');
   });
   const result = await makeReviewAddressMany({
-    coordinationRoot: '/unused-test-coordination',
+    coordinationRoot: coordinationRoot(),
     isolate: async (root) => root,
     gh,
     address,
@@ -32,7 +33,7 @@ test('refused usage settlement retains sibling reports and names the accounting 
     },
   }));
   const result = await makeReviewAddressMany({
-    coordinationRoot: '/unused-test-coordination',
+    coordinationRoot: coordinationRoot(),
     gh,
     address,
     isolate: async (root) => root,
@@ -51,7 +52,7 @@ test('a throwing settlement waits for siblings and preserves their individual re
     },
   }));
   const result = await makeReviewAddressMany({
-    coordinationRoot: '/unused-test-coordination',
+    coordinationRoot: coordinationRoot(),
     gh,
     address,
     isolate: async (root) => root,
@@ -73,7 +74,7 @@ test('skipped rows name the settlement fault and held allocation', async () => {
     },
   }));
   const result = await makeReviewAddressMany({
-    coordinationRoot: '/unused-test-coordination',
+    coordinationRoot: coordinationRoot(),
     gh,
     address,
     isolate: async (root) => root,

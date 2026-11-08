@@ -6,7 +6,6 @@ import {
 import { reviewBranchKey } from './internal/branchKey.js';
 import { provenanceConfig } from '../../config/provenance.js';
 import { currentCqEnv } from '../../config/run-env.js';
-import { makeGitMutex } from '../../shared/gitMutex.js';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   mkdir,
@@ -29,7 +28,7 @@ import type { OpRegistryEntry, OpResult, Plan, RunReport } from '../../kernel/ty
 import { makeGhRunner, type GhFn } from '../../adapters/forge-github/gh.js';
 import { fetchReviewState } from '../../adapters/forge-github/fetchReviewState.js';
 import { requestReviewers } from '../../adapters/forge-github/requestReviewers.js';
-import { fileWorktreeRegistry, type WorktreeRegistry } from '../../adapters/git/prWorktree.js';
+import type { SlotWorktreeRegistry } from '../../adapters/git/slotWorktreeRegistry.js';
 import { loopReplyVerdict, replySignature } from '../../plans/review-loop.js';
 import { DEFAULT_REVIEW_WALL_MS, parseCqConfig, type CqConfig } from '../analyze/cqConfig.js';
 import { resolveCqConfigDefaults, requireAgenticTokenBudget } from '../analyze/cqConfigDefaults.js';
@@ -89,10 +88,11 @@ import {
   addressOrdinaryReport,
   addressTerminalWorkerBinding,
   isAddressOwnershipAdmissionRefusal,
+  isAddressCheckoutIncomplete,
   runAddressReviewLoop,
   withAddressOwnership,
   type AddressLease,
-} from './internal/addressOwnership.js';
+} from './internal/addressCheckoutOwnership.js';
 import {
   DEV_LEDGER_VERSION,
   devLedgerPath,
@@ -278,7 +278,7 @@ export interface ReviewAddressDeps {
   drivers?: DriverFactory;
   git?: GhFn;
   gh?: GhFn;
-  worktreeRegistry?: WorktreeRegistry;
+  worktreeRegistry?: SlotWorktreeRegistry;
   config?: CqConfig;
   initialRecord?: FindingsRecord;
   /**
@@ -711,6 +711,11 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
         if (!addressLease) return { status: 'needs-human', reason: 'parent cancelled', report };
         if (worker) report.escalation = worker.escalation();
         return addressCancelledResult(addressLease);
+      }
+      const incomplete = addressLease?.incompleteReason?.();
+      if (incomplete) {
+        status = 'needs-human';
+        reason = incomplete;
       }
       if (reason && !report.reasons.includes(reason)) report.reasons.push(reason);
       let publicationFailed = false;
@@ -1316,9 +1321,9 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
           unsetEnv: ['GH_REPO'],
           timeoutMs: Math.min(cap, 60_000),
         });
-      // Ownership spans worker edits as well as index mutation, restoration and
-      // publication. Linked worktrees share this conservative exclusion domain;
-      // UUID journal paths and lexical checkout aliases cannot split it.
+      // Ownership spans worker edits, restoration, reports and publication.
+      // PR slots coordinate resolution; the actual checkout slot excludes edits
+      // across entrypoints and canonical aliases.
       const withOwnership = async (
         action: (lease: AddressLease) => Promise<ReviewAddressResult>,
       ) => {
@@ -1329,6 +1334,9 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
               repoRoot: input.repoRoot,
               git: rawGit,
               source: input.source,
+              ...(deps.coordinationRoot ? { coordinationRoot: deps.coordinationRoot } : {}),
+              legacySources: [resolve(journalDir, 'worktrees.json')],
+              ...(input.expectedHead ? { expectedHead: input.expectedHead } : {}),
               production: Object.keys(deps).length === 0,
               controller: ownershipAbort,
               signal: parent,
@@ -1355,7 +1363,10 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
             unheld === undefined || 'observation' in observed
               ? observed
               : { ...observed, observation: unheld };
-          if (!entered && isAddressOwnershipAdmissionRefusal(cause)) {
+          if (
+            (!entered && isAddressOwnershipAdmissionRefusal(cause)) ||
+            isAddressCheckoutIncomplete(cause)
+          ) {
             const { stop: _stop, ...observed } = report;
             return {
               status: 'needs-human' as const,
@@ -1387,7 +1398,8 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
           addressLease = lease;
 
           await bindAddressTerminalReport(lease, report);
-          await addressTerminalBookkeeping(lease, input.repoRoot, bookkeeping);
+          if (input.source === 'local')
+            await addressTerminalBookkeeping(lease, input.repoRoot, bookkeeping);
           try {
             await lease.assertOwned();
             await mkdir(journalDir, { recursive: true });
@@ -2983,10 +2995,9 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                   ...(roundOneExpectedHead ? { expectedHead: roundOneExpectedHead } : {}),
                   gh,
                   git,
-                  registry:
-                    deps.worktreeRegistry ??
-                    lease.registry ??
-                    fileWorktreeRegistry(resolve(journalDir, 'worktrees.json')),
+                  registry: deps.worktreeRegistry ?? lease.registry!,
+                  isBookkeepingPath: (path) =>
+                    withBookkeepingAccess(workerRoot, () => untrackedAllowed(workerRoot, path)),
                   beforeWorktreeResolve: () =>
                     lease.assertSelection({
                       pr: meta.pr,
@@ -3489,26 +3500,6 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
             );
           }
         });
-      if (input.source !== 'local') {
-        const common = await rawGit([
-          '-C',
-          input.repoRoot,
-          'rev-parse',
-          '--path-format=absolute',
-          '--git-common-dir',
-        ]);
-        if (common.code !== 0 || !common.stdout.trim())
-          throw new Error('checkout ownership identity unavailable');
-        const domain = deps.coordinationRoot ?? resolve(input.repoRoot, common.stdout.trim());
-        await mkdir(domain, { recursive: true });
-        return await makeGitMutex({
-          lockPath: resolve(
-            await realpath(domain),
-            `cq-review-address-pr-${input.source.slice(3)}`,
-          ),
-          failFast: true,
-        }).withLock(runOwned, parent);
-      }
       return await runOwned();
     } catch (error) {
       return await finish('needs-human', error instanceof Error ? error.message : String(error));

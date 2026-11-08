@@ -1,3 +1,4 @@
+import { REPO } from './prWorktree.helpers.js';
 // Split provenance: test/ops/review/prWorktree.test.ts was split into
 // prWorktree.helpers.ts (shared fixtures) and prWorktree.fetchFirst.test.ts,
 // prWorktree.registryConsult.test.ts, prWorktree.scanReuse.test.ts,
@@ -35,7 +36,7 @@ describe('create path', () => {
     try {
       const calls: string[][] = [];
       const registry = memRegistry();
-      const model = mkModel([{ path: '/repo', branch: 'main', head: SHA_MAIN }]);
+      const model = mkModel([{ path: `${REPO}`, branch: 'main', head: SHA_MAIN }]);
       const result = await resolvePrWorktree(
         baseOpts(model, registry, { repoRoot, run: fakeGit(model, calls) }),
       );
@@ -163,7 +164,7 @@ describe('PR-keyed branch labels', () => {
     try {
       const registry = memRegistry();
       // PR 7 resolves first: its label is cq-review/pr-7, its path pr-7-main.
-      const model = mkModel([{ path: '/repo', branch: 'main', head: SHA_MAIN }]);
+      const model = mkModel([{ path: `${REPO}`, branch: 'main', head: SHA_MAIN }]);
       const r7 = await resolvePrWorktree(
         baseOpts(model, registry, { repoRoot, headRefName: 'main', run: fakeGit(model) }),
       );

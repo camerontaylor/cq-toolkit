@@ -1,3 +1,4 @@
+import { slotWorktreeRegistry } from '../../../src/adapters/git/slotWorktreeRegistry.js';
 import type { ChildProcess } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
@@ -5,7 +6,7 @@ import { lstat, readFile, readdir, rename, unlink, writeFile } from 'node:fs/pro
 import { dirname, join } from 'node:path';
 import { expect } from 'vitest';
 import { makeGhRunner } from '../../../src/adapters/forge-github/gh.js';
-import { fileWorktreeRegistry, resolvePrWorktree } from '../../../src/adapters/git/prWorktree.js';
+import { resolvePrWorktree } from '../../../src/adapters/git/prWorktree.js';
 import { makeTestRepo, type TestRepo } from '../dev/repo.js';
 import type { ReviewAddressReport } from '../../../src/ops/review/address.js';
 
@@ -62,7 +63,9 @@ export async function fixture() {
         headRefName: pr.headRefName,
         run,
         // Separate handles share the real file lock and persistence boundary.
-        registry: fileWorktreeRegistry(registryPath),
+        registry: slotWorktreeRegistry(
+          repo.git('rev-parse', '--path-format=absolute', '--git-common-dir').trim(),
+        ),
         worktreeRoot,
         nowMs: NOW + pr.number,
       });
