@@ -44,7 +44,8 @@ def decision(repo, row, tip, report):
             commit = repo.resolve(commit)
             if commit not in repo.git('rev-list', tip).decode().splitlines():
                 raise ValueError('commit not ancestor')
-            if verdict == 'fixed' and row['finding']['path'] not in repo.git('diff-tree', '--root', '--no-commit-id', '--name-only', '--first-parent', '-m', '-r', commit).decode().splitlines():
+            fixing_path = repo.lineage(row['target'], commit, row['finding']['path']) or row['finding']['path']
+            if verdict == 'fixed' and fixing_path not in repo.git('diff-tree', '--root', '--no-commit-id', '--name-only', '--first-parent', '-m', '-r', commit).decode().splitlines():
                 raise ValueError('fix does not touch path')
         except (TypeError, ValueError, ledger.IntegrityError, subprocess.CalledProcessError):
             return 'needs-human', 'unverified fixing/superseding commit: ' + reason, {}
@@ -70,12 +71,14 @@ def decision(repo, row, tip, report):
 def phase(inbox, repo, tip, judge, transport, at, *, maximum=6, seconds=600, dry_run=False):
     """Dry-run never recovers events, changes rows, or calls the transport."""
     deadline = time.monotonic() + seconds
+    repo.begin_invocation()
     if not dry_run:
         inbox.recover(inbox.publication.retained())
     rows = [ledger.loads(p.read_bytes()) for p in sorted((inbox.root / 'triage').glob('*.json'))]
     reviews = inbox.publication.retained()
     for row in rows:
-        if hasattr(inbox, 'recovered_anchor'):
+        if (time.monotonic() < deadline and row['finding'].get('anchor_status') != 'verified'
+                and row['status'] in (*PENDING, 'confirmed') and hasattr(inbox, 'recovered_anchor')):
             recovered = inbox.recovered_anchor(row, repo, reviews)
             if recovered:
                 row['recovered_anchor'] = recovered
@@ -96,7 +99,13 @@ def phase(inbox, repo, tip, judge, transport, at, *, maximum=6, seconds=600, dry
             continue
         if anchor.get('intervals') and anchor.get('blob') and row['status'] not in ('already-fixed', 'fixed', 'dismissed', 'superseded'):
             seen.setdefault(key, f['id'])
-        if row['status'] not in PENDING:
+        if row['status'] not in PENDING and not (row['status'] == 'confirmed' and row.get('target_current') != tip):
+            continue
+        if not isinstance(f.get('path'), str) or not f['path']:
+            plans.append((row, 'needs-human', 'finding has no repository path', {}))
+            continue
+        if time.monotonic() >= deadline:
+            candidates.append(row)
             continue
         mapped = repo.lineage(row['target'], tip, f['path'])
         if mapped is None and f['path'] not in entries and repo.proven_deleted(row['target'], tip, f['path']):
@@ -109,15 +118,20 @@ def phase(inbox, repo, tip, judge, transport, at, *, maximum=6, seconds=600, dry
     candidates.sort(key=lambda r: ({'critical': 0, 'major': 1}.get(r['finding']['severity'], 2), age(r), r['finding']['id']))
     judged = 0
     stopped = None
+    stopped_report = {}
     for row in candidates[:maximum]:
         if time.monotonic() >= deadline:
             stopped = 'deadline'; break
         try:
-            report = judge(row, context(repo, row, tip), deadline - time.monotonic())
+            packed = context(repo, row, tip)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                stopped = 'deadline'; break
+            report = judge(row, packed, remaining)
         except (subprocess.TimeoutExpired, OSError):
             stopped = 'deferred'; break
         if report.get('stop') != 'ok':
-            stopped = report.get('stop', 'error'); break
+            stopped = report.get('stop', 'error'); stopped_report = report; break
         row['_triage_model'] = report.get('model', 'judge')
         action, reason, kwargs = decision(repo, row, tip, report)
         if action == 'duplicate' and (kwargs.get('canonical_id') == row['finding']['id'] or not any(r['finding']['id'] == kwargs.get('canonical_id') and r['status'] != 'duplicate' for r in rows)):
@@ -143,4 +157,4 @@ def phase(inbox, repo, tip, judge, transport, at, *, maximum=6, seconds=600, dry
                     delivery_deferred += 1
     return {'total': len(rows), 'judged': judged, 'unjudged': len(candidates) - judged,
             'counts': dict(collections.Counter(o['action'] for o in outcomes)),
-            'delivered': delivered, 'delivery_deferred': delivery_deferred, 'stopped': stopped, 'dry_run': dry_run, 'outcomes': outcomes}
+            'delivered': delivered, 'delivery_deferred': delivery_deferred, 'stop_report': stopped_report, 'stopped': stopped, 'dry_run': dry_run, 'outcomes': outcomes}

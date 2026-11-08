@@ -153,3 +153,41 @@ class PhaseTest(FindingTest):
                        lambda *_: {'stop': 'ok', 'verdict': 'fixed', 'reason': 'fixed by merge', 'fixing_commit': tip},
                        None, AT, dry_run=True)
         self.assertEqual(result['counts'], {'already-fixed': 1})
+
+    def test_pathless_finding_is_needs_human_without_judge(self):
+        path = self.inbox.root / 'triage' / (self.fid + '.json')
+        row = ledger.loads(path.read_bytes()); row['finding']['path'] = None
+        row['finding']['anchor_status'] = 'unverified'; row['finding']['intervals'] = []
+        ledger.atomic(path, ledger.canonical(row))
+        result, _, judge = self.run_phase(dry=True)
+        judge.assert_not_called()
+        self.assertEqual(result['counts'], {'needs-human': 1})
+
+    def test_stale_confirmation_is_judged_again(self):
+        self.inbox.triage(self.fid, self.f.repo, self.t, 'confirmed', 'test', 'valid', AT)
+        tip = self.f.commit({'b': b'unrelated\n'})
+        judge = mock.Mock(return_value={'stop': 'ok', 'verdict': 'invalid', 'reason': 'now invalid'})
+        result = phase(self.inbox, self.f.repo, tip, judge, None, AT, dry_run=True)
+        judge.assert_called_once()
+        self.assertEqual(result['counts'], {'dismissed': 1})
+
+    def test_fix_after_exact_rename_verifies_new_path(self):
+        self.f.git('mv', 'a', 'renamed')
+        self.f.git('commit', '-qm', 'rename')
+        tip = self.f.commit({'renamed': b'fixed\ntwo\n'})
+        result = phase(self.inbox, self.f.repo, tip,
+                       lambda *_: {'stop': 'ok', 'verdict': 'fixed', 'reason': 'fixed renamed path', 'fixing_commit': tip},
+                       None, AT, dry_run=True)
+        self.assertEqual(result['counts'], {'already-fixed': 1})
+
+    def test_context_scan_sees_unescaped_source_before_dispatch(self):
+        path = Path(__file__).parent / 'crq_repair.py'
+        spec = importlib.util.spec_from_file_location('triage_scan_test', path)
+        service = importlib.util.module_from_spec(spec); spec.loader.exec_module(service)
+        scanner = mock.Mock(return_value=(False, {}))
+        c = SimpleNamespace(secret_scan_diff=scanner)
+        context = {'finding': {'path': 'src/a.py', 'body': 'review'}, 'region': [{'text': 'token=canary\nsecond line'}]}
+        self.assertFalse(service.triage_context_safe(c, context, self.root / 'scan.json'))
+        submitted = scanner.call_args.args[0]
+        self.assertIn('+token=canary\n+second line', submitted)
+        self.assertIn('diff --git a/src/a.py b/src/a.py', submitted)

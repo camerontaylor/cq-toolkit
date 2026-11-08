@@ -433,6 +433,24 @@ def fetch_clone(config, lock_wait=None):
             fcntl.flock(lock, fcntl.LOCK_UN)
 
 
+def triage_context_safe(c, context, output):
+    """Scan unescaped string values before serialization or any model upload."""
+    def strings(value):
+        if isinstance(value, str):
+            yield value
+        elif isinstance(value, dict):
+            for item in value.values():
+                yield from strings(item)
+        elif isinstance(value, list):
+            for item in value:
+                yield from strings(item)
+    content = '\n'.join(strings(context))
+    path = context.get('current_path') or context['finding'].get('path') or 'triage-context.txt'
+    diff = 'diff --git a/' + path + ' b/' + path + '\n@@ -0,0 +1 @@\n'
+    diff += '\n'.join('+' + line for line in content.splitlines()) + '\n'
+    return c.secret_scan_diff(diff, output)[0]
+
+
 def triage_phase(config, dry_run=False):
     import crq as c
     import backfill_runtime as runtime
@@ -455,6 +473,10 @@ def triage_phase(config, dry_run=False):
     def judge(row, context, remaining):
         job = {'job': 'crq-triage-' + row['finding']['id'], 'run': row['review_id'],
                'triage_context': context}
+        directory = state / 'repair/triage' / row['finding']['id']
+        directory.mkdir(parents=True, exist_ok=True)
+        if not triage_context_safe(c, context, directory / 'context-scan.json'):
+            return {'stop': 'ok', 'verdict': 'unsure', 'reason': 'triage context secret scan rejected'}
         bounded_config = copy.deepcopy(config)
         bounded_config['repair']['budget']['wall_clock_min'] = remaining / 60
         return dispatch(bounded_config, role, job, config['clone'],
@@ -476,7 +498,7 @@ def triage_phase(config, dry_run=False):
                    seconds=config['repair']['budget']['wall_clock_min'] * 60, dry_run=dry_run)
     print('backfill triage: ' + json.dumps(result))
     if result.get('stopped') == 'rate-limit' and not dry_run:
-        rate_limit_pause({}, 'backfill-triage')
+        rate_limit_pause(result.get('stop_report', {}), 'backfill-triage')
     return result
 
 
