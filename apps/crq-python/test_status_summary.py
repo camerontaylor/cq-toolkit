@@ -25,6 +25,21 @@ def setUpModule():
 
 
 class SummaryTest(unittest.TestCase):
+    def test_local_review_preview_aging_repeat_reason_position(self):
+        queue = {"items": [dict(id="repeat", kind="local-review", generation=1,
+            repeat_requested=True, created_at="1970-01-01T00:00:00Z", state="pending",
+            wait_reason="capacity", order=1), dict(id="first", kind="local-review",
+            generation=1, state="pending", order=2)]}
+        config = dict(repo="owner/repo", max_starts_per_hour=8)
+        for clock, generations in ((3599, [1, 1]), (3600, [1, 1])):
+            data = adapter.summarize({"generated_at": "1970-01-01T01:00:00Z"}, queue, {}, config, [], clock)
+            rows = data["pending_items"]
+            self.assertEqual([r["generation"] for r in rows], generations)
+            repeat = next(r for r in rows if r["reason"] == "capacity")
+            self.assertEqual(repeat["band"], "interactive")
+            self.assertEqual(repeat["aging_deadline"], 3600)
+            self.assertEqual(repeat["approximate_position"], 2 if clock < 3600 else 1)
+
     def test_preview_prioritizes_foreign_open_pr_before_repository_rank(self):
         queue = {"items": [
             {"id": "foreign", "repo": "owner/foreign", "kind": "open", "state": "pending", "order": 0},

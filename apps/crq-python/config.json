@@ -10,6 +10,7 @@
   "max_inflight": 10,
   "review_timeout_min": 120,
   "quiet_minutes": 30,
+  "local_review_aging_minutes": 60,
   "rate_limit_default_backoff_min": 30,
   "error_backoff_min": 30,
   "max_item_failures": 3,

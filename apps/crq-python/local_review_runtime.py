@@ -162,12 +162,14 @@ def complete(c, q, item, rdir, run_id, cls, ended_at, exit_code):
             key = receipts.digest([request_id, event_id, destination])
             q.setdefault("review_notify_outbox", {}).setdefault(key, dict(v=1, request_id=request_id,
                 event_id=event_id, destination=copy.deepcopy(destination), state="pending", receipt_id=receipt_id))
+    run = item.get("run") or {}
     item.update(state="done" if adequate else "failed", scope_adequate=adequate,
                 receipt_id=receipt_id, run=None, publication_pending=True,
                 local_run_id=run_id, completed_at=ended_at, last_error=cls.get("message"))
     if not any(a.get("run_id") == run_id for a in item.get("attempts", [])):
         item.setdefault("attempts", []).append(dict(run_id=run_id, outcome=cls["outcome"],
-            counted=adequate, at=ended_at, receipt_id=receipt_id))
+            counted=adequate, at=ended_at, receipt_id=receipt_id,
+            band=run.get("band", "background"), started_at=run.get("started_at")))
     c.save_queue(q)
     republish(c, q, item)
     return f"{item['id']}: {item['state']}; receipt {receipt_id}"
