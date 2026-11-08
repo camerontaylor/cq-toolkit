@@ -42,10 +42,14 @@ function expectEveryJobGuarded(text: string, file: string): void {
     const idLine = lines.findIndex((line, i) => i >= start && line === `  ${id}:`);
     const next = lines.findIndex((line, i) => i > idLine && /^ {2}[A-Za-z0-9_-]+:\s*$/.test(line));
     const blockLines = lines.slice(idLine, next === -1 ? lines.length : next);
-    expect(
-      blockLines,
-      `${file} job ${id} carries event selection at JOB-KEY indentation`,
-    ).toContain(jobLevelGuard);
+    const guard = blockLines.find((line) => line.startsWith('    if:'));
+    expect(guard, `${file} job ${id} has event selection`).toBeDefined();
+    if (file.includes('denylist')) expect(blockLines).toContain(jobLevelGuard);
+    else {
+      expect(guard).toContain("github.event_name == 'pull_request'");
+      expect(guard).toContain("github.ref == 'refs/heads/main'");
+      expect(guard).toContain("github.event_name == 'schedule'");
+    }
   }
 }
 
