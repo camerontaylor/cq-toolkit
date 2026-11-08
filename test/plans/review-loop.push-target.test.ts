@@ -84,3 +84,58 @@ describe('fork push target (round-3 item 1)', () => {
     expect(forked.outcome.status).toBe('ok');
   });
 });
+
+test('second publication uses the confirmed advanced lease', async () => {
+  const world = defaultWorld();
+  world.worktreeAdvancesAt = 2;
+  world.worktreeAdvancesTo = NEW_SHA;
+  const { gitLog, outcome } = await runLoop(world, {
+    driverResults: [completeWorker(fixLine(true, 'fix', [NEW_SHA]))],
+  });
+  const pushes = gitLog.filter((args) => args[2] === 'push');
+  expect(pushes).toHaveLength(2);
+  expect(pushes[1]?.[3]).toBe(`--force-with-lease=refs/heads/${HEAD_REF}:${NEW_SHA}`);
+  expect(outcome.actionsPosted).toBeGreaterThan(0);
+});
+
+test('rejected publication is reconciled and withholds all replies without retry', async () => {
+  const world = defaultWorld();
+  world.pushFailAt = 1;
+  const { gitLog, outcome } = await runLoop(world, {
+    driverResults: [completeWorker(fixLine(true, 'fix', [NEW_SHA]))],
+  });
+  expect(gitLog.filter((args) => args[2] === 'push')).toHaveLength(1);
+  expect(gitLog.some((args) => args[2] === 'ls-remote')).toBe(true);
+  expect(outcome.actionsPosted).toBe(0);
+});
+
+test('a lost acknowledgement is reconciled before the reply-stage push and replies', async () => {
+  const world = defaultWorld();
+  world.worktreeAdvancesAt = 2;
+  world.worktreeAdvancesTo = NEW_SHA;
+  world.loseFirstPushAcknowledgement = true;
+  const { gitLog, outcome } = await runLoop(world, {
+    driverResults: [completeWorker(fixLine(true, 'fix', [NEW_SHA]))],
+  });
+  expect(outcome.status).toBe('ok');
+  expect(outcome.actionsPosted).toBeGreaterThan(0);
+  const publication = gitLog.findIndex((args) => args[2] === 'push');
+  const reconciliation = gitLog.findIndex((args) => args[2] === 'ls-remote');
+  const replyPush = gitLog.findLastIndex((args) => args[2] === 'push');
+  expect(reconciliation).toBeGreaterThan(publication);
+  expect(replyPush).toBeGreaterThan(reconciliation);
+  expect(gitLog[replyPush]?.[3]).toBe(`--force-with-lease=refs/heads/${HEAD_REF}:${NEW_SHA}`);
+});
+
+test('a mid-run pushurl change cannot redirect the reply-stage push', async () => {
+  const world = defaultWorld();
+  world.changePushurlAfterFirstPush = true;
+  const { gitLog, outcome } = await runLoop(world, {
+    driverResults: [completeWorker(fixLine(true, 'fix', [NEW_SHA]))],
+  });
+  expect(outcome.status).toBe('ok');
+  const pushes = gitLog.filter((args) => args[2] === 'push');
+  expect(pushes).toHaveLength(2);
+  expect(pushes.map((args) => args[4])).toEqual(['/fake/origin.git', '/fake/origin.git']);
+  expect(gitLog.filter((args) => args[2] === 'remote' && args[3] === 'get-url')).toHaveLength(1);
+});
