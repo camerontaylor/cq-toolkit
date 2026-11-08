@@ -212,7 +212,8 @@ describe('manifest-declared credential names', () => {
       const { code } = await server.exited;
       expect(code).toBe(78);
       expect(server.stdout()).toBe('');
-      expect(server.stderr()).toContain(name);
+      expect(server.stderr()).toContain(`'${name}' is a credential`);
+      expect(server.stderr()).toContain('only the in-process SDK transport may pass');
       expect(server.stderr()).not.toContain(dummy);
     },
     20_000,

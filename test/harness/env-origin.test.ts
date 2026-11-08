@@ -11,6 +11,7 @@ import {
   HarnessManifestSchema,
 } from '../../src/harness/surface.js';
 import type { HarnessManifest } from '../../src/harness/surface.js';
+import { TRUSTED_ENV_EXEMPT_NAMES } from '../../src/config/parsers.js';
 import { scratch, withRun } from './surface.helpers.js';
 
 afterEach(() => {
@@ -58,6 +59,62 @@ describe('manifest env name origin', () => {
     const built = await codeManifest(['SSH_AUTH_SOCK']);
     expect(() => createHarnessSurface(HarnessManifestSchema.parse(built))).toThrow(/SSH_AUTH_SOCK/);
     expect(() => createHarnessSurface({ ...built })).toThrow(/SSH_AUTH_SOCK/);
+  });
+
+  test.each([
+    'CQ_AUTOMATION_TOKEN',
+    'AWS_SECRET_ACCESS_KEY',
+    'NPM_TOKEN',
+    'DATABASE_URL',
+    'NODE_OPTIONS',
+    'NODE_PATH',
+    'CQ_TEST_KEEP',
+    'ANTHROPIC_API_KEY',
+  ])('a code-level %s is refused too (only the named exemptions pass)', async (name) => {
+    vi.stubEnv(name, dummy);
+    let message = '';
+    try {
+      createHarnessSurface(await codeManifest([name]));
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).toContain(name);
+    expect(message).not.toContain(dummy);
+  });
+
+  test('the trusted exemption list is frozen and holds exactly the stated names', () => {
+    expect(Object.isFrozen(TRUSTED_ENV_EXEMPT_NAMES)).toBe(true);
+    // Adding a name needs a change here AND a stated reason in ADR-0009.
+    expect([...TRUSTED_ENV_EXEMPT_NAMES]).toEqual(['SSH_AUTH_SOCK']);
+    expect(() => (TRUSTED_ENV_EXEMPT_NAMES as string[]).push('NPM_TOKEN')).toThrow();
+  });
+
+  test('mutating a trusted manifest, or wrapping it, adds no trust', async () => {
+    vi.stubEnv('SSH_AUTH_SOCK', dummy);
+    const built = await codeManifest([]);
+    built.envNames.push('SSH_AUTH_SOCK');
+    expect(() => createHarnessSurface(built)).toThrow(/SSH_AUTH_SOCK/);
+    const trusted = await codeManifest(['SSH_AUTH_SOCK']);
+    expect(() => createHarnessSurface(Object.create(trusted) as HarnessManifest)).toThrow();
+    expect(() => createHarnessSurface(new Proxy(trusted, {}))).toThrow(/SSH_AUTH_SOCK/);
+  });
+
+  test('the declared-credential refusal text says what is allowed, without a value', async () => {
+    const fromFile = JSON.parse(
+      JSON.stringify(await codeManifest(['ANTHROPIC_API_KEY'])),
+    ) as HarnessManifest;
+    vi.stubEnv('ANTHROPIC_API_KEY', dummy);
+    let message = '';
+    try {
+      createHarnessSurface(fromFile);
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).toContain("'ANTHROPIC_API_KEY' is a credential");
+    expect(message).toContain(
+      'only the in-process SDK transport may pass code-declared credential names',
+    );
+    expect(message).not.toContain(dummy);
   });
 
   test('a code-level policy knob is still refused', async () => {

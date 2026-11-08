@@ -4,7 +4,12 @@
 import { resolveSandboxConfig, SANDBOX_POLICY_ENV_NAMES } from './config.js';
 import type { SandboxConfig } from './config.js';
 import type { CqEnv } from '../config/env.js';
-import { credentialRefusal, isEnvName, passthroughRefusal } from '../config/parsers.js';
+import {
+  TRUSTED_ENV_EXEMPT_NAMES,
+  credentialRefusal,
+  isEnvName,
+  passthroughRefusal,
+} from '../config/parsers.js';
 import { processEnv } from '../config/process-env.js';
 
 const SAFE_ENV = new Set([
@@ -59,19 +64,31 @@ export function buildSandboxLauncherEnv(
     if (SANDBOX_POLICY_ENV_NAMES.has(name.toUpperCase())) {
       throw new Error(`sandbox: launcher env ${origin} name '${name}' is not permitted`);
     }
-    // A credential-shaped name (Annex B §B.5) never reaches a run child from
-    // ANY origin: a manifest's declared names are plain data too.
-    // The one exception is the TRUSTED origin: names set in-process by trusted
-    // code (a driver's `envAllowlist`), which Annex B and proc.ts let carry
-    // e.g. SSH_AUTH_SOCK. That origin is never reachable from JSON, a manifest
-    // file, a plan or op input (see harness/surface.ts).
-    const credential = origin === 'trusted' ? undefined : credentialRefusal(name);
-    if (credential !== undefined) throw new Error(`sandbox: launcher env ${origin} ${credential}`);
-    // The operator passthrough additionally refuses every CQ_* name, the same
-    // check parsePassthrough applies at parse time.
-    if (origin === 'passthrough') {
-      const refusal = passthroughRefusal(name);
-      if (refusal !== undefined) throw new Error(`sandbox: launcher env passthrough ${refusal}`);
+    // Every refusal applies to every origin. The TRUSTED origin (names set
+    // in-process by trusted code, a driver's `envAllowlist`; never reachable
+    // from JSON, a manifest file, a plan or op input) is exempt only for the
+    // explicit TRUSTED_ENV_EXEMPT_NAMES (SSH_AUTH_SOCK); credentials, every
+    // CQ_* name and the policy knobs stay refused for it too.
+    if (origin === 'trusted') {
+      if (!TRUSTED_ENV_EXEMPT_NAMES.includes(name)) {
+        const refusal = passthroughRefusal(name);
+        if (refusal !== undefined) throw new Error(`sandbox: launcher env trusted ${refusal}`);
+      }
+    } else {
+      const credential = credentialRefusal(name);
+      if (credential !== undefined) {
+        throw new Error(
+          origin === 'declared'
+            ? `sandbox: launcher env declared name '${name}' is a credential; only the in-process SDK transport may pass code-declared credential names (the MCP stdio transport refuses them)`
+            : `sandbox: launcher env ${origin} ${credential}`,
+        );
+      }
+      // The operator passthrough additionally refuses every CQ_* name, the
+      // same check parsePassthrough applies at parse time.
+      if (origin === 'passthrough') {
+        const refusal = passthroughRefusal(name);
+        if (refusal !== undefined) throw new Error(`sandbox: launcher env passthrough ${refusal}`);
+      }
     }
     const value = parent[name];
     if (value !== undefined) out[name] = value;

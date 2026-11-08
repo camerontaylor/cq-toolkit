@@ -85,6 +85,15 @@ export const PASSTHROUGH_DENIED_NAMES: readonly string[] = Object.freeze([
   'NODE_PATH',
 ]);
 
+/**
+ * The names a TRUSTED (in-process, code-level) env allowlist may carry despite
+ * the credential refusal. Every other refusal still applies to that origin
+ * (credential-shaped names, every `CQ_*` name, the policy knobs). Frozen and
+ * explicit: adding a name needs a stated reason in ADR-0009 ("Origin of env
+ * names") and a change to test/harness/env-origin.test.ts, which pins this list.
+ */
+export const TRUSTED_ENV_EXEMPT_NAMES: readonly string[] = Object.freeze(['SSH_AUTH_SOCK']);
+
 /** True when `name` has the env var NAME shape. */
 export function isEnvName(name: string): boolean {
   return ENV_NAME_PATTERN.test(name);

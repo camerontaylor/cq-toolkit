@@ -81,11 +81,17 @@ config error that names the offending name, or the position of a malformed entry
 
 **Origin of env names.** Trusted code that sets a value in-process (the SDK `optIn` ruling above, a driver's
 `envAllowlist`) is a trusted origin; names from a manifest file, a plan, op input or the env/CLI are untrusted data.
-A harness manifest's `envNames` from a file get the credential refusal (not the `CQ_*` one); a name that trusted code
-passed to `buildManifest` (for example `SSH_AUTH_SOCK`) keeps working in-process, but a policy knob never does. The
-origin is not a manifest field: it is remembered against the object `buildManifest` returned (module-private, keyed by
-identity), so JSON, a clone or any input cannot claim it, and the strict manifest schema rejects an extra key. A
-manifest serialized to the MCP bin loses it and is fully checked there.
+A harness manifest's `envNames` from a file get the credential refusal (not the `CQ_*` one). The trusted origin is
+NOT a blanket exemption: it keeps every refusal (credential-shaped names, every `CQ_*` name, the sandbox policy knobs)
+except an explicit, frozen exemption list, `TRUSTED_ENV_EXEMPT_NAMES` in `src/config/parsers.ts`, which holds only
+`SSH_AUTH_SOCK` (a deployment's git-over-ssh agent socket, which a run child needs and which is not a bearer secret
+the toolkit mints). A name is added only with a reason stated here and a change to the test that pins the list.
+The origin is not a manifest field: it is remembered against the object `buildManifest` returned (module-private,
+keyed by identity), so JSON, a clone, a prototype or proxy wrapper, a plan or any other input cannot claim it, and the
+strict manifest schema rejects an extra key. Only in-process code paths can carry it (`HarnessRunGate.trustedEnvNames`
+is a code-level field). A manifest serialized to the MCP stdio bin loses it, so over that transport code-declared
+credential names are refused (fail closed, exit 78): the message names the variable, says it is a credential and that
+only the in-process SDK transport may pass code-declared credential names, and never echoes a value.
 
 **Inspection.** `cq config` prints each resolved key, its source layer, the warnings and the errors. It exits 2
 when the environment has errors (after printing the report), like every other subcommand. `cq config --strict`
