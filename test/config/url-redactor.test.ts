@@ -369,6 +369,24 @@ describe('redactUrlUserinfo (cases from PR #1235)', () => {
     expect(boundedErrorText(`failed at ${url}`)).toBe(`failed at ${redacted}`);
   });
 
+  test.each([
+    ['https://user:password-http:tail@host.test/path', 'https://[redacted]@host.test/path'],
+    ['https://user:password-https:tail@host.test/path', 'https://[redacted]@host.test/path'],
+    ['https://host.test/?next=https://private.test/sensitive', 'https://host.test/?[redacted]'],
+    ['https://host.test/#https://private.test/sensitive', 'https://host.test/#[redacted]'],
+    [
+      'https://u:password-http:tail@one.test/a and https://u:p@two.test/b?q=https://private.test/sensitive',
+      'https://[redacted]@one.test/a and https://[redacted]@two.test/b?[redacted]',
+    ],
+    [
+      'https://u:password-http:tail@one.test/a,https://u:p@two.test/b',
+      'https://[redacted]@one.test/a,https://[redacted]@two.test/b',
+    ],
+  ])('keeps embedded schemes inside their enclosing URL: %s', (input, expected) => {
+    expect(redactUrlUserinfo(input)).toBe(expected);
+    expect(boundedErrorText(input)).toBe(expected);
+  });
+
   test('handles long credential-free output without repeated scheme or authority scans', () => {
     const inputs = [
       'a'.repeat(40_000),

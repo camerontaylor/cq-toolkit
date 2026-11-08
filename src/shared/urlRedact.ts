@@ -70,6 +70,35 @@ function discoverSchemes(run: string, lenient: boolean): SchemeHit[] {
   return hits;
 }
 
+/** Keep nested scheme-like text inside its enclosing authority or query. */
+function independentTextUrls(run: string, hits: readonly SchemeHit[]): SchemeHit[] {
+  const independent: SchemeHit[] = [];
+  let scan = 0;
+  let inAuthority = false;
+  let inQuery = false;
+  for (const hit of hits) {
+    while (scan < hit.start) {
+      const ch = run[scan] ?? '';
+      if ('/\\?#'.includes(ch)) inAuthority = false;
+      if (ch === '?' || ch === '#') inQuery = true;
+      scan++;
+    }
+    // Whitespace already separates runs. Inside one run, a new URL needs a
+    // prose delimiter outside the enclosing authority/query. A scheme in a
+    // password or a query parameter is data, never an independent URL.
+    if (
+      independent.length === 0 ||
+      (!inAuthority && !inQuery && '\"\',;)>]}'.includes(run[hit.start - 1] ?? ''))
+    ) {
+      independent.push(hit);
+      scan = hit.authority;
+      inAuthority = true;
+      inQuery = false;
+    }
+  }
+  return independent;
+}
+
 /**
  * The FREE-TEXT form: wherever a URL authority appears in text, drop its
  * userinfo (`https://u:p@host/x` becomes `https://[redacted]@host/x`) and its
@@ -115,7 +144,7 @@ export function redactUrlUserinfo(text: string): string {
     const start = i;
     while (i < text.length && !/\s/.test(text[i] ?? '')) i++;
     const run = text.slice(start, i);
-    const hits = discoverSchemes(run, true);
+    const hits = independentTextUrls(run, discoverSchemes(run, true));
     let cursor = 0;
     for (let k = 0; k < hits.length; k++) {
       const hit = hits[k];

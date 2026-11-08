@@ -543,6 +543,24 @@ describe('finishAttempt', () => {
     expect(record.priceTableRevision).toEqual('rev@7');
   });
 
+  it.each([
+    ['https://user:password-http:tail@host.test/path', 'https://[redacted]@host.test/path'],
+    ['https://host.test/?next=https://private.test/sensitive', 'https://host.test/?[redacted]'],
+  ])('keeps embedded schemes redacted in persisted identifiers: %s', (value, expected) => {
+    const record = finishAttempt({
+      ...base,
+      completed: true,
+      invocation: value,
+      requestedModel: value,
+      servedModel: value,
+    });
+    for (const shown of [record.invocation, record.requestedModel, record.servedModel]) {
+      expect(shown).toBe(expected);
+      expect(shown).not.toContain('password');
+      expect(shown).not.toContain('private.test');
+    }
+  });
+
   it('redacts URL-shaped attempt identifiers without relying on env values', () => {
     const value = 'https://u:IdentifierCanary@host/x?token=IdentifierCanary';
     const record = finishAttempt({
