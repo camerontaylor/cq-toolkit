@@ -146,6 +146,11 @@ class SummaryTest(unittest.TestCase):
             events.write_text('{"event":"review_finished","at":"2026-10-08T02:30:00Z","outcome":"completed","secret":"never publish"}\n')
             queue = {"last_tick": "2026-10-08T02:24:00Z", "items": [], "starts": []}
             config = {"max_starts_per_hour": 5, "schedule_id": "tick", "clone": "/private/clone"}
+            triage = root / "state/backfill/findings/triage"
+            triage.mkdir(parents=True)
+            (triage / "a.json").write_text(json.dumps({"status": "needs-human", "target": "tip",
+                "canonical_id": "a", "finding": {"id": "a", "title": "Needs inspection",
+                "path": "a.py", "severity": "minor"}}))
             xdg = root / "xdg-state"
             with mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(xdg)}), \
                     mock.patch.object(adapter, "command", return_value="12\n"):
@@ -157,6 +162,8 @@ class SummaryTest(unittest.TestCase):
             self.assertNotIn("never publish", target.read_text())
             self.assertNotIn("/private/clone", target.read_text())
             self.assertEqual(data["outcomes_24h"]["completed"], 1)
+            self.assertEqual(data["finding_triage"]["counts"], {"needs-human": 1})
+            self.assertEqual(data["finding_triage"]["needs_human"][0]["id"], "a")
             self.assertEqual(data["schema_version"], 2)
             self.assertEqual(set(data["systemd_timers"]),
                              {"crq-tick.timer", "crq-watchdog.timer", "crq-slot.timer",

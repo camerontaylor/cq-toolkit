@@ -1,7 +1,26 @@
 """Baseline/current debt and capacity reports; removals never mean reviewed."""
 import collections
+from pathlib import Path
 
 import review_ledger as ledger
+
+
+def finding_triage(root):
+    """Read current atomic finding rows, rather than the last inventory cache."""
+    counts = collections.Counter()
+    needs_human = []
+    for filename in sorted((Path(root) / "triage").glob("*.json")):
+        row = ledger.loads(filename.read_bytes())
+        status = row["status"]
+        counts[status] += 1
+        if status == "needs-human":
+            finding = row["finding"]
+            needs_human.append({"id": finding["id"], "canonical_id": row["canonical_id"],
+                                "path": row.get("mapped_path") or finding.get("path"),
+                                "title": finding["title"], "severity": finding["severity"],
+                                "target": row.get("target_current", row["target"]),
+                                "event_id": row.get("previous_event_id")})
+    return {"counts": dict(sorted(counts.items())), "needs_human": needs_human}
 
 
 def baseline(repo, ranked, policy_digest, ledger_head, at):
@@ -16,7 +35,7 @@ def baseline(repo, ranked, policy_digest, ledger_head, at):
     return value
 
 
-def summary(repo, ranked, queue, original=None):
+def summary(repo, ranked, queue, original=None, *, findings_root=None):
     totals = {tier: {"covered_lines": 0, "uncovered_lines": 0, "unresolved_objects": [], "empty_files": 0} for tier in ("T1", "T2", "T3", "T4")}
     current = {r["path"]: r for r in ranked["paths"]}
     for row in current.values():
@@ -74,11 +93,13 @@ def summary(repo, ranked, queue, original=None):
         age = (ledger.timestamp(ranked.get("evaluated_at", original["pinned_at"])) - ledger.timestamp(original["pinned_at"])).days
         pending = baseline_result["surviving_T1_debt"] or baseline_result["unresolved_baseline_objects"]
         baseline_result["target_status"] = "missed-capacity-or-exclusions" if age >= 14 and pending else "pending" if pending else "baseline-zero"
+    triage = finding_triage(findings_root) if findings_root is not None else None
     states = collections.Counter(j.get("state", "unknown") for j in queue.get("items", []) if j.get("kind") in ("backfill", "coverage"))
     return {"manifest_id": ranked["manifest_id"], "target": ranked["target"], "tiers": totals,
             "baseline": baseline_result, "required": ranked["required"], "states": dict(sorted(states.items())),
             "publication_pending": states["publication-pending"], "quarantined_families": sum(bool(f.get("quarantined")) for f in queue.get("backfill_families", {}).values()),
-            "finding_delivery_backlog": queue.get("backfill_finding_backlog", {"status": "not-collected"}),
+            "finding_triage": triage or {"status": "not-collected"},
+            "finding_delivery_backlog": triage["counts"] if triage is not None else queue.get("backfill_finding_backlog", {"status": "not-collected"}),
             "spare_quota_admissions": queue.get("backfill_admissions", []),
             "daily_capacity": queue.get("backfill_daily_capacity", {}),
             "idle_with_coverage_candidate": queue.get("backfill_idle_with_candidate", 0),

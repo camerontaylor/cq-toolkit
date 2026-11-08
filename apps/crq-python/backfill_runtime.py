@@ -598,7 +598,7 @@ def run_inventory(c, queue, *, required_paths=None, members=None, fetch=True, en
     queue["backfill_finding_backlog"] = dict(sorted(statuses.items()))
     baseline_file = c.STATE / "backfill/baseline.json"
     original = ledger.loads(baseline_file.read_bytes()) if baseline_file.exists() else None
-    report = reporting.summary(repo, ranked, queue, original)
+    report = reporting.summary(repo, ranked, queue, original, findings_root=c.STATE / "backfill/findings")
     report["construction_debt"] = debt
     if prepare_only:
         return {"queue": queue, "manifest": manifest, "ranked": ranked, "report": report, "event_items": event_items}

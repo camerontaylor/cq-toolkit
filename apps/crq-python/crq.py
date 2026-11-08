@@ -3420,6 +3420,8 @@ def write_status(q: Dict[str, Any]) -> None:
           *repo_status_lines(q, items), *([""] if repo_lines else []),
           "| item | repo | kind | state | cycles | pinned base | last outcome | wait / last error | supersession |",
           "|---|---|---|---|---|---|---|---|---|", *rows, "", "## Recent events", "", "```", *recent, "```", ""]
+    md.extend(["## Backfill finding triage", "", "```json",
+               json.dumps(status_summary.finding_triage(STATE / "backfill/findings"), sort_keys=True), "```", ""])
     md.extend(["## Repair and utilization", "", "```json",
                json.dumps({"repair": repair_tick.digest(ROOT, q),
                    "utilization": coverage.utilization_digest(q, q.get("coverage") or coverage.new_ledger(),
@@ -3427,6 +3429,7 @@ def write_status(q: Dict[str, Any]) -> None:
     (STATE / "status.md").write_text("\n".join(md))
     (STATE / "status.json").write_text(json.dumps({"generated_at": iso(), "paused": q.get("paused"),
                                                    "cooldown_until": q.get("cooldown_until"),
+                                                   "finding_triage": status_summary.finding_triage(STATE / "backfill/findings"),
                                                    "items": [{**{k: i.get(k) for k in ("id", "kind", "state",
                                                               "prior_cycles", "cycles", "operator_priority", "optional_cycle", "pinned_base", "last_error",
                                                               "wait_reason", "gate_stalled_at")},
