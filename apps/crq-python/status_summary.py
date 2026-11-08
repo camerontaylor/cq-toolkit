@@ -2,7 +2,7 @@
 import datetime as dt
 from queue_time import parse_utc
 import coverage
-from backfill_report import finding_triage
+import backfill_report
 import review_receipt
 import repo_registry
 import repair_tick
@@ -14,6 +14,11 @@ import re
 import subprocess
 import tempfile
 import time
+
+
+def finding_triage(root):
+    """Bound status previews and report malformed rows without stopping ticks."""
+    return backfill_report.finding_triage(root, strict=False, limit=32)
 
 
 def timestamp(value):

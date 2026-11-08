@@ -160,7 +160,13 @@ Only confirmed, verified current anchors enter the existing repair inbox;
 triage never invents GitHub threads. Ambiguous judgements remain `needs-human`.
 The inventory report's `finding_triage` and `crq status` show current counts by
 status and the needs-human list (finding ID, canonical ID, path, title,
-severity, target and event ID). The event ID links to the retained decision
+severity, target and event ID). Status previews retain at most 32 needs-human
+entries and report `needs_human_count` and `needs_human_omitted`; durable rows
+and inventory reports retain the full list. Malformed rows do not stop status
+publication: `error_count`, a bounded `errors` list and `errors_omitted` expose
+them, and `counts_complete: false` marks counts as partial (valid rows only).
+The needs-human count is also partial in that case. Inventory remains strict
+on malformed rows. The event ID links to the retained decision
 evidence. Counts describe occurrences, including duplicates, rather than
 unique repair jobs. `backfill.py triage` with an actor/reason remains the
 operator override, and `backfill.py deliver` remains available for confirmed

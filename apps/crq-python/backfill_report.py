@@ -5,22 +5,45 @@ from pathlib import Path
 import review_ledger as ledger
 
 
-def finding_triage(root):
-    """Read current atomic finding rows, rather than the last inventory cache."""
+def finding_triage(root, *, strict=True, limit=None):
+    """Read atomic rows; status may expose partial counts with explicit errors."""
     counts = collections.Counter()
     needs_human = []
+    human_count = error_count = 0
+    errors = []
     for filename in sorted((Path(root) / "triage").glob("*.json")):
-        row = ledger.loads(filename.read_bytes())
-        status = row["status"]
+        try:
+            row = ledger.loads(filename.read_bytes())
+            status = row["status"]
+            finding = row["finding"]
+            for value in (status, row["canonical_id"], row["target"],
+                          finding["id"], finding["title"], finding["severity"]):
+                if not isinstance(value, str) or not value:
+                    raise ValueError("invalid finding row")
+            detail = {"id": finding["id"], "canonical_id": row["canonical_id"],
+                      "path": row.get("mapped_path") or finding.get("path"),
+                      "title": finding["title"], "severity": finding["severity"],
+                      "target": row.get("target_current", row["target"]),
+                      "event_id": row.get("previous_event_id")}
+        except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+            if strict:
+                raise
+            error_count += 1
+            if len(errors) < 32:
+                errors.append({"file": filename.name, "error": type(exc).__name__})
+            continue
         counts[status] += 1
         if status == "needs-human":
-            finding = row["finding"]
-            needs_human.append({"id": finding["id"], "canonical_id": row["canonical_id"],
-                                "path": row.get("mapped_path") or finding.get("path"),
-                                "title": finding["title"], "severity": finding["severity"],
-                                "target": row.get("target_current", row["target"]),
-                                "event_id": row.get("previous_event_id")})
-    return {"counts": dict(sorted(counts.items())), "needs_human": needs_human}
+            human_count += 1
+            if limit is None or len(needs_human) < limit:
+                needs_human.append(detail)
+    result = {"counts": dict(sorted(counts.items())), "needs_human": needs_human}
+    if not strict or limit is not None:
+        result.update(counts_complete=error_count == 0, error_count=error_count,
+                      errors=errors, errors_omitted=error_count - len(errors),
+                      needs_human_count=human_count,
+                      needs_human_omitted=human_count - len(needs_human))
+    return result
 
 
 def baseline(repo, ranked, policy_digest, ledger_head, at):

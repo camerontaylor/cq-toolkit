@@ -180,6 +180,38 @@ class SummaryTest(unittest.TestCase):
                 adapter.publish(root, queue, config, {}, home=root)
             self.assertEqual(target.read_bytes(), old)
 
+    def test_publish_survives_corrupt_triage_and_bounds_partial_preview(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rows = root / "state/backfill/findings/triage"
+            rows.mkdir(parents=True)
+            for n in range(35):
+                row = {"status": "needs-human", "target": "tip", "canonical_id": str(n),
+                       "finding": {"id": str(n), "title": "Check", "severity": "major", "path": "a"}}
+                (rows / f"{n:02}.json").write_text(json.dumps(row))
+            for name, data in (("invalid", "broken"), ("list", "[]"),
+                               ("missing", '{}'), ("status", '{"status": []}')):
+                (rows / (name + ".json")).write_text(data)
+            with mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(root / "xdg")}), \
+                 mock.patch.object(adapter, "systemd_activity", return_value=({}, {})):
+                data = adapter.publish(root, {"items": [], "last_tick": "2026-11-08T00:00:00Z"},
+                                       {"max_starts_per_hour": 8}, {}, home=root)
+            triage = data["finding_triage"]
+            self.assertEqual(triage["counts"], {"needs-human": 35})
+            self.assertFalse(triage["counts_complete"])
+            self.assertEqual(triage["error_count"], 4)
+            self.assertEqual(len(triage["errors"]), 4)
+            self.assertEqual(triage["needs_human_count"], 35)
+            self.assertEqual(len(triage["needs_human"]), 32)
+            self.assertEqual(triage["needs_human_omitted"], 3)
+            self.assertEqual(json.loads((root / "xdg/crq/summary.json").read_text()), data)
+            for n in range(40):
+                (rows / f"bad{n}.json").write_text("broken")
+            triage = adapter.finding_triage(root / "state/backfill/findings")
+            self.assertEqual(triage["error_count"], 44)
+            self.assertEqual(len(triage["errors"]), 32)
+            self.assertEqual(triage["errors_omitted"], 12)
+
     def test_corrupt_last_tick_preserves_summary_accepted_by_fleet_reader(self):
         spec = importlib.util.spec_from_file_location("fleet_reader", ROOT / "ops/fleet-reader.py")
         reader = importlib.util.module_from_spec(spec)
