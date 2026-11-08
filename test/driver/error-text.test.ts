@@ -30,6 +30,12 @@ describe('driver error text — plain, bounded, secret-redacted', () => {
     ['//user:pass@example.test/path', '//[redacted]@example.test/path'],
     ['https:user:pass@example.test/path', 'https:[redacted]@example.test/path'],
     ['http:user:pass@example.test', 'http:[redacted]@example.test'],
+    ['...https:user:pass@example.test', '...https:[redacted]@example.test'],
+    ['xhttps:user:pass@example.test', 'xhttps:[redacted]@example.test'],
+    ['prefixHTTP:user:pass@example.test', 'prefixHTTP:[redacted]@example.test'],
+    ['xftp:user:pass@example.test', 'xftp:[redacted]@example.test'],
+    ['xws:user:pass@example.test', 'xws:[redacted]@example.test'],
+    ['xwss:user:pass@example.test', 'xwss:[redacted]@example.test'],
     ["https://user:p'ass@example.test/", 'https://[redacted]@example.test/'],
     [
       String.raw`https:\/\/user:pass@example.test/path`,
@@ -52,6 +58,8 @@ describe('driver error text — plain, bounded, secret-redacted', () => {
       JSON.stringify({ content: 'a'.repeat(80_000) }),
       'https:'.repeat(10_000),
       '//host/'.repeat(10_000),
+      'xhttps:'.repeat(10_000),
+      'x'.repeat(80_000) + 'https:host',
     ];
     const start = performance.now();
     for (const input of inputs) expect(redactSensitiveText(input)).toBe(input);

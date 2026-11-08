@@ -38,10 +38,11 @@ export function redactSensitiveText(text: string): string {
   // Consume each candidate even without userinfo. The left boundary prevents
   // retrying a long scheme at every character; requiring @ in the regex would
   // also retry overlapping candidates on credential-free diagnostic output.
-  // Special schemes accept missing slashes; backslashes include JSON-escaped
+  // Fixed-length special schemes need no left boundary, including when glued
+  // to prose. They accept missing slashes; backslashes include JSON-escaped
   // slashes and WHATWG special-scheme separators. Other schemes require //.
   return out.replace(
-    /((?<![a-z0-9+.-])(?:[a-z][a-z0-9+.-]*:[/\\]{2,}|(?:https?|wss?|ftp):[/\\]*)|[/\\]{2,})([^\s/\\?#]*)/gi,
+    /((?<![a-z0-9+.-])[a-z][a-z0-9+.-]*:[/\\]{2,}|(?:https?|wss?|ftp):[/\\]*|[/\\]{2,})([^\s/\\?#]*)/gi,
     (_match, prefix: string, authority: string) => {
       const at = authority.lastIndexOf('@');
       return at < 0 ? prefix + authority : `${prefix}[redacted]${authority.slice(at)}`;
