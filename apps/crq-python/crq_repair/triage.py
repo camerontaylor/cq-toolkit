@@ -8,6 +8,8 @@ import review_ledger as ledger
 
 
 PENDING = ('untriaged', 'needs-retriage')
+CONTRACT_PATH = 'docs/current-contract-and-backlog.md'
+CONTRACT_MAX_CHARS = 24000
 
 
 def context(repo, row, tip):
@@ -28,7 +30,13 @@ def context(repo, row, tip):
         needle = next((line.strip() for line in original.splitlines() if len(line.strip()) >= 12), '')
         if needle and not lines:
             search = repo.git('grep', '-n', '-F', '-e', needle[:200], tip, '--', finding['path'], check=False).decode(errors='replace')[:16000]
-    return {'original_region': original, 'content_search': search, 'finding': finding, 'target': row['target'], 'tip': tip, 'current_path': name,
+    contract_entry = entries.get(CONTRACT_PATH)
+    contract_text = repo.git('cat-file', 'blob', contract_entry['blob']).decode(errors='replace') if contract_entry else ''
+    contract = {'path': CONTRACT_PATH, 'tip': tip, 'blob': contract_entry['blob'] if contract_entry else None,
+                'status': 'present' if contract_entry else 'absent', 'text': contract_text[:CONTRACT_MAX_CHARS],
+                'total_chars': len(contract_text), 'limit_chars': CONTRACT_MAX_CHARS,
+                'truncated': len(contract_text) > CONTRACT_MAX_CHARS}
+    return {'current_contract': contract, 'original_region': original, 'content_search': search, 'finding': finding, 'target': row['target'], 'tip': tip, 'current_path': name,
             'region': [{'line': i + 1, 'text': text[i]} for i in range(start, end)],
             'history': repo.git('log', '-n', '40', '--format=%H %s', row['target'] + '..' + tip, '--', finding['path']).decode(errors='replace')[:16000]}
 

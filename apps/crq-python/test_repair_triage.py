@@ -258,3 +258,43 @@ class PhaseTest(FindingTest):
         events = [e for e in self.out.retained() if e['event_type'] == 'finding-event']
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]['payload']['actor'], 'operator')
+
+    def test_contract_context_uses_pinned_current_blob_with_explicit_bound(self):
+        from crq_repair.triage import context, CONTRACT_PATH, CONTRACT_MAX_CHARS
+        text = 'Promotion gate retired.\n' + 'x' * CONTRACT_MAX_CHARS
+        tip = self.f.commit({CONTRACT_PATH: text.encode()})
+        (self.f.root / CONTRACT_PATH).write_text('uncommitted replacement must not be read')
+        row = ledger.loads((self.inbox.root / 'triage' / (self.fid + '.json')).read_bytes())
+        packed = context(self.f.repo, row, tip)
+        contract = packed['current_contract']
+        self.assertEqual(contract['text'], text[:CONTRACT_MAX_CHARS])
+        self.assertEqual(contract['status'], 'present')
+        self.assertTrue(contract['truncated'])
+        self.assertEqual(contract['total_chars'], len(text))
+        self.assertEqual(contract['limit_chars'], CONTRACT_MAX_CHARS)
+        self.assertEqual(contract['blob'], self.f.repo.entries(tip)[CONTRACT_PATH]['blob'])
+        self.assertEqual(contract['tip'], tip)
+        self.assertEqual(packed['original_region'], 'one')
+        self.assertEqual(packed['region'][0], {'line': 1, 'text': 'one'})
+
+    def test_missing_contract_is_explicit_without_losing_source_context(self):
+        from crq_repair.triage import context
+        row = ledger.loads((self.inbox.root / 'triage' / (self.fid + '.json')).read_bytes())
+        packed = context(self.f.repo, row, self.t)
+        self.assertEqual(packed['current_contract']['status'], 'absent')
+        self.assertEqual(packed['current_contract']['text'], '')
+        self.assertFalse(packed['current_contract']['truncated'])
+        self.assertEqual(packed['region'][0]['text'], 'one')
+
+    def test_triage_prompt_distinguishes_retired_recommendations_from_requirements(self):
+        import json
+        from crq_repair.drivers import cq
+        config = {'repair': {'cq_bin': '/unused/cli.js', 'budget': {'wall_clock_min': 1}}}
+        report = SimpleNamespace(returncode=0, stdout='{"stop":"ok","verdict":"unsure","reason":"test"}', stderr='')
+        with mock.patch.object(cq, 'command', return_value=report):
+            cq.judge(config, {'model': 'opencode-go/deepseek-v4.1-flash'},
+                     {'triage_context': {'current_contract': {'text': 'Promotion retired'}}}, self.f.root, self.root)
+        request = json.loads((self.root / 'judge-request.json').read_text())
+        self.assertIn('Historical documents and review recommendations are not current requirements', request['prompt'])
+        self.assertIn('absent or truncated', request['prompt'])
+        self.assertEqual(request['schema'], 'crq.triage/v1')
