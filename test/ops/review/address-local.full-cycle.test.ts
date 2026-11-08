@@ -2,6 +2,7 @@
 // subject files sharing ./address-local.helpers.ts. This file holds the
 // review.address local full-cycle suite.
 import { readFile } from 'node:fs/promises';
+import { resolve } from 'node:path';
 import { describe, expect, test } from 'vitest';
 import type { ReviewAddressReport } from '../../../src/ops/review/address.js';
 import type { Finding } from '../../../src/ops/review/findings.js';
@@ -218,7 +219,7 @@ test('local exit publication leases the observed destination separately from the
   try {
     const expected = f.repo.git('rev-parse', 'HEAD').trim();
     f.repo.git('push', 'origin', 'HEAD:refs/heads/feature/x');
-    const pushDestination = `${f.repo.root}/../push.git`;
+    const pushDestination = resolve(f.repo.root, '../push.git');
     f.repo.git('init', '--bare', pushDestination);
     f.repo.git('push', pushDestination, 'HEAD:refs/heads/feature/x');
     f.repo.git('config', 'remote.origin.pushurl', pushDestination);
@@ -257,7 +258,7 @@ test('local exit publication leases the observed destination separately from the
   }
 });
 
-test.each(['nonzero', 'throw'] as const)(
+test.each(['nonzero', 'throw', 'multiple-pushurls'] as const)(
   'remote observation %s yields a needs-human report before edits',
   async (fault) => {
     const f = await fixture();
@@ -267,6 +268,8 @@ test.each(['nonzero', 'throw'] as const)(
         drivers: f.drivers,
         initialRecord: f.record,
         git: async (args) => {
+          if (fault === 'multiple-pushurls' && args.includes('get-url'))
+            return { code: 0, stdout: '/first.git\n/second.git\n', stderr: '' };
           if (args.includes('ls-remote')) {
             if (fault === 'throw') throw new Error('transient remote failure');
             return { code: 128, stdout: '', stderr: 'transient remote failure' };
@@ -286,6 +289,11 @@ test.each(['nonzero', 'throw'] as const)(
       expect(result.report?.reasons).toContain(
         'publication remote head unavailable; fixes withheld',
       );
+      expect(
+        result.report?.reasons.filter(
+          (reason) => reason === 'publication remote head unavailable; fixes withheld',
+        ),
+      ).toHaveLength(1);
       expect(f.models).toEqual([]);
       expect(JSON.parse(await readFile(result.report!.reportPath, 'utf8'))).toEqual(result.report);
     } finally {

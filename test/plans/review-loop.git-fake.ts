@@ -41,7 +41,12 @@ export const fakeGit = (world: LoopWorld, log: string[][], worktreePath: string)
     if (rest[0] === 'rev-parse' && rest[1] === '--absolute-git-dir') {
       return ok('/fake/git-dir\n');
     }
-    if (rest[0] === 'remote' && rest[1] === 'get-url') return ok('/fake/origin.git\n');
+    if (rest[0] === 'remote' && rest[1] === 'get-url')
+      return ok(
+        world.changePushurlAfterFirstPush && pushCount > 0
+          ? '/fake/changed.git\n'
+          : '/fake/origin.git\n',
+      );
     if (rest[0] === 'fetch' && rest[1] === 'origin') {
       return ok('');
     }

@@ -58,6 +58,7 @@ export interface LoopWorld {
   /** When set, the Nth and every later git push FAILS (1-based). */
   pushFailAt?: number;
   loseFirstPushAcknowledgement?: boolean;
+  changePushurlAfterFirstPush?: boolean;
   /**
    * When set, the fake gh's PR-object reads keep serving the OLD head —
    * origin REST lag — while the git world HAS the new commit (finding 6:

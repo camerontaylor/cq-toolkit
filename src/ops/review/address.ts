@@ -1,4 +1,8 @@
-import { leasedPush, resolvePushDestination } from '../../adapters/git/leasedPush.js';
+import {
+  leasedPush,
+  resolvePushDestination,
+  type PushDestination,
+} from '../../adapters/git/leasedPush.js';
 import { reviewBranchKey } from './internal/branchKey.js';
 import { readCqEnv } from '../../config/env.js';
 import { provenanceConfig } from '../../config/provenance.js';
@@ -1731,7 +1735,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
             const unpublished = new Set<string>();
             let publishBranch: string | undefined;
             let publishRemote = 'origin';
-            let publishDestination: string | undefined;
+            let publishDestination: PushDestination | undefined;
             let publishedBase: string | undefined;
             let expectedRemoteHead: string | undefined;
             let workerRoot = resolve(input.repoRoot);
@@ -2371,7 +2375,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                   const remote = await gitText(root, [
                     'ls-remote',
                     '--refs',
-                    publishDestination,
+                    publishDestination.url,
                     ref,
                   ]);
                   const [sha, destination, extra] = remote.split('\t');
@@ -2386,7 +2390,6 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                 }
               } catch {
                 const reason = 'publication remote head unavailable; fixes withheld';
-                report.reasons.push(reason);
                 return reason;
               }
 

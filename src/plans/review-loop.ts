@@ -1,4 +1,8 @@
-import { leasedPush, resolvePushDestination } from '../adapters/git/leasedPush.js';
+import {
+  leasedPush,
+  resolvePushDestination,
+  type PushDestination,
+} from '../adapters/git/leasedPush.js';
 // review-loop — E4 slice 2 (goal E4; ws-e item 8): the SHIPPED review-loop
 // plan wiring. Sequential stages, each a DIRECT call to the shipped atomic
 // op; ONLY the fix fan-out rides runPlan (bounded, governor applies — the
@@ -1566,7 +1570,7 @@ async function runOwnedReviewLoop(
     !dirtyWorktree &&
     !headUnreadable;
   let expectedPublishedHead = observedBase ?? '';
-  let pushDestination: string | undefined;
+  let pushDestination: PushDestination | undefined;
   let publicationFailed = false;
   const publish: GhFn = async () => {
     if (publicationFailed)

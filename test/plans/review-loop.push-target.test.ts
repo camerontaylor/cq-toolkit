@@ -126,3 +126,16 @@ test('a lost acknowledgement is reconciled before the reply-stage push and repli
   expect(replyPush).toBeGreaterThan(reconciliation);
   expect(gitLog[replyPush]?.[3]).toBe(`--force-with-lease=refs/heads/${HEAD_REF}:${NEW_SHA}`);
 });
+
+test('a mid-run pushurl change cannot redirect the reply-stage push', async () => {
+  const world = defaultWorld();
+  world.changePushurlAfterFirstPush = true;
+  const { gitLog, outcome } = await runLoop(world, {
+    driverResults: [completeWorker(fixLine(true, 'fix', [NEW_SHA]))],
+  });
+  expect(outcome.status).toBe('ok');
+  const pushes = gitLog.filter((args) => args[2] === 'push');
+  expect(pushes).toHaveLength(2);
+  expect(pushes.map((args) => args[4])).toEqual(['/fake/origin.git', '/fake/origin.git']);
+  expect(gitLog.filter((args) => args[2] === 'remote' && args[3] === 'get-url')).toHaveLength(1);
+});
