@@ -575,6 +575,9 @@ def reconcile_fix_prs(c, q):
                 continue
             pr['state'] = info['state']
             if info['state'] == 'MERGED':
+                prepared_head = record.get('publication', {}).get('head')
+                if prepared_head and info.get('headRefOid') != prepared_head:
+                    continue  # A changed fix PR is not the prepared repair evidence.
                 merge = (info.get('mergeCommit') or {}).get('oid')
                 if not merge or not c.is_ancestor(merge, c.git('rev-parse', DEFAULT_REF)):
                     continue
