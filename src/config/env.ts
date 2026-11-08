@@ -6,10 +6,12 @@
 //     collected, never only the first.
 //   - An unknown `CQ_*` name is a warning with the nearest known name.
 //   - A reserved name that is set is a warning ("set but not honoured yet").
-//   - A denied name (`CQ_APPROVAL_KEY*`) is an error.
+//   - A denied name (a registry entry with status 'denied', or any name with a
+//     denied prefix such as `CQ_APPROVAL_KEY*`) is an error, even when blank:
+//     the denial is a name rule, so an exported-but-empty denied name fails too.
 //   - Secret values stay in `values` for use but never appear in diagnostics.
 //
-// This slice does not wire the function into entry points; slice C3 does.
+// Entry points call it once through src/config/entry.ts.
 import { nearestKey } from '../shared/nearest.js';
 import { deepFreeze } from '../shared/deepFreeze.js';
 import { CQ_ENV_REGISTRY, type CqEnvEntry, type CqEnvRegistry } from './env-registry.js';
@@ -47,8 +49,7 @@ function nearestName(name: string, entries: readonly CqEnvEntry[]): string | und
   return near === undefined ? undefined : `CQ_${near}`;
 }
 
-const isBlank = (raw: string | undefined): raw is undefined =>
-  raw === undefined || raw.trim() === '';
+const isBlank = (raw: string | undefined): boolean => raw === undefined || raw.trim() === '';
 
 export function readCqEnv(
   env: Readonly<Record<string, string | undefined>> = process.env,
@@ -70,17 +71,18 @@ export function readCqEnv(
   for (const name of Object.keys(env).sort()) {
     if (!name.startsWith('CQ_')) continue;
     const raw = env[name];
-    if (raw !== undefined) present.push(name);
-    if (isBlank(raw)) continue;
+    if (raw === undefined) continue;
+    present.push(name);
+    const entry = known.get(name);
     const denied = registry.denied.find((d) => name.startsWith(d.prefix));
-    if (denied !== undefined) {
+    if (denied !== undefined || entry?.status === 'denied') {
       errors.push({
         name,
-        message: `${name} is not accepted from the environment: ${denied.description}`,
+        message: `${name} is not accepted from the environment: ${denied?.description ?? entry?.description ?? 'denied'}`,
       });
       continue;
     }
-    const entry = known.get(name);
+    if (isBlank(raw)) continue;
     if (entry === undefined) {
       const near = nearestName(name, registry.entries);
       warnings.push({

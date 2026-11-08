@@ -119,3 +119,18 @@ describe('resolveProtectedPathsConfig', () => {
     }
   });
 });
+
+describe('resolveProtectedPathsConfig with a CqEnv snapshot', () => {
+  test('the snapshot wins over the process env and an unset key is the default', async () => {
+    const { readCqEnv } = await import('../../../src/config/env.js');
+    const set = resolveProtectedPathsConfig({
+      cqEnv: readCqEnv({ CQ_MERGE_PROTECTED_PATHS: 'advisory' }),
+      env: { CQ_MERGE_PROTECTED_PATHS: 'human' },
+    });
+    expect(set).toEqual({ posture: 'advisory', layer: 'env' });
+    expect(resolveProtectedPathsConfig({ cqEnv: readCqEnv({}) })).toEqual({
+      posture: 'human',
+      layer: 'default',
+    });
+  });
+});

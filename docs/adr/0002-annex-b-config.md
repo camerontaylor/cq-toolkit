@@ -7,7 +7,7 @@
   [ADR-0004](0004-policy-check-trust-boundaries.md)
 
 Post-acceptance notes N3, N4, N15, N21, N22 and N23 in the [ADR index](README.md#post-acceptance-notes) narrow parts of this record.
-[ADR-0009](0009-config-contract-v2.md) supersedes §B.2.5 strictness and reserved refusal, §B.1 "never workspace files" for non-trust keys, closed-domain enforcement and the `optIn` machinery (note N24).
+[ADR-0009](0009-config-contract-v2.md) supersedes §B.2.5 strictness and reserved refusal, §B.4.1 `CQ_PROFILE` profile seeding, §B.1 "never workspace files" for non-trust keys, closed-domain enforcement and the `optIn` machinery (note N24).
 
 This annex fills ADR-0002's Annex B. It also defines the configuration keys ADR-0003 refers to. Neither ADR's main
 text changes.
@@ -16,7 +16,7 @@ text changes.
 
 - **Namespace.** One strict namespace, `CQ_<DOMAIN>_<KEY>`: a closed set of domains plus one dynamic family,
   `CQ_PROVIDER_<ID>_<KEY>`. Each key is mechanically mirrored as a per-call id, `<domain>.<camelKey>`.
-- **Precedence.** P7's three layers, **built-in → project env → per-call**, with the last one winning. The
+- **Precedence.** (Profile seeding by `CQ_PROFILE` is retired by ADR-0009 / N24; ignore the profile text below.) P7's three layers, **built-in → project env → per-call**, with the last one winning. The
   project-env layer may be seeded by a bundled profile (`CQ_PROFILE`); explicit `CQ_*` vars beat the profile.
   Blank means "this layer sets nothing", so with `CQ_PROFILE` blank every key resolves to its conservative value. A
   per-call value less conservative than the resolved value is refused unless its key is named in `optIn`. Config
@@ -142,7 +142,7 @@ built-in default  →  project env (CQ_*, optionally seeded by the bundled profi
                                                               last one wins, subject to the rules below
 ```
 
-1. **Profile = a seed inside the project-env layer.** P7's three layers are unchanged.
+1. **Profile = a seed inside the project-env layer.** _Retired by ADR-0009 (N24): `CQ_PROFILE` is not read and profile seeding does not exist; the text of this item is historical._ P7's three layers are unchanged.
    `CQ_PROFILE ∈ {conservative, solo-maintainer}` (blank ≡ `conservative`) expands to that profile's key values; an
    explicit `CQ_*` beats the profile's value for the same key (per entry for maps, §B.3). The journal and the stderr
    summary distinguish `profile` from `env` (§B.7).

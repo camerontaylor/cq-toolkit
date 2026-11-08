@@ -8,6 +8,34 @@ import { createDriverFactory } from '../../src/driver/factory.js';
 import type { DriverFactoryConfig } from '../../src/driver/factory.js';
 import { probe } from './factory.helpers.js';
 
+describe('driver factory — bindings container validation', () => {
+  test.each([[42], [true], ['x'], [[]], [null]])(
+    'bindings = %j is a config error at construction',
+    (bad) => {
+      let err: unknown;
+      try {
+        createDriverFactory({ bindings: bad } as unknown as DriverFactoryConfig);
+      } catch (e) {
+        err = e;
+      }
+      expect(err).toBeInstanceOf(DispatchError);
+      expect(errorClassOf(err)).toBe('config');
+      expect((err as Error).message).toMatch(/bindings must be an object/);
+    },
+  );
+
+  test('undefined (absent) and a valid object still construct', () => {
+    expect(() => createDriverFactory({})).not.toThrow();
+    expect(() =>
+      createDriverFactory({ bindings: undefined } as unknown as DriverFactoryConfig),
+    ).not.toThrow();
+    expect(() =>
+      createDriverFactory({ bindings: { fixer: { zai: 'claude-code' } } }),
+    ).not.toThrow();
+    expect(() => createDriverFactory({ bindings: {} })).not.toThrow();
+  });
+});
+
 describe('driver factory — resolution', () => {
   test('claude-code is never a default: an unbound non-default provider is a config throw', () => {
     const factory = createDriverFactory({ bindings: { fixer: { zai: 'claude-code' } } });

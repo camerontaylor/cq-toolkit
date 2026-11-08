@@ -1,4 +1,5 @@
 // PR-only advisory ratchet verifier.
+import type { CqEnv } from '../config/env.js';
 import { pathToFileURL } from 'node:url';
 import { z } from 'zod';
 import type { OpResult } from '../kernel/types.js';
@@ -73,7 +74,9 @@ export interface VerifyMainDeps extends VerifyDeps {
 
 /** Parse, verify, write ONE JSON line; return the I1 exit code (./trusted-entry.ts). */
 export function mainWith(argv: readonly string[], deps: VerifyMainDeps): Promise<number> {
-  return runEntry<VerifyRatchetOutcome>(() => {
+  // `_cqEnv` is deliberately unused: the posture comes from `deps.env` (the explicit
+  // seam), and no other CQ_* name is read by this entry.
+  return runEntry<VerifyRatchetOutcome>((_cqEnv: CqEnv) => {
     const args = parseVerifyArgs(argv);
     return verifySubject(
       {
