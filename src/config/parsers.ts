@@ -76,7 +76,7 @@ export const ENV_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
  * `CQ_*` name (a nested cq could read trust config from one) are refused on top
  * of this set.
  */
-export const PASSTHROUGH_DENIED_NAMES: ReadonlySet<string> = new Set([
+export const PASSTHROUGH_DENIED_NAMES: readonly string[] = Object.freeze([
   'NPM_TOKEN',
   'SSH_AUTH_SOCK',
   'GOOGLE_APPLICATION_CREDENTIALS',
@@ -85,20 +85,40 @@ export const PASSTHROUGH_DENIED_NAMES: ReadonlySet<string> = new Set([
   'NODE_PATH',
 ]);
 
+/** True when `name` has the env var NAME shape. */
+export function isEnvName(name: string): boolean {
+  return ENV_NAME_PATTERN.test(name);
+}
+
 /**
- * Why `name` may not be passed through to a run child, or `undefined` when it
- * may. The reason names the NAME only; a value never reaches this function.
+ * Why a well-formed `name` is credential-shaped and may never reach a run
+ * child from ANY origin (operator passthrough or harness manifest), or
+ * `undefined`. Secret-suffixed names (which include every `*_URL`), the
+ * `AWS_*` family and the listed names. Names the NAME only.
  */
-export function passthroughRefusal(name: string): string | undefined {
-  if (!ENV_NAME_PATTERN.test(name)) return `invalid env name '${name}'`;
+export function credentialRefusal(name: string): string | undefined {
   const folded = name.toUpperCase();
-  if (SANDBOX_POLICY_ENV_NAMES.has(folded)) return `may not expose policy env '${name}'`;
-  if (folded.startsWith('CQ_')) return `may not expose CQ_* name '${name}'`;
-  if (isSecretEnvName(name)) return `may not expose credential-shaped name '${name}'`;
-  if (folded.startsWith('AWS_') || PASSTHROUGH_DENIED_NAMES.has(folded)) {
+  if (
+    isSecretEnvName(name) ||
+    folded.startsWith('AWS_') ||
+    PASSTHROUGH_DENIED_NAMES.includes(folded)
+  ) {
     return `may not expose credential-shaped name '${name}'`;
   }
   return undefined;
+}
+
+/**
+ * Why a well-formed `name` may not be passed through by the OPERATOR key
+ * (`CQ_RUN_ENV_PASSTHROUGH`): the credential refusal plus the sandbox policy
+ * knobs and every `CQ_*` name. A malformed token is the caller's to report
+ * (by position, never by text). Names the NAME only; a value never reaches here.
+ */
+export function passthroughRefusal(name: string): string | undefined {
+  const folded = name.toUpperCase();
+  if (SANDBOX_POLICY_ENV_NAMES.has(folded)) return `may not expose policy env '${name}'`;
+  if (folded.startsWith('CQ_')) return `may not expose CQ_* name '${name}'`;
+  return credentialRefusal(name);
 }
 
 /**
@@ -106,15 +126,22 @@ export function passthroughRefusal(name: string): string | undefined {
  * by commas and/or whitespace; blank means none. Every path (registry
  * snapshot, sandbox config, child-env builder, launcher) goes through here, so
  * a value is accepted or refused identically everywhere. Throws a config error
- * naming the first offending name.
+ * naming the first offending name (or, for a malformed token, its position).
  */
 export function parsePassthrough(raw: string | undefined): readonly string[] {
   if (raw === undefined || raw.trim() === '') return [];
   const names = raw.split(/[,\s]+/).filter((name) => name !== '');
-  for (const name of names) {
+  names.forEach((name, index) => {
+    // A malformed token may be an operator's `NAME=value` slip: report its
+    // position only, never any part of the raw text.
+    if (!isEnvName(name)) {
+      throw new Error(
+        `sandbox: CQ_RUN_ENV_PASSTHROUGH entry ${index + 1} is not an env var name (names match ${String(ENV_NAME_PATTERN)})`,
+      );
+    }
     const refusal = passthroughRefusal(name);
     if (refusal !== undefined) throw new Error(`sandbox: CQ_RUN_ENV_PASSTHROUGH ${refusal}`);
-  }
+  });
   return [...new Set(names)];
 }
 

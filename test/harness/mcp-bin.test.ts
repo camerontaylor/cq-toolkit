@@ -200,6 +200,25 @@ describe('config error at startup', () => {
   }, 20_000);
 });
 
+describe('manifest-declared credential names', () => {
+  test.each(['ANTHROPIC_API_KEY', 'GH_TOKEN', 'MY_SERVICE_SECRET'])(
+    'envNames [%s] refuses to start: exit 78, no stdout',
+    async (name) => {
+      const dummy = ['dummy', 'credential', String(Date.now())].join('-');
+      const server = startBin(
+        [JSON.stringify(manifestFor(scratch(), ['env'], { envNames: [name] }))],
+        baseEnv({ [name]: dummy }),
+      );
+      const { code } = await server.exited;
+      expect(code).toBe(78);
+      expect(server.stdout()).toBe('');
+      expect(server.stderr()).toContain(name);
+      expect(server.stderr()).not.toContain(dummy);
+    },
+    20_000,
+  );
+});
+
 describe('lifetime', () => {
   test('stdin EOF exits 0 after flushing the last response', async () => {
     const server = startBin([JSON.stringify(manifestFor(scratch()))]);

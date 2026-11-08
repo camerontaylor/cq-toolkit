@@ -74,9 +74,10 @@ tables are retired; where they differ from the registry, the registry is current
 **`CQ_RUN_ENV_PASSTHROUGH` grammar and deny set.** One parser (`parsePassthrough`, `src/config/parsers.ts`) owns both,
 and the registry, `resolveSandboxConfig`, `buildChildEnv` and the launcher env all use it. Names are separated by
 commas and/or whitespace. Annex B §B.5 stays in force: secret-suffixed names, the `AWS_*` family, `NPM_TOKEN`,
-`SSH_AUTH_SOCK`, `GOOGLE_APPLICATION_CREDENTIALS`, `DATABASE_URL`, `NODE_OPTIONS` and `NODE_PATH` are refused, and
-so is every `CQ_*` name (a nested cq could read trust config from one). The refusal is a config error that names
-the offending name (never a value).
+`SSH_AUTH_SOCK`, `GOOGLE_APPLICATION_CREDENTIALS`, `DATABASE_URL`, `NODE_OPTIONS` and `NODE_PATH` are refused (and
+so is every `*_URL` name, via the secret-suffix rule, pending the owner's decision on that suffix), and
+so is every `CQ_*` name (a nested cq could read trust config from one). A harness manifest's declared `envNames` get the same credential refusal (not the `CQ_*` one). The refusal is a
+config error that names the offending name, or the position of a malformed entry (never any part of the raw value).
 
 **Inspection.** `cq config` prints each resolved key, its source layer, the warnings and the errors. It exits 2
 when the environment has errors (after printing the report), like every other subcommand. `cq config --strict`

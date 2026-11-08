@@ -40,7 +40,7 @@
 import { realpath, stat } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { z } from 'zod';
-import { ENV_NAME_PATTERN } from '../config/parsers.js';
+import { ENV_NAME_PATTERN, parsePassthrough } from '../config/parsers.js';
 import type { SandboxLevel, ToolPolicy } from '../driver/types.js';
 import { TOOL_FAILURE_KINDS } from './failures.js';
 import { HarnessConfigSchema } from './config.js';
@@ -205,7 +205,7 @@ export async function buildManifest(inputs: ManifestInputs): Promise<HarnessMani
     envNames: [
       ...new Set([
         ...(inputs.envNames ?? []),
-        ...(processEnv()['CQ_RUN_ENV_PASSTHROUGH'] ?? '').split(/[,\s]+/).filter(Boolean),
+        ...parsePassthrough(processEnv()['CQ_RUN_ENV_PASSTHROUGH']),
       ]),
     ],
   });

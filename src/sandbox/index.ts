@@ -4,7 +4,7 @@
 import { resolveSandboxConfig, SANDBOX_POLICY_ENV_NAMES } from './config.js';
 import type { SandboxConfig } from './config.js';
 import type { CqEnv } from '../config/env.js';
-import { ENV_NAME_PATTERN, passthroughRefusal } from '../config/parsers.js';
+import { credentialRefusal, isEnvName, passthroughRefusal } from '../config/parsers.js';
 import { processEnv } from '../config/process-env.js';
 
 const SAFE_ENV = new Set([
@@ -51,11 +51,18 @@ export function buildSandboxLauncherEnv(
     ...config.envPassthrough.map((name) => [name, 'passthrough'] as const),
     ...(config.declaredEnvNames ?? []).map((name) => [name, 'declared'] as const),
   ]) {
-    if (!ENV_NAME_PATTERN.test(name) || SANDBOX_POLICY_ENV_NAMES.has(name.toUpperCase())) {
+    if (!isEnvName(name)) {
+      throw new Error(`sandbox: launcher env ${origin} name is not a valid env var name`);
+    }
+    if (SANDBOX_POLICY_ENV_NAMES.has(name.toUpperCase())) {
       throw new Error(`sandbox: launcher env ${origin} name '${name}' is not permitted`);
     }
-    // The operator passthrough additionally refuses credential-shaped names
-    // (Annex B §B.5), the same check parsePassthrough applies at parse time.
+    // A credential-shaped name (Annex B §B.5) never reaches a run child from
+    // ANY origin: a manifest's declared names are plain data too.
+    const credential = credentialRefusal(name);
+    if (credential !== undefined) throw new Error(`sandbox: launcher env ${origin} ${credential}`);
+    // The operator passthrough additionally refuses every CQ_* name, the same
+    // check parsePassthrough applies at parse time.
     if (origin === 'passthrough') {
       const refusal = passthroughRefusal(name);
       if (refusal !== undefined) throw new Error(`sandbox: launcher env passthrough ${refusal}`);

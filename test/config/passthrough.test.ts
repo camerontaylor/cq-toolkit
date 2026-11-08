@@ -1,6 +1,8 @@
 // CQ_RUN_ENV_PASSTHROUGH: one grammar and one deny set on every path
 // (Annex B §B.5): registry snapshot, sandbox config, child-env builder and
 // the launcher env all accept or refuse the same value the same way.
+import { readFileSync, readdirSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
 import {
   PASSTHROUGH_DENIED_NAMES,
@@ -9,6 +11,8 @@ import {
 } from '../../src/config/parsers.js';
 import { CQ_ENV_ENTRIES, FOREIGN_ENV_ENTRIES } from '../../src/config/env-registry.js';
 import { readCqEnv } from '../../src/config/env.js';
+import { provenanceConfig } from '../../src/config/provenance.js';
+import { scrubEnvironment } from '../../src/harness/mcp/startup.js';
 import { resolveSandboxConfig } from '../../src/sandbox/config.js';
 import { buildSandboxLauncherEnv } from '../../src/sandbox/index.js';
 import { DEFAULT_CHILD_ENV_ALLOWLIST, buildChildEnv } from '../../src/shared/proc.js';
@@ -95,7 +99,7 @@ describe('passthrough deny set', () => {
 
   test('no allowlisted default name is itself refused as credential-shaped', () => {
     for (const name of DEFAULT_CHILD_ENV_ALLOWLIST) {
-      expect(PASSTHROUGH_DENIED_NAMES.has(name)).toBe(false);
+      expect(PASSTHROUGH_DENIED_NAMES.includes(name)).toBe(false);
     }
   });
 
@@ -173,5 +177,138 @@ function parsePassthroughSafe(raw: string): readonly string[] {
     return parsePassthrough(raw);
   } catch {
     return [];
+  }
+}
+
+describe('no part of a raw value is echoed', () => {
+  const secret = ['sk', 'live', 'TOPSECRET', String(Date.now())].join('-');
+  const long = `FOO=${secret}${'x'.repeat(5000)}`;
+  const shapes = [
+    `FOO=${secret}`,
+    `ANTHROPIC_API_KEY=${secret}`,
+    `FOO=${secret},BAR`,
+    `"${secret}"`,
+    `'FOO=${secret}'`,
+    `GOOD ${secret}=1 OTHER`,
+    `FOO\t${secret}/bad`,
+    `${secret};rm`,
+    long,
+  ];
+  const messageOf = (run: () => unknown): string => {
+    try {
+      run();
+      return '';
+    } catch (error) {
+      return (error as Error).message;
+    }
+  };
+
+  test.each(shapes)('value shape %#', (raw) => {
+    const messages = [
+      messageOf(() => parsePassthrough(raw)),
+      messageOf(() => buildChildEnv({ CQ_RUN_ENV_PASSTHROUGH: raw })),
+      messageOf(() => resolveSandboxConfig({ env: { CQ_RUN_ENV_PASSTHROUGH: raw } })),
+      JSON.stringify(readCqEnv({ CQ_RUN_ENV_PASSTHROUGH: raw }).errors),
+      readCqEnv({ CQ_RUN_ENV_PASSTHROUGH: raw })
+        .errors.map((e) => e.message)
+        .join('\n'),
+    ];
+    for (const message of messages) {
+      expect(message).not.toBe('[]');
+      expect(message).not.toContain(secret);
+      expect(message).not.toContain('TOPSECRET');
+      expect(message.length).toBeLessThan(600);
+    }
+  });
+
+  test('a malformed entry is reported by position', () => {
+    expect(() => parsePassthrough(`GOOD FOO=${secret}`)).toThrow(/entry 2 is not an env var name/);
+  });
+
+  test('provenance records only valid names for the passthrough key', () => {
+    const cqEnv = readCqEnv({ CQ_RUN_ENV_PASSTHROUGH: 'FOO BAR' });
+    const recorded = JSON.stringify(provenanceConfig(cqEnv, {}));
+    expect(recorded).toContain('FOO');
+    const bad = readCqEnv({ CQ_RUN_ENV_PASSTHROUGH: `FOO=${secret}` });
+    expect(bad.errors).toHaveLength(1);
+    expect(JSON.stringify(provenanceConfig(bad, {}))).not.toContain(secret);
+  });
+});
+
+describe('manifest-declared names get the credential refusal', () => {
+  const declared = [
+    'ANTHROPIC_API_KEY',
+    'GH_TOKEN',
+    'MY_SERVICE_SECRET',
+    'AWS_REGION',
+    'DATABASE_URL',
+  ];
+
+  test.each(declared)('buildSandboxLauncherEnv refuses declared %s', (name) => {
+    const parent = { [name]: dummySecret, PATH: '/bin' };
+    const message = messageFrom(() =>
+      buildSandboxLauncherEnv(parent, { envPassthrough: [], declaredEnvNames: [name] }),
+    );
+    expect(message).toContain(name);
+    expect(message).not.toContain(dummySecret);
+  });
+
+  test.each(['CQ_SANDBOX', 'CQ_RUN_TOOL'])('declared policy knob %s is refused', (name) => {
+    expect(() =>
+      buildSandboxLauncherEnv({ [name]: 'x' }, { envPassthrough: [], declaredEnvNames: [name] }),
+    ).toThrow(name);
+  });
+
+  test('a declared non-credential name (even CQ_*) still works', () => {
+    expect(
+      buildSandboxLauncherEnv(
+        { CQ_TEST_KEEP: 'kept', PATH: '/bin' },
+        { envPassthrough: [], declaredEnvNames: ['CQ_TEST_KEEP'] },
+      ),
+    ).toEqual({ PATH: '/bin', CQ_TEST_KEEP: 'kept' });
+  });
+
+  test.each(declared)('scrubEnvironment (the MCP startup path) refuses %s', (name) => {
+    const prior = { ...process.env };
+    try {
+      process.env[name] = dummySecret;
+      const message = messageFrom(() => scrubEnvironment([name]));
+      expect(message).toContain(name);
+      expect(message).not.toContain(dummySecret);
+      expect(process.env[name]).toBe(dummySecret); // refused before the env was replaced
+    } finally {
+      for (const key of Object.keys(process.env)) delete process.env[key];
+      Object.assign(process.env, prior);
+    }
+  });
+});
+
+describe('one parser for the passthrough env', () => {
+  test('src contains no second split of CQ_RUN_ENV_PASSTHROUGH', () => {
+    const root = join(import.meta.dirname, '..', '..', 'src');
+    const offenders: string[] = [];
+    const walk = (dir: string): void => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const full = join(dir, entry.name);
+        if (entry.isDirectory()) walk(full);
+        else if (entry.name.endsWith('.ts')) {
+          const text = readFileSync(full, 'utf8');
+          if (/CQ_RUN_ENV_PASSTHROUGH[^\n]*\.split\(|\.split\(\/\[,\\s\]\+\//.test(text)) {
+            offenders.push(full);
+          }
+        }
+      }
+    };
+    walk(root);
+    expect(offenders.map((f) => f.replace(root, ''))).toEqual(['/config/parsers.ts']);
+  });
+});
+
+function messageFrom(run: () => unknown): string {
+  try {
+    run();
+    return '';
+  } catch (error) {
+    return (error as Error).message;
   }
 }

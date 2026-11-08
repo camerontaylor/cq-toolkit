@@ -236,7 +236,7 @@ export function buildChildEnv(
   for (const name of extraAllowlist) {
     if (!ENV_NAME.test(name)) {
       throw new Error(
-        `envAllowlist entries must be env var names matching ${String(ENV_NAME)}, got ${JSON.stringify(name)}`,
+        `envAllowlist entries must be env var names matching ${String(ENV_NAME)} (a malformed entry is not echoed)`,
       );
     }
   }
