@@ -235,6 +235,32 @@ describe('classify trust defaults are independent per key', () => {
     });
   });
 
+  test('a configured COMMENTED acceptance state is usable under the resolved policy, and never masks an objection', async () => {
+    const cqEnv = env({ CQ_MERGE_ACCEPT_REVIEW_STATES: 'COMMENTED' });
+    const commented = (state: 'COMMENTED' | 'CHANGES_REQUESTED', at: string) => ({
+      id: `c-${state}-${at}`,
+      authorLogin: 'maintainer',
+      state,
+      body: 'looked at it',
+      submittedAt: at,
+      authorAssociation: 'MEMBER' as const,
+    });
+    const ok = eligible(7, { reviews: [commented('COMMENTED', '2026-01-01T00:00:00.500Z')] });
+    const op = await entryOf('merge.classifyPrs').importer({ cqEnv });
+    const r = (await op({ candidate: ok, nowMs: NOW_MS })) as {
+      value: { verdict: string; reason: string };
+    };
+    expect(r.value.reason).not.toBe('no_acceptable_review');
+    const blocked = eligible(8, {
+      reviews: [
+        commented('CHANGES_REQUESTED', '2026-01-01T00:00:00.400Z'),
+        commented('COMMENTED', '2026-01-01T00:00:00.800Z'),
+      ],
+    });
+    const b = (await op({ candidate: blocked, nowMs: NOW_MS })) as { value: { reason: string } };
+    expect(b.value.reason).toBe('merge_objection_outstanding');
+  });
+
   test('none set: nothing synthesised (built-in classifier behaviour unchanged); a restated documented default is accepted', () => {
     expect(resolveClassifyTrust('t', undefined, env())).toEqual({});
     expect(
