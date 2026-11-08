@@ -79,6 +79,9 @@ class Inbox:
         with ledger.locked(self.root / "findings.lock"):
             filename = self.root / "triage" / (fid + ".json")
             row = ledger.loads(filename.read_bytes())
+            current = row.get("receipt", {}).get("repair_task")
+            if current and current != job:
+                return  # A replaced generation cannot overwrite the latest disposition.
             evidence = {"repair_task": job, "reason": reason, "fix_pr": fix_pr}
             if fixing_commit:
                 evidence.update(fixing_commit=fixing_commit, verification=reason)
@@ -197,6 +200,17 @@ def repair_transport(root, queue, save_queue, scan):
             queue["items"].append({"id": item_id, "kind": "merged", "pr": 0, "state": "repairing", "cycles": [],
                                    "repair_runs": {run: {"jobs": [job_id], "pin": request["target"], "base": request["target"],
                                                          "branch": None, "open_pr": False, "round": 1, "state": "queued"}}})
+        for old_item in queue["items"]:
+            for old_run in old_item.get("repair_runs", {}).values():
+                if old_run.get("state") not in ("queued", "ready", "publish_failed") or old_run.get("publication"):
+                    continue  # Published fixes retain their existing PR lifecycle.
+                for old_id in old_run.get("jobs", []):
+                    if old_id == job_id:
+                        continue
+                    old_path = root / "state/repair/inbox" / (old_id + ".json")
+                    if old_path.exists() and ledger.loads(old_path.read_bytes()).get("canonical_finding_id") == request["canonical_id"]:
+                        old_run.update(state="stale", error="superseded by repair generation " + job_id)
+                        old_item["state"] = "done"
         save_queue(queue)
         return {"acknowledgement": ledger.digest(job), "repair_task": job_id}
     return accept

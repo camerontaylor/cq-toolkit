@@ -58,6 +58,10 @@ class FindingTest(unittest.TestCase):
         job = ledger.loads((self.root / "state/repair/inbox" / (second["repair_task"] + ".json")).read_bytes())
         self.assertEqual(job["canonical_finding_id"], self.fid)
         self.assertEqual(len(queue["items"]), 2)
+        self.assertEqual(next(iter(queue["items"][0]["repair_runs"].values()))["state"], "stale")
+        before = self.out.retained()
+        self.inbox.repair_outcome(self.fid, first["repair_task"], "needs-human", "late old failure", AT)
+        self.assertEqual(self.out.retained(), before)
 
     def test_changed_request_without_receipt_preserves_possibly_accepted_task(self):
         self.inbox.triage(self.fid, self.f.repo, self.t, "confirmed", "judge", "valid", AT)
@@ -75,6 +79,8 @@ class FindingTest(unittest.TestCase):
         self.assertNotEqual(receipt["repair_task"], "crq-backfill-" + self.fid)
         self.assertEqual((self.root / "findings/delivery" / (self.fid + ".json")).read_bytes(), original)
         self.assertEqual(len(queue["items"]), 2)
+        self.assertEqual(next(iter(queue["items"][0]["repair_runs"].values()))["state"], "stale")
+        self.assertEqual(queue["items"][0]["state"], "done")
         self.assertEqual(self.inbox.deliver(self.fid, transport, AT), receipt)
 
     def test_confirmed_cannot_override_canonical_identity(self):

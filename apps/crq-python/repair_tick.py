@@ -230,6 +230,15 @@ def harvest(c, q, item, dry=False):
             if result.get('retry_after'):
                 break
             expected = json.loads((c.STATE / 'repair/inbox' / (job_id + '.json')).read_text())
+            fid = expected.get('canonical_finding_id')
+            source_row = c.STATE / 'backfill/findings/triage' / (fid + '.json') if fid else None
+            if source_row and source_row.exists():
+                latest = json.loads(source_row.read_text()).get('receipt', {}).get('repair_task')
+                if latest and latest != job_id:
+                    if not dry:
+                        record.update(state='stale', error='superseded repair generation')
+                        item['state'] = 'done'
+                    break
             if result.get('job') != job_id or result.get('item') != item['id']:
                 raise ValueError('repair result identity mismatch')
             if expected.get('source_sha') and any(result.get(k) != expected.get(k)
