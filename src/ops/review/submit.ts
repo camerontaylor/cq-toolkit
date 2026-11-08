@@ -125,6 +125,19 @@ export const makeSubmit = (transport?: QueueTransport) =>
           await writeFile(prepared, JSON.stringify({ ...record, wire }), { mode: 0o600 });
           await rename(prepared, path);
         }
+        if (wire.snapshot) {
+          const decodedBytes = wire.snapshot.objects.reduce(
+            (total, object) => total + Buffer.byteLength(object.data, 'base64'),
+            0,
+          );
+          if (decodedBytes > capabilities.limits.max_content_bytes)
+            throw new ReviewInputError('snapshot content exceeds bound');
+          if (
+            Buffer.byteLength(JSON.stringify(wire.snapshot)) >
+            capabilities.limits.max_snapshot_bytes
+          )
+            throw new ReviewInputError('snapshot wire exceeds bound');
+        }
         mutationSent = true;
         const response = await client.request(wire);
         if (!('state' in response)) throw new Error('expected admission response');

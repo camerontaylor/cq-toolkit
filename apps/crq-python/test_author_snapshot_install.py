@@ -16,6 +16,16 @@ from test_author_snapshot_fixtures import SnapshotTransportFixture, envelope
 
 
 class SnapshotTransport(SnapshotTransportFixture, unittest.TestCase):
+    def test_original_install_uses_real_crq_denylist_parser_and_git_reader(self):
+        ref = self.seed_live_denylist()
+        # The envelope's deterministic commit is also a valid original commit;
+        # no denylist or diff-scanner stubs mask the production policy path here.
+        with mock.patch.multiple(crq, CLONE=self.destination, DEFAULT_REF=ref,
+                                 WT_ROOT=self.state / "worktrees", ALLOWLIST_PATHS=[]), \
+             mock.patch.object(crq.shutil, "which", return_value=None):  # offline: no external gitleaks
+            snapshot.install(self.request["snapshot"], self.request["binding"], crq, original=True)
+        self.assertEqual(snapshot.git(self.destination, "cat-file", "-t", self.request["binding"]["head"]).strip(), b"commit")
+
     def test_install_batches_object_writes_per_type(self):
         files = [(f"f{i}.txt", self.git("hash-object", "-w", "--stdin", data=b"blob %d\n" % i))
                  for i in range(40)]

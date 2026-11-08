@@ -5,6 +5,7 @@ the full-range CLI adapter cannot prove per-line coverage.
 """
 import copy
 import datetime as dt
+import hashlib
 import json
 import subprocess
 from pathlib import Path
@@ -86,8 +87,8 @@ def prepare(c, q, item, dry, *, completed_only=False):
         if pr.get("kind") not in ("open", "delta"):
             continue
         for record in reversed(pr.get("cycles", [])):
-            if item["generation"] > 1 and record.get("completed_at", "") <= item["created_at"]:
-                continue  # an explicit repeat does not replay already-finished PR work
+            if item.get("repeat_requested", item["generation"] > 1):
+                continue  # an explicit repeat requires a fresh invocation, even at generation 1
             if operation.equivalent(cycle_facts(c, pr, record), wanted):
                 if not dry:
                     rdir = c.RUNS / record["run_id"]
@@ -134,7 +135,8 @@ def reconcile_completed(c, q):
 def complete(c, q, item, rdir, run_id, cls, ended_at, exit_code):
     """Content-stable publication before terminal queue mutation; safe to replay."""
     findings = []
-    raw = (rdir / "review.ndjson").read_text()
+    raw_bytes = (rdir / "review.ndjson").read_bytes()
+    raw = raw_bytes.decode("utf-8", errors="replace")
     for line in raw.splitlines():
         try:
             value = json.loads(line)
@@ -147,9 +149,11 @@ def complete(c, q, item, rdir, run_id, cls, ended_at, exit_code):
                     identity_inputs=item["identity_inputs"], profile=item["profile"], run_id=run_id,
                     outcome=("findings" if findings else "clean") if adequate else "no-verdict",
                     scope_adequate=adequate, findings=findings,
-                    report=(rdir / "findings.md").read_text() if (rdir / "findings.md").exists() else raw,
+                    report=(rdir / "findings.md").read_text(errors="replace") if (rdir / "findings.md").exists() else raw,
                     observed={"cli_version": None, "model_version": None, "reason": "not-observed",
-                              "classification": cls, "exit_code": exit_code}, independent_acceptance=False)
+                              "classification": cls, "exit_code": exit_code,
+                              "artifacts": {"review.ndjson": hashlib.sha256(raw_bytes).hexdigest()}},
+                    independent_acceptance=False)
     operation.validate("receipt", document)
     receipt_id = receipts.write_receipt(c.STATE / "receipts", document)
     event_id = receipts.digest(dict(item=item["id"], run=run_id, receipt=receipt_id))
@@ -165,7 +169,9 @@ def complete(c, q, item, rdir, run_id, cls, ended_at, exit_code):
     run = item.get("run") or {}
     item.update(state="done" if adequate else "failed", scope_adequate=adequate,
                 receipt_id=receipt_id, run=None, publication_pending=True,
-                local_run_id=run_id, completed_at=ended_at, last_error=cls.get("message"))
+                local_run_id=run_id, completed_at=ended_at, last_error=cls.get("message"), wait_reason=None)
+    item.pop("not_before", None)
+    item.pop("reconcile_failures", None)
     if not any(a.get("run_id") == run_id for a in item.get("attempts", [])):
         item.setdefault("attempts", []).append(dict(run_id=run_id, outcome=cls["outcome"],
             counted=adequate, at=ended_at, receipt_id=receipt_id,

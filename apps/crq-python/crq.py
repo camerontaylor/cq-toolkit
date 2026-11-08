@@ -2966,7 +2966,8 @@ def start_one(q, log, dry, only, ignore_quiet, capture_current=True):
             item["wait_reason"] = "linked merged-current intent owns current-scope recovery; legacy evidence retained"
             continue
         if item.get("not_before") and parse_iso(item["not_before"]) > now():
-            item["wait_reason"] = f"backoff until {item['not_before']}"
+            if not (item.get("wait_reason") or "").startswith("completed-evidence-unavailable:"):
+                item["wait_reason"] = f"backoff until {item['not_before']}"
             continue
         if not deps_met(q, item):
             item["wait_reason"] = f"waiting for {item['depends_on']}"

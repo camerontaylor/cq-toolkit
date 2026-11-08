@@ -536,7 +536,7 @@
                     },
                     "max_content_bytes": {
                       "type": "integer",
-                      "const": 4194304
+                      "const": 3145728
                     },
                     "max_objects": {
                       "type": "integer",

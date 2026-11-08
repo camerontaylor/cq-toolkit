@@ -115,6 +115,18 @@ class SnapshotTransportFixture(SnapshotGitFixture):
         (self.state / "policy.json").write_text('{"review":{"reviewerTimeoutMin":25}}')
         self.request = envelope(self.repo, self.base, self.changed_tree)
 
+    def seed_live_denylist(self):
+        """Put the repository's real policy behind an offline ref for crq.denylist_rules()."""
+        policy = Path(__file__).resolve().parents[2] / "policy/denylist/patterns.yml"
+        blob = self.git("-C", str(self.destination), "hash-object", "-w", "--stdin", data=policy.read_bytes())
+        tree = self.git("-C", str(self.destination), "mktree", data=f"100644 blob {blob}\tpatterns.yml\n".encode())
+        for directory in ("denylist", "policy"):
+            tree = self.git("-C", str(self.destination), "mktree", data=f"040000 tree {tree}\t{directory}\n".encode())
+        commit = self.git("-C", str(self.destination), "commit-tree", tree, data=b"live policy fixture\n")
+        ref = "refs/heads/denylist-policy"
+        self.git("-C", str(self.destination), "update-ref", ref, commit)
+        return ref
+
     def call(self, request=None):
         return json.loads(transport_fixture(self.destination, self.state, json.dumps(request or self.request).encode()))
 

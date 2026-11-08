@@ -75,6 +75,30 @@ afterAll(async () => {
 });
 
 describe('tree snapshot capture', () => {
+  it('bounds original decoded content at 3 MiB while retaining the legacy 4 MiB cap', async () => {
+    const repo = join(root, 'content-bound');
+    await exec('git', ['clone', '-q', '--no-hardlinks', worker, repo], { env });
+    await writeFile(join(repo, 'file.txt'), Buffer.alloc(3 * 1024 * 1024, 120));
+    await git(repo, 'add', 'file.txt');
+    await git(
+      repo,
+      '-c',
+      'user.name=Fixture',
+      '-c',
+      'user.email=fixture@example.invalid',
+      'commit',
+      '-qm',
+      'head',
+    );
+    const head = await git(repo, 'rev-parse', 'HEAD');
+    const headTree = await git(repo, 'rev-parse', 'HEAD^{tree}');
+    await expect(captureSnapshot(repo, base, headTree, accept, 30000, head)).rejects.toThrow(
+      'snapshot content exceeds bound',
+    );
+    const legacy = await captureSnapshot(repo, base, headTree, accept);
+    expect(Buffer.byteLength(JSON.stringify(legacy.snapshot))).toBeLessThan(5 * 1024 * 1024);
+  });
+
   it('is deterministic and leaves HEAD, the index and working files alone', async () => {
     const indexBefore = await readFile(join(worker, '.git/index'));
     const fileBefore = await readFile(join(worker, 'file.txt'));

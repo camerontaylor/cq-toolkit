@@ -2,6 +2,7 @@
 import copy
 import contextlib
 import datetime as dt
+import hashlib
 import json
 import subprocess
 from pathlib import Path
@@ -61,7 +62,11 @@ class ExecutionTests(SnapshotGitFixture, unittest.TestCase):
         pr = self.pr()
         with self.assertRaisesRegex(crq.NotReady, "equivalent-local-review"):
             runtime.reconcile_pr(self.c, self.q, pr, self.plan(), False)
+        self.item.update(wait_reason="backoff until old time", not_before=self.c.iso(), reconcile_failures=2)
         self.finish()
+        self.assertIsNone(self.item["wait_reason"])
+        self.assertNotIn("not_before", self.item)
+        self.assertNotIn("reconcile_failures", self.item)
         self.assertTrue(self.item["publication_pending"])
         self.assertEqual(self.item["publication_reason"], "publication-disabled")
         self.assertIsNotNone(runtime.retained(self.c, self.item))
@@ -84,6 +89,7 @@ class ExecutionTests(SnapshotGitFixture, unittest.TestCase):
             stack.enter_context(mock.patch.object(crq, "gh_json", return_value=opened))
             stack.enter_context(mock.patch.object(crq, "ensure_commit", return_value=True))
             stack.enter_context(mock.patch.object(crq, "read_slot_usage", return_value=({"remaining": remaining}, [])))
+            stack.enter_context(mock.patch.object(crq, "coverage_fallback", return_value=(None, False)))
             for module, name, result in ((backfill_runtime, "settings", None),
                 (crq.push_current, "discover", []), (crq.pr_enroll, "enroll", []),
                 (crq.deferred_refresh, "refresh_deferred", []), (crq.client_health, "record", []),
@@ -201,10 +207,12 @@ class ExecutionTests(SnapshotGitFixture, unittest.TestCase):
                     return real_run(cmd, *args, **kw)
                 with mock.patch.object(subprocess, "run", side_effect=git_process):
                     self.full_tick([dict(number=2, isDraft=False, baseRefName="main",
-                        headRefName="unrelated", headRefOid=self.head)], clone=partial)
+                        headRefName="unrelated", headRefOid=self.head)], clone=partial, remaining=1)
                 self.assertTrue(any(i["id"] == "pr2" for i in self.q["items"]))
                 self.assertEqual(self.item["state"], "pending")
                 self.assertIn("RuntimeError" if failure == "missing" else "TimeoutExpired", self.item["wait_reason"])
+                status = admission.status(self.q, "one")
+                self.assertTrue(status["reason"].startswith("completed-evidence-unavailable:"))
                 with mock.patch.object(crq, "CLONE", partial), mock.patch.object(crq, "git", wraps=crq.git) as git:
                     runtime.reconcile_completed(crq, self.q)
                     git.assert_not_called()  # repeated ticks honor the existing not_before gate
@@ -236,12 +244,44 @@ class ExecutionTests(SnapshotGitFixture, unittest.TestCase):
                      mock.patch.object(crq, "run_liveness", return_value="alive"):
                     self.full_tick([], clone=partial)
                 self.assertEqual(self.item["state"], "done")
+                self.assertNotIn("reason", admission.status(self.q, "one"))
                 self.assertNotIn("not_before", self.item)
                 self.assertNotIn("reconcile_failures", self.item)
                 if failure == "missing":
                     # For timeout case the object exists: only the real process
                     # timeout wrapper fails, rather than a missing-object mock.
                     self.assertEqual(self.item["identity_inputs"], self.facts)
+
+    def test_invalid_utf8_output_finishes_failed_and_completed_runs_with_raw_digest(self):
+        initial = copy.deepcopy(self.q)
+        for completed in (False, True):
+            with self.subTest(completed=completed):
+                self.q = copy.deepcopy(initial)
+                self.item = self.q["items"][0]
+                self.item.update(state="reviewing", run=dict(run_id="run-1"))
+                raw = b'{"type":"finding","severity":"info","comment":"bad \xff byte"}\n'
+                raw += (b'{"type":"complete","status":"review_completed"}\n' if completed else
+                        b'{"type":"error","errorType":"unknown","message":"bad \xff"}\n')
+                if not completed:
+                    raw += b"\xff\xe2\x82"  # malformed/truncated trailing event from a terminated process
+                (self.rdir / "review.ndjson").write_bytes(raw)
+                exit_code = 0 if completed else 1
+                (self.rdir / "exit.json").write_text(json.dumps(dict(exit=exit_code, ended_at=self.c.iso())))
+                (self.rdir / "meta.json").write_text(json.dumps(dict(worktree=str(self.repo),
+                    wt_branch="fixture", item_id=self.item["id"], label="fixture", run_id="run-1",
+                    base=self.base, head=self.head)))
+                with mock.patch.multiple(crq, STATE=self.state, RUNS=self.runs), \
+                     mock.patch.object(crq, "run_liveness", return_value="harvest"), \
+                     mock.patch.object(crq, "event"), mock.patch.object(crq, "remove_worktree"), \
+                     mock.patch.object(crq, "save_queue"), mock.patch.object(backfill_runtime, "settings", return_value=None):
+                    crq.harvest_review(self.q, self.item, False)
+                self.assertEqual(self.item["state"], "done" if completed else "failed")
+                review_receipt.read_receipt(self.state / "receipts", self.item["receipt_id"])  # verifies receipt bytes
+                document = json.loads((self.state / "receipts" / (self.item["receipt_id"] + ".json")).read_text())
+                self.assertEqual(document["observed"]["artifacts"]["review.ndjson"], hashlib.sha256(raw).hexdigest())
+                self.assertIn("\ufffd", document["findings"][0]["comment"])
+                self.assertEqual((self.rdir / "review.ndjson").read_bytes(), raw)
+                self.assertEqual(len(self.q["review_events"]), 1)
 
     def test_local_harvest_retains_global_auth_and_rate_gates(self):
         for outcome in ("auth", "action_required", "rate_limited"):
@@ -386,6 +426,45 @@ class ExecutionTests(SnapshotGitFixture, unittest.TestCase):
                 self.assertEqual(self.item["state"], "done")
                 self.assertEqual(len(self.q["review_events"]), 1)
                 self.assertEqual(len(self.item["attempts"]), 1)
+
+    def test_explicit_repeat_launches_despite_completed_pr_or_local_evidence(self):
+        initial = copy.deepcopy(self.q)
+        for source in ("pr", "local"):
+            with self.subTest(source):
+                self.q = copy.deepcopy(initial)
+                self.item = self.q["items"][0]
+                if source == "local":
+                    self.finish()
+                    self.assertEqual(self.admit("normal")["action"], "reused")
+                else:
+                    pr = self.pr()
+                    pr.update(state="done", cycles=[dict(base=self.base, head=self.head,
+                        profile=self.profile, range_policy="full-range-once-v1", run_id="run-1",
+                        completed_at="2026-11-08T00:01:00Z", ndjson=str(self.rdir / "review.ndjson"))])
+                    self.assertIsNone(runtime.prepare(self.c, self.q, self.item, False))
+                    self.assertEqual(self.item["state"], "done")  # a non-repeat reuses the PR
+                    self.q["items"].remove(self.item)
+                    self.q["review_requests"] = {}
+                self.assertEqual(self.admit("fresh", repeat=True)["action"], "created")
+                item = self.q["items"][-1]
+                self.assertTrue(item["repeat_requested"])
+                self.assertEqual(item["generation"], 1 if source == "pr" else 2)
+                self.admit("fresh", repeat=True)  # retry joins this exact generation
+                self.assertEqual(self.q["items"][-1]["id"], item["id"])
+                plan = runtime.prepare(self.c, self.q, item, False)
+                self.assertIsNotNone(plan)
+                worktree = self.repo / ("repeat-wt-" + source)
+                worktree.mkdir()
+                with mock.patch.multiple(crq, CLONE=self.repo, STATE=self.state, RUNS=self.runs), \
+                     mock.patch.object(crq, "secret_scan", return_value=(True, {})), \
+                     mock.patch.object(crq, "make_worktree", return_value=(worktree, "fixture-branch")), \
+                     mock.patch.object(crq, "save_queue"), mock.patch.object(crq, "append_work_record"), \
+                     mock.patch.object(crq, "event"), \
+                     mock.patch.object(crq, "subprocess", SimpleNamespace(DEVNULL=-3,
+                         Popen=mock.Mock(return_value=SimpleNamespace(pid=12345)))) as processes:
+                    crq.launch(self.q, item, plan)
+                processes.Popen.assert_called_once()
+                self.assertEqual(item["state"], "reviewing")
 
     def test_third_generation_really_launches_stored_flags(self):
         saved = []

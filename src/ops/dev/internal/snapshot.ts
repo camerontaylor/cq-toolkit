@@ -94,7 +94,11 @@ export async function captureSnapshot(
       throw new Error('invalid snapshot object');
     const size = Number(sizeText);
     total += size;
-    if (!Number.isSafeInteger(size) || size < 0 || total > MAX_CONTENT)
+    if (
+      !Number.isSafeInteger(size) ||
+      size < 0 ||
+      total > (originalHead === undefined ? MAX_CONTENT : 3 * 1024 * 1024)
+    )
       throw new Error('snapshot content exceeds bound');
     if (nl + 1 + size >= out.length) throw new Error('invalid snapshot object');
     const data = out.subarray(nl + 1, nl + 1 + size).toString('base64');
