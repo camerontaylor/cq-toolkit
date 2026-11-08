@@ -74,7 +74,7 @@ def budget(config, role):
     base, own = config['repair']['budget'], role.get('budget', {})
     return {'maxOutputTokens': own.get('max_output_tokens', base.get('max_output_tokens', MAX_OUTPUT_TOKENS)),
             'maxContextTokens': own.get('max_context_tokens', base.get('max_context_tokens', MAX_CONTEXT_TOKENS)),
-            'wallClockMs': base['wall_clock_min'] * 60000}
+            'wallClockMs': int(base['wall_clock_min'] * 60000)}
 
 
 def session_files(sessions_dir):

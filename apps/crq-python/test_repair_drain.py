@@ -310,6 +310,82 @@ class RepairDrainTest(unittest.TestCase):
             self.assertEqual(result['verdict'], 'NOT-FIXED')
             self.assertNotIn('retry_after', result)
 
+    def test_provider_fallback_persists_reset_and_skips_exhausted_zai(self):
+        self.config['repair']['fallback_models'] = ['opencode-go/deepseek-v4.1-flash', 'deepseek/deepseek-flash']
+        reset = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=3)).strftime('%Y-%m-%d %H:%M:%S')
+        limited = {'stop': 'rate-limit', 'summary': 'Weekly/Monthly Limit Exhausted. Your limit will reset at ' + reset}
+        success = {'stop': 'ok', 'changed': False}
+        with mock.patch.dict(os.environ, {'ZAI_API_KEY': 'fixture', 'OPENCODE_GO_API_KEY': 'fixture', 'OPENCODE_GO_BASE_URL': 'https://fixture.invalid', 'DEEPSEEK_API_KEY': 'fixture'}), \
+             mock.patch.object(service, '_dispatch', side_effect=[limited, success, success]) as dispatch:
+            first = service.dispatch(self.config, ROLES['fixer'], {'run': 'r', 'job': 'j'}, self.clone, self.root / 'attempt')
+            self.assertEqual(first['model'], 'opencode-go/deepseek-v4.1-flash')
+            service.dispatch(self.config, ROLES['judge'], {'run': 'r', 'job': 'j'}, self.clone, self.root / 'judge', judge=True)
+            self.assertEqual([c.args[1]['model'] for c in dispatch.call_args_list],
+                             ['zai/glm-5.3-flash', 'opencode-go/deepseek-v4.1-flash', 'opencode-go/deepseek-v4.1-flash'])
+            self.assertTrue(dispatch.call_args_list[-1].args[-1])
+            self.assertGreater(service.provider_cooldowns()['zai'], (dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=2)).isoformat())
+            service.rate_limit_pause({}, 'old-global-marker')
+            self.assertIsNone(service.dispatch_paused(self.config))
+
+    def test_reset_offset_is_stored_as_utc(self):
+        now = dt.datetime.now(dt.timezone.utc)
+        reset = (now + dt.timedelta(days=2)).astimezone(dt.timezone(dt.timedelta(hours=-8)))
+        until = service.remember_provider_limit('zai', {'summary': 'Your limit will reset at ' + reset.isoformat()})
+        self.assertEqual(until, reset.astimezone(dt.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'))
+
+    def test_fallback_discards_throttled_fixers_partial_commits_and_files(self):
+        self.config['repair']['fallback_models'] = ['deepseek/deepseek-flash']
+        original = self.git('rev-parse', 'HEAD')
+        def invoke(config, role, job, wt, directory, judge):
+            if role['model'].startswith('zai/'):
+                (wt / 'src/kept.ts').write_text('partial edit')
+                self.git('commit', '-qam', 'partial fixer commit')
+                (wt / 'partial-untracked').write_text('partial file')
+                return {'stop': 'rate-limit'}
+            self.assertEqual(self.git('rev-parse', 'HEAD'), original)
+            self.assertEqual((wt / 'src/kept.ts').read_text(), 'one\ntwo\n')
+            self.assertFalse((wt / 'partial-untracked').exists())
+            return {'stop': 'ok', 'changed': False}
+        with mock.patch.dict(os.environ, {'ZAI_API_KEY': 'fixture', 'DEEPSEEK_API_KEY': 'fixture'}), \
+             mock.patch.object(service, '_dispatch', side_effect=invoke):
+            result = service.dispatch(self.config, ROLES['fixer'], {'run': 'r', 'job': 'j'}, self.clone, self.root)
+        self.assertEqual(result['model'], 'deepseek/deepseek-flash')
+
+    def test_remaining_wire_budget_is_integer_milliseconds(self):
+        config = {'repair': {'budget': {'wall_clock_min': 0.123456789}}}
+        budget = service.cq.budget(config, ROLES['fixer'])
+        self.assertIsInstance(budget['wallClockMs'], int)
+        self.assertEqual(budget['wallClockMs'], 7407)
+
+    def test_all_providers_limited_defers_to_earliest_reset(self):
+        self.config['repair']['fallback_models'] = ['opencode-go/deepseek-v4.1-flash', 'deepseek/deepseek-flash']
+        with mock.patch.dict(os.environ, {'ZAI_API_KEY': 'fixture', 'OPENCODE_GO_API_KEY': 'fixture', 'OPENCODE_GO_BASE_URL': 'https://fixture.invalid', 'DEEPSEEK_API_KEY': 'fixture'}), \
+             mock.patch.object(service, '_dispatch', side_effect=[{'stop': 'rate-limit', 'retry_after_ms': ms} for ms in [3600000, 1800000, 7200000]]) as dispatch:
+            report = service.dispatch(self.config, ROLES['fixer'], {'run': 'r', 'job': 'j'}, self.clone, self.root / 'attempt')
+            self.assertEqual(dispatch.call_count, 3)
+            self.assertEqual(report['stop'], 'rate-limit')
+            self.assertTrue(1700000 < report['retry_after_ms'] <= 1800000)
+            self.assertEqual(len(service.provider_cooldowns()), 3)
+            again = service.dispatch(self.config, ROLES['fixer'], {'run': 'r', 'job': 'j'}, self.clone, self.root / 'again')
+            self.assertEqual(dispatch.call_count, 3)
+            self.assertEqual(again['stop'], 'rate-limit')
+
+    def test_non_quota_failure_does_not_spend_on_fallback(self):
+        self.config['repair']['fallback_models'] = ['deepseek/deepseek-flash']
+        with mock.patch.dict(os.environ, {'ZAI_API_KEY': 'fixture'}), \
+             mock.patch.object(service, '_dispatch', return_value={'stop': 'error', 'summary': 'bad input'}) as dispatch:
+            report = service.dispatch(self.config, ROLES['fixer'], {'run': 'r', 'job': 'j'}, self.clone, self.root)
+        self.assertEqual(report['stop'], 'error')
+        self.assertEqual(dispatch.call_count, 1)
+
+    def test_missing_fallback_credentials_are_not_dispatched(self):
+        self.config['repair']['fallback_models'] = ['opencode-go/deepseek-v4.1-flash']
+        with mock.patch.dict(os.environ, {'ZAI_API_KEY': 'fixture'}, clear=True), \
+             mock.patch.object(service, '_dispatch', return_value={'stop': 'rate-limit'}) as dispatch:
+            report = service.dispatch(self.config, ROLES['fixer'], {'run': 'r', 'job': 'j'}, self.clone, self.root)
+        self.assertEqual(report['stop'], 'rate-limit')
+        self.assertEqual(dispatch.call_count, 1)
+
     def test_pause_defaults_to_30_minutes_and_is_never_shortened(self):
         now = dt.datetime.now(dt.timezone.utc)
         first = dt.datetime.fromisoformat(service.rate_limit_pause({}, 'j1').replace('Z', '+00:00'))
@@ -503,11 +579,12 @@ class RepairDrainTest(unittest.TestCase):
         self.assertTrue(service.blocked(repair, utc('2026-11-02T07:00:00')))
         self.assertFalse(service.blocked(repair, utc('2026-11-02T10:00:00')))  # 18:00
 
-    def test_committed_config_is_cq_glm_only_and_enabled(self):
+    def test_committed_config_enables_cq_with_provider_fallback(self):
         repair = json.loads((ROOT / 'config.json').read_text())['repair']
         self.assertIs(repair['enabled'], True)
         self.assertIsInstance(repair['spend_authorization'], str)
-        self.assertIn('2026-11-02', repair['spend_authorization'])
+        self.assertIn('2026-11-08', repair['spend_authorization'])
+        self.assertEqual(repair['fallback_models'], ['opencode-go/deepseek-v4.1-flash', 'deepseek/deepseek-flash'])
         self.assertEqual(repair['roles'], ROLES)
         self.assertEqual(repair['blackout'], {'enabled': False, **BLACKOUT})  # suspended 2026-11-02
         self.assertNotIn('peak', repair)
