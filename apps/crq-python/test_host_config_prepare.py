@@ -15,6 +15,20 @@ from test_host_config_fixtures import HostConfigFixture, ROOT, host
 
 
 class HostConfigTests(HostConfigFixture, unittest.TestCase):
+    def test_notification_allowlist_overlay_renders_and_validates(self):
+        hosts = ['triton:6767', 'uranus:6767', 'pluto:6767']
+        self.overlay['config']['notify'] = {'hosts': hosts}
+        host.validate(self.overlay)
+        config = json.loads((ROOT / 'config.json').read_text())
+        self.assertEqual(config['notify']['hosts'], [])
+        self.assertEqual(host.apply(config, self.overlay)['notify']['hosts'], hosts)
+        for bad in ('triton:6767', [None], ['--host:6767'], ['$(id):6767'],
+                    ['triton'], ['triton:0'], ['triton:65536'], ['a' * 254 + ':6767'],
+                    ['triton:6767'] * 33):
+            self.overlay['config']['notify']['hosts'] = bad
+            with self.subTest(bad=bad), self.assertRaisesRegex(ValueError, 'notify.hosts'):
+                host.validate(self.overlay)
+
     def test_fleet_source_is_overlay_and_plists_render_without_host_literals(self):
         spec = importlib.util.spec_from_file_location('fleet', ROOT / 'ops/fleet-reader.py')
         fleet = importlib.util.module_from_spec(spec)

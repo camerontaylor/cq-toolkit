@@ -1836,14 +1836,12 @@ def starts_last_hour(q: Dict[str, Any]) -> int:
     return sum(1 for s in q.get("starts", []) if parse_iso(s) > cutoff)
 
 
-def notify_owner(text: str) -> Dict[str, Any]:
-    """Paseo message to the chancellor (the owner's desk). promotion.alert_agent_host
-    names its daemon when it is not the local one (queue-host runner → worker-host). Never
-    raises: an unreachable daemon must not stall the tick that is reporting."""
+def notify(destination, text: str) -> Dict[str, Any]:
+    """Deliver using argv only. Runtime failures never stall queue progress."""
     res: Dict[str, Any] = {}
-    aid = CONFIG.get("promotion", {}).get("alert_agent_id")
+    aid = destination.get("paseo_agent_id")
     if aid:
-        host = CONFIG.get("promotion", {}).get("alert_agent_host")
+        host = destination.get("paseo_host")
         try:
             p = run(["paseo", "send", "--no-wait", *(["--host", host] if host else []), aid, text], check=False,
                     timeout=30 if host else 90)
@@ -1851,6 +1849,12 @@ def notify_owner(text: str) -> Dict[str, Any]:
         except (subprocess.TimeoutExpired, OSError) as exc:
             res["paseo_send"] = f"error: {exc}"[:150]
     return res
+
+
+def notify_owner(text: str) -> Dict[str, Any]:
+    promotion = CONFIG.get("promotion", {})
+    return notify(dict(paseo_agent_id=promotion.get("alert_agent_id"),
+                       paseo_host=promotion.get("alert_agent_host")), text)
 
 
 def inflight(q: Dict[str, Any]) -> List[Dict[str, Any]]:

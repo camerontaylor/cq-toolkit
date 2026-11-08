@@ -57,7 +57,12 @@
 // explicitly declares surface, per the coverage heuristic's
 // referenced-module rule.)
 import { z } from 'zod';
-import { ReferenceSchema, SubmitInputSchema, WaitInputSchema } from './internal/reviewOperation.js';
+import {
+  ReferenceSchema,
+  StatusInputSchema,
+  SubmitInputSchema,
+  WaitInputSchema,
+} from './internal/reviewOperation.js';
 import { createDriverFactory } from '../../driver/factory.js';
 import { HarnessConfigSchema } from '../../harness/config.js';
 import type { Op, OpRegistryEntry } from '../../kernel/types.js';
@@ -615,7 +620,7 @@ export const registry: OpRegistryEntry[] = [
   },
   {
     name: 'review.status',
-    inputSchema: ReferenceSchema,
+    inputSchema: StatusInputSchema,
     importer: async () => (await import('./status.js')).makeStatus() as Op<unknown, unknown>,
   },
   {

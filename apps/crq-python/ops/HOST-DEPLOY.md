@@ -50,6 +50,13 @@ host switch: `false` keeps repair off; `true` is refused unless committed policy
 records a spend authorization. Spend authorization, provider/model roles, checks, triggers, quotas
 and backoffs remain committed policy. No model/provider is selected by this tool.
 
+`notify.hosts` is an optional private overlay list of at most 32 host:port
+strings (DNS/IPv4 host up to 253 characters, port 1..65535). It renders over the
+committed empty allowlist; no destination is accepted by default. At D-1 set the
+approved worker endpoints in the private overlay (triton:6767, uranus:6767 and
+pluto:6767 for the current fleet). Null/local-daemon entries are not supported by
+the deployment overlay. Missing SDK host labels therefore remain unsupported.
+
 Example only; replace every host value privately:
 
 ```json
@@ -66,6 +73,7 @@ Example only; replace every host value privately:
     "worktree_root": "/srv/crq-worktrees",
     "timeout_bin": "/usr/bin/timeout",
     "paseo_hosts": ["worker.example.invalid:6767", "127.0.0.1:6767"],
+    "notify": {"hosts": ["worker.example.invalid:6767"]},
     "promotion": {
       "record_url_template": "http://queue.example.invalid:6778/promotion/{item}",
       "alert_agent_host": "worker.example.invalid:6767",

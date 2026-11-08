@@ -49,6 +49,11 @@ class RuntimeTest(RuntimeTestBase):
     def test_publisher_journals_publication_when_the_refresh_fails(self):
         import backfill_coverage
         import backfill_publisher
+        import review_notify
+        self.c.with_lock = lambda fn, **kwargs: fn()
+        self.c.load_queue = lambda: self.q
+        self.assertNotIn("review_notify_outbox", self.q)
+        self.assertEqual(review_notify.drain(self.c), 0)
         with mock.patch.object(backfill_publisher, "run", return_value={"publication": "idle"}), \
              mock.patch.object(backfill_coverage, "run", side_effect=OSError("snapshot volume full")):
             result = backfill_publisher.main(self.c)

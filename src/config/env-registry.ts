@@ -133,6 +133,14 @@ export const CQ_ENV_ENTRIES: readonly CqEnvEntry[] = [
     'Repository path the review-transport author side works in.',
   ),
   entry(
+    'CQ_REVIEW_NOTIFY_HOST',
+    'config',
+    text,
+    'neutral',
+    false,
+    'Paseo host label for local-review completion notifications.',
+  ),
+  entry(
     'CQ_AUTHOR_SNAPSHOT_SCANNER',
     'config',
     text,
@@ -387,6 +395,7 @@ export const FOREIGN_ENV_ENTRIES: readonly ForeignEnvEntry[] = [
   foreign('GITHUB_REPOSITORY', 'Repository slug set by GitHub Actions.'),
   foreign('GITHUB_TOKEN', 'GitHub Actions token (removed from gh children).'),
   foreign('NPM_TOKEN', 'npm publish token (kept out of child environments).'),
+  foreign('PASEO_AGENT_ID', 'Current Paseo agent notification destination.'),
   foreign('OPENAI_API_KEY', 'OpenAI API key.'),
   foreign('OPENCODE_GO_API_KEY', 'OpenCode Go API key.'),
   foreign('OPENCODE_GO_BASE_URL', 'OpenCode Go endpoint (required, no default).'),

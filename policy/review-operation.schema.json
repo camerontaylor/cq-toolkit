@@ -203,10 +203,26 @@
               "required": ["paseo_agent_id", "paseo_host"],
               "properties": {
                 "paseo_agent_id": {
-                  "type": "string",
-                  "minLength": 1
+                  "type": "string"
                 },
                 "paseo_host": {
+                  "type": ["string", "null"]
+                }
+              },
+              "additionalProperties": false
+            },
+            "principal": {
+              "type": "string",
+              "minLength": 1
+            },
+            "notify_status": {
+              "type": "object",
+              "required": ["state"],
+              "properties": {
+                "state": {
+                  "enum": ["pending", "sent", "error", "withdrawn", "not-required"]
+                },
+                "reason": {
                   "type": "string",
                   "minLength": 1
                 }
@@ -351,12 +367,10 @@
                   "required": ["paseo_agent_id", "paseo_host"],
                   "properties": {
                     "paseo_agent_id": {
-                      "type": "string",
-                      "minLength": 1
+                      "type": "string"
                     },
                     "paseo_host": {
-                      "type": "string",
-                      "minLength": 1
+                      "type": ["string", "null"]
                     }
                   },
                   "additionalProperties": false
@@ -429,6 +443,45 @@
                 }
               },
               "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "required": ["v", "op", "request_id", "notify"],
+              "properties": {
+                "v": {
+                  "const": 1,
+                  "type": "integer"
+                },
+                "op": {
+                  "const": "notify-update"
+                },
+                "request_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$"
+                },
+                "notify": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "required": ["paseo_agent_id", "paseo_host"],
+                      "properties": {
+                        "paseo_agent_id": {
+                          "type": "string"
+                        },
+                        "paseo_host": {
+                          "type": ["string", "null"]
+                        }
+                      },
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "additionalProperties": false
             }
           ]
         }
@@ -485,6 +538,20 @@
                 "reason": {
                   "type": "string",
                   "minLength": 1
+                },
+                "notify": {
+                  "type": "object",
+                  "required": ["state"],
+                  "properties": {
+                    "state": {
+                      "enum": ["pending", "sent", "error", "withdrawn", "not-required"]
+                    },
+                    "reason": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "additionalProperties": false
                 }
               },
               "additionalProperties": false
@@ -503,7 +570,14 @@
                 "operations": {
                   "type": "array",
                   "items": {
-                    "enum": ["capabilities", "submit", "status", "result", "cancel"]
+                    "enum": [
+                      "capabilities",
+                      "submit",
+                      "status",
+                      "result",
+                      "cancel",
+                      "notify-update"
+                    ]
                   }
                 },
                 "features": {

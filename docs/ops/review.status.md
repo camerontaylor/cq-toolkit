@@ -20,6 +20,32 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
       "default": ".",
       "type": "string"
     },
+    "notify": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "paseo_agent_id": {
+              "type": "string"
+            },
+            "paseo_host": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "paseo_agent_id",
+            "paseo_host"
+          ],
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "requestId": {
       "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$",
       "type": "string"
