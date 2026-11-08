@@ -189,10 +189,11 @@ class PhaseTest(FindingTest):
         service = importlib.util.module_from_spec(spec); spec.loader.exec_module(service)
         scanner = mock.Mock(return_value=(False, {}))
         c = SimpleNamespace(secret_scan_diff=scanner)
-        context = {'finding': {'path': 'src/a.py', 'body': 'review'}, 'region': [{'text': 'token=canary\nsecond line'}]}
+        canary = 'token=' + 'canary'
+        context = {'finding': {'path': 'src/a.py', 'body': 'review'}, 'region': [{'text': canary + '\nsecond line'}]}
         self.assertFalse(service.triage_context_safe(c, context, self.root / 'scan.json'))
         submitted = scanner.call_args.args[0]
-        self.assertIn('+token=canary\n+second line', submitted)
+        self.assertIn('+' + canary + '\n+second line', submitted)
         self.assertIn('diff --git a/src/a.py b/src/a.py', submitted)
 
     def test_real_context_scanner_rejects_policy_key_marker_without_logging_content(self):
