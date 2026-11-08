@@ -235,8 +235,18 @@ describe('classify trust defaults are independent per key', () => {
     });
   });
 
-  test('none set: nothing synthesised (built-in classifier behaviour unchanged)', () => {
+  test('none set: nothing synthesised (built-in classifier behaviour unchanged); a restated documented default is accepted', () => {
     expect(resolveClassifyTrust('t', undefined, env())).toEqual({});
+    expect(
+      resolveClassifyTrust(
+        't',
+        { trustedAssociations: ['OWNER', 'MEMBER', 'COLLABORATOR'] },
+        env(),
+      ),
+    ).toEqual({});
+    expect(() => resolveClassifyTrust('t', { trustedAssociations: ['OWNER'] }, env())).toThrow(
+      /trust input/,
+    );
   });
 
   test('runPrs: the env-synthesised trust merges into the caller classifyConfig; excluded reviewers cannot merge', async () => {

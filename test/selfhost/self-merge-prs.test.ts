@@ -279,6 +279,9 @@ describe('runSelfMergePrs — real run', () => {
     expect(result).toMatchObject({ outcome: cannedOutcome });
     expect(seen[0]?.config).toEqual({
       settleWindowMs: defaultClassifyPrConfig.settleWindowMs,
+      // the unset keys take their documented defaults, independently
+      trustedBots: [],
+      acceptReviewStates: ['APPROVED'],
       trustedAssociations: ['OWNER'],
       automationLogin: 'cq-automation[bot]',
     });

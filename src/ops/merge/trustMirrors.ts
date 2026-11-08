@@ -94,6 +94,12 @@ export interface ClassifyTrust {
   acceptReviewStates?: ('APPROVED' | 'CHANGES_REQUESTED' | 'COMMENTED')[];
 }
 
+const CLASSIFY_TRUST_DEFAULTS: Readonly<Record<ClassifyTrustField, readonly string[]>> = {
+  trustedBots: [],
+  trustedAssociations: ASSOCIATIONS,
+  acceptReviewStates: ['APPROVED'],
+};
+
 const sameSet = (a: readonly string[], b: readonly string[]): boolean => {
   const sa = new Set(a);
   const sb = new Set(b);
@@ -145,9 +151,11 @@ export function resolveClassifyTrust(
   for (const field of fields) {
     const given = supplied?.[field];
     if (given === undefined) continue;
-    const want = effective[field];
+    // With no key set, a restated list is accepted only if it equals the documented default
+    // (stricter than the built-in legacy behaviour, so it supplies no authority).
+    const want = effective[field] ?? CLASSIFY_TRUST_DEFAULTS[field];
     const norm = field === 'trustedBots' ? given : given.map((v) => v.toUpperCase());
-    if (want === undefined || !sameSet(norm, want)) {
+    if (!sameSet(norm, want)) {
       throw new DispatchError(
         'config',
         `${op}: input.config.${field} is a trust input and cannot be set by plan data or op input; configure ${CLASSIFY_TRUST_KEYS[field]} instead (value not echoed)`,
