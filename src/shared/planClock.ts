@@ -7,7 +7,7 @@ import { DispatchError } from '../driver/errors.js';
  * A plan/op-input clock must be a finite, non-negative number no later than
  * the real clock; anything else fails with `config` (the value is never
  * echoed). Rejecting, not clamping, keeps the dispatched ops deterministic for
- * every accepted input: a later clock would shorten a wait or mark evidence as
+ * every accepted clock reading: a later clock would shorten a wait or mark evidence as
  * older than it is, an earlier one only lengthens it.
  */
 export function assertPlanClock(op: string, nowMs: unknown): number {
