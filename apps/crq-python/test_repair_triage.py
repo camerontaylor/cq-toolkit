@@ -206,3 +206,29 @@ class PhaseTest(FindingTest):
             self.assertNotIn(marker, output.read_text())
             context['region'] = [{'text': 'ordinary source line'}]
             self.assertTrue(service.triage_context_safe(crq, context, output))
+
+    def test_duplicate_with_different_severity_remains_independently_judgeable(self):
+        import copy
+        path = self.inbox.root / 'triage' / (self.fid + '.json')
+        duplicate = copy.deepcopy(ledger.loads(path.read_bytes()))
+        duplicate['finding']['id'] = '0' * 64
+        duplicate['finding']['severity'] = 'info'
+        ledger.atomic(path.parent / ('0' * 64 + '.json'), ledger.canonical(duplicate))
+        result, _, _ = self.run_phase(dry=True, maximum=0)
+        self.assertEqual(result['counts'], {})
+        self.assertEqual(result['unjudged'], 2)
+
+    def test_operator_disposition_during_judgment_is_not_overwritten(self):
+        def judge(*_):
+            self.inbox.triage(self.fid, self.f.repo, self.t, 'dismissed', 'operator', 'reviewed and dismissed', AT)
+            return {'stop': 'ok', 'verdict': 'valid', 'reason': 'stale judgment',
+                    'current_path': 'a', 'current_lines': [[1, 1]], 'quoted_text': 'one'}
+        transport = mock.Mock()
+        result = phase(self.inbox, self.f.repo, self.t, judge, transport, AT)
+        transport.assert_not_called()
+        self.assertEqual(result['counts'], {})
+        row = ledger.loads((self.inbox.root / 'triage' / (self.fid + '.json')).read_bytes())
+        self.assertEqual(row['status'], 'dismissed')
+        events = [e for e in self.out.retained() if e['event_type'] == 'finding-event']
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]['payload']['actor'], 'operator')
