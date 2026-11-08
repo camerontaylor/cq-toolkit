@@ -10,6 +10,7 @@ import { makeRunMergePrsOp } from '../../../src/ops/merge/runPrs.js';
 import { defaultClassifyPrConfig } from '../../../src/ops/merge/classify.config.js';
 import {
   assertBaseBranchMirror,
+  mergeClassifyConfig,
   resolveClassifyTrust,
 } from '../../../src/ops/merge/trustMirrors.js';
 import { buildRunInput } from '../../../src/selfhost/self-merge-prs.js';
@@ -259,6 +260,88 @@ describe('classify trust defaults are independent per key', () => {
     });
     const b = (await op({ candidate: blocked, nowMs: NOW_MS })) as { value: { reason: string } };
     expect(b.value.reason).toBe('merge_objection_outstanding');
+  });
+
+  test('a bot skip/failure notice is never acceptance, with or without automationLogin', async () => {
+    const skip = (state: 'COMMENTED' | 'APPROVED') => ({
+      id: `s-${state}`,
+      authorLogin: 'coderabbitai[bot]',
+      state,
+      body: 'CodeRabbit skipped this run because the PR is too large',
+      submittedAt: '2026-01-01T00:00:00.500Z',
+    });
+    const cqEnv = env({
+      CQ_MERGE_TRUSTED_BOTS: 'coderabbitai[bot]',
+      CQ_MERGE_ACCEPT_REVIEW_STATES: 'COMMENTED,APPROVED',
+    });
+    const op = await entryOf('merge.classifyPrs').importer({ cqEnv });
+    for (const state of ['COMMENTED', 'APPROVED'] as const) {
+      for (const config of [undefined, { automationLogin: 'x' }]) {
+        const r = (await op({
+          candidate: eligible(9, { reviews: [skip(state)] }),
+          nowMs: NOW_MS,
+          ...(config ? { config } : {}),
+        })) as { value: { reason: string } };
+        expect(r.value.reason).toBe('no_acceptable_review');
+      }
+    }
+    // the reproduction through runPrs: plan automationLogin must not make the notice merge
+    const effects = new FakeMergeEffects();
+    const run = makeRunMergePrsOp({ effects, cqEnv });
+    const out = (await run({
+      baseBranch: 'main',
+      repoRoot: '.',
+      nowMs: NOW_MS,
+      prs: [eligible(9, { reviews: [skip('COMMENTED')] })],
+      config: { automationLogin: 'x' },
+    })) as { value: { firstPass: { merged: unknown[] } } };
+    expect(out.value.firstPass.merged).toEqual([]);
+    expect(effects.calls.filter((c) => c.startsWith('merge'))).toEqual([]);
+  });
+
+  test('plan config can only narrow: excludedLogins union, settle never shortened, conflicting automationLogin fails config', async () => {
+    const cqEnv = env({
+      CQ_MERGE_TRUSTED_ASSOCIATIONS: 'MEMBER',
+      CQ_MERGE_ACCEPT_REVIEW_STATES: 'COMMENTED',
+    });
+    const member = eligible(11, {
+      reviews: [
+        {
+          id: 'x',
+          authorLogin: 'excluded-member',
+          state: 'COMMENTED',
+          body: 'looked at it',
+          submittedAt: '2026-01-01T00:00:00.500Z',
+          authorAssociation: 'MEMBER',
+        },
+      ],
+    });
+    const effects = new FakeMergeEffects();
+    const op = makeRunMergePrsOp({ effects, cqEnv });
+    const hostCfg = {
+      ...defaultClassifyPrConfig,
+      excludedLogins: ['excluded-member'],
+      automationLogin: 'cq-automation[bot]',
+    };
+    const base = {
+      baseBranch: 'main',
+      repoRoot: '.',
+      nowMs: NOW_MS,
+      prs: [member],
+      classifyConfig: hostCfg,
+    };
+    const dropped = (await op({ ...base, config: { excludedLogins: [] } } as never)) as {
+      value: { firstPass: { merged: unknown[] } };
+    };
+    expect(dropped.value.firstPass.merged).toEqual([]);
+    const shortened = mergeClassifyConfig('t', hostCfg, { settleWindowMs: 0 });
+    expect(shortened.settleWindowMs).toBe(defaultClassifyPrConfig.settleWindowMs);
+    effects.calls.length = 0;
+    const err = await op({ ...base, config: { automationLogin: 'other' } } as never).catch(
+      (e: unknown) => e,
+    );
+    expect(errorClassOf(err)).toBe('config');
+    expect(effects.calls).toEqual([]);
   });
 
   test('none set: nothing synthesised (built-in classifier behaviour unchanged); a restated documented default is accepted', () => {

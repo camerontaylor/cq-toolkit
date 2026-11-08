@@ -174,3 +174,45 @@ export function checkedBaseBranch(op: string, cqEnv?: CqEnv): string {
 export function checkedProtectedBranch(op: string, cqEnv?: CqEnv): string {
   return assertProtectedBranchMirror(op, undefined, cqEnv);
 }
+
+interface ClassifyNarrowFields {
+  settleWindowMs?: number | undefined;
+  automationLogin?: string | null | undefined;
+  excludedLogins?: readonly string[] | undefined;
+}
+
+/**
+ * Merge a plan/op-input classify `config` over the host's config so that the
+ * plan can only NARROW trust: `excludedLogins` is the union of host and plan,
+ * `settleWindowMs` is the larger of the two (a plan cannot shorten the wait),
+ * and an `automationLogin` that conflicts with the host's is a `config`
+ * error, never silently ignored. The trust lists were already checked by
+ * `resolveClassifyTrust` and are taken from the plan side (equal to the
+ * resolved values). Everything else the host set survives.
+ */
+export function mergeClassifyConfig<H extends ClassifyNarrowFields>(
+  op: string,
+  host: H,
+  plan: (ClassifyNarrowFields & Record<string, unknown>) | undefined,
+): H {
+  if (plan === undefined) return host;
+  const merged: Record<string, unknown> = { ...host, ...plan };
+  if (plan.automationLogin !== undefined && host.automationLogin !== undefined) {
+    if (plan.automationLogin !== host.automationLogin) {
+      throw new DispatchError(
+        'config',
+        `${op}: input.config.automationLogin conflicts with the host's automation identity and cannot override it (value not echoed)`,
+      );
+    }
+  }
+  if (host.automationLogin !== undefined) merged['automationLogin'] = host.automationLogin;
+  if (host.excludedLogins !== undefined || plan.excludedLogins !== undefined) {
+    merged['excludedLogins'] = [
+      ...new Set([...(host.excludedLogins ?? []), ...(plan.excludedLogins ?? [])]),
+    ];
+  }
+  if (host.settleWindowMs !== undefined && plan.settleWindowMs !== undefined) {
+    merged['settleWindowMs'] = Math.max(host.settleWindowMs, plan.settleWindowMs);
+  }
+  return merged as unknown as H;
+}

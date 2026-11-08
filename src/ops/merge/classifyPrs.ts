@@ -296,7 +296,13 @@ const stateCounts = (state: ReviewSummary['state'], config: ClassifyPrConfig): b
  * identity is special.
  */
 const isAcceptableReview = (review: ReviewSummary, ctx: ReviewContext): boolean =>
-  isReviewableEvidence(review, ctx) && stateCounts(review.state, ctx.config);
+  isReviewableEvidence(review, ctx) &&
+  stateCounts(review.state, ctx.config) &&
+  // A bot skip/failure notice is never acceptance, whoever authored it and
+  // whatever automationLogin says (plan data can set automationLogin); the
+  // objection path keeps the narrower exemption so a human's objection with a
+  // bot-shaped body is not suppressed.
+  !matchesSkipPattern(review.body, ctx.config);
 
 /** Review independence is judged by the merging agent, including shared accounts. */
 const hasSameAccountAgentAcceptance = (candidate: PrCandidate, ctx: ReviewContext): boolean => {

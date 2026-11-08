@@ -98,6 +98,7 @@ import type { CqEnv } from '../../config/env.js';
 import {
   assertBaseBranchMirror,
   assertProtectedBranchMirror,
+  mergeClassifyConfig,
   resolveClassifyTrust,
 } from './trustMirrors.js';
 import { diagnoseMergeFailure } from './diagnoseMergeFailure.js';
@@ -323,10 +324,11 @@ export async function runMergePrs(
   const classifyConfig =
     input.config === undefined
       ? input.classifyConfig
-      : ({
-          ...(input.classifyConfig ?? defaultClassifyPrConfig),
-          ...input.config,
-        } as ClassifyPrConfig);
+      : (mergeClassifyConfig(
+          'merge.runPrs',
+          input.classifyConfig ?? defaultClassifyPrConfig,
+          input.config,
+        ) as ClassifyPrConfig);
   const planned1 = classifyStage(input.prs, nowMs, classifyConfig);
   const plan1 = planMergeOrder({ baseBranch: input.baseBranch, prs: planned1 });
   const firstPass = await execute(plan1);
