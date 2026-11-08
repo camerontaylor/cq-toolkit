@@ -6,7 +6,11 @@
 // an API key must not leak it). These are the helper-level pins; the drivers'
 // own tests cover the wiring.
 import { describe, expect, test } from 'vitest';
-import { boundedErrorText, describeError } from '../../src/driver/error-text.js';
+import {
+  boundedErrorText,
+  describeError,
+  redactSensitiveText,
+} from '../../src/driver/error-text.js';
 
 describe('driver error text — plain, bounded, secret-redacted', () => {
   test('describeError keeps the message only, never a vendor class name', () => {
@@ -23,11 +27,36 @@ describe('driver error text — plain, bounded, secret-redacted', () => {
       'postgres://diagnostic-user:p%40ss%3Aword@localhost:5432/db',
       'postgres://[redacted]@localhost:5432/db',
     ],
+    ['//user:pass@example.test/path', '//[redacted]@example.test/path'],
+    ['https:user:pass@example.test/path', 'https:[redacted]@example.test/path'],
+    ['http:user:pass@example.test', 'http:[redacted]@example.test'],
+    ["https://user:p'ass@example.test/", 'https://[redacted]@example.test/'],
+    [
+      String.raw`https:\/\/user:pass@example.test/path`,
+      String.raw`https:\/\/[redacted]@example.test/path`,
+    ],
+    [
+      String.raw`https:\user:pass@example.test/path`,
+      String.raw`https:\[redacted]@example.test/path`,
+    ],
     ['HTTPS://user@example.test/', 'HTTPS://[redacted]@example.test/'],
     ['https://:password@[::1]:443/', 'https://[redacted]@[::1]:443/'],
     ['https://user:raw@password@example.test/', 'https://[redacted]@example.test/'],
   ])('redacts URL userinfo without an environment value: %s', (url, redacted) => {
     expect(boundedErrorText(`failed at ${url}`)).toBe(`failed at ${redacted}`);
+  });
+
+  test('handles long credential-free output without repeated scheme or authority scans', () => {
+    const inputs = [
+      'a'.repeat(40_000),
+      JSON.stringify({ content: 'a'.repeat(80_000) }),
+      'https:'.repeat(10_000),
+      '//host/'.repeat(10_000),
+    ];
+    const start = performance.now();
+    for (const input of inputs) expect(redactSensitiveText(input)).toBe(input);
+    // Deliberately generous: the former matcher took seconds on just 40 KB.
+    expect(performance.now() - start).toBeLessThan(1000);
   });
 
   test('preserves URLs without userinfo, including at-signs outside the authority', () => {
