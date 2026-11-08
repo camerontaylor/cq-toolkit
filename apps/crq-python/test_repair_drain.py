@@ -159,6 +159,70 @@ class RepairDrainTest(unittest.TestCase):
         self.assertIn('| `ledger-event` |', body)
         self.assertNotIn('`original-cli-review`', body)
 
+    def test_canonical_provenance_links_retained_review_at_its_recorded_date(self):
+        import finding_delivery
+        import review_ledger as ledger
+        from test_review_ledger import review, rehash, SHA
+        store = ledger.ArtifactStore(self.root / 'durable')
+        finding = finding_delivery.normalize('crq-runner-app', 'source-run', {
+            'severity': 'major', 'path': 'src/a.ts', 'blob': SHA, 'intervals': [[1, 1]],
+            'title': 'Issue', 'body': 'Details'})
+        value = review([store.put(b'retained source')], findings=[finding])
+        value['occurred_at'] = '2023-12-07T10:00:00Z'
+        rehash(value)
+        outbox = ledger.Outbox(self.root / 'publication', store)
+        outbox.spool(value)
+        outbox.acknowledge(value, {value['id']})
+        self.assertEqual(outbox.pending(), [])
+        job_id = 'crq-run1-F1'
+        path = self.root / 'state/repair/inbox' / (job_id + '.json')
+        job = json.loads(path.read_text())
+        job.update(canonical_finding_id=finding['id'], review_id=value['id'], pr=0)
+        atomic(path, job)
+        c = SimpleNamespace(STATE=self.root / 'state', REPO=ledger.REPO)
+        with mock.patch.object(repair_tick, 'finding_inbox', return_value=SimpleNamespace(publication=outbox)):
+            body = '\n'.join(repair_tick.repair_provenance(c, {'jobs': [job_id]}, 'repair-run'))
+        expected = 'https://github.com/' + ledger.REPO + '/blob/cq/review-ledger/records/2023/12/' + value['id'] + '.json'
+        self.assertIn(expected, body)
+        self.assertIn(finding['id'], body)
+        self.assertIn(value['id'], body)
+
+    def test_missing_retained_review_uses_existing_local_locator(self):
+        job_id = 'crq-run1-F1'
+        path = self.root / 'state/repair/inbox' / (job_id + '.json')
+        job = json.loads(path.read_text())
+        fid = 'd' * 64
+        job.update(canonical_finding_id=fid, review_id='e' * 64, pr=0)
+        atomic(path, job)
+        row_path = self.root / 'state/backfill/findings/triage' / (fid + '.json')
+        atomic(row_path, {'status': 'delivered'})
+        c = SimpleNamespace(STATE=self.root / 'state', REPO='example/repo')
+        inbox = SimpleNamespace(publication=SimpleNamespace(retained=lambda: []))
+        with mock.patch.object(repair_tick, 'finding_inbox', return_value=inbox):
+            body = '\n'.join(repair_tick.repair_provenance(c, {'jobs': [job_id]}, 'repair-run'))
+        self.assertIn('state/backfill/findings/triage/' + fid + '.json', body)
+        self.assertNotIn('/blob/cq/review-ledger/', body)
+        row_path.unlink()
+        with mock.patch.object(repair_tick, 'finding_inbox', side_effect=OSError('unavailable')):
+            body = '\n'.join(repair_tick.repair_provenance(c, {'jobs': [job_id]}, 'repair-run'))
+        self.assertIn('state/repair/inbox/' + job_id + '.json', body)
+        self.assertNotIn('/blob/cq/review-ledger/', body)
+
+    def test_threadless_cli_provenance_locates_existing_source_artifact(self):
+        job_id = 'crq-run1-F1'
+        path = self.root / 'state/repair/inbox' / (job_id + '.json')
+        job = json.loads(path.read_text())
+        job.update(pr=0, run='revalidated-current', source={'run': 'original-run'})
+        atomic(path, job)
+        raw = self.root / 'state/runs/original-run/review.ndjson'
+        raw.parent.mkdir(parents=True)
+        raw.write_text('retained source')
+        c = SimpleNamespace(STATE=self.root / 'state', REPO='example/repo')
+        body = '\n'.join(repair_tick.repair_provenance(c, {'jobs': [job_id]}, 'repair-run'))
+        self.assertIn('state/runs/original-run/review.ndjson', body)
+        self.assertIn('| `original-run` |', body)
+        self.assertNotIn('https://', body)
+
     def test_source_resolution_resumes_existing_publication_journal(self):
         item = self.queue['items'][0]
         record = item['repair_runs']['run1']
