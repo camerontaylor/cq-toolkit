@@ -58,17 +58,17 @@ outside the verified list cannot.
 ```yaml
 name: ci
 
-# Invariant I4: required checks never get paths-ignore — nor any path, branch,
-# or tag filter at all. This workflow triggers on every push and on every
-# pull_request, without exception. Skips belong in job-level `if:` conditions
-# only; the one sanctioned skip below is the `cq-state` settle-ledger branch
-# (review-debt #226): a machine-written ledger push carries no reviewable
-# change, so running the suite on it only burns runners. The trigger surface
-# itself stays unfiltered — a skipped job on an unprotected branch has no
-# merge consequence.
+# Invariant I4: keep required-workflow triggers unfiltered. Job-level
+# selection runs every PR (including forks) and main pushes, avoiding
+# duplicate suites on feature pushes. cq-state is a machine ledger.
 on:
   push:
   pull_request:
+
+# Event isolation prevents a feature push from cancelling its PR check.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -82,7 +82,7 @@ env:
 jobs:
   crq-python:
     runs-on: {{RUNNER}}
-    if: ${{ github.ref != 'refs/heads/cq-state' }}
+    if: ${{ github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     steps:
       - name: Check out the repo
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -100,7 +100,7 @@ jobs:
     # The `cq-state` settle ledger is machine-written (selfhost settle-state);
     # its pushes are not reviewable changes (review-debt #226). Job-level,
     # never a trigger filter — I4 keeps the trigger surface intact.
-    if: ${{ github.ref != 'refs/heads/cq-state' }}
+    if: ${{ github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     steps:
       - name: Check out the repo
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (immutable commit pin; repo policy)
@@ -137,7 +137,7 @@ jobs:
     runs-on: {{RUNNER}}
     # Same cq-state skip as the static job (review-debt #226): the ledger
     # push is not a reviewable change.
-    if: ${{ github.ref != 'refs/heads/cq-state' }}
+    if: ${{ github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     steps:
       - name: Check out the repo
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (immutable commit pin; repo policy)

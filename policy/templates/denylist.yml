@@ -11,6 +11,11 @@ on:
   push:
   pull_request:
 
+# Keep PR and push cancellation separate, including fork PRs.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
@@ -19,7 +24,7 @@ jobs:
     runs-on: ubuntu-latest
     # The `cq-state` settle ledger is machine-written; its pushes are not
     # reviewable changes (review-debt #226).
-    if: ${{ github.ref != 'refs/heads/cq-state' }}
+    if: ${{ github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     env:
       # The scanner policy is the DEFAULT BRANCH's copy (see the header),
       # never the scanned revision's.

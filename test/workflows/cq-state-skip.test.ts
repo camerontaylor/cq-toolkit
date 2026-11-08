@@ -1,24 +1,12 @@
-// The `cq-state` settle-ledger skip guards (review-debt #226).
-//
-// Pushes to the machine-written `cq-state` branch used to fire the
-// unfiltered push workflows (ci, denylist) — wasted runner time on
-// a branch that carries no reviewable change. The I4-sanctioned fix is a
-// JOB-LEVEL `if:` (never a trigger filter: the `on:` block of a required
-// workflow stays unfiltered, or the required check never reports — unchanged
-// here), pinned per file in this test so a regeneration cannot drop it.
 import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { STATE_BRANCH } from '../../src/selfhost/state-branch.js';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 
-// Built from the owned constant (PR #234 r1), not a 'cq-state' literal:
-// the YAML files spell the branch out, so a STATE_BRANCH rename must fail
-// HERE — a hardcoded literal would let a rename silently disable every
-// guard with no failing test.
-const SKIP = `if: \${{ github.ref != 'refs/heads/${STATE_BRANCH}' }}`;
+// Required workflows select PR events and main pushes at job level.
+const SKIP = `if: \${{ github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}`;
 
 const read = (rel: string): string => readFileSync(join(ROOT, rel), 'utf8');
 
@@ -56,14 +44,14 @@ function expectEveryJobGuarded(text: string, file: string): void {
     const blockLines = lines.slice(idLine, next === -1 ? lines.length : next);
     expect(
       blockLines,
-      `${file} job ${id} carries the cq-state skip at JOB-KEY indentation`,
+      `${file} job ${id} carries event selection at JOB-KEY indentation`,
     ).toContain(jobLevelGuard);
   }
 }
 
-describe('the cq-state skip guards (review-debt #226)', () => {
+describe('required workflow event selection', () => {
   it.each(['.github/workflows/ci.yml', '.github/workflows/denylist.yml'])(
-    'every job in %s skips the cq-state ledger branch at the JOB level',
+    'every job in %s selects PRs and main pushes at the JOB level',
     (file) => {
       expectEveryJobGuarded(read(file), file);
     },
@@ -81,4 +69,18 @@ describe('the cq-state skip guards (review-debt #226)', () => {
     // worked example stays filter-free.
     expect(yaml).toMatch(/on:\n {2}push:\n {2}pull_request:\n/);
   });
+});
+
+describe('required workflow cancellation isolation', () => {
+  it.each(['.github/workflows/ci.yml', '.github/workflows/denylist.yml'])(
+    '%s isolates each event and PR/ref',
+    (file) => {
+      const text = read(file);
+      expect(text).toContain(
+        'group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}',
+      );
+      expect(text).toContain('cancel-in-progress: true');
+      expect(text).toMatch(/on:\n {2}push:\n {2}pull_request:\n/);
+    },
+  );
 });
