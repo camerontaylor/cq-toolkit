@@ -82,26 +82,26 @@
     },
     "1222": {
       "tuple": {
-        "head": "b23634bbab4c1a95cc69c5a05464264d2b5c1d3e",
+        "head": "3ef1f13a50da85f692dbefe9da42ede305cda6ef",
         "base": "e61fc8c9718b8a6e505549a3ac628f01eb0d3c42",
         "forcePushEpoch": 0
       },
       "observations": [
         {
-          "observedAt": "2026-11-08T06:44:22.470Z",
+          "observedAt": "2026-11-08T07:10:29.199Z",
           "by": "self-merge-prs:observe"
         }
       ]
     },
     "1223": {
       "tuple": {
-        "head": "0e73dd142c5d463a387c38e51ab66936fcbe5ff2",
+        "head": "feced54d917dbaa65e3888e4c0eb988a72e531fa",
         "base": "e61fc8c9718b8a6e505549a3ac628f01eb0d3c42",
         "forcePushEpoch": 0
       },
       "observations": [
         {
-          "observedAt": "2026-11-08T06:46:31.878Z",
+          "observedAt": "2026-11-08T07:10:29.199Z",
           "by": "self-merge-prs:observe"
         }
       ]
