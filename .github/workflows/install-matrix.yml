@@ -14,6 +14,9 @@ on:
       - '.oxlint*'
       - 'lint/**'
       - 'test/driver/**'
+      - test/suite-classes.json
+      - test/global-setup.ts
+      - 'test/helpers/**'
       - 'scripts/**'
       - '.github/actions/**'
       - .github/workflows/install-matrix.yml
