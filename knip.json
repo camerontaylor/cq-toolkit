@@ -6,6 +6,7 @@
     "src/registry/types.ts",
     "src/ops/*/registry.ts",
     "scripts/*.mjs",
+    "scripts/ci-select-checks.d.mts",
     "scripts/lib/affected-tests.d.mts",
     "scripts/lib/build-env.d.mts",
     "scripts/lib/eval-axes-select.d.mts",

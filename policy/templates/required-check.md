@@ -64,6 +64,9 @@ name: ci
 on:
   push:
   pull_request:
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
 
 # Cancel obsolete PR updates only. Every push gets a unique group, avoiding
 # case-insensitive ref/expression collisions; default-branch pushes all finish.
@@ -81,9 +84,33 @@ env:
   PNPM_CONFIG_VIRTUAL_STORE_TYPE: project
 
 jobs:
+  changes:
+    runs-on: {{RUNNER}}
+    if: ${{ github.event_name == 'pull_request' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
+    outputs:
+      typescript: ${{ steps.select.outputs.typescript }}
+      python: ${{ steps.select.outputs.python }}
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Set up Node {{NODE_VERSION}}
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          package-manager-cache: false
+          node-version: {{NODE_VERSION}}
+      - name: Select coarse checks (failure falls back to full)
+        id: select
+        env:
+          CHANGE_BASE: ${{ github.event.pull_request.base.sha }}
+          CHANGE_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: node scripts/ci-select-checks.mjs
   crq-python:
     runs-on: {{RUNNER}}
-    if: ${{ github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
+    needs: changes
+    if: ${{ always() && !cancelled() && (github.event_name == 'pull_request' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))) && (needs.changes.result != 'success' || needs.changes.outputs.python != 'false') }}
     steps:
       - name: Check out the repo
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -98,8 +125,9 @@ jobs:
         run: python3 -m unittest discover -p 'test_*.py'
   static:
     runs-on: {{RUNNER}}
-    # Every PR and default-branch push; feature pushes carry no duplicate suite.
-    if: ${{ github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
+    # Every PR, default-branch push, nightly and manual full run.
+    needs: changes
+    if: ${{ always() && !cancelled() && (github.event_name == 'pull_request' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))) }}
     steps:
       - name: Check out the repo
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (immutable commit pin; repo policy)
@@ -122,7 +150,11 @@ jobs:
       # macOS venue's static-macos mirror (macos-venue.yml), so the two run
       # one step list. Checkout, toolchain and install stay above: a local
       # action is read from the checked-out workspace.
+      - name: Check formatting (prose/Python only)
+        if: ${{ needs.changes.result == 'success' && needs.changes.outputs.typescript == 'false' }}
+        run: pnpm run format:check
       - name: Static gate steps (.github/actions/static-gate)
+        if: ${{ (needs.changes.result != 'success' || needs.changes.outputs.typescript != 'false') }}
         uses: ./.github/actions/static-gate
 
   # Stage-1 self-hosting (T1.7 / ws-k stage 1 item 6): CI runs the toolkit
@@ -134,8 +166,9 @@ jobs:
   # presence cannot dangle a branch-protection wait.
   from-source:
     runs-on: {{RUNNER}}
-    # Match the static job's event selection.
-    if: ${{ github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
+    # Match static event selection, with coarse PR ownership.
+    needs: changes
+    if: ${{ always() && !cancelled() && (github.event_name == 'pull_request' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))) && (needs.changes.result != 'success' || needs.changes.outputs.typescript != 'false') }}
     steps:
       - name: Check out the repo
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (immutable commit pin; repo policy)
