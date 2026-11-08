@@ -52,8 +52,9 @@ def finding_intervals(value):
         vendor_intervals = value.get("intervals")
         if "intervals" not in value:
             start, end = value.get("startLine"), value.get("endLine")
-            start = start if type(start) is int and start > 0 else None
-            end = end if type(end) is int and end > 0 else None
+            for key in ("startLine", "endLine"):
+                if key in value and (type(value[key]) is not int or not 1 <= value[key] <= 1_000_000):
+                    raise ValueError("invalid vendor endpoint")
             start, end = start or end, end or start
             vendor_intervals = [[min(start, end), max(start, end)]] if start and end else []
         for start, end in vendor_intervals or []:
