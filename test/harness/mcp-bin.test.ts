@@ -213,12 +213,50 @@ describe('manifest-declared credential names', () => {
       expect(code).toBe(78);
       expect(server.stdout()).toBe('');
       expect(server.stderr()).toContain(`'${name}' is a credential`);
-      expect(server.stderr()).toContain(
-        'only SSH_AUTH_SOCK (the frozen code-level exemption) may pass',
-      );
+      expect(server.stderr()).toContain('a declared or manifest name can never pass it');
       expect(server.stderr()).toContain('invalid env:');
       expect(server.stderr()).not.toContain('surface mismatch');
       expect(server.stderr()).not.toContain(dummy);
+    },
+    20_000,
+  );
+});
+
+describe('manifest startup diagnostics', () => {
+  test('a declared SSH_AUTH_SOCK says declared names can never pass it', async () => {
+    const dummy = ['dummy', 'sock', String(Date.now())].join('-');
+    const server = startBin(
+      [JSON.stringify(manifestFor(scratch(), ['env'], { envNames: ['SSH_AUTH_SOCK'] }))],
+      baseEnv({ SSH_AUTH_SOCK: dummy }),
+    );
+    expect((await server.exited).code).toBe(78);
+    expect(server.stderr()).toContain(
+      'a declared or manifest name can never pass it (not even SSH_AUTH_SOCK)',
+    );
+    expect(server.stderr()).not.toContain('declare it');
+    expect(server.stderr()).not.toContain(dummy);
+  }, 20_000);
+
+  test.each([
+    ['an assignment', ['FOO=sk-live-secret-value']],
+    ['a non-string', [42]],
+    ['an empty string', ['']],
+  ])(
+    'a malformed envNames (%s) is a one-line manifest error without the value',
+    async (_l, bad) => {
+      const server = startBin(
+        [JSON.stringify({ ...manifestFor(scratch(), ['env']), envNames: bad })],
+        baseEnv(),
+      );
+      expect((await server.exited).code).toBe(78);
+      const lines = server
+        .stderr()
+        .split('\n')
+        .filter((line) => line !== '');
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toMatch(/invalid manifest: harness manifest: invalid envNames\.0/);
+      expect(server.stderr()).not.toContain('sk-live-secret-value');
+      expect(server.stderr()).not.toContain('invalid manifest: [');
     },
     20_000,
   );

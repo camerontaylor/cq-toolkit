@@ -92,7 +92,7 @@ export function buildSandboxLauncherEnv(
       if (credential !== undefined) {
         throw new LauncherEnvError(
           origin === 'declared'
-            ? `sandbox: launcher env declared name '${name}' is a credential; only SSH_AUTH_SOCK (the frozen code-level exemption) may pass, and only in-process; the MCP stdio transport refuses it as well`
+            ? `sandbox: launcher env declared name '${name}' is a credential; a declared or manifest name can never pass it (not even SSH_AUTH_SOCK); only the in-process code-level origin may pass SSH_AUTH_SOCK, and the MCP stdio transport refuses it as well`
             : `sandbox: launcher env ${origin} ${credential}`,
         );
       }

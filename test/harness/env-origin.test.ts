@@ -136,7 +136,7 @@ describe('manifest env name origin', () => {
     }
     expect(message).toContain("'ANTHROPIC_API_KEY' is a credential");
     expect(message).toContain(
-      'only SSH_AUTH_SOCK (the frozen code-level exemption) may pass, and only in-process',
+      'a declared or manifest name can never pass it (not even SSH_AUTH_SOCK); only the in-process code-level origin may pass SSH_AUTH_SOCK',
     );
     expect(message).not.toContain(dummy);
   });

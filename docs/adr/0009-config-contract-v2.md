@@ -92,7 +92,8 @@ keyed by identity), so JSON, a clone, a prototype or proxy wrapper, a plan or an
 strict manifest schema rejects an extra key. Only in-process code paths can carry it (`HarnessRunGate.trustedEnvNames`
 is a code-level field). A manifest serialized to the MCP stdio bin loses it, so over that transport even
 `SSH_AUTH_SOCK` is refused (fail closed, exit 78, prefix `invalid env:`): the message names the variable, says it is a
-credential, says only `SSH_AUTH_SOCK` may pass and only in-process, and never echoes a value.
+credential, says a declared or manifest name can never pass it and only the in-process code-level origin may pass
+`SSH_AUTH_SOCK`, and never echoes a value.
 
 **Inspection.** `cq config` prints each resolved key, its source layer, the warnings and the errors. It exits 2
 when the environment has errors (after printing the report), like every other subcommand. `cq config --strict`
