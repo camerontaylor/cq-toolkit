@@ -135,17 +135,40 @@ class RepairDrainTest(unittest.TestCase):
         self.assertNotIn('fix_merged', record)
 
     def test_review_descendant_requires_unchanged_repaired_source_blobs(self):
-        published = self.commit_on(self.tip, 'src/kept.ts', 'fixed implementation\n')
-        formatted = self.commit_on(published, 'review-format.txt', 'formatting-only review fix\n')
-        reverted = self.commit_on(published, 'src/kept.ts', 'one\ntwo\n')
-        other_changed = self.commit_on(published, 'src/moved.ts', 'changed second finding source\n')
+        def commit_files(base, files):
+            self.git('checkout', '-q', '--detach', base)
+            for name, text in files.items():
+                path = self.clone / name
+                if text is None:
+                    path.unlink()
+                else:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text(text)
+            self.git('add', '-A')
+            self.git('commit', '-qm', 'review evidence fixture')
+            return self.git('rev-parse', 'HEAD')
+        test_path = 'test/scripts/fix.test.ts'
+        base = commit_files(self.tip, {'src/helper.ts': 'old helper\n', test_path: 'old test\n',
+                                      'settings.json': 'old config\n', 'docs/fix.md': 'old docs\n',
+                                      'src/obsolete.ts': 'obsolete implementation\n'})
+        published = commit_files(base, {'src/kept.ts': 'fixed implementation\n', 'src/helper.ts': 'fixed helper\n',
+                                        test_path: 'new regression test\n', 'settings.json': 'fixed config\n',
+                                        'docs/fix.md': 'fixed docs\n', 'src/added.ts': 'new helper\n', 'src/obsolete.ts': None})
+        formatted = commit_files(published, {test_path: ' new regression test \n'})
+        extra_file = commit_files(published, {'review-format.txt': 'format-only unrelated file\n'})
+        reverted = commit_files(published, {'src/kept.ts': 'one\ntwo\n'})
+        helper_reverted = commit_files(published, {'src/helper.ts': 'old helper\n'})
+        other_changed = commit_files(published, {'src/moved.ts': 'changed second finding source\n'})
+        config_changed = commit_files(published, {'settings.json': 'review config change\n'})
+        docs_changed = commit_files(published, {'docs/fix.md': 'review docs change\n'})
+        restored = commit_files(published, {'src/obsolete.ts': 'obsolete implementation\n'})
+        removed_added = commit_files(published, {'src/added.ts': None})
         first_job = self.root / 'state/repair/inbox/crq-run1-F1.json'
         job = json.loads(first_job.read_text())
         job['canonical_finding_id'] = 'd' * 64
-        atomic(first_job, job)
         item = self.queue['items'][0]
         jobs = ['crq-run1-F1', 'crq-run1-F2']
-        publication = {'head': published}
+        publication = {'head': published, 'commits': [published]}
         journal = self.root / 'state/repair' / jobs[0] / 'publication.json'
         atomic(journal, publication)
         original = journal.read_bytes()
@@ -153,8 +176,14 @@ class RepairDrainTest(unittest.TestCase):
                             is_ancestor=lambda a, b: subprocess.run(
                                 ['git', '-C', str(self.clone), 'merge-base', '--is-ancestor', a, b],
                                 capture_output=True).returncode == 0)
-        for actual, allowed in ((formatted, True), (reverted, False), (other_changed, False), (self.tip, False)):
-            with self.subTest(actual=actual):
+        cases = [(formatted, True, 'src/kept.ts'), (extra_file, True, 'src/kept.ts')]
+        cases += [(head, False, 'src/kept.ts') for head in
+                  (reverted, helper_reverted, other_changed, config_changed, docs_changed, restored, removed_added, self.tip)]
+        cases.append((formatted, False, test_path))  # A test-file anchor is never exempt.
+        for actual, allowed, anchor in cases:
+            with self.subTest(actual=actual, anchor=anchor):
+                job['finding']['path'] = anchor
+                atomic(first_job, job)
                 self.git('update-ref', 'refs/remotes/origin/main', actual)
                 record = {'jobs': jobs, 'fix_pr': {'number': 99}, 'publication': dict(publication),
                           'verdicts': [{'job': j, 'verdict': 'FIXED'} for j in jobs]}
@@ -170,12 +199,23 @@ class RepairDrainTest(unittest.TestCase):
                 self.assertEqual(journal.read_bytes(), original)
                 if allowed:
                     proof = record['validated_merge_head']
+                    expected = {'src/kept.ts', 'src/moved.ts', 'src/helper.ts', 'settings.json',
+                                'docs/fix.md', 'src/added.ts', 'src/obsolete.ts'}
                     self.assertEqual((proof['published_head'], proof['actual_head'], proof['merge_commit']),
                                      (published, actual, actual))
-                    self.assertEqual(set(proof['source_blobs']), {'src/kept.ts', 'src/moved.ts'})
-                    self.assertEqual(proof['source_blobs']['src/kept.ts'], self.git('rev-parse', published + ':src/kept.ts'))
+                    self.assertEqual(set(proof['source_blobs']), expected)
+                    self.assertEqual(proof['compared_paths'], sorted(expected))
+                    self.assertEqual(proof['excluded_test_paths'], [test_path])
+                    self.assertIsNone(proof['source_blobs']['src/obsolete.ts'])
+                    self.assertEqual(proof['source_blobs']['src/helper.ts'], self.git('rev-parse', published + ':src/helper.ts'))
                 else:
                     self.assertIn('source_publication_error', record)
+
+    def test_descendant_without_published_commit_metadata_requires_revalidation(self):
+        record = {'publication': {'head': self.pin}, 'verdicts': [{'job': 'crq-run1-F1', 'verdict': 'FIXED'}]}
+        c = SimpleNamespace(is_ancestor=lambda *args: True)
+        with self.assertRaisesRegex(ValueError, 'commits unavailable'):
+            repair_tick.merge_head_evidence(c, record, self.tip)
 
     def test_exact_publication_head_retains_shortcut(self):
         c = SimpleNamespace(git=mock.Mock(), is_ancestor=mock.Mock())

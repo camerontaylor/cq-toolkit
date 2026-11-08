@@ -645,6 +645,22 @@ def publish_source_resolution(c, record, merge):
         atomic(journal, publication)
 
 
+def repair_test_path(path):
+    # Exact classifier from scripts/lib/affected-tests.mjs:isTest; no Python exemption.
+    return re.fullmatch(r'(?:test/.*\.test\.(?:ts|mjs)|lint/.*\.test\.ts)', path) is not None
+
+
+def repair_source_entry(c, head, path):
+    raw = c.git('ls-tree', '-z', head, '--', path)
+    if not raw:
+        return None  # Preserve a published deletion, not just existing blobs.
+    header, name = raw.rstrip('\0').split('\t', 1)
+    mode, kind, blob = header.split()
+    if name != path or kind != 'blob':
+        raise ValueError('repair source is not an exact blob path: ' + path)
+    return mode, blob
+
+
 def merge_head_evidence(c, record, actual_head):
     published = record.get('publication', {}).get('head')
     if not published:
@@ -655,14 +671,26 @@ def merge_head_evidence(c, record, actual_head):
     fixed = [v['job'] for v in record.get('verdicts', []) if v['verdict'] == 'FIXED']
     if not actual_head or not fixed or not c.is_ancestor(published, actual_head):
         raise ValueError('merged repair head is not a descendant of the published fix')
-    for job_id in fixed:
-        job = json.loads((c.STATE / 'repair/inbox' / (job_id + '.json')).read_text())
-        path = source_path(job['finding'])
-        before = c.git('rev-parse', '--verify', published + ':' + path)
-        after = c.git('rev-parse', '--verify', actual_head + ':' + path)
-        if before != after or c.git('cat-file', '-t', before) != 'blob':
+    commits = record.get('publication', {}).get('commits')
+    if not isinstance(commits, list) or not commits:
+        raise ValueError('published repair commits unavailable; needs revalidation')
+    anchors = {source_path(json.loads((c.STATE / 'repair/inbox' / (j + '.json')).read_text())['finding']) for j in fixed}
+    changed = set()
+    for sha in commits:
+        if not isinstance(sha, str) or not re.fullmatch(r'[0-9a-f]{40}', sha) or not c.is_ancestor(sha, published):
+            raise ValueError('published repair commit lineage unavailable; needs revalidation')
+        changed.update(p for p in c.git('diff-tree', '--root', '--no-commit-id', '--name-only',
+                                        '--no-renames', '-r', '-z', sha).split('\0') if p)
+    paths = anchors | {p for p in changed if not repair_test_path(p)}
+    evidence.update(compared_paths=sorted(paths), excluded_test_paths=sorted(changed - paths), source_modes={})
+    for path in sorted(paths):
+        source_path({'path': path})
+        before = repair_source_entry(c, published, path)
+        after = repair_source_entry(c, actual_head, path)
+        if before != after:
             raise ValueError('merged repair source changed; needs revalidation: ' + path)
-        evidence['source_blobs'][path] = before
+        evidence['source_blobs'][path] = before[1] if before else None
+        evidence['source_modes'][path] = before[0] if before else None
     return evidence
 
 
