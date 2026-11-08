@@ -84,11 +84,8 @@ describe('required workflow cancellation isolation', () => {
     '%s isolates each event and PR/ref',
     (file) => {
       const text = read(file);
-      const subject = file.includes('denylist')
-        ? 'github.event.pull_request.number || github.run_id'
-        : "(github.event_name == 'push' && github.ref != format('refs/heads/{0}', github.event.repository.default_branch) && github.run_id) || github.event.pull_request.number || github.ref";
       expect(text).toContain(
-        `group: \${{ github.workflow }}-\${{ github.event_name }}-\${{ ${subject} }}`,
+        'group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}',
       );
       expect(text).toContain('cancel-in-progress: true');
       expect(text).toMatch(/on:\n {2}push:\n {2}pull_request:\n/);
@@ -96,10 +93,12 @@ describe('required workflow cancellation isolation', () => {
   );
 });
 
-// Evaluate the actual rendered keys, including GitHub's case-insensitive groups.
+// Evaluate actual keys with no string comparisons: property lookup and || only.
+// JavaScript string equality would not model GitHub's case-insensitive equality.
 describe('concurrency collisions', () => {
   it.each(['ci.yml', 'denylist.yml'])('%s isolates cancellation axes', (file) => {
     const workflow = parse(read(`.github/workflows/${file}`)) as { concurrency: { group: string } };
+    expect(workflow.concurrency.group).not.toMatch(/==|!=|format\(/);
     const key = (event: string, ref: string, run: number, pr = 0): string =>
       workflow.concurrency.group
         .replace(/\$\{\{([\s\S]*?)\}\}/g, (_whole: string, expression: string) =>
@@ -119,8 +118,8 @@ describe('concurrency collisions', () => {
         )
         .toLowerCase();
     const main = key('push', 'refs/heads/main', 1);
-    // Preserve every incremental scan; full static can cancel obsolete main work.
-    expect(key('push', 'refs/heads/main', 2) === main).toBe(file === 'ci.yml');
+    // Every push finishes independently, including incremental main scans.
+    expect(key('push', 'refs/heads/main', 2)).not.toBe(main);
     for (const ref of ['refs/heads/feature', 'refs/heads/Main', 'refs/tags/v1']) {
       expect(key('push', ref, 3)).not.toBe(main);
     }
