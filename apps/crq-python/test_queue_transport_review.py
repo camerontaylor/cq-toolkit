@@ -11,6 +11,7 @@ from unittest import mock
 
 import author_snapshot
 import capability_dispatcher
+import crq
 import review_receipt
 import review_transport as transport
 from test_author_snapshot_fixtures import SnapshotTransportFixture
@@ -267,7 +268,7 @@ class ReviewTransportTests(SnapshotTransportFixture, unittest.TestCase):
                 self.call_review(self.original_range(intermediate, tree, name + "-head"))
 
     def test_commit_messages_and_identity_metadata_are_secret_scanned(self):
-        self.runner.denylist_rules = lambda: [{"regex": "commit-secret-marker", "path": "^not-a-file$"}]
+        self.runner.denylist_rules = lambda: [{"regex": "commit-secret-marker"}]
         for field in ("message", "author", "committer"):
             body = author_snapshot.git(self.repo, "cat-file", "commit", self.head)
             if field == "message":
@@ -278,6 +279,39 @@ class ReviewTransportTests(SnapshotTransportFixture, unittest.TestCase):
             with self.assertRaisesRegex(author_snapshot.AuthorRefused, "commit metadata secret scan"):
                 self.call_review(self.original_range(head, self.changed_tree, field))
         self.assertEqual(self.saved["items"], [])
+
+    def test_plain_original_submit_installs_with_live_policy_and_scans_commit_text(self):
+        ref = self.seed_live_denylist()
+        self.runner.denylist_rules = crq.denylist_rules
+        with mock.patch.multiple(crq, CLONE=self.destination, DEFAULT_REF=ref), \
+             mock.patch.object(self.runner, "secret_scan_diff", return_value=(True, {})) as scan:
+            rules = crq.denylist_rules()
+            self.assertTrue(any(rule.get("path") and rule["regex"] == ".+" for rule in rules))
+            self.assertEqual(self.call_review(self.review)["action"], "created")
+        commit_text = author_snapshot.git(self.repo, "cat-file", "commit", self.head).decode()
+        self.assertIn(commit_text, scan.call_args.args[0])
+
+    def test_live_pathless_secret_rule_refuses_original_commit_message(self):
+        ref = self.seed_live_denylist()
+        self.runner.denylist_rules = crq.denylist_rules
+        marker = "pk-" + "snapshot_fixture_value"
+        body = author_snapshot.git(self.repo, "cat-file", "commit", self.head) + marker.encode() + b"\n"
+        head = self.git("hash-object", "-w", "-t", "commit", "--stdin", data=body)
+        with mock.patch.multiple(crq, CLONE=self.destination, DEFAULT_REF=ref):
+            rule = next(r for r in crq.denylist_rules() if r["id"] == "class:route-key-material")
+            self.assertNotIn("path", rule)
+            self.assertRegex(marker, rule["regex"])
+            with self.assertRaisesRegex(author_snapshot.AuthorRefused, "commit metadata secret scan"):
+                self.call_review(self.original_range(head, self.changed_tree))
+        self.assertEqual(self.saved["items"], [])
+        self.assertEqual(author_snapshot.git(self.destination, "for-each-ref", "refs/crq/"), b"")
+
+    def test_path_scoped_catchall_does_not_refuse_original_commit_text(self):
+        ref = self.seed_live_denylist()
+        with mock.patch.multiple(crq, CLONE=self.destination, DEFAULT_REF=ref):
+            rules = crq.denylist_rules()
+        self.runner.denylist_rules = lambda: rules + [{"regex": ".+", "path": "^metadata-only$"}]
+        self.assertEqual(self.call_review(self.review)["action"], "created")
 
     def test_original_decoded_content_limit_is_reachable_and_enforced(self):
         limit = transport.capabilities()["limits"]["max_content_bytes"]

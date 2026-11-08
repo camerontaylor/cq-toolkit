@@ -239,13 +239,14 @@ def install(snapshot, binding, runner, *, original=False):
         scan_size = len(diff.encode())
         if original:
             # Original commit messages, author/committer names and extra
-            # headers are uploaded context too. They have no file-path scope
-            # or allowlist exemption; scan all text, not just the message tail.
+            # headers are uploaded context too. Only path-less rules apply:
+            # commit metadata has no file path. Scan all text, not just the message tail.
             for oid, kind, data in objects:
                 if kind != "commit":
                     continue
                 text = data.decode("utf-8", errors="replace")
-                if any(regex.search(line) for regex, _ in compiled for line in text.splitlines()):
+                if any(regex.search(line) for regex, path_regex in compiled
+                       if path_regex is None for line in text.splitlines()):
                     raise AuthorRefused("snapshot commit metadata secret scan refused")
                 part = "commit " + oid + "\n" + text
                 scan_size += len(part.encode()) + 1
