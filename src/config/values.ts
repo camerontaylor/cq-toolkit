@@ -27,7 +27,7 @@ export const BOT_ENTRY_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\[bot\]
 export const ACCEPT_STATES: readonly string[] = Object.freeze(['APPROVED', 'COMMENTED']);
 export const ASSOCIATIONS: readonly string[] = Object.freeze(['OWNER', 'MEMBER', 'COLLABORATOR']);
 
-/** The bare branch name: one leading `refs/heads/` is stripped. */
+/** The bare branch name: one leading `refs/heads/` or `heads/` is stripped. */
 export function bareBranch(ref: string): string {
-  return ref.startsWith('refs/heads/') ? ref.slice('refs/heads/'.length) : ref;
+  return ref.replace(/^(?:refs\/)?heads\//, '');
 }
