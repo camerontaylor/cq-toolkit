@@ -59,7 +59,8 @@ describe('checkDiffMonotonicity', () => {
     (whitespace) => {
       const old = body('higher-is-better', 80);
       const injected = old.replace('"value": 80', `"value": 80, "val\\u0075e"${whitespace}: 50`);
-      expect(JSON.parse(injected).value).toBe(50);
+      const parsed = JSON.parse(injected) as { value: unknown };
+      expect(parsed.value).toBe(50);
       const diff = modifiedSection(REL, old.trimEnd().split('\n'), injected.trimEnd().split('\n'));
       expect(checkDiffMonotonicity(diff)).toEqual({
         ok: false,
