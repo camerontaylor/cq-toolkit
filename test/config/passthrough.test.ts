@@ -227,11 +227,19 @@ describe('no part of a raw value is echoed', () => {
 
   test('provenance records only valid names for the passthrough key', () => {
     const cqEnv = readCqEnv({ CQ_RUN_ENV_PASSTHROUGH: 'FOO BAR' });
-    const recorded = JSON.stringify(provenanceConfig(cqEnv, {}));
+    const recorded = JSON.stringify(provenanceConfig(cqEnv));
     expect(recorded).toContain('FOO');
     const bad = readCqEnv({ CQ_RUN_ENV_PASSTHROUGH: `FOO=${secret}` });
     expect(bad.errors).toHaveLength(1);
-    expect(JSON.stringify(provenanceConfig(bad, {}))).not.toContain(secret);
+    // Provenance refuses an env with errors, and its message carries no raw text.
+    let message = '';
+    try {
+      provenanceConfig(bad);
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).not.toBe('');
+    expect(message).not.toContain(secret);
   });
 });
 
