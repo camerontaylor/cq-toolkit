@@ -123,11 +123,12 @@ class RepairDrainTest(unittest.TestCase):
         self.assertEqual(record['fix_merged'], 'now')
         self.assertNotIn('source_publication_error', record)
 
-    def test_merge_head_mismatch_cannot_mark_prepared_finding_fixed(self):
+    def test_unverifiable_head_mismatch_cannot_mark_prepared_finding_fixed(self):
         record = self.queue['items'][0]['repair_runs']['run1']
         record.update(fix_pr={'number': 99}, publication={'head': self.pin})
         c = SimpleNamespace(pr_info=lambda n: {'state': 'MERGED', 'headRefOid': self.tip,
-                                              'mergeCommit': {'oid': self.tip}})
+                                              'mergeCommit': {'oid': self.tip}},
+                            git=lambda *args: self.tip, is_ancestor=lambda *args: True)
         with mock.patch.object(repair_tick, 'mark_finding_outcome') as mark:
             repair_tick.reconcile_fix_prs(c, self.queue)
             mark.assert_not_called()
