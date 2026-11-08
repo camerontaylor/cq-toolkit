@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 import re
 from crq_repair import atomic, findings, git as wt_git, hack_detector, verify
-from crq_repair.bounded import JOB_ID, identity, job_path, source_path, validate_revalidation
+from crq_repair.bounded import JOB_ID, identity, job_path, require_canonical_delivery, source_path, validate_revalidation
 
 
 def prepare_current_job(c, q, old_job_id, source_sha, evidence):
@@ -241,15 +241,13 @@ def harvest(c, q, item, dry=False):
             if result.get('retry_after'):
                 break
             expected = json.loads((c.STATE / 'repair/inbox' / (job_id + '.json')).read_text())
-            fid = expected.get('canonical_finding_id')
-            source_row = c.STATE / 'backfill/findings/triage' / (fid + '.json') if fid else None
-            if source_row and source_row.exists():
-                latest = json.loads(source_row.read_text()).get('receipt', {}).get('repair_task')
-                if latest and latest != job_id:
-                    if not dry:
-                        record.update(state='stale', error='superseded repair generation')
-                        item['state'] = 'done'
-                    break
+            try:
+                require_canonical_delivery(c.STATE.parent, expected)
+            except ValueError as exc:
+                if not dry:
+                    record.update(state='stale', error=str(exc))
+                    item['state'] = 'done'
+                break  # Retain the result artifact without publishing an obsolete fix.
             if result.get('job') != job_id or result.get('item') != item['id']:
                 raise ValueError('repair result identity mismatch')
             if expected.get('source_sha') and any(result.get(k) != expected.get(k)

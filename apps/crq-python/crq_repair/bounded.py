@@ -58,6 +58,23 @@ def validate_revalidation(config, old, source_sha, evidence):
     return expected
 
 
+def require_canonical_delivery(root, job):
+    """Read the existing atomic triage row; legacy jobs have no canonical owner."""
+    if 'canonical_finding_id' not in job:
+        return
+    fid = job['canonical_finding_id']
+    if not isinstance(fid, str) or not re.fullmatch(r'[0-9a-f]{64}', fid):
+        raise ValueError('invalid canonical finding identity')
+    try:
+        row = json.loads((Path(root) / 'state/backfill/findings/triage' / (fid + '.json')).read_text())
+    except (OSError, ValueError) as exc:
+        raise ValueError('canonical delivery state unavailable') from exc
+    if (not isinstance(row, dict) or row.get('status') != 'delivered'
+            or not isinstance(row.get('receipt'), dict)
+            or row['receipt'].get('repair_task') != job.get('job')):
+        raise ValueError('canonical finding is not delivered to this repair task')
+
+
 def select_job(root, config, job_id, source_sha, finding_sha256):
     """Read exactly one inbox job. Never enumerate, repin or dispatch the inbox."""
     check_sha(source_sha)
@@ -66,6 +83,7 @@ def select_job(root, config, job_id, source_sha, finding_sha256):
         raise ValueError('job identity/source pin mismatch; historical jobs cannot be repinned')
     if identity(job['finding']) != finding_sha256 or job.get('finding_sha256') != finding_sha256:
         raise ValueError('finding evidence digest mismatch')
+    require_canonical_delivery(root, job)
     evidence = job.get('revalidation') or {}
     validate_revalidation(config, job, source_sha, evidence)
     if not job.get('origin_job'):
@@ -104,7 +122,7 @@ def drain_job(root, config, queue, job_id):
     Returns (status, job, reason). 'run': a job bound to its immutable pin, for
     process_item. 'stale': not started and superseded on the current default
     branch, so no spend. 'skip': not drainable (no queued tick-owned run,
-    malformed). Started jobs always resume; they were checked when they began.
+    malformed). Canonical ownership is checked again for resumed jobs; legacy jobs keep their existing resume behavior.
     """
     try:
         job = json.loads(job_path(root, job_id).read_text())
@@ -118,6 +136,7 @@ def drain_job(root, config, queue, job_id):
         return 'skip', job, 'no queued tick-owned repair run'
     resume = started(root, job_id)
     try:
+        require_canonical_delivery(root, job)
         finding = job['finding']
         if finding.get('severity') not in ('critical', 'major'):
             raise ValueError('only critical/major findings are repaired')

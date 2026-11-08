@@ -246,10 +246,10 @@ class RepairDrainTest(unittest.TestCase):
         job_id = record['jobs'][0]
         job_path = self.root / 'state/repair/inbox' / (job_id + '.json')
         job = json.loads(job_path.read_text())
-        job['canonical_finding_id'] = 'canonical'
+        job['canonical_finding_id'] = 'd' * 64
         atomic(job_path, job)
-        atomic(self.root / 'state/backfill/findings/triage/canonical.json',
-               {'receipt': {'repair_task': 'newer-generation'}})
+        atomic(self.root / 'state/backfill/findings/triage' / ('d' * 64 + '.json'),
+               {'status': 'delivered', 'receipt': {'repair_task': 'newer-generation'}})
         atomic(self.root / 'state/repair' / job_id / 'result.json',
                {'job': job_id, 'item': item['id'], 'verdict': 'FIXED'})
         with mock.patch.object(repair_tick, 'publish') as publish:
@@ -257,6 +257,50 @@ class RepairDrainTest(unittest.TestCase):
             publish.assert_not_called()
         self.assertEqual(record['state'], 'stale')
         self.assertEqual(item['state'], 'done')
+
+    def test_dispatch_rechecks_canonical_state_between_jobs(self):
+        self.worktree()
+        jobs = [json.loads((self.root / 'state/repair/inbox' / (j + '.json')).read_text())
+                for j in ('crq-run1-F1', 'crq-run1-F2')]
+        fid = 'd' * 64
+        jobs[1]['canonical_finding_id'] = fid
+        row_path = self.root / 'state/backfill/findings/triage' / (fid + '.json')
+        row = {'status': 'delivered', 'receipt': {'repair_task': jobs[1]['job']}}
+        atomic(row_path, row)
+        def process(*args):
+            atomic(row_path, {**row, 'status': 'dismissed'})
+            return {'verdict': 'NOT-FIXED'}
+        with mock.patch.object(service, 'blocked', return_value=False), \
+             mock.patch.object(service, 'dispatch_paused', return_value=None), \
+             mock.patch.object(service, 'process', side_effect=process) as model:
+            service.process_item(self.config, jobs)
+        self.assertEqual(model.call_count, 1)
+        self.assertEqual(model.call_args.args[1]['job'], 'crq-run1-F1')
+        with mock.patch.object(service, 'source_snapshot') as snapshot, mock.patch.object(service.cq, 'invoke') as provider:
+            with self.assertRaisesRegex(ValueError, 'canonical'):
+                service._dispatch(self.config, {'driver': 'cq'}, jobs[1], self.root,
+                                  self.root / 'dispatch', judge=False)
+            snapshot.assert_not_called()
+            provider.assert_not_called()
+
+    def test_operator_disposition_prevents_publication_of_finished_job(self):
+        item = self.queue['items'][0]
+        record = item['repair_runs']['run1']
+        job_id = record['jobs'][0]
+        path = self.root / 'state/repair/inbox' / (job_id + '.json')
+        job = json.loads(path.read_text())
+        job['canonical_finding_id'] = 'd' * 64
+        atomic(path, job)
+        atomic(self.root / 'state/backfill/findings/triage' / ('d' * 64 + '.json'),
+               {'status': 'superseded', 'receipt': {'repair_task': job_id}})
+        result = self.root / 'state/repair' / job_id / 'result.json'
+        atomic(result, {'job': job_id, 'item': item['id'], 'verdict': 'FIXED', 'audit': 'retained'})
+        before = result.read_bytes()
+        with mock.patch.object(repair_tick, 'publish') as publish:
+            repair_tick.harvest(SimpleNamespace(STATE=self.root / 'state'), self.queue, item)
+            publish.assert_not_called()
+        self.assertEqual(record['state'], 'stale')
+        self.assertEqual(result.read_bytes(), before)
 
     def git(self, *args):
         return subprocess.run(['git', '-C', str(self.clone), *args], check=True,
