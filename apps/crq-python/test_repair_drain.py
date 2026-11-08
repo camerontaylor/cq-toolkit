@@ -224,6 +224,24 @@ class RepairDrainTest(unittest.TestCase):
             repair_tick.reconcile_fix_prs(c, self.queue)
             self.assertEqual(mark.call_args.args[3], self.tip)
 
+    def test_obsolete_generation_cannot_harvest_or_publish(self):
+        item = self.queue['items'][0]
+        record = item['repair_runs']['run1']
+        job_id = record['jobs'][0]
+        job_path = self.root / 'state/repair/inbox' / (job_id + '.json')
+        job = json.loads(job_path.read_text())
+        job['canonical_finding_id'] = 'canonical'
+        atomic(job_path, job)
+        atomic(self.root / 'state/backfill/findings/triage/canonical.json',
+               {'receipt': {'repair_task': 'newer-generation'}})
+        atomic(self.root / 'state/repair' / job_id / 'result.json',
+               {'job': job_id, 'item': item['id'], 'verdict': 'FIXED'})
+        with mock.patch.object(repair_tick, 'publish') as publish:
+            repair_tick.harvest(SimpleNamespace(STATE=self.root / 'state'), self.queue, item)
+            publish.assert_not_called()
+        self.assertEqual(record['state'], 'stale')
+        self.assertEqual(item['state'], 'done')
+
     def git(self, *args):
         return subprocess.run(['git', '-C', str(self.clone), *args], check=True,
                               capture_output=True, text=True).stdout.strip()
