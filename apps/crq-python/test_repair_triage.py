@@ -191,3 +191,18 @@ class PhaseTest(FindingTest):
         submitted = scanner.call_args.args[0]
         self.assertIn('+token=canary\n+second line', submitted)
         self.assertIn('diff --git a/src/a.py b/src/a.py', submitted)
+
+    def test_real_context_scanner_rejects_policy_key_marker_without_logging_content(self):
+        import crq
+        path = Path(__file__).parent / 'crq_repair.py'
+        spec = importlib.util.spec_from_file_location('triage_real_scan_test', path)
+        service = importlib.util.module_from_spec(spec); spec.loader.exec_module(service)
+        policy = Path(__file__).resolve().parents[2] / 'policy/denylist/patterns.yml'
+        marker = '-----BEGIN ' + 'OPENSSH PRIVATE KEY-----'
+        output = self.root / 'scan.json'
+        context = {'finding': {'path': 'src/a.py', 'body': 'review'}, 'region': [{'text': marker}]}
+        with mock.patch.object(crq, 'git', return_value=policy.read_text()), mock.patch.object(crq.shutil, 'which', return_value=None):
+            self.assertFalse(service.triage_context_safe(crq, context, output))
+            self.assertNotIn(marker, output.read_text())
+            context['region'] = [{'text': 'ordinary source line'}]
+            self.assertTrue(service.triage_context_safe(crq, context, output))
