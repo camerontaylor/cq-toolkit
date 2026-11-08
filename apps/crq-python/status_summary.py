@@ -2,6 +2,7 @@
 import datetime as dt
 from queue_time import parse_utc
 import coverage
+import backfill_report
 import review_receipt
 import repo_registry
 import repair_tick
@@ -13,6 +14,11 @@ import re
 import subprocess
 import tempfile
 import time
+
+
+def finding_triage(root):
+    """Bound status previews and report malformed rows without stopping ticks."""
+    return backfill_report.finding_triage(root, strict=False, limit=32)
 
 
 def timestamp(value):
@@ -360,6 +366,7 @@ def publish(root, queue, config, schedule, home=None, now=None):
     data["systemd_timers"], data["systemd_services"] = systemd_activity()
     data["merged_current"] = merged_current(queue, root / "state/receipts")
     data["repair"] = repair_tick.digest(root, queue)
+    data["finding_triage"] = finding_triage(root / "state/backfill/findings")
     data["utilization"] = coverage.utilization_digest(queue, queue.get("coverage") or coverage.new_ledger(),
         now=now, max_starts_per_hour=data["starts_cap"])
     data["schedule"] = {"id": config.get("schedule_id", "crq-tick.timer"), "state": schedule.get("status") or "systemd"}

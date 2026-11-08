@@ -80,6 +80,9 @@ class MultiRepoIdentityTests(unittest.TestCase):
             self.assertEqual([i["id"] for i in sorted(q["items"], key=crq.sort_key)], ["o", "f", "b"])
 
     def test_write_status_carries_repo(self):
+        rows = self.state / "backfill/findings/triage"
+        rows.mkdir(parents=True)
+        (rows / "bad.json").write_text("broken")
         self.write_legacy_queue()
         q = crq.load_queue()
         q["items"].append({"id": "push-infra-aaaa000000-bbbb000000", "repo": "camerontaylor/infra",
@@ -93,7 +96,12 @@ class MultiRepoIdentityTests(unittest.TestCase):
         self.assertIn("| push-infra-aaaa000000-bbbb000000 | camerontaylor/infra | push-current |", text)
         self.assertIn("repo camerontaylor/infra: 1 item(s) (1 pending, 0 reviewing, 0 blocked)", text)
         self.assertIn("push reviewed_tip uninitialized", text)
+        self.assertIn("## Backfill finding triage", text)
+        self.assertIn('"needs_human": []', text)
         data = json.loads((self.state / "status.json").read_text())
+        self.assertEqual(data["finding_triage"]["counts"], {})
+        self.assertFalse(data["finding_triage"]["counts_complete"])
+        self.assertEqual(data["finding_triage"]["error_count"], 1)
         by_id = {i["id"]: i for i in data["items"]}
         self.assertEqual(by_id["push-infra-aaaa000000-bbbb000000"]["repo"], "camerontaylor/infra")
         self.assertEqual(by_id["pr12"]["repo"], crq.REPO)
