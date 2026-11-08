@@ -202,11 +202,17 @@ for (const refusal of ['oversize', 'scanner'])
     );
     await git('add', 'file');
     await git('commit', '-qm', 'head');
+    // A refusing scanner must be reached portably: macOS has no /bin/false (its
+    // false lives at /usr/bin/false), and a missing executable becomes a
+    // SnapshotConfigError/needs-human rather than the refusal this case asserts.
+    // A shebang script that exits nonzero is equivalent on every platform.
+    const scanner = join(cwd, 'refusing-scanner');
+    await writeFile(scanner, '#!/bin/sh\nexit 1\n', { mode: 0o700 });
     const calls: string[] = [];
     const result = await makeSubmit(async (raw) => {
       calls.push((JSON.parse(raw) as { op: string }).op);
       return JSON.stringify(caps);
-    })({ cwd, repo: 'owner/repo', target: 'target', scanner: '/bin/false' });
+    })({ cwd, repo: 'owner/repo', target: 'target', scanner });
     expect(result.status).toBe('failed');
     if (result.status === 'failed') {
       expect(result.error).toContain(

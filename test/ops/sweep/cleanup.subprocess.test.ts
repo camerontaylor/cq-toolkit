@@ -3,7 +3,7 @@
 // subprocess adapter against REAL git (the dirty-refusal backstop,
 // PR 156 r1 D).
 import { execFile } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
@@ -164,11 +164,13 @@ describe('subprocess cleanup effects (real git smoke)', () => {
         run(['-C', dir, 'worktree', 'list', '--porcelain'], dir),
       );
       // Porcelain entries are blank-line-separated blocks; find each tree's block.
+      // git reports CANONICAL paths (`/private/var/...` on macOS, where tmpdir()
+      // hands out `/var/...`), so both sides are compared as realpaths.
       const blockOf = (wtPath: string): string[] =>
         porcelain
           .split('\n\n')
           .map((block) => block.split('\n'))
-          .find((lines) => lines[0] === `worktree ${wtPath}`) ?? [];
+          .find((lines) => lines[0] === `worktree ${realpathSync(wtPath)}`) ?? [];
       // The sweep lock is back WITH its reason; the never-locked tree gained none.
       expect(blockOf(lockedPath)).toContain('locked cq sweep active');
       expect(blockOf(plainPath).some((line) => line.startsWith('locked'))).toBe(false);
