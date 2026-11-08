@@ -275,7 +275,8 @@
         "submit",
         "status",
         "result",
-        "cancel"
+        "cancel",
+        "notify-update"
       ],
       "features": [
         "original-commit-snapshot-v1",
@@ -686,5 +687,59 @@
       }
     },
     "valid": false
+  },
+  {
+    "name": "notify-update-replace",
+    "type": "wire",
+    "value": {
+      "v": 1,
+      "op": "notify-update",
+      "request_id": "r1",
+      "notify": {
+        "paseo_agent_id": "12345678-1234-1234-1234-123456789abc",
+        "paseo_host": null
+      }
+    },
+    "valid": true
+  },
+  {
+    "name": "notify-update-withdraw",
+    "type": "wire",
+    "value": {
+      "v": 1,
+      "op": "notify-update",
+      "request_id": "r1",
+      "notify": null
+    },
+    "valid": true
+  },
+  {
+    "name": "notify-update-extra",
+    "type": "wire",
+    "value": {
+      "v": 1,
+      "op": "notify-update",
+      "request_id": "r1",
+      "notify": {
+        "paseo_agent_id": "12345678-1234-1234-1234-123456789abc",
+        "paseo_host": null
+      },
+      "text": "injection"
+    },
+    "valid": false
+  },
+  {
+    "name": "notify-status-error",
+    "type": "response",
+    "value": {
+      "v": 1,
+      "action": "observed",
+      "state": "queued",
+      "notify": {
+        "state": "error",
+        "reason": "unsupported-destination"
+      }
+    },
+    "valid": true
   }
 ]

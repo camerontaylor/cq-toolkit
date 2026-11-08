@@ -44,6 +44,15 @@ export const ProfileSchema = z
     flags: z.array(z.string().min(1)),
   })
   .strict();
+export const NotifyDestinationSchema = z
+  .object({ paseo_agent_id: z.string(), paseo_host: z.string().nullable() })
+  .strict();
+const NotifyStateSchema = z
+  .object({
+    state: z.enum(['pending', 'sent', 'error', 'withdrawn']),
+    reason: z.string().min(1).optional(),
+  })
+  .strict();
 export const RequestSchema = z
   .object({
     v: z.literal(1),
@@ -51,18 +60,25 @@ export const RequestSchema = z
     identity: z.string().regex(new RegExp('^[0-9a-f]{64}$')),
     item: z.string().min(1),
     created_at: z.string().min(1),
+    principal: z.string().min(1).optional(),
+    notify_status: NotifyStateSchema.optional(),
     supersedes: z
       .string()
       .min(1)
       .regex(/^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$/)
       .optional(),
-    notify: z
-      .object({ paseo_agent_id: z.string().min(1), paseo_host: z.string().min(1) })
-      .strict()
-      .optional(),
+    notify: NotifyDestinationSchema.optional(),
   })
   .strict();
 export const WireSchema = z.union([
+  z
+    .object({
+      v: z.literal(1),
+      op: z.literal('notify-update'),
+      request_id: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$/),
+      notify: NotifyDestinationSchema.nullable(),
+    })
+    .strict(),
   z.object({ v: z.literal(1), op: z.literal('capabilities') }).strict(),
   z
     .object({
@@ -104,10 +120,7 @@ export const WireSchema = z.union([
         })
         .strict()
         .optional(),
-      notify: z
-        .object({ paseo_agent_id: z.string().min(1), paseo_host: z.string().min(1) })
-        .strict()
-        .optional(),
+      notify: NotifyDestinationSchema.optional(),
       supersedes: z
         .string()
         .min(1)
@@ -156,6 +169,7 @@ export const ResponseSchema = z.union([
         .min(1)
         .regex(/^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$/)
         .optional(),
+      notify: NotifyStateSchema.optional(),
       action: z.enum(['created', 'joined', 'reused', 'observed', 'no-changes']),
       state: z.enum(['queued', 'running', 'completed', 'failed', 'cancelled', 'unsupported']),
       identity: z.string().regex(new RegExp('^[0-9a-f]{64}$')).optional(),
@@ -170,7 +184,9 @@ export const ResponseSchema = z.union([
     .object({
       v: z.literal(1),
       command: z.literal('review-v1'),
-      operations: z.array(z.enum(['capabilities', 'submit', 'status', 'result', 'cancel'])),
+      operations: z.array(
+        z.enum(['capabilities', 'submit', 'status', 'result', 'cancel', 'notify-update']),
+      ),
       features: z.array(
         z.enum(['original-commit-snapshot-v1', 'chunked-result-v1', 'repeat-generations-v1']),
       ),
@@ -317,6 +333,9 @@ export const ReferenceSchema = z
     cwd: z.string().default('.'),
   })
   .strict();
+export const StatusInputSchema = ReferenceSchema.extend({
+  notify: NotifyDestinationSchema.nullable().optional(),
+});
 export const WaitInputSchema = ReferenceSchema.extend({
   waitMs: z.number().int().nonnegative().default(600000),
 });
@@ -329,6 +348,7 @@ export const SubmitInputSchema = z
       .string()
       .regex(/^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$/)
       .optional(),
+    notify: NotifyDestinationSchema.optional(),
     reachable: z.boolean().default(false),
     scanner: z.string().optional(),
     repeat: z.boolean().optional(),

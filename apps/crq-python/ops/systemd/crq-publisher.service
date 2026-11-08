@@ -1,10 +1,10 @@
 [Unit]
 Description=CRQ off-lock durable ledger publisher
-ConditionPathExists=@CRQ_ROOT@/state/backfill-rollout.json
 [Service]
 Type=oneshot
 Nice=10
 Environment=PATH=%h/.local/share/mise/shims:%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=-%h/.local/state/paseo/env
 WorkingDirectory=@CRQ_ROOT@
 ExecStart=/usr/bin/env python3 @CRQ_ROOT@/backfill_publisher.py
 TimeoutStartSec=45min

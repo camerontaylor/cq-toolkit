@@ -44,6 +44,8 @@ def status(q, request_id):
         raise ValueError("unknown review request")
     result = {"v": 1, "request_id": request_id, "action": "observed",
               "identity": request["identity"]}
+    if "notify_status" in request:
+        result["notify"] = copy.deepcopy(request["notify_status"])
     item = next(i for i in q["items"] if i["id"] == request["item"])
     if item.get("outcome") == "no-changes":
         return {**result, "action": "no-changes", "state": "completed"}

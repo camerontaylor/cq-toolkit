@@ -1,3 +1,4 @@
+import { reviewNotifyDestination } from '../../config/review-notify.js';
 import { SubmitInputSchema } from './internal/reviewOperation.js';
 import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, writeFile, rename } from 'node:fs/promises';
@@ -76,9 +77,11 @@ export const makeSubmit = (transport?: QueueTransport) =>
         };
         if (inputs.base_tree === inputs.head_tree)
           return { v: 1, action: 'no-changes', state: 'completed', exclusions, reviewedHead: head };
+        const notify = i.notify ?? reviewNotifyDestination();
         wire = WireSchema.parse({
           v: 1,
           op: 'submit',
+          ...(notify === undefined ? {} : { notify }),
           request_id: requestId,
           inputs,
           ...(i.repeat === undefined ? {} : { repeat: i.repeat }),

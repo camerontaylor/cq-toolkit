@@ -11,12 +11,13 @@ import author_snapshot
 import queue_transport
 import review_admission as admission
 import review_operation as operation
+import review_notify
 import review_receipt
 
 MAX_BYTES = 6 * 1024 * 1024
 MAX_SNAPSHOT_BYTES = 5 * 1024 * 1024
 DEADLINE_S = 120
-OPERATIONS = ["capabilities", "submit", "status", "result", "cancel"]
+OPERATIONS = ["capabilities", "submit", "status", "result", "cancel", "notify-update"]
 
 
 def decode(raw):
@@ -107,7 +108,13 @@ def handle(raw, runner, *, principal, policy):
             result = admission.admit(q, request_id=req["request_id"], inputs=inputs,
                                      resolved=facts, profile=stored, at=runner.iso(),
                                      repeat=req.get("repeat", False), supersedes=req.get("supersedes"),
-                                     notify=req.get("notify"), verify_receipt=lambda item: retained(runner, item))
+                                     notify=review_notify.destination(req.get("notify"), runner.CONFIG), verify_receipt=lambda item: retained(runner, item))
+            binding = q["review_requests"][req["request_id"]]
+            binding["principal"] = principal
+            if "notify" in req:
+                binding["notify_status"] = review_notify.validation(req["notify"], runner.CONFIG)
+            if "notify_status" in binding:
+                result["notify"] = binding["notify_status"]
             runner.save_queue(q)
             if result["action"] == "created" and any(i.get("kind") in ("open", "delta") and i.get("cycles") for i in q["items"]):
                 item = next(i for i in q["items"] if i["id"] == result["item"])
@@ -117,6 +124,13 @@ def handle(raw, runner, *, principal, policy):
                     reused = False
                 if reused:
                     result = {**admission.status(q, req["request_id"]), "action": "reused"}
+    elif op == "notify-update":
+        binding = q.get("review_requests", {}).get(req["request_id"])
+        if binding is None or binding.get("principal") != principal:
+            raise ValueError("notification request owner denied")
+        review_notify.update(q, req["request_id"], req["notify"], runner.CONFIG)
+        runner.save_queue(q)
+        result = admission.status(q, req["request_id"])
     elif op == "cancel":
         result = admission.cancel(q, req["request_id"])
         runner.save_queue(q)
