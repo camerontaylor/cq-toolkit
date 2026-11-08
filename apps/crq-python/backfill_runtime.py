@@ -330,17 +330,7 @@ def completion_event(repo, store, item, raw, exit_code, meta, ended_at, submissi
             # whose vendor anchor is absent or outside the pinned repository.
             intervals = []
         else:
-            lines = set()
-            try:
-                for start, end in value.get("intervals") or []:
-                    if type(start) is not int or type(end) is not int or not 1 <= start <= end <= 1_000_000:
-                        raise ValueError("invalid vendor interval")
-                    lines.update(range(start, end + 1))
-                    if len(lines) > 1_000_000:
-                        raise ValueError("vendor interval bound")
-                intervals = accounting.ranges(lines)
-            except (TypeError, ValueError):
-                intervals = []
+            intervals = history.finding_intervals(value)
         normalized = {"source_id": str(value["id"]) if value.get("id") is not None else None, "severity": value.get("severity", "info"), "path": name,
                       "blob": entries.get(name, {}).get("blob"), "intervals": intervals,
                       "title": value.get("title") or "Unverified vendor finding anchor",

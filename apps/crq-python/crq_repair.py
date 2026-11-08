@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Detached repair drain. Never writes queue.json or calls GitHub/push."""
+"""Detached repair drain. Backfill delivery uses the tick lock; no GitHub/push."""
 import argparse
 import contextlib
 import copy
@@ -213,6 +213,8 @@ def dispatch(config, role, job, wt, directory, judge=False):
 def _dispatch(config, role, job, wt, directory, judge=False):
     directory.mkdir(parents=True, exist_ok=True)
     job = copy.deepcopy(job)
+    if job.get('triage_context') is not None:
+        return cq.judge(config, role, job, wt, directory)
     job['source_snapshot'] = source_snapshot(config, job)
     atomic(directory / 'source-snapshot.json', job['source_snapshot'])
     if role['driver'] == 'cq':
@@ -431,6 +433,75 @@ def fetch_clone(config, lock_wait=None):
             fcntl.flock(lock, fcntl.LOCK_UN)
 
 
+def triage_context_safe(c, context, output):
+    """Scan unescaped string values before serialization or any model upload."""
+    def strings(value):
+        if isinstance(value, str):
+            yield value
+        elif isinstance(value, dict):
+            for item in value.values():
+                yield from strings(item)
+        elif isinstance(value, list):
+            for item in value:
+                yield from strings(item)
+    content = '\n'.join(strings(context))
+    path = context.get('current_path') or context['finding'].get('path') or 'triage-context.txt'
+    diff = 'diff --git a/' + path + ' b/' + path + '\n@@ -0,0 +1 @@\n'
+    diff += '\n'.join('+' + line for line in content.splitlines()) + '\n'
+    return c.secret_scan_diff(diff, output)[0]
+
+
+def triage_phase(config, dry_run=False):
+    import crq as c
+    import backfill_runtime as runtime
+    import finding_delivery
+    from crq_repair.triage import phase
+    from runtime_target import DEFAULT_REF
+    state = ROOT / 'state'
+    if not (state / 'backfill/findings/triage').exists():
+        return None
+    rollout = runtime.settings(state)
+    if not rollout:
+        return None
+    repo, _, outbox, _ = runtime.services(c, rollout)
+    inbox = finding_delivery.Inbox(state / 'backfill/findings', outbox)
+    tip = git(config['clone'], 'rev-parse', DEFAULT_REF)
+    options = config['repair'].get('triage', {})
+    role = options.get('role', {'driver': 'cq', 'model': 'opencode-go/deepseek-v4.1-flash'})
+    if role.get('driver') != 'cq':
+        raise ValueError('triage requires cq structured judge bridge')
+    def judge(row, context, remaining):
+        job = {'job': 'crq-triage-' + row['finding']['id'], 'run': row['review_id'],
+               'triage_context': context}
+        directory = state / 'repair/triage' / row['finding']['id']
+        directory.mkdir(parents=True, exist_ok=True)
+        if not triage_context_safe(c, context, directory / 'context-scan.json'):
+            return {'stop': 'ok', 'verdict': 'unsure', 'reason': 'triage context secret scan rejected'}
+        bounded_config = copy.deepcopy(config)
+        bounded_config['repair']['budget']['wall_clock_min'] = remaining / 60
+        return dispatch(bounded_config, role, job, config['clone'],
+                        state / 'repair/triage' / row['finding']['id'], judge=True)
+    def transport(key, request):
+        receipt = []
+        def deliver_locked():
+            queue = c.load_queue()
+            def scan(target, name):
+                base, head = runtime.subjects.projection(repo, target, [name])
+                return c.secret_scan(base, head, state / 'backfill/repair-scan.json')[0]
+            accept = finding_delivery.repair_transport(ROOT, queue, c.save_queue, scan)
+            receipt.append(accept(key, request))
+        if not c.ran_locked(deliver_locked):
+            raise RuntimeError('tick busy; confirmed delivery will retry')
+        return receipt[0]
+    result = phase(inbox, repo, tip, judge, transport, utc(),
+                   maximum=max(0, min(6, int(options.get('max_per_pass', 6)))),
+                   seconds=config['repair']['budget']['wall_clock_min'] * 60, dry_run=dry_run)
+    print('backfill triage: ' + json.dumps(result))
+    if result.get('stopped') == 'rate-limit' and not dry_run:
+        rate_limit_pause(result.get('stop_report', {}), 'backfill-triage')
+    return result
+
+
 def drain(config):
     """Automatic inbox drain, oldest first. Items run serially: one item
     worktree at a time, serial findings within it (see README for why)."""
@@ -444,6 +515,12 @@ def drain(config):
     error = fetch_clone(config)
     if error is not None:
         print('repair drain skipped: ' + error[:200])
+        return
+    try:
+        triage_phase(config)
+    except Exception as exc:  # backfill deferral must not starve existing repair jobs
+        print('backfill triage deferred: ' + str(exc)[:300])
+    if dispatch_paused(config):
         return
     groups = {}  # item -> job ids, items in order of their oldest job
     for job_id in drain_order(ROOT):
@@ -520,6 +597,7 @@ def process_item(config, jobs):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description='Drain eligible repair inbox jobs, or repair one explicit prepared job')
+    parser.add_argument('--triage-dry-run', action='store_true')
     parser.add_argument('--job')
     parser.add_argument('--source-sha')
     parser.add_argument('--finding-sha256')
@@ -529,6 +607,9 @@ def main(argv=None):
     authorization = repair.get('spend_authorization')
     if repair.get('enabled') is not True or not isinstance(authorization, str) or not authorization.strip():
         print('repair dispatch disabled: repair.enabled and a recorded spend_authorization are required')
+        return
+    if args.triage_dry_run:
+        triage_phase(config, dry_run=True)
         return
     selectors = (args.job, args.source_sha, args.finding_sha256)
     if any(selectors) and not all(selectors):

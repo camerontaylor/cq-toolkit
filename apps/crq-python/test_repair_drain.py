@@ -73,6 +73,175 @@ class RepairDrainTest(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
+    def test_harvest_writeback_maps_nonfixed_outcomes(self):
+        c = SimpleNamespace(STATE=self.root / 'state', iso=lambda: 'now')
+        job = {'job': 'job', 'canonical_finding_id': 'finding'}
+        with mock.patch('backfill_runtime.settings', return_value={'durable_artifact_root': str(self.root / 'artifacts')}), mock.patch('finding_delivery.Inbox') as inbox:
+            for verdict, judge, expected in [('STALE', None, 'needs-retriage'),
+                    ('FAILED', None, 'needs-human'), ('NOT-FIXED', {'verdict': 'invalid'}, 'dismissed'),
+                    ('FIXED', None, 'fixed')]:
+                repair_tick.mark_finding_outcome(c, job, {'verdict': verdict, 'judge': judge, 'reason': 'evidence'},
+                                                self.tip if verdict == 'FIXED' else None)
+                self.assertEqual(inbox.return_value.repair_outcome.call_args.args[2], expected)
+            inbox.reset_mock()
+            repair_tick.mark_finding_outcome(c, job, {'verdict': 'FIXED'})
+            inbox.assert_not_called()
+
+    def test_merge_reconciliation_marks_threadless_ledger_only_after_merge(self):
+        job_id = 'crq-run1-F1'
+        item = self.queue['items'][0]
+        record = item['repair_runs']['run1']
+        record.update(fix_pr={'number': 99, 'url': 'https://github.com/example/repo/pull/99'},
+                      verdicts=[{'job': job_id, 'verdict': 'FIXED', 'reason': 'verified'}])
+        c = SimpleNamespace(STATE=self.root / 'state', iso=lambda: 'now',
+                            pr_info=mock.Mock(return_value={'state': 'OPEN'}),
+                            git=lambda *args: self.tip, is_ancestor=lambda *args: True)
+        with mock.patch.object(repair_tick, 'mark_finding_outcome') as mark:
+            repair_tick.reconcile_fix_prs(c, self.queue)
+            mark.assert_not_called()
+            c.pr_info.return_value = {'state': 'MERGED', 'mergeCommit': {'oid': self.tip}}
+            repair_tick.reconcile_fix_prs(c, self.queue)
+            self.assertEqual(mark.call_args.args[3], self.tip)
+            repair_tick.reconcile_fix_prs(c, self.queue)
+            self.assertEqual(mark.call_count, 1)
+
+    def test_source_failure_is_retained_without_aborting_reconciliation(self):
+        item = self.queue['items'][0]
+        record = item['repair_runs']['run1']
+        record.update(fix_pr={'number': 99}, verdicts=[])
+        c = SimpleNamespace(iso=lambda: 'now', git=lambda *args: self.tip,
+                            is_ancestor=lambda *args: True,
+                            pr_info=lambda n: {'state': 'MERGED', 'mergeCommit': {'oid': self.tip}})
+        with mock.patch.object(repair_tick, 'publish_source_resolution', side_effect=RuntimeError('forge exhausted')):
+            repair_tick.reconcile_fix_prs(c, self.queue)
+        self.assertEqual(record['source_publication_error'], 'forge exhausted')
+        self.assertNotIn('fix_merged', record)
+        errors = repair_tick.digest(self.root, self.queue)['source_publication_errors']
+        self.assertEqual(errors, [{'item': item['id'], 'run': 'run1', 'error': 'forge exhausted'}])
+        with mock.patch.object(repair_tick, 'publish_source_resolution'):
+            repair_tick.reconcile_fix_prs(c, self.queue)
+        self.assertEqual(record['fix_merged'], 'now')
+        self.assertNotIn('source_publication_error', record)
+
+    def test_merge_head_mismatch_cannot_mark_prepared_finding_fixed(self):
+        record = self.queue['items'][0]['repair_runs']['run1']
+        record.update(fix_pr={'number': 99}, publication={'head': self.pin})
+        c = SimpleNamespace(pr_info=lambda n: {'state': 'MERGED', 'headRefOid': self.tip,
+                                              'mergeCommit': {'oid': self.tip}})
+        with mock.patch.object(repair_tick, 'mark_finding_outcome') as mark:
+            repair_tick.reconcile_fix_prs(c, self.queue)
+            mark.assert_not_called()
+        self.assertNotIn('fix_merged', record)
+
+    def test_fix_pr_provenance_includes_threadless_and_pr_sources(self):
+        path = self.root / 'state/repair/inbox/crq-run1-F1.json'
+        job = json.loads(path.read_text())
+        job.update(canonical_finding_id='canonical-id', review_id='ledger-review-id', pr=0)
+        atomic(path, job)
+        c = SimpleNamespace(STATE=self.root / 'state', REPO='example/repo')
+        body = '\n'.join(repair_tick.repair_provenance(c, self.queue['items'][0]['repair_runs']['run1'], 'run1'))
+        for value in ('canonical-id', 'ledger-review-id', 'threadless', '/pull/1', 'crq-run1-F2', 'run1'):
+            self.assertIn(value, body)
+
+    def test_source_resolution_resumes_existing_publication_journal(self):
+        item = self.queue['items'][0]
+        record = item['repair_runs']['run1']
+        job_id = record['jobs'][0]
+        path = self.root / 'state/repair/inbox' / (job_id + '.json')
+        job = json.loads(path.read_text())
+        job['source_thread_id'] = 'thread-node'
+        atomic(path, job)
+        record.update(publication={'head': self.tip}, fix_pr={'url': 'https://github.com/example/repo/pull/99'},
+                      verdicts=[{'job': job_id, 'verdict': 'FIXED'}])
+        atomic(self.root / 'state/repair' / job_id / 'publication.json', record['publication'])
+        c = SimpleNamespace(STATE=self.root / 'state', REPO='example/repo', run=mock.Mock(),
+                            gh_json=mock.Mock(side_effect=[[], {'data': {'resolveReviewThread': {'thread': {'isResolved': True}}}}]))
+        repair_tick.publish_source_resolution(c, record, self.tip)
+        repair_tick.publish_source_resolution(c, record, self.tip)
+        self.assertEqual(c.run.call_count, 1)
+        self.assertEqual(c.gh_json.call_count, 2)
+        journal = json.loads((self.root / 'state/repair' / job_id / 'publication.json').read_text())
+        self.assertEqual(journal['source_resolutions'], [job_id])
+        self.assertIn('--body-file', c.run.call_args.args[0])
+
+    def test_enqueue_preserves_explicit_source_ids_and_published_ordinal(self):
+        rdir = self.root / 'runs/source'
+        rdir.mkdir(parents=True)
+        events = [{'type': 'finding', 'severity': 'minor', 'fileName': 'other', 'comment': 'minor'},
+                  {'type': 'finding', 'severity': 'major', 'fileName': 'src/kept.ts', 'comment': 'major',
+                   'id': 'vendor-id', 'source_id': 'source-id', 'review_id': 'review-id', 'thread_id': 'thread-node'}]
+        (rdir / 'review.ndjson').write_text('\n'.join(json.dumps(e) for e in events))
+        c = SimpleNamespace(REPO='o/r', item_repo=lambda item: 'o/r', CONFIG=self.config,
+                            STATE=self.root / 'state', git=lambda *a, **k: '' if a[0] == 'rev-list' else self.tip)
+        item = {'id': 'pr9', 'pr': 9, 'kind': 'merged', 'state': 'reviewing'}
+        meta = {'run_id': 'source-run', 'base': self.pin, 'head': self.tip}
+        self.assertTrue(repair_tick.enqueue(c, {'items': []}, item, meta, rdir))
+        job = json.loads((self.root / 'state/repair/inbox/crq-source-run-F1.json').read_text())
+        self.assertEqual(job['source'], {'id': 'vendor-id', 'source_id': 'source-id',
+                                         'review_id': 'review-id', 'thread_id': 'thread-node', 'finding_number': 2, 'run': 'source-run'})
+        self.assertNotIn('_source', job['finding'])
+        self.assertEqual(repair_tick.source_thread(c, job), 'thread-node')
+        job.pop('source')
+        job_path = self.root / 'state/repair/inbox/crq-source-run-F1.json'
+        atomic(job_path, job)
+        self.assertTrue(repair_tick.enqueue(c, {'items': []}, item, meta, rdir))
+        self.assertEqual(json.loads(job_path.read_text())['source']['thread_id'], 'thread-node')
+
+    def test_source_thread_lookup_pages_and_refuses_ambiguous_matches(self):
+        job = {'pr': 9, 'run': 'run1', 'finding': {'path': 'src/kept.ts'}, 'source': {'finding_number': 2}}
+        def page(threads):
+            return {'data': {'repository': {'pullRequest': {'reviewThreads': {'nodes': threads}}}}}
+        def thread(tid, run='run1', path='src/kept.ts'):
+            return {'id': tid, 'comments': {'nodes': [{'path': path,
+                    'body': '**crq finding F2 [major]** issue\n<sub>crq run `' + run + '`, line 1</sub>'}]}}
+        c = SimpleNamespace(REPO='o/r', gh_json=mock.Mock(return_value=[page([thread('wrong', run='run2')]), page([thread('right')])]))
+        self.assertEqual(repair_tick.source_thread(c, job), 'right')
+        revalidated = {**job, 'run': 'new-run', 'source': {**job['source'], 'run': 'run1'}}
+        self.assertEqual(repair_tick.source_thread(c, revalidated), 'right')
+        self.assertIn('--paginate', c.gh_json.call_args.args[0])
+        c.gh_json.return_value = [page([thread('right'), thread('duplicate')])]
+        with self.assertRaisesRegex(ValueError, 'ambiguous'):
+            repair_tick.source_thread(c, job)
+        c.gh_json.return_value = [page([])]
+        self.assertIsNone(repair_tick.source_thread(c, job))
+        self.assertIsNone(repair_tick.source_thread(c, {**job, 'pr': 0}))
+
+    def test_same_pr_publication_reconciles_only_after_validated_merge(self):
+        item = self.queue['items'][0]
+        record = item['repair_runs']['run1']
+        job_id = record['jobs'][0]
+        record['verdicts'] = [{'job': job_id, 'verdict': 'FIXED'}]
+        publication = {'open_pr': True, 'head': self.tip, 'branch': 'branch', 'commits': [self.tip]}
+        c = SimpleNamespace(STATE=self.root / 'state', REPO='o/r', save_queue=lambda q: None,
+                            iso=lambda: 'now', git=lambda *args: self.tip, is_ancestor=lambda *args: True,
+                            pr_info=mock.Mock(return_value={'state': 'OPEN'}))
+        repair_tick.finalize_publication(c, self.queue, item, 'run1', record, publication)
+        self.assertEqual(record['fix_pr']['number'], item['pr'])
+        with mock.patch.object(repair_tick, 'mark_finding_outcome') as mark, mock.patch.object(repair_tick, 'publish_source_resolution'):
+            repair_tick.reconcile_fix_prs(c, self.queue)
+            mark.assert_not_called()
+            c.pr_info.return_value = {'state': 'MERGED', 'headRefOid': self.tip, 'mergeCommit': {'oid': self.tip}}
+            repair_tick.reconcile_fix_prs(c, self.queue)
+            self.assertEqual(mark.call_args.args[3], self.tip)
+
+    def test_obsolete_generation_cannot_harvest_or_publish(self):
+        item = self.queue['items'][0]
+        record = item['repair_runs']['run1']
+        job_id = record['jobs'][0]
+        job_path = self.root / 'state/repair/inbox' / (job_id + '.json')
+        job = json.loads(job_path.read_text())
+        job['canonical_finding_id'] = 'canonical'
+        atomic(job_path, job)
+        atomic(self.root / 'state/backfill/findings/triage/canonical.json',
+               {'receipt': {'repair_task': 'newer-generation'}})
+        atomic(self.root / 'state/repair' / job_id / 'result.json',
+               {'job': job_id, 'item': item['id'], 'verdict': 'FIXED'})
+        with mock.patch.object(repair_tick, 'publish') as publish:
+            repair_tick.harvest(SimpleNamespace(STATE=self.root / 'state'), self.queue, item)
+            publish.assert_not_called()
+        self.assertEqual(record['state'], 'stale')
+        self.assertEqual(item['state'], 'done')
+
     def git(self, *args):
         return subprocess.run(['git', '-C', str(self.clone), *args], check=True,
                               capture_output=True, text=True).stdout.strip()
