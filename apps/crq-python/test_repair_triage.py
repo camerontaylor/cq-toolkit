@@ -51,6 +51,23 @@ class PhaseTest(FindingTest):
         judge.assert_not_called()
         self.assertEqual(result['unjudged'], 1)
 
+    def test_operator_supersedes_delivered_finding_before_dispatch(self):
+        self.inbox = delivery.Inbox(self.root / 'state/backfill/findings', self.out)
+        self.inbox.ingest(self.value)
+        _, queue, _ = self.run_phase()
+        item = queue['items'][0]
+        record = next(iter(item['repair_runs'].values()))
+        job_id = record['jobs'][0]
+        self.f.repo.git('update-ref', 'refs/remotes/origin/main', self.t)
+        config = {'clone': str(self.f.repo.root), 'repair': {'max_rounds_per_pin': 2}}
+        self.assertEqual(drain_job(self.root, config, queue, job_id)[0], 'run')
+        self.inbox.triage(self.fid, self.f.repo, self.t, 'superseded', 'operator',
+                          'Historical requirement retired at this commit', AT, fixing_commit=self.t)
+        status, _, reason = drain_job(self.root, config, queue, job_id)
+        self.assertEqual(status, 'skip')
+        self.assertIn('canonical', reason)
+        self.assertEqual(record['state'], 'queued')  # Eligibility must honor the ledger itself.
+
     def test_delivered_pr_zero_job_is_consumed_and_harvested(self):
         _, queue, _ = self.run_phase()
         item = queue['items'][0]
