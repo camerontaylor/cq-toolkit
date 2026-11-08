@@ -182,6 +182,7 @@ export async function readSlotMetadata(metadataPath: string): Promise<SlotMetada
 
 /** Attach the one metadata protocol to an already-held persistent lock inode. */
 export function attachSlotMetadata(lock: Awaited<ReturnType<typeof acquireFileLock>>) {
+  if (!lock.path.endsWith('.lock')) throw new Error('Slot lock path must end in .lock');
   const metadataPath = lock.path.replace(/\.lock$/, '.json');
   const slot = {
     ...lock,

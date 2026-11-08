@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from 'vitest';
-import { mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { once } from 'node:events';
@@ -7,6 +7,7 @@ import {
   CheckoutWriterContext,
   checkoutWriterStdio,
 } from '../../src/shared/checkoutWriterContext.js';
+import { acquireSlot } from '../../src/adapters/lock/slotLock.js';
 import { checkoutWriterCommand } from '../../src/shared/checkoutWriterCommand.js';
 import { makeGhRunner } from '../../src/adapters/forge-github/gh.js';
 import { spawnManaged } from '../../src/shared/proc.js';
@@ -21,7 +22,7 @@ afterEach(async () => {
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), 'cq-writer-'));
   roots.push(root);
-  const context = new CheckoutWriterContext();
+  const context = new CheckoutWriterContext(acquireSlot);
   const first = await context.acquire(root, 1),
     second = await context.acquire(root, 2);
   await context.begin();
@@ -77,7 +78,7 @@ test.each(['gh', 'managed', 'acp', 'argv', 'shell', 'effects', 'collector'] as c
         return result.stdout;
       });
       expect(JSON.parse(stdout) as unknown).toEqual(f.expected);
-      expect(f.context.children.size).toBe(0);
+      expect(f.context.pendingChildren).toBe(0);
     } finally {
       await f.context.close();
     }
@@ -99,7 +100,7 @@ test('outside review context preserves stdin stdout stderr (mutation: append unc
 test('unbegun context refuses spawn snapshot (mutation: omit durable-admission guard)', async () => {
   const root = await mkdtemp(join(tmpdir(), 'cq-writer-'));
   roots.push(root);
-  const context = new CheckoutWriterContext();
+  const context = new CheckoutWriterContext(acquireSlot);
   try {
     expect(() => context.run(() => checkoutWriterStdio(['pipe', 'pipe', 'pipe']))).toThrow(
       /no held slots/,
@@ -134,6 +135,71 @@ test('post-spawn error does not drain a live child (mutation: settle tracking on
     child.kill('SIGKILL');
     await closed;
     await f.context.close().catch(() => undefined);
+  }
+});
+
+test('external child-set mutation cannot bypass drain (mutation: expose the live child set)', async () => {
+  const f = await fixture();
+  const child = f.context.run(() =>
+    spawnAcpProcess({
+      command: process.execPath,
+      args: ['-e', "console.log('ready');process.stdin.resume()"],
+      cwd: f.root,
+      env: {},
+    }),
+  );
+  const closed = new Promise<void>((done) => child.once('close', () => done()));
+  try {
+    await once(child.stdout!, 'data');
+    const exposed: unknown = Reflect.get(f.context, 'children');
+    if (exposed instanceof Set) exposed.clear();
+    // A caller can add a similarly named field, but cannot alter the private tracker.
+    Reflect.set(f.context, 'children', new Set());
+    await expect(f.context.close()).rejects.toThrow(/not closed/);
+    expect(f.context.pendingChildren).toBe(1);
+  } finally {
+    child.kill('SIGKILL');
+    await closed;
+    await f.context.close().catch(() => undefined);
+  }
+});
+
+test('begin compensation restores verified checkout binding (mutation: default checkout pre-state to unbound)', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'cq-writer-'));
+  roots.push(root);
+  const checkoutPath = join(root, 'checkout');
+  const checkoutGitDir = join(checkoutPath, '.git');
+  await mkdir(checkoutGitDir, { recursive: true });
+  const context = new CheckoutWriterContext(async (common, key) => {
+    const slot = await acquireSlot(common, key);
+    if (key !== 2) return slot;
+    return {
+      ...slot,
+      async writeMetadata(metadata) {
+        if (metadata.incomplete) throw new Error('injected second-slot persistence failure');
+        await slot.writeMetadata(metadata);
+      },
+    };
+  });
+  try {
+    const checkout = await context.acquire(root, { checkoutPath, checkoutGitDir });
+    const pr = await context.acquire(root, 2);
+    expect(await checkout.readMetadata()).toBeUndefined();
+    expect(await pr.readMetadata()).toBeUndefined();
+    await expect(context.begin()).rejects.toThrow(/injected second-slot/);
+    expect(await checkout.readMetadata()).toEqual({
+      version: 1,
+      state: 'bound',
+      incomplete: false,
+      checkoutPath: await realpath(checkoutPath),
+      checkoutGitDir: await realpath(checkoutGitDir),
+    });
+    expect(await pr.readMetadata()).toEqual({ version: 1, state: 'unbound', incomplete: false });
+    expect(() => context.run(() => checkoutWriterStdio(['pipe', 'pipe', 'pipe']))).toThrow(
+      /not yet durable/,
+    );
+  } finally {
+    await context.close();
   }
 });
 
@@ -173,7 +239,7 @@ test.each([
           ),
         ),
       ).rejects.toMatchObject({ code });
-      expect(f.context.children.size).toBe(0);
+      expect(f.context.pendingChildren).toBe(0);
     } finally {
       await f.context.close().catch(() => undefined);
     }

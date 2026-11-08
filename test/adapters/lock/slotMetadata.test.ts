@@ -61,3 +61,19 @@ test('existing lock attachment uses persistent metadata sibling (mutation: attac
     await recovered.close();
   }
 });
+
+test('attachment refuses a path without .lock and preserves exclusion (mutation: omit suffix validation)', async () => {
+  const path = join(await root(), 'slot');
+  const lock = await acquireFileLock(path);
+  try {
+    const before = await stat(path);
+    const bytes = await readFile(path);
+    expect(() => attachSlotMetadata(lock)).toThrow(/must end in \.lock/);
+    expect((await stat(path)).ino).toBe(before.ino);
+    expect(await readFile(path)).toEqual(bytes);
+    await lock.assertIdentity();
+    await expect(acquireFileLock(path)).rejects.toThrow(/Slot busy/);
+  } finally {
+    await lock.close();
+  }
+});
