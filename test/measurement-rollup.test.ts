@@ -976,6 +976,7 @@ describe('M4b1 acceptance import composed into the M10d readout', () => {
         // HEAD2 has no recorded base: an importer unknown, never a row.
         acceptanceComment(12, missingBaseUrl, HEAD2),
       ],
+      reviews: [],
       bases: { [HEAD1]: BASE },
       complete: true,
     };
