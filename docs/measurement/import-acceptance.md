@@ -1,6 +1,6 @@
 # Acceptance import recipe (M4b1)
 
-A **recorded snapshot** of one PR's comments is captured by hand, read-only,
+A **recorded snapshot** of one PR's comments and reviews is captured by hand, read-only,
 with the recipe below (always `env -u GITHUB_TOKEN gh api`). The importer
 (`importAcceptance` in `scripts/measurement-acceptance.mjs`) is a pure
 function over the recorded JSON: no `gh`, no network, no journal writes.
@@ -40,6 +40,10 @@ env -u GITHUB_TOKEN gh api repos/{owner}/{repo}/pulls/{n}
 # 2. the issue comments, --paginate --slurp, flattened to one list — record
 #    id, html_url, created_at, updated_at, user.login, body
 env -u GITHUB_TOKEN gh api "repos/{owner}/{repo}/issues/{n}/comments?per_page=100" --paginate --slurp
+# 2b. the PR reviews (cq-review-post findings mode posts its verdict as one),
+#    --paginate --slurp, flattened to one list as `reviews` — record id,
+#    html_url, submitted_at, user.login, body
+env -u GITHUB_TOKEN gh api "repos/{owner}/{repo}/pulls/{n}/reviews?per_page=100" --paginate --slurp
 # 3. per head named by an acceptance header, at capture time —
 #    bases[headSha] = merge_base_commit.sha, null when compare fails
 env -u GITHUB_TOKEN gh api repos/{owner}/{repo}/compare/{base.ref}...{headSha}
@@ -47,7 +51,10 @@ env -u GITHUB_TOKEN gh api repos/{owner}/{repo}/compare/{base.ref}...{headSha}
 
 ## What counts as an acceptance
 
-Only the comment's first line (one trailing `\r` trimmed), anchored exact:
+Only the header line of each comment or review is read, anchored exact: the
+first line, one trailing `\r` trimmed, after skipping leading lines that are
+a whole HTML comment (a publisher's run marker such as
+`<!-- crq-findings run=… -->`, which findings-mode review bodies start with).
 
 - **Review** — ``**Independent review (<reviewer>): PASS|ITERATE for
 `<40-hex sha>`**``: `reviewerId` is `self-declared:<reviewer>`, or
@@ -64,11 +71,13 @@ acceptance.
 ## Snapshot shape and unknowns
 
 Snake_case: `repo`, `pr_number`, `fetched_at` (ISO 8601 UTC); `pr` and
-`comments` as above; `bases`; `pagination`/`complete`/`failed_step` as in
+`comments` and `reviews` as above (a review's time is `submitted_at`); `bases`; `pagination`/`complete`/`failed_step` as in
 the M10a2 CI snapshot recipe (`export-ci-snapshot.md`). Unknown is never
 zero: `complete: false` still yields its rows plus one partial unknown
 naming `failed_step`; an absent or malformed snapshot (not an object,
 missing `pr`, `comments` not an array) yields no rows plus one corrupt
-unknown; a head with no recorded base is an unknown, never a row; identical
+unknown; a snapshot without `reviews` (recorded before step 2b existed)
+yields one `PR reviews not recorded` unknown and a non-array `reviews` one
+corrupt unknown; a head with no recorded base is an unknown, never a row; identical
 duplicates under the head+base+reviewer key dedupe while disagreeing copies
 conflict out — and the output never depends on comment order.

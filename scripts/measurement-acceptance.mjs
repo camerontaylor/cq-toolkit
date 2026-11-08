@@ -1,5 +1,5 @@
-// M4b1: import self-declared acceptances from a recorded PR-comment
-// snapshot (ADR-0008 T20; docs/measurement/import-acceptance.md). Pure and
+// M4b1: import self-declared acceptances from a recorded PR-comment and
+// PR-review snapshot (ADR-0008 T20; docs/measurement/import-acceptance.md). Pure and
 // offline: no files, no network, no `gh`. Independence is self-declared —
 // most agents post as the same GitHub account, so the comment's own header
 // is the only basis and /independent records exactly that. A review header
@@ -14,6 +14,9 @@ const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/; // strict UTC
 const REVIEW =
   /^\*\*Independent review \(([A-Za-z][A-Za-z0-9.+ -]{0,39})\): (PASS|ITERATE) for `([0-9a-f]{40})`\*\*$/;
 const CARRY = /^\*\*Independent PASS carried to (?:rebased )?head `([0-9a-f]{40})`\.\*\*$/;
+// A whole-line HTML comment before the header is a publisher's run marker
+// (crq's `<!-- crq-findings run=… -->` on findings-mode review bodies).
+const MARKER = /^<!--(?:(?!-->).)*-->$/;
 const REFERENCED = /https?:\/\/\S*?issuecomment-\d+/g;
 const INDEPENDENT_REASON =
   'self-declared in review comment header; reviewer identity not verified (shared GitHub account)';
@@ -41,6 +44,22 @@ function instant(v) {
   return new Date(ms).toISOString() === normal ? normal : null;
 }
 
+/** The header line: the first line after any leading marker lines, one
+ * trailing `\r` trimmed. A header anywhere later is not a header. */
+function headerLine(body) {
+  const lines = body.split('\n').map((line) => line.replace(/\r$/, ''));
+  let i = 0;
+  while (i < lines.length - 1 && MARKER.test(lines[i])) i += 1;
+  return lines[i];
+}
+
+// Issue comments carry created_at; PR reviews (findings mode posts one)
+// carry submitted_at. Reason strings keep each kind's own noun.
+const KINDS = {
+  comment: { list: 'snapshot comments', time: 'created_at' },
+  review: { list: 'snapshot reviews', time: 'submitted_at' },
+};
+
 /** Import from one recorded snapshot; see the header comment for shape. */
 export function importAcceptance(snapshot) {
   const unknown = [];
@@ -50,18 +69,30 @@ export function importAcceptance(snapshot) {
     return { acceptances: [], meta: [], unknown };
   }
   const bases = map_(snapshot.bases) ? snapshot.bases : {};
-  for (const comment of snapshot.comments) {
+  // Snapshots recorded before the reviews step (2026-11-08) have no
+  // `reviews`: PR-review acceptances are then unknown, never zero.
+  let reviews = [];
+  if (!Object.hasOwn(snapshot, 'reviews'))
+    unknown.push(bad('snapshot', 'unavailable', 'PR reviews not recorded'));
+  else if (!Array.isArray(snapshot.reviews))
+    unknown.push(bad('snapshot reviews', 'corrupt', 'reviews is not an array'));
+  else reviews = snapshot.reviews;
+  const entries = [
+    ...snapshot.comments.map((item) => ['comment', item]),
+    ...reviews.map((item) => ['review', item]),
+  ];
+  for (const [kind, comment] of entries) {
     if (!map_(comment)) {
-      unknown.push(bad('snapshot comments', 'corrupt', 'comment entry is not an object'));
+      unknown.push(bad(KINDS[kind].list, 'corrupt', `${kind} entry is not an object`));
       continue;
     }
     const url = text(comment.html_url) ? comment.html_url : null;
-    const source = url ?? `comment ${JSON.stringify(comment.id ?? null)}`;
+    const source = url ?? `${kind} ${JSON.stringify(comment.id ?? null)}`;
     if (typeof comment.body !== 'string') {
-      unknown.push(bad(source, 'corrupt', 'comment body is not a string'));
+      unknown.push(bad(source, 'corrupt', `${kind} body is not a string`));
       continue;
     }
-    const first = comment.body.split('\n', 1)[0].replace(/\r$/, '');
+    const first = headerLine(comment.body);
     const review = REVIEW.exec(first);
     const carry = review === null ? CARRY.exec(first) : null;
     if (review === null && carry === null) {
@@ -72,12 +103,13 @@ export function importAcceptance(snapshot) {
       continue;
     }
     if (url === null) {
-      unknown.push(bad(source, 'corrupt', 'acceptance comment is missing html_url'));
+      unknown.push(bad(source, 'corrupt', `acceptance ${kind} is missing html_url`));
       continue;
     }
-    const at = instant(comment.created_at);
+    const time = KINDS[kind].time;
+    const at = instant(comment[time]);
     if (at === null) {
-      unknown.push(bad(source, 'corrupt', 'comment created_at is not a UTC instant'));
+      unknown.push(bad(source, 'corrupt', `${kind} ${time} is not a UTC instant`));
       continue;
     }
     const headSha = review?.[3] ?? carry[1];
