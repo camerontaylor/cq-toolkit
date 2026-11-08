@@ -15,6 +15,7 @@ export async function captureSnapshot(
   tree: string,
   scanner?: string,
   scanTimeoutMs = 30_000,
+  originalHead?: string,
 ) {
   if (![base, tree].every((oid) => /^[0-9a-f]{40}$/.test(oid)))
     throw new Error('invalid snapshot identity');
@@ -62,9 +63,15 @@ export async function captureSnapshot(
     (await git(['cat-file', '-t', tree])).toString().trim() !== 'tree'
   )
     throw new Error('snapshot requires a commit base and tree');
-  const head = (await git(['hash-object', '-w', '-t', 'commit', '--stdin'], commitBody(base, tree)))
-    .toString()
-    .trim();
+  if (originalHead !== undefined && !/^[0-9a-f]{40}$/.test(originalHead))
+    throw new Error('invalid original head');
+  const head =
+    originalHead ??
+    (await git(['hash-object', '-w', '-t', 'commit', '--stdin'], commitBody(base, tree)))
+      .toString()
+      .trim();
+  if ((await git(['rev-parse', head + '^{tree}'])).toString().trim() !== tree)
+    throw new Error('original head tree mismatch');
   const ids = (await git(['rev-list', '--objects', '--no-object-names', head, '^' + base]))
     .toString()
     .trim()
@@ -124,7 +131,10 @@ export async function captureSnapshot(
     });
   });
   const snapshot = { v: 1 as const, tree, objects, sha256: digest.digest('hex') };
-  if (Buffer.byteLength(JSON.stringify(snapshot)) > MAX_WIRE - 8192)
+  if (
+    Buffer.byteLength(JSON.stringify(snapshot)) >
+    (originalHead === undefined ? MAX_WIRE - 8192 : 5 * 1024 * 1024)
+  )
     throw new Error('snapshot wire exceeds bound');
   return { head, snapshot };
 }

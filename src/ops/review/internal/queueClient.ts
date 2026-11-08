@@ -1,3 +1,7 @@
+import {
+  WireSchema as ReviewWireSchema,
+  ResponseSchema as ReviewResponseSchema,
+} from './reviewOperation.js';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { z } from 'zod';
@@ -25,6 +29,7 @@ import {
   sha256,
   type QueueEvidence,
 } from './queueEvidence.js';
+import { readCqEnv, type CqEnv } from '../../../config/env.js';
 import { processEnv } from '../../../config/process-env.js';
 
 const CommonPage = z.object({
@@ -98,13 +103,18 @@ export function makeConfiguredQueueClient() {
 }
 
 /** Fixed capability only; alias is operator configured, never a request field. */
-export function sshQueueTransport(alias: string): QueueTransport {
+export function sshQueueTransport(
+  alias: string,
+  command: 'queue-v1' | 'review-v1' = 'queue-v1',
+): QueueTransport {
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/.test(alias)) throw new Error('invalid queue SSH alias');
   return (request, options) =>
     new Promise((resolve, reject) => {
       const signal = options?.signal;
       signal?.throwIfAborted();
-      if (Buffer.byteLength(request) > QUEUE_WIRE_BYTES) {
+      if (
+        Buffer.byteLength(request) > (command === 'review-v1' ? 6 * 1024 * 1024 : QUEUE_WIRE_BYTES)
+      ) {
         reject(new Error('oversized queue request'));
         return;
       }
@@ -128,7 +138,7 @@ export function sshQueueTransport(alias: string): QueueTransport {
           'RequestTTY=no',
           '--',
           alias,
-          'queue-v1',
+          command,
         ],
         { stdio: ['pipe', 'pipe', 'pipe'] },
       );
@@ -170,6 +180,8 @@ export function sshQueueTransport(alias: string): QueueTransport {
         clearTimeout(timer);
         signal?.removeEventListener('abort', onAbort);
         if (code === 0 && size <= QUEUE_WIRE_BYTES) resolve(Buffer.concat(chunks).toString('utf8'));
+        else if (command === 'review-v1' && code === 2 && size === 0)
+          reject(new QueueUnsupported('review-v1 capability unavailable'));
         else if (
           code === 2 &&
           size === 0 &&
@@ -422,3 +434,76 @@ export function makeQueueClient(transport: QueueTransport): DeferredQueueClient 
     },
   };
 }
+
+/** review-v1 uses the queue identity; no author or vendor fallback exists. */
+export function makeReviewClient(transport: QueueTransport) {
+  async function request(input: z.infer<typeof ReviewWireSchema>, options?: QueueLifetimeOptions) {
+    let wire: string;
+    try {
+      const parsed = ReviewWireSchema.parse(input);
+      if (
+        parsed.op === 'submit' &&
+        parsed.snapshot &&
+        Buffer.byteLength(JSON.stringify(parsed.snapshot)) > 5 * 1024 * 1024
+      )
+        throw new Error('snapshot wire exceeds 5 MiB bound');
+      wire = JSON.stringify(parsed) + '\n';
+      if (Buffer.byteLength(wire) > 6 * 1024 * 1024) throw new Error('oversized review request');
+    } catch (error) {
+      throw new ReviewInputError(error instanceof Error ? error.message : String(error));
+    }
+    const raw = await transport(wire, options);
+    if (Buffer.byteLength(raw) > QUEUE_WIRE_BYTES) throw new Error('oversized review response');
+    const result = ReviewResponseSchema.parse(JSON.parse(raw));
+    if ('error' in result) throw new ReviewRemoteError(result.error);
+    if (
+      input.op !== 'capabilities' &&
+      ((!('state' in result) && !(input.op === 'result' && 'index' in result)) ||
+        ('request_id' in result &&
+          result.request_id !== undefined &&
+          result.request_id !== input.request_id))
+    )
+      throw new Error('review response operation or request mismatch');
+    return result;
+  }
+  return {
+    request,
+    async capabilities(options?: QueueLifetimeOptions) {
+      try {
+        const result = await request({ v: 1, op: 'capabilities' }, options);
+        if (
+          'command' in result &&
+          (['submit', 'status', 'result', 'cancel'] as const).every((op) =>
+            result.operations.includes(op),
+          ) &&
+          result.features.includes('chunked-result-v1')
+        )
+          return result;
+        throw new QueueUnsupported('review-v1 capability unavailable');
+      } catch (error) {
+        if (
+          error instanceof QueueUnsupported ||
+          (error instanceof ReviewRemoteError &&
+            ['unsupported', 'unsupported-command'].includes(error.remote.code))
+        )
+          throw new QueueUnsupported('review-v1 capability unavailable');
+        throw error;
+      }
+    },
+  };
+}
+export class ReviewRemoteError extends Error {
+  constructor(readonly remote: { code: string; message: string; retryable: boolean }) {
+    super(remote.message);
+  }
+}
+
+export function makeConfiguredReviewClient(env: CqEnv = readCqEnv()) {
+  const alias = env.values['CQ_QUEUE_SSH_ALIAS'];
+  if (typeof alias !== 'string' || !alias)
+    throw new QueueConfigurationError('Configure CQ_QUEUE_SSH_ALIAS for review-v1');
+  return makeReviewClient(sshQueueTransport(alias, 'review-v1'));
+}
+
+/** A definite local refusal before transport dispatch. */
+export class ReviewInputError extends Error {}

@@ -57,6 +57,7 @@
 // explicitly declares surface, per the coverage heuristic's
 // referenced-module rule.)
 import { z } from 'zod';
+import { ReferenceSchema, SubmitInputSchema, WaitInputSchema } from './internal/reviewOperation.js';
 import { createDriverFactory } from '../../driver/factory.js';
 import { HarnessConfigSchema } from '../../harness/config.js';
 import type { Op, OpRegistryEntry } from '../../kernel/types.js';
@@ -606,6 +607,31 @@ export const registry: OpRegistryEntry[] = [
             : {},
         ),
       }) as Op<unknown, unknown>,
+  },
+  {
+    name: 'review.submit',
+    inputSchema: SubmitInputSchema,
+    importer: async () => (await import('./submit.js')).makeSubmit() as Op<unknown, unknown>,
+  },
+  {
+    name: 'review.status',
+    inputSchema: ReferenceSchema,
+    importer: async () => (await import('./status.js')).makeStatus() as Op<unknown, unknown>,
+  },
+  {
+    name: 'review.wait',
+    inputSchema: WaitInputSchema,
+    importer: async () => (await import('./wait.js')).makeWait() as Op<unknown, unknown>,
+  },
+  {
+    name: 'review.result',
+    inputSchema: ReferenceSchema,
+    importer: async () => (await import('./result.js')).makeResult() as Op<unknown, unknown>,
+  },
+  {
+    name: 'review.cancel',
+    inputSchema: ReferenceSchema,
+    importer: async () => (await import('./cancel.js')).makeCancel() as Op<unknown, unknown>,
   },
   // ./queue.js owns queue-v1; ./internal/queueEvidence.js is isolated from findings v1.
   {

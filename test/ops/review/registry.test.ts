@@ -1,9 +1,9 @@
 // E4 slice 1b — tests for the review family registry
-// (src/ops/review/registry.ts): the SIX review-loop op entries, each with a
+// (src/ops/review/registry.ts): producer, loop and queued-review entries, each with a
 // strict registry-time input mirror and a lazy importer.
 //
 // Pinned here, for EVERY entry:
-//   1. Name — the family carries exactly the six loop ops, each entry named
+//   1. Name — the family carries exactly the declared ops, each entry named
 //   `<family>.<module base>` so the central completeness heuristic's
 //   family-prefixed rule covers the module.
 //   2. Schema accepts a minimal valid input for that op (the same JSON a
@@ -46,9 +46,14 @@ interface LooseResult {
   error?: string;
 }
 
-/** The review producer plus six loop entries, in registry order. */
+/** The complete review family surface, including queued review operations. */
 const ENTRY_NAMES = [
   'review.addressMany',
+  'review.submit',
+  'review.status',
+  'review.wait',
+  'review.result',
+  'review.cancel',
   'review.retry',
   'review.drain',
   'review.enqueue',
@@ -118,6 +123,11 @@ const minimalInputs: Record<string, () => Record<string, unknown>> = {
     maxTokens: 2,
     tokensPerPr: 1,
   }),
+  'review.submit': () => ({ repo: 'owner/repo', target: 'main' }),
+  'review.status': () => ({ requestId: 'request-1' }),
+  'review.wait': () => ({ requestId: 'request-1' }),
+  'review.result': () => ({ requestId: 'request-1' }),
+  'review.cancel': () => ({ requestId: 'request-1' }),
   'review.enqueue': () => ({
     requestId: 'request-1',
     binding: {
