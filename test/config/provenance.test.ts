@@ -66,6 +66,10 @@ describe('provenanceConfig is schema-valid for every registry entry', () => {
     '/tmp/x',
     'a,b',
     'alias',
+    'APPROVED',
+    'OWNER',
+    'human',
+    'refs/heads/main',
     'owner/repo',
     'x',
   ];
