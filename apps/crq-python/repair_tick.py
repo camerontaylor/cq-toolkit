@@ -205,6 +205,8 @@ def mark_finding_outcome(c, job, result, merge=None, fix_pr=None):
 
 
 def repair_provenance(c, record, run):
+    import review_ledger as ledger
+    reviews = None
     lines = ['', 'Source run: `' + run + '`', '', '| finding ID | source ledger/review | source |',
              '|---|---|---|']
     for job_id in record['jobs']:
@@ -212,7 +214,29 @@ def repair_provenance(c, record, run):
         finding = job.get('finding', {})
         fid = job.get('canonical_finding_id') or finding.get('id') or finding.get('source_id') or job.get('source', {}).get('id') or job.get('source', {}).get('source_id') or job_id
         source = job.get('review_id') or job.get('source', {}).get('review_id') or job.get('source', {}).get('run') or job.get('run') or run
-        link = ('https://github.com/' + c.REPO + '/pull/' + str(job['pr'])) if job.get('pr') else 'threadless; finding ledger is authoritative'
+        job_file = c.STATE / 'repair/inbox' / (job_id + '.json')
+        source_run = job.get('source', {}).get('run') or job.get('run') or run
+        raw = c.STATE / 'runs' / source_run / 'review.ndjson'
+        local = raw if raw.exists() else job_file
+        link = ('https://github.com/' + c.REPO + '/pull/' + str(job['pr'])) if job.get('pr') else 'threadless; local source `' + str(local.relative_to(c.STATE.parent)) + '`'
+        if job.get('canonical_finding_id'):
+            row = c.STATE / 'backfill/findings/triage' / (fid + '.json')
+            local = row if row.exists() else job_file
+            link = 'threadless; local source `' + str(local.relative_to(c.STATE.parent)) + '`'
+            if reviews is None:
+                try:
+                    reviews = {v['id']: v for v in finding_inbox(c).publication.retained()
+                               if isinstance(v, dict) and v.get('event_type') == 'review'}
+                except (OSError, ValueError, KeyError):
+                    reviews = {}
+            value = reviews.get(job.get('review_id') or job.get('source', {}).get('review_id'))
+            if value:
+                try:
+                    ledger.validate(value)
+                    if value['payload']['repo'] == c.REPO and any(f['id'] == fid for f in value['payload']['findings']):
+                        link = '[ledger review](https://github.com/' + c.REPO + '/blob/cq/review-ledger/' + ledger.record_path(value) + ')'
+                except (ValueError, KeyError, TypeError):
+                    pass  # Keep an accurate local locator; never invent a ledger URL.
         lines.append('| `' + str(fid) + '` | `' + str(source) + '` | ' + link + ' |')
     return lines
 
