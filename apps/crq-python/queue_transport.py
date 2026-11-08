@@ -109,6 +109,11 @@ def validate_policy(policy):
         raise ValueError("invalid queue policy enabled boolean")
     if not _match(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,99}/[A-Za-z0-9][A-Za-z0-9_.-]{0,99}", policy.get("repo")):
         raise ValueError("invalid queue policy repository")
+    if "repos" in policy:
+        repos = policy["repos"]
+        if (type(repos) is not list or any(not _match(
+                r"[A-Za-z0-9][A-Za-z0-9_.-]{0,99}/[A-Za-z0-9][A-Za-z0-9_.-]{0,99}", repo) for repo in repos)):
+            raise ValueError("invalid queue policy repositories")
     for key in ("read", "write", "targets", "branches"):
         values = policy.get(key, [])
         if type(values) is not list or any(type(value) is not str or not value for value in values):

@@ -21,10 +21,12 @@ from author_quota import AuthorRefused
 KIND = operation.KIND
 
 
-def facts(c, base, head, profile):
-    inputs = dict(repo=c.REPO, target="main", base_commit=base, head_commit=head,
-                  base_tree=c.git("rev-parse", base + "^{tree}"),
-                  head_tree=c.git("rev-parse", head + "^{tree}"), projection="full-diff")
+def facts(c, base, head, profile, repo=None):
+    repo = repo or c.REPO
+    kwargs = {} if repo == c.REPO else dict(cwd=transport.clone_for(c, repo))
+    inputs = dict(repo=repo, target="main", base_commit=base, head_commit=head,
+                  base_tree=c.git("rev-parse", base + "^{tree}", **kwargs),
+                  head_tree=c.git("rev-parse", head + "^{tree}", **kwargs), projection="full-diff")
     return transport.resolve(c, inputs, profile)
 
 
@@ -44,17 +46,14 @@ def retained(c, item):
 
 def cycle_facts(c, item, record):
     profile = record.get("profile")
-    if (item.get("repo", c.REPO) != c.REPO or not profile
-            or record.get("range_policy") != "full-range-once-v1"):
+    if not profile or record.get("range_policy") != "full-range-once-v1":
         return None
-    return facts(c, record["base"], record["head"], profile)
+    return facts(c, record["base"], record["head"], profile, item.get("repo", c.REPO))
 
 
 def reconcile_pr(c, q, item, plan, dry):
-    if item.get("repo", c.REPO) != c.REPO:
-        return plan
     stored = transport.profile(c.CONFIG, plan["base"])
-    wanted = facts(c, plan["base"], plan["head"], stored)
+    wanted = facts(c, plan["base"], plan["head"], stored, item.get("repo", c.REPO))
     plan.update(profile=stored, config_digest=wanted["config_digest"])
     for local in q["items"]:
         if local.get("kind") != KIND or not operation.equivalent(local.get("identity_inputs"), wanted):
@@ -80,11 +79,15 @@ def reconcile_pr(c, q, item, plan, dry):
 
 def prepare(c, q, item, dry, *, completed_only=False):
     wanted = item["identity_inputs"]
+    if wanted["repo"] != c.REPO:
+        clone = transport.clone_for(c, wanted["repo"])
+        if not all(c.object_present(wanted[end + "_commit"], clone=clone) for end in ("base", "head")):
+            c.fetch(clone=clone)
     # Re-resolve pinned objects/config but never today's profile flags.
-    if facts(c, wanted["base_commit"], wanted["head_commit"], item["profile"]) != wanted:
+    if facts(c, wanted["base_commit"], wanted["head_commit"], item["profile"], wanted["repo"]) != wanted:
         raise c.NotReady("pinned-local-review-facts-mismatch")
     for pr in q["items"]:
-        if pr.get("kind") not in ("open", "delta"):
+        if pr.get("kind") not in ("open", "delta") or pr.get("repo", c.REPO) != wanted["repo"]:
             continue
         for record in reversed(pr.get("cycles", [])):
             if item.get("repeat_requested", item["generation"] > 1):

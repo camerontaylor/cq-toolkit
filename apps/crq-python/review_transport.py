@@ -13,6 +13,7 @@ import review_admission as admission
 import review_operation as operation
 import review_notify
 import review_receipt
+import repo_registry
 
 MAX_BYTES = 6 * 1024 * 1024
 MAX_SNAPSHOT_BYTES = 5 * 1024 * 1024
@@ -47,9 +48,19 @@ def profile(config, base):
     return result
 
 
+def clone_for(runner, repo):
+    """Clone configuration locates objects; policy authorization is separate."""
+    if repo == runner.REPO:
+        return Path(runner.CLONE)
+    cfg = repo_registry.by_repo(getattr(runner, "REPOS", []), repo)
+    if cfg is None:
+        raise ValueError("unconfigured review repository")
+    return Path(cfg["clone"])
+
+
 def resolve(runner, inputs, stored):
     """Compute all hashed facts from installed immutable objects."""
-    clone = runner.CLONE
+    clone = clone_for(runner, inputs["repo"])
     facts = {k: inputs[k] for k in ("repo", "base_commit", "head_commit", "projection")}
     for end in ("base", "head"):
         commit = author_snapshot.git(clone, "rev-parse", "--verify", inputs[end + "_commit"] + "^{commit}").decode().strip()
@@ -91,17 +102,31 @@ def handle(raw, runner, *, principal, policy):
     op = req["op"]
     if op == "submit":
         inputs = req["inputs"]
-        if inputs["repo"] != runner.REPO or inputs["repo"] != policy["repo"]:
+        allowed = [policy["repo"], *policy.get("repos", [])]
+        configured = inputs["repo"] == runner.REPO or repo_registry.by_repo(getattr(runner, "REPOS", []), inputs["repo"]) is not None
+        if inputs["repo"] not in allowed or not configured:
             return review_receipt.canonical(dict(v=1, action="observed", state="unsupported", reason="unsupported-repo"))
         if inputs["target"] not in policy.get("branches", []):
             raise ValueError("target branch denied")
         key = admission.key_digest(inputs, repeat=req.get("repeat", False))
         result = admission.retry(q, req["request_id"], key)
         if result is None:
+            clone = clone_for(runner, inputs["repo"])
+            if inputs["repo"] != runner.REPO:
+                needed = [inputs["base_commit"]] if "snapshot" in req else [inputs["base_commit"], inputs["head_commit"]]
+                try:
+                    for commit in needed:
+                        author_snapshot.git(clone, "cat-file", "-e", commit + "^{commit}")
+                except author_snapshot.AuthorRefused:
+                    runner.fetch(clone=clone)
             if "snapshot" in req:
                 if req["snapshot"]["tree"] != inputs["head_tree"]:
                     raise ValueError("snapshot tree mismatch")
-                author_snapshot.install(req["snapshot"], dict(base=inputs["base_commit"], head=inputs["head_commit"]), runner, original=True)
+                cfg = repo_registry.by_repo(getattr(runner, "REPOS", []), inputs["repo"])
+                classes = (runner.UNIVERSAL_SCAN_CLASSES | set(cfg.get("scan_extra_classes", []))
+                           if inputs["repo"] != runner.REPO else None)
+                author_snapshot.install(req["snapshot"], dict(base=inputs["base_commit"], head=inputs["head_commit"]),
+                                        runner, original=True, clone=clone, classes=classes)
             stored = profile(runner.CONFIG, inputs["base_commit"])
             facts = resolve(runner, inputs, stored)
             import local_review_runtime

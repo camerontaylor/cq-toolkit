@@ -344,7 +344,7 @@ class ReviewTransportTests(SnapshotTransportFixture, unittest.TestCase):
         ref = self.seed_live_denylist()
         with mock.patch.multiple(crq, CLONE=self.destination, DEFAULT_REF=ref):
             rules = crq.denylist_rules()
-        self.runner.denylist_rules = lambda: rules + [{"regex": ".+", "path": "^metadata-only$"}]
+        self.runner.denylist_rules = lambda classes=None: [r for r in rules if classes is None or r["id"] in classes] + [{"regex": ".+", "path": "^metadata-only$"}]
         self.assertEqual(self.call_review(self.review)["action"], "created")
 
     def test_original_decoded_content_limit_is_reachable_and_enforced(self):
@@ -364,3 +364,90 @@ class ReviewTransportTests(SnapshotTransportFixture, unittest.TestCase):
             else:
                 with self.assertRaisesRegex(author_snapshot.AuthorRefused, "3145728 decoded bytes"):
                     self.call_review(req)
+
+    def test_foreign_repo_snapshot_plan_launch_and_cleanup(self):
+        import local_review_runtime as runtime
+        foreign = "example/secondary"
+        self.review["inputs"]["repo"] = foreign
+        self.policy["repos"] = [foreign]
+        cfg = dict(repo=foreign, clone=str(self.destination), scan_extra_classes=[])
+        self.runner.REPOS = [cfg]
+        self.runner.UNIVERSAL_SCAN_CLASSES = crq.UNIVERSAL_SCAN_CLASSES
+        self.runner.CLONE = self.repo  # different object store: import must target destination
+        ref = self.seed_live_denylist()
+        with mock.patch.multiple(crq, CLONE=self.destination, DEFAULT_REF=ref):
+            rules = crq.denylist_rules()
+        self.assertGreater(len(rules), 0)
+        self.runner.denylist_rules = lambda classes=None: [r for r in rules if classes is None or r["id"] in classes]
+        result = self.call_review(self.review)
+        self.assertEqual(result["action"], "created")
+        self.assertTrue(author_snapshot.git(self.destination, "cat-file", "commit", self.head))
+        self.assertTrue(author_snapshot.git(self.destination, "for-each-ref", "refs/crq/author-snapshots"))
+        self.assertFalse(author_snapshot.git(self.repo, "for-each-ref", "refs/crq/author-snapshots"))
+        item = self.saved["items"][0]
+        wt_root = self.state / "worktrees"
+        with mock.patch.multiple(crq, CLONE=self.repo, REPOS=[cfg], STATE=self.state,
+                RUNS=self.state / "runs", WT_ROOT=wt_root, CONFIG={}), \
+             mock.patch.object(crq, "save_queue"), mock.patch.object(crq, "event"), \
+             mock.patch.object(crq, "append_work_record"), \
+             mock.patch.object(crq, "secret_scan", return_value=(True, {})) as scan, \
+             mock.patch.object(crq.subprocess, "Popen", wraps=crq.subprocess.Popen) as processes:
+            plan = runtime.prepare(crq, self.saved, item, False)
+            # Spawn is the only execution fake: worktree creation remains real git.
+            real_popen = processes._mock_wraps
+            def spawn(argv, *args, **kwargs):
+                if isinstance(argv, list) and "_review" in argv:
+                    return SimpleNamespace(pid=12345)
+                return real_popen(argv, *args, **kwargs)
+            processes.side_effect = spawn
+            run_id = crq.launch(self.saved, item, plan)
+            scan.assert_called_once()
+            self.assertEqual(scan.call_args.kwargs["clone"], self.destination)
+            meta = json.loads((crq.RUNS / run_id / "meta.json").read_text())
+            self.assertEqual(meta["repo"], foreign)
+            self.assertEqual(author_snapshot.git(Path(meta["worktree"]), "rev-parse", "HEAD").decode().strip(), self.head)
+            rdir = crq.RUNS / run_id
+            (rdir / "review.ndjson").write_text('{"type":"complete","status":"completed"}\n')
+            (rdir / "exit.json").write_text(json.dumps(dict(exit=0, ended_at="2026-11-08T00:01:00Z")))
+            with mock.patch.object(crq, "classify", return_value=dict(counted=True, outcome="completed", findings=0, severity_counts={})), \
+                 mock.patch.object(crq, "findings_md", return_value="Clean"), \
+                 mock.patch.object(crq, "run_liveness", return_value="harvest"), \
+                 mock.patch("backfill_runtime.settings", return_value=None):
+                crq.harvest_review(self.saved, item, False)
+            self.assertEqual(item["state"], "done")
+            self.assertFalse(Path(meta["worktree"]).exists())
+            self.assertIsNotNone(runtime.retained(crq, item))
+            self.assertTrue(crq.local_review_pr.associate(crq, self.saved, foreign, 7, self.base, self.head, False))
+        self.assertEqual(self.call_review(dict(v=1, op="status", request_id="local-1"))["state"], "completed")
+        chunk = self.call_review(dict(v=1, op="result", request_id="local-1", index=0))
+        self.assertEqual(json.loads(base64.b64decode(chunk["data"]))["identity_inputs"]["repo"], foreign)
+
+    def test_clone_is_not_authorization_and_repos_is_optional(self):
+        import queue_transport
+        foreign = "example/secondary"
+        self.runner.REPOS = [dict(repo=foreign, clone=str(self.destination))]
+        self.review["inputs"]["repo"] = foreign
+        self.assertEqual(self.call_review(self.review)["reason"], "unsupported-repo")
+        policy_file = self.state / "queue-policy.json"
+        policy_file.write_text(json.dumps(self.policy))
+        self.assertEqual(queue_transport.validate_policy(json.loads(policy_file.read_text()))["repo"], crq.REPO)
+        for value in ("example/secondary", [False], ["bad"], None):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                queue_transport.validate_policy(dict(self.policy, repos=value))
+
+    def test_foreign_reachable_submit_fetches_selected_clone(self):
+        foreign = "example/secondary"
+        clone = self.repo / "fetch-destination"
+        clone.mkdir()
+        author_snapshot.git(clone, "init", "-q")
+        author_snapshot.git(clone, "remote", "add", "origin", str(self.repo))
+        author_snapshot.git(self.repo, "update-ref", "refs/heads/available", self.head)
+        self.runner.REPOS = [dict(repo=foreign, clone=str(clone))]
+        self.runner.fetch = lambda **kw: crq.fetch(**kw)
+        self.policy["repos"] = [foreign]
+        self.review["inputs"]["repo"] = foreign
+        self.review.pop("snapshot")
+        with mock.patch.object(crq, "fetch", wraps=crq.fetch) as fetch:
+            self.assertEqual(self.call_review(self.review)["action"], "created")
+            fetch.assert_called_once_with(clone=clone)
+        self.assertEqual(self.saved["items"][0]["identity_inputs"]["repo"], foreign)

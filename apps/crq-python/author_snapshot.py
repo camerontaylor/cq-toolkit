@@ -157,14 +157,14 @@ def decode(snapshot, binding, *, original=False):
     return decoded
 
 
-def install(snapshot, binding, runner, *, original=False):
+def install(snapshot, binding, runner, *, original=False, clone=None, classes=None):
     """Caller holds tick.lock. Validate/scan in quarantine, then pin before enrollment.
 
     Pins intentionally survive interrupted enrollment and rollback. They can only
     be collected by a future operator GC after queue/recovery retention expires.
     """
     objects = decode(snapshot, binding, original=original)
-    clone = Path(runner.CLONE).resolve()
+    clone = Path(clone if clone is not None else runner.CLONE).resolve()
     if git(clone, "cat-file", "-t", binding["base"]).strip() != b"commit":
         raise AuthorRefused("snapshot base must already be available")
     object_dir = git(clone, "rev-parse", "--git-path", "objects").decode().strip()
@@ -231,7 +231,7 @@ def install(snapshot, binding, runner, *, original=False):
         name_max = os.pathconf(limits, "PC_NAME_MAX")
         fs_path_max = os.pathconf(limits, "PC_PATH_MAX")
         path_max = fs_path_max - len(str(runner.WT_ROOT)) - 256
-        rules = runner.denylist_rules()  # raises (fail closed) when the policy is absent
+        rules = runner.denylist_rules() if classes is None else runner.denylist_rules(classes)  # raises (fail closed) when the policy is absent
         compiled = [(re.compile(rule["regex"]), re.compile(rule["path"]) if "path" in rule else None)
                     for rule in rules]
         allow = [re.compile(pattern) for pattern in runner.ALLOWLIST_PATHS]
@@ -281,7 +281,8 @@ def install(snapshot, binding, runner, *, original=False):
                 raise AuthorRefused("snapshot scan exceeds bound")
             scan_parts.append(part)
         ok, _ = runner.secret_scan_diff("\n".join(scan_parts), quarantine / "scan.json",
-                                        base=binding["base"], head=binding["head"])
+                                        base=binding["base"], head=binding["head"],
+                                        **({"classes": classes} if classes is not None else {}))
         if not ok:
             raise AuthorRefused("snapshot secret scan refused")
         write_objects(clone, objects, "snapshot installation mismatch")
