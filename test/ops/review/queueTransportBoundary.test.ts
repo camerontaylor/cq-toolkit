@@ -252,3 +252,95 @@ test('review client enforces the 5 MiB snapshot limit before transport while pre
   await expect(client.request(request)).rejects.toBeInstanceOf(ReviewInputError);
   expect(calls).toBe(1);
 });
+
+const busyReply = JSON.stringify({
+  v: 1,
+  error: { code: 'busy', message: 'not admitted', retryable: true },
+});
+const submitWire = () => ({
+  v: 1 as const,
+  op: 'submit' as const,
+  request_id: 'pinned-request',
+  repeat: true,
+  inputs: {
+    repo: 'owner/repo',
+    target: 'main',
+    base_commit: 'a'.repeat(40),
+    base_tree: 'b'.repeat(40),
+    head_commit: 'c'.repeat(40),
+    head_tree: 'd'.repeat(40),
+    projection: 'full-diff',
+  },
+});
+
+test('review busy retries preserve the exact generation request and admit once', async () => {
+  const { makeReviewClient } = await import('../../../src/ops/review/internal/queueClient.js');
+  const wires: string[] = [];
+  let admissions = 0;
+  const input = submitWire();
+  const client = makeReviewClient(async (wire) => {
+    wires.push(wire);
+    if (wires.length < 3) return busyReply;
+    admissions++;
+    return JSON.stringify({ v: 1, action: 'created', state: 'queued' });
+  });
+  const pending = client.request(input);
+  input.request_id = 'caller-mutated';
+  await vi.advanceTimersByTimeAsync(500);
+  await expect(pending).resolves.toMatchObject({ action: 'created' });
+  expect(new Set(wires).size).toBe(1);
+  expect(JSON.parse(wires[0]!) as unknown).toMatchObject({ request_id: 'pinned-request' });
+  expect(admissions).toBe(1);
+});
+
+test('persistent busy is bounded and remains explicit non-acceptance', async () => {
+  const { makeReviewClient, ReviewRemoteError } =
+    await import('../../../src/ops/review/internal/queueClient.js');
+  const transport = vi.fn(async () => busyReply);
+  const pending = makeReviewClient(transport).request(submitWire());
+  const assertion = expect(pending).rejects.toBeInstanceOf(ReviewRemoteError);
+  await vi.advanceTimersByTimeAsync(35_000);
+  await assertion;
+  expect(transport).toHaveBeenCalledTimes(140);
+});
+
+test('busy retry respects cancellation and caller deadline without another delivery', async () => {
+  const { makeReviewClient, ReviewRemoteError } =
+    await import('../../../src/ops/review/internal/queueClient.js');
+  for (const abort of [false, true]) {
+    const transport = vi.fn(async () => busyReply);
+    const controller = new AbortController();
+    const until = Date.now() + 100;
+    const reason = new Error('cancelled');
+    const pending = makeReviewClient(transport).request(submitWire(), {
+      signal: controller.signal,
+      remainingMs: () => until - Date.now(),
+    });
+    const assertion = abort
+      ? expect(pending).rejects.toBe(reason)
+      : expect(pending).rejects.toBeInstanceOf(ReviewRemoteError);
+    await vi.advanceTimersByTimeAsync(0);
+    if (abort) controller.abort(reason);
+    await vi.advanceTimersByTimeAsync(100);
+    await assertion;
+    expect(transport).toHaveBeenCalledTimes(1);
+  }
+});
+
+test('unknown delivery never retries a paid generation', async () => {
+  const { makeReviewClient } = await import('../../../src/ops/review/internal/queueClient.js');
+  const transport = vi.fn(async () => {
+    throw new Error('connection lost');
+  });
+  await expect(makeReviewClient(transport).request(submitWire())).rejects.toThrow(
+    'connection lost',
+  );
+  expect(transport).toHaveBeenCalledTimes(1);
+});
+
+test('review operation reports exhausted explicit busy as failure, not unknown delivery', async () => {
+  const { makeStatus } = await import('../../../src/ops/review/status.js');
+  const pending = makeStatus(async () => busyReply)({ requestId: 'pinned-request' });
+  await vi.advanceTimersByTimeAsync(35_000);
+  await expect(pending).resolves.toEqual({ status: 'failed', error: 'not admitted' });
+});

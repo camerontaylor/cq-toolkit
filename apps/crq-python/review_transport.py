@@ -213,7 +213,7 @@ def main():
         principal = os.environ["CRQ_QUEUE_PRINCIPAL"]
         import crq
         work = lambda runner: safe_handle(raw, runner, principal=principal, policy=policy)
-        result = work(crq) if req["op"] in ("capabilities", "status", "result") else supervised(work, crq)
+        result = work(crq) if req["op"] in ("capabilities", "status", "result") else supervised(work, crq, lock_wait=2)
         if result is None:
             result = error("busy", "review queue lock busy; retry the same request id", True)
         sys.stdout.buffer.write(result)
