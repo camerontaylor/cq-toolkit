@@ -74,7 +74,11 @@ import { readCqEnv } from '../config/env.js';
 import type { CqEnv } from '../config/env.js';
 import { defaultClassifyPrConfig } from '../ops/merge/classify.config.js';
 import { classifyPr } from '../ops/merge/classifyPrs.js';
-import { resolvedBaseBranch, resolvedProtectedBranch } from '../ops/merge/trustMirrors.js';
+import {
+  resolveClassifyTrust,
+  checkedBaseBranch,
+  checkedProtectedBranch,
+} from '../ops/merge/trustMirrors.js';
 import type { PrClassification } from '../ops/merge/classifyPrs.js';
 import type { ClassifyPrConfig } from '../ops/merge/classify.config.js';
 import { realMergeEffects, type MergeEffects } from '../adapters/forge-github/mergeEffects.js';
@@ -296,11 +300,11 @@ export function buildRunInput(
   const cqEnv = cfg.cqEnv ?? readCqEnv();
   const classifyConfig = cfg.classifyConfig;
   return {
-    baseBranch: cfg.baseBranch ?? resolvedBaseBranch(cqEnv),
+    baseBranch: cfg.baseBranch ?? checkedBaseBranch('selfhost.mergePrs', cqEnv),
     repoRoot: cfg.repoRoot,
     prs: candidates,
     // Same source as the op's mirror check: cfg.cqEnv, else the process env.
-    protectedBranch: resolvedProtectedBranch(cqEnv),
+    protectedBranch: checkedProtectedBranch('selfhost.mergePrs', cqEnv),
     wallClockMs: SelfhostDefaults.perJobWallClockMs,
     ...(cfg.disableConflictResolution === true
       ? { conflictResolutionDisabled: true }
@@ -408,8 +412,10 @@ export async function runSelfMergePrs(
   // below is taken ONCE.
   const clock = deps.nowMs ?? ((): number => Date.now());
   const nowMs = clock();
+  // The reviewer trust set comes from config only (CQ_MERGE_TRUSTED_*, CQ_MERGE_ACCEPT_REVIEW_STATES).
   const classifyConfig: ClassifyPrConfig = {
     ...(cfg.classifyConfig ?? defaultClassifyPrConfig),
+    ...resolveClassifyTrust('selfhost.mergePrs', cfg.classifyConfig, cfg.cqEnv),
   };
   // The ONE clock reading rides into the fetch too: the closed-ancestor
   // sweep's freshness window is judged from the same instant the
@@ -490,8 +496,8 @@ export async function runSelfMergePrs(
   // injected driverRegistryView is used verbatim (its scripted op owns its
   // merge path).
   const resolvedEnv = cfg.cqEnv ?? readCqEnv();
-  const protectedBranch = resolvedProtectedBranch(resolvedEnv);
-  const baseBranchResolved = cfg.baseBranch ?? resolvedBaseBranch(resolvedEnv);
+  const protectedBranch = checkedProtectedBranch('selfhost.mergePrs', resolvedEnv);
+  const baseBranchResolved = cfg.baseBranch ?? checkedBaseBranch('selfhost.mergePrs', resolvedEnv);
   const basePolicy = cfg.trustPolicy ?? CONSERVATIVE_TRUST_POLICY;
   const policy: TrustPolicy = {
     ...basePolicy,

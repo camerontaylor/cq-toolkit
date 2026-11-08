@@ -124,6 +124,7 @@ import {
 } from '../../adapters/forge-github/mergeEffects.js';
 import type { MergeEffects } from '../../adapters/forge-github/mergeEffects.js';
 import type { CqEnv } from '../../config/env.js';
+import { bareBranch, stripRefsHeads } from '../../config/values.js';
 import { assertProtectedBranchMirror } from './trustMirrors.js';
 
 // ---------------------------------------------------------------------------
@@ -474,8 +475,10 @@ export function makeResolveConflictOp(
     // same ref, and the prompt's push refspec takes the headBranch
     // verbatim — `HEAD:refs/heads/main` would target the protected branch
     // through a bare-name-only comparison.
-    const bareBranch = (ref: string): string => ref.replace(/^(?:refs\/)?heads\//, '');
-    if (bareBranch(input.headBranch) === bareBranch(resolvedProtected)) {
+    if (
+      bareBranch(input.headBranch) === resolvedProtected ||
+      stripRefsHeads(input.headBranch) === resolvedProtected
+    ) {
       return {
         status: 'failed',
         error: 'headBranch equals the protected branch — refusing to dispatch a push-capable agent',

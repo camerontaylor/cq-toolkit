@@ -82,8 +82,8 @@
 import { enterWithCqEnv } from '../config/entry.js';
 import { readCqEnv } from '../config/env.js';
 import type { CqEnv } from '../config/env.js';
-import { bareBranch } from '../config/values.js';
-import { resolvedProtectedBranch } from '../ops/merge/trustMirrors.js';
+import { stripRefsHeads } from '../config/values.js';
+import { checkedProtectedBranch } from '../ops/merge/trustMirrors.js';
 import { appendFileSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -462,7 +462,8 @@ const preLoopExclusion = (
   if (row.headRepoFullName !== `${owner}/${repo}`) return excludeForked(row.headRepoFullName);
   if (row.draft) return EXCLUDE_DRAFT;
   // Either spelling of the resolved protected branch counts.
-  if (bareBranch(row.headRefName) === protectedBranch) return excludeProtectedHead(protectedBranch);
+  if (stripRefsHeads(row.headRefName) === protectedBranch)
+    return excludeProtectedHead(protectedBranch);
   return null;
 };
 
@@ -496,7 +497,7 @@ export async function runSelfReviewLoop(
   const registry = fileWorktreeRegistry(join(journalRoot, 'worktree-registry.json'));
   const worktreeRoot = join(cfg.repoRoot, '.selfhost', 'worktrees');
 
-  const protectedBranch = resolvedProtectedBranch(cfg.cqEnv ?? readCqEnv());
+  const protectedBranch = checkedProtectedBranch('selfhost.reviewLoop', cfg.cqEnv);
   const rows = await listOpenPrs({ gh: deps.gh, owner: cfg.owner, repo: cfg.repo });
 
   if (cfg.dryRun === true) {

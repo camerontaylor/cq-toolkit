@@ -27,7 +27,7 @@
 // no branch name: baseBranch is configuration arriving on the input, and
 // every other caller passes its own trunk.
 import { readCqEnv } from '../config/env.js';
-import { resolvedBaseBranch } from '../ops/merge/trustMirrors.js';
+import { checkedBaseBranch } from '../ops/merge/trustMirrors.js';
 import type { Plan, PlanRegistryEntry } from '../kernel/types.js';
 import type { RunMergePrsInput } from '../ops/merge/runPrs.js';
 
@@ -62,7 +62,7 @@ export const plan: PlanRegistryEntry = {
     const cqEnv = wiring?.cqEnv ?? readCqEnv();
     return makeMergePrsPlan({
       repoRoot: '.',
-      baseBranch: resolvedBaseBranch(cqEnv),
+      baseBranch: checkedBaseBranch('merge-prs floor', cqEnv),
       prs: [],
     });
   },

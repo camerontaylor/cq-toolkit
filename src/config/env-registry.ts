@@ -18,7 +18,7 @@ import {
   ASSOCIATIONS,
   BOT_ENTRY_RE,
   POSTURE_LIST,
-  bareBranch,
+  stripRefsHeads,
   isPosture,
 } from './values.js';
 
@@ -30,7 +30,7 @@ import {
 const branchName =
   (key: string) =>
   (raw: string): string => {
-    const v = bareBranch(raw.trim());
+    const v = stripRefsHeads(raw.trim());
     if (
       v === '' ||
       v.length > 250 ||

@@ -445,18 +445,21 @@ export const registry: OpRegistryEntry[] = [
   {
     name: 'merge.classifyPrs',
     inputSchema: ClassifyPrsInputSchema,
-    importer: async () => {
+    importer: async (wiring) => {
       const { classifyPr } = await import('./classifyPrs.js');
       const { defaultClassifyPrConfig } = await import('./classify.config.js');
-      const op: Op<ClassifyPrsInput, PrClassification> = (input) => {
+      const { resolveClassifyTrust } = await import('./trustMirrors.js');
+      const op: Op<ClassifyPrsInput, PrClassification> = async (input) => {
+        // Who counts as a reviewer is a trust input: resolved from config only.
+        const trust = resolveClassifyTrust('merge.classifyPrs', input.config, wiring?.cqEnv);
         const config: ClassifyPrConfig =
-          input.config === undefined
+          input.config === undefined && Object.keys(trust).length === 0
             ? defaultClassifyPrConfig
-            : ({ ...defaultClassifyPrConfig, ...input.config } as ClassifyPrConfig);
-        return Promise.resolve({
+            : ({ ...defaultClassifyPrConfig, ...input.config, ...trust } as ClassifyPrConfig);
+        return {
           status: 'ok',
           value: classifyPr(input.candidate, input.nowMs, config),
-        });
+        };
       };
       return op as Op<unknown, unknown>;
     },
@@ -468,10 +471,14 @@ export const registry: OpRegistryEntry[] = [
       const { planMergeOrder } = await import('./planMergeOrder.js');
       const { assertBaseBranchMirror } = await import('./trustMirrors.js');
       const op: Op<PlanMergeOrderInput, PlanMergeResult> = async (input) => {
-        assertBaseBranchMirror('merge.planMergeOrder', input.baseBranch, wiring?.cqEnv);
+        const baseBranch = assertBaseBranchMirror(
+          'merge.planMergeOrder',
+          input.baseBranch,
+          wiring?.cqEnv,
+        );
         return {
           status: 'ok',
-          value: planMergeOrder({ baseBranch: input.baseBranch, prs: input.prs }),
+          value: planMergeOrder({ baseBranch, prs: input.prs }),
         };
       };
       return op as Op<unknown, unknown>;
@@ -487,7 +494,11 @@ export const registry: OpRegistryEntry[] = [
         await import('./trustMirrors.js');
       const op: Op<ExecuteMergesInput, ExecutionReport> = async (input) => {
         // The plan's baseBranch defaults every entry's expected forge base: a mirror of the queue base.
-        assertBaseBranchMirror('merge.executeMerges', input.plan.baseBranch, wiring?.cqEnv);
+        const baseBranch = assertBaseBranchMirror(
+          'merge.executeMerges',
+          input.plan.baseBranch,
+          wiring?.cqEnv,
+        );
         const protectedBranch = assertProtectedBranchMirror(
           'merge.executeMerges',
           input.protectedBranch,
@@ -502,7 +513,7 @@ export const registry: OpRegistryEntry[] = [
         return {
           status: 'ok',
           value: await executeMerges({
-            plan: input.plan,
+            plan: { ...input.plan, baseBranch },
             effects,
             ...(input.maxRetries !== undefined ? { maxRetries: input.maxRetries } : {}),
           }),

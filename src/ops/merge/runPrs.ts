@@ -95,7 +95,11 @@ import type { ExecutionReport } from './executeMerges.js';
 import { realMergeEffects } from '../../adapters/forge-github/mergeEffects.js';
 import type { MergeEffects } from '../../adapters/forge-github/mergeEffects.js';
 import type { CqEnv } from '../../config/env.js';
-import { assertBaseBranchMirror, assertProtectedBranchMirror } from './trustMirrors.js';
+import {
+  assertBaseBranchMirror,
+  assertProtectedBranchMirror,
+  resolveClassifyTrust,
+} from './trustMirrors.js';
 import { diagnoseMergeFailure } from './diagnoseMergeFailure.js';
 import type { MergeFailureDiagnosis } from './diagnoseMergeFailure.js';
 import { planMergeOrder } from './planMergeOrder.js';
@@ -671,7 +675,13 @@ export function makeRunMergePrsOp(
       input.protectedBranch,
       deps?.cqEnv,
     );
-    assertBaseBranchMirror('merge.runPrs', input.baseBranch, deps?.cqEnv);
+    const baseBranch = assertBaseBranchMirror('merge.runPrs', input.baseBranch, deps?.cqEnv);
+    // Who counts as a reviewer is a trust input: resolved from config only.
+    const trust = resolveClassifyTrust('merge.runPrs', input.config, deps?.cqEnv);
+    const config =
+      input.config === undefined && Object.keys(trust).length === 0
+        ? undefined
+        : { ...input.config, ...trust };
     const effects =
       deps?.effects ??
       realMergeEffects({
@@ -699,7 +709,7 @@ export function makeRunMergePrsOp(
     });
     // The nested resolve calls see the RESOLVED protected branch, never the raw input.
     const outcome = await runMergePrs(
-      { ...input, protectedBranch },
+      { ...input, baseBranch, protectedBranch, ...(config !== undefined ? { config } : {}) },
       {
         effects,
         resolve,
