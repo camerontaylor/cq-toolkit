@@ -26,6 +26,8 @@
 // default for the shipped entry only. The merge.runPrs op itself hardcodes
 // no branch name: baseBranch is configuration arriving on the input, and
 // every other caller passes its own trunk.
+import { readCqEnv } from '../config/env.js';
+import { checkedBaseBranch } from '../ops/merge/trustMirrors.js';
 import type { Plan, PlanRegistryEntry } from '../kernel/types.js';
 import type { RunMergePrsInput } from '../ops/merge/runPrs.js';
 
@@ -53,5 +55,15 @@ export function makeMergePrsPlan(input: RunMergePrsInput): Plan {
  */
 export const plan: PlanRegistryEntry = {
   name: MERGE_PRS_PLAN_ID,
-  importer: async () => makeMergePrsPlan({ repoRoot: '.', baseBranch: 'main', prs: [] }),
+  // The floor's trust-mirrored fields come from the host's resolved config, so
+  // the op's mirror check passes by construction when CQ_MERGE_BASE_BRANCH or
+  // CQ_MERGE_PROTECTED_BRANCH is set (no snapshot: the built-in defaults).
+  importer: async (wiring) => {
+    const cqEnv = wiring?.cqEnv ?? readCqEnv();
+    return makeMergePrsPlan({
+      repoRoot: '.',
+      baseBranch: checkedBaseBranch('merge-prs floor', cqEnv),
+      prs: [],
+    });
+  },
 };

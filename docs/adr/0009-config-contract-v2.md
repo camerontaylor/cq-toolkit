@@ -38,8 +38,15 @@
 
 **Precedence.** built-in → `cq.json` (committed, schema-strict) → env (`CQ_*`) → per call (CLI flag or op
 input). Trust-boundary keys (sandbox, merge trust set, protected branch and paths, approval) skip the `cq.json`
-and per-call layers: they never come from `cq.json`, plan JSON or op input. The list is examples: the `trust`
+and per-call layers: they never come from `cq.json`, plan JSON, op input or workspace files: an op-input field that restates one must equal the resolved value and supplies nothing. The list is examples: the `trust`
 flag in the registry (`src/config/env-registry.ts`) is authoritative for which keys are trust-boundary keys.
+
+**The one per-call route for a trust key** is an explicit in-process SDK `optIn` (ADR-0003 named authorization),
+built with `trustedOptIn()` (`src/config/optin.ts`). It must never be fed from plan JSON, op input or the CLI: the
+brand is a module-private `WeakSet` entry, so a JSON-derived object cannot carry it. The resolvers
+(`resolveSandboxConfig`, `resolveProtectedPathsConfig`) call `assertOptInAuthority`, which consults the `trust`
+flag: a per-call value for a `trust: true` key from anything but a `trustedOptIn()` object is refused with a
+`config` error. Keys with `trust: false` are unaffected.
 
 `CQ_PROFILE` profile seeding (Annex B §B.4.1) is retired. Nothing in `src` reads `CQ_PROFILE`.
 
@@ -62,10 +69,18 @@ have no built-in default and the correlation record carries them. Secrets are re
 by value. Defaults and other layers are not recorded. A snapshot that carries an error is refused, never recorded.
 This extends ADR-0008 provenance (`cqJsonHash`).
 
-**Op-input mirrors of trust keys** (for example `protectedBranch`, `baseBranch`) are removed where the caller can
-use the resolved value. Any that remain are compared with the resolved value, and a difference fails with `config`.
-Neutral keys such as `sessionsDir` may be set per call; a per-call value is not recorded in the run-start
-config (call-layer recording is out of scope for C5 and would need a schema and ADR change).
+**Op-input mirrors of trust keys** (`protectedBranch`, `baseBranch`, and the classification trust fields
+`config.trustedBots`, `config.trustedAssociations` and `config.acceptReviewStates`) are removed where the caller can
+use the resolved value. Any that remain are compared with the resolved value (`src/ops/merge/trustMirrors.ts`), and
+a difference fails with `config` before any effect; the error names the field and never echoes a plan-supplied trust
+list. A mirror that equals the resolved value is accepted, because it supplies nothing: the effective value always
+comes from the registry key (`CQ_MERGE_PROTECTED_BRANCH`, `CQ_MERGE_BASE_BRANCH`, `CQ_MERGE_TRUSTED_BOTS`,
+`CQ_MERGE_TRUSTED_ASSOCIATIONS`, `CQ_MERGE_ACCEPT_REVIEW_STATES`), and an invalid snapshot value fails rather than
+defaulting. Branch values are normalised exactly once, by stripping a single leading `refs/heads/`.
+When any reviewer-trust key is set, each unset one independently takes its documented default (bots: none;
+associations: OWNER, MEMBER, COLLABORATOR; states: APPROVED). Neutral keys such as `sessionsDir` may be set per call;
+a per-call value is not recorded in the run-start config (call-layer recording is out of scope for C5 and would need
+a schema and ADR change).
 
 **Key list.** The key list is generated from the code registry `src/config/env-registry.ts` into
 [`docs/config.md`](../config.md); the static gate fails when that table is stale. Annex B's hand-written key

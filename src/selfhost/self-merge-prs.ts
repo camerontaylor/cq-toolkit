@@ -38,7 +38,7 @@
 // only from a trusted actor's CURRENT review whose commit.oid equals the
 // live headRefOid; open threads are advisory; the base branch name
 // the executor's readBaseRef saw right before the call must still be the
-// live base, and a live base of SelfhostDefaults.protectedBranch refuses.
+// live base, and a live base of the resolved CQ_MERGE_PROTECTED_BRANCH (default main) refuses.
 // Settle comes from >= 2 durable observations of the identical (head, base,
 // force-push epoch) tuple >= settleMs apart, recorded on the `cq-state`
 // branch through the git-data API with the run's GH_TOKEN (the automation
@@ -70,9 +70,15 @@ import { createGovernor, governorConfig } from '../kernel/governor.js';
 import { runPlan, type OpRegistryView } from '../kernel/runner.js';
 import type { OpRegistryEntry, RunOptions, RunReport } from '../kernel/types.js';
 import { enterWithCqEnv } from '../config/entry.js';
+import { readCqEnv } from '../config/env.js';
 import type { CqEnv } from '../config/env.js';
 import { defaultClassifyPrConfig } from '../ops/merge/classify.config.js';
 import { classifyPr } from '../ops/merge/classifyPrs.js';
+import {
+  resolveClassifyTrust,
+  checkedBaseBranch,
+  checkedProtectedBranch,
+} from '../ops/merge/trustMirrors.js';
 import type { PrClassification } from '../ops/merge/classifyPrs.js';
 import type { ClassifyPrConfig } from '../ops/merge/classify.config.js';
 import { realMergeEffects, type MergeEffects } from '../adapters/forge-github/mergeEffects.js';
@@ -291,16 +297,18 @@ export function buildRunInput(
   },
   nowMs: number,
 ): RunMergePrsInput {
+  const cqEnv = cfg.cqEnv ?? readCqEnv();
   const classifyConfig = cfg.classifyConfig;
   return {
-    baseBranch: cfg.baseBranch ?? SelfhostDefaults.baseBranch,
+    baseBranch: cfg.baseBranch ?? checkedBaseBranch('selfhost.mergePrs', cqEnv),
     repoRoot: cfg.repoRoot,
     prs: candidates,
-    protectedBranch: SelfhostDefaults.protectedBranch,
+    // Same source as the op's mirror check: cfg.cqEnv, else the process env.
+    protectedBranch: checkedProtectedBranch('selfhost.mergePrs', cqEnv),
     wallClockMs: SelfhostDefaults.perJobWallClockMs,
     ...(cfg.disableConflictResolution === true
       ? { conflictResolutionDisabled: true }
-      : { modelSpec: resolveSelfhostDriver(nowMs, cfg.cqEnv) }),
+      : { modelSpec: resolveSelfhostDriver(nowMs, cqEnv) }),
     sessionsDir: join(cfg.journalRoot ?? defaultJournalRoot(cfg.repoRoot), 'sessions'),
     nowMs,
     ...(classifyConfig === undefined
@@ -356,18 +364,23 @@ const centralRegistryView = async (): Promise<OpRegistryView> => {
 export function recheckedRegistryView(opts: {
   baseView: OpRegistryView;
   innerEffects: MergeEffects;
+  /** The resolved config snapshot the gated merge.runPrs checks its mirrors against. */
+  cqEnv?: CqEnv;
   recheck: (
     pr: number,
     expectedHead: string | undefined,
     expectedBase: string | undefined,
   ) => Promise<RecheckResult>;
 }): OpRegistryView {
-  const { baseView, innerEffects, recheck } = opts;
+  const { baseView, innerEffects, recheck, cqEnv } = opts;
   return {
     get: (name) => {
       const entry = baseView.get(name);
       if (name !== MERGE_RUN_PRS_OP || entry === undefined) return entry;
-      const gated = makeRunMergePrsOp({ effects: gateMergeEffects(innerEffects, recheck) });
+      const gated = makeRunMergePrsOp({
+        effects: gateMergeEffects(innerEffects, recheck),
+        ...(cqEnv !== undefined ? { cqEnv } : {}),
+      });
       return {
         name: entry.name,
         inputSchema: entry.inputSchema,
@@ -393,13 +406,21 @@ export async function runSelfMergePrs(
   deps: SelfMergePrsDeps,
   cfg: SelfMergePrsCfg,
 ): Promise<SelfMergePrsResult> {
+  cfg = { ...cfg, cqEnv: cfg.cqEnv ?? readCqEnv() };
+  // Validate the trust snapshot BEFORE any fetch or observation: an invalid
+  // protected/base branch or trust list fails `config` with nothing read.
+  const resolvedEnv = cfg.cqEnv ?? readCqEnv();
+  const protectedBranch = checkedProtectedBranch('selfhost.mergePrs', resolvedEnv);
+  const baseBranchResolved = cfg.baseBranch ?? checkedBaseBranch('selfhost.mergePrs', resolvedEnv);
   // The LIVE clock: the observation pass and every recheck read it per call
   // (settle is measured at the actual merge instant). The classify reading
   // below is taken ONCE.
   const clock = deps.nowMs ?? ((): number => Date.now());
   const nowMs = clock();
+  // The reviewer trust set comes from config only (CQ_MERGE_TRUSTED_*, CQ_MERGE_ACCEPT_REVIEW_STATES).
   const classifyConfig: ClassifyPrConfig = {
     ...(cfg.classifyConfig ?? defaultClassifyPrConfig),
+    ...resolveClassifyTrust('selfhost.mergePrs', cfg.classifyConfig, cfg.cqEnv),
   };
   // The ONE clock reading rides into the fetch too: the closed-ancestor
   // sweep's freshness window is judged from the same instant the
@@ -501,8 +522,9 @@ export async function runSelfMergePrs(
         deps.mergeEffects ??
         realMergeEffects({
           repoRoot: cfg.repoRoot,
-          protectedBranch: SelfhostDefaults.protectedBranch,
+          protectedBranch,
         }),
+      cqEnv: resolvedEnv,
       recheck: (pr, head, base) =>
         identityRefusal !== null
           ? Promise.resolve<RecheckResult>({
@@ -517,9 +539,9 @@ export async function runSelfMergePrs(
                 nowMs: clock,
                 settleMs,
                 policy,
-                ...((cfg.baseBranch ?? SelfhostDefaults.baseBranch) === 'main'
-                  ? {}
-                  : { protectedBranch: SelfhostDefaults.protectedBranch }),
+                // The queue target itself is never refused as a base; any other
+                // PR base equal to the resolved protected branch is.
+                ...(baseBranchResolved === protectedBranch ? {} : { protectedBranch }),
               },
               pr,
               head,

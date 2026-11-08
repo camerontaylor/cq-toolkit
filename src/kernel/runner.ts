@@ -542,6 +542,15 @@ async function runPlanUnderLease(
   // point): any invalid value throws here, before a job can dispatch.
   const cqEnv = opts.cqEnv ?? readCqEnv();
   assertCqEnv(cqEnv, 'runPlan');
+  const unboundRegistry = registry;
+  registry = {
+    get: (name) => {
+      const entry = unboundRegistry.get(name);
+      return entry === undefined
+        ? undefined
+        : { ...entry, importer: () => entry.importer({ cqEnv }) };
+    },
+  };
   // Caps guard, BEFORE anything else: a cap without a governor is a lie —
   // there would be no admission gate and no spend observation to enforce it.
   if ((opts.maxUsd !== undefined || opts.maxTokens !== undefined) && gov === undefined) {
