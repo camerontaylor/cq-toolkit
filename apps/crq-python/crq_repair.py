@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Detached repair drain. Never writes queue.json or calls GitHub/push."""
+"""Detached repair drain. Backfill delivery uses the tick lock; no GitHub/push."""
 import argparse
 import contextlib
 import copy
@@ -494,7 +494,10 @@ def drain(config):
     if error is not None:
         print('repair drain skipped: ' + error[:200])
         return
-    triage_phase(config)
+    try:
+        triage_phase(config)
+    except Exception as exc:  # backfill deferral must not starve existing repair jobs
+        print('backfill triage deferred: ' + str(exc)[:300])
     if dispatch_paused(config):
         return
     groups = {}  # item -> job ids, items in order of their oldest job

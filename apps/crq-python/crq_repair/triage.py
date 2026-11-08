@@ -44,7 +44,7 @@ def decision(repo, row, tip, report):
             commit = repo.resolve(commit)
             if commit not in repo.git('rev-list', tip).decode().splitlines():
                 raise ValueError('commit not ancestor')
-            if verdict == 'fixed' and row['finding']['path'] not in repo.git('diff-tree', '--root', '--no-commit-id', '--name-only', '-r', commit).decode().splitlines():
+            if verdict == 'fixed' and row['finding']['path'] not in repo.git('diff-tree', '--root', '--no-commit-id', '--name-only', '--first-parent', '-m', '-r', commit).decode().splitlines():
                 raise ValueError('fix does not touch path')
         except (TypeError, ValueError, ledger.IntegrityError, subprocess.CalledProcessError):
             return 'needs-human', 'unverified fixing/superseding commit: ' + reason, {}
@@ -90,17 +90,18 @@ def phase(inbox, repo, tip, judge, transport, at, *, maximum=6, seconds=600, dry
     for row in rows:
         f = row['finding']; anchor = row.get('recovered_anchor') or f
         # An empty/unknown anchor is never evidence for an exact duplicate.
-        key = (f['path'], ' '.join(f['title'].split()).casefold(), json.dumps(anchor.get('intervals')))
-        canonical = seen.get(key) if anchor.get('intervals') else None
+        key = (f['path'], anchor.get('blob'), f['body'], ' '.join(f['title'].split()).casefold(), json.dumps(anchor.get('intervals')))
+        canonical = seen.get(key) if anchor.get('intervals') and anchor.get('blob') else None
         if row['status'] == 'duplicate':
             continue
-        if anchor.get('intervals'):
+        if anchor.get('intervals') and anchor.get('blob') and row['status'] not in ('already-fixed', 'fixed', 'dismissed', 'superseded'):
             seen.setdefault(key, f['id'])
         if row['status'] not in PENDING:
             continue
-        if f['path'] not in entries:
+        mapped = repo.lineage(row['target'], tip, f['path'])
+        if mapped is None and f['path'] not in entries and repo.proven_deleted(row['target'], tip, f['path']):
             deletion = repo.git('log', '-1', '--format=%H', '--diff-filter=D', tip, '--', f['path']).decode().strip()
-            plans.append((row, 'superseded', 'path absent at promoted tip ' + tip + '; deleting commit ' + deletion, {}))
+            plans.append((row, 'superseded', 'path absent at promoted tip ' + tip + '; deleting commit ' + deletion, {'fixing_commit': deletion} if deletion else {}))
         elif canonical:
             plans.append((row, 'duplicate', 'exact path/title/anchor duplicate', {'canonical_id': canonical}))
         else:
@@ -111,7 +112,10 @@ def phase(inbox, repo, tip, judge, transport, at, *, maximum=6, seconds=600, dry
     for row in candidates[:maximum]:
         if time.monotonic() >= deadline:
             stopped = 'deadline'; break
-        report = judge(row, context(repo, row, tip), deadline - time.monotonic())
+        try:
+            report = judge(row, context(repo, row, tip), deadline - time.monotonic())
+        except (subprocess.TimeoutExpired, OSError):
+            stopped = 'deferred'; break
         if report.get('stop') != 'ok':
             stopped = report.get('stop', 'error'); break
         row['_triage_model'] = report.get('model', 'judge')
@@ -127,11 +131,16 @@ def phase(inbox, repo, tip, judge, transport, at, *, maximum=6, seconds=600, dry
             action = event['payload']['action']
         outcomes.append({'finding_id': fid, 'action': action, 'reason': reason})
     delivered = 0
+    delivery_deferred = 0
     if not dry_run:
         for path in sorted((inbox.root / 'triage').glob('*.json')):
             row = ledger.loads(path.read_bytes())
-            if row['status'] == 'confirmed' and row.get('target_current') == tip:
-                inbox.deliver(row['finding']['id'], transport, at); delivered += 1
+            if (row['status'] == 'confirmed' and row.get('target_current') == tip
+                    and row['finding']['severity'] in ('critical', 'major')):
+                try:
+                    inbox.deliver(row['finding']['id'], transport, at); delivered += 1
+                except (RuntimeError, OSError):
+                    delivery_deferred += 1
     return {'total': len(rows), 'judged': judged, 'unjudged': len(candidates) - judged,
             'counts': dict(collections.Counter(o['action'] for o in outcomes)),
-            'delivered': delivered, 'stopped': stopped, 'dry_run': dry_run, 'outcomes': outcomes}
+            'delivered': delivered, 'delivery_deferred': delivery_deferred, 'stopped': stopped, 'dry_run': dry_run, 'outcomes': outcomes}

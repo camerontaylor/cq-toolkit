@@ -96,3 +96,60 @@ class PhaseTest(FindingTest):
     def test_fixed_requires_commit_that_touches_path_and_is_ancestor(self):
         result, _, _ = self.run_phase({'stop': 'ok', 'verdict': 'fixed', 'reason': 'fixed', 'fixing_commit': '0' * 40})
         self.assertEqual(result['counts'], {'needs-human': 1})
+
+    def test_renamed_path_is_not_mechanically_superseded(self):
+        self.f.git('mv', 'a', 'renamed')
+        self.f.git('commit', '-qm', 'rename')
+        tip = self.f.git('rev-parse', 'HEAD')
+        judge = mock.Mock()
+        result = phase(self.inbox, self.f.repo, tip, judge, None, AT, dry_run=True, maximum=0)
+        self.assertEqual(result['counts'], {})
+        self.assertEqual(result['unjudged'], 1)
+
+    def test_different_source_blob_or_body_is_not_exact_duplicate(self):
+        import copy
+        path = self.inbox.root / 'triage' / (self.fid + '.json')
+        duplicate = copy.deepcopy(ledger.loads(path.read_bytes()))
+        duplicate['finding']['id'] = 'f' * 64
+        duplicate['finding']['blob'] = '0' * 40
+        ledger.atomic(path.parent / ('f' * 64 + '.json'), ledger.canonical(duplicate))
+        result, _, _ = self.run_phase(dry=True, maximum=0)
+        self.assertEqual(result['counts'], {})
+        self.assertEqual(result['unjudged'], 2)
+
+    def test_delivery_contention_keeps_confirmed_retryable(self):
+        report = {'stop': 'ok', 'verdict': 'valid', 'reason': 'valid',
+                  'current_path': 'a', 'current_lines': [[1, 1]], 'quoted_text': 'one'}
+        result = phase(self.inbox, self.f.repo, self.t, lambda *_: report,
+                       mock.Mock(side_effect=RuntimeError('tick busy')), AT)
+        self.assertEqual(result['delivery_deferred'], 1)
+        path = self.inbox.root / 'triage' / (self.fid + '.json')
+        self.assertEqual(ledger.loads(path.read_bytes())['status'], 'confirmed')
+
+    def test_judge_timeout_leaves_unjudged(self):
+        import subprocess
+        judge = mock.Mock(side_effect=subprocess.TimeoutExpired('judge', 1))
+        result = phase(self.inbox, self.f.repo, self.t, judge, None, AT)
+        self.assertEqual(result['stopped'], 'deferred')
+        self.assertEqual(result['unjudged'], 1)
+
+    def test_info_confirmed_finding_is_not_delivered(self):
+        path = self.inbox.root / 'triage' / (self.fid + '.json')
+        row = ledger.loads(path.read_bytes()); row['finding']['severity'] = 'info'
+        ledger.atomic(path, ledger.canonical(row))
+        result, queue, _ = self.run_phase()
+        self.assertEqual(result['counts'], {'confirmed': 1})
+        self.assertEqual(result['delivered'], 0)
+        self.assertEqual(queue['items'], [])
+
+    def test_merge_fix_commit_is_checked_against_first_parent(self):
+        self.f.git('checkout', '-qb', 'fix')
+        self.f.commit({'a': b'fixed\ntwo\n'})
+        self.f.git('checkout', '--detach', self.t)
+        self.f.commit({'b': b'unrelated\n'})
+        self.f.git('merge', '--no-ff', 'fix', '-m', 'merge fix')
+        tip = self.f.git('rev-parse', 'HEAD')
+        result = phase(self.inbox, self.f.repo, tip,
+                       lambda *_: {'stop': 'ok', 'verdict': 'fixed', 'reason': 'fixed by merge', 'fixing_commit': tip},
+                       None, AT, dry_run=True)
+        self.assertEqual(result['counts'], {'already-fixed': 1})
