@@ -7,7 +7,7 @@
 # the mechanical proof of that ADR claim, both halves, on every PR:
 #   - without-peer: a plain `pnpm install --frozen-lockfile` (the optional
 #     peer is NOT installed; pnpm-workspace.yaml sets autoInstallPeers: false)
-#     — the typecheck ratchet, lint, full suite, and build must pass with
+#     — the compiler + typed lint, full suite, and build must pass with
 #     the SDK absent.
 #   - with-peer: the same gates after installing the pinned peer
 #     (checkout-local, so the committed lockfile stays peer-free) — the
@@ -69,10 +69,8 @@ jobs:
       - name: Install dependencies (optional peer absent)
         run: pnpm install --frozen-lockfile
       # The typecheck gate IS this ratchet step (same posture as ci.yml).
-      - name: Typecheck ratchet
+      - name: Compiler and typed lint
         run: node scripts/ratchet-typecheck.mjs
-      - name: Lint
-        run: pnpm run lint
       - name: Test
         run: pnpm run test
       - name: Build
@@ -123,10 +121,8 @@ jobs:
       # would.
       - name: Install the optional agent SDK peer (pinned, checkout-local)
         run: pnpm add --save-optional @anthropic-ai/claude-agent-sdk@0.3.270
-      - name: Typecheck ratchet
+      - name: Compiler and typed lint
         run: node scripts/ratchet-typecheck.mjs
-      - name: Lint
-        run: pnpm run lint
       - name: Test
         run: pnpm run test
       - name: Build
