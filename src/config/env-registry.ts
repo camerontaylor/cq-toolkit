@@ -138,7 +138,7 @@ export const CQ_ENV_ENTRIES: readonly CqEnvEntry[] = [
     text,
     'neutral',
     false,
-    'Paseo host label for local-review completion notifications.',
+    'Paseo host:port override for local-review completion notifications; defaults to the lowercase short OS hostname on port 6767, or null if unusable.',
   ),
   entry(
     'CQ_AUTHOR_SNAPSHOT_SCANNER',
