@@ -55,7 +55,9 @@ function runDemo(args: string[], keys: Record<string, string> = {}): SpawnSyncRe
   // spawnSync blocks the event loop, so Vitest's test timeout cannot interrupt a
   // wedged child: a timeout or spawn failure surfaces as a named error.
   if (res.error !== undefined)
-    throw new Error(`demo-eval-axes spawn failed: ${res.error.message}\n${res.stdout}${res.stderr}`);
+    throw new Error(
+      `demo-eval-axes spawn failed: ${res.error.message}\n${res.stdout}${res.stderr}`,
+    );
   return res;
 }
 
@@ -87,7 +89,9 @@ describe('eval-axes-select module: --only selection and the credential gate (pur
   });
 
   it('selectCells rejects an empty --only value instead of matching every cell', () => {
-    expect(() => selectCells(CELLS, ['node', 'x', '--only', ''])).toThrow('--only requires a value');
+    expect(() => selectCells(CELLS, ['node', 'x', '--only', ''])).toThrow(
+      '--only requires a value',
+    );
   });
 
   it('requiredKeys: a zai-only selection with ZAI_API_KEY set needs nothing', () => {
