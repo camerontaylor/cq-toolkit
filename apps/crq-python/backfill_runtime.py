@@ -35,6 +35,8 @@ def settings(state, *, dispatch=False):
     if not filename.exists():
         return None
     value = ledger.loads(filename.read_bytes())
+    if dispatch and value.get("enabled") is not True:
+        return None
     required = ("operational_ruling", "no_live_run_verification", "owner_branch_ruleset_evidence", "durable_artifact_root", "runner_identity", "publisher_spool")
     if any(not value.get(k) for k in required) or value["runner_identity"] != "crq-runner-app":
         raise ledger.IntegrityError("backfill rollout prerequisites incomplete")
@@ -45,8 +47,6 @@ def settings(state, *, dispatch=False):
             or not isinstance(alias, str) or not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9._-]*@[A-Za-z0-9][A-Za-z0-9.:-]*", alias)
             or not isinstance(key, str) or not key.strip() or any(c in key for c in "\n\r\x00")):
         raise ledger.IntegrityError("backfill rollout publisher_spool incomplete or invalid")
-    if dispatch and value.get("enabled") is not True:
-        return None
     if dispatch:
         inventory.effective_limits(policies()[1])
     return value
@@ -165,6 +165,13 @@ def select(c, queue, log, dry, only):
     # A rollout owns the rank-4 lane; the path-count-only fallback cannot launch
     # outside the ledger accounting once the new mechanism is enabled.
     items = [j for j in queue["items"] if j.get("kind") == jobs.KIND and (not only or only == j["id"])]
+    # Terminal refusals cannot become eligible again merely to retry publication.
+    for item in items:
+        pending_event = item.get("refusal_state_event")
+        if pending_event and not dry:
+            state_event(c, queue, item, pending_event["at"], pending_event["reason"])
+            del item["refusal_state_event"]
+            c.save_queue(queue)
     items.sort(key=lambda j: (j["tier_importance"], j.get("retry", False), j["subject_kind"],
                              j.get("row") or 0 if j["subject_kind"] == "A" else -j["score"], j["subject_id"]))
     pending = [j for j in items if jobs.eligible(queue, j, c.iso())]
@@ -259,6 +266,7 @@ def select(c, queue, log, dry, only):
         plan = {"base": item["base"], "head": item["head"], "target": item["target"], "cycle": None,
                 "branch": None, "notes": [], "label": "pinned scoped backfill", "range_policy": "backfill-current-scoped-v1"}
         run_bound = False
+        terminal_recorded = False
         try:
             run_id = c.launch(queue, item, plan)
             if item.get("state") == "reviewing":
@@ -271,8 +279,14 @@ def select(c, queue, log, dry, only):
             if not item.get("run"):
                 jobs.cancel_before_vendor(queue, item)
             jobs.terminal(queue, item, c.iso(), "secret-scan", vendor_terminal=not bool(item.get("run")), reason=item.get("last_error", "launch refused"))
+            terminal_recorded = True
+            item["refusal_state_event"] = {"at": c.iso(), "reason": "launch refused before vendor binding"}
+            c.save_queue(queue)
+            state_event(c, queue, item, item["refusal_state_event"]["at"], item["refusal_state_event"]["reason"])
+            del item["refusal_state_event"]
+            c.save_queue(queue)
         except Exception:
-            if not run_bound:
+            if not run_bound and not terminal_recorded:
                 item.update(state="launch-unknown", vendor_state="unknown")
             c.save_queue(queue)
             raise
@@ -316,7 +330,17 @@ def completion_event(repo, store, item, raw, exit_code, meta, ended_at, submissi
             # whose vendor anchor is absent or outside the pinned repository.
             intervals = []
         else:
-            intervals = value.get("intervals", [])
+            lines = set()
+            try:
+                for start, end in value.get("intervals") or []:
+                    if type(start) is not int or type(end) is not int or not 1 <= start <= end <= 1_000_000:
+                        raise ValueError("invalid vendor interval")
+                    lines.update(range(start, end + 1))
+                    if len(lines) > 1_000_000:
+                        raise ValueError("vendor interval bound")
+                intervals = accounting.ranges(lines)
+            except (TypeError, ValueError):
+                intervals = []
         normalized = {"source_id": str(value["id"]) if value.get("id") is not None else None, "severity": value.get("severity", "info"), "path": name,
                       "blob": entries.get(name, {}).get("blob"), "intervals": intervals,
                       "title": value.get("title") or "Unverified vendor finding anchor",
@@ -532,6 +556,8 @@ def run_inventory(c, queue, *, required_paths=None, members=None, fetch=True, en
     config = settings(c.STATE)
     if not config:
         raise ledger.IntegrityError("operator rollout configuration required for inventory publication")
+    if enqueue and config.get("enabled") is not True:
+        raise ledger.IntegrityError("operator rollout must be enabled before inventory enqueue")
     repo, store, outbox, publisher = services(c, config)
     repo.immutable_cache = {}  # This invocation only; keys contain immutable object IDs.
     # Cross-run, disposable index of immutable Git-derived facts (lineage, blame,

@@ -53,6 +53,8 @@ describe('selected dist dependencies', () => {
     try {
       writeFileSync(join(root, 'source.test.ts'), "import '../src/index.js';");
       writeFileSync(join(root, 'built.test.ts'), "import '../dist/index.js';");
+      writeFileSync(join(root, 'tick.test.ts'), "path.join(root, `dist`, 'index.js');");
+      expect(needsDist(['tick.test.ts'], root)).toBe(true);
       expect(needsDist(['source.test.ts'], root)).toBe(false);
       expect(needsDist(['source.test.ts', 'built.test.ts'], root)).toBe(true);
       expect(needsDist([], root)).toBe(false);

@@ -1,9 +1,11 @@
 """Atomic, allow-listed fleet summary; no review launches or git fetches."""
 import datetime as dt
+from queue_time import parse_utc
 import coverage
 import review_receipt
 import repo_registry
 import repair_tick
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -14,13 +16,31 @@ import time
 
 
 def timestamp(value):
-    if not value:
-        return None
-    return dt.datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    parsed = parse_utc(value)
+    return parsed.timestamp() if parsed is not None else None
 
 
 def read(path):
+    """Plain JSON read for documents with no digest of their own.
+
+    Receipts go through read_receipt_document: their digest covers the exact
+    bytes that get parsed.
+    """
     return json.loads(Path(path).read_text())
+
+
+def read_receipt_document(root, receipt_id):
+    """Parse the receipt bytes the digest covers, from a single snapshot.
+
+    read_receipt verifies one snapshot but returns only a manifest, so a
+    second read here could parse different bytes than the ones verified.
+    """
+    if not isinstance(receipt_id, str) or not re.fullmatch(r"[0-9a-f]{64}", receipt_id):
+        raise ValueError("invalid receipt id")
+    data = (Path(root) / (receipt_id + ".json")).read_bytes()
+    if hashlib.sha256(data).hexdigest() != receipt_id:
+        raise ValueError("receipt digest mismatch")
+    return json.loads(data)
 
 
 def command(argv, timeout):
@@ -47,8 +67,7 @@ def merged_current(queue, receipt_root=None):
             receipt_id = item["receipt_id"]
             if receipt_root is None:
                 raise ValueError("receipt bytes unavailable")
-            review_receipt.read_receipt(receipt_root, receipt_id)
-            document = read(Path(receipt_root) / (receipt_id + ".json"))
+            document = read_receipt_document(receipt_root, receipt_id)
             capture = document["capture"]
             # Follow only retained queue lineage with matching receipt/state;
             # reject dangling/cyclic links and verify the original source binding.
@@ -92,7 +111,7 @@ def merged_current(queue, receipt_root=None):
                 disposition = path.get("disposition", "unknown")
                 if disposition not in ("included", "renamed"):
                     exclusions[disposition] = exclusions.get(disposition, 0) + 1
-        except (KeyError, TypeError, ValueError, OSError):
+        except (KeyError, TypeError, ValueError, AttributeError, OSError):
             counts["unverified"] += 1
     discovery = queue.get("merged_reconcile") or {}
     allowed = ("after", "before", "complete", "complete_through", "next_cursor", "represented",
@@ -176,22 +195,32 @@ def summarize(status, queue, heartbeat, config, events, now):
             other += 1
     last_tick = heartbeat.get("last_tick") or queue.get("last_tick")
     # Freshness must follow completed ticks, never status-file writes or probes.
-    timestamp(last_tick)
+    if last_tick is not None and timestamp(last_tick) is None:
+        raise ValueError("invalid last_tick")
     # The configured cap is a conservative scheduler fallback, not an account quota.
     usage = queue.get("usage") or {}
     limit = usage.get("limit") if isinstance(usage, dict) else None
     starts_cap = limit if type(limit) is int and limit > 0 else config["max_starts_per_hour"]
     ranks = [{**entry, "rank_tier": entry.get("rank_tier", repo_registry.DEFAULT_RANK)}
              for entry in config.get("repos", [])]
+    def aging_deadline(item):
+        if item.get("kind") == "local-review" and (item.get("generation", 1) > 1 or item.get("repeat_requested") is True) and item.get("created_at"):
+            created = timestamp(item["created_at"])
+            if created is not None:
+                return created + config.get("local_review_aging_minutes", 60) * 60
+        return None
     def pending_key(item):
         rank = {"open": 0, "recent_merge": 2, "backfill": 3, "other": 4}[category(item)]
         if item.get("kind") in ("coverage", "backfill"):
             rank = 4
         elif item.get("kind") == "delta" and category(item) == "open":
             rank = 1
+        if item.get("kind") == "local-review":
+            deadline = aging_deadline(item)
+            rank = 0 if (item.get("generation", 1) == 1 and item.get("repeat_requested") is not True) or deadline is not None and now >= deadline else 1
         repo_rank = repo_registry.rank_for(item, primary, ranks)
         # Open PRs/deltas now outrank repository tiers across all repos (#1177).
-        if repo_rank is not None and category(item) != "open":
+        if repo_rank is not None and category(item) != "open" and item.get("kind") != "local-review":
             rank = repo_rank
         return (not item.get("operator_priority", False), rank, item.get("order", 999))
     pending = [i for i in items if i.get("state") == "pending"
@@ -201,12 +230,17 @@ def summarize(status, queue, heartbeat, config, events, now):
         "completed_24h_by_work": completed,
         "pending_items": [{"repo": i.get("repo") or (i.get("subject") or {}).get("repo") or config.get("repo"),
                            "pr": i.get("pr") or (i.get("subject") or {}).get("pr"),
-                           "title": i.get("title"), "kind": i.get("kind")}
-                          for i in sorted(pending, key=pending_key)[:10]],
+                           "title": i.get("title"), "kind": i.get("kind"),
+                           "band": "interactive" if pending_key(i)[1] < 2 else "background",
+                           "generation": i.get("generation"), "aging_deadline": aging_deadline(i),
+                           "reason": i.get("wait_reason") or i.get("last_error"),
+                           "approximate_position": position}
+                          for position, i in enumerate(sorted(pending, key=pending_key)[:10], 1)],
         "merged_current": merged_current(queue),
         "last_tick": last_tick, "status_as_of": status["generated_at"],
         "paused": bool(queue.get("paused")), "cooldown_until": queue.get("cooldown_until"),
-        "starts_60m": sum(now - 3600 <= timestamp(s) <= now for s in queue.get("starts", [])),
+        "starts_60m": sum(at is not None and now - 3600 <= at <= now
+                          for at in (timestamp(s) for s in queue.get("starts", []))),
         "starts_cap": starts_cap,
         "in_flight": sum(i["state"] == "reviewing" for i in items),
         "outcomes_24h": outcomes, "other_outcomes_24h": other, "backlog": backlog,
@@ -260,10 +294,11 @@ def systemd_activity():
     def monotonic_time(value):
         if not value or value in ("0", "infinity", "n/a"):
             return None
-        scales = {"w": 604800, "d": 86400, "h": 3600, "min": 60,
-                  "s": 1, "ms": .001, "us": .000001, "µs": .000001}
-        parts = re.findall(r"(\d+(?:\.\d+)?)(min|ms|us|µs|w|d|h|s)", value)
-        if not parts or re.sub(r"\d+(?:\.\d+)?(?:min|ms|us|µs|w|d|h|s)\s*", "", value).strip():
+        scales = {"y": 31557600, "month": 2629800, "w": 604800, "d": 86400, "h": 3600,
+                  "min": 60, "s": 1, "ms": .001, "us": .000001, "µs": .000001}
+        units = "y|month|min|ms|us|µs|w|d|h|s"
+        parts = re.findall(rf"(\d+(?:\.\d+)?)({units})", value)
+        if not parts or re.sub(rf"\d+(?:\.\d+)?(?:{units})\s*", "", value).strip():
             raise ValueError("unexpected systemd timespan")
         return realtime + sum(float(n) * scales[unit] for n, unit in parts) - monotonic
 

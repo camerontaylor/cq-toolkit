@@ -195,4 +195,42 @@ describe('sweep.cleanup residue, branch-aware age, in-lock revalidation', () => 
     const keptRow = report.kept.find((k) => k.path === WT_PATH);
     expect(keptRow?.reason).toMatch(/revalidated inside the mutex.*younger than the cutoff/s);
   });
+
+  test('A: a residue dir that reappears inside the mutex is kept — the stale prune never runs', async () => {
+    const repo = fakeRepo();
+    // Registered with a branch, but NO dir at classification: residue. Its
+    // stale branch tip is YOUNG, so the branch-only sweep probes it and
+    // leaves it in place.
+    repo.worktrees.push({ path: WT_PATH, branch: WT_BRANCH });
+    repo.branches.push(WT_BRANCH);
+    repo.branchTimes.set(WT_BRANCH, NOW - 1_000);
+    let mtimeProbes = 0;
+    const effects: CleanupEffects = {
+      ...effectsOf(repo),
+      modifiedTimeMs: async (path) => {
+        mtimeProbes += 1;
+        repo.calls.push(`modifiedTimeMs:${path}`);
+        if (mtimeProbes === 1) {
+          // The classification probe: absent — the residue class.
+          const err = new Error(`ENOENT: no dir yet '${path}'`) as Error & {
+            code?: string;
+          };
+          err.code = 'ENOENT';
+          throw err;
+        }
+        // The in-guard recheck: the dir is back — a concurrent worktreeFor
+        // pruned the stale registration and recreated a LIVE tree here.
+        return NOW - 60_000;
+      },
+    };
+    const report = await okReport(makeCleanup(effects), { ...INPUT, dryRun: false });
+    // No prune ran (it would have stripped the live tree's lock) and no row
+    // was misreported as pruned.
+    expect(mtimeProbes).toBe(2);
+    expect(repo.prunes).toHaveLength(0);
+    expect(report.pruned).toEqual([]);
+    expect(repo.branchDeletes).toHaveLength(0);
+    const keptRow = report.kept.find((k) => k.path === WT_PATH);
+    expect(keptRow?.reason).toMatch(/revalidated inside the mutex.*reappeared/s);
+  });
 });

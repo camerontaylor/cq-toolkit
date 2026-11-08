@@ -17,7 +17,11 @@ on:
 permissions: {}
 
 concurrency:
-  group: cq-verify-${{ github.event.workflow_run.id || inputs.measure_run_id }}
+  # Neither id input exists on a pull_request run, so without the run_id
+  # fallback every PR would share the literal group `cq-verify-`, and a
+  # newer pending run replaces (cancels) the older one despite
+  # cancel-in-progress: false.
+  group: cq-verify-${{ github.event.workflow_run.id || inputs.measure_run_id || github.run_id }}
   cancel-in-progress: false
 
 # pnpm-workspace.yaml's global virtual store is a local-worktree speedup

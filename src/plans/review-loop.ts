@@ -1,3 +1,8 @@
+import {
+  leasedPush,
+  resolvePushDestination,
+  type PushDestination,
+} from '../adapters/git/leasedPush.js';
 // review-loop — E4 slice 2 (goal E4; ws-e item 8): the SHIPPED review-loop
 // plan wiring. Sequential stages, each a DIRECT call to the shipped atomic
 // op; ONLY the fix fan-out rides runPlan (bounded, governor applies — the
@@ -388,6 +393,8 @@ export interface ReviewLoopOpts {
    * Same-repo callers omit it: the push targets 'origin' as before.
    */
   headRepo?: string;
+  /** Fires per confirmed push, including re-assertion; independent of final outcome. Must not throw. */
+  onPublished?: (sha: string) => void;
   /** The checked-out repository root resolvePrWorktree anchors to. */
   repoRoot: string;
   /** The gh transport — review reads, replies, and resolves ride it. */
@@ -542,11 +549,20 @@ export interface ReviewLoopOutcome {
   fixReport?: RunReport;
   /**
    * The before/after verdict — present exactly when at least one fix job
-   * ran. OBSERVABILITY ONLY: it rides the payload for humans; resolve
-   * gating is per-item commit verification, and this verdict never feeds
-   * `reasons`.
+   * ran AND the after-snapshot succeeded. OBSERVABILITY ONLY: it rides the
+   * payload for humans; resolve gating is per-item commit verification, and
+   * this verdict never feeds `reasons`.
    */
   verify?: VerifyOutcome;
+  /**
+   * The after-snapshot's failure text when that post-fix PR-state read threw.
+   * The failure is already recorded in `reasons` and never hides the
+   * published replies/resolves — but the caller must not continue into a PR
+   * re-review: the round's retained settled run is the record of what the
+   * fixes did, and an unverified continuation overwrites it with a
+   * re-reviewed (often empty) population.
+   */
+  verifyFailure?: string;
   /** The reply/resolve dispatch result — present when any action was dispatched. */
   reply?: ReplyAndResolveResult;
   /** How many actions replyAndResolve actually posted (its `posted` length). */
@@ -575,11 +591,13 @@ export interface EnrichedFixItem {
 
 /**
  * Σ of the frozen Usage fields — the governor's token-rollup fold (DD-9
- * totalTokensOf), so a sweep decrements its token budget by exactly what the
+ * totalTokensOf, including additive `reasoning`), so a sweep decrements its token budget by exactly what the
  * governor counted against the cap. Absent usage is 0.
  */
 export const totalTokens = (usage: Usage | undefined): number =>
-  usage === undefined ? 0 : usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
+  usage === undefined
+    ? 0
+    : usage.input + usage.output + usage.cacheRead + usage.cacheWrite + (usage.reasoning ?? 0);
 
 /**
  * Correlate one ClassifiedItem against the fetched state and build the
@@ -731,29 +749,6 @@ const centralRegistryView = async (): Promise<OpRegistryView> => {
     get: (name) => entryByName.get(name) as OpRegistryEntry<never, never> | undefined,
   };
 };
-
-/**
- * The composed worktree push — the git argv that publishes the fix,
- * mirroring prWorktree's argv composition exactly: a leading `-C <path>`
- * (the runner spawns with the process cwd; effect comes only from the
- * explicit prefix), then `push <target> HEAD:<headRefName>` — the PR'S REAL
- * HEAD (finding: the internal `cq-review/pr-<n>` worktree label would leave
- * origin's PR untouched, so the verifier could never see the fix, and a
- * stray branch accumulates on origin). The target is 'origin' for same-repo
- * PRs; FORK PRs push straight to the head repository URL
- * (`https://github.com/<headRepo>.git`) — the worktree's 'origin' remote is
- * the base repo, which must never receive the fix. The worktree branch sits
- * AT the fetched sha, so the push is a fast-forward; a raced head refuses
- * it — the push failure feeds the existing push-before-post retriable path.
- * Used BOTH for the fix-stage publish (so the verifier can see the fix's
- * own commit) and as replyAndResolve's push-before-post args (an idempotent
- * re-assertion).
- */
-const worktreePushArgs = (
-  worktreePath: string,
-  headRefName: string,
-  pushTarget: string,
-): string[] => ['-C', worktreePath, 'push', pushTarget, `HEAD:${headRefName}`];
 
 /**
  * Verify one claimed commit through the git seam IN THE PUSHED WORKTREE,
@@ -1574,8 +1569,38 @@ async function runOwnedReviewLoop(
     !unreportedCommit &&
     !dirtyWorktree &&
     !headUnreadable;
+  let expectedPublishedHead = observedBase ?? '';
+  let pushDestination: PushDestination | undefined;
+  let publicationFailed = false;
+  const publish: GhFn = async () => {
+    if (publicationFailed)
+      return {
+        code: 1,
+        stdout: '',
+        stderr: 'previous publication failed; reconciliation required',
+      };
+    try {
+      pushDestination ??= await resolvePushDestination(opts.git, worktree.path, pushTarget);
+    } catch {
+      publicationFailed = true;
+      return { code: 1, stdout: '', stderr: 'publication push destination unavailable' };
+    }
+    const result = await leasedPush(
+      opts.git,
+      worktree.path,
+      pushDestination,
+      opts.headRefName,
+      expectedPublishedHead,
+      worktreeTip,
+    );
+    if (result.code === 0) {
+      expectedPublishedHead = worktreeTip;
+      opts.onPublished?.(worktreeTip);
+    } else publicationFailed = true;
+    return result;
+  };
   if (commits.length > 0 && publishable) {
-    const push = await opts.git(worktreePushArgs(worktree.path, opts.headRefName, pushTarget));
+    const push = await publish([]);
     if (push.code !== 0) {
       const stderr = push.stderr.trim();
       reasons.push(
@@ -1586,15 +1611,25 @@ async function runOwnedReviewLoop(
   if (opts.signal?.aborted) return cancelledOutcome();
   const fixJobsRan = plan.jobs.length > 0;
   let verify: VerifyOutcome | undefined;
+  let verifyFailure: string | undefined;
   if (fixJobsRan) {
-    const after = await snapshotPrState({
-      owner: opts.owner,
-      repo: opts.repo,
-      pr: opts.pr,
-      run: opts.gh,
-      nowMs: opts.nowMs,
-    });
-    verify = verifyPrOutcome(before, after, { responderLogin: opts.responderLogin ?? null });
+    try {
+      const after = await snapshotPrState({
+        owner: opts.owner,
+        repo: opts.repo,
+        pr: opts.pr,
+        run: opts.gh,
+        nowMs: opts.nowMs,
+      });
+      verify = verifyPrOutcome(before, after, { responderLogin: opts.responderLogin ?? null });
+    } catch (err) {
+      // Observability only: a failed after-snapshot is recorded, never hidden
+      // (I5), but must not strand replies/resolves for a fix already pushed.
+      // The caller stops before any PR re-review on `verifyFailure` — the
+      // retained settled run is this round's record and stays it.
+      verifyFailure = String(err);
+      reasons.push(`verify snapshot failed: ${verifyFailure.slice(0, PUSH_REASON_MAX)}`);
+    }
     // VerifyOutcome is OBSERVABILITY ONLY (round-2 finding 6): it rides the
     // outcome payload and never feeds hasFailures — resolve gating is the
     // per-item commit verification, and one thread's missing PR-wide signal
@@ -1766,6 +1801,10 @@ async function runOwnedReviewLoop(
   // already published when the reply recorded, and the resolve mutation
   // pushes nothing.
   actions.push(...carriedResolves);
+  if (opts.publish === false && carriedResolves.length > 0)
+    reasons.push(
+      `${String(carriedResolves.length)} carried resolve(s) withheld; publication requires --push`,
+    );
 
   // (7) Reply + resolve over the gh seam — push-before-post (the same
   // composed worktree push: an idempotent re-assertion against origin races
@@ -1779,10 +1818,7 @@ async function runOwnedReviewLoop(
       repo: opts.repo,
       pr: opts.pr,
       run: opts.gh,
-      push:
-        commits.length > 0 && publishable
-          ? { run: opts.git, args: worktreePushArgs(worktree.path, opts.headRefName, pushTarget) }
-          : null,
+      push: commits.length > 0 && publishable ? { run: publish, args: [] } : null,
       dispatchLog: fileDispatchLog(opts.dispatchLogPath),
       nowMs: opts.nowMs,
       ...(opts.signal ? { signal: opts.signal } : {}),
@@ -1817,6 +1853,7 @@ async function runOwnedReviewLoop(
     plan,
     fixReport,
     ...(verify !== undefined ? { verify } : {}),
+    ...(verifyFailure !== undefined ? { verifyFailure } : {}),
     ...(reply !== undefined ? { reply } : {}),
     actionsPosted: reply === undefined ? 0 : reply.posted.length,
   };

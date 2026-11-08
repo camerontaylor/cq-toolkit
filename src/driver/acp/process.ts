@@ -1,3 +1,4 @@
+import { checkoutWriterStdio, trackCheckoutWriter } from '../../shared/checkoutWriterContext.js';
 // Process-lifecycle helpers for the acp driver — T1.8.
 //
 // THE I8 EXEMPT FILE (same posture as shared/proc.ts — the subprocess
@@ -122,12 +123,13 @@ export function spawnAcpProcess(opts: AcpSpawnOptions): ChildProcess {
   const child = spawn(spec.command, spec.args, {
     cwd: opts.cwd,
     shell: false, // driver-built argv — nothing is ever re-interpreted by a shell
-    stdio: ['pipe', 'pipe', 'pipe'],
+    stdio: checkoutWriterStdio(['pipe', 'pipe', 'pipe']),
     env: { ...opts.env },
     // Only ever set on the win32 shim path (ignored elsewhere): the /s
     // token must reach cmd.exe verbatim, not node-quoted.
     ...(spec.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
   });
+  trackCheckoutWriter(child);
   child.stdout?.setEncoding('utf8');
   child.stderr?.setEncoding('utf8');
   child.stdin?.on('error', () => {
@@ -278,6 +280,9 @@ export async function terminateAcpProcess(
   }
   if (await closesWithin(termGraceMs)) {
     return 'terminated';
+  }
+  if (isAcpProcessExited(child)) {
+    return 'terminated'; // exited in the window; only the stdio close is pending
   }
 
   // Rung 2: SIGKILL — the unconditional rung.

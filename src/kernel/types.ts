@@ -143,7 +143,7 @@ export type RunEarlyStopReason = 'budget' | 'signal';
 export interface JobOutcome {
   jobId: string;
   op: string;
-  result: OpResult<unknown>;
+  result: OpResultArtifact<unknown>;
   /** Token usage rolled up for this job, when its driver reported usage. */
   usage?: Usage;
   /** Derived-only USD cost for this job (caller-side price map); never driver-trusted. */
@@ -297,7 +297,7 @@ export interface JobFinishedJournalEvent {
   jobId: string;
   opId: string;
   inputsHash: string;
-  result: OpResult<unknown>;
+  result: OpResultArtifact<unknown>;
   /** Per-job token usage rollup, when the driver reported it (USD stays derived-only downstream). */
   usage?: Usage;
   /** Per-job modeled USD rollup (costBasis 'modeled'), when cost was observed. */
@@ -516,7 +516,7 @@ export interface WitnessesRecord {
  */
 export interface ProvenanceConfig {
   /** Resolved `source: 'env'` values; secrets and foreign secrets are the literal 'set'. */
-  env: Record<string, string | number | boolean | string[] | null>;
+  env: Record<string, string>;
   sources: Record<string, 'env'>;
   /** Env diagnostics as message text (never a value). */
   warnings: string[];
@@ -1097,6 +1097,8 @@ export interface OpRegistryEntry<I = unknown, R = unknown> {
   importer: (wiring?: {
     /** Sink for the driver factory's deprecated-alias notice (review-debt #186). */
     onDeprecatedAlias?: (message: string) => void;
+    /** The entry point's frozen CQ_* snapshot, so an op never re-reads the process env. */
+    cqEnv?: CqEnv;
   }) => Promise<Op<I, R>>;
 }
 

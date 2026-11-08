@@ -121,4 +121,39 @@ describe('workspace holds after a stranded rollback', () => {
       expect(h.quarantine.isQuarantined('other-playbook')).toBe(false);
     });
   }
+
+  test('an engine failure that wrote nothing leaves no hold to block a later repair', async () => {
+    const h = harness(FIXTURE, 0);
+    const inner = h.run;
+    let scans = 0;
+    // The preflight scan (first ast-grep call) is healthy; the apply's own
+    // re-scan faults, so the dispatch fails with NOTHING written.
+    const flaky = Object.assign(
+      async (cmd: Parameters<Harness['run']>[0]) => {
+        if (cmd.command === 'ast-grep' && ++scans === 2) {
+          return { stdout: 'not json at all', stderr: '', exitCode: 0 };
+        }
+        return inner(cmd);
+      },
+      { scans: [], verifierCalls: [] },
+    ) as Harness['run'];
+    const dispatch = () =>
+      makePlaybookDispatchOp({
+        playbooks: h.playbooks,
+        quarantine: h.quarantine,
+        run: flaky,
+        storeFor: () => h.store,
+        approval: approvedAuthority().authority,
+      });
+    const input = { playbookId: 'fix-foo-bar', dir: '/ws', targets: ['src/a.ts'] };
+    const failed = await dispatch()(input);
+    expect(failed.status).toBe('failed');
+    expect(h.store.backing.get('src/a.ts')).toBe(FIXTURE['src/a.ts']);
+    // A later legitimate edit (for instance the repair an operator makes
+    // after reading the fault) must not be refused as a stranded rollback:
+    // this dispatch changed none of those bytes.
+    h.store.backing.set('src/a.ts', `${FIXTURE['src/a.ts']}// repaired after the scan fault\n`);
+    const retried = await dispatch()(input);
+    expect(retried.status).toBe('ok');
+  });
 });

@@ -24,7 +24,7 @@ behavior; the checked-in config ships empty, host overlays add entries):
     "floor": "2026-11-10T00:00:00Z",
     "quiet_minutes": 30,
     "include": ["**"],
-    "exclude": ["**/*.lock", "vendored/**"],
+    "exclude": ["*.lock", "vendored/**"],
     "rank_tier": 3,
     "findings": "issue"}
  ]}
@@ -75,7 +75,8 @@ refuse the config).
   open PRs `<name>-pr<n>`, deltas `<name>-pr<n>-range-<pin>-<head>`.
   `<name>` is the repo's suffix after `/`.
 - Push items: kind `push-current`, `pr: 0`, subject binding
-  `{"type": "push-range", "repo", "base", "head", "target_selector", "policy"}`.
+  `{"type": "push-range", "repo", "base", "head", "policy"}`, plus optional
+  `paths_filter` and `pin` (the parent capture target) on split follow-up parts.
   Merged-current bindings already carry `repo` and stay as they are.
 - Run records (`meta.json`), work records and status.json items gain `repo`.
 
@@ -212,3 +213,16 @@ Creating the six clones and any keys on the queue host; GitHub App
 installations and repo permissions (issue creation via the existing `gh`
 auth); choosing floors and exclude lists per repo; the queue-host deploy
 itself (coordinator).
+
+## Local-first review authorization
+
+`review-v1` uses the configured repository clone for object resolution, snapshot
+installation, planning, scans, execution worktrees and cleanup. A clone entry in
+runner configuration does not authorize submissions. The queue policy's existing
+`repo` remains authorized; an optional `repos` array adds repository slugs, for
+example `"repos": ["example/secondary"]`. Existing policies without this field
+retain single-repository behavior. The principal and target branch must still
+match the policy's `write` and `branches` allowlists.
+
+D-1 must add `repos` to the live queue policy before enabling any non-primary
+repository. This source change does not update or activate that live policy.

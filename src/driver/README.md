@@ -1,10 +1,14 @@
 # Driver seam
 
 The seam between the toolkit and any worker that can run a prompt. One
-method: `Driver.run(opInvocation) → Promise<WorkerResult>`. Source of
-truth: `src/driver/types.ts` (types); zod mirrors of the serializable
-parts live in `src/driver/schema.ts` and are re-exported by
-`src/kernel/schema.ts`.
+method: `Driver.run(opInvocation, options?) → Promise<WorkerResult>`.
+`opInvocation` is the plain-data request (below); `options` is the
+runtime-only `RunOptions` and carries the governed abort `signal`. A
+governed caller MUST pass `options.signal` — it is the only cancellation
+channel the lanes honor (conformance leg b-iii), and a run dispatched
+without it cannot be stopped. Source of truth: `src/driver/types.ts`
+(types); zod mirrors of the serializable parts live in
+`src/driver/schema.ts` and are re-exported by `src/kernel/schema.ts`.
 
 ## The contract
 
@@ -35,8 +39,9 @@ parts live in `src/driver/schema.ts` and are re-exported by
 ## Seam rules
 
 - Tokens are the source of truth. `costUSD` is OPTIONAL and derived-only:
-  callers compute it from a price map over `usage`; drivers never report
-  trusted USD. A present `costUSD` is labeled `costBasis: 'modeled'` — the
+  each driver attaches it from its price map over `usage` (unknown model →
+  absent), and the kernel only observes the figure. Drivers never report
+  vendor-trusted USD. A present `costUSD` is labeled `costBasis: 'modeled'` — the
   api-equivalent list-price proxy for the tokens consumed, never presented
   as billed (`billed` is reserved for a lane whose provider reports actual
   invoiced cost; none exists in v1) — and a result with no `costUSD`
@@ -173,10 +178,14 @@ realpath-recheck existing paths (pre-existing symlinks are denied), but a
 symlink planted after the check is a documented TOCTOU window; the mitigation
 is keeping run command allowlists tight (never allowlist `ln`).
 
-Mixed-model `modelUsage` is priced per contributing model. Unknown model IDs
-use the served model's rate when available and record
-`{cq: 'pricing-fallback', models: [...], rate: 'served-model'}` in session
-narration. If neither rate is known, modeled cost remains absent.
+Mixed-model `modelUsage` is priced per contributing model. An unpriced
+model ID is never priced at another rate: modeled cost stays absent (so a
+`maxUsd` cap trips fail-loud, DD-9 §4). When the fold was PARTIALLY priced
+(some contributor priced, some not), the narration marker
+`{cq: 'pricing-fallback', models: [...], rate: 'none'}` names the unpriced
+models; a fold with no priced contributor at all is the ordinary unpriced
+baseline and records no marker (routine bookkeeping never widens the
+record's role-'tool' contract).
 
 Budget mapping (I8): the driver owns NO wall clock — it forwards the
 run's `RunOptions.signal` (seam v2 — the caller passes the governed rung-1
@@ -239,7 +248,8 @@ earlier "no driver-side retries" note: the same endpoint is healthy on the
 classifier cell, so one retry recovers the hiccup; a governed abort still
 surfaces immediately.
 
-Stop reasons: governed abort or abort-shaped failure → `aborted`; token
+Stop reasons: governed run-signal abort → `aborted` (the ONLY cancellation
+source; an SDK-internal abort-shaped throw is a run failure); token
 budget tripped or SDK `length` → `budget`; SDK `error`/`content-filter` or
 a mid-run throw → `error`; otherwise `complete`.
 
@@ -257,7 +267,8 @@ not a driver failure — and `structuredOutput` is likewise never fabricated
 on those paths. The remaining `errorClass` values come from the structured
 cuts: `'transient'` for the SDK-retryable class (endpoint header timeout,
 network error) AND the non-retryable step-timeout abort (its `TimeoutError`
-name), `'rate-limit'`/`'quota'`/`'auth'`/`'provider-error'` per the limit
+name, or the generic `AbortError` its retry delay substitutes),
+`'rate-limit'`/`'quota'`/`'auth'`/`'provider-error'` per the limit
 rules, and `'unknown'` for anything message-only (a bare message regex is
 never a class). The classification lives in the exported pure
 `classifyRunFailure(err)`.
@@ -494,8 +505,10 @@ inject a plain-object mock) and feature-detected against the driven
 surface (query / tool / createSdkMcpServer) — capability detection, never
 version checks. A peer that is absent (or misshaped) is a PRE-DISPATCH
 throw naming the peer and the install command. The repo builds and the
-whole suite passes with the peer ABSENT; the `install-matrix` workflow
-proves both halves on every PR. Refusal detection is the D-E′ F2
+whole suite passes with the peer ABSENT. The `install-matrix` workflow
+checks SDK driver tests, build and public import in both peer modes on
+relevant PRs; nightly and pre-release manual runs test the full suite in
+both modes. Refusal detection is the D-E′ F2
 alternative to a pin bump: the lane detects `stop_reason: 'refusal'`
 structurally (available in the vendor vocabulary since the 0.3.162-era
 frames) instead of requiring ≥0.3.302 pins — the recorded fixtures pin

@@ -1,3 +1,4 @@
+import { checkoutWriterStdio, trackCheckoutWriter } from './checkoutWriterContext.js';
 // Child-process mechanics for the drivers — T1.5 slice 1 (migration 1.1:
 // moved from src/driver/subprocess/process.ts to shared/proc.ts so the
 // harness and every lane consume shared process lifecycle instead of
@@ -489,7 +490,7 @@ export function spawnManaged(opts: SpawnOptions): ManagedChild {
   const child: ChildProcessWithoutNullStreams = spawn(opts.command, [...opts.args], {
     cwd: opts.cwd,
     shell: false, // driver-built argv — nothing is ever re-interpreted by a shell
-    stdio: ['pipe', 'pipe', 'pipe'],
+    stdio: checkoutWriterStdio(['pipe', 'pipe', 'pipe']),
     // POSIX: the child becomes its own process-group leader, so the group
     // kill below reaches agent-spawned descendants too. Windows: not set —
     // no Job Object in v1, descendants can survive (header).
@@ -497,8 +498,9 @@ export function spawnManaged(opts: SpawnOptions): ManagedChild {
     // DEFAULT-DENY child env (issue #183): only the allowlisted parent names
     // are inherited; the explicit per-Route overrides always ride on top.
     env: withoutNames(buildChildEnv(process.env, opts.env, opts.envAllowlist), opts.envRemove),
-  });
+  }) as ChildProcessWithoutNullStreams;
 
+  trackCheckoutWriter(child);
   activeChildren.add(child);
   child.stdout.setEncoding('utf8');
   child.stdout.on('data', (chunk: string) => stdout.onChunk(chunk));

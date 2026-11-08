@@ -25,6 +25,29 @@ def setUpModule():
 
 
 class SummaryTest(unittest.TestCase):
+    def test_local_review_preview_aging_repeat_reason_position(self):
+        queue = {"items": [dict(id="repeat", kind="local-review", generation=1,
+            repeat_requested=True, created_at="1970-01-01T00:00:00Z", state="pending",
+            wait_reason="capacity", order=1), dict(id="first", kind="local-review",
+            generation=1, state="pending", order=2)]}
+        config = dict(repo="owner/repo", max_starts_per_hour=8)
+        for clock, generations in ((3599, [1, 1]), (3600, [1, 1])):
+            data = adapter.summarize({"generated_at": "1970-01-01T01:00:00Z"}, queue, {}, config, [], clock)
+            rows = data["pending_items"]
+            self.assertEqual([r["generation"] for r in rows], generations)
+            repeat = next(r for r in rows if r["reason"] == "capacity")
+            self.assertEqual(repeat["band"], "interactive")
+            self.assertEqual(repeat["aging_deadline"], 3600)
+            self.assertEqual(repeat["approximate_position"], 2 if clock < 3600 else 1)
+
+    def test_invalid_local_review_age_does_not_break_preview(self):
+        queue = {"items": [dict(kind="local-review", generation=2, created_at="invalid",
+            state="pending", order=1), dict(kind="local-review", generation=1, state="pending", order=2)]}
+        result = adapter.summarize({"generated_at": "1970-01-01T01:00:00Z"}, queue, {},
+            dict(repo="owner/repo", max_starts_per_hour=8), [], 3600)
+        self.assertEqual([i["generation"] for i in result["pending_items"]], [1, 2])
+        self.assertIsNone(result["pending_items"][1]["aging_deadline"])
+
     def test_preview_prioritizes_foreign_open_pr_before_repository_rank(self):
         queue = {"items": [
             {"id": "foreign", "repo": "owner/foreign", "kind": "open", "state": "pending", "order": 0},
@@ -150,6 +173,37 @@ class SummaryTest(unittest.TestCase):
                 adapter.publish(root, queue, config, {}, home=root)
             self.assertEqual(target.read_bytes(), old)
 
+    def test_corrupt_last_tick_preserves_summary_accepted_by_fleet_reader(self):
+        spec = importlib.util.spec_from_file_location("fleet_reader", ROOT / "ops/fleet-reader.py")
+        reader = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(reader)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "state").mkdir()
+            (root / "state/events.jsonl").write_text("")
+            target = root / "xdg/crq/summary.json"
+            queue = dict(last_tick="2026-11-08T00:00:00Z", items=[])
+            config = dict(max_starts_per_hour=8)
+            with mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(root / "xdg")}), \
+                 mock.patch.object(adapter, "systemd_activity", return_value=({}, {})):
+                adapter.publish(root, queue, config, {}, home=root)
+                retained = target.read_bytes()
+                for corrupt in ("garbage", 123, [], ""):
+                    with self.subTest(last_tick=corrupt):
+                        with self.assertRaisesRegex(ValueError, "invalid last_tick|no completed tick"):
+                            adapter.publish(root, dict(queue, last_tick=corrupt), config, {}, home=root)
+                        self.assertEqual(target.read_bytes(), retained)
+                settings = dict(ssh_host="fixture", source="/fixture/summary.json")
+                with mock.patch.object(reader, "source_settings", return_value=settings), \
+                     mock.patch.object(reader.subprocess, "run",
+                         return_value=mock.Mock(returncode=0, stdout=retained.decode())), \
+                     mock.patch.object(reader.Path, "home", return_value=root / "mirror-home"), \
+                     mock.patch("builtins.print"):
+                    reader.main(["--overlay", str(root / "overlay.json")])
+                mirrored = json.loads(target.read_text())
+                self.assertEqual(mirrored["last_tick"], queue["last_tick"])
+                self.assertEqual(mirrored["source_host"], "fixture")
+
     def test_failed_optional_probes_stay_unknown(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -176,10 +230,19 @@ class SummaryTest(unittest.TestCase):
             self.assertEqual(unknown["schedule"]["state"], "unknown")
             self.assertEqual(unknown["schedule"]["error"], "schedule probe unavailable")
 
-
-
-if __name__ == "__main__":
-    unittest.main()
+    def test_monotonic_timer_timespans_accept_month_and_year_units(self):
+        # systemd renders long monotonic values with month/y units; a healthy
+        # timer must stay observable after about 30 days of host uptime.
+        blocks = [f"Id={unit}\nLoadState=loaded\nActiveState=active\n"
+                  f"LastTriggerUSec=@1700000000\nNextElapseUSecMonotonic={value}"
+                  for unit, value in (("crq-watchdog.timer", "1month 2d 3h"),
+                                      ("crq-tick.timer", "1y 2month 13h 30min"))]
+        with mock.patch.object(adapter, "command", return_value="\n\n".join(blocks)):
+            timers, _ = adapter.systemd_activity()
+        for unit in ("crq-watchdog.timer", "crq-tick.timer"):
+            self.assertNotIn("error", timers[unit])
+            self.assertRegex(timers[unit]["next_elapse"],
+                             r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
 
 
 class MergedCurrentSummaryTest(unittest.TestCase):
@@ -310,3 +373,7 @@ class ReposSummaryTests(unittest.TestCase):
                                  {"max_starts_per_hour": 5}, [], 0)
         self.assertEqual(data["repos"], {})
         self.assertEqual(data["backlog"]["open"], 1)
+
+
+if __name__ == "__main__":
+    unittest.main()

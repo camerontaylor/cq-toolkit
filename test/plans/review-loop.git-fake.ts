@@ -31,6 +31,7 @@ export const fakeGit = (world: LoopWorld, log: string[][], worktreePath: string)
   const treeAt = (object: string): Record<string, number> =>
     world.filesAt?.[object.slice(0, 40)] ?? world.files ?? DEFAULT_WORLD_FILES;
   let pushCount = 0;
+  let publishedTip: string | undefined;
   let worktreeHeadReads = 0;
   return async (args) => {
     log.push(args);
@@ -40,6 +41,12 @@ export const fakeGit = (world: LoopWorld, log: string[][], worktreePath: string)
     if (rest[0] === 'rev-parse' && rest[1] === '--absolute-git-dir') {
       return ok('/fake/git-dir\n');
     }
+    if (rest[0] === 'remote' && rest[1] === 'get-url')
+      return ok(
+        world.changePushurlAfterFirstPush && pushCount > 0
+          ? '/fake/changed.git\n'
+          : '/fake/origin.git\n',
+      );
     if (rest[0] === 'fetch' && rest[1] === 'origin') {
       return ok('');
     }
@@ -76,7 +83,7 @@ export const fakeGit = (world: LoopWorld, log: string[][], worktreePath: string)
       // a known new commit and TO is HEAD (the pushed-head check).
       const servedHead = from === BEFORE_SHA || from === AFTER_SHA || from === SHA;
       const descendantOfHead = servedHead && world.knownShas.includes(to);
-      const inPushedHead = world.knownShas.includes(from) && to === 'HEAD';
+      const inPushedHead = world.knownShas.includes(from) && (to === 'HEAD' || to === from);
       if (descendantOfHead || inPushedHead) {
         return { code: 0, stdout: '', stderr: '' };
       }
@@ -172,6 +179,8 @@ export const fakeGit = (world: LoopWorld, log: string[][], worktreePath: string)
           ? ok('')
           : ok(Array.from({ length: lines }, (_, i) => `line ${String(i + 1)}`).join('\n') + '\n');
     }
+    if (rest[0] === 'ls-remote' && world.loseFirstPushAcknowledgement && publishedTip)
+      return ok(`${publishedTip}\trefs/heads/${HEAD_REF}\n`);
     if (rest[0] === 'push') {
       pushCount += 1;
       if (world.pushFailAt !== undefined && pushCount >= world.pushFailAt) {
@@ -180,9 +189,15 @@ export const fakeGit = (world: LoopWorld, log: string[][], worktreePath: string)
       // KEYED (finding 1): only a push of the PR's REAL head moves the
       // served origin state — a push of the internal cq-review label must
       // NOT (a stray label branch and a phantom progress signal).
-      if (world.advanceOnPush && rest[2] === `HEAD:${HEAD_REF}`) {
+      if (
+        world.advanceOnPush &&
+        (rest.at(-1) === `HEAD:${HEAD_REF}` || rest.at(-1)?.endsWith(`:refs/heads/${HEAD_REF}`))
+      ) {
         world.sha = AFTER_SHA;
+        publishedTip = rest.at(-1)?.split(':')[0];
       }
+      if (world.loseFirstPushAcknowledgement && pushCount === 1)
+        return { code: 124, stdout: '', stderr: 'push acknowledgement lost' };
       return ok('');
     }
     return { code: 1, stdout: '', stderr: `unexpected git argv: ${args.join(' ')}` };

@@ -46,6 +46,16 @@ export function assertCqEnv(cqEnv: CqEnv, prefix: string): void {
 }
 
 /**
+ * Refuse a snapshot that carries an error for `name`. A resolver that reads one
+ * key from a snapshot calls this before using the (then unset) value, so an
+ * invalid or denied key can never fall through to the built-in default.
+ */
+export function assertCqEnvName(cqEnv: CqEnv, prefix: string, name: string): void {
+  const own = cqEnv.errors.filter((d) => d.name === name);
+  if (own.length > 0) throw new CqEnvError(prefix, own);
+}
+
+/**
  * Process-entry gate for scripts: print each warning once and every error on
  * `stderr`, and return the snapshot, or `undefined` when the caller must exit
  * (code 2) before doing anything.

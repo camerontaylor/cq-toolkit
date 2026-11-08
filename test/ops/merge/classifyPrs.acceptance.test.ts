@@ -4,6 +4,7 @@
 // as acceptable review evidence: plain exact-head PASS signals, the row-6
 // reviewer rules, and the row-7 verdict states.
 import { describe, expect, test } from 'vitest';
+import { defaultClassifyPrConfig } from '../../../src/ops/merge/classify.config.js';
 import { classifyPr } from '../../../src/ops/merge/classifyPrs.js';
 import {
   PENDING_MS,
@@ -62,7 +63,7 @@ describe('plain independent review acceptance', () => {
             approved({
               ...author,
               state: 'COMMENTED',
-              body: `Independent review: PASS for ${'a'.repeat(40)}`,
+              body: `**Independent review (Sol): PASS for \`${'a'.repeat(40)}\`**`,
             }),
           ],
           threads: [thread({ ...author, body: 'minor: simplify the helper' })],
@@ -72,16 +73,125 @@ describe('plain independent review acceptance', () => {
     ).toBe('settle_window_pending');
   });
 
-  test('accepts a plain top-level PR comment with the exact head and PASS', () => {
+  test.each([{ automationLogin: 'cq-automation[bot]' }, { excludedLogins: ['automation-author'] }])(
+    'still accepts the cq-review App PASS when the PR author itself is automation or excluded: %j',
+    (config) => {
+      const authorLogin = 'automationLogin' in config ? 'cq-automation[bot]' : 'automation-author';
+      expect(
+        classifyPr(
+          candidate({
+            headRefOid: 'a'.repeat(40),
+            authorLogin,
+            issueComments: [
+              comment({
+                authorType: 'Bot',
+                authorLogin: 'cq-review[bot]',
+                body: `${'a'.repeat(40)} PASS`,
+              }),
+            ],
+          }),
+          PENDING_MS,
+          { ...defaultClassifyPrConfig, ...config },
+        ).reason,
+      ).toBe('settle_window_pending');
+    },
+  );
+
+  test('the excluded PR author cannot accept through the shared-account path', () => {
     expect(
       classifyPr(
         candidate({
           headRefOid: 'a'.repeat(40),
-          issueComments: [comment({ body: `opus ${'a'.repeat(40)} PASS` })],
+          authorLogin: 'automation-author',
+          issueComments: [
+            comment({
+              authorType: 'User',
+              authorLogin: 'automation-author',
+              body: `${'a'.repeat(40)} PASS`,
+            }),
+          ],
+        }),
+        PENDING_MS,
+        { ...defaultClassifyPrConfig, excludedLogins: ['automation-author'] },
+      ).reason,
+    ).toBe('no_acceptable_review');
+  });
+
+  test.each([{ automationLogin: 'AuToMaTiOn-AuThOr' }, { excludedLogins: ['AuToMaTiOn-AuThOr'] }])(
+    'mixed-case author exclusions block exact-head PASS: %j',
+    (config) => {
+      for (const evidence of ['comment', 'review']) {
+        const signal = { authorLogin: 'automation-author', body: `${'a'.repeat(40)} PASS` };
+        expect(
+          classifyPr(
+            candidate({
+              authorLogin: 'automation-author',
+              headRefOid: 'a'.repeat(40),
+              issueComments: evidence === 'comment' ? [comment(signal)] : [],
+              reviews: evidence === 'review' ? [approved({ ...signal, state: 'COMMENTED' })] : [],
+            }),
+            PENDING_MS,
+            { ...defaultClassifyPrConfig, ...config },
+          ).reason,
+        ).toBe('no_acceptable_review');
+      }
+    },
+  );
+
+  test('accepts a plain top-level PR-author comment with the exact head and PASS', () => {
+    expect(
+      classifyPr(
+        candidate({
+          headRefOid: 'a'.repeat(40),
+          issueComments: [
+            comment({ authorLogin: 'pr-author', body: `opus ${'a'.repeat(40)} PASS` }),
+          ],
         }),
         PENDING_MS,
       ).reason,
     ).toBe('settle_window_pending');
+  });
+
+  test('a non-author commenter posting an exact-head PASS is not acceptance', () => {
+    expect(
+      classifyPr(
+        candidate({
+          headRefOid: 'a'.repeat(40),
+          issueComments: [comment({ authorLogin: 'mallory', body: `${'a'.repeat(40)} PASS` })],
+        }),
+        PENDING_MS,
+      ).reason,
+    ).toBe('no_acceptable_review');
+  });
+
+  test('a DISMISSED author review carrying a PASS is void', () => {
+    const pr = candidate({
+      authorLogin: 'pr-author',
+      headRefOid: 'a'.repeat(40),
+      reviews: [
+        approved({
+          authorLogin: 'pr-author',
+          state: 'DISMISSED',
+          body: `${'a'.repeat(40)} PASS`,
+        }),
+      ],
+    });
+    expect(classifyPr(pr, PENDING_MS).reason).toBe('no_acceptable_review');
+  });
+
+  test('the automation login authoring the PR cannot self-accept', () => {
+    const pr = candidate({
+      authorLogin: 'automation',
+      headRefOid: 'a'.repeat(40),
+      issueComments: [comment({ authorLogin: 'automation', body: `${'a'.repeat(40)} PASS` })],
+    });
+    expect(
+      classifyPr(pr, PENDING_MS, {
+        ...defaultClassifyPrConfig,
+        trustedBots: [],
+        automationLogin: 'automation',
+      }).reason,
+    ).toBe('no_acceptable_review');
   });
   test.each([`Reviewer opus: ${'a'.repeat(40)} PASS`, agentMarker('PASS')])(
     'accepts a shared-account exact-head PASS without opt-in: %s',

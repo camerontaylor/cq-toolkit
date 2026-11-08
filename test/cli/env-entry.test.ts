@@ -13,6 +13,55 @@ afterEach(() => {
 const warningLines = (err: string): string[] =>
   err.split('\n').filter((line) => line.startsWith('cq: warning:'));
 
+describe('cq config exit codes', () => {
+  test('invalid values and denied names exit 2 with the report on stdout', async () => {
+    vi.stubEnv('CQ_SANDBOX', 'of');
+    vi.stubEnv('CQ_RUN_TOOL', 'maybe');
+    const run = await capture(['config']);
+    expect(run.code).toBe(2);
+    expect(JSON.parse(run.out)).toHaveProperty('value.errors');
+    expect(run.err.match(/cq: error:/g)).toHaveLength(2);
+    vi.unstubAllEnvs();
+    vi.stubEnv('CQ_APPROVAL_KEY_X', 'x');
+    expect((await capture(['config', '--strict'])).code).toBe(2);
+  });
+
+  test('--strict with only warnings exits 1; without --strict exits 0', async () => {
+    vi.stubEnv('CQ_SANBOX', 'off');
+    expect((await capture(['config', '--strict'])).code).toBe(1);
+    expect((await capture(['config'])).code).toBe(0);
+  });
+});
+
+describe('cq config --json exit codes', () => {
+  const asJson = (out: string): unknown => JSON.parse(out);
+
+  test('invalid values and denied names exit 2 with one JSON artifact and empty stderr', async () => {
+    vi.stubEnv('CQ_SANDBOX', 'of');
+    const bad = await capture(['config', '--json']);
+    expect(bad.code).toBe(2);
+    expect(asJson(bad.out)).toHaveProperty('value.errors');
+    expect(bad.err).toBe('');
+    vi.unstubAllEnvs();
+    vi.stubEnv('CQ_APPROVAL_KEY_X', 'x');
+    const denied = await capture(['config', '--json']);
+    expect(denied.code).toBe(2);
+    expect(() => asJson(denied.out)).not.toThrow();
+  });
+
+  test('--strict with only warnings exits 1, clean exits 0, stdout stays JSON', async () => {
+    vi.stubEnv('CQ_SANBOX', 'off');
+    const strict = await capture(['config', '--json', '--strict']);
+    expect(strict.code).toBe(1);
+    expect(() => asJson(strict.out)).not.toThrow();
+    expect((await capture(['config', '--json'])).code).toBe(0);
+    vi.unstubAllEnvs();
+    const clean = await capture(['config', '--json', '--strict']);
+    expect(clean.code).toBe(0);
+    expect(() => asJson(clean.out)).not.toThrow();
+  });
+});
+
 describe('CLI env entry', () => {
   test('a misspelled CQ_SANDBOX keeps the sandbox required and warns exactly once', async () => {
     vi.stubEnv('CQ_SANBOX', 'off');

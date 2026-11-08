@@ -39,8 +39,9 @@ promotion run.
 > from the `automation` environment secret `CQ_AUTOMATION_APP_KEY` plus the
 > `CQ_AUTOMATION_APP_CLIENT_ID` repository variable, so the DoD-2 soak
 > follow-up is provisioning those two — **not** a `GH_TOKEN` PAT, which no
-> _self-host_ workflow reads (the `drill` environment's `GH_TOKEN` for
-> `live-review` is a separate, still-live credential and is not affected).
+> _self-host_ workflow reads (`live-review` still expects a `drill`-environment
+> `GH_TOKEN`, but that secret is not provisioned at C3 — see the C3 record
+> below).
 > The historical NOT MET record and the red-run description
 > below stand as the phase-4 state; see
 > [ADR-0004 note N22](docs/adr/README.md#post-acceptance-notes) and
@@ -67,8 +68,8 @@ or merged by the automations. Every PR in the window was merged by the lane
 leader. Configuring `GH_TOKEN` (owner: phase 5) is the follow-up that lets
 the scheduled automations process PRs directly; it is recorded here rather
 than hidden. **(Superseded 2026-10-14: see the correction above — no
-_self-host_ workflow reads `GH_TOKEN` (the `drill` `GH_TOKEN` for
-`live-review` is unaffected); provision `CQ_AUTOMATION_APP_KEY` +
+_self-host_ workflow reads `GH_TOKEN` (the `drill` `GH_TOKEN` that
+`live-review` expects is not provisioned at C3); provision `CQ_AUTOMATION_APP_KEY` +
 `CQ_AUTOMATION_APP_CLIENT_ID` instead.)**
 
 ## Queue promotions
@@ -132,9 +133,9 @@ The first automation-authored PR is therefore recorded below as a convention
 gap, not as a conforming row. Adding the prefix/label (owner: phase 5,
 release follow-up) is a follow-up in the op's effects layer.
 
-| PR                                                           | gates                                                                                                                 | convention note                                                                                                                                                                                                                    |
-| ------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [#198](https://github.com/camerontaylor/cq-toolkit/pull/198) | all required checks green (`static` ×2, `denylist` ×2, `ratchet` ×2, `from-source` ×2, `pack-audit`, `build+test` ×2) | no `[automation]` prefix / `cq-automation` label — the shipped op does not set the convention yet; merged after the green required checks + the recorded single-identity fresh review → `0d76ed5b410b413309d33e4d4e11eaee146db099` |
+| PR                                                           | gates                                                                                                                                                                                                                    | convention note                                                                                                                                                                                                                    |
+| ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [#198](https://github.com/camerontaylor/cq-toolkit/pull/198) | all required checks green (`static` ×2, `denylist` ×2, `ratchet` ×2, `from-source` ×2, `pack-audit`, `build+test` ×2; [promotion run 35527938976](https://github.com/camerontaylor/cq-toolkit/actions/runs/35527938976)) | no `[automation]` prefix / `cq-automation` label — the shipped op does not set the convention yet; merged after the green required checks + the recorded single-identity fresh review → `0d76ed5b410b413309d33e4d4e11eaee146db099` |
 
 ## Hand-merge log
 
@@ -148,13 +149,13 @@ reviews are counted under the trust rules, and W0.6's disabled conflict stage
 routes DIRTY candidates to needs-human instead of claiming an automated
 resolution.
 
-| PR                                                                  | merged SHA                                 | date       | reason                                                                                   | gates evidence                                                                                                                                      |
-| ------------------------------------------------------------------- | ------------------------------------------ | ---------- | ---------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [#192 (T4.2)](https://github.com/camerontaylor/cq-toolkit/pull/192) | `3b3775633c461ecd6391969a023505a64d71e85d` | 2026-09-20 | lane-leader merge; scheduled automation red at `GH_TOKEN` (no `awaiting` classification) | PR body §Verification: CI on final head `0ba2753` green — `static` ×2, `denylist` ×2, `ratchet` ×2, `from-source` ×2, `pack-audit`, `build+test` ×2 |
-| [#194 (T4.3)](https://github.com/camerontaylor/cq-toolkit/pull/194) | `a6011346f2cc4ad4370acf45f964ba8a30e5a046` | 2026-09-20 | lane-leader merge; scheduled automation red at `GH_TOKEN` (no `awaiting` classification) | PR body §Verification: CI on final head `cf00699` green — same required-check set                                                                   |
-| [#196 (#193)](https://github.com/camerontaylor/cq-toolkit/pull/196) | `ed2f8fb889f0f0a612088401419cf424d556bcf1` | 2026-09-20 | lane-leader merge; scheduled automation red at `GH_TOKEN` (no `awaiting` classification) | PR body §Verification: CI on final head `0987343` green — same required-check set                                                                   |
-| [#197 (T4.4)](https://github.com/camerontaylor/cq-toolkit/pull/197) | `51c81eb068f43e3c890f874cd90e57a9d966e428` | 2026-09-20 | lane-leader merge; scheduled automation red at `GH_TOKEN` (no `awaiting` classification) | PR body §Verification: CI on final head `3ab3db2` green — same required-check set                                                                   |
-| [#198](https://github.com/camerontaylor/cq-toolkit/pull/198)        | `0d76ed5b410b413309d33e4d4e11eaee146db099` | 2026-09-20 | lane-leader merge; scheduled automation red at `GH_TOKEN` (no `awaiting` classification) | `gh pr checks 198`: all required checks green; fresh review + audit PASS                                                                            |
+| PR                                                                  | merged SHA                                 | date       | reason                                                                                   | gates evidence                                                                                                                                                                                                                                          |
+| ------------------------------------------------------------------- | ------------------------------------------ | ---------- | ---------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [#192 (T4.2)](https://github.com/camerontaylor/cq-toolkit/pull/192) | `3b3775633c461ecd6391969a023505a64d71e85d` | 2026-09-20 | lane-leader merge; scheduled automation red at `GH_TOKEN` (no `awaiting` classification) | PR body §Verification: CI on final head `0ba2753` green — `static` ×2, `denylist` ×2, `ratchet` ×2, `from-source` ×2, `pack-audit`, `build+test` ×2 ([promotion run 35518211437](https://github.com/camerontaylor/cq-toolkit/actions/runs/35518211437)) |
+| [#194 (T4.3)](https://github.com/camerontaylor/cq-toolkit/pull/194) | `a6011346f2cc4ad4370acf45f964ba8a30e5a046` | 2026-09-20 | lane-leader merge; scheduled automation red at `GH_TOKEN` (no `awaiting` classification) | PR body §Verification: CI on final head `cf00699` green — same required-check set ([promotion run 35521532118](https://github.com/camerontaylor/cq-toolkit/actions/runs/35521532118))                                                                   |
+| [#196 (#193)](https://github.com/camerontaylor/cq-toolkit/pull/196) | `ed2f8fb889f0f0a612088401419cf424d556bcf1` | 2026-09-20 | lane-leader merge; scheduled automation red at `GH_TOKEN` (no `awaiting` classification) | PR body §Verification: CI on final head `0987343` green — same required-check set ([promotion run 35524615344](https://github.com/camerontaylor/cq-toolkit/actions/runs/35524615344))                                                                   |
+| [#197 (T4.4)](https://github.com/camerontaylor/cq-toolkit/pull/197) | `51c81eb068f43e3c890f874cd90e57a9d966e428` | 2026-09-20 | lane-leader merge; scheduled automation red at `GH_TOKEN` (no `awaiting` classification) | PR body §Verification: CI on final head `3ab3db2` green — same required-check set ([promotion run 35526586515](https://github.com/camerontaylor/cq-toolkit/actions/runs/35526586515))                                                                   |
+| [#198](https://github.com/camerontaylor/cq-toolkit/pull/198)        | `0d76ed5b410b413309d33e4d4e11eaee146db099` | 2026-09-20 | lane-leader merge; scheduled automation red at `GH_TOKEN` (no `awaiting` classification) | `gh pr checks 198`: all required checks green; fresh review + audit PASS ([promotion run 35527938976](https://github.com/camerontaylor/cq-toolkit/actions/runs/35527938976))                                                                            |
 
 Empty for T4.1 itself: it is leader-authored and merged through the normal
 protocol (two CodeRabbit cycles plus the gates), not by the automation.
@@ -166,7 +167,11 @@ protocol (two CodeRabbit cycles plus the gates), not by the automation.
 
 W1.10 lands cutover step **C1** (ADR-0004 D-H.3.1; `docs/methods-w1-10.md`).
 Every App path is built but switches on only when its repository variable
-is set; until then the interim credentials below stay in use. The target
+is set; until then the remaining interim credentials (`PROMOTE_TOKEN`,
+`CQ_SETTINGS_TOKEN`) stay in use. The retired automation PATs do not: with
+`CQ_AUTOMATION_APP_CLIENT_ID` unset the automation jobs take their documented
+tokenless paths (sync refuses, init fails loudly, the scheduled dispatches
+skip honestly) instead of falling back to a stored credential. The target
 state is `policy/templates/github-settings.json`, and `settings-drift`
 reports the distance to it.
 
@@ -206,8 +211,9 @@ Interim credentials (reported by the drift check until C3):
   it any more. `sync-merge-queue`, `init-merge-queue`, `ratchet-propose`,
   `self-merge-prs` and `self-review-loop` all mint the `cq-automation` App's
   installation token per run from `CQ_AUTOMATION_APP_KEY` and the
-  `CQ_AUTOMATION_APP_CLIENT_ID` variable. The secret is revoked/deleted at C3
-  with the other interim PATs; until then the drift check still notices it.
+  `CQ_AUTOMATION_APP_CLIENT_ID` variable. The secret was removed from the
+  repository at C3; the PAT itself was not revoked because it remains in use
+  elsewhere.
 - `CQ_SETTINGS_TOKEN` — read-only fine-grained PAT (Administration,
   Environments, Secrets, Actions: read) for the drift check.
 

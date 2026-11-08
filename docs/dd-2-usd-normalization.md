@@ -35,9 +35,11 @@ rides `maxTokens 200_000`; see below):
    200_000 because the harness's fixed scaffolding alone is ~26k tokens
    (the raw-chat 2k cap would misclassify every honest run 'budget').
 
-`costUSD` in every cell is DERIVED, never reported by a driver or vendor:
-`usage × vendored per-million rates` (`src/driver/pricing/data.ts` —
-models.dev, MIT, as-of 2026-09, re-verified in `docs/reverify-2026-09.md`).
+`costUSD` in every cell is DERIVED by the driver from usage and the vendored
+per-million rates (`usage × vendored per-million rates`;
+`src/driver/pricing/data.ts` — models.dev, MIT, as-of 2026-09, re-verified in
+`docs/reverify-2026-09.md`). It is modeled api-equivalent cost, never billed
+cost reported by a vendor.
 
 ## The rates used (and their sources)
 

@@ -272,9 +272,10 @@ class CoverageFallbackTargetTest(unittest.TestCase):
         with mock.patch.object(spool, "_ssh", side_effect=crq.SpoolUnreachable("connection lost")):
             with self.assertRaises(OSError):
                 spool.publish_ledger(base, head, b"bundle")
-        with mock.patch.object(spool, "_ssh", return_value=json.dumps({"published": base})):
-            with self.assertRaises(OSError):
-                spool.publish_ledger(base, head, b"bundle")
+        for reply in (json.dumps({"published": base}), "not json", ""):
+            with self.subTest(reply=reply), mock.patch.object(spool, "_ssh", return_value=reply):
+                with self.assertRaises(OSError):
+                    spool.publish_ledger(base, head, b"bundle")
 
     def test_measure_skips_repair_only_merged_item(self):
         repair = {"id": "repair-1", "kind": "merged", "pr": 0, "repair_runs": {"run": {}}, "state": "pending"}
@@ -287,6 +288,41 @@ class CoverageFallbackTargetTest(unittest.TestCase):
         measure.assert_not_called()
         save.assert_called_once_with(queue)
         self.assertNotIn('measure', repair)
+
+    def test_measure_ranks_only_measured_items(self):
+        skipped = {"id": "f-1", "kind": "merged", "pr": 5, "source": "followup", "state": "skipped"}
+        done = {"id": "m-1", "kind": "merged", "pr": 6, "state": "pending"}
+        queue = {"items": [skipped, done]}
+
+        def fake_measure(item):
+            item["measure"] = {"docs_only": False, "surviving_nondoc": 1, "surviving": 1, "added": 1,
+                               "survival": 1, "file_level_focus": 0, "synthetic_paths": [], "excluded_paths": [],
+                               "synthetic_added": 0, "covered_surviving": 0, "focus": 0}
+        with tempfile.TemporaryDirectory() as td, mock.patch.object(crq, 'STATE', Path(td)), \
+             mock.patch.object(crq, 'load_queue', return_value=queue), mock.patch.object(crq, 'fetch'), \
+             mock.patch.object(crq, 'apply_measure', side_effect=fake_measure), \
+             mock.patch.object(crq, 'save_queue') as save, mock.patch.object(crq, 'write_status'), \
+             mock.patch('builtins.print'):
+            crq.cmd_measure()
+        save.assert_called_once_with(queue)
+        self.assertNotIn("order", skipped)
+        self.assertEqual(done["order"], 0)
+
+    def test_secret_scan_ignores_header_shaped_hunk_content(self):
+        rule = {"id": "marker", "regex": "SECRETMARKER"}
+        diff = "\n".join([
+            "diff --git a/src/app.sql b/src/app.sql", "--- a/src/app.sql", "+++ b/src/app.sql",
+            "@@ -1,0 +2,2 @@", "+++ b/node_modules/x", "+SECRETMARKER", ""])
+        removed = "\n".join([
+            "diff --git a/src/app.sql b/src/app.sql", "--- a/src/app.sql", "+++ b/src/app.sql",
+            "@@ -1,2 +1,0 @@", "--- SECRETMARKER", ""])
+        with tempfile.TemporaryDirectory() as td, mock.patch.object(crq, 'denylist_rules', return_value=[rule]), \
+             mock.patch.object(crq.shutil, 'which', return_value=None):
+            ok, res = crq.secret_scan_diff(diff, Path(td) / "s.json")
+            self.assertFalse(ok)
+            self.assertEqual([h["file"] for h in res["denylist_hits"]], ["src/app.sql"])
+            ok, res = crq.secret_scan_diff(removed, Path(td) / "s.json")
+            self.assertFalse(ok)
 
     def test_measurement_uses_supplied_immutable_target(self):
         target = 'a' * 40

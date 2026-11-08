@@ -25,7 +25,7 @@ LEGACY_SHA = '0e35cd11153fc7ad681f002d580b9b22feb22092'
 # A closed leaf allowlist, NOT arbitrary recursive config.update().
 CONFIG_KEYS = {
     'clone', 'worktree_root', 'timeout_bin', 'paseo_hosts',
-    'repos',
+    'repos', 'notify.hosts',
     'promotion.record_url_template', 'promotion.alert_agent_host',
     'promotion.alert_agent_id',
     'promotion.signer.spool.dir', 'promotion.signer.spool.ssh_alias',
@@ -33,7 +33,7 @@ CONFIG_KEYS = {
     'repair.paseo_host', 'repair.blackout.enabled',
 }
 # Allowlisted but optional: absent means the committed value applies.
-OPTIONAL_KEYS = {'repos', 'promotion.signer.spool.dir', 'promotion.alert_agent_id',
+OPTIONAL_KEYS = {'repos', 'notify.hosts', 'promotion.signer.spool.dir', 'promotion.alert_agent_id',
                  'repair.blackout.enabled'}
 HOST_KEYS = {'schema_version', 'deploy_root', 'record_dir', 'config', 'fleet_reader'}
 PATH_KEYS = {'clone', 'worktree_root', 'timeout_bin', 'repair.cq_bin',
@@ -106,6 +106,12 @@ def validate(overlay):
                     or any(not isinstance(v, str) or not v for v in value)
                     or len(set(value)) < 2):
                 raise ValueError('paseo_hosts must contain at least two distinct nonempty endpoint strings')
+        elif name == 'notify.hosts':
+            if (not isinstance(value, list) or len(value) > 32
+                    or any(not isinstance(v, str) or len(v) > 259 or not re.fullmatch(
+                        r'[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?:[0-9]{1,5}', v)
+                        or not 1 <= int(v.rsplit(':', 1)[1]) <= 65535 for v in value)):
+                raise ValueError('notify.hosts must be at most 32 host:port strings with ports 1..65535')
         elif name == 'repos':
             # Per-repo review config is host-specific (its clone path lives on
             # this host), so an overlay replaces the committed list. Shape is
@@ -126,7 +132,9 @@ def validate(overlay):
                 seen.add(repo)
                 clone = entry.get('clone')
                 if clone is not None:
-                    host_path(clone)
+                    clone_path = host_path(clone)
+                    if not outside(clone_path, deploy) or not outside(deploy, clone_path):
+                        raise ValueError('repos clone must be separate from deployment clone')
         elif name in PATH_KEYS:
             # The accepted legacy renderer records a literal ~/ key path.
             # CRQ expands it only at SSH invocation; retain those config bytes.
@@ -285,7 +293,15 @@ def inactive(root):
         args = ['systemctl', '--user', command, '--no-legend', '--no-pager', '--plain']
         if command == 'list-units':
             args.append('--all')
-        for line in run([*args, 'crq-*']).splitlines():
+        try:
+            output = run([*args, 'crq-*'])
+        except subprocess.CalledProcessError as exc:
+            # A unit-file pattern that matches nothing exits 1 with no diagnostic.
+            # An unavailable user bus or any other failure still raises.
+            if command != 'list-unit-files' or exc.returncode != 1 or (exc.stderr or '').strip():
+                raise
+            output = ''
+        for line in output.splitlines():
             name = line.split()[0] if line.split() else ''
             if not name.startswith('crq-') or not re.fullmatch(r'[A-Za-z0-9_.@:-]+', name):
                 raise ValueError('unrecognized CRQ unit listing')
@@ -451,6 +467,9 @@ def legacy_check(root, overlay, raw):
     """Read-only first-deploy fence: accepted source + host overrides + 5→1 only."""
     if git(root, 'rev-parse', 'HEAD') != LEGACY_SHA:
         raise ValueError('legacy checkout HEAD must match the accepted baseline')
+    tracked = git(root, 'status', '--porcelain', '--untracked-files=no').splitlines()
+    if any(line != ' M config.json' for line in tracked):
+        raise ValueError('legacy checkout has tracked changes other than config.json')
     config = apply(committed(root, LEGACY_SHA, 'config.json'), overlay)
     if config['promotion']['merges_trigger'] != 5:
         raise ValueError('unexpected accepted baseline policy')

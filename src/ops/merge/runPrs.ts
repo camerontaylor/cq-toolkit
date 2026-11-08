@@ -358,7 +358,7 @@ export async function runMergePrs(
   }
 
   if (conflictSet.length > 0) {
-    if (input.modelSpec === undefined) {
+    if (input.conflictResolutionDisabled === true || input.modelSpec === undefined) {
       // The dispatch gate's upstream copy: no ModelSpec configured → the
       // prs are NOT resolved (no fabricated vendor default); they divert
       // to needsHuman at escalation priority. secondPass stays null.

@@ -75,7 +75,7 @@
                   "minLength": 1
                 },
                 "type": {
-                  "enum": ["crq-run", "github-review", "author-cli"]
+                  "enum": ["crq-run", "github-review", "author-cli", "author-queue"]
                 },
                 "id": {
                   "type": "string",
@@ -281,7 +281,7 @@
                     "minLength": 1
                   },
                   "kind": {
-                    "enum": ["git-bundle"]
+                    "enum": ["git-bundle", "local-review-full-diff"]
                   }
                 },
                 "additionalProperties": false
@@ -403,7 +403,7 @@
                   "minLength": 1
                 },
                 "type": {
-                  "enum": ["crq-run", "github-review", "author-cli"]
+                  "enum": ["crq-run", "github-review", "author-cli", "author-queue"]
                 },
                 "id": {
                   "type": "string",
@@ -448,7 +448,7 @@
                     "minLength": 1
                   },
                   "kind": {
-                    "enum": ["git-bundle"]
+                    "enum": ["git-bundle", "local-review-full-diff"]
                   }
                 },
                 "additionalProperties": false

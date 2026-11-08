@@ -73,7 +73,11 @@ import { countUnresolvedThreads } from '../review/threads.js';
 import type { RestComment, ReviewSummary, ReviewThread } from '../review/threads.js';
 import type { ClassifyPrConfig } from './classify.config.js';
 import { defaultClassifyPrConfig } from './classify.config.js';
-import { isIgnoredBotAuthor, parseIndependentReview } from '../../shared/independent-review.js';
+import {
+  isIgnoredBotAuthor,
+  isReviewAppAuthor,
+  parseIndependentReview,
+} from '../../shared/independent-review.js';
 
 /**
  * The frozen I2 vocabulary — the ONLY four things that can be said about a
@@ -295,12 +299,29 @@ const isAcceptableReview = (review: ReviewSummary, ctx: ReviewContext): boolean 
   isReviewableEvidence(review, ctx) && stateCounts(review.state, ctx.config);
 
 /** Review independence is judged by the merging agent, including shared accounts. */
-const hasSameAccountAgentAcceptance = (candidate: PrCandidate, _ctx: ReviewContext): boolean => {
+const hasSameAccountAgentAcceptance = (candidate: PrCandidate, ctx: ReviewContext): boolean => {
   const head = candidate.headRefOid;
   if (head == null || !/^[0-9a-f]{40}$/i.test(head)) return false;
-  return [...candidate.reviews, ...candidate.issueComments].some(
+  // The shared-account alternative trusts only the PR author's own account, and
+  // never the automation identity or an excluded login. Those guards bind THAT
+  // alternative only: the cq-review App's PASS is independent acceptance, so an
+  // automation-authored or excluded-author PR must still be able to earn it.
+  // DISMISSED evidence is void on both paths.
+  const prAuthor = candidate.authorLogin;
+  const authorSharesAccount =
+    prAuthor !== null &&
+    prAuthor.toLowerCase() !== ctx.config.automationLogin?.toLowerCase() &&
+    ctx.config.excludedLogins?.some((login) => login.toLowerCase() === prAuthor.toLowerCase()) !==
+      true;
+  return [
+    ...candidate.reviews.filter((review) => review.state !== 'DISMISSED'),
+    ...candidate.issueComments,
+  ].some(
     (comment) =>
-      !isIgnoredBotAuthor(comment.authorType, comment.authorLogin) &&
+      (isReviewAppAuthor(comment.authorType, comment.authorLogin) ||
+        (authorSharesAccount &&
+          comment.authorLogin === prAuthor &&
+          !isIgnoredBotAuthor(comment.authorType, comment.authorLogin))) &&
       parseIndependentReview(comment.body, head).kind === 'valid',
   );
 };

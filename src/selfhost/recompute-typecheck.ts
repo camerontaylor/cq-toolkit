@@ -14,6 +14,7 @@
 // step's validation (`.status == "ok"`, a numeric `.value.count`) is
 // unchanged. Bad arguments or a throw are a failed result, never a count;
 // exit codes follow I1 (./trusted-entry.ts).
+import type { CqEnv } from '../config/env.js';
 import { pathToFileURL } from 'node:url';
 import {
   recomputeTypecheck,
@@ -41,8 +42,9 @@ export interface RecomputeMainDeps {
 
 /** Parse, recompute, write ONE JSON line; return the I1 exit code. */
 export function mainWith(argv: readonly string[], deps: RecomputeMainDeps): Promise<number> {
+  // `_cqEnv` is deliberately unused: this entry reads no CQ_* name.
   return runEntry<RecomputeTypecheckOutcome>(
-    () => (deps.recompute ?? recomputeTypecheck)(parseRecomputeArgs(argv)),
+    (_cqEnv: CqEnv) => (deps.recompute ?? recomputeTypecheck)(parseRecomputeArgs(argv)),
     deps.write,
   );
 }

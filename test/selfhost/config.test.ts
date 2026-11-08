@@ -257,3 +257,12 @@ describe('selfhost drivers are configuration (owner ruling 2026-10-16)', () => {
     );
   });
 });
+
+describe('resolveSelfhostDrivers with an errored snapshot', () => {
+  test('an invalid driver value is refused, not replaced by the default driver', async () => {
+    const { readCqEnv } = await import('../../src/config/env.js');
+    expect(() => resolveSelfhostDrivers(readCqEnv({ [SELFHOST_DRIVER_ENV]: 'no-slash' }))).toThrow(
+      new RegExp(SELFHOST_DRIVER_ENV),
+    );
+  });
+});

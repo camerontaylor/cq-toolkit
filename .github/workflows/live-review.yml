@@ -11,11 +11,16 @@
 # pack-audit.yml, install-matrix.yml — are likewise repo-owned).
 #
 # SECRETS: this file carries NAMES only. GH_TOKEN must be a `drill`
-# environment secret with repo scope on the dispatching user's account (it
-# creates cq-scratch-e5-<run_id>, pushes, and posts). Prefer a FINE-GRAINED PAT
-# scoped to the scratch repo(s) only — not the full account token: the drill
-# needs create/push/comment on one scratch repo and nothing else (the
-# names-only rule is unchanged; this line is about the secret's SCOPE).
+# environment secret on the dispatching user's account: the drill CREATES
+# cq-scratch-e5-<run_id> (POST user/repos), then pushes and posts in it. A
+# fine-grained PAT cannot be pre-scoped to that repository, because
+# selected-repository tokens require the repository to exist when the token
+# is created. The credential therefore needs repository creation at the
+# account level (Administration: write) plus contents and pull-request write
+# on the scratch repo it creates, and nothing else. A token scoped to just
+# the scratch repo works only if creation moves out of the drill (pre-create
+# the repo and drop the create call). The names-only rule is unchanged; this
+# note is about the secret's SCOPE.
 # The scratch repo is LEFT
 # BEHIND on purpose (the token holds no delete_repo scope); use a FRESH
 # run_id per drill so the seeded fixtures are unambiguous.
@@ -107,8 +112,9 @@ jobs:
       - name: Live review-loop e2e (test/e2e/review/live.test.ts)
         env:
           # Names only — scoped to THIS step on purpose (round-3 fix): the
-          # token must not reach pnpm install's lifecycle scripts. Prefer the
-          # fine-grained, scratch-repo-scoped PAT from the header note.
+          # token must not reach pnpm install's lifecycle scripts. The header
+          # note states the credential's scope: account-level repository
+          # creation plus contents/PR write on the scratch repo it creates.
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
           test -n "$GH_TOKEN" || { echo 'GH_TOKEN is not set — every gh call would fail mid-run; refusing to start' >&2; exit 1; }

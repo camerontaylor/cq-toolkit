@@ -288,8 +288,9 @@ except author_quota.AuthorRefused:
     print('refused')
 '''
         commands = [("queue", BEFORE), ("agent", DEADLINE)]
+        here = str(Path(__file__).resolve().parent)
         children = [subprocess.Popen([sys.executable, "-c", script, str(self.root), action, at, legacy.REQ],
-                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                                     cwd=here, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
                     for action, at in commands]
         outputs = []
         for child in children:

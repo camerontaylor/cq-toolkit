@@ -1,6 +1,11 @@
+import {
+  leasedPush,
+  resolvePushDestination,
+  type PushDestination,
+} from '../../adapters/git/leasedPush.js';
 import { reviewBranchKey } from './internal/branchKey.js';
-import { readCqEnv } from '../../config/env.js';
 import { provenanceConfig } from '../../config/provenance.js';
+import { currentCqEnv } from '../../config/run-env.js';
 import { makeGitMutex } from '../../shared/gitMutex.js';
 import { createHash, randomUUID } from 'node:crypto';
 import {
@@ -14,6 +19,7 @@ import {
   unlink,
 } from 'node:fs/promises';
 import { resolve, join, posix, relative } from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 import { createDriverFactory, type DriverFactory } from '../../driver/factory.js';
 import { correlationInvocation } from '../../driver/correlationInvocation.js';
 import type { Usage, WorkerResult } from '../../driver/types.js';
@@ -28,7 +34,7 @@ import { loopReplyVerdict, replySignature } from '../../plans/review-loop.js';
 import { DEFAULT_REVIEW_WALL_MS, parseCqConfig, type CqConfig } from '../analyze/cqConfig.js';
 import { resolveCqConfigDefaults, requireAgenticTokenBudget } from '../analyze/cqConfigDefaults.js';
 import { makeDevDisposition } from '../dev/disposition.js';
-import { makeSubprocessDevEffects } from '../dev/effects.js';
+import { makeSubprocessDevEffects, type DevEffects } from '../dev/effects.js';
 import {
   FindingsRecordSchema,
   findingDispositionView,
@@ -87,7 +93,12 @@ import {
   withAddressOwnership,
   type AddressLease,
 } from './internal/addressOwnership.js';
-import { DEV_LEDGER_VERSION, devLedgerPath, type DevCycleRecord } from '../dev/record.js';
+import {
+  DEV_LEDGER_VERSION,
+  devLedgerPath,
+  type DevCycleRecord,
+  type DevLedgerFile,
+} from '../dev/record.js';
 import {
   createKnownUsageLedger,
   normalizeUsageObservation,
@@ -115,7 +126,6 @@ import { repoIdFromRemote, sanitizeObservation } from '../fix/attemptRecord.js';
 import { resolveCorrelation } from '../fix/correlation.js';
 import { assembleReportV2 } from '../fix/reportFold.js';
 import { measureRun, reviewPlannedUnitsOf } from '../fix/measurement.js';
-import { processEnv } from '../../config/process-env.js';
 
 export interface ReviewAddressInput {
   repoRoot: string;
@@ -305,17 +315,24 @@ async function captureAddressProvenance(
   configJsonText: string,
   gitText: (args: string[]) => Promise<string>,
 ): Promise<{ provenance: ProvenanceRecord }> {
-  const [remote, packageText] = await Promise.all([
+  // The resolved snapshot: a blank CQ_PRODUCER_VERSION is unset (registry contract).
+  const cqEnv = currentCqEnv();
+  const resolved = cqEnv.values['CQ_PRODUCER_VERSION'];
+  const envVersion = typeof resolved === 'string' ? resolved : undefined;
+  const [remote, packageVersion] = await Promise.all([
     // The composition's git transport answers this like every other read; a
     // missing remote is repoId null/unavailable (ADR-0008), never a failure.
     gitText(['config', '--get', 'remote.origin.url']).catch(() => ''),
-    // The emitting package version: the toolkit's own package.json.
-    readFile(new URL('../../../package.json', import.meta.url), 'utf8'),
+    // The emitting package version: the toolkit's own package.json. The env
+    // override never reads the file, and a read or parse failure degrades to
+    // 'unavailable' — an observation PRE-FLIGHT failure never fails the run.
+    envVersion !== undefined
+      ? Promise.resolve(envVersion)
+      : readFile(new URL('../../../package.json', import.meta.url), 'utf8')
+          .then((text) => (JSON.parse(text) as { version?: string }).version)
+          .catch(() => undefined),
   ]);
-  const version =
-    processEnv().CQ_PRODUCER_VERSION ??
-    (JSON.parse(packageText) as { version?: string }).version ??
-    'unavailable';
+  const version = packageVersion ?? 'unavailable';
   const provenance: ProvenanceRecord = {
     cqVersion: version,
     producerVersion: version,
@@ -329,7 +346,7 @@ async function captureAddressProvenance(
     journalLink: 'unavailable',
     reportLink: 'unavailable',
     witnesses: { base: baseSha, admitted: null, execution: null, reviewed: null, accepted: null },
-    config: provenanceConfig(readCqEnv()),
+    config: provenanceConfig(cqEnv),
   };
   return sanitizeObservation({ provenance });
 }
@@ -695,7 +712,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
         if (worker) report.escalation = worker.escalation();
         return addressCancelledResult(addressLease);
       }
-      if (reason) report.reasons.push(reason);
+      if (reason && !report.reasons.includes(reason)) report.reasons.push(reason);
       let publicationFailed = false;
       if (publishOnExit && !parent?.aborted) {
         try {
@@ -1027,21 +1044,31 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
         // with; the correlation record joins its streams on that same workId.
         ...(injectedWriter === undefined ? {} : { workId: injectedWriter.workId }),
       };
+      // ADR-0008 T31: a provenance rejection is an observation failure, never
+      // a run failure — the surface records the sanitized reason and the run
+      // proceeds with no header.
+      let provenanceFailure: string | undefined;
       const sanitizedProvenance =
         baseSha === null
           ? null
-          : (
-              await captureAddressProvenance(
-                input.source,
-                new Date(start).toISOString(),
-                baseSha,
-                configText ?? JSON.stringify(config),
-                async (args) => {
-                  const probe = await rawGit(['-C', input.repoRoot, ...args]);
-                  return probe.stdout.trim();
-                },
-              )
-            ).provenance;
+          : await captureAddressProvenance(
+              input.source,
+              new Date(start).toISOString(),
+              baseSha,
+              configText ?? JSON.stringify(config),
+              async (args) => {
+                const probe = await rawGit(['-C', input.repoRoot, ...args]);
+                return probe.stdout.trim();
+              },
+            ).then(
+              (captured) => captured.provenance,
+              (error: unknown) => {
+                provenanceFailure = sanitizeObservation(
+                  `observation: provenance unavailable: ${String(error)}`,
+                );
+                return null;
+              },
+            );
       // ADR-0008 T31: DECLARE the observation surface here, but open nothing
       // yet. Opening the writer creates the journal directory (mkdir -p) and
       // the composition header append is journal IO; a run refused before it
@@ -1060,9 +1087,10 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
         workId: correlationRecord.workId,
         baseSha,
         failure:
-          baseSha === null
+          provenanceFailure ??
+          (baseSha === null
             ? 'observation: base witness unavailable'
-            : 'observation: ownership not held',
+            : 'observation: ownership not held'),
         kernelRuns: [],
         ...(sanitizedProvenance === null
           ? {}
@@ -1709,7 +1737,9 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
             const unpublished = new Set<string>();
             let publishBranch: string | undefined;
             let publishRemote = 'origin';
+            let publishDestination: PushDestination | undefined;
             let publishedBase: string | undefined;
+            let expectedRemoteHead: string | undefined;
             let workerRoot = resolve(input.repoRoot);
             noteEvidenceImportedImpl = (evidence) => noteQueueEvidence(workerRoot, evidence);
             const remember = (fix: AddressFix) => {
@@ -1729,8 +1759,12 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
             };
             const publishOnExitInner = async (): Promise<void> => {
               if (!input.push || unpublished.size === 0 || parent?.aborted) return;
-              if (!publishedBase) throw new Error('publication baseline unavailable');
-              const range = (await gitText(workerRoot, ['rev-list', `${publishedBase}..HEAD`]))
+              if (!publishedBase || expectedRemoteHead === undefined)
+                throw new Error('publication baseline unavailable');
+              const verifiedTip = await gitText(workerRoot, ['rev-parse', 'HEAD']);
+              const range = (
+                await gitText(workerRoot, ['rev-list', `${publishedBase}..${verifiedTip}`])
+              )
                 .split('\n')
                 .filter(Boolean);
               if (
@@ -1739,12 +1773,30 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                 [...unpublished].some((sha) => !range.includes(sha))
               )
                 throw new Error('publication contains an unverified commit or changed ancestry');
-              await gitText(workerRoot, ['merge-base', '--is-ancestor', publishedBase, 'HEAD']);
+              await gitText(workerRoot, [
+                'merge-base',
+                '--is-ancestor',
+                publishedBase,
+                verifiedTip,
+              ]);
               if (!(await publicationTreeClean(workerRoot)))
                 throw new Error('worker tree/index is dirty; verified commits retained');
               const branch = publishBranch ?? (await branchName(workerRoot));
               if (parent?.aborted) throw new Error('parent cancelled');
-              await gitText(workerRoot, ['push', publishRemote, `HEAD:refs/heads/${branch}`]);
+              const pushed = await leasedPush(
+                git,
+                workerRoot,
+                (publishDestination ??= await resolvePushDestination(
+                  git,
+                  workerRoot,
+                  publishRemote,
+                )),
+                branch,
+                expectedRemoteHead,
+                verifiedTip,
+              );
+              if (pushed.code !== 0)
+                throw new Error(`publication failed: ${pushed.stderr.slice(0, 500)}`);
               // The engine's own witness: a push actually left the process, so
               // the withhold rows' commit is out (#469). Set ONLY here — an
               // early return (no push run, nothing unpublished) never counts
@@ -1768,7 +1820,8 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
               settleWithholdRows(
                 "; exit-published — the engine's exit publication pushed the exact verified range; only this item's reply and resolve remain withheld",
               );
-              publishedBase = await gitText(workerRoot, ['rev-parse', 'HEAD']);
+              publishedBase = verifiedTip;
+              expectedRemoteHead = verifiedTip;
               unpublished.clear();
             };
             // The engine witnesses its own exit publication so the report can
@@ -1799,18 +1852,56 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
               if (!policy.review.reviewers.includes('coderabbit')) return complete;
               return withBookkeepingAccess(root, async () => {
                 if (stop()) return false;
-                const context = await (
-                  deps.resolveDeferredVendorContext ?? resolveDeferredVendorContext
-                )({
+                const request: DeferredVendorContextRequest = {
                   repoRoot: root,
                   target: input.target ?? 'main',
                   base: reviewedBase,
                   record,
                   onEvidenceImported: (evidence) => noteQueueEvidence(root, evidence),
+                  remainingMs: remainingWallMs,
                   ...(parent ? { signal: parent } : {}),
-                });
-                if (!deps.resolveDeferredVendorContext && context)
-                  await noteBookkeeping(devLedgerPath(root, record.branch));
+                };
+                // Correlate durable ledger bytes with the mutation the loader
+                // itself requested: never bless bytes the engine did not write
+                // (an external append stays unowned and fails closed at the
+                // next bookkeeping fingerprint check).
+                let requestedLedger: DevLedgerFile | undefined;
+                let provisionalLedger: DevLedgerFile | undefined;
+                const context = deps.resolveDeferredVendorContext
+                  ? await deps.resolveDeferredVendorContext(request)
+                  : await resolveDeferredVendorContext(request, {
+                      ...(deps.queueClient ? { queueClient: deps.queueClient } : {}),
+                      effectsFactory: (effectRoot): DevEffects => {
+                        const effects = makeSubprocessDevEffects(effectRoot);
+                        return {
+                          ...effects,
+                          openLedger: (branch) => {
+                            const store = effects.openLedger(branch);
+                            return {
+                              ...store,
+                              mutate: (update) =>
+                                store
+                                  .mutate((latest) => {
+                                    const change = update(latest);
+                                    provisionalLedger = structuredClone(change.ledger);
+                                    return change;
+                                  })
+                                  .then((result) => {
+                                    // Promote only once the store durably
+                                    // accepted the requested state.
+                                    requestedLedger = provisionalLedger;
+                                    return result;
+                                  }),
+                            };
+                          },
+                        };
+                      },
+                    });
+                if (!deps.resolveDeferredVendorContext && context) {
+                  const after = makeSubprocessDevEffects(root).openLedger(record.branch).load();
+                  if (requestedLedger !== undefined && isDeepStrictEqual(requestedLedger, after))
+                    await noteBookkeeping(devLedgerPath(root, record.branch));
+                }
                 if (stop()) return false;
                 if (!context) {
                   if (complete) delete report.deferredVendorDebt;
@@ -1957,9 +2048,11 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                   target: input.target ?? 'main',
                   ...(input.base
                     ? { base: input.base }
-                    : reviewedBasePinned
-                      ? { base: await reviewedBasePinned() }
-                      : {}),
+                    : reviewedBase
+                      ? { base: reviewedBase }
+                      : reviewedBasePinned
+                        ? { base: await reviewedBasePinned() }
+                        : {}),
                 });
                 if (!read.ok) throw new Error(read.reason);
                 const state = read.state;
@@ -2276,6 +2369,33 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
               await admitRecord(root, record);
               report.verifiedHead ??= record.head;
               publishedBase ??= await gitText(root, ['rev-parse', 'HEAD']);
+              try {
+                if (input.push && expectedRemoteHead === undefined) {
+                  publishDestination ??= await resolvePushDestination(git, root, publishRemote);
+                  const branch = publishBranch ?? (await branchName(root));
+                  const ref = `refs/heads/${branch}`;
+                  const remote = await gitText(root, [
+                    'ls-remote',
+                    '--refs',
+                    publishDestination.url,
+                    ref,
+                  ]);
+                  const [sha, destination, extra] = remote.split('\t');
+                  if (
+                    remote !== '' &&
+                    (!/^[0-9a-f]{40,64}$/i.test(sha ?? '') ||
+                      destination !== ref ||
+                      extra !== undefined)
+                  )
+                    throw new Error('publication remote head unavailable');
+                  expectedRemoteHead = remote === '' ? '' : sha!;
+                }
+              } catch {
+                const reason = 'publication remote head unavailable; fixes withheld';
+                report.reasons.push(reason);
+                return reason;
+              }
+
               const unresolvedReason = 'unresolved: finding has no file path';
               const pathless = record.findings.filter(
                 (finding) => finding.status === 'open' && finding.file === '',
@@ -2464,6 +2584,12 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                 headRepo: `${meta.headRepositoryOwner.login}/${meta.headRepository.name}`,
                 login: loginResult.stdout.trim(),
               };
+              publishBranch = prMetadata.headRefName;
+              publishRemote =
+                prMetadata.headRepo === name
+                  ? 'origin'
+                  : `https://github.com/${prMetadata.headRepo}.git`;
+
               // Publication receipts outlive run-specific reports. A changed target,
               // fork/branch or authenticated actor cannot borrow another run's log.
               // The loop still requires fetched authenticated current-head/round proof;
@@ -2842,6 +2968,11 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                     return { status: 'ok', value };
                   },
                 };
+                // The head check is admission-only: from round 2 on the
+                // previous round's commit has legitimately moved the worktree
+                // HEAD, so no expected head is passed.
+                const roundOneExpectedHead =
+                  round === 1 ? (lease.expectedHead ?? input.expectedHead) : undefined;
                 const loop = await runAddressReviewLoop(lease, {
                   owner: meta.owner,
                   repo: meta.repo,
@@ -2849,27 +2980,32 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                   headRefName: meta.headRefName,
                   ...(meta.headRepo ? { headRepo: meta.headRepo } : {}),
                   repoRoot: input.repoRoot,
-                  ...(round === 1 && input.expectedHead
-                    ? { expectedHead: input.expectedHead }
-                    : {}),
+                  ...(roundOneExpectedHead ? { expectedHead: roundOneExpectedHead } : {}),
                   gh,
                   git,
                   registry:
                     deps.worktreeRegistry ??
                     lease.registry ??
                     fileWorktreeRegistry(resolve(journalDir, 'worktrees.json')),
-                  ...(lease.expectedHead ? { expectedHead: lease.expectedHead } : {}),
                   beforeWorktreeResolve: () =>
                     lease.assertSelection({
                       pr: meta.pr,
                       headRepo: meta.headRepo ?? `${meta.owner}/${meta.repo}`,
                       headRefName: meta.headRefName,
                     }),
-                  onWorktreeResolved: async (info) =>
-                    lease.claimCheckout({
+                  onWorktreeResolved: async (info) => {
+                    expectedRemoteHead ??= await gitText(info.path, ['rev-parse', 'HEAD']);
+                    publishedBase ??= expectedRemoteHead;
+                    await lease.claimCheckout({
                       ...info,
                       head: await gitText(info.path, ['rev-parse', 'HEAD']),
-                    }),
+                    });
+                  },
+                  onPublished: (sha) => {
+                    unpublished.clear();
+                    publishedBase = sha;
+                    expectedRemoteHead = sha;
+                  },
                   driver: policy.roles.worker!,
                   driverRegistryView: {
                     get: (name) => (name === 'review.fixItem' ? entry : undefined),
@@ -2942,7 +3078,11 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                     // and exact bytes re-validated by the receipt's own
                     // machinery); any other dirt keeps the strict refusal.
                     // onCreated still performs the receipt rotation afterwards.
-                    if (!persistedBookkeeping) return false;
+                    // Once bookkeeping fingerprints exist, deleting receipt-owned
+                    // files would leave the in-memory map pointing at deleted
+                    // paths, so the next check would (wrongly) declare the run
+                    // tampered: keep the strict refusal instead.
+                    if (!persistedBookkeeping || bookkeeping.size > 0) return false;
                     const owned = await persistedBookkeeping.ownedFiles();
                     for (const path of owned) await unlink(path);
                     return true;
@@ -2972,10 +3112,6 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                 root = loop.worktree.path;
                 workerRoot = root;
                 publishBranch = meta.headRefName;
-                if (input.push && loop.status === 'ok') {
-                  unpublished.clear();
-                  publishedBase = await gitText(root, ['rev-parse', 'HEAD']);
-                }
                 if (loop.status !== 'ok') report.reasons.push(...loop.reasons);
                 if (loop.headRefused)
                   return await finish('needs-human', 'PR head changed before dispatch');
@@ -3053,6 +3189,16 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                     await rename(`${pendingRerequestPath}.tmp`, pendingRerequestPath);
                   }
                 }
+                // A failed after-snapshot leaves the loop's replies/resolves
+                // published but the round unverified. Stop BEFORE the
+                // re-review, after preserving pending reviewer requests. That pass
+                // would replace the settled record with the re-reviewed
+                // population and lose the history of what the fixes did.
+                if (loop.verifyFailure !== undefined)
+                  return await finish(
+                    'needs-human',
+                    `verify snapshot failed: ${loop.verifyFailure}`,
+                  );
                 if ((await branchName(root)) !== loop.worktree.branch)
                   return await finish('needs-human', 'PR worker branch changed');
                 const currentHead = await gitText(root, ['rev-parse', 'HEAD']);
@@ -3207,7 +3353,16 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                   let path = input.record;
                   if (!path) {
                     const folder = resolve(root, '.cq', 'review', reviewBranchKey(branch));
-                    const files = (await readdir(folder))
+                    // A branch with no review.run yet has no folder: that is the
+                    // documented "no findings record" guidance, not a raw ENOENT.
+                    let names: string[];
+                    try {
+                      names = await readdir(folder);
+                    } catch (error) {
+                      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+                      names = [];
+                    }
+                    const files = names
                       .filter((name) => /^\d+\.json$/.test(name))
                       .sort((a, b) => Number(b.slice(0, -5)) - Number(a.slice(0, -5)));
                     if (!files[0])

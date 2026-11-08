@@ -1,7 +1,10 @@
 name: denylist
 
 # Required check. gitleaks scans the commits this push or pull request adds
-# (their diffs and their messages) with the repository's .gitleaks.toml.
+# (their diffs and their messages) with the DEFAULT BRANCH's .gitleaks.toml.
+# The policy comes from a trusted default-branch checkout, never from the
+# scanned revision: a required check that a pull request can re-configure
+# could allowlist its own findings and still pass.
 # Triggers stay unfiltered: a required check that a path filter skips never
 # reports, and the pull request can never merge.
 on:
@@ -17,21 +20,47 @@ jobs:
     # The `cq-state` settle ledger is machine-written; its pushes are not
     # reviewable changes (review-debt #226).
     if: ${{ github.ref != 'refs/heads/cq-state' }}
+    env:
+      # The scanner policy is the DEFAULT BRANCH's copy (see the header),
+      # never the scanned revision's.
+      GITLEAKS_CONFIG: ${{ github.workspace }}/trust/.gitleaks.toml
     steps:
+      # The repo checkout comes FIRST: it checks out into the workspace root
+      # and its default `clean: true` runs `git clean -ffdx` there, which
+      # would delete a sibling `trust/` checkout made before it.
       - name: Check out the repo
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (immutable commit pin; repo policy)
         with:
           persist-credentials: false
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Check out the trusted scanner policy (default branch)
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (immutable commit pin; repo policy)
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.repository.default_branch }}
+          path: trust
+          sparse-checkout: .gitleaks.toml
+          sparse-checkout-cone-mode: false
+      - name: Cache pinned gitleaks archive
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: ${{ runner.temp }}/gitleaks-archive/gitleaks_8.30.1_linux_x64.tar.gz
+          key: gitleaks-8.30.1-Linux-X64-551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
       - name: Install pinned gitleaks v8.30.1 (digest-pinned)
         run: |
           set -euo pipefail
-          cd "${RUNNER_TEMP:-/tmp}"
+          mkdir -p "${RUNNER_TEMP}/gitleaks-archive"
+          cd "${RUNNER_TEMP}/gitleaks-archive"
           tarball="gitleaks_8.30.1_linux_x64.tar.gz"
           digest="551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
-          curl -fsSL -o "${tarball}" \
-            "https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/${tarball}"
+          if [ ! -f "${tarball}" ]; then
+            curl --fail --silent --show-error --location \
+              --retry 5 --retry-delay 10 --retry-max-time 240 \
+              --connect-timeout 15 --max-time 60 \
+              --output "${tarball}" \
+              "https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/${tarball}"
+          fi
           echo "${digest}  ${tarball}" | sha256sum -c -
           tar -xzf "${tarball}" gitleaks
           sudo install -m 0755 gitleaks /usr/local/bin/gitleaks
@@ -62,9 +91,9 @@ jobs:
         # it for octopus merges, so those are scanned against their first parent.
         run: |
           set -euo pipefail
-          gitleaks git --no-banner --redact --config .gitleaks.toml --log-opts="$RANGE --diff-merges=remerge" .
+          gitleaks git --no-banner --redact --config "$GITLEAKS_CONFIG" --log-opts="$RANGE --diff-merges=remerge" .
           for commit in $(git rev-list --min-parents=3 "$RANGE"); do
-            gitleaks git --no-banner --redact --config .gitleaks.toml --log-opts="-1 $commit --diff-merges=first-parent" .
+            gitleaks git --no-banner --redact --config "$GITLEAKS_CONFIG" --log-opts="-1 $commit --diff-merges=first-parent" .
           done
       - name: Scan commit messages
         env:
@@ -72,4 +101,4 @@ jobs:
         run: |
           set -euo pipefail
           git log --format='--- commit %h%n%B' "$RANGE" \
-            | gitleaks stdin --no-banner --redact --config .gitleaks.toml
+            | gitleaks stdin --no-banner --redact --config "$GITLEAKS_CONFIG"

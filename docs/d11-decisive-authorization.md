@@ -103,12 +103,15 @@ moves no ref, so the leases cannot catch it).
 The observer prunes the ledger to open PRs (`merge-recheck.ts`
 `pruneToOpen`), so a merged PR's record can be gone from the `cq-state`
 tip before the gate runs. The gate lists the ledger's commits newest first
-(at most `SETTLE_HISTORY_MAX` versions) and reads versions until each
-admitted PR is found. `headObservationEpochInHistory` takes the newest
-version that holds a record for the PR: if that record's tuple head is
-the merged head, the epoch is its first observation; otherwise there is
-none. An older version holding an earlier head is never consulted, so a
-superseded observation cannot anchor the label.
+(at most `SETTLE_HISTORY_MAX_PAGES` pages of up to 100 ledger commits) and
+reads versions until each admitted PR is found. A version with discarded
+content is a barrier: the lookup stops there, and the PR gets no epoch.
+The page budget can also run out first, which is reported as `limited` and
+likewise leaves the PR without an epoch. `headObservationEpochInHistory`
+takes the newest version that holds a record for the PR: if that record's
+tuple head is the merged head, the epoch is its first observation;
+otherwise there is none. An older version holding an earlier head is never
+consulted, so a superseded observation cannot anchor the label.
 
 ## verifyRatchet shares the same object
 
@@ -140,19 +143,19 @@ it still runs no head code and writes only `checks`.
 Each of these leaves the affected path unauthorized (needs-human) and is
 named in the report:
 
-| Case                                                                                        | Mechanism                                         |
-| ------------------------------------------------------------------------------------------- | ------------------------------------------------- |
-| Settle ledger absent or unreadable, or the PR not in the last `SETTLE_HISTORY_MAX` versions | no epoch → record `invalid`                       |
-| Attestation absent, unreadable, or schema-invalid at the trust ref                          | `attested: false` → record `dormant`              |
-| Label applied at or before the epoch                                                        | `invalid` (strictly after)                        |
-| Label applied at or before the C3 attestation's `attestedAt` (attested)                     | `invalid` (strictly after; never retroactive)     |
-| Label applied via a GitHub App, or by anyone but the owner's `User`                         | `invalid`                                         |
-| Owner id unreadable                                                                         | every record `invalid`                            |
-| Label events unreadable                                                                     | that PR's record `invalid`                        |
-| Path changed by no admitted contribution (PR not in the closure)                            | `not contributed by any admitted PR`              |
-| Two contributions claim the same merge, or one PR twice (ambiguous)                         | both records `invalid`                            |
-| Closure violation, ambiguous merge PR, evil merge                                           | the gate refuses before any authorization (D-K.3) |
-| `lint` finding                                                                              | `fail`, never authorizable                        |
+| Case                                                                                                                                                                          | Mechanism                                         |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------- |
+| Settle ledger absent or unreadable, a history barrier (discarded content), a history page budget exhausted (`limited`), or the PR not within `SETTLE_HISTORY_MAX_PAGES` pages | no epoch → record `invalid`                       |
+| Attestation absent, unreadable, or schema-invalid at the trust ref                                                                                                            | `attested: false` → record `dormant`              |
+| Label applied at or before the epoch                                                                                                                                          | `invalid` (strictly after)                        |
+| Label applied at or before the C3 attestation's `attestedAt` (attested)                                                                                                       | `invalid` (strictly after; never retroactive)     |
+| Label applied via a GitHub App, or by anyone but the owner's `User`                                                                                                           | `invalid`                                         |
+| Owner id unreadable                                                                                                                                                           | every record `invalid`                            |
+| Label events unreadable                                                                                                                                                       | that PR's record `invalid`                        |
+| Path changed by no admitted contribution (PR not in the closure)                                                                                                              | `not contributed by any admitted PR`              |
+| Two contributions claim the same merge, or one PR twice (ambiguous)                                                                                                           | both records `invalid`                            |
+| Closure violation, ambiguous merge PR, evil merge                                                                                                                             | the gate refuses before any authorization (D-K.3) |
+| `lint` finding                                                                                                                                                                | `fail`, never authorizable                        |
 
 The `absent` and `dormant` cases keep today's behaviour exactly.
 

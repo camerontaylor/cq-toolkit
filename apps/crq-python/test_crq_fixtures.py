@@ -155,7 +155,7 @@ def offline_git_boundary(real_popen, home, violations):
         if cmd == "diff":
             shapes = (["--name-status"], ["--no-ext-diff"],
                       ["--name-only", "--no-renames", "-z"],
-                      ["--name-status", "-M50%", "-z"],
+                      ["--raw", "--no-abbrev", "-M50%", "-z"],
                       ["--text", "--no-textconv", "--no-ext-diff", "--no-renames", "--no-color", "--unified=0"],
                       ["--no-color", "--no-ext-diff", "--unified=0"])
             return any(tail[:-2] == flags and len(tail) == len(flags) + 2

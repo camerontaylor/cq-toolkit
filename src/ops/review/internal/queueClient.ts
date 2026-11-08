@@ -1,3 +1,7 @@
+import {
+  WireSchema as ReviewWireSchema,
+  ResponseSchema as ReviewResponseSchema,
+} from './reviewOperation.js';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { z } from 'zod';
@@ -25,6 +29,8 @@ import {
   sha256,
   type QueueEvidence,
 } from './queueEvidence.js';
+import type { CqEnv } from '../../../config/env.js';
+import { currentCqEnv } from '../../../config/run-env.js';
 import { processEnv } from '../../../config/process-env.js';
 
 const CommonPage = z.object({
@@ -98,11 +104,18 @@ export function makeConfiguredQueueClient() {
 }
 
 /** Fixed capability only; alias is operator configured, never a request field. */
-export function sshQueueTransport(alias: string): QueueTransport {
+export function sshQueueTransport(
+  alias: string,
+  command: 'queue-v1' | 'review-v1' = 'queue-v1',
+): QueueTransport {
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/.test(alias)) throw new Error('invalid queue SSH alias');
   return (request, options) =>
     new Promise((resolve, reject) => {
-      if (Buffer.byteLength(request) > QUEUE_WIRE_BYTES) {
+      const signal = options?.signal;
+      signal?.throwIfAborted();
+      if (
+        Buffer.byteLength(request) > (command === 'review-v1' ? 6 * 1024 * 1024 : QUEUE_WIRE_BYTES)
+      ) {
         reject(new Error('oversized queue request'));
         return;
       }
@@ -126,7 +139,7 @@ export function sshQueueTransport(alias: string): QueueTransport {
           'RequestTTY=no',
           '--',
           alias,
-          'queue-v1',
+          command,
         ],
         { stdio: ['pipe', 'pipe', 'pipe'] },
       );
@@ -134,11 +147,22 @@ export function sshQueueTransport(alias: string): QueueTransport {
       let size = 0;
       const timer = setTimeout(
         () => {
+          signal?.removeEventListener('abort', onAbort);
           child.kill('SIGKILL');
           reject(new Error('queue delivery unknown: timeout'));
         },
         Math.max(1, Math.min(45000, lifetimeRemaining(options) ?? 45000)),
       );
+      // An abort during the in-flight call kills the child and keeps the caller's exact reason;
+      // delivery stays unknown because the remote side may already have applied the request.
+      const onAbort = () => {
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', onAbort);
+        child.kill('SIGKILL');
+        reject(signal?.reason ?? new Error('queue delivery unknown: aborted'));
+      };
+      signal?.addEventListener('abort', onAbort, { once: true });
+      if (signal?.aborted) onAbort();
       child.stdout.on('data', (chunk: Buffer) => {
         size += chunk.length;
         if (size > QUEUE_WIRE_BYTES) {
@@ -150,11 +174,15 @@ export function sshQueueTransport(alias: string): QueueTransport {
       child.stdin.on('error', () => undefined);
       child.on('error', () => {
         clearTimeout(timer);
+        signal?.removeEventListener('abort', onAbort);
         reject(new Error('queue transport unavailable'));
       });
       child.on('close', (code) => {
         clearTimeout(timer);
+        signal?.removeEventListener('abort', onAbort);
         if (code === 0 && size <= QUEUE_WIRE_BYTES) resolve(Buffer.concat(chunks).toString('utf8'));
+        else if (command === 'review-v1' && code === 2 && size === 0)
+          reject(new QueueUnsupported('review-v1 capability unavailable'));
         else if (
           code === 2 &&
           size === 0 &&
@@ -407,3 +435,107 @@ export function makeQueueClient(transport: QueueTransport): DeferredQueueClient 
     },
   };
 }
+
+/** review-v1 uses the queue identity; no author or vendor fallback exists. */
+export function makeReviewClient(transport: QueueTransport) {
+  async function request(input: z.infer<typeof ReviewWireSchema>, options?: QueueLifetimeOptions) {
+    let wire: string;
+    let parsed: z.infer<typeof ReviewWireSchema>;
+    try {
+      parsed = ReviewWireSchema.parse(input);
+      if (
+        parsed.op === 'submit' &&
+        parsed.snapshot &&
+        Buffer.byteLength(JSON.stringify(parsed.snapshot)) > 5 * 1024 * 1024
+      )
+        throw new Error('snapshot wire exceeds 5 MiB bound');
+      wire = JSON.stringify(parsed) + '\n';
+      if (Buffer.byteLength(wire) > 6 * 1024 * 1024) throw new Error('oversized review request');
+    } catch (error) {
+      throw new ReviewInputError(error instanceof Error ? error.message : String(error));
+    }
+    // Only a typed busy reply proves that locked work did not run. Never retry
+    // a disconnect, malformed reply, or any other unknown-delivery failure.
+    const retryUntil = Date.now() + 35_000;
+    let result;
+    for (;;) {
+      refuseOnLifetime(options, 'review request');
+      const raw = await transport(wire, options);
+      if (Buffer.byteLength(raw) > QUEUE_WIRE_BYTES) throw new Error('oversized review response');
+      result = ReviewResponseSchema.parse(JSON.parse(raw));
+      if (!('error' in result)) break;
+      const fault = new ReviewRemoteError(result.error);
+      if (result.error.code !== 'busy' || !result.error.retryable) throw fault;
+      const remaining = Math.min(retryUntil - Date.now(), lifetimeRemaining(options) ?? Infinity);
+      if (remaining <= 0) throw fault;
+      await new Promise<void>((resolve, reject) => {
+        const signal = options?.signal;
+        const onAbort = () => {
+          clearTimeout(timer);
+          signal?.removeEventListener('abort', onAbort);
+          reject(signal?.reason);
+        };
+        const timer = setTimeout(
+          () => {
+            signal?.removeEventListener('abort', onAbort);
+            resolve();
+          },
+          Math.min(250, remaining),
+        );
+        signal?.addEventListener('abort', onAbort, { once: true });
+        if (signal?.aborted) onAbort();
+      });
+      options?.signal?.throwIfAborted();
+      if (Date.now() >= retryUntil || (lifetimeRemaining(options) ?? Infinity) <= 0) throw fault;
+    }
+    if (
+      parsed.op !== 'capabilities' &&
+      ((!('state' in result) && !(parsed.op === 'result' && 'index' in result)) ||
+        ('request_id' in result &&
+          result.request_id !== undefined &&
+          result.request_id !== parsed.request_id))
+    )
+      throw new Error('review response operation or request mismatch');
+    return result;
+  }
+  return {
+    request,
+    async capabilities(options?: QueueLifetimeOptions) {
+      try {
+        const result = await request({ v: 1, op: 'capabilities' }, options);
+        if (
+          'command' in result &&
+          (['submit', 'status', 'result', 'cancel'] as const).every((op) =>
+            result.operations.includes(op),
+          ) &&
+          result.features.includes('chunked-result-v1')
+        )
+          return result;
+        throw new QueueUnsupported('review-v1 capability unavailable');
+      } catch (error) {
+        if (
+          error instanceof QueueUnsupported ||
+          (error instanceof ReviewRemoteError &&
+            ['unsupported', 'unsupported-command'].includes(error.remote.code))
+        )
+          throw new QueueUnsupported('review-v1 capability unavailable');
+        throw error;
+      }
+    },
+  };
+}
+export class ReviewRemoteError extends Error {
+  constructor(readonly remote: { code: string; message: string; retryable: boolean }) {
+    super(remote.message);
+  }
+}
+
+export function makeConfiguredReviewClient(env: CqEnv = currentCqEnv()) {
+  const alias = env.values['CQ_QUEUE_SSH_ALIAS'];
+  if (typeof alias !== 'string' || !alias)
+    throw new QueueConfigurationError('Configure CQ_QUEUE_SSH_ALIAS for review-v1');
+  return makeReviewClient(sshQueueTransport(alias, 'review-v1'));
+}
+
+/** A definite local refusal before transport dispatch. */
+export class ReviewInputError extends Error {}

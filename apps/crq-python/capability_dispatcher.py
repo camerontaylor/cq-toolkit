@@ -10,11 +10,15 @@ import signal
 import sys
 
 
-def dispatch(command, author, queue):
+def dispatch(command, author, queue, review=None):
     if command == "author-v1":
         return author()
     if command == "queue-v1":
         return queue()
+    if command == "review-v1":
+        if review is None:
+            from review_transport import main as review
+        return review()
     raise ValueError("unsupported forced command")
 
 
@@ -54,17 +58,10 @@ def queue_main():
                 policy={**policy, "enabled": False}, verify_source=None, receipt_root=None))
             return 0
 
-        def verify(repo, pr):
-            source = crq.gh_json(["api", f"repos/{repo}/pulls/{pr}"])
-            return {"repo": source["base"]["repo"]["full_name"], "pr": source["number"],
-                    "producer": source["user"]["login"], "head": source["head"]["sha"],
-                    "target": source["base"]["ref"], "mergeSha": source.get("merge_commit_sha"),
-                    "state": "MERGED" if source.get("merged") else source["state"].upper()}
-
         read_only = queue_transport.decode(raw)["op"] in queue_transport.READ | {"inventory"}
         execute = (lambda work, runner: work(runner)) if read_only else supervised
         result = execute(lambda runner: queue_transport.handle(
-            raw, runner, principal=principal, policy=policy, verify_source=verify,
+            raw, runner, principal=principal, policy=policy, verify_source=crq.verify_deferred_source,
             receipt_root=crq.STATE / "receipts"), crq)
         if not isinstance(result, bytes):
             result = queue_transport._encode(queue_transport.decode(raw),

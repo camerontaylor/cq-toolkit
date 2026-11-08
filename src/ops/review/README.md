@@ -1,10 +1,58 @@
 # Review addressing
 
-Queue submission and current-scope report consumption use `review.enqueue`,
-`review.queueStatus`, and `review.report`. See [queue client protocol](../../../docs/queue-client.md)
-for the separate queue-v1 capability, deferred pre-PR binding, deployment
-prerequisites, and queue-evidence import. These reports grant no full-branch
-readiness or independent acceptance credit.
+`review.submit` requests a committed full-diff review against an explicit local
+`target`. Configure `CQ_QUEUE_SSH_ALIAS` for a server supporting `review-v1`.
+For unpublished commits supply an absolute `scanner` executable; it receives
+repository, base and original head arguments and must exit zero after scanning
+all outgoing objects. For commits already reachable on the authorized remote,
+`reachable=true` omits the snapshot; the server still verifies the Git objects.
+Staged, unstaged and untracked exclusions are reported without prompting.
+
+Submission persists its request under `.cq/queue-evidence/requests/` before
+network discovery. If delivery is unknown, retry with the reported `requestId`:
+the saved inputs and original head are reused even if the checkout has moved.
+Use a fresh request ID for a new submission. The server assigns identity and
+generation; `repeat=true` requests another generation explicitly.
+
+`review.status` observes, `review.wait` polls at 15 seconds with jitter for ten
+minutes by default, and `review.cancel` withdraws request interest. Wait expiry
+returns `waitOutcome=deadline`; resume with the same request ID. `review.result`
+verifies chunk and whole-receipt digests and saves `receipt.json` and `report.md`
+under `.cq/queue-evidence/results/<receipt_id>/`. Inspect `reviewOutcome` and
+`scopeAdequate`; an operation-level success grants no independent acceptance
+credit. Unsupported deployments return `state=unsupported`.
+
+When `PASEO_AGENT_ID` is present, submission captures it with the configured
+`CQ_REVIEW_NOTIFY_HOST` host:port override. When unset or blank, the SDK reads
+`os.hostname()`, lowercases it, takes the part before the first dot, and appends
+`:6767` (Paseo's default daemon port). For example, `TRITON.example.invalid`
+becomes `triton:6767`. IPv4 and IPv6 literal hostnames are unusable and remain
+null rather than being shortened. An unusable or unavailable hostname leaves the host null.
+Null means the runner's local daemon if explicitly allowlisted; the supported
+host:port-only deployment overlay cannot allow null, so it reports
+`notify.state=error, reason=unsupported-destination` while review submission
+still succeeds. Configure the override to route such callers to a reachable daemon.
+An explicit
+`notify={paseo_agent_id,paseo_host}` overrides that destination, including for a
+joiner. The runner's `notify.hosts` allowlist must contain each allowed label;
+the supported deployment overlay accepts host:port strings only. Invalid destinations report
+`notify.state=error` without refusing review admission.
+
+Use `review.status` with a `notify` object to replace the destination, or
+`notify=null` to withdraw it. This invokes `review-v1 notify-update` and requires
+the principal that submitted that request. Legacy requests without an owner
+cannot update destinations. Status reports delivery separately from review state. Synchronous terminal returns
+report `not-required`; cancelling a subscription closes it as `withdrawn`.
+The publisher sends at most four notifications per tick, retries with the runner's
+exponential error backoff, and records error after five failed attempts. Delivery
+is at least once; messages include the stable terminal event ID for deduplication.
+A replacement can race an in-flight message. The publisher service loads the
+optional Paseo environment file and runs independently of ledger rollout.
+
+The earlier `review.enqueue`, `review.queueStatus`, `review.drain` and
+`review.report` operations remain available. See the
+[queue client protocol](../../../docs/queue-client.md) for queue-v1 and deferred
+pre-PR bindings.
 
 `review.address` fixes or records a disposition for local findings or PR
 threads, then re-runs review until clean or the configured round cap. Run

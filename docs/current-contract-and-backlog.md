@@ -1,6 +1,7 @@
 # Current contract and backlog
 
-- **Dated:** 2026-10-24.
+- **Dated:** 2026-10-24 (contract baseline).
+- **Last updated:** 2026-11-06.
 - **Source:** seeded from toolkit-research `research/research-20261022-status-consolidation/consolidation.md` §2 (contract) and §3 (backlog triage), under owner decisions 5–7 of 2026-10-24 (`specs/cq-next-step-slice-decisions-20261024.md`).
 - **Supersedes:** this page supersedes the 2026-09-12 spec (`specs/portable-code-quality-toolkit-spec.md` in toolkit-research) as the normative contract. The spec and all pre-2026-10-16 plans carry a historical header and are kept for reference.
 - **Next step:** the approved next-step spec and plan live in toolkit-research at `specs/cq-next-step-slice-spec.md` and `plans/cq-next-step-slice-plan.md`.
@@ -29,7 +30,7 @@ residual ownership rules: [CRQ contract](../apps/crq-python/README.md#runtime-ow
 ## Current contract
 
 1. **SDK first; every op runnable standalone from TS and the CLI.** Spec, 2026-09-12. _Amended:_ ADR-0005 (2026-10-16) found it "met in letter, missed in default wiring". The 2026-10-20 posture makes CLI usability the goal and fresh-repo transcripts the acceptance bar.
-2. **I1 output contract.** JSON on stdout, narration on stderr, exits 0/1/2/3. _Extended_ on 2026-10-20 by `--fail-on-verdict` and a `--json` error artifact. Flags only, no positionals.
+2. **I1 output contract.** JSON on stdout, narration on stderr, exits 0/1/2/3. _Extended_ on 2026-10-20 by `--fail-on-verdict` and a `--json` error artifact: in machine mode (`--json`) stderr stays empty, and an error with no result writes its `{ error: … }` object to stdout instead. Flags only, no positionals.
 3. **Generic mechanism only, zero webfront-isms, webfront untouched** (2026-09-12). Unchanged.
 4. **Public MIT; first npm release `0.2.0`, never 1.x.** The publication gate is CI green + packed-artifact smoke (#394); G2/G3 as written are retired (see [Retirements](#retirements-2026-10-24)).
 5. **Topology.** A six-package monorepo absorbing crq and `packages/eval` (ADR-0005). Phase 2 is narrowed to `@cq/policy` + `@cq/ops` and comes after the acceptance exercise.
@@ -45,7 +46,7 @@ residual ownership rules: [CRQ contract](../apps/crq-python/README.md#runtime-ow
 15. **The PR is not development state; every checkable rule is a command** (2026-10-16).
 16. **Gates are advisory; only the privileged list needs a human** (2026-10-20). `cq/policy` is not required; the `cq-override` label is parked.
 17. **Must stay blocking:** fail-closed denylist before upload; core CI at the exact SHA; independent head-bound PASS with no P0/P1; no force-push or shared-history rewrite; owner sign-off on credentials, custody and deploy trust. PRs target `main` with required `static` and `denylist` checks.
-18. **Merge commits directly to main.** Merge on `static` + `denylist` + one independent exact-head review comment; CRQ reviews after merge. The promotion gate, signer status and settle-ledger promotion path are retired. See [merge policy](promotion-policy.md).
+18. **Merge commits directly to main.** Merge on `static` + `denylist` + one independent exact-head PASS with no P0/P1; truncated review data fails closed. CRQ reviews after merge. The promotion gate, signer status and settle-ledger promotion path are retired. See [merge policy](promotion-policy.md).
 19. **Self-hosting proves the toolkit** (spec DoD 2). _Scaled back_ 2026-10-20: review loop off, self-merge off, re-enable only with a fixes-per-run metric.
 20. **Freeze new self-host machinery until S1–S6 ship** (2026-10-20). S1–S6 shipped 2026-10-20; whether the freeze lifted is a GAP.
 21. **Local tests are narrow, on triton, one run at a time; CI is the full-suite authority** (owner, 2026-10-11/10-14). Per-package suites come after the ops cut.

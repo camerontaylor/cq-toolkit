@@ -29,13 +29,15 @@ def main(state_dir=None, clock=None, load_runner=None):
             return 0
         if future(hint, clock()):
             return 0
-        if load_runner is None:
-            import crq
-            runner = crq
-        else:
-            runner = load_runner()
-        for line in runner.slot():
-            print(line)
+    # The runner owns the short state transactions. Quota probes must not inherit
+    # this preflight lock across external work.
+    if load_runner is None:
+        import crq
+        runner = crq
+    else:
+        runner = load_runner()
+    for line in runner.scheduled_slot():
+        print(line)
     return 0
 
 

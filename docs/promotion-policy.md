@@ -2,7 +2,9 @@
 
 Open PRs directly against `main`. Merge with a merge commit when `static` and
 `denylist` are green on the exact PR head and one independent reviewer has
-posted a PASS review body or comment for that head, with no unresolved P0/P1 findings.
+posted a PASS review body or comment for that head, with no unresolved P0/P1
+findings raised by that independent review. Bot and CodeRabbit findings stay advisory and are
+not part of this condition (see [review guidance](coderabbit-review.md)).
 
 The reviewer comment names the reviewer agent, the full head SHA and `PASS`.
 Reviewers post it with `cq-review-post` (agents repo), which posts as the
@@ -22,9 +24,17 @@ Reviewers write every actionable finding, including minor and nonblocking ones,
 as one ndjson `finding` event: `type: "finding"`, original `severity`, `title`,
 and `comment` describing the failure scenario and fix guidance. Include
 `fileName`, `startLine`, `endLine` only when the code was actually located.
-Never invent a location. Write a summary file containing
-`Independent review: PASS|CHANGES REQUESTED for <full head SHA>`, reviewer name,
-and an evidence line. From the reviewed cq-toolkit worktree, run:
+Never invent a location. Start the summary file with this exact header form:
+
+```markdown
+**Independent review (<Name>): PASS|ITERATE for `<40-hex sha>`**
+```
+
+Choose `PASS` or `ITERATE`. The reviewer name starts with a letter, contains only
+letters, digits, spaces or `.+-`, and is at most 40 characters. Keep the bold
+markers and backticks around the full lowercase head SHA; the acceptance readout
+requires this format. Follow it with the evidence line. From the reviewed
+cq-toolkit worktree, run:
 
 ```sh
 cq-review-post --repo OWNER/NAME --pr N --head SHA --base BASE_SHA \

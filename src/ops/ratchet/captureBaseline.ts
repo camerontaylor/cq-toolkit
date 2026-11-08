@@ -290,16 +290,16 @@ export function createCaptureBaseline(
       await mkdir(join(input.ws, 'baselines'), { recursive: true });
     } catch (err) {
       return {
-        status: 'indeterminate',
-        detail: `ratchet: could not ensure baselines dir for '${input.ws}' — ${errorMessage(err)}`,
+        status: 'failed',
+        error: `ratchet: could not ensure baselines dir for '${input.ws}' — ${errorMessage(err)}`,
       };
     }
     const containment = await resolveBaselinesDir(input.ws);
     if (containment.ok === false) {
       if (containment.missing) {
         return {
-          status: 'indeterminate',
-          detail: `ratchet: baselines dir vanished during capture — ${containment.error}`,
+          status: 'failed',
+          error: `ratchet: baselines dir vanished during capture — ${containment.error}`,
         };
       }
       return { status: 'failed', error: containment.error };
@@ -323,8 +323,8 @@ export function createCaptureBaseline(
     } catch (err) {
       if (!isEnoent(err)) {
         return {
-          status: 'indeterminate',
-          detail: `ratchet: could not inspect existing baseline '${relPath}' — ${errorMessage(err)}`,
+          status: 'failed',
+          error: `ratchet: could not inspect existing baseline '${relPath}' — ${errorMessage(err)}`,
         };
       }
     }
@@ -348,8 +348,8 @@ export function createCaptureBaseline(
       } catch (err) {
         if (!isEnoent(err)) {
           return {
-            status: 'indeterminate',
-            detail: `ratchet: could not read existing baseline '${relPath}' — ${errorMessage(err)}`,
+            status: 'failed',
+            error: `ratchet: could not read existing baseline '${relPath}' — ${errorMessage(err)}`,
           };
         }
       }

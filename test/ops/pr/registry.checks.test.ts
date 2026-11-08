@@ -80,6 +80,10 @@ describe('reviewStateOfDecision (gh pr view --json reviewDecision)', () => {
     expect(reviewStateOfDecision(null)).toEqual({ state: 'none' });
   });
 
+  test('an empty gh review decision (Go string zero value) maps to none', () => {
+    expect(reviewStateOfDecision('')).toEqual({ state: 'none' });
+  });
+
   test('REVIEW_REQUIRED is `required`, NOT `none` — the r1#1 flip (a demanded-but-absent review is never ready)', () => {
     expect(reviewStateOfDecision('REVIEW_REQUIRED')).toEqual({ state: 'required' });
   });

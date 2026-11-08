@@ -57,6 +57,12 @@
 // explicitly declares surface, per the coverage heuristic's
 // referenced-module rule.)
 import { z } from 'zod';
+import {
+  ReferenceSchema,
+  StatusInputSchema,
+  SubmitInputSchema,
+  WaitInputSchema,
+} from './internal/reviewOperation.js';
 import { createDriverFactory } from '../../driver/factory.js';
 import { HarnessConfigSchema } from '../../harness/config.js';
 import type { Op, OpRegistryEntry } from '../../kernel/types.js';
@@ -422,6 +428,9 @@ export const ReviewRunInputSchema: z.ZodType<ReviewRunInput> = z
     prepareEvidence: z.boolean().exactOptional(),
     target: z.string().min(1).exactOptional(),
     base: ReviewBaseRevision.exactOptional(),
+    // Previous-round findings for an internal address round (see
+    // ReviewRunInput); the strict mirror must accept the declared field.
+    priorFindings: z.array(FindingSchema).exactOptional(),
   })
   .strict();
 
@@ -450,7 +459,10 @@ type VerifyReviewOutcomeOpInput = z.infer<typeof VerifyReviewOutcomeOpInputSchem
  * boundary). The comments array's `.max(100)` is the dispatch boundary's
  * deliberate cap, riding this schema alone (the FixableReviewItem type
  * itself is unbounded): a comment flood is a fetch/classification bug, not
- * a fixer prompt.
+ * a fixer prompt. `authorType` mirrors {@link ThreadComment} exactly: the
+ * thread vocabulary carries the actor type when the fetch supplied it, so
+ * a reply forwarded into the fixer prompt must stay dispatchable through
+ * the strict comment mirror.
  */
 const FixableReviewItemSchema: z.ZodType<FixableReviewItem> = z
   .object({
@@ -458,17 +470,9 @@ const FixableReviewItemSchema: z.ZodType<FixableReviewItem> = z
     path: z.string().min(1).nullable(),
     line: z.number().int().nullable(),
     body: z.string(),
-    comments: z
-      .array(
-        z
-          .object({
-            authorLogin: z.string().nullable(),
-            body: z.string(),
-            createdAt: z.string().min(1).nullable(),
-          })
-          .strict(),
-      )
-      .max(100),
+    // Reuse the shared mirror: the inline object omitted `authorType`, so an
+    // item whose prior comment carried it failed the JSON boundary.
+    comments: z.array(ThreadCommentSchema).max(100),
   })
   .strict();
 
@@ -569,7 +573,11 @@ export const ReviewAddressManyInputSchema = z
     concurrency: z.number().int().positive().exactOptional(),
     cloneRoot: z.string().min(1).exactOptional(),
     enrollments: z
-      .array(z.object({ number: z.number().int().positive(), request: QueueEnqueueInputSchema }))
+      .array(
+        z
+          .object({ number: z.number().int().positive(), request: QueueEnqueueInputSchema })
+          .strict(),
+      )
       .exactOptional(),
     owner: z.string().min(1),
     maxTokens: z.number().int().positive(),
@@ -596,8 +604,39 @@ export const registry: OpRegistryEntry[] = [
   {
     name: 'review.addressMany',
     inputSchema: ReviewAddressManyInputSchema,
-    importer: async () =>
-      (await import('./addressMany.js')).makeReviewAddressMany() as Op<unknown, unknown>,
+    importer: async (wiring) =>
+      (await import('./addressMany.js')).makeReviewAddressMany({
+        drivers: createDriverFactory(
+          wiring?.onDeprecatedAlias !== undefined
+            ? { onDeprecatedAlias: wiring.onDeprecatedAlias }
+            : {},
+        ),
+      }) as Op<unknown, unknown>,
+  },
+  {
+    name: 'review.submit',
+    inputSchema: SubmitInputSchema,
+    importer: async () => (await import('./submit.js')).makeSubmit() as Op<unknown, unknown>,
+  },
+  {
+    name: 'review.status',
+    inputSchema: StatusInputSchema,
+    importer: async () => (await import('./status.js')).makeStatus() as Op<unknown, unknown>,
+  },
+  {
+    name: 'review.wait',
+    inputSchema: WaitInputSchema,
+    importer: async () => (await import('./wait.js')).makeWait() as Op<unknown, unknown>,
+  },
+  {
+    name: 'review.result',
+    inputSchema: ReferenceSchema,
+    importer: async () => (await import('./result.js')).makeResult() as Op<unknown, unknown>,
+  },
+  {
+    name: 'review.cancel',
+    inputSchema: ReferenceSchema,
+    importer: async () => (await import('./cancel.js')).makeCancel() as Op<unknown, unknown>,
   },
   // ./queue.js owns queue-v1; ./internal/queueEvidence.js is isolated from findings v1.
   {

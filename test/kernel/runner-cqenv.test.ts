@@ -1,7 +1,9 @@
 // C3a: runPlan reads the CQ_* environment once (or takes the entry point's
 // snapshot) and refuses to dispatch when it carries errors.
-import { describe, expect, test } from 'vitest';
-import { readCqEnv } from '../../src/config/env.js';
+import { describe, expect, test, vi } from 'vitest';
+import { readCqEnv, type CqEnv } from '../../src/config/env.js';
+import { currentCqEnv } from '../../src/config/run-env.js';
+import { okOp } from './runner-governed.helpers.js';
 import { CqEnvError } from '../../src/config/entry.js';
 import {
   countingOp,
@@ -39,5 +41,41 @@ describe('runPlan CQ_* environment', () => {
     );
     expect(report.counts.done).toBe(2);
     expect(calls).toHaveLength(2);
+  });
+
+  test('ops see the run snapshot; a nested runPlan reuses it instead of re-reading ambient', async () => {
+    const outer = readCqEnv({ CQ_SANDBOX: 'off' });
+    const seen: { where: string; env: CqEnv }[] = [];
+    const innerView = viewWith(
+      entry('inner', async (raw) => {
+        seen.push({ where: 'inner', env: currentCqEnv() });
+        return okOp(raw);
+      }),
+    );
+    const outerView = viewWith(
+      entry('outer', async (raw) => {
+        seen.push({ where: 'outer', env: currentCqEnv() });
+        // No cqEnv passed: the nested run must inherit the enclosing snapshot.
+        await runPlan(
+          independentPlan('plan-cqenv-nested', 1, 'inner'),
+          { concurrency: 1, stopOnError: false },
+          innerView,
+        );
+        return okOp(raw);
+      }),
+    );
+    vi.stubEnv('CQ_SANDBOX', 'required');
+    try {
+      await runPlan(
+        independentPlan('plan-cqenv-outer', 1, 'outer'),
+        { concurrency: 1, stopOnError: false, cqEnv: outer },
+        outerView,
+      );
+    } finally {
+      vi.unstubAllEnvs();
+    }
+    expect(seen.map((s) => s.where)).toEqual(['outer', 'inner']);
+    expect(seen.every((s) => s.env.values['CQ_SANDBOX'] === 'off')).toBe(true);
+    expect(seen[0]?.env).toBe(outer);
   });
 });

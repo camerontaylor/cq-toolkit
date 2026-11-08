@@ -1,5 +1,6 @@
 {
   "test/adapters/forge-github/forge.test.ts": "pure",
+  "test/adapters/lock/slotMetadata.test.ts": "process",
   "test/adversarial/a14-privileged-workflow.benign-edits.test.ts": "process",
   "test/adversarial/a14-privileged-workflow.classifier-postures.test.ts": "process",
   "test/adversarial/a14-privileged-workflow.d11-authorization.test.ts": "process",
@@ -77,6 +78,8 @@
   "test/driver/ai-sdk.seam-signal.test.ts": "process",
   "test/driver/ai-sdk.structured-output.test.ts": "process",
   "test/driver/ai-sdk.upload-gate.test.ts": "process",
+  "test/driver/checkoutWriterCommand.test.ts": "process",
+  "test/driver/checkoutWriterContext.test.ts": "process",
   "test/driver/claude-code/cli.abort-grace.test.ts": "process",
   "test/driver/claude-code/cli.argv-options.test.ts": "process",
   "test/driver/claude-code/cli.child-env.test.ts": "process",

@@ -43,8 +43,9 @@
 // narration to machine mode (NarrationMode 'json': stderr stays EMPTY,
 // stdout carries ONE JSON artifact). --fail-on-verdict is an exit-code
 // opt-in: an `ok` op result whose value is an object with `verdict: 'fail'`
-// (or, for run-plan/plan subcommands, any ok row with such a value) exits 1
-// instead of 0; every other result maps unchanged and stdout is identical.
+// or `verdict: 'regression'` (or, for run-plan/plan subcommands, any ok row
+// with such a value) exits 1 instead of 0; every other result maps unchanged
+// and stdout is identical.
 // A VALUED reserved spelling (`--json=x`, `--help=x`, `--h=x`,
 // `--fail-on-verdict=x`) is a usage error (exit 2) on EVERY subcommand — the
 // raw-token gate runs before the help/mode branches — while the bare
@@ -92,7 +93,7 @@ import { get, list } from '../registry/index.js';
 import { getPlan } from '../registry/plans.js';
 import { KnownUsageSummarySchema, OpResultSchema } from '../kernel/schema.js';
 import type { OpRegistryEntry } from '../kernel/types.js';
-import { checkEntryEnv, type CqEnv } from '../registry/entry-env.js';
+import { checkEntryEnv, runWithCqEnv, type CqEnv } from '../registry/entry-env.js';
 import { EXIT_CODES, exitCodeForOpResult } from './exit.js';
 import {
   assertJsonLossless,
@@ -515,8 +516,12 @@ async function dispatchCli(
   // --json mode, where stdout still carries exactly one JSON artifact (the
   // op/run result shapes have no `warnings` slot, so stderr is the only
   // channel). `cq config` reports the same diagnostics itself, so it is the
-  // one subcommand that skips the gate.
+  // one subcommand that skips the gate (it exits 2 after printing its report).
   let cqEnv: CqEnv | undefined;
+  // `cq config` still runs when the snapshot carries errors (the report must reach
+  // stdout so the operator sees what failed); it then exits 2 like every other entry.
+  let configErrorLines: readonly string[] = [];
+  if (sub === 'config') configErrorLines = checkEntryEnv().errorLines;
   if (sub !== 'config') {
     const check = checkEntryEnv();
     if (check.errorLines.length > 0) {
@@ -757,7 +762,13 @@ async function dispatchCli(
   // sink rides the importer into the ops registries' DriverFactoryConfig.
   // Human mode passes none: the library default is byte-identical narration
   // (one `cq:`-prefixed stderr line).
-  const importerWiring = mode === 'json' ? { onDeprecatedAlias: (): void => {} } : undefined;
+  const importerWiring =
+    mode === 'json' || cqEnv !== undefined
+      ? {
+          ...(mode === 'json' ? { onDeprecatedAlias: (): void => {} } : {}),
+          ...(cqEnv !== undefined ? { cqEnv } : {}),
+        }
+      : undefined;
   try {
     const op = await entry.importer(importerWiring);
     // The op's TypeScript return type is no runtime guarantee: ops load from
@@ -765,7 +776,9 @@ async function dispatchCli(
     // value with the kernel's own mirror before ANY stdout artifact or
     // exit-code derivation (the plan path gets the same two probes via
     // runPlan's executeOp; this is their direct-path counterpart).
-    const raw: unknown = await op(check.data);
+    // The op runs inside the entry's snapshot (resolve once; ADR-0009).
+    const raw: unknown =
+      cqEnv === undefined ? await op(check.data) : await runWithCqEnv(cqEnv, () => op(check.data));
     // I1 permits optional report and typed usage envelopes on every status.
     // Keep the frozen result mirror strict: no other extension key is accepted.
     let base = raw;
@@ -846,6 +859,10 @@ async function dispatchCli(
     }
     writeResultJson(io, raw); // the ONE stdout artifact, including optional report
     narrateOpResult(io, sub, checked.data, mode); // failures-only; silent in json mode
+    if (configErrorLines.length > 0) {
+      if (mode !== 'json') for (const line of configErrorLines) io.stderr(`${line}\n`);
+      return EXIT_CODES.usage;
+    }
     return exitCodeForOpResult(checked.data, { failOnVerdict });
   } catch (err) {
     // Thrown (uncaught exception) → 1, decided HERE (the caller of the

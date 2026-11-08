@@ -28,6 +28,7 @@ op input. `secret` values are never printed.
 | `CQ_PRODUCER_VERSION` | config | no | neutral | live | no | Producer version stamped into run provenance (default: the toolkit package version). |
 | `CQ_QUEUE_SSH_ALIAS` | config | no | neutral | live | no | SSH alias of the review queue host. |
 | `CQ_RESOURCE_SCOPED` | test | no | neutral | live | no | Set to 1 by the repo scripts once they run inside a memory scope (scripts/lib/resource-scope.mjs). |
+| `CQ_REVIEW_NOTIFY_HOST` | config | no | neutral | live | no | Paseo host:port override for local-review completion notifications; defaults to the lowercase short OS hostname on port 6767, or null if unusable. |
 | `CQ_ROLE` | identity | no | neutral | live | no | Role label stamped into child environments. |
 | `CQ_RUN_ENV_PASSTHROUGH` | config | yes | conservative | live | no | Extra env names copied into run children (blank: none). |
 | `CQ_RUN_ID` | identity | no | neutral | live | no | Run id stamped into child environments. |
@@ -64,6 +65,7 @@ all that is recorded.
 | `OPENAI_API_KEY` | yes | OpenAI API key. |
 | `OPENCODE_GO_API_KEY` | yes | OpenCode Go API key. |
 | `OPENCODE_GO_BASE_URL` | yes | OpenCode Go endpoint (required, no default). |
+| `PASEO_AGENT_ID` | no | Current Paseo agent notification destination. |
 | `ZAI_ANTHROPIC_BASE_URL` | yes | Z.ai Anthropic-compatible endpoint override. |
 | `ZAI_API_KEY` | yes | Z.ai API key. |
 | `ZAI_BASE_URL` | yes | Z.ai ai-sdk endpoint override. |

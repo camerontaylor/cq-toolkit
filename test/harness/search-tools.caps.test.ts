@@ -11,6 +11,24 @@ import { buildTools } from '../../src/harness/tools.js';
 import { withWorkspace, tool } from './search-tools.helpers.js';
 
 describe('contained grep and glob tools', () => {
+  test('files_with_matches charges one row per file, not per match line', async () => {
+    await withWorkspace(async (workspace) => {
+      await writeFile(
+        join(workspace, 'a-busy.txt'),
+        `${Array.from({ length: 150 }, () => 'token').join('\n')}\n`,
+        'utf8',
+      );
+      await writeFile(join(workspace, 'b-other.txt'), 'token\n', 'utf8');
+      const grep = tool(buildTools(defaultHarnessConfig, workspace, 'read-only'), 'grep');
+      const result = await grep.execute({ pattern: 'token', output_mode: 'files_with_matches' });
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.output).toContain('a-busy.txt');
+        expect(result.output).toContain('b-other.txt');
+      }
+    });
+  });
+
   test('shows explicit match, output, per-line, and byte-cap markers', async () => {
     await withWorkspace(async (workspace) => {
       const longLine = `${'x'.repeat(2_100)} token`;

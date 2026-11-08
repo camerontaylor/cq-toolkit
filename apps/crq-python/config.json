@@ -3,6 +3,7 @@
   "clone": "@HOST_CLONE@",
   "worktree_root": "@HOST_WORKTREE_ROOT@",
   "repos": [],
+  "notify": {"hosts": []},
   "_repos_note": "Per-repo review config for non-primary repositories; empty keeps single-repo behavior. Shape and semantics: docs/multi-repo.md. Host overlays supply entries with real clone paths at deploy time.",
   "worktree_prefix": "coderabbit-queue-",
   "max_starts_per_hour": 5,
@@ -10,6 +11,7 @@
   "max_inflight": 10,
   "review_timeout_min": 120,
   "quiet_minutes": 30,
+  "local_review_aging_minutes": 60,
   "rate_limit_default_backoff_min": 30,
   "error_backoff_min": 30,
   "max_item_failures": 3,
@@ -60,7 +62,8 @@
   "paseo_hosts": [],
   "repair": {
     "enabled": true,
-    "spend_authorization": "owner 2026-11-02: turn on the fixers; cq/GLM only",
+    "spend_authorization": "owner 2026-11-08: cq fixers and judges; Z.ai with OpenCode Go and DeepSeek fallback",
+    "fallback_models": ["opencode-go/deepseek-v4.1-flash", "deepseek/deepseek-flash"],
     "max_rounds_per_pin": 2,
     "fix_pr_cycles": 1,
     "blackout": {

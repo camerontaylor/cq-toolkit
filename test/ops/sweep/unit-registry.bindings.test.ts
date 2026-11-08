@@ -33,6 +33,18 @@ describe('sweep.unit registry entry (jSKJF)', () => {
   test('bindingsFromDispatch defaults the push leg ON (push:false opts out)', () => {
     expect(bindingsFromDispatch(VALID, fakeFactory).pushBranch).toBeDefined();
     expect(bindingsFromDispatch({ ...VALID, push: false }, fakeFactory).pushBranch).toBeUndefined();
+    // A failed-attempt upload is its OWN opt-in: `push:false` alone never
+    // grants it, and `taskLoop.pushFailed` grants it without granting the
+    // fix-branch push (fix.run publishes failed attempts, not its fix branch).
+    expect(
+      bindingsFromDispatch({ ...VALID, push: false }, fakeFactory).publishFailedAttempts,
+    ).toBeUndefined();
+    const failedOnly = bindingsFromDispatch(
+      { ...VALID, push: false, taskLoop: { pushFailed: true } },
+      fakeFactory,
+    );
+    expect(failedOnly.publishFailedAttempts).toBe(true);
+    expect(failedOnly.pushBranch).toBeUndefined();
     // The prompt template: the shipped default, placeholders substituted.
     const bindings = bindingsFromDispatch(VALID, fakeFactory);
     expect(bindings.sandboxPolicy).toEqual({ level: 'workspace-write' });

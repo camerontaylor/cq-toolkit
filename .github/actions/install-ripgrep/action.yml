@@ -3,13 +3,12 @@ description: Install the digest-pinned ripgrep host tool used by harness search 
 runs:
   using: composite
   steps:
-    - name: Install ripgrep 15.2.0 from the pinned upstream release
+    - name: Select pinned ripgrep archive
+      id: archive
       shell: bash
       run: |
         set -euo pipefail
         version=15.2.0
-        observed_version=not-yet-observed
-        trap 'status=$?; printf "install-ripgrep: line %s command %q failed with status %s; observed ripgrep version: %s\n" "$LINENO" "$BASH_COMMAND" "$status" "$observed_version" >&2' ERR
         case "${RUNNER_OS}:${RUNNER_ARCH}" in
           Linux:X64)
             target=x86_64-unknown-linux-musl
@@ -33,18 +32,40 @@ runs:
             ;;
         esac
 
+        printf 'version=%s\ntarget=%s\ndigest=%s\n' "$version" "$target" "$digest" >> "$GITHUB_OUTPUT"
+    - name: Cache pinned ripgrep archive
+      uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+      with:
+        path: ${{ runner.temp }}/ripgrep-archive
+        key: ripgrep-${{ steps.archive.outputs.version }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.archive.outputs.target }}-${{ steps.archive.outputs.digest }}
+    - name: Install ripgrep 15.2.0 from the pinned upstream release
+      shell: bash
+      env:
+        version: ${{ steps.archive.outputs.version }}
+        target: ${{ steps.archive.outputs.target }}
+        digest: ${{ steps.archive.outputs.digest }}
+      run: |
+        set -euo pipefail
+        observed_version=not-yet-observed
+        trap 'status=$?; printf "install-ripgrep: line %s command %q failed with status %s; observed ripgrep version: %s\n" "$LINENO" "$BASH_COMMAND" "$status" "$observed_version" >&2' ERR
         archive="ripgrep-${version}-${target}.tar.gz"
         workdir="$(mktemp -d "${RUNNER_TEMP:-/tmp}/ripgrep.XXXXXX")"
         mkdir "${workdir}/extracted"
-        curl --fail --silent --show-error --location --retry 3 \
-          "https://github.com/BurntSushi/ripgrep/releases/download/${version}/${archive}" \
-          --output "${workdir}/${archive}"
-        if [ "$RUNNER_OS" = macOS ]; then
-          printf '%s  %s\n' "$digest" "${workdir}/${archive}" | shasum -a 256 -c -
-        else
-          printf '%s  %s\n' "$digest" "${workdir}/${archive}" | sha256sum -c -
+        cache_dir="${RUNNER_TEMP}/ripgrep-archive"
+        mkdir -p "$cache_dir"
+        if [ ! -f "${cache_dir}/${archive}" ]; then
+          curl --fail --silent --show-error --location \
+            --retry 5 --retry-delay 10 --retry-max-time 240 \
+            --connect-timeout 15 --max-time 60 \
+            "https://github.com/BurntSushi/ripgrep/releases/download/${version}/${archive}" \
+            --output "${cache_dir}/${archive}"
         fi
-        tar -xzf "${workdir}/${archive}" --strip-components=1 -C "${workdir}/extracted"
+        if [ "$RUNNER_OS" = macOS ]; then
+          printf '%s  %s\n' "$digest" "${cache_dir}/${archive}" | shasum -a 256 -c -
+        else
+          printf '%s  %s\n' "$digest" "${cache_dir}/${archive}" | sha256sum -c -
+        fi
+        tar -xzf "${cache_dir}/${archive}" --strip-components=1 -C "${workdir}/extracted"
         bin_dir="${RUNNER_TEMP:?RUNNER_TEMP must be set}/bin"
         mkdir -p "$bin_dir"
         install -m 0755 "${workdir}/extracted/rg" "${bin_dir}/rg"

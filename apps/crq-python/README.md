@@ -83,13 +83,20 @@ publication then discards the result. Prepared (`repair-prepare`) jobs keep the
 strict one-job selector, so a moved tip makes them `STALE`.
 `--job/--source-sha/--finding-sha256` still repairs exactly one prepared job.
 
-Any provider rate limit or spent quota (`errorClass=rate-limit` or `quota`,
-fixer or judge) atomically writes the global pause
-marker `state/repair/rate-limited-until` with the provider's retry time
-(`retryAfterMs`; 30 minutes if none, at most 24 hours, never shortened). The
-attempt or pending judge defers to that time and the drain stops. While the
-marker is in the future no pass makes any model call for any item; nothing is
-counted against jobs, so a long quota window fails nothing. The drain's
+Repair dispatch tries the configured role, then `repair.fallback_models` in order:
+OpenCode Go DeepSeek V4.1 Flash, then direct DeepSeek Flash. Fixers and judges
+share durable provider cooldowns in `state/repair/provider-cooldowns.json`.
+Quota/rate-limit responses move to the next credentialed provider without consuming
+an attempt. Other failures retain normal retry handling. Explicit vendor reset
+timestamps are retained for up to seven days (unzoned dates conservatively mean
+UTC); otherwise the retry signal or a thirty-minute default applies. A provider's
+cooldown is never shortened. The existing global pause applies when all available
+providers are cooling down; a healthy fallback can bypass a legacy global pause.
+Each dispatch keeps its original wall-clock budget across the fallback chain and
+records the actual model and separate provider session artifacts.
+Credentials come from dotfiles-secrets' rendered `~/.config/crq/repair.env`:
+`ZAI_API_KEY`, `OPENCODE_GO_API_KEY`, `OPENCODE_GO_BASE_URL`, `DEEPSEEK_API_KEY`.
+The drain's
 `git fetch --prune` runs under the tick's own `state/tick.lock` (flock, as
 `crq.with_lock`). If the tick holds it, the drain polls for up to
 `repair.tick_lock_wait_s` seconds (default 300) before skipping the pass. The
@@ -97,7 +104,7 @@ inbox path unit fires while the enqueuing tick still holds the lock, so an
 instant skip dropped every path-triggered pass.
 Runtime dispatch requires `repair.enabled`, a recorded
 `repair.spend_authorization` string, and `ZAI_API_KEY` in the service environment
-(`EnvironmentFile=-%h/.config/crq/repair.env`). Roles are cq-driver GLM only
+(`EnvironmentFile=-%h/.config/crq/repair.env`). Roles use cq-driver GLM by default, with OpenCode Go and direct DeepSeek fallbacks
 (fixer `zai/glm-5.3-flash`, escalation `zai/glm-5.3`, judge `zai/glm-5.3-flash`,
 critical judge `zai/glm-5.3`). `repair.blackout.enabled` switches the window on
 or off (committed `false` since 2026-11-02: GLM quota is plentiful); the host
@@ -155,12 +162,10 @@ Selective starts for author and merged-current items remain refused. Explicit
 author cycle-2 requests also rank last and wait for rank 0–3 demand to clear.
 
 Every job records FIXED, NOT-FIXED or FAILED, a reason, attempts and judge evidence.
-A0 uses the window's fixer. A mechanical failure retries the same model at A1,
+A0 uses the fixer. A mechanical failure retries the same model at A1,
 then escalation at A2; three fixer attempts and one judge are the ceiling.
-Provider rate limits defer without consuming an attempt. The job's window stays
-pinned across attempts. Weekday 14:00–18:00 Asia/Singapore uses Luna fixers and
-Muse judges; default workers/judges use GLM Flash (D9 configurable). Critical
-judgements use Sol in both windows. Recurring NOT-FIXED majors and configured
+Provider rate limits defer without consuming an attempt. Critical findings use
+the critical judge. Recurring NOT-FIXED majors and configured
 sampling trigger a read-only judge; valid findings receive one A2 refix.
 
 Tests and probes are suspended. No worker or mechanical stage runs them.

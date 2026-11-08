@@ -1,6 +1,7 @@
 """Source-verified cq CLI JSON flag adapter; never launches tests."""
 import json
 import os
+import subprocess
 import time
 from pathlib import Path
 from crq_repair import command
@@ -54,6 +55,17 @@ MAX_OUTPUT_TOKENS = 500_000
 MAX_CONTEXT_TOKENS = 200_000
 
 
+def _log_invocation(directory, stdout_text, stderr_text):
+    """Append one invocation's output to driver.log.
+
+    Called on the timeout path too: `command` raises with the partial output
+    attached, and a wall-clock kill must keep its evidence like any other
+    invocation."""
+    with Path(directory, 'driver.log').open('a') as log:
+        log.write('\n# invocation ' + time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()) + '\n'
+                  + stdout_text + '\n' + stderr_text)
+
+
 def budget(config, role):
     """Per-attempt cq budget. Owner 2026-11-06: count OUTPUT tokens only (the
     old maxTokens summed input and cache reads, which every tool-loop step
@@ -62,7 +74,7 @@ def budget(config, role):
     base, own = config['repair']['budget'], role.get('budget', {})
     return {'maxOutputTokens': own.get('max_output_tokens', base.get('max_output_tokens', MAX_OUTPUT_TOKENS)),
             'maxContextTokens': own.get('max_context_tokens', base.get('max_context_tokens', MAX_CONTEXT_TOKENS)),
-            'wallClockMs': base['wall_clock_min'] * 60000}
+            'wallClockMs': int(base['wall_clock_min'] * 60000)}
 
 
 def session_files(sessions_dir):
@@ -125,11 +137,13 @@ def invoke(config, role, job, wt, directory):
     argv = ['node', config['repair']['cq_bin'], 'review.fixItem', '--json']
     argv += ['--' + k + '=' + json.dumps(v) for k, v in payload.items()]
     before = session_files(sessions_dir)
-    p = command(argv, cwd=wt, env=env, timeout=config['repair']['budget']['wall_clock_min'] * 60)
+    try:
+        p = command(argv, cwd=wt, env=env, timeout=config['repair']['budget']['wall_clock_min'] * 60)
+    except subprocess.TimeoutExpired as exc:
+        _log_invocation(directory, str(exc.stdout or ''), str(exc.stderr or ''))
+        raise
     created = session_files(sessions_dir) - before
-    with Path(directory, 'driver.log').open('a') as log:
-        log.write('\n# invocation ' + time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()) + '\n'
-                  + p.stdout + '\n' + p.stderr)
+    _log_invocation(directory, p.stdout, p.stderr)
     try:
         data = json.loads(p.stdout)
     except ValueError:
@@ -185,11 +199,13 @@ def judge(config, role, job, wt, directory):
     path = directory / 'judge-request.json'
     path.write_text(json.dumps(request))
     bridge = Path(__file__).parents[1] / 'judge-cq.mjs'
-    p = command(['node', str(bridge), str(path)], cwd=wt,
-                timeout=config['repair']['budget']['wall_clock_min'] * 60)
-    with (directory / 'driver.log').open('a') as log:
-        log.write('\n# invocation ' + time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()) + '\n'
-                  + p.stdout + '\n' + p.stderr)
+    try:
+        p = command(['node', str(bridge), str(path)], cwd=wt,
+                    timeout=config['repair']['budget']['wall_clock_min'] * 60)
+    except subprocess.TimeoutExpired as exc:
+        _log_invocation(directory, str(exc.stdout or ''), str(exc.stderr or ''))
+        raise
+    _log_invocation(directory, p.stdout, p.stderr)
     if p.returncode:
         return {'stop': 'error', 'verdict': 'unsure', 'reason': 'cq read-only judge failed'}
     return json.loads(p.stdout)

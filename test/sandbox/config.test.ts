@@ -88,3 +88,12 @@ describe('CQ sandbox policy', () => {
     ).toThrow(/not available on darwin/);
   });
 });
+
+describe('resolveSandboxConfig with an invalid snapshot', () => {
+  it('an error for a sandbox key is refused, not defaulted', async () => {
+    const { readCqEnv } = await import('../../src/config/env.js');
+    expect(() => resolveSandboxConfig({ cqEnv: readCqEnv({ CQ_SANDBOX: 'of' }) })).toThrow(
+      /CQ_SANDBOX/,
+    );
+  });
+});

@@ -144,6 +144,29 @@ test('drain retains successful observations alongside per-ID errors and enforces
     },
   });
 });
+test('zero-wait drain still observes each request once', async () => {
+  const calls: string[] = [];
+  const ops = makeQueueOps(async (raw) => {
+    const req = JSON.parse(raw) as { requestId: string; binding: unknown };
+    calls.push(req.requestId);
+    return JSON.stringify({
+      v: 1,
+      requestId: req.requestId,
+      binding: req.binding,
+      result: pending,
+    });
+  });
+  expect(await ops.drain({ requests: [ref], waitMs: 0 })).toMatchObject({
+    status: 'ok',
+    value: {
+      action: 'observed',
+      accepted: false,
+      unfinished: [ref.requestId],
+      observations: { 'request-1': { reviewed: false } },
+    },
+  });
+  expect(calls).toEqual(['request-1']);
+});
 test('transport rejection at the deadline still returns unfinished IDs', async () => {
   vi.useFakeTimers();
   const ops = makeQueueOps(
@@ -204,4 +227,33 @@ test('denied probe reports no-permission and sends no retry write', async () => 
     value: { action: 'denied', accepted: false, reason: 'no-permission' },
   });
   expect(calls).toEqual(['retry-capability']);
+});
+
+test('A-12 review wait deadline detaches and resumes with status reads only', async () => {
+  vi.useFakeTimers();
+  const { makeWait } = await import('../../../src/ops/review/wait.js');
+  const vectors = await import('../../../apps/crq-python/fixtures/review-operation/vectors.json');
+  const capability = vectors.default.find((row) => row.name === 'capabilities-response');
+  expect(capability).toBeDefined();
+  let state = 'queued';
+  const calls: string[] = [];
+  const op = makeWait(async (raw) => {
+    const req = JSON.parse(raw) as { op: string };
+    calls.push(req.op);
+    return JSON.stringify(
+      req.op === 'capabilities' ? capability!.value : { v: 1, action: 'observed', state },
+    );
+  });
+  const first = op({ requestId: 'resume', waitMs: 50 });
+  await vi.advanceTimersByTimeAsync(50);
+  expect(await first).toMatchObject({
+    status: 'ok',
+    value: { waitOutcome: 'deadline', state: 'queued' },
+  });
+  state = 'completed';
+  expect(await op({ requestId: 'resume', waitMs: 50 })).toMatchObject({
+    status: 'ok',
+    value: { waitOutcome: 'terminal', state: 'completed' },
+  });
+  expect(new Set(calls)).toEqual(new Set(['capabilities', 'status']));
 });

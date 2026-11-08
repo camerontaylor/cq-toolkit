@@ -8,6 +8,7 @@ never own GitHub or queue mutation. See README.md and ops/CUTOVER.md.
 from __future__ import annotations
 
 import argparse
+import collections
 import contextlib
 import datetime as dt
 import fcntl
@@ -25,6 +26,7 @@ import time
 from runtime_target import DEFAULT_REF, DISCOVERY_BRANCHES, DISCOVERY_SELECTOR
 import client_health
 import status_summary
+from queue_time import parse_utc
 import repair_tick
 import coverage
 import author_quota
@@ -33,6 +35,7 @@ import author_lease
 import review_receipt
 import finding_issues
 import pr_review_findings
+import local_review_pr
 import deferred_refresh
 import merged_reconcile
 import push_current
@@ -42,6 +45,7 @@ import usage_slots
 import backfill_runtime
 import backfill_jobs
 import admission_history
+import local_review_runtime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -237,7 +241,11 @@ class Spool:
             reply = self._ssh("ledger-publish " + base + " " + head, bundle, timeout=330)
         except SpoolUnreachable as exc:
             raise OSError("ledger signer transport unavailable; retain publication outbox") from exc
-        if json.loads(reply) != {"published": head}:
+        try:
+            acknowledgement = json.loads(reply)
+        except ValueError as exc:
+            raise OSError("signer reply unreadable; retain publication outbox") from exc
+        if acknowledgement != {"published": head}:
             raise OSError("signer did not acknowledge the exact ledger commit")
 
 
@@ -419,15 +427,21 @@ def secret_scan_diff(diff: str, out: Path, *, base=None, head=None,
     allow = [re.compile(p) for p in ALLOWLIST_PATHS]
     hits: List[Dict[str, Any]] = []
     path = None
+    in_header = False  # ---/+++ are headers only between "diff --git" and the first "@@"
     for n, line in enumerate(diff.splitlines(), 1):
-        if line.startswith("+++ ") or line.startswith("--- "):
-            p = line[4:]
-            if p != "/dev/null":
-                path = p[2:] if p[:2] in ("a/", "b/") else p
-            continue
         if line.startswith("diff --git"):
             m = re.match(r"diff --git a/(.*) b/(.*)$", line)
             path = m.group(2) if m else None
+            in_header = True
+            continue
+        if line.startswith("@@"):
+            in_header = False
+            continue
+        if in_header:
+            if line.startswith("+++ ") or line.startswith("--- "):
+                p = line[4:]
+                if p != "/dev/null":
+                    path = p[2:] if p[:2] in ("a/", "b/") else p
             continue
         if not line or line[0] not in "+-" or path is None:
             continue
@@ -775,6 +789,8 @@ def quiet_reason(item: Dict[str, Any], info: Dict[str, Any], ignore_age: bool = 
     ours = (item.get("last_push") or {}).get("sha") == info["headRefOid"]
     if ours:
         return None  # head is our own addressing push and nobody else is running on it
+    if not ensure_commit(item["pr"], info["headRefOid"], clone=clone):
+        return "source head unavailable in repository clone"
     ct = int(git("log", "-1", "--format=%ct", info["headRefOid"], cwd=clone))
     last = max(ct, parse_iso(info["updatedAt"]).timestamp())
     age = (time.time() - last) / 60
@@ -966,27 +982,31 @@ def current_paths(merge: str, target: str, *, pre: Optional[str] = None,
     names = sorted(set(git_z("diff", "--name-only", "--no-renames", "-z", pre, merge, cwd=clone)))
     if len(names) > CURRENT_PATH_CAP:
         return oversized_current_paths(names)
-    fields = git_z("diff", "--name-status", "-M50%", "-z", merge, target, cwd=clone)
+    # One raw diff carries both blob ids, so churn unrelated to the source
+    # costs no per-path git process (the removed/added lists have no cap).
+    fields = git_z("diff", "--raw", "--no-abbrev", "-M50%", "-z", merge, target, cwd=clone)
     renames = {}
-    removed = []
-    added = []
+    old_blob_by_path = {}
+    removed_blobs = []
+    added_blobs = []
     while fields:
-        status = fields.pop(0)
+        _old_mode, _new_mode, old_sha, new_sha, status = fields.pop(0).split()
         old = fields.pop(0)
         if status.startswith(("R", "C")):
             new = fields.pop(0)
             if status.startswith("R"):
                 renames[old] = new
-                removed.append(old)
-                added.append(new)
+                old_blob_by_path[old] = old_sha
+                removed_blobs.append(old_sha)
+                added_blobs.append(new_sha)
         elif status == "D":
-            removed.append(old)
+            removed_blobs.append(old_sha)
         elif status == "A":
-            added.append(old)
+            added_blobs.append(new_sha)
     # Git's rename heuristic can arbitrarily pair duplicate identical files.
     # Such lineage is not enough to claim current scope; retain ambiguity.
-    old_blobs = [git("rev-parse", merge + ":" + path, cwd=clone) for path in removed]
-    new_blobs = [git("rev-parse", target + ":" + path, cwd=clone) for path in added]
+    removed_counts = collections.Counter(removed_blobs)
+    added_counts = collections.Counter(added_blobs)
     result = []
     total = 0
     for original in names:
@@ -997,9 +1017,9 @@ def current_paths(merge: str, target: str, *, pre: Optional[str] = None,
                            "disposition": "unsupported", "reason": NON_UTF8_PATH})
             continue
         if not path_exists(target, path, clone=clone) and path in renames:
-            blob = git("rev-parse", merge + ":" + path, cwd=clone)
+            blob = old_blob_by_path[path]
             path = renames[path]
-            if old_blobs.count(blob) > 1 or new_blobs.count(blob) > 1:
+            if removed_counts[blob] > 1 or added_counts[blob] > 1:
                 result.append({"source_path": original, "path": path, "resolution": "git-rename-M50",
                                "disposition": "ambiguous", "reason": "duplicate blobs make rename lineage ambiguous"})
                 continue
@@ -1705,7 +1725,7 @@ class NotReady(Exception):
     pass
 
 
-def plan_open(item: Dict[str, Any], info: Dict[str, Any], dry: bool) -> Dict[str, Any]:
+def plan_open(item: Dict[str, Any], info: Dict[str, Any], dry: bool, q=None) -> Dict[str, Any]:
     if info["state"] != "OPEN":
         raise NotReady(f"PR is {info['state']}")
     if info["isDraft"]:
@@ -1715,6 +1735,8 @@ def plan_open(item: Dict[str, Any], info: Dict[str, Any], dry: bool) -> Dict[str
     # default branch (docs/multi-repo.md); the primary repo keeps today's path.
     cfg = repo_registry.by_repo(REPOS, item_repo(item))
     clone = Path(cfg["clone"]) if cfg else None
+    if not ensure_commit(item["pr"], head, clone=clone):
+        raise NotReady("source head unavailable")
     target = f"origin/{cfg['default_branch']}" if cfg else f"origin/{info['baseRefName']}"
     pin = git("merge-base", target, head, cwd=clone)
     notes = []
@@ -1729,9 +1751,10 @@ def plan_open(item: Dict[str, Any], info: Dict[str, Any], dry: bool) -> Dict[str
         item["pinned_base"] = pin
         item["target_ref"] = target
     cycle = len(item.get("cycles", [])) + 1
-    return {"base": pin, "head": head, "target": target, "label": "one review of captured range", "cycle": cycle,
+    plan = {"base": pin, "head": head, "target": target, "label": "one review of captured range", "cycle": cycle,
             "notes": notes, "branch": info["headRefName"], "review_pin": pin,
             "range_policy": "full-range-once-v1"}
+    return local_review_runtime.reconcile_pr(sys.modules[__name__], q, item, plan, dry) if q is not None else plan
 
 
 class NothingToReview(Exception):
@@ -1747,7 +1770,7 @@ def ensure_commit(pr: int, sha: str, *, clone: Optional[Path] = None) -> bool:
     return have()
 
 
-def plan_delta(item: Dict[str, Any], info: Dict[str, Any], dry: bool) -> Dict[str, Any]:
+def plan_delta(item: Dict[str, Any], info: Dict[str, Any], dry: bool, q=None) -> Dict[str, Any]:
     """Conservative full-range fallback when equivalent scope is unproven."""
     if info["state"] not in ("OPEN", "MERGED"):
         raise NotReady(f"PR is {info['state']}")
@@ -1765,10 +1788,11 @@ def plan_delta(item: Dict[str, Any], info: Dict[str, Any], dry: bool) -> Dict[st
         if (record.get("base") == pin and record.get("head") == head and
                 record.get("range_policy") == "full-range-once-v1" and record.get("run_id")):
             raise NothingToReview("equivalent captured full range already reviewed")
-    return {"base": pin, "head": head, "pr_head": head, "target": target,
+    plan = {"base": pin, "head": head, "pr_head": head, "target": target,
             "label": "one full-range review (prior equivalent scope unproven)", "cycle": None,
             "notes": [], "branch": info.get("headRefName") if info["state"] == "OPEN" else None,
             "review_pin": pin, "range_policy": "full-range-once-v1"}
+    return local_review_runtime.reconcile_pr(sys.modules[__name__], q, item, plan, dry) if q is not None else plan
 
 
 def plan_merged(item: Dict[str, Any], dry: bool) -> Dict[str, Any]:
@@ -1813,14 +1837,12 @@ def starts_last_hour(q: Dict[str, Any]) -> int:
     return sum(1 for s in q.get("starts", []) if parse_iso(s) > cutoff)
 
 
-def notify_owner(text: str) -> Dict[str, Any]:
-    """Paseo message to the chancellor (the owner's desk). promotion.alert_agent_host
-    names its daemon when it is not the local one (queue-host runner → worker-host). Never
-    raises: an unreachable daemon must not stall the tick that is reporting."""
+def notify(destination, text: str) -> Dict[str, Any]:
+    """Deliver using argv only. Runtime failures never stall queue progress."""
     res: Dict[str, Any] = {}
-    aid = CONFIG.get("promotion", {}).get("alert_agent_id")
+    aid = destination.get("paseo_agent_id")
     if aid:
-        host = CONFIG.get("promotion", {}).get("alert_agent_host")
+        host = destination.get("paseo_host")
         try:
             p = run(["paseo", "send", "--no-wait", *(["--host", host] if host else []), aid, text], check=False,
                     timeout=30 if host else 90)
@@ -1828,6 +1850,12 @@ def notify_owner(text: str) -> Dict[str, Any]:
         except (subprocess.TimeoutExpired, OSError) as exc:
             res["paseo_send"] = f"error: {exc}"[:150]
     return res
+
+
+def notify_owner(text: str) -> Dict[str, Any]:
+    promotion = CONFIG.get("promotion", {})
+    return notify(dict(paseo_agent_id=promotion.get("alert_agent_id"),
+                       paseo_host=promotion.get("alert_agent_host")), text)
 
 
 def inflight(q: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -1850,7 +1878,7 @@ def launch(q: Dict[str, Any], item: Dict[str, Any], plan: Dict[str, Any]) -> str
         # Universal secret shapes plus this repo's configured extra classes;
         # the primary repo's publish classes stay out of foreign scans.
         scan_classes = UNIVERSAL_SCAN_CLASSES | set(cfg["scan_extra_classes"])
-    elif item["kind"] in ("open", "delta") and item_repo(item) != REPO:
+    elif item["kind"] in ("open", "delta", local_review_runtime.KIND) and item_repo(item) != REPO:
         # Foreign open/delta review (docs/multi-repo.md discovery pr): scan and
         # worktree run in that repo's clone with the same universal secret-shape
         # set as push items. These reviews scan the raw base..head range — not a
@@ -1912,8 +1940,14 @@ def launch(q: Dict[str, Any], item: Dict[str, Any], plan: Dict[str, Any]) -> str
             "label": plan["label"], "cycle": plan["cycle"], "base": plan["base"], "head": plan["head"],
             "pr_head": plan.get("pr_head", plan["head"]), "review_pin": plan.get("review_pin", plan["base"]),
             "target": plan["target"], "pr_branch": plan["branch"], "worktree": str(wt), "wt_branch": wbranch,
-            "dirty_diff": "clean tree", "range_policy": plan.get("range_policy"), "started_at": iso(),
+            "dirty_diff": "clean tree", "range_policy": plan.get("range_policy"), "band": launch_band(item), "started_at": iso(),
             "cmd": [*cli_cmd, "--base-commit", plan["base"]]}
+    if plan.get("profile"):
+        meta.update(profile=plan["profile"], config_digest=plan["config_digest"])
+        meta["cmd"] = ["coderabbit", "review", *plan["profile"]["flags"]]
+    if item["kind"] == local_review_runtime.KIND:
+        meta["profile"] = item["profile"]
+        meta["cmd"] = ["coderabbit", "review", *item["profile"]["flags"]]
     if item["kind"] == backfill_jobs.KIND:
         meta["backfill"] = {k: item[k] for k in ("subject_id", "job_id", "attempt_id", "target", "scope_digest")}
     if item["kind"] == review_receipt.KIND:
@@ -1936,7 +1970,7 @@ def launch(q: Dict[str, Any], item: Dict[str, Any], plan: Dict[str, Any]) -> str
             # immediately before reservation, still under the same tick lock.
             author_lease.grant_queue(item, at=iso())
         except author_quota.AuthorRefused:
-            remove_worktree(wt, wbranch)
+            remove_worktree(wt, wbranch, clone=repo_clone)
             raise
     repair_tick.atomic(rdir / "meta.json", meta)
     # Session-log preservation (item 2.1): one work-started line per review,
@@ -1958,7 +1992,7 @@ def launch(q: Dict[str, Any], item: Dict[str, Any], plan: Dict[str, Any]) -> str
         "head": plan["head"],
     })
     item["state"] = "reviewing"
-    item["run"] = {"run_id": run_id, "pid": None, "started_at": meta["started_at"], "launch_pending": True}
+    item["run"] = {"run_id": run_id, "pid": None, "started_at": meta["started_at"], "band": meta["band"], "launch_pending": True}
     item["wait_reason"] = None
     q.setdefault("starts", []).append(meta["started_at"])
     # Reserve identity/quota BEFORE any child or remote status mutation. A
@@ -1972,14 +2006,14 @@ def launch(q: Dict[str, Any], item: Dict[str, Any], plan: Dict[str, Any]) -> str
     except OSError as exc:
         # A failed spawn is a CONSUMED, DISTINCT terminal admission: the start
         # was already persisted above, so no automatic retry can double-spend it.
-        # Only author items get this terminal here; every other kind keeps the
-        # previous (raise) behaviour.
-        if item["kind"] != author_quota.AUTHOR_KIND:
+        # Author and local-review items consume this failed attempt; neither
+        # silently returns to pending after a failed spawn.
+        if item["kind"] not in (author_quota.AUTHOR_KIND, local_review_runtime.KIND):
             raise
-        item["run"] = {"run_id": run_id, "pid": None, "started_at": meta["started_at"],
+        item["run"] = {"run_id": run_id, "pid": None, "started_at": meta["started_at"], "band": meta["band"],
                        "launch_pending": False, "spawn_failed_at": iso(), "error": str(exc)[:200]}
-        item["state"] = author_quota.AUTHOR_FAILED
-        item["last_error"] = f"author spawn failed (no retry): {exc}"[:300]
+        item["state"] = "failed" if item["kind"] == local_review_runtime.KIND else author_quota.AUTHOR_FAILED
+        item["last_error"] = f"{item['kind']} spawn failed (no retry): {exc}"[:300]
         event("spawn_failed", item=item["id"], run=run_id, error=str(exc)[:200])
         save_queue(q)
         return run_id
@@ -2376,13 +2410,32 @@ def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
     # so status outcomes count every review that review_started counted.
     event("review_finished", item=item["id"], run=r["run_id"], outcome=cls["outcome"],
           findings=cls["findings"], severity=cls["severity_counts"])
+    if item["kind"] == local_review_runtime.KIND:
+        if cls["outcome"] == "rate_limited":
+            set_rate_cooldown(q, cls, rdir)
+        if cls["outcome"] in ("auth", "action_required"):
+            q.update(paused=True, pause_reason=f"{cls['outcome']} on {r['run_id']}; owner action needed")
+        result = local_review_runtime.complete(sys.modules[__name__], q, item, rdir, r["run_id"], cls,
+                    json.loads(exitf.read_text())["ended_at"], exit_code)
+        try:
+            try:
+                clone = local_review_runtime.transport.clone_for(sys.modules[__name__], item_repo(item))
+            except ValueError:
+                # Resolve the owning git directory before removing a worktree
+                # whose repo was removed from REPOS. Never use the primary clone.
+                clone = Path(git("rev-parse", "--path-format=absolute", "--git-common-dir",
+                                 cwd=Path(meta["worktree"])))
+            remove_worktree(Path(meta["worktree"]), meta["wt_branch"], clone=clone)
+        except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+            event("local_review_cleanup_failed", item=item["id"], reason=str(exc)[:300])
+        return result
     if item["kind"] == review_receipt.KIND:
         # Receipt before queue mutation: a crash here is recovered by re-harvest.
         partial = any(p["disposition"] in ("unsupported", "ambiguous") for p in item["capture"]["paths"])
         outcome = ("partial-scope" if partial else "terminal-with-findings" if cls["findings"] else "terminal-clean") if cls["counted"] else cls["outcome"]
         item["receipt_id"] = review_receipt.write_receipt(STATE / "receipts",
             current_document(item, outcome, meta=meta, cls=cls, rdir=rdir))
-        item.setdefault("attempts", []).append({"run_id": r["run_id"], "outcome": cls["outcome"],
+        item.setdefault("attempts", []).append({"run_id": r["run_id"], "band": r.get("band", "background"), "started_at": r.get("started_at"), "outcome": cls["outcome"],
                                               "counted": cls["counted"], "receipt_id": item["receipt_id"]})
         item["run"] = None
         if outcome == "terminal-with-findings":
@@ -2411,7 +2464,7 @@ def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
         outcome = ("partial-scope" if partial else "terminal-with-findings" if cls["findings"] else "terminal-clean") if cls["counted"] else cls["outcome"]
         item["receipt_id"] = review_receipt.write_receipt(STATE / "receipts",
             current_document(item, outcome, meta=meta, cls=cls, rdir=rdir))
-        item.setdefault("attempts", []).append({"run_id": r["run_id"], "outcome": cls["outcome"],
+        item.setdefault("attempts", []).append({"run_id": r["run_id"], "band": r.get("band", "background"), "started_at": r.get("started_at"), "outcome": cls["outcome"],
                                                 "counted": cls["counted"], "receipt_id": item["receipt_id"]})
         item["run"] = None
         if cls["counted"]:
@@ -2460,8 +2513,14 @@ def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
                         clone=Path(push_cfg["clone"]) if push_cfg else None)
         return f"{item['id']}: {outcome}; receipt {item['receipt_id']}"
     if item["kind"] == backfill_jobs.KIND:
-        return backfill_runtime.harvest(sys.modules[__name__], q, item, rdir, meta, cls, exit_code,
+        result = backfill_runtime.harvest(sys.modules[__name__], q, item, rdir, meta, cls, exit_code,
                                         terminal_verified=(state == "harvest"))
+        if not item.get("run") and not any(a.get("run_id") == r["run_id"] for a in item.get("attempts", [])):
+            item.setdefault("attempts", []).append({"run_id": r["run_id"],
+                "band": r.get("band", "background"), "started_at": r.get("started_at"),
+                "outcome": cls["outcome"]})
+            save_queue(q)
+        return result
     if item["kind"] == "coverage":
         try:
             coverage._legacy_origins(q, item)
@@ -2486,7 +2545,7 @@ def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
         cfg = repo_registry.by_repo(REPOS, item_repo(item))
         cleanup_clone = Path(cfg["clone"]) if cfg else None
     remove_worktree(Path(meta["worktree"]), meta["wt_branch"], clone=cleanup_clone)
-    attempt = {"run_id": r["run_id"], "outcome": cls["outcome"], "counted": cls["counted"], "at": iso(),
+    attempt = {"run_id": r["run_id"], "band": r.get("band", "background"), "started_at": r.get("started_at"), "outcome": cls["outcome"], "counted": cls["counted"], "at": iso(),
                "head": meta["head"], "base": meta["base"], "message": cls.get("message")}
     item.setdefault("attempts", []).append(attempt)
     item["run"] = None
@@ -2498,6 +2557,8 @@ def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
                   "pr_head": meta.get("pr_head", meta["head"]),
                   "dirty_diff": "clean tree", "range_policy": meta.get("range_policy"), "ndjson": str(rdir / "review.ndjson"),
                   "findings": cls["findings"], "severity_counts": cls["severity_counts"], "completed_at": iso()}
+        if meta.get("profile"):
+            record.update(profile=meta["profile"], config_digest=meta["config_digest"])
         if item["kind"] == author_quota.AUTHOR_KIND:
             # Genuine cycle evidence, but NEVER repair debt and NEVER promoted
             # coverage credit: author_cycles is not scanned by repair_tick.backfill,
@@ -2636,6 +2697,12 @@ def rank(item: Dict[str, Any]) -> int:
         return 0
     if item["kind"] == "delta" and item.get("followup") != "merged":
         return 1
+    if item["kind"] == local_review_runtime.KIND:
+        if item.get("generation", 1) == 1 and item.get("repeat_requested") is not True:
+            return 0
+        created = parse_utc(item.get("created_at"))
+        aged = created is not None and (now() - created).total_seconds() >= CONFIG.get("local_review_aging_minutes", 60) * 60
+        return 0 if aged else 1
     repo_rank = repo_registry.rank_for(item, REPO, REPOS)
     if repo_rank is not None:
         return repo_rank
@@ -2648,6 +2715,36 @@ def rank(item: Dict[str, Any]) -> int:
     if item["kind"] == "delta":
         return 2
     return 2 if item.get("source") == "followup" else 3
+
+
+def launch_band(item):
+    return "interactive" if rank(item) < 2 else "background"
+
+
+def background_turn(q):
+    """Use reservation chronology, including running work, never completion order."""
+    records = {}
+    for item in q["items"]:
+        for record in [*item.get("attempts", []), item.get("run")]:
+            if record and isinstance(record.get("run_id"), str):
+                old = records.get(record["run_id"])
+                # Receipt-only reuse must not replace the original reservation.
+                if old is None or parse_utc(record.get("started_at")) is not None:
+                    records[record["run_id"]] = record
+    launches = []
+    for run_id, record in records.items():
+        started = parse_utc(record.get("started_at"))
+        band = record.get("band", "background")
+        if started is None:
+            started = parse_utc(run_id.rsplit("-", 1)[-1])
+            if record.get("started_at") is not None:
+                band = "background"  # malformed launch metadata never extends a streak
+        if started is None:
+            # Skip unknown chronology; it supplies no interactive launch credit.
+            continue
+        launches.append((started, run_id, band))
+    latest = sorted(launches)[-2:]
+    return len(latest) == 2 and all(band == "interactive" for _, _, band in latest)
 
 
 def sort_key(item: Dict[str, Any]) -> Tuple:
@@ -2714,6 +2811,15 @@ def enroll(q: Dict[str, Any], dry: bool) -> List[str]:
             continue
         mine = [i for i in live_items(q) if i["pr"] == n and i["kind"] in ("open", "delta")
                 and item_repo(i) == REPO]
+        pin = None
+        try:
+            if not ensure_commit(n, head):
+                raise NotReady("source head unavailable")
+            pin = git("merge-base", f"origin/{p['baseRefName']}", head)
+        except (NotReady, OSError, RuntimeError, subprocess.TimeoutExpired):
+            pass  # preserve the original first-enrollment fallback
+        if pin and local_review_pr.associate(sys.modules[__name__], q, REPO, n, pin, head, dry):
+            continue
         if not mine:
             stacked = "" if p["baseRefName"] in DISCOVERY_BRANCHES else f", stacked on {p['baseRefName']}"
             new_item(q, log, dry, id=f"pr{n}", pr=n, kind="open", tier=1, prior_cycles=0,
@@ -2721,11 +2827,7 @@ def enroll(q: Dict[str, Any], dry: bool) -> List[str]:
             continue
         if any(i["state"] in ("pending", "reviewing", "repairing", "blocked") and not optional_open(i) for i in mine):
             continue
-        try:
-            if not ensure_commit(n, head):
-                raise NotReady("source head unavailable")
-            pin = git("merge-base", f"origin/{p['baseRefName']}", head)
-        except (NotReady, OSError, RuntimeError, subprocess.TimeoutExpired):
+        if pin is None:
             log.append(f"PR #{n}: range identity unavailable; enrollment deferred")
             continue
         last = last_reviewed(q, n)
@@ -2763,7 +2865,17 @@ def ordinary_review_eligible(q):
                for i in live_items(q))
 
 
-def coverage_fallback(q, log, dry, only):
+def coverage_fallback(q, log, dry, only, ordinary_eligible=None):
+    previous = q.get("backfill_ordinary_exhausted", False)
+    if ordinary_eligible is False:
+        q["backfill_ordinary_exhausted"] = True
+    try:
+        return _coverage_fallback(q, log, dry, only)
+    finally:
+        q["backfill_ordinary_exhausted"] = previous
+
+
+def _coverage_fallback(q, log, dry, only):
     started, available = backfill_runtime.select(sys.modules[__name__], q, log, dry, only)
     if started or available:
         return started, available
@@ -2836,7 +2948,19 @@ def start_one(q, log, dry, only, ignore_quiet, capture_current=True):
     has_coverage = False
     reservations_before = len(q.get("starts", []))
     q["backfill_ordinary_exhausted"] = False
-    for item in sorted(live_items(q), key=sort_key):
+    selection = sorted(live_items(q), key=sort_key)
+    turn = not only and background_turn(q) and any(
+        i["state"] == "pending" and rank(i) < 2 for i in selection)
+    if turn:
+        # Try rank 2–3 plans in order; their ordinary gates establish eligibility.
+        selection.sort(key=lambda i: (not bool(i.get("operator_priority")),
+            0 if 2 <= rank(i) <= 3 else 1))
+    for item in selection:
+        if turn and not item.get("operator_priority") and not 2 <= rank(item) <= 3:
+            turn = False
+            started, has_coverage = coverage_fallback(q, log, dry, only, ordinary_eligible=False)
+            if started or (dry and has_coverage):
+                break
         if only and item["id"] != only:
             continue
         if item["state"] != "pending":
@@ -2873,13 +2997,18 @@ def start_one(q, log, dry, only, ignore_quiet, capture_current=True):
             item["wait_reason"] = "linked merged-current intent owns current-scope recovery; legacy evidence retained"
             continue
         if item.get("not_before") and parse_iso(item["not_before"]) > now():
-            item["wait_reason"] = f"backoff until {item['not_before']}"
+            if not (item.get("wait_reason") or "").startswith("completed-evidence-unavailable:"):
+                item["wait_reason"] = f"backoff until {item['not_before']}"
             continue
         if not deps_met(q, item):
             item["wait_reason"] = f"waiting for {item['depends_on']}"
             continue
         try:
-            if item["kind"] == author_quota.AUTHOR_KIND:
+            if item["kind"] == local_review_runtime.KIND:
+                plan = local_review_runtime.prepare(sys.modules[__name__], q, item, dry)
+                if plan is None:
+                    continue
+            elif item["kind"] == author_quota.AUTHOR_KIND:
                 # Author items bind their own base/head/target: no PR, no
                 # active-agent quiet gate. Global pause/cooldown/hourly/
                 # inflight gates and the pre-upload secret scan still apply.
@@ -2910,7 +3039,7 @@ def start_one(q, log, dry, only, ignore_quiet, capture_current=True):
                 if qr:
                     item["wait_reason"] = qr
                     continue
-                plan = (plan_open if item["kind"] == "open" else plan_delta)(item, info, dry)
+                plan = (plan_open if item["kind"] == "open" else plan_delta)(item, info, dry, q)
         except NotReady as exc:
             item["wait_reason"] = str(exc)
             if len(q.get("starts", [])) > reservations_before:
@@ -2991,6 +3120,8 @@ def read_slot_usage(q):
 def collect_finished(q, log):
     """Terminal detached reviews only; no enrollment, repairs or promotion audits."""
     for item in list(live_items(q)):
+        if item.get("kind") == local_review_runtime.KIND and item.get("publication_pending"):
+            local_review_runtime.republish(sys.modules[__name__], q, item)
         if item["state"] != "reviewing" or not item.get("run"):
             continue
         run = item["run"]
@@ -3002,6 +3133,8 @@ def collect_finished(q, log):
         msg = harvest_review(q, item, False)
         if msg:
             log.append(msg)
+
+    local_review_runtime.reconcile_completed(sys.modules[__name__], q)
 
 
 def refresh_backfill_usage(q):
@@ -3062,27 +3195,39 @@ def admit_available(q, usage, log, dry=False, only=None, ignore_quiet=False, res
     return has_coverage, global_gate, max(0, slots - spent)
 
 
-def slot():
-    """Collect terminal reviews and admit under the tick lock; no enrollment/audit."""
+def scheduled_slot():
+    """Probe quota without tick.lock; discard the observation if ANY queue state changed.
+
+    No reservation can be based on a stale snapshot: the comparison, collection,
+    admission and journal writes are one existing tick.lock transaction. A busy
+    scheduler simply retries on its next timer invocation.
+    """
     if (STATE / "runner-disabled").exists():
         return ["runner disabled for host handover"]
-    q = load_queue()
+    snapshot = with_lock(lambda: json.loads(json.dumps(load_queue())))
+    if snapshot is None:
+        return []
+    observed = json.loads(json.dumps(snapshot))
+    observation = read_slot_usage(observed)
+
+    def commit():
+        if load_queue() != snapshot:
+            return ["queue changed during quota probe; retry next slot tick"]
+        return slot(observed, observation)
+    return with_lock(commit) or []
+
+
+def slot(q=None, observation=None):
+    """One locked admission pass; the timer owns subsequent deadline retries."""
+    if (STATE / "runner-disabled").exists():
+        return ["runner disabled for host handover"]
+    q = load_queue() if q is None else q
     log = []
-    # One short wait at most, bounded to <60s; usage can be slow/unavailable.
-    # After an early local reservation expiry, the next minute retries rather
-    # than trusting fullCapacityInMs as the first available slot.
-    for attempt in range(2):
-        collect_finished(q, log)
-        usage, reserved = read_slot_usage(q)
-        _, gate, remaining = admit_available(q, usage, log, reserved=reserved, capture_current=False)
-        save_queue(q)
-        at = now()
-        deadline = refresh_slot_deadline(q, usage, remaining, gate, at=at)
-        delay = (deadline - at).total_seconds()
-        if attempt == 0 and 0 < delay < 60 and gate in ("slots", "cooldown"):
-            time.sleep(delay)
-            continue
-        break
+    collect_finished(q, log)
+    usage, reserved = read_slot_usage(q) if observation is None else observation
+    _, gate, remaining = admit_available(q, usage, log, reserved=reserved, capture_current=False)
+    save_queue(q)
+    refresh_slot_deadline(q, usage, remaining, gate, at=now())
     return log
 
 
@@ -3132,6 +3277,8 @@ def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = Fal
         log += push_current.discover(sys.modules[__name__], q, dry)
     starts_before = len(q.get("starts", []))
     for item in list(live_items(q)):
+        if not dry and item.get("kind") == local_review_runtime.KIND and item.get("publication_pending"):
+            local_review_runtime.republish(sys.modules[__name__], q, item)
         if item["state"] == "reviewing":
             msg = harvest_review(q, item, dry)
             if msg:
@@ -3151,6 +3298,7 @@ def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = Fal
         # can still be outstanding) run after the harvest pass and are capped, so
         # no gh call delays harvesting. Rotation by last attempt keeps a failing
         # delivery from starving later ones.
+        local_review_runtime.reconcile_completed(sys.modules[__name__], q)
         candidates = sorted(
             (i for i in live_items(q) if i.get("issue_pending") and
              i.get("kind") == push_current.KIND),
@@ -3191,6 +3339,7 @@ def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = Fal
         refresh_slot_deadline(q, usage, remaining, global_gate)
         write_status(q)
         write_heartbeat(q)
+        local_review_pr.publish(sys.modules[__name__], q)
         log.extend(client_health.record(sys.modules[__name__], q, discovery_enabled=(not only and
             isinstance(CONFIG.get("merged_discovery"), dict) and
             CONFIG["merged_discovery"].get("enabled") is True)))
@@ -3345,12 +3494,14 @@ def cmd_measure() -> None:
     # Repair-only backfill items share the merged kind but have no PR merge.
     merged = [i for i in live_items(q) if i["kind"] == "merged"
               and not (i.get("pr") == 0 and i.get("repair_runs") and not i.get("merge_commit"))]
+    measured = []
     for i in merged:
         if i.get("source") == "followup" and i["state"] == "skipped" and not i.get("measure"):
             continue  # merged head already reviewed; not a supersession decision
         apply_measure(i)
+        measured.append(i)
     # rank: code before docs-only, then most surviving non-doc lines first
-    ranked = sorted(merged, key=lambda i: (i["measure"]["docs_only"], -i["measure"]["surviving_nondoc"],
+    ranked = sorted(measured, key=lambda i: (i["measure"]["docs_only"], -i["measure"]["surviving_nondoc"],
                                            -i["measure"]["surviving"]))
     for n, i in enumerate(ranked):
         i["order"] = n
@@ -3382,8 +3533,19 @@ def write_heartbeat(q: Dict[str, Any]) -> None:
         event("heartbeat_failed", error=str(exc)[:200])
 
 
+# The third-party App identity wrongly pinned on 2026-10-04 must never reappear
+# in config; `selfcheck` is the independent negative check for it.
+BANNED_BOT_IDS = {202921479}
+BANNED_BOT_LOGINS = {"cq-reviewer[bot]"}
+
+
 def cmd_selfcheck() -> int:
-    print("ok: post-merge review queue")
+    raw = (ROOT / "config.json").read_text()
+    bad = [str(x) for x in BANNED_BOT_IDS if str(x) in raw] + [x for x in BANNED_BOT_LOGINS if x in raw]
+    if bad:
+        print(f"FAIL: config.json contains banned third-party identity {bad}")
+        return 1
+    print("ok: post-merge review queue; no banned third-party reviewer identity")
     return 0
 
 
@@ -3407,6 +3569,18 @@ def with_lock(fn, *a, lock_wait=0, **kw):
     finally:
         fcntl.flock(fh, fcntl.LOCK_UN)
         fh.close()
+
+
+def ran_locked(fn, *a, lock_wait: int = 0) -> bool:
+    """True when fn ran under the tick lock; False when the lock was busy.
+
+    The mutating commands return None on success, so with_lock's None cannot
+    tell a completed run from a lock-busy no-op; this wrapper makes it explicit.
+    """
+    def run():
+        fn(*a)
+        return True
+    return with_lock(run, lock_wait=lock_wait) is not None
 
 
 def admin(action: str, item_id: Optional[str], reason: Optional[str], *,
@@ -3621,9 +3795,11 @@ def main() -> int:
     if args.cmd == "selfcheck":
         return cmd_selfcheck()
     if args.cmd == "init":
-        with_lock(cmd_init, args.force)
+        if not ran_locked(cmd_init, args.force):
+            return 3
     elif args.cmd == "measure":
-        with_lock(cmd_measure)
+        if not ran_locked(cmd_measure):
+            return 3
     elif args.cmd == "repair-prepare":
         def prepare():
             evidence = json.loads(Path(args.revalidation).read_text())
@@ -3631,7 +3807,8 @@ def main() -> int:
                                                     args.job, args.source_sha, evidence)
             event("repair_prepared", origin_job=args.job, job=job_id, source_sha=args.source_sha)
             print(job_id)
-        with_lock(prepare)
+        if not ran_locked(prepare):
+            return 3
     elif args.cmd in ("tick", "start"):
         only = getattr(args, "item", None)
         out = with_lock(tick, args.dry_run, only, getattr(args, "ignore_quiet", False), lock_wait=90)
@@ -3661,8 +3838,9 @@ def main() -> int:
         print(f"PR #{args.pr}: {n} paths; base {base} head {head}")
         print(git("diff", "--shortstat", base, head))
     elif args.cmd == "author-enroll":
-        with_lock(enroll_author, args.request_id, args.base, args.head, args.target, args.cycle,
-                  args.review_policy, args.fallback_reviewer)
+        if not ran_locked(enroll_author, args.request_id, args.base, args.head, args.target, args.cycle,
+                          args.review_policy, args.fallback_reviewer):
+            return 3
     elif args.cmd in ("author-lease", "author-fallback"):
         try:
             result = with_lock(author_lease_command, args.request_id, args.cmd == "author-fallback")
@@ -3673,10 +3851,12 @@ def main() -> int:
             return 3
         print(json.dumps(result, sort_keys=True))
     elif args.cmd == "author-observe":
-        with_lock(author_observe, args.manifest)
+        if not ran_locked(author_observe, args.manifest):
+            return 3
     else:
         try:
-            with_lock(admin, args.cmd, getattr(args, "item", None), getattr(args, "reason", None))
+            if not ran_locked(admin, args.cmd, getattr(args, "item", None), getattr(args, "reason", None)):
+                return 3
         except AdminRefused as exc:
             print(f"{args.cmd} refused: {exc}", file=sys.stderr)
             return 3

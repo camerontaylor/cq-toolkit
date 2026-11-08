@@ -6,8 +6,8 @@
   [approval-token annex](0003-approval-token.md), the [journal annex](0003-journal-migration.md),
   [ADR-0004](0004-policy-check-trust-boundaries.md)
 
-Post-acceptance notes N3, N4, N15 and N23 in the [ADR index](README.md#post-acceptance-notes) narrow parts of this record.
-[ADR-0009](0009-config-contract-v2.md) supersedes §B.2.5 strictness and reserved refusal, §B.1 "never workspace files" for non-trust keys, closed-domain enforcement and the `optIn` machinery (note N24).
+Post-acceptance notes N3, N4, N15, N21, N22 and N23 in the [ADR index](README.md#post-acceptance-notes) narrow parts of this record.
+[ADR-0009](0009-config-contract-v2.md) supersedes §B.2.5 strictness and reserved refusal, §B.4.1 `CQ_PROFILE` profile seeding, §B.1 "never workspace files" for non-trust keys, closed-domain enforcement and the `optIn` machinery (note N24).
 
 This annex fills ADR-0002's Annex B. It also defines the configuration keys ADR-0003 refers to. Neither ADR's main
 text changes.
@@ -16,7 +16,7 @@ text changes.
 
 - **Namespace.** One strict namespace, `CQ_<DOMAIN>_<KEY>`: a closed set of domains plus one dynamic family,
   `CQ_PROVIDER_<ID>_<KEY>`. Each key is mechanically mirrored as a per-call id, `<domain>.<camelKey>`.
-- **Precedence.** P7's three layers, **built-in → project env → per-call**, with the last one winning. The
+- **Precedence.** (Profile seeding by `CQ_PROFILE` is retired by ADR-0009 / N24; ignore the profile text below.) P7's three layers, **built-in → project env → per-call**, with the last one winning. The
   project-env layer may be seeded by a bundled profile (`CQ_PROFILE`); explicit `CQ_*` vars beat the profile.
   Blank means "this layer sets nothing", so with `CQ_PROFILE` blank every key resolves to its conservative value. A
   per-call value less conservative than the resolved value is refused unless its key is named in `optIn`. Config
@@ -142,7 +142,7 @@ built-in default  →  project env (CQ_*, optionally seeded by the bundled profi
                                                               last one wins, subject to the rules below
 ```
 
-1. **Profile = a seed inside the project-env layer.** P7's three layers are unchanged.
+1. **Profile = a seed inside the project-env layer.** _Retired by ADR-0009 (N24): `CQ_PROFILE` is not read and profile seeding does not exist; the text of this item is historical._ P7's three layers are unchanged.
    `CQ_PROFILE ∈ {conservative, solo-maintainer}` (blank ≡ `conservative`) expands to that profile's key values; an
    explicit `CQ_*` beats the profile's value for the same key (per entry for maps, §B.3). The journal and the stderr
    summary distinguish `profile` from `env` (§B.7).
@@ -221,6 +221,11 @@ built-in default  →  project env (CQ_*, optionally seeded by the bundled profi
 > Narrowed: the CQ secret is env-only (no SDK typed option); see post-acceptance note N4 in the
 > [ADR index](README.md#post-acceptance-notes).
 
+> Narrowed: the `CQ secret` row's CI source is the `automation` environment secret
+> `CQ_AUTOMATION_APP_KEY` (plus the `CQ_AUTOMATION_APP_CLIENT_ID` variable), and every consumer mints the
+> `cq-automation` App installation token per run; `CQ_AUTOMATION_TOKEN` survives only as an interim
+> allowlist entry. See post-acceptance note N22 in the [ADR index](README.md#post-acceptance-notes).
+
 **The rule is by name.** A name is secret iff it ends with one of the existing `SECRET_ENV_SUFFIXES`
 (`_API_KEY _TOKEN _AUTH_TOKEN _SECRET _KEY _PASSWORD _CREDENTIALS PRIVATE_KEY`,
 [src/driver/error-text.ts](../../src/driver/error-text.ts)).
@@ -230,6 +235,11 @@ not), so one suffix list drives naming, redaction, journalling and the `vars.*` 
 apart. `_TOKENS` (e.g. `CQ_BUDGET_MAX_TOKENS`) does not end with `_TOKEN`. The lint also checks every `keyEnv`
 name in the subprocess and claude-agent routing tables against the suffix rule, so a route cannot hand a key
 through an unredacted name.
+
+> Superseded in part: the one-suffix-list rule no longer holds for `_URL`. Config resolution, journalling and
+> passthrough treat `_URL` as non-secret (value-gated), while diagnostics keep it in `SECRET_ENV_SUFFIXES`, so
+> the two lists diverge on purpose. See post-acceptance note N21 in the
+> [ADR index](README.md#post-acceptance-notes).
 
 **Consequences:**
 
@@ -292,9 +302,11 @@ through an unredacted name.
 7. **Renames that must land with W3.6:**
    - `vars.CQ_DRILL_OWNER` → `CQTEST_DRILL_OWNER` (`live-merge.yml`);
    - the self-host `GH_REPOSITORY` fallback → `GH_REPO`;
-   - the self-host template placeholder `{{SELFHOST_DRIVER_KEY}}` now names an environment secret
-     (`{{SELFHOST_TOKEN}}` is retired — every automation job mints the `cq-automation` App token per
-     run; see post-acceptance note N22 in the [ADR index](README.md#post-acceptance-notes));
+   - the template placeholders `{{SELFHOST_TOKEN}}`/`{{SELFHOST_DRIVER_KEY}}` now name environment secrets;
+
+     > Superseded in part: `{{SELFHOST_TOKEN}}` is retired — every automation job mints the `cq-automation`
+     > App token per run; see post-acceptance note N22 in the [ADR index](README.md#post-acceptance-notes).
+
    - the self-host workflows' `max_usd` dispatch input, when non-empty, is passed as
      `--max-usd "$MAX_USD" --opt-in selfhost.maxUsd`. The dispatcher typed it, so it is a named per-call value
      (§B.4 item 3c). Without this, a dispatch above the resolved `CQ_SELFHOST_MAX_USD` would now be refused.
@@ -458,6 +470,10 @@ Today's run-tool defaults live in [src/harness/config.ts](../../src/harness/conf
 | `CQ_DRIVER_ACP_ENDPOINT`         | enum (endpoint-table names) `zcode-acp-server\|dsh-acp`                                             | `zcode-acp-server`                                                                                                                 | —                         | ✗                           | unordered                                                                                                          |
 | `CQ_DRIVER_ACP_COMMAND`          | argv                                                                                                | the endpoint's argv                                                                                                                | —                         | ✗                           | unordered                                                                                                          |
 | `CQ_DRIVER_ACP_ENV_NAMES`        | list<env name>                                                                                      | none                                                                                                                               | —                         | ✗                           | subset tighter; rejects `CQ_*`                                                                                     |
+
+> **Post-acceptance note:** the `CQ_DRIVER_SESSIONS_DIR` row above is historical. The current key is
+> `CQ_SESSIONS_DIR`, defaulting to the durable `${XDG_STATE_HOME:-~/.local/state}/cq/sessions`; see
+> [Session store migration and constrained environments](#session-store-migration-and-constrained-environments) below.
 
 **Binding resolution:** the most specific entry wins: `role/provider` > `role/*` > `*/provider` > `*/*`.
 

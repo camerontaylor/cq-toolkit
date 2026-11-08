@@ -1,3 +1,4 @@
+import { checkoutWriterStdio, trackCheckoutWriter } from '../../shared/checkoutWriterContext.js';
 // The injectable `gh` CLI runner — E1 slice 1 (goal E1: address-review fetch
 // lane).
 //
@@ -122,9 +123,11 @@ export function makeGhRunner(opts?: {
         }
       }
       const child = spawn(bin, args, {
+        stdio: checkoutWriterStdio(['pipe', 'pipe', 'pipe']),
         ...(opts?.cwd !== undefined ? { cwd: opts.cwd } : {}),
         env: { ...inherited, ...opts?.env },
       });
+      trackCheckoutWriter(child);
       // The runner — not the child — owns this one wall clock: it bounds a
       // single spawned gh invocation and OBEYS by killing, never by deciding
       // policy (the governor owns WHEN a run aborts; this only bounds one
@@ -136,10 +139,10 @@ export function makeGhRunner(opts?: {
               child.kill('SIGKILL');
             }, opts.timeoutMs)
           : undefined;
-      child.stdout.on('data', (chunk: Buffer) => {
+      child.stdout!.on('data', (chunk: Buffer) => {
         stdoutChunks.push(chunk);
       });
-      child.stderr.on('data', (chunk: Buffer) => {
+      child.stderr!.on('data', (chunk: Buffer) => {
         stderrChunks.push(chunk);
       });
       child.on('error', (err: Error) => {

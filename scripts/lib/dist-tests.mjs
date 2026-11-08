@@ -19,13 +19,16 @@ const INDIRECT_DIST_TESTS = new Set([
   // Same indirect shape: measurement-inputs.test.ts reaches dist only through
   // scripts/measurement-inputs.mjs (the v2 report schema import).
   'test/measurement-inputs.test.ts',
+  // gen-config-docs.test.ts spawns scripts/gen-config-docs.mjs, which imports
+  // dist/config/env-registry.js; the test text never names dist.
+  'test/config/gen-config-docs.test.ts',
 ]);
 export function needsDist(files, root) {
   return files.some((file) => {
     const absolute = resolve(root, file);
     const name = relative(root, absolute).split(sep).join('/');
     return (
-      INDIRECT_DIST_TESTS.has(name) || /\bdist(?:\/|['"])/.test(readFileSync(absolute, 'utf8'))
+      INDIRECT_DIST_TESTS.has(name) || /\bdist(?:\/|['"`])/.test(readFileSync(absolute, 'utf8'))
     );
   });
 }

@@ -169,20 +169,50 @@ class ConcurrencyTest(unittest.TestCase):
         self.assertEqual((self.root / 'next-review-at').read_text().strip(),
                          crq.iso(AT + dt.timedelta(minutes=12)))
 
-    def test_slot_waits_subminute_and_rechecks_vendor_before_start(self):
+    def test_slot_records_subminute_deadline_without_sleeping(self):
         self.items()
         self.q['starts'] = [crq.iso(AT - dt.timedelta(minutes=59, seconds=43))] * 10
-        clock = [AT]
-        self.probe.side_effect = [{'limit': 10, 'remaining': 0}, {'limit': 10, 'remaining': 2}]
-        def sleep(seconds):
-            clock[0] += dt.timedelta(seconds=seconds)
+        self.probe.return_value = {'limit': 10, 'remaining': 0}
         with mock.patch.object(crq, 'refresh_slot_deadline', REFRESH), \
-             mock.patch.object(crq, 'now', side_effect=lambda: clock[0]), \
-             mock.patch.object(crq.time, 'sleep', side_effect=sleep) as wait:
+             mock.patch.object(crq, 'now', return_value=AT), \
+             mock.patch.object(crq.time, 'sleep') as wait:
             crq.slot()
-        wait.assert_called_once_with(17)
-        self.assertEqual(self.probe.call_count, 2)
-        self.assertEqual(self.started, ['prioritized', 'normal'])
+        wait.assert_not_called()
+        self.assertEqual(self.probe.call_count, 1)
+        self.assertEqual(self.started, [])
+        self.assertEqual((self.root / 'next-review-at').read_text().strip(),
+                         crq.iso(AT + dt.timedelta(seconds=17)))
+
+    def test_slow_quota_probe_allows_admission_and_discards_stale_state(self):
+        self.items()
+        with mock.patch.object(crq, 'LOCK', self.root / 'tick.lock'):
+            def probe(clone):
+                # Synchronous concurrent writer: it can acquire the real flock
+                # while the quota probe is in flight, with no sleeps or races.
+                def submit():
+                    self.q['review_requests'] = {'concurrent': {'item': 'new'}}
+                    self.q['starts'].append(crq.iso())
+                    return True
+                self.assertTrue(crq.with_lock(submit))
+                return {'remaining': 3}
+            self.probe.side_effect = probe
+            self.assertIn('queue changed', crq.scheduled_slot()[0])
+        self.assertIn('concurrent', self.q['review_requests'])
+        self.assertEqual(len(self.q['starts']), 1)
+        self.assertEqual(self.started, [])
+        crq.save_queue.assert_not_called()
+
+    def test_unchanged_probe_commits_with_lock_and_preserves_reservations(self):
+        self.items()
+        def persist(q):
+            self.q.clear()
+            self.q.update(q)
+        crq.save_queue.side_effect = persist
+        with mock.patch.object(crq, 'LOCK', self.root / 'tick.lock'):
+            crq.scheduled_slot()
+            crq.scheduled_slot()
+        self.assertEqual(self.started, ['prioritized', 'normal', 'promotion'])
+        self.assertEqual(len(self.q['starts']), 3)
 
     def test_repeated_usage_does_not_spend_outstanding_reservations(self):
         self.items()

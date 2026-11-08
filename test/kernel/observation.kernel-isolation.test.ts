@@ -69,14 +69,15 @@ describe('T29 kernel isolation (P2-5)', () => {
         op: 'sweep.unit',
         attempt: 1,
       };
-      await runLogA.append(KERNEL_RUN, kernelEvent);
-      await runLogB.append(KERNEL_RUN, kernelEvent);
       // foldOrderRuns requires each run to open with its run-started header:
       // written raw in both dirs (the RunLog's append stays v1/v2-only
-      // until T04) — identical bytes on both sides.
+      // until T04) — identical bytes on both sides. The event is appended
+      // AFTER the raw header so the two-event file survives the comparison.
       const v3HeaderLine = `${JSON.stringify(kernelV3Header())}\n`;
       await writeFile(join(withObs, `${KERNEL_RUN}.ndjson`), v3HeaderLine, 'utf8');
       await writeFile(join(withoutObs, `${KERNEL_RUN}.ndjson`), v3HeaderLine, 'utf8');
+      await runLogA.append(KERNEL_RUN, kernelEvent);
+      await runLogB.append(KERNEL_RUN, kernelEvent);
       await writeStream(withObs, [header()]);
       const runsA = await runLogA.runs();
       const runsB = await runLogB.runs();

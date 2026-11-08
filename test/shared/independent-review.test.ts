@@ -73,6 +73,16 @@ describe('parseIndependentReview', () => {
     });
   });
 
+  test.each([
+    `${'a'.repeat(40)} does not PASS`,
+    `${'a'.repeat(40)} BYPASS this`,
+    `${'a'.repeat(40)} PASSWORD leaked`,
+    `${'a'.repeat(40)} PASS? no - HOLD`,
+    `${'a'.repeat(40)} isn't PASS`,
+  ])('rejects negated or unrelated PASS: %s', (body) => {
+    expect(parseIndependentReview(body)).toEqual({ kind: 'absent' });
+  });
+
   test.each(['PASS', `${'a'.repeat(40)} HOLD`, 'bad PASS'])(
     'ignores incomplete evidence: %s',
     (body) => {

@@ -50,6 +50,13 @@ host switch: `false` keeps repair off; `true` is refused unless committed policy
 records a spend authorization. Spend authorization, provider/model roles, checks, triggers, quotas
 and backoffs remain committed policy. No model/provider is selected by this tool.
 
+`notify.hosts` is an optional private overlay list of at most 32 host:port
+strings (DNS/IPv4 host up to 253 characters, port 1..65535). It renders over the
+committed empty allowlist; no destination is accepted by default. At D-1 set the
+approved worker endpoints in the private overlay (triton:6767, uranus:6767 and
+pluto:6767 for the current fleet). Null/local-daemon entries are not supported by
+the deployment overlay. Missing SDK host labels therefore remain unsupported.
+
 Example only; replace every host value privately:
 
 ```json
@@ -66,6 +73,7 @@ Example only; replace every host value privately:
     "worktree_root": "/srv/crq-worktrees",
     "timeout_bin": "/usr/bin/timeout",
     "paseo_hosts": ["worker.example.invalid:6767", "127.0.0.1:6767"],
+    "notify": {"hosts": ["worker.example.invalid:6767"]},
     "promotion": {
       "record_url_template": "http://queue.example.invalid:6778/promotion/{item}",
       "alert_agent_host": "worker.example.invalid:6767",
@@ -213,19 +221,23 @@ Ordering and guarantees:
    invoking the controller. The controller never creates it or missing ancestors;
    absence, wrong type/mode and ambiguous prior annotated tags refuse before
    helper entry. A private mode-0600 recovery intent is atomically written and its
-   file and existing record directory synced before any helper call.
+   file and existing record directory synced before any mutating helper call, but
+   only after the pure validators in step 3 pass.
 2. **Drain** — every queue item with a recorded run is probed with the
    runner's own fail-closed `crq.run_liveness` from the same checkout.
    `alive` or `ambiguous` blocks the controller; it never signals or kills a
    process (exact owned-PID drain means: verified-none, not a sweep). Drain
    live/ambiguous work through the documented author-recovery path first.
-3. **Switch** — before the durable intent is written, the controller calls
-   the helper's own pure validators (`root_check`, `verify_target` with its
-   full `crq-runner/YYYYMMDD-N` tag match and annotated-tag binding, and the
-   destination `render`). A bad tag or target is a plain exit-2 refusal with
+3. **Switch** — first the controller calls the helper's own pure validators
+   (`root_check`, `verify_target` with its full `crq-runner/YYYYMMDD-N` tag
+   match and annotated-tag binding, and the destination `render`); they are
+   read-only helper calls. A bad tag or target is a plain exit-2 refusal with
    no record and no change. The controller's own tag check is also a full
-   match now. Then the helper's `switch` runs unchanged, under its tick lock
-   and drift fence.
+   match now. Only then is the durable recovery intent written (the
+   `deploy_pending`/`rollback_pending` record described below), and the
+   helper's `switch` runs unchanged, under its tick lock and drift fence. An
+   interruption during validation therefore leaves no intent to replace or
+   clear; one after the write is replaced by its recorded outcome.
 4. **Preservation** — `state/queue.json` (items, starts, author_requests,
    author_observations) and `state/heartbeat.json` must be byte-identical
    across the switch; any difference after helper entry requires owner recovery
@@ -250,7 +262,9 @@ Ordering and guarantees:
    polls every five seconds for up to `--first-tick-timeout-seconds` (default
    1500: one 20-minute cadence plus five minutes of slack), so a just-switched
    runner can finish its first tick. Timeout remains unhealthy. Subsequent
-   observations use `--interval-seconds`. `crq.py` assigns and
+   observations sleep the required `--interval-seconds` before sampling; that
+   is a fixed delay rather than polling, so choose at least one runner cadence
+   plus slack (the runbook uses 1500). `crq.py` assigns and
    saves `queue.last_tick` before status publication and replaces the
    completion heartbeat (`WATCHDOG_HOME/heartbeat.json`, resolved as
    `$XDG_STATE_HOME/crq` or `~/.local/state/crq`) only afterward, so
@@ -290,8 +304,10 @@ the runner's explicit `run: null` marker) is skipped, so no switch proceeds
 without an absence proof for every recorded run.
 
 Schema-1 records add `transaction_id` and `outcome` without changing legacy
-completed journal inputs. Before entering the helper, a `deploy_pending` or
-`rollback_pending` intent retains the prior HEAD/config/preserved-state digests,
+completed journal inputs. The `deploy_pending`/`rollback_pending` intent IS the
+mode-0600 recovery intent from step 1: it is written after the pure validators
+and immediately before the mutating helper, never before validation. It retains
+the prior HEAD/config/preserved-state digests,
 prior approval tag and intended target/tag, plus the checkout status and the
 installed CRQ user units (`$XDG_CONFIG_HOME/systemd/user/crq-*` and
 `*.wants/crq-*` links). If the helper raises and the controller then observes
@@ -351,7 +367,11 @@ field names only and refuses before restore/checkout. Resolve drift by an approv
 overlay/repository change and a recorded render, never by editing live JSON.
 It refuses other dirty/untracked files; restores tracked config; requires a clean
 Git status; checks out detached; records and atomically re-renders target config;
-and requires status to show only ` M apps/crq-python/config.json`.
+and requires status to show only:
+
+```text
+ M apps/crq-python/config.json
+```
 The same protocol applies to rollback. State is ignored and retained in place.
 
 `--live-config` (alias `live-config`) performs only a recorded, locked config

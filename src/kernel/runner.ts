@@ -147,6 +147,7 @@ import pLimit from 'p-limit';
 import { randomBytes } from 'node:crypto';
 import { messageOf } from '../shared/messageOf.js';
 import { assertCqEnv } from '../config/entry.js';
+import { currentCqEnv, runWithCqEnv } from '../config/run-env.js';
 import { readCqEnv } from '../config/env.js';
 import { GovernanceOptInRefusedError } from './errors.js';
 import {
@@ -325,7 +326,7 @@ function validSessionLink(link: unknown): JobSessionLink | undefined {
   const nonEmpty = (v: unknown): v is string => typeof v === 'string' && v !== '';
   if (!nonEmpty(raw['sessionId'])) return undefined;
   return {
-    driver: typeof raw['driver'] === 'string' ? raw['driver'] : 'unknown',
+    driver: nonEmpty(raw['driver']) ? raw['driver'] : 'unknown',
     sessionId: raw['sessionId'],
     ...(nonEmpty(raw['nativeSessionId']) ? { nativeSessionId: raw['nativeSessionId'] } : {}),
     ...(nonEmpty(raw['path']) ? { path: raw['path'] } : {}),
@@ -509,7 +510,12 @@ export async function runPlan(
   const lease: LeaseState = {};
   let report: RunReport;
   try {
-    report = await runPlanUnderLease(plan, opts, registry, gov, lease);
+    // Resolve the CQ_* snapshot once and carry it to the ops (ADR-0009).
+    // A nested runPlan (a composition's plan runs) inherits the enclosing run's snapshot.
+    const cqEnv = opts.cqEnv ?? currentCqEnv();
+    report = await runWithCqEnv(cqEnv, () =>
+      runPlanUnderLease(plan, { ...opts, cqEnv }, registry, gov, lease),
+    );
   } catch (error) {
     // The run's own failure is the root cause: a release that fails too
     // (often the same disk fault) must not replace it. An unreleased record
@@ -1301,7 +1307,10 @@ async function runPlanUnderLease(
       correlationByJob.set(job.id, {
         workId,
         runId,
-        role: job.op,
+        // JobFinishedJournalEventSchema.role requires a non-empty string: an
+        // empty op name (accepted by the plan schema) must not turn the
+        // job-finished append into a run-wide schema rejection.
+        ...(job.op !== '' ? { role: job.op } : {}),
         ...(parentWorkId !== undefined ? { parentWorkId } : {}),
       });
 
@@ -1393,7 +1402,11 @@ async function runPlanUnderLease(
       };
 
       let dispatchSignal: AbortSignal | undefined;
-      const invocationPermission = (): OpResult<unknown> | undefined => {
+      // A guard refusal ends the dispatch BEFORE the op body: provably no
+      // spend, so the settle must read 'observed' even though the refusal's
+      // indeterminate verdict looks like an op-produced one.
+      let refusedBeforeBody = false;
+      const invocationRefusal = (): OpResult<unknown> | undefined => {
         // Infrastructure failure remains a run rejection with an unresolved
         // opened fact. Ordinary cancellation instead follows normal settlement.
         try {
@@ -1415,6 +1428,11 @@ async function runPlanUnderLease(
           };
         }
         return undefined;
+      };
+      const invocationPermission = (): OpResult<unknown> | undefined => {
+        const refusal = invocationRefusal();
+        if (refusal !== undefined) refusedBeforeBody = true;
+        return refusal;
       };
       const dispatchGuard = {
         async beforeBody(): Promise<OpResult<unknown> | undefined> {
@@ -1678,7 +1696,9 @@ async function runPlanUnderLease(
             outcome.outcome === 'killed' ||
             outcome.outcome === 'threw' ||
             dispatchUnknown ||
-            (outcome.outcome === 'completed' && outcome.value.status === 'indeterminate')
+            (outcome.outcome === 'completed' &&
+              outcome.value.status === 'indeterminate' &&
+              !refusedBeforeBody)
               ? 'full'
               : 'observed';
           try {
@@ -1731,7 +1751,7 @@ async function runPlanUnderLease(
         ...(correlation?.parentWorkId !== undefined
           ? { parentWorkId: correlation.parentWorkId }
           : {}),
-        ...(correlation !== undefined ? { role: correlation.role } : {}),
+        ...(correlation?.role !== undefined ? { role: correlation.role } : {}),
         ...(jobSessions !== undefined ? { sessions: jobSessions } : {}),
         ...(jobUsage !== undefined ? { usage: jobUsage } : {}),
         ...(jobCostUSD !== undefined ? { costUSD: jobCostUSD } : {}),
@@ -1817,9 +1837,13 @@ async function runPlanUnderLease(
           // Governed: a tripped budget stops dispatch (I9) — 'signal' trips
           // flow through the same gate. The job is left unclassified; the stop
           // sweep marks it queued (or blocked) and the honest-stop pass below
-          // owns the budget attribution.
+          // owns the budget attribution. CONTINUE, not break: the replay check
+          // above runs first in this loop, and a replay is not a dispatch (it
+          // spends nothing and needs no admission), so a replayable job later
+          // in the same wave must still be re-attested instead of being swept
+          // into a budget verdict.
           if (governedDispatch && governor !== undefined && governor.tripped) {
-            break;
+            continue;
           }
           // Catch immediately, including while the producer awaits a replay
           // emit, so no rejected job promise can become unhandled before the

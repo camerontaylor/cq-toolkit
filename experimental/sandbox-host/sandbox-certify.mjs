@@ -33,6 +33,23 @@ import { parseArgs } from 'node:util';
 
 const USAGE = 'usage: sandbox-certify.mjs [--network model-only|allow] [--model-proxy] [--json]';
 
+// Machine-mode failures (Doctrine I1): with `--json`, every usage, load
+// and probe failure emits one `{ error: { kind, subcommand, message,
+// exitCode } }` object on stdout with stderr empty. `process.argv` is
+// checked directly because the strict parse has not run yet.
+const jsonMode = process.argv.slice(2).includes('--json');
+const fail = async (kind, message, code = 2) => {
+  if (!jsonMode) {
+    stderr.write(`sandbox-certify: ${message}\n`);
+    exit(code);
+  }
+  const artifact = { error: { kind, subcommand: 'sandbox-certify', message, exitCode: code } };
+  // Await the write so piped stdout drains before the process exits. The
+  // await also suspends the module, so no later code runs after a failure.
+  await new Promise((resolve) => stdout.write(`${JSON.stringify(artifact)}\n`, resolve));
+  exit(code);
+};
+
 // Strict parse BEFORE any probe work (Codex P2): an unknown, positional, or
 // repeated option is a usage error, never a silent fall-back to the default
 // posture — automation must get evidence for exactly the posture it asked for.
@@ -57,8 +74,7 @@ try {
   }
   args = parsed.values;
 } catch (error) {
-  stderr.write(`sandbox-certify: ${error.message}\n${USAGE}\n`);
-  exit(2);
+  await fail('usage', jsonMode ? error.message : `${error.message}\n${USAGE}`);
 }
 
 const repoRoot = join(fileURLToPath(new URL('.', import.meta.url)), '../..');
@@ -68,21 +84,19 @@ let probe;
 try {
   probe = await import(probeUrl.href);
 } catch (error) {
-  stderr.write(
-    `sandbox-certify: cannot load dist/experimental/sandbox-host/probe.js — see Usage above for the experimental compile command\n  ${error.message}\n`,
+  await fail(
+    'load',
+    `cannot load dist/experimental/sandbox-host/probe.js — see Usage above for the experimental compile command\n  ${error.message}`,
   );
-  exit(2);
 }
 
 const network = args.network;
 if (network !== undefined && network !== 'model-only' && network !== 'allow') {
-  stderr.write(`sandbox-certify: --network must be model-only or allow, got '${network}'\n`);
-  exit(2);
+  await fail('usage', `--network must be model-only or allow, got '${network}'`);
 }
 const modelProxy = args['model-proxy'] === true;
 if (modelProxy && network === 'allow') {
-  stderr.write('sandbox-certify: --model-proxy contradicts --network allow\n');
-  exit(2);
+  await fail('usage', '--model-proxy contradicts --network allow');
 }
 
 let certification;
@@ -92,8 +106,7 @@ try {
     ...(modelProxy ? { modelProxy: true } : {}),
   });
 } catch (error) {
-  stderr.write(`sandbox-certify: probe failed: ${error?.stack ?? error}\n`);
-  exit(2);
+  await fail('probe', `probe failed: ${error?.stack ?? error}`);
 }
 
 if (args.json === true) {

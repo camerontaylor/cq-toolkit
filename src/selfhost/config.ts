@@ -20,6 +20,7 @@
 import { join } from 'node:path';
 import type { ModelSpec } from '../driver/types.js';
 import { parseModelSpec } from '../config/parsers.js';
+import { assertCqEnvName } from '../config/entry.js';
 import type { CqEnv } from '../config/env.js';
 import { deepFreeze } from '../shared/deepFreeze.js';
 import { processEnv } from '../config/process-env.js';
@@ -275,6 +276,8 @@ export function resolveSelfhostDrivers(
 ): SelfhostDrivers {
   if (isCqEnv(env)) {
     // The snapshot already parsed (and, at the entry, validated) both specs.
+    assertCqEnvName(env, 'selfhost', SELFHOST_DRIVER_ENV);
+    assertCqEnvName(env, 'selfhost', SELFHOST_PEAK_DRIVER_ENV);
     const offPeak = env.values[SELFHOST_DRIVER_ENV] as ModelSpec | undefined;
     const peak = env.values[SELFHOST_PEAK_DRIVER_ENV] as ModelSpec | undefined;
     return { offPeak: offPeak ?? SelfhostDefaults.driver, peak: peak ?? SelfhostPeak.driver };
@@ -444,6 +447,11 @@ export function parseSelfhostArgs(argv: readonly string[]): ParsedSelfhostArgs {
       }
       if (value === '') {
         throw new Error(`selfhost: ${arg} requires a non-empty value. ${USAGE}`);
+      }
+      if (value.startsWith('--')) {
+        throw new Error(
+          `selfhost: ${arg} requires a value, got flag-like ${JSON.stringify(value)}. ${USAGE}`,
+        );
       }
       i++;
       if (arg === '--journal-root') {

@@ -76,13 +76,13 @@ class ModuleTest(unittest.TestCase):
         self.addCleanup(self.td.cleanup)
 
     def test_independent_summary_explicit_login_and_base(self):
-        meta = {**META, "base": "c" * 40, "label": "Independent reviewer", "summary": "PASS for " + HEAD}
+        meta = {**META, "base": "c" * 40, "label": "Independent reviewer", "summary": f"**Independent review (Sol): PASS for `{HEAD}`**"}
         gh = FakeGh()
         result = prf.deliver(REPO, 7, meta, write_ndjson(self.td.name,
             [{**ANCHORED, "severity": "nonblocking"}, OUTSIDE]), gh=gh, login="cq-review[bot]")
         self.assertEqual(result["inline"], 1)
         payload = gh.posts()[0]
-        self.assertTrue(payload["body"].startswith(prf.marker(META["run_id"]) + "\nPASS"))
+        self.assertTrue(payload["body"].startswith(prf.marker(META["run_id"]) + "\n" + meta["summary"]))
         self.assertIn("Independent reviewer", payload["body"])
         self.assertIn("nonblocking", payload["comments"][0]["body"])
         self.assertIn("lines 20-22", payload["body"])
@@ -90,7 +90,7 @@ class ModuleTest(unittest.TestCase):
         self.assertTrue(any("repos/" + REPO + "/compare/" + "c" * 40 + "..." + HEAD in argv for argv, _ in gh.calls))
 
     def test_summary_survives_422_and_empty_findings(self):
-        meta = {**META, "summary": "Independent review: PASS for " + HEAD}
+        meta = {**META, "summary": f"**Independent review (Sol): PASS for `{HEAD}`**"}
         gh = FakeGh(post=[(1, "", "HTTP 422"), (0, '{"id":77}', "")])
         result = prf.deliver(REPO, 7, meta, write_ndjson(self.td.name, [ANCHORED]), gh=gh)
         self.assertEqual(result["body_only"], 1)
@@ -98,11 +98,23 @@ class ModuleTest(unittest.TestCase):
         gh = FakeGh()
         self.assertEqual(prf.deliver(REPO, 7, meta, write_ndjson(self.td.name, []), gh=gh)["state"], "created")
 
+    def test_independent_summary_survives_matching_crq_findings(self):
+        class MatchingCrqGh(FakeGh):
+            def __call__(self, argv, *, input_text=None):
+                if "--paginate" in argv and "crq-local-findings head=" in argv[-1]:
+                    return SimpleNamespace(returncode=0, stdout='{"id":66,"url":"https://x/r/66"}', stderr="")
+                return super().__call__(argv, input_text=input_text)
+        meta = {**META, "summary": f"**Independent review (Sol): PASS for `{HEAD}`**"}
+        gh = MatchingCrqGh()
+        result = prf.deliver(REPO, 7, meta, write_ndjson(self.td.name, [ANCHORED]), gh=gh)
+        self.assertEqual(result["state"], "created")
+        self.assertIn(meta["summary"], gh.posts()[0]["body"])
+
     def test_cli_json(self):
         import contextlib
         import io
         body = Path(self.td.name) / "summary.md"
-        body.write_text("Independent review: PASS for " + HEAD)
+        body.write_text(f"**Independent review (Sol): PASS for `{HEAD}`**")
         findings = write_ndjson(self.td.name, [ANCHORED])
         argv = ["--repo", REPO, "--pr", "7", "--head", HEAD, "--base", BASE,
                 "--run-id", "review-cli", "--findings", str(findings), "--body-file", str(body)]
@@ -117,7 +129,7 @@ class ModuleTest(unittest.TestCase):
         import contextlib
         import io
         body = Path(self.td.name) / "summary.md"
-        body.write_text("PASS for " + HEAD)
+        body.write_text(f"**Independent review (Sol): ITERATE for `{HEAD}`**")
         for event in ({"type": "finding"}, {**ANCHORED, "startLine": "2"},
                       {**ANCHORED, "endLine": True}, {**ANCHORED, "fileName": ""}):
             findings = write_ndjson(self.td.name, [event])
@@ -201,7 +213,7 @@ class ModuleTest(unittest.TestCase):
         self.assertEqual((result["state"], result["review_id"]), ("existing", 5))
         self.assertEqual(gh.posts(), [])
         listing = next(a for a, _ in gh.calls if "--paginate" in a)
-        self.assertIn('startswith("<!-- crq-findings run=pr7-20261106T000000Z -->")', listing[-1])
+        self.assertIn("crq-local-findings head=" + HEAD, listing[-1])
         self.assertIn('.user.login == "crq-host"', listing[-1])
 
     def test_marker_search_needs_a_usable_authenticated_login(self):

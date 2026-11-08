@@ -1,3 +1,5 @@
+import { checkoutWriterContext } from '../../shared/checkoutWriterContext.js';
+import { checkoutWriterCommand } from '../../shared/checkoutWriterCommand.js';
 // Dev lane — the subprocess effects seam: the ONE place the dev family
 // touches processes, the host clock, and the filesystem outside the repo.
 // The ops are composed over the injected {@link DevEffects}; tests inject
@@ -174,18 +176,51 @@ function ensurePrivateLogDir(dir: string): void {
  * entry never touches the host.
  */
 export function makeSubprocessDevEffects(repoRoot: string): DevEffects {
-  const runCommand: RunCommand = (command, args, opts) =>
-    new Promise<CommandResult>((resolvePromise, reject) => {
-      if (opts.signal?.aborted) {
-        resolvePromise({
-          exitCode: null,
-          stdout: '',
-          stderr: `command cancelled before dispatch: ${faultText(opts.signal.reason)}`,
-          timedOut: false,
-          interruption: { kind: 'abort', reason: opts.signal.reason },
-        });
-        return;
-      }
+  const runCommand: RunCommand = (command, args, opts) => {
+    if (opts.signal?.aborted) {
+      return Promise.resolve({
+        exitCode: null,
+        stdout: '',
+        stderr: `command cancelled before dispatch: ${faultText(opts.signal.reason)}`,
+        timedOut: false,
+        interruption: { kind: 'abort', reason: opts.signal.reason as unknown },
+      });
+    }
+    if (checkoutWriterContext())
+      return checkoutWriterCommand(command, command === 'git' ? [...GIT_HARDEN, ...args] : args, {
+        cwd: opts.cwd ?? repoRoot,
+        env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+        maxBuffer: GATE_OUTPUT_MAX_BUFFER_BYTES,
+        timeout: opts.timeoutMs,
+        ...(opts.signal ? { signal: opts.signal } : {}),
+      }).then(
+        ({ stdout, stderr }) => ({ exitCode: 0, stdout, stderr, timedOut: false }),
+        (error: unknown) => {
+          const failure = error as Error & {
+            code?: unknown;
+            killed?: boolean;
+            stdout?: string;
+            stderr?: string;
+          };
+          if (
+            !failure.message.includes('maxBuffer') &&
+            (typeof failure.code === 'number' || failure.killed || failure.code === 'ABORT_ERR')
+          )
+            return {
+              exitCode: typeof failure.code === 'number' ? failure.code : null,
+              stdout: failure.stdout ?? '',
+              stderr: failure.stderr ?? '',
+              timedOut: failure.killed === true && failure.code !== 'ABORT_ERR',
+              ...(failure.code === 'ABORT_ERR' && opts.signal?.aborted
+                ? {
+                    interruption: { kind: 'abort' as const, reason: opts.signal.reason as unknown },
+                  }
+                : {}),
+            };
+          throw mapSpawnFault(command, failure, opts.timeoutMs);
+        },
+      );
+    return new Promise<CommandResult>((resolvePromise, reject) => {
       const child = execFile(
         command,
         command === 'git' ? [...GIT_HARDEN, ...args] : [...args],
@@ -215,7 +250,9 @@ export function makeSubprocessDevEffects(repoRoot: string): DevEffects {
               stderr,
               timedOut: error.killed === true && code !== 'ABORT_ERR',
               ...(code === 'ABORT_ERR' && opts.signal?.aborted
-                ? { interruption: { kind: 'abort' as const, reason: opts.signal.reason } }
+                ? {
+                    interruption: { kind: 'abort' as const, reason: opts.signal.reason as unknown },
+                  }
                 : {}),
             };
             if (code === 'ABORT_ERR' && child.exitCode === null && child.signalCode === null)
@@ -227,6 +264,7 @@ export function makeSubprocessDevEffects(repoRoot: string): DevEffects {
         },
       );
     });
+  };
 
   const mutex = makeGitMutex({ lockPath: hostReviewLockPath() });
 

@@ -123,4 +123,21 @@ describe('hackDetector: diff parsing and line-number tracking', () => {
   test('an empty diff is a clean diff', async () => {
     expect(await findingsOf('')).toEqual([]);
   });
+
+  test('a modified rename of protected config paths reports each path once', async () => {
+    const diff = [
+      'diff --git a/jest.config.js b/jest.config.cjs',
+      'similarity index 90%',
+      'rename from jest.config.js',
+      'rename to jest.config.cjs',
+      'index 1111111..2222222 100644',
+      '--- a/jest.config.js',
+      '+++ b/jest.config.cjs',
+      '@@ -1,1 +1,2 @@',
+      ' module.exports = {};',
+      '+// edited',
+    ].join('\n');
+    const configs = (await findingsOf(diff)).filter((f) => f.kind === 'protected-config');
+    expect(configs.map((f) => f.file).sort()).toEqual(['jest.config.cjs', 'jest.config.js']);
+  });
 });

@@ -45,6 +45,46 @@ test.each(['edit', 'feedback'] as const)(
   },
 );
 
+test('an index changed after path/tamper gating is refused, never committed', async () => {
+  const world = await makeWorld([{ failing: true }, { failing: false }]);
+  const underlying = world.gitFactory();
+  // The gated tree is captured first; the broader probe's write-tree sees a
+  // DIFFERENT tree, as if a check had staged extra bytes in the same index.
+  let writeTrees = 0;
+  try {
+    const result = await runUnit(world, {
+      taskLoop: {},
+      git: async (args) => {
+        if (args.includes('write-tree')) {
+          writeTrees += 1;
+          if (writeTrees > 1) return { code: 0, stdout: 'd'.repeat(40), stderr: '' };
+        }
+        return underlying(args);
+      },
+      driver: {
+        run: async () => ({
+          usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+          denials: [],
+          stopReason: 'complete',
+          structuredOutput: { outcome: 'code-bug', summary: 'repair', confidence: 0.9 },
+        }),
+      },
+    });
+    expect(result.status).toBe('ok');
+    if (result.status === 'ok') {
+      const task = result.value.tasks?.[0];
+      expect(task?.outcome).toBe('unfixed');
+      expect(task?.reason).toContain('index changed after path/tamper gating');
+      expect(task?.commits).toEqual([]);
+    }
+    expect(world.gitCalls.some((args) => args.includes('commit') && !args.includes('-tree'))).toBe(
+      false,
+    );
+  } finally {
+    await rm(world.root, { recursive: true, force: true });
+  }
+});
+
 test.each([false, true])(
   'broader timeout uses remaining unit wall and bounds retries (bail=%s)',
   async (bail) => {

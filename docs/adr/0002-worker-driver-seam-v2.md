@@ -8,6 +8,8 @@
   [B](0002-annex-b-config.md) (configuration keys).
 
 Post-acceptance notes N10 and N11 in the [ADR index](README.md#post-acceptance-notes) narrow parts of this record.
+[ADR-0005](0005-architecture-revision.md) decision 4 supersedes the four-lane seam with three lanes; the four-lane
+sections below are the historical record, not the current seam contract.
 
 ## 1. Context
 
@@ -212,6 +214,10 @@ When no schema is requested, `structuredOutput` MUST be absent.
   (`DriverRequest.sessionRetention`, §2.5), not a seam field.
 
 ### 2.5 Driver construction and `DriverFactory`
+
+> Superseded in part: the four-lane `LaneId` and default bindings below are historical. ADR-0005 decision 4
+> reduces the seam to three lanes (`driver-ai-sdk`, `driver-claude-code`, `driver-acp`); see
+> [ADR-0005](0005-architecture-revision.md).
 
 ```ts
 // src/driver/factory.ts (new; driver family — no kernel import)

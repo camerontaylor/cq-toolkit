@@ -784,6 +784,15 @@ export function makePlaybookDispatchOp(
           const result = await apply();
           if (result.status === 'ok' && result.value.engine.status !== 'ok') {
             holdWorkspace(deps.playbooks, input.dir, targets, preApply, store);
+            // Only a workspace the failed engine actually changed may stay
+            // held. A second-scan, collision, freshness or splice fault wrote
+            // nothing, so every target still matches its pre-dispatch bytes
+            // and reconciliation clears the hold here; otherwise a later
+            // legitimate edit (the repair an operator makes after reading the
+            // fault) would be refused as a stranded rollback. A partial write
+            // or a failed rollback leaves bytes that differ, so its hold
+            // survives.
+            await reconcileWorkspace(deps.playbooks, input.dir);
           }
           return result;
         } catch (err) {
@@ -837,9 +846,10 @@ export function makePlaybookDispatchOp(
     const postApply: Map<string, string> = approved.value.applied;
     if (engineResult.status !== 'ok') {
       // An engine failure can leave partial writes when its own rollback
-      // fails. Preserve its result, but require reconciliation of all targets
-      // before another dispatch; a clean engine rollback clears on the next
-      // byte check without punishing the playbook.
+      // fails. The hold installed at the mutation boundary is reconciled
+      // immediately: a failure that wrote nothing (or rolled back cleanly)
+      // leaves every target at its pre-dispatch bytes, so no hold survives to
+      // punish the playbook or block a later repair.
       return engineResult;
     }
     const applied = engineResult.value;

@@ -8,6 +8,49 @@ import { createDriverFactory } from '../../src/driver/factory.js';
 import type { DriverFactoryConfig } from '../../src/driver/factory.js';
 import { probe } from './factory.helpers.js';
 
+describe('driver factory — bindings container validation', () => {
+  test.each([
+    [42],
+    [true],
+    ['x'],
+    [[]],
+    [null],
+    [new Map()],
+    [new Date(0)],
+    [new Set()],
+    [new (class Table {})()],
+  ])('bindings = %j is a config error at construction', (bad) => {
+    let err: unknown;
+    try {
+      createDriverFactory({ bindings: bad } as unknown as DriverFactoryConfig);
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(DispatchError);
+    expect(errorClassOf(err)).toBe('config');
+    expect((err as Error).message).toMatch(/bindings must be an object/);
+  });
+
+  test('a null-prototype table is plain and still constructs', () => {
+    expect(() =>
+      createDriverFactory({
+        bindings: Object.create(null) as NonNullable<DriverFactoryConfig['bindings']>,
+      }),
+    ).not.toThrow();
+  });
+
+  test('undefined (absent) and a valid object still construct', () => {
+    expect(() => createDriverFactory({})).not.toThrow();
+    expect(() =>
+      createDriverFactory({ bindings: undefined } as unknown as DriverFactoryConfig),
+    ).not.toThrow();
+    expect(() =>
+      createDriverFactory({ bindings: { fixer: { zai: 'claude-code' } } }),
+    ).not.toThrow();
+    expect(() => createDriverFactory({ bindings: {} })).not.toThrow();
+  });
+});
+
 describe('driver factory — resolution', () => {
   test('claude-code is never a default: an unbound non-default provider is a config throw', () => {
     const factory = createDriverFactory({ bindings: { fixer: { zai: 'claude-code' } } });
@@ -150,5 +193,69 @@ describe('aggregate config errors', () => {
       m.startsWith("driver factory: no lane binding for role 'classifier' on provider 'nope'"),
     ).toBe(true);
     expect(m).not.toContain('\n');
+  });
+});
+
+describe('own-property lookups and malformed rows', () => {
+  const PROTO_NAMES = ['constructor', 'toString', 'valueOf', 'hasOwnProperty', '__proto__'];
+  const cfg = (bindings: unknown) =>
+    createDriverFactory({ bindings: bindings as NonNullable<DriverFactoryConfig['bindings']> });
+  const msgOf = (f: () => unknown): string => {
+    try {
+      f();
+    } catch (err) {
+      expect(errorClassOf(err)).toBe('config');
+      return (err as Error).message;
+    }
+    return '';
+  };
+
+  test('prototype-key provider names are unbound, never a silent ai-sdk fallback', () => {
+    const f = cfg({ fixer: { zai: 'acp' } });
+    for (const provider of PROTO_NAMES) {
+      const m = msgOf(() => f.resolve({ role: 'fixer', modelSpec: { provider, model: 'm' } }));
+      expect(m).toContain("no lane binding for role 'fixer'");
+    }
+  });
+
+  test('a wildcard binding still serves any provider, including prototype names', () => {
+    const f = cfg({ fixer: { '*': 'acp' } });
+    for (const provider of ['anything', ...PROTO_NAMES]) {
+      expect(f.resolve({ role: 'fixer', modelSpec: { provider, model: 'm' } }).lane).toBe('acp');
+    }
+  });
+
+  test('prototype-key role names do not borrow a row; defaults still apply to default providers', () => {
+    const f = cfg({ fixer: { vendorx: 'acp' } });
+    for (const role of PROTO_NAMES) {
+      expect(
+        msgOf(() => f.resolve({ role, modelSpec: { provider: 'vendorx', model: 'm' } })),
+      ).toContain(`no lane binding for role '${role}'`);
+      expect(f.resolve({ role, modelSpec: { provider: 'zai', model: 'm' } }).lane).toBe('ai-sdk');
+    }
+  });
+
+  test('prototype-key lane values are unknown lanes', () => {
+    for (const lane of PROTO_NAMES) {
+      expect(msgOf(() => cfg({ fixer: { zai: lane } }))).toContain(`unknown lane '${lane}'`);
+    }
+  });
+
+  test.each([
+    ['null', null],
+    ['42', 42],
+    ['true', true],
+    ['[]', []],
+    ['a string', 'acp'],
+  ])('a %s bindings row is a config error naming the row', (_n, row) => {
+    const m = msgOf(() => cfg({ fixer: row }));
+    expect(m).toContain("binding table for role 'fixer' must map provider → lane");
+  });
+
+  test('a malformed row is aggregated with other problems', () => {
+    const m = msgOf(() => cfg({ fixer: null, classifier: { zai: 'vendor' } }));
+    expect(m).toContain('2 configuration problems');
+    expect(m).toContain("role 'fixer'");
+    expect(m).toContain("unknown lane 'vendor'");
   });
 });

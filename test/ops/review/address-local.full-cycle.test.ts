@@ -2,7 +2,8 @@
 // subject files sharing ./address-local.helpers.ts. This file holds the
 // review.address local full-cycle suite.
 import { readFile } from 'node:fs/promises';
-import { describe, expect, test } from 'vitest';
+import { resolve } from 'node:path';
+import { describe, expect, test, vi } from 'vitest';
 import type { ReviewAddressReport } from '../../../src/ops/review/address.js';
 import type { Finding } from '../../../src/ops/review/findings.js';
 import { makeSubprocessDevEffects } from '../../../src/ops/dev/effects.js';
@@ -11,6 +12,8 @@ import { runPlan } from '../../../src/kernel/runner.js';
 import { createGovernor } from '../../../src/kernel/governor.js';
 import type { OpRegistryEntry } from '../../../src/kernel/types.js';
 import { z } from 'zod';
+import { makeReviewAddress } from '../../../src/ops/review/address.js';
+import { makeGhRunner } from '../../../src/adapters/forge-github/gh.js';
 import { fixture, gitleaksCalls, useGitleaksPath } from './address-local.helpers.js';
 
 useGitleaksPath();
@@ -210,3 +213,100 @@ describe('review.address local full cycle', () => {
     },
   );
 });
+
+test('local exit publication leases the observed destination separately from the local baseline', async () => {
+  const f = await fixture();
+  try {
+    const expected = f.repo.git('rev-parse', 'HEAD').trim();
+    f.repo.git('push', 'origin', 'HEAD:refs/heads/feature/x');
+    const pushDestination = resolve(f.repo.root, '../push.git');
+    f.repo.git('init', '--bare', pushDestination);
+    f.repo.git('push', pushDestination, 'HEAD:refs/heads/feature/x');
+    f.repo.git('config', 'remote.origin.pushurl', pushDestination);
+    f.repo.git('commit', '--allow-empty', '-m', 'prior local work');
+    f.record.head = f.repo.git('rev-parse', 'HEAD').trim();
+    f.repo.git(
+      'push',
+      f.repo.git('remote', 'get-url', 'origin').trim(),
+      'HEAD:refs/heads/feature/x',
+    );
+    const pushes: string[][] = [];
+    const git = makeGhRunner({ bin: 'git' });
+    const op = makeReviewAddress({
+      drivers: f.drivers,
+      initialRecord: f.record,
+      git: async (args) => {
+        if (args.includes('push')) pushes.push(args);
+        return git(args);
+      },
+    });
+    const result = await op({
+      repoRoot: f.repo.root,
+      source: 'local',
+      journalDir: f.journalDir,
+      push: true,
+    });
+    expect(result.status, JSON.stringify(result)).toBe('ok');
+    expect(pushes).toHaveLength(1);
+    expect(pushes[0]).toContain(pushDestination);
+    expect(pushes[0]).toContain(`--force-with-lease=refs/heads/feature/x:${expected}`);
+    expect(pushes[0]?.at(-1)).toBe(
+      `${f.repo.git('rev-parse', 'HEAD').trim()}:refs/heads/feature/x`,
+    );
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test.each(['nonzero', 'throw', 'multiple-pushurls', 'stop-wins'] as const)(
+  'remote observation %s yields a needs-human report before edits',
+  async (fault) => {
+    const f = await fixture();
+    const realNow = Date.now.bind(Date);
+    let elapsed = 0;
+    const clock = vi.spyOn(Date, 'now').mockImplementation(() => realNow() + elapsed);
+    try {
+      const git = makeGhRunner({ bin: 'git' });
+      const op = makeReviewAddress({
+        drivers: f.drivers,
+        initialRecord: f.record,
+        git: async (args) => {
+          if (fault === 'multiple-pushurls' && args.includes('get-url'))
+            return { code: 0, stdout: '/first.git\n/second.git\n', stderr: '' };
+          if (args.includes('ls-remote')) {
+            if (fault === 'stop-wins') elapsed = 60_000;
+            if (fault === 'throw') throw new Error('transient remote failure');
+            return { code: 128, stdout: '', stderr: 'transient remote failure' };
+          }
+          return git(args);
+        },
+      });
+      const result = await op({
+        repoRoot: f.repo.root,
+        source: 'local',
+        journalDir: f.journalDir,
+        push: true,
+      });
+      expect(result.status).toBe('needs-human');
+      if (result.status !== 'needs-human') return;
+      expect(result.reason).toContain(
+        fault === 'stop-wins'
+          ? 'token or wall budget exhausted'
+          : 'publication remote head unavailable',
+      );
+      expect(result.report?.reasons).toContain(
+        'publication remote head unavailable; fixes withheld',
+      );
+      expect(
+        result.report?.reasons.filter(
+          (reason) => reason === 'publication remote head unavailable; fixes withheld',
+        ),
+      ).toHaveLength(1);
+      expect(f.models).toEqual([]);
+      expect(JSON.parse(await readFile(result.report!.reportPath, 'utf8'))).toEqual(result.report);
+    } finally {
+      clock.mockRestore();
+      await f.cleanup();
+    }
+  },
+);
