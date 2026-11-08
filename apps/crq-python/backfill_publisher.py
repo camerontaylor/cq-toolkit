@@ -100,7 +100,8 @@ def main(c):
     except Exception:
         notifications = "retry-pending"
     result = run(c)
-    result["notifications"] = notifications
+    if notifications:
+        result["notifications"] = notifications
     # Off tick.lock: refresh the coverage snapshots selection reads, after a
     # publication moved the ledger head or when selection asked for one. A
     # refresh failure never hides the publication result.

@@ -13,6 +13,21 @@ from test_backfill_jobs import AT
 class PublisherTest(unittest.TestCase):
     setUp = RuntimeTestBase.setUp
 
+    def test_main_reports_delivery_only_for_work_or_failures(self):
+        import review_notify
+        import backfill_coverage
+        for outcome in (0, 2, OSError("queue unavailable")):
+            with self.subTest(outcome=outcome):
+                kwargs = {"side_effect": outcome} if isinstance(outcome, Exception) else {"return_value": outcome}
+                with mock.patch.object(review_notify, "drain", **kwargs), \
+                     mock.patch.object(worker, "run", return_value={"publication": "idle"}), \
+                     mock.patch.object(backfill_coverage, "run", return_value="idle"):
+                    result = worker.main(self.c)
+                expected = dict(publication="idle", coverage="idle")
+                if outcome:
+                    expected["notifications"] = "retry-pending" if isinstance(outcome, Exception) else outcome
+                self.assertEqual(result, expected)
+
     def prepare(self):
         self.held = False
         def lock(fn, **kwargs):

@@ -85,6 +85,16 @@ class DeliveryTests(unittest.TestCase):
         self.assertTrue(self.held)
         self.q = copy.deepcopy(q)
 
+    def test_no_rows_is_idle_without_notification_config_or_send(self):
+        for outbox in (None, {}):
+            self.q.pop("review_notify_outbox", None)
+            if outbox is not None:
+                self.q["review_notify_outbox"] = outbox
+            self.c.CONFIG = {}
+            self.c.notify = mock.Mock(side_effect=AssertionError("idle must not send"))
+            self.assertEqual(notify.drain(self.c, self.now), 0)
+            self.c.notify.assert_not_called()
+
     def test_restart_transient_backoff_duplicate_and_fetchable_state(self):
         notify.drain(self.c, self.now)
         self.assertEqual(notify.drain(self.c, self.now + timedelta(minutes=1)), 0)
