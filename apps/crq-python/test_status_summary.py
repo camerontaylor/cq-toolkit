@@ -173,6 +173,37 @@ class SummaryTest(unittest.TestCase):
                 adapter.publish(root, queue, config, {}, home=root)
             self.assertEqual(target.read_bytes(), old)
 
+    def test_corrupt_last_tick_preserves_summary_accepted_by_fleet_reader(self):
+        spec = importlib.util.spec_from_file_location("fleet_reader", ROOT / "ops/fleet-reader.py")
+        reader = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(reader)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "state").mkdir()
+            (root / "state/events.jsonl").write_text("")
+            target = root / "xdg/crq/summary.json"
+            queue = dict(last_tick="2026-11-08T00:00:00Z", items=[])
+            config = dict(max_starts_per_hour=8)
+            with mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(root / "xdg")}), \
+                 mock.patch.object(adapter, "systemd_activity", return_value=({}, {})):
+                adapter.publish(root, queue, config, {}, home=root)
+                retained = target.read_bytes()
+                for corrupt in ("garbage", 123, [], ""):
+                    with self.subTest(last_tick=corrupt):
+                        with self.assertRaisesRegex(ValueError, "invalid last_tick|no completed tick"):
+                            adapter.publish(root, dict(queue, last_tick=corrupt), config, {}, home=root)
+                        self.assertEqual(target.read_bytes(), retained)
+                settings = dict(ssh_host="fixture", source="/fixture/summary.json")
+                with mock.patch.object(reader, "source_settings", return_value=settings), \
+                     mock.patch.object(reader.subprocess, "run",
+                         return_value=mock.Mock(returncode=0, stdout=retained.decode())), \
+                     mock.patch.object(reader.Path, "home", return_value=root / "mirror-home"), \
+                     mock.patch("builtins.print"):
+                    reader.main(["--overlay", str(root / "overlay.json")])
+                mirrored = json.loads(target.read_text())
+                self.assertEqual(mirrored["last_tick"], queue["last_tick"])
+                self.assertEqual(mirrored["source_host"], "fixture")
+
     def test_failed_optional_probes_stay_unknown(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

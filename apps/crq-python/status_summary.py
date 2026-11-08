@@ -195,7 +195,8 @@ def summarize(status, queue, heartbeat, config, events, now):
             other += 1
     last_tick = heartbeat.get("last_tick") or queue.get("last_tick")
     # Freshness must follow completed ticks, never status-file writes or probes.
-    timestamp(last_tick)
+    if last_tick is not None and timestamp(last_tick) is None:
+        raise ValueError("invalid last_tick")
     # The configured cap is a conservative scheduler fallback, not an account quota.
     usage = queue.get("usage") or {}
     limit = usage.get("limit") if isinstance(usage, dict) else None
