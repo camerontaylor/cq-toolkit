@@ -14,11 +14,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { once } from 'node:events';
-import {
-  acquireSlot,
-  SlotBusyError,
-  UnsupportedLockError,
-} from '../../../src/adapters/lock/slotLock.js';
+import { acquireSlot, SlotBusyError } from '../../../src/adapters/lock/slotLock.js';
 
 const directories: string[] = [];
 const children: ChildProcess[] = [];
@@ -275,14 +271,13 @@ test.each([
   }
 });
 
-test('symlinked lock is refused with a declared error and leaves target intact', async () => {
+test('symlinked lock preserves ELOOP and leaves target intact', async () => {
   const root = await directory();
   await mkdir(join(root, 'cq-review', 'slots'), { recursive: true });
   const target = join(root, 'target');
   await writeFile(target, 'untouched');
   await symlink(target, join(root, 'cq-review', 'slots', 'pr-1.lock'));
-  await expect(acquireSlot(root, 1)).rejects.toMatchObject({ name: 'UnsupportedLockError' });
-  await expect(acquireSlot(root, 1)).rejects.toBeInstanceOf(UnsupportedLockError);
+  await expect(acquireSlot(root, 1)).rejects.toMatchObject({ code: 'ELOOP' });
   expect(await readFile(target, 'utf8')).toBe('untouched');
 });
 
@@ -378,4 +373,92 @@ test('unsupported platform refuses before creating namespace', async () => {
   const code: unknown = (await once(child, 'exit'))[0];
   expect(code).toBe(0);
   await expect(stat(join(root, 'cq-review'))).rejects.toMatchObject({ code: 'ENOENT' });
+});
+
+async function probe(root: string, script: string) {
+  const url = new URL('../../../src/adapters/lock/slotLock.ts', import.meta.url).href;
+  const child = spawn(
+    process.execPath,
+    [
+      '--expose-gc',
+      '--input-type=module',
+      '-e',
+      `
+    import fs from 'node:fs/promises';
+    import { syncBuiltinESMExports } from 'node:module';
+    import assert from 'node:assert/strict';
+    const common = process.argv[1];
+    const originalOpen = fs.open;
+    const adapter = await import(${JSON.stringify(url)});
+    ${script}
+  `,
+      root,
+    ],
+    { stdio: ['ignore', 'pipe', 'pipe'] },
+  );
+  children.push(child);
+  let output = '';
+  child.stderr?.on('data', (data: Buffer) => {
+    output += data.toString();
+  });
+  const code: unknown = (await once(child, 'exit'))[0];
+  expect(output).toBe('');
+  expect(code).toBe(0);
+}
+
+test('close failure unpins the handle for GC while preserving the rejection', async () => {
+  await probe(
+    await directory(),
+    `
+    let weak;
+    fs.open = async (...args) => {
+      const file = await originalOpen(...args);
+      if (String(args[0]).endsWith('.lock')) {
+        weak = new WeakRef(file);
+        const originalClose = file.close.bind(file);
+        file.close = async () => { await originalClose(); throw Error('close failure'); };
+      }
+      return file;
+    };
+    syncBuiltinESMExports();
+    let slot = await adapter.acquireSlot(common, 1);
+    fs.open = originalOpen;
+    syncBuiltinESMExports();
+    await assert.rejects(slot.close(), /close failure/);
+    slot = undefined;
+    for (let n = 0; n < 50; n++) { await new Promise(r => setImmediate(r)); global.gc(); }
+    assert.equal(weak.deref(), undefined, 'closed handle must not remain pinned');
+  `,
+  );
+});
+
+test('ordinary lock-open errors retain errno and identity rather than becoming unsupported', async () => {
+  await probe(
+    await directory(),
+    `
+    for (const code of ['EACCES', 'ENOSPC', 'EMFILE']) {
+      const expected = Object.assign(Error(code), {code});
+      fs.open = async (...args) => {
+        if (String(args[0]).endsWith('.lock')) throw expected;
+        return originalOpen(...args);
+      };
+      syncBuiltinESMExports();
+      await assert.rejects(adapter.acquireSlot(common, 1), error => error === expected);
+    }
+    fs.open = originalOpen;
+    syncBuiltinESMExports();
+  `,
+  );
+});
+
+test('non-regular lock path has a distinct diagnostic', async () => {
+  const root = await directory();
+  const lock = await acquireSlot(root, 1);
+  try {
+    await rename(lock.path, lock.path + '.old');
+    await mkdir(lock.path);
+    await expect(lock.assertIdentity()).rejects.toThrow('Slot lock path must be a regular file');
+  } finally {
+    await lock.close();
+  }
 });

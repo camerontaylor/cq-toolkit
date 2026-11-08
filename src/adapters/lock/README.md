@@ -20,8 +20,9 @@ record has no checkout identity; a bound record stores canonical paths.
 Never rename or unlink lock files. External replacement is detected at API
 boundaries, not continuously; arbitrary same-user writers are not excluded by
 an advisory protocol. An inherited fd remains locked after the parent closes
-its reference. Opening/flocking a lock fails closed with UnsupportedLockError;
-contention uses SlotBusyError. Other filesystem/identity/metadata errors
+its reference. Unsupported platform/addon/syscall failures use UnsupportedLockError;
+contention uses SlotBusyError. Ordinary lock-open filesystem failures preserve
+their errno (including ELOOP for a symlink). Other filesystem/identity/metadata errors
 propagate and must also refuse dispatch.
 
 Metadata uses a unique temporary file, fsync, rename, and directory fsync. A

@@ -53,7 +53,11 @@ export async function acquireFileLock(path: string) {
   try {
     file = await open(path, constants.O_CREAT | constants.O_RDWR | constants.O_NOFOLLOW, 0o600);
   } catch (cause) {
-    throw new UnsupportedLockError(`Cannot open slot lock ${path}`, { cause });
+    const code = (cause as NodeJS.ErrnoException).code;
+    if (code === 'ENOSYS' || code === 'ENOTSUP' || code === 'EOPNOTSUPP') {
+      throw new UnsupportedLockError(`Cannot open slot lock ${path}`, { cause });
+    }
+    throw cause;
   }
   try {
     try {
@@ -68,7 +72,8 @@ export async function acquireFileLock(path: string) {
     const assertIdentity = async () => {
       if (closed) throw new Error('Slot lock is closed');
       const [held, named] = await Promise.all([file.stat(), lstat(path)]);
-      if (!named.isFile() || held.nlink !== 1 || held.dev !== named.dev || held.ino !== named.ino) {
+      if (!named.isFile()) throw new Error(`Slot lock path must be a regular file: ${path}`);
+      if (held.nlink !== 1 || held.dev !== named.dev || held.ino !== named.ino) {
         throw new Error(`Slot lock inode replaced: ${path}`);
       }
     };
@@ -81,8 +86,11 @@ export async function acquireFileLock(path: string) {
       async close() {
         if (!closed) {
           closed = true;
-          await file.close();
-          heldFiles.delete(file);
+          try {
+            await file.close();
+          } finally {
+            heldFiles.delete(file);
+          }
         }
       },
     };
