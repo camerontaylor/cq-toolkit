@@ -179,7 +179,7 @@ const UNIT_RE = /"unit"\s*:\s*"((?:[^"\\]|\\.)*)"/g;
 // A property KEY containing any escape: JSON.parse decodes `"val\u0075e"` to
 // `value`, invisible to every literal-key regex above (and the last duplicate
 // key wins). Rendered baselines never escape keys — fail closed.
-const ESCAPED_KEY_RE = /(?:^|[,{])\s*"(?:[^"\\]|\\.)*\\(?:[^"\\]|\\.)*"\s*:/;
+const ESCAPED_KEY_RE = /(?:^|[,{])\s*"(?:[^"\\]|\\.)*\\(?:[^"\\]|\\.)*"\s*:/m;
 
 /**
  * Decode one captured JSON string body (the capture EXCLUDES the quotes):
