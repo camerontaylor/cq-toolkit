@@ -185,6 +185,33 @@ describe('ai-sdk driver review fixes (#18/#24)', () => {
     }
   });
 
+  test('triage-sized prompt capacity is supported without truncation and stays finite', async () => {
+    const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-triage-'));
+    try {
+      const driver = new AiSdkDriver({
+        providers: { mock: () => modelFor({ kind: 'reply', text: 'ok' }) },
+        sessionsDir: join(scratchDir, 'sessions'),
+        harnessConfig: {
+          ...defaultHarnessConfig,
+          promptBudget: { ...defaultHarnessConfig.promptBudget, maxSystemPromptChars: 128000 },
+        },
+      });
+      const prompt = 'current contract and source evidence '.repeat(1000);
+      expect(prompt.length).toBeGreaterThan(20000);
+      await driver.run(invocation({ prompt, toolPolicy: { mode: 'none', allow: [] } }));
+      expect(lastGenerateTextArgs().messages).toContainEqual({ role: 'user', content: prompt });
+      const calls = captured.generateTextArgs.length;
+      const refused = await driver
+        .run(invocation({ prompt: 'x'.repeat(128001), toolPolicy: { mode: 'none', allow: [] } }))
+        .catch((err: unknown) => err);
+      expect(errorClassOf(refused)).toBe('config');
+      expect((refused as Error).message).toContain('over the harness prompt budget of 128000');
+      expect(captured.generateTextArgs).toHaveLength(calls);
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
   test('a throw after the record is created is bound to its session (reap-on-settle removes it)', async () => {
     const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-session-bound-'));
     try {
