@@ -1,6 +1,7 @@
 """Operator commands require fresh exact evidence and never dispatch reviews."""
 from pathlib import Path
 import tempfile
+import threading
 import copy
 from types import SimpleNamespace
 import unittest
@@ -266,37 +267,84 @@ class OperatorTest(unittest.TestCase):
                 with self.assertRaises(ledger.IntegrityError):
                     backfill.execute(c, args)
 
-    def test_history_catalog_rejects_late_collector(self):
+    def test_history_catalog_serializes_across_state_directories(self):
         for initial in (None, b"previous catalog"):
             with self.subTest(initial=initial), tempfile.TemporaryDirectory() as td:
-                output = Path(td) / "catalog.json"
+                root = Path(td)
+                output = root / "catalog.json"
+                (root / "alias").symlink_to(root, target_is_directory=True)
                 if initial is not None:
                     output.write_bytes(initial)
-                held = [False]
-                def lock(fn, **kwargs):
-                    self.assertFalse(held[0])
-                    held[0] = True
+                entered = threading.Event()
+                release = threading.Event()
+                attempted = threading.Event()
+                newer_entered = threading.Event()
+                failures = []
+                held = {}
+                snapshots = []
+                def context(name):
+                    state = root / name
+                    held[state] = False
+                    def lock(fn, **kwargs):
+                        with ledger.locked(state / "tick.lock"):
+                            held[state] = True
+                            try:
+                                return fn()
+                            finally:
+                                held[state] = False
+                    def load():
+                        snapshots.append(name)
+                        return {"items": []}
+                    return SimpleNamespace(STATE=state, with_lock=lock, load_queue=load)
+                older, newer = context("older"), context("newer")
+                def collect(queue, state, store, **kwargs):
+                    self.assertFalse(held[state])
+                    if state == older.STATE:
+                        entered.set()
+                        self.assertTrue(release.wait(5))
+                    elif state == newer.STATE:
+                        newer_entered.set()
+                    return {"sources": [state.name], "acquisition": {}}
+                real_locked = ledger.locked
+                def locked(path):
+                    if threading.current_thread().name == "newer" and str(path).endswith(".collect-history.lock"):
+                        attempted.set()
+                    return real_locked(path)
+                def run(c):
                     try:
-                        return fn()
-                    finally:
-                        held[0] = False
-                c = SimpleNamespace(STATE=Path(td), with_lock=lock, load_queue=lambda: {"items": []})
-                args = SimpleNamespace(output=str(output), github=False)
-                newer = {"sources": ["newer"], "acquisition": {}}
-                older = {"sources": ["older"], "acquisition": {}}
-                def collect(*a, **kw):
-                    self.assertFalse(held[0])
-                    # A second collector snapshots and publishes before the
-                    # first completes. Neither collection holds tick.lock.
-                    with mock.patch.object(history, "collect_sources", return_value=newer):
-                        backfill.collect_history_unlocked(c, args)
-                    return older
+                        destination = root / "alias/catalog.json" if c is newer else output
+                        backfill.collect_history_unlocked(c, SimpleNamespace(output=str(destination), github=False))
+                    except BaseException as exc:
+                        failures.append(exc)
+                first = threading.Thread(target=run, args=(older,), name="older")
+                second = threading.Thread(target=run, args=(newer,), name="newer")
                 with mock.patch.object(backfill.runtime, "settings", return_value={"enabled": True}), \
                      mock.patch.object(backfill.runtime, "services", return_value=(None, None, None, None)), \
-                     mock.patch.object(history, "collect_sources", side_effect=collect):
-                    with self.assertRaisesRegex(ledger.IntegrityError, "catalog changed"):
-                        backfill.collect_history_unlocked(c, args)
-                self.assertEqual(ledger.loads(output.read_bytes()), newer)
+                     mock.patch.object(history, "collect_sources", side_effect=collect), \
+                     mock.patch.object(ledger, "locked", side_effect=locked):
+                    first.start()
+                    try:
+                        self.assertTrue(entered.wait(5))
+                        second.start()
+                        self.assertTrue(attempted.wait(5))
+                        self.assertFalse(newer_entered.wait(0.1))
+                        self.assertEqual(snapshots, ["older"])
+                        # Another output can finish while the first collector
+                        # still holds its catalog lock and the second waits.
+                        independent = context("independent")
+                        other_output = root / "other.json"
+                        backfill.collect_history_unlocked(independent, SimpleNamespace(output=str(other_output), github=False))
+                        self.assertEqual(ledger.loads(other_output.read_bytes())["sources"], ["independent"])
+                    finally:
+                        release.set()
+                        first.join(5)
+                        if second.ident is not None:
+                            second.join(5)
+                self.assertFalse(first.is_alive())
+                self.assertFalse(second.is_alive())
+                self.assertEqual(failures, [])
+                self.assertEqual(snapshots, ["older", "independent", "newer"])
+                self.assertEqual(ledger.loads(output.read_bytes())["sources"], ["newer"])
 
     def test_timer_inert_six_hour_schedule_shared_cli_and_stage2_switch(self):
         root = Path(__file__).resolve().parent
