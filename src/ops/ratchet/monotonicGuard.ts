@@ -307,7 +307,8 @@ function contentLines(lines: string[]): { minus: string[]; plus: string[]; conte
  */
 function carriesMalformedStringField(minus: string[], plus: string[], context: string[]): boolean {
   for (const lines of [minus, plus, context]) {
-    if (lines.some((l) => ESCAPED_KEY_RE.test(l))) return true;
+    // JSON whitespace may put the colon on a later line than its escaped key.
+    if (ESCAPED_KEY_RE.test(lines.join('\n'))) return true;
   }
   const fields: Array<[RegExp, RegExp]> = [
     [DIRECTION_KEY_RE, DIRECTION_RE],

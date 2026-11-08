@@ -54,6 +54,21 @@ describe('checkDiffMonotonicity', () => {
     expect(checkDiffMonotonicity(diff)).toMatchObject({ ok: false });
   });
 
+  test.each(['\n', '\n\t', '\r\n'])(
+    'an escaped key split from its colon by %j fails closed',
+    (whitespace) => {
+      const old = body('higher-is-better', 80);
+      const injected = old.replace('"value": 80', `"value": 80, "val\\u0075e"${whitespace}: 50`);
+      expect(JSON.parse(injected).value).toBe(50);
+      const diff = modifiedSection(REL, old.trimEnd().split('\n'), injected.trimEnd().split('\n'));
+      expect(checkDiffMonotonicity(diff)).toEqual({
+        ok: false,
+        violations: [{ path: REL, why: 'unparsable baseline diff' }],
+        filesChecked: 1,
+      });
+    },
+  );
+
   test('an escaped property key on the delete+add path fails closed', () => {
     const old = body('higher-is-better', 80);
     const injected = body('higher-is-better', 80).replace(
