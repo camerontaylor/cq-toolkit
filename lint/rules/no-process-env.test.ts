@@ -20,6 +20,15 @@ const ok = (code: string) => ({ code, filename: 'src/ops/x.ts' });
 
 ruleTester.run('no-process-env', rule, {
   valid: [
+    ok('const p = process; function f(p) { return p.env; }'),
+    ok('const p = process; { const p = { env: {} }; p.env; }'),
+    ok("import proc from 'node:process'; function f(proc) { return proc.env; }"),
+    ok("import * as proc from 'process'; { const proc = { env: {} }; proc.env; }"),
+    ok('let p = process; p = { env: {} }; p.env;'),
+    ok('let p = process; ({ p } = other); p.env;'),
+    ok('let p = process; p++; p.env;'),
+    ok('var p = process; var p = other; p.env;'),
+    ok('function f(process) { const p = process; return p.env; }'),
     ok("import { processEnv } from '../config/process-env.js'; const v = processEnv()['A'];"),
     ok('const env = { PATH: "/bin" }; env.PATH;'),
     ok('process.argv.slice(2);'),
@@ -34,6 +43,17 @@ ruleTester.run('no-process-env', rule, {
     ok('let a; ({ argv: a } = process);'),
   ],
   invalid: [
+    {
+      ...bad('process.env;'),
+      languageOptions: { globals: { process: 'readonly' } },
+    },
+    bad('const p = process; function f(p) { return p.env; } p.env;'),
+    bad('const p = process; const q = p; q.env;'),
+    bad('let p = process; p = p.env;'),
+    bad('function a() { const p = process; } function b(p) { return p.env; } process.env;'),
+    bad('let p = process; const q = p; p = other; q.env;'),
+    bad('let p = process; p.env; p = other; p.env;'),
+    bad("import proc from 'node:process'; function f(proc) { return proc.env; } proc.env;"),
     bad('const p = process; p.env.A;'),
     bad('const v = (process as any).env.A;'),
     bad('const p = process as NodeJS.Process; const v = p.env.A;'),

@@ -62,10 +62,32 @@ export default {
     },
   },
   create(context) {
-    const processNames = new Set(); // local names bound to the process module
+    const processBindings = new Map();
+    const bindingOf = (node) => {
+      for (let scope = context.sourceCode.getScope(node); scope; scope = scope.upper) {
+        const binding = scope.set.get(node.name);
+        if (binding) return binding;
+      }
+      return null;
+    };
+    const addAlias = (node) => {
+      const binding = bindingOf(node);
+      if (binding) processBindings.set(binding, node.range[0]);
+    };
     const isProcessNode = (raw) => {
       const node = unwrap(raw);
-      return isProcess(node) || (node.type === 'Identifier' && processNames.has(node.name));
+      if (node.type !== 'Identifier') return isProcess(node);
+      const binding = bindingOf(node);
+      if (!binding || binding.defs.length === 0) return isProcess(node);
+      return (
+        processBindings.has(binding) &&
+        !binding.references.some(
+          (ref) =>
+            ref.isWrite() &&
+            ref.identifier.range[0] !== processBindings.get(binding) &&
+            (ref.writeExpr?.range[1] ?? ref.identifier.range[1]) <= node.range[0],
+        )
+      );
     };
     const hasEnvKey = (pattern) =>
       pattern.properties.some(
@@ -93,9 +115,9 @@ export default {
           if (spec.type === 'ImportSpecifier') {
             const imported = spec.imported.name ?? spec.imported.value;
             if (imported === 'env') context.report({ node: spec, messageId: 'processEnv' });
-            if (imported === 'default') processNames.add(spec.local.name);
+            if (imported === 'default') addAlias(spec.local);
           } else {
-            processNames.add(spec.local.name);
+            addAlias(spec.local);
           }
         }
       },
@@ -107,7 +129,7 @@ export default {
       VariableDeclarator(node) {
         // A plain alias: `const p = process;` makes `p.env` a process.env read.
         if (node.id.type === 'Identifier' && node.init && isProcessNode(node.init)) {
-          processNames.add(node.id.name);
+          addAlias(node.id);
         }
         checkPattern(node.id, node.init, node);
       },
