@@ -57,6 +57,8 @@ describe('self-host workflows share ONE concurrency group (#186)', () => {
     const templateGroups = TEMPLATES.map((path) => concurrencyOf(readFileSync(path, 'utf8')));
     expect(templateGroups[0]?.group).toBeDefined();
     expect(templateGroups[0]?.group).toBe(templateGroups[1]?.group);
+    expect(templateGroups[0]?.cancelInProgress).toBe('false');
+    expect(templateGroups[1]?.cancelInProgress).toBe('false');
     expect(templateGroups[0]?.group).toBe(
       concurrencyOf(readFileSync(INSTANTIATED[0] as string, 'utf8')).group,
     );
