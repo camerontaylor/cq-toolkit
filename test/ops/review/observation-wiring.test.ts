@@ -40,6 +40,13 @@ import type { Finding, FindingsRecord } from '../../../src/ops/review/findings.j
 import { makeTestRepo } from '../dev/repo.js';
 import type { ReviewRunInput, ReviewRunResult } from '../../../src/ops/review/run.js';
 import { makeGitleaksFixture } from '../../helpers/gitleaks-fixture.js';
+import { readFileSync } from 'node:fs';
+
+const packageVersion = (
+  JSON.parse(readFileSync(new URL('../../../package.json', import.meta.url), 'utf8')) as {
+    version: string;
+  }
+).version;
 
 let scanner: Awaited<ReturnType<typeof makeGitleaksFixture>>;
 beforeEach(async () => {
@@ -331,6 +338,10 @@ describe('T31 round-trip through the address composition', () => {
     const fakeToken = ['tok', 'en', '-', Math.random().toString(36).slice(2), 'zz'].join('');
     vi.stubEnv('CQ_SANDBOX', 'off');
     vi.stubEnv('CQ_AUTOMATION_TOKEN', fakeToken);
+    // A model-spec value once made the strict header schema reject the whole stream.
+    vi.stubEnv('CQ_SELFHOST_DRIVER', 'zai/glm-5');
+    // Blank means unset: the version must stay the package version, not ''.
+    vi.stubEnv('CQ_PRODUCER_VERSION', '  ');
     try {
       const result = await invoke(f);
       expect(result.status, JSON.stringify(result)).toBe('ok');
@@ -373,6 +384,9 @@ describe('T31 round-trip through the address composition', () => {
       expect(recorded?.env['CQ_SANDBOX']).toBe('off');
       expect(recorded?.env['CQ_AUTOMATION_TOKEN']).toBe('set');
       expect(recorded?.sources['CQ_SANDBOX']).toBe('env');
+      expect(recorded?.env['CQ_SELFHOST_DRIVER']).toBe('zai/glm-5');
+      expect(header.payload.provenance.cqVersion).toBe(packageVersion);
+      expect(report?.observation?.status).not.toBe('indeterminate');
       expect(JSON.stringify(stream.events)).not.toContain(fakeToken);
       expect(JSON.stringify(report)).not.toContain(fakeToken);
       expect(report?.observation?.baseSha).toBe(header.payload.provenance.baseSha);

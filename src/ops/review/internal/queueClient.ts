@@ -29,7 +29,8 @@ import {
   sha256,
   type QueueEvidence,
 } from './queueEvidence.js';
-import { readCqEnv, type CqEnv } from '../../../config/env.js';
+import type { CqEnv } from '../../../config/env.js';
+import { currentCqEnv } from '../../../config/run-env.js';
 import { processEnv } from '../../../config/process-env.js';
 
 const CommonPage = z.object({
@@ -529,7 +530,7 @@ export class ReviewRemoteError extends Error {
   }
 }
 
-export function makeConfiguredReviewClient(env: CqEnv = readCqEnv()) {
+export function makeConfiguredReviewClient(env: CqEnv = currentCqEnv()) {
   const alias = env.values['CQ_QUEUE_SSH_ALIAS'];
   if (typeof alias !== 'string' || !alias)
     throw new QueueConfigurationError('Configure CQ_QUEUE_SSH_ALIAS for review-v1');

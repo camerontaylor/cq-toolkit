@@ -667,10 +667,7 @@ export const WitnessesRecordSchema: z.ZodType<WitnessesRecord> = z
 
 export const ProvenanceConfigSchema: z.ZodType<ProvenanceConfig> = z
   .object({
-    env: z.record(
-      z.string(),
-      z.union([z.string(), z.number(), z.boolean(), z.array(z.string()), z.null()]),
-    ),
+    env: z.record(z.string(), z.string()),
     sources: z.record(z.string(), z.literal('env')),
     warnings: z.array(z.string()),
   })

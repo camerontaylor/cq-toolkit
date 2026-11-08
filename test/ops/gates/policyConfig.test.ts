@@ -133,4 +133,21 @@ describe('resolveProtectedPathsConfig with a CqEnv snapshot', () => {
       layer: 'default',
     });
   });
+
+  test('a snapshot with an error for the key is refused, not defaulted to human', async () => {
+    const { readCqEnv } = await import('../../../src/config/env.js');
+    const bad = readCqEnv({ CQ_MERGE_PROTECTED_PATHS: 'bogus' });
+    expect(() => resolveProtectedPathsConfig({ cqEnv: bad })).toThrow(/CQ_MERGE_PROTECTED_PATHS/);
+    // A call opt-in still wins over the env layer, as before.
+    expect(
+      resolveProtectedPathsConfig({
+        cqEnv: bad,
+        optIn: { 'merge.protectedPaths': 'human' },
+      }).layer,
+    ).toBe('call');
+    // An error for an unrelated key does not affect this resolver.
+    expect(resolveProtectedPathsConfig({ cqEnv: readCqEnv({ CQ_SANDBOX: 'of' }) }).layer).toBe(
+      'default',
+    );
+  });
 });

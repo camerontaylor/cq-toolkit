@@ -15,6 +15,7 @@ import {
   type SandboxMode,
   type SandboxNetwork,
 } from '../config/parsers.js';
+import { assertCqEnvName } from '../config/entry.js';
 import type { CqEnv } from '../config/env.js';
 import { processEnv } from '../config/process-env.js';
 
@@ -96,8 +97,9 @@ export function resolveSandboxConfig(options: ResolveSandboxOptions = {}): Sandb
   ): T =>
     optInRaw !== undefined
       ? parse(optInRaw)
-      : typed !== undefined
-        ? ((typed[name] as T | undefined) ?? parse(undefined))
+      : typed !== undefined && options.cqEnv !== undefined
+        ? (assertCqEnvName(options.cqEnv, 'sandbox', name),
+          (typed[name] as T | undefined) ?? parse(undefined))
         : parse(env[name]);
   const mode = layered(optIn.sandbox, parseMode, 'CQ_SANDBOX');
   const backend = layered(optIn['sandbox.backend'], parseBackend, 'CQ_SANDBOX_BACKEND') ?? 'auto';

@@ -9,3 +9,4 @@ export {
   type EntryEnvCheck,
 } from '../config/entry.js';
 export type { CqEnv } from '../config/env.js';
+export { runWithCqEnv } from '../config/run-env.js';

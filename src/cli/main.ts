@@ -93,7 +93,7 @@ import { get, list } from '../registry/index.js';
 import { getPlan } from '../registry/plans.js';
 import { KnownUsageSummarySchema, OpResultSchema } from '../kernel/schema.js';
 import type { OpRegistryEntry } from '../kernel/types.js';
-import { checkEntryEnv, type CqEnv } from '../registry/entry-env.js';
+import { checkEntryEnv, runWithCqEnv, type CqEnv } from '../registry/entry-env.js';
 import { EXIT_CODES, exitCodeForOpResult } from './exit.js';
 import {
   assertJsonLossless,
@@ -776,7 +776,9 @@ async function dispatchCli(
     // value with the kernel's own mirror before ANY stdout artifact or
     // exit-code derivation (the plan path gets the same two probes via
     // runPlan's executeOp; this is their direct-path counterpart).
-    const raw: unknown = await op(check.data);
+    // The op runs inside the entry's snapshot (resolve once; ADR-0009).
+    const raw: unknown =
+      cqEnv === undefined ? await op(check.data) : await runWithCqEnv(cqEnv, () => op(check.data));
     // I1 permits optional report and typed usage envelopes on every status.
     // Keep the frozen result mirror strict: no other extension key is accepted.
     let base = raw;

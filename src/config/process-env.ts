@@ -1,5 +1,4 @@
-// The one place outside the entry helpers that touches the ambient process
-// environment (config contract C7). A reader that has no snapshot from its
+// The shared accessor for the ambient process environment (config contract C7). A reader that has no snapshot from its
 // caller (a registry-composed op, a driver constructor default) goes through
 // `processEnv()` instead of naming `process.env`, so the lint rule
 // `cq/no-process-env` can confine direct reads to src/config and the driver

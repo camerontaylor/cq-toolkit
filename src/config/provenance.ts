@@ -1,50 +1,62 @@
 // provenanceConfig — the resolved env config as recorded in run-start
 // provenance (config contract C5; ADR-0008 `provenance.config?`).
 //
-// Only names whose source is 'env' are recorded (defaults are not journalled).
-// Secret values (registry `secret: true`, by suffix) become the literal 'set';
-// the listed foreign secret names are recorded as 'set' when present. Identity
-// names are excluded: the correlation record already carries them. Warnings
-// are recorded as message text (never a value). Parse errors are not recorded:
-// runPlan refuses a run whose env has errors (assertCqEnv), so none reach a run.
-// Non-secret values are capped at MAX_VALUE_CHARS so a long value cannot bloat a journal.
+// Built from the run's validated CqEnv only; it never reads the ambient
+// environment (resolve once, ADR-0009).
+//
+// Only names whose source is 'env' are recorded: a name that is absent means
+// the built-in default applied (defaults are not journalled). Secret values
+// (registry `secret: true`, by suffix) become the literal 'set'; the
+// registered foreign secret names are recorded as 'set' when present.
+// Identity names are excluded: the correlation record already carries them.
+// Warnings are recorded as message text (never a value). Parse errors are not
+// recorded: an errored snapshot is REFUSED (assertCqEnv), never recorded as
+// absent, because absence means "the built-in default applied".
+//
+// Every recorded value is a STRING, whatever the registry parser returned
+// (model spec, list, number, boolean), so it always satisfies the strict
+// ProvenanceConfigSchema. Non-secret values are capped at MAX_VALUE_CHARS so
+// a long value cannot bloat a journal.
 import type { ProvenanceConfig } from '../kernel/types.js';
+import { assertCqEnv } from './entry.js';
 import type { CqEnv } from './env.js';
-import { CQ_ENV_ENTRIES, FOREIGN_ENV_ENTRIES } from './env-registry.js';
+import { CQ_ENV_ENTRIES } from './env-registry.js';
 
 const MAX_VALUE_CHARS = 200;
 
-function cap(value: unknown): unknown {
-  const text = typeof value === 'string' ? value : undefined;
-  if (text === undefined && !Array.isArray(value)) return value;
-  const flat = text ?? JSON.stringify(value);
-  return flat.length <= MAX_VALUE_CHARS
-    ? value
-    : `${flat.slice(0, MAX_VALUE_CHARS)}… (${flat.length} chars)`;
+/** A parsed value as text, in the grammar of the env value itself. */
+function render(value: unknown): string {
+  if (typeof value === 'string') return value;
+  if (Array.isArray(value)) return value.map(render).join(',');
+  if (typeof value === 'object' && value !== null) {
+    const spec = value as { provider?: unknown; model?: unknown };
+    if (typeof spec.provider === 'string' && typeof spec.model === 'string') {
+      return `${spec.provider}/${spec.model}`;
+    }
+    return JSON.stringify(value);
+  }
+  return String(value);
 }
 
-export function provenanceConfig(
-  cqEnv: CqEnv,
-  env: Readonly<Record<string, string | undefined>> = process.env,
-): ProvenanceConfig {
-  const envValues: Record<string, unknown> = {};
+function cap(text: string): string {
+  return text.length <= MAX_VALUE_CHARS
+    ? text
+    : `${text.slice(0, MAX_VALUE_CHARS)}… (${text.length} chars)`;
+}
+
+export function provenanceConfig(cqEnv: CqEnv): ProvenanceConfig {
+  assertCqEnv(cqEnv, 'provenance');
+  const env: Record<string, string> = {};
   const sources: Record<string, 'env'> = {};
   for (const entry of CQ_ENV_ENTRIES) {
     if (entry.kind === 'identity' || entry.status !== 'live') continue;
     if (cqEnv.sources[entry.name] !== 'env') continue;
-    envValues[entry.name] = entry.secret ? 'set' : cap(cqEnv.values[entry.name]);
+    env[entry.name] = entry.secret ? 'set' : cap(render(cqEnv.values[entry.name]));
     sources[entry.name] = 'env';
   }
-  for (const foreign of FOREIGN_ENV_ENTRIES) {
-    if (!foreign.secret) continue;
-    const raw = env[foreign.name];
-    if (raw === undefined || raw.trim() === '') continue;
-    envValues[foreign.name] = 'set';
-    sources[foreign.name] = 'env';
+  for (const name of cqEnv.foreignSecretsPresent) {
+    env[name] = 'set';
+    sources[name] = 'env';
   }
-  return {
-    env: envValues as ProvenanceConfig['env'],
-    sources,
-    warnings: cqEnv.warnings.map((w) => w.message),
-  };
+  return { env, sources, warnings: cqEnv.warnings.map((w) => w.message) };
 }

@@ -55,12 +55,17 @@ should stay a secret suffix is pending an owner decision and is not decided here
 reads the environment once into a deeply frozen snapshot of values, sources, warnings and errors, and passes it
 down. Code below the entry point does not read `process.env` for `CQ_*` names.
 
-**Run-start record.** The run-start record carries the resolved values, their source layers and the warnings.
-Secrets are recorded as present or absent, never by value. This extends ADR-0008 provenance (`cqJsonHash`).
+**Run-start record.** The run-start record carries the resolved values of the configuration names the
+environment set (source `env`), every value as text, and the warnings. A configuration name that is absent from the
+record means the built-in default applied. Identity names (`CQ_WORK_ID` and the like) are excluded by design: they
+have no built-in default and the correlation record carries them. Secrets are recorded as present or absent, never
+by value. Defaults and other layers are not recorded. A snapshot that carries an error is refused, never recorded.
+This extends ADR-0008 provenance (`cqJsonHash`).
 
 **Op-input mirrors of trust keys** (for example `protectedBranch`, `baseBranch`) are removed where the caller can
 use the resolved value. Any that remain are compared with the resolved value, and a difference fails with `config`.
-Neutral keys such as `sessionsDir` may be set per call and are recorded as the `call` layer.
+Neutral keys such as `sessionsDir` may be set per call; a per-call value is not recorded in the run-start
+config (call-layer recording is out of scope for C5 and would need a schema and ADR change).
 
 **Key list.** The key list is generated from the code registry `src/config/env-registry.ts` into
 [`docs/config.md`](../config.md); the static gate fails when that table is stale. Annex B's hand-written key
@@ -95,7 +100,9 @@ variable mapping (N15 and N21); the ADR-0004 trust boundaries; P8 (conservative 
 
 ## Appendix: process.env confinement (C7)
 
-The lint rule `cq/no-process-env` bans `process.env` in `src/**`. The files below are switched off in `.oxlintrc.json`, each for one reason:
+The lint rule `cq/no-process-env` bans `process.env` in `src/**`. The rule is also switched off for `src/config/**` (the snapshot and entry helpers and the shared accessor may read
+`process.env`; code below an entry point must not, see "Resolve once"). The files below are switched off in
+`.oxlintrc.json`, each for one reason:
 
 - `src/adapters/forge-github/gh.ts`: gh child env composition
 - `src/adapters/forge-github/ghEffects.ts`: gh child env composition
@@ -131,7 +138,6 @@ The rule `cq/no-process-env-accessor` bans importing or calling `processEnv()` (
 - `src/ops/fix/runFix.ts`
 - `src/ops/gates/policyConfig.ts`
 - `src/ops/gates/registry.ts`
-- `src/ops/review/address.ts`
 - `src/ops/review/internal/addressEvidence.ts`
 - `src/ops/review/internal/queueClient.ts`
 - `src/ops/review/queue.ts`

@@ -5,8 +5,8 @@ import {
   rescueAllocation,
   type EscalationState,
 } from './escalation.js';
-import { readCqEnv } from '../../config/env.js';
 import { provenanceConfig } from '../../config/provenance.js';
+import { currentCqEnv } from '../../config/run-env.js';
 import type { z } from 'zod';
 import { createHash, randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
@@ -239,8 +239,11 @@ async function captureProvenance(
     git(['rev-parse', '--verify', `${base}^{commit}`]),
     readFile(new URL('../../../package.json', import.meta.url), 'utf8').catch(() => '{}'),
   ]);
+  // The resolved snapshot: a blank CQ_PRODUCER_VERSION is unset (registry contract).
+  const cqEnv = currentCqEnv();
+  const envVersion = cqEnv.values['CQ_PRODUCER_VERSION'];
   const version =
-    processEnv().CQ_PRODUCER_VERSION ??
+    (typeof envVersion === 'string' ? envVersion : undefined) ??
     (JSON.parse(packageText) as { version?: string }).version ??
     'unavailable';
   const provenance: ProvenanceRecord = {
@@ -255,7 +258,7 @@ async function captureProvenance(
     journalLink: 'unavailable',
     reportLink: 'unavailable',
     witnesses: { base: baseSha, admitted: null, execution: null, reviewed: null, accepted: null },
-    config: provenanceConfig(readCqEnv()),
+    config: provenanceConfig(cqEnv),
   };
   // parentWorkId is a UUID per CorrelationRecordSchema: only a genuinely
   // UUID-shaped inbound id persists; the paseo:<id> link form (and any other

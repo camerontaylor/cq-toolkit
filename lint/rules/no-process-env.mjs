@@ -12,14 +12,35 @@
 // Forms caught: `process.env`, `process['env']`, `globalThis.process.env`,
 // destructuring `{ env } = process` in declarations, assignments and
 // parameters, `import { env } from 'node:process'`, and `.env` on a default
-// or namespace import of `node:process` / `process`.
+// or namespace import of `node:process` / `process`, a local alias
+// (`const p = process`), and TS assertions around any of these. Not caught: an
+// assignment alias (`let p; p = process`).
 
-const isProcess = (node) =>
-  (node.type === 'Identifier' && node.name === 'process') ||
-  (node.type === 'MemberExpression' &&
-    isPlainKey(node, 'process') &&
-    node.object.type === 'Identifier' &&
-    node.object.name === 'globalThis');
+const WRAPPERS = new Set([
+  'TSAsExpression',
+  'TSTypeAssertion',
+  'TSNonNullExpression',
+  'TSSatisfiesExpression',
+  'ParenthesizedExpression',
+]);
+
+/** Strip TS assertions and parentheses: `(process as any)` is `process`. */
+function unwrap(node) {
+  let n = node;
+  while (n && WRAPPERS.has(n.type)) n = n.expression;
+  return n;
+}
+
+const isProcess = (raw) => {
+  const node = unwrap(raw);
+  return (
+    (node.type === 'Identifier' && node.name === 'process') ||
+    (node.type === 'MemberExpression' &&
+      isPlainKey(node, 'process') &&
+      unwrap(node.object).type === 'Identifier' &&
+      unwrap(node.object).name === 'globalThis')
+  );
+};
 
 function isPlainKey(member, name) {
   if (!member.computed)
@@ -42,8 +63,10 @@ export default {
   },
   create(context) {
     const processNames = new Set(); // local names bound to the process module
-    const isProcessNode = (node) =>
-      isProcess(node) || (node.type === 'Identifier' && processNames.has(node.name));
+    const isProcessNode = (raw) => {
+      const node = unwrap(raw);
+      return isProcess(node) || (node.type === 'Identifier' && processNames.has(node.name));
+    };
     const hasEnvKey = (pattern) =>
       pattern.properties.some(
         (p) =>
@@ -82,6 +105,10 @@ export default {
         }
       },
       VariableDeclarator(node) {
+        // A plain alias: `const p = process;` makes `p.env` a process.env read.
+        if (node.id.type === 'Identifier' && node.init && isProcessNode(node.init)) {
+          processNames.add(node.id.name);
+        }
         checkPattern(node.id, node.init, node);
       },
       AssignmentExpression(node) {

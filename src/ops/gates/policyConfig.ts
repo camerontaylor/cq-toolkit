@@ -27,6 +27,7 @@ import {
   isPosture,
   type ProtectedPathsPosture,
 } from '../../config/values.js';
+import { assertCqEnvName } from '../../config/entry.js';
 import { processEnv } from '../../config/process-env.js';
 
 /**
@@ -88,6 +89,8 @@ export function resolveProtectedPathsConfig(
     return Object.freeze({ posture: call, layer: 'call' });
   }
 
+  // An invalid snapshot value is unset in `values`: refuse it, never default to `human` silently.
+  if (options.cqEnv !== undefined) assertCqEnvName(options.cqEnv, 'policy', PROTECTED_PATHS_ENV);
   const raw = env[PROTECTED_PATHS_ENV];
   if (raw === undefined || raw.trim() === '') {
     return Object.freeze({ posture: 'human', layer: 'default' });
