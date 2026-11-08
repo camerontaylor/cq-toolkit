@@ -274,20 +274,38 @@ Ordering and guarantees:
    malformed or other-checkout heartbeat refuses assessment. Each
    observation also carries two independent receipt verdicts that never
    change `healthy` or the exit code (a bad sample is not a tick failure):
-   - `receipts_readable` — the ten most recently modified
-     `state/runs/*/meta.json` parse as JSON (counts under `receipts`);
+   - `receipts_readable` — the ten most recently modified run directories
+     under `state/runs` have a `meta.json` that parses as JSON. A directory
+     holding only `secret-scan.json` (and `context-secret-scan.json`) is a
+     review stopped before launch (blocked secret scan or refused checkout,
+     which `crq.py` records before `meta.json`); it is counted as
+     `prelaunch`, not as unreadable. Any other missing or corrupt entry is
+     listed by run name and reason under `receipts.unreadable`.
+     Non-directory entries (for example AppleDouble `._*` copies) are not
+     runs: they are counted as `ignored_entries` and never sampled;
    - `receipts_valid` — the ten most recently modified retained
-     `state/receipts/<sha256>.json` receipts validate against the stable v1 receipt schema
-     (`review_receipt.py`, TS `QueueReceiptSchema`): content identity,
-     run identity (`item_id`, well-formed `run_id`), captured target (v1
-     source binding, 40-hex `capture.target`/`tree`, matching scope
-     digest) and terminal outcome (a counted receipt needs a completed,
-     classified run). Policy, version and target selectors come from this
-     deployment's own `review_receipt.py`/`runtime_target.py`, parsed
+     `state/receipts/<sha256>.json` receipts validate against their own
+     family. All families first prove content identity. Merged-current and
+     push-range receipts (`crq.current_document`) check the stable v1
+     receipt schema (`review_receipt.py`, TS `QueueReceiptSchema`): run
+     identity (`item_id`, well-formed `run_id`), captured target (source
+     binding, 40-hex `capture.target`/`tree`, matching scope digest) and
+     terminal outcome (a counted receipt needs a completed, classified run).
+     A merged-current source names a PR, merge SHA and target selector; a
+     push-range source names 40-hex `base`/`head` and may carry a split
+     part's `paths_filter`/`pin`, and only push captures may contain
+     `deferred-split` rows. Policy, version and target selectors come from
+     this deployment's own `review_receipt.py`/`runtime_target.py`, parsed
      read-only (never executed); if they are unusable the builtin copy is
-     used. `receipt_validation.schema_source` records which, and why.
-     Details, with a reason per invalid receipt, are under
-     `receipt_validation`.
+     used. `local-review-full-diff` receipts are checked against the
+     `receipt` variant of this deployment's
+     `policy/review-operation.schema.json` (read as data), plus their
+     identity digest and outcome/scope consistency; without that file they
+     are reported as unverified, never accepted. Any other `kind` is an
+     unsupported family. `receipt_validation.schema_source` and
+     `local_review_schema_source` record which sources were used, and why;
+     `families` counts the sample by family, and each invalid receipt
+     carries its family and reason.
    Each verdict is `true`, `false`, or `null` when nothing was sampled; the
    top-level artifact repeats both, aggregated across observations. Tick
    advancement, receipt readability and receipt validity are distinct

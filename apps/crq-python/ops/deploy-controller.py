@@ -553,6 +553,20 @@ RECEIPT_COUNTED_OUTCOMES = ("terminal-clean", "terminal-with-findings", "partial
 RECEIPT_RESOLUTIONS = ("same-path-current", "git-rename-M50")
 RECEIPT_DISPOSITIONS = ("included", "renamed", "deleted", "unsupported",
                         "ambiguous", "excluded-with-reason")
+# Receipt families sharing state/receipts. merged-current and push-range are
+# crq.current_document() receipts (``version``); push items differ only in
+# their source subject (push_current._enroll) and may defer overflow paths to
+# a follow-up part. Local reviews (local_review_runtime.complete) are a
+# separate ``v``/``kind`` document checked against the deployment's
+# policy/review-operation.schema.json, read as data and never executed.
+FAMILY_MERGED = "merged-current"
+FAMILY_PUSH = "push-range"
+FAMILY_LOCAL = "local-review-full-diff"
+# push_current.prepare: out-of-repo-scope rows stay in the manifest as
+# excluded-config; scope-cap overflow is deferred-split to a follow-up part.
+PUSH_DISPOSITIONS = RECEIPT_DISPOSITIONS + ("excluded-config", "deferred-split")
+LOCAL_REVIEW_SCHEMA = "policy/review-operation.schema.json"
+_REPO_RE = re.compile(r"[\w.-]+/[\w.-]+")
 _HEX40 = re.compile(r"[0-9a-f]{40}")
 _HEX64 = re.compile(r"[0-9a-f]{64}")
 
@@ -677,24 +691,150 @@ def receipt_schema(effects: Effects) -> dict:
         if (not isinstance(policy, str) or type(version) is not int or not targets
                 or not all(isinstance(t, str) for t in targets)):
             raise ValueError("unexpected constant types")
-        return {"schema_source": "deployment:apps/crq-python/review_receipt.py",
-                "policy": policy, "version": version, "targets": targets}
+        schema = {"schema_source": "deployment:apps/crq-python/review_receipt.py",
+                  "policy": policy, "version": version, "targets": targets}
     except (OSError, SyntaxError, ValueError, KeyError, TypeError) as exc:
-        return {"schema_source": "builtin (deployment constants unavailable: "
-                                 + type(exc).__name__ + ": " + str(exc)[:80] + ")",
-                "policy": RECEIPT_POLICY, "version": RECEIPT_VERSION,
-                "targets": RECEIPT_TARGETS}
+        schema = {"schema_source": "builtin (deployment constants unavailable: "
+                                   + type(exc).__name__ + ": " + str(exc)[:80] + ")",
+                  "policy": RECEIPT_POLICY, "version": RECEIPT_VERSION,
+                  "targets": RECEIPT_TARGETS}
+    return {**schema, **local_review_schema(effects.root)}
+
+
+def local_review_schema(root: Path) -> dict:
+    """The deployment's local-review receipt rule, read as JSON data.
+
+    There is no builtin copy: when the file or its ``receipt`` variant is
+    unusable, ``local_review`` is None and every local-review receipt in the
+    sample is reported as unverified rather than silently accepted.
+    """
+    try:
+        document = json.loads((root / LOCAL_REVIEW_SCHEMA).read_text())
+        rules = [variant["properties"]["value"] for variant in document["oneOf"]
+                 if variant["properties"]["type"].get("const") == "receipt"]
+        if len(rules) != 1 or not isinstance(rules[0], dict):
+            raise ValueError("expected exactly one receipt variant")
+        return {"local_review": rules[0],
+                "local_review_source": "deployment:" + LOCAL_REVIEW_SCHEMA}
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+        return {"local_review": None,
+                "local_review_source": "unavailable: " + type(exc).__name__
+                                       + ": " + str(exc)[:80]}
+
+
+_SCHEMA_KEYWORDS = {"$schema", "oneOf", "type", "const", "enum", "required", "properties",
+                    "additionalProperties", "items", "minItems", "maxItems", "minimum",
+                    "minLength", "pattern"}
+_SCHEMA_TYPES = {"object": dict, "array": list, "string": str, "integer": int,
+                 "boolean": bool, "null": type(None)}
+
+
+def schema_problem(value, rule: dict, at: str = "") -> str | None:
+    """Evaluate the checked-in schema vocabulary exactly as
+    review_ledger._schema does (fail closed on any other keyword), returning
+    the first violation with its location instead of raising."""
+    where = at or "receipt"
+    if set(rule) - _SCHEMA_KEYWORDS:
+        return where + ": unsupported schema keyword"
+    if "oneOf" in rule:
+        matches = sum(schema_problem(value, branch, at) is None for branch in rule["oneOf"])
+        return None if matches == 1 else where + ": does not match exactly one variant"
+    expected = rule.get("type")
+    if expected and type(value) not in [_SCHEMA_TYPES[t] for t in (
+            expected if isinstance(expected, list) else [expected])]:
+        return where + ": type mismatch"
+    if "const" in rule and value != rule["const"] or "enum" in rule and value not in rule["enum"]:
+        return where + ": value mismatch"
+    if isinstance(value, dict):
+        missing = sorted(set(rule.get("required", [])) - value.keys())
+        if missing:
+            return where + ": missing " + ",".join(missing)
+        properties = rule.get("properties", {})
+        unknown = sorted(value.keys() - properties.keys())
+        if rule.get("additionalProperties") is False and unknown:
+            return where + ": unknown " + ",".join(unknown)
+        for key in sorted(value.keys() & properties.keys()):
+            problem = schema_problem(value[key], properties[key], (at + "." if at else "") + key)
+            if problem:
+                return problem
+    if isinstance(value, list):
+        if len(value) < rule.get("minItems", 0) or len(value) > rule.get("maxItems", len(value)):
+            return where + ": array bound"
+        for index, item in enumerate(value):
+            problem = schema_problem(item, rule.get("items", {}), where + "[" + str(index) + "]")
+            if problem:
+                return problem
+    if isinstance(value, str):
+        if len(value) < rule.get("minLength", 0) or (
+                "pattern" in rule and not re.fullmatch(rule["pattern"], value)):
+            return where + ": string bound"
+    if type(value) is int and "minimum" in rule and value < rule["minimum"]:
+        return where + ": below minimum"
+    return None
+
+
+def receipt_family(doc: dict) -> str:
+    """Which writer produced a parsed receipt (never a validity verdict)."""
+    if "kind" in doc or "v" in doc:
+        kind = doc.get("kind")
+        return kind if isinstance(kind, str) and kind else "unknown"
+    source = doc.get("source")
+    if isinstance(source, dict) and source.get("type") == FAMILY_PUSH:
+        return FAMILY_PUSH
+    return FAMILY_MERGED
+
+
+def _canonical_digest(value) -> str:
+    """review_receipt.digest: sha256 of the canonical JSON encoding."""
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"),
+                                     ensure_ascii=True).encode("utf-8")).hexdigest()
+
+
+def local_review_problem(doc: dict, rule: dict | None) -> str | None:
+    """A local-review-full-diff receipt against the deployment schema plus
+    the bindings local_review_runtime.complete() always writes."""
+    if rule is None:
+        return "local-review: unverified, deployment receipt schema unavailable"
+    problem = schema_problem(doc, rule)
+    if problem:
+        return "local-review schema: " + problem
+    if doc["identity"] != _canonical_digest(doc["identity_inputs"]):
+        return "local-review identity: identity is not the digest of identity_inputs"
+    if doc["scope_adequate"] and doc["outcome"] != ("findings" if doc["findings"] else "clean"):
+        return "local-review outcome: adequate scope with an outcome that contradicts findings"
+    if not doc["scope_adequate"] and doc["outcome"] in ("clean", "findings"):
+        return "local-review outcome: verdict recorded without adequate scope"
+    return None
+
+
+def _push_source_problem(source, schema: dict) -> str | None:
+    """push_current._enroll's subject: a pinned (base, head] range."""
+    if not (isinstance(source, dict) and source.get("type") == FAMILY_PUSH
+            and _text(source.get("repo")) and _REPO_RE.fullmatch(source["repo"])
+            and _hex(_HEX40, source.get("base")) and _hex(_HEX40, source.get("head"))
+            and source.get("policy") == schema["policy"]):
+        return "target: source binding is not a v1 push-range subject"
+    paths_filter = source.get("paths_filter")
+    if paths_filter is not None and not (isinstance(paths_filter, list) and paths_filter
+                                         and all(_text(p) for p in paths_filter)):
+        return "target: malformed push-range paths_filter"
+    if "pin" in source and not _hex(_HEX40, source["pin"]):
+        return "target: push-range pin is not a 40-hex SHA"
+    return None
 
 
 def receipt_problem(name: str, data: bytes, schema: dict | None = None) -> str | None:
-    """Why a retained receipt is not a valid v1 review receipt, or None.
+    """Why a retained receipt is not a valid receipt of its family, or None.
 
-    Mirrors the stable receipt contract read-only and offline: the immutable
-    content identity (review_receipt.read_receipt), the TS QueueReceiptSchema
-    (src/ops/review/internal/queueEvidence.ts) and its scope-digest check.
-    Groups: run identity, captured target, terminal outcome. Never imports
-    runner code and never grants review credit. ``schema`` is
-    ``receipt_schema()`` output; the builtin copy when omitted.
+    Every family first proves its immutable content identity
+    (review_receipt.read_receipt). merged-current and push-range receipts
+    then mirror the stable receipt contract read-only and offline: the TS
+    QueueReceiptSchema (src/ops/review/internal/queueEvidence.ts) and its
+    scope-digest check, grouped as run identity, captured target and terminal
+    outcome; they differ only in the source binding. local-review receipts are
+    checked by local_review_problem. Never imports runner code and never
+    grants review credit. ``schema`` is ``receipt_schema()`` output; the
+    builtin copy (with no local-review rule) when omitted.
     """
     schema = schema or {"policy": RECEIPT_POLICY, "version": RECEIPT_VERSION,
                         "targets": RECEIPT_TARGETS}
@@ -706,6 +846,11 @@ def receipt_problem(name: str, data: bytes, schema: dict | None = None) -> str |
         return "malformed: not valid JSON"
     if not isinstance(doc, dict):
         return "malformed: not a JSON object"
+    family = receipt_family(doc)
+    if family == FAMILY_LOCAL:
+        return local_review_problem(doc, schema.get("local_review"))
+    if family not in (FAMILY_MERGED, FAMILY_PUSH):
+        return "unsupported receipt family: " + family[:60]
     if doc.get("version") != schema["version"]:
         return "unsupported receipt version"
     # Run identity: the queue item, and the run when one was launched.
@@ -721,14 +866,19 @@ def receipt_problem(name: str, data: bytes, schema: dict | None = None) -> str |
         return "run identity: malformed started_at"
     # Captured target: the bound source and the pinned capture it reviewed.
     source, capture = doc.get("source"), doc.get("capture")
-    if not (isinstance(source, dict)
-            and _text(source.get("repo"))
-            and re.fullmatch(r"[\w.-]+/[\w.-]+", source["repo"])
-            and type(source.get("pr")) is int and source["pr"] > 0
-            and _hex(_HEX40, source.get("merge_sha"))
-            and source.get("target_selector") in schema["targets"]
-            and source.get("policy") == schema["policy"]):
+    if family == FAMILY_PUSH:
+        problem = _push_source_problem(source, schema)
+        if problem:
+            return problem
+    elif not (isinstance(source, dict)
+              and _text(source.get("repo"))
+              and _REPO_RE.fullmatch(source["repo"])
+              and type(source.get("pr")) is int and source["pr"] > 0
+              and _hex(_HEX40, source.get("merge_sha"))
+              and source.get("target_selector") in schema["targets"]
+              and source.get("policy") == schema["policy"]):
         return "target: source binding is not a v1 merged-current subject"
+    dispositions = PUSH_DISPOSITIONS if family == FAMILY_PUSH else RECEIPT_DISPOSITIONS
     if not (isinstance(capture, dict)
             and _hex(_HEX40, capture.get("target"))
             and _hex(_HEX40, capture.get("tree"))):
@@ -738,7 +888,7 @@ def receipt_problem(name: str, data: bytes, schema: dict | None = None) -> str |
             isinstance(entry, dict) and _text(entry.get("source_path"))
             and _text(entry.get("path"))
             and entry.get("resolution") in RECEIPT_RESOLUTIONS
-            and entry.get("disposition") in RECEIPT_DISPOSITIONS for entry in paths)):
+            and entry.get("disposition") in dispositions for entry in paths)):
         return "target: malformed captured path manifest"
     canonical = json.dumps(paths, sort_keys=True, separators=(",", ":"),
                            ensure_ascii=True).encode("utf-8")
@@ -788,17 +938,82 @@ def receipt_validation(effects: Effects) -> dict | None:
     names = [entry.name for entry in _newest(
         [e for e in root.iterdir() if RECEIPT_NAME_RE.fullmatch(e.name)], RECEIPT_SAMPLE)]
     schema = receipt_schema(effects)
-    invalid = []
+    invalid, families = [], {}
     for name in names:
+        family = "unreadable"
         try:
-            problem = receipt_problem(name, (root / name).read_bytes(), schema)
+            data = (root / name).read_bytes()
+            problem = receipt_problem(name, data, schema)
+            try:
+                doc = json.loads(data)
+                family = receipt_family(doc) if isinstance(doc, dict) else "malformed"
+            except ValueError:
+                family = "malformed"
         except OSError as exc:
             problem = "unreadable: " + str(exc)[:80]
+        families[family] = families.get(family, 0) + 1
         if problem:
-            invalid.append({"receipt": name[:-5], "reason": problem})
+            invalid.append({"receipt": name[:-5], "family": family, "reason": problem})
     return {"sampled": len(names), "valid_count": len(names) - len(invalid),
             "invalid": invalid, "valid": (not invalid) if names else None,
-            "schema_source": schema["schema_source"]}
+            "families": families, "schema_source": schema["schema_source"],
+            "local_review_schema_source": schema["local_review_source"]}
+
+
+# Artifacts crq.launch() writes before meta.json: a run directory holding only
+# these is a review that never launched (secret scan blocked, or worktree
+# checkout refused), not lost metadata.
+PRELAUNCH_ARTIFACTS = frozenset({"secret-scan.json", "context-secret-scan.json"})
+
+
+def run_metadata_problem(entry: Path) -> str | None:
+    """Why a run directory's metadata is unusable; None when meta.json
+    parses, or when the run is an expected pre-launch stop (``"prelaunch"``
+    is returned for that case so callers can count it separately)."""
+    meta = entry / "meta.json"
+    try:
+        if meta.is_file():
+            json.loads(meta.read_text())
+            return None
+        names = {child.name for child in entry.iterdir()}
+        if not names:
+            return "missing meta.json: empty run directory"
+        if names <= PRELAUNCH_ARTIFACTS and "secret-scan.json" in names:
+            for name in sorted(names):
+                if not isinstance(json.loads((entry / name).read_text()), dict):
+                    return "corrupt pre-launch artifact: " + name
+            return "prelaunch"
+        return "missing meta.json alongside " + ",".join(sorted(names))[:120]
+    except ValueError:
+        return "corrupt: unparseable " + (meta.name if meta.is_file() else "pre-launch artifact")
+    except OSError as exc:
+        return "unreadable: " + str(exc)[:80]
+
+
+def run_metadata_sample(effects: Effects) -> dict | None:
+    """The newest run directories' metadata (state/runs). Non-directory
+    entries (e.g. AppleDouble ``._*`` copies) are not runs: they are counted
+    under ``ignored_entries`` and never sampled."""
+    runs = effects.state_dir() / "runs"
+    if not runs.is_dir():
+        return None
+    entries, ignored = [], 0
+    for entry in runs.iterdir():
+        if entry.is_dir():
+            entries.append(entry)
+        else:
+            ignored += 1
+    readable, prelaunch, unreadable = 0, 0, []
+    for entry in _newest(entries, RECEIPT_SAMPLE):
+        problem = run_metadata_problem(entry)
+        if problem is None:
+            readable += 1
+        elif problem == "prelaunch":
+            prelaunch += 1
+        else:
+            unreadable.append({"run": entry.name, "reason": problem})
+    return {"sampled": readable + prelaunch + len(unreadable), "readable": readable,
+            "prelaunch": prelaunch, "unreadable": unreadable, "ignored_entries": ignored}
 
 
 def health_observation(effects: Effects, prior_tick: str) -> dict:
@@ -806,32 +1021,20 @@ def health_observation(effects: Effects, prior_tick: str) -> dict:
 
     Advancement is lexicographic on the strict UTC timestamps (they sort
     chronologically), never a wall-clock delta. Two independent receipt
-    verdicts ride along: ``receipts_readable`` (state/runs/*/meta.json parse)
-    and ``receipts_valid`` (state/receipts schema sample). Neither affects
-    advancement; neither grants review credit.
+    verdicts ride along: ``receipts_readable`` (state/runs/*/meta.json parse;
+    pre-launch stops are expected, named missing/corrupt entries are not)
+    and ``receipts_valid`` (state/receipts family schema sample). Neither
+    affects advancement; neither grants review credit.
     """
     _parse_iso(prior_tick)
     current = _tick_value(effects)
     _parse_iso(current)
     advanced = current > prior_tick
-    receipts = effects.state_dir() / "runs"
-    receipt_sample = None
-    if receipts.is_dir():
-        entries = _newest(list(receipts.iterdir()), RECEIPT_SAMPLE)
-        readable = 0
-        for entry in entries:
-            meta = entry / "meta.json"
-            if meta.is_file():
-                try:
-                    json.loads(meta.read_text())
-                    readable += 1
-                except (ValueError, OSError):
-                    pass
-        receipt_sample = {"sampled": len(entries), "readable": readable}
+    receipt_sample = run_metadata_sample(effects)
     validation = receipt_validation(effects)
     return {"observed_tick": current, "advanced": advanced,
             "receipts": receipt_sample,
-            "receipts_readable": (receipt_sample["readable"] == receipt_sample["sampled"]
+            "receipts_readable": (not receipt_sample["unreadable"]
                                   if receipt_sample and receipt_sample["sampled"] else None),
             "receipt_validation": validation,
             "receipts_valid": validation["valid"] if validation else None}

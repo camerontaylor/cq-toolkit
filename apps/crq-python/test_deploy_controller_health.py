@@ -82,7 +82,9 @@ class HealthTests(ControllerFixture):
         first, second = result["observations"]
         self.assertEqual(first["observed_tick"], "2026-10-28T00:05:00Z")
         self.assertEqual(second["observed_tick"], "2026-10-28T00:10:00Z")
-        self.assertEqual(first["receipts"], {"sampled": 2, "readable": 1})
+        self.assertEqual(first["receipts"], {
+            "sampled": 2, "readable": 1, "prelaunch": 0, "ignored_entries": 0,
+            "unreadable": [{"run": "run-b", "reason": "corrupt: unparseable meta.json"}]})
         # Readability is its own verdict and never a tick failure (#550).
         self.assertIs(first["receipts_readable"], False)
         self.assertIs(result["receipts_readable"], False)
@@ -227,12 +229,209 @@ class HealthTests(ControllerFixture):
         self.age(broken, 0)
         self.complete_tick("2026-10-28T00:05:00Z")
         observation = dc.health_observation(self.effects, "2026-10-28T00:00:00Z")
-        self.assertEqual(observation["receipts"],
-                         {"sampled": dc.RECEIPT_SAMPLE, "readable": dc.RECEIPT_SAMPLE - 1})
+        self.assertEqual(observation["receipts"]["sampled"], dc.RECEIPT_SAMPLE)
+        self.assertEqual(observation["receipts"]["readable"], dc.RECEIPT_SAMPLE - 1)
+        self.assertEqual(observation["receipts"]["unreadable"],
+                         [{"run": broken.name, "reason": "corrupt: unparseable meta.json"}])
         self.assertIs(observation["receipts_readable"], False)
         self.age(broken, 10**6)
         observation = dc.health_observation(self.effects, "2026-10-28T00:00:00Z")
         self.assertIs(observation["receipts_readable"], True)
+
+    def test_prelaunch_stops_are_expected_and_real_gaps_are_named(self):
+        """crq.launch() writes secret-scan artifacts before meta.json; a
+        blocked scan or refused checkout leaves only those. Other gaps, and
+        non-run entries such as AppleDouble copies, are reported distinctly."""
+        runs = self.runner / "state/runs"
+        layout = {
+            "ok-20261108T000000Z": {"meta.json": "{}"},
+            "scan-blocked-20261108T000001Z": {"secret-scan.json": '{"ok": false}'},
+            "backfill-blocked-20261108T000002Z": {"secret-scan.json": "{}",
+                                                  "context-secret-scan.json": "{}"},
+            "lost-meta-20261108T000003Z": {"secret-scan.json": "{}",
+                                           "review.ndjson": ""},
+            "corrupt-scan-20261108T000004Z": {"secret-scan.json": "{broken"},
+            "empty-20261108T000005Z": {},
+        }
+        for name, files in layout.items():
+            (runs / name).mkdir(parents=True)
+            for child, text in files.items():
+                (runs / name / child).write_text(text)
+        (runs / "._ok-20261108T000000Z").write_bytes(b"\x00\x05\x16\x07")
+        sample = dc.run_metadata_sample(self.effects)
+        self.assertEqual(sample["sampled"], 6)
+        self.assertEqual(sample["readable"], 1)
+        self.assertEqual(sample["prelaunch"], 2)
+        self.assertEqual(sample["ignored_entries"], 1)
+        self.assertEqual(
+            {row["run"]: row["reason"] for row in sample["unreadable"]},
+            {"lost-meta-20261108T000003Z":
+                 "missing meta.json alongside review.ndjson,secret-scan.json",
+             "corrupt-scan-20261108T000004Z": "corrupt: unparseable pre-launch artifact",
+             "empty-20261108T000005Z": "missing meta.json: empty run directory"})
+        self.complete_tick("2026-10-28T00:05:00Z")
+        observation = dc.health_observation(self.effects, "2026-10-28T00:00:00Z")
+        self.assertIs(observation["receipts_readable"], False)
+        for name in ("lost-meta-20261108T000003Z", "corrupt-scan-20261108T000004Z",
+                     "empty-20261108T000005Z"):
+            shutil.rmtree(runs / name)
+        # Only expected pre-launch stops remain: readable, not hidden.
+        observation = dc.health_observation(self.effects, "2026-10-28T00:00:00Z")
+        self.assertIs(observation["receipts_readable"], True)
+        self.assertEqual(observation["receipts"]["prelaunch"], 2)
+
+    def push_document(self, **overrides):
+        """A push-range receipt shaped like push_current._enroll's subject and
+        crq.current_document, including a scope-cap split and a byte-cap row."""
+        paths = [{"source_path": "src/a.rs", "path": "src/a.rs",
+                  "resolution": "same-path-current", "disposition": "included"},
+                 {"source_path": "src/big.rs", "path": "src/big.rs",
+                  "resolution": "same-path-current", "disposition": "unsupported",
+                  "reason": "current content exceeds scope byte cap"},
+                 {"source_path": "src/b.rs", "path": "src/b.rs",
+                  "resolution": "same-path-current", "disposition": "deferred-split",
+                  "reason": "deferred to follow-up review push-x-p2 (review scope cap)"},
+                 {"source_path": "vendor/x.rs", "path": "vendor/x.rs",
+                  "resolution": "same-path-current", "disposition": "excluded-config",
+                  "reason": "excluded by repos config for o/jcode"}]
+        document = self.receipt_document(
+            item_id="push-jcode-ae0f09de39-a047a0c07b", outcome="partial-scope",
+            run_id="push-jcode-ae0f09de39-a047a0c07b-20261108T053626Z",
+            source={"type": "push-range", "repo": "o/jcode", "base": "e" * 40,
+                    "head": "f" * 40, "policy": review_receipt.POLICY})
+        capture = {**document["capture"], "paths": paths,
+                   "scope_digest": review_receipt.digest(paths)}
+        capture["equivalence"] = review_receipt.current_equivalence(capture)
+        document["capture"] = capture
+        document.update(overrides)
+        return document
+
+    def test_push_range_receipts_validate_as_their_own_family(self):
+        valid = self.push_document()
+        split_part = self.push_document(source={**valid["source"], "pin": "a" * 40,
+                                                "paths_filter": ["src/b.rs"]})
+        merged = self.receipt_document()
+        cases = {
+            "valid": (valid, None),
+            "split-part": (split_part, None),
+            "short-head": (self.push_document(source={**valid["source"], "head": "f" * 12}),
+                           "push-range subject"),
+            "foreign-policy": (self.push_document(source={**valid["source"], "policy": "x"}),
+                               "push-range subject"),
+            "bad-pin": (self.push_document(source={**valid["source"], "pin": "main"}),
+                        "pin"),
+            "empty-filter": (self.push_document(source={**valid["source"], "paths_filter": []}),
+                             "paths_filter"),
+            "counted-unfinished": (self.push_document(
+                classification={"counted": False, "outcome": "failed"}), "terminal outcome"),
+            # Shared checks still apply to the push family.
+            "scope-digest": (self.push_document(
+                capture={**valid["capture"], "scope_digest": "e" * 64}), "scope digest"),
+            # deferred-split and excluded-config are push-only dispositions.
+            "merged-deferred-split": (self.receipt_document(capture={
+                **merged["capture"], "paths": valid["capture"]["paths"][:3],
+                "scope_digest": review_receipt.digest(valid["capture"]["paths"][:3])}),
+                "path manifest"),
+            "merged-excluded-config": (self.receipt_document(capture={
+                **merged["capture"], "paths": valid["capture"]["paths"][3:],
+                "scope_digest": review_receipt.digest(valid["capture"]["paths"][3:])}),
+                "path manifest"),
+            "unknown-disposition": (self.push_document(capture={
+                **valid["capture"],
+                "paths": [{**valid["capture"]["paths"][0], "disposition": "skipped"}],
+                "scope_digest": review_receipt.digest(
+                    [{**valid["capture"]["paths"][0], "disposition": "skipped"}])}),
+                "path manifest"),
+            # A merged subject missing its PR is still not a push receipt.
+            "merged-no-pr": (self.receipt_document(source={**merged["source"], "pr": 0}),
+                             "merged-current subject"),
+        }
+        for label, (document, expected) in cases.items():
+            with self.subTest(label=label):
+                data = review_receipt.canonical(document)
+                problem = dc.receipt_problem(hashlib.sha256(data).hexdigest() + ".json", data)
+                if expected is None:
+                    self.assertIsNone(problem)
+                else:
+                    self.assertIn(expected, problem)
+
+    def install_local_review_schema(self):
+        target = self.root / dc.LOCAL_REVIEW_SCHEMA
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(ROOT.parent.parent / dc.LOCAL_REVIEW_SCHEMA, target)
+
+    def local_document(self, **overrides):
+        """A receipt shaped exactly like local_review_runtime.complete()."""
+        inputs = {"v": 1, "repo": "o/r", "base_commit": "a" * 40, "base_tree": "b" * 40,
+                  "head_commit": "c" * 40, "head_tree": "d" * 40, "scope": "full-diff",
+                  "projection": "git-diff-full", "config_digest": "e" * 64,
+                  "profile": {"adapter": "coderabbit-cli", "revision": "1"}}
+        document = {"v": 1, "kind": "local-review-full-diff",
+                    "identity": review_receipt.digest(inputs), "identity_inputs": inputs,
+                    "profile": {"adapter": "coderabbit-cli", "revision": "1",
+                                "flags": ["--agent"]},
+                    "run_id": "local-1-20261108T000000Z", "outcome": "findings",
+                    "scope_adequate": True, "findings": [{"type": "finding"}],
+                    "report": "# findings", "observed": {"exit_code": 0},
+                    "independent_acceptance": False}
+        document.update(overrides)
+        return document
+
+    def test_local_review_receipts_use_the_deployment_schema(self):
+        import review_operation
+        self.install_local_review_schema()
+        schema = dc.receipt_schema(self.effects)
+        self.assertEqual(schema["local_review_source"],
+                         "deployment:" + dc.LOCAL_REVIEW_SCHEMA)
+        valid = self.local_document()
+        # The fixture is a real receipt under the runner's own contract.
+        review_operation.validate("receipt", valid)
+        cases = {
+            "valid": (valid, None),
+            "no-verdict": (self.local_document(outcome="no-verdict", scope_adequate=False,
+                                               findings=[]), None),
+            "extra-field": (self.local_document(extra=1), "unknown extra"),
+            "wrong-v": (self.local_document(v=2), "local-review schema: v"),
+            "bad-head": (self.local_document(identity_inputs={
+                **valid["identity_inputs"], "head_commit": "main"}), "head_commit"),
+            "identity-unbound": (self.local_document(identity="0" * 64), "identity"),
+            "contradicting-outcome": (self.local_document(outcome="clean"), "contradicts"),
+            "verdict-without-scope": (self.local_document(scope_adequate=False),
+                                      "without adequate scope"),
+            "unknown-family": ({**valid, "kind": "other-kind"}, "family: other-kind"),
+        }
+        for label, (document, expected) in cases.items():
+            with self.subTest(label=label):
+                data = review_receipt.canonical(document)
+                problem = dc.receipt_problem(hashlib.sha256(data).hexdigest() + ".json",
+                                             data, schema)
+                if expected is None:
+                    self.assertIsNone(problem)
+                else:
+                    self.assertIn(expected, problem)
+
+    def test_local_review_without_deployment_schema_is_unverified_not_accepted(self):
+        schema = dc.receipt_schema(self.effects)  # fixture root has no policy/
+        self.assertTrue(schema["local_review_source"].startswith("unavailable"))
+        data = review_receipt.canonical(self.local_document())
+        problem = dc.receipt_problem(hashlib.sha256(data).hexdigest() + ".json", data, schema)
+        self.assertIn("unverified", problem)
+
+    def test_mixed_family_sample_reports_family_per_receipt(self):
+        self.install_local_review_schema()
+        self.write_receipt(self.receipt_document())
+        self.write_receipt(self.push_document())
+        self.write_receipt(self.local_document())
+        bad_push = self.write_receipt(self.push_document(
+            source={**self.push_document()["source"], "base": "nope"}))
+        validation = dc.receipt_validation(self.effects)
+        self.assertEqual(validation["families"],
+                         {"merged-current": 1, "push-range": 2, "local-review-full-diff": 1})
+        self.assertEqual(validation["invalid"], [{
+            "receipt": bad_push, "family": "push-range",
+            "reason": "target: source binding is not a v1 push-range subject"}])
+        self.assertEqual(validation["local_review_schema_source"],
+                         "deployment:" + dc.LOCAL_REVIEW_SCHEMA)
 
     def install_receipt_sources(self, selectors=None):
         shutil.copy(ROOT / "runtime_target.py", self.runner / "runtime_target.py")
