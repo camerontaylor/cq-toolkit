@@ -148,7 +148,7 @@ class ModuleTest(unittest.TestCase):
         self.assertEqual((result["state"], result["review_id"]), ("existing", 5))
         self.assertEqual(gh.posts(), [])
         listing = next(a for a, _ in gh.calls if "--paginate" in a)
-        self.assertIn('startswith("<!-- crq-findings run=pr7-20261106T000000Z -->")', listing[-1])
+        self.assertIn("crq-local-findings head=" + HEAD, listing[-1])
         self.assertIn('.user.login == "crq-host"', listing[-1])
 
     def test_marker_search_needs_a_usable_authenticated_login(self):

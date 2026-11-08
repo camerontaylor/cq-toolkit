@@ -359,18 +359,18 @@ def deliver(repo: str, pr: int, meta: Dict[str, Any], ndjson: Path,
     if not findings:
         return {**result, "state": "skipped-empty"}
     login = authenticated_login(gh)
-    fingerprint = None
-    if meta.get("local_review"):
-        pairs = sorted({(f.get("fileName", f.get("path", "")), f.get("title", "")) for f in findings})
-        fingerprint = hashlib.sha256(json.dumps(pairs, ensure_ascii=True).encode()).hexdigest()
-        wanted = f"<!-- crq-local-findings head={head} set={fingerprint} -->"
-        argv = ["gh", "api", "--paginate", f"repos/{repo}/pulls/{pr}/reviews?per_page=100", "--jq",
-                f'.[] | select(.user.login == {json.dumps(login)} and ((.body // "") | contains({json.dumps(wanted)}))) | {{id: .id, url: .html_url}}']
-        out = _ok(argv, _call(gh, argv))
-        for line in (out.stdout or "").splitlines():
-            row = json.loads(line)
-            if type(row.get("id")) is int:
-                return {**result, "state": "existing", "review_id": row["id"], "review_url": row.get("url")}
+    # Hash complete normalized findings, independent of ordering and producer.
+    # Serializing each object also makes nullable paths/locations comparable.
+    normalized = sorted({json.dumps(f, sort_keys=True, ensure_ascii=True) for f in findings})
+    fingerprint = hashlib.sha256(json.dumps(normalized).encode()).hexdigest()
+    wanted = f"<!-- crq-local-findings head={head} set={fingerprint} -->"
+    argv = ["gh", "api", "--paginate", f"repos/{repo}/pulls/{pr}/reviews?per_page=100", "--jq",
+            f'.[] | select(.user.login == {json.dumps(login)} and ((.body // "") | contains({json.dumps(wanted)}))) | {{id: .id, url: .html_url}}']
+    out = _ok(argv, _call(gh, argv))
+    for line in (out.stdout or "").splitlines():
+        row = json.loads(line)
+        if type(row.get("id")) is int:
+            return {**result, "state": "existing", "review_id": row["id"], "review_url": row.get("url")}
     found = existing_review(gh, repo, pr, run_id, login)
     if found:
         return {**result, "state": "existing", "review_id": found["id"], "review_url": found["url"]}
@@ -378,7 +378,7 @@ def deliver(repo: str, pr: int, meta: Dict[str, Any], ndjson: Path,
     review = build_review(meta, findings, hunks)
     if fingerprint:
         review["body"] += "\n" + wanted
-        if pr_state(gh, repo, pr).get("head") != head:
+        if meta.get("local_review") and pr_state(gh, repo, pr).get("head") != head:
             return {**result, "state": "skipped-head"}
     argv, p = _post(gh, repo, pr, review)
     if getattr(p, "returncode", 0) != 0 and "HTTP 422" in (getattr(p, "stderr", "") or "") \
@@ -387,7 +387,7 @@ def deliver(repo: str, pr: int, meta: Dict[str, Any], ndjson: Path,
         # nothing was created, so fall back once to a body-only review.
         review = build_review(meta, findings, None)
         if fingerprint:
-            if pr_state(gh, repo, pr).get("head") != head:
+            if meta.get("local_review") and pr_state(gh, repo, pr).get("head") != head:
                 return {**result, "state": "skipped-head"}
             review["body"] += "\n" + wanted
         argv, p = _post(gh, repo, pr, review)
