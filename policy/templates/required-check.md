@@ -68,9 +68,10 @@ on:
     - cron: '17 3 * * *'
   workflow_dispatch:
 
-# Event isolation prevents a feature push from cancelling its PR check.
+# Cancel obsolete PR updates only. Every push gets a unique group, avoiding
+# case-insensitive ref/expression collisions; default-branch pushes all finish.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name }}-${{ (github.event_name == 'push' && github.ref != format('refs/heads/{0}', github.event.repository.default_branch) && github.run_id) || github.event.pull_request.number || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: true
 
 permissions:
