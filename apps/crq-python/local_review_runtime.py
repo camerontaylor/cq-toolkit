@@ -92,6 +92,8 @@ def prepare(c, q, item, dry, *, completed_only=False):
         for record in reversed(pr.get("cycles", [])):
             if item.get("repeat_requested", item["generation"] > 1):
                 continue  # an explicit repeat requires a fresh invocation, even at generation 1
+            if record.get("base") != wanted["base_commit"] or record.get("head") != wanted["head_commit"]:
+                continue
             if operation.equivalent(cycle_facts(c, pr, record), wanted):
                 if not dry:
                     rdir = c.RUNS / record["run_id"]
@@ -104,7 +106,8 @@ def prepare(c, q, item, dry, *, completed_only=False):
         run = None if completed_only else pr.get("run")
         if run:
             meta = json.loads((c.RUNS / run["run_id"] / "meta.json").read_text())
-            if operation.equivalent(cycle_facts(c, pr, meta), wanted):
+            if (meta.get("base") == wanted["base_commit"] and meta.get("head") == wanted["head_commit"]
+                    and operation.equivalent(cycle_facts(c, pr, meta), wanted)):
                 raise c.NotReady("equivalent-pr-review")
     return dict(base=wanted["base_commit"], head=wanted["head_commit"],
                 target=wanted["base_commit"], label="local full-diff review",
@@ -186,6 +189,10 @@ def complete(c, q, item, rdir, run_id, cls, ended_at, exit_code):
 
 def republish(c, q, item):
     """Remote publication is independent of local completion and exact reuse."""
+    if item["identity_inputs"]["repo"] != c.REPO:
+        item.update(publication_pending=False, publication_reason="multi-repo publication unsupported")
+        c.save_queue(q)
+        return
     try:
         import backfill_runtime
         config = backfill_runtime.settings(c.STATE)

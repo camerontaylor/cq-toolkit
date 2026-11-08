@@ -2417,8 +2417,17 @@ def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
             q.update(paused=True, pause_reason=f"{cls['outcome']} on {r['run_id']}; owner action needed")
         result = local_review_runtime.complete(sys.modules[__name__], q, item, rdir, r["run_id"], cls,
                     json.loads(exitf.read_text())["ended_at"], exit_code)
-        remove_worktree(Path(meta["worktree"]), meta["wt_branch"],
-                        clone=local_review_runtime.transport.clone_for(sys.modules[__name__], item_repo(item)))
+        try:
+            try:
+                clone = local_review_runtime.transport.clone_for(sys.modules[__name__], item_repo(item))
+            except ValueError:
+                # Resolve the owning git directory before removing a worktree
+                # whose repo was removed from REPOS. Never use the primary clone.
+                clone = Path(git("rev-parse", "--path-format=absolute", "--git-common-dir",
+                                 cwd=Path(meta["worktree"])))
+            remove_worktree(Path(meta["worktree"]), meta["wt_branch"], clone=clone)
+        except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+            event("local_review_cleanup_failed", item=item["id"], reason=str(exc)[:300])
         return result
     if item["kind"] == review_receipt.KIND:
         # Receipt before queue mutation: a crash here is recovered by re-harvest.

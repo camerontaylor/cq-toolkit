@@ -365,7 +365,7 @@ class ReviewTransportTests(SnapshotTransportFixture, unittest.TestCase):
                 with self.assertRaisesRegex(author_snapshot.AuthorRefused, "3145728 decoded bytes"):
                     self.call_review(req)
 
-    def test_foreign_repo_snapshot_plan_launch_and_cleanup(self):
+    def test_foreign_repo_snapshot_plan_launch_and_cleanup(self, removed=False):
         import local_review_runtime as runtime
         foreign = "example/secondary"
         self.review["inputs"]["repo"] = foreign
@@ -409,6 +409,8 @@ class ReviewTransportTests(SnapshotTransportFixture, unittest.TestCase):
             rdir = crq.RUNS / run_id
             (rdir / "review.ndjson").write_text('{"type":"complete","status":"completed"}\n')
             (rdir / "exit.json").write_text(json.dumps(dict(exit=0, ended_at="2026-11-08T00:01:00Z")))
+            if removed:
+                crq.REPOS = []
             with mock.patch.object(crq, "classify", return_value=dict(counted=True, outcome="completed", findings=0, severity_counts={})), \
                  mock.patch.object(crq, "findings_md", return_value="Clean"), \
                  mock.patch.object(crq, "run_liveness", return_value="harvest"), \
@@ -417,10 +419,17 @@ class ReviewTransportTests(SnapshotTransportFixture, unittest.TestCase):
             self.assertEqual(item["state"], "done")
             self.assertFalse(Path(meta["worktree"]).exists())
             self.assertIsNotNone(runtime.retained(crq, item))
-            self.assertTrue(crq.local_review_pr.associate(crq, self.saved, foreign, 7, self.base, self.head, False))
+            self.assertFalse(item["publication_pending"])
+            self.assertEqual(item["publication_reason"], "multi-repo publication unsupported")
+            self.assertNotIn(meta["wt_branch"], author_snapshot.git(self.destination, "branch", "--list").decode())
+            if not removed:
+                self.assertTrue(crq.local_review_pr.associate(crq, self.saved, foreign, 7, self.base, self.head, False))
         self.assertEqual(self.call_review(dict(v=1, op="status", request_id="local-1"))["state"], "completed")
         chunk = self.call_review(dict(v=1, op="result", request_id="local-1", index=0))
         self.assertEqual(json.loads(base64.b64decode(chunk["data"]))["identity_inputs"]["repo"], foreign)
+
+    def test_removed_foreign_repo_harvest_cleans_owning_worktree(self):
+        self.test_foreign_repo_snapshot_plan_launch_and_cleanup(removed=True)
 
     def test_clone_is_not_authorization_and_repos_is_optional(self):
         import queue_transport
