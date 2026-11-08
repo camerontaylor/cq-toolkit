@@ -152,7 +152,7 @@ describe('resolveProtectedPathsConfig with a CqEnv snapshot', () => {
     expect(
       resolveProtectedPathsConfig({
         cqEnv: bad,
-        optIn: { 'merge.protectedPaths': 'human' },
+        optIn: trustedOptIn({ 'merge.protectedPaths': 'human' }),
       }).layer,
     ).toBe('call');
     // An error for an unrelated key does not affect this resolver.
