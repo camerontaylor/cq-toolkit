@@ -87,7 +87,9 @@ def enqueue(c, q, item, meta, rdir):
     existing = item.setdefault('repair_runs', {}).get(meta['run_id'])
     if existing:
         return existing['state'] in ('queued', 'ready', 'publish_failed')
-    actionable = findings(rdir / 'review.ndjson')
+    sourced = findings(rdir / 'review.ndjson', provenance=True)
+    sources = [f.pop('_source', {}) for f in sourced]
+    actionable = sourced
     if not actionable:
         return False
     if own_range(c, q, meta['base'], meta.get('pr_head', meta['head'])):
@@ -129,7 +131,7 @@ def enqueue(c, q, item, meta, rdir):
                'run': meta['run_id'], 'cycle': meta.get('cycle'), 'repair_base': base,
                'branch': record['branch'], 'finding': finding, 'repair_round': count + 1,
                'prior': prior[-1] if prior else None, 'recurrence': bool(prior),
-               'review_diff': reviewed_diff}
+               'review_diff': reviewed_diff, 'source': sources[n - 1]}
         path = c.STATE / 'repair/inbox' / (job_id + '.json')
         if not path.exists():
             atomic(path, job)
@@ -182,8 +184,8 @@ def repair_provenance(c, record, run):
     for job_id in record['jobs']:
         job = json.loads((c.STATE / 'repair/inbox' / (job_id + '.json')).read_text())
         finding = job.get('finding', {})
-        fid = job.get('canonical_finding_id') or finding.get('id') or finding.get('source_id') or job_id
-        source = job.get('review_id') or job.get('run') or run
+        fid = job.get('canonical_finding_id') or finding.get('id') or finding.get('source_id') or job.get('source', {}).get('id') or job.get('source', {}).get('source_id') or job_id
+        source = job.get('review_id') or job.get('source', {}).get('review_id') or job.get('run') or run
         link = ('https://github.com/' + c.REPO + '/pull/' + str(job['pr'])) if job.get('pr') else 'threadless; finding ledger is authoritative'
         lines.append('| `' + str(fid) + '` | `' + str(source) + '` | ' + link + ' |')
     return lines
@@ -377,6 +379,7 @@ def finalize_publication(c, q, item, run, record, publication):
     record['published_commits'] = translated
     if publication['open_pr']:
         item['last_push'] = {'sha': head, 'shas': translated, 'at': c.iso()}
+        record['fix_pr'] = {'number': item['pr'], 'url': 'https://github.com/' + c.REPO + '/pull/' + str(item['pr'])}
     else:
         prs = c.gh_json(['pr', 'list', '--repo', c.REPO, '--head', branch, '--state', 'all', '--json', 'number,url,state'])
         if not prs:
@@ -520,6 +523,38 @@ def reconcile_current_fix(c, item):
         item.pop('remediation', None)
 
 
+def source_thread(c, job):
+    source = job.get('source', {})
+    explicit = (job.get('source_thread_id') or job.get('thread_id') or
+                source.get('source_thread_id') or source.get('thread_id') or
+                job.get('finding', {}).get('thread_id'))
+    if explicit:
+        return explicit
+    number = source.get('finding_number')
+    if not number or not job.get('pr'):
+        return None
+    owner, repo = c.REPO.split('/')
+    query = ('query($owner:String!,$repo:String!,$pr:Int!,$endCursor:String){'
+             'repository(owner:$owner,name:$repo){pullRequest(number:$pr){'
+             'reviewThreads(first:100,after:$endCursor){pageInfo{hasNextPage endCursor}'
+             'nodes{id comments(first:1){nodes{body path}}}}}}}')
+    pages = c.gh_json(['api', 'graphql', '--paginate', '--slurp', '-f', 'query=' + query,
+                       '-f', 'owner=' + owner, '-f', 'repo=' + repo, '-F', 'pr=' + str(job['pr'])])
+    matches = set()
+    for page in pages:
+        if page.get('errors'):
+            raise ValueError('source thread lookup failed')
+        for thread in page['data']['repository']['pullRequest']['reviewThreads']['nodes']:
+            for comment in thread['comments']['nodes']:
+                if (comment.get('path') == job['finding'].get('path') and
+                        comment.get('body', '').startswith('**crq finding F' + str(number) + ' [') and
+                        '<sub>crq run `' + job['run'] + '`' in comment.get('body', '')):
+                    matches.add(thread['id'])
+    if len(matches) > 1:
+        raise ValueError('ambiguous source thread; retain publication for retry')
+    return next(iter(matches), None)
+
+
 def publish_source_resolution(c, record, merge):
     """Resume source comments/resolves in the existing publication journal."""
     publication = record.get('publication')
@@ -541,7 +576,7 @@ def publish_source_resolution(c, record, merge):
             body = journal.parent / ('source-' + job['job'] + '.md')
             body.write_text(marker + '\nFixed by ' + record['fix_pr']['url'] + ' (merge `' + merge + '`).\n')
             c.run(['env', '-u', 'GITHUB_TOKEN', 'gh', 'pr', 'comment', str(job['pr']), '--repo', c.REPO, '--body-file', str(body)])
-        thread = job.get('source_thread_id') or job.get('thread_id') or job.get('finding', {}).get('thread_id')
+        thread = source_thread(c, job)
         if thread:
             request = journal.parent / ('resolve-' + job['job'] + '.json')
             atomic(request, {'query': 'mutation($threadId:ID!){resolveReviewThread(input:{threadId:$threadId}){thread{isResolved}}}',

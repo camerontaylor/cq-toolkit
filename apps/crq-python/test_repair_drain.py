@@ -162,6 +162,59 @@ class RepairDrainTest(unittest.TestCase):
         self.assertEqual(journal['source_resolutions'], [job_id])
         self.assertIn('--body-file', c.run.call_args.args[0])
 
+    def test_enqueue_preserves_explicit_source_ids_and_published_ordinal(self):
+        rdir = self.root / 'runs/source'
+        rdir.mkdir(parents=True)
+        events = [{'type': 'finding', 'severity': 'minor', 'fileName': 'other', 'comment': 'minor'},
+                  {'type': 'finding', 'severity': 'major', 'fileName': 'src/kept.ts', 'comment': 'major',
+                   'id': 'vendor-id', 'source_id': 'source-id', 'review_id': 'review-id', 'thread_id': 'thread-node'}]
+        (rdir / 'review.ndjson').write_text('\n'.join(json.dumps(e) for e in events))
+        c = SimpleNamespace(REPO='o/r', item_repo=lambda item: 'o/r', CONFIG=self.config,
+                            STATE=self.root / 'state', git=lambda *a, **k: '' if a[0] == 'rev-list' else self.tip)
+        item = {'id': 'pr9', 'pr': 9, 'kind': 'merged', 'state': 'reviewing'}
+        meta = {'run_id': 'source-run', 'base': self.pin, 'head': self.tip}
+        self.assertTrue(repair_tick.enqueue(c, {'items': []}, item, meta, rdir))
+        job = json.loads((self.root / 'state/repair/inbox/crq-source-run-F1.json').read_text())
+        self.assertEqual(job['source'], {'id': 'vendor-id', 'source_id': 'source-id',
+                                         'review_id': 'review-id', 'thread_id': 'thread-node', 'finding_number': 2})
+        self.assertNotIn('_source', job['finding'])
+        self.assertEqual(repair_tick.source_thread(c, job), 'thread-node')
+
+    def test_source_thread_lookup_pages_and_refuses_ambiguous_matches(self):
+        job = {'pr': 9, 'run': 'run1', 'finding': {'path': 'src/kept.ts'}, 'source': {'finding_number': 2}}
+        def page(threads):
+            return {'data': {'repository': {'pullRequest': {'reviewThreads': {'nodes': threads}}}}}
+        def thread(tid, run='run1', path='src/kept.ts'):
+            return {'id': tid, 'comments': {'nodes': [{'path': path,
+                    'body': '**crq finding F2 [major]** issue\n<sub>crq run `' + run + '`, line 1</sub>'}]}}
+        c = SimpleNamespace(REPO='o/r', gh_json=mock.Mock(return_value=[page([thread('wrong', run='run2')]), page([thread('right')])]))
+        self.assertEqual(repair_tick.source_thread(c, job), 'right')
+        self.assertIn('--paginate', c.gh_json.call_args.args[0])
+        c.gh_json.return_value = [page([thread('right'), thread('duplicate')])]
+        with self.assertRaisesRegex(ValueError, 'ambiguous'):
+            repair_tick.source_thread(c, job)
+        c.gh_json.return_value = [page([])]
+        self.assertIsNone(repair_tick.source_thread(c, job))
+        self.assertIsNone(repair_tick.source_thread(c, {**job, 'pr': 0}))
+
+    def test_same_pr_publication_reconciles_only_after_validated_merge(self):
+        item = self.queue['items'][0]
+        record = item['repair_runs']['run1']
+        job_id = record['jobs'][0]
+        record['verdicts'] = [{'job': job_id, 'verdict': 'FIXED'}]
+        publication = {'open_pr': True, 'head': self.tip, 'branch': 'branch', 'commits': [self.tip]}
+        c = SimpleNamespace(STATE=self.root / 'state', REPO='o/r', save_queue=lambda q: None,
+                            iso=lambda: 'now', git=lambda *args: self.tip, is_ancestor=lambda *args: True,
+                            pr_info=mock.Mock(return_value={'state': 'OPEN'}))
+        repair_tick.finalize_publication(c, self.queue, item, 'run1', record, publication)
+        self.assertEqual(record['fix_pr']['number'], item['pr'])
+        with mock.patch.object(repair_tick, 'mark_finding_outcome') as mark, mock.patch.object(repair_tick, 'publish_source_resolution'):
+            repair_tick.reconcile_fix_prs(c, self.queue)
+            mark.assert_not_called()
+            c.pr_info.return_value = {'state': 'MERGED', 'headRefOid': self.tip, 'mergeCommit': {'oid': self.tip}}
+            repair_tick.reconcile_fix_prs(c, self.queue)
+            self.assertEqual(mark.call_args.args[3], self.tip)
+
     def git(self, *args):
         return subprocess.run(['git', '-C', str(self.clone), *args], check=True,
                               capture_output=True, text=True).stdout.strip()
