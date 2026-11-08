@@ -188,7 +188,7 @@ class Inbox:
             row["recovered_anchor"] = p["evidence"]["recovered_anchor"]
         if p["action"] == "delivered":
             row["receipt"] = p["evidence"]
-        elif p["action"] in ("confirmed", "needs-human", "duplicate", "dismissed", "superseded", "fixed", "already-fixed"):
+        elif "target" in p["evidence"]:
             row.update(target_current=p["evidence"]["target"], mapped_path=p["evidence"].get("mapped_path"),
                        mapped_intervals=p["evidence"].get("mapped_intervals", []))
             if p["action"] == "duplicate":

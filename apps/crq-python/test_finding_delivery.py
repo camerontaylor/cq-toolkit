@@ -142,6 +142,28 @@ class FindingTest(unittest.TestCase):
         self.assertEqual(job["repair_base"], self.t)
         self.assertEqual(job["canonical_finding_id"], self.fid)
 
+    def test_outcome_events_without_target_replay_preserving_current_anchor(self):
+        filename = self.root / "findings/triage" / (self.fid + ".json")
+        confirmed = self.inbox.triage(self.fid, self.f.repo, self.t, "confirmed", "reviewer", "valid", AT)
+        before = filename.read_bytes()
+        for action in ("needs-retriage", "fixed", "dismissed", "needs-human"):
+            with self.subTest(action=action):
+                ledger.atomic(filename, before)
+                evidence = {"reason": "repair outcome", "fixing_commit": self.t, "verification": "merged"}
+                event = ledger.event("finding-event", "outcome:" + action, AT,
+                                     {"finding_id": self.fid, "review_id": self.value["id"],
+                                      "previous_event_id": confirmed["id"], "action": action,
+                                      "evidence": evidence, "actor": "crq-repair"})
+                self.inbox.recover([event])
+                row = ledger.loads(filename.read_bytes())
+                self.assertEqual(row["status"], action)
+                self.assertEqual(row["previous_event_id"], event["id"])
+                self.assertEqual(row["target_current"], self.t)
+                self.assertEqual(row["mapped_path"], "a")
+                self.assertEqual(row["mapped_intervals"], [[1, 1]])
+                self.inbox.recover([event])
+                self.assertEqual(ledger.loads(filename.read_bytes()), row)
+
     def test_reverse_order_acknowledged_chain_recovers_after_local_state_loss(self):
         filename = self.root / "findings/triage" / (self.fid + ".json")
         before = filename.read_bytes()
