@@ -79,7 +79,9 @@
 // DETERMINISM: classify and plan are pure and clock-free; Date.now() is
 // read ONCE, here (the composition is the one place the ambient clock is
 // allowed — tests inject `nowMs`). Same input + same nowMs → deep-equal
-// outcome, always.
+// outcome, always. The dispatched op REJECTS (`config`) a plan-supplied
+// `nowMs` later than the real clock (a later clock would shorten the settle
+// wait), so the dispatch route stays deterministic for every accepted input.
 import pLimit from 'p-limit';
 import { createDriverFactory } from '../../driver/factory.js';
 import type { DriverFactory } from '../../driver/factory.js';
@@ -98,7 +100,7 @@ import type { CqEnv } from '../../config/env.js';
 import {
   assertBaseBranchMirror,
   assertProtectedBranchMirror,
-  clampClock,
+  assertPlanClock,
   mergeClassifyConfig,
   resolveClassifyTrust,
 } from './trustMirrors.js';
@@ -685,6 +687,9 @@ export function makeRunMergePrsOp(
       deps?.cqEnv,
     );
     const baseBranch = assertBaseBranchMirror('merge.runPrs', input.baseBranch, deps?.cqEnv);
+    // A plan-supplied clock later than the real one is a `config` error (before any effect).
+    const nowMs =
+      input.nowMs !== undefined ? assertPlanClock('merge.runPrs', input.nowMs) : undefined;
     // Who counts as a reviewer is a trust input: resolved from config only.
     const trust = resolveClassifyTrust('merge.runPrs', input.config, deps?.cqEnv);
     const config =
@@ -722,8 +727,7 @@ export function makeRunMergePrsOp(
         ...input,
         baseBranch,
         protectedBranch,
-        // a plan-supplied clock can only stall, never skip a settle wait
-        ...(input.nowMs !== undefined ? { nowMs: clampClock(input.nowMs) } : {}),
+        ...(nowMs !== undefined ? { nowMs } : {}),
         ...(config !== undefined ? { config } : {}),
       },
       {

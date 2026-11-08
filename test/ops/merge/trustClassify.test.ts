@@ -409,13 +409,136 @@ describe('classify trust defaults are independent per key', () => {
     ).toMatchObject({ trustedAssociations: ['MEMBER'], acceptReviewStates: ['APPROVED'] });
   });
 
-  test('a plan-supplied clock can only stall: a future nowMs is clamped to the real clock', async () => {
+  test('a plan-supplied nowMs later than the real clock, or invalid, is a config error (no clamp)', async () => {
     const op = await entryOf('merge.classifyPrs').importer({ cqEnv: env() });
-    const young = eligible(13, { lastCommitAt: new Date(Date.now() - 1000).toISOString() });
-    const r = (await op({ candidate: young, nowMs: Date.now() + 30 * 24 * 3600 * 1000 })) as {
-      value: { reason: string };
-    };
-    expect(r.value.reason).not.toBe('settle_window_elapsed');
+    const now = Date.now();
+    // a review AFTER lastCommitAt, no all-clear body: only the clock decides the verdict
+    const fresh = eligible(13, {
+      lastCommitAt: new Date(now - 5000).toISOString(),
+      reviews: [
+        {
+          id: 'r13',
+          authorLogin: 'alice',
+          state: 'APPROVED',
+          body: 'approving the cache changes',
+          submittedAt: new Date(now - 4000).toISOString(),
+        },
+      ],
+    });
+    const verdict = async (nowMs: unknown) =>
+      (await op({ candidate: fresh, nowMs } as never).catch((e: unknown) => e)) as {
+        value?: { reason: string };
+      };
+    // the real clock: the window has not elapsed
+    expect((await verdict(now)).value?.reason).toBe('settle_window_pending');
+    // a later clock would skip the wait; it is rejected, never accepted or clamped
+    for (const bad of [now + 30 * 24 * 3600 * 1000, Number.NaN, -1, Infinity, 'x']) {
+      const err = await verdict(bad);
+      expect(errorClassOf(err)).toBe('config');
+      expect(String(err)).toContain('input.nowMs');
+      expect(String(err)).not.toContain('x"');
+    }
+    // runPrs rejects the same before any effect
+    const effects = new FakeMergeEffects();
+    const run = makeRunMergePrsOp({ effects, cqEnv: env() });
+    const err = await run({
+      baseBranch: 'main',
+      repoRoot: '.',
+      prs: [fresh],
+      nowMs: now + 30 * 24 * 3600 * 1000,
+    }).catch((e: unknown) => e);
+    expect(errorClassOf(err)).toBe('config');
+    expect(effects.calls).toEqual([]);
+  });
+
+  test('prototype-named plan keys are refused as unknown fields, not ignored', () => {
+    for (const key of ['__proto__', 'constructor', 'toString', 'hasOwnProperty']) {
+      const plan = JSON.parse(`{"${key}": {"x": 1}}`) as Record<string, unknown>;
+      let err: unknown;
+      try {
+        mergeClassifyConfig('t', defaultClassifyPrConfig, plan);
+      } catch (e) {
+        err = e;
+      }
+      expect(errorClassOf(err)).toBe('config');
+      expect(String(err)).toContain(key);
+    }
+  });
+
+  test('a wrong-shape known field is a config error, never a TypeError', () => {
+    const shapes: Array<[string, unknown]> = [
+      ['excludedLogins', 'a-string'],
+      ['excludedLogins', { a: 1 }],
+      ['excludedLogins', [1]],
+      ['settleWindowMs', '5'],
+      ['settleWindowMs', Number.NaN],
+      ['settleWindowMs', -1],
+      ['automationLogin', 7],
+      ['trustedBots', 'x'],
+      ['trustedBots', [1]],
+      ['trustedAssociations', { 0: 'MEMBER' }],
+      ['trustedAssociations', 'MEMBER'],
+      ['acceptReviewStates', [null]],
+      ['acceptReviewStates', 'APPROVED'],
+    ];
+    for (const [field, value] of shapes) {
+      let err: unknown;
+      try {
+        mergeClassifyConfig('t', defaultClassifyPrConfig, { [field]: value });
+      } catch (e) {
+        err = e;
+      }
+      expect(err, `${field}=${JSON.stringify(value)}`).toBeInstanceOf(Error);
+      expect(errorClassOf(err)).toBe('config');
+      expect(String(err)).toContain(field);
+    }
+  });
+
+  test('a conflicting automationLogin message never echoes either value', () => {
+    let err: unknown;
+    try {
+      mergeClassifyConfig(
+        't',
+        { ...defaultClassifyPrConfig, automationLogin: 'host-secret-login' },
+        { automationLogin: 'plan-attacker-login' },
+      );
+    } catch (e) {
+      err = e;
+    }
+    expect(errorClassOf(err)).toBe('config');
+    expect(String(err)).not.toContain('host-secret-login');
+    expect(String(err)).not.toContain('plan-attacker-login');
+  });
+
+  test('schema level: a negative, NaN or Infinity settleWindowMs is rejected at dispatch', () => {
+    // schema-valid candidates (the twin is strict: no headRefName/baseRefName/state on the classify twin)
+    const { headRefName: _h, baseRefName: _b, state: _s, ...plain } = candidate;
+    const runCandidate = { ...candidate };
+    for (const entryName of ['merge.classifyPrs', 'merge.runPrs']) {
+      const schema = entryOf(entryName).inputSchema;
+      for (const bad of [-1, Number.NaN, Infinity]) {
+        const input =
+          entryName === 'merge.classifyPrs'
+            ? { candidate: plain, nowMs: NOW_MS, config: { settleWindowMs: bad } }
+            : {
+                baseBranch: 'main',
+                repoRoot: '.',
+                prs: [runCandidate],
+                config: { settleWindowMs: bad },
+              };
+        expect(schema.safeParse(input).success, `${entryName} ${String(bad)}`).toBe(false);
+      }
+      const ok =
+        entryName === 'merge.classifyPrs'
+          ? { candidate: plain, nowMs: NOW_MS, config: { settleWindowMs: 1 } }
+          : {
+              baseBranch: 'main',
+              repoRoot: '.',
+              prs: [runCandidate],
+              config: { settleWindowMs: 1 },
+            };
+      expect(schema.safeParse(ok).success).toBe(true);
+    }
   });
 
   test('none set: nothing synthesised (built-in classifier behaviour unchanged); a restated documented default is accepted', () => {
