@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import random
+import re
 import time
 from zoneinfo import ZoneInfo
 from crq_repair import atomic, command, git, hack_detector, utc, verify
@@ -110,9 +111,95 @@ def correlation(job, judge):
                 os.environ[key] = old
 
 
+def fallback_roles(config, role):
+    return [role] + [{**role, 'driver': 'cq', 'model': model}
+                     for model in config['repair'].get('fallback_models', [])
+                     if role['driver'] == 'cq' and model != role['model']]
+
+
+def provider_ready(role):
+    provider = role['model'].split('/', 1)[0]
+    keys = {'zai': ('ZAI_API_KEY',), 'opencode-go': ('OPENCODE_GO_API_KEY', 'OPENCODE_GO_BASE_URL'),
+            'deepseek': ('DEEPSEEK_API_KEY',)}
+    return all(os.environ.get(key) for key in keys.get(provider, ()))
+
+
+def provider_cooldowns():
+    path = ROOT / 'state/repair/provider-cooldowns.json'
+    if not path.exists():
+        return {}
+    # Corrupt state must not silently spend against a known exhausted provider.
+    return json.loads(path.read_text())
+
+
+def remember_provider_limit(provider, report):
+    now = dt.datetime.now(dt.timezone.utc)
+    retry_ms = report.get('retry_after_ms') or (report.get('providerSignals') or {}).get('retryAfterMs')
+    wait = dt.timedelta(milliseconds=retry_ms) if isinstance(retry_ms, (int, float)) and retry_ms > 0 else DEFAULT_RATE_LIMIT_PAUSE
+    until = now + min(wait, dt.timedelta(days=7))
+    # Only parse the vendor's explicit reset phrase, never arbitrary dates in
+    # finding text. An unzoned date is conservatively treated as UTC, avoiding
+    # an early retry against a provider whose local timezone is east of UTC.
+    text = str(report.get('summary') or report.get('reason') or '')
+    reset = re.search(r'limit will reset at (\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:Z|[+-]\d{2}:\d{2})?)', text, re.I)
+    if reset:
+        try:
+            end = dt.datetime.fromisoformat(reset[1].replace('Z', '+00:00'))
+            if end.tzinfo is None:
+                end = end.replace(tzinfo=dt.timezone.utc)
+            until = max(until, min(end, now + dt.timedelta(days=7)))
+        except ValueError:
+            pass
+    state = provider_cooldowns()
+    stamp = until.strftime('%Y-%m-%dT%H:%M:%SZ')
+    state[provider] = max(state.get(provider, ''), stamp)
+    atomic(ROOT / 'state/repair/provider-cooldowns.json', state)
+    return state[provider]
+
+
+def dispatch_paused(config):
+    if config['repair'].get('fallback_models'):
+        state = provider_cooldowns()
+        now = utc()
+        roles = [candidate for role in config['repair']['roles'].values()
+                 for candidate in fallback_roles(config, role) if provider_ready(candidate)]
+        if any(state.get(role['model'].split('/', 1)[0], '') <= now for role in roles):
+            return None
+    return paused()
+
+
 def dispatch(config, role, job, wt, directory, judge=False):
+    if not config['repair'].get('fallback_models') or role['driver'] != 'cq':
+        with correlation(job, judge):
+            return _dispatch(config, role, job, wt, directory, judge)
+    state = provider_cooldowns()
+    deadline = time.monotonic() + config['repair']['budget']['wall_clock_min'] * 60
+    waits = []
+    seen = set()
     with correlation(job, judge):
-        return _dispatch(config, role, job, wt, directory, judge)
+        for candidate in fallback_roles(config, role):
+            provider = candidate['model'].split('/', 1)[0]
+            if provider in seen or not provider_ready(candidate):
+                continue
+            seen.add(provider)
+            if state.get(provider, '') > utc():
+                waits.append(state[provider])
+                continue
+            # Separate sessions and logs for each provider, including judges.
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return {'stop': 'budget', 'summary': 'repair dispatch wall-clock deadline reached'}
+            bounded_config = copy.deepcopy(config)
+            bounded_config['repair']['budget']['wall_clock_min'] = remaining / 60
+            report = _dispatch(bounded_config, candidate, job, wt, directory / provider, judge)
+            report.update(driver=candidate['driver'], model=candidate['model'])
+            if report.get('stop') != 'rate-limit':
+                return report
+            waits.append(remember_provider_limit(provider, report))
+    if not waits:
+        return {'stop': 'configuration', 'summary': 'no configured repair provider is available'}
+    end = dt.datetime.fromisoformat(min(waits).replace('Z', '+00:00'))
+    return {'stop': 'rate-limit', 'retry_after_ms': max(1000, (end - dt.datetime.now(dt.timezone.utc)).total_seconds() * 1000)}
 
 
 def _dispatch(config, role, job, wt, directory, judge=False):
@@ -138,7 +225,7 @@ def process(config, job, wt):
     result_path = directory / 'result.json'
     if result_path.exists():
         prior = json.loads(result_path.read_text())
-        if not prior.get('retry_after') or dt.datetime.fromisoformat(prior['retry_after'].replace('Z', '+00:00')) > dt.datetime.now(dt.timezone.utc):
+        if not prior.get('retry_after') or (not repair.get('fallback_models') and dt.datetime.fromisoformat(prior['retry_after'].replace('Z', '+00:00')) > dt.datetime.now(dt.timezone.utc)):
             return prior
     roles = copy.deepcopy(repair['roles'])
     result = {'job': job['job'], 'item': job['item'], 'repair_base': job['repair_base'],
@@ -197,7 +284,7 @@ def process(config, job, wt):
                     result['next_rung'] = rung
                     return defer('provider rate limit; attempt deferred', rate_limit=report)
                 attempt = {'rung': 'A' + str(rung), 'role': 'fixer' if rung < 2 else 'fixer_escalation',
-                           'driver': role['driver'], 'model': role['model'], 'stop': report.get('stop'),
+                           'driver': report.get('driver', role['driver']), 'model': report.get('model', role['model']), 'stop': report.get('stop'),
                            'changed': report.get('changed', False)}
                 result['attempts'].append(attempt)
                 if report.get('stop') == 'configuration':
@@ -340,7 +427,7 @@ def drain(config):
     """Automatic inbox drain, oldest first. Items run serially: one item
     worktree at a time, serial findings within it (see README for why)."""
     repair = config['repair']
-    until = paused()
+    until = dispatch_paused(config)
     if until:
         print('repair drain paused: provider rate limit until ' + until)
         return
@@ -407,14 +494,14 @@ def process_item(config, jobs):
     for job in jobs:
         if blocked(config['repair']):
             break  # never start a new finding inside the GLM peak window
-        if paused():
+        if dispatch_paused(config):
             return 'rate-limit'  # no model call anywhere while the pause marker is live
         if job['run'] != last_run:
             base = job['repair_base']
             last_run = job['run']
         job['repair_base'] = base
         res = process(config, job, wt)
-        if paused():
+        if dispatch_paused(config):
             return 'rate-limit'
         if res.get('retry_after'):
             break
@@ -452,7 +539,9 @@ def main(argv=None):
         return
     # A missing key would otherwise turn every attempt into a FAILED verdict.
     if any(role['driver'] == 'cq' and role['model'].startswith('zai/') for role in repair['roles'].values()) \
-            and not os.environ.get('ZAI_API_KEY'):
+            and not os.environ.get('ZAI_API_KEY') and not any(
+                provider_ready(candidate) for role in repair['roles'].values()
+                for candidate in fallback_roles(config, role)[1:]):
         print('repair dispatch disabled: ZAI_API_KEY is not in the service environment')
         return
     if blocked(repair):

@@ -62,7 +62,8 @@
   "paseo_hosts": [],
   "repair": {
     "enabled": true,
-    "spend_authorization": "owner 2026-11-02: turn on the fixers; cq/GLM only",
+    "spend_authorization": "owner 2026-11-08: cq fixers and judges; Z.ai with OpenCode Go and DeepSeek fallback",
+    "fallback_models": ["opencode-go/deepseek-v4.1-flash", "deepseek/deepseek-flash"],
     "max_rounds_per_pin": 2,
     "fix_pr_cycles": 1,
     "blackout": {
