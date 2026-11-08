@@ -1,10 +1,8 @@
 import {
-  liveLeases,
-  terminalWorkers,
-  participantLeases,
+  createAddressRunContext,
+  addressRunLeaseAuthority,
   type Participant,
-  terminalInternals,
-  terminalAuthorities,
+  type AddressRunLease,
 } from './addressRunLifecycle.js';
 export {
   validateAddressTerminalAuthority,
@@ -277,7 +275,10 @@ export class AddressOwnership {
   private readonly tasks = new Set<Promise<unknown>>();
   private readonly recorded = new Set<string>();
   private readonly retentionAdvisories: string[] = [];
-  private readonly terminalToken = Object.freeze({});
+  private readonly runContext;
+  private get terminalToken(): object {
+    return this.runContext.token;
+  }
   private readonly participants = new Set<Participant>();
   private readonly terminalProcesses = new Set<Promise<void>>();
   private readonly terminalOperations = new Set<Promise<void>>();
@@ -308,7 +309,7 @@ export class AddressOwnership {
       string,
       { root: string; directory: Identity; entry: Identity; link: string }
     >();
-    terminalInternals.set(this, {
+    this.runContext = createAddressRunContext(this, {
       checkpoint: (root, head, expected) =>
         checkpointAddressTerminalEvidence(this.terminalToken, root, head, expected),
       bookkeeping: (root, entries) =>
@@ -360,6 +361,10 @@ export class AddressOwnership {
         releaseAddressTerminalEvidence(attempt);
       },
     });
+  }
+
+  runParticipant<T>(lease: AddressLease, action: () => Promise<T>): Promise<T> {
+    return this.runContext.runParticipant(lease, action);
   }
 
   private get storePath(): string {
@@ -886,8 +891,8 @@ export class AddressOwnership {
     );
   }
 
-  private async participant<T>(lease: AddressLease, action: () => Promise<T>): Promise<T> {
-    if (liveLeases.get(lease) !== this || participantLeases.has(lease))
+  private async participant<T>(lease: AddressRunLease, action: () => Promise<T>): Promise<T> {
+    if (addressRunLeaseAuthority(lease) !== this || this.runContext.participant(lease))
       throw new Error('address terminal: forged/reused participant');
     const participant: Participant = {
       lease,
@@ -897,7 +902,7 @@ export class AddressOwnership {
       attempts: [],
       opaqueDispatched: false,
     };
-    participantLeases.set(lease, participant);
+    this.runContext.registerParticipant(lease, participant);
     this.participants.add(participant);
     try {
       const result = await action();
@@ -909,8 +914,8 @@ export class AddressOwnership {
     }
   }
 
-  private async bindReport(lease: AddressLease, report: ReviewAddressReport): Promise<void> {
-    const participant = participantLeases.get(lease);
+  private async bindReport(lease: AddressRunLease, report: ReviewAddressReport): Promise<void> {
+    const participant = this.runContext.participant(lease);
     if (
       !participant ||
       participant.closed ||
@@ -957,8 +962,8 @@ export class AddressOwnership {
     participant.report = report;
   }
 
-  private noteOpaqueInvocation(lease: AddressLease): void {
-    const participant = participantLeases.get(lease);
+  private noteOpaqueInvocation(lease: AddressRunLease): void {
+    const participant = this.runContext.participant(lease);
     if (
       !this.active ||
       !this.admitting ||
@@ -972,13 +977,11 @@ export class AddressOwnership {
     participant.opaqueDispatched = true;
   }
 
-  private workerBinding(lease: AddressLease): object {
-    const participant = participantLeases.get(lease);
+  private workerBinding(lease: AddressRunLease): object {
+    const participant = this.runContext.participant(lease);
     if (!participant || participant.closed || !this.participants.has(participant))
       throw new Error('address terminal: worker association refused');
-    const binding = Object.freeze({});
-    terminalWorkers.set(binding, { owner: this, participant });
-    return binding;
+    return this.runContext.workerBinding(participant);
   }
 
   private async recordAttempt(
@@ -1153,8 +1156,8 @@ export class AddressOwnership {
     }
   }
 
-  private async cancelledResult(lease: AddressLease): Promise<ReviewAddressResult> {
-    const participant = participantLeases.get(lease);
+  private async cancelledResult(lease: AddressRunLease): Promise<ReviewAddressResult> {
+    const participant = this.runContext.participant(lease);
     if (!participant?.report || !this.participants.has(participant))
       throw new Error('address terminal: missing report association');
     await this.arrive(participant);
@@ -1252,7 +1255,7 @@ export class AddressOwnership {
         await this.persist('active');
         this.signal.throwIfAborted();
         this.active = this.admitting = true;
-        terminalAuthorities.set(this.terminalToken, this);
+        this.runContext.activate();
         this.signal.addEventListener('abort', this.stopAdmissions, { once: true });
         if (this.signal.aborted) this.stopAdmissions();
         let checking: Promise<void> | undefined;
@@ -1481,7 +1484,7 @@ export class AddressOwnership {
         await this.assertOwned();
       },
     };
-    liveLeases.set(lease, this);
+    this.runContext.registerLease(lease);
     return lease;
   }
 }
@@ -1491,7 +1494,7 @@ export async function runAddressReviewLoop(
   lease: AddressLease,
   opts: ReviewLoopOpts,
 ): Promise<ReviewLoopOutcome> {
-  const owner = liveLeases.get(lease);
+  const owner = addressRunLeaseAuthority(lease);
   if (!owner) throw new Error('address ownership: forged loop lease');
   await lease.assertOwned();
   if ((await commonDirectory(opts)) !== owner.commonDir)
@@ -1512,7 +1515,7 @@ export async function withReviewLoopOwnership<T>(
     // borrow an invocation, including callbacks running in inherited ALS.
     if (context.consumed) throw new Error('address ownership: loop permit already consumed');
     context.consumed = true;
-    const owner = liveLeases.get(context.lease);
+    const owner = addressRunLeaseAuthority(context.lease);
     if (!owner || (await commonDirectory(opts)) !== owner.commonDir)
       throw new Error('address ownership: invalid loop permit');
     await context.lease.assertOwned();
@@ -1543,11 +1546,11 @@ export async function withAddressOwnership<T>(
       throw new Error('address ownership: invalid production child identity');
     await child.owner.assertOwned();
     const lease = child.owner.lease(child);
-    return terminalInternals.get(child.owner)!.participant(lease, () => fn(lease));
+    return child.owner.runParticipant(lease, () => fn(lease));
   }
   const owner = await makeAddressOwnership(opts);
   return owner.withLock(async () => {
     const lease = owner.lease();
-    return terminalInternals.get(owner)!.participant(lease, () => fn(lease));
+    return owner.runParticipant(lease, () => fn(lease));
   });
 }
