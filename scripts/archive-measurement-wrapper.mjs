@@ -323,7 +323,11 @@ export async function runMeasurementArchive(input = {}) {
   };
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+// Compare through the entry's real path: argv[1] may name a symlink (a bin shim
+// or a linked checkout) while import.meta.url is already resolved, so the plain
+// path comparison silently skipped the CLI block.
+const entry = process.argv[1] ? await realpath(resolve(process.argv[1])).catch(() => null) : null;
+if (entry && import.meta.url === pathToFileURL(entry).href) {
   const args = process.argv.slice(2);
   const option = (name) => {
     const value = args[args.indexOf(name) + 1];
