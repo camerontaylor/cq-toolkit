@@ -43,7 +43,7 @@ class BoundedRepairTest(unittest.TestCase):
                                      SOURCE if args == ('rev-parse', 'origin/main') else BLOB).start()
         self.addCleanup(mock.patch.stopall)
         self.c = SimpleNamespace(ROOT=self.root, STATE=self.root / 'state', CONFIG=self.config,
-                                 CLONE=Path('/unused'), run=mock.Mock(return_value=SimpleNamespace(stdout='\nfirst\nsecond\n')),
+                                 CLONE=Path('/unused'), iso=lambda: 'now', run=mock.Mock(return_value=SimpleNamespace(stdout='\nfirst\nsecond\n')),
                                  secret_scan_diff=mock.Mock(return_value=(True, {})),
                                  save_queue=lambda q: atomic(self.root / 'state/queue.json', q))
 
@@ -117,7 +117,8 @@ class BoundedRepairTest(unittest.TestCase):
         self.queue['items'].append({'id': 'backfill-finding-b', 'pr': 0, 'repair_runs': {
             'b1': {'pin': SOURCE}, 'b2': {'pin': SOURCE}}})
         atomic(bounded.job_path(self.root, OLD), self.old)
-        self.prepare()
+        with mock.patch.object(repair_tick, 'finding_inbox'):
+            self.prepare()
         new_evidence = {**self.evidence, 'reason': 'Independent revalidation of the same finding.'}
         with self.assertRaisesRegex(ValueError, 'ceiling'):
             repair_tick.prepare_current_job(self.c, self.queue, OLD, SOURCE, new_evidence)
