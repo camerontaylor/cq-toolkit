@@ -1,6 +1,8 @@
 import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { runInNewContext } from 'node:vm';
+import { parse } from 'yaml';
 import { describe, expect, it } from 'vitest';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
@@ -82,12 +84,50 @@ describe('required workflow cancellation isolation', () => {
     '%s isolates each event and PR/ref',
     (file) => {
       const text = read(file);
-      const subject = file.includes('denylist') ? 'github.sha' : 'github.ref';
+      const subject = file.includes('denylist')
+        ? 'github.event.pull_request.number || github.run_id'
+        : "(github.event_name == 'push' && github.ref != format('refs/heads/{0}', github.event.repository.default_branch) && github.run_id) || github.event.pull_request.number || github.ref";
       expect(text).toContain(
-        `group: \${{ github.workflow }}-\${{ github.event_name }}-\${{ github.event.pull_request.number || ${subject} }}`,
+        `group: \${{ github.workflow }}-\${{ github.event_name }}-\${{ ${subject} }}`,
       );
       expect(text).toContain('cancel-in-progress: true');
       expect(text).toMatch(/on:\n {2}push:\n {2}pull_request:\n/);
     },
   );
+});
+
+// Evaluate the actual rendered keys, including GitHub's case-insensitive groups.
+describe('concurrency collisions', () => {
+  it.each(['ci.yml', 'denylist.yml'])('%s isolates cancellation axes', (file) => {
+    const workflow = parse(read(`.github/workflows/${file}`)) as { concurrency: { group: string } };
+    const key = (event: string, ref: string, run: number, pr = 0): string =>
+      workflow.concurrency.group
+        .replace(/\$\{\{([\s\S]*?)\}\}/g, (_whole: string, expression: string) =>
+          String(
+            runInNewContext(expression, {
+              github: {
+                workflow: file,
+                event_name: event,
+                ref,
+                run_id: run,
+                sha: 'same-sha',
+                event: { repository: { default_branch: 'main' }, pull_request: { number: pr } },
+              },
+              format: (pattern: string, value: string) => pattern.replace('{0}', value),
+            }),
+          ),
+        )
+        .toLowerCase();
+    const main = key('push', 'refs/heads/main', 1);
+    // Preserve every incremental scan; full static can cancel obsolete main work.
+    expect(key('push', 'refs/heads/main', 2) === main).toBe(file === 'ci.yml');
+    for (const ref of ['refs/heads/feature', 'refs/heads/Main', 'refs/tags/v1']) {
+      expect(key('push', ref, 3)).not.toBe(main);
+    }
+    const pr = key('pull_request', 'refs/pull/7/merge', 4, 7);
+    expect(key('pull_request', 'refs/pull/7/merge', 5, 7)).toBe(pr);
+    expect(key('pull_request', 'refs/pull/8/merge', 6, 8)).not.toBe(pr);
+    expect(key('push', 'refs/heads/feature', 7)).not.toBe(pr);
+    expect(main).not.toBe(pr);
+  });
 });
