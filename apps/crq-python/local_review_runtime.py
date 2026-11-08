@@ -86,8 +86,8 @@ def prepare(c, q, item, dry, *, completed_only=False):
         if pr.get("kind") not in ("open", "delta"):
             continue
         for record in reversed(pr.get("cycles", [])):
-            if item["generation"] > 1 and record.get("completed_at", "") <= item["created_at"]:
-                continue  # an explicit repeat does not replay already-finished PR work
+            if item.get("repeat_requested", item["generation"] > 1):
+                continue  # an explicit repeat requires a fresh invocation, even at generation 1
             if operation.equivalent(cycle_facts(c, pr, record), wanted):
                 if not dry:
                     rdir = c.RUNS / record["run_id"]

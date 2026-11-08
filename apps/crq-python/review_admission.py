@@ -91,7 +91,8 @@ def admit(q, *, request_id, inputs, resolved, profile, at, repeat=False,
         item = dict(id=f"lr-{identity[:12]}-g{generation}", kind=operation.KIND,
                     repo=resolved["repo"], identity=identity,
                     identity_inputs=copy.deepcopy(resolved), profile=copy.deepcopy(profile),
-                    generation=generation, observers=[], notify=[], state="pending", pr=None,
+                    generation=generation, repeat_requested=repeat,
+                    observers=[], notify=[], state="pending", pr=None,
                     created_at=at, order=max((i.get("order", 0) for i in q.get("items", [])), default=0) + 1,
                     cycles=[], attempts=[], failures=0, depends_on=[])
         q.setdefault("items", []).append(item)

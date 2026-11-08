@@ -395,6 +395,45 @@ class ExecutionTests(SnapshotGitFixture, unittest.TestCase):
                 self.assertEqual(len(self.q["review_events"]), 1)
                 self.assertEqual(len(self.item["attempts"]), 1)
 
+    def test_explicit_repeat_launches_despite_completed_pr_or_local_evidence(self):
+        initial = copy.deepcopy(self.q)
+        for source in ("pr", "local"):
+            with self.subTest(source):
+                self.q = copy.deepcopy(initial)
+                self.item = self.q["items"][0]
+                if source == "local":
+                    self.finish()
+                    self.assertEqual(self.admit("normal")["action"], "reused")
+                else:
+                    pr = self.pr()
+                    pr.update(state="done", cycles=[dict(base=self.base, head=self.head,
+                        profile=self.profile, range_policy="full-range-once-v1", run_id="run-1",
+                        completed_at="2026-11-08T00:01:00Z", ndjson=str(self.rdir / "review.ndjson"))])
+                    self.assertIsNone(runtime.prepare(self.c, self.q, self.item, False))
+                    self.assertEqual(self.item["state"], "done")  # a non-repeat reuses the PR
+                    self.q["items"].remove(self.item)
+                    self.q["review_requests"] = {}
+                self.assertEqual(self.admit("fresh", repeat=True)["action"], "created")
+                item = self.q["items"][-1]
+                self.assertTrue(item["repeat_requested"])
+                self.assertEqual(item["generation"], 1 if source == "pr" else 2)
+                self.admit("fresh", repeat=True)  # retry joins this exact generation
+                self.assertEqual(self.q["items"][-1]["id"], item["id"])
+                plan = runtime.prepare(self.c, self.q, item, False)
+                self.assertIsNotNone(plan)
+                worktree = self.repo / ("repeat-wt-" + source)
+                worktree.mkdir()
+                with mock.patch.multiple(crq, CLONE=self.repo, STATE=self.state, RUNS=self.runs), \
+                     mock.patch.object(crq, "secret_scan", return_value=(True, {})), \
+                     mock.patch.object(crq, "make_worktree", return_value=(worktree, "fixture-branch")), \
+                     mock.patch.object(crq, "save_queue"), mock.patch.object(crq, "append_work_record"), \
+                     mock.patch.object(crq, "event"), \
+                     mock.patch.object(crq, "subprocess", SimpleNamespace(DEVNULL=-3,
+                         Popen=mock.Mock(return_value=SimpleNamespace(pid=12345)))) as processes:
+                    crq.launch(self.q, item, plan)
+                processes.Popen.assert_called_once()
+                self.assertEqual(item["state"], "reviewing")
+
     def test_third_generation_really_launches_stored_flags(self):
         saved = []
         legacy = crq.author_quota.enroll(self.q, request_id="legacy-author", base=self.base,
