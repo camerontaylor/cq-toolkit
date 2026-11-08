@@ -916,8 +916,6 @@ const sameAccountAgentAccepted = (
   headSha: string,
   policy: TrustPolicy,
 ): AuthenticatedR4Evidence | null => {
-  // Without the PR author, the actor's relationship to the PR is unknown.
-  if (snapshot.authorLogin === null || snapshot.authorLogin === '') return null;
   for (const review of [...snapshot.reviews, ...(snapshot.allClear?.comments ?? [])]) {
     if (isIgnoredBotAuthor(review.authorType, review.authorLogin)) continue;
     const login = review.authorLogin;
@@ -928,6 +926,7 @@ const sameAccountAgentAccepted = (
     // alternative: a plain comment counts from the PR author (shared-account
     // design) or a User holding a trusted association, never from an excluded login.
     if (!isReviewAppAuthor(review.authorType, login)) {
+      if (snapshot.authorLogin === null || snapshot.authorLogin === '') continue;
       if ([...policy.excludedLogins].some((entry) => bareName(entry) === name)) continue;
       if (review.authorType !== 'User') continue;
       const isAuthor = snapshot.authorLogin !== null && bareName(snapshot.authorLogin) === name;
