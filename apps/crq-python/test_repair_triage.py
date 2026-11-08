@@ -298,3 +298,41 @@ class PhaseTest(FindingTest):
         self.assertIn('Historical documents and review recommendations are not current requirements', request['prompt'])
         self.assertIn('absent or truncated', request['prompt'])
         self.assertEqual(request['schema'], 'crq.triage/v1')
+
+    def test_bridge_accepts_contract_sized_triage_prompt_with_finite_isolated_cap(self):
+        import json
+        import subprocess
+        dist = self.root / 'bridge-dist'
+        (dist / 'driver/ai-sdk').mkdir(parents=True)
+        (dist / 'harness').mkdir()
+        (dist / 'package.json').write_text('{"type":"module"}')
+        (dist / 'harness/config.js').write_text('export const defaultHarnessConfig={tools:{},promptBudget:{maxSystemPromptChars:20000,maxTools:6}};')
+        (dist / 'driver/served-model.js').write_text('export const withServedModelAssertion=driver=>driver;')
+        (dist / 'driver/ai-sdk/index.js').write_text("""
+export class AiSdkDriver {
+  constructor(options={}) { this.cap=options.harnessConfig?.promptBudget.maxSystemPromptChars??20000; }
+  async run(request) {
+    if(request.prompt.length>this.cap) throw Error('prompt budget exceeded');
+    if(request.toolPolicy.mode!=='none'||request.sandboxPolicy.level!=='read-only') throw Error('authority changed');
+    return {stopReason:'complete',structuredOutput:{verdict:'unsure',reason:JSON.stringify({cap:this.cap,budget:request.budget,schema:request.outputSchema.name})}};
+  }
+}
+""")
+        bridge = Path(__file__).parent / 'crq_repair/judge-cq.mjs'
+        request_path = self.root / 'bridge-request.json'
+        budget = {'maxContextTokens': 200000, 'maxOutputTokens': 1000, 'wallClockMs': 60000}
+        def invoke(schema, length):
+            request = {'cq_bin': str(dist / 'cli.js'), 'schema': schema, 'prompt': 'x' * length,
+                       'modelSpec': {'provider': 'unused', 'model': 'offline'}, 'budget': budget}
+            request_path.write_text(json.dumps(request))
+            return subprocess.run(['node', str(bridge), str(request_path)], capture_output=True, text=True, timeout=20)
+        triage = invoke('crq.triage/v1', 24000)
+        self.assertEqual(triage.returncode, 0, triage.stderr)
+        detail = json.loads(json.loads(triage.stdout)['reason'])
+        self.assertEqual(detail['cap'], 128000)
+        self.assertEqual(detail['budget'], budget)
+        self.assertEqual(detail['schema'], 'crq.triage/v1')
+        ordinary = invoke('crq.judge/v1', 100)
+        self.assertEqual(ordinary.returncode, 0, ordinary.stderr)
+        self.assertEqual(json.loads(json.loads(ordinary.stdout)['reason'])['cap'], 20000)
+        self.assertNotEqual(invoke('crq.triage/v1', 128001).returncode, 0)
