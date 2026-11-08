@@ -296,6 +296,13 @@ class PhaseTest(FindingTest):
                      {'triage_context': {'current_contract': {'text': 'Promotion retired'}}}, self.f.root, self.root)
         request = json.loads((self.root / 'judge-request.json').read_text())
         self.assertIn('Historical documents and review recommendations are not current requirements', request['prompt'])
+        self.assertIn('not an exhaustive specification of ordinary code correctness', request['prompt'])
+        self.assertIn('infer ordinary bugs from the supplied code and stable API/test semantics', request['prompt'])
+        self.assertIn('do not require an explicit contract clause', request['prompt'])
+        self.assertIn('explicitly retired', request['prompt'])
+        self.assertIn('contract silence alone does not imply uncertainty', request['prompt'])
+        self.assertIn('relevant source evidence is missing', request['prompt'])
+        self.assertNotIn('is still required by the current contract', request['prompt'])
         self.assertIn('absent or truncated', request['prompt'])
         self.assertEqual(request['schema'], 'crq.triage/v1')
 
