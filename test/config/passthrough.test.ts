@@ -259,13 +259,13 @@ describe('manifest-declared names get the credential refusal', () => {
     ).toThrow(name);
   });
 
-  test('a declared non-credential name (even CQ_*) still works', () => {
+  test('a declared non-credential, non-CQ_ name still works', () => {
     expect(
       buildSandboxLauncherEnv(
-        { CQ_TEST_KEEP: 'kept', PATH: '/bin' },
-        { envPassthrough: [], declaredEnvNames: ['CQ_TEST_KEEP'] },
+        { TEST_KEEP_CANARY: 'kept', PATH: '/bin' },
+        { envPassthrough: [], declaredEnvNames: ['TEST_KEEP_CANARY'] },
       ),
-    ).toEqual({ PATH: '/bin', CQ_TEST_KEEP: 'kept' });
+    ).toEqual({ PATH: '/bin', TEST_KEEP_CANARY: 'kept' });
   });
 
   test.each(declared)('scrubEnvironment (the MCP startup path) refuses %s', (name) => {

@@ -11,7 +11,7 @@ import {
   HarnessManifestSchema,
 } from '../../src/harness/surface.js';
 import type { HarnessManifest } from '../../src/harness/surface.js';
-import { TRUSTED_ENV_EXEMPT_NAMES } from '../../src/config/parsers.js';
+import { DECLARED_ENV_EXEMPT_NAMES, TRUSTED_ENV_EXEMPT_NAMES } from '../../src/config/parsers.js';
 import { scratch, withRun } from './surface.helpers.js';
 
 afterEach(() => {
@@ -88,6 +88,30 @@ describe('manifest env name origin', () => {
     expect([...TRUSTED_ENV_EXEMPT_NAMES]).toEqual(['SSH_AUTH_SOCK']);
     expect(() => (TRUSTED_ENV_EXEMPT_NAMES as string[]).push('NPM_TOKEN')).toThrow();
   });
+
+  test('the manifest-file exemption list is frozen and empty', () => {
+    expect(Object.isFrozen(DECLARED_ENV_EXEMPT_NAMES)).toBe(true);
+    // No current non-test caller needs a CQ_* or credential name from a file.
+    expect([...DECLARED_ENV_EXEMPT_NAMES]).toEqual([]);
+    expect(() => (DECLARED_ENV_EXEMPT_NAMES as string[]).push('CQ_TEST_KEEP')).toThrow();
+  });
+
+  test.each(['CQ_TEST_KEEP', 'CQ_SESSIONS_DIR', 'CQ_AUTOMATION_TOKEN', 'cq_work_id'])(
+    'a manifest-file %s is refused, with no value in the error',
+    async (name) => {
+      vi.stubEnv(name, dummy);
+      const fromFile = JSON.parse(JSON.stringify(await codeManifest([]))) as HarnessManifest;
+      fromFile.envNames.push(name);
+      let message = '';
+      try {
+        createHarnessSurface(fromFile);
+      } catch (error) {
+        message = (error as Error).message;
+      }
+      expect(message).toContain(name);
+      expect(message).not.toContain(dummy);
+    },
+  );
 
   test('mutating a trusted manifest, or wrapping it, adds no trust', async () => {
     vi.stubEnv('SSH_AUTH_SOCK', dummy);

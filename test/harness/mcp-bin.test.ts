@@ -313,8 +313,12 @@ describe('env scrub', () => {
   test('a provider credential never reaches a run child; PATH and envNames do', async () => {
     const workspace = scratch();
     const server = startBin(
-      [JSON.stringify(manifestFor(workspace, ['env'], { envNames: ['CQ_TEST_KEEP'] }))],
-      baseEnv({ ANTHROPIC_API_KEY: 'secret', CQ_TEST_KEEP: 'kept', CQ_TEST_DROP: 'dropped' }),
+      [JSON.stringify(manifestFor(workspace, ['env'], { envNames: ['TEST_KEEP_CANARY'] }))],
+      baseEnv({
+        ANTHROPIC_API_KEY: 'secret',
+        TEST_KEEP_CANARY: 'kept',
+        TEST_DROP_CANARY: 'dropped',
+      }),
     );
     server.send({
       jsonrpc: '2.0',
@@ -326,8 +330,8 @@ describe('env scrub', () => {
     expect(text.startsWith('exit 0')).toBe(true);
     expect(text).not.toContain('ANTHROPIC_API_KEY');
     expect(text).not.toContain('secret');
-    expect(text).not.toContain('CQ_TEST_DROP');
-    expect(text).toContain('CQ_TEST_KEEP=kept');
+    expect(text).not.toContain('TEST_DROP_CANARY');
+    expect(text).toContain('TEST_KEEP_CANARY=kept');
     expect(text).toMatch(/^PATH=/m);
     server.child.stdin.end();
     expect((await server.exited).code).toBe(0);

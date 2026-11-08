@@ -5,10 +5,10 @@ import { resolveSandboxConfig, SANDBOX_POLICY_ENV_NAMES } from './config.js';
 import type { SandboxConfig } from './config.js';
 import type { CqEnv } from '../config/env.js';
 import {
+  DECLARED_ENV_EXEMPT_NAMES,
   TRUSTED_ENV_EXEMPT_NAMES,
   credentialRefusal,
   isEnvName,
-  passthroughRefusal,
 } from '../config/parsers.js';
 import { processEnv } from '../config/process-env.js';
 
@@ -64,17 +64,20 @@ export function buildSandboxLauncherEnv(
     if (SANDBOX_POLICY_ENV_NAMES.has(name.toUpperCase())) {
       throw new Error(`sandbox: launcher env ${origin} name '${name}' is not permitted`);
     }
-    // Every refusal applies to every origin. The TRUSTED origin (names set
-    // in-process by trusted code, a driver's `envAllowlist`; never reachable
-    // from JSON, a manifest file, a plan or op input) is exempt only for the
-    // explicit TRUSTED_ENV_EXEMPT_NAMES (SSH_AUTH_SOCK); credentials, every
-    // CQ_* name and the policy knobs stay refused for it too.
-    if (origin === 'trusted') {
-      if (!TRUSTED_ENV_EXEMPT_NAMES.includes(name)) {
-        const refusal = passthroughRefusal(name);
-        if (refusal !== undefined) throw new Error(`sandbox: launcher env trusted ${refusal}`);
-      }
-    } else {
+    // Every refusal applies to every origin: credential-shaped names and every
+    // CQ_* name (the policy knobs were refused above). Each origin has ONE
+    // frozen, named exemption list: trusted code-level names may carry
+    // SSH_AUTH_SOCK; a manifest file's list is empty; the operator key has none.
+    // The trusted origin is names set in-process by trusted code (a driver's
+    // `envAllowlist`), never reachable from JSON, a manifest file, a plan or
+    // op input.
+    const exempt =
+      origin === 'trusted'
+        ? TRUSTED_ENV_EXEMPT_NAMES
+        : origin === 'declared'
+          ? DECLARED_ENV_EXEMPT_NAMES
+          : [];
+    if (!exempt.includes(name)) {
       const credential = credentialRefusal(name);
       if (credential !== undefined) {
         throw new Error(
@@ -83,11 +86,8 @@ export function buildSandboxLauncherEnv(
             : `sandbox: launcher env ${origin} ${credential}`,
         );
       }
-      // The operator passthrough additionally refuses every CQ_* name, the
-      // same check parsePassthrough applies at parse time.
-      if (origin === 'passthrough') {
-        const refusal = passthroughRefusal(name);
-        if (refusal !== undefined) throw new Error(`sandbox: launcher env passthrough ${refusal}`);
+      if (name.toUpperCase().startsWith('CQ_')) {
+        throw new Error(`sandbox: launcher env ${origin} may not expose CQ_* name '${name}'`);
       }
     }
     const value = parent[name];

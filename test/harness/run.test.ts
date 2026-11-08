@@ -213,9 +213,9 @@ describe('shared run core environment boundary', { timeout: 30_000 }, () => {
         vi.stubEnv('CQ_SANDBOX', 'off'); // Explicit passthrough opts into the sandbox policy.
         vi.stubEnv('CQ_RUN_ENV_PASSTHROUGH', 'RUN_TEST_CONFIGURED_CANARY');
         vi.stubEnv('CQ_RUN_TEST_SECRET', 'must-not-leak');
-        vi.stubEnv('CQ_RUN_TEST_EXPLICIT', 'explicit-visible');
+        vi.stubEnv('RUN_TEST_EXPLICIT_CANARY', 'explicit-visible');
         vi.stubEnv('RUN_TEST_CONFIGURED_CANARY', 'configured-visible');
-        const result = await run(workspace, config(), ['CQ_RUN_TEST_EXPLICIT']).execute({
+        const result = await run(workspace, config(), ['RUN_TEST_EXPLICIT_CANARY']).execute({
           command,
         });
         expect(result).toMatchObject({ ok: true, exitCode: 0 });
@@ -224,7 +224,7 @@ describe('shared run core environment boundary', { timeout: 30_000 }, () => {
           expect(result.output).not.toContain('must-not-leak');
           expect(result.output).not.toContain('CQ_SANDBOX=');
           expect(result.output).not.toContain('CQ_RUN_ENV_PASSTHROUGH=');
-          expect(result.output).toContain('CQ_RUN_TEST_EXPLICIT=explicit-visible');
+          expect(result.output).toContain('RUN_TEST_EXPLICIT_CANARY=explicit-visible');
           expect(result.output).toContain('RUN_TEST_CONFIGURED_CANARY=configured-visible');
           expect(result.output).toContain('PATH=');
         }

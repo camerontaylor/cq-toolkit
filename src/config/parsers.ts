@@ -94,6 +94,14 @@ export const PASSTHROUGH_DENIED_NAMES: readonly string[] = Object.freeze([
  */
 export const TRUSTED_ENV_EXEMPT_NAMES: readonly string[] = Object.freeze(['SSH_AUTH_SOCK']);
 
+/**
+ * The names a harness MANIFEST FILE's `envNames` may carry despite the
+ * credential and `CQ_*` refusals. Empty: no current non-test caller needs one
+ * (CQ_TEST_KEEP was only a test canary). Frozen; pinned by
+ * test/harness/env-origin.test.ts; a name needs a stated reason in ADR-0009.
+ */
+export const DECLARED_ENV_EXEMPT_NAMES: readonly string[] = Object.freeze([]);
+
 /** True when `name` has the env var NAME shape. */
 export function isEnvName(name: string): boolean {
   return ENV_NAME_PATTERN.test(name);
