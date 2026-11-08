@@ -169,7 +169,7 @@ def dispatch_paused(config):
 
 
 def dispatch(config, role, job, wt, directory, judge=False):
-    if not config['repair'].get('fallback_models') or role['driver'] != 'cq':
+    if role['driver'] != 'cq' or not config.get('repair', {}).get('fallback_models'):
         with correlation(job, judge):
             return _dispatch(config, role, job, wt, directory, judge)
     state = provider_cooldowns()
