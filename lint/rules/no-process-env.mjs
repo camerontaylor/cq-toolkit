@@ -77,6 +77,21 @@ export default {
       if (!writes) processBindings.set(binding, (writes = new Set()));
       writes.add(node.range[0]);
     };
+    // Keep a possible alias when a write is guarded by a branch/loop that
+    // does not also contain the read. This is deliberately not a CFG analysis.
+    const isGuardedWrite = (identifier, read, executionBlock) => {
+      for (let child = identifier; child.parent && child !== executionBlock; child = child.parent) {
+        const parent = child.parent;
+        if (
+          /^(IfStatement|ConditionalExpression|LogicalExpression|ForStatement|ForInStatement|ForOfStatement|WhileStatement|DoWhileStatement|SwitchCase|TryStatement|CatchClause|AssignmentPattern|ChainExpression)$/.test(
+            parent.type,
+          ) &&
+          !(child.range[0] <= read.range[0] && child.range[1] >= read.range[1])
+        )
+          return true;
+      }
+      return false;
+    };
     const isProcessNode = (raw) => {
       const node = unwrap(raw);
       if (node.type !== 'Identifier') return isProcess(node);
@@ -95,6 +110,11 @@ export default {
         let scope = readScope;
         while (scope && scope !== writeScope) scope = scope.upper;
         if (!scope) continue;
+        if (
+          !aliases.has(ref.identifier.range[0]) &&
+          isGuardedWrite(ref.identifier, node, writeScope.block)
+        )
+          continue;
         if (!latestWrite || ref.identifier.range[0] > latestWrite.identifier.range[0]) {
           latestWrite = ref;
         }

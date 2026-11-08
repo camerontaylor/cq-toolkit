@@ -20,6 +20,8 @@ const ok = (code: string) => ({ code, filename: 'src/ops/x.ts' });
 
 ruleTester.run('no-process-env', rule, {
   valid: [
+    ok('let p = process; if (useFallback) { p = {}; p.env; }'),
+    ok('let p = process; if (useFallback) { p = {}; } p = {}; p.env;'),
     ok('let p; function reset() { p = process; } p.env;'),
     ok('let p = process; function f() { p = {}; return p.env; }'),
     ok('let p = process; p = {}; function f() { return p.env; }'),
@@ -47,6 +49,10 @@ ruleTester.run('no-process-env', rule, {
     ok('let a; ({ argv: a } = process);'),
   ],
   invalid: [
+    bad('let p = process; if (useFallback) { p = { env: {} }; } p.env;'),
+    bad('let p = process; useFallback && (p = {}); p.env;'),
+    bad('let p = process; useFallback ? p = {} : null; p.env;'),
+    bad('let p = process; while (useFallback) { p = {}; } p.env;'),
     bad('let p = process; function reset() { p = {}; } p.env;'),
     bad('let p = process; function reset() { p = {}; } function read() { return p.env; }'),
     bad('var p = process; var p = process; p.env;'),
