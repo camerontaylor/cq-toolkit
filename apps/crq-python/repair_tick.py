@@ -151,6 +151,44 @@ def enqueue(c, q, item, meta, rdir):
     return True
 
 
+def mark_finding_outcome(c, job, result, merge=None, fix_pr=None):
+    """The source finding ledger remains authoritative for threadless repairs."""
+    fid = job.get('canonical_finding_id')
+    if not fid:
+        return
+    verdict = result['verdict']
+    action = 'fixed' if merge and verdict == 'FIXED' else {
+        'STALE': 'needs-retriage', 'FAILED': 'needs-human'}.get(verdict)
+    if verdict == 'NOT-FIXED':
+        action = 'dismissed' if (result.get('judge') or {}).get('verdict') == 'invalid' else 'needs-human'
+    if not action:
+        return
+    import backfill_runtime
+    import finding_delivery
+    import review_ledger as ledger
+    config = backfill_runtime.settings(c.STATE)
+    if not config:
+        raise ValueError('backfill repair write-back requires existing ledger configuration')
+    store = ledger.ArtifactStore(config['durable_artifact_root'])
+    inbox = finding_delivery.Inbox(c.STATE / 'backfill/findings',
+                                  ledger.Outbox(c.STATE / 'backfill/publication', store))
+    inbox.repair_outcome(fid, job['job'], action, result.get('reason') or verdict,
+                         c.iso(), fixing_commit=merge, fix_pr=fix_pr)
+
+
+def repair_provenance(c, record, run):
+    lines = ['', 'Source run: `' + run + '`', '', '| finding ID | source ledger/review | source |',
+             '|---|---|---|']
+    for job_id in record['jobs']:
+        job = json.loads((c.STATE / 'repair/inbox' / (job_id + '.json')).read_text())
+        finding = job.get('finding', {})
+        fid = job.get('canonical_finding_id') or finding.get('id') or finding.get('source_id') or job_id
+        source = job.get('review_id') or job.get('run') or run
+        link = ('https://github.com/' + c.REPO + '/pull/' + str(job['pr'])) if job.get('pr') else 'threadless; finding ledger is authoritative'
+        lines.append('| `' + str(fid) + '` | `' + str(source) + '` | ' + link + ' |')
+    return lines
+
+
 def harvest(c, q, item, dry=False):
     messages = []
     for run, record in item.get('repair_runs', {}).items():
@@ -202,6 +240,8 @@ def harvest(c, q, item, dry=False):
                 predecessor = result['commits'][-1]
             elif result.get('verdict') not in ('NOT-FIXED', 'FAILED', 'STALE'):
                 raise ValueError('unknown repair verdict')
+            if not dry:
+                mark_finding_outcome(c, expected, result)
             verdicts.append({**result, 'finding': expected['finding']})
         if len(verdicts) != len(record['jobs']):
             continue
@@ -345,6 +385,7 @@ def finalize_publication(c, q, item, run, record, publication):
             body = ['Verified CodeRabbit repairs from ' + run, '', '| finding | verdict | reason |', '|---|---|---|']
             for v in record['verdicts']:
                 body.append('| ' + v['job'] + ' | ' + v['verdict'] + ' | ' + v['reason'].replace('|', r'\|').replace('\n', ' ') + ' |')
+            body.extend(repair_provenance(c, record, run))
             path = c.STATE / 'repair' / record['jobs'][0] / 'fix-pr.md'
             path.write_text('\n'.join(body) + '\n')
             publication['pr_create_pending'] = True
@@ -479,6 +520,39 @@ def reconcile_current_fix(c, item):
         item.pop('remediation', None)
 
 
+def publish_source_resolution(c, record, merge):
+    """Resume source comments/resolves in the existing publication journal."""
+    publication = record.get('publication')
+    if not publication:
+        return
+    journal = c.STATE / 'repair' / record['jobs'][0] / 'publication.json'
+    completed = publication.setdefault('source_resolutions', [])
+    for result in record.get('verdicts', []):
+        if result['verdict'] != 'FIXED' or result['job'] in completed:
+            continue
+        job = json.loads((c.STATE / 'repair/inbox' / (result['job'] + '.json')).read_text())
+        if not job.get('pr'):
+            continue  # Threadless source truth is the finding ledger.
+        marker = '<!-- crq-repair-source:' + job['job'] + ' -->'
+        pages = c.gh_json(['api', 'repos/' + c.REPO + '/issues/' + str(job['pr']) + '/comments',
+                           '--paginate', '--slurp'])
+        comments = [comment for page in pages for comment in page]
+        if not any(marker in comment.get('body', '') for comment in comments):
+            body = journal.parent / ('source-' + job['job'] + '.md')
+            body.write_text(marker + '\nFixed by ' + record['fix_pr']['url'] + ' (merge `' + merge + '`).\n')
+            c.run(['env', '-u', 'GITHUB_TOKEN', 'gh', 'pr', 'comment', str(job['pr']), '--repo', c.REPO, '--body-file', str(body)])
+        thread = job.get('source_thread_id') or job.get('thread_id') or job.get('finding', {}).get('thread_id')
+        if thread:
+            request = journal.parent / ('resolve-' + job['job'] + '.json')
+            atomic(request, {'query': 'mutation($threadId:ID!){resolveReviewThread(input:{threadId:$threadId}){thread{isResolved}}}',
+                             'variables': {'threadId': thread}})
+            response = c.gh_json(['api', 'graphql', '--input', str(request)])
+            if response.get('errors') or not response.get('data', {}).get('resolveReviewThread', {}).get('thread', {}).get('isResolved'):
+                raise ValueError('source thread resolution unconfirmed')
+        completed.append(job['job'])
+        atomic(journal, publication)
+
+
 def reconcile_fix_prs(c, q):
     for item in q['items']:
         if item['kind'] == review_receipt.KIND:
@@ -489,8 +563,6 @@ def reconcile_fix_prs(c, q):
                 if item.get('remediation_state') == 'fixed':
                     item['remediation_state'] = 'pending-merged-evidence'
                 item['repair_error'] = str(exc)[:300]
-            continue
-        if item['kind'] != 'promotion':
             continue
         for record in item.get('repair_runs', {}).values():
             pr = record.get('fix_pr')
@@ -509,9 +581,13 @@ def reconcile_fix_prs(c, q):
                 fixed = {v['job'] for v in record.get('verdicts', []) if v['verdict'] == 'FIXED'}
                 for index, job in enumerate(record['jobs'], 1):
                     if job in fixed:
+                        expected = json.loads((c.STATE / 'repair/inbox' / (job + '.json')).read_text())
+                        result = next(v for v in record['verdicts'] if v['job'] == job)
+                        mark_finding_outcome(c, expected, result, merge, pr.get('url'))
                         for blocker in item.get('blocking', []):
                             if blocker.get('repair_job') == job:
                                 blocker['resolution'] = {'fix_pr': pr['number'], 'merge': merge, 'at': c.iso()}
+                publish_source_resolution(c, record, merge)
                 record['fix_merged'] = c.iso()
 
 

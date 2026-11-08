@@ -73,6 +73,29 @@ class Inbox:
             ledger.atomic(filename, ledger.canonical(row))
             return value
 
+    def repair_outcome(self, fid, job, action, reason, at, *, fixing_commit=None, fix_pr=None):
+        """Idempotently publish a repair result through the existing event chain."""
+        self.recover(self.publication.retained())
+        with ledger.locked(self.root / "findings.lock"):
+            filename = self.root / "triage" / (fid + ".json")
+            row = ledger.loads(filename.read_bytes())
+            evidence = {"repair_task": job, "reason": reason, "fix_pr": fix_pr}
+            if fixing_commit:
+                evidence.update(fixing_commit=fixing_commit, verification=reason)
+            token = ledger.digest({"job": job, "action": action, "evidence": evidence})
+            # Retained outbox records survive acknowledgment and caller crashes.
+            if any(v["event_type"] == "finding-event" and
+                   v["source_key"] == "repair-outcome:" + token
+                   for v in self.publication.retained()):
+                return
+            value = ledger.event("finding-event", "repair-outcome:" + token, at,
+                                 {"finding_id": fid, "review_id": row["review_id"],
+                                  "previous_event_id": row["previous_event_id"], "action": action,
+                                  "evidence": evidence, "actor": "crq-repair"})
+            self.publication.spool(value)
+            row.update(status=action, previous_event_id=value["id"])
+            ledger.atomic(filename, ledger.canonical(row))
+
     def deliver(self, fid, transport, at):
         """Transport accepts a stable idempotency key and returns the same receipt."""
         self.recover(self.publication.retained())
@@ -86,19 +109,22 @@ class Inbox:
             request = {"canonical_id": row["canonical_id"], "finding_id": fid, "review_id": row["review_id"],
                        "target": row["target_current"], "path": row["mapped_path"], "intervals": row["mapped_intervals"],
                        "finding": row["finding"]}
-            request_file = self.root / "delivery" / (row["canonical_id"] + ".json")
+            delivery_key = row["canonical_id"]
+            if row.get("receipt"):
+                delivery_key = ledger.digest({"canonical": delivery_key, "confirmation": row["previous_event_id"]})
+            request_file = self.root / "delivery" / (delivery_key + ".json")
             if request_file.exists():
                 saved = ledger.loads(request_file.read_bytes())
                 if saved != request:
                     raise ledger.IntegrityError("canonical repair request changed; reconcile")
             else:
                 ledger.atomic(request_file, ledger.canonical(request))
-            receipt_file = self.root / "receipts" / (row["canonical_id"] + ".json")
-            receipt = ledger.loads(receipt_file.read_bytes()) if receipt_file.exists() else transport(row["canonical_id"], request)
+            receipt_file = self.root / "receipts" / (delivery_key + ".json")
+            receipt = ledger.loads(receipt_file.read_bytes()) if receipt_file.exists() else transport(delivery_key, request)
             if not receipt.get("acknowledgement") or not receipt.get("repair_task"):
                 raise ledger.IntegrityError("repair transport did not acknowledge durable task")
             ledger.atomic(receipt_file, ledger.canonical(receipt))
-            value = ledger.event("finding-event", "delivery:" + fid, at, {"finding_id": fid, "review_id": row["review_id"],
+            value = ledger.event("finding-event", "delivery:" + fid + ":" + delivery_key, at, {"finding_id": fid, "review_id": row["review_id"],
                                  "previous_event_id": row["previous_event_id"], "action": "delivered", "evidence": receipt, "actor": "crq-repair-adapter"})
             self.publication.spool(value)
             row.update(status="delivered", previous_event_id=value["id"], receipt=receipt)
@@ -132,8 +158,8 @@ class Inbox:
         row.update(status=p["action"], previous_event_id=value["id"])
         if p["action"] == "delivered":
             row["receipt"] = p["evidence"]
-        elif p["action"] in ("confirmed", "needs-human", "duplicate", "dismissed", "superseded", "fixed", "already-fixed"):
-            row.update(target_current=p["evidence"]["target"], mapped_path=p["evidence"].get("mapped_path"),
+        elif "target" in p["evidence"]:
+            row.update(target_current=p["evidence"].get("target", row.get("target_current")), mapped_path=p["evidence"].get("mapped_path"),
                        mapped_intervals=p["evidence"].get("mapped_intervals", []))
             if p["action"] == "duplicate":
                 row["canonical_id"] = p["evidence"]["canonical_id"]
@@ -156,7 +182,7 @@ def repair_transport(root, queue, save_queue, scan):
         job = {"job": job_id, "item": item_id, "kind": "merged", "pr": 0, "run": run, "cycle": None,
                "repair_base": request["target"], "branch": None, "finding": finding, "repair_round": 1,
                "prior": None, "recurrence": False, "review_diff": "", "review_id": request["review_id"],
-               "canonical_finding_id": key}
+               "canonical_finding_id": request["canonical_id"]}
         if filename.exists() and ledger.loads(filename.read_bytes()) != job:
             raise ledger.IntegrityError("repair inbox idempotency conflict")
         ledger.atomic(filename, ledger.canonical(job))

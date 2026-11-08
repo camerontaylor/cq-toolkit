@@ -73,6 +73,69 @@ class RepairDrainTest(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
+    def test_harvest_writeback_maps_nonfixed_outcomes(self):
+        c = SimpleNamespace(STATE=self.root / 'state', iso=lambda: 'now')
+        job = {'job': 'job', 'canonical_finding_id': 'finding'}
+        with mock.patch('backfill_runtime.settings', return_value={'durable_artifact_root': str(self.root / 'artifacts')}), mock.patch('finding_delivery.Inbox') as inbox:
+            for verdict, judge, expected in [('STALE', None, 'needs-retriage'),
+                    ('FAILED', None, 'needs-human'), ('NOT-FIXED', {'verdict': 'invalid'}, 'dismissed'),
+                    ('FIXED', None, 'fixed')]:
+                repair_tick.mark_finding_outcome(c, job, {'verdict': verdict, 'judge': judge, 'reason': 'evidence'},
+                                                self.tip if verdict == 'FIXED' else None)
+                self.assertEqual(inbox.return_value.repair_outcome.call_args.args[2], expected)
+            inbox.reset_mock()
+            repair_tick.mark_finding_outcome(c, job, {'verdict': 'FIXED'})
+            inbox.assert_not_called()
+
+    def test_merge_reconciliation_marks_threadless_ledger_only_after_merge(self):
+        job_id = 'crq-run1-F1'
+        item = self.queue['items'][0]
+        record = item['repair_runs']['run1']
+        record.update(fix_pr={'number': 99, 'url': 'https://github.com/example/repo/pull/99'},
+                      verdicts=[{'job': job_id, 'verdict': 'FIXED', 'reason': 'verified'}])
+        c = SimpleNamespace(STATE=self.root / 'state', iso=lambda: 'now',
+                            pr_info=mock.Mock(return_value={'state': 'OPEN'}),
+                            git=lambda *args: self.tip, is_ancestor=lambda *args: True)
+        with mock.patch.object(repair_tick, 'mark_finding_outcome') as mark:
+            repair_tick.reconcile_fix_prs(c, self.queue)
+            mark.assert_not_called()
+            c.pr_info.return_value = {'state': 'MERGED', 'mergeCommit': {'oid': self.tip}}
+            repair_tick.reconcile_fix_prs(c, self.queue)
+            self.assertEqual(mark.call_args.args[3], self.tip)
+            repair_tick.reconcile_fix_prs(c, self.queue)
+            self.assertEqual(mark.call_count, 1)
+
+    def test_fix_pr_provenance_includes_threadless_and_pr_sources(self):
+        path = self.root / 'state/repair/inbox/crq-run1-F1.json'
+        job = json.loads(path.read_text())
+        job.update(canonical_finding_id='canonical-id', review_id='ledger-review-id', pr=0)
+        atomic(path, job)
+        c = SimpleNamespace(STATE=self.root / 'state', REPO='example/repo')
+        body = '\n'.join(repair_tick.repair_provenance(c, self.queue['items'][0]['repair_runs']['run1'], 'run1'))
+        for value in ('canonical-id', 'ledger-review-id', 'threadless', '/pull/1', 'crq-run1-F2', 'run1'):
+            self.assertIn(value, body)
+
+    def test_source_resolution_resumes_existing_publication_journal(self):
+        item = self.queue['items'][0]
+        record = item['repair_runs']['run1']
+        job_id = record['jobs'][0]
+        path = self.root / 'state/repair/inbox' / (job_id + '.json')
+        job = json.loads(path.read_text())
+        job['source_thread_id'] = 'thread-node'
+        atomic(path, job)
+        record.update(publication={'head': self.tip}, fix_pr={'url': 'https://github.com/example/repo/pull/99'},
+                      verdicts=[{'job': job_id, 'verdict': 'FIXED'}])
+        atomic(self.root / 'state/repair' / job_id / 'publication.json', record['publication'])
+        c = SimpleNamespace(STATE=self.root / 'state', REPO='example/repo', run=mock.Mock(),
+                            gh_json=mock.Mock(side_effect=[[], {'data': {'resolveReviewThread': {'thread': {'isResolved': True}}}}]))
+        repair_tick.publish_source_resolution(c, record, self.tip)
+        repair_tick.publish_source_resolution(c, record, self.tip)
+        self.assertEqual(c.run.call_count, 1)
+        self.assertEqual(c.gh_json.call_count, 2)
+        journal = json.loads((self.root / 'state/repair' / job_id / 'publication.json').read_text())
+        self.assertEqual(journal['source_resolutions'], [job_id])
+        self.assertIn('--body-file', c.run.call_args.args[0])
+
     def git(self, *args):
         return subprocess.run(['git', '-C', str(self.clone), *args], check=True,
                               capture_output=True, text=True).stdout.strip()

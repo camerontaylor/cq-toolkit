@@ -26,6 +26,39 @@ class FindingTest(unittest.TestCase):
         self.inbox = delivery.Inbox(self.root / "findings", self.out)
         self.inbox.ingest(self.value)
 
+    def test_repair_outcome_is_durable_idempotent_and_recoverable(self):
+        filename = self.root / "findings/triage" / (self.fid + ".json")
+        chain = [self.value]
+        for action in ("needs-retriage", "needs-human", "dismissed", "fixed"):
+            before = filename.read_bytes()
+            self.inbox.repair_outcome(self.fid, "job-" + action, action, "repair evidence", AT,
+                                      fixing_commit=self.t if action == "fixed" else None,
+                                      fix_pr="https://github.com/example/repo/pull/1")
+            events = self.out.retained()
+            count = len(events)
+            chain.append(next(v for v in events if v["id"] == ledger.loads(filename.read_bytes())["previous_event_id"]))
+            ledger.atomic(filename, before)
+            self.inbox.repair_outcome(self.fid, "job-" + action, action, "repair evidence", AT,
+                                      fixing_commit=self.t if action == "fixed" else None,
+                                      fix_pr="https://github.com/example/repo/pull/1")
+            self.assertEqual(len(self.out.retained()), count)
+            self.assertEqual(ledger.loads(filename.read_bytes())["status"], action)
+        ledger.validate_sequence(chain)
+
+    def test_retriage_delivery_creates_fresh_job_preserving_canonical_provenance(self):
+        self.inbox.triage(self.fid, self.f.repo, self.t, "confirmed", "judge", "valid", AT)
+        queue = {"items": []}
+        transport = delivery.repair_transport(self.root, queue, lambda q: None, lambda *_: True)
+        first = self.inbox.deliver(self.fid, transport, AT)
+        self.inbox.repair_outcome(self.fid, first["repair_task"], "needs-retriage", "stale", AT)
+        self.inbox.triage(self.fid, self.f.repo, self.t, "confirmed", "judge", "valid again", AT)
+        second = self.inbox.deliver(self.fid, transport, AT)
+        self.assertNotEqual(first["repair_task"], second["repair_task"])
+        self.assertEqual(self.inbox.deliver(self.fid, transport, AT), second)
+        job = ledger.loads((self.root / "state/repair/inbox" / (second["repair_task"] + ".json")).read_bytes())
+        self.assertEqual(job["canonical_finding_id"], self.fid)
+        self.assertEqual(len(queue["items"]), 2)
+
     def test_confirmed_cannot_override_canonical_identity(self):
         self.inbox.triage(self.fid, self.f.repo, self.t, "confirmed", "reviewer", "valid", AT, canonical_id="foreign")
         row = ledger.loads((self.root / "findings/triage" / (self.fid + ".json")).read_bytes())

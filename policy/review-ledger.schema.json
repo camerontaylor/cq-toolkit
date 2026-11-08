@@ -589,6 +589,7 @@
               "enum": [
                 "confirmed",
                 "already-fixed",
+                "needs-retriage",
                 "superseded",
                 "dismissed",
                 "needs-human",
