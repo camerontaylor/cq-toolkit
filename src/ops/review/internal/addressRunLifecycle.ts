@@ -1,6 +1,16 @@
 import type { AddressLease } from './addressOwnership.js';
 import type { ReviewAddressResult, ReviewAddressReport } from '../address.js';
-import type { AddressTerminalAttempt, AddressTerminalAttemptInput } from './addressEvidence.js';
+import {
+  recordAddressTerminalEvidence,
+  releaseAddressTerminalEvidence,
+  settleAddressTerminalEvidence,
+  persistAddressTerminalReport,
+  type AddressTerminalAttempt,
+  type AddressTerminalAttemptInput,
+} from './addressEvidence.js';
+import { lstat, realpath } from 'node:fs/promises';
+import { basename, dirname, resolve } from 'node:path';
+const same = (a: Identity, b: Identity) => a.ino === b.ino && a.dev === b.dev;
 type Identity = { ino: number; dev: number };
 /** Identity boundary shared by store-backed and future checkout-lock lifetimes. */
 export interface AddressRunAuthority {
@@ -49,29 +59,41 @@ export interface Participant {
   opaqueDispatched: boolean;
 }
 
-/** In-memory lifecycle, independent of the durable ownership protocol. */
-export abstract class AddressRunLifecycle {
-  private readonly tasks = new Set<Promise<unknown>>();
-  private readonly retentionAdvisories: string[] = [];
-  private readonly terminalToken = Object.freeze({});
-  private readonly participants = new Set<Participant>();
-  private readonly terminalProcesses = new Set<Promise<void>>();
-  private readonly terminalOperations = new Set<Promise<void>>();
-  private stopping = false;
+/** In-memory writer and terminal lifetime; contains no durable ownership protocol. */
+export abstract class AddressRunLifecycle implements AddressRunAuthority {
+  abstract readonly commonDir: string;
+  abstract assertOwned(): Promise<void>;
+  protected abstract assertIdentity(): Promise<void>;
+  readonly signal: AbortSignal;
+  protected readonly controller: AbortController;
+  protected readonly tasks = new Set<Promise<unknown>>();
+  protected readonly retentionAdvisories: string[] = [];
+  protected readonly terminalToken = Object.freeze({});
+  protected readonly participants = new Set<Participant>();
+  protected readonly terminalProcesses = new Set<Promise<void>>();
+  protected readonly terminalOperations = new Set<Promise<void>>();
+  protected stopping = false;
   // Refusal blocks terminal IO, but cannot substitute for the actual-task drain.
-  private terminalAdmissionRefusal?: Error;
-  private terminalFailure?: unknown;
-  private terminalRun?: Promise<void>;
+  protected terminalAdmissionRefusal?: Error;
+  protected terminalFailure?: unknown;
+  protected terminalRun?: Promise<void>;
 
-  private active = false;
-  private admitting = false;
-  private compromised = false;
-  private stopAdmissions = () => {
+  protected active = false;
+  protected admitting = false;
+  protected compromised = false;
+
+  protected constructor(opts: { controller?: AbortController; signal?: AbortSignal }) {
+    this.controller = opts.controller ?? new AbortController();
+    this.signal = opts.signal
+      ? AbortSignal.any([opts.signal, this.controller.signal])
+      : this.controller.signal;
+  }
+  protected stopAdmissions = () => {
     this.stopping = true;
     this.admitting = false;
   };
 
-  private async validateTerminal(): Promise<{ commonDir: string; terminal: boolean }> {
+  protected async validateTerminal(): Promise<{ commonDir: string; terminal: boolean }> {
     if (!this.active || this.compromised || this.terminalFailure)
       throw new Error('address terminal: owner inactive/compromised');
     this.controller.signal.throwIfAborted();
@@ -80,7 +102,7 @@ export abstract class AddressRunLifecycle {
     return { commonDir: this.commonDir, terminal: this.stopping };
   }
 
-  private registerTerminalProcess(promise: Promise<void>): void {
+  protected registerTerminalProcess(promise: Promise<void>): void {
     if (!this.active || this.compromised || this.terminalFailure)
       throw new Error('address terminal: process after retirement');
     const set = this.stopping ? this.terminalProcesses : this.tasks;
@@ -91,7 +113,7 @@ export abstract class AddressRunLifecycle {
     );
   }
 
-  private async participant<T>(lease: AddressLease, action: () => Promise<T>): Promise<T> {
+  protected async participant<T>(lease: AddressLease, action: () => Promise<T>): Promise<T> {
     if (liveLeases.get(lease) !== this || participantLeases.has(lease))
       throw new Error('address terminal: forged/reused participant');
     const participant: Participant = {
@@ -114,7 +136,7 @@ export abstract class AddressRunLifecycle {
     }
   }
 
-  private async bindReport(lease: AddressLease, report: ReviewAddressReport): Promise<void> {
+  protected async bindReport(lease: AddressLease, report: ReviewAddressReport): Promise<void> {
     const participant = participantLeases.get(lease);
     if (
       !participant ||
@@ -162,7 +184,7 @@ export abstract class AddressRunLifecycle {
     participant.report = report;
   }
 
-  private noteOpaqueInvocation(lease: AddressLease): void {
+  protected noteOpaqueInvocation(lease: AddressLease): void {
     const participant = participantLeases.get(lease);
     if (
       !this.active ||
@@ -177,7 +199,7 @@ export abstract class AddressRunLifecycle {
     participant.opaqueDispatched = true;
   }
 
-  private workerBinding(lease: AddressLease): object {
+  protected workerBinding(lease: AddressLease): object {
     const participant = participantLeases.get(lease);
     if (!participant || participant.closed || !this.participants.has(participant))
       throw new Error('address terminal: worker association refused');
@@ -186,7 +208,7 @@ export abstract class AddressRunLifecycle {
     return binding;
   }
 
-  private async recordAttempt(
+  protected async recordAttempt(
     participant: Participant,
     input: AddressTerminalAttemptInput,
   ): Promise<object> {
@@ -208,7 +230,7 @@ export abstract class AddressRunLifecycle {
     }
   }
 
-  private deferAttempt(participant: Participant, value: object): boolean {
+  protected deferAttempt(participant: Participant, value: object): boolean {
     if (!this.signal.aborted || this.controller.signal.aborted || this.compromised) return false;
     if (participant.closed) {
       this.terminalFailure = new Error('address terminal: closed participant attempted cleanup');
@@ -358,7 +380,7 @@ export abstract class AddressRunLifecycle {
     }
   }
 
-  private async cancelledResult(lease: AddressLease): Promise<ReviewAddressResult> {
+  protected async cancelledResult(lease: AddressLease): Promise<ReviewAddressResult> {
     const participant = participantLeases.get(lease);
     if (!participant?.report || !this.participants.has(participant))
       throw new Error('address terminal: missing report association');
@@ -369,7 +391,6 @@ export abstract class AddressRunLifecycle {
       report: participant.report,
     };
   }
-
 }
 
 export async function validateAddressTerminalAuthority(

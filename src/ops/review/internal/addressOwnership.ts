@@ -1,8 +1,6 @@
 import {
+  AddressRunLifecycle,
   liveLeases,
-  terminalWorkers,
-  participantLeases,
-  type Participant,
   terminalInternals,
   terminalAuthorities,
 } from './addressRunLifecycle.js';
@@ -25,24 +23,20 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
 import { link, lstat, mkdir, open, opendir, realpath, rename, rm } from 'node:fs/promises';
-import { basename, dirname, resolve } from 'node:path';
+import { basename, resolve } from 'node:path';
 import type { GhFn } from '../../../adapters/forge-github/gh.js';
 import { fileWorktreeRegistry, reviewBranchFor } from '../../../adapters/git/prWorktree.js';
 import { makeGitMutex } from '../../../shared/gitMutex.js';
 import { boundedErrorText, describeError } from '../../../driver/error-text.js';
-import type { ReviewAddressInput, ReviewAddressResult, ReviewAddressReport } from '../address.js';
+import type { ReviewAddressInput, ReviewAddressResult } from '../address.js';
 import {
   disposeAddressTerminalSession,
-  recordAddressTerminalEvidence,
   releaseAddressTerminalEvidence,
   checkpointAddressTerminalEvidence,
   noteAddressTerminalBookkeeping,
   noteAddressOrdinaryReport,
   removeAddressTerminalCandidate,
-  settleAddressTerminalEvidence,
-  persistAddressTerminalReport,
   type AddressTerminalAttempt,
-  type AddressTerminalAttemptInput,
 } from './addressEvidence.js';
 import type { ReviewLoopOpts, ReviewLoopOutcome } from '../../../plans/review-loop.js';
 
@@ -266,11 +260,9 @@ function resourceKeys(selection: AddressSelection): string[] {
  * unconfirmed completion if the older forensic generation has been removed.
  * Old binaries which ignore the guard must not overlap deployment of this coordinator.
  */
-export class AddressOwnership {
+export class AddressOwnership extends AddressRunLifecycle {
   readonly registry;
-  readonly signal: AbortSignal;
   readonly guardPath: string;
-  private readonly controller: AbortController;
   private readonly epoch = randomUUID();
   private readonly claims = new Map<string, Child>();
   private readonly children = new Set<Promise<unknown>>();
@@ -283,10 +275,7 @@ export class AddressOwnership {
     private readonly opts: OwnershipOptions,
     readonly commonDir: string,
   ) {
-    this.controller = opts.controller ?? new AbortController();
-    this.signal = opts.signal
-      ? AbortSignal.any([opts.signal, this.controller.signal])
-      : this.controller.signal;
+    super(opts);
     this.guardPath = resolve(commonDir, 'cq-review-address-ownership.owner.json');
     this.registry = fileWorktreeRegistry(resolve(commonDir, 'cq-review-address-worktrees.json'));
     const candidates = new Map<
@@ -818,7 +807,7 @@ export class AddressOwnership {
     );
   }
 
-  private async assertIdentity(): Promise<void> {
+  protected async assertIdentity(): Promise<void> {
     if (!this.active || this.compromised) throw new Error('address ownership: owner inactive');
     // Joining the write tail only orders mutations enqueued at that instant; a
     // claim or persist enqueued later can publish this owner's legitimate

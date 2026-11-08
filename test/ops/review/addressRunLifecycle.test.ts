@@ -23,3 +23,48 @@ test('compatibility exports share the private capability boundary', async () => 
     await f.repo.cleanup();
   }
 });
+
+test('a store-free lifetime supplies identity checks and tracks actual process close', async () => {
+  class Lifetime extends lifecycle.AddressRunLifecycle {
+    readonly commonDir = '/checkout';
+    checks = 0;
+    constructor() {
+      super({});
+      this.active = this.admitting = true;
+    }
+    async assertOwned() {
+      await this.assertIdentity();
+    }
+    protected async assertIdentity() {
+      this.checks++;
+    }
+    validate() {
+      return this.validateTerminal();
+    }
+    track(promise: Promise<void>) {
+      this.registerTerminalProcess(promise);
+    }
+    stop() {
+      this.stopAdmissions();
+    }
+    get pending() {
+      return this.tasks.size + this.terminalProcesses.size;
+    }
+  }
+  const run = new Lifetime();
+  let close!: () => void;
+  run.track(
+    new Promise<void>((done) => {
+      close = done;
+    }),
+  );
+  expect(run.pending).toBe(1);
+  expect(await run.validate()).toEqual({ commonDir: '/checkout', terminal: false });
+  run.stop();
+  expect(run.pending).toBe(1);
+  expect(await run.validate()).toEqual({ commonDir: '/checkout', terminal: true });
+  expect(run.checks).toBe(2);
+  close();
+  await Promise.resolve();
+  expect(run.pending).toBe(0);
+});
