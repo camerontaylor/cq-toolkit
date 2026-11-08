@@ -645,6 +645,27 @@ def publish_source_resolution(c, record, merge):
         atomic(journal, publication)
 
 
+def merge_head_evidence(c, record, actual_head):
+    published = record.get('publication', {}).get('head')
+    if not published:
+        return None  # Preserve legacy reconciliation without a publication journal.
+    evidence = {'published_head': published, 'actual_head': actual_head, 'source_blobs': {}}
+    if actual_head == published:
+        return evidence
+    fixed = [v['job'] for v in record.get('verdicts', []) if v['verdict'] == 'FIXED']
+    if not actual_head or not fixed or not c.is_ancestor(published, actual_head):
+        raise ValueError('merged repair head is not a descendant of the published fix')
+    for job_id in fixed:
+        job = json.loads((c.STATE / 'repair/inbox' / (job_id + '.json')).read_text())
+        path = source_path(job['finding'])
+        before = c.git('rev-parse', '--verify', published + ':' + path)
+        after = c.git('rev-parse', '--verify', actual_head + ':' + path)
+        if before != after or c.git('cat-file', '-t', before) != 'blob':
+            raise ValueError('merged repair source changed; needs revalidation: ' + path)
+        evidence['source_blobs'][path] = before
+    return evidence
+
+
 def reconcile_fix_prs(c, q):
     for item in q['items']:
         if item['kind'] == review_receipt.KIND:
@@ -667,12 +688,16 @@ def reconcile_fix_prs(c, q):
                 continue
             pr['state'] = info['state']
             if info['state'] == 'MERGED':
-                prepared_head = record.get('publication', {}).get('head')
-                if prepared_head and info.get('headRefOid') != prepared_head:
-                    continue  # A changed fix PR is not the prepared repair evidence.
                 merge = (info.get('mergeCommit') or {}).get('oid')
                 if not merge or not c.is_ancestor(merge, c.git('rev-parse', DEFAULT_REF)):
                     continue
+                try:
+                    proof = merge_head_evidence(c, record, info.get('headRefOid'))
+                except Exception as exc:
+                    record['source_publication_error'] = str(exc)[:300]
+                    continue
+                if proof is not None:
+                    record['validated_merge_head'] = {**proof, 'merge_commit': merge}
                 fixed = {v['job'] for v in record.get('verdicts', []) if v['verdict'] == 'FIXED'}
                 for index, job in enumerate(record['jobs'], 1):
                     if job in fixed:

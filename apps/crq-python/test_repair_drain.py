@@ -133,6 +133,56 @@ class RepairDrainTest(unittest.TestCase):
             mark.assert_not_called()
         self.assertNotIn('fix_merged', record)
 
+    def test_review_descendant_requires_unchanged_repaired_source_blobs(self):
+        published = self.commit_on(self.tip, 'src/kept.ts', 'fixed implementation\n')
+        formatted = self.commit_on(published, 'review-format.txt', 'formatting-only review fix\n')
+        reverted = self.commit_on(published, 'src/kept.ts', 'one\ntwo\n')
+        other_changed = self.commit_on(published, 'src/moved.ts', 'changed second finding source\n')
+        first_job = self.root / 'state/repair/inbox/crq-run1-F1.json'
+        job = json.loads(first_job.read_text())
+        job['canonical_finding_id'] = 'd' * 64
+        atomic(first_job, job)
+        item = self.queue['items'][0]
+        jobs = ['crq-run1-F1', 'crq-run1-F2']
+        publication = {'head': published}
+        journal = self.root / 'state/repair' / jobs[0] / 'publication.json'
+        atomic(journal, publication)
+        original = journal.read_bytes()
+        c = SimpleNamespace(STATE=self.root / 'state', iso=lambda: 'now', git=self.git,
+                            is_ancestor=lambda a, b: subprocess.run(
+                                ['git', '-C', str(self.clone), 'merge-base', '--is-ancestor', a, b],
+                                capture_output=True).returncode == 0)
+        for actual, allowed in ((formatted, True), (reverted, False), (other_changed, False), (self.tip, False)):
+            with self.subTest(actual=actual):
+                self.git('update-ref', 'refs/remotes/origin/main', actual)
+                record = {'jobs': jobs, 'fix_pr': {'number': 99}, 'publication': dict(publication),
+                          'verdicts': [{'job': j, 'verdict': 'FIXED'} for j in jobs]}
+                item['repair_runs'] = {'run1': record}
+                c.pr_info = lambda n: {'state': 'MERGED', 'headRefOid': actual, 'mergeCommit': {'oid': actual}}
+                with mock.patch.object(repair_tick, 'mark_finding_outcome') as mark, \
+                     mock.patch.object(repair_tick, 'publish_source_resolution') as source:
+                    repair_tick.reconcile_fix_prs(c, self.queue)
+                self.assertEqual(mark.call_count, 2 if allowed else 0)
+                self.assertEqual(source.call_count, 1 if allowed else 0)
+                self.assertEqual('fix_merged' in record, allowed)
+                self.assertEqual(record['publication']['head'], published)
+                self.assertEqual(journal.read_bytes(), original)
+                if allowed:
+                    proof = record['validated_merge_head']
+                    self.assertEqual((proof['published_head'], proof['actual_head'], proof['merge_commit']),
+                                     (published, actual, actual))
+                    self.assertEqual(set(proof['source_blobs']), {'src/kept.ts', 'src/moved.ts'})
+                    self.assertEqual(proof['source_blobs']['src/kept.ts'], self.git('rev-parse', published + ':src/kept.ts'))
+                else:
+                    self.assertIn('source_publication_error', record)
+
+    def test_exact_publication_head_retains_shortcut(self):
+        c = SimpleNamespace(git=mock.Mock(), is_ancestor=mock.Mock())
+        proof = repair_tick.merge_head_evidence(c, {'publication': {'head': self.tip}}, self.tip)
+        self.assertEqual(proof['actual_head'], self.tip)
+        c.git.assert_not_called()
+        c.is_ancestor.assert_not_called()
+
     def test_fix_pr_provenance_includes_threadless_and_pr_sources(self):
         path = self.root / 'state/repair/inbox/crq-run1-F1.json'
         job = json.loads(path.read_text())
