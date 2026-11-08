@@ -10,6 +10,7 @@ const require = createRequire(import.meta.url);
 
 export class UnsupportedLockError extends Error {}
 export class SlotBusyError extends Error {}
+export class IncompleteSlotError extends Error {}
 
 function nativeFlock(): (fd: number, operation: string) => void {
   if (process.platform !== 'linux' && process.platform !== 'darwin') {
@@ -65,21 +66,25 @@ export async function acquireFileLock(path: string) {
   }
 }
 
-export interface SlotMetadata {
+export type SlotMetadata = {
   version: 1;
-  checkoutGitDir: string;
-  checkoutPath: string;
   incomplete: boolean;
-}
+} & (
+  | { state: 'unbound'; checkoutGitDir?: never; checkoutPath?: never }
+  | { state: 'bound'; checkoutGitDir: string; checkoutPath: string }
+);
 
 function parseMetadata(text: string): SlotMetadata {
   const value = JSON.parse(text) as Partial<SlotMetadata> | null;
   if (
     !value ||
     value.version !== 1 ||
-    typeof value.checkoutGitDir !== 'string' ||
-    typeof value.checkoutPath !== 'string' ||
-    typeof value.incomplete !== 'boolean'
+    typeof value.incomplete !== 'boolean' ||
+    !(value.state === 'unbound'
+      ? !('checkoutGitDir' in value) && !('checkoutPath' in value)
+      : value.state === 'bound' &&
+        typeof value.checkoutGitDir === 'string' &&
+        typeof value.checkoutPath === 'string')
   ) {
     throw new Error('Invalid slot metadata');
   }
@@ -109,7 +114,7 @@ export async function acquireSlot(commonDir: string, key: number | { checkoutGit
   }
   const lock = await acquireFileLock(join(await realpath(directory), `${name}.lock`));
   const metadataPath = join(dirname(lock.path), `${name}.json`);
-  return {
+  const slot = {
     ...lock,
     metadataPath,
     async readMetadata(): Promise<SlotMetadata | undefined> {
@@ -121,16 +126,26 @@ export async function acquireSlot(commonDir: string, key: number | { checkoutGit
         throw error;
       }
     },
+    // Call before checkout reuse/dispatch, after acquiring the slot. Acquisition alone
+    // permits inspection/reconciliation; it does not authorize reuse of incomplete work.
+    async assertReusable(): Promise<void> {
+      if ((await slot.readMetadata())?.incomplete) {
+        throw new IncompleteSlotError(`Incomplete slot requires reconciliation: ${metadataPath}`);
+      }
+    },
     // Caller must persist incomplete=true BEFORE dispatch, and false only AFTER actual drain.
     // An incomplete predecessor must be reconciled before any reuse; taking flock is not recovery.
     async writeMetadata(metadata: SlotMetadata): Promise<void> {
       await lock.assertIdentity();
       parseMetadata(JSON.stringify(metadata));
-      const canonical = {
-        ...metadata,
-        checkoutGitDir: await realpath(metadata.checkoutGitDir),
-        checkoutPath: await realpath(metadata.checkoutPath),
-      };
+      const canonical =
+        metadata.state === 'bound'
+          ? {
+              ...metadata,
+              checkoutGitDir: await realpath(metadata.checkoutGitDir),
+              checkoutPath: await realpath(metadata.checkoutPath),
+            }
+          : metadata;
       const temporary = `${metadataPath}.${randomUUID()}.tmp`;
       const output = await open(temporary, 'wx', 0o600);
       try {
@@ -153,4 +168,5 @@ export async function acquireSlot(commonDir: string, key: number | { checkoutGit
       }
     },
   };
+  return slot;
 }

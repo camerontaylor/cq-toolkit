@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from 'vitest';
-import { mkdtemp, symlink, rename, writeFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, symlink, rename, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawn, type ChildProcess } from 'node:child_process';
@@ -22,7 +22,7 @@ async function directory() {
   directories.push(path);
   return path;
 }
-async function holder(common: string, orphan = false) {
+async function holder(common: string, orphan = false, incomplete = false) {
   const url = new URL('../../../src/adapters/lock/slotLock.ts', import.meta.url).href;
   const child = spawn(
     process.execPath,
@@ -40,6 +40,7 @@ async function holder(common: string, orphan = false) {
       console.log(writer.pid);`
         : ''
     }
+    ${incomplete ? `await lock.writeMetadata({version:1, state:'unbound', incomplete:true});` : ''}
     console.log('ready'); setInterval(()=>{},1000);
   `,
       common,
@@ -134,6 +135,7 @@ test('replacement is detected and metadata cannot be written under replaced inod
     await expect(
       lock.writeMetadata({
         version: 1,
+        state: 'bound',
         checkoutPath: root,
         checkoutGitDir: root,
         incomplete: true,
@@ -150,6 +152,7 @@ test('per-slot metadata persists incomplete state across close and drains indepe
   expect(await first.readMetadata()).toBeUndefined();
   await first.writeMetadata({
     version: 1,
+    state: 'bound',
     checkoutPath: root,
     checkoutGitDir: root,
     incomplete: true,
@@ -166,5 +169,49 @@ test('per-slot metadata persists incomplete state across close and drains indepe
   } finally {
     await next.close();
     await other.close();
+  }
+});
+
+test('unbound incomplete metadata survives SIGKILL and refuses reuse until reconciled', async () => {
+  const common = await directory();
+  const { child } = await holder(common, false, true);
+  child.kill('SIGKILL');
+  await once(child, 'exit');
+  const successor = await acquireSlot(common, 1);
+  try {
+    expect(await successor.readMetadata()).toEqual({
+      version: 1,
+      state: 'unbound',
+      incomplete: true,
+    });
+    await expect(successor.assertReusable()).rejects.toThrow('requires reconciliation');
+    await successor.writeMetadata({ version: 1, state: 'unbound', incomplete: false });
+    await successor.assertReusable();
+  } finally {
+    await successor.close();
+  }
+});
+
+test('slot transitions unbound to bound to unbound across checkout creation and removal', async () => {
+  const common = await directory();
+  const checkout = join(common, 'new-checkout');
+  const lock = await acquireSlot(common, 1);
+  try {
+    await lock.writeMetadata({ version: 1, state: 'unbound', incomplete: true });
+    expect(await lock.readMetadata()).toEqual({ version: 1, state: 'unbound', incomplete: true });
+    await mkdir(checkout);
+    await lock.writeMetadata({
+      version: 1,
+      state: 'bound',
+      incomplete: true,
+      checkoutPath: checkout,
+      checkoutGitDir: checkout,
+    });
+    expect((await lock.readMetadata())?.state).toBe('bound');
+    await rm(checkout, { recursive: true });
+    await lock.writeMetadata({ version: 1, state: 'unbound', incomplete: false });
+    expect(await lock.readMetadata()).toEqual({ version: 1, state: 'unbound', incomplete: false });
+  } finally {
+    await lock.close();
   }
 });
