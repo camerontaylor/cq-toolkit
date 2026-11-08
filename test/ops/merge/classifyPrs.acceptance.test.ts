@@ -53,6 +53,26 @@ describe('plain independent review acceptance', () => {
     ).toBe('settle_window_pending');
   });
 
+  test('accepts a cq-review COMMENT review with an unresolved minor thread', () => {
+    const author = { authorType: 'Bot', authorLogin: 'cq-review[bot]' };
+    expect(
+      classifyPr(
+        candidate({
+          headRefOid: 'a'.repeat(40),
+          reviews: [
+            approved({
+              ...author,
+              state: 'COMMENTED',
+              body: `**Independent review (Sol): PASS for \`${'a'.repeat(40)}\`**`,
+            }),
+          ],
+          threads: [thread({ ...author, body: 'minor: simplify the helper' })],
+        }),
+        PENDING_MS,
+      ).reason,
+    ).toBe('settle_window_pending');
+  });
+
   test.each([{ automationLogin: 'cq-automation[bot]' }, { excludedLogins: ['automation-author'] }])(
     'still accepts the cq-review App PASS when the PR author itself is automation or excluded: %j',
     (config) => {
