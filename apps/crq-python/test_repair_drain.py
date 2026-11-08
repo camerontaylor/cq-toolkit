@@ -105,6 +105,22 @@ class RepairDrainTest(unittest.TestCase):
             repair_tick.reconcile_fix_prs(c, self.queue)
             self.assertEqual(mark.call_count, 1)
 
+    def test_source_failure_is_retained_without_aborting_reconciliation(self):
+        item = self.queue['items'][0]
+        record = item['repair_runs']['run1']
+        record.update(fix_pr={'number': 99}, verdicts=[])
+        c = SimpleNamespace(iso=lambda: 'now', git=lambda *args: self.tip,
+                            is_ancestor=lambda *args: True,
+                            pr_info=lambda n: {'state': 'MERGED', 'mergeCommit': {'oid': self.tip}})
+        with mock.patch.object(repair_tick, 'publish_source_resolution', side_effect=RuntimeError('forge exhausted')):
+            repair_tick.reconcile_fix_prs(c, self.queue)
+        self.assertEqual(record['source_publication_error'], 'forge exhausted')
+        self.assertNotIn('fix_merged', record)
+        with mock.patch.object(repair_tick, 'publish_source_resolution'):
+            repair_tick.reconcile_fix_prs(c, self.queue)
+        self.assertEqual(record['fix_merged'], 'now')
+        self.assertNotIn('source_publication_error', record)
+
     def test_merge_head_mismatch_cannot_mark_prepared_finding_fixed(self):
         record = self.queue['items'][0]['repair_runs']['run1']
         record.update(fix_pr={'number': 99}, publication={'head': self.pin})

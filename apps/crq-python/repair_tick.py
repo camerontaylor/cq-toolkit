@@ -590,7 +590,12 @@ def reconcile_fix_prs(c, q):
                         for blocker in item.get('blocking', []):
                             if blocker.get('repair_job') == job:
                                 blocker['resolution'] = {'fix_pr': pr['number'], 'merge': merge, 'at': c.iso()}
-                publish_source_resolution(c, record, merge)
+                try:
+                    publish_source_resolution(c, record, merge)
+                except Exception as exc:
+                    record['source_publication_error'] = str(exc)[:300]
+                    continue  # Optional feedback must not abort the scheduler tick.
+                record.pop('source_publication_error', None)
                 record['fix_merged'] = c.iso()
 
 
