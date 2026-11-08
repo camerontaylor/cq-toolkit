@@ -140,6 +140,79 @@ class ModuleTest(unittest.TestCase):
             self.assertEqual(result, 1)
             self.assertEqual(gh.calls, [])
 
+    def test_script_entrypoint_publishes_and_reports_errors(self):
+        import sys
+        root = Path(self.td.name)
+        body = root / "summary.md"
+        summary = f"**Independent review (Sol): ITERATE for `{HEAD}`**"
+        body.write_text(summary, encoding="utf-8")
+        findings = write_ndjson(root, [ANCHORED])
+        calls = root / "calls.ndjson"
+        payload = root / "payload.json"
+        # Exercise the real script and subprocess boundary, with no real gh or
+        # credentials. Each fake gh process records the endpoint it received.
+        fake = root / "gh"
+        fake.write_text(f"#!{sys.executable}\n" + """
+import json
+import sys
+from pathlib import Path
+root = Path(__file__).parent
+args = sys.argv[1:]
+with (root / 'calls.ndjson').open('a') as log:
+    log.write(json.dumps(args) + '\\n')
+if (root / 'fail').exists():
+    print('mock publication failure', file=sys.stderr)
+    sys.exit(1)
+if '--method' in args:
+    (root / 'payload.json').write_text(sys.stdin.read())
+    print(json.dumps({'id': 77, 'html_url': 'https://example.test/review/77'}))
+elif args[1] == 'user':
+    print('mock-reviewer')
+elif '/compare/' in args[1]:
+    print(json.dumps([{'filename': 'src/a.py', 'status': 'modified',
+                       'patch': '@@ -1,3 +1,3 @@\\n a\\n+b\\n c'}]))
+elif '--paginate' not in args:
+    print(json.dumps({'state': 'open', 'merged': False}))
+""", encoding="utf-8")
+        fake.chmod(0o700)
+        env = {"PATH": str(root), "PYTHONIOENCODING": "utf-8"}
+        argv = [sys.executable, str(Path(prf.__file__).resolve()),
+                "--repo", REPO, "--pr", "7", "--head", HEAD, "--base", BASE,
+                "--run-id", "script-review", "--reviewer", "Sol",
+                "--findings", str(findings), "--body-file", str(body)]
+
+        def run(extra=()):
+            return subprocess.run(argv + list(extra), env=env, cwd=root,
+                                  capture_output=True, text=True, timeout=20)
+
+        result = run()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(json.loads(result.stdout), {
+            "state": "created", "review_id": 77,
+            "review_url": "https://example.test/review/77", "inline": 1, "body_only": 0})
+        review = json.loads(payload.read_text())
+        self.assertEqual(review["commit_id"], HEAD)
+        self.assertIn(summary, review["body"])
+        self.assertEqual(review["comments"][0]["path"], "src/a.py")
+        self.assertEqual(review["comments"][0]["line"], 3)
+        self.assertTrue(any(json.loads(line)[1] == "user"
+                            for line in calls.read_text().splitlines()))
+
+        before = calls.read_text()
+        for extra in (["--base", "bad"], ["--body-file", str(root / "missing")]):
+            with self.subTest(extra=extra):
+                result = run(extra)
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual(result.stdout, "")
+                self.assertIn("pr_review_findings:", result.stderr)
+                self.assertEqual(calls.read_text(), before)
+        (root / "fail").touch()
+        result = run()
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("mock publication failure", result.stderr)
+
     def test_right_ranges_cover_each_hunk_including_context(self):
         self.assertEqual(prf.right_ranges(PATCH), [(1, 4), (41, 46)])
         self.assertEqual(prf.right_ranges("@@ -3 +3 @@\n-x\n+y\n@@ -9,2 +8,0 @@\n-a\n-b\n"), [(3, 3)])
