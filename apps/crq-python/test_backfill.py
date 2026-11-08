@@ -266,6 +266,38 @@ class OperatorTest(unittest.TestCase):
                 with self.assertRaises(ledger.IntegrityError):
                     backfill.execute(c, args)
 
+    def test_history_catalog_rejects_late_collector(self):
+        for initial in (None, b"previous catalog"):
+            with self.subTest(initial=initial), tempfile.TemporaryDirectory() as td:
+                output = Path(td) / "catalog.json"
+                if initial is not None:
+                    output.write_bytes(initial)
+                held = [False]
+                def lock(fn, **kwargs):
+                    self.assertFalse(held[0])
+                    held[0] = True
+                    try:
+                        return fn()
+                    finally:
+                        held[0] = False
+                c = SimpleNamespace(STATE=Path(td), with_lock=lock, load_queue=lambda: {"items": []})
+                args = SimpleNamespace(output=str(output), github=False)
+                newer = {"sources": ["newer"], "acquisition": {}}
+                older = {"sources": ["older"], "acquisition": {}}
+                def collect(*a, **kw):
+                    self.assertFalse(held[0])
+                    # A second collector snapshots and publishes before the
+                    # first completes. Neither collection holds tick.lock.
+                    with mock.patch.object(history, "collect_sources", return_value=newer):
+                        backfill.collect_history_unlocked(c, args)
+                    return older
+                with mock.patch.object(backfill.runtime, "settings", return_value={"enabled": True}), \
+                     mock.patch.object(backfill.runtime, "services", return_value=(None, None, None, None)), \
+                     mock.patch.object(history, "collect_sources", side_effect=collect):
+                    with self.assertRaisesRegex(ledger.IntegrityError, "catalog changed"):
+                        backfill.collect_history_unlocked(c, args)
+                self.assertEqual(ledger.loads(output.read_bytes()), newer)
+
     def test_timer_inert_six_hour_schedule_shared_cli_and_stage2_switch(self):
         root = Path(__file__).resolve().parent
         timer = (root / "ops/systemd/crq-backfill.timer").read_text()

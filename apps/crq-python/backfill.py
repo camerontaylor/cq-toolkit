@@ -194,17 +194,32 @@ def inventory_unlocked(c, args, clock=time.monotonic):
 
 def collect_history_unlocked(c, args):
     """Snapshot the queue under the lock; run the slow GitHub collection outside it."""
-    taken = c.with_lock(lambda: (copy.deepcopy(c.load_queue()), runtime.settings(c.STATE)), lock_wait=30)
+    output = Path(args.output)
+    def revision():
+        try:
+            stat = output.stat()
+            return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+        except FileNotFoundError:
+            return None
+    def snapshot():
+        return copy.deepcopy(c.load_queue()), runtime.settings(c.STATE), revision()
+    taken = c.with_lock(snapshot, lock_wait=30)
     if taken is None:
         return None
-    queue, config = taken
+    queue, config, original_output = taken
     if not config:
         raise ledger.IntegrityError("owner-provisioned rollout configuration is absent")
     _, store, _, _ = runtime.services(c, config)
     from backfill_history import collect_sources, github_sources
     value = collect_sources(queue, c.STATE, store, github=(lambda: github_sources(store)) if args.github else None)
-    ledger.atomic(args.output, ledger.canonical(value))
-    return {"catalog": args.output, "sources": len(value["sources"]), "acquisition": value["acquisition"]}
+    def publish():
+        # Reuse the queue lock only for publication. A collector that finished
+        # during our slow I/O owns the destination; never replace its catalog.
+        if revision() != original_output:
+            raise ledger.IntegrityError("history catalog changed during collection; retry collect-history")
+        ledger.atomic(output, ledger.canonical(value))
+        return {"catalog": args.output, "sources": len(value["sources"]), "acquisition": value["acquisition"]}
+    return c.with_lock(publish, lock_wait=30)
 
 
 def main():
