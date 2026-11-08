@@ -185,6 +185,7 @@ class SummaryTest(unittest.TestCase):
             root = Path(tmp)
             rows = root / "state/backfill/findings/triage"
             rows.mkdir(parents=True)
+            (root / "state/events.jsonl").write_text("")
             for n in range(35):
                 row = {"status": "needs-human", "target": "tip", "canonical_id": str(n),
                        "finding": {"id": str(n), "title": "Check", "severity": "major", "path": "a"}}
