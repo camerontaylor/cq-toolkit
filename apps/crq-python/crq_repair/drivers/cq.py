@@ -146,6 +146,8 @@ def invoke(config, role, job, wt, directory):
     _log_invocation(directory, p.stdout, p.stderr)
     try:
         data = json.loads(p.stdout)
+        if not isinstance(data, dict):
+            raise ValueError('cq output must be an object')
     except ValueError:
         return {'stop': 'error', 'changed': False, 'summary': 'invalid cq output', 'commits': []}
     # The session link (item 2.3), written even on a non-ok verdict: the
@@ -153,11 +155,17 @@ def invoke(config, role, job, wt, directory):
     # its JSON value, so the job-local store is the source of truth: it holds
     # one `<sessionId>.jsonl` per session this job's runner created. A
     # value-level sessionId (if a later runner returns one) wins.
-    result = data.get('value') or data.get('result') or {}
+    result = data.get('value')
+    if result is None:
+        result = data.get('result')
+    if result is None:
+        result = {}
+    if not isinstance(result, dict):
+        return {'stop': 'error', 'changed': False, 'summary': 'invalid cq output', 'commits': []}
     from crq_repair import atomic as _atomic
     try:  # best-effort: the session link never outranks the verdict
         stored = sorted(f.stem for f in sessions_dir.glob('*.jsonl')) if sessions_dir.is_dir() else []
-        sid = result.get('sessionId') if isinstance(result, dict) else None
+        sid = result.get('sessionId')
         if not (isinstance(sid, str) and sid) and len(stored) == 1:
             sid = stored[0]
         _atomic(Path(directory) / 'session.json', {
@@ -184,7 +192,6 @@ def invoke(config, role, job, wt, directory):
                                               or 'token or wall-clock cap (no budget-stop line)')
         return {'stop': stop, 'changed': False, 'summary': summary, 'commits': [],
                 'retry_after_ms': signals.get('retryAfterMs')}
-    result = data.get('value') or data.get('result') or {}
     return {**result, 'stop': 'ok'}  # session.json already written above
 
 
@@ -208,4 +215,10 @@ def judge(config, role, job, wt, directory):
     _log_invocation(directory, p.stdout, p.stderr)
     if p.returncode:
         return {'stop': 'error', 'verdict': 'unsure', 'reason': 'cq read-only judge failed'}
-    return json.loads(p.stdout)
+    try:
+        result = json.loads(p.stdout)
+    except ValueError:
+        result = None
+    if not isinstance(result, dict):
+        return {'stop': 'error', 'verdict': 'unsure', 'reason': 'invalid cq read-only judge output'}
+    return result
