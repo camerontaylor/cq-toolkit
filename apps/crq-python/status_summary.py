@@ -202,15 +202,25 @@ def summarize(status, queue, heartbeat, config, events, now):
     starts_cap = limit if type(limit) is int and limit > 0 else config["max_starts_per_hour"]
     ranks = [{**entry, "rank_tier": entry.get("rank_tier", repo_registry.DEFAULT_RANK)}
              for entry in config.get("repos", [])]
+    def aging_deadline(item):
+        if item.get("kind") == "local-review" and (item.get("generation", 1) > 1 or item.get("repeat_requested") is True) and item.get("created_at"):
+            try:
+                return timestamp(item["created_at"]) + config.get("local_review_aging_minutes", 60) * 60
+            except (ValueError, TypeError, AttributeError):
+                return None
+        return None
     def pending_key(item):
         rank = {"open": 0, "recent_merge": 2, "backfill": 3, "other": 4}[category(item)]
         if item.get("kind") in ("coverage", "backfill"):
             rank = 4
         elif item.get("kind") == "delta" and category(item) == "open":
             rank = 1
+        if item.get("kind") == "local-review":
+            deadline = aging_deadline(item)
+            rank = 0 if (item.get("generation", 1) == 1 and item.get("repeat_requested") is not True) or deadline is not None and now >= deadline else 1
         repo_rank = repo_registry.rank_for(item, primary, ranks)
         # Open PRs/deltas now outrank repository tiers across all repos (#1177).
-        if repo_rank is not None and category(item) != "open":
+        if repo_rank is not None and category(item) != "open" and item.get("kind") != "local-review":
             rank = repo_rank
         return (not item.get("operator_priority", False), rank, item.get("order", 999))
     pending = [i for i in items if i.get("state") == "pending"
@@ -220,8 +230,12 @@ def summarize(status, queue, heartbeat, config, events, now):
         "completed_24h_by_work": completed,
         "pending_items": [{"repo": i.get("repo") or (i.get("subject") or {}).get("repo") or config.get("repo"),
                            "pr": i.get("pr") or (i.get("subject") or {}).get("pr"),
-                           "title": i.get("title"), "kind": i.get("kind")}
-                          for i in sorted(pending, key=pending_key)[:10]],
+                           "title": i.get("title"), "kind": i.get("kind"),
+                           "band": "interactive" if pending_key(i)[1] < 2 else "background",
+                           "generation": i.get("generation"), "aging_deadline": aging_deadline(i),
+                           "reason": i.get("wait_reason") or i.get("last_error"),
+                           "approximate_position": position}
+                          for position, i in enumerate(sorted(pending, key=pending_key)[:10], 1)],
         "merged_current": merged_current(queue),
         "last_tick": last_tick, "status_as_of": status["generated_at"],
         "paused": bool(queue.get("paused")), "cooldown_until": queue.get("cooldown_until"),

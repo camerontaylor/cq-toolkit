@@ -1934,7 +1934,7 @@ def launch(q: Dict[str, Any], item: Dict[str, Any], plan: Dict[str, Any]) -> str
             "label": plan["label"], "cycle": plan["cycle"], "base": plan["base"], "head": plan["head"],
             "pr_head": plan.get("pr_head", plan["head"]), "review_pin": plan.get("review_pin", plan["base"]),
             "target": plan["target"], "pr_branch": plan["branch"], "worktree": str(wt), "wt_branch": wbranch,
-            "dirty_diff": "clean tree", "range_policy": plan.get("range_policy"), "started_at": iso(),
+            "dirty_diff": "clean tree", "range_policy": plan.get("range_policy"), "band": launch_band(item), "started_at": iso(),
             "cmd": [*cli_cmd, "--base-commit", plan["base"]]}
     if plan.get("profile"):
         meta.update(profile=plan["profile"], config_digest=plan["config_digest"])
@@ -1986,7 +1986,7 @@ def launch(q: Dict[str, Any], item: Dict[str, Any], plan: Dict[str, Any]) -> str
         "head": plan["head"],
     })
     item["state"] = "reviewing"
-    item["run"] = {"run_id": run_id, "pid": None, "started_at": meta["started_at"], "launch_pending": True}
+    item["run"] = {"run_id": run_id, "pid": None, "started_at": meta["started_at"], "band": meta["band"], "launch_pending": True}
     item["wait_reason"] = None
     q.setdefault("starts", []).append(meta["started_at"])
     # Reserve identity/quota BEFORE any child or remote status mutation. A
@@ -2004,7 +2004,7 @@ def launch(q: Dict[str, Any], item: Dict[str, Any], plan: Dict[str, Any]) -> str
         # silently returns to pending after a failed spawn.
         if item["kind"] not in (author_quota.AUTHOR_KIND, local_review_runtime.KIND):
             raise
-        item["run"] = {"run_id": run_id, "pid": None, "started_at": meta["started_at"],
+        item["run"] = {"run_id": run_id, "pid": None, "started_at": meta["started_at"], "band": meta["band"],
                        "launch_pending": False, "spawn_failed_at": iso(), "error": str(exc)[:200]}
         item["state"] = "failed" if item["kind"] == local_review_runtime.KIND else author_quota.AUTHOR_FAILED
         item["last_error"] = f"{item['kind']} spawn failed (no retry): {exc}"[:300]
@@ -2419,7 +2419,7 @@ def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
         outcome = ("partial-scope" if partial else "terminal-with-findings" if cls["findings"] else "terminal-clean") if cls["counted"] else cls["outcome"]
         item["receipt_id"] = review_receipt.write_receipt(STATE / "receipts",
             current_document(item, outcome, meta=meta, cls=cls, rdir=rdir))
-        item.setdefault("attempts", []).append({"run_id": r["run_id"], "outcome": cls["outcome"],
+        item.setdefault("attempts", []).append({"run_id": r["run_id"], "band": r.get("band", "background"), "started_at": r.get("started_at"), "outcome": cls["outcome"],
                                               "counted": cls["counted"], "receipt_id": item["receipt_id"]})
         item["run"] = None
         if outcome == "terminal-with-findings":
@@ -2448,7 +2448,7 @@ def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
         outcome = ("partial-scope" if partial else "terminal-with-findings" if cls["findings"] else "terminal-clean") if cls["counted"] else cls["outcome"]
         item["receipt_id"] = review_receipt.write_receipt(STATE / "receipts",
             current_document(item, outcome, meta=meta, cls=cls, rdir=rdir))
-        item.setdefault("attempts", []).append({"run_id": r["run_id"], "outcome": cls["outcome"],
+        item.setdefault("attempts", []).append({"run_id": r["run_id"], "band": r.get("band", "background"), "started_at": r.get("started_at"), "outcome": cls["outcome"],
                                                 "counted": cls["counted"], "receipt_id": item["receipt_id"]})
         item["run"] = None
         if cls["counted"]:
@@ -2497,8 +2497,14 @@ def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
                         clone=Path(push_cfg["clone"]) if push_cfg else None)
         return f"{item['id']}: {outcome}; receipt {item['receipt_id']}"
     if item["kind"] == backfill_jobs.KIND:
-        return backfill_runtime.harvest(sys.modules[__name__], q, item, rdir, meta, cls, exit_code,
+        result = backfill_runtime.harvest(sys.modules[__name__], q, item, rdir, meta, cls, exit_code,
                                         terminal_verified=(state == "harvest"))
+        if not item.get("run") and not any(a.get("run_id") == r["run_id"] for a in item.get("attempts", [])):
+            item.setdefault("attempts", []).append({"run_id": r["run_id"],
+                "band": r.get("band", "background"), "started_at": r.get("started_at"),
+                "outcome": cls["outcome"]})
+            save_queue(q)
+        return result
     if item["kind"] == "coverage":
         try:
             coverage._legacy_origins(q, item)
@@ -2523,7 +2529,7 @@ def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
         cfg = repo_registry.by_repo(REPOS, item_repo(item))
         cleanup_clone = Path(cfg["clone"]) if cfg else None
     remove_worktree(Path(meta["worktree"]), meta["wt_branch"], clone=cleanup_clone)
-    attempt = {"run_id": r["run_id"], "outcome": cls["outcome"], "counted": cls["counted"], "at": iso(),
+    attempt = {"run_id": r["run_id"], "band": r.get("band", "background"), "started_at": r.get("started_at"), "outcome": cls["outcome"], "counted": cls["counted"], "at": iso(),
                "head": meta["head"], "base": meta["base"], "message": cls.get("message")}
     item.setdefault("attempts", []).append(attempt)
     item["run"] = None
@@ -2675,6 +2681,15 @@ def rank(item: Dict[str, Any]) -> int:
         return 0
     if item["kind"] == "delta" and item.get("followup") != "merged":
         return 1
+    if item["kind"] == local_review_runtime.KIND:
+        if item.get("generation", 1) == 1 and item.get("repeat_requested") is not True:
+            return 0
+        created = item.get("created_at")
+        try:
+            aged = created and (now() - parse_iso(created)).total_seconds() >= CONFIG.get("local_review_aging_minutes", 60) * 60
+        except (ValueError, TypeError, AttributeError):
+            aged = False
+        return 0 if aged else 1
     repo_rank = repo_registry.rank_for(item, REPO, REPOS)
     if repo_rank is not None:
         return repo_rank
@@ -2687,6 +2702,23 @@ def rank(item: Dict[str, Any]) -> int:
     if item["kind"] == "delta":
         return 2
     return 2 if item.get("source") == "followup" else 3
+
+
+def launch_band(item):
+    return "interactive" if rank(item) < 2 else "background"
+
+
+def background_turn(q):
+    """Use reservation chronology, including running work, never completion order."""
+    records = {}
+    for item in q["items"]:
+        for record in [*item.get("attempts", []), item.get("run")]:
+            if record and record.get("run_id"):
+                records[record["run_id"]] = record
+    def started(record):
+        return record.get("started_at") or record["run_id"].rsplit("-", 1)[-1]
+    latest = sorted(records.values(), key=lambda r: (started(r).replace("-", "").replace(":", ""), r["run_id"]))[-2:]
+    return len(latest) == 2 and all(r.get("band", "background") == "interactive" for r in latest)
 
 
 def sort_key(item: Dict[str, Any]) -> Tuple:
@@ -2802,7 +2834,17 @@ def ordinary_review_eligible(q):
                for i in live_items(q))
 
 
-def coverage_fallback(q, log, dry, only):
+def coverage_fallback(q, log, dry, only, ordinary_eligible=None):
+    previous = q.get("backfill_ordinary_exhausted", False)
+    if ordinary_eligible is False:
+        q["backfill_ordinary_exhausted"] = True
+    try:
+        return _coverage_fallback(q, log, dry, only)
+    finally:
+        q["backfill_ordinary_exhausted"] = previous
+
+
+def _coverage_fallback(q, log, dry, only):
     started, available = backfill_runtime.select(sys.modules[__name__], q, log, dry, only)
     if started or available:
         return started, available
@@ -2875,7 +2917,19 @@ def start_one(q, log, dry, only, ignore_quiet, capture_current=True):
     has_coverage = False
     reservations_before = len(q.get("starts", []))
     q["backfill_ordinary_exhausted"] = False
-    for item in sorted(live_items(q), key=sort_key):
+    selection = sorted(live_items(q), key=sort_key)
+    turn = not only and background_turn(q) and any(
+        i["state"] == "pending" and rank(i) < 2 for i in selection)
+    if turn:
+        # Try rank 2–3 plans in order; their ordinary gates establish eligibility.
+        selection.sort(key=lambda i: (not bool(i.get("operator_priority")),
+            0 if 2 <= rank(i) <= 3 else 1))
+    for item in selection:
+        if turn and not item.get("operator_priority") and not 2 <= rank(item) <= 3:
+            turn = False
+            started, has_coverage = coverage_fallback(q, log, dry, only, ordinary_eligible=False)
+            if started or (dry and has_coverage):
+                break
         if only and item["id"] != only:
             continue
         if item["state"] != "pending":

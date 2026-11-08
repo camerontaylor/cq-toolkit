@@ -411,11 +411,19 @@ class ExecutionTests(SnapshotGitFixture, unittest.TestCase):
                 plan = runtime.prepare(self.c, self.q, item, False)
                 run_id = crq.launch(self.q, item, plan)
                 meta = json.loads((self.runs / run_id / "meta.json").read_text())
+                self.assertEqual(item["run"]["band"], "interactive")
+                self.assertEqual(meta["band"], "interactive")
                 self.assertEqual(meta["cmd"], ["coderabbit", "review", *item["profile"]["flags"]])
                 self.assertIn("--committed", meta["cmd"])
                 self.assertEqual(meta["cmd"][-2:], ["--base-commit", self.base])
                 self.assertTrue(any(q["items"][-1].get("run", {}).get("launch_pending") for q in saved if q["items"][-1].get("run")))
-                item.update(state="done", run=None, scope_adequate=True, receipt_id="f" * 64)
+                reserved_band = item["run"]["band"]
+                (self.runs / run_id / "review.ndjson").write_text(self.raw)
+                with mock.patch.object(backfill_runtime, "settings", return_value=None):
+                    runtime.complete(self.c, self.q, item, self.runs / run_id, run_id,
+                        self.cls, "2026-11-08T00:01:00Z", 0)
+                self.assertIsNone(item["run"])
+                self.assertEqual(item["attempts"][-1]["band"], reserved_band)
             self.assertEqual(processes.Popen.call_count, 3)
             self.assertEqual(self.q["items"][-1]["generation"], 3)
             pr = self.pr()
@@ -461,3 +469,67 @@ class ExecutionTests(SnapshotGitFixture, unittest.TestCase):
                         self.assertTrue(restored["items"][0]["run"]["launch_pending"])
                         crq.start_one(restored, [], False, None, False)
                         self.assertEqual(processes.Popen.call_count, 1)
+
+
+class SchedulingTests(unittest.TestCase):
+    def test_generation_aging_fifo_and_foreign_open(self):
+        clock = dt.datetime(2026, 11, 8, 1, tzinfo=dt.timezone.utc)
+        repeat = dict(kind="local-review", generation=2, created_at="2026-11-08T00:00:00Z", order=1)
+        first = dict(kind="local-review", generation=1, order=2)
+        with mock.patch.object(crq, "now", return_value=clock):
+            self.assertEqual(crq.rank(repeat), 0)
+            self.assertLess(crq.sort_key(repeat), crq.sort_key(first))
+            repeat["created_at"] = "2026-11-08T00:00:01Z"
+            self.assertEqual(crq.rank(repeat), 1)
+            self.assertEqual(crq.rank(dict(first, repeat_requested=True)), 1)
+            self.assertEqual(crq.rank(dict(kind="open", repo="other/repo")), 0)
+
+    def test_foreign_local_reviews_bypass_repository_rank_and_invalid_age(self):
+        clock = dt.datetime(2026, 11, 8, 1, tzinfo=dt.timezone.utc)
+        repos = [dict(repo="other/repo", rank_tier=3)]
+        with mock.patch.object(crq, "REPOS", repos), mock.patch.object(crq, "now", return_value=clock):
+            for generation, explicit, created, expected in (
+                    (1, False, None, 0), (2, False, "2026-11-08T00:00:01Z", 1),
+                    (1, True, "2026-11-08T00:00:01Z", 1), (2, False, "2026-11-08T00:00:00Z", 0),
+                    (2, False, "invalid", 1)):
+                with self.subTest(generation=generation, explicit=explicit, created=created):
+                    item = dict(kind="local-review", repo="other/repo", generation=generation,
+                        repeat_requested=explicit, created_at=created)
+                    self.assertEqual(crq.repo_registry.rank_for(item, crq.REPO, repos), 3)
+                    self.assertEqual(crq.rank(item), expected)
+
+    def test_running_restart_reverse_harvest_and_legacy(self):
+        a = dict(run_id="a-20261108T000000Z", band="interactive", started_at="2026-11-08T00:00:00Z")
+        b = dict(run_id="b-20261108T000001Z", band="interactive", started_at="2026-11-08T00:00:01Z")
+        q = dict(items=[dict(run=a), dict(run=b)])
+        self.assertTrue(crq.background_turn(json.loads(json.dumps(q))))
+        q = dict(items=[dict(attempts=[b, a])])
+        self.assertTrue(crq.background_turn(q))
+        q["items"][0]["attempts"].append(dict(run_id="old-20261108T000002Z"))
+        self.assertFalse(crq.background_turn(q))
+
+    def test_turn_fallback_is_scoped(self):
+        q = dict(items=[], backfill_ordinary_exhausted=False)
+        with mock.patch.object(crq, "_coverage_fallback", side_effect=lambda *args: (crq.ordinary_review_eligible(q), True)):
+            self.assertEqual(crq.coverage_fallback(q, [], False, None, ordinary_eligible=False), (False, True))
+        self.assertFalse(q["backfill_ordinary_exhausted"])
+
+    def test_band_turn_background_eligibility_and_operator_priority(self):
+        for priority, blocked in ((False, False), (True, False), (False, True)):
+            with self.subTest(priority=priority, blocked=blocked):
+                interactive = dict(id="i", kind="local-review", generation=1, state="pending", order=1,
+                    operator_priority=priority)
+                background = dict(id="b", kind="merged", state="pending", pr=1, order=2,
+                    not_before="2099-01-01T00:00:00Z" if blocked else None)
+                q = dict(items=[interactive, background])
+                plan = dict(notes=[], base="a", head="b", target="c", label="test")
+                def launch(q, item, plan):
+                    item["state"] = "reviewing"
+                    return item["id"]
+                with mock.patch.object(crq, "background_turn", return_value=True), \
+                     mock.patch.object(crq, "plan_merged", return_value=plan), \
+                     mock.patch.object(runtime, "prepare", return_value=plan), \
+                     mock.patch.object(crq, "launch", side_effect=launch), \
+                     mock.patch.object(crq, "coverage_fallback", return_value=(None, False)):
+                    result = crq.start_one(q, [], False, None, False)[0]
+                self.assertEqual(result, "i" if priority or blocked else "b")
