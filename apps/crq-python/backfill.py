@@ -115,7 +115,7 @@ def execute(c, args):
         repo.git("fetch", "--no-tags", "origin", DEFAULT_FETCH_REFSPEC)
         tip = repo.git("rev-parse", DEFAULT_REF + "^{commit}").decode().strip()
         return inbox.triage(args.finding, repo, tip, args.action, args.operator, args.reason, c.iso(),
-                            fixing_commit=args.fixing_commit, canonical_id=args.canonical_id)
+                            fixing_commit=args.fixing_commit, canonical_id=args.canonical_id, reviews=publisher.fetch()[1])
     if args.command == "deliver":
         def scan(target, name):
             base, head = runtime.subjects.projection(repo, target, [name])
