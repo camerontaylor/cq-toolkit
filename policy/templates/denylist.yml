@@ -11,9 +11,9 @@ on:
   push:
   pull_request:
 
-# Keep PR and push cancellation separate, including fork PRs.
+# PR updates cancel obsolete scans; incremental pushes must all be scanned.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: true
 
 permissions:
