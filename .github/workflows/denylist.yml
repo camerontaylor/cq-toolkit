@@ -12,9 +12,9 @@ on:
   push:
   pull_request:
 
-# PR updates cancel obsolete scans; incremental pushes must all be scanned.
+# PR updates cancel obsolete scans; every incremental push has a unique group.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.sha }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: true
 
 permissions:
