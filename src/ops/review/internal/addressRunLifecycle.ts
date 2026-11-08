@@ -1,4 +1,3 @@
-import type { AddressLease } from './addressOwnership.js';
 import type { ReviewAddressResult, ReviewAddressReport } from '../address.js';
 import {
   recordAddressTerminalEvidence,
@@ -11,6 +10,11 @@ import {
 import { lstat, realpath } from 'node:fs/promises';
 import { basename, dirname, resolve } from 'node:path';
 const same = (a: Identity, b: Identity) => a.ino === b.ino && a.dev === b.dev;
+/** Minimal capability surface; checkout registry and durable claims stay with the owner. */
+export interface AddressRunLease {
+  readonly signal: AbortSignal;
+  assertOwned(): Promise<void>;
+}
 type Identity = { ino: number; dev: number };
 /** Identity boundary shared by store-backed and future checkout-lock lifetimes. */
 export interface AddressRunAuthority {
@@ -18,13 +22,13 @@ export interface AddressRunAuthority {
   readonly signal: AbortSignal;
   assertOwned(): Promise<void>;
 }
-export const liveLeases = new WeakMap<AddressLease, AddressRunAuthority>();
-interface TerminalInternals {
-  participant<T>(lease: AddressLease, action: () => Promise<T>): Promise<T>;
-  bindReport(lease: AddressLease, report: ReviewAddressReport): Promise<void>;
-  workerBinding(lease: AddressLease): object;
-  opaque(lease: AddressLease): void;
-  cancelledResult(lease: AddressLease): Promise<ReviewAddressResult>;
+const liveLeases = new WeakMap<AddressRunLease, AddressRunAuthority>();
+export interface TerminalInternals {
+  participant<T>(lease: AddressRunLease, action: () => Promise<T>): Promise<T>;
+  bindReport(lease: AddressRunLease, report: ReviewAddressReport): Promise<void>;
+  workerBinding(lease: AddressRunLease): object;
+  opaque(lease: AddressRunLease): void;
+  cancelledResult(lease: AddressRunLease): Promise<ReviewAddressResult>;
   validate(): Promise<{ commonDir: string; terminal: boolean }>;
   track(promise: Promise<void>): void;
   record(participant: Participant, input: AddressTerminalAttemptInput): Promise<object>;
@@ -39,15 +43,15 @@ interface TerminalInternals {
   ordinaryReport(path: string, bytes: string): Promise<void>;
   candidate(root: string, path: string, remove: boolean): Promise<void>;
 }
-export const terminalInternals = new WeakMap<AddressRunAuthority, TerminalInternals>();
-export const terminalAuthorities = new WeakMap<object, AddressRunAuthority>();
-export const terminalWorkers = new WeakMap<
+const terminalInternals = new WeakMap<AddressRunAuthority, TerminalInternals>();
+const terminalAuthorities = new WeakMap<object, AddressRunAuthority>();
+const terminalWorkers = new WeakMap<
   object,
   { owner: AddressRunAuthority; participant: Participant }
 >();
-export const participantLeases = new WeakMap<AddressLease, Participant>();
+const participantLeases = new WeakMap<AddressRunLease, Participant>();
 export interface Participant {
-  lease: AddressLease;
+  lease: AddressRunLease;
   closed: boolean;
   arrived: boolean;
   report?: ReviewAddressReport;
@@ -59,6 +63,49 @@ export interface Participant {
   opaqueDispatched: boolean;
 }
 
+/** A fresh context mints its own token; callers cannot install or replace global capabilities. */
+export function createAddressRunContext(owner: AddressRunAuthority, internals: TerminalInternals) {
+  const token = Object.freeze({});
+  if (terminalInternals.has(owner)) throw new Error('address terminal: reused run authority');
+  terminalInternals.set(owner, internals);
+  return Object.freeze({
+    token,
+    activate() {
+      terminalAuthorities.set(token, owner);
+    },
+    registerLease(lease: AddressRunLease) {
+      if (liveLeases.has(lease)) throw new Error('address terminal: reused lease');
+      liveLeases.set(lease, owner);
+    },
+    participant(lease: AddressRunLease) {
+      return liveLeases.get(lease) === owner ? participantLeases.get(lease) : undefined;
+    },
+    registerParticipant(lease: AddressRunLease, participant: Participant) {
+      if (liveLeases.get(lease) !== owner || participantLeases.has(lease))
+        throw new Error('address terminal: forged/reused participant');
+      participantLeases.set(lease, participant);
+    },
+    workerBinding(participant: Participant) {
+      if (
+        participantLeases.get(participant.lease) !== participant ||
+        liveLeases.get(participant.lease) !== owner
+      )
+        throw new Error('address terminal: forged participant');
+      const binding = Object.freeze({});
+      terminalWorkers.set(binding, { owner, participant });
+      return binding;
+    },
+    runParticipant<T>(lease: AddressRunLease, action: () => Promise<T>): Promise<T> {
+      return internals.participant(lease, action);
+    },
+  });
+}
+
+/** Read-only lookup for authentic single-use nested leases. */
+export function addressRunLeaseAuthority(lease: AddressRunLease): AddressRunAuthority | undefined {
+  return liveLeases.get(lease);
+}
+
 /** In-memory writer and terminal lifetime; contains no durable ownership protocol. */
 export abstract class AddressRunLifecycle implements AddressRunAuthority {
   abstract readonly commonDir: string;
@@ -68,7 +115,10 @@ export abstract class AddressRunLifecycle implements AddressRunAuthority {
   protected readonly controller: AbortController;
   protected readonly tasks = new Set<Promise<unknown>>();
   protected readonly retentionAdvisories: string[] = [];
-  protected readonly terminalToken = Object.freeze({});
+  protected runContext!: ReturnType<typeof createAddressRunContext>;
+  protected get terminalToken(): object {
+    return this.runContext.token;
+  }
   protected readonly participants = new Set<Participant>();
   protected readonly terminalProcesses = new Set<Promise<void>>();
   protected readonly terminalOperations = new Set<Promise<void>>();
@@ -81,7 +131,6 @@ export abstract class AddressRunLifecycle implements AddressRunAuthority {
   protected active = false;
   protected admitting = false;
   protected compromised = false;
-
   protected constructor(opts: { controller?: AbortController; signal?: AbortSignal }) {
     this.controller = opts.controller ?? new AbortController();
     this.signal = opts.signal
@@ -113,8 +162,8 @@ export abstract class AddressRunLifecycle implements AddressRunAuthority {
     );
   }
 
-  protected async participant<T>(lease: AddressLease, action: () => Promise<T>): Promise<T> {
-    if (liveLeases.get(lease) !== this || participantLeases.has(lease))
+  protected async participant<T>(lease: AddressRunLease, action: () => Promise<T>): Promise<T> {
+    if (addressRunLeaseAuthority(lease) !== this || this.runContext.participant(lease))
       throw new Error('address terminal: forged/reused participant');
     const participant: Participant = {
       lease,
@@ -124,7 +173,7 @@ export abstract class AddressRunLifecycle implements AddressRunAuthority {
       attempts: [],
       opaqueDispatched: false,
     };
-    participantLeases.set(lease, participant);
+    this.runContext.registerParticipant(lease, participant);
     this.participants.add(participant);
     try {
       const result = await action();
@@ -136,8 +185,8 @@ export abstract class AddressRunLifecycle implements AddressRunAuthority {
     }
   }
 
-  protected async bindReport(lease: AddressLease, report: ReviewAddressReport): Promise<void> {
-    const participant = participantLeases.get(lease);
+  protected async bindReport(lease: AddressRunLease, report: ReviewAddressReport): Promise<void> {
+    const participant = this.runContext.participant(lease);
     if (
       !participant ||
       participant.closed ||
@@ -184,8 +233,8 @@ export abstract class AddressRunLifecycle implements AddressRunAuthority {
     participant.report = report;
   }
 
-  protected noteOpaqueInvocation(lease: AddressLease): void {
-    const participant = participantLeases.get(lease);
+  protected noteOpaqueInvocation(lease: AddressRunLease): void {
+    const participant = this.runContext.participant(lease);
     if (
       !this.active ||
       !this.admitting ||
@@ -199,13 +248,11 @@ export abstract class AddressRunLifecycle implements AddressRunAuthority {
     participant.opaqueDispatched = true;
   }
 
-  protected workerBinding(lease: AddressLease): object {
-    const participant = participantLeases.get(lease);
+  protected workerBinding(lease: AddressRunLease): object {
+    const participant = this.runContext.participant(lease);
     if (!participant || participant.closed || !this.participants.has(participant))
       throw new Error('address terminal: worker association refused');
-    const binding = Object.freeze({});
-    terminalWorkers.set(binding, { owner: this, participant });
-    return binding;
+    return this.runContext.workerBinding(participant);
   }
 
   protected async recordAttempt(
@@ -380,8 +427,8 @@ export abstract class AddressRunLifecycle implements AddressRunAuthority {
     }
   }
 
-  protected async cancelledResult(lease: AddressLease): Promise<ReviewAddressResult> {
-    const participant = participantLeases.get(lease);
+  protected async cancelledResult(lease: AddressRunLease): Promise<ReviewAddressResult> {
+    const participant = this.runContext.participant(lease);
     if (!participant?.report || !this.participants.has(participant))
       throw new Error('address terminal: missing report association');
     await this.arrive(participant);
@@ -406,14 +453,14 @@ export function trackAddressTerminalProcess(token: object, promise: Promise<void
   terminalInternals.get(owner)!.track(promise);
 }
 export async function bindAddressTerminalReport(
-  lease: AddressLease,
+  lease: AddressRunLease,
   report: ReviewAddressReport,
 ): Promise<void> {
   const owner = liveLeases.get(lease);
   if (!owner) throw new Error('address terminal: forged report lease');
   await terminalInternals.get(owner)!.bindReport(lease, report);
 }
-export function addressTerminalWorkerBinding(lease: AddressLease): object {
+export function addressTerminalWorkerBinding(lease: AddressRunLease): object {
   const owner = liveLeases.get(lease);
   if (!owner) throw new Error('address terminal: forged worker lease');
   return terminalInternals.get(owner)!.workerBinding(lease);
@@ -436,13 +483,13 @@ export function deferAddressTerminalAttempt(binding: object, attempt: object): b
   if (!association) throw new Error('address terminal: forged worker association');
   return terminalInternals.get(association.owner)!.defer(association.participant, attempt);
 }
-export function addressCancelledResult(lease: AddressLease): Promise<ReviewAddressResult> {
+export function addressCancelledResult(lease: AddressRunLease): Promise<ReviewAddressResult> {
   const owner = liveLeases.get(lease);
   if (!owner) throw new Error('address terminal: forged cancellation lease');
   return terminalInternals.get(owner)!.cancelledResult(lease);
 }
 
-export function noteAddressOpaqueInvocation(lease: AddressLease): void {
+export function noteAddressOpaqueInvocation(lease: AddressRunLease): void {
   const owner = liveLeases.get(lease);
   if (!owner) throw new Error('address terminal: forged opaque invocation lease');
   terminalInternals.get(owner)!.opaque(lease);
@@ -471,7 +518,7 @@ export function addressTerminalCandidate(
   return terminalInternals.get(association.owner)!.candidate(root, path, remove);
 }
 export function addressTerminalBookkeeping(
-  lease: AddressLease,
+  lease: AddressRunLease,
   root: string,
   entries: ReadonlyMap<string, string>,
 ): Promise<void> {
@@ -480,7 +527,7 @@ export function addressTerminalBookkeeping(
   return terminalInternals.get(owner)!.bookkeeping(root, entries);
 }
 export function addressOrdinaryReport(
-  lease: AddressLease,
+  lease: AddressRunLease,
   path: string,
   bytes: string,
 ): Promise<void> {

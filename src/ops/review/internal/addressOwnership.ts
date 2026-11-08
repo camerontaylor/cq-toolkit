@@ -1,8 +1,7 @@
 import {
+  createAddressRunContext,
+  addressRunLeaseAuthority,
   AddressRunLifecycle,
-  liveLeases,
-  terminalInternals,
-  terminalAuthorities,
 } from './addressRunLifecycle.js';
 export {
   validateAddressTerminalAuthority,
@@ -282,7 +281,7 @@ export class AddressOwnership extends AddressRunLifecycle {
       string,
       { root: string; directory: Identity; entry: Identity; link: string }
     >();
-    terminalInternals.set(this, {
+    this.runContext = createAddressRunContext(this, {
       checkpoint: (root, head, expected) =>
         checkpointAddressTerminalEvidence(this.terminalToken, root, head, expected),
       bookkeeping: (root, entries) =>
@@ -334,6 +333,10 @@ export class AddressOwnership extends AddressRunLifecycle {
         releaseAddressTerminalEvidence(attempt);
       },
     });
+  }
+
+  runParticipant<T>(lease: AddressLease, action: () => Promise<T>): Promise<T> {
+    return this.runContext.runParticipant(lease, action);
   }
 
   private get storePath(): string {
@@ -922,7 +925,7 @@ export class AddressOwnership extends AddressRunLifecycle {
         await this.persist('active');
         this.signal.throwIfAborted();
         this.active = this.admitting = true;
-        terminalAuthorities.set(this.terminalToken, this);
+        this.runContext.activate();
         this.signal.addEventListener('abort', this.stopAdmissions, { once: true });
         if (this.signal.aborted) this.stopAdmissions();
         let checking: Promise<void> | undefined;
@@ -1151,7 +1154,7 @@ export class AddressOwnership extends AddressRunLifecycle {
         await this.assertOwned();
       },
     };
-    liveLeases.set(lease, this);
+    this.runContext.registerLease(lease);
     return lease;
   }
 }
@@ -1161,7 +1164,7 @@ export async function runAddressReviewLoop(
   lease: AddressLease,
   opts: ReviewLoopOpts,
 ): Promise<ReviewLoopOutcome> {
-  const owner = liveLeases.get(lease);
+  const owner = addressRunLeaseAuthority(lease);
   if (!owner) throw new Error('address ownership: forged loop lease');
   await lease.assertOwned();
   if ((await commonDirectory(opts)) !== owner.commonDir)
@@ -1182,7 +1185,7 @@ export async function withReviewLoopOwnership<T>(
     // borrow an invocation, including callbacks running in inherited ALS.
     if (context.consumed) throw new Error('address ownership: loop permit already consumed');
     context.consumed = true;
-    const owner = liveLeases.get(context.lease);
+    const owner = addressRunLeaseAuthority(context.lease);
     if (!owner || (await commonDirectory(opts)) !== owner.commonDir)
       throw new Error('address ownership: invalid loop permit');
     await context.lease.assertOwned();
@@ -1213,11 +1216,11 @@ export async function withAddressOwnership<T>(
       throw new Error('address ownership: invalid production child identity');
     await child.owner.assertOwned();
     const lease = child.owner.lease(child);
-    return terminalInternals.get(child.owner)!.participant(lease, () => fn(lease));
+    return child.owner.runParticipant(lease, () => fn(lease));
   }
   const owner = await makeAddressOwnership(opts);
   return owner.withLock(async () => {
     const lease = owner.lease();
-    return terminalInternals.get(owner)!.participant(lease, () => fn(lease));
+    return owner.runParticipant(lease, () => fn(lease));
   });
 }

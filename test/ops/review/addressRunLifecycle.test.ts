@@ -1,15 +1,43 @@
+import { readdir } from 'node:fs/promises';
+import { join } from 'node:path';
+import { checkpointAddressTerminalEvidence } from '../../../src/ops/review/internal/addressEvidence.js';
 import { expect, test } from 'vitest';
 import * as lifecycle from '../../../src/ops/review/internal/addressRunLifecycle.js';
 import * as compatibility from '../../../src/ops/review/internal/addressOwnership.js';
 import { fixture } from './addressManyWorktree.helpers.js';
 
 test('compatibility exports share the private capability boundary', async () => {
-  expect(compatibility.validateAddressTerminalAuthority).toBe(
-    lifecycle.validateAddressTerminalAuthority,
-  );
-  expect(compatibility.addressTerminalWorkerBinding).toBe(lifecycle.addressTerminalWorkerBinding);
+  const entryPoints = [
+    'validateAddressTerminalAuthority',
+    'trackAddressTerminalProcess',
+    'bindAddressTerminalReport',
+    'addressTerminalWorkerBinding',
+    'recordAddressTerminalAttempt',
+    'releaseAddressTerminalAttempt',
+    'deferAddressTerminalAttempt',
+    'addressCancelledResult',
+    'noteAddressOpaqueInvocation',
+    'checkpointAddressTerminalWorker',
+    'addressTerminalCandidate',
+    'addressTerminalBookkeeping',
+    'addressOrdinaryReport',
+  ] as const;
+  for (const name of entryPoints) expect(compatibility[name]).toBe(lifecycle[name]);
+  for (const value of Object.values(lifecycle)) expect(value).not.toBeInstanceOf(WeakMap);
+  for (const name of [
+    'liveLeases',
+    'terminalInternals',
+    'terminalAuthorities',
+    'terminalWorkers',
+    'participantLeases',
+  ])
+    expect(lifecycle).not.toHaveProperty(name);
+  await expect(lifecycle.validateAddressTerminalAuthority({})).rejects.toThrow('forged');
   const f = await fixture();
   try {
+    const before = await readdir(join(f.repo.root, '.git'));
+    await expect(checkpointAddressTerminalEvidence({}, f.repo.root)).rejects.toThrow('forged');
+    expect(await readdir(join(f.repo.root, '.git'))).toEqual(before);
     await compatibility.withAddressOwnership(
       { repoRoot: f.repo.root, git: f.run, source: 'local', production: false },
       async (lease) => {
