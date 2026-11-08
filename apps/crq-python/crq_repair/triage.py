@@ -93,7 +93,7 @@ def phase(inbox, repo, tip, judge, transport, at, *, maximum=6, seconds=600, dry
     for row in rows:
         f = row['finding']; anchor = row.get('recovered_anchor') or f
         # An empty/unknown anchor is never evidence for an exact duplicate.
-        key = (f['path'], anchor.get('blob'), f['body'], ' '.join(f['title'].split()).casefold(), json.dumps(anchor.get('intervals')))
+        key = (f['severity'], f['path'], anchor.get('blob'), f['body'], ' '.join(f['title'].split()).casefold(), json.dumps(anchor.get('intervals')))
         canonical = seen.get(key) if anchor.get('intervals') and anchor.get('blob') else None
         if row['status'] == 'duplicate':
             continue
@@ -141,7 +141,9 @@ def phase(inbox, repo, tip, judge, transport, at, *, maximum=6, seconds=600, dry
     for row, action, reason, kwargs in plans:
         fid = row['finding']['id']
         if not dry_run:
-            event = inbox.triage(fid, repo, tip, action, 'crq-triage/' + row.get('_triage_model', 'deterministic'), reason, at, **kwargs)
+            event = inbox.triage(fid, repo, tip, action, 'crq-triage/' + row.get('_triage_model', 'deterministic'), reason, at, expected_previous_event_id=row['previous_event_id'], **kwargs)
+            if event is None:
+                continue  # Operator/recovery changed the row during model judgment.
             action = event['payload']['action']
         outcomes.append({'finding_id': fid, 'action': action, 'reason': reason})
     delivered = 0

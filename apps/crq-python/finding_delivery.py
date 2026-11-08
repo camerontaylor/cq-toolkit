@@ -9,6 +9,8 @@ import backfill_history as history
 from backfill_accounting import ranges, line_bytes
 
 
+_UNSET = object()
+
 def occurrence(producer, run_id, finding):
     vendor = finding.get("source_id")
     identity = {"producer": producer, "run_id": run_id}
@@ -87,13 +89,15 @@ class Inbox:
         except (OSError, ValueError, TypeError, KeyError, ledger.IntegrityError):
             return None
 
-    def triage(self, fid, repo, promoted, action, actor, reason, at, *, fixing_commit=None, canonical_id=None, reviews=(), current_path=None, current_lines=None, quoted_text=None):
+    def triage(self, fid, repo, promoted, action, actor, reason, at, *, fixing_commit=None, canonical_id=None, reviews=(), current_path=None, current_lines=None, quoted_text=None, expected_previous_event_id=_UNSET):
         """Mapping confirms the anchor only; actor must confirm substantive validity."""
         retained = self.publication.retained()
         self.recover(retained)
         with ledger.locked(self.root / "findings.lock"):
             filename = self.root / "triage" / (fid + ".json")
             row = ledger.loads(filename.read_bytes()); finding = row["finding"]
+            if expected_previous_event_id is not _UNSET and row["previous_event_id"] != expected_previous_event_id:
+                return None  # A newer disposition supersedes this snapshot plan.
             repo.resolve(promoted)
             recovered = self.recovered_anchor(row, repo, [*retained, *reviews]) if finding["anchor_status"] != "verified" else None
             anchor = recovered or finding
@@ -145,6 +149,8 @@ class Inbox:
 
     def handoff(self, fid, previous_task, job, at):
         """Assign a validated prepared retry through the existing delivery chain."""
+        if job.get("canonical_finding_id") != fid or job.get("origin_job") != previous_task:
+            raise ledger.IntegrityError("prepared retry source identity mismatch")
         self.recover(self.publication.retained())
         with ledger.locked(self.root / "findings.lock"):
             filename = self.root / "triage" / (fid + ".json")

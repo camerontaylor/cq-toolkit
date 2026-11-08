@@ -184,7 +184,11 @@ class FindingTest(unittest.TestCase):
         self.inbox.deliver(self.fid, lambda *_: {"acknowledgement": "ack", "repair_task": "old-task"}, AT)
         filename = self.inbox.root / "triage" / (self.fid + ".json")
         before = filename.read_bytes()
-        job = {"job": "prepared-task", "canonical_finding_id": self.fid}
+        job = {"job": "prepared-task", "canonical_finding_id": self.fid, "origin_job": "old-task"}
+        with self.assertRaisesRegex(ledger.IntegrityError, "identity mismatch"):
+            self.inbox.handoff(self.fid, "old-task", {**job, "canonical_finding_id": "other"}, AT)
+        with self.assertRaisesRegex(ledger.IntegrityError, "identity mismatch"):
+            self.inbox.handoff(self.fid, "old-task", {**job, "origin_job": "other"}, AT)
         self.inbox.handoff(self.fid, "old-task", job, AT)
         count = len(self.out.retained())
         ledger.atomic(filename, before)
@@ -196,7 +200,7 @@ class FindingTest(unittest.TestCase):
         self.inbox.repair_outcome(self.fid, "prepared-task", "needs-human", "current result", AT)
         self.assertEqual(ledger.loads(filename.read_bytes())["status"], "needs-human")
         with self.assertRaisesRegex(ledger.IntegrityError, "no longer owns"):
-            self.inbox.handoff(self.fid, "old-task", {"job": "obsolete-successor"}, AT)
+            self.inbox.handoff(self.fid, "old-task", {**job, "job": "obsolete-successor"}, AT)
 
     def test_confirmed_cannot_override_canonical_identity(self):
         self.inbox.triage(self.fid, self.f.repo, self.t, "confirmed", "reviewer", "valid", AT, canonical_id="foreign")
