@@ -143,6 +143,22 @@ class RepairDrainTest(unittest.TestCase):
         for value in ('canonical-id', 'ledger-review-id', 'threadless', '/pull/1', 'crq-run1-F2', 'run1'):
             self.assertIn(value, body)
 
+    def test_prepared_fix_pr_provenance_retains_original_cli_review_run(self):
+        job_id = 'crq-run1-F1'
+        path = self.root / 'state/repair/inbox' / (job_id + '.json')
+        job = json.loads(path.read_text())
+        job.update(run='revalidated-current', source={'run': 'original-cli-review'})
+        atomic(path, job)
+        c = SimpleNamespace(STATE=self.root / 'state', REPO='example/repo')
+        body = '\n'.join(repair_tick.repair_provenance(c, {'jobs': [job_id]}, 'repair-run'))
+        self.assertIn('| `original-cli-review` |', body)
+        self.assertNotIn('`revalidated-current`', body)
+        job['review_id'] = 'ledger-event'
+        atomic(path, job)
+        body = '\n'.join(repair_tick.repair_provenance(c, {'jobs': [job_id]}, 'repair-run'))
+        self.assertIn('| `ledger-event` |', body)
+        self.assertNotIn('`original-cli-review`', body)
+
     def test_source_resolution_resumes_existing_publication_journal(self):
         item = self.queue['items'][0]
         record = item['repair_runs']['run1']
