@@ -55,9 +55,7 @@ function runDemo(args: string[], keys: Record<string, string> = {}): SpawnSyncRe
   // spawnSync blocks the event loop, so Vitest's test timeout cannot interrupt a
   // wedged child: a timeout or spawn failure surfaces as a named error.
   if (res.error !== undefined)
-    throw new Error(
-      `demo-eval-axes spawn failed: ${res.error.message}\n${res.stdout}${res.stderr}`,
-    );
+    throw new Error(`demo-eval-axes spawn failed: ${res.error.message}\n${res.stdout}${res.stderr}`);
   return res;
 }
 
