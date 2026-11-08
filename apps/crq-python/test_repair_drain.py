@@ -327,6 +327,36 @@ class RepairDrainTest(unittest.TestCase):
             service.rate_limit_pause({}, 'old-global-marker')
             self.assertIsNone(service.dispatch_paused(self.config))
 
+    def test_reset_offset_is_stored_as_utc(self):
+        now = dt.datetime.now(dt.timezone.utc)
+        reset = (now + dt.timedelta(days=2)).astimezone(dt.timezone(dt.timedelta(hours=-8)))
+        until = service.remember_provider_limit('zai', {'summary': 'Your limit will reset at ' + reset.isoformat()})
+        self.assertEqual(until, reset.astimezone(dt.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'))
+
+    def test_fallback_discards_throttled_fixers_partial_commits_and_files(self):
+        self.config['repair']['fallback_models'] = ['deepseek/deepseek-flash']
+        original = self.git('rev-parse', 'HEAD')
+        def invoke(config, role, job, wt, directory, judge):
+            if role['model'].startswith('zai/'):
+                (wt / 'src/kept.ts').write_text('partial edit')
+                self.git('commit', '-qam', 'partial fixer commit')
+                (wt / 'partial-untracked').write_text('partial file')
+                return {'stop': 'rate-limit'}
+            self.assertEqual(self.git('rev-parse', 'HEAD'), original)
+            self.assertEqual((wt / 'src/kept.ts').read_text(), 'one\ntwo\n')
+            self.assertFalse((wt / 'partial-untracked').exists())
+            return {'stop': 'ok', 'changed': False}
+        with mock.patch.dict(os.environ, {'ZAI_API_KEY': 'fixture', 'DEEPSEEK_API_KEY': 'fixture'}), \
+             mock.patch.object(service, '_dispatch', side_effect=invoke):
+            result = service.dispatch(self.config, ROLES['fixer'], {'run': 'r', 'job': 'j'}, self.clone, self.root)
+        self.assertEqual(result['model'], 'deepseek/deepseek-flash')
+
+    def test_remaining_wire_budget_is_integer_milliseconds(self):
+        config = {'repair': {'budget': {'wall_clock_min': 0.123456789}}}
+        budget = service.cq.budget(config, ROLES['fixer'])
+        self.assertIsInstance(budget['wallClockMs'], int)
+        self.assertEqual(budget['wallClockMs'], 7407)
+
     def test_all_providers_limited_defers_to_earliest_reset(self):
         self.config['repair']['fallback_models'] = ['opencode-go/deepseek-v4.1-flash', 'deepseek/deepseek-flash']
         with mock.patch.dict(os.environ, {'ZAI_API_KEY': 'fixture', 'OPENCODE_GO_API_KEY': 'fixture', 'OPENCODE_GO_BASE_URL': 'https://fixture.invalid', 'DEEPSEEK_API_KEY': 'fixture'}), \

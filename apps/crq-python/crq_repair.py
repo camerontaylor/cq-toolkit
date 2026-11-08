@@ -141,7 +141,7 @@ def remember_provider_limit(provider, report):
     # finding text. An unzoned date is conservatively treated as UTC, avoiding
     # an early retry against a provider whose local timezone is east of UTC.
     text = str(report.get('summary') or report.get('reason') or '')
-    reset = re.search(r'limit will reset at (\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:Z|[+-]\d{2}:\d{2})?)', text, re.I)
+    reset = re.search(r'limit will reset at (\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?)', text, re.I)
     if reset:
         try:
             end = dt.datetime.fromisoformat(reset[1].replace('Z', '+00:00'))
@@ -151,7 +151,7 @@ def remember_provider_limit(provider, report):
         except ValueError:
             pass
     state = provider_cooldowns()
-    stamp = until.strftime('%Y-%m-%dT%H:%M:%SZ')
+    stamp = until.astimezone(dt.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
     state[provider] = max(state.get(provider, ''), stamp)
     atomic(ROOT / 'state/repair/provider-cooldowns.json', state)
     return state[provider]
@@ -175,6 +175,8 @@ def dispatch(config, role, job, wt, directory, judge=False):
     state = provider_cooldowns()
     deadline = time.monotonic() + config['repair']['budget']['wall_clock_min'] * 60
     waits = []
+    baseline = git(wt, 'rev-parse', 'HEAD') if not judge else None
+    attempted = False
     seen = set()
     with correlation(job, judge):
         for candidate in fallback_roles(config, role):
@@ -187,8 +189,14 @@ def dispatch(config, role, job, wt, directory, judge=False):
                 continue
             # Separate sessions and logs for each provider, including judges.
             remaining = deadline - time.monotonic()
-            if remaining <= 0:
+            if remaining < 0.001:
                 return {'stop': 'budget', 'summary': 'repair dispatch wall-clock deadline reached'}
+            if attempted and not judge:
+                # This is the repair-owned worktree, reset by process() before
+                # dispatch. A throttled fixer may have edited or committed.
+                git(wt, 'reset', '--hard', baseline)
+                git(wt, 'clean', '-fd')
+            attempted = True
             bounded_config = copy.deepcopy(config)
             bounded_config['repair']['budget']['wall_clock_min'] = remaining / 60
             report = _dispatch(bounded_config, candidate, job, wt, directory / provider, judge)
@@ -409,7 +417,7 @@ def fetch_clone(config, lock_wait=None):
                 break
             except BlockingIOError:
                 remaining = deadline - time.monotonic()
-                if remaining <= 0:
+                if remaining < 0.001:
                     return 'crq tick holds tick.lock'
                 time.sleep(min(5.0, remaining))
         try:
