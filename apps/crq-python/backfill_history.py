@@ -45,6 +45,29 @@ def vendor_events(raw):
     return result
 
 
+def finding_intervals(value):
+    """Normalize explicit or CodeRabbit line anchors; invalid anchors stay unverified."""
+    lines = set()
+    try:
+        vendor_intervals = value.get("intervals")
+        if "intervals" not in value:
+            start, end = value.get("startLine"), value.get("endLine")
+            start = start if type(start) is int and start > 0 else None
+            end = end if type(end) is int and end > 0 else None
+            start, end = start or end, end or start
+            vendor_intervals = [[min(start, end), max(start, end)]] if start and end else []
+        for start, end in vendor_intervals or []:
+            if type(start) is not int or type(end) is not int or not 1 <= start <= end <= 1_000_000:
+                raise ValueError("invalid vendor interval")
+            lines.update(range(start, end + 1))
+            if len(lines) > 1_000_000:
+                raise ValueError("vendor interval bound")
+        intervals = ranges(lines)
+    except (TypeError, ValueError):
+        intervals = []
+    return intervals
+
+
 def terminal_scope(raw, expected_head):
     """Only explicit, terminal path/blob/interval evidence is scoped completion."""
     events = vendor_events(raw)
