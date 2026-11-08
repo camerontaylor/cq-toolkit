@@ -76,7 +76,7 @@ export const fakeGit = (world: LoopWorld, log: string[][], worktreePath: string)
       // a known new commit and TO is HEAD (the pushed-head check).
       const servedHead = from === BEFORE_SHA || from === AFTER_SHA || from === SHA;
       const descendantOfHead = servedHead && world.knownShas.includes(to);
-      const inPushedHead = world.knownShas.includes(from) && to === 'HEAD';
+      const inPushedHead = world.knownShas.includes(from) && (to === 'HEAD' || to === from);
       if (descendantOfHead || inPushedHead) {
         return { code: 0, stdout: '', stderr: '' };
       }
@@ -180,7 +180,10 @@ export const fakeGit = (world: LoopWorld, log: string[][], worktreePath: string)
       // KEYED (finding 1): only a push of the PR's REAL head moves the
       // served origin state — a push of the internal cq-review label must
       // NOT (a stray label branch and a phantom progress signal).
-      if (world.advanceOnPush && rest[2] === `HEAD:${HEAD_REF}`) {
+      if (
+        world.advanceOnPush &&
+        (rest.at(-1) === `HEAD:${HEAD_REF}` || rest.at(-1)?.endsWith(`:refs/heads/${HEAD_REF}`))
+      ) {
         world.sha = AFTER_SHA;
       }
       return ok('');

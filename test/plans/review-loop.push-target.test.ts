@@ -84,3 +84,27 @@ describe('fork push target (round-3 item 1)', () => {
     expect(forked.outcome.status).toBe('ok');
   });
 });
+
+test('second publication uses the confirmed advanced lease', async () => {
+  const world = defaultWorld();
+  world.worktreeAdvancesAt = 2;
+  world.worktreeAdvancesTo = NEW_SHA;
+  const { gitLog, outcome } = await runLoop(world, {
+    driverResults: [completeWorker(fixLine(true, 'fix', [NEW_SHA]))],
+  });
+  const pushes = gitLog.filter((args) => args[2] === 'push');
+  expect(pushes).toHaveLength(2);
+  expect(pushes[1]?.[3]).toBe(`--force-with-lease=refs/heads/${HEAD_REF}:${NEW_SHA}`);
+  expect(outcome.actionsPosted).toBeGreaterThan(0);
+});
+
+test('rejected publication is reconciled and withholds all replies without retry', async () => {
+  const world = defaultWorld();
+  world.pushFailAt = 1;
+  const { gitLog, outcome } = await runLoop(world, {
+    driverResults: [completeWorker(fixLine(true, 'fix', [NEW_SHA]))],
+  });
+  expect(gitLog.filter((args) => args[2] === 'push')).toHaveLength(1);
+  expect(gitLog.some((args) => args[2] === 'ls-remote')).toBe(true);
+  expect(outcome.actionsPosted).toBe(0);
+});

@@ -1,3 +1,4 @@
+import { leasedPush } from '../../adapters/git/leasedPush.js';
 import { reviewBranchKey } from './internal/branchKey.js';
 import { readCqEnv } from '../../config/env.js';
 import { provenanceConfig } from '../../config/provenance.js';
@@ -1765,7 +1766,15 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                 throw new Error('worker tree/index is dirty; verified commits retained');
               const branch = publishBranch ?? (await branchName(workerRoot));
               if (parent?.aborted) throw new Error('parent cancelled');
-              await gitText(workerRoot, ['push', publishRemote, `HEAD:refs/heads/${branch}`]);
+              const pushed = await leasedPush(
+                git,
+                workerRoot,
+                publishRemote,
+                branch,
+                publishedBase,
+              );
+              if (pushed.code !== 0)
+                throw new Error(`publication failed: ${pushed.stderr.slice(0, 500)}`);
               // The engine's own witness: a push actually left the process, so
               // the withhold rows' commit is out (#469). Set ONLY here — an
               // early return (no push run, nothing unpublished) never counts
