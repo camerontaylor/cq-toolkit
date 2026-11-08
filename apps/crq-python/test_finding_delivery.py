@@ -179,6 +179,25 @@ class FindingTest(unittest.TestCase):
             if artifact.exists():
                 artifact.unlink()
 
+    def test_prepared_handoff_is_durable_and_rejects_obsolete_origin(self):
+        self.inbox.triage(self.fid, self.f.repo, self.t, "confirmed", "judge", "valid", AT)
+        self.inbox.deliver(self.fid, lambda *_: {"acknowledgement": "ack", "repair_task": "old-task"}, AT)
+        filename = self.inbox.root / "triage" / (self.fid + ".json")
+        before = filename.read_bytes()
+        job = {"job": "prepared-task", "canonical_finding_id": self.fid}
+        self.inbox.handoff(self.fid, "old-task", job, AT)
+        count = len(self.out.retained())
+        ledger.atomic(filename, before)
+        self.inbox.handoff(self.fid, "old-task", job, AT)
+        self.assertEqual(len(self.out.retained()), count)
+        self.assertEqual(ledger.loads(filename.read_bytes())["receipt"]["repair_task"], "prepared-task")
+        self.inbox.repair_outcome(self.fid, "old-task", "needs-human", "obsolete", AT)
+        self.assertEqual(len(self.out.retained()), count)
+        self.inbox.repair_outcome(self.fid, "prepared-task", "needs-human", "current result", AT)
+        self.assertEqual(ledger.loads(filename.read_bytes())["status"], "needs-human")
+        with self.assertRaisesRegex(ledger.IntegrityError, "no longer owns"):
+            self.inbox.handoff(self.fid, "old-task", {"job": "obsolete-successor"}, AT)
+
     def test_confirmed_cannot_override_canonical_identity(self):
         self.inbox.triage(self.fid, self.f.repo, self.t, "confirmed", "reviewer", "valid", AT, canonical_id="foreign")
         row = ledger.loads((self.root / "findings/triage" / (self.fid + ".json")).read_bytes())

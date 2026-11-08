@@ -143,6 +143,26 @@ class Inbox:
             ledger.atomic(filename, ledger.canonical(row))
             return value
 
+    def handoff(self, fid, previous_task, job, at):
+        """Assign a validated prepared retry through the existing delivery chain."""
+        self.recover(self.publication.retained())
+        with ledger.locked(self.root / "findings.lock"):
+            filename = self.root / "triage" / (fid + ".json")
+            row = ledger.loads(filename.read_bytes())
+            current = row.get("receipt", {}).get("repair_task")
+            if current == job["job"]:
+                return
+            if current != previous_task:
+                raise ledger.IntegrityError("prepared retry no longer owns canonical finding")
+            receipt = {"acknowledgement": ledger.digest(job), "repair_task": job["job"]}
+            value = ledger.event("finding-event", "prepared-delivery:" + fid + ":" + job["job"], at,
+                                 {"finding_id": fid, "review_id": row["review_id"],
+                                  "previous_event_id": row["previous_event_id"], "action": "delivered",
+                                  "evidence": receipt, "actor": "crq-repair-preparation"})
+            self.publication.spool(value)
+            row.update(status="delivered", previous_event_id=value["id"], receipt=receipt)
+            ledger.atomic(filename, ledger.canonical(row))
+
     def repair_outcome(self, fid, job, action, reason, at, *, fixing_commit=None, fix_pr=None):
         """Idempotently publish a repair result through the existing event chain."""
         self.recover(self.publication.retained())

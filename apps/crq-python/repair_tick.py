@@ -25,6 +25,9 @@ def prepare_current_job(c, q, old_job_id, source_sha, evidence):
     job_id = 'crq-' + run + '-F1'
     existing = item.get('repair_runs', {}).get(run)
     if existing:
+        if old.get('canonical_finding_id'):
+            job = json.loads(job_path(c.ROOT, job_id).read_text())
+            finding_inbox(c).handoff(old['canonical_finding_id'], old_job_id, job, c.iso())
         return job_id
     history = [r for i in q['items'] if (i.get('id') == item.get('id') if old.get('canonical_finding_id')
                                         else i.get('pr') == item.get('pr'))
@@ -51,6 +54,10 @@ def prepare_current_job(c, q, old_job_id, source_sha, evidence):
            'prior': None, 'recurrence': False,
            'source': {**old.get('source', {}), 'run': old.get('source', {}).get('run', old['run'])}}
     atomic(job_path(c.ROOT, job_id), job)
+    if old.get('canonical_finding_id'):
+        finding_inbox(c).handoff(old['canonical_finding_id'], old_job_id, job, c.iso())
+        if old_record.get('state') in ('queued', 'ready', 'publish_failed') and not old_record.get('fix_pr'):
+            old_record.update(state='stale', error='superseded by prepared retry ' + job_id)
     item.setdefault('repair_runs', {})[run] = {
         'jobs': [job_id], 'pin': source_sha, 'base': source_sha, 'branch': None,
         'open_pr': False, 'round': count + 1, 'state': 'queued',
@@ -168,6 +175,18 @@ def enqueue(c, q, item, meta, rdir):
     return True
 
 
+def finding_inbox(c):
+    import backfill_runtime
+    import finding_delivery
+    import review_ledger as ledger
+    config = backfill_runtime.settings(c.STATE)
+    if not config:
+        raise ValueError('backfill repair write-back requires existing ledger configuration')
+    store = ledger.ArtifactStore(config['durable_artifact_root'])
+    return finding_delivery.Inbox(c.STATE / 'backfill/findings',
+                                  ledger.Outbox(c.STATE / 'backfill/publication', store))
+
+
 def mark_finding_outcome(c, job, result, merge=None, fix_pr=None):
     """The source finding ledger remains authoritative for threadless repairs."""
     fid = job.get('canonical_finding_id')
@@ -180,15 +199,7 @@ def mark_finding_outcome(c, job, result, merge=None, fix_pr=None):
         action = 'dismissed' if (result.get('judge') or {}).get('verdict') == 'invalid' else 'needs-human'
     if not action:
         return
-    import backfill_runtime
-    import finding_delivery
-    import review_ledger as ledger
-    config = backfill_runtime.settings(c.STATE)
-    if not config:
-        raise ValueError('backfill repair write-back requires existing ledger configuration')
-    store = ledger.ArtifactStore(config['durable_artifact_root'])
-    inbox = finding_delivery.Inbox(c.STATE / 'backfill/findings',
-                                  ledger.Outbox(c.STATE / 'backfill/publication', store))
+    inbox = finding_inbox(c)
     inbox.repair_outcome(fid, job['job'], action, result.get('reason') or verdict,
                          c.iso(), fixing_commit=merge, fix_pr=fix_pr)
 

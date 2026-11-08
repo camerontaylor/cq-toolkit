@@ -66,14 +66,17 @@ class PhaseTest(FindingTest):
         service = importlib.util.module_from_spec(spec); spec.loader.exec_module(service)
         config['repair']['blackout'] = {'enabled': False}
         config['worktree_root'] = str(self.root / 'worktrees')
-        result = {'job': job_id, 'item': item['id'], 'verdict': 'NOT-FIXED', 'reason': 'invalid', 'commits': []}
+        result = {'job': job_id, 'item': item['id'], 'verdict': 'NOT-FIXED', 'reason': 'invalid', 'commits': [], 'judge': {'verdict': 'invalid'}}
         def process(*args):
             atomic(self.root / 'state/repair' / job_id / 'result.json', result)
             return result
         with mock.patch.object(service, 'ROOT', self.root), mock.patch.object(service, 'process', side_effect=process), mock.patch.object(service, 'dispatch_paused', return_value=None):
             service.process_item(config, [job])
-        c = SimpleNamespace(STATE=self.root / 'state')
-        messages = repair_tick.harvest(c, queue, item)
+        c = SimpleNamespace(STATE=self.root / 'state', iso=lambda: AT)
+        with mock.patch.object(repair_tick, 'finding_inbox', return_value=self.inbox):
+            messages = repair_tick.harvest(c, queue, item)
+        row = ledger.loads((self.inbox.root / 'triage' / (self.fid + '.json')).read_bytes())
+        self.assertEqual(row['status'], 'dismissed')
         self.assertTrue(messages)
         self.assertEqual(item['repair_runs'][run]['state'], 'done')
         self.assertEqual(item['state'], 'done')

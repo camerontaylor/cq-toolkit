@@ -68,6 +68,21 @@ class BoundedRepairTest(unittest.TestCase):
         self.assertEqual(self.prepare()[0], job_id)
         self.assertEqual(self.c.secret_scan_diff.call_count, 1)
 
+    def test_prepared_canonical_retry_transfers_durable_delivery_ownership(self):
+        self.old['canonical_finding_id'] = 'canonical'
+        atomic(bounded.job_path(self.root, OLD), self.old)
+        self.c.iso = lambda: 'now'
+        inbox = mock.Mock()
+        def handoff(fid, previous, job, at):
+            self.assertEqual((fid, previous, at), ('canonical', OLD, 'now'))
+            self.assertEqual(json.loads(bounded.job_path(self.root, job['job']).read_text()), job)
+        inbox.handoff.side_effect = handoff
+        with mock.patch.object(repair_tick, 'finding_inbox', return_value=inbox):
+            job_id, job = self.prepare()
+            self.assertEqual(self.prepare()[0], job_id)
+        self.assertEqual(inbox.handoff.call_count, 2)
+        self.assertEqual(self.queue['items'][0]['repair_runs']['old-run']['state'], 'stale')
+
     def test_preparation_scans_full_source_at_real_path(self):
         self.prepare()
         patch = self.c.secret_scan_diff.call_args.args[0]
