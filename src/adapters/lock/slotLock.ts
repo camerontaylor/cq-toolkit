@@ -1,16 +1,29 @@
 // Private coordination for cooperating review writers on local Linux/macOS disks.
-// Never unlink these lock files, including during checkout removal.
+// Never unlink these lock files, including during checkout removal. External inode
+// replacement is detected at API calls, not continuously; this is advisory exclusion.
+// Local storage is a caller precondition, not inferred from mount-type heuristics.
 import { constants } from 'node:fs';
-import { mkdir, open, realpath, lstat, readFile, rename, unlink } from 'node:fs/promises';
+import { mkdir, open, realpath, lstat, rename, unlink } from 'node:fs/promises';
+import type { FileHandle } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 
 const require = createRequire(import.meta.url);
 
-export class UnsupportedLockError extends Error {}
-export class SlotBusyError extends Error {}
-export class IncompleteSlotError extends Error {}
+// A numeric fd does not keep a FileHandle alive. Pin until explicit close so
+// a dropped slot cannot silently release exclusion through Node's GC finalizer.
+const heldFiles = new Set<FileHandle>();
+
+export class UnsupportedLockError extends Error {
+  override name = 'UnsupportedLockError';
+}
+export class SlotBusyError extends Error {
+  override name = 'SlotBusyError';
+}
+export class IncompleteSlotError extends Error {
+  override name = 'IncompleteSlotError';
+}
 
 function nativeFlock(): (fd: number, operation: string) => void {
   if (process.platform !== 'linux' && process.platform !== 'darwin') {
@@ -27,10 +40,21 @@ function nativeFlock(): (fd: number, operation: string) => void {
   }
 }
 
-/** Only close releases our reference: inherited writer descriptors must remain locked. */
+/**
+ * Retain the returned object and call close after actual writer drain. fd is a
+ * borrowed descriptor for inheritance, never for caller close/unlock. The module
+ * pins the FileHandle against GC, including if the caller accidentally drops it;
+ * dropping the object therefore leaks exclusion until process exit, rather than
+ * releasing it early. Inherited writer references survive our explicit close.
+ */
 export async function acquireFileLock(path: string) {
   const flock = nativeFlock();
-  const file = await open(path, constants.O_CREAT | constants.O_RDWR | constants.O_NOFOLLOW, 0o600);
+  let file: FileHandle;
+  try {
+    file = await open(path, constants.O_CREAT | constants.O_RDWR | constants.O_NOFOLLOW, 0o600);
+  } catch (cause) {
+    throw new UnsupportedLockError(`Cannot open slot lock ${path}`, { cause });
+  }
   try {
     try {
       flock(file.fd, 'exnb');
@@ -49,6 +73,7 @@ export async function acquireFileLock(path: string) {
       }
     };
     await assertIdentity();
+    heldFiles.add(file);
     return {
       fd: file.fd,
       path,
@@ -57,6 +82,7 @@ export async function acquireFileLock(path: string) {
         if (!closed) {
           closed = true;
           await file.close();
+          heldFiles.delete(file);
         }
       },
     };
@@ -93,6 +119,7 @@ function parseMetadata(text: string): SlotMetadata {
 
 /** PR keys ignore branch names and custom checkout roots; local keys use the Git admin dir. */
 export async function acquireSlot(commonDir: string, key: number | { checkoutGitDir: string }) {
+  nativeFlock(); // Refuse unsupported platforms/addons before creating the namespace.
   const common = await realpath(commonDir);
   let name: string;
   if (typeof key === 'number') {
@@ -120,7 +147,18 @@ export async function acquireSlot(commonDir: string, key: number | { checkoutGit
     async readMetadata(): Promise<SlotMetadata | undefined> {
       await lock.assertIdentity();
       try {
-        return parseMetadata(await readFile(metadataPath, 'utf8'));
+        // NONBLOCK prevents opening a planted FIFO from waiting for a writer.
+        const input = await open(
+          metadataPath,
+          constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+        );
+        try {
+          if (!(await input.stat()).isFile())
+            throw new Error('Slot metadata must be a regular file');
+          return parseMetadata(await input.readFile('utf8'));
+        } finally {
+          await input.close();
+        }
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
         throw error;

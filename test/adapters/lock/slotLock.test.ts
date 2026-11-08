@@ -1,10 +1,24 @@
 import { afterEach, expect, test } from 'vitest';
-import { mkdir, mkdtemp, symlink, rename, writeFile, rm } from 'node:fs/promises';
+import {
+  mkdir,
+  mkdtemp,
+  symlink,
+  rename,
+  writeFile,
+  rm,
+  open,
+  readFile,
+  stat,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { once } from 'node:events';
-import { acquireSlot, SlotBusyError } from '../../../src/adapters/lock/slotLock.js';
+import {
+  acquireSlot,
+  SlotBusyError,
+  UnsupportedLockError,
+} from '../../../src/adapters/lock/slotLock.js';
 
 const directories: string[] = [];
 const children: ChildProcess[] = [];
@@ -132,6 +146,7 @@ test('replacement is detected and metadata cannot be written under replaced inod
     await rename(lock.path, `${lock.path}.old`);
     await writeFile(lock.path, '');
     await expect(lock.assertIdentity()).rejects.toThrow('inode replaced');
+    await expect(lock.readMetadata()).rejects.toThrow('inode replaced');
     await expect(
       lock.writeMetadata({
         version: 1,
@@ -214,4 +229,153 @@ test('slot transitions unbound to bound to unbound across checkout creation and 
   } finally {
     await lock.close();
   }
+});
+
+test('atomic metadata replacement preserves already-open snapshots and replaces the inode', async () => {
+  const root = await directory();
+  const lock = await acquireSlot(root, 1);
+  const before = { version: 1, state: 'unbound', incomplete: true } as const;
+  try {
+    await lock.writeMetadata(before);
+    const snapshot = await open(lock.metadataPath, 'r');
+    try {
+      const oldStat = await snapshot.stat();
+      await lock.writeMetadata({ ...before, incomplete: false });
+      expect(JSON.parse(await snapshot.readFile('utf8'))).toEqual(before);
+      expect((await stat(lock.metadataPath)).ino).not.toBe(oldStat.ino);
+      expect((await lock.readMetadata())?.incomplete).toBe(false);
+    } finally {
+      await snapshot.close();
+    }
+  } finally {
+    await lock.close();
+  }
+});
+
+test.each([
+  '',
+  '{',
+  'null',
+  '[]',
+  '42',
+  '{"version":2,"state":"unbound","incomplete":false}',
+  '{"version":1,"state":"unbound"}',
+  '{"version":1,"state":"other","incomplete":false}',
+  '{"version":1,"state":"unbound","incomplete":false,"checkoutPath":"/tmp"}',
+  '{"version":1,"state":"bound","incomplete":false,"checkoutGitDir":"/tmp"}',
+])('malformed metadata refuses read and reuse: %s', async (text) => {
+  const root = await directory();
+  const lock = await acquireSlot(root, 1);
+  try {
+    await writeFile(lock.metadataPath, text);
+    await expect(lock.readMetadata()).rejects.toThrow();
+    await expect(lock.assertReusable()).rejects.toThrow();
+  } finally {
+    await lock.close();
+  }
+});
+
+test('symlinked lock is refused with a declared error and leaves target intact', async () => {
+  const root = await directory();
+  await mkdir(join(root, 'cq-review', 'slots'), { recursive: true });
+  const target = join(root, 'target');
+  await writeFile(target, 'untouched');
+  await symlink(target, join(root, 'cq-review', 'slots', 'pr-1.lock'));
+  await expect(acquireSlot(root, 1)).rejects.toMatchObject({ name: 'UnsupportedLockError' });
+  await expect(acquireSlot(root, 1)).rejects.toBeInstanceOf(UnsupportedLockError);
+  expect(await readFile(target, 'utf8')).toBe('untouched');
+});
+
+test('metadata symlinks and non-regular files refuse read and reuse', async () => {
+  const root = await directory();
+  const lock = await acquireSlot(root, 1);
+  const target = join(root, 'target');
+  try {
+    await writeFile(target, '{"version":1,"state":"unbound","incomplete":false}');
+    await symlink(target, lock.metadataPath);
+    await expect(lock.readMetadata()).rejects.toThrow();
+    await expect(lock.assertReusable()).rejects.toThrow();
+    await rm(lock.metadataPath);
+    await mkdir(lock.metadataPath);
+    await expect(lock.readMetadata()).rejects.toThrow('regular file');
+    await rm(lock.metadataPath, { recursive: true });
+    const fifo = spawn('mkfifo', [lock.metadataPath], { stdio: 'ignore' });
+    children.push(fifo);
+    const code: unknown = (await once(fifo, 'exit'))[0];
+    expect(code).toBe(0);
+    await expect(lock.readMetadata()).rejects.toThrow('regular file');
+  } finally {
+    await lock.close();
+  }
+});
+
+test('FileHandles remain pinned through exposed GC with retained and dropped slot objects', async () => {
+  const root = await directory();
+  const url = new URL('../../../src/adapters/lock/slotLock.ts', import.meta.url).href;
+  const child = spawn(
+    process.execPath,
+    [
+      '--expose-gc',
+      '--input-type=module',
+      '-e',
+      `
+    import { acquireSlot, SlotBusyError } from ${JSON.stringify(url)};
+    const common = process.argv[1];
+    let slot = await acquireSlot(common, 1);
+    const fd = slot.fd;
+    const contend = async () => {
+      try { const other = await acquireSlot(common, 1); await other.close(); throw Error('GC unlocked'); }
+      catch (error) { if (!(error instanceof SlotBusyError)) throw error; }
+    };
+    for (let n = 0; n < 30; n++) { global.gc(); await new Promise(r => setImmediate(r)); }
+    await contend();
+    await slot.assertIdentity();
+    slot = undefined;
+    for (let n = 0; n < 30; n++) { global.gc(); await new Promise(r => setImmediate(r)); }
+    await contend();
+    if (!Number.isInteger(fd)) throw Error('invalid borrowed descriptor');
+    console.log('GC exclusion held');
+  `,
+      root,
+    ],
+    { stdio: ['ignore', 'pipe', 'pipe'] },
+  );
+  children.push(child);
+  let output = '';
+  child.stdout?.on('data', (data: Buffer) => {
+    output += data.toString();
+  });
+  child.stderr?.on('data', (data: Buffer) => {
+    output += data.toString();
+  });
+  const code: unknown = (await once(child, 'exit'))[0];
+  expect(output).not.toContain('DEP0137');
+  expect(output).toContain('GC exclusion held');
+  expect(code).toBe(0);
+  const successor = await acquireSlot(root, 1);
+  await successor.close();
+});
+
+test('unsupported platform refuses before creating namespace', async () => {
+  const root = await directory();
+  const url = new URL('../../../src/adapters/lock/slotLock.ts', import.meta.url).href;
+  const child = spawn(
+    process.execPath,
+    [
+      '--input-type=module',
+      '-e',
+      `
+    import { acquireSlot, UnsupportedLockError } from ${JSON.stringify(url)};
+    Object.defineProperty(process, 'platform', {value: 'win32'});
+    try { await acquireSlot(process.argv[1], 1); process.exitCode = 1; }
+    catch (error) { if (!(error instanceof UnsupportedLockError)) throw error; }
+  `,
+      root,
+    ],
+    { stdio: 'ignore' },
+  );
+  children.push(child);
+  const code: unknown = (await once(child, 'exit'))[0];
+  expect(code).toBe(0);
+  await expect(stat(join(root, 'cq-review'))).rejects.toMatchObject({ code: 'ENOENT' });
 });
