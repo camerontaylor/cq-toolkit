@@ -156,8 +156,10 @@ pending work for a later pass. `--triage-dry-run` runs triage only, without
 recording events or delivering findings; use it for rollout evidence before
 live enablement. This documentation change does not enable or deploy triage.
 
-Only confirmed, verified current anchors enter the existing repair inbox;
-triage never invents GitHub threads. Ambiguous judgements remain `needs-human`.
+Only confirmed, verified current anchors of critical or major severity enter
+the repair inbox automatically. Minor findings may be triaged and remain
+`confirmed`; automatic minor delivery and repair (S4) are deferred. Triage
+never invents GitHub threads. Ambiguous judgements remain `needs-human`.
 The inventory report's `finding_triage` and `crq status` show current counts by
 status and the needs-human list (finding ID, canonical ID, path, title,
 severity, target and event ID). Status previews retain at most 32 needs-human
