@@ -545,6 +545,14 @@ describe('finishAttempt', () => {
 
   it.each([
     ['https://user:password-http:tail@host.test/path', 'https://[redacted]@host.test/path'],
+    ['https://user:password-https:tail@host.test/path', 'https://[redacted]@host.test/path'],
+    ['https://user:password-wss:tail@host.test/path', 'https://[redacted]@host.test/path'],
+    ['https://user:password-ftp:tail@host.test/path', 'https://[redacted]@host.test/path'],
+    [
+      'https://host.test/?next=https://private:password@private.test/sensitive',
+      'https://host.test/?[redacted]',
+    ],
+    ['https://host.test/#https://private.test/sensitive', 'https://host.test/#[redacted]'],
     ['https://host.test/?next=https://private.test/sensitive', 'https://host.test/?[redacted]'],
   ])('keeps embedded schemes redacted in persisted identifiers: %s', (value, expected) => {
     const record = finishAttempt({

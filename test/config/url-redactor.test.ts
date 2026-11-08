@@ -372,6 +372,28 @@ describe('redactUrlUserinfo (cases from PR #1235)', () => {
   test.each([
     ['https://user:password-http:tail@host.test/path', 'https://[redacted]@host.test/path'],
     ['https://user:password-https:tail@host.test/path', 'https://[redacted]@host.test/path'],
+    ['https://user:password-wss:tail@host.test/path', 'https://[redacted]@host.test/path'],
+    ['https://user:password-ftp:tail@host.test/path', 'https://[redacted]@host.test/path'],
+    [
+      'https://host.test/?next=https://private:password@private.test/sensitive',
+      'https://host.test/?[redacted]',
+    ],
+    [
+      'https://host.test/#https://private:password@private.test/sensitive',
+      'https://host.test/#[redacted]',
+    ],
+    [
+      '"fetch https://user:password-http:tail@host.test/path?q=https://private.test/sensitive" now',
+      '"fetch https://[redacted]@host.test/path?[redacted]" now',
+    ],
+    [
+      'https://host.test/path/https://nested.test/path',
+      'https://host.test/path/https://nested.test/path',
+    ],
+    [
+      'https://u:password-http:tail@one.test/a)https://u:p@two.test/b',
+      'https://[redacted]@one.test/a)https://[redacted]@two.test/b',
+    ],
     ['https://host.test/?next=https://private.test/sensitive', 'https://host.test/?[redacted]'],
     ['https://host.test/#https://private.test/sensitive', 'https://host.test/#[redacted]'],
     [
