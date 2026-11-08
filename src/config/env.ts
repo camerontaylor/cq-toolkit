@@ -12,6 +12,12 @@
 //   - Secret values stay in `values` for use but never appear in diagnostics.
 //
 // Entry points call it once through src/config/entry.ts.
+import {
+  isUrlEnvName,
+  redactUrlUserinfo,
+  showUrl,
+  stripCredentialText,
+} from '../shared/urlRedact.js';
 import { nearestKey } from '../shared/nearest.js';
 import { deepFreeze } from '../shared/deepFreeze.js';
 import {
@@ -44,6 +50,12 @@ export interface CqEnv {
    * non-blank value (sorted). Presence only, never a value; resolved once with the rest.
    */
   readonly foreignSecretsPresent: readonly string[];
+  /**
+   * Registered non-secret foreign URL names that are set, with the value already
+   * passed through the one shared redactor (userinfo, query, fragment stripped).
+   * The raw value never enters the snapshot.
+   */
+  readonly foreignUrls: Readonly<Record<string, string>>;
   readonly warnings: readonly CqEnvDiagnostic[];
   readonly errors: readonly CqEnvDiagnostic[];
 }
@@ -115,7 +127,8 @@ export function readCqEnv(
         : err instanceof Error
           ? err.message
           : String(err);
-      errors.push({ name, message: `${name}: ${detail}` });
+      // A parser message may quote a URL value: show it through the one redactor.
+      errors.push({ name, message: `${name}: ${stripCredentialText(redactUrlUserinfo(detail))}` });
     }
   }
 
@@ -123,7 +136,22 @@ export function readCqEnv(
     .map((f) => f.name)
     .sort();
 
-  return deepFreeze({ values, sources, present, foreignSecretsPresent, warnings, errors });
+  const foreignUrls: Record<string, string> = {};
+  for (const f of FOREIGN_ENV_ENTRIES) {
+    const raw = env[f.name];
+    if (f.secret || !isUrlEnvName(f.name) || raw === undefined || isBlank(raw)) continue;
+    foreignUrls[f.name] = showUrl(raw);
+  }
+
+  return deepFreeze({
+    values,
+    sources,
+    present,
+    foreignSecretsPresent,
+    foreignUrls,
+    warnings,
+    errors,
+  });
 }
 
 /** `cq: warning: …` / `cq: error: …` lines, errors first; never contains a value. */

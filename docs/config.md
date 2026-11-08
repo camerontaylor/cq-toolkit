@@ -48,15 +48,16 @@ op input. `secret` values are never printed.
 
 ## Foreign names
 
-Read by drivers, forge adapters and selfhost entries. They are never warned on; secret presence is
-all that is recorded.
+Read by drivers, forge adapters and selfhost entries. They are never warned on. A secret name records
+presence only. `_URL` is not a secret suffix: a URL value is shown and recorded with userinfo, query and
+fragment stripped, or `[redacted-url]` when it does not parse (ADR-0009).
 
 | Name | Secret | Description |
 | --- | --- | --- |
 | `ANTHROPIC_API_KEY` | yes | Anthropic API key (claude-code and ai-sdk drivers). |
 | `ANTHROPIC_AUTH_TOKEN` | yes | Anthropic auth token injected into claude-code children. |
-| `ANTHROPIC_BASE_URL` | yes | Anthropic endpoint override. |
-| `DEEPSEEK_ANTHROPIC_BASE_URL` | yes | DeepSeek Anthropic-compatible endpoint override. |
+| `ANTHROPIC_BASE_URL` | no | Anthropic endpoint override. |
+| `DEEPSEEK_ANTHROPIC_BASE_URL` | no | DeepSeek Anthropic-compatible endpoint override. |
 | `DEEPSEEK_API_KEY` | yes | DeepSeek API key. |
 | `GH_REPOSITORY` | no | Repository slug default for selfhost entries. |
 | `GH_TOKEN` | yes | GitHub token read by gh. |
@@ -65,8 +66,8 @@ all that is recorded.
 | `NPM_TOKEN` | yes | npm publish token (kept out of child environments). |
 | `OPENAI_API_KEY` | yes | OpenAI API key. |
 | `OPENCODE_GO_API_KEY` | yes | OpenCode Go API key. |
-| `OPENCODE_GO_BASE_URL` | yes | OpenCode Go endpoint (required, no default). |
+| `OPENCODE_GO_BASE_URL` | no | OpenCode Go endpoint (required, no default). |
 | `PASEO_AGENT_ID` | no | Current Paseo agent notification destination. |
-| `ZAI_ANTHROPIC_BASE_URL` | yes | Z.ai Anthropic-compatible endpoint override. |
+| `ZAI_ANTHROPIC_BASE_URL` | no | Z.ai Anthropic-compatible endpoint override. |
 | `ZAI_API_KEY` | yes | Z.ai API key. |
-| `ZAI_BASE_URL` | yes | Z.ai ai-sdk endpoint override. |
+| `ZAI_BASE_URL` | no | Z.ai ai-sdk endpoint override. |

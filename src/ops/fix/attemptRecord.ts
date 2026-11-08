@@ -12,7 +12,12 @@
 // form, never the hostname/path itself. No journal writes here — writers land
 // in T30/T31.
 import { createHash } from 'node:crypto';
-import { redactSensitiveText } from '../../driver/error-text.js';
+import { redactEnvSecrets } from '../../driver/error-text.js';
+import {
+  cutAuthorityUserinfo,
+  redactUrlUserinfo,
+  stripCredentialText,
+} from '../../shared/urlRedact.js';
 import type { ModelSpec } from '../../driver/types.js';
 import type {
   AttemptError,
@@ -51,144 +56,6 @@ export const STOP_CODE_CLASS: ReadonlyMap<string, AttemptStopClass> = new Map([
 /** Per-string cap for sanitized output; overflow is marked, not dropped. */
 export const MAX_SANITIZED_CHARS = 64 * 1024;
 
-/**
- * Strip URL userinfo/query/fragment and SCP-style (or bare email-like)
- * `user[:secret]@host` prefixes from a text fragment.
- *
- * Deliberate over-matching: a bare `name@host` in free text (an email
- * address, or a package spec like `vitest@5.0.0` that happens to end in a
- * colon-terminated token, `@types/node@22`, `@scope/pkg@1.2.3`, or
- * `image@sha256:…`) is also stripped, because a credential prefix is
- * indistinguishable from these without scheme context and the sanitizer fails
- * closed. Credential leakage is worse than a mangled spec string.
- */
-function stripCredentialText(text: string): string {
-  const chunks: string[] = [];
-  // Free-text runs deliberately fail closed even for a dangling @ or an
-  // unusual host initial. Keep only opening boundary punctuation and the tail.
-  const freeText = (run: string): string => {
-    const at = run.lastIndexOf('@');
-    if (at < 0) return run;
-    let prefix = 0;
-    while (prefix < at && '\'"([{=,;'.includes(run[prefix] ?? '')) prefix++;
-    return run.slice(0, prefix) + run.slice(at + 1);
-  };
-  // Backslash runs before distinct quotes are disjoint, so counting their
-  // parity keeps the scanner linear and works for both quote delimiters.
-  const closesQuery = (run: string, index: number, terminator: string): boolean => {
-    if (terminator === '' || run[index] !== terminator) return false;
-    if (terminator !== "'" && terminator !== '"') return true;
-    let backslashes = 0;
-    for (let j = index - 1; j >= 0 && run[j] === '\\'; j--) backslashes++;
-    return backslashes % 2 === 0;
-  };
-  let i = 0;
-  while (i < text.length) {
-    if (/\s/.test(text[i] ?? '')) {
-      chunks.push(text[i] ?? '');
-      i++;
-      continue;
-    }
-    const start = i;
-    while (i < text.length && !/\s/.test(text[i] ?? '')) i++;
-    const run = text.slice(start, i);
-    let next = i;
-    while (next < text.length && /\s/.test(text[next] ?? '')) next++;
-    const nextStart = next;
-    while (next < text.length && !/\s/.test(text[next] ?? '')) next++;
-    const newlineCredential =
-      text.slice(i, nextStart).includes('\n') && text.slice(nextStart, next).includes('@');
-    // Discover all schemes in one forward pass. Never search the remaining
-    // suffix again for each URL (many adjacent URLs must also stay linear).
-    const schemes: Array<{ start: number; authority: number }> = [];
-    let wordStart = 0;
-    for (let j = 0; j < run.length; j++) {
-      const ch = run[j] ?? '';
-      if (
-        ch === ':' &&
-        run[j + 1] === '/' &&
-        run[j + 2] === '/' &&
-        j > wordStart &&
-        /[a-z]/i.test(run[wordStart] ?? '')
-      ) {
-        schemes.push({ start: wordStart, authority: j + 3 });
-        j += 2;
-        wordStart = j + 1;
-      } else if (!/[a-z0-9+.-]/i.test(ch)) {
-        wordStart = j + 1;
-      }
-    }
-    let cursor = 0;
-    let droppingQuery = false;
-    let terminator = '';
-    for (let k = 0; k < schemes.length; k++) {
-      const scheme = schemes[k];
-      if (scheme === undefined) continue;
-      const limit = schemes[k + 1]?.start ?? run.length;
-      if (droppingQuery) {
-        let close = scheme.start;
-        while (close < limit && !closesQuery(run, close, terminator)) close++;
-        if (close < limit) {
-          chunks.push(freeText(run.slice(close, limit)));
-          droppingQuery = false;
-        }
-        cursor = limit;
-        continue;
-      }
-      chunks.push(freeText(run.slice(cursor, scheme.start)));
-      const opener = run[scheme.start - 1];
-      terminator = opener === "'" || opener === '"' ? opener : opener === '<' ? '>' : '';
-      const token = run.slice(scheme.authority, limit);
-      let authorityEnd = 0;
-      while (authorityEnd < token.length && !'/?#'.includes(token[authorityEnd] ?? ''))
-        authorityEnd++;
-      let end = authorityEnd;
-      while (end < token.length && !'?#'.includes(token[end] ?? '')) end++;
-      let tailEnd = end;
-      if (end < token.length) {
-        tailEnd++;
-        while (tailEnd < token.length && !closesQuery(run, scheme.authority + tailEnd, terminator))
-          tailEnd++;
-      }
-      const at = token.lastIndexOf('@', end - 1);
-      const authority = token.slice(0, authorityEnd);
-      const hostPort = /^(\[[^\]]*\]|[^:@]+):\d+$/.test(authority);
-      const incomplete =
-        at < 0 &&
-        !hostPort &&
-        ((authority.includes(':') && !/^\[[^\]]*\]$/.test(authority)) ||
-          (newlineCredential && authorityEnd === token.length));
-      chunks.push(run.slice(scheme.start, scheme.authority));
-      chunks.push(incomplete ? '' : token.slice(at >= 0 ? at + 1 : 0, end));
-      chunks.push(freeText(token.slice(tailEnd)));
-      droppingQuery = end < token.length && tailEnd === token.length;
-      cursor = limit;
-    }
-    if (schemes.length === 0) {
-      // A newline can split user:token before @. Drop the first half too.
-      // Multi-character credential fragments are ambiguous; short k:v prose,
-      // paths and numeric stack-frame segments remain intact.
-      const parts = run.split(':');
-      const credentialShape =
-        run.endsWith(':') ||
-        (!run.includes('/') &&
-          parts.length >= 2 &&
-          parts.every((part) => part.length >= 2 && !/^\d+$/.test(part)));
-      const nextRun = text.slice(nextStart, next);
-      const nextAt = nextRun.indexOf('@');
-      const splitUsername =
-        !nextRun.slice(0, nextAt).includes('://') &&
-        /^[a-z][a-z0-9_-]*$/i.test(run) &&
-        nextAt >= 0 &&
-        nextRun.slice(0, nextAt).includes(':');
-      const splitCredential = newlineCredential && (credentialShape || splitUsername);
-      chunks.push(splitCredential ? '' : freeText(run));
-    }
-  }
-  // Scheme-less queries are not stripped: prose ? and # must survive.
-  return chunks.join('');
-}
-
 /** Cap a sanitized string, marking (not hiding) the overflow size. */
 function capSanitized(text: string): string {
   if (text.length <= MAX_SANITIZED_CHARS) return text;
@@ -200,19 +67,22 @@ function capSanitized(text: string): string {
 }
 
 /**
- * Sanitize a structured identifier: redact environment secrets and cap it.
+ * Sanitize a structured identifier: redact environment secrets and URLs, then cap it.
  * Identifier fields skip credential-prefix stripping because an `@`-versioned
  * handle (for example a Vertex model id) is identity, not the free-text
  * `user@host` shape {@link sanitizeObservation} fails closed on.
  */
 function sanitizeIdentifier(text: string): string {
-  return capSanitized(redactSensitiveText(text));
+  return capSanitized(redactUrlUserinfo(redactEnvSecrets(text)));
 }
 
 /**
  * Recursively sanitize a persisted observation: redact environment secrets,
  * strip credential URL/SCP prefixes, then redact again so a secret the
- * stripping mangled cannot survive as a partial value; the result is capped at
+ * stripping mangled cannot survive as a partial value. The strict stripper
+ * deliberately treats a path at-sign as credential-like too (`https://h/a@b`
+ * becomes `https://b`); observations prefer over-redaction to missed secrets.
+ * The result is capped at
  * {@link MAX_SANITIZED_CHARS} per string. Sanitized objects and arrays use
  * null prototypes so `__proto__`-style keys pass through as data. Non-JSON
  * values are outside the observation contract and pass through.
@@ -220,7 +90,7 @@ function sanitizeIdentifier(text: string): string {
 export function sanitizeObservation<T>(value: T): T {
   if (typeof value === 'string') {
     return capSanitized(
-      redactSensitiveText(stripCredentialText(redactSensitiveText(value))),
+      redactUrlUserinfo(redactEnvSecrets(stripCredentialText(redactEnvSecrets(value)))),
     ) as unknown as T;
   }
   if (Array.isArray(value)) {
@@ -243,21 +113,7 @@ function canonicalRepoPath(remote: string): string | null {
   // Strip userinfo: scan the anchored scheme procedurally (linear, ReDoS-safe
   // — see stripCredentialText) and cut the authority at the LAST `@`.
   const schemeM = /(?<![a-z0-9+.-])[a-z][a-z0-9+.-]*:\/\//i.exec(rest);
-  if (schemeM !== null) {
-    const schemeEnd = schemeM.index + schemeM[0].length;
-    let end = schemeEnd;
-    while (end < rest.length) {
-      const ch: string | undefined = rest[end];
-      if (ch === undefined || /\s/.test(ch) || ch === '?' || ch === '#') break;
-      end++;
-    }
-    const authority = rest.slice(schemeEnd, end);
-    const at = authority.lastIndexOf('@');
-    rest =
-      rest.slice(0, schemeEnd) +
-      (at === -1 ? authority : authority.slice(at + 1)) +
-      rest.slice(end);
-  }
+  if (schemeM !== null) rest = cutAuthorityUserinfo(rest, schemeM);
   // Cut query/fragment.
   const q = /[?#]/.exec(rest);
   if (q !== null) rest = rest.slice(0, q.index);

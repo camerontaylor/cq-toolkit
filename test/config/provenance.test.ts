@@ -25,7 +25,7 @@ describe('provenanceConfig', () => {
     expect(config.env['CQ_SANDBOX']).toBe('off');
     expect(config.env['CQ_AUTOMATION_TOKEN']).toBe('set');
     expect(config.env['ZAI_API_KEY']).toBe('set');
-    expect(config.env['ZAI_BASE_URL']).toBe('set'); // _URL is a secret suffix
+    expect(config.env['ZAI_BASE_URL']).toBe('https://example.invalid/'); // _URL is not a secret suffix
     expect(config.env).not.toHaveProperty('GH_REPOSITORY');
     expect(config.env).not.toHaveProperty('GITHUB_REPOSITORY');
     expect(config.env).not.toHaveProperty('CQ_WORK_ID');

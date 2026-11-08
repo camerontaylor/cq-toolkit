@@ -36,7 +36,6 @@ const REFUSED = [
   'NPM_TOKEN',
   'SSH_AUTH_SOCK',
   'GOOGLE_APPLICATION_CREDENTIALS',
-  'DATABASE_URL',
   'NODE_OPTIONS',
   'NODE_PATH',
   'anthropic_api_key',
@@ -244,13 +243,7 @@ describe('no part of a raw value is echoed', () => {
 });
 
 describe('manifest-declared names get the credential refusal', () => {
-  const declared = [
-    'ANTHROPIC_API_KEY',
-    'GH_TOKEN',
-    'MY_SERVICE_SECRET',
-    'AWS_REGION',
-    'DATABASE_URL',
-  ];
+  const declared = ['ANTHROPIC_API_KEY', 'GH_TOKEN', 'MY_SERVICE_SECRET', 'AWS_REGION'];
 
   test.each(declared)('buildSandboxLauncherEnv refuses declared %s', (name) => {
     const parent = { [name]: dummySecret, PATH: '/bin' };
