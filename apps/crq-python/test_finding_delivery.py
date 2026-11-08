@@ -26,6 +26,70 @@ class FindingTest(unittest.TestCase):
         self.inbox = delivery.Inbox(self.root / "findings", self.out)
         self.inbox.ingest(self.value)
 
+    def legacy_finding(self, events):
+        finding = self.value["payload"]["findings"][0]
+        finding.update(intervals=[], anchor_status="unverified")
+        self.value["payload"]["artifacts"] = [self.f.store.put(
+            b"\n".join(ledger.canonical(v) for v in events))]
+        rehash(self.value)
+        filename = self.root / "findings/triage" / (self.fid + ".json")
+        row = ledger.loads(filename.read_bytes())
+        row.update(review_id=self.value["id"], finding=finding)
+        ledger.atomic(filename, ledger.canonical(row))
+        return filename, filename.read_bytes()
+
+    def raw_finding(self, **changes):
+        return dict(type="finding", fileName="a", title="Issue", comment="Details",
+                    **changes)
+
+    def test_recovered_anchor_replay_repeated_triage_and_delivery_keep_identity(self):
+        filename, before = self.legacy_finding([self.raw_finding(startLine=2, endLine=2)])
+        original = ledger.canonical(self.value)
+        event = self.inbox.triage(self.fid, self.f.repo, self.t, "confirmed", "reviewer", "valid", AT,
+                                  reviews=[self.value])
+        self.assertEqual(event["payload"]["action"], "confirmed")
+        evidence = event["payload"]["evidence"]
+        self.assertEqual(evidence["anchor_recovered_from"], self.value["payload"]["artifacts"][0]["sha256"])
+        ledger.atomic(filename, before)  # Crash after event spool, before row write.
+        self.inbox.recover([event])
+        self.inbox.triage(self.fid, self.f.repo, self.t, "confirmed", "reviewer", "again", AT)
+        row = ledger.loads(filename.read_bytes())
+        self.assertEqual(row["mapped_intervals"], [[2, 2]])
+        self.assertEqual(row["finding"]["intervals"], [])
+        self.assertEqual(row["finding"]["id"], self.fid)
+        self.assertEqual(ledger.canonical(self.value), original)
+        requests = []
+        self.inbox.deliver(self.fid, lambda key, request: requests.append(request) or
+                           {"acknowledgement": "ack", "repair_task": "task"}, AT)
+        self.assertEqual(requests[0]["intervals"], [[2, 2]])
+        self.inbox.ingest(self.value)
+
+    def test_missing_ambiguous_mismatched_or_out_of_bounds_anchor_needs_human(self):
+        raw = self.raw_finding(startLine=1)
+        for events in ([], [raw, raw], [dict(raw, comment="Different")],
+                       [dict(raw, startLine=3)], [dict(raw, startLine=True)]):
+            with self.subTest(events=events):
+                filename, _ = self.legacy_finding(events)
+                event = self.inbox.triage(self.fid, self.f.repo, self.t, "confirmed", "reviewer", "valid", AT,
+                                          reviews=[self.value])
+                self.assertEqual(event["payload"]["action"], "needs-human")
+                self.assertNotIn("recovered_anchor", ledger.loads(filename.read_bytes()))
+
+    def test_corrupt_or_missing_raw_artifact_needs_human(self):
+        for missing in (False, True):
+            filename, _ = self.legacy_finding([self.raw_finding(startLine=1)])
+            reference = self.value["payload"]["artifacts"][0]
+            artifact = Path(reference["location"])
+            if missing:
+                artifact.unlink()
+            else:
+                artifact.write_bytes(b"corrupted")
+            event = self.inbox.triage(self.fid, self.f.repo, self.t, "confirmed", "reviewer", "valid", AT,
+                                      reviews=[self.value])
+            self.assertEqual(event["payload"]["action"], "needs-human")
+            if artifact.exists():
+                artifact.unlink()
+
     def test_confirmed_cannot_override_canonical_identity(self):
         self.inbox.triage(self.fid, self.f.repo, self.t, "confirmed", "reviewer", "valid", AT, canonical_id="foreign")
         row = ledger.loads((self.root / "findings/triage" / (self.fid + ".json")).read_bytes())
