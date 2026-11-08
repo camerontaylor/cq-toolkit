@@ -67,7 +67,7 @@ on:
 
 # Event isolation prevents a feature push from cancelling its PR check.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ (github.event_name == 'push' && github.ref != format('refs/heads/{0}', github.event.repository.default_branch) && github.run_id) || github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 permissions:

@@ -76,9 +76,11 @@ describe('required workflow cancellation isolation', () => {
     '%s isolates each event and PR/ref',
     (file) => {
       const text = read(file);
-      const subject = file.includes('denylist') ? 'github.run_id' : 'github.ref';
+      const subject = file.includes('denylist')
+        ? 'github.event.pull_request.number || github.run_id'
+        : "(github.event_name == 'push' && github.ref != format('refs/heads/{0}', github.event.repository.default_branch) && github.run_id) || github.event.pull_request.number || github.ref";
       expect(text).toContain(
-        `group: \${{ github.workflow }}-\${{ github.event_name }}-\${{ github.event.pull_request.number || ${subject} }}`,
+        `group: \${{ github.workflow }}-\${{ github.event_name }}-\${{ ${subject} }}`,
       );
       expect(text).toContain('cancel-in-progress: true');
       expect(text).toMatch(/on:\n {2}push:\n {2}pull_request:\n/);
