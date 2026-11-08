@@ -111,6 +111,51 @@ class CqDriverTest(unittest.TestCase):
             report = cq.invoke(config, {'model': 'zai/glm-5.3-flash'}, job, Path(tmp.name), self.directory)
         return report, command.call_args.args[0]
 
+    def test_invalid_fixer_output_returns_structured_error(self):
+        invalid_results = [json.dumps({'status': 'ok', key: value})
+                           for key in ('value', 'result')
+                           for value in ([], 0, '', False)]
+        for stdout in (*invalid_results, 'not json', '', 'null', '[]', '[1]', '"text"', '42', 'true',
+                       '{"status":"ok","value":[1]}',
+                       '{"status":"ok","result":"text"}'):
+            with self.subTest(stdout=stdout):
+                report, _ = self.invoke(stdout, returncode=0)
+                self.assertEqual(report, {'stop': 'error', 'changed': False,
+                                         'summary': 'invalid cq output', 'commits': []})
+                self.assertIn(stdout, (self.directory / 'driver.log').read_text())
+
+    def test_missing_or_null_fixer_result_defaults_to_object(self):
+        for data in ({'status': 'ok'}, {'status': 'ok', 'value': None},
+                     {'status': 'ok', 'result': None}, {'status': 'ok', 'value': {}},
+                     {'status': 'ok', 'value': None, 'result': {'changed': False}}):
+            with self.subTest(data=data):
+                report, _ = self.invoke(json.dumps(data), returncode=0)
+                self.assertEqual(report['stop'], 'ok')
+
+    def test_judge_output_failures_return_unsure(self):
+        config = {'repair': {'cq_bin': '/unused/cli.js',
+                             'budget': {'wall_clock_min': 1}}}
+        valid = {'verdict': 'valid', 'reason': 'source confirms finding'}
+        cases = [(text, 0) for text in ('not json', '', 'null', '[]', '[1]',
+                                      '"text"', '42', 'true')]
+        cases += [(json.dumps(valid), 1), (json.dumps(valid), 0)]
+        for stdout, returncode in cases:
+            with self.subTest(stdout=stdout, returncode=returncode):
+                with tempfile.TemporaryDirectory() as tmp:
+                    with mock.patch.object(cq, 'command', return_value=SimpleNamespace(
+                            returncode=returncode, stdout=stdout, stderr='judge stderr')):
+                        report = cq.judge(config, {'model': 'example/model'}, {},
+                                          Path(tmp), Path(tmp))
+                    if returncode == 0 and stdout == json.dumps(valid):
+                        self.assertEqual(report, valid)
+                    else:
+                        self.assertEqual(report['stop'], 'error')
+                        self.assertEqual(report['verdict'], 'unsure')
+                        self.assertTrue(report['reason'])
+                    log = (Path(tmp) / 'driver.log').read_text()
+                    self.assertIn(stdout, log)
+                    self.assertIn('judge stderr', log)
+
     def test_quota_exhaustion_pauses_like_a_rate_limit(self):
         # 24 runner-host jobs burned A0..A2 in seconds on Z.ai's weekly limit.
         error = ('fixReviewItem: driver reported an error stop (session s); errorClass=quota: '
