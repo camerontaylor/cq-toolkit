@@ -505,8 +505,10 @@ inject a plain-object mock) and feature-detected against the driven
 surface (query / tool / createSdkMcpServer) — capability detection, never
 version checks. A peer that is absent (or misshaped) is a PRE-DISPATCH
 throw naming the peer and the install command. The repo builds and the
-whole suite passes with the peer ABSENT; the `install-matrix` workflow
-proves both halves on every PR. Refusal detection is the D-E′ F2
+whole suite passes with the peer ABSENT. The `install-matrix` workflow
+checks SDK driver tests, build and public import in both peer modes on
+relevant PRs; nightly and pre-release manual runs test the full suite in
+both modes. Refusal detection is the D-E′ F2
 alternative to a pin bump: the lane detects `stop_reason: 'refusal'`
 structurally (available in the vendor vocabulary since the 0.3.162-era
 frames) instead of requiring ≥0.3.302 pins — the recorded fixtures pin

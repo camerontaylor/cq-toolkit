@@ -165,6 +165,13 @@ def select(c, queue, log, dry, only):
     # A rollout owns the rank-4 lane; the path-count-only fallback cannot launch
     # outside the ledger accounting once the new mechanism is enabled.
     items = [j for j in queue["items"] if j.get("kind") == jobs.KIND and (not only or only == j["id"])]
+    # Terminal refusals cannot become eligible again merely to retry publication.
+    for item in items:
+        pending_event = item.get("refusal_state_event")
+        if pending_event and not dry:
+            state_event(c, queue, item, pending_event["at"], pending_event["reason"])
+            del item["refusal_state_event"]
+            c.save_queue(queue)
     items.sort(key=lambda j: (j["tier_importance"], j.get("retry", False), j["subject_kind"],
                              j.get("row") or 0 if j["subject_kind"] == "A" else -j["score"], j["subject_id"]))
     pending = [j for j in items if jobs.eligible(queue, j, c.iso())]
@@ -259,6 +266,7 @@ def select(c, queue, log, dry, only):
         plan = {"base": item["base"], "head": item["head"], "target": item["target"], "cycle": None,
                 "branch": None, "notes": [], "label": "pinned scoped backfill", "range_policy": "backfill-current-scoped-v1"}
         run_bound = False
+        terminal_recorded = False
         try:
             run_id = c.launch(queue, item, plan)
             if item.get("state") == "reviewing":
@@ -271,10 +279,14 @@ def select(c, queue, log, dry, only):
             if not item.get("run"):
                 jobs.cancel_before_vendor(queue, item)
             jobs.terminal(queue, item, c.iso(), "secret-scan", vendor_terminal=not bool(item.get("run")), reason=item.get("last_error", "launch refused"))
-            state_event(c, queue, item, c.iso(), "launch refused before vendor binding")
+            terminal_recorded = True
+            item["refusal_state_event"] = {"at": c.iso(), "reason": "launch refused before vendor binding"}
+            c.save_queue(queue)
+            state_event(c, queue, item, item["refusal_state_event"]["at"], item["refusal_state_event"]["reason"])
+            del item["refusal_state_event"]
             c.save_queue(queue)
         except Exception:
-            if not run_bound:
+            if not run_bound and not terminal_recorded:
                 item.update(state="launch-unknown", vendor_state="unknown")
             c.save_queue(queue)
             raise

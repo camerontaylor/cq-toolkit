@@ -3,7 +3,7 @@
 // subprocess adapter against REAL git (the dirty-refusal backstop,
 // PR 156 r1 D).
 import { execFile } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
@@ -130,7 +130,8 @@ describe('subprocess cleanup effects (real git smoke)', () => {
   }, 120_000);
 
   test('a FAILED removal restores the sweep lock with its reason; an UNLOCKED tree stays unlocked', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'cleanup-relock-'));
+    // Git reports canonical paths, including /private/var on macOS.
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'cleanup-relock-')));
     try {
       await resilient(() => run(['init', '-q', '-b', 'main', dir], dir));
       await resilient(() => run(['-C', dir, 'config', 'user.email', 't@example.invalid'], dir));

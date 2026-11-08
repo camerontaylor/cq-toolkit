@@ -97,6 +97,27 @@ describe('plain independent review acceptance', () => {
     ).toBe('no_acceptable_review');
   });
 
+  test.each([{ automationLogin: 'AuToMaTiOn-AuThOr' }, { excludedLogins: ['AuToMaTiOn-AuThOr'] }])(
+    'mixed-case author exclusions block exact-head PASS: %j',
+    (config) => {
+      for (const evidence of ['comment', 'review']) {
+        const signal = { authorLogin: 'automation-author', body: `${'a'.repeat(40)} PASS` };
+        expect(
+          classifyPr(
+            candidate({
+              authorLogin: 'automation-author',
+              headRefOid: 'a'.repeat(40),
+              issueComments: evidence === 'comment' ? [comment(signal)] : [],
+              reviews: evidence === 'review' ? [approved({ ...signal, state: 'COMMENTED' })] : [],
+            }),
+            PENDING_MS,
+            { ...defaultClassifyPrConfig, ...config },
+          ).reason,
+        ).toBe('no_acceptable_review');
+      }
+    },
+  );
+
   test('accepts a plain top-level PR-author comment with the exact head and PASS', () => {
     expect(
       classifyPr(
