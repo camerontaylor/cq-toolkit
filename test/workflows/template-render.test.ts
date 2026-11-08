@@ -327,16 +327,19 @@ describe('render-templates --write refuses an invalid table', () => {
 describe('install-ripgrep action version validation', () => {
   const actionPath = join(ROOT, '.github/actions/install-ripgrep/action.yml');
   const actionText = readFileSync(actionPath, 'utf8');
-  const runMarker = '      run: |\n';
-  const runStart = actionText.indexOf(runMarker);
-  if (runStart < 0) throw new Error('install-ripgrep action run script is missing');
-  const actionScript = actionText
-    .slice(runStart + runMarker.length)
-    .split('\n')
-    .map((line) => (line.startsWith('        ') ? line.slice(8) : line))
-    .join('\n');
+  const scripts = [...actionText.matchAll(/ {6}run: \|\n((?:        .*\n|\n)*)/g)].map((match) =>
+    (match[1] ?? '')
+      .split('\n')
+      .map((line) => line.slice(8))
+      .join('\n'),
+  );
+  const actionScript = `${scripts[0]}\nset -a\nsource "$GITHUB_OUTPUT"\nset +a\n${scripts[1]}`;
 
-  function runActionWithVersion(versionLine: string): {
+  function runActionWithVersion(
+    versionLine: string,
+    cached = false,
+    corrupt = false,
+  ): {
     root: string;
     status: number | null;
     stderr: string;
@@ -349,12 +352,20 @@ describe('install-ripgrep action version validation', () => {
     mkdirSync(mockBin);
     mkdirSync(runnerTemp);
     writeFileSync(githubPath, '');
+    if (cached) {
+      mkdirSync(join(runnerTemp, 'ripgrep-archive'));
+      writeFileSync(
+        join(runnerTemp, 'ripgrep-archive/ripgrep-15.2.0-x86_64-unknown-linux-musl.tar.gz'),
+        'cached',
+      );
+    }
 
     const mock = (name: string, lines: string[]) =>
       writeFileSync(join(mockBin, name), `${lines.join('\n')}\n`, { mode: 0o755 });
     mock('curl', [
       '#!/usr/bin/env bash',
       'set -euo pipefail',
+      ...(cached ? ['exit 99'] : []),
       'while (($#)); do',
       '  if [[ "$1" == "--output" ]]; then',
       '    shift',
@@ -365,7 +376,7 @@ describe('install-ripgrep action version validation', () => {
       'done',
       'exit 2',
     ]);
-    mock('sha256sum', ['#!/usr/bin/env bash', 'cat >/dev/null']);
+    mock('sha256sum', ['#!/usr/bin/env bash', 'cat >/dev/null', ...(corrupt ? ['exit 1'] : [])]);
     mock('tar', [
       '#!/usr/bin/env bash',
       'set -euo pipefail',
@@ -389,6 +400,7 @@ describe('install-ripgrep action version validation', () => {
       env: {
         ...process.env,
         GITHUB_PATH: githubPath,
+        GITHUB_OUTPUT: join(root, 'github-output'),
         PATH: `${mockBin}:${process.env.PATH ?? ''}`,
         RG_FIXTURE_VERSION: versionLine,
         RUNNER_ARCH: 'X64',
@@ -398,6 +410,16 @@ describe('install-ripgrep action version validation', () => {
     });
     return { root, status: result.status, stderr: result.stderr, githubPath };
   }
+
+  it.each([false, true])('verifies cached bytes before extraction (corrupt=%s)', (corrupt) => {
+    const result = runActionWithVersion('ripgrep 15.2.0', true, corrupt);
+    try {
+      expect(result.status, result.stderr).toBe(corrupt ? 1 : 0);
+      expect(existsSync(join(result.root, 'runner-temp/bin/rg'))).toBe(!corrupt);
+    } finally {
+      rmSync(result.root, { recursive: true, force: true });
+    }
+  });
 
   it('accepts the pinned version followed by the upstream revision suffix', () => {
     const result = runActionWithVersion('ripgrep 15.2.0 (rev e89fff89ac)');

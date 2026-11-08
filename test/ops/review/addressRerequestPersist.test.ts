@@ -38,7 +38,7 @@ const namespace = createHash('sha256')
   .update(JSON.stringify(['octo', 'widget', 7, 'main', null, 'octo/widget', 'feature/x', 'author']))
   .digest('hex');
 
-test('a failed re-request is recovered on the next invocation', async () => {
+test.each(['request', 'snapshot'])('recovers failed %s', async (failure) => {
   const repo = await makeTestRepo();
   const journal = await realTmpDir('cq-address-rerequest-');
   const role = { provider: 'scripted', model: 'worker' };
@@ -76,8 +76,10 @@ test('a failed re-request is recovered on the next invocation', async () => {
     const actions: string[] = [];
     const replies: Array<{ id: number; in_reply_to_id: number; body: string }> = [];
     const reRequested = new Set<string>();
-    // Run 1's re-review works; only the reviewer-request API fails.
-    let failReRequest = true;
+    // Fail either the post-fix snapshot or the reviewer-request API.
+    let failReRequest = failure === 'request';
+    let failSnapshot = failure === 'snapshot';
+    let snapshotReads = 0;
     const threads = () => [
       {
         id: 'T1',
@@ -152,7 +154,12 @@ test('a failed re-request is recovered on the next invocation', async () => {
           },
         });
       const endpoint = args.find((arg) => arg.startsWith('repos/')) ?? '';
-      if (endpoint === 'repos/octo/widget/pulls/7') return ok({ head: { sha: remoteHead() } });
+      if (endpoint === 'repos/octo/widget/pulls/7') {
+        snapshotReads++;
+        if (failSnapshot && snapshotReads === 2)
+          return { code: 1, stdout: '', stderr: 'snapshot unavailable' };
+        return ok({ head: { sha: remoteHead() } });
+      }
       if (endpoint.includes('/pulls/7/comments'))
         return ok([
           ...threads().map((thread) => ({
@@ -240,10 +247,14 @@ test('a failed re-request is recovered on the next invocation', async () => {
       'pending-rerequests.json',
     );
 
-    // Run 1: the fix lands, the re-review is fine, the re-request API fails.
+    // Run 1: the fix lands but the selected recovery step fails.
     const first = await invoke();
     expect(first.status).toBe('needs-human');
-    expect(actions).toEqual(['reply', 'resolve', 'rerequest-failed']);
+    const firstActions =
+      failure === 'request' ? ['reply', 'resolve', 'rerequest-failed'] : ['reply', 'resolve'];
+    expect(actions).toEqual(firstActions);
+    if (failure === 'snapshot')
+      expect(first.report?.reasons.join(' ')).toContain('verify snapshot failed');
     // The pending re-request is durably recorded beside the publication receipts.
     const pending = JSON.parse(await readFile(pendingPath, 'utf8')) as string[];
     expect(pending).toContain('octocat');
@@ -252,10 +263,11 @@ test('a failed re-request is recovered on the next invocation', async () => {
     // lose the human reviewer, and a successful re-request clears the store.
     resolvedThreads.add('T1');
     failReRequest = false;
+    failSnapshot = false;
     advancePrHead();
     const second = await invoke();
     expect(second.status, JSON.stringify(second.report?.reasons)).toBe('ok');
-    expect(actions).toEqual(['reply', 'resolve', 'rerequest-failed', 'rerequest']);
+    expect(actions).toEqual([...firstActions, 'rerequest']);
     expect(reRequested.size).toBeGreaterThanOrEqual(1);
     await expect(readFile(pendingPath)).rejects.toMatchObject({ code: 'ENOENT' });
   } finally {
