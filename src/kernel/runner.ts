@@ -147,7 +147,7 @@ import pLimit from 'p-limit';
 import { randomBytes } from 'node:crypto';
 import { messageOf } from '../shared/messageOf.js';
 import { assertCqEnv } from '../config/entry.js';
-import { runWithCqEnv } from '../config/run-env.js';
+import { currentCqEnv, runWithCqEnv } from '../config/run-env.js';
 import { readCqEnv } from '../config/env.js';
 import { GovernanceOptInRefusedError } from './errors.js';
 import {
@@ -511,7 +511,8 @@ export async function runPlan(
   let report: RunReport;
   try {
     // Resolve the CQ_* snapshot once and carry it to the ops (ADR-0009).
-    const cqEnv = opts.cqEnv ?? readCqEnv();
+    // A nested runPlan (a composition's plan runs) inherits the enclosing run's snapshot.
+    const cqEnv = opts.cqEnv ?? currentCqEnv();
     report = await runWithCqEnv(cqEnv, () =>
       runPlanUnderLease(plan, { ...opts, cqEnv }, registry, gov, lease),
     );

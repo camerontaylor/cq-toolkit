@@ -516,7 +516,7 @@ export interface WitnessesRecord {
  */
 export interface ProvenanceConfig {
   /** Resolved `source: 'env'` values; secrets and foreign secrets are the literal 'set'. */
-  env: Record<string, string | number | boolean | string[] | null>;
+  env: Record<string, string>;
   sources: Record<string, 'env'>;
   /** Env diagnostics as message text (never a value). */
   warnings: string[];

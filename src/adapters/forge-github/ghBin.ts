@@ -9,10 +9,11 @@
 // which binary a relative CQ_GH_BIN names. Bare names keep PATH lookup;
 // absolute paths pass through.
 import { isAbsolute, resolve as pathResolve } from 'node:path';
-import { readCqEnv, type CqEnv } from '../../config/env.js';
+import type { CqEnv } from '../../config/env.js';
+import { currentCqEnv } from '../../config/run-env.js';
 
 export function resolveGhBin(cqEnv?: CqEnv): string {
-  const configured = (cqEnv ?? readCqEnv()).values['CQ_GH_BIN'];
+  const configured = (cqEnv ?? currentCqEnv()).values['CQ_GH_BIN'];
   const rawBin = typeof configured === 'string' ? configured : 'gh';
   return rawBin.includes('/') || rawBin.includes('\\')
     ? isAbsolute(rawBin)

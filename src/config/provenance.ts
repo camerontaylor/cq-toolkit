@@ -10,13 +10,15 @@
 // registered foreign secret names are recorded as 'set' when present.
 // Identity names are excluded: the correlation record already carries them.
 // Warnings are recorded as message text (never a value). Parse errors are not
-// recorded: runPlan refuses a run whose env has errors (assertCqEnv).
+// recorded: an errored snapshot is REFUSED (assertCqEnv), never recorded as
+// absent, because absence means "the built-in default applied".
 //
 // Every recorded value is a STRING, whatever the registry parser returned
 // (model spec, list, number, boolean), so it always satisfies the strict
 // ProvenanceConfigSchema. Non-secret values are capped at MAX_VALUE_CHARS so
 // a long value cannot bloat a journal.
 import type { ProvenanceConfig } from '../kernel/types.js';
+import { assertCqEnv } from './entry.js';
 import type { CqEnv } from './env.js';
 import { CQ_ENV_ENTRIES } from './env-registry.js';
 
@@ -43,6 +45,7 @@ function cap(text: string): string {
 }
 
 export function provenanceConfig(cqEnv: CqEnv): ProvenanceConfig {
+  assertCqEnv(cqEnv, 'provenance');
   const env: Record<string, string> = {};
   const sources: Record<string, 'env'> = {};
   for (const entry of CQ_ENV_ENTRIES) {
