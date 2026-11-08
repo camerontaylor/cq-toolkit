@@ -28,7 +28,7 @@ env:
 jobs:
   changes:
     runs-on: ubuntu-latest
-    if: ${{ github.event_name == 'pull_request' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    if: ${{ github.event_name == 'pull_request' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
     outputs:
       typescript: ${{ steps.select.outputs.typescript }}
       python: ${{ steps.select.outputs.python }}
@@ -52,7 +52,7 @@ jobs:
   crq-python:
     runs-on: ubuntu-latest
     needs: changes
-    if: ${{ always() && !cancelled() && (github.event_name == 'pull_request' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && (needs.changes.result != 'success' || needs.changes.outputs.python != 'false') }}
+    if: ${{ always() && !cancelled() && (github.event_name == 'pull_request' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))) && (needs.changes.result != 'success' || needs.changes.outputs.python != 'false') }}
     steps:
       - name: Check out the repo
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -67,11 +67,9 @@ jobs:
         run: python3 -m unittest discover -p 'test_*.py'
   static:
     runs-on: ubuntu-latest
-    # The `cq-state` settle ledger is machine-written (selfhost settle-state);
-    # its pushes are not reviewable changes (review-debt #226). Job-level,
-    # never a trigger filter — I4 keeps the trigger surface intact.
+    # Every PR, default-branch push, nightly and manual full run.
     needs: changes
-    if: ${{ always() && !cancelled() && (github.event_name == 'pull_request' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) }}
+    if: ${{ always() && !cancelled() && (github.event_name == 'pull_request' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))) }}
     steps:
       - name: Check out the repo
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (immutable commit pin; repo policy)
@@ -110,10 +108,9 @@ jobs:
   # presence cannot dangle a branch-protection wait.
   from-source:
     runs-on: ubuntu-latest
-    # Same cq-state skip as the static job (review-debt #226): the ledger
-    # push is not a reviewable change.
+    # Match static event selection, with coarse PR ownership.
     needs: changes
-    if: ${{ always() && !cancelled() && (github.event_name == 'pull_request' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && (needs.changes.result != 'success' || needs.changes.outputs.typescript != 'false') }}
+    if: ${{ always() && !cancelled() && (github.event_name == 'pull_request' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))) && (needs.changes.result != 'success' || needs.changes.outputs.typescript != 'false') }}
     steps:
       - name: Check out the repo
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (immutable commit pin; repo policy)

@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest';
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 
 // Required workflows select PR events and main pushes at job level.
-const SKIP = `if: \${{ github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}`;
+const SKIP = `if: \${{ github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}`;
 
 const read = (rel: string): string => readFileSync(join(ROOT, rel), 'utf8');
 
@@ -47,7 +47,7 @@ function expectEveryJobGuarded(text: string, file: string): void {
     if (file.includes('denylist')) expect(blockLines).toContain(jobLevelGuard);
     else {
       expect(guard).toContain("github.event_name == 'pull_request'");
-      expect(guard).toContain("github.ref == 'refs/heads/main'");
+      expect(guard).toContain("github.ref == format('refs/heads/{0}', github.event.repository.default_branch)");
       expect(guard).toContain("github.event_name == 'schedule'");
     }
   }
