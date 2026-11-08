@@ -41,12 +41,19 @@ def check_sha(value):
     return value
 
 
+def repairable(job):
+    severity = job.get('finding', {}).get('severity')
+    return severity in ('critical', 'major') or (severity == 'minor' and
+            isinstance(job.get('canonical_finding_id'), str) and
+            bool(job['canonical_finding_id'].strip()))
+
+
 def validate_revalidation(config, old, source_sha, evidence):
     check_sha(source_sha)
     if git(config['clone'], 'rev-parse', DEFAULT_REF) != source_sha:
         raise ValueError('source SHA is not the observed current default-branch tip')
-    if old.get('finding', {}).get('severity') not in ('critical', 'major'):
-        raise ValueError('only recorded critical/major findings can be prepared')
+    if not repairable(old):
+        raise ValueError('only recorded critical/major or canonical minor findings can be prepared')
     blob = git(config['clone'], 'rev-parse', source_sha + ':' + source_path(old['finding']))
     expected = {'source_sha': source_sha, 'finding_sha256': identity(old['finding']),
                 'source_blob_sha': blob, 'verdict': 'still-valid'}
@@ -119,8 +126,8 @@ def drain_job(root, config, queue, job_id):
     resume = started(root, job_id)
     try:
         finding = job['finding']
-        if finding.get('severity') not in ('critical', 'major'):
-            raise ValueError('only critical/major findings are repaired')
+        if not repairable(job):
+            raise ValueError('only critical/major or canonical minor findings are repaired')
         path = source_path(finding)
         if job.get('revalidation'):
             # Prepared jobs keep the strict one-job selector, including its
