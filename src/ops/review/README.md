@@ -26,7 +26,8 @@ When `PASEO_AGENT_ID` is present, submission captures it with the configured
 `CQ_REVIEW_NOTIFY_HOST` host:port override. When unset or blank, the SDK reads
 `os.hostname()`, lowercases it, takes the part before the first dot, and appends
 `:6767` (Paseo's default daemon port). For example, `TRITON.example.invalid`
-becomes `triton:6767`. An unusable or unavailable hostname leaves the host null.
+becomes `triton:6767`. IPv4 and IPv6 literal hostnames are unusable and remain
+null rather than being shortened. An unusable or unavailable hostname leaves the host null.
 Null means the runner's local daemon if explicitly allowlisted; the supported
 host:port-only deployment overlay cannot allow null, so it reports
 `notify.state=error, reason=unsupported-destination` while review submission

@@ -1,11 +1,19 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { mkdtemp, readFile, writeFile, readdir, mkdir, access } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { beforeEach, expect, test } from 'vitest';
+import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { makeSubmit } from '../../../src/ops/review/submit.js';
 import { SnapshotSchema } from '../../../src/ops/review/internal/reviewOperation.js';
+vi.mock('node:os', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:os')>();
+  return { ...actual, hostname: vi.fn(actual.hostname) };
+});
+afterEach(() => {
+  vi.unstubAllEnvs();
+  vi.mocked(hostname).mockReset();
+});
 const run = promisify(execFile);
 let cwd: string;
 const git = async (...args: string[]) => (await run('git', args, { cwd })).stdout.trim();
@@ -32,6 +40,28 @@ beforeEach(async () => {
   await git('add', 'file', '.gitignore');
   await git('commit', '-qm', 'base');
   await git('branch', 'target');
+});
+test('submission sends the hostname-derived notification destination on the wire', async () => {
+  const agent = '12345678-1234-1234-1234-123456789abc';
+  vi.stubEnv('PASEO_AGENT_ID', agent);
+  vi.stubEnv('CQ_REVIEW_NOTIFY_HOST', undefined);
+  vi.mocked(hostname).mockReturnValue('triton');
+  await writeFile(join(cwd, 'file'), 'head');
+  await git('add', 'file');
+  await git('commit', '-qm', 'head');
+  const submissions: unknown[] = [];
+  const result = await makeSubmit(async (raw) => {
+    const wire = JSON.parse(raw) as { op: string };
+    if (wire.op === 'capabilities') return JSON.stringify(caps);
+    submissions.push(wire);
+    return JSON.stringify({ v: 1, action: 'created', state: 'queued' });
+  })({ cwd, repo: 'owner/repo', target: 'target', reachable: true });
+  expect(result.status).toBe('ok');
+  expect(submissions).toHaveLength(1);
+  expect(submissions[0]).toMatchObject({
+    op: 'submit',
+    notify: { paseo_agent_id: agent, paseo_host: 'triton:6767' },
+  });
 });
 test('empty committed diff avoids all network calls and reports exclusions', async () => {
   await writeFile(join(cwd, 'file'), 'staged');

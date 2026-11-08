@@ -48,6 +48,17 @@ test('unusable or unavailable hostnames leave host null', () => {
   ).toBeNull();
 });
 
+test('IPv4 and IPv6 literal hostnames are unusable before truncation', () => {
+  for (const host of ['10.0.0.5', '127.0.0.1', '::1', '2001:db8::1', '::ffff:10.0.0.5'])
+    expect(reviewNotifyDestination({ PASEO_AGENT_ID: 'agent' }, () => host)?.paseo_host).toBeNull();
+  expect(
+    reviewNotifyDestination(
+      { PASEO_AGENT_ID: 'agent', CQ_REVIEW_NOTIFY_HOST: 'triton:6767' },
+      () => '10.0.0.5',
+    )?.paseo_host,
+  ).toBe('triton:6767');
+});
+
 test('status accepts replacement and explicit withdrawal and dispatches notify-update', async () => {
   expect(StatusInputSchema.parse({ requestId: 'one', notify: null }).notify).toBeNull();
   const wires: unknown[] = [];

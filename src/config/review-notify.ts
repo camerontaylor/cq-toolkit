@@ -1,3 +1,4 @@
+import { isIP } from 'node:net';
 import { hostname } from 'node:os';
 import { readCqEnv } from './env.js';
 
@@ -12,7 +13,8 @@ export function reviewNotifyDestination(
   if (typeof host === 'string') return { paseo_agent_id: agent, paseo_host: host };
   let derived: string | null = null;
   try {
-    const short = getHostname().toLowerCase().split('.')[0] ?? '';
+    const name = getHostname().toLowerCase();
+    const short = isIP(name) === 0 ? (name.split('.')[0] ?? '') : '';
     if (/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(short)) derived = `${short}:6767`;
   } catch {
     // An unavailable hostname leaves notification admission to the runner.
