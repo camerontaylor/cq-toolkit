@@ -187,10 +187,12 @@ describe('sanitizeObservation', () => {
     expect(sanitizeObservation(input)).toEqual(expected);
   });
 
-  it('requires post-strip redaction for a newly exposed URL secret', () => {
+  it('a *_URL value is not a secret: the credential-stripped URL stays visible', () => {
     process.env.ZZ_HOOK_URL = 'https://hooks.example/svc/p';
     try {
-      expect(sanitizeObservation('https://u:p@hooks.example/svc/p')).toEqual('[redacted]');
+      expect(sanitizeObservation('https://u:p@hooks.example/svc/p')).toEqual(
+        'https://hooks.example/svc/p',
+      );
     } finally {
       delete process.env.ZZ_HOOK_URL;
     }
@@ -214,12 +216,12 @@ describe('sanitizeObservation', () => {
     });
   });
 
-  it('redact-before-strip kills a *_URL secret whose stripped host survives', () => {
+  it('a *_URL value with userinfo is shown through the shared redactor (userinfo gone)', () => {
     process.env.FAKE_HOOK_URL = 'https://tolk3n@hooks.example.test/wb';
     try {
       const out = sanitizeObservation('webhook https://tolk3n@hooks.example.test/wb fired');
       expect(out).not.toContain('tolk3n');
-      expect(out).toContain('[redacted]');
+      expect(out).toContain('https://hooks.example.test/wb');
     } finally {
       delete process.env.FAKE_HOOK_URL;
     }

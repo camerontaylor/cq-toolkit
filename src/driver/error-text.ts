@@ -11,6 +11,7 @@
 // substring replace would shred unrelated words that merely contain the
 // value — a match is bounded by non-identifier characters instead.
 import { isSecretEnvName } from '../config/secret.js';
+import { isUrlEnvName, stripCredentialText } from '../shared/urlRedact.js';
 
 const MAX_ERROR_CHARS = 500;
 
@@ -27,11 +28,16 @@ export function redactSensitiveText(text: string): string {
     // in lowercase by an operator; classify case-folded so `metrics_url`
     // cannot dodge the redaction.
     const classified = name.toUpperCase();
-    if (value !== undefined && value.length >= 4 && isSecretEnvName(classified)) {
+    if (value === undefined || value.length < 4) continue;
+    // `_URL` is not a secret suffix: a URL value is shown with userinfo, query
+    // and fragment stripped (the one shared redactor); a clean URL is left as is.
+    const secret = isSecretEnvName(classified);
+    const shown = !secret && isUrlEnvName(classified) ? stripCredentialText(value) : undefined;
+    if (secret || (shown !== undefined && shown !== value)) {
       const escaped = value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       out = out.replace(
         new RegExp(`(?<![A-Za-z0-9_])${escaped}(?![A-Za-z0-9_])`, 'g'),
-        '[redacted]',
+        () => shown ?? '[redacted]',
       );
     }
   }

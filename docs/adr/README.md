@@ -424,6 +424,16 @@ nine entries. It also closes the `_URL` question N15 deliberately left open:
 N15 aligned §B.4/§B.6/§B.9 and kept "the annex-B `_URL` secret-suffix
 question" out of its scope pending this decision.
 
+**Update (2026-11-09): the divergence is closed.** The owner re-confirmed that `_URL` is not a secret suffix and
+added the value screen. `_URL` is removed from `SECRET_ENV_SUFFIXES` ([`src/config/secret.ts`](../../src/config/secret.ts)),
+so the registry, provenance, `cq config` and the persisted-error-text redaction in
+[`src/driver/error-text.ts`](../../src/driver/error-text.ts) use one list again. A URL value is shown with userinfo,
+query and fragment stripped by the single shared redactor
+([`src/shared/urlRedact.ts`](../../src/shared/urlRedact.ts)); persisted error text strips an env URL value the same
+way instead of redacting it by name. Passthrough allows `*_URL` names (including `DATABASE_URL`) but refuses a value
+with URL userinfo, failing closed on an unparseable value with an `@` before the host. The paragraph above that
+describes diagnostics keeping `_URL` is superseded by this update.
+
 ### N22 — ADR-0004 D-D.2/D-D.3: every remaining automation consumer mints the `cq-automation` App token per run (C3 T3)
 
 N20 landed the per-run App mint for the review loop; PR #307 had already

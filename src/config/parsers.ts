@@ -4,6 +4,7 @@
 // The original modules re-export these, so existing callers are unchanged.
 
 import { isSecretEnvName } from './secret.js';
+import { isUrlEnvName, urlValueHasUserinfo } from '../shared/urlRedact.js';
 
 export type SandboxMode = 'off' | 'required';
 /**
@@ -80,7 +81,6 @@ export const PASSTHROUGH_DENIED_NAMES: readonly string[] = Object.freeze([
   'NPM_TOKEN',
   'SSH_AUTH_SOCK',
   'GOOGLE_APPLICATION_CREDENTIALS',
-  'DATABASE_URL',
   'NODE_OPTIONS',
   'NODE_PATH',
 ]);
@@ -101,6 +101,21 @@ export const TRUSTED_ENV_EXEMPT_NAMES: readonly string[] = Object.freeze(['SSH_A
  * test/harness/env-origin.test.ts; a name needs a stated reason in ADR-0009.
  */
 export const DECLARED_ENV_EXEMPT_NAMES: readonly string[] = Object.freeze([]);
+
+/**
+ * Refuse a passthrough VALUE that carries URL credentials. A `*_URL` name is
+ * allowed by name (`_URL` is not a secret suffix), but a value with userinfo
+ * (`user@host`, `user:pass@host`) is refused, failing closed when it does not
+ * parse. Applies to a URL-named variable and to any value with a scheme
+ * separator. The message names the VARIABLE only, never the value. Returns the
+ * reason text, or `undefined` when the value is fine.
+ */
+export function urlValueRefusal(name: string, value: string): string | undefined {
+  if (!isUrlEnvName(name) && !value.includes('://')) return undefined;
+  return urlValueHasUserinfo(value)
+    ? `value of '${name}' carries URL credentials (userinfo); refused`
+    : undefined;
+}
 
 /** True when `name` has the env var NAME shape. */
 export function isEnvName(name: string): boolean {

@@ -236,18 +236,18 @@ apart. `_TOKENS` (e.g. `CQ_BUDGET_MAX_TOKENS`) does not end with `_TOKEN`. The l
 name in the subprocess and claude-agent routing tables against the suffix rule, so a route cannot hand a key
 through an unredacted name.
 
-> Superseded in part: the one-suffix-list rule no longer holds for `_URL`. Config resolution, journalling and
-> passthrough treat `_URL` as non-secret (value-gated), while diagnostics keep it in `SECRET_ENV_SUFFIXES`, so
-> the two lists diverge on purpose. See post-acceptance note N21 in the
-> [ADR index](README.md#post-acceptance-notes).
+> Superseded in part: `_URL` is not a secret suffix. A URL value is shown with userinfo, query and fragment stripped
+> (one shared redactor, `src/shared/urlRedact.ts`), and a credential-bearing URL is refused in passthrough. There
+> is one suffix list again (`src/config/secret.ts`, without `_URL`). See post-acceptance note N21 in the
+> [ADR index](README.md#post-acceptance-notes) and [ADR-0009](0009-config-contract-v2.md).
 
 **Consequences:**
 
 - The toolkit refuses a secret-classed `CQ_*` found in a profile file.
 - `CQ_RUN_ENV_PASSTHROUGH` may not name any `CQ_*`, any secret-suffixed name, or any credential-shaped name.
   Credential-shaped names are the set the subprocess allowlist already excludes by design (`AWS_*`, `NPM_TOKEN`,
-  `SSH_AUTH_SOCK`, `GOOGLE_APPLICATION_CREDENTIALS`, `*_URL` names carrying userinfo, `NODE_OPTIONS`, `NODE_PATH`;
-  see [src/shared/proc.ts](../../src/shared/proc.ts)), plus `DATABASE_URL`. A worker can
+  `SSH_AUTH_SOCK`, `GOOGLE_APPLICATION_CREDENTIALS`, `NODE_OPTIONS`, `NODE_PATH`;
+  see [src/shared/proc.ts](../../src/shared/proc.ts)). A `*_URL` name is allowed, but a value carrying URL userinfo is refused. A worker can
   exfiltrate whatever it can read (D14). The deny set is registry data, drift-tested against that file's list.
 - `CQ_DRIVER_ACP_ENV_NAMES` may name secret-suffixed vendor keys. That is its purpose (the acp child is the model
   harness). It may not name `CQ_*`.

@@ -45,9 +45,12 @@ flag in the registry (`src/config/env-registry.ts`) is authoritative for which k
 
 **Secrets** come from env only. A key is secret by name suffix. The list is `SECRET_ENV_SUFFIXES` in
 `src/config/secret.ts`, matched case-insensitively by `isSecretEnvName`, and the registry derives each entry's
-`secret` flag from it. Today the list includes `_URL`, which Annex B's own list omits, so vendor `*_BASE_URL` names
-(for example `ANTHROPIC_BASE_URL`) are classified secret and recorded as present or absent only. Whether `_URL`
-should stay a secret suffix is pending an owner decision and is not decided here.
+`secret` flag from it. `_URL` is NOT a secret suffix (owner ruling 2026-10-11, re-confirmed 2026-11-09; post-acceptance
+note N21). Vendor `*_BASE_URL` names (for example `ANTHROPIC_BASE_URL`) are non-secret: their values are shown and
+recorded in provenance, always through the one shared URL redactor (`stripCredentialText`, `src/shared/urlRedact.ts`),
+which strips userinfo, query and fragment. That redactor is used at every place a URL-valued config or env value is
+shown or recorded: `cq config` (text and `--json`), v3 provenance, config diagnostics, attempt records and persisted
+error text. A credential-bearing URL is refused in passthrough (below), not redacted into a pass.
 
 **`CQ_APPROVAL_KEY*` is denied.** Approval is the attended preview-digest authority, not an env key.
 
@@ -74,9 +77,11 @@ tables are retired; where they differ from the registry, the registry is current
 **`CQ_RUN_ENV_PASSTHROUGH` grammar and deny set.** One parser (`parsePassthrough`, `src/config/parsers.ts`) owns both,
 and the registry, `resolveSandboxConfig`, `buildChildEnv` and the launcher env all use it. Names are separated by
 commas and/or whitespace. Annex B §B.5 stays in force: secret-suffixed names, the `AWS_*` family, `NPM_TOKEN`,
-`SSH_AUTH_SOCK`, `GOOGLE_APPLICATION_CREDENTIALS`, `DATABASE_URL`, `NODE_OPTIONS` and `NODE_PATH` are refused (and
-so is every `*_URL` name, via the secret-suffix rule, pending the owner's decision on that suffix), and
-so is every `CQ_*` name (a nested cq could read trust config from one). The refusal is a
+`SSH_AUTH_SOCK`, `GOOGLE_APPLICATION_CREDENTIALS`, `NODE_OPTIONS` and `NODE_PATH` are refused, and
+so is every `CQ_*` name (a nested cq could read trust config from one). A `*_URL` name (including `DATABASE_URL`) is
+passable by name, but an entry whose VALUE carries URL userinfo (`user@host`, `user:pass@host`) is refused on every
+origin and every path that copies a value (the operator key, the launcher env, `buildChildEnv`), failing closed when
+the value does not parse as a URL but has an `@` before the host. The refusal names the variable, never the value. The refusal is a
 config error that names the offending name, or the position of a malformed entry (never any part of the raw value).
 
 **Origin of env names.** Trusted code that sets a value in-process (the SDK `optIn` ruling above, a driver's

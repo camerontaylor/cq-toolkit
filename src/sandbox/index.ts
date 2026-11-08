@@ -7,6 +7,7 @@ import type { CqEnv } from '../config/env.js';
 import {
   DECLARED_ENV_EXEMPT_NAMES,
   TRUSTED_ENV_EXEMPT_NAMES,
+  urlValueRefusal,
   credentialRefusal,
   isEnvName,
 } from '../config/parsers.js';
@@ -103,6 +104,11 @@ export function buildSandboxLauncherEnv(
       }
     }
     const value = parent[name];
+    if (value !== undefined) {
+      const urlRefusal = urlValueRefusal(name, value);
+      if (urlRefusal !== undefined)
+        throw new LauncherEnvError(`sandbox: launcher env ${origin} ${urlRefusal}`);
+    }
     if (value !== undefined) out[name] = value;
   }
   return out;

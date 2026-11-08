@@ -65,7 +65,6 @@ describe('manifest env name origin', () => {
     'CQ_AUTOMATION_TOKEN',
     'AWS_SECRET_ACCESS_KEY',
     'NPM_TOKEN',
-    'DATABASE_URL',
     'NODE_OPTIONS',
     'NODE_PATH',
     'CQ_TEST_KEEP',
