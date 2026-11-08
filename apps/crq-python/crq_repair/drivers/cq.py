@@ -212,6 +212,13 @@ def judge(config, role, job, wt, directory):
                              'contradicts the current contract, return superseded or invalid with concrete evidence. '
                              'Otherwise infer ordinary bugs from the supplied code and stable API/test semantics; '
                              'do not require an explicit contract clause for a valid code defect. '
+                             "A finding's assertions are allegations, not proof. Distinguish implementation errors in "
+                             'existing intended behavior from proposals to add or enlarge requirements, approval, or '
+                             'protection scope. Respect explicitly accepted limitations and advisory or retired mechanisms; '
+                             'an opportunity to harden them does not itself establish a defect. A retained implementation '
+                             'or omitted list entry alone does not establish a current obligation. For asserted live '
+                             'consumers or enforcement roles, use supplied current evidence; if needed consumer or '
+                             'enforcement evidence is missing, return unsure rather than inventing an obligation. '
                              'If contract evidence is absent or truncated, contract silence alone does not imply uncertainty. '
                              'Return valid, fixed, superseded, invalid, duplicate-of or unsure, with reason. '
                              'For valid supply current_path, current_lines as [[start,end]], quoted_text exactly matching those lines. '
