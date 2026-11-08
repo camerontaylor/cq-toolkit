@@ -463,6 +463,7 @@ export async function world(
     }
     if (a[0] === 'log') return ok(commits.get(a[3]!)?.message ?? '');
     if (a[0] === 'diff' && a[1] === '--quiet') return { code: 1, stdout: '', stderr: '' };
+    if (a[0] === 'remote' && a[1] === 'get-url') return ok('https://github.com/octo/widget.git\n');
     if (a[0] === 'ls-remote') return ok(`${remote}\trefs/heads/feature\n`);
     if (a[0] === 'push') {
       pushes.push(a);

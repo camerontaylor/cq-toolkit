@@ -218,8 +218,17 @@ test('local exit publication leases the observed destination separately from the
   try {
     const expected = f.repo.git('rev-parse', 'HEAD').trim();
     f.repo.git('push', 'origin', 'HEAD:refs/heads/feature/x');
+    const pushDestination = `${f.repo.root}/../push.git`;
+    f.repo.git('init', '--bare', pushDestination);
+    f.repo.git('push', pushDestination, 'HEAD:refs/heads/feature/x');
+    f.repo.git('config', 'remote.origin.pushurl', pushDestination);
     f.repo.git('commit', '--allow-empty', '-m', 'prior local work');
     f.record.head = f.repo.git('rev-parse', 'HEAD').trim();
+    f.repo.git(
+      'push',
+      f.repo.git('remote', 'get-url', 'origin').trim(),
+      'HEAD:refs/heads/feature/x',
+    );
     const pushes: string[][] = [];
     const git = makeGhRunner({ bin: 'git' });
     const op = makeReviewAddress({
@@ -238,6 +247,7 @@ test('local exit publication leases the observed destination separately from the
     });
     expect(result.status, JSON.stringify(result)).toBe('ok');
     expect(pushes).toHaveLength(1);
+    expect(pushes[0]).toContain(pushDestination);
     expect(pushes[0]).toContain(`--force-with-lease=refs/heads/feature/x:${expected}`);
     expect(pushes[0]?.at(-1)).toBe(
       `${f.repo.git('rev-parse', 'HEAD').trim()}:refs/heads/feature/x`,
@@ -246,3 +256,40 @@ test('local exit publication leases the observed destination separately from the
     await f.cleanup();
   }
 });
+
+test.each(['nonzero', 'throw'] as const)(
+  'remote observation %s yields a needs-human report before edits',
+  async (fault) => {
+    const f = await fixture();
+    try {
+      const git = makeGhRunner({ bin: 'git' });
+      const op = makeReviewAddress({
+        drivers: f.drivers,
+        initialRecord: f.record,
+        git: async (args) => {
+          if (args.includes('ls-remote')) {
+            if (fault === 'throw') throw new Error('transient remote failure');
+            return { code: 128, stdout: '', stderr: 'transient remote failure' };
+          }
+          return git(args);
+        },
+      });
+      const result = await op({
+        repoRoot: f.repo.root,
+        source: 'local',
+        journalDir: f.journalDir,
+        push: true,
+      });
+      expect(result.status).toBe('needs-human');
+      if (result.status !== 'needs-human') return;
+      expect(result.reason).toContain('publication remote head unavailable');
+      expect(result.report?.reasons).toContain(
+        'publication remote head unavailable; fixes withheld',
+      );
+      expect(f.models).toEqual([]);
+      expect(JSON.parse(await readFile(result.report!.reportPath, 'utf8'))).toEqual(result.report);
+    } finally {
+      await f.cleanup();
+    }
+  },
+);

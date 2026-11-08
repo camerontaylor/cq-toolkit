@@ -1,4 +1,4 @@
-import { leasedPush } from '../../adapters/git/leasedPush.js';
+import { leasedPush, resolvePushDestination } from '../../adapters/git/leasedPush.js';
 import { reviewBranchKey } from './internal/branchKey.js';
 import { readCqEnv } from '../../config/env.js';
 import { provenanceConfig } from '../../config/provenance.js';
@@ -1731,6 +1731,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
             const unpublished = new Set<string>();
             let publishBranch: string | undefined;
             let publishRemote = 'origin';
+            let publishDestination: string | undefined;
             let publishedBase: string | undefined;
             let expectedRemoteHead: string | undefined;
             let workerRoot = resolve(input.repoRoot);
@@ -1779,7 +1780,11 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
               const pushed = await leasedPush(
                 git,
                 workerRoot,
-                publishRemote,
+                (publishDestination ??= await resolvePushDestination(
+                  git,
+                  workerRoot,
+                  publishRemote,
+                )),
                 branch,
                 expectedRemoteHead,
                 verifiedTip,
@@ -2358,19 +2363,31 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
               await admitRecord(root, record);
               report.verifiedHead ??= record.head;
               publishedBase ??= await gitText(root, ['rev-parse', 'HEAD']);
-              if (input.push && expectedRemoteHead === undefined) {
-                const branch = publishBranch ?? (await branchName(root));
-                const ref = `refs/heads/${branch}`;
-                const remote = await gitText(root, ['ls-remote', '--refs', publishRemote, ref]);
-                const [sha, destination, extra] = remote.split('\t');
-                if (
-                  remote !== '' &&
-                  (!/^[0-9a-f]{40,64}$/i.test(sha ?? '') ||
-                    destination !== ref ||
-                    extra !== undefined)
-                )
-                  throw new Error('publication remote head unavailable');
-                expectedRemoteHead = remote === '' ? '' : sha!;
+              try {
+                if (input.push && expectedRemoteHead === undefined) {
+                  publishDestination ??= await resolvePushDestination(git, root, publishRemote);
+                  const branch = publishBranch ?? (await branchName(root));
+                  const ref = `refs/heads/${branch}`;
+                  const remote = await gitText(root, [
+                    'ls-remote',
+                    '--refs',
+                    publishDestination,
+                    ref,
+                  ]);
+                  const [sha, destination, extra] = remote.split('\t');
+                  if (
+                    remote !== '' &&
+                    (!/^[0-9a-f]{40,64}$/i.test(sha ?? '') ||
+                      destination !== ref ||
+                      extra !== undefined)
+                  )
+                    throw new Error('publication remote head unavailable');
+                  expectedRemoteHead = remote === '' ? '' : sha!;
+                }
+              } catch {
+                const reason = 'publication remote head unavailable; fixes withheld';
+                report.reasons.push(reason);
+                return reason;
               }
 
               const unresolvedReason = 'unresolved: finding has no file path';

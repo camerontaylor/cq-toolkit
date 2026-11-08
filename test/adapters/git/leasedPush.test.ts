@@ -126,3 +126,34 @@ test('empty expectation creates an absent destination and refuses a raced creati
   const tip = await f.local('rev-parse', 'HEAD');
   expect((await leasedPush(f.run, f.checkout, f.base, 'topic', '', tip)).code).not.toBe(0);
 });
+
+test('divergent pushurl cannot reconcile a rejected push against the fetch repository', async () => {
+  const f = await fixture();
+  await f.local('push', f.base, `${f.tip}:refs/heads/topic`);
+  await f.local('config', 'remote.origin.pushurl', f.remote);
+  const result = await leasedPush(f.run, f.checkout, 'origin', 'topic', f.tip, f.tip);
+  expect(result.code).not.toBe(0);
+  expect(await f.git('ls-remote', '--refs', f.remote, 'refs/heads/topic')).toBe(
+    `${f.expected}\trefs/heads/topic`,
+  );
+});
+test('lost acknowledgement reconciles against the pinned pushurl even if config changes', async () => {
+  const f = await fixture();
+  await f.local('config', 'remote.origin.pushurl', f.remote);
+  const uncertain: GhFn = async (args) => {
+    const result = await f.run(args);
+    if (args.includes('push')) {
+      expect(result.code).toBe(0);
+      await f.local('config', 'remote.origin.pushurl', f.base);
+      return { code: 124, stdout: '', stderr: 'lost acknowledgement' };
+    }
+    return result;
+  };
+  expect((await leasedPush(uncertain, f.checkout, 'origin', 'topic', f.expected, f.tip)).code).toBe(
+    0,
+  );
+  expect(await f.git('ls-remote', '--refs', f.remote, 'refs/heads/topic')).toBe(
+    `${f.tip}\trefs/heads/topic`,
+  );
+  expect(await f.git('ls-remote', f.base)).toBe('');
+});

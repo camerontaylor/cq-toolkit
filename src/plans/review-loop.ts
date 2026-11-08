@@ -1,4 +1,4 @@
-import { leasedPush } from '../adapters/git/leasedPush.js';
+import { leasedPush, resolvePushDestination } from '../adapters/git/leasedPush.js';
 // review-loop — E4 slice 2 (goal E4; ws-e item 8): the SHIPPED review-loop
 // plan wiring. Sequential stages, each a DIRECT call to the shipped atomic
 // op; ONLY the fix fan-out rides runPlan (bounded, governor applies — the
@@ -389,7 +389,7 @@ export interface ReviewLoopOpts {
    * Same-repo callers omit it: the push targets 'origin' as before.
    */
   headRepo?: string;
-  /** Confirmed publication, independent of later verification/dispatch outcomes. */
+  /** Fires per confirmed push, including re-assertion; independent of final outcome. Must not throw. */
   onPublished?: (sha: string) => void;
   /** The checked-out repository root resolvePrWorktree anchors to. */
   repoRoot: string;
@@ -1566,6 +1566,7 @@ async function runOwnedReviewLoop(
     !dirtyWorktree &&
     !headUnreadable;
   let expectedPublishedHead = observedBase ?? '';
+  let pushDestination: string | undefined;
   let publicationFailed = false;
   const publish: GhFn = async () => {
     if (publicationFailed)
@@ -1574,10 +1575,16 @@ async function runOwnedReviewLoop(
         stdout: '',
         stderr: 'previous publication failed; reconciliation required',
       };
+    try {
+      pushDestination ??= await resolvePushDestination(opts.git, worktree.path, pushTarget);
+    } catch {
+      publicationFailed = true;
+      return { code: 1, stdout: '', stderr: 'publication push destination unavailable' };
+    }
     const result = await leasedPush(
       opts.git,
       worktree.path,
-      pushTarget,
+      pushDestination,
       opts.headRefName,
       expectedPublishedHead,
       worktreeTip,

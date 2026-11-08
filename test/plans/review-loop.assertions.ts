@@ -33,7 +33,7 @@ export const firstMutationIndex = (ghLog: string[][]): number =>
 /** The composed worktree push argv the loop must use (clarified pattern). */
 export const expectedPushArgs = (
   worktreePath: string,
-  target = 'origin',
+  target = '/fake/origin.git',
   expected = SHA,
 ): string[] => [
   '-C',
