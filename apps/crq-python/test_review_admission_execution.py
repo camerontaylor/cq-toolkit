@@ -612,3 +612,54 @@ class SchedulingTests(unittest.TestCase):
                      mock.patch.object(crq, "coverage_fallback", return_value=(None, False)):
                     result = crq.start_one(q, [], False, None, False)[0]
                 self.assertEqual(result, "i" if priority or blocked else "b")
+
+
+class TimestampTests(unittest.TestCase):
+    def test_shared_utc_parser_rank_deadline_and_preview(self):
+        clock = dt.datetime(2026, 11, 8, 1, 0, 0, 500000, tzinfo=dt.timezone.utc)
+        for value, valid in (("2026-11-08T00:00:00.500Z", True),
+                ("2026-11-08T10:00:00.500+10:00", True),
+                ("2026-11-08T00:00:00.500", True), (123, False), ("garbage", False), (None, False), ([], False), ({}, False)):
+            with self.subTest(value=value):
+                item = dict(kind="local-review", title="repeat", generation=1, repeat_requested=True,
+                    created_at=value, state="pending", order=1)
+                config = dict(repo=crq.REPO, max_starts_per_hour=8)
+                for delta in (-0.001, 0):
+                    at = clock + dt.timedelta(seconds=delta)
+                    with mock.patch.object(crq, "now", return_value=at):
+                        self.assertEqual(crq.rank(item), 0 if valid and delta == 0 else 1)
+                    summary = crq.status_summary.summarize(dict(generated_at=at.isoformat()),
+                        dict(items=[item, dict(kind="local-review", generation=1, state="pending", order=2)],
+                            starts=[value]), {}, config, [], at.timestamp())
+                    row = next(i for i in summary["pending_items"] if i["title"] == "repeat")
+                    self.assertEqual(row["approximate_position"], 1 if valid and delta == 0 else 2)
+                    self.assertEqual(row["aging_deadline"], clock.timestamp() if valid else None)
+                    self.assertEqual(summary["starts_60m"], int(valid))
+                    self.assertEqual(crq.status_summary.timestamp(value),
+                        clock.timestamp() - 3600 if valid else None)
+                    if valid:
+                        self.assertEqual(crq.parse_utc(value).tzinfo, dt.timezone.utc)
+
+    def test_launch_order_uses_utc_and_fractional_seconds(self):
+        # Character ordering would place the background offset after both interactive runs.
+        records = [dict(run_id="background", band="background", started_at="2026-11-08T10:00:00+10:00"),
+            dict(run_id="first", band="interactive", started_at="2026-11-08T00:00:00.100Z"),
+            dict(run_id="second", band="interactive", started_at="2026-11-08T00:00:00.200")]
+        for ordered in (records, list(reversed(records))):
+            self.assertTrue(crq.background_turn(dict(items=[dict(attempts=ordered)])))
+        records.append(dict(run_id="latest", band="background", started_at="2026-11-07T19:00:01-05:00"))
+        self.assertFalse(crq.background_turn(dict(items=[dict(attempts=records)])))
+
+    def test_invalid_launch_metadata_is_background_and_suffix_fallback(self):
+        first = dict(run_id="a-20261108T000000Z", band="interactive", started_at="2026-11-08T00:00:00Z")
+        for value in (123, "garbage", [], {}):
+            with self.subTest(value=value):
+                second = dict(run_id="b-20261108T000001Z", band="interactive", started_at=value)
+                self.assertFalse(crq.background_turn(dict(items=[dict(attempts=[first, second])])))
+                second["run_id"] = "no-chronology"
+                self.assertFalse(crq.background_turn(dict(items=[dict(attempts=[first, second])])))
+        second = dict(run_id="b-20261108T000001Z", band="interactive")
+        self.assertTrue(crq.background_turn(dict(items=[dict(attempts=[first, second])])))
+        # A receipt-only reuse of the first run must retain its reservation metadata.
+        reused = dict(run_id=first["run_id"], band="background", started_at=None)
+        self.assertTrue(crq.background_turn(dict(items=[dict(attempts=[first, second]), dict(attempts=[reused])])))
