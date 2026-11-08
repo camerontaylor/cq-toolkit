@@ -106,10 +106,12 @@ test('no lifecycle export or backend context returns an accepted terminal token'
     }
     async assertOwned() {}
     protected async assertIdentity() {}
-    activateAndInspect() {
+    activateAndInspect(): unknown[] {
       this.active = true;
       this.runContext.activate();
-      return [this, this.runContext, ...Object.values(this), ...Object.values(this.runContext)];
+      const instanceValues: unknown[] = Object.values(this);
+      const contextValues: unknown[] = Object.values(this.runContext);
+      return [this, this.runContext, ...instanceValues, ...contextValues];
     }
   }
   const probe = new Probe();

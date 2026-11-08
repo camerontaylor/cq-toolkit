@@ -160,7 +160,7 @@ export abstract class AddressRunLifecycle implements AddressRunAuthority {
   protected readonly controller: AbortController;
   protected readonly tasks = new Set<Promise<unknown>>();
   protected readonly retentionAdvisories: string[] = [];
-  protected readonly runContext;
+  protected readonly runContext: ReturnType<typeof createAddressRunContext>;
   protected readonly participants = new Set<Participant>();
   protected readonly terminalProcesses = new Set<Promise<void>>();
   protected readonly terminalOperations = new Set<Promise<void>>();
