@@ -200,6 +200,30 @@ describe('config error at startup', () => {
   }, 20_000);
 });
 
+describe('manifest-declared credential names', () => {
+  test.each(['ANTHROPIC_API_KEY', 'GH_TOKEN', 'MY_SERVICE_SECRET'])(
+    'envNames [%s] refuses to start: exit 78, no stdout',
+    async (name) => {
+      const dummy = ['dummy', 'credential', String(Date.now())].join('-');
+      const server = startBin(
+        [JSON.stringify(manifestFor(scratch(), ['env'], { envNames: [name] }))],
+        baseEnv({ [name]: dummy }),
+      );
+      const { code } = await server.exited;
+      expect(code).toBe(78);
+      expect(server.stdout()).toBe('');
+      expect(server.stderr()).toContain(`'${name}' is a credential`);
+      expect(server.stderr()).toContain(
+        'only SSH_AUTH_SOCK (the frozen code-level exemption) may pass',
+      );
+      expect(server.stderr()).toContain('invalid env:');
+      expect(server.stderr()).not.toContain('surface mismatch');
+      expect(server.stderr()).not.toContain(dummy);
+    },
+    20_000,
+  );
+});
+
 describe('lifetime', () => {
   test('stdin EOF exits 0 after flushing the last response', async () => {
     const server = startBin([JSON.stringify(manifestFor(scratch()))]);
@@ -293,8 +317,12 @@ describe('env scrub', () => {
   test('a provider credential never reaches a run child; PATH and envNames do', async () => {
     const workspace = scratch();
     const server = startBin(
-      [JSON.stringify(manifestFor(workspace, ['env'], { envNames: ['CQ_TEST_KEEP'] }))],
-      baseEnv({ ANTHROPIC_API_KEY: 'secret', CQ_TEST_KEEP: 'kept', CQ_TEST_DROP: 'dropped' }),
+      [JSON.stringify(manifestFor(workspace, ['env'], { envNames: ['TEST_KEEP_CANARY'] }))],
+      baseEnv({
+        ANTHROPIC_API_KEY: 'secret',
+        TEST_KEEP_CANARY: 'kept',
+        TEST_DROP_CANARY: 'dropped',
+      }),
     );
     server.send({
       jsonrpc: '2.0',
@@ -306,8 +334,8 @@ describe('env scrub', () => {
     expect(text.startsWith('exit 0')).toBe(true);
     expect(text).not.toContain('ANTHROPIC_API_KEY');
     expect(text).not.toContain('secret');
-    expect(text).not.toContain('CQ_TEST_DROP');
-    expect(text).toContain('CQ_TEST_KEEP=kept');
+    expect(text).not.toContain('TEST_DROP_CANARY');
+    expect(text).toContain('TEST_KEEP_CANARY=kept');
     expect(text).toMatch(/^PATH=/m);
     server.child.stdin.end();
     expect((await server.exited).code).toBe(0);

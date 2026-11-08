@@ -71,6 +71,29 @@ config (call-layer recording is out of scope for C5 and would need a schema and 
 [`docs/config.md`](../config.md); the static gate fails when that table is stale. Annex B's hand-written key
 tables are retired; where they differ from the registry, the registry is current.
 
+**`CQ_RUN_ENV_PASSTHROUGH` grammar and deny set.** One parser (`parsePassthrough`, `src/config/parsers.ts`) owns both,
+and the registry, `resolveSandboxConfig`, `buildChildEnv` and the launcher env all use it. Names are separated by
+commas and/or whitespace. Annex B §B.5 stays in force: secret-suffixed names, the `AWS_*` family, `NPM_TOKEN`,
+`SSH_AUTH_SOCK`, `GOOGLE_APPLICATION_CREDENTIALS`, `DATABASE_URL`, `NODE_OPTIONS` and `NODE_PATH` are refused (and
+so is every `*_URL` name, via the secret-suffix rule, pending the owner's decision on that suffix), and
+so is every `CQ_*` name (a nested cq could read trust config from one). The refusal is a
+config error that names the offending name, or the position of a malformed entry (never any part of the raw value).
+
+**Origin of env names.** Trusted code that sets a value in-process (the SDK `optIn` ruling above, a driver's
+`envAllowlist`) is a trusted origin; names from a manifest file, a plan, op input or the env/CLI are untrusted data.
+Every origin refuses credential-shaped names, every `CQ_*` name and the sandbox policy knobs. Each origin has at most
+one explicit, frozen exemption list. The operator key has none. A harness manifest file's list, `DECLARED_ENV_EXEMPT_NAMES`,
+is empty (the only `CQ_*` name a test ever declared, `CQ_TEST_KEEP`, was a test canary and moved to a non-`CQ_` name).
+The trusted origin is NOT a blanket exemption; its list, `TRUSTED_ENV_EXEMPT_NAMES` in `src/config/parsers.ts`, which holds only
+`SSH_AUTH_SOCK` (a deployment's git-over-ssh agent socket, which a run child needs and which is not a bearer secret
+the toolkit mints). A name is added only with a reason stated here and a change to the test that pins the list.
+The origin is not a manifest field: it is remembered against the object `buildManifest` returned (module-private,
+keyed by identity), so JSON, a clone, a prototype or proxy wrapper, a plan or any other input cannot claim it, and the
+strict manifest schema rejects an extra key. Only in-process code paths can carry it (`HarnessRunGate.trustedEnvNames`
+is a code-level field). A manifest serialized to the MCP stdio bin loses it, so over that transport even
+`SSH_AUTH_SOCK` is refused (fail closed, exit 78, prefix `invalid env:`): the message names the variable, says it is a
+credential, says only `SSH_AUTH_SOCK` may pass and only in-process, and never echoes a value.
+
 **Inspection.** `cq config` prints each resolved key, its source layer, the warnings and the errors. It exits 2
 when the environment has errors (after printing the report), like every other subcommand. `cq config --strict`
 exits 1 on any warning when there are no errors. It is opt-in, not a required check.
