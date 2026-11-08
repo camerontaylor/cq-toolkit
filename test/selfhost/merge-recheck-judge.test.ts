@@ -95,7 +95,9 @@ describe('judgeAtHead', () => {
       expect(judgeAtHead(snap, SHA_B, CONSERVATIVE_TRUST_POLICY)).toMatchObject({
         accepted: false,
       });
-      expect(judgeAtHead(snap, SHA_B, CONSERVATIVE_TRUST_POLICY).authenticatedR4).toBeUndefined();
+      expect(judgeAtHead(snap, SHA_B, CONSERVATIVE_TRUST_POLICY)).not.toHaveProperty(
+        'authenticatedR4',
+      );
     },
   );
 
