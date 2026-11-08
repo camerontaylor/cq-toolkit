@@ -7,9 +7,15 @@ const root = dirname(request.cq_bin);
 const {AiSdkDriver} = await import(pathToFileURL(join(root, 'driver/ai-sdk/index.js')));
 const {withServedModelAssertion} = await import(pathToFileURL(join(root, 'driver/served-model.js')));
 const driver = withServedModelAssertion(new AiSdkDriver(), {lane:'ai-sdk'});
+const triageSchema = {type:'object',additionalProperties:false,
+  properties:{verdict:{type:'string',enum:['valid','fixed','superseded','invalid','duplicate-of','unsure']},
+    reason:{type:'string'},fixing_commit:{type:['string','null']},current_path:{type:['string','null']},
+    current_lines:{type:'array',items:{type:'array',items:{type:'integer'},minItems:2,maxItems:2}},
+    quoted_text:{type:['string','null']},canonical_of:{type:['string','null']}},
+  required:['verdict','reason','fixing_commit','current_path','current_lines','quoted_text','canonical_of']};
 const report = await driver.run({prompt:request.prompt, modelSpec:request.modelSpec,
   toolPolicy:{mode:'none',allow:[]}, sandboxPolicy:{level:'read-only'}, budget:request.budget,
-  outputSchema:{name:'crq.judge/v1',schema:{type:'object',additionalProperties:false,
+  outputSchema:request.schema === 'crq.triage/v1' ? {name:request.schema,schema:triageSchema} : {name:'crq.judge/v1',schema:{type:'object',additionalProperties:false,
     properties:{verdict:{type:'string',enum:['valid','invalid','unsure']},reason:{type:'string'}},
     required:['verdict','reason']}}});
 console.log(JSON.stringify({...report.structuredOutput,

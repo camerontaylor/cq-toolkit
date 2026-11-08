@@ -87,7 +87,7 @@ class Inbox:
         except (OSError, ValueError, TypeError, KeyError, ledger.IntegrityError):
             return None
 
-    def triage(self, fid, repo, promoted, action, actor, reason, at, *, fixing_commit=None, canonical_id=None, reviews=()):
+    def triage(self, fid, repo, promoted, action, actor, reason, at, *, fixing_commit=None, canonical_id=None, reviews=(), current_path=None, current_lines=None, quoted_text=None):
         """Mapping confirms the anchor only; actor must confirm substantive validity."""
         retained = self.publication.retained()
         self.recover(retained)
@@ -98,8 +98,22 @@ class Inbox:
             recovered = self.recovered_anchor(row, repo, [*retained, *reviews]) if finding["anchor_status"] != "verified" else None
             anchor = recovered or finding
             name, lines = repo.carry(row["target"], promoted, anchor["path"], ledger.intervals(anchor["intervals"])) if recovered or finding["anchor_status"] == "verified" else (None, set())
-            evidence = {"target": promoted, "reason": reason, "anchor_verified": bool(name and lines and len(lines) == len(ledger.intervals(anchor["intervals"]))) }
+            if action == "confirmed" and current_path is not None:
+                entries = repo.entries(promoted)
+                try:
+                    selected = ledger.intervals(current_lines)
+                    text = repo.git("cat-file", "blob", entries[current_path]["blob"]).decode().splitlines()
+                    quote = "\n".join(text[i - 1] for i in sorted(selected) if 1 <= i <= len(text))
+                    if (not selected or min(selected) < 1 or max(selected) > len(text)
+                            or not isinstance(quoted_text, str) or not quoted_text.strip() or quote != quoted_text):
+                        raise ValueError("quote mismatch")
+                    name, lines = current_path, selected
+                except (KeyError, TypeError, ValueError, UnicodeError, ledger.IntegrityError):
+                    name, lines = None, set()
+            evidence = {"target": promoted, "reason": reason, "anchor_verified": bool(name and lines and (current_path is not None or len(lines) == len(ledger.intervals(anchor["intervals"])))) }
             evidence.update(mapped_path=name, mapped_intervals=ranges(lines))
+            if current_path is not None and evidence["anchor_verified"]:
+                evidence["quoted_text"] = quoted_text
             if recovered:
                 evidence.update(recovered_anchor=recovered, anchor_recovered_from=recovered["anchor_recovered_from"])
             if not actor or not reason:
@@ -111,6 +125,8 @@ class Inbox:
                     raise ledger.IntegrityError("fixing commit required")
                 repo.resolve(fixing_commit)
                 evidence.update(fixing_commit=fixing_commit, verification=reason)
+            if action == "superseded" and fixing_commit:
+                evidence["fixing_commit"] = repo.resolve(fixing_commit)
             if action == "duplicate":
                 if not canonical_id or canonical_id == fid or not (self.root / "triage" / (canonical_id + ".json")).exists():
                     raise ledger.IntegrityError("duplicate link requires existing canonical issue and evidence")
