@@ -556,6 +556,7 @@ test('explicit base must be an ancestor of HEAD before any network call', async 
 test('remote-only target resolves a unique origin tracking ref', async () => {
   const base = await git('rev-parse', 'target');
   await git('update-ref', 'refs/remotes/origin/remote-target', base);
+  await git('update-ref', 'refs/remotes/origin/topic/remote-target', base);
   await commitContent('feature');
   const { op, wires } = reachableSubmit();
   expect(

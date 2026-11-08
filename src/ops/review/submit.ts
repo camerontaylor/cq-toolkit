@@ -35,7 +35,9 @@ async function resolveTarget(cwd: string, target: string) {
     throw new ReviewInputError('ambiguous target; use an explicit refs/ reference');
   if (direct[0]) return resolveCommit(cwd, direct[0]);
   const remote = refs.filter(
-    (ref) => ref.startsWith('refs/remotes/') && ref.endsWith('/' + target),
+    (ref) =>
+      ref.startsWith('refs/remotes/') &&
+      ref.slice('refs/remotes/'.length).split('/').slice(1).join('/') === target,
   );
   if (remote.length > 1)
     throw new ReviewInputError('ambiguous remote target; use an explicit refs/remotes/ reference');
