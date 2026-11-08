@@ -112,7 +112,8 @@ def handle(raw, runner, *, principal, policy):
             binding = q["review_requests"][req["request_id"]]
             binding["principal"] = principal
             if "notify" in req:
-                binding["notify_status"] = review_notify.validation(req["notify"], runner.CONFIG)
+                binding["notify_status"] = review_notify.validation(req["notify"], runner.CONFIG,
+                    required=any(req["request_id"] in i.get("observers", []) for i in q["items"]))
             if "notify_status" in binding:
                 result["notify"] = binding["notify_status"]
             runner.save_queue(q)

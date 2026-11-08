@@ -25,7 +25,7 @@ LEGACY_SHA = '0e35cd11153fc7ad681f002d580b9b22feb22092'
 # A closed leaf allowlist, NOT arbitrary recursive config.update().
 CONFIG_KEYS = {
     'clone', 'worktree_root', 'timeout_bin', 'paseo_hosts',
-    'repos',
+    'repos', 'notify.hosts',
     'promotion.record_url_template', 'promotion.alert_agent_host',
     'promotion.alert_agent_id',
     'promotion.signer.spool.dir', 'promotion.signer.spool.ssh_alias',
@@ -33,7 +33,7 @@ CONFIG_KEYS = {
     'repair.paseo_host', 'repair.blackout.enabled',
 }
 # Allowlisted but optional: absent means the committed value applies.
-OPTIONAL_KEYS = {'repos', 'promotion.signer.spool.dir', 'promotion.alert_agent_id',
+OPTIONAL_KEYS = {'repos', 'notify.hosts', 'promotion.signer.spool.dir', 'promotion.alert_agent_id',
                  'repair.blackout.enabled'}
 HOST_KEYS = {'schema_version', 'deploy_root', 'record_dir', 'config', 'fleet_reader'}
 PATH_KEYS = {'clone', 'worktree_root', 'timeout_bin', 'repair.cq_bin',
@@ -106,6 +106,12 @@ def validate(overlay):
                     or any(not isinstance(v, str) or not v for v in value)
                     or len(set(value)) < 2):
                 raise ValueError('paseo_hosts must contain at least two distinct nonempty endpoint strings')
+        elif name == 'notify.hosts':
+            if (not isinstance(value, list) or len(value) > 32
+                    or any(not isinstance(v, str) or len(v) > 259 or not re.fullmatch(
+                        r'[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?:[0-9]{1,5}', v)
+                        or not 1 <= int(v.rsplit(':', 1)[1]) <= 65535 for v in value)):
+                raise ValueError('notify.hosts must be at most 32 host:port strings with ports 1..65535')
         elif name == 'repos':
             # Per-repo review config is host-specific (its clone path lives on
             # this host), so an overlay replaces the committed list. Shape is

@@ -14,7 +14,10 @@ def destination(value, config):
     if not isinstance(value, dict) or set(value) != {"paseo_agent_id", "paseo_host"}:
         return None
     agent, host = value["paseo_agent_id"], value["paseo_host"]
-    hosts = config.get("notify", {}).get("hosts", [])
+    section = config.get("notify")
+    hosts = section.get("hosts", []) if isinstance(section, dict) else []
+    if not isinstance(hosts, list):
+        return None
     if (not isinstance(agent, str) or not UUID.fullmatch(agent)
             or (host is not None and (not isinstance(host, str) or host.startswith("-")
                                       or not re.fullmatch(r"[A-Za-z0-9_.:-]+", host)))
@@ -23,8 +26,8 @@ def destination(value, config):
     return copy.deepcopy(value)
 
 
-def validation(value, config):
-    return ({"state": "pending"} if destination(value, config) else
+def validation(value, config, required=True):
+    return ({"state": "pending" if required else "not-required"} if destination(value, config) else
             {"state": "error", "reason": "unsupported-destination"})
 
 
@@ -43,6 +46,11 @@ def update(q, request_id, value, config):
                 key = ledger.digest([request_id, event_id, accepted])
                 q.setdefault("review_notify_outbox", {})[key] = dict(v=1, request_id=request_id,
                     event_id=event_id, destination=accepted, state="pending", receipt_id=event["receipt_id"])
+        item = next((i for i in q.get("items", []) if i["id"] == request["item"]), None)
+        pending = any(row["request_id"] == request_id and row["state"] == "pending"
+                      for row in q.get("review_notify_outbox", {}).values())
+        if item is not None and not pending and request_id not in item.get("observers", []):
+            request["notify_status"] = {"state": "not-required"}
 
 
 def message(row, event):
@@ -70,6 +78,10 @@ def drain(c, now=None):
         if c.with_lock(select, lock_wait=1) is not True:
             return 0
         for key, row, event in selected:
+            def still_current():
+                return c.load_queue().get("review_notify_outbox", {}).get(key) == row
+            if c.with_lock(still_current, lock_wait=1) is not True:
+                continue
             accepted = destination(row["destination"], c.CONFIG)
             try:
                 success = accepted is not None and c.notify(accepted, message(row, event)).get("paseo_send") == 0

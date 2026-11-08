@@ -220,7 +220,7 @@
               "required": ["state"],
               "properties": {
                 "state": {
-                  "enum": ["pending", "sent", "error", "withdrawn"]
+                  "enum": ["pending", "sent", "error", "withdrawn", "not-required"]
                 },
                 "reason": {
                   "type": "string",
@@ -544,7 +544,7 @@
                   "required": ["state"],
                   "properties": {
                     "state": {
-                      "enum": ["pending", "sent", "error", "withdrawn"]
+                      "enum": ["pending", "sent", "error", "withdrawn", "not-required"]
                     },
                     "reason": {
                       "type": "string",

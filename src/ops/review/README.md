@@ -26,13 +26,14 @@ When `PASEO_AGENT_ID` is present, submission captures it with the configured
 `CQ_REVIEW_NOTIFY_HOST` label (or null for the local daemon). An explicit
 `notify={paseo_agent_id,paseo_host}` overrides that destination, including for a
 joiner. The runner's `notify.hosts` allowlist must contain each allowed label;
-include null explicitly to allow the local daemon. Invalid destinations report
+the supported deployment overlay accepts host:port strings only. Invalid destinations report
 `notify.state=error` without refusing review admission.
 
 Use `review.status` with a `notify` object to replace the destination, or
 `notify=null` to withdraw it. This invokes `review-v1 notify-update` and requires
 the principal that submitted that request. Legacy requests without an owner
-cannot update destinations. Status reports delivery separately from review state.
+cannot update destinations. Status reports delivery separately from review state. Synchronous terminal returns
+report `not-required`; cancelling a subscription closes it as `withdrawn`.
 The publisher sends at most four notifications per tick, retries with the runner's
 exponential error backoff, and records error after five failed attempts. Delivery
 is at least once; messages include the stable terminal event ID for deduplication.

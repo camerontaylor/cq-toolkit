@@ -49,7 +49,7 @@ export const NotifyDestinationSchema = z
   .strict();
 const NotifyStateSchema = z
   .object({
-    state: z.enum(['pending', 'sent', 'error', 'withdrawn']),
+    state: z.enum(['pending', 'sent', 'error', 'withdrawn', 'not-required']),
     reason: z.string().min(1).optional(),
   })
   .strict();

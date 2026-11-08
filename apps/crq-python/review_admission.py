@@ -117,6 +117,9 @@ def cancel(q, request_id):
         raise ValueError("unknown review request")
     item = next(i for i in q["items"] if i["id"] == request["item"])
     item["observers"] = [r for r in item.get("observers", []) if r != request_id]
+    if "notify_status" in request or "notify" in request:
+        import review_notify
+        review_notify.update(q, request_id, None, {})
     if not item["observers"] and item["state"] == "pending":
         item["state"] = "cancelled"
     return status(q, request_id)

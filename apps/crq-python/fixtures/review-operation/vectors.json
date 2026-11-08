@@ -741,5 +741,18 @@
       }
     },
     "valid": true
+  },
+  {
+    "name": "notify-not-required",
+    "type": "response",
+    "value": {
+      "v": 1,
+      "action": "reused",
+      "state": "completed",
+      "notify": {
+        "state": "not-required"
+      }
+    },
+    "valid": true
   }
 ]

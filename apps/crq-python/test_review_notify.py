@@ -124,6 +124,18 @@ class DeliveryTests(unittest.TestCase):
         self.assertEqual(notify.drain(self.c, self.now), notify.LIMIT)
         self.assertEqual(len(self.sent), notify.LIMIT)
 
+    def test_withdraw_later_row_while_first_send_blocks(self):
+        self.q['review_requests']['r2'] = dict(item='item')
+        notify.update(self.q, 'r2', DEST, CONFIG)
+        def send(destination, text):
+            self.sent.append(text)
+            notify.update(self.q, 'r2', None, CONFIG)
+            return dict(paseo_send=0)
+        self.c.notify = send
+        notify.drain(self.c, self.now)
+        self.assertEqual(len(self.sent), 1)
+        self.assertEqual(self.q['review_requests']['r2']['notify_status']['state'], 'withdrawn')
+
     def test_injection_and_argv_only(self):
         for bad in ({**DEST, "paseo_agent_id": "--help"}, {**DEST, "paseo_host": "$(id)"}, {**DEST, "paseo_host": "unknown"}):
             self.assertIsNone(notify.destination(bad, CONFIG))

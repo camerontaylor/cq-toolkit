@@ -97,10 +97,44 @@ class ReviewTransportTests(SnapshotTransportFixture, unittest.TestCase):
         self.assertEqual(before, self.saved)
 
     def test_notify_is_persisted_before_response(self):
-        destination = dict(paseo_agent_id="08e32e05-647c-4bbf-be31-2a6aeaec0654", paseo_host="triton")
+        destination = dict(paseo_agent_id="08e32e05-647c-4bbf-be31-2a6aeaec0654", paseo_host="triton:6767")
+        self.runner.CONFIG = {"notify": {"hosts": ["triton:6767"]}}
         self.review["notify"] = destination
         self.call_review(self.review)
         self.assertEqual(self.saved["review_requests"]["local-1"]["notify"], destination)
+
+    def test_missing_allowlist_rejects_destination_without_refusing_submit(self):
+        self.review["notify"] = dict(paseo_agent_id="08e32e05-647c-4bbf-be31-2a6aeaec0654", paseo_host="triton:6767")
+        result = self.call_review(self.review)
+        self.assertEqual(result["action"], "created")
+        self.assertEqual(result["notify"], dict(state="error", reason="unsupported-destination"))
+        self.assertNotIn("notify", self.saved["review_requests"]["local-1"])
+
+    def test_terminal_notification_states_and_cancellation(self):
+        self.runner.CONFIG = {"notify": {"hosts": ["triton:6767"]}}
+        self.review["notify"] = dict(paseo_agent_id="08e32e05-647c-4bbf-be31-2a6aeaec0654", paseo_host="triton:6767")
+        self.assertEqual(self.call_review(self.review)["notify"]["state"], "pending")
+        self.review.pop("snapshot")
+        self.review["request_id"] = "joined"
+        self.assertEqual(self.call_review(self.review)["notify"]["state"], "pending")
+        for rid in ("joined", "local-1"):
+            reply = self.call_review(dict(v=1, op="cancel", request_id=rid))
+            self.assertEqual(reply["notify"]["state"], "withdrawn")
+        self.saved["items"][0].update(state="failed")
+        self.review["request_id"] = "failed-observer"
+        reply = self.call_review(self.review)
+        self.assertEqual(reply["action"], "observed")
+        self.assertEqual(reply["notify"]["state"], "not-required")
+        self.saved["items"][0].update(state="done", scope_adequate=True, receipt_id="e" * 64)
+        self.review["request_id"] = "reused"
+        with mock.patch.object(transport, "retained", return_value=True):
+            reply = self.call_review(self.review)
+        self.assertEqual(reply["action"], "reused")
+        self.assertEqual(reply["notify"]["state"], "not-required")
+        self.review["request_id"] = "empty"
+        self.review["inputs"].update(head_commit=self.base, head_tree=self.base_tree)
+        self.assertEqual(self.call_review(self.review)["notify"]["state"], "not-required")
+        self.assertFalse(self.saved.get("review_notify_outbox"))
 
     def test_fresh_claimed_tree_mismatches_refuse_without_mutation(self):
         self.call_review(self.review)  # install objects first
