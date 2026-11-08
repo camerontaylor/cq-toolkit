@@ -441,3 +441,26 @@ queue mutation and never takes tick.lock. An unavailable retry capability return
 is inferred.
 
 Drain returns `state:"unsupported"` immediately on an unsupported capability.
+
+## Local review scope and target freshness
+
+`cq review.submit --repo=owner/repo --target=main` selects the complete committed
+merge-base-to-HEAD diff. A local branch always supplies its own commit, even when
+its configured upstream is newer. When the two differ, `value.targetFreshness`
+reports `local` and `upstream` commit SHAs plus `ahead` and `behind` commit counts.
+This is advisory metadata based on existing local refs: submission does not fetch
+or substitute the upstream. It is saved with the request and preserved on retries.
+Missing upstream refs do not prevent review.
+
+Use `--base=<commit-or-ref>` to choose a specific base. It must resolve to an
+ancestor of HEAD; its resolved commit and trees enter the existing review identity.
+A retry with the same request ID keeps that identity, and a supplied base must
+resolve to the saved base. Omitting base on retry reuses the saved scope. Server
+validation and receipt adequacy still apply; a review with a different base is not
+reusable for a later PR merely because the head matches.
+
+Fully qualified refs such as `--target=refs/remotes/origin/main` are supported.
+For shorthand targets, local branch/tag/remote names must be unambiguous. If no
+such ref exists, a sole `origin/<target>` tracking ref is accepted. Multiple remote
+candidates are refused, as is a lone non-origin candidate; name the full ref in
+those cases. A local branch remains selected when remote tracking refs also exist.

@@ -482,3 +482,118 @@ test('cached snapshots exceeding the decoded limit are refused before submit dis
   });
   expect(calls).toEqual(['capabilities']);
 });
+
+async function commitContent(content: string) {
+  await writeFile(join(cwd, 'file'), content);
+  await git('add', 'file');
+  await git('commit', '-qm', content);
+  return git('rev-parse', 'HEAD');
+}
+function reachableSubmit() {
+  const wires: { inputs: { base_commit: string } }[] = [];
+  const op = makeSubmit(async (raw) => {
+    const wire = JSON.parse(raw) as { op: string; inputs: { base_commit: string } };
+    if (wire.op === 'capabilities') return JSON.stringify(caps);
+    wires.push(wire);
+    return JSON.stringify({ v: 1, action: 'created', state: 'queued' });
+  });
+  return { op, wires };
+}
+test('stale local target reports upstream divergence without moving the base', async () => {
+  const local = await git('rev-parse', 'target');
+  const upstream = await commitContent('upstream');
+  await git('update-ref', 'refs/remotes/origin/target', upstream);
+  await git('config', 'remote.origin.url', '.');
+  await git('config', 'remote.origin.fetch', '+refs/heads/*:refs/remotes/origin/*');
+  await git('config', 'branch.target.remote', 'origin');
+  await git('config', 'branch.target.merge', 'refs/heads/target');
+  await commitContent('feature');
+  const { op, wires } = reachableSubmit();
+  const input = { cwd, repo: 'owner/repo', target: 'target', reachable: true, requestId: 'stale' };
+  expect(await op(input)).toMatchObject({
+    status: 'ok',
+    value: { targetFreshness: { local, upstream, ahead: 0, behind: 1 } },
+  });
+  expect(wires[0]?.inputs.base_commit).toBe(local);
+  const newer = await commitContent('newer');
+  await git('update-ref', 'refs/remotes/origin/target', newer);
+  await git('update-ref', 'refs/heads/target', newer);
+  expect(await op(input)).toMatchObject({
+    status: 'ok',
+    value: { targetFreshness: { local, upstream, ahead: 0, behind: 1 } },
+  });
+  expect(wires[1]).toEqual(wires[0]);
+  expect(wires[0]).not.toHaveProperty('targetFreshness');
+});
+test('explicit base selects an ancestor and refuses a different base on retry', async () => {
+  const base = await commitContent('middle');
+  await commitContent('feature');
+  const { op, wires } = reachableSubmit();
+  const input = {
+    cwd,
+    repo: 'owner/repo',
+    target: 'target',
+    reachable: true,
+    requestId: 'explicit-base',
+    base,
+  };
+  expect(await op(input)).toMatchObject({ status: 'ok' });
+  expect(wires[0]?.inputs.base_commit).toBe(base);
+  expect(await op({ ...input, base: 'target' })).toMatchObject({ status: 'failed' });
+  expect(wires).toHaveLength(1);
+});
+test('explicit base must be an ancestor of HEAD before any network call', async () => {
+  await git('checkout', '-qb', 'other');
+  const base = await commitContent('other');
+  await git('checkout', '-q', 'target');
+  await commitContent('feature');
+  const { op, wires } = reachableSubmit();
+  expect(
+    await op({ cwd, repo: 'owner/repo', target: 'target', base, reachable: true }),
+  ).toMatchObject({ status: 'failed', error: expect.stringContaining('ancestor') as unknown });
+  expect(wires).toHaveLength(0);
+});
+test('remote-only target resolves a unique origin tracking ref', async () => {
+  const base = await git('rev-parse', 'target');
+  await git('update-ref', 'refs/remotes/origin/remote-target', base);
+  await commitContent('feature');
+  const { op, wires } = reachableSubmit();
+  expect(
+    await op({ cwd, repo: 'owner/repo', target: 'remote-target', reachable: true }),
+  ).toMatchObject({
+    status: 'ok',
+  });
+  expect(wires[0]?.inputs.base_commit).toBe(base);
+});
+test('remote-only target refuses multiple remotes, but explicit remote ref works', async () => {
+  const base = await git('rev-parse', 'target');
+  await git('update-ref', 'refs/remotes/origin/remote-target', base);
+  await git('update-ref', 'refs/remotes/other/remote-target', base);
+  await commitContent('feature');
+  const { op, wires } = reachableSubmit();
+  expect(
+    await op({ cwd, repo: 'owner/repo', target: 'remote-target', reachable: true }),
+  ).toMatchObject({
+    status: 'failed',
+    error: expect.stringContaining('ambiguous') as unknown,
+  });
+  expect(wires).toHaveLength(0);
+  expect(
+    await op({
+      cwd,
+      repo: 'owner/repo',
+      target: 'refs/remotes/origin/remote-target',
+      reachable: true,
+    }),
+  ).toMatchObject({ status: 'ok' });
+});
+test('target branch and tag collision is refused even when commits coincide', async () => {
+  await git('tag', 'target');
+  await commitContent('feature');
+  const { op, wires } = reachableSubmit();
+  expect(await op({ cwd, repo: 'owner/repo', target: 'target', reachable: true })).toMatchObject({
+    status: 'failed',
+    error: expect.stringContaining('ambiguous') as unknown,
+  });
+  expect(wires).toHaveLength(0);
+});

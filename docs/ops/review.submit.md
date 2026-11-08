@@ -16,6 +16,10 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "properties": {
+    "base": {
+      "minLength": 1,
+      "type": "string"
+    },
     "cwd": {
       "default": ".",
       "type": "string"
