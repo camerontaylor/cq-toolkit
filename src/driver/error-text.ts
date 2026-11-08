@@ -35,7 +35,9 @@ export function redactSensitiveText(text: string): string {
       );
     }
   }
-  return out;
+  // SDK diagnostics can contain credentials that never appeared in the environment.
+  // Match userinfo only within a URL authority, preserving its scheme and host.
+  return out.replace(/([a-z][a-z0-9+.-]*:\/\/)[^\s/?#]*@/gi, '$1[redacted]@');
 }
 
 /** Bound a diagnostic string and redact environment secrets before persistence. */

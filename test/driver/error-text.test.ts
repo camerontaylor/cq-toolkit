@@ -14,6 +14,38 @@ describe('driver error text — plain, bounded, secret-redacted', () => {
     expect(describeError('raw')).toBe('raw');
   });
 
+  test.each([
+    [
+      'https://diagnostic-user:diagnostic-password@example.test/path',
+      'https://[redacted]@example.test/path',
+    ],
+    [
+      'postgres://diagnostic-user:p%40ss%3Aword@localhost:5432/db',
+      'postgres://[redacted]@localhost:5432/db',
+    ],
+    ['HTTPS://user@example.test/', 'HTTPS://[redacted]@example.test/'],
+    ['https://:password@[::1]:443/', 'https://[redacted]@[::1]:443/'],
+    ['https://user:raw@password@example.test/', 'https://[redacted]@example.test/'],
+  ])('redacts URL userinfo without an environment value: %s', (url, redacted) => {
+    expect(boundedErrorText(`failed at ${url}`)).toBe(`failed at ${redacted}`);
+  });
+
+  test('preserves URLs without userinfo, including at-signs outside the authority', () => {
+    const text =
+      'https://example.test/user@host https://example.test?q=user@host https://example.test#user@host';
+    expect(boundedErrorText(text)).toBe(text);
+  });
+
+  test('redacts multiple credential-bearing URLs before truncation', () => {
+    const text = 'https://u:p@one.test/ and ftp://u:p@two.test/ ' + 'x'.repeat(600);
+    expect(boundedErrorText(text)).toBe(
+      ('https://[redacted]@one.test/ and ftp://[redacted]@two.test/ ' + 'x'.repeat(600)).slice(
+        0,
+        500,
+      ) + '… [truncated]',
+    );
+  });
+
   test('boundedErrorText truncates an over-long diagnostic', () => {
     const marker = '… [truncated]';
     const bounded = boundedErrorText('x'.repeat(600));
