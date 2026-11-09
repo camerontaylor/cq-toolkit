@@ -122,6 +122,16 @@ class PhaseTest(FindingTest):
         result, _, _ = self.run_phase({'stop': 'ok', 'verdict': 'fixed', 'reason': 'fixed', 'fixing_commit': '0' * 40})
         self.assertEqual(result['counts'], {'needs-human': 1})
 
+    def test_fixing_commit_before_target_is_not_accepted(self):
+        from crq_repair.triage import decision
+        early = self.f.commit({'a': b'one\ntwo\nfixed\n'})
+        target = self.f.commit({'b': b'unrelated\n'})
+        tip = self.f.commit({'c': b'unrelated\n'})
+        row = {'target': target, 'finding': {'path': 'a'}}
+        for verdict in ('fixed', 'superseded'):
+            action, _, _ = decision(self.f.repo, row, tip, {'verdict': verdict, 'reason': 'fixed before target', 'fixing_commit': early})
+            self.assertEqual(action, 'needs-human')
+
     def test_renamed_path_is_not_mechanically_superseded(self):
         self.f.git('mv', 'a', 'renamed')
         self.f.git('commit', '-qm', 'rename')

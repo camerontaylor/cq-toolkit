@@ -50,7 +50,7 @@ def decision(repo, row, tip, report):
         commit = report.get('fixing_commit')
         try:
             commit = repo.resolve(commit)
-            if commit not in repo.git('rev-list', tip).decode().splitlines():
+            if commit not in repo.git('rev-list', row['target'] + '..' + tip).decode().splitlines():
                 raise ValueError('commit not ancestor')
             fixing_path = repo.lineage(row['target'], commit, row['finding']['path']) or row['finding']['path']
             if verdict == 'fixed' and fixing_path not in repo.git('diff-tree', '--root', '--no-commit-id', '--name-only', '--first-parent', '-m', '-r', commit).decode().splitlines():
