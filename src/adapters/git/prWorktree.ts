@@ -201,26 +201,30 @@ export function fileWorktreeRegistry(path: string): WorktreeRegistry {
   };
   const withLock = async <T>(fn: () => Promise<T>): Promise<T> => {
     let release: (() => Promise<void>) | undefined;
-    try {
-      release = await lock(path, {
-        stale: 10_000,
-        // The section this lock guards is NOT a small file write: it runs
-        // `git worktree list`, per-candidate `rev-parse`/`rev-list`,
-        // `git worktree remove`, a full `git worktree add` checkout and the
-        // caller's callback. A waiter must therefore outlive that section,
-        // not a few hundred ms (concurrent jobs for DIFFERENT PRs are a
-        // supported case, so a live holder is the ordinary contention). The
-        // holder refreshes the lock every stale/2 = 5s, so it stays live
-        // while waiting; the backoff accumulates ~100s (100·1.5^n capped at
-        // 2s per attempt), i.e. tens of seconds of real section time.
-        retries: { retries: 60, factor: 1.5, minTimeout: 100, maxTimeout: 2_000 },
-        realpath: false,
-      });
-    } catch (err) {
-      throw new Error(
-        `fileWorktreeRegistry: could not acquire the registry lock ${JSON.stringify(`${path}.lock`)} within the retry bound — another process still HOLDS it (a live holder, or a crashed holder's lock that has not aged out); refusing to write unserialized. Do NOT delete a live lock (that breaks serialization) — wait for the holder to finish and re-run`,
-        { cause: err },
-      );
+    // The section includes git worktree add and the caller's callback.
+    // Keep the 60-retry, ~109s budget for contention. proper-lockfile retries
+    // every error, so handle backoff here to fail immediately on disk errors.
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        release = await lock(path, { stale: 10_000, retries: 0, realpath: false });
+        break;
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException).code;
+        if (code === 'ELOCKED' && attempt < 60) {
+          await new Promise<void>((resolve) =>
+            setTimeout(resolve, Math.min(Math.round(100 * 1.5 ** attempt), 2_000)),
+          );
+          continue;
+        }
+        const reason =
+          code === 'ELOCKED'
+            ? 'within the retry bound — another process still holds it; do not delete a live lock; wait for the holder to finish and re-run'
+            : `— acquisition failed (${code ?? 'unknown error'}); check the registry path and filesystem`;
+        throw new Error(
+          `fileWorktreeRegistry: could not acquire the registry lock ${JSON.stringify(`${path}.lock`)} ${reason}; refusing to write unserialized`,
+          { cause: err },
+        );
+      }
     }
     try {
       await ensureTarget();
