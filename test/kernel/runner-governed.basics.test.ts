@@ -77,6 +77,26 @@ describe('governance requires a governor', () => {
 // ---------------------------------------------------------------------------
 
 describe('governed run basics (no journal — in-memory)', () => {
+  test('a scheduler cannot dispatch the same job twice', async () => {
+    const calls: string[] = [];
+    const governor = createGovernor({ maxUsd: 5 });
+    await expect(
+      runPlan(
+        independentPlan('plan-schedule-once', 1),
+        { concurrency: 1, stopOnError: false },
+        viewWith(entry('fake', countingOp(calls))),
+        {
+          governor,
+          allowAdvisory: true,
+          scheduleJob: async (_id, run) => {
+            await run();
+            await run();
+          },
+        },
+      ),
+    ).rejects.toThrow('scheduled job already consumed');
+    expect(calls).toEqual(['j1']);
+  });
   test('a 3-job plan runs to completion; no spend → no costUSD, no early stop', async () => {
     const calls: string[] = [];
     const governor = createGovernor({ maxUsd: 5, maxTokens: 1000 });
