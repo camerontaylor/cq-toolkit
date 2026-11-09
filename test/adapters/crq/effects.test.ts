@@ -127,13 +127,16 @@ test('cleanup removes only old adapter temps under the writer lock', async () =>
   const recent = join(root, '.queue.json.22222222-2222-4222-8222-222222222222.tmp');
   const link = join(root, '.queue.json.33333333-3333-4333-8333-333333333333.tmp');
   const unrelated = join(root, '.queue.json.other.tmp');
+  const pythonTemp = join(root, '.queue.jsonabcdefgh');
   await Promise.all([
     writeFile(old, 'old'),
     writeFile(recent, 'recent'),
     writeFile(unrelated, 'other'),
+    writeFile(pythonTemp, 'python'),
   ]);
   await symlink(unrelated, link);
   await utimes(old, new Date(0), new Date(0));
+  await utimes(pythonTemp, new Date(0), new Date(0));
   expect(
     await withLock(join(root, 'tick.lock'), { wait: true }, () =>
       cleanupAtomicTemps(target, Date.now() - 1000),
@@ -142,6 +145,12 @@ test('cleanup removes only old adapter temps under the writer lock', async () =>
   expect(await readdir(root)).toEqual(
     expect.arrayContaining(['queue.json.other.tmp'].map((n) => `.${n}`)),
   );
+  expect(await readFile(pythonTemp, 'utf8')).toBe('python');
+  expect(
+    await withLock(join(root, 'tick.lock'), { wait: true }, () =>
+      cleanupAtomicTemps(target, Date.now() - 1000, { includePythonTemps: true }),
+    ),
+  ).toBe(1);
   expect(await readFile(recent, 'utf8')).toBe('recent');
   expect(await readFile(link, 'utf8')).toBe('other');
 });
