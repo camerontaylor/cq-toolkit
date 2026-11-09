@@ -231,7 +231,16 @@ export function readPythonReport(stderr) {
   const last = matches.at(-1);
   if (last === undefined || Number(last[1]) === 0) return null;
   const total = Number(last[1]);
-  const count = (key) => Number(new RegExp(`\\b${key}=(\\d+)`).exec(last[3] ?? '')?.[1] ?? 0);
+  // Split the parenthetical into whole `key=value` pairs so a key can never
+  // be read out of a longer one (`failures` inside `expected failures`).
+  const fields = new Map(
+    (last[3] ?? '')
+      .split(',')
+      .map((pair) => pair.split('='))
+      .filter(([, n]) => n !== undefined)
+      .map(([key, n]) => [key.trim(), Number(n)]),
+  );
+  const count = (key) => fields.get(key) ?? 0;
   const failed = count('failures') + count('errors') + count('unexpected successes');
   const skipped = count('skipped') + count('expected failures');
   return { total, passed: total - failed - skipped, failed, skipped };

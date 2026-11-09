@@ -637,6 +637,17 @@ describe('Python narrow selection and evidence', () => {
       )?.failed,
     ).toBe(1);
   });
+  it('anchors count keys so `expected failures` never reads as `failures`', () => {
+    expect(readPythonReport('Ran 2 tests in 0.01s\n\nOK (expected failures=1)\n')).toEqual({
+      total: 2,
+      passed: 1,
+      failed: 0,
+      skipped: 1,
+    });
+    expect(
+      readPythonReport('Ran 4 tests in 0.01s\n\nFAILED (errors=1, expected failures=1)\n'),
+    ).toEqual({ total: 4, passed: 2, failed: 1, skipped: 1 });
+  });
   it('requires a nonempty terminal unittest report', () => {
     expect(readPythonReport('Ran 3 tests in 0.01s\n\nOK (skipped=1)\n')).toEqual({
       total: 3,
