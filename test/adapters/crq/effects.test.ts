@@ -1,11 +1,11 @@
 import { afterEach, expect, test } from 'vitest';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtemp, open, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, open, readFile, readdir, rm, symlink, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { withLock } from '../../../src/adapters/crq/lock.js';
-import { atomicWrite } from '../../../src/adapters/crq/atomic.js';
+import { atomicWrite, cleanupAtomicTemps } from '../../../src/adapters/crq/atomic.js';
 import { groupAlive, launchDetached } from '../../../src/adapters/crq/process.js';
 import { review, usage } from '../../../src/adapters/crq/coderabbit.js';
 
@@ -118,4 +118,67 @@ test('fake CLI receives exact arguments and review stream is classified', async 
     'abc',
   ]);
   expect(result.verdict).toEqual({ kind: 'terminal' });
+});
+
+test('cleanup removes only old adapter temps under the writer lock', async () => {
+  const root = await dir();
+  const target = join(root, 'queue.json');
+  const old = join(root, '.queue.json.11111111-1111-4111-8111-111111111111.tmp');
+  const recent = join(root, '.queue.json.22222222-2222-4222-8222-222222222222.tmp');
+  const link = join(root, '.queue.json.33333333-3333-4333-8333-333333333333.tmp');
+  const unrelated = join(root, '.queue.json.other.tmp');
+  await Promise.all([
+    writeFile(old, 'old'),
+    writeFile(recent, 'recent'),
+    writeFile(unrelated, 'other'),
+  ]);
+  await symlink(unrelated, link);
+  await utimes(old, new Date(0), new Date(0));
+  expect(
+    await withLock(join(root, 'tick.lock'), { wait: true }, () =>
+      cleanupAtomicTemps(target, Date.now() - 1000),
+    ),
+  ).toBe(1);
+  expect(await readdir(root)).toEqual(
+    expect.arrayContaining(['queue.json.other.tmp'].map((n) => `.${n}`)),
+  );
+  expect(await readFile(recent, 'utf8')).toBe('recent');
+  expect(await readFile(link, 'utf8')).toBe('other');
+});
+
+test('group remains alive when its leader exits but a descendant remains', async () => {
+  const root = await dir();
+  const log = await open(join(root, 'log'), 'w');
+  const script = `const {spawn}=require('node:child_process'); const c=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'}); console.log(c.pid); c.unref(); setTimeout(()=>process.exit(0),100);`;
+  const pid = await launchDetached(process.execPath, ['-e', script], {
+    cwd: root,
+    stdout: log.fd,
+    stderr: log.fd,
+  });
+  await log.close();
+  try {
+    for (let n = 0; n < 100 && !(await readFile(join(root, 'log'), 'utf8')).trim(); n++)
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(groupAlive(pid)).toBe(true);
+  } finally {
+    try {
+      process.kill(-pid, 'SIGKILL');
+    } catch {
+      /* gone */
+    }
+  }
+});
+
+test('no fresh review stays blocked with the migration reason', async () => {
+  const root = await dir();
+  const binary = join(root, 'fake-cli');
+  await writeFile(
+    binary,
+    '#!/usr/bin/env node\nconsole.log(JSON.stringify({type:"complete",status:"review_completed",message:"No fresh detailed file review was performed in this run."}));\n',
+    { mode: 0o755 },
+  );
+  const result = await review(['--agent'], { cwd: root, binary });
+  expect(result.verdict.kind).toBe('blocked');
+  expect(result.reason).toBe('skipped:no-fresh');
 });
