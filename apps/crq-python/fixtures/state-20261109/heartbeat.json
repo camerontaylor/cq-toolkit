@@ -1,0 +1,8 @@
+{
+  "last_tick": "2026-11-09T11:50:00Z",
+  "stale_alarm_min": 36,
+  "schedule_id": null,
+  "root": "/srv/crq-fixture",
+  "alert_agent_id": "00000000-0000-4000-8000-000000000001",
+  "alert_agent_host": "fixture-host:6767"
+}

@@ -1,0 +1,2 @@
+{"at":"2026-11-08T23:50:00Z","event":"review_started","item":"open-101","run":"open-101-20261108T235500Z","label":"fixture","base":"1111111111111111111111111111111111111111","head":"2222222222222222222222222222222222222222"}
+{"at":"2026-11-08T23:55:00Z","event":"review_finished","item":"open-101","run":"open-101-20261108T235500Z","outcome":"completed","findings":1,"severity":"minor"}

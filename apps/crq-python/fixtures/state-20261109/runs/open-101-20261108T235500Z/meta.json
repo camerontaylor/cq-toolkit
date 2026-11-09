@@ -1,0 +1,29 @@
+{
+  "run_id": "open-101-20261108T235500Z",
+  "item_id": "open-101",
+  "pr": 101,
+  "kind": "open",
+  "repo": "example/primary",
+  "workId": "fixture-work-1",
+  "label": "fixture",
+  "cycle": 1,
+  "base": "1111111111111111111111111111111111111111",
+  "head": "2222222222222222222222222222222222222222",
+  "pr_head": "2222222222222222222222222222222222222222",
+  "review_pin": "2222222222222222222222222222222222222222",
+  "target": "origin/main",
+  "pr_branch": "fixture/open-101",
+  "worktree": "/srv/crq-fixture/wt/open-101",
+  "wt_branch": "crq/open-101",
+  "dirty_diff": "",
+  "range_policy": "committed-full-diff-v1",
+  "started_at": "2026-11-08T23:50:00Z",
+  "cmd": [
+    "coderabbit",
+    "review",
+    "--base",
+    "1111111111111111111111111111111111111111",
+    "--base-commit",
+    "2222222222222222222222222222222222222222"
+  ]
+}

@@ -1,0 +1,45 @@
+{
+  "generated_at": "2026-11-09T11:50:00Z",
+  "paused": false,
+  "cooldown_until": "2026-11-09T12:15:00Z",
+  "finding_triage": {
+    "counts": {},
+    "needs_human": [],
+    "counts_complete": true,
+    "error_count": 0,
+    "errors": [],
+    "errors_omitted": 0,
+    "needs_human_count": 0,
+    "needs_human_omitted": 0
+  },
+  "items": [
+    {
+      "id": "open-101",
+      "kind": "open",
+      "state": "pending",
+      "prior_cycles": 1,
+      "cycles": [],
+      "operator_priority": false,
+      "optional_cycle": null,
+      "pinned_base": "1111111111111111111111111111111111111111",
+      "last_error": null,
+      "wait_reason": null,
+      "gate_stalled_at": null,
+      "repo": "example/primary"
+    },
+    {
+      "id": "current-103",
+      "kind": "merged-current",
+      "state": "pending",
+      "prior_cycles": null,
+      "cycles": [],
+      "operator_priority": false,
+      "optional_cycle": null,
+      "pinned_base": null,
+      "last_error": null,
+      "wait_reason": null,
+      "gate_stalled_at": null,
+      "repo": "example/primary"
+    }
+  ]
+}
