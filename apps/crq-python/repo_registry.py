@@ -25,6 +25,16 @@ _ALLOWED = frozenset({"repo", "clone", "default_branch", "discovery", "floor", "
                       "include", "exclude", "rank_tier", "findings", "scan_extra_classes"})
 
 
+def _identity(slug: Any) -> str:
+    """Normalized repository identity for comparisons.
+
+    GitHub treats owner/name as case-insensitive, so duplicate checks, the
+    primary check and repository lookup all compare identities, never the raw
+    spelling: `Owner/Repo` and `owner/repo` are one repository.
+    """
+    return slug.casefold() if isinstance(slug, str) else ""
+
+
 def _refuse(entry: Any, why: str) -> None:
     slug = entry.get("repo") if isinstance(entry, dict) else None
     raise ValueError(f"repos entry {slug if isinstance(slug, str) else '?'}: {why}")
@@ -99,14 +109,14 @@ def parse(config: Dict[str, Any]) -> List[Dict[str, Any]]:
     names = set()
     for entry in entries:
         parsed = parse_entry(entry)
-        if parsed["repo"] in seen:
+        if _identity(parsed["repo"]) in seen:
             raise ValueError(f"repos entry duplicated: {parsed['repo']}")
-        if parsed["name"] in names:
+        if _identity(parsed["name"]) in names:
             raise ValueError(f"repos entry name collides with another repo: {parsed['name']}")
-        if parsed["repo"] == config.get("repo"):
+        if _identity(parsed["repo"]) == _identity(config.get("repo")):
             raise ValueError("repos must not repeat the primary repo (top-level config owns it)")
-        seen.add(parsed["repo"])
-        names.add(parsed["name"])
+        seen.add(_identity(parsed["repo"]))
+        names.add(_identity(parsed["name"]))
         repos.append(parsed)
     return repos
 
@@ -114,7 +124,8 @@ def parse(config: Dict[str, Any]) -> List[Dict[str, Any]]:
 def by_repo(repos: List[Dict[str, Any]], slug: Optional[str]) -> Optional[Dict[str, Any]]:
     if not slug:
         return None
-    return next((cfg for cfg in repos if cfg["repo"] == slug), None)
+    wanted = _identity(slug)
+    return next((cfg for cfg in repos if _identity(cfg["repo"]) == wanted), None)
 
 
 def rank_for(item: Dict[str, Any], primary: str, repos: List[Dict[str, Any]]) -> Optional[int]:
@@ -125,7 +136,7 @@ def rank_for(item: Dict[str, Any], primary: str, repos: List[Dict[str, Any]]) ->
     than silently changing tier).
     """
     slug = item.get("repo") or primary
-    if slug == primary:
+    if _identity(slug) == _identity(primary):
         return None
     cfg = by_repo(repos, slug)
     return cfg["rank_tier"] if cfg else DEFAULT_RANK

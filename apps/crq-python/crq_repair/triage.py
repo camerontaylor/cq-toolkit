@@ -3,6 +3,7 @@ import collections
 import json
 import time
 import subprocess
+import re
 
 import review_ledger as ledger
 
@@ -36,7 +37,20 @@ def context(repo, row, tip):
                 'status': 'present' if contract_entry else 'absent', 'text': contract_text[:CONTRACT_MAX_CHARS],
                 'total_chars': len(contract_text), 'limit_chars': CONTRACT_MAX_CHARS,
                 'truncated': len(contract_text) > CONTRACT_MAX_CHARS}
-    return {'current_contract': contract, 'original_region': original, 'content_search': search, 'finding': finding, 'target': row['target'], 'tip': tip, 'current_path': name,
+    extra = []
+    if row.get('_escalate'):
+        # Repository-controlled, immutable blobs only; the caller scans the
+        # complete pack before dispatch. Never give the model raw file tools.
+        body = ' '.join(str(finding.get(k) or '') for k in ('title', 'body'))
+        paths = [name] + re.findall(r'[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+', body)
+        paths = [path if path in entries else path.rstrip('.') for path in paths]
+        for path in dict.fromkeys(paths):
+            if path not in entries or len(extra) >= 3:
+                continue
+            content = repo.git('cat-file', 'blob', entries[path]['blob']).decode(errors='replace')
+            extra.append({'path': path, 'blob': entries[path]['blob'], 'text': content[:8000],
+                          'truncated': len(content) > 8000})
+    return {'current_contract': contract, 'original_region': original, 'content_search': search, 'finding': finding, 'target': row['target'], 'tip': tip, 'current_path': name, 'additional_sources': extra,
             'region': [{'line': i + 1, 'text': text[i]} for i in range(start, end)],
             'history': repo.git('log', '-n', '40', '--format=%H %s', row['target'] + '..' + tip, '--', finding['path']).decode(errors='replace')[:16000]}
 
@@ -84,6 +98,7 @@ def phase(inbox, repo, tip, judge, transport, at, *, maximum=6, seconds=600, dry
         inbox.recover(inbox.publication.retained())
     rows = [ledger.loads(p.read_bytes()) for p in sorted((inbox.root / 'triage').glob('*.json'))]
     reviews = inbox.publication.retained()
+    events = {v['id']: v for v in reviews if v.get('event_type') == 'finding-event'}
     for row in rows:
         if (time.monotonic() < deadline and row['finding'].get('anchor_status') != 'verified'
                 and row['status'] in (*PENDING, 'confirmed') and hasattr(inbox, 'recovered_anchor')):
@@ -107,8 +122,14 @@ def phase(inbox, repo, tip, judge, transport, at, *, maximum=6, seconds=600, dry
             continue
         if anchor.get('intervals') and anchor.get('blob') and row['status'] not in ('already-fixed', 'fixed', 'dismissed', 'superseded'):
             seen.setdefault(key, f['id'])
-        if row['status'] not in PENDING and not (row['status'] == 'confirmed' and row.get('target_current') != tip):
+        prior = events.get(row.get('previous_event_id'), {}).get('payload', {})
+        escalation = (row['status'] == 'needs-human'
+                      and str(prior.get('actor', '')).startswith('crq-triage/')
+                      and not str(prior.get('actor', '')).startswith('crq-triage/escalation/'))
+        if row['status'] not in PENDING and not escalation and not (row['status'] == 'confirmed' and row.get('target_current') != tip):
             continue
+        if escalation:
+            row['_escalate'] = True
         if not isinstance(f.get('path'), str) or not f['path']:
             plans.append((row, 'needs-human', 'finding has no repository path', {}))
             continue
@@ -139,6 +160,11 @@ def phase(inbox, repo, tip, judge, transport, at, *, maximum=6, seconds=600, dry
         except (subprocess.TimeoutExpired, OSError):
             stopped = 'deferred'; break
         if report.get('stop') != 'ok':
+            if row.get('_escalate') and report.get('stop') == 'error' and report.get('errorClass') == 'output-invalid':
+                row['_triage_model'] = report.get('model', 'judge')
+                plans.append((row, 'needs-human', 'escalation returned invalid structured output', {}))
+                judged += 1
+                continue
             stopped = report.get('stop', 'error'); stopped_report = report; break
         row['_triage_model'] = report.get('model', 'judge')
         action, reason, kwargs = decision(repo, row, tip, report)
@@ -149,7 +175,8 @@ def phase(inbox, repo, tip, judge, transport, at, *, maximum=6, seconds=600, dry
     for row, action, reason, kwargs in plans:
         fid = row['finding']['id']
         if not dry_run:
-            event = inbox.triage(fid, repo, tip, action, 'crq-triage/' + row.get('_triage_model', 'deterministic'), reason, at, expected_previous_event_id=row['previous_event_id'], **kwargs)
+            actor = 'crq-triage/' + ('escalation/' if row.get('_escalate') else '') + row.get('_triage_model', 'deterministic')
+            event = inbox.triage(fid, repo, tip, action, actor, reason, at, expected_previous_event_id=row['previous_event_id'], **kwargs)
             if event is None:
                 continue  # Operator/recovery changed the row during model judgment.
             action = event['payload']['action']
