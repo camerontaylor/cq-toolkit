@@ -1117,9 +1117,10 @@ class CanonicalFixedProjectionTest(unittest.TestCase):
         def changed(job, merge):
             calls.append(job['job'])
             if len(calls) == 2:
-                row = ledger.loads(self.row_file.read_bytes())
-                row['status'] = 'superseded'
-                ledger.atomic(self.row_file, ledger.canonical(row))
+                before = self.row_file.read_bytes()
+                self.inbox.triage(self.fid, self.f.repo, self.merge, 'superseded', 'fixture',
+                                  'Newer retained disposition before feedback', self.at)
+                ledger.atomic(self.row_file, before)  # Crash after spool, before row update.
             return original(job, merge)
         with mock.patch.object(self.inbox, 'current_fixed_event', side_effect=changed), \
              mock.patch.object(self.inbox, 'repair_outcome') as outcome, \
@@ -1131,6 +1132,30 @@ class CanonicalFixedProjectionTest(unittest.TestCase):
         self.assertNotIn('fix_merged', self.record)
         self.assertIn('changed before source feedback', self.record['source_publication_error'])
         self.assertEqual(self.journal.read_bytes(), self.original_journal)
+
+    def assert_spooled_successor_prevents_projection(self, action):
+        before = self.row_file.read_bytes()
+        self.inbox.triage(self.fid, self.f.repo, self.merge, action, 'fixture',
+                          'Newer authoritative disposition', self.at)
+        retained = self.out.retained()
+        ledger.atomic(self.row_file, before)  # Durable event survived; cache did not.
+        with mock.patch.object(self.inbox, 'repair_outcome') as outcome, \
+             mock.patch.object(self.out, 'spool', wraps=self.out.spool) as spool, \
+             mock.patch.object(repair_tick, 'publish_source_resolution') as source:
+            repair_tick.reconcile_fix_prs(self.c, self.queue)
+            outcome.assert_not_called()
+            spool.assert_not_called()
+            source.assert_not_called()
+        self.assertEqual(ledger.loads(self.row_file.read_bytes())['status'], action)
+        self.assertNotIn('fix_merged', self.record)
+        self.assertEqual(self.out.retained(), retained)
+        self.assertEqual(self.journal.read_bytes(), self.original_journal)
+
+    def test_retained_needs_human_successor_recovers_before_projection(self):
+        self.assert_spooled_successor_prevents_projection('needs-human')
+
+    def test_retained_superseded_successor_recovers_before_projection(self):
+        self.assert_spooled_successor_prevents_projection('superseded')
 
 
 if __name__ == '__main__':

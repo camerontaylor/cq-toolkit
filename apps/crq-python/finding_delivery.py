@@ -175,6 +175,7 @@ class Inbox:
         fid = job.get("canonical_finding_id")
         if not isinstance(fid, str) or not re.fullmatch(r"[0-9a-f]{64}", fid):
             return None
+        self.recover(self.publication.retained())
         with ledger.locked(self.root / "findings.lock"):
             filename = self.root / "triage" / (fid + ".json")
             if not filename.exists():
@@ -186,7 +187,15 @@ class Inbox:
                     or row.get("review_id") != job.get("review_id")
                     or row.get("receipt", {}).get("repair_task") != job.get("job")):
                 raise ledger.IntegrityError("current fixed finding identity does not match repair")
-            events = [v for v in self.publication.retained() if v.get("id") == row.get("previous_event_id")]
+            retained = self.publication.retained()
+            # A writer may have spooled a successor after recovery but before
+            # this lock. Never project the cached predecessor in that window.
+            if any(v.get("event_type") == "finding-event"
+                   and v["payload"].get("finding_id") == fid
+                   and v["payload"].get("previous_event_id") == row.get("previous_event_id")
+                   for v in retained):
+                raise ledger.IntegrityError("current fixed finding has a retained successor")
+            events = [v for v in retained if v.get("id") == row.get("previous_event_id")]
             if len(events) != 1:
                 raise ledger.IntegrityError("current fixed finding event is unavailable")
             value = events[0]
