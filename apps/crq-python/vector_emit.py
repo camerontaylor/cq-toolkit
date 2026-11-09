@@ -269,7 +269,6 @@ def classify_vectors() -> Dict[str, Any]:
     ]
     d2_whitelist = {
         "affirmative-no-fresh-completion-is-skipped",
-        "complete-status-other-than-review-completed-is-skipped",
     }
     for case in cases:
         if case["name"] in d2_whitelist:

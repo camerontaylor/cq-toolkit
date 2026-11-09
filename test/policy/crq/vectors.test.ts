@@ -14,6 +14,7 @@ import {
   sha256Hex,
 } from '../../../src/policy/crq/pythonJson.js';
 import { parseIso, parseUtc, UtcParseError } from '../../../src/policy/crq/utc.js';
+import { decideCompletion, parseReviewerStream } from '../../../src/ops/dev/coderabbit.js';
 
 const GROUP_P = new URL('../../../apps/crq-python/fixtures/group-p/', import.meta.url);
 
@@ -117,6 +118,15 @@ describe.each(loadFamily('canonical'))('canonical/$name', (vector) => {
   });
 });
 
+test('a changed canonical byte fails the differential', () => {
+  const vector = loadFamily('canonical')[0];
+  if (vector === undefined) throw new Error('canonical vectors are empty');
+  const result = encodeCanonical(vector) as { canonical: string; sha256: string };
+  expect(() =>
+    assertExpected(vector, { ok: true, value: { ...result, canonical: `${result.canonical} ` } }),
+  ).toThrow();
+});
+
 describe.each(loadFamily('time'))('time/$name', (vector) => {
   test(`${vector.source} matches the Python oracle`, () => {
     assertExpected(
@@ -135,6 +145,34 @@ describe.each(loadFamily('queue-bytes'))('queue-bytes/$name', (vector) => {
   });
 });
 
+// Only completion eligibility is implemented by the existing TS classifier;
+// the Python diagnostic fields and retry provenance await the crq port.
+test('classifier vectors include the D2 no-fresh case', () => {
+  expect(loadFamily('classify').map((vector) => vector.name)).toContain(
+    'affirmative-no-fresh-completion-is-skipped',
+  );
+});
+describe.each(loadFamily('classify'))('classify/$name', (vector) => {
+  test('completion eligibility matches Python, with the D2 no-fresh exception', () => {
+    const ndjson = toPlainJson(valueAt(vector.input, 'ndjson'));
+    const exit = toPlainJson(valueAt(vector.input, 'exit_code'));
+    const expected = toPlainJson(valueAt(vector.expect, 'value')) as {
+      counted: boolean;
+      outcome: string;
+    };
+    const verdict = decideCompletion(
+      typeof exit === 'number' ? exit : -1,
+      parseReviewerStream(typeof ndjson === 'string' ? ndjson : ''),
+    );
+    expect(verdict.kind === 'terminal').toBe(expected.counted);
+    if (vector.name === 'affirmative-no-fresh-completion-is-skipped') {
+      expect(expected.outcome).toBe('skipped');
+      expect(verdict.kind).toBe('blocked');
+      if (verdict.kind === 'blocked') expect(verdict.reason).toContain('skipped:no-fresh');
+    }
+  });
+});
+
 /**
  * A family WITHOUT a ported implementation. The reason is part of the test so
  * the runner cannot claim broad vector coverage by omission.
@@ -144,8 +182,6 @@ const NOT_APPLICABLE: Readonly<Record<string, string>> = {
   'backfill-inventory': 'backfill inventory is a later group-P port',
   'backfill-report': 'backfill report is a later group-P port',
   backfill: 'backfill driver helpers are a later group-P port',
-  classify:
-    'D2: TypeScript no-fresh/trailing-event semantics intentionally diverge from the Python vector (blocked/retriable, explicit skipped:no-fresh reason)',
   coverage: 'coverage policy is a later group-P port',
   ledger:
     'ledger validators/interval/path/creditable functions are a later group-P port; review_ledger.canonical+digest cases live in canonical.json and ARE replayed above',
@@ -156,7 +192,7 @@ const NOT_APPLICABLE: Readonly<Record<string, string>> = {
   usage: 'usage/slot pacing is a later group-P port',
 };
 
-const HANDLED = new Set(['canonical', 'time', 'queue-bytes']);
+const HANDLED = new Set(['canonical', 'time', 'queue-bytes', 'classify']);
 
 test('every group-P family is either replayed or explicitly not applicable', () => {
   const families = readdirSync(GROUP_P)
@@ -172,14 +208,4 @@ test('every group-P family is either replayed or explicitly not applicable', () 
   for (const [family, reason] of Object.entries(NOT_APPLICABLE)) {
     expect(reason.length, family).toBeGreaterThan(0);
   }
-});
-
-test('the D2 exclusion names no-fresh and trailing-event divergence', () => {
-  const reason = NOT_APPLICABLE['classify'] ?? '';
-  expect(reason).toContain('D2');
-  expect(reason).toContain('no-fresh');
-  expect(reason).toContain('trailing-event');
-  const names = loadFamily('classify').map((vector) => vector.name);
-  expect(names).toContain('affirmative-no-fresh-completion-is-skipped');
-  expect(names).toContain('nonterminal-last-event-is-interrupted');
 });
