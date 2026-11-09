@@ -199,7 +199,8 @@ class RecoveryTest(unittest.TestCase):
 
     def test_cached_unresolved_replays_after_unrelated_tip_advance(self):
         self.retain_old_unresolved()
-        old_tip = self.run_git(self.repo, 'rev-parse', 'HEAD')
+        artifact = self.root / 'state/repair/crq-job/recovery.json'
+        old_binding = json.loads(artifact.read_text())['binding']
         result_path = self.root / 'state/repair/crq-job/result.json'
         original = result_path.read_bytes()
         (self.repo / 'unrelated').write_text('new\n')
@@ -210,7 +211,7 @@ class RecoveryTest(unittest.TestCase):
         result = self.run_recovery()
         self.assertEqual(result['disposition'], 'retry')
         self.assertEqual(result['binding']['source_sha'], tip)
-        self.assertEqual(result['judgment_binding']['source_sha'], old_tip)
+        self.assertEqual(result['judgment_binding'], old_binding)
         self.assertEqual(result_path.read_bytes(), original)
         self.assertEqual(self.run_recovery(), result)
         self.judge.assert_called_once()
@@ -221,6 +222,11 @@ class RecoveryTest(unittest.TestCase):
         for selected, quote, path in [([[2, 2]], 'second line', 'a.py'),
                                       ([[1, 3]], 'original\nsecond line', 'a.py'),
                                       ([[True, 2]], 'original\nsecond line', 'a.py'),
+                                      ([[1, 2], [3, 4]], 'original\nsecond line', 'a.py'),
+                                      ([[2, 1]], 'original\nsecond line', 'a.py'),
+                                      ([[0, 2]], 'original\nsecond line', 'a.py'),
+                                      ([1, 2], 'original\nsecond line', 'a.py'),
+                                      ('1-2', 'original\nsecond line', 'a.py'),
                                       ([[1, 2]], 'original', 'a.py'),
                                       ([[1, 2]], 'original\nsecond line', 'other.py')]:
             with self.subTest(selected=selected, quote=quote, path=path):
@@ -229,6 +235,30 @@ class RecoveryTest(unittest.TestCase):
                     artifact.unlink()
                 self.judge.return_value.update(current_lines=selected, quoted_text=quote, current_path=path)
                 self.assertEqual(self.run_recovery()['disposition'], 'unresolved')
+        self.prepare.assert_not_called()
+
+    def test_cached_unresolved_refuses_unavailable_or_invalid_context(self):
+        self.retain_old_unresolved()
+        evidence = self.root / 'state/repair/crq-job/recovery-evidence.json'
+        original = evidence.read_text()
+        evidence.unlink()
+        with self.assertRaisesRegex(ValueError, 'retained recovery requires inspection'):
+            self.run_recovery()
+        evidence.write_text('{invalid json')
+        with self.assertRaisesRegex(ValueError, 'retained recovery requires inspection'):
+            self.run_recovery()
+        evidence.write_text(original)
+        read_text = Path.read_text
+
+        def unreadable(path, *args, **kwargs):
+            if path == evidence:
+                raise PermissionError('unreadable')
+            return read_text(path, *args, **kwargs)
+
+        with mock.patch.object(Path, 'read_text', unreadable):
+            with self.assertRaisesRegex(ValueError, 'retained recovery requires inspection'):
+                self.run_recovery()
+        self.judge.assert_called_once()
         self.prepare.assert_not_called()
 
     def test_cached_unresolved_rejects_changed_evidence_and_ownership(self):

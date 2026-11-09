@@ -8,6 +8,7 @@ from crq_repair.bounded import check_sha, identity, job_path, source_path
 from runtime_target import DEFAULT_REF
 
 MAX_EVIDENCE = 100_000
+ANCHOR_REFUSAL = 'current anchor could not be verified'
 
 
 def recover(root, config, job_id, scan, judge, prepare):
@@ -104,12 +105,15 @@ def recover(root, config, job_id, scan, judge, prepare):
         saved = json.loads(artifact.read_text())
         old_binding = saved.get('binding')
         replay = (saved.get('state') == 'complete' and saved.get('disposition') == 'unresolved'
-                  and saved.get('reason') == 'current anchor could not be verified'
+                  and saved.get('reason') == ANCHOR_REFUSAL
                   and isinstance(saved.get('report'), dict)
                   and saved['report'].get('stop') == 'ok' and saved['report'].get('verdict') == 'valid')
         if replay and isinstance(old_binding, dict):
             old_tip = check_sha(old_binding.get('source_sha'))
-            old_context = json.loads((directory / 'recovery-evidence.json').read_text())
+            try:
+                old_context = json.loads((directory / 'recovery-evidence.json').read_text())
+            except (OSError, json.JSONDecodeError) as exc:
+                raise ValueError('recovery evidence or source changed; retained recovery requires inspection') from exc
             expected_context = {**context, 'source_sha': old_tip, 'tip': old_tip}
             old_contract = command(['git', 'show', old_tip + ':' + contract_path], cwd=config['clone'])
             same_contract = ((old_contract.returncode == 0) == (contract_result.returncode == 0)
@@ -165,7 +169,7 @@ def recover(root, config, job_id, scan, judge, prepare):
             or report.get('current_path') != path or not valid_span
             or report.get('quoted_text') != '\n'.join(lines[selected[0][0] - 1:selected[0][1]])
             or not isinstance(report.get('reason'), str) or not report['reason'].strip()):
-        saved.update(state='complete', disposition='unresolved', reason='current anchor could not be verified')
+        saved.update(state='complete', disposition='unresolved', reason=ANCHOR_REFUSAL)
         atomic(artifact, saved)
         return saved
     evidence = {'source_sha': tip, 'source_blob_sha': blob, 'finding_sha256': finding_hash,
