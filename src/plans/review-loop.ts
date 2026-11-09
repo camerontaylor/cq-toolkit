@@ -791,7 +791,7 @@ type CommitVerificationFailure =
  */
 const MAX_EVIDENCE_BLOB_BYTES = 2_000_000;
 
-const evidenceFailure = async (
+export const evidenceFailure = async (
   git: GhFn,
   worktreePath: string,
   tip: string,
