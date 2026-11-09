@@ -635,6 +635,37 @@ export function findReusableCycle(
     .find((cycle) => cycle.completion.kind === 'terminal' && cycle.vendorFailure === undefined);
   if (selected === undefined) return null;
   const configured = new Set(input.configuredReviewers ?? ['coderabbit', 'agent']);
+  // A retained matching enrollment can later authorize debt readiness. Do not
+  // reuse an agent cycle that readiness would reject for missing coverage;
+  // queue verification remains readiness's responsibility.
+  const enrollment =
+    input.debtValid === undefined && selected.reviewer.startsWith('agent:')
+      ? readCurrentEnrollment(
+          { version: DEV_LEDGER_VERSION, branch: 'reuse-selection', records: [...records] },
+          { head: input.head, base: input.base, dirtySha256: input.dirtySha256 },
+          input.target,
+        )
+      : undefined;
+  const debtCandidate =
+    enrollment?.kind === 'enrollment' &&
+    configured.has('coderabbit') &&
+    configured.has('agent') &&
+    [...configured].every((reviewer) => reviewer === 'coderabbit' || reviewer === 'agent') &&
+    hasPersistedVendorOutageOrigin(
+      enrollment.enrollment.snapshot.originAttempt,
+      records.filter((record): record is DevCycleRecord => record.kind === 'cycle'),
+    );
+  const coverageRequired = input.debtValid ?? debtCandidate;
+  if (
+    coverageRequired &&
+    selected.reviewer.startsWith('agent:') &&
+    (!selected.agentCoverage ||
+      !isCoverageV2Complete(selected.agentCoverage) ||
+      selected.agentCoverage.scope !== 'full' ||
+      selected.agentCoverage.head !== input.head ||
+      selected.agentCoverage.base !== input.base)
+  )
+    return null;
   const laterCycles = records
     .slice(records.indexOf(selected) + 1)
     .filter((record): record is DevCycleRecord => record.kind === 'cycle');

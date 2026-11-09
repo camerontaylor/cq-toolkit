@@ -63,6 +63,56 @@ test('missing fresh engine proof blocks otherwise authorized debt readiness', as
   if (!missingProof.ready)
     expect(missingProof.gaps.map((gap) => gap.field)).toEqual(['agent-coverage']);
 });
+test('reuse dispatches a fresh agent when a matching debt candidate lacks coverage', async () => {
+  const f = await fixture();
+  const request = {
+    ...f.identity,
+    reviewer: 'agent:reviewer',
+    target: 'main',
+    scope: 'full' as const,
+  };
+  expect(findReusableCycle(f.ledger.records, request)?.cycle.cycleId).toBe(f.agent.cycleId);
+  delete f.agent.agentCoverage;
+  expect(findReusableCycle(f.ledger.records, request)).toBeNull();
+  expect(findReusableCycle([f.agent], request)?.cycle.cycleId).toBe(f.agent.cycleId);
+});
+test('a retained debt candidate cannot hide a later vendor cycle at a different head', async () => {
+  const f = await fixture();
+  f.ledger.records.push(
+    cycleRecord({ ...f.identity, cycleId: 'c003-vendor', head: 'd'.repeat(40) }),
+  );
+  const request = {
+    ...f.identity,
+    reviewer: 'agent:reviewer',
+    target: 'main',
+    scope: 'full' as const,
+  };
+  expect(findReusableCycle(f.ledger.records, request)).toBeNull();
+  expect(findReusableCycle(f.ledger.records, { ...request, debtValid: true })?.cycle.cycleId).toBe(
+    f.agent.cycleId,
+  );
+});
+test('reuse only reads debt lineage when agent debt inference needs it', async () => {
+  const f = await fixture();
+  const missing = { ...f.debt.reference, requestId: 'missing-predecessor' };
+  const records = f.ledger.records.map((record) =>
+    record.kind === 'vendor-debt'
+      ? { ...record, debt: { ...record.debt, predecessor: missing } }
+      : record,
+  );
+  records.push(cycleRecord({ ...f.identity, cycleId: 'c003-vendor' }));
+  const request = { ...f.identity, target: 'main', scope: 'full' as const };
+  expect(findReusableCycle(records, { ...request, reviewer: 'coderabbit' })?.cycle.cycleId).toBe(
+    'c003-vendor',
+  );
+  expect(
+    findReusableCycle(records, { ...request, reviewer: 'agent:reviewer', debtValid: false })?.cycle
+      .cycleId,
+  ).toBe(f.agent.cycleId);
+  expect(() => findReusableCycle(records, { ...request, reviewer: 'agent:reviewer' })).toThrow(
+    'lineage is missing',
+  );
+});
 test('fresh engine proof cannot replace authorized current vendor debt', async () => {
   const f = await fixture();
   expect(f.assemble().ready).toBe(true);
