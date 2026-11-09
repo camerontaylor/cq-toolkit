@@ -587,6 +587,31 @@ class RepairDrainTest(unittest.TestCase):
         repair_tick.harvest(c, self.queue, item)
         self.assertFalse(wt.exists())
 
+    def test_unchanged_contract_verifies_and_preserves_source_evidence(self):
+        job_id = 'crq-run1-F1'
+        self.job(job_id, 'pr1-merged', 'run1', 'src/kept.ts')
+        job = bounded.drain_job(self.root, self.config, self.queue, job_id)[1]
+        wt = self.worktree('crq-repair-pr1-merged-' + job_id)
+        report = {'stop': 'ok', 'changed': False, 'disposition': 'unchanged_with_reason',
+                  'summary': 'No defect in pinned code', 'evidence': [{'path': 'src/kept.ts', 'line': 1}]}
+        with mock.patch.object(service, 'blocked', return_value=False), \
+             mock.patch.object(service, 'dispatch', return_value=report) as dispatch:
+            result = service.process(self.config, job, wt)
+        self.assertEqual(result['verdict'], 'NOT-FIXED')
+        self.assertEqual(result['unchanged_evidence'][0]['target'], self.pin)
+        self.assertTrue(result['unchanged_evidence'][0]['quoted_text'])
+        dispatch.assert_called_once()
+
+    def test_unchanged_evidence_projects_to_dismissed(self):
+        c = SimpleNamespace(iso=lambda: 'now')
+        evidence = [{'path': 'src/kept.ts', 'line': 1, 'target': self.pin, 'quoted_text': 'one'}]
+        with mock.patch.object(repair_tick, 'finding_inbox') as inbox:
+            repair_tick.mark_finding_outcome(c, {'job': 'j', 'canonical_finding_id': 'f'},
+                {'verdict': 'NOT-FIXED', 'reason': 'No defect', 'unchanged_evidence': evidence})
+        call = inbox.return_value.repair_outcome.call_args
+        self.assertEqual(call.args[2], 'dismissed')
+        self.assertEqual(call.kwargs['source_evidence'], evidence)
+
     def test_process_captures_terminal_tree_for_later_harvest_cleanup(self):
         item = self.queue['items'][0]
         record = item['repair_runs']['run1']

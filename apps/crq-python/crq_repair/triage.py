@@ -55,11 +55,23 @@ def context(repo, row, tip):
             'history': repo.git('log', '-n', '40', '--format=%H %s', row['target'] + '..' + tip, '--', finding['path']).decode(errors='replace')[:16000]}
 
 
+def missing_evidence(reason):
+    """Legacy unsure reasons only; operational failures must never enter repair."""
+    return (isinstance(reason, str)
+            and not reason.startswith('fixer investigation:')
+            and not re.search(r'secret|scan|dispatch|invalid|budget|timeout|timed out|provider|rate.limit', reason, re.I)
+            and bool(re.search(r'(?:missing|insufficient|lack|need|unavailable|not provided).*?(?:source|context|evidence)|(?:source|context|evidence).*?(?:missing|insufficient|unavailable|not provided)', reason, re.I)))
+
+
 def decision(repo, row, tip, report):
     reason = report.get('reason')
     if not isinstance(reason, str) or not reason.strip():
         return 'needs-human', 'judge supplied no reason', {}
     verdict = report.get('verdict')
+    if verdict == 'unsure' and missing_evidence(reason):
+        # Admission to investigation, not a substantive validity judgment.
+        # Inbox.triage still verifies the carried anchor before delivery.
+        return 'confirmed', 'fixer investigation: ' + reason, {}
     if verdict in ('fixed', 'superseded'):
         commit = report.get('fixing_commit')
         try:
@@ -123,9 +135,18 @@ def phase(inbox, repo, tip, judge, transport, at, *, maximum=6, seconds=600, dry
         if anchor.get('intervals') and anchor.get('blob') and row['status'] not in ('already-fixed', 'fixed', 'dismissed', 'superseded'):
             seen.setdefault(key, f['id'])
         prior = events.get(row.get('previous_event_id'), {}).get('payload', {})
+        investigate = (row['status'] == 'needs-human'
+                       and str(prior.get('actor', '')).startswith('crq-triage/')
+                       and missing_evidence(prior.get('evidence', {}).get('reason')))
+        if investigate and (len(plans) >= maximum or time.monotonic() >= deadline):
+            continue
+        if investigate and len(plans) < maximum and time.monotonic() < deadline:
+            plans.append((row, 'confirmed', 'fixer investigation: ' + prior['evidence']['reason'], {}))
+            continue
         escalation = (row['status'] == 'needs-human'
                       and str(prior.get('actor', '')).startswith('crq-triage/')
-                      and not str(prior.get('actor', '')).startswith('crq-triage/escalation/'))
+                      and not str(prior.get('actor', '')).startswith('crq-triage/escalation/')
+                      and not str(prior.get('evidence', {}).get('reason', '')).startswith('fixer investigation:'))
         if row['status'] not in PENDING and not escalation and not (row['status'] == 'confirmed' and row.get('target_current') != tip):
             continue
         if escalation:
@@ -150,7 +171,7 @@ def phase(inbox, repo, tip, judge, transport, at, *, maximum=6, seconds=600, dry
     stopped_report = {}
     context_errors = []
     for row in candidates:
-        if judged >= maximum:
+        if judged + sum(reason.startswith('fixer investigation:') for _, _, reason, _ in plans) >= maximum:
             break
         if time.monotonic() >= deadline:
             stopped = 'deadline'; break
