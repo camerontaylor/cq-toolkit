@@ -1,7 +1,7 @@
 // Split provenance: test/harness/mcp-server.test.ts was split into subject
 // files; this one covers lifecycle hardening: a reused in-flight id is
 // refused with -32600, and an output error (EPIPE from a dead peer) ends the
-// loop like EOF.
+// loop like EOF. Pending response writes stay protected after the loop ends.
 // Siblings: mcp-server.helpers.ts (shared fixtures) and the other
 // mcp-server.*.test.ts files in this directory.
 import { PassThrough, Writable } from 'node:stream';
