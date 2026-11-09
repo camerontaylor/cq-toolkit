@@ -59,8 +59,8 @@ Completed reviews count only after terminal success.
 Secret scanning happens before upload; credits are never enabled automatically.
 
 `crq-repair.path` and a ten-minute fallback timer activate `crq_repair.py`. With
-no arguments it drains the inbox under `service.lock`, critical/major items
-before minor-only items, oldest first within each class. Within an item,
+no arguments it drains the inbox under `service.lock`, items with pending runnable
+critical/major work before items with none, oldest first within each class. Within an item,
 critical/major findings precede minors. Minor jobs require a lowercase 64-character hexadecimal `canonical_finding_id`
 and a matching delivered triage receipt; ordinary minor, trivial, info and none jobs are skipped. It
 owns `state/repair/`, uses one worktree per item and serial findings within that
