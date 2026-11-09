@@ -1,0 +1,262 @@
+{
+  "schema": "cq.crq-group-p-vector/v1",
+  "family": "time",
+  "cases": [
+    {
+      "name": "zulu-seconds",
+      "source": "queue_time.parse_utc",
+      "input": {
+        "value": "2026-11-08T00:00:00Z"
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "utc": "2026-11-08T00:00:00.000000Z"
+        }
+      }
+    },
+    {
+      "name": "zulu-fraction",
+      "source": "queue_time.parse_utc",
+      "input": {
+        "value": "2026-11-08T00:00:00.500Z"
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "utc": "2026-11-08T00:00:00.500000Z"
+        }
+      }
+    },
+    {
+      "name": "numeric-offset",
+      "source": "queue_time.parse_utc",
+      "input": {
+        "value": "2026-11-08T10:00:00.500+10:00"
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "utc": "2026-11-08T00:00:00.500000Z"
+        }
+      }
+    },
+    {
+      "name": "naive-means-utc",
+      "source": "queue_time.parse_utc",
+      "input": {
+        "value": "2026-11-08T00:00:00.500"
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "utc": "2026-11-08T00:00:00.500000Z"
+        }
+      }
+    },
+    {
+      "name": "compact-run-suffix",
+      "source": "queue_time.parse_utc",
+      "input": {
+        "value": "20261108T000000.500Z"
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "utc": "2026-11-08T00:00:00.500000Z"
+        }
+      }
+    },
+    {
+      "name": "negative-offset",
+      "source": "queue_time.parse_utc",
+      "input": {
+        "value": "2026-11-07T19:00:00-05:00"
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "utc": "2026-11-08T00:00:00.000000Z"
+        }
+      }
+    },
+    {
+      "name": "microseconds",
+      "source": "queue_time.parse_utc",
+      "input": {
+        "value": "2026-11-08T00:00:00.123456Z"
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "utc": "2026-11-08T00:00:00.123456Z"
+        }
+      }
+    },
+    {
+      "name": "non-string",
+      "source": "queue_time.parse_utc",
+      "input": {
+        "value": 123
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "utc": null
+        }
+      }
+    },
+    {
+      "name": "empty",
+      "source": "queue_time.parse_utc",
+      "input": {
+        "value": ""
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "utc": null
+        }
+      }
+    },
+    {
+      "name": "garbage",
+      "source": "queue_time.parse_utc",
+      "input": {
+        "value": "garbage"
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "utc": null
+        }
+      }
+    },
+    {
+      "name": "impossible-month",
+      "source": "queue_time.parse_utc",
+      "input": {
+        "value": "2026-13-08T00:00:00Z"
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "utc": null
+        }
+      }
+    },
+    {
+      "name": "offset-overflow",
+      "source": "queue_time.parse_utc",
+      "input": {
+        "value": "0001-01-01T00:00:00+10:00"
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "utc": null
+        }
+      }
+    },
+    {
+      "name": "iso-exact-seconds",
+      "source": "crq.parse_iso",
+      "input": {
+        "value": "2026-11-08T00:00:00Z"
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "utc": "2026-11-08T00:00:00.000000Z"
+        }
+      }
+    },
+    {
+      "name": "iso-strips-zero-milliseconds",
+      "source": "crq.parse_iso",
+      "input": {
+        "value": "2026-11-08T00:00:00.000Z"
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "utc": "2026-11-08T00:00:00.000000Z"
+        }
+      }
+    },
+    {
+      "name": "iso-nonzero-fraction-raises",
+      "source": "crq.parse_iso",
+      "input": {
+        "value": "2026-11-08T00:00:00.500Z"
+      },
+      "expect": {
+        "ok": false,
+        "error": "ValueError",
+        "message": "time data '2026-11-08T00:00:00.Z' does not match format '%Y-%m-%dT%H:%M:%SZ'"
+      }
+    },
+    {
+      "name": "iso-six-digit-fraction-raises",
+      "source": "crq.parse_iso",
+      "input": {
+        "value": "2026-11-08T00:00:00.000000Z"
+      },
+      "expect": {
+        "ok": false,
+        "error": "ValueError",
+        "message": "time data '2026-11-08T00:00:000Z' does not match format '%Y-%m-%dT%H:%M:%SZ'"
+      }
+    },
+    {
+      "name": "iso-offset-raises",
+      "source": "crq.parse_iso",
+      "input": {
+        "value": "2026-11-08T10:00:00+10:00"
+      },
+      "expect": {
+        "ok": false,
+        "error": "ValueError",
+        "message": "time data '2026-11-08T10:00:00+Z' does not match format '%Y-%m-%dT%H:%M:%SZ'"
+      }
+    },
+    {
+      "name": "iso-date-only-raises",
+      "source": "crq.parse_iso",
+      "input": {
+        "value": "2026-11-08"
+      },
+      "expect": {
+        "ok": false,
+        "error": "ValueError",
+        "message": "time data '2026-11-08Z' does not match format '%Y-%m-%dT%H:%M:%SZ'"
+      }
+    },
+    {
+      "name": "iso-none-is-none",
+      "source": "crq.parse_iso",
+      "input": {
+        "value": null
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "utc": null
+        }
+      }
+    },
+    {
+      "name": "iso-empty-is-none",
+      "source": "crq.parse_iso",
+      "input": {
+        "value": ""
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "utc": null
+        }
+      }
+    }
+  ]
+}

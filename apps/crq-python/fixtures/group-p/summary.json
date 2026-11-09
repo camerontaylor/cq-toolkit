@@ -1,0 +1,535 @@
+{
+  "schema": "cq.crq-group-p-vector/v1",
+  "family": "summary",
+  "cases": [
+    {
+      "name": "mixed-queue-renders-stable-summary",
+      "source": "status_summary.summarize",
+      "input": {
+        "status": {
+          "generated_at": "2026-11-09T11:55:00Z"
+        },
+        "queue": {
+          "items": [
+            {
+              "id": "open-1",
+              "repo": "camerontaylor/cq-toolkit",
+              "pr": 101,
+              "kind": "open",
+              "state": "pending",
+              "order": 1,
+              "cycles": [],
+              "created_at": "2026-11-09T09:00:00Z"
+            },
+            {
+              "id": "delta-1",
+              "repo": "camerontaylor/cq-toolkit",
+              "pr": 102,
+              "kind": "delta",
+              "state": "pending",
+              "order": 2,
+              "cycles": [],
+              "since": "2026-11-09T08:00:00Z"
+            },
+            {
+              "id": "merged-1",
+              "repo": "camerontaylor/cq-toolkit",
+              "pr": 103,
+              "kind": "merged",
+              "state": "pending",
+              "order": 3,
+              "cycles": []
+            },
+            {
+              "id": "current-1",
+              "repo": "camerontaylor/cq-toolkit",
+              "pr": 104,
+              "kind": "merged-current",
+              "state": "pending",
+              "order": 4,
+              "cycles": []
+            },
+            {
+              "id": "review-1",
+              "repo": "camerontaylor/other",
+              "pr": 7,
+              "kind": "local-review",
+              "state": "pending",
+              "order": 5,
+              "cycles": [],
+              "generation": 2,
+              "repeat_requested": true,
+              "created_at": "2026-11-09T08:30:00Z"
+            },
+            {
+              "id": "promotion-1",
+              "repo": "camerontaylor/cq-toolkit",
+              "pr": 105,
+              "kind": "promotion",
+              "state": "pending",
+              "order": 6,
+              "cycles": []
+            }
+          ],
+          "starts": [
+            "2026-11-09T11:30:00Z",
+            "2026-11-09T10:00:00Z"
+          ],
+          "paused": false,
+          "cooldown_until": "2026-11-09T12:15:00Z",
+          "last_tick": "2026-11-09T11:50:00Z",
+          "usage": {
+            "limit": 6
+          },
+          "merged_watermark": "2026-11-08T00:00:00Z",
+          "merged_reconcile": {
+            "after": "2026-11-08T00:00:00Z",
+            "before": "2026-11-09T00:00:00Z",
+            "complete": true,
+            "pages_read": 4,
+            "duplicates_seen": 1,
+            "inventory_digest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+          },
+          "push_discovery": {
+            "camerontaylor/other": {
+              "reviewed_tip": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }
+          }
+        },
+        "heartbeat": {
+          "last_tick": "2026-11-09T11:50:00Z"
+        },
+        "config": {
+          "repo": "camerontaylor/cq-toolkit",
+          "max_starts_per_hour": 5,
+          "local_review_aging_minutes": 60,
+          "repos": [
+            {
+              "repo": "camerontaylor/other",
+              "rank_tier": 3
+            }
+          ]
+        },
+        "events": [
+          {
+            "at": "2026-11-09T10:00:00Z",
+            "event": "review_finished",
+            "run": "run-1",
+            "item": "open-1",
+            "outcome": "completed"
+          },
+          {
+            "at": "2026-11-09T10:05:00Z",
+            "event": "review_finished",
+            "run": "run-1",
+            "item": "open-1",
+            "outcome": "completed"
+          },
+          {
+            "at": "2026-11-09T10:10:00Z",
+            "event": "review_finished",
+            "run": "run-2",
+            "item": "merged-1",
+            "outcome": "error"
+          },
+          {
+            "at": "2026-11-09T10:15:00Z",
+            "event": "review_finished",
+            "run": "run-3",
+            "item": "unknown",
+            "outcome": "weird"
+          }
+        ],
+        "now": 1794225600
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "backfill_reserved_slots": 1,
+          "completed_24h_by_work": {
+            "open": 1,
+            "recent_merge": 0,
+            "backfill": 0,
+            "other": 0
+          },
+          "pending_items": [
+            {
+              "repo": "camerontaylor/cq-toolkit",
+              "pr": 101,
+              "title": null,
+              "kind": "open",
+              "band": "interactive",
+              "generation": null,
+              "aging_deadline": null,
+              "reason": null,
+              "approximate_position": 1
+            },
+            {
+              "repo": "camerontaylor/other",
+              "pr": 7,
+              "title": null,
+              "kind": "local-review",
+              "band": "interactive",
+              "generation": 2,
+              "aging_deadline": 1794216600.0,
+              "reason": null,
+              "approximate_position": 2
+            },
+            {
+              "repo": "camerontaylor/cq-toolkit",
+              "pr": 102,
+              "title": null,
+              "kind": "delta",
+              "band": "interactive",
+              "generation": null,
+              "aging_deadline": null,
+              "reason": null,
+              "approximate_position": 3
+            },
+            {
+              "repo": "camerontaylor/cq-toolkit",
+              "pr": 104,
+              "title": null,
+              "kind": "merged-current",
+              "band": "background",
+              "generation": null,
+              "aging_deadline": null,
+              "reason": null,
+              "approximate_position": 4
+            },
+            {
+              "repo": "camerontaylor/cq-toolkit",
+              "pr": 103,
+              "title": null,
+              "kind": "merged",
+              "band": "background",
+              "generation": null,
+              "aging_deadline": null,
+              "reason": null,
+              "approximate_position": 5
+            }
+          ],
+          "merged_current": {
+            "natural_discovery": {},
+            "discovery": {
+              "after": "2026-11-08T00:00:00Z",
+              "before": "2026-11-09T00:00:00Z",
+              "complete": true,
+              "duplicates_seen": 1,
+              "inventory_digest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+              "pages_read": 4
+            },
+            "watermark": "2026-11-08T00:00:00Z",
+            "receipts": {
+              "pending": 1,
+              "reviewing": 0,
+              "blocked": 0,
+              "unverified": 0,
+              "proven_terminal": 0,
+              "no_current_code": 0,
+              "partial_scope": 0,
+              "unsupported": 0
+            },
+            "path_exclusions": {},
+            "captured_targets": [],
+            "additional_captured_targets": 0,
+            "coverage_at_today_target": "unverified",
+            "legacy_done_is_review_proof": false
+          },
+          "last_tick": "2026-11-09T11:50:00Z",
+          "status_as_of": "2026-11-09T11:55:00Z",
+          "paused": false,
+          "cooldown_until": "2026-11-09T12:15:00Z",
+          "starts_60m": 1,
+          "starts_cap": 6,
+          "in_flight": 0,
+          "outcomes_24h": {
+            "completed": 1,
+            "interrupted": 0,
+            "error": 1
+          },
+          "other_outcomes_24h": 1,
+          "backlog": {
+            "open": 1,
+            "delta": 1,
+            "merged": 1,
+            "coverage": 0,
+            "merged-current": 1,
+            "backfill": 0
+          },
+          "repos": {
+            "camerontaylor/other": {
+              "pending": 1,
+              "reviewing": 0,
+              "blocked": 0,
+              "other": 0,
+              "reviewed_tip": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "invalid-last-tick-is-refused",
+      "source": "status_summary.summarize",
+      "input": {
+        "status": {
+          "generated_at": "2026-11-09T11:55:00Z"
+        },
+        "queue": {
+          "items": [
+            {
+              "id": "open-1",
+              "repo": "camerontaylor/cq-toolkit",
+              "pr": 101,
+              "kind": "open",
+              "state": "pending",
+              "order": 1,
+              "cycles": [],
+              "created_at": "2026-11-09T09:00:00Z"
+            },
+            {
+              "id": "delta-1",
+              "repo": "camerontaylor/cq-toolkit",
+              "pr": 102,
+              "kind": "delta",
+              "state": "pending",
+              "order": 2,
+              "cycles": [],
+              "since": "2026-11-09T08:00:00Z"
+            },
+            {
+              "id": "merged-1",
+              "repo": "camerontaylor/cq-toolkit",
+              "pr": 103,
+              "kind": "merged",
+              "state": "pending",
+              "order": 3,
+              "cycles": []
+            },
+            {
+              "id": "current-1",
+              "repo": "camerontaylor/cq-toolkit",
+              "pr": 104,
+              "kind": "merged-current",
+              "state": "pending",
+              "order": 4,
+              "cycles": []
+            },
+            {
+              "id": "review-1",
+              "repo": "camerontaylor/other",
+              "pr": 7,
+              "kind": "local-review",
+              "state": "pending",
+              "order": 5,
+              "cycles": [],
+              "generation": 2,
+              "repeat_requested": true,
+              "created_at": "2026-11-09T08:30:00Z"
+            },
+            {
+              "id": "promotion-1",
+              "repo": "camerontaylor/cq-toolkit",
+              "pr": 105,
+              "kind": "promotion",
+              "state": "pending",
+              "order": 6,
+              "cycles": []
+            }
+          ],
+          "starts": [
+            "2026-11-09T11:30:00Z",
+            "2026-11-09T10:00:00Z"
+          ],
+          "paused": false,
+          "cooldown_until": "2026-11-09T12:15:00Z",
+          "last_tick": "2026-11-09T11:50:00Z",
+          "usage": {
+            "limit": 6
+          },
+          "merged_watermark": "2026-11-08T00:00:00Z",
+          "merged_reconcile": {
+            "after": "2026-11-08T00:00:00Z",
+            "before": "2026-11-09T00:00:00Z",
+            "complete": true,
+            "pages_read": 4,
+            "duplicates_seen": 1,
+            "inventory_digest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+          },
+          "push_discovery": {
+            "camerontaylor/other": {
+              "reviewed_tip": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }
+          }
+        },
+        "heartbeat": {
+          "last_tick": "not-a-timestamp"
+        },
+        "config": {
+          "repo": "camerontaylor/cq-toolkit",
+          "max_starts_per_hour": 5,
+          "local_review_aging_minutes": 60,
+          "repos": [
+            {
+              "repo": "camerontaylor/other",
+              "rank_tier": 3
+            }
+          ]
+        },
+        "events": [
+          {
+            "at": "2026-11-09T10:00:00Z",
+            "event": "review_finished",
+            "run": "run-1",
+            "item": "open-1",
+            "outcome": "completed"
+          },
+          {
+            "at": "2026-11-09T10:05:00Z",
+            "event": "review_finished",
+            "run": "run-1",
+            "item": "open-1",
+            "outcome": "completed"
+          },
+          {
+            "at": "2026-11-09T10:10:00Z",
+            "event": "review_finished",
+            "run": "run-2",
+            "item": "merged-1",
+            "outcome": "error"
+          },
+          {
+            "at": "2026-11-09T10:15:00Z",
+            "event": "review_finished",
+            "run": "run-3",
+            "item": "unknown",
+            "outcome": "weird"
+          }
+        ],
+        "now": 1794225600
+      },
+      "expect": {
+        "ok": false,
+        "error": "ValueError",
+        "message": "invalid last_tick"
+      }
+    },
+    {
+      "name": "historical-promotion-items-stay-out-of-summary",
+      "source": "status_summary.summarize",
+      "input": {
+        "status": {
+          "generated_at": "2026-11-09T11:55:00Z"
+        },
+        "queue": {
+          "items": [
+            {
+              "id": "promotion-done",
+              "kind": "promotion",
+              "state": "done",
+              "order": 0,
+              "cycles": []
+            },
+            {
+              "id": "promotion-promoting",
+              "kind": "promotion",
+              "state": "promoting",
+              "order": 1,
+              "cycles": []
+            },
+            {
+              "id": "open-1",
+              "repo": "example/primary",
+              "pr": 101,
+              "kind": "open",
+              "state": "pending",
+              "order": 2,
+              "cycles": []
+            }
+          ],
+          "starts": [],
+          "paused": false,
+          "last_tick": "2026-11-09T11:50:00Z"
+        },
+        "heartbeat": {
+          "last_tick": "2026-11-09T11:50:00Z"
+        },
+        "config": {
+          "repo": "example/primary",
+          "max_starts_per_hour": 5
+        },
+        "events": [],
+        "now": 1794225600
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "backfill_reserved_slots": 1,
+          "completed_24h_by_work": {
+            "open": 0,
+            "recent_merge": 0,
+            "backfill": 0,
+            "other": 0
+          },
+          "pending_items": [
+            {
+              "repo": "example/primary",
+              "pr": 101,
+              "title": null,
+              "kind": "open",
+              "band": "interactive",
+              "generation": null,
+              "aging_deadline": null,
+              "reason": null,
+              "approximate_position": 1
+            }
+          ],
+          "merged_current": {
+            "natural_discovery": {},
+            "discovery": {},
+            "watermark": null,
+            "receipts": {
+              "pending": 0,
+              "reviewing": 0,
+              "blocked": 0,
+              "unverified": 0,
+              "proven_terminal": 0,
+              "no_current_code": 0,
+              "partial_scope": 0,
+              "unsupported": 0
+            },
+            "path_exclusions": {},
+            "captured_targets": [],
+            "additional_captured_targets": 0,
+            "coverage_at_today_target": "unverified",
+            "legacy_done_is_review_proof": false
+          },
+          "last_tick": "2026-11-09T11:50:00Z",
+          "status_as_of": "2026-11-09T11:55:00Z",
+          "paused": false,
+          "cooldown_until": null,
+          "starts_60m": 0,
+          "starts_cap": 5,
+          "in_flight": 0,
+          "outcomes_24h": {
+            "completed": 0,
+            "interrupted": 0,
+            "error": 0
+          },
+          "other_outcomes_24h": 0,
+          "backlog": {
+            "open": 1,
+            "delta": 0,
+            "merged": 0,
+            "coverage": 0,
+            "merged-current": 0,
+            "backfill": 0
+          },
+          "repos": {}
+        }
+      },
+      "note": "Ceres retains 70 historical promotion items; none may appear as pending scheduling work or backlog"
+    }
+  ]
+}

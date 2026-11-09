@@ -1,0 +1,194 @@
+{
+  "schema": "cq.crq-group-p-vector/v1",
+  "family": "queue-bytes",
+  "cases": [
+    {
+      "name": "insertion-order-is-preserved",
+      "source": "crq_repair.atomic",
+      "input": {
+        "value": {
+          "z": 1,
+          "a": 2,
+          "m": {
+            "b": 1,
+            "a": 2
+          }
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "text": "{\n  \"z\": 1,\n  \"a\": 2,\n  \"m\": {\n    \"b\": 1,\n    \"a\": 2\n  }\n}\n",
+          "sha256": "026228e9c616088910b6ae90eca73ff7c5e65958b24e87adb0d89b87f249edaf"
+        }
+      }
+    },
+    {
+      "name": "ascii-escaping-is-the-default",
+      "source": "crq_repair.atomic",
+      "input": {
+        "value": {
+          "emoji": "\ud83d\ude00",
+          "unicode": "\u96ea",
+          "control": "\u0001"
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "text": "{\n  \"emoji\": \"\\ud83d\\ude00\",\n  \"unicode\": \"\\u96ea\",\n  \"control\": \"\\u0001\"\n}\n",
+          "sha256": "24407cfe4fc937f41a75434c2322a382ab74cde9105f5375ff7d36b56742a9ad"
+        }
+      }
+    },
+    {
+      "name": "python-float-repr-is-preserved",
+      "source": "crq_repair.atomic",
+      "input": {
+        "value": {
+          "one": 1.0,
+          "tenth": 0.1,
+          "negative_zero": -0.0,
+          "exponent": 1e+20
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "text": "{\n  \"one\": 1.0,\n  \"tenth\": 0.1,\n  \"negative_zero\": -0.0,\n  \"exponent\": 1e+20\n}\n",
+          "sha256": "94064e4ea287edd7a9cfdd9f96a704218ed84292f51f0f9da7217e80fbf6306a"
+        }
+      }
+    },
+    {
+      "name": "large-integers-are-written-in-full",
+      "source": "crq_repair.atomic",
+      "input": {
+        "value": {
+          "safe": 9007199254740991,
+          "wide": 9223372036854775808
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "text": "{\n  \"safe\": 9007199254740991,\n  \"wide\": 9223372036854775808\n}\n",
+          "sha256": "cbdf40c92135fbe4a8e49f0207476c2d885b117e788ff2ab7e3d0fcb182b160c"
+        }
+      }
+    },
+    {
+      "name": "empty-containers-and-scalars",
+      "source": "crq_repair.atomic",
+      "input": {
+        "value": {
+          "array": [],
+          "object": {},
+          "none": null,
+          "false": false
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "text": "{\n  \"array\": [],\n  \"object\": {},\n  \"none\": null,\n  \"false\": false\n}\n",
+          "sha256": "1a9bf458323ce65d98770c04aa6757ab57dfe690e0b7e90ef806a3cb211c2fff"
+        }
+      }
+    },
+    {
+      "name": "realistic-queue-shape",
+      "source": "crq_repair.atomic",
+      "input": {
+        "value": {
+          "created_at": "2026-11-09T00:00:00Z",
+          "items": [
+            {
+              "id": "open-101",
+              "pr": 101,
+              "kind": "open",
+              "state": "pending",
+              "order": 1,
+              "cycles": [],
+              "notes": [],
+              "repair_runs": {}
+            }
+          ],
+          "starts": [
+            "2026-11-09T11:30:00Z"
+          ],
+          "paused": false,
+          "last_tick": "2026-11-09T11:50:00Z",
+          "pause_reason": null,
+          "cooldown_until": "2026-11-09T12:15:00Z",
+          "rl_backoff_min": 15
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "text": "{\n  \"created_at\": \"2026-11-09T00:00:00Z\",\n  \"items\": [\n    {\n      \"id\": \"open-101\",\n      \"pr\": 101,\n      \"kind\": \"open\",\n      \"state\": \"pending\",\n      \"order\": 1,\n      \"cycles\": [],\n      \"notes\": [],\n      \"repair_runs\": {}\n    }\n  ],\n  \"starts\": [\n    \"2026-11-09T11:30:00Z\"\n  ],\n  \"paused\": false,\n  \"last_tick\": \"2026-11-09T11:50:00Z\",\n  \"pause_reason\": null,\n  \"cooldown_until\": \"2026-11-09T12:15:00Z\",\n  \"rl_backoff_min\": 15\n}\n",
+          "sha256": "2bee671d627369a731c9edcf55bfe2f99c0e5d7cfbb80161a1e1d54cca6c75e5"
+        }
+      }
+    },
+    {
+      "name": "round-trip-keeps-python-formatted-text",
+      "source": "crq_repair.atomic",
+      "input": {
+        "raw": "{\n  \"created_at\": \"2026-11-09T00:00:00Z\",\n  \"items\": [\n    {\n      \"id\": \"open-101\",\n      \"pr\": 101,\n      \"kind\": \"open\",\n      \"state\": \"pending\",\n      \"order\": 1,\n      \"cycles\": [],\n      \"notes\": [],\n      \"repair_runs\": {}\n    }\n  ],\n  \"starts\": [\n    \"2026-11-09T11:30:00Z\"\n  ],\n  \"paused\": false,\n  \"last_tick\": \"2026-11-09T11:50:00Z\",\n  \"pause_reason\": null,\n  \"cooldown_until\": \"2026-11-09T12:15:00Z\",\n  \"rl_backoff_min\": 15\n}\n"
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "text": "{\n  \"created_at\": \"2026-11-09T00:00:00Z\",\n  \"items\": [\n    {\n      \"id\": \"open-101\",\n      \"pr\": 101,\n      \"kind\": \"open\",\n      \"state\": \"pending\",\n      \"order\": 1,\n      \"cycles\": [],\n      \"notes\": [],\n      \"repair_runs\": {}\n    }\n  ],\n  \"starts\": [\n    \"2026-11-09T11:30:00Z\"\n  ],\n  \"paused\": false,\n  \"last_tick\": \"2026-11-09T11:50:00Z\",\n  \"pause_reason\": null,\n  \"cooldown_until\": \"2026-11-09T12:15:00Z\",\n  \"rl_backoff_min\": 15\n}\n",
+          "sha256": "2bee671d627369a731c9edcf55bfe2f99c0e5d7cfbb80161a1e1d54cca6c75e5"
+        }
+      }
+    },
+    {
+      "name": "round-trip-normalizes-compact-input",
+      "source": "crq_repair.atomic",
+      "input": {
+        "raw": "{\"b\":1,\"a\":[1,2]}\n"
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "text": "{\n  \"b\": 1,\n  \"a\": [\n    1,\n    2\n  ]\n}\n",
+          "sha256": "bf99a6ab52366291d6aad828165d64bb9288f7a37bf30e7b6ae1f053100f28f0"
+        }
+      }
+    },
+    {
+      "name": "lone-surrogate-is-escaped",
+      "source": "crq_repair.atomic",
+      "input": {
+        "value": {
+          "value": "\ud800"
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "text": "{\n  \"value\": \"\\ud800\"\n}\n",
+          "sha256": "a0ff48442c2fc6923147607c996ef39bc3c6e70c9bb9f82a79b7b1e4a2f0cb85"
+        }
+      }
+    },
+    {
+      "name": "empty-object",
+      "source": "crq_repair.atomic",
+      "input": {
+        "value": {}
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "text": "{}\n",
+          "sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356"
+        }
+      }
+    }
+  ]
+}

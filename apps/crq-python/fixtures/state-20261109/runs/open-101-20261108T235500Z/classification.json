@@ -1,0 +1,22 @@
+{
+  "bad_lines": 0,
+  "counted": true,
+  "events": 3,
+  "exit": 0,
+  "failure_provenance": {
+    "causes": [],
+    "complete": true,
+    "version": 1
+  },
+  "findings": 1,
+  "outcome": "completed",
+  "reviewed_files": 1,
+  "severity_counts": {
+    "critical": 0,
+    "info": 0,
+    "major": 0,
+    "minor": 1,
+    "none": 0,
+    "trivial": 0
+  }
+}

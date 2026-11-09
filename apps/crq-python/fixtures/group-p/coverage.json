@@ -1,0 +1,401 @@
+{
+  "schema": "cq.crq-group-p-vector/v1",
+  "family": "coverage",
+  "cases": [
+    {
+      "name": "observed-window-and-cooldown",
+      "source": "coverage.utilization_digest",
+      "input": {
+        "queue": {
+          "starts": [
+            "2026-11-09T11:00:00Z",
+            "2026-11-08T11:59:00Z",
+            "2026-11-07T11:00:00Z"
+          ],
+          "cooldown_until": "2026-11-09T12:15:00Z"
+        },
+        "ledger": {
+          "schema_version": 1,
+          "paths": {
+            "a.py": {
+              "review_count": 2,
+              "last_reviewed_at": "2026-11-01T00:00:00Z"
+            }
+          },
+          "runs": {},
+          "observations": {
+            "2026-11-09T10:00:00Z": {
+              "started": true,
+              "pending": true,
+              "candidate_exists": true,
+              "blocked_reason": null
+            },
+            "2026-11-09T10:10:00Z": {
+              "started": false,
+              "pending": true,
+              "candidate_exists": true,
+              "blocked_reason": null
+            },
+            "2026-11-09T10:20:00Z": {
+              "started": false,
+              "pending": true,
+              "candidate_exists": false,
+              "blocked_reason": "paused"
+            },
+            "2026-11-07T10:00:00Z": {
+              "started": false,
+              "pending": true,
+              "candidate_exists": true,
+              "blocked_reason": null
+            }
+          }
+        },
+        "now": "2026-11-09T12:00:00Z",
+        "max_starts_per_hour": 5
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "starts_24h": 1,
+          "nominal_cap_24h": 120,
+          "nominal_utilization": 0.008333333333333333,
+          "cooldown_minutes": 15.0,
+          "observed_ticks_24h": 3,
+          "available_start_opportunities_24h": 2,
+          "idle_while_pending_24h": 1,
+          "idle_with_coverage_candidate_24h": 1,
+          "coverage_reviewed_paths": 1
+        }
+      }
+    },
+    {
+      "name": "no-observations-stay-unknown",
+      "source": "coverage.utilization_digest",
+      "input": {
+        "queue": {
+          "starts": []
+        },
+        "ledger": {
+          "schema_version": 1,
+          "paths": {},
+          "runs": {},
+          "observations": {}
+        },
+        "now": "2026-11-09T12:00:00Z",
+        "max_starts_per_hour": 5
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "starts_24h": 0,
+          "nominal_cap_24h": 120,
+          "nominal_utilization": 0.0,
+          "cooldown_minutes": 0,
+          "observed_ticks_24h": 0,
+          "available_start_opportunities_24h": 0,
+          "idle_while_pending_24h": null,
+          "idle_with_coverage_candidate_24h": null,
+          "coverage_reviewed_paths": 0
+        }
+      }
+    },
+    {
+      "name": "expired-cooldown-floors-at-zero",
+      "source": "coverage.utilization_digest",
+      "input": {
+        "queue": {
+          "starts": [],
+          "cooldown_until": "2026-11-09T11:00:00Z"
+        },
+        "ledger": {
+          "schema_version": 1,
+          "paths": {},
+          "runs": {},
+          "observations": {}
+        },
+        "now": "2026-11-09T12:00:00Z",
+        "max_starts_per_hour": 5
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "starts_24h": 0,
+          "nominal_cap_24h": 120,
+          "nominal_utilization": 0.0,
+          "cooldown_minutes": 0,
+          "observed_ticks_24h": 0,
+          "available_start_opportunities_24h": 0,
+          "idle_while_pending_24h": null,
+          "idle_with_coverage_candidate_24h": null,
+          "coverage_reviewed_paths": 0
+        }
+      }
+    },
+    {
+      "name": "non-positive-cap-refused",
+      "source": "coverage.utilization_digest",
+      "input": {
+        "queue": {
+          "starts": [
+            "2026-11-09T11:00:00Z",
+            "2026-11-08T11:59:00Z",
+            "2026-11-07T11:00:00Z"
+          ],
+          "cooldown_until": "2026-11-09T12:15:00Z"
+        },
+        "ledger": {
+          "schema_version": 1,
+          "paths": {},
+          "runs": {},
+          "observations": {}
+        },
+        "now": "2026-11-09T12:00:00Z",
+        "max_starts_per_hour": 0
+      },
+      "expect": {
+        "ok": false,
+        "error": "ValueError",
+        "message": "max_starts_per_hour must be positive"
+      }
+    },
+    {
+      "name": "ordinary-eligible-has-no-coverage-candidate",
+      "source": "coverage.coverage_candidate",
+      "input": {
+        "queue": {
+          "items": [
+            {
+              "id": "merged-1",
+              "pr": 11,
+              "kind": "merged",
+              "state": "done",
+              "merge_commit": "cccccccccccccccccccccccccccccccccccccccc",
+              "order": 3,
+              "measure": {
+                "merge_queue": "dddddddddddddddddddddddddddddddddddddddd",
+                "files": [
+                  {
+                    "path": "src/a.py",
+                    "now": "src/a.py",
+                    "synthetic_added": 2
+                  },
+                  {
+                    "path": "src/a.py",
+                    "now": "src/a.py",
+                    "synthetic_added": 4
+                  },
+                  {
+                    "path": "src/deep/b.py",
+                    "now": "src/deep/b.py",
+                    "synthetic_added": 1
+                  }
+                ]
+              }
+            },
+            {
+              "id": "merged-2",
+              "pr": 12,
+              "kind": "merged",
+              "state": "done",
+              "merge_commit": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+              "order": 4,
+              "measure": {
+                "merge_queue": "dddddddddddddddddddddddddddddddddddddddd",
+                "files": [
+                  {
+                    "path": "lib/c.py",
+                    "now": "lib/c.py",
+                    "synthetic_added": 1
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        "ledger": {
+          "schema_version": 1,
+          "paths": {},
+          "runs": {},
+          "observations": {}
+        },
+        "merge_queue_sha": "dddddddddddddddddddddddddddddddddddddddd",
+        "ordinary_eligible": true,
+        "now": "2026-11-09T12:00:00Z",
+        "max_paths": 8,
+        "min_age_hours": 24,
+        "excluded_paths": []
+      },
+      "expect": {
+        "ok": true,
+        "value": null
+      }
+    },
+    {
+      "name": "oldest-unreviewed-region-is-selected",
+      "source": "coverage.coverage_candidate",
+      "input": {
+        "queue": {
+          "items": [
+            {
+              "id": "merged-1",
+              "pr": 11,
+              "kind": "merged",
+              "state": "done",
+              "merge_commit": "cccccccccccccccccccccccccccccccccccccccc",
+              "order": 3,
+              "measure": {
+                "merge_queue": "dddddddddddddddddddddddddddddddddddddddd",
+                "files": [
+                  {
+                    "path": "src/a.py",
+                    "now": "src/a.py",
+                    "synthetic_added": 2
+                  },
+                  {
+                    "path": "src/a.py",
+                    "now": "src/a.py",
+                    "synthetic_added": 4
+                  },
+                  {
+                    "path": "src/deep/b.py",
+                    "now": "src/deep/b.py",
+                    "synthetic_added": 1
+                  }
+                ]
+              }
+            },
+            {
+              "id": "merged-2",
+              "pr": 12,
+              "kind": "merged",
+              "state": "done",
+              "merge_commit": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+              "order": 4,
+              "measure": {
+                "merge_queue": "dddddddddddddddddddddddddddddddddddddddd",
+                "files": [
+                  {
+                    "path": "lib/c.py",
+                    "now": "lib/c.py",
+                    "synthetic_added": 1
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        "ledger": {
+          "schema_version": 1,
+          "paths": {
+            "src/a.py": {
+              "review_count": 1,
+              "last_reviewed_at": "2026-10-01T00:00:00Z"
+            }
+          },
+          "runs": {},
+          "observations": {}
+        },
+        "merge_queue_sha": "dddddddddddddddddddddddddddddddddddddddd",
+        "ordinary_eligible": false,
+        "now": "2026-11-09T12:00:00Z",
+        "max_paths": 1,
+        "min_age_hours": 24,
+        "excluded_paths": [
+          "lib"
+        ]
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "id": "coverage-74d865f0349c4713",
+          "pr": 12,
+          "kind": "coverage",
+          "tier": 4,
+          "order": 5,
+          "state": "pending",
+          "cycles": [],
+          "attempts": [],
+          "notes": [],
+          "merge_commit": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+          "coverage_source": "merged-2",
+          "coverage_sha": "dddddddddddddddddddddddddddddddddddddddd",
+          "coverage_paths": [
+            "lib/c.py"
+          ],
+          "coverage_region": "lib",
+          "created_at": "2026-11-09T12:00:00Z",
+          "measure": {
+            "merge_queue": "dddddddddddddddddddddddddddddddddddddddd",
+            "synthetic_paths": [
+              "lib/c.py"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "active-coverage-item-blocks-a-second",
+      "source": "coverage.coverage_candidate",
+      "input": {
+        "queue": {
+          "items": [
+            {
+              "id": "coverage-1",
+              "kind": "coverage",
+              "state": "reviewing"
+            }
+          ]
+        },
+        "ledger": {
+          "schema_version": 1,
+          "paths": {},
+          "runs": {},
+          "observations": {}
+        },
+        "merge_queue_sha": "dddddddddddddddddddddddddddddddddddddddd",
+        "ordinary_eligible": false,
+        "now": "2026-11-09T12:00:00Z",
+        "max_paths": 8,
+        "min_age_hours": 24,
+        "excluded_paths": []
+      },
+      "expect": {
+        "ok": true,
+        "value": null
+      }
+    },
+    {
+      "name": "record-opportunity-is-keyed-by-utc-time",
+      "source": "coverage.record_opportunity",
+      "input": {
+        "ledger": {
+          "schema_version": 1,
+          "paths": {},
+          "runs": {},
+          "observations": {}
+        },
+        "now": "2026-11-09T12:00:00Z",
+        "started": false,
+        "pending": true,
+        "candidate_exists": true,
+        "blocked_reason": null
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "schema_version": 1,
+          "paths": {},
+          "runs": {},
+          "observations": {
+            "2026-11-09T12:00:00Z": {
+              "started": false,
+              "pending": true,
+              "candidate_exists": true,
+              "blocked_reason": null
+            }
+          }
+        }
+      }
+    }
+  ]
+}
