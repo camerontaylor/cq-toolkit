@@ -95,9 +95,23 @@ export async function run(
     await mkdir(dir, { recursive: true });
     await writeFile(
       join(dir, `${options.tick}.json`),
-      `${JSON.stringify({ command, mutations: plan.mutations }, null, 2)}\n`,
+      `${JSON.stringify({ command, value: plan.value, mutations: plan.mutations }, null, 2)}\n`,
       { flag: 'wx' },
     );
+    if (
+      typeof plan.value === 'object' &&
+      plan.value !== null &&
+      'complete' in plan.value &&
+      plan.value.complete === false
+    ) {
+      return {
+        artifact: {
+          status: 'indeterminate',
+          detail: 'Shadow plan is incomplete and cannot be used for parity comparison',
+        },
+        exitCode: 1,
+      };
+    }
     return { artifact: { status: 'ok', value: plan.value }, exitCode: 0 };
   } catch (error) {
     return {

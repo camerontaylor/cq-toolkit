@@ -845,6 +845,82 @@ class RepairDrainTest(unittest.TestCase):
         self.assertEqual(bounded.drain_job(self.root, self.config, self.queue, 'crq-run3-F1')[0], 'skip')
         self.assertEqual(bounded.drain_job(self.root, self.config, {'items': []}, 'crq-run1-F1')[0], 'skip')
 
+    def test_only_canonical_minors_are_drainable(self):
+        path = bounded.job_path(self.root, 'crq-run1-F1')
+        job = json.loads(path.read_text())
+        atomic(self.root / 'state/backfill/findings/triage' / ('d' * 64 + '.json'),
+               {'status': 'delivered', 'receipt': {'repair_task': job['job']}})
+        for severity, canonical, expected in (
+                ('minor', None, 'skip'), ('minor', '', 'skip'),
+                ('minor', '  ', 'skip'), ('minor', 123, 'skip'),
+                ('minor', 'canonical-1', 'skip'), ('minor', 'd' * 64, 'run'), ('info', 'd' * 64, 'skip')):
+            with self.subTest(severity=severity, canonical=canonical):
+                job['finding']['severity'] = severity
+                job['canonical_finding_id'] = canonical
+                atomic(path, job)
+                self.assertEqual(bounded.drain_job(
+                    self.root, self.config, self.queue, job['job'])[0], expected)
+        job['finding']['severity'] = 'minor'
+        job['canonical_finding_id'] = 'd' * 64
+        job['finding']['path'] = 'src/moved.ts'
+        atomic(path, job)
+        self.assertEqual(bounded.drain_job(
+            self.root, self.config, self.queue, job['job'])[0], 'stale')
+
+    def test_drain_prioritizes_major_items_over_older_canonical_minors(self):
+        job_id = 'crq-backfill-minor'
+        item_id = 'backfill-finding-minor'
+        self.queue['items'].append(self.item(item_id, 'backfill-minor', [job_id], False))
+        self.job(job_id, item_id, 'backfill-minor', 'src/kept.ts', severity='minor')
+        path = bounded.job_path(self.root, job_id)
+        job = json.loads(path.read_text())
+        job['canonical_finding_id'] = 'd' * 64
+        atomic(self.root / 'state/backfill/findings/triage' / ('d' * 64 + '.json'),
+               {'status': 'delivered', 'receipt': {'repair_task': job_id}})
+        atomic(path, job)
+        atomic(self.root / 'state/queue.json', self.queue)
+        with mock.patch.object(service, 'drain_order', return_value=[job_id, 'crq-run1-F1']), \
+             mock.patch.object(service, 'blocked', return_value=False), \
+             mock.patch.object(service, 'process_item') as process_item:
+            service.drain(self.config)
+        self.assertEqual([call.args[1][0]['job'] for call in process_item.call_args_list],
+                         ['crq-run1-F1', job_id])
+        jobs = [job, {'job': 'crq-run1-F1', 'run': 'run1', 'finding': {'severity': 'major'}},
+                {'job': 'crq-run2-F1', 'run': 'run2', 'finding': {'severity': 'critical'}}]
+        self.assertEqual([j['job'] for j in sorted(jobs, key=service.finding_order)],
+                         ['crq-run1-F1', 'crq-run2-F1', job_id])
+        same_class = [{'job': 'crq-z-F2', 'run': 'z', 'finding': {'severity': 'major'}},
+                      {'job': 'crq-a-F2', 'run': 'a', 'finding': {'severity': 'critical'}},
+                      {'job': 'crq-a-F1', 'run': 'a', 'finding': {'severity': 'major'}}]
+        self.assertEqual([j['job'] for j in sorted(same_class, key=service.finding_order)],
+                         ['crq-a-F1', 'crq-a-F2', 'crq-z-F2'])
+
+    def test_priority_uses_eligible_jobs_and_preserves_item_order(self):
+        specs = [('minor-a', 'minor'), ('major-a', 'major'),
+                 ('minor-b', 'minor'), ('major-b', 'critical')]
+        for name, severity in specs:
+            job_id, item_id = 'crq-' + name, 'item-' + name
+            self.queue['items'].append(self.item(item_id, name, [job_id], False))
+            self.job(job_id, item_id, name, 'src/kept.ts', severity=severity)
+            if severity == 'minor':
+                path = bounded.job_path(self.root, job_id)
+                job = json.loads(path.read_text())
+                fid = ('a' if name == 'minor-a' else 'b') * 64
+                job['canonical_finding_id'] = fid
+                atomic(path, job)
+                atomic(self.root / 'state/backfill/findings/triage' / (fid + '.json'),
+                       {'status': 'delivered', 'receipt': {'repair_task': job_id}})
+        # This older major belongs to the minor item but is not queued.
+        self.job('crq-ineligible', 'item-minor-a', 'minor-a', 'src/kept.ts')
+        atomic(self.root / 'state/queue.json', self.queue)
+        order = ['crq-ineligible', 'crq-minor-a', 'crq-major-a', 'crq-minor-b', 'crq-major-b']
+        with mock.patch.object(service, 'drain_order', return_value=order), \
+             mock.patch.object(service, 'blocked', return_value=False), \
+             mock.patch.object(service, 'process_item') as process_item:
+            service.drain(self.config)
+        self.assertEqual([call.args[1][0]['job'] for call in process_item.call_args_list],
+                         ['crq-major-a', 'crq-major-b', 'crq-minor-a', 'crq-minor-b'])
+
     def test_started_job_resumes_even_if_now_superseded(self):
         atomic(self.root / 'state/repair/crq-run1-F2/progress.json', {'attempts': []})
         self.assertEqual(bounded.drain_job(self.root, self.config, self.queue, 'crq-run1-F2')[0], 'run')

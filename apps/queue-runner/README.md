@@ -1,13 +1,17 @@
 # CRQ TypeScript runner
 
 The runner entry point is `src/queue-runner/crq.ts`, built as
-`dist/queue-runner/crq.js` and exposed as `crq`. Commands currently refuse
-execution until their Python equivalents are ported. No heartbeat is emitted.
+`dist/queue-runner/crq.js` and exposed as `crq`. Run `crq tick --dry-run` from
+its state directory (containing `queue.json`) to write a unique file under
+`shadow/`. The recorded plan currently covers only the queue's `last_tick`
+update; it explicitly marks itself incomplete because discovery, harvest and
+admission are not ported. A `runner-disabled` marker produces an empty plan.
+Incomplete plans exit 1 with an indeterminate result and must not be used as
+parity or C2 comparison evidence.
 
-The runner's planning seam records intended mutations under `shadow/<tick>.json`
-in dry-run mode. Planners must not perform mutations themselves; live execution
-is deliberately unavailable in the skeleton. Later ports must supply the state
-root and a unique tick identifier and preserve the shared locking contract.
+Other commands and live execution refuse until their Python equivalents are
+ported. No heartbeat is emitted. Planners must not perform mutations themselves;
+later ports must preserve the shared locking contract.
 
 `apps/crq-python/ops/package-runner.py` archives a prebuilt, self-contained
 production staging directory offline. It rejects links outside the staging

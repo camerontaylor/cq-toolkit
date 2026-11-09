@@ -441,7 +441,8 @@ def process(config, job, wt):
 def finding_order(job):
     # Review jobs end in -F<n>; backfill jobs (crq-backfill-<key>) carry none.
     suffix = job['job'].rsplit('-F', 1)
-    return job['run'], int(suffix[1]) if len(suffix) == 2 and suffix[1].isdigit() else 0
+    number = int(suffix[1]) if len(suffix) == 2 and suffix[1].isdigit() else 0
+    return job.get('finding', {}).get('severity') == 'minor', job['run'], number
 
 
 def pending(job_id):
@@ -568,7 +569,7 @@ def triage_phase(config, dry_run=False):
 
 
 def drain(config):
-    """Automatic inbox drain, oldest first. Items run serially: one item
+    """Automatic inbox drain, minor-only items after critical/major items. Items run serially: one item
     worktree at a time, serial findings within it (see README for why)."""
     repair = config['repair']
     until = dispatch_paused(config)
@@ -590,12 +591,25 @@ def drain(config):
     groups = {}  # item -> job ids, items in order of their oldest job
     for job_id in drain_order(ROOT):
         try:
-            item = json.loads((ROOT / 'state/repair/inbox' / (job_id + '.json')).read_text()).get('item')
+            job = json.loads((ROOT / 'state/repair/inbox' / (job_id + '.json')).read_text())
+            item = job.get('item')
         except (OSError, ValueError, AttributeError):
             continue
         if isinstance(item, str):
             groups.setdefault(item, []).append(job_id)
-    for item, job_ids in groups.items():
+    # Classify against the queue before sorting. Skipped, stale and completed
+    # jobs cannot promote a minor-only item; stable sort retains inbox order.
+    queue_path = ROOT / 'state/queue.json'
+    queue = json.loads(queue_path.read_text()) if queue_path.exists() else {'items': []}
+    def priority(item):
+        for job_id in groups[item]:
+            status, job, _ = drain_job(ROOT, config, queue, job_id)
+            if (status == 'run' and job and job.get('item') == item
+                    and pending(job_id) and job.get('finding', {}).get('severity') in ('critical', 'major')):
+                return 0
+        return 1
+    for item in sorted(groups, key=priority):
+        job_ids = groups[item]
         if blocked(repair):
             print('repair drain paused: GLM peak blackout')
             return
