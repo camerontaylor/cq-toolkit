@@ -63,13 +63,18 @@ it('executes the built CLI dry-run against a queue without changing its bytes', 
     encoding: 'utf8',
   });
   expect(result.status).toBe(1);
-  expect(JSON.parse(result.stdout).status).toBe('indeterminate');
+  const output = JSON.parse(result.stdout) as { status: string };
+  expect(output.status).toBe('indeterminate');
   const files = await readdir(join(root, 'shadow'));
   expect(files).toHaveLength(1);
-  const shadow = JSON.parse(await readFile(join(root, 'shadow', files[0]!), 'utf8'));
+  const shadow = JSON.parse(await readFile(join(root, 'shadow', files[0]!), 'utf8')) as {
+    value: { complete: boolean };
+    mutations: { operation: string; target: string; value: string }[];
+  };
   expect(shadow.value.complete).toBe(false);
-  expect(shadow.mutations).toEqual([
-    { operation: 'set', target: 'queue.json#/last_tick', value: expect.any(String) },
-  ]);
+  expect(shadow.mutations).toHaveLength(1);
+  expect(shadow.mutations[0]?.operation).toBe('set');
+  expect(shadow.mutations[0]?.target).toBe('queue.json#/last_tick');
+  expect(shadow.mutations[0]?.value).toMatch(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/);
   expect(await readFile(join(root, 'queue.json'), 'utf8')).toBe(queue);
 });
