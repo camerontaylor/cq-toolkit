@@ -1,7 +1,7 @@
 // Split provenance: test/ops/review/fixReviewItem.test.ts was split into the
 // fixReviewItem.*.test.ts siblings in this directory; the shared fixtures live
 // in fixReviewItem.helpers.ts and the original suite header sits there.
-import { describe, expect, test } from 'vitest';
+import { describe, expect, test, vi } from 'vitest';
 import { MAX_ITEM_BODY_CHARS, defangFenceLines } from '../../../src/ops/review/fixReviewItem.js';
 import { defaultFixPrompt } from '../../../src/ops/review/prompts/defaultFixPrompt.js';
 import {
@@ -37,8 +37,10 @@ describe('trusted fixer operating instructions', () => {
     expect(prompt).toContain('After a denied command, use a supported tool');
     expect(prompt).toContain('stage only explicit');
     expect(prompt).toContain('git rev-parse HEAD');
-    expect(prompt).toContain('Allowed tools (caller harness): ["read","edit","bash"].');
-    expect(prompt).not.toContain('Allowed tools (caller harness): ["read","edit","write"');
+    expect(prompt).toContain('Configured tools (capped caller harness): ["read","edit","bash"].');
+    expect(prompt).not.toContain(
+      'Configured tools (capped caller harness): ["read","edit","write"',
+    );
     expect(invocation?.budget).toEqual({ maxSteps: 40 });
     expect(requests[0]?.harness).toEqual(harness);
     expect(invocation?.toolPolicy).toEqual({
@@ -57,10 +59,39 @@ describe('trusted fixer operating instructions', () => {
     const prompt = invocations[0]?.prompt ?? '';
     expect(prompt.startsWith('CUSTOM SYSTEM\n\n')).toBe(true);
     expect(prompt).not.toContain(defaultFixPrompt);
-    expect(prompt).toContain('Allowed tools (caller harness): ["read","edit","write"].');
-    expect(prompt).toContain('Bash is unavailable');
+    expect(prompt).toContain('Configured tools (capped caller harness): ["read","edit","write"].');
+    expect(prompt).toContain('Bash is absent from the capped caller harness');
     expect(prompt).not.toContain('Bash command patterns');
     expect(prompt).not.toContain('git commit');
+  });
+
+  test('a malformed configured pattern returns needs-human without dispatch', async () => {
+    const harness = harnessWith((h) => {
+      h.tools.bash.commandPatterns = ['re:['];
+    });
+    const { op, invocations } = scriptedOp([completeWorker(UNCHANGED)]);
+    const result = await op(baseInput({ harness }));
+    expect(result.status).toBe('needs-human');
+    expect(invocations).toEqual([]);
+  });
+
+  test('process sandbox gate does not contradict the resolved driver runtime', async () => {
+    vi.stubEnv('CQ_RUN_TOOL', 'off');
+    try {
+      const harness = harnessWith((h) => {
+        h.tools.bash.commandPatterns = ['git commit'];
+        h.promptBudget.maxTools = 3;
+      });
+      const { op, invocations } = scriptedOp([completeWorker(UNCHANGED)]);
+      await op(baseInput({ harness }));
+      const prompt = invocations[0]?.prompt ?? '';
+      expect(prompt).toContain('Configured tools (capped caller harness): ["read","edit","bash"].');
+      expect(prompt).toContain('Runtime tool definitions are authoritative');
+      expect(prompt).not.toContain('do not attempt shell commands');
+      expect(invocations[0]?.toolPolicy.allow).toContain('bash');
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 });
 

@@ -470,11 +470,21 @@ const composeUserPrompt = (input: FixReviewItemInput): { text: string; truncated
   lines.push(`Location: ${anchor}`);
   lines.push(`Worktree: ${input.worktree.path} (branch: ${input.worktree.branch})`);
   // Operating instructions come from the caller's harness, never review data.
-  // Keep this outside the fences and use the same effective harness as dispatch.
+  // Keep this outside the fences. The op knows the capped caller config,
+  // but the resolved driver owns the runtime sandbox gate, which may differ
+  // from the process environment. Do not infer that gate here.
   const harness = input.harness ?? defaultHarnessConfig;
-  const tools = selectHarnessSurface(harness, toolPolicyFor(harness), undefined, 'workspace-write');
+  const tools = selectHarnessSurface(
+    harness,
+    toolPolicyFor(harness),
+    { enabled: true, envPassthrough: [] },
+    'workspace-write',
+  );
   lines.push('');
-  lines.push(`Allowed tools (caller harness): ${JSON.stringify(tools)}.`);
+  lines.push(`Configured tools (capped caller harness): ${JSON.stringify(tools)}.`);
+  lines.push(
+    'Runtime tool definitions are authoritative; the driver may withhold configured tools. Use only tools actually exposed to you.',
+  );
   if (tools.includes('bash')) {
     lines.push(
       `Bash command patterns (caller harness): ${JSON.stringify(harness.tools.bash.commandPatterns)}.`,
@@ -486,7 +496,7 @@ const composeUserPrompt = (input: FixReviewItemInput): { text: string; truncated
       'For permitted git inspection, use the closed forms git diff, git diff --cached, git log -n 1, git log --oneline -n 20. Search arguments must match the supplied pattern, including its restrictions on quotes, backslashes and shell characters.',
     );
   } else {
-    lines.push('Bash is unavailable; do not attempt shell commands.');
+    lines.push('Bash is absent from the capped caller harness; do not attempt shell commands.');
   }
   lines.push('');
   lines.push('Reviewed item body:');
@@ -775,7 +785,21 @@ export function makeFixReviewItem(deps: {
       input.promptOverride ?? defaultFixPrompt,
       harness.promptBudget.maxSystemPromptChars,
     );
-    const user = composeUserPrompt(input);
+    let user: ReturnType<typeof composeUserPrompt>;
+    try {
+      user = composeUserPrompt(input);
+    } catch (err) {
+      if (currentJobContext()?.signal.aborted === true) {
+        return {
+          status: 'indeterminate',
+          detail: `fixReviewItem: prompt preparation cancelled: ${messageOf(err)}`,
+        };
+      }
+      return {
+        status: 'needs-human',
+        reason: `fixReviewItem: invalid harness for prompt preparation: ${messageOf(err)}`,
+      };
+    }
     const truncated = system.truncated || user.truncated;
     const invocation: OpInvocation = {
       prompt: `${system.text}\n\n${user.text}`,
