@@ -240,6 +240,33 @@ describe('SessionStore torn-tail recovery (fix 2)', () => {
     });
   });
 
+  test('torn tail after a NON-ASCII line truncates on the byte offset, not the character offset', async () => {
+    await withScratch(async (scratchDir) => {
+      const store = new SessionStore(scratchDir);
+      const record = await store.create(scratchDir);
+      // 'é😀' is 6 bytes but 3 UTF-16 code units of JSON content, and
+      // JSON.stringify leaves it unescaped: the byte offset of the last
+      // newline is strictly greater than its character offset. Pre-fix,
+      // recovery truncated at the CHARACTER offset and cut inside this
+      // complete record, so the next append glued onto the fragment.
+      await store.appendMessage(record.sessionId, {
+        role: 'user',
+        content: 'é😀',
+        at: '2026-09-14T00:00:00.000Z',
+      });
+      // Simulate a crash mid-append: a partial JSON line without a newline.
+      await appendFile(join(scratchDir, `${record.sessionId}.jsonl`), '{"type":"message","mess');
+      await store.appendMessage(record.sessionId, {
+        role: 'assistant',
+        content: 'after recovery',
+        at: '2026-09-14T00:00:01.000Z',
+      });
+      const loaded = await store.load(record.sessionId);
+      expect(loaded).toBeDefined();
+      expect(loaded?.messages.map((m) => m.content)).toEqual(['é😀', 'after recovery']);
+    });
+  });
+
   test('a file with no complete line is a torn header — appending refuses (session never existed)', async () => {
     await withScratch(async (scratchDir) => {
       const store = new SessionStore(scratchDir);
