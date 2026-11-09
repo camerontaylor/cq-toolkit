@@ -173,6 +173,11 @@ describe('ai-sdk driver token meter', () => {
         }),
       );
       expect(result.stopReason).toBe(expected);
+      const files = await readdir(join(scratch, 'sessions'));
+      const log = (
+        await Promise.all(files.map((f) => readFile(join(scratch, 'sessions', f), 'utf8')))
+      ).join('');
+      if (expected === 'complete') expect(log).not.toContain('budget-stop');
       expect(result.structuredOutput).toEqual(
         expected === 'complete' ? { answer: 'ok' } : undefined,
       );
@@ -180,6 +185,51 @@ describe('ai-sdk driver token meter', () => {
       await rm(scratch, { recursive: true, force: true });
     }
   });
+
+  test.each(['{"answer":3}', 'not-json'])(
+    'invalid terminal output at context ceiling is output-invalid without repair: %s',
+    async (text) => {
+      const scratch = await mkdtemp(join(tmpdir(), 'aidrv-invalid-meter-'));
+      let calls = 0;
+      const model = new MockLanguageModelV4({
+        modelId: 'mock-1',
+        doGenerate: async () => {
+          calls++;
+          return {
+            content: [{ type: 'text', text }],
+            finishReason: { unified: 'stop', raw: undefined },
+            usage: {
+              inputTokens: { total: 100, noCache: 100, cacheRead: 0, cacheWrite: 0 },
+              outputTokens: { total: 10, text: 10, reasoning: 0 },
+            },
+            warnings: [],
+          };
+        },
+      });
+      try {
+        const driver = new AiSdkDriver({
+          providers: { mock: () => model },
+          sessionsDir: join(scratch, 'sessions'),
+          harnessConfig: conformanceHarnessConfig(scratch),
+        });
+        const result = await driver.run(
+          invocation({
+            budget: { maxContextTokens: 100 },
+            outputSchema: toOutputSchema('answer', z.object({ answer: z.string() })),
+          }),
+        );
+        expect(result).toMatchObject({ stopReason: 'error', errorClass: 'output-invalid' });
+        expect(calls).toBe(1);
+        const files = await readdir(join(scratch, 'sessions'));
+        const log = (
+          await Promise.all(files.map((f) => readFile(join(scratch, 'sessions', f), 'utf8')))
+        ).join('');
+        expect(log).not.toContain('budget-stop');
+      } finally {
+        await rm(scratch, { recursive: true, force: true });
+      }
+    },
+  );
 
   test('context ceiling stops the loop before the next request and records why', async () => {
     const { result, calls, stops } = await runLoop({ maxContextTokens: 200_000 }, [

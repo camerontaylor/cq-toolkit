@@ -1143,7 +1143,10 @@ export class AiSdkDriver implements Driver {
             meteredSteps.push(usageFromSdk(step.usage));
             if (meterStop === undefined) {
               meterStop = tokenMeterVerdict(budget, meteredSteps);
-              if (meterStop !== undefined) {
+              if (
+                meterStop !== undefined &&
+                (meterStop.cause !== 'context' || step.finishReason !== 'stop')
+              ) {
                 await store.appendBudgetStop(record.sessionId, {
                   type: 'budget-stop',
                   cause: meterStop.cause,
@@ -1236,7 +1239,10 @@ export class AiSdkDriver implements Driver {
             mainUsage: stepUsage,
             mainUsageEvidence: usageEvidence,
             mainSteps: completedSteps,
-            meterStopped: meterStop !== undefined,
+            meterStopped:
+              meterStop !== undefined &&
+              (meterStop.cause !== 'context' || (err.finishReason ?? 'error') !== 'stop'),
+            contextBlocked: meterStop?.cause === 'context' && err.finishReason === 'stop',
             servedModel:
               typeof err.response?.modelId === 'string' && err.response.modelId !== ''
                 ? err.response.modelId
@@ -1310,7 +1316,9 @@ export class AiSdkDriver implements Driver {
             mainUsage: usage,
             mainUsageEvidence: resolvedUsageMeasured,
             mainSteps: completedSteps,
-            meterStopped: meterStop !== undefined,
+            meterStopped:
+              meterStop !== undefined && (meterStop.cause !== 'context' || finishReason !== 'stop'),
+            contextBlocked: meterStop?.cause === 'context' && finishReason === 'stop',
             servedModel,
             responseHeaders: result.response.headers,
             finishReason,
@@ -1509,6 +1517,7 @@ export class AiSdkDriver implements Driver {
     mainSteps: number;
     /** The output-only cap or context ceiling stopped the main loop. */
     meterStopped: boolean;
+    contextBlocked: boolean;
     servedModel: string | undefined;
     responseHeaders: Record<string, string> | undefined;
     finishReason: FinishReason;
@@ -1621,6 +1630,22 @@ export class AiSdkDriver implements Driver {
           `ai-sdk driver: the run ended with finishReason '${String(finishReason)}' before a schema-valid object (${rejection})`,
         ),
         errorClass: finishReasonErrorClass(finishReason),
+        ...verdictSignals(),
+      };
+    }
+
+    if (inputs.contextBlocked) {
+      return {
+        ...(servedModel !== undefined ? { model: servedModel } : {}),
+        ...verdictExtras(mainUsage, mainUsageEvidence),
+        sessionId: record.sessionId,
+        denials,
+        ...capabilityEvidence,
+        stopReason: 'error',
+        error: boundedErrorText(
+          `ai-sdk driver: structured output invalid and the context ceiling prevents repair — ${rejection}`,
+        ),
+        errorClass: 'output-invalid',
         ...verdictSignals(),
       };
     }
