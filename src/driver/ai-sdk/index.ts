@@ -484,8 +484,8 @@ export class AiSdkDriver implements Driver {
     } catch (error) {
       // A throw AFTER the record was created (prompt append, tool surface
       // build, any other setup before the generateText try) must still name
-      // the freshest record: withReapOnSettle reaps only a rejection that
-      // carries `sessionId`, so a bare rethrow would leave the fresh record
+      // the freshest record: withReapOnSettle reaps only a rejection wrapped
+      // in SessionBoundError, so a bare rethrow would leave the fresh record
       // on disk (the claude-code lane binds the same way).
       if (sessionId !== undefined) throw new SessionBoundError(error, sessionId);
       throw error;

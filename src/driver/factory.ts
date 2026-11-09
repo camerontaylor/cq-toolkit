@@ -32,8 +32,8 @@
 //   - SESSION RETENTION: 'keep' (the default) wraps nothing — session
 //     records are worker evidence. 'reap-on-settle' deletes, after the run
 //     settles WHATEVER the verdict, ONLY the FRESH record that run created:
-//     the run created a record iff it resolved with a sessionId AND the
-//     invocation carried NO sessionRef. A sessionRef-resumed record is
+//     ownership requires a resolved sessionId or a rejected SessionBoundError,
+//     AND the invocation carried NO sessionRef. A sessionRef-resumed record is
 //     NEVER reaped (it predates the run and may carry later turns).
 import { AcpDriver } from './acp/index.js';
 import type { AcpDriverOptions } from './acp/index.js';
