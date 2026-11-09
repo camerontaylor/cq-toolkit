@@ -46,12 +46,13 @@ describe('fileWorktreeRegistry', () => {
       acquireFault.attempts = 0;
       const callback = vi.fn();
       try {
-        await expect(
-          fileWorktreeRegistry('/unused/registry.json').withLock(callback),
-        ).rejects.toMatchObject({
-          message: expect.stringContaining(`acquisition failed (${code})`),
-          cause: expect.objectContaining({ code }),
-        });
+        const error: unknown = await fileWorktreeRegistry('/unused/registry.json')
+          .withLock(callback)
+          .catch((caught: unknown) => caught);
+        expect(error).toBeInstanceOf(Error);
+        if (!(error instanceof Error)) throw new Error('expected acquisition failure');
+        expect(error.message).toContain(`acquisition failed (${code})`);
+        expect(error.cause).toMatchObject({ code });
         expect(acquireFault.attempts).toBe(1);
         expect(callback).not.toHaveBeenCalled();
       } finally {
