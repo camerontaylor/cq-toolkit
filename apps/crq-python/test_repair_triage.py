@@ -115,6 +115,88 @@ class PhaseTest(FindingTest):
                                      'current_path': 'a', 'current_lines': [[1, 1]], 'quoted_text': 'wrong'})
         self.assertEqual(result['counts'], {'needs-human': 1})
 
+    def test_escalates_once_with_pinned_extra_source_and_keeps_validation(self):
+        first, _, _ = self.run_phase({'stop': 'ok', 'verdict': 'unsure', 'reason': 'need source'})
+        self.assertEqual(first['counts'], {'needs-human': 1})
+        second, _, judge = self.run_phase({'stop': 'ok', 'verdict': 'valid', 'reason': 'asserted',
+                                          'current_path': 'a', 'current_lines': [[1, 1]], 'quoted_text': 'wrong'})
+        self.assertEqual(second['counts'], {'needs-human': 1})
+        self.assertEqual(judge.call_args.args[1]['additional_sources'][0]['text'], 'one\ntwo\n')
+        third, _, judge = self.run_phase()
+        judge.assert_not_called()
+        self.assertEqual(third['judged'], 0)
+        events = [e for e in self.out.retained() if e['event_type'] == 'finding-event']
+        self.assertEqual(len(events), 2)
+        self.assertEqual(sum(e['payload']['actor'].startswith('crq-triage/escalation/') for e in events), 1)
+
+    def test_escalation_can_confirm_and_deliver(self):
+        self.run_phase({'stop': 'ok', 'verdict': 'unsure', 'reason': 'missing context'})
+        result, queue, _ = self.run_phase()
+        self.assertEqual(result['counts'], {'confirmed': 1})
+        self.assertEqual(result['delivered'], 1)
+        self.assertEqual(len(queue['items']), 1)
+
+    def test_transient_escalation_failures_defer_until_service_recovers(self):
+        self.run_phase({'stop': 'ok', 'verdict': 'unsure', 'reason': 'missing context'})
+        for stop in ('configuration', 'budget', 'error', 'rate-limit'):
+            with self.subTest(stop=stop):
+                result, _, judge = self.run_phase({'stop': stop})
+                self.assertEqual(result['counts'], {})
+                self.assertEqual(judge.call_count, 1)
+        result, _, judge = self.run_phase()
+        self.assertEqual(result['counts'], {'confirmed': 1})
+        judge.assert_called_once()
+
+    def test_timed_out_escalation_remains_eligible(self):
+        import subprocess
+        self.run_phase({'stop': 'ok', 'verdict': 'unsure', 'reason': 'missing context'})
+        judge = mock.Mock(side_effect=subprocess.TimeoutExpired('judge', 1))
+        result = phase(self.inbox, self.f.repo, self.t, judge, mock.Mock(), AT)
+        self.assertEqual(result['counts'], {})
+        result, _, next_judge = self.run_phase()
+        self.assertEqual(result['counts'], {'confirmed': 1})
+        next_judge.assert_called_once()
+
+    def test_outage_does_not_consume_other_escalation_rows(self):
+        import copy
+        self.run_phase({'stop': 'ok', 'verdict': 'unsure', 'reason': 'missing context'})
+        path = self.inbox.root / 'triage' / (self.fid + '.json')
+        row = copy.deepcopy(ledger.loads(path.read_bytes()))
+        row['finding'].update(id='f' * 64, title='Another finding')
+        row['canonical_id'] = 'f' * 64
+        ledger.atomic(path.parent / ('f' * 64 + '.json'), ledger.canonical(row))
+        result, _, judge = self.run_phase({'stop': 'configuration'})
+        self.assertEqual(result['counts'], {})
+        self.assertEqual(judge.call_count, 1)
+        self.assertEqual(ledger.loads(path.read_bytes())['status'], 'needs-human')
+        self.assertEqual(ledger.loads((path.parent / ('f' * 64 + '.json')).read_bytes())['status'], 'needs-human')
+
+    def test_invalid_completed_output_is_terminal_and_later_rows_progress(self):
+        import copy
+        self.run_phase({'stop': 'ok', 'verdict': 'unsure', 'reason': 'missing context'})
+        path = self.inbox.root / 'triage' / (self.fid + '.json')
+        row = copy.deepcopy(ledger.loads(path.read_bytes()))
+        row['finding'].update(id='f' * 64, title='Another finding', severity='minor')
+        row.update(canonical_id='f' * 64, status='untriaged', previous_event_id=None)
+        ledger.atomic(path.parent / ('f' * 64 + '.json'), ledger.canonical(row))
+        judge = mock.Mock(side_effect=[{'stop': 'error', 'errorClass': 'output-invalid'},
+                                      {'stop': 'ok', 'verdict': 'invalid', 'reason': 'not a defect'}])
+        result = phase(self.inbox, self.f.repo, self.t, judge, mock.Mock(), AT)
+        self.assertEqual(result['counts'], {'needs-human': 1, 'dismissed': 1})
+        self.assertEqual(judge.call_count, 2)
+        for _ in range(3):
+            _, _, next_judge = self.run_phase({'stop': 'error', 'errorClass': 'output-invalid'})
+            next_judge.assert_not_called()
+
+    def test_escalation_reads_referenced_path_followed_by_period(self):
+        from crq_repair.triage import context
+        tip = self.f.commit({'docs/other.md': b'linked evidence\n'})
+        row = ledger.loads((self.inbox.root / 'triage' / (self.fid + '.json')).read_bytes())
+        row['_escalate'] = True
+        row['finding']['body'] = 'See docs/other.md.'
+        packed = context(self.f.repo, row, tip)
+        self.assertIn('docs/other.md', [v['path'] for v in packed['additional_sources']])
+
     def test_zero_limit_leaves_unjudged(self):
         result, _, judge = self.run_phase(maximum=0)
         judge.assert_not_called()
@@ -392,6 +474,15 @@ class PhaseTest(FindingTest):
         self.assertIn('absent or truncated', request['prompt'])
         self.assertEqual(request['schema'], 'crq.triage/v1')
 
+    def test_judge_adapter_preserves_structured_error_class(self):
+        from crq_repair.drivers import cq
+        config = {'repair': {'cq_bin': '/unused/cli.js', 'budget': {'wall_clock_min': 1}}}
+        result = SimpleNamespace(returncode=0, stdout='{"stop":"error","errorClass":"output-invalid"}', stderr='')
+        with mock.patch.object(cq, 'command', return_value=result):
+            report = cq.judge(config, {'model': 'opencode-go/deepseek-v4.1-flash'},
+                              {'triage_context': {}}, self.f.root, self.root)
+        self.assertEqual(report['errorClass'], 'output-invalid')
+
     def test_bridge_accepts_contract_sized_triage_prompt_with_finite_isolated_cap(self):
         import json
         import subprocess
@@ -407,6 +498,7 @@ export class AiSdkDriver {
   async run(request) {
     if(request.prompt.length>this.cap) throw Error('prompt budget exceeded');
     if(request.toolPolicy.mode!=='none'||request.sandboxPolicy.level!=='read-only') throw Error('authority changed');
+    if(request.prompt==='invalid') return {stopReason:'error',errorClass:'output-invalid',error:'bad output'};
     return {stopReason:'complete',structuredOutput:{verdict:'unsure',reason:JSON.stringify({cap:this.cap,budget:request.budget,schema:request.outputSchema.name})}};
   }
 }
@@ -429,3 +521,8 @@ export class AiSdkDriver {
         self.assertEqual(ordinary.returncode, 0, ordinary.stderr)
         self.assertEqual(json.loads(json.loads(ordinary.stdout)['reason'])['cap'], 20000)
         self.assertNotEqual(invoke('crq.triage/v1', 128001).returncode, 0)
+        request = {'cq_bin': str(dist / 'cli.js'), 'schema': 'crq.triage/v1', 'prompt': 'invalid',
+                   'modelSpec': {'provider': 'unused', 'model': 'offline'}, 'budget': budget}
+        request_path.write_text(json.dumps(request))
+        invalid = subprocess.run(['node', str(bridge), str(request_path)], capture_output=True, text=True, timeout=20)
+        self.assertEqual(json.loads(invalid.stdout)['errorClass'], 'output-invalid')
