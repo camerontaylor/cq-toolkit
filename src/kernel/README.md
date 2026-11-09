@@ -436,15 +436,23 @@ to `settle`.
   pre-dispatch floor at this seam (no `W_max`); the ADR's floor machinery
   (W2.1/W3.5) is the closure, and until then breach is evidence of
   underselling, not prevention. Residuals, recorded: post-settle folds from
-  a detached (killed) op promise are suppressed at the runner — the `full`
-  charge covers them — but a misbehaving op streaming evidence after a
-  NORMAL settle would move the live ledger without journal backing (the
-  driver-side report-on-every-exit-path guard, W2.1, is the real closure);
-  and a durable `reservation-settled` WRITE failure after the in-memory
-  settle leaves the journal's reservation open while the live ledger took
-  the charge — the next fold charges `r` in full where the live run charged
-  possibly-less (conservative, but permanent divergence with no abandon
-  path; the write-ahead OPEN side has one, the settle side has none).
+  a detached (killed) op promise are suppressed at the runner, and the `full`
+  charge does NOT cover what they would have reported — it is max(r, folded),
+  built only from the reservation and the evidence folded BEFORE settlement.
+  An op that keeps spending after its invocation settled (detaching stops
+  the run WAITING, not the op) therefore overshoots unrecorded: its late
+  evidence is dropped, and with no fold there is no `charged > r`, so no
+  `breach` can fire on that spend. The full charge is a floor on what the
+  folds saw, never a ceiling on what a detached op can still spend. A
+  DIFFERENT case, with the opposite failure: a misbehaving op streaming
+  evidence after a NORMAL settle would move the live ledger without journal
+  backing (the driver-side report-on-every-exit-path guard, W2.1, is the
+  real closure); and a durable `reservation-settled` WRITE failure after the
+  in-memory settle leaves the journal's reservation open while the live
+  ledger took the charge — the next fold charges `r` in full where the live
+  run charged possibly-less (conservative, but permanent divergence with no
+  abandon path; the write-ahead OPEN side has one, the settle side has
+  none).
 - **The structured driver-seam settle channel** (`errorClass`,
   `providerSignals`, `failedAttemptsObserved`, ADR-0003 §2.2 step 9) rides
   `reservation-settled` from W2.1/W3.3 outward; this slice journals the
