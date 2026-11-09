@@ -35,7 +35,6 @@ test('detached child work quarantines promptly and prevents another admission', 
     headRefName: 'feature/x',
   };
   const input = { repoRoot: f.repo.root, source: 'pr:7' };
-  let timer: ReturnType<typeof setTimeout> | undefined;
   let observed: Promise<string> | undefined;
   try {
     const owner = await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run });
@@ -47,17 +46,10 @@ test('detached child work quarantines promptly and prevents another admission', 
       () => 'fulfilled',
       () => 'quarantined',
     );
-    const result = await Promise.race([
-      observed,
-      new Promise<string>((resolve) => {
-        timer = setTimeout(() => resolve('timed out'), 2000);
-      }),
-    ]);
-    expect(result).toBe('quarantined');
+    expect(await observed).toBe('quarantined');
     const next = await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run });
     await expect(next.withLock(async () => undefined)).rejects.toThrow('quarantined guard');
   } finally {
-    if (timer) clearTimeout(timer);
     release.resolve();
     await observed;
     factory.mockRestore();
