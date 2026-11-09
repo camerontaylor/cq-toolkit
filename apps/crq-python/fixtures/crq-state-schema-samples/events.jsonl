@@ -1,0 +1,8 @@
+{"at": "2026-11-09T08:24:00Z", "event": "review_started", "item": "pr1304", "run": "pr1304-20261109T082400Z", "base": "0123456789abcdef0123456789abcdef01234567", "head": "89abcdef0123456789abcdef0123456789abcdef", "label": "PR #1304 cycle 1"}
+{"at": "2026-11-09T08:41:00Z", "event": "review_finished", "item": "pr1304", "run": "pr1304-20261109T082400Z", "outcome": "completed", "findings": 1, "severity": {"critical": 0, "major": 1, "minor": 0, "trivial": 0, "info": 0, "none": 0}}
+{"at": "2026-11-09T08:45:00Z", "event": "enrolled", "item": "pr1304-range-0123456789-89abcdef01", "reason": "2026-11-09T08:45:00Z auto-enrolled: current full range lacks equivalent captured evidence"}
+{"at": "2026-11-09T09:02:00Z", "event": "blocked", "item": "pr1304", "reason": "review worktree checkout failed: smudge filter unavailable"}
+{"at": "2026-11-09T09:12:00Z", "event": "tick_gap", "last_tick": "2026-11-09T08:48:00Z", "gap_min": 24}
+{"at": "2026-11-09T09:20:00Z", "event": "admin_pause", "item": "pr1304", "reason": "owner holding the queue for a deploy"}
+{"at": "2026-11-09T09:30:00Z", "event": "findings_delivered", "item": "lr-888888888888-g1", "issue": 1305, "state": "delivered"}
+{"at": "2026-11-09T09:40:00Z", "event": "work_record_failed", "error": "No space left on device"}

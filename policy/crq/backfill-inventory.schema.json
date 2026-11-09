@@ -1,0 +1,286 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": [
+    "manifest_id",
+    "target",
+    "evaluated_at",
+    "candidates",
+    "paths",
+    "required",
+    "evidence_gaps"
+  ],
+  "properties": {
+    "manifest_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "target": {
+      "type": "string",
+      "minLength": 1
+    },
+    "evaluated_at": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,9})?Z$"
+    },
+    "candidates": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "repo",
+          "kind",
+          "prs",
+          "paths",
+          "target",
+          "scope_digest",
+          "construction_policy_digest",
+          "partition",
+          "subject_id",
+          "family",
+          "generation",
+          "retry",
+          "row",
+          "tier",
+          "score",
+          "scope",
+          "job_id",
+          "path_lineages",
+          "path_tiers",
+          "path_scores"
+        ],
+        "properties": {
+          "repo": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+          },
+          "kind": {
+            "enum": ["A", "B"]
+          },
+          "prs": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "lineage": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "paths": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "target": {
+            "type": "string"
+          },
+          "scope_digest": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "construction_policy_digest": {
+            "type": "string"
+          },
+          "partition": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "subject_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "family": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "generation": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "retry": {
+            "type": "boolean"
+          },
+          "row": {
+            "type": ["integer", "null"]
+          },
+          "tier": {
+            "type": "string"
+          },
+          "score": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "scope": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["path", "blob", "intervals"],
+              "properties": {
+                "path": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "blob": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "intervals": {
+                  "type": "array",
+                  "items": {
+                    "type": "array",
+                    "items": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "minItems": 2,
+                    "maxItems": 2
+                  }
+                }
+              },
+              "additionalProperties": true
+            }
+          },
+          "job_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "path_lineages": {
+            "type": "object"
+          },
+          "path_tiers": {
+            "type": "object"
+          },
+          "path_scores": {
+            "type": "object"
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "paths": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "blob", "lines", "disposition", "uncovered", "eligible", "score"],
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "blob": {
+            "type": "string",
+            "minLength": 1
+          },
+          "lines": {
+            "type": ["integer", "null"],
+            "minimum": 0
+          },
+          "bytes": {
+            "type": ["integer", "null"],
+            "minimum": 0
+          },
+          "churn": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "findings": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "tier": {
+            "type": "string"
+          },
+          "disposition": {
+            "enum": ["included", "renamed", "unsupported", "ambiguous", "empty", "deleted"]
+          },
+          "reason": {
+            "type": ["string", "null"]
+          },
+          "evidence": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "covered": {
+            "type": "array"
+          },
+          "uncovered": {
+            "type": "array",
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "minItems": 2,
+              "maxItems": 2
+            }
+          },
+          "eligible": {
+            "type": "array",
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "minItems": 2,
+              "maxItems": 2
+            }
+          },
+          "score": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "required": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["prs", "paths", "missing_source_evidence"],
+        "properties": {
+          "prs": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "row": {
+            "type": "integer"
+          },
+          "missing_source_evidence": {
+            "type": "array",
+            "items": {
+              "type": "integer"
+            }
+          },
+          "paths": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "evidence_gaps": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    }
+  },
+  "additionalProperties": true
+}

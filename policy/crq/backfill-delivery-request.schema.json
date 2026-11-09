@@ -1,0 +1,98 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["canonical_id", "finding_id", "review_id", "target", "path", "intervals", "finding"],
+  "properties": {
+    "canonical_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "finding_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "review_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "target": {
+      "type": "string",
+      "minLength": 1
+    },
+    "path": {
+      "type": ["string", "null"]
+    },
+    "intervals": {
+      "type": "array",
+      "items": {
+        "type": "array",
+        "items": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "minItems": 2,
+        "maxItems": 2
+      }
+    },
+    "finding": {
+      "type": "object",
+      "required": [
+        "id",
+        "severity",
+        "path",
+        "blob",
+        "intervals",
+        "title",
+        "body",
+        "status",
+        "anchor_status"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "severity": {
+          "type": "string",
+          "minLength": 1
+        },
+        "path": {
+          "type": ["string", "null"]
+        },
+        "blob": {
+          "type": ["string", "null"]
+        },
+        "intervals": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "minItems": 2,
+            "maxItems": 2
+          }
+        },
+        "title": {
+          "type": "string"
+        },
+        "body": {
+          "type": "string"
+        },
+        "source_id": {
+          "type": ["string", "null"]
+        },
+        "status": {
+          "type": "string",
+          "minLength": 1
+        },
+        "anchor_status": {
+          "enum": ["verified", "unverified"]
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}
