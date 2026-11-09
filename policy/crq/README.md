@@ -4,9 +4,11 @@ JSON Schemas for the on-disk state of `apps/crq-python` (the CodeRabbit review
 queue that runs on ceres). They are the contract the TypeScript port builds on
 (plan `crq-ts-migration-plan-20261109` §2.2 and §4 phase 0.2).
 
-These files are data. No Python or TypeScript runtime imports them yet, and
-they describe the files the current runtime already writes. They do not add
-validation to a running queue, so a schema mistake can never block a tick.
+These files are data and remain the authority. Python does not import them;
+the TypeScript port embeds them through the generated
+`src/policy/crq/schemas.ts` and validates state read-only in
+`src/policy/crq/state.ts`. No TypeScript writer uses them yet, so a schema
+mistake cannot block a running tick.
 
 ## Compatibility rules
 
@@ -23,10 +25,10 @@ validation to a running queue, so a schema mistake can never block a tick.
 - No top-level `schema_version` is added to `queue.json`. Python's
   `admission_history.load` tolerates unknown top-level keys, and the existing
   capture `apps/crq-python/fixtures/author-0e35cd11.json` proves it by carrying
-  an `unknown` key, but the TypeScript runtime has no queue reader yet, so the
-  "both runtimes ignore unknown fields" test cannot be met. Adding a version
-  key now would be an unverified state change. Revisit in Phase 1.1 when the
-  zod reader exists.
+  an `unknown` key. Phase 1.1 added a TypeScript READER (`parseCrqState`) that
+  admits the same unknown top-level keys, but there is still no TypeScript
+  queue writer to prove the write path tolerates them. Adding a version key
+  remains an unverified state change until that writer exists.
 - `state/next-review-at` is not JSON. It is one `%Y-%m-%dT%H:%M:%SZ` timestamp
   plus a newline; `next-review-at.schema.json` describes the stripped string.
 
@@ -112,13 +114,37 @@ complements Phase 0.3's synthetic deployed-shape snapshot at
 snapshot read-only, because this phase's schemas are its authority. A redacted
 real ceres capture remains a Phase 0.3 follow-up.
 
+## TypeScript consumer
+
+`scripts/gen-crq-schemas.mjs` embeds every schema above verbatim in
+`src/policy/crq/schemas.ts` and hands each document to zod's
+`z.fromJSONSchema`. The generated file is checked in and formatted, so a
+schema edit is a two-file change. `src/policy/crq/state.ts` then:
+
+- parses the text with `src/policy/crq/jsonValue.ts`, which keeps the Python
+  `int` vs `float` source distinction and large integers exact;
+- validates the zod schema and a JSON-Schema evaluator over that lossless
+  value;
+- reports a `divergence` and fails closed if the two disagree.
+
+The second evaluator exists because zod sees `1.0` as the JavaScript number
+`1`; the lossless document still knows the source was a float, which Python's
+`type(value) is int` rejects in an integer position. Tests under
+`test/policy/crq/` pin representative fixtures, the deployed snapshot, the
+historical capture, map interiors, integer-lexeme refusals, and every embedded
+schema against its policy file.
+
 ## Changing a schema
 
-Update the schema and the fixture in the same change, then run:
+Update the schema and the fixture in the same change, regenerate the embedded
+module, then run:
 
 ```
+node scripts/gen-crq-schemas.mjs
 pnpm test:narrow apps/crq-python/test_crq_state_schemas.py
+pnpm test:narrow test/policy/crq/schemas.test.ts
 ```
 
-The test also asserts that every schema is paired with a fixture, so a new
-state file needs both.
+Both tests assert that every schema is paired with a fixture, so a new state
+file needs both. The generated module's test also proves the embedded document
+is exactly the checked-in JSON Schema.
