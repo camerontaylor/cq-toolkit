@@ -77,6 +77,12 @@ export function classifyStagePaths(
  * are `<status> NUL <path> [NUL <path2>]` — an R/C (rename/copy) status
  * carries the OLD then the NEW path, and BOTH are scope-checked (the source
  * is the production code a rename deletes); every other status carries one.
+ *
+ * A record whose path token is missing is a TRUNCATED (or misaligned) capture:
+ * throwing — never silently dropping the path — keeps a rename's new path from
+ * going unchecked and `classifyStagePaths` from returning `clean` on evidence
+ * it never saw (I5: missing evidence is non-passing; the caller maps the throw
+ * onto `infra`/`failed`).
  */
 export function stagedPathsOf(capture: string): string[] {
   const tokens = capture.split('\0').filter((token) => token !== '');
@@ -87,7 +93,10 @@ export function stagedPathsOf(capture: string): string[] {
     const pathCount = /^[RC]/.test(status) ? 2 : 1;
     for (let n = 0; n < pathCount; n += 1) {
       const path = tokens[index];
-      if (path !== undefined) paths.push(path);
+      if (path === undefined) {
+        throw new Error(`malformed name-status capture: status '${status}' is missing a path`);
+      }
+      paths.push(path);
       index += 1;
     }
   }
