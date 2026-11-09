@@ -160,6 +160,9 @@ export interface SelfhostPeakConfig {
  * multiplies (~3×) — written in UTC because every consumer reads a UTC
  * clock: **06:00–10:00 UTC, Monday–Friday**. The peak driver uses the
  * configured OpenCode Go route and its `OPENCODE_GO_API_KEY` credential.
+ * The default DeepSeek model requires Global to be allowed in the OpenCode
+ * workspace privacy settings. An owner can instead configure an available
+ * model via `CQ_SELFHOST_PEAK_DRIVER`; see https://opencode.ai/docs/console/go/.
  *
  * IMMUTABLE BY CONSTRUCTION (deepFreeze), like every other shared default:
  * a nested write throws instead of silently re-pointing a live run's model.
