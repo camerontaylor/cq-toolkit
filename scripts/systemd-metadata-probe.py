@@ -62,7 +62,15 @@ def recover(journal, phase):
     die('restore')
     ctl('daemon-reload')
     die('reload-restore')
-    ctl('start', rec['timer'])
+    try:
+        ctl('start', rec['timer'])
+    except subprocess.CalledProcessError:
+        subprocess.run(['systemctl', '--user', 'show', rec['timer'], rec['unit'],
+                        '-p', 'LoadState', '-p', 'ActiveState', '-p', 'SubState',
+                        '-p', 'Result', '-p', 'Job', '-p', 'FragmentPath'], check=False)
+        subprocess.run(['journalctl', '--user', '-u', rec['timer'], '-u', rec['unit'],
+                        '--no-pager', '-n', '30'], check=False)
+        raise
     die('activation')
 
 
