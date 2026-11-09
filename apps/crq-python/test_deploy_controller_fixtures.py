@@ -64,7 +64,7 @@ class ControllerFixture(unittest.TestCase):
         self.command("commit", "-qm", "baseline")
         self.before = self.command("rev-parse", "HEAD").strip()
         config = json.loads((self.runner / "config.json").read_text())
-        config["promotion"]["hours_trigger"] = 9
+        config["quiet_minutes"] = 31
         (self.runner / "config.json").write_bytes(host.encode(config))
         self.command("commit", "-qam", "next policy")
         self.target = self.command("rev-parse", "HEAD").strip()
@@ -82,12 +82,7 @@ class ControllerFixture(unittest.TestCase):
                 "worktree_root": str(self.base / "worktrees"),
                 "timeout_bin": "/usr/bin/timeout",
                 "paseo_hosts": ["worker.example.invalid:6767", "127.0.0.1:6767"],
-                "promotion": {"record_url_template":
-                              "http://queue.example.invalid:6778/promotion/{item}",
-                              "alert_agent_host": "worker.example.invalid:6767",
-                              "signer": {"spool": {
-                                  "ssh_alias": "operator@127.0.0.1",
-                                  "ssh_key": "/srv/keys/crq-spool"}}},
+                "alerts": {"alert_agent_host": "worker.example.invalid:6767"},
                 "repair": {"enabled": False,
                            "cq_bin": str(self.base / "runtime/dist/cli.js"),
                            "paseo_host": "127.0.0.1:6767"},

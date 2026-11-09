@@ -91,11 +91,15 @@ its next mutating save (keep the full merged audit separately).
 
 ## Synthetic benchmarks
 
+The generator (`benchmark_admission_history.py`) was deleted with the Python crq
+migration (Phase 0.1, 2026-11-09). The measurements below are retained as
+historical evidence; they are not reproducible from this tree.
+
 ### Stress fixture
 
 Generate only synthetic data; no live queue or production-host access was used. Run
-`benchmark_admission_history.py <scratch-directory> generate`, then `before`,
-`compact`, `after` in separate processes. The fixture has about 150 MiB of ordinary
+the generator with `<scratch-directory> generate`, then `before`, `compact`, `after`
+in separate processes. The fixture has about 150 MiB of ordinary
 items plus 600 MiB of repeated observations and 3,000 reservation snapshots per
 decision, predominantly released. `before` uses the legacy JSON loader and `after` uses the new incremental
 loader, both with the production atomic writer; `compact` uses the incremental
@@ -129,8 +133,8 @@ The independent review's read-only shape observation found 783,287,101 bytes:
 about 773.8 MB history and 9.5 MB other data, including 1,596 items (~7.8 MB).
 No live contents are copied into the generator.
 
-Run `benchmark_admission_history.py <new-scratch-directory> generate-live`,
-then `before`, `compact`, `after` in separate sequential processes. This fixture
+The generator ran with `<new-scratch-directory> generate-live`, then `before`,
+`compact`, `after` in separate sequential processes. This fixture
 has 25,526 decisions of 30,535 bytes each, 112 holds (100 expired), and 1,596 items
 with about 9.5 MB non-history data. It models the observed shape rather than the
 stress fixture's 3,000 holds and 150 MiB ordinary payload.

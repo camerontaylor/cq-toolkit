@@ -26,14 +26,22 @@ LEGACY_SHA = '0e35cd11153fc7ad681f002d580b9b22feb22092'
 CONFIG_KEYS = {
     'clone', 'worktree_root', 'timeout_bin', 'paseo_hosts',
     'repos', 'notify.hosts',
+    'alerts.alert_agent_host', 'alerts.alert_agent_id',
+    # Transition-only promotion leaves: switch() renders the live source
+    # before its drift check, so an overlay must still be able to reproduce a
+    # pre-Phase-0.1 config byte-for-byte. New configs keep the alert recipient
+    # and ignore the rest; see apply().
     'promotion.record_url_template', 'promotion.alert_agent_host',
-    'promotion.alert_agent_id',
-    'promotion.signer.spool.dir', 'promotion.signer.spool.ssh_alias',
-    'promotion.signer.spool.ssh_key', 'repair.enabled', 'repair.cq_bin',
+    'promotion.alert_agent_id', 'promotion.signer.spool.dir',
+    'promotion.signer.spool.ssh_alias', 'promotion.signer.spool.ssh_key',
+    'repair.enabled', 'repair.cq_bin',
     'repair.paseo_host', 'repair.blackout.enabled',
 }
 # Allowlisted but optional: absent means the committed value applies.
-OPTIONAL_KEYS = {'repos', 'notify.hosts', 'promotion.signer.spool.dir', 'promotion.alert_agent_id',
+OPTIONAL_KEYS = {'repos', 'notify.hosts', 'alerts.alert_agent_id',
+                 'promotion.record_url_template', 'promotion.alert_agent_id',
+                 'promotion.signer.spool.dir', 'promotion.signer.spool.ssh_alias',
+                 'promotion.signer.spool.ssh_key',
                  'repair.blackout.enabled'}
 HOST_KEYS = {'schema_version', 'deploy_root', 'record_dir', 'config', 'fleet_reader'}
 PATH_KEYS = {'clone', 'worktree_root', 'timeout_bin', 'repair.cq_bin',
@@ -140,7 +148,7 @@ def validate(overlay):
             # CRQ expands it only at SSH invocation; retain those config bytes.
             checked = value[1:] if name == 'promotion.signer.spool.ssh_key' and isinstance(value, str) and value.startswith('~/') else value
             host_path(checked)
-        elif name == 'promotion.alert_agent_id':
+        elif name in ('alerts.alert_agent_id', 'promotion.alert_agent_id'):
             # The alert recipient (a Paseo agent id) is host-specific, like its host.
             if not isinstance(value, str) or not re.fullmatch(
                     r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', value):
@@ -154,12 +162,18 @@ def validate(overlay):
     # Paths/endpoints needed by the model-free runner must be explicit.
     supplied = dict(leaves(overlay['config']))
     required = CONFIG_KEYS - OPTIONAL_KEYS
+    # Either the current or the transition-only alert host must be supplied.
+    required.discard('alerts.alert_agent_host')
+    required.discard('promotion.alert_agent_host')
     if not required <= supplied.keys():
         raise ValueError('missing host config keys: ' + ', '.join(sorted(required - supplied.keys())))
-    try:
-        supplied['promotion.record_url_template'].format(item='record-validation')
-    except (ValueError, KeyError, IndexError, AttributeError, TypeError):
-        raise ValueError('invalid promotion record URL template') from None
+    if not {'alerts.alert_agent_host', 'promotion.alert_agent_host'} & supplied.keys():
+        raise ValueError('missing host config keys: alerts.alert_agent_host')
+    if 'promotion.record_url_template' in supplied:
+        try:
+            supplied['promotion.record_url_template'].format(item='record-validation')
+        except (ValueError, KeyError, IndexError, AttributeError, TypeError):
+            raise ValueError('invalid promotion record URL template') from None
     for name in ('clone', 'worktree_root'):
         path = Path(supplied[name])
         if not outside(path, deploy) or not outside(deploy, path):
@@ -197,9 +211,23 @@ def load_overlay(path):
 
 def apply(config, overlay):
     config = copy.deepcopy(config)
-    for name, value in leaves(overlay['config']):
-        dest = config
+    renamed = isinstance(config.get('alerts'), dict)
+    # Transitional promotion leaves first, so the current alerts keys win if an
+    # overlay supplies both shapes for their one overlapping purpose.
+    entries = sorted(leaves(overlay['config']), key=lambda item: not item[0].startswith('promotion.'))
+    for name, value in entries:
         parts = name.split('.')
+        if renamed and parts[0] == 'promotion':
+            # A new-shape config has no promotion consumer. Keep the alert
+            # recipient for compatibility; ignore the rest of the old block.
+            if len(parts) == 2 and parts[1] in ('alert_agent_id', 'alert_agent_host'):
+                config['alerts'][parts[1]] = value
+            continue
+        if parts[0] == 'alerts' and not renamed:
+            # Phase 0.1 renamed the alert leaves. A pre-rename target still
+            # reads them from promotion, so render that shape for the source.
+            parts = ['promotion', parts[1]]
+        dest = config
         for part in parts[:-1]:
             dest = dest[part]
         dest[parts[-1]] = value
@@ -423,7 +451,9 @@ def verify_target(root, target, tag):
         raise ValueError('target must not track runner state')
     # Targets before import C have a different configuration/state contract.
     config = committed(root, target)
-    if config['promotion']['merges_trigger'] != 1 or config['promotion']['dispatch_after_min'] != 0:
+    # Configs before Phase 0.1 carry the promotion block; later ones do not.
+    promotion = config.get('promotion') or {}
+    if promotion.get('merges_trigger', 1) != 1 or promotion.get('dispatch_after_min', 0) != 0:
         raise ValueError('target predates the every-green-tip policy floor')
     if not git(root, 'ls-tree', target, 'apps/crq-python/ops/prepare-host.py'):
         raise ValueError('target lacks monorepo deploy helper')

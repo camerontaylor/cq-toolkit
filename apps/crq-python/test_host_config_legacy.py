@@ -19,13 +19,16 @@ class HostConfigTests(HostConfigFixture, unittest.TestCase):
         legacy = self.base / 'old'
         legacy.mkdir()
         committed = json.loads((ROOT / 'config.json').read_text())
-        committed['promotion']['merges_trigger'] = 5
-        committed['promotion']['dispatch_after_min'] = 20
-        self.overlay['config']['promotion']['signer']['spool']['ssh_key'] = '~/.ssh/crq-spool-key'
+        alerts = committed.pop('alerts')
+        # The accepted legacy baseline predates the alerts rename.
+        committed['promotion'] = {'merges_trigger': 5, 'dispatch_after_min': 20,
+                                  'alert_agent_id': alerts['alert_agent_id'],
+                                  'alert_agent_host': None}
         host.validate(self.overlay)
         self.raw = host.encode(self.overlay)
         expected = host.apply(copy.deepcopy(committed), self.overlay)
-        self.assertEqual(expected['promotion']['signer']['spool']['ssh_key'], '~/.ssh/crq-spool-key')
+        self.assertEqual(expected['promotion']['alert_agent_host'],
+                         self.overlay['config']['alerts']['alert_agent_host'])
         expected['promotion']['merges_trigger'] = 1
         (legacy / 'config.json').write_bytes(host.encode(expected))
         original = (legacy / 'config.json').read_bytes()
