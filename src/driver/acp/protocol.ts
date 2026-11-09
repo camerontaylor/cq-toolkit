@@ -632,9 +632,27 @@ export function mapWireUsage(raw: unknown): Usage | undefined {
 export function modelOptionValueFrom(
   configOptions: readonly ConfigOption[] | undefined,
 ): string | undefined {
+  return configOptionValueFrom(configOptions, 'model', 'model');
+}
+
+/**
+ * ONE config option's CURRENT value from a configOptions array — the entry
+ * matching `id`, with `category` as the fallback match. Returns undefined
+ * for an absent/empty/non-string value. The mode pin reads `mode` through
+ * this: ACP answers `session/set_config_option` with the session's
+ * `configOptions`, so a compliant agent may report the switch there without
+ * echoing `modes` and without a `current_mode_update`.
+ */
+export function configOptionValueFrom(
+  configOptions: readonly ConfigOption[] | undefined,
+  id: string,
+  category?: string,
+): string | undefined {
   const option =
-    configOptions?.find((entry) => entry.id === 'model') ??
-    configOptions?.find((entry) => entry.category === 'model');
+    configOptions?.find((entry) => entry.id === id) ??
+    (category === undefined
+      ? undefined
+      : configOptions?.find((entry) => entry.category === category));
   const value = option?.currentValue;
   return typeof value === 'string' && value !== '' ? value : undefined;
 }

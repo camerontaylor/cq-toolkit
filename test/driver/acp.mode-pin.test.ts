@@ -34,9 +34,9 @@ describe('acp driver specifics (fake ACP server)', () => {
       // FAKE_ACP_IGNORE_MODE_PIN: the pin request is answered 2xx but the
       // fixture never applies it — the echo names 'yolo'. A driver that
       // trusts the 2xx prompts into the policy void; the fixed driver
-      // requires EITHER confirmation surface to name 'build' — the echo or
-      // a folded current_mode_update — and refuses to prompt when neither
-      // does (this persona provides neither).
+      // requires one confirmation surface to name 'build' — the echo, the
+      // response's mode configOption, or a fresh current_mode_update — and
+      // refuses to prompt when none does (this persona provides none).
       const driver = new AcpDriver(
         driverOptions(scratchDir, { FAKE_ACP_MODE: 'ok', FAKE_ACP_IGNORE_MODE_PIN: '1' }, []),
       );
@@ -74,6 +74,35 @@ describe('acp driver specifics (fake ACP server)', () => {
       );
       const result = await driver.run(invocation({ prompt: 'notification-pin run' }));
       expect(result.stopReason).toBe('complete'); // confirmed via current_mode_update — the prompt fired
+      const record = await store.load(result.sessionId as string);
+      expect(
+        record?.messages.some((m) => m.role === 'assistant' && m.content.includes('[mode:build]')),
+      ).toBe(true);
+    });
+  });
+
+  test('the mode pin confirms from the CONFIG-OPTION response: no modes echo, no notification, configOptions mode=build prompts normally', async () => {
+    await withScratch(async (scratchDir, store) => {
+      // FAKE_ACP_MODE_PIN_CONFIG_OPTION: the compliant-agent shape ACP
+      // allows — the set_config_option answer returns the session's
+      // current values in `configOptions`, so the applied switch is the
+      // `mode` entry's currentValue, with NO modes echo and NO
+      // current_mode_update. A driver verifying only those two surfaces
+      // would reject this successful pin before every prompt.
+      const driver = new AcpDriver(
+        driverOptions(
+          scratchDir,
+          {
+            FAKE_ACP_MODE: 'tool-then-reply',
+            FAKE_ACP_TOOL: 'read',
+            FAKE_ACP_INPUT: JSON.stringify({ path: 'note.txt' }),
+            FAKE_ACP_MODE_PIN_CONFIG_OPTION: '1',
+          },
+          [],
+        ),
+      );
+      const result = await driver.run(invocation({ prompt: 'config-option-pin run' }));
+      expect(result.stopReason).toBe('complete'); // confirmed via configOptions — the prompt fired
       const record = await store.load(result.sessionId as string);
       expect(
         record?.messages.some((m) => m.role === 'assistant' && m.content.includes('[mode:build]')),

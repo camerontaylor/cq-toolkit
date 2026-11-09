@@ -749,9 +749,11 @@ the RD-F PR): the set_config_option ANSWER carries no `modes` member —
 notification naming `build`, written in the same stdout flush BEFORE the
 response line. A driver that verifies the pin from the response echo alone
 would fail every live run pre-prompt; the driver therefore confirms from
-either surface (echo, or a folded current_mode_update naming `build` —
-the wire's line ordering guarantees the notification is already folded
-when the pin await resolves).
+any of three surfaces: the echo, the response's `configOptions` entry for
+`mode` with currentValue `build`, or a fresh folded `current_mode_update`
+naming `build`. The wire's line ordering guarantees the notification is
+already folded when the pin await resolves. See the mode-pin rule in
+[the driver guide](acp-driver.md).
 
 **OQ-6 (cancel-spend) — ANSWERED (client-observable scope per §2.3).**
 Mid-turn `session/cancel` on a generation prompt: `session/prompt` resolves
