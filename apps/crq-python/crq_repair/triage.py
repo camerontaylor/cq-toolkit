@@ -156,7 +156,13 @@ def phase(inbox, repo, tip, judge, transport, at, *, maximum=6, seconds=600, dry
             if remaining <= 0:
                 stopped = 'deadline'; break
             report = judge(row, packed, remaining)
-        except (subprocess.TimeoutExpired, OSError):
+        except subprocess.TimeoutExpired:
+            if row.get('_escalate'):
+                plans.append((row, 'needs-human', 'escalation timed out before a disposition', {}))
+                judged += 1
+                continue
+            stopped = 'deferred'; break
+        except OSError:
             stopped = 'deferred'; break
         if report.get('stop') != 'ok':
             if row.get('_escalate') and report.get('stop') not in ('rate-limit',):

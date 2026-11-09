@@ -143,6 +143,15 @@ class PhaseTest(FindingTest):
         _, _, judge = self.run_phase()
         judge.assert_not_called()
 
+    def test_timed_out_escalation_is_not_repeated_on_each_pass(self):
+        import subprocess
+        self.run_phase({'stop': 'ok', 'verdict': 'unsure', 'reason': 'missing context'})
+        judge = mock.Mock(side_effect=subprocess.TimeoutExpired('judge', 1))
+        result = phase(self.inbox, self.f.repo, self.t, judge, mock.Mock(), AT)
+        self.assertEqual(result['counts'], {'needs-human': 1})
+        _, _, next_judge = self.run_phase()
+        next_judge.assert_not_called()
+
     def test_zero_limit_leaves_unjudged(self):
         result, _, judge = self.run_phase(maximum=0)
         judge.assert_not_called()
