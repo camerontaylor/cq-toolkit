@@ -295,7 +295,9 @@ export function scanText(
   rules: readonly DenylistRule[],
   path: string | undefined,
 ): DenylistHit[] {
-  const lines = text.split('\n');
+  // Split like the parser above: a CRLF line keeps no trailing `\r`, so
+  // anchored rules (`.$`) match exactly as they do on LF content.
+  const lines = text.split(/\r?\n/);
   const hits: DenylistHit[] = [];
   for (const rule of rules) {
     let re: RegExp;
