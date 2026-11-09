@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
 import type { OpInvocation } from '../../src/driver/types.js';
-import { REPLY_RESOLVE_MARKER } from '../../src/plans/review-loop.js';
+import { evidenceFailure, REPLY_RESOLVE_MARKER } from '../../src/plans/review-loop.js';
 import {
   actionableThread,
   answerOnce,
@@ -33,6 +33,25 @@ import {
   settleWorld,
   SHA,
 } from './review-loop.helpers.js';
+
+describe('evidence verifier defense in depth', () => {
+  test('rejects empty and invalid line citations even if a producer bypasses validation', async () => {
+    const git = async (args: string[]) => ({
+      code: 0,
+      stdout: args.includes('-t') ? 'blob' : args.includes('-s') ? '4' : 'line',
+      stderr: '',
+    });
+    expect(await evidenceFailure(git, '/worktree', SHA, [])).toBe('no evidence cited');
+    for (const line of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(await evidenceFailure(git, '/worktree', SHA, [{ path: 'src/a.ts', line }])).toContain(
+        'not a valid line',
+      );
+    }
+    expect(
+      await evidenceFailure(git, '/worktree', SHA, [{ path: 'src/a.ts', line: 1 }]),
+    ).toBeNull();
+  });
+});
 
 describe('thread settle gate (PR #336 incident)', () => {
   test('a marked reply with no dispatch record (lost cache) is looked at again, never silently re-resolved (PR #343 Codex review)', async () => {
