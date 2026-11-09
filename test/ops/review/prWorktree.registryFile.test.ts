@@ -7,8 +7,8 @@
 //
 // Shared fixtures and the fake git model (with the full pinned-behavior
 // header) live in prWorktree.helpers.ts.
-import { describe, expect, test } from 'vitest';
-import { readFile, rm, writeFile } from 'node:fs/promises';
+import { describe, expect, test, vi } from 'vitest';
+import { mkdir, readFile, rm, utimes, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { realTmpDir } from '../../helpers/tmp-dir.js';
 import {
@@ -19,11 +19,89 @@ import {
 import type { RegistryMap, WorktreeRegistryEntry } from '../../../src/adapters/git/prWorktree.js';
 import { NOW, LABEL } from './prWorktree.helpers.js';
 
+const acquireFault = vi.hoisted(() => ({ code: '', attempts: 0 }));
+vi.mock('proper-lockfile', async (original) => {
+  const actual = await original<typeof import('proper-lockfile')>();
+  return {
+    ...actual,
+    lock: async (...args: Parameters<typeof actual.lock>) => {
+      if (acquireFault.code) {
+        acquireFault.attempts += 1;
+        throw Object.assign(new Error('filesystem unavailable'), { code: acquireFault.code });
+      }
+      return actual.lock(...args);
+    },
+  };
+});
+
 // ---------------------------------------------------------------------------
 // fileWorktreeRegistry — the file-backed registry
 // ---------------------------------------------------------------------------
 
 describe('fileWorktreeRegistry', () => {
+  test.each(['EACCES', 'EPERM', 'EROFS', 'ENOSPC', 'ENOENT'])(
+    'fails immediately on %s without blaming a lock holder or entering the callback',
+    async (code) => {
+      acquireFault.code = code;
+      acquireFault.attempts = 0;
+      const callback = vi.fn();
+      try {
+        const error: unknown = await fileWorktreeRegistry('/unused/registry.json')
+          .withLock(callback)
+          .catch((caught: unknown) => caught);
+        expect(error).toBeInstanceOf(Error);
+        if (!(error instanceof Error)) throw new Error('expected acquisition failure');
+        expect(error.message).toContain(`acquisition failed (${code})`);
+        expect(error.cause).toMatchObject({ code });
+        expect(acquireFault.attempts).toBe(1);
+        expect(callback).not.toHaveBeenCalled();
+      } finally {
+        acquireFault.code = '';
+      }
+    },
+  );
+
+  test('a contender waits until a recently abandoned lock becomes stale and recovers it', async () => {
+    const dir = await realTmpDir('cq-wt-reg-');
+    const path = join(dir, 'worktrees.json');
+    try {
+      await mkdir(`${path}.lock`);
+      const abandoned = new Date(Date.now() - 9_900);
+      await utimes(`${path}.lock`, abandoned, abandoned);
+      const registry = fileWorktreeRegistry(path);
+      await registry.withLock(() =>
+        registry.update('7', { path: '/t/pr-7', branch: 'b7', createdAt: NOW }),
+      );
+      expect(await registry.load()).toHaveProperty('7');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('a live holder can finish a checkout longer than the old retry budget before the contender enters', async () => {
+    const dir = await realTmpDir('cq-wt-reg-');
+    const registry = fileWorktreeRegistry(join(dir, 'worktrees.json'));
+    let entered!: () => void;
+    const holding = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    let holderFinished = false;
+    try {
+      const holder = registry.withLock(async () => {
+        entered();
+        await new Promise<void>((resolve) => setTimeout(resolve, 1_000));
+        holderFinished = true;
+      });
+      await holding;
+      const contender = registry.withLock(async () => {
+        expect(holderFinished).toBe(true);
+      });
+      await Promise.all([holder, contender]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   test('a missing registry file loads as empty, save creates it, and a fresh instance round-trips', async () => {
     const dir = await realTmpDir('cq-wt-reg-');
     try {
