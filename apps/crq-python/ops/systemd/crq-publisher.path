@@ -1,7 +1,8 @@
 [Unit]
 Description=Publish CRQ ledger records as soon as they are spooled
 # Drain work already spooled at boot or path-unit restart once. Pending records
-# are retained after acknowledgement, so DirectoryNotEmpty would retrigger forever.
+# are retained after acknowledgement, so DirectoryNotEmpty would repeatedly
+# activate the worker.
 Wants=crq-publisher.service
 [Path]
 # Harvest, admission and inventory spool records here; publish them at once
