@@ -1,6 +1,7 @@
 """finding_issues: GitHub-issue delivery of non-primary-repo findings (docs/multi-repo.md)."""
 import json
 import unittest
+from unittest import mock
 from types import SimpleNamespace
 
 import finding_issues
@@ -111,6 +112,11 @@ class BodyTests(unittest.TestCase):
 
 
 class FileIssueTests(unittest.TestCase):
+    def test_real_gh_calls_have_short_timeout(self):
+        with mock.patch.object(finding_issues.subprocess, 'run', return_value=ok('[]')) as run:
+            finding_issues._gh(['gh', 'issue', 'list'])
+        self.assertEqual(run.call_args.kwargs['timeout'], 10)
+
     def test_disabled_repo_is_noop_without_gh_calls(self):
         fake = FakeGh()
         result = finding_issues.file_issue({"repo": REPO, "findings": "none"}, base=BASE, head=HEAD,

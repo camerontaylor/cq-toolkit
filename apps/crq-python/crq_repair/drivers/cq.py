@@ -190,6 +190,9 @@ def invoke(config, role, job, wt, directory):
                                               or 'token or wall-clock cap (no budget-stop line)')
         return {'stop': stop, 'changed': False, 'summary': summary, 'commits': [],
                 'retry_after_ms': signals.get('retryAfterMs')}
+    if result.get('verdict') in ('fail', 'failed', 'regression'):
+        return {**result, 'stop': 'error', 'changed': False, 'commits': [],
+                'summary': str(result.get('summary') or result.get('reason') or result['verdict'])}
     return {**result, 'stop': 'ok'}  # session.json already written above
 
 
