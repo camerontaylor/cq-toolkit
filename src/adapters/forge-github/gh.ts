@@ -16,7 +16,7 @@ import { checkoutWriterStdio, trackCheckoutWriter } from '../../shared/checkoutW
 // normalizer) — hoisted here so the seams cannot drift apart.
 import { spawn } from 'node:child_process';
 import type { CqEnv } from '../../config/env.js';
-import { ghSpawnEnv, resolveGhBin, resolveWindowsCommand } from './ghBin.js';
+import { ghMergeEnv, ghSpawnEnv, resolveGhBin, resolveWindowsCommand } from './ghBin.js';
 import { isAbsolute, resolve as pathResolve } from 'node:path';
 
 /** Result of one `gh` invocation: the exit code plus the captured streams. */
@@ -111,7 +111,7 @@ export function makeGhRunner(opts?: {
           if (targets.includes(probe)) delete inherited[name];
         }
       }
-      const childEnv = { ...inherited, ...opts?.env };
+      const childEnv = ghMergeEnv(inherited, opts?.env);
       const rawBin = opts?.bin ?? resolveGhBin(opts?.cqEnv);
       const hasSeparator = rawBin.includes('/') || rawBin.includes('\\');
       const bin = hasSeparator && !isAbsolute(rawBin) ? pathResolve(process.cwd(), rawBin) : rawBin;

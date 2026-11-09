@@ -23,6 +23,20 @@ export function resolveGhBin(cqEnv?: CqEnv): string {
     : rawBin;
 }
 
+/** Merge explicit environment values using the platform's key semantics. */
+export function ghMergeEnv(
+  inherited: NodeJS.ProcessEnv,
+  overrides: Readonly<Record<string, string>> | undefined,
+  platform: NodeJS.Platform = process.platform,
+): NodeJS.ProcessEnv {
+  const result = { ...inherited };
+  if (platform === 'win32' && overrides !== undefined) {
+    const keys = new Set(Object.keys(overrides).map((key) => key.toUpperCase()));
+    for (const key of Object.keys(result)) if (keys.has(key.toUpperCase())) delete result[key];
+  }
+  return { ...result, ...overrides };
+}
+
 /** Anchor PATH entries before any subprocess changes cwd, preserving native search semantics. */
 export function ghSpawnEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const result = { ...env };

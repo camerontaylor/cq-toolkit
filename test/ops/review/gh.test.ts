@@ -13,7 +13,7 @@ import { delimiter, dirname, join, relative } from 'node:path';
 import { afterEach, describe, expect, test } from 'vitest';
 import { makeGhRunner, ghJson } from '../../../src/adapters/forge-github/gh.js';
 import type { GhFn } from '../../../src/adapters/forge-github/gh.js';
-import { resolveWindowsCommand } from '../../../src/adapters/forge-github/ghBin.js';
+import { ghMergeEnv, resolveWindowsCommand } from '../../../src/adapters/forge-github/ghBin.js';
 import { makeSubprocessPrEffects } from '../../../src/adapters/forge-github/ghEffects.js';
 
 const tempDirs: string[] = [];
@@ -145,6 +145,12 @@ describe('makeGhRunner', () => {
       if (oldGh === undefined) delete process.env.CQ_GH_BIN;
       else process.env.CQ_GH_BIN = oldGh;
     }
+  });
+
+  test('Windows explicit environment overrides inherited keys case-insensitively', () => {
+    expect(
+      ghMergeEnv({ PATH: 'inherited', Other: 'value' }, { Path: 'explicit' }, 'win32'),
+    ).toEqual({ Path: 'explicit', Other: 'value' });
   });
 
   test('Windows executable resolution searches caller PATH without consulting child cwd', async () => {
