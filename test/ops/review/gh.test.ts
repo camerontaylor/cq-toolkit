@@ -210,9 +210,10 @@ describe('makeGhRunner', () => {
       await writeFile(join(root, 'bin', 'cq-symlink-probe'), '#!/bin/sh\nprintf wrong', {
         mode: 0o755,
       });
-      const path = `${root}/link/../bin`;
-      const result = await makeGhRunner({ bin: 'cq-symlink-probe', env: { PATH: path } })([]);
-      expect(result.stdout).toBe('correct');
+      for (const path of [`${root}/link/../bin`, `${relative(process.cwd(), root)}/link/../bin`]) {
+        const result = await makeGhRunner({ bin: 'cq-symlink-probe', env: { PATH: path } })([]);
+        expect(result.stdout).toBe('correct');
+      }
     },
   );
 
