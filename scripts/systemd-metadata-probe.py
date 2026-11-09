@@ -97,7 +97,8 @@ with tempfile.TemporaryDirectory(prefix=name + '-') as work:
     content = b'[Service]\nType=oneshot\nExecStart=/bin/true\n'
     atomic(backing, content, 0o640)
     service.symlink_to(backing)
-    atomic(timer_file, ('[Timer]\nOnActiveSec=1h\nUnit=' + unit + '\n[Install]\nWantedBy=timers.target\n').encode(), 0o644)
+    # The fixture deliberately restarts this synthetic timer many times in seconds.
+    atomic(timer_file, ('[Unit]\nStartLimitIntervalSec=0\n[Timer]\nOnActiveSec=1h\nUnit=' + unit + '\n[Install]\nWantedBy=timers.target\n').encode(), 0o644)
     try:
         ctl('daemon-reload')
         ctl('enable', timer)
