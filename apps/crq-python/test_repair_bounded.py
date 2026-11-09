@@ -290,7 +290,7 @@ class BoundedRepairTest(unittest.TestCase):
         atomic(self.root / 'state/repair' / job_id / 'result.json', result)
         item = self.queue['items'][0]
         repair_tick.harvest(self.c, self.queue, item)
-        record = item['repair_runs']['old-run']
+        record = item['repair_runs'][job['run']]
         self.assertEqual(record['state'], 'failed')
         self.assertIn('source/evidence binding', record['error'])
         self.assertEqual(item['state'], 'repair_failed')
@@ -300,13 +300,24 @@ class BoundedRepairTest(unittest.TestCase):
         job_id, job = self.prepare()
         atomic(self.root / 'state/repair' / job_id / 'result.json',
                {'job': job_id, 'item': job['item'], 'verdict': 'FIXED', 'commits': [],
-                'worktree': str(self.root / 'wt/crq-repair-pr1-merged'), 'reason': 'test'})
+                'worktree': str(self.root / 'wt/crq-repair-pr1-merged'), 'reason': 'test',
+                'source_sha': job['source_sha'], 'finding_sha256': job['finding_sha256'], 'origin_job': OLD})
         item = self.queue['items'][0]
         repair_tick.harvest(self.c, self.queue, item)
-        record = item['repair_runs']['old-run']
+        record = item['repair_runs'][job['run']]
         self.assertEqual(record['state'], 'failed')
         self.assertIn('without valid commits', record['error'])
         self.assertEqual(item['state'], 'repair_failed')
+
+    def test_harvest_retains_malformed_json_and_fails_the_prepared_run(self):
+        job_id, job = self.prepare()
+        result = self.root / 'state/repair' / job_id / 'result.json'
+        result.parent.mkdir(parents=True, exist_ok=True)
+        result.write_text('{broken')
+        item = self.queue['items'][0]
+        repair_tick.harvest(self.c, self.queue, item)
+        self.assertEqual(item['repair_runs'][job['run']]['state'], 'failed')
+        self.assertEqual(result.read_text(), '{broken')
 
     def test_service_dispatches_one_selected_job_without_inbox_enumeration(self):
         job_id, job = self.prepare()

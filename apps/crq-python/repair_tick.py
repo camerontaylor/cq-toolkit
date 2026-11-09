@@ -261,9 +261,6 @@ def harvest(c, q, item, dry=False):
             path = c.STATE / 'repair' / job_id / 'result.json'
             if not path.exists():
                 break
-            result = json.loads(path.read_text())
-            if result.get('retry_after'):
-                break
             expected = json.loads((c.STATE / 'repair/inbox' / (job_id + '.json')).read_text())
             try:
                 require_canonical_delivery(c.STATE.parent, expected)
@@ -273,6 +270,11 @@ def harvest(c, q, item, dry=False):
                     item['state'] = 'done'
                 break  # Retain the result artifact without publishing an obsolete fix.
             try:
+                result = json.loads(path.read_text())
+                if not isinstance(result, dict):
+                    raise ValueError('repair result must be an object')
+                if result.get('retry_after'):
+                    break
                 if result.get('job') != job_id or result.get('item') != item['id']:
                     raise ValueError('repair result identity mismatch')
                 if expected.get('source_sha') and any(result.get(k) != expected.get(k)
