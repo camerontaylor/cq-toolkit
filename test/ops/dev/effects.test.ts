@@ -171,3 +171,18 @@ test('a numeric command failure has no abort provenance even if the caller later
   expect(result.timedOut).toBe(false);
   expect(result).not.toHaveProperty('interruption');
 });
+
+test('a command killed by an external signal is a verdict (exitCode null), not a spawn fault', async () => {
+  const effects = makeSubprocessDevEffects(dir);
+  // The child dies from a signal this runner did NOT send: Node reports
+  // code null, killed false and signal 'SIGKILL'. The command RAN, so it
+  // must resolve for the caller to classify red — never "could not be spawned".
+  const result = await effects.runCommand(
+    process.execPath,
+    ['-e', "process.kill(process.pid, 'SIGKILL')"],
+    { timeoutMs: 10_000 },
+  );
+  expect(result.exitCode).toBeNull();
+  expect(result.timedOut).toBe(false);
+  expect(result).not.toHaveProperty('interruption');
+});
