@@ -231,6 +231,38 @@ describe('ai-sdk driver token meter', () => {
     },
   );
 
+  test('a provider error at the context ceiling remains an error', async () => {
+    const scratch = await mkdtemp(join(tmpdir(), 'aidrv-error-meter-'));
+    const model = new MockLanguageModelV4({
+      modelId: 'mock-1',
+      doGenerate: async () => ({
+        content: [],
+        finishReason: { unified: 'error', raw: undefined },
+        usage: {
+          inputTokens: { total: 100, noCache: 100, cacheRead: 0, cacheWrite: 0 },
+          outputTokens: { total: 1, text: 1, reasoning: 0 },
+        },
+        warnings: [],
+      }),
+    });
+    try {
+      const driver = new AiSdkDriver({
+        providers: { mock: () => model },
+        sessionsDir: join(scratch, 'sessions'),
+        harnessConfig: conformanceHarnessConfig(scratch),
+      });
+      const result = await driver.run(invocation({ budget: { maxContextTokens: 100 } }));
+      expect(result.stopReason).toBe('error');
+      const files = await readdir(join(scratch, 'sessions'));
+      const log = (
+        await Promise.all(files.map((f) => readFile(join(scratch, 'sessions', f), 'utf8')))
+      ).join('');
+      expect(log).not.toContain('budget-stop');
+    } finally {
+      await rm(scratch, { recursive: true, force: true });
+    }
+  });
+
   test('context ceiling stops the loop before the next request and records why', async () => {
     const { result, calls, stops } = await runLoop({ maxContextTokens: 200_000 }, [
       { input: 50_000, cacheRead: 0, output: 100 },

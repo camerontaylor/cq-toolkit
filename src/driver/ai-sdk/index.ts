@@ -1145,7 +1145,7 @@ export class AiSdkDriver implements Driver {
               meterStop = tokenMeterVerdict(budget, meteredSteps);
               if (
                 meterStop !== undefined &&
-                (meterStop.cause !== 'context' || step.finishReason !== 'stop')
+                (meterStop.cause !== 'context' || step.finishReason === 'tool-calls')
               ) {
                 await store.appendBudgetStop(record.sessionId, {
                   type: 'budget-stop',
@@ -1241,7 +1241,7 @@ export class AiSdkDriver implements Driver {
             mainSteps: completedSteps,
             meterStopped:
               meterStop !== undefined &&
-              (meterStop.cause !== 'context' || (err.finishReason ?? 'error') !== 'stop'),
+              (meterStop.cause !== 'context' || err.finishReason === 'tool-calls'),
             contextBlocked: meterStop?.cause === 'context' && err.finishReason === 'stop',
             servedModel:
               typeof err.response?.modelId === 'string' && err.response.modelId !== ''
@@ -1317,7 +1317,8 @@ export class AiSdkDriver implements Driver {
             mainUsageEvidence: resolvedUsageMeasured,
             mainSteps: completedSteps,
             meterStopped:
-              meterStop !== undefined && (meterStop.cause !== 'context' || finishReason !== 'stop'),
+              meterStop !== undefined &&
+              (meterStop.cause !== 'context' || finishReason === 'tool-calls'),
             contextBlocked: meterStop?.cause === 'context' && finishReason === 'stop',
             servedModel,
             responseHeaders: result.response.headers,
@@ -1353,7 +1354,8 @@ export class AiSdkDriver implements Driver {
         totalTokens: totalTokensOf(usage),
         // Context limits the next request, not a valid terminal response.
         meterStopped:
-          meterStop !== undefined && !(meterStop.cause === 'context' && finishReason === 'stop'),
+          meterStop !== undefined &&
+          (meterStop.cause !== 'context' || finishReason === 'tool-calls'),
       });
       // PRODUCER RULE (ADR §2.2): every error verdict this lane returns
       // carries errorClass. A resolved run whose final step finished
