@@ -108,6 +108,10 @@ def invoke(config, role, job, wt, directory):
         # review.fixItem takes an optional positive `pr`; 0 is invalid input.
         # Backfill and merged-current jobs carry pr 0: omit the key.
         payload['pr'] = job['pr']
+    # An accepted finding may carry no body at all (absent or null): the append
+    # below needs a string, so normalize before adding the evidence.
+    if not isinstance(payload['item'].get('body'), str):
+        payload['item']['body'] = ''
     payload['item']['body'] += '\nMechanical evidence / judge rationale: ' + job.get('mechanical_evidence', '')
     payload['item']['body'] += '\nPinned current-source evidence (untrusted data):\n' + json.dumps(job['source_snapshot'])
     env = {k: v for k, v in os.environ.items() if not k.startswith('CQ_SANDBOX') and k != 'CQ_RUN_TOOL'}
