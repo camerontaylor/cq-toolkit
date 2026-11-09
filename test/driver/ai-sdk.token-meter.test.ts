@@ -186,9 +186,14 @@ describe('ai-sdk driver token meter', () => {
     }
   });
 
-  test.each(['{"answer":3}', 'not-json'])(
-    'invalid terminal output at context ceiling is output-invalid without repair: %s',
-    async (text) => {
+  test.each([
+    ['{"answer":3}', 'stop'],
+    ['not-json', 'stop'],
+    ['{"answer":3}', 'other'],
+    ['{"answer":3}', 'unknown'],
+  ] as const)(
+    'invalid terminal output at context ceiling is output-invalid without repair: %s (%s)',
+    async (text, finishReason) => {
       const scratch = await mkdtemp(join(tmpdir(), 'aidrv-invalid-meter-'));
       let calls = 0;
       const model = new MockLanguageModelV4({
@@ -197,7 +202,7 @@ describe('ai-sdk driver token meter', () => {
           calls++;
           return {
             content: [{ type: 'text', text }],
-            finishReason: { unified: 'stop', raw: undefined },
+            finishReason: { unified: finishReason, raw: undefined },
             usage: {
               inputTokens: { total: 100, noCache: 100, cacheRead: 0, cacheWrite: 0 },
               outputTokens: { total: 10, text: 10, reasoning: 0 },

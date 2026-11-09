@@ -1242,7 +1242,7 @@ export class AiSdkDriver implements Driver {
             meterStopped:
               meterStop !== undefined &&
               (meterStop.cause !== 'context' || err.finishReason === 'tool-calls'),
-            contextBlocked: meterStop?.cause === 'context' && err.finishReason === 'stop',
+            contextBlocked: meterStop?.cause === 'context',
             servedModel:
               typeof err.response?.modelId === 'string' && err.response.modelId !== ''
                 ? err.response.modelId
@@ -1319,7 +1319,7 @@ export class AiSdkDriver implements Driver {
             meterStopped:
               meterStop !== undefined &&
               (meterStop.cause !== 'context' || finishReason === 'tool-calls'),
-            contextBlocked: meterStop?.cause === 'context' && finishReason === 'stop',
+            contextBlocked: meterStop?.cause === 'context',
             servedModel,
             responseHeaders: result.response.headers,
             finishReason,
