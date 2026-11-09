@@ -980,12 +980,7 @@ async function runOwnedReviewLoop(
       ...(opts.onWorktreeStaleRefresh ? { onStaleRefresh: opts.onWorktreeStaleRefresh } : {}),
     });
   } catch (error) {
-    if (
-      !(error instanceof Error) ||
-      (error.message !== 'PR fetched head changed since admission; checkout left untouched' &&
-        !isPrWorktreeAdmissionRefusal(error))
-    )
-      throw error;
+    if (!isPrWorktreeAdmissionRefusal(error)) throw error;
     return {
       status: 'needs-human',
       reasons: [

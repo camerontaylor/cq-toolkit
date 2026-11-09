@@ -1,3 +1,4 @@
+import { resolvePrWorktree } from '../../src/adapters/git/prWorktree.js';
 import { expect, test } from 'vitest';
 import { readSlotMetadata } from '../../src/adapters/lock/slotLock.js';
 import * as checkoutOwner from '../../src/ops/review/internal/addressCheckoutOwnership.js';
@@ -173,3 +174,41 @@ test.each(['fetch', 'identity', 'dirty'] as const)(
     }
   },
 );
+
+test('an old head-refusal message cannot clear a failure after add (mutation: classify by head message alone)', async () => {
+  const f = await slotFixture();
+  try {
+    const opts = f.opts();
+    const refusal = await resolvePrWorktree({
+      repoRoot: opts.repoRoot,
+      pr: 7,
+      headRefName: opts.headRefName,
+      run: opts.git,
+      registry: opts.registry,
+      nowMs: opts.nowMs,
+      worktreeRoot: f.worktreeRoot,
+      expectedHead: 'f'.repeat(40),
+    }).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    expect(refusal).toBeInstanceOf(Error);
+    expect((await readSlotMetadata(join(f.common, 'cq-review/slots/pr-7.json')))?.incomplete).toBe(
+      false,
+    );
+    await expect(
+      runReviewLoop({
+        ...opts,
+        onWorktreeCreated: () => {
+          throw refusal;
+        },
+      }),
+    ).rejects.toThrow('PR fetched head changed since admission');
+    expect(await readSlotMetadata(join(f.common, 'cq-review/slots/pr-7.json'))).toMatchObject({
+      state: 'bound',
+      incomplete: true,
+    });
+  } finally {
+    await f.repo.cleanup();
+  }
+});
