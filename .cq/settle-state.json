@@ -560,6 +560,45 @@
           "by": "self-merge-prs:observe"
         }
       ]
+    },
+    "1390": {
+      "tuple": {
+        "head": "63f19a2fa102d5a547b4643c6d50bdcabbd7cc26",
+        "base": "86247bb624de9ef20453df5d66ce9ef84040f933",
+        "forcePushEpoch": 0
+      },
+      "observations": [
+        {
+          "observedAt": "2026-11-09T19:02:34.991Z",
+          "by": "self-merge-prs:observe"
+        }
+      ]
+    },
+    "1391": {
+      "tuple": {
+        "head": "38d6dfd98a9b611a5252ce950edcf1181ad730fb",
+        "base": "86247bb624de9ef20453df5d66ce9ef84040f933",
+        "forcePushEpoch": 0
+      },
+      "observations": [
+        {
+          "observedAt": "2026-11-09T19:02:34.991Z",
+          "by": "self-merge-prs:observe"
+        }
+      ]
+    },
+    "1392": {
+      "tuple": {
+        "head": "9488e40453354696e5654673153d52485a4e367e",
+        "base": "86247bb624de9ef20453df5d66ce9ef84040f933",
+        "forcePushEpoch": 0
+      },
+      "observations": [
+        {
+          "observedAt": "2026-11-09T19:02:34.991Z",
+          "by": "self-merge-prs:observe"
+        }
+      ]
     }
   }
 }
