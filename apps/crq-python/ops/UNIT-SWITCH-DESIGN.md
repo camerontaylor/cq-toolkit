@@ -58,23 +58,44 @@ No VM reboot or power-loss test has been performed.
    metadata and pointer, plus each relevant timer/path and service activation
    state. Persist the complete intent and snapshot with atomic replacement and
    file and directory fsync before changing the host. The adapter must validate
-   the snapshot's shape and paths before it acts; the present generic seam does
-   not validate adapter-specific snapshot contents.
+   the snapshot's shape and paths before it acts. The seam calls the adapter's
+   validation before fencing or restoration, but has no production snapshot
+   schema or path validator yet.
 3. Stop the unit's timer and path activators, install the durable service mask,
    reload the stable manager, and explicitly stop or cancel the target's queued
    and running work. Verify the manager has no pending service job and no
    owned work remains before installing a new unit. Refuse ambiguous results;
    masking alone is insufficient. Exact process ownership, mask replacement,
    metadata preservation and race handling need VM proof.
-4. Install the selected unit and pointer while fenced, reload, restore the
+4. Once draining is complete, capture and persist the preservation baseline;
+   legitimate work can write state during drain. Install the selected unit and
+   pointer while fenced and verify preservation against that baseline. Before
+   any activation, persist an `activation_pending` phase; then release the
    intended activators and require two advancing successful completions bound
-   to this unit and runtime. Persist completion only after these checks. In the
-   absence of a real completion provider, refuse before mutation.
-5. On failure or an incomplete intent, keep or re-establish the fence, verify
-   drain, restore the retained file, pointer and activation state, verify
-   preserved data, and only then mark the journal rolled back. Recovery must be
-   idempotent and retain a recoverable intent when any operation is ambiguous
-   or interrupted. Queue data is never restored from the snapshot.
+   to this unit and runtime. Only then persist completion. In the absence of a
+   real completion provider, refuse before mutation.
+5. Before activation, recovery may re-establish the fence, verify drain and
+   restore the snapshot. It persists `restore_activation_pending` before
+   releasing prior activation, and records rollback only afterwards. A crash
+   in either activation-pending phase is ambiguous: stop/drain, retain the
+   intent and investigate rather than blindly replay or restore. Queue data is
+   never restored from the snapshot. Actual controller retries and interruption
+   at each phase require VM proof; synthetic recovery is not that proof.
+
+The installed templates provide tick, slot, backfill and watchdog timers;
+repair and publisher each have both timer and path activators. The host adapter
+must discover and account for direct starts, dependencies and any other
+activation sources, queued jobs, service cgroups and owned work outside them.
+The exact inventory and the proof that it is complete remain open. Release of
+each activator and the service must be controlled and crash-tested; the seam's
+single `start` call is not evidence that production release is safe.
+
+Checkout deploy and rollback now refuse unresolved unit intents, and unit
+switch/recovery refuses unresolved checkout intents, in the supplied journal
+directory. This does not protect against a caller choosing a different record
+directory or an older controller bypassing the checks. The CLI currently permits
+different directories, so a shared, discoverable journal identity and handling
+of pre-existing records remain unresolved before a host adapter can be enabled.
 
 ## Durable fence boundaries requiring proof
 

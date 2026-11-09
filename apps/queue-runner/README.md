@@ -23,9 +23,9 @@ before installation remain required. The packager checks the pinned version and
 ELF architecture, but does not load the addon or prove its Node ABI. This
 packager does not authorize cutover.
 
-The unit-switch recovery seam retains the prior snapshot and preservation
-digests in the controller journal before mutation. A production recovery
-adapter must validate that record before acting, restore the exact unit and
+The unit-switch recovery seam retains the prior unit snapshot before fencing
+and records preservation digests after draining, before installation. A
+production recovery adapter must validate that record before acting, restore the exact unit and
 activation state, and retain the pending intent if any step fails. Its fence
 and crash behavior need proof on a disposable VM, including timer, path, direct
 activation, surviving processes, and interruption at each mutation boundary.
