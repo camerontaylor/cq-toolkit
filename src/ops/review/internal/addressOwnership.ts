@@ -914,7 +914,13 @@ export class AddressOwnership extends AddressRunLifecycle {
           return makeReviewAddress()(input);
         });
       } finally {
-        while (child.tasks.size) await Promise.allSettled([...child.tasks]);
+        if (child.tasks.size) {
+          // The child returned while work it started still runs. Retain its
+          // claims and force owner quarantine instead of waiting indefinitely.
+          const error = new Error('address ownership: detached child work requires quarantine');
+          this.controller.abort(error);
+          throw error;
+        }
         for (const key of child.keys) this.claims.delete(key);
       }
     })();
