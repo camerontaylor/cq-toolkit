@@ -476,14 +476,15 @@ async function runTaskLoopInner(
                 throw new Error('worker upload scanner is required');
               }
               await bindings.scanPrompt(text, contents);
-            } catch {
-              if (!stopSet) {
-                setStop({
-                  stopCode: 'human-deferred',
-                  stopReason: 'worker upload refused: missing, failed or positive denylist scan',
-                });
-              }
+            } catch (scanError) {
               row.outcome = 'escalated-to-human';
+              // A pre-scan stop (cancellation, missing scanner) keeps its own
+              // observed cause instead of being reported as a scan refusal.
+              if (stopSet) throw scanError;
+              setStop({
+                stopCode: 'human-deferred',
+                stopReason: 'worker upload refused: missing, failed or positive denylist scan',
+              });
               throw new Error('worker upload refused: missing, failed or positive denylist scan');
             }
             if (bindings.cancelled?.()) {
