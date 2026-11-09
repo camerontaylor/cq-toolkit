@@ -588,18 +588,24 @@ class RepairDrainTest(unittest.TestCase):
         self.assertFalse(wt.exists())
 
     def test_unchanged_contract_verifies_and_preserves_source_evidence(self):
+        (self.clone / 'src/kept.ts').write_text('\n  one\n\n')
+        self.git('commit', '-qam', 'leading blank lines')
+        self.pin = self.git('rev-parse', 'HEAD')
+        self.git('push', '-q', 'origin', self.pin + ':refs/heads/main')
+        self.git('fetch', '-q', 'origin')
+        self.queue['items'][0]['repair_runs']['run1']['base'] = self.pin
         job_id = 'crq-run1-F1'
         self.job(job_id, 'pr1-merged', 'run1', 'src/kept.ts')
         job = bounded.drain_job(self.root, self.config, self.queue, job_id)[1]
         wt = self.worktree('crq-repair-pr1-merged-' + job_id)
         report = {'stop': 'ok', 'changed': False, 'disposition': 'unchanged_with_reason',
-                  'summary': 'No defect in pinned code', 'evidence': [{'path': 'src/kept.ts', 'line': 1}]}
+                  'summary': 'No defect in pinned code', 'evidence': [{'path': 'src/kept.ts', 'line': 2}]}
         with mock.patch.object(service, 'blocked', return_value=False), \
              mock.patch.object(service, 'dispatch', return_value=report) as dispatch:
             result = service.process(self.config, job, wt)
         self.assertEqual(result['verdict'], 'NOT-FIXED')
         self.assertEqual(result['unchanged_evidence'][0]['target'], self.pin)
-        self.assertTrue(result['unchanged_evidence'][0]['quoted_text'])
+        self.assertEqual(result['unchanged_evidence'][0]['quoted_text'], '  one')
         dispatch.assert_called_once()
 
     def test_unchanged_evidence_projects_to_dismissed(self):

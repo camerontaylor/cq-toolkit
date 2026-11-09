@@ -166,12 +166,13 @@ def phase(inbox, repo, tip, judge, transport, at, *, maximum=6, seconds=600, dry
         else:
             candidates.append(row)
     candidates.sort(key=lambda r: ({'critical': 0, 'major': 1}.get(r['finding']['severity'], 2), age(r), r['finding']['id']))
+    investigation_admissions = sum(reason.startswith('fixer investigation:') for _, _, reason, _ in plans)
     judged = 0
     stopped = None
     stopped_report = {}
     context_errors = []
     for row in candidates:
-        if judged + sum(reason.startswith('fixer investigation:') for _, _, reason, _ in plans) >= maximum:
+        if judged + investigation_admissions >= maximum:
             break
         if time.monotonic() >= deadline:
             stopped = 'deadline'; break

@@ -344,7 +344,10 @@ def process(config, job, wt):
                         if (not isinstance(path, str) or path.startswith('/') or '..' in path.split('/')
                                 or not isinstance(line, int) or isinstance(line, bool) or line < 1):
                             raise ValueError('invalid unchanged evidence anchor')
-                        source = git(wt, 'show', base + ':' + path).splitlines()
+                        blob = command(['git', 'cat-file', 'blob', base + ':' + path], cwd=wt)
+                        if blob.returncode:
+                            raise ValueError('unchanged evidence blob absent')
+                        source = blob.stdout.splitlines()
                         if line > len(source):
                             raise ValueError('unchanged evidence line absent')
                         verified.append({'path': path, 'line': line, 'quoted_text': source[line - 1], 'target': base})
