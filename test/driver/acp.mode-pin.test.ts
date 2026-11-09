@@ -34,9 +34,9 @@ describe('acp driver specifics (fake ACP server)', () => {
       // FAKE_ACP_IGNORE_MODE_PIN: the pin request is answered 2xx but the
       // fixture never applies it — the echo names 'yolo'. A driver that
       // trusts the 2xx prompts into the policy void; the fixed driver
-      // requires EITHER confirmation surface to name 'build' — the echo or
-      // a folded current_mode_update — and refuses to prompt when neither
-      // does (this persona provides neither).
+      // requires one confirmation surface to name 'build' — the echo, the
+      // response's mode configOption, or a fresh current_mode_update — and
+      // refuses to prompt when none does (this persona provides none).
       const driver = new AcpDriver(
         driverOptions(scratchDir, { FAKE_ACP_MODE: 'ok', FAKE_ACP_IGNORE_MODE_PIN: '1' }, []),
       );
