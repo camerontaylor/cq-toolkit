@@ -92,6 +92,7 @@ import type { DriverFactory, ResolvedDriver } from '../../driver/factory.js';
 import { deepFreeze } from '../../shared/deepFreeze.js';
 import { defaultHarnessConfig, HarnessConfigSchema } from '../../harness/config.js';
 import type { HarnessConfig } from '../../harness/config.js';
+import { selectHarnessSurface } from '../../harness/surface.js';
 import type {
   Budget,
   ModelSpec,
@@ -471,7 +472,7 @@ const composeUserPrompt = (input: FixReviewItemInput): { text: string; truncated
   // Operating instructions come from the caller's harness, never review data.
   // Keep this outside the fences and use the same effective harness as dispatch.
   const harness = input.harness ?? defaultHarnessConfig;
-  const tools = toolPolicyFor(harness).allow;
+  const tools = selectHarnessSurface(harness, toolPolicyFor(harness), undefined, 'workspace-write');
   lines.push('');
   lines.push(`Allowed tools (caller harness): ${JSON.stringify(tools)}.`);
   if (tools.includes('bash')) {

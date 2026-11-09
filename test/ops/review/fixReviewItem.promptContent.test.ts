@@ -18,6 +18,7 @@ describe('trusted fixer operating instructions', () => {
     const patterns = ['git add', 'git commit', 'git diff', 'git rev-parse'];
     const harness = harnessWith((h) => {
       h.tools.bash.commandPatterns = patterns;
+      h.promptBudget.maxTools = 3;
     });
     const { op, invocations, requests } = scriptedOp([completeWorker(UNCHANGED)]);
     const input = baseInput({ harness, budget: { maxSteps: 40 } });
@@ -36,6 +37,8 @@ describe('trusted fixer operating instructions', () => {
     expect(prompt).toContain('After a denied command, use a supported tool');
     expect(prompt).toContain('stage only explicit');
     expect(prompt).toContain('git rev-parse HEAD');
+    expect(prompt).toContain('Allowed tools (caller harness): ["read","edit","bash"].');
+    expect(prompt).not.toContain('Allowed tools (caller harness): ["read","edit","write"');
     expect(invocation?.budget).toEqual({ maxSteps: 40 });
     expect(requests[0]?.harness).toEqual(harness);
     expect(invocation?.toolPolicy).toEqual({
