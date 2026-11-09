@@ -134,6 +134,13 @@
 //                         STILL 'yolo' (the unconfirmed-pin persona,
 //                         review-debt #39: the driver must verify the
 //                         echoed mode and fail the run pre-prompt)
+//   FAKE_ACP_MODE_PIN_CONFIG_OPTION when '1', the set_config_option answer
+//                         carries NO modes echo and NO current_mode_update —
+//                         the applied switch is reported as the `mode`
+//                         entry's currentValue in `configOptions` (the
+//                         compliant-agent shape: ACP returns current
+//                         values there; the driver must confirm the pin
+//                         from it and prompt)
 //   FAKE_ACP_MODE_PIN_NOTIFICATION when '1', the set_config_option answer
 //                         carries NO modes echo — the switch is broadcast
 //                         as a current_mode_update notification naming
@@ -249,6 +256,7 @@ const PLACEHOLDER_CARD = process.env.FAKE_ACP_PLACEHOLDER_CARD === '1';
 const BIG_FRAME = process.env.FAKE_ACP_BIG_FRAME === '1';
 const IGNORE_MODE_PIN = process.env.FAKE_ACP_IGNORE_MODE_PIN === '1';
 const MODE_PIN_NOTIFICATION = process.env.FAKE_ACP_MODE_PIN_NOTIFICATION === '1';
+const MODE_PIN_CONFIG_OPTION = process.env.FAKE_ACP_MODE_PIN_CONFIG_OPTION === '1';
 const MODE_DOWNGRADE = process.env.FAKE_ACP_MODE_DOWNGRADE === '1';
 const PIN_UNSHAPEABLE = process.env.FAKE_ACP_PIN_UNSHAPEABLE === '1';
 const DENY_BUT_COMPLETE = process.env.FAKE_ACP_DENY_BUT_COMPLETE === '1';
@@ -478,6 +486,23 @@ function configOptionsLazy() {
       category: 'model',
       type: 'select',
       currentValue: lazyModel(),
+      options: [],
+    },
+  ];
+}
+
+// The COMPLIANT config-option pin answer: ACP returns current values in
+// `configOptions`, so the applied mode rides the `mode` option's
+// currentValue — no `modes` echo, no current_mode_update notification.
+function configOptionsWithMode() {
+  return [
+    ...configOptionsLazy(),
+    {
+      id: 'mode',
+      name: 'Mode',
+      category: 'mode',
+      type: 'select',
+      currentValue: sessionMode,
       options: [],
     },
   ];
@@ -1029,6 +1054,19 @@ function onFrame(frame) {
         // current_mode_update — the only 'build' observation on the wire
         // is the pre-pin announcement above.
         send({ jsonrpc: '2.0', id: frame.id, result: { configOptions: configOptionsLazy() } });
+        return;
+      }
+      if (MODE_PIN_CONFIG_OPTION) {
+        // The compliant-agent shape: the answer carries NO modes echo and
+        // NO current_mode_update; the applied switch is reported as the
+        // `mode` configOptions entry's currentValue (ACP returns current
+        // values there). The driver must confirm the pin from that surface
+        // and prompt.
+        send({
+          jsonrpc: '2.0',
+          id: frame.id,
+          result: { configOptions: configOptionsWithMode() },
+        });
         return;
       }
       if (MODE_PIN_NOTIFICATION) {

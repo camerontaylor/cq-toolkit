@@ -296,6 +296,7 @@ import {
   SessionUpdateParamsSchema,
   SetConfigOptionResultSchema,
   AcpRpcError,
+  configOptionValueFrom,
   isAuthRequiredError,
   mapWireUsage,
   modelOptionValueFrom,
@@ -1507,25 +1508,41 @@ export class AcpDriver implements Driver {
         });
         const pin = SetConfigOptionResultSchema.safeParse(pinRaw);
         const echoedMode = pin.success ? pin.data.modes?.currentModeId : undefined;
-        // TWO confirmation surfaces (review round 1 / the live record): the
-        // response's modes echo, OR a current_mode_update naming the pinned
-        // mode that arrived AFTER the pin was sent — the live vendor does
-        // the latter, in the same flush BEFORE the response line, so it is
-        // already folded (with a newer seq) when this continuation runs
-        // (wire lines process in order). Neither surface confirming = an
-        // unpinned session: a policy void, refusing to prompt.
+        // The response's `configOptions` are the third confirmation surface:
+        // ACP returns the session's current option values there, so a
+        // compliant agent may report the switch as the `mode` option's
+        // currentValue without echoing `modes` and without sending a
+        // current_mode_update. Rejecting that shape would fail a successful
+        // pin before every prompt.
+        const configOptionMode = pin.success
+          ? configOptionValueFrom(pin.data.configOptions, MODE_CONFIG_ID)
+          : undefined;
+        // THREE confirmation surfaces (review round 1 / the live record /
+        // the config-option response): the response's modes echo, the
+        // response's `mode` configOption value, OR a current_mode_update
+        // naming the pinned mode that arrived AFTER the pin was sent — the
+        // live vendor does the last, in the same flush BEFORE the response
+        // line, so it is already folded (with a newer seq) when this
+        // continuation runs (wire lines process in order). No surface
+        // confirming = an unpinned session: a policy void, refusing to
+        // prompt.
         const notificationConfirms =
           observation.observedMode === GATING_MODE &&
           observation.observedModeSeq !== undefined &&
           observation.observedModeSeq > seqBeforePin;
-        if (echoedMode !== GATING_MODE && !notificationConfirms) {
+        if (
+          echoedMode !== GATING_MODE &&
+          configOptionMode !== GATING_MODE &&
+          !notificationConfirms
+        ) {
           const stale =
             observation.observedMode === GATING_MODE
               ? ' (STALE — folded before the pin was sent; not a confirmation of THIS pin)'
               : '';
           handshakeFailure =
             `the mode pin was not confirmed (session/set_config_option ${MODE_CONFIG_ID}=${GATING_MODE} ` +
-            `echoed ${echoedMode === undefined ? (pin.success ? 'no mode echo' : 'unshapeable pin response') : `mode '${echoedMode}'`}, observed ` +
+            `echoed ${echoedMode === undefined ? (pin.success ? 'no mode echo' : 'unshapeable pin response') : `mode '${echoedMode}'`}, ` +
+            `configOptions carried ${configOptionMode === undefined ? (pin.success ? 'no mode option' : 'an unshapeable pin response') : `mode '${configOptionMode}'`}, observed ` +
             `${observation.observedMode === undefined ? 'no mode update' : `mode '${observation.observedMode}'`}${stale}) — ` +
             'an unpinned session is a policy void, refusing to prompt';
         }

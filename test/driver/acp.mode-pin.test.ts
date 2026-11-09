@@ -81,6 +81,35 @@ describe('acp driver specifics (fake ACP server)', () => {
     });
   });
 
+  test('the mode pin confirms from the CONFIG-OPTION response: no modes echo, no notification, configOptions mode=build prompts normally', async () => {
+    await withScratch(async (scratchDir, store) => {
+      // FAKE_ACP_MODE_PIN_CONFIG_OPTION: the compliant-agent shape ACP
+      // allows — the set_config_option answer returns the session's
+      // current values in `configOptions`, so the applied switch is the
+      // `mode` entry's currentValue, with NO modes echo and NO
+      // current_mode_update. A driver verifying only those two surfaces
+      // would reject this successful pin before every prompt.
+      const driver = new AcpDriver(
+        driverOptions(
+          scratchDir,
+          {
+            FAKE_ACP_MODE: 'tool-then-reply',
+            FAKE_ACP_TOOL: 'read',
+            FAKE_ACP_INPUT: JSON.stringify({ path: 'note.txt' }),
+            FAKE_ACP_MODE_PIN_CONFIG_OPTION: '1',
+          },
+          [],
+        ),
+      );
+      const result = await driver.run(invocation({ prompt: 'config-option-pin run' }));
+      expect(result.stopReason).toBe('complete'); // confirmed via configOptions — the prompt fired
+      const record = await store.load(result.sessionId as string);
+      expect(
+        record?.messages.some((m) => m.role === 'assistant' && m.content.includes('[mode:build]')),
+      ).toBe(true);
+    });
+  });
+
   test('a PRE-pin mode report naming build is STALE — it cannot confirm the pin (PR #53 review, Codex P1)', async () => {
     await withScratch(async (scratchDir, store) => {
       // FAKE_ACP_PRE_PIN_MODE_BUILD: the agent announces its initial mode
