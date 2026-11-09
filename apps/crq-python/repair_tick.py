@@ -9,6 +9,11 @@ from crq_repair import atomic, findings, git as wt_git, hack_detector, verify
 from crq_repair.bounded import JOB_ID, identity, job_path, require_canonical_delivery, source_path, validate_revalidation
 
 
+# The fixer ladder crq_repair.process runs is exactly A0-A2; digest keys its
+# fixed counts on these rungs, so nothing else may be recorded as a fix.
+FIXED_RUNGS = ('A0', 'A1', 'A2')
+
+
 def prepare_current_job(c, q, old_job_id, source_sha, evidence):
     """Locked operator preparation, not dispatch or a historical-job disposition."""
     old = json.loads(job_path(c.ROOT, old_job_id).read_text())
@@ -278,6 +283,13 @@ def harvest(c, q, item, dry=False):
                     for k in ('source_sha', 'finding_sha256', 'origin_job')):
                 raise ValueError('prepared repair result source/evidence binding mismatch')
             if result.get('verdict') == 'FIXED':
+                # digest counts a fixed finding by the final attempt's rung, so a
+                # missing or empty attempts list, or a rung off the A0-A2 ladder,
+                # must be refused here rather than raise KeyError/IndexError there.
+                attempts = result.get('attempts')
+                final = attempts[-1] if isinstance(attempts, list) and attempts else None
+                if not isinstance(final, dict) or final.get('rung') not in FIXED_RUNGS:
+                    raise ValueError('repair fixed result lacks a valid final attempt rung')
                 wt = Path(result['worktree']).resolve()
                 root = c.WT_ROOT.resolve()
                 if wt.parent != root or wt.name != 'crq-repair-' + item['id']:
