@@ -406,30 +406,6 @@ function makeReviewAddressManyCore(
           let enrollment: AddressManyEnrollment = requestedEnrollment(candidate.number);
           let isolatedRoot: string | undefined;
           try {
-            const request = input.enrollments?.find(
-              (row) => row.number === candidate.number,
-            )?.request;
-            if (request) {
-              try {
-                if (request.action && request.action !== 'enqueue')
-                  throw new Error('Enrollment requires enqueue action');
-                if (
-                  request.binding.kind !== 'deferred-author' ||
-                  request.binding.repo.toLowerCase() !== input.repo.toLowerCase() ||
-                  request.binding.head !== candidate.headOid
-                )
-                  throw new Error('Enrollment binding does not match admitted PR head');
-                const queued = await (deps.enqueue ?? makeQueueOps().enqueue)(request);
-                enrollment =
-                  queued.status === 'ok' &&
-                  queued.value.state !== 'unsupported' &&
-                  queued.value.enqueued === true
-                    ? { state: 'enrolled' }
-                    : { state: 'unavailable', reason: JSON.stringify(queued) };
-              } catch (error) {
-                enrollment = { state: 'unavailable', reason: String(error) };
-              }
-            }
             const root = deps.isolate
               ? await deps.isolate(input.repoRoot, candidate.number, {
                   cloneRoot,
@@ -473,6 +449,30 @@ function makeReviewAddressManyCore(
                 reason: 'PR eligibility, head or base changed before dispatch',
               };
             } else {
+              const request = input.enrollments?.find(
+                (row) => row.number === candidate.number,
+              )?.request;
+              if (request) {
+                try {
+                  if (request.action && request.action !== 'enqueue')
+                    throw new Error('Enrollment requires enqueue action');
+                  if (
+                    request.binding.kind !== 'deferred-author' ||
+                    request.binding.repo.toLowerCase() !== input.repo.toLowerCase() ||
+                    request.binding.head !== candidate.headOid
+                  )
+                    throw new Error('Enrollment binding does not match admitted PR head');
+                  const queued = await (deps.enqueue ?? makeQueueOps().enqueue)(request);
+                  enrollment =
+                    queued.status === 'ok' &&
+                    queued.value.state !== 'unsupported' &&
+                    queued.value.enqueued === true
+                      ? { state: 'enrolled' }
+                      : { state: 'unavailable', reason: JSON.stringify(queued) };
+                } catch (error) {
+                  enrollment = { state: 'unavailable', reason: String(error) };
+                }
+              }
               dispatched = true;
               result = await address({
                 repoRoot: root,
