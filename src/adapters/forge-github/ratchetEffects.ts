@@ -182,14 +182,18 @@ async function runGit(
   // Hooks are disabled and the automation token is scrubbed: git runs local
   // hooks and filters during checkout/commit/push.
   const env = ghSpawnEnv(gitEnv());
-  const res = await exec(
-    resolveWindowsCommand('git', env),
-    ['-c', 'core.hooksPath=/dev/null', ...args],
-    {
-      cwd: repoRoot,
-      env,
-    },
-  );
+  const bin = resolveWindowsCommand('git', env, process.platform, process.env);
+  const res: ExecResult =
+    bin === undefined
+      ? {
+          ok: false,
+          timedOut: false,
+          stdout: '',
+          stderr: '',
+          errorMessage: 'git executable not found',
+          errorCode: 'ENOENT',
+        }
+      : await exec(bin, ['-c', 'core.hooksPath=/dev/null', ...args], { cwd: repoRoot, env });
   if (res.timedOut) {
     throw new Error(`git ${args[0] ?? ''} timed out after ${EXEC_TIMEOUT_MS}ms`);
   }
