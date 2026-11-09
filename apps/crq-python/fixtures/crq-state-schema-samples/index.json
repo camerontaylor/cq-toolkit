@@ -43,8 +43,34 @@
             "backfill_scope_failures"
           ],
           "rule": ["properties", "backfill_scope_failures", "additionalProperties"]
+        },
+        {
+          "at": [
+            "merged_current_requests"
+          ],
+          "rule": ["properties", "merged_current_requests", "additionalProperties"]
+        },
+        {
+          "at": [
+            "backfill_path_lineages"
+          ],
+          "rule": ["properties", "backfill_path_lineages", "additionalProperties"]
+        },
+        {
+          "at": [
+            "legacy_coverage_failure_runs"
+          ],
+          "rule": ["properties", "legacy_coverage_failure_runs", "additionalProperties"]
         }
       ]
+    },
+    {
+      "path": "queue-usage-unavailable.json",
+      "schema": "queue.schema.json"
+    },
+    {
+      "path": "queue-backfill-halted.json",
+      "schema": "queue.schema.json"
     },
     {
       "path": "coverage.json",
@@ -79,6 +105,10 @@
       "path": "work.jsonl",
       "schema": "work-record.schema.json",
       "lines": true
+    },
+    {
+      "path": "status.json",
+      "schema": "status.schema.json"
     },
     {
       "path": "runs/pr1304-20261109T082400Z/meta.json",
@@ -121,6 +151,10 @@
       "schema": "repair-job.schema.json"
     },
     {
+      "path": "repair/inbox/crq-legacy-run-F1.json",
+      "schema": "repair-job.schema.json"
+    },
+    {
       "path": "repair/crq-pr1304-20261109T082400Z-F1/result.json",
       "schema": "repair-result.schema.json"
     },
@@ -148,6 +182,10 @@
       "text": true
     },
     {
+      "path": "repair/rate-limited-until",
+      "schema": "repair-pause.schema.json"
+    },
+    {
       "path": "backfill/latest-ranked.json",
       "schema": "backfill-inventory.schema.json"
     },
@@ -172,6 +210,26 @@
     {
       "path": "backfill/baseline.json",
       "schema": "backfill-baseline.schema.json"
+    },
+    {
+      "path": "backfill/publish-request.json",
+      "schema": "backfill-publish-request.schema.json"
+    },
+    {
+      "path": "backfill/publication-failure.json",
+      "schema": "backfill-publication-failure.schema.json"
+    },
+    {
+      "path": "backfill/findings/triage/1414141414141414141414141414141414141414141414141414141414141414.json",
+      "schema": "backfill-triage.schema.json"
+    },
+    {
+      "path": "backfill/findings/delivery/1414141414141414141414141414141414141414141414141414141414141414.json",
+      "schema": "backfill-delivery-request.schema.json"
+    },
+    {
+      "path": "backfill/findings/receipts/1414141414141414141414141414141414141414141414141414141414141414.json",
+      "schema": "backfill-delivery-receipt.schema.json"
     }
   ]
 }

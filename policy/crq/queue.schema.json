@@ -493,7 +493,7 @@
       "additionalProperties": true
     },
     "usage": {
-      "type": "object"
+      "type": ["object", "null"]
     },
     "author_requests": {
       "type": "object",
@@ -524,7 +524,7 @@
           },
           "target": {
             "type": "string",
-            "pattern": "^[0-9a-f]{40}$"
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$"
           },
           "cycle": {
             "type": "integer",
@@ -579,7 +579,7 @@
       "type": ["string", "null"]
     },
     "deferred_refresh_cursor": {
-      "type": ["object", "null"]
+      "type": ["string", "null"]
     },
     "push_discovery": {
       "type": "object"
@@ -697,7 +697,11 @@
       }
     },
     "backfill_capacity_runs": {
-      "type": "object"
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
     },
     "backfill_last_manifest": {
       "type": "object"
@@ -718,10 +722,10 @@
       "type": ["object", "null"]
     },
     "backfill_halted": {
-      "type": ["boolean", "null"]
+      "type": ["string", "null"]
     },
     "backfill_halt_operation": {
-      "type": ["object", "null"]
+      "type": ["string", "null"]
     },
     "backfill_idle_with_candidate": {
       "type": "integer",
@@ -753,9 +757,32 @@
       }
     },
     "legacy_coverage_failure_runs": {
-      "type": "array",
-      "items": {
-        "type": "object"
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["item", "outcome", "origins", "at"],
+        "properties": {
+          "item": {
+            "type": "string",
+            "minLength": 1
+          },
+          "outcome": {
+            "type": "string",
+            "minLength": 1
+          },
+          "origins": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "at": {
+            "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,9})?Z$"
+          }
+        },
+        "additionalProperties": true
       }
     },
     "legacy_repair_backfilled": {

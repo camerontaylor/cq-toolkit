@@ -202,7 +202,11 @@
             "type": ["string", "null"]
           },
           "evidence": {
-            "type": ["object", "null"]
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
           },
           "covered": {
             "type": "array"

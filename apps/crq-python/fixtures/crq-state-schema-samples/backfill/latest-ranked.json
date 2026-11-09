@@ -22,7 +22,7 @@
       "retry": false,
       "row": 1,
       "tier": "T2",
-      "score": 84,
+      "score": 420,
       "scope": [
         {
           "path": "src/ops/crq/tick.ts",
@@ -43,7 +43,7 @@
         "src/ops/crq/tick.ts": "T2"
       },
       "path_scores": {
-        "src/ops/crq/tick.ts": 84
+        "src/ops/crq/tick.ts": 420
       }
     }
   ],
@@ -58,8 +58,15 @@
       "tier": "T2",
       "disposition": "included",
       "reason": null,
-      "evidence": null,
-      "covered": [],
+      "evidence": [
+        "3131313131313131313131313131313131313131313131313131313131313131"
+      ],
+      "covered": [
+        [
+          85,
+          120
+        ]
+      ],
       "uncovered": [
         [
           1,
@@ -72,7 +79,7 @@
           84
         ]
       ],
-      "score": 84
+      "score": 420
     }
   ],
   "required": [

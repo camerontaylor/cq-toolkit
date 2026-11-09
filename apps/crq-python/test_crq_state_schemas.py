@@ -77,11 +77,37 @@ def rule_at(schema, keys):
     return rule
 
 
-def at(document, keys):
+_MISSING = object()
+
+
+def at_or_missing(document, keys):
     value = document
     for key in keys:
+        if not isinstance(value, dict) or key not in value:
+            return _MISSING
         value = value[key]
     return value
+
+
+def queue_map_checks():
+    index = load(FIXTURES / "index.json")
+    entry = next(e for e in index["documents"] if e["path"] == "queue.json")
+    return entry["map_checks"]
+
+
+def check_maps(case, document, schema, checks):
+    for check in checks:
+        values = at_or_missing(document, check["at"])
+        if values is _MISSING:
+            # A representative fixture need not carry every historical
+            # accumulator; the captures below do.
+            continue
+        with case.subTest(map=check["at"]):
+            case.assertIsInstance(values, dict)
+            rule = rule_at(schema, check["rule"])
+            for key, value in values.items():
+                with case.subTest(map=check["at"], key=key):
+                    _schema(value, rule)
 
 
 class CheckedInVocabulary(unittest.TestCase):
@@ -113,8 +139,7 @@ class FixtureDocuments(unittest.TestCase):
                 else:
                     document = load(path)
                 _schema(document, schema)
-                for check in entry.get("map_checks", []):
-                    self._check_map(document, schema, check)
+                self._check_maps(document, schema, entry.get("map_checks", []))
 
     def _check_lines(self, path, schema):
         for number, line in enumerate(path.read_text().splitlines(), 1):
@@ -123,20 +148,17 @@ class FixtureDocuments(unittest.TestCase):
             with self.subTest(line=number):
                 _schema(json.loads(line), schema)
 
-    def _check_map(self, document, schema, check):
-        values = at(document, check["at"])
-        self.assertIsInstance(values, dict)
-        rule = rule_at(schema, check["rule"])
-        for key, value in values.items():
-            with self.subTest(key=key):
-                _schema(value, rule)
+    def _check_maps(self, document, schema, checks):
+        check_maps(self, document, schema, checks)
 
 
 class ExistingCapture(unittest.TestCase):
     def test_captured_author_queue_validates_with_unknown_top_level_key(self):
         queue = load(AUTHOR_CAPTURE)["capture"]["queue"]
         self.assertIn("unknown", queue, "the capture pins unknown-key tolerance")
-        _schema(queue, load(SCHEMAS / "queue.schema.json"))
+        schema = load(SCHEMAS / "queue.schema.json")
+        _schema(queue, schema)
+        check_maps(self, queue, schema, queue_map_checks())
 
     def test_queue_schema_version_stays_absent(self):
         # Phase 0.2 decision: no top-level schema_version until both runtimes
@@ -151,7 +173,7 @@ class ExistingCapture(unittest.TestCase):
         kinds = set(schema["properties"]["items"]["items"]["properties"]["kind"]["enum"])
         fixture = load(FIXTURES / "queue.json")
         seen = {item["kind"] for item in fixture["items"]}
-        self.assertEqual(seen, kinds)
+        self.assertEqual(seen, kinds, "the sample must exercise every live item kind")
 
 
 class TimestampPatterns(unittest.TestCase):
@@ -177,7 +199,11 @@ class DeployedShapeSnapshot(unittest.TestCase):
             with self.subTest(path=relative):
                 path = DEPLOYED / relative
                 self.assertTrue(path.exists(), f"missing phase 0.3 fixture {relative}")
-                _schema(load(path), load(SCHEMAS / schema_name))
+                document = load(path)
+                schema = load(SCHEMAS / schema_name)
+                _schema(document, schema)
+                if relative == "queue.json":
+                    check_maps(self, document, schema, queue_map_checks())
 
     def test_jsonl_lines_validate(self):
         for relative, schema_name in DEPLOYED_LINES:
@@ -194,6 +220,113 @@ class DeployedShapeSnapshot(unittest.TestCase):
                 path = DEPLOYED / relative
                 self.assertTrue(path.exists(), f"missing phase 0.3 fixture {relative}")
                 _schema(path.read_text().strip(), load(SCHEMAS / schema_name))
+
+
+class ReviewFindings(unittest.TestCase):
+    """Each review finding gets an executable shape assertion."""
+
+    def test_f1_usage_is_nullable(self):
+        document = load(FIXTURES / "queue-usage-unavailable.json")
+        self.assertIsNone(document["usage"])
+        _schema(document, load(SCHEMAS / "queue.schema.json"))
+
+    def test_f2_deferred_refresh_cursor_is_a_string(self):
+        queue = load(FIXTURES / "queue.json")
+        self.assertIsInstance(queue["deferred_refresh_cursor"], str)
+        _schema(queue, load(SCHEMAS / "queue.schema.json"))
+
+    def test_f3_backfill_capacity_runs_is_a_list(self):
+        queue = load(FIXTURES / "queue.json")
+        self.assertIsInstance(queue["backfill_capacity_runs"], list)
+        _schema(queue, load(SCHEMAS / "queue.schema.json"))
+
+    def test_f4_backfill_halt_fields_are_strings(self):
+        queue = load(FIXTURES / "queue-backfill-halted.json")
+        self.assertIsInstance(queue["backfill_halted"], str)
+        self.assertIsInstance(queue["backfill_halt_operation"], str)
+        _schema(queue, load(SCHEMAS / "queue.schema.json"))
+
+    def test_f5_legacy_coverage_failure_runs_is_a_keyed_map(self):
+        queue = load(FIXTURES / "queue.json")
+        failures = queue["legacy_coverage_failure_runs"]
+        self.assertIsInstance(failures, dict)
+        value = next(iter(failures.values()))
+        self.assertEqual(set(value), {"item", "outcome", "origins", "at"})
+        _schema(queue, load(SCHEMAS / "queue.schema.json"))
+
+    def test_f6_inventory_evidence_is_a_sorted_list(self):
+        ranked = load(FIXTURES / "backfill/latest-ranked.json")
+        for row in ranked["paths"]:
+            evidence = row["evidence"]
+            self.assertIsInstance(evidence, list)
+            self.assertEqual(evidence, sorted(evidence))
+        schema = load(SCHEMAS / "backfill-inventory.schema.json")
+        evidence_rule = schema["properties"]["paths"]["items"]["properties"]["evidence"]
+        _schema([], evidence_rule)
+        _schema(ranked, schema)
+
+    def test_f7_work_record_pr_is_nullable(self):
+        schema = load(SCHEMAS / "work-record.schema.json")
+        for line in (FIXTURES / "work.jsonl").read_text().splitlines():
+            record = json.loads(line)
+            self.assertIn("pr", record)
+            _schema(record, schema)
+        self.assertIn(None, [json.loads(line)["pr"] for line in (FIXTURES / "work.jsonl").read_text().splitlines()])
+
+    def test_f8_author_target_is_a_ref(self):
+        queue = load(AUTHOR_CAPTURE)["capture"]["queue"]
+        targets = {request["target"] for request in queue["author_requests"].values()}
+        self.assertTrue(targets)
+        self.assertTrue(any("/" in target for target in targets))
+        for target in targets:
+            self.assertNotRegex(target, r"^[0-9a-f]{40}$")
+        _schema(queue, load(SCHEMAS / "queue.schema.json"))
+
+    def test_f9_legacy_repair_job_lacks_review_diff_and_source(self):
+        legacy = load(FIXTURES / "repair/inbox/crq-legacy-run-F1.json")
+        self.assertNotIn("review_diff", legacy)
+        self.assertNotIn("source", legacy)
+        _schema(legacy, load(SCHEMAS / "repair-job.schema.json"))
+        modern = load(FIXTURES / "repair/inbox/crq-pr1304-20261109T082400Z-F1.json")
+        self.assertIn("review_diff", modern)
+        _schema(modern, load(SCHEMAS / "repair-job.schema.json"))
+
+    def test_f11_ranked_scores_follow_the_writer_formula(self):
+        ranked = load(FIXTURES / "backfill/latest-ranked.json")
+        scores = {}
+        for row in ranked["paths"]:
+            uncovered = sum(end - start + 1 for start, end in row["uncovered"])
+            expected = uncovered * (1 + row["churn"] + row["findings"])
+            self.assertEqual(row["score"], expected, row["path"])
+            scores[row["path"]] = expected
+        for candidate in ranked["candidates"]:
+            self.assertEqual(
+                candidate["score"],
+                sum(scores[path] for path in candidate["paths"]),
+            )
+            self.assertEqual(candidate["path_scores"], {path: scores[path] for path in candidate["paths"]})
+
+    def test_f12_new_state_documents_validate(self):
+        for relative, schema in (
+            ("status.json", "status.schema.json"),
+            ("repair/rate-limited-until", "repair-pause.schema.json"),
+            ("backfill/publish-request.json", "backfill-publish-request.schema.json"),
+            ("backfill/publication-failure.json", "backfill-publication-failure.schema.json"),
+            (
+                "backfill/findings/triage/1414141414141414141414141414141414141414141414141414141414141414.json",
+                "backfill-triage.schema.json",
+            ),
+            (
+                "backfill/findings/delivery/1414141414141414141414141414141414141414141414141414141414141414.json",
+                "backfill-delivery-request.schema.json",
+            ),
+            (
+                "backfill/findings/receipts/1414141414141414141414141414141414141414141414141414141414141414.json",
+                "backfill-delivery-receipt.schema.json",
+            ),
+        ):
+            with self.subTest(path=relative):
+                _schema(load(FIXTURES / relative), load(SCHEMAS / schema))
 
 
 if __name__ == "__main__":

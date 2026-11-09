@@ -1,0 +1,16 @@
+{
+  "job": "crq-legacy-run-F1",
+  "item": "pr1304",
+  "kind": "open",
+  "pr": 1304,
+  "run": "legacy-run",
+  "repair_base": "89abcdef0123456789abcdef0123456789abcdef",
+  "branch": null,
+  "finding": {
+    "severity": "major",
+    "path": "src/ops/crq/tick.ts",
+    "line": 88,
+    "body": "A legacy inbox job written before source and review_diff were recorded."
+  },
+  "repair_round": 1
+}

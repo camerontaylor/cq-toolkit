@@ -14,6 +14,7 @@
     "limit": 10,
     "rollingWindowMs": 3600000
   },
+  "deferred_refresh_cursor": "author-cycle-2",
   "items": [
     {
       "id": "pr1304",
@@ -468,6 +469,9 @@
   },
   "backfill_mapped_ownership": [],
   "backfill_idle_with_candidate": 0,
+  "backfill_capacity_runs": [
+    "backfill-0123456789abcdef-g0-20261108T120000Z"
+  ],
   "backfill_usage": {
     "remaining": 7,
     "observed_at": "2026-11-09T09:48:00Z"
@@ -477,6 +481,15 @@
   ],
   "legacy_coverage_releases": [],
   "legacy_coverage_quota_releases": [],
-  "legacy_coverage_failure_runs": [],
+  "legacy_coverage_failure_runs": {
+    "legacy-coverage-run-1": {
+      "item": "coverage-0123456789abcdef",
+      "outcome": "error",
+      "origins": [
+        "legacy-coverage:1200:src/shared/proc.ts"
+      ],
+      "at": "2026-11-08T22:00:00Z"
+    }
+  },
   "review_ledger_head": "1717171717171717171717171717171717171717"
 }

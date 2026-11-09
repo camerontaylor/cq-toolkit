@@ -41,7 +41,7 @@
       "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
     },
     "pr": {
-      "type": "integer",
+      "type": ["integer", "null"],
       "minimum": 0
     },
     "head": {

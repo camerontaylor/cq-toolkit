@@ -10,9 +10,7 @@
     "repair_base",
     "branch",
     "finding",
-    "repair_round",
-    "review_diff",
-    "source"
+    "repair_round"
   ],
   "properties": {
     "job": {

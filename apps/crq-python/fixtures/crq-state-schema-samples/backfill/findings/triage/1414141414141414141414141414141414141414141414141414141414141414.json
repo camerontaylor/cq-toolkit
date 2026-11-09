@@ -1,0 +1,36 @@
+{
+  "review_id": "3131313131313131313131313131313131313131313131313131313131313131",
+  "finding": {
+    "id": "1414141414141414141414141414141414141414141414141414141414141414",
+    "severity": "minor",
+    "path": "src/ops/crq/tick.ts",
+    "blob": "2020202020202020202020202020202020202020",
+    "intervals": [
+      [
+        1,
+        4
+      ]
+    ],
+    "title": "Guard the admission path",
+    "body": "The scheduler can launch twice.",
+    "source_id": null,
+    "status": "untriaged",
+    "anchor_status": "verified"
+  },
+  "target": "origin/main",
+  "canonical_id": "1414141414141414141414141414141414141414141414141414141414141414",
+  "previous_event_id": null,
+  "status": "delivered",
+  "target_current": "origin/main",
+  "mapped_path": "src/ops/crq/tick.ts",
+  "mapped_intervals": [
+    [
+      1,
+      4
+    ]
+  ],
+  "receipt": {
+    "acknowledgement": "3232323232323232323232323232323232323232323232323232323232323232",
+    "repair_task": "crq-pr1304-20261109T082400Z-F1"
+  }
+}

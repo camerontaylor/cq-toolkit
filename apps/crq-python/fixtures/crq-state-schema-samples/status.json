@@ -1,0 +1,34 @@
+{
+  "generated_at": "2026-11-09T09:49:00Z",
+  "paused": false,
+  "cooldown_until": null,
+  "finding_triage": {
+    "counts": {
+      "delivered": 1,
+      "untriaged": 2
+    },
+    "needs_human": [],
+    "counts_complete": true,
+    "error_count": 0,
+    "errors": [],
+    "errors_omitted": 0,
+    "needs_human_count": 0,
+    "needs_human_omitted": 0
+  },
+  "items": [
+    {
+      "id": "pr1304",
+      "kind": "open",
+      "state": "pending",
+      "repo": "camerontaylor/cq-toolkit",
+      "prior_cycles": 1,
+      "cycles": [],
+      "operator_priority": null,
+      "optional_cycle": null,
+      "pinned_base": null,
+      "last_error": null,
+      "wait_reason": null,
+      "gate_stalled_at": null
+    }
+  ]
+}
