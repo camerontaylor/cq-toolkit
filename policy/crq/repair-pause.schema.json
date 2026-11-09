@@ -9,7 +9,7 @@
     },
     "job": {
       "type": "string",
-      "pattern": "^crq-[A-Za-z0-9._-]+$"
+      "minLength": 1
     },
     "at": {
       "type": "string",

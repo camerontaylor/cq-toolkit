@@ -4,8 +4,7 @@
   "required": ["error"],
   "properties": {
     "error": {
-      "type": "string",
-      "minLength": 1
+      "type": "string"
     }
   },
   "additionalProperties": true

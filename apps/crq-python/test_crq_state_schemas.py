@@ -327,6 +327,13 @@ class ReviewFindings(unittest.TestCase):
         ):
             with self.subTest(path=relative):
                 _schema(load(FIXTURES / relative), load(SCHEMAS / schema))
+        # `rate_limit_pause` also records operator/backfill markers, not only
+        # crq job IDs, and an exception can carry an empty message.
+        _schema(
+            {"until": "2026-11-09T12:30:00Z", "job": "backfill-triage", "at": "2026-11-09T12:00:00Z"},
+            load(SCHEMAS / "repair-pause.schema.json"),
+        )
+        _schema({"error": ""}, load(SCHEMAS / "backfill-publication-failure.schema.json"))
 
 
 if __name__ == "__main__":
