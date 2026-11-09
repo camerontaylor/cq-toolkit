@@ -111,10 +111,13 @@ test('mixed outcomes are fully accounted: fixed, failed-with-branch, branchless 
           expect(failure.gate).toBe('none');
           expect(failure.reason).toBeTruthy();
         }
-    // Explicit denominators: planned = fixed + unresolved.
+    // Explicit denominators: planned = fixed + skipped + unresolved.
     expect(report.counters.planned).toBe(report.planned.length);
     expect(report.counters.fixed).toBe(1);
-    expect(report.counters.unresolved).toBe(report.counters.planned - 1);
+    expect(report.counters.skipped).toBe(0);
+    expect(report.counters.unresolved).toBe(
+      report.counters.planned - report.counters.fixed - report.counters.skipped,
+    );
     expect(report.counters.attempted).toBeGreaterThanOrEqual(1);
     // The legacy failed evidence still carries the retained branch row.
     expect(report.failed.some((row) => 'branch' in row)).toBe(true);

@@ -228,7 +228,7 @@ describe('fix-run report accounting', () => {
     expect(attempted.outcome).toBe('escalated-to-human');
   });
 
-  test('a skipped task (fixed by an earlier verified sibling) counts skipped, not unresolved-free', () => {
+  test('a skipped task (fixed by an earlier verified sibling) counts skipped, not unresolved', () => {
     const skipped = plannedTaskRowOf(
       task({
         outcome: 'fixed',
@@ -242,6 +242,31 @@ describe('fix-run report accounting', () => {
       attempted: 0,
       fixed: 0,
       skipped: 1,
+      unresolved: 0,
+    });
+  });
+
+  test('a commitless ATTEMPTED fixed row is not skipped: it stays unresolved', () => {
+    const attemptedNoCommit = plannedTaskRowOf(
+      task({
+        outcome: 'fixed',
+        attempts: [
+          {
+            tier: 'worker',
+            attempt: 1,
+            invocation: 'edit',
+            model,
+            wallMs: 1,
+            reason: 'initial task',
+          },
+        ],
+      }),
+    );
+    expect(fixRunCounters([attemptedNoCommit])).toMatchObject({
+      planned: 1,
+      attempted: 1,
+      fixed: 0,
+      skipped: 0,
       unresolved: 1,
     });
   });
