@@ -261,6 +261,16 @@ class BoundedRepairTest(unittest.TestCase):
         self.assertIn(SOURCE, body)
         self.assertIn('2: pinned code', body)
         self.assertIn('Earlier verification failed', body)
+        # Operating instructions belong to the SDK's trusted prompt, not the
+        # untrusted finding body. The adapter still sends the same permissions.
+        self.assertNotIn('Shell: the bash tool', body)
+        self.assertNotIn('Anything else is denied', body)
+        harness_arg = next(arg for arg in cmd.call_args.args[0] if arg.startswith('--harness='))
+        harness = json.loads(harness_arg.split('=', 1)[1])
+        self.assertEqual(harness, service.cq.HARNESS)
+        self.assertEqual(harness['tools']['run']['commandPatterns'],
+                         ['git ' + name for name in ('add', 'commit', 'status', 'diff', 'log', 'rev-parse')]
+                         + service.cq.SEARCH_PATTERNS)
 
     def test_harvest_refuses_wrong_prepared_source_binding(self):
         job_id, job = self.prepare()

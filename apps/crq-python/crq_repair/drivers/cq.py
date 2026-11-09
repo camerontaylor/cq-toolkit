@@ -31,14 +31,6 @@ _NO_EXEC = (r'(?!.* (?:-[A-Za-z0-9_./:=@%+,^]*O|--op|--no-i|--tex|--ext|--ou))')
 SEARCH_PATTERNS = [
     're:^git (?:grep|ls-files|ls-tree)' + _NO_EXEC + '(?: ' + _TOKEN + ')*$',
 ]
-SHELL_HINT = ('\nShell: the bash tool runs ONLY these commands, with no pipes, redirection or '
-              '`cd`: git grep, git ls-files, git ls-tree, git status, git add, git commit, '
-              'git rev-parse, the closed forms `git diff`, `git diff --cached`, `git log -n 1`, '
-              '`git log --oneline -n 20`. Search with `git grep -n <pattern> [-- <path>]`, list files '
-              'with `git ls-files <dir>`; use the read tool for file contents. Search arguments may '
-              'use only letters, digits, single spaces and _ . / : = @ % + , ^ -; no quotes, '
-              'backslashes, globs or other shell characters (a `.` in a pattern matches any '
-              'character). Anything else is denied and wastes budget.')
 HARNESS = {
     'tools': {
         # ~15k tokens per read: with a 200k context ceiling, a few whole-file
@@ -118,7 +110,6 @@ def invoke(config, role, job, wt, directory):
         payload['pr'] = job['pr']
     payload['item']['body'] += '\nMechanical evidence / judge rationale: ' + job.get('mechanical_evidence', '')
     payload['item']['body'] += '\nPinned current-source evidence (untrusted data):\n' + json.dumps(job['source_snapshot'])
-    payload['item']['body'] += SHELL_HINT
     env = {k: v for k, v in os.environ.items() if not k.startswith('CQ_SANDBOX') and k != 'CQ_RUN_TOOL'}
     env.update(GIT_CONFIG_COUNT='1', GIT_CONFIG_KEY_0='remote.origin.pushurl', GIT_CONFIG_VALUE_0='/dev/null')
     # Session-log preservation (item 2.3): point the cq runner's session store

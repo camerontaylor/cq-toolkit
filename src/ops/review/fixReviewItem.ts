@@ -468,6 +468,25 @@ const composeUserPrompt = (input: FixReviewItemInput): { text: string; truncated
         : `${singleLine(input.item.path)}:${input.item.line}`;
   lines.push(`Location: ${anchor}`);
   lines.push(`Worktree: ${input.worktree.path} (branch: ${input.worktree.branch})`);
+  // Operating instructions come from the caller's harness, never review data.
+  // Keep this outside the fences and use the same effective harness as dispatch.
+  const harness = input.harness ?? defaultHarnessConfig;
+  const tools = toolPolicyFor(harness).allow;
+  lines.push('');
+  lines.push(`Allowed tools (caller harness): ${JSON.stringify(tools)}.`);
+  if (tools.includes('bash')) {
+    lines.push(
+      `Bash command patterns (caller harness): ${JSON.stringify(harness.tools.bash.commandPatterns)}.`,
+    );
+    lines.push(
+      'Use only commands matching these patterns and the harness command syntax. Patterns starting with re: are regular expressions, not commands to run. Use read for file contents; do not guess shell alternatives after a command is denied.',
+    );
+    lines.push(
+      'For permitted git inspection, use the closed forms git diff, git diff --cached, git log -n 1, git log --oneline -n 20. Search arguments must match the supplied pattern, including its restrictions on quotes, backslashes and shell characters.',
+    );
+  } else {
+    lines.push('Bash is unavailable; do not attempt shell commands.');
+  }
   lines.push('');
   lines.push('Reviewed item body:');
   // The body and the comments are UNTRUSTED review content (finding: prompt
