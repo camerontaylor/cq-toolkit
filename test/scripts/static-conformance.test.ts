@@ -57,7 +57,7 @@ function kernelImports(directory: string, root = directory): string[] {
 function fixture(prefix = 'cq-static-conformance-'): string {
   const root = mkdtempSync(join(tmpdir(), prefix));
   roots.push(root);
-  for (const directory of ['src', 'test', 'lint/rules', 'scripts', 'baselines', 'unvisited']) {
+  for (const directory of ['src', 'test', 'lint/rules', 'scripts/lib', 'baselines', 'unvisited']) {
     mkdirSync(join(root, directory), { recursive: true });
   }
   for (const file of [
@@ -70,6 +70,7 @@ function fixture(prefix = 'cq-static-conformance-'): string {
     'lint/rules/no-vendor-sdk-in-kernel.mjs',
     'scripts/ratchet-typecheck.mjs',
     'scripts/ratchet-lib.mjs',
+    'scripts/lib/build-env.mjs',
     BASELINE,
   ]) {
     cpSync(join(ROOT, file), join(root, file));

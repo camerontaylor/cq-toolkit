@@ -34,6 +34,7 @@ function fixture(realTools = true): string {
     'scripts/lib/owned-files.mjs',
     'scripts/ratchet-typecheck.mjs',
     'scripts/ratchet-lib.mjs',
+    'scripts/lib/build-env.mjs',
     'baselines/typecheck--typecheck-count--7caef1e76077.json',
   ])
     cpSync(join(ROOT, file), join(root, file));
@@ -100,6 +101,48 @@ function command(
 }
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+});
+
+it.skipIf(process.platform === 'win32')('scrubs credentials from a ratchet build child', () => {
+  const root = fixture(false);
+  const bin = join(root, 'bin');
+  const report = join(root, 'build-env.json');
+  mkdirSync(bin);
+  const pnpm = join(bin, 'pnpm');
+  writeFileSync(
+    pnpm,
+    `#!${process.execPath}
+import { writeFileSync } from 'node:fs';
+const names = ['ENCRYPTION_KEY', 'SIGNING_KEY', 'GH_TOKEN', 'BUILD_KEY', 'PATH', 'HOME'];
+writeFileSync(${JSON.stringify(report)}, JSON.stringify({
+  argv: process.argv.slice(2),
+  env: Object.fromEntries(names.flatMap(name => process.env[name] === undefined ? [] : [[name, process.env[name]]]))
+}));
+`,
+  );
+  chmodSync(pnpm, 0o755);
+  const env = {
+    PATH: `${bin}:${process.env.PATH ?? ''}`,
+    HOME: root,
+    BUILD_KEY: 'safe-cache-key',
+    ENCRYPTION_KEY: 'fixture-encryption',
+    SIGNING_KEY: 'fixture-signing',
+    GH_TOKEN: 'fixture-token',
+  };
+  const result = spawnSync(
+    process.execPath,
+    [
+      '--input-type=module',
+      '--eval',
+      "import { ensureDist } from './scripts/ratchet-lib.mjs'; ensureDist();",
+    ],
+    { cwd: root, env, encoding: 'utf8', timeout: 30_000 },
+  );
+  expect(result.status, result.stderr).toBe(0);
+  expect(JSON.parse(readFileSync(report, 'utf8'))).toEqual({
+    argv: ['run', 'build'],
+    env: { PATH: env.PATH, HOME: root, BUILD_KEY: 'safe-cache-key' },
+  });
 });
 
 describe('full static gate versus explicit-file fast lint', { timeout: 60_000 }, () => {

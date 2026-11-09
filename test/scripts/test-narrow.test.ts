@@ -379,12 +379,14 @@ describe('distIsFresh (the runner skips the build only when this holds)', () => 
     const root = mkdtempSync(join(tmpdir(), 'dist-fresh-'));
     const put = (file: string, seconds: number) => {
       mkdirSync(dirname(join(root, file)), { recursive: true });
-      writeFileSync(join(root, file), '');
+      writeFileSync(join(root, file), file === 'package.json' ? '{}' : '');
       utimesSync(join(root, file), seconds, seconds);
     };
     for (const file of inputs) put(file, 1_000);
     for (const file of outputs) put(file, 2_000);
     copyFileSync(lib, join(root, 'scripts/ratchet-lib.mjs'));
+    mkdirSync(join(root, 'scripts/lib'), { recursive: true });
+    copyFileSync(join(dirname(lib), 'lib/build-env.mjs'), join(root, 'scripts/lib/build-env.mjs'));
     const mod = (await import(pathToFileURL(join(root, 'scripts/ratchet-lib.mjs')).href)) as {
       distIsFresh: () => boolean;
       invalidateBuild: () => void;
