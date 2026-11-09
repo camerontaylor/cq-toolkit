@@ -47,7 +47,7 @@ describe('the fix-run wall-clock ladder (opts.limits → the governor)', () => {
     await running;
     expect(calls).toEqual(['fix-1']);
   });
-  test('a detached first worker keeps same-file successors waiting for actual settlement', async () => {
+  test('a detached first worker cannot hold the run or admit a same-file successor', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     const world = defaultWorld();
     world.threads = [
@@ -62,10 +62,6 @@ describe('the fix-run wall-clock ladder (opts.limits → the governor)', () => {
     const finish = new Promise<void>((resolve) => {
       finishFirst = resolve;
     });
-    let secondStarted!: () => void;
-    const second = new Promise<void>((resolve) => {
-      secondStarted = resolve;
-    });
     const calls: string[] = [];
     try {
       const running = runLoop(world, {
@@ -77,17 +73,16 @@ describe('the fix-run wall-clock ladder (opts.limits → the governor)', () => {
           if (id === 'fix-1') {
             firstStarted();
             await finish;
-          } else secondStarted();
+          }
           return completeWorker(fixLine(false, 'No change needed.', []));
         },
       });
+      const settled = expect(running).rejects.toThrow('detached work requires quarantine');
       await started;
       await vi.advanceTimersByTimeAsync(20_000);
       expect(calls).toEqual(['fix-1']);
-      finishFirst();
-      await second;
-      await running;
-      expect(calls).toEqual(['fix-1', 'fix-2']);
+      await settled;
+      expect(calls).toEqual(['fix-1']);
     } finally {
       finishFirst();
       vi.useRealTimers();

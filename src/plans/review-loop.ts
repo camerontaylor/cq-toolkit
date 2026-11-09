@@ -1310,6 +1310,11 @@ async function runOwnedReviewLoop(
     try {
       if (!signal.aborted) await Promise.race([Promise.all(waits), cancelled]);
       await run();
+      // A ladder can detach a non-cooperative body. Do not let its ordering
+      // lease hold this run forever, or dispatch another writer over it.
+      if (state.started && scheduled.has(jobId)) {
+        governor.tripSignal('review fixer detached before its body settled');
+      }
     } finally {
       signal.removeEventListener('abort', wake);
       if (!state.started) state.release();
