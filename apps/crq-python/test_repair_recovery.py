@@ -276,6 +276,18 @@ class RecoveryTest(unittest.TestCase):
         self.judge.assert_called_once()
         self.prepare.assert_not_called()
 
+    def test_cached_unresolved_refuses_non_utf8_context_without_side_effects(self):
+        self.retain_old_unresolved()
+        directory = self.root / 'state/repair/crq-job'
+        artifact = directory / 'recovery.json'
+        before = artifact.read_bytes()
+        (directory / 'recovery-evidence.json').write_bytes(b'\xff')
+        with self.assertRaisesRegex(ValueError, 'retained recovery requires inspection'):
+            self.run_recovery()
+        self.assertEqual(artifact.read_bytes(), before)
+        self.judge.assert_called_once()
+        self.prepare.assert_not_called()
+
     def test_cached_unresolved_rejects_changed_evidence_and_ownership(self):
         self.retain_old_unresolved()
         (self.wt / 'a.py').write_text('changed patch\n')

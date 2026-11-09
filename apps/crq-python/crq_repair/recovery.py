@@ -112,7 +112,7 @@ def recover(root, config, job_id, scan, judge, prepare):
             old_tip = check_sha(old_binding.get('source_sha'))
             try:
                 old_context = json.loads((directory / 'recovery-evidence.json').read_text())
-            except (OSError, json.JSONDecodeError) as exc:
+            except (OSError, UnicodeError, json.JSONDecodeError) as exc:
                 raise ValueError('recovery evidence or source changed; retained recovery requires inspection') from exc
             expected_context = {**context, 'source_sha': old_tip, 'tip': old_tip}
             old_contract = command(['git', 'show', old_tip + ':' + contract_path], cwd=config['clone'])
