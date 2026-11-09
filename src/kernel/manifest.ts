@@ -85,7 +85,12 @@ export function hashInputs(op: string, input: unknown): string {
  * and sparse-array holes (read as `undefined`) stay allowed — both are
  * documented canonical forms.
  */
-function snapshotHashableInput(jobId: string, value: unknown, path = 'input'): unknown {
+function snapshotHashableInput(
+  jobId: string,
+  value: unknown,
+  path = 'input',
+  seen = new WeakMap<object, unknown>(),
+): unknown {
   if (value === null) return value;
   if (typeof value === 'number') {
     if (!Number.isFinite(value)) {
@@ -94,11 +99,13 @@ function snapshotHashableInput(jobId: string, value: unknown, path = 'input'): u
     return value;
   }
   if (typeof value !== 'object') return value;
+  if (seen.has(value)) return seen.get(value);
   if (Array.isArray(value)) {
     const snapshot: unknown[] = new Array(value.length);
+    seen.set(value, snapshot);
     for (const [key, member] of Object.entries(value)) {
       Object.defineProperty(snapshot, key, {
-        value: snapshotHashableInput(jobId, member, `${path}[${key}]`),
+        value: snapshotHashableInput(jobId, member, `${path}[${key}]`, seen),
         enumerable: true,
         configurable: true,
         writable: true,
@@ -110,12 +117,17 @@ function snapshotHashableInput(jobId: string, value: unknown, path = 'input'): u
   if (proto !== Object.prototype && proto !== null) {
     throw new Error(`manifest: job '${jobId}' ${path} is not plain JSON data`);
   }
-  return Object.fromEntries(
-    Object.entries(value).map(([key, member]) => [
-      key,
-      snapshotHashableInput(jobId, member, `${path}.${key}`),
-    ]),
-  );
+  const snapshot: Record<string, unknown> = {};
+  seen.set(value, snapshot);
+  for (const [key, member] of Object.entries(value)) {
+    Object.defineProperty(snapshot, key, {
+      value: snapshotHashableInput(jobId, member, `${path}.${key}`, seen),
+      enumerable: true,
+      configurable: true,
+      writable: true,
+    });
+  }
+  return snapshot;
 }
 
 /**

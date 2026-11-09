@@ -256,6 +256,25 @@ describe('makeManifest', () => {
     expect(job?.inputsHash).toBe(hashInputs('op-g', { n: 1 }));
   });
 
+  test('snapshots a shared input object once and preserves its aliases', () => {
+    let reads = 0;
+    const shared = {
+      get n() {
+        return ++reads;
+      },
+    };
+    const plan: Plan = {
+      id: 'plan-shared-input',
+      jobs: [{ id: 's1', op: 'op-s', input: { left: shared, right: shared } }],
+    };
+    const job = makeManifest(plan).jobs[0];
+    const input = job?.input as { left: unknown; right: unknown };
+    expect(reads).toBe(1);
+    expect(input.left).toBe(input.right);
+    expect(input.left).not.toBe(shared);
+    expect(job?.inputsHash).toBe(hashInputs('op-s', input));
+  });
+
   test('still accepts the documented undefined values and sparse arrays', () => {
     const sparse = new Array(2);
     const plan: Plan = {
