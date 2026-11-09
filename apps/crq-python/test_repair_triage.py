@@ -136,21 +136,49 @@ class PhaseTest(FindingTest):
         self.assertEqual(result['delivered'], 1)
         self.assertEqual(len(queue['items']), 1)
 
-    def test_failed_escalation_is_not_repeated_on_each_pass(self):
+    def test_transient_escalation_failures_defer_until_service_recovers(self):
         self.run_phase({'stop': 'ok', 'verdict': 'unsure', 'reason': 'missing context'})
-        result, _, _ = self.run_phase({'stop': 'error', 'reason': 'incomplete output'})
-        self.assertEqual(result['counts'], {'needs-human': 1})
-        _, _, judge = self.run_phase()
-        judge.assert_not_called()
+        for stop in ('configuration', 'budget', 'error', 'rate-limit'):
+            with self.subTest(stop=stop):
+                result, _, judge = self.run_phase({'stop': stop})
+                self.assertEqual(result['counts'], {})
+                self.assertEqual(judge.call_count, 1)
+        result, _, judge = self.run_phase()
+        self.assertEqual(result['counts'], {'confirmed': 1})
+        judge.assert_called_once()
 
-    def test_timed_out_escalation_is_not_repeated_on_each_pass(self):
+    def test_timed_out_escalation_remains_eligible(self):
         import subprocess
         self.run_phase({'stop': 'ok', 'verdict': 'unsure', 'reason': 'missing context'})
         judge = mock.Mock(side_effect=subprocess.TimeoutExpired('judge', 1))
         result = phase(self.inbox, self.f.repo, self.t, judge, mock.Mock(), AT)
-        self.assertEqual(result['counts'], {'needs-human': 1})
-        _, _, next_judge = self.run_phase()
-        next_judge.assert_not_called()
+        self.assertEqual(result['counts'], {})
+        result, _, next_judge = self.run_phase()
+        self.assertEqual(result['counts'], {'confirmed': 1})
+        next_judge.assert_called_once()
+
+    def test_outage_does_not_consume_other_escalation_rows(self):
+        import copy
+        self.run_phase({'stop': 'ok', 'verdict': 'unsure', 'reason': 'missing context'})
+        path = self.inbox.root / 'triage' / (self.fid + '.json')
+        row = copy.deepcopy(ledger.loads(path.read_bytes()))
+        row['finding'].update(id='f' * 64, title='Another finding')
+        row['canonical_id'] = 'f' * 64
+        ledger.atomic(path.parent / ('f' * 64 + '.json'), ledger.canonical(row))
+        result, _, judge = self.run_phase({'stop': 'configuration'})
+        self.assertEqual(result['counts'], {})
+        self.assertEqual(judge.call_count, 1)
+        self.assertEqual(ledger.loads(path.read_bytes())['status'], 'needs-human')
+        self.assertEqual(ledger.loads((path.parent / ('f' * 64 + '.json')).read_bytes())['status'], 'needs-human')
+
+    def test_escalation_reads_referenced_path_followed_by_period(self):
+        from crq_repair.triage import context
+        tip = self.f.commit({'docs/other.md': b'linked evidence\n'})
+        row = ledger.loads((self.inbox.root / 'triage' / (self.fid + '.json')).read_bytes())
+        row['_escalate'] = True
+        row['finding']['body'] = 'See docs/other.md.'
+        packed = context(self.f.repo, row, tip)
+        self.assertIn('docs/other.md', [v['path'] for v in packed['additional_sources']])
 
     def test_zero_limit_leaves_unjudged(self):
         result, _, judge = self.run_phase(maximum=0)

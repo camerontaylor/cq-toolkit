@@ -43,6 +43,7 @@ def context(repo, row, tip):
         # complete pack before dispatch. Never give the model raw file tools.
         body = ' '.join(str(finding.get(k) or '') for k in ('title', 'body'))
         paths = [name] + re.findall(r'[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+', body)
+        paths = [path if path in entries else path.rstrip('.') for path in paths]
         for path in dict.fromkeys(paths):
             if path not in entries or len(extra) >= 3:
                 continue
@@ -156,20 +157,9 @@ def phase(inbox, repo, tip, judge, transport, at, *, maximum=6, seconds=600, dry
             if remaining <= 0:
                 stopped = 'deadline'; break
             report = judge(row, packed, remaining)
-        except subprocess.TimeoutExpired:
-            if row.get('_escalate'):
-                plans.append((row, 'needs-human', 'escalation timed out before a disposition', {}))
-                judged += 1
-                continue
-            stopped = 'deferred'; break
-        except OSError:
+        except (subprocess.TimeoutExpired, OSError):
             stopped = 'deferred'; break
         if report.get('stop') != 'ok':
-            if row.get('_escalate') and report.get('stop') not in ('rate-limit',):
-                row['_triage_model'] = report.get('model', 'judge')
-                plans.append((row, 'needs-human', 'escalation did not complete: ' + str(report.get('reason') or report.get('summary') or report.get('stop'))[:800], {}))
-                judged += 1
-                continue
             stopped = report.get('stop', 'error'); stopped_report = report; break
         row['_triage_model'] = report.get('model', 'judge')
         action, reason, kwargs = decision(repo, row, tip, report)
