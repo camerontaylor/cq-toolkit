@@ -9,7 +9,7 @@
 // fixtures) and run through the real makeGhRunner seam.
 import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, relative } from 'node:path';
+import { delimiter, dirname, join, relative } from 'node:path';
 import { afterEach, describe, expect, test } from 'vitest';
 import { makeGhRunner, ghJson } from '../../../src/adapters/forge-github/gh.js';
 import type { GhFn } from '../../../src/adapters/forge-github/gh.js';
@@ -100,6 +100,29 @@ describe('makeGhRunner', () => {
     expect(res.code).toBe(0);
     expect(res.stdout).toBe('resolved-ok');
   }, 10_000);
+
+  test('bare binary resolves explicit relative PATH against caller cwd, never child cwd', async () => {
+    const trusted = await tempBin('cq-gh-path-probe', '#!/bin/sh\nprintf trusted');
+    const childDir = await mkdtemp(join(tmpdir(), 'cq-gh-scoped-'));
+    tempDirs.push(childDir);
+    await writeFile(join(childDir, 'cq-gh-path-probe'), '#!/bin/sh\nprintf hostile', {
+      mode: 0o755,
+    });
+    const result = await makeGhRunner({
+      bin: 'cq-gh-path-probe',
+      cwd: childDir,
+      env: { PATH: `${relative(process.cwd(), dirname(trusted))}${delimiter}/bin` },
+    })([]);
+    expect(result.code).toBe(0);
+    expect(result.stdout).toBe('trusted');
+    const missing = await makeGhRunner({
+      bin: 'cq-gh-path-probe',
+      cwd: childDir,
+      env: { PATH: '' },
+    })([]);
+    expect(missing.code).toBe(127);
+    expect(missing.stdout).toBe('');
+  });
 
   test('a nonexistent binary resolves (never rejects) with the 127 convention', async () => {
     const run = makeGhRunner({ bin: '/nonexistent-cq-gh-probe' });

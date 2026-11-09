@@ -15,9 +15,10 @@ import { checkoutWriterStdio, trackCheckoutWriter } from '../../shared/checkoutW
 // owner/repo spelling validator and the `--paginate --slurp` payload
 // normalizer) — hoisted here so the seams cannot drift apart.
 import { spawn } from 'node:child_process';
+import { accessSync, constants, statSync } from 'node:fs';
 import type { CqEnv } from '../../config/env.js';
 import { resolveGhBin } from './ghBin.js';
-import { isAbsolute, resolve as pathResolve } from 'node:path';
+import { delimiter, isAbsolute, join, resolve as pathResolve } from 'node:path';
 
 /** Result of one `gh` invocation: the exit code plus the captured streams. */
 export interface GhResult {
@@ -61,6 +62,43 @@ export class GhError extends Error {
 }
 
 /**
+ * Resolve a BARE binary name like `which` (synchronously): every PATH entry is
+ * ABSOLUTIZED against the process cwd before the probe — the pre-scoping
+ * resolution — so a relative or empty entry cannot make the answer depend on
+ * the directory the spawn later runs in. An empty entry resolves to the caller
+ * cwd. On
+ * win32 the name is also probed with the PATHEXT suffixes, since an
+ * extensionless probe cannot see a `gh.exe`/`gh.cmd`. Undefined = not found;
+ * the caller reports 127 without falling back to a cwd-scoped lookup.
+ */
+function resolveBareOnPath(
+  name: string,
+  env: Readonly<Record<string, string | undefined>>,
+): string | undefined {
+  const exts =
+    process.platform !== 'win32'
+      ? []
+      : (env['PATHEXT'] ?? '.COM;.EXE;.BAT;.CMD')
+          .split(';')
+          .map((ext) => ext.trim())
+          .filter((ext) => ext !== '');
+  const candidates = [name, ...exts.map((ext) => name + ext)];
+  for (const entry of (env['PATH'] ?? '/usr/bin:/bin').split(delimiter)) {
+    const dir = pathResolve(entry);
+    for (const candidate of candidates) {
+      const full = join(dir, candidate);
+      try {
+        accessSync(full, constants.X_OK);
+        if (statSync(full).isFile()) return full;
+      } catch {
+        // Keep searching the remaining PATH entries.
+      }
+    }
+  }
+  return undefined;
+}
+
+/**
  * The default GhFn: spawns `opts.bin`, else CQ_GH_BIN, else `'gh'` (CQ_GH_BIN
  * is the seam CLI-driven tests use to substitute a fake gh script), captures
  * both streams, and resolves with code + streams. The environment passes
@@ -96,17 +134,6 @@ export function makeGhRunner(opts?: {
 }): GhFn {
   return (args: string[]) =>
     new Promise<GhResult>((resolve) => {
-      const rawBin = opts?.bin ?? resolveGhBin(opts?.cqEnv);
-      // Bare names PATH-lookup (cwd-independent), but a RELATIVE bin path
-      // with a separator resolves against the spawn cwd — with a scoped
-      // runner that would silently change which binary runs. Pre-resolve
-      // such paths against the process cwd, the pre-scoping resolution.
-      const bin =
-        rawBin.includes('/') || rawBin.includes('\\')
-          ? isAbsolute(rawBin)
-            ? rawBin
-            : pathResolve(process.cwd(), rawBin)
-          : rawBin;
       const stdoutChunks: Buffer[] = [];
       const stderrChunks: Buffer[] = [];
       let timedOut = false;
@@ -121,6 +148,26 @@ export function makeGhRunner(opts?: {
           const probe = caseFold ? name.toUpperCase() : name;
           if (targets.includes(probe)) delete inherited[name];
         }
+      }
+      const childEnv = { ...inherited, ...opts?.env };
+      const rawBin = opts?.bin ?? resolveGhBin(opts?.cqEnv);
+      // A bare name is NOT cwd-independent once the spawn is scoped: the child
+      // PATH-looks-it-up relative to `opts.cwd` through any RELATIVE or EMPTY
+      // PATH entry, so a repository holding an executable named `gh` could run
+      // in place of the intended binary. Resolve such names here, like
+      // `which`, to an ABSOLUTE path (every PATH entry absolutized against the
+      // process cwd — the pre-scoping resolution) and spawn that. A RELATIVE
+      // bin path with a separator resolves the same way, and an unresolvable
+      // bare name returns the 127 convention without a child-cwd lookup.
+      const bin =
+        rawBin.includes('/') || rawBin.includes('\\')
+          ? isAbsolute(rawBin)
+            ? rawBin
+            : pathResolve(process.cwd(), rawBin)
+          : resolveBareOnPath(rawBin, childEnv);
+      if (bin === undefined) {
+        resolve({ code: 127, stdout: '', stderr: `executable not found: ${rawBin}` });
+        return;
       }
       const child = spawn(bin, args, {
         stdio: checkoutWriterStdio(['pipe', 'pipe', 'pipe']),
