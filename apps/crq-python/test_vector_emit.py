@@ -12,6 +12,7 @@ import unittest
 
 import admission_history
 import backfill_accounting
+import backfill_inventory
 import backfill_jobs
 import coverage
 import crq
@@ -126,6 +127,8 @@ def invoke(source, inputs):
                                            inputs["ordinary_eligible"],
                                            reserve=inputs["reserve"])
         return {"decision": decision, "queue": queue, "item": item}
+    if source == "backfill_inventory.rank":
+        return backfill_inventory.rank(inputs["manifest"], inputs["inputs"])
     if source == "review_ledger.timestamp":
         return review_ledger.timestamp(inputs["value"]).isoformat()
     if source == "review_ledger.path":
@@ -206,6 +209,7 @@ class VectorFileTest(unittest.TestCase):
                         "backfill_accounting.ranges",
                         "admission_history.summarize",
                         "backfill_jobs.admission",
+                        "backfill_inventory.rank",
                         "review_ledger.timestamp",
                         "review_ledger.path",
                         "review_ledger.intervals",

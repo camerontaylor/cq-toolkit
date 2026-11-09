@@ -26,6 +26,7 @@ import tempfile
 from typing import Any, Callable, Dict, List
 
 import backfill_accounting
+import backfill_inventory
 import backfill_jobs
 import coverage
 import crq
@@ -662,6 +663,196 @@ def backfill_vectors() -> Dict[str, Any]:
     return _family("backfill", cases)
 
 
+# --------------------------------------------------------------- backfill inventory
+
+
+INVENTORY_REPO = "example/primary"
+INVENTORY_TARGET = "1" * 40
+INVENTORY_EVALUATED = "2026-11-09T00:00:00Z"
+
+
+def _inventory_blob(path: str) -> str:
+    return review_ledger.digest({"path": path})[:40]
+
+
+def _row(path: str, *, tier: str = "T3", lines: int = 1, covered=(),
+         bytes_: int = 10, disposition: str = "included", reason: str = "",
+         churn: int = 0, findings: int = 0, evidence=()) -> Dict[str, Any]:
+    return {"path": path, "blob": _inventory_blob(path), "mode": "100644",
+            "bytes": bytes_, "lines": lines, "disposition": disposition,
+            "reason": reason, "covered": [list(row) for row in covered],
+            "evidence": list(evidence), "churn": churn, "findings": findings,
+            "tier": tier}
+
+
+def _inventory_limits(*, files: int = 8, file_bytes: int = 1000,
+                      total: int = 2000) -> Dict[str, Any]:
+    return {"version": 1, "construction_version": "fixture-v1",
+            "scoring_version": "fixture-v1", "max_files": files,
+            "max_file_bytes": file_bytes, "max_total_bytes": total,
+            "reviewer": {"verified": True, "evidence": "fixture",
+                         "max_files": files, "max_diff_bytes": 2000}}
+
+
+def _inventory_inputs(objects: List[Dict[str, Any]], *, queue=None,
+                      required=None, required_paths=None, limits=None) -> Dict[str, Any]:
+    return {"queue": queue if queue is not None else {"items": []},
+            "required": required if required is not None else
+            {"version": 1, "rows": [], "explicit_unions": []},
+            "tiers": {"version": 1},
+            "limits": limits if limits is not None else _inventory_limits(),
+            "objects": objects,
+            "required_paths": required_paths if required_paths is not None else {},
+            "ledger": [], "required_members": {}, "evidence_gaps": {},
+            "protected_policy": "{}"}
+
+
+def _inventory_manifest(inputs: Dict[str, Any]) -> Dict[str, Any]:
+    snapshots = {key: {"sha256": review_ledger.digest(value), "location": f"fixture/{key}"}
+                 for key, value in inputs.items()}
+    manifest = {
+        "version": backfill_inventory.VERSION, "repo": INVENTORY_REPO,
+        "target": INVENTORY_TARGET, "tree": "2" * 40, "ledger_head": "3" * 40,
+        "evaluated_at": INVENTORY_EVALUATED, "snapshots": snapshots,
+        "git_version": "git version 2.43.0",
+        "blame_options": backfill_accounting.BLAME_OPTIONS,
+        "construction_version": inputs["limits"]["construction_version"],
+        "scoring_version": inputs["limits"]["scoring_version"],
+        "limits_version": inputs["limits"]["version"],
+        "tiers_version": inputs["tiers"]["version"],
+        "git_bundle": {"sha256": "4" * 64, "location": "fixture/git.bundle"},
+        "raw_queue": {"sha256": "5" * 64, "location": "fixture/raw-queue"},
+        "queue_encoding": "legacy-number-tag/v1",
+    }
+    manifest["id"] = review_ledger.digest(manifest)
+    return manifest
+
+
+def _inventory_build(objects: List[Dict[str, Any]], **kwargs):
+    inputs = _inventory_inputs(objects, **kwargs)
+    manifest = _inventory_manifest(inputs)
+    return manifest, inputs, backfill_inventory.rank(manifest, inputs)
+
+
+def _inventory_family(kind: str, names=(), prs=()) -> str:
+    source = {"repo": INVENTORY_REPO, "kind": kind, "prs": sorted(prs)}
+    if kind == "B":
+        source["lineage"] = sorted(names)
+    return review_ledger.digest(source)
+
+
+def _inventory_case(name: str, objects: List[Dict[str, Any]], **kwargs) -> Dict[str, Any]:
+    manifest, inputs, _ = _inventory_build(objects, **kwargs)
+    return _capture(name, "backfill_inventory.rank",
+                    {"manifest": manifest, "inputs": inputs},
+                    lambda: backfill_inventory.rank(manifest, inputs))
+
+
+def backfill_inventory_vectors() -> Dict[str, Any]:
+    objects_ordering = [
+        _row("apps/crq-python/a.py", tier="T1", lines=2,
+             covered=[[1, 1]], bytes_=10),
+        _row("src/kernel/b.ts", tier="T2", lines=3, bytes_=20),
+        _row("src/new.ts", tier="T3", lines=1, bytes_=5),
+    ]
+    required_ordering = {"version": 1, "rows": [{"row": 1, "pr": 10}],
+                         "explicit_unions": []}
+    required_paths_ordering = {"10": [{"path": "src/kernel/b.ts"}]}
+
+    objects_score = [
+        _row("alpha/a.py", lines=4),
+        _row("beta/b.py", lines=2),
+        _row("gamma/c.py", lines=3),
+    ]
+    gamma_family = _inventory_family("B", ["gamma/c.py"])
+
+    objects_owned = [_row("src/a.py", lines=6, covered=[[1, 2]]),
+                     _row("src/b.py", lines=3)]
+    owned_queue = {
+        "items": [{"id": "active", "state": "reviewing",
+                   "target": INVENTORY_TARGET,
+                   "scope": [{"path": "src/a.py", "blob": _inventory_blob("src/a.py"),
+                              "intervals": [[3, 3]]}]}],
+        "backfill_mapped_ownership": [
+            {"target": INVENTORY_TARGET, "path": "src/a.py",
+             "blob": _inventory_blob("src/a.py"), "intervals": [[4, 5]]},
+            {"target": INVENTORY_TARGET, "path": "src/b.py",
+             "blob": _inventory_blob("src/b.py"), "intervals": [[1, 3]]},
+        ],
+    }
+
+    objects_quarantine = [_row("alpha/a.py"), _row("beta/b.py"),
+                          _row("gamma/c.py"), _row("delta/d.py")]
+    quarantine_queue = {
+        "items": [],
+        "backfill_families": {
+            _inventory_family("B", ["alpha/a.py"]): {"quarantined": True},
+            _inventory_family("B", ["beta/b.py"]): {
+                "next_eligible_at": "2026-12-01T00:00:00Z"},
+            _inventory_family("B", ["delta/d.py"]): {
+                "next_eligible_at": "2026-10-01T00:00:00Z"},
+        },
+        "backfill_scope_failures": {"gamma/c.py": {"quarantined": True}},
+    }
+
+    objects_files = [_row("src/a.py"), _row("src/b.py"),
+                     _row("src/c.py"), _row("src/huge.py", bytes_=60)]
+    objects_bytes = [_row("src/a.py", bytes_=60), _row("src/b.py", bytes_=60),
+                     _row("src/c.py", bytes_=30)]
+
+    required_union = {"version": 1,
+                      "rows": [{"row": 1, "pr": 10}, {"row": 2, "pr": 11},
+                               {"row": 3, "pr": 12}],
+                      "explicit_unions": [[10, 11]]}
+    required_paths_union = {
+        "10": [{"path": "src/a.py"},
+               {"path": "docs/deleted.md", "disposition": "deleted",
+                "deletion_evidence": ["commit:fixture"]}],
+        "11": [{"path": "src/b.py"}, {"path": "src/c.py"}],
+    }
+    objects_union = [_row("src/a.py", lines=2),
+                     _row("src/b.py", lines=0, bytes_=0, disposition="empty"),
+                     _row("src/c.py", disposition="unsupported")]
+
+    generation_objects = [_row("src/a.py", lines=2)]
+    manifest_one, inputs_one, first = _inventory_build(generation_objects)
+    del manifest_one, inputs_one
+    candidate = first["candidates"][0]
+    generation_queue = {
+        "items": [{"id": "old-job", "state": "blocked",
+                   "inventory_subject_id": candidate["subject_id"],
+                   "generation": 0}],
+        "backfill_families": {candidate["family"]: {"failures": 1}},
+    }
+    generation_manifest, generation_inputs, generation_result = _inventory_build(
+        generation_objects, queue=generation_queue)
+
+    cases = [
+        _inventory_case("ordering-tier-before-required", objects_ordering,
+                        required=required_ordering,
+                        required_paths=required_paths_ordering),
+        _inventory_case("ordering-score-then-retry", objects_score,
+                        queue={"items": [],
+                               "backfill_families": {gamma_family: {"failures": 2}}}),
+        _inventory_case("ownership-subtracts-active-and-mapped-scope", objects_owned,
+                        queue=owned_queue),
+        _inventory_case("quarantine-and-future-eligibility-suppress", objects_quarantine,
+                        queue=quarantine_queue),
+        _inventory_case("partition-file-limit-skips-oversize-file", objects_files,
+                        limits=_inventory_limits(files=2, file_bytes=50, total=1000)),
+        _inventory_case("partition-byte-limit-splits-cluster", objects_bytes,
+                        limits=_inventory_limits(files=8, file_bytes=1000, total=100)),
+        _inventory_case("required-union-evidence-outcomes-and-missing", objects_union,
+                        required=required_union,
+                        required_paths=required_paths_union),
+        _case("previous-job-increments-generation",
+              "backfill_inventory.rank",
+              {"manifest": generation_manifest, "inputs": generation_inputs},
+              value=generation_result),
+    ]
+    return _family("backfill-inventory", cases)
+
+
 # --------------------------------------------------------------- ledger
 
 
@@ -885,6 +1076,7 @@ BUILDERS: Dict[str, Callable[[], Dict[str, Any]]] = {
     "merged-reconcile": merged_reconcile_vectors,
     "coverage": coverage_vectors,
     "backfill": backfill_vectors,
+    "backfill-inventory": backfill_inventory_vectors,
     "ledger": ledger_vectors,
     "summary": summary_vectors,
 }

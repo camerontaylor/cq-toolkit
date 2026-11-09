@@ -75,6 +75,7 @@ byte equality.
 | `merged-reconcile.json` | `merged_reconcile.normalize_interval`, `normalize_page_budget`, `record_identity`, `checkpoint_digest`, `new_checkpoint`, `reconcile_page`, `load_checkpoint` | exact timestamps, Unicode digits, page folds, duplicates, outside-window records, sealed checkpoint loading and refusals |
 | `coverage.json` | `coverage.utilization_digest`, `coverage.coverage_candidate`, `coverage.record_opportunity` | 24 h window, unknown observations, cooldown floor, oldest-region selection, active-item exclusion |
 | `backfill.json` | `backfill_accounting.ranges`, `admission_history.summarize`, `backfill_jobs.admission` | range coalescing, bounded diagnostics, ordinary/usage/reserve/inflight decisions |
+| `backfill-inventory.json` | `backfill_inventory.rank` | tier/retry/score ordering, active and mapped ownership subtraction, family and path quarantine/eligibility, file/byte partition limits, required unions and evidence outcomes |
 | `ledger.json` | `review_ledger.timestamp`, `path`, `intervals`, `scope`, `validate`, `validate_sequence`, `creditable` | exact UTC, canonical paths, interval overlap, scope duplicates, event hash, quarantine operator requirement, credit authority |
 | `summary.json` | `status_summary.summarize` | backlog, bounded pending preview, 24 h outcomes, merged discovery, historical promotion exclusion, invalid tick refusal |
 
@@ -89,7 +90,7 @@ comparison generally.
 ## Gaps
 
 Not vectorized here because they need effect doubles, filesystem state or a
-repository adapter: `backfill_inventory.rank`, `backfill_report.summary` and
-`finding_triage` (repository lineage/carry effects), `status_summary.publish`
-(systemd and home filesystem), and the tick/slot launch and harvest loops.
-Group E fixtures seeded from `fixtures/state-<date>/` cover those in Phase 1.
+repository adapter: `backfill_report.summary` and `finding_triage` (repository
+lineage/carry effects), `status_summary.publish` (systemd and home filesystem),
+and the tick/slot launch and harvest loops. Group E fixtures seeded from
+`fixtures/state-<date>/` cover those in Phase 1.
