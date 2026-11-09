@@ -116,19 +116,26 @@ function assertHashableInput(jobId: string, value: unknown, path = 'input'): voi
  * so a structuredClone snapshot is lossless) — meaning a committed run cannot
  * be changed by mutating the plan afterwards, and the hash committed at
  * manifest time stays the hash of the input that will be dispatched. Inputs
- * the canonical hash cannot represent losslessly are rejected here, before
- * the snapshot is taken (see {@link assertHashableInput}).
+ * the canonical hash cannot represent losslessly are rejected here (see
+ * {@link assertHashableInput}).
+ *
+ * One read, one plan: the input is snapshotted first and validation, the
+ * committed `input`, and `inputsHash` all read that same snapshot — never the
+ * plan-owned object again. Otherwise an accessor could answer differently on
+ * each read, so the validated data, the stored input, and the hash could
+ * disagree.
  */
 export function makeManifest(plan: Plan): RunManifest {
   return {
     planId: plan.id,
     jobs: plan.jobs.map((job) => {
-      assertHashableInput(job.id, job.input);
+      const input: unknown = structuredClone(job.input);
+      assertHashableInput(job.id, input);
       return {
         id: job.id,
         op: job.op,
-        input: structuredClone(job.input),
-        inputsHash: hashInputs(job.op, job.input),
+        input,
+        inputsHash: hashInputs(job.op, input),
         dependsOn: [...(job.dependsOn ?? [])],
       };
     }),

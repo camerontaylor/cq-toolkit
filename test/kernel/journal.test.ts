@@ -226,6 +226,24 @@ describe('makeManifest', () => {
     expect(() => makeManifest(plan)).toThrow(/job 'd1'.*not plain JSON data/);
   });
 
+  test('hashes the input snapshot, not the plan-owned object', () => {
+    // An accessor that answers differently on each read must not be able to
+    // make the validated/stored input disagree with the hashed one: one
+    // snapshot is read, then validated, stored, AND hashed.
+    let read = 0;
+    const input = {
+      get n() {
+        read += 1;
+        return read === 1 ? 1 : 2;
+      },
+    };
+    const plan: Plan = { id: 'plan-accessor', jobs: [{ id: 'g1', op: 'op-g', input }] };
+
+    const job = makeManifest(plan).jobs[0];
+    expect(job?.input).toEqual({ n: 1 });
+    expect(job?.inputsHash).toBe(hashInputs('op-g', { n: 1 }));
+  });
+
   test('still accepts the documented undefined values and sparse arrays', () => {
     const sparse = new Array(2);
     const plan: Plan = {
