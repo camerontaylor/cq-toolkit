@@ -908,17 +908,33 @@ export class AddressOwnership extends AddressRunLifecycle {
         throw new Error('address ownership: child source mismatch');
       await this.assertOwned();
       const keys = resourceKeys(selection);
-      try {
+      const finish = () => {
+        if (child.tasks.size) {
+          // The child returned while work it started still runs. Retain its
+          // claims and force owner quarantine instead of waiting indefinitely.
+          const error = new Error('address ownership: detached child work requires quarantine');
+          this.controller.abort(error);
+          throw error;
+        }
+        for (const key of child.keys) this.claims.delete(key);
+      };
+      return (async () => {
         await this.claim(child, keys);
         await this.assertOwned();
-        return await childContext.run(child, async () => {
+        return childContext.run(child, async () => {
           const { makeReviewAddress } = await import('../address.js');
           return makeReviewAddress()(input);
         });
-      } finally {
-        while (child.tasks.size) await Promise.allSettled([...child.tasks]);
-        for (const key of child.keys) this.claims.delete(key);
-      }
+      })().then(
+        (result) => {
+          finish();
+          return result;
+        },
+        (error: unknown) => {
+          finish();
+          throw error;
+        },
+      );
     })();
     this.children.add(work);
     // Observe both outcomes even if the caller neglects to await a child.
