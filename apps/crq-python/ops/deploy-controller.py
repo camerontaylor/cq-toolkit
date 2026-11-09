@@ -131,7 +131,7 @@ class RecoveryRequired(Exception):
     """
 
     def __init__(self, recovery: dict):
-        super().__init__(recovery["reason"])
+        super().__init__(recovery.get("reason", "unit recovery required"))
         self.recovery = recovery
 
 

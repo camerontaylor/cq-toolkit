@@ -93,3 +93,25 @@ class UnitSwitchTests(ControllerFixture):
         with self.assertRaisesRegex(dc.Refused, "no runtime-bound"):
             dc.switch_unit(self.effects, None, "crq-tick.service", "node:" + "a" * 40)
         self.assertEqual(list(self.record_dir.iterdir()), [])
+
+    def test_recovery_failure_keeps_pending_record_and_reports_recovery(self):
+        class Crash(BaseException):
+            pass
+
+        class InterruptedAdapter(Adapter):
+            def install(self, unit, runtime):
+                raise Crash()
+
+        adapter = InterruptedAdapter("python")
+        with self.assertRaises(Crash):
+            dc.switch_unit(self.effects, adapter, "crq-tick.service", "node:" + "a" * 40)
+        path = next(self.record_dir.glob("controller-*.json"))
+
+        class BrokenRecovery(Adapter):
+            def stop_and_drain(self, unit):
+                raise RuntimeError("drain failed")
+
+        with self.assertRaises(dc.RecoveryRequired) as failure:
+            dc.recover_unit(self.effects, BrokenRecovery("python"), path)
+        self.assertEqual(failure.exception.recovery["record_path"], str(path))
+        self.assertEqual(json.loads(path.read_text())["outcome"], "pending")
