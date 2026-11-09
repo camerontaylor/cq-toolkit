@@ -164,6 +164,8 @@ def repos_summary(queue, primary, configured=()):
 
 def summarize(status, queue, heartbeat, config, events, now):
     primary = config.get("repo")
+    # Retired promotion records remain in state/queue.json; keep them out of
+    # capacity, backlog and completed-work counts until they are removed.
     items = [i for i in queue["items"] if i.get("kind") != "promotion"]
     primary_items = [i for i in items if (i.get("repo") or primary) == primary]
     backlog = {kind: sum(i["kind"] == kind and i["state"] == "pending"

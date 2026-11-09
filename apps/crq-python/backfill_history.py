@@ -1,7 +1,7 @@
 """Conservative, idempotent history accounting with retained source bytes.
 
 Source collectors pass authenticated transport envelopes, not prose judgements.
-All four classes get an import result even when artifacts establish no scope.
+All three classes get an import result even when artifacts establish no scope.
 No provider review is launched to fill historical evidence gaps.
 """
 import copy
@@ -15,7 +15,7 @@ from backfill_accounting import ranges
 
 REVIEWER_FORMATS = {"0.8.2": "coderabbit-agent-0.8.2", "0.9.2": "coderabbit-agent-0.9.2"}
 
-CLASSES = ("crq-counted-cycle", "merged-current-receipt", "promotion-range", "github-app-review")
+CLASSES = ("crq-counted-cycle", "merged-current-receipt", "github-app-review")
 
 
 def vendor_events(raw):
@@ -230,9 +230,10 @@ def collect_sources(queue, state, store, *, github=None):
     def retain(kind, ident, raw, envelope):
         catalog.append({"class": kind, "id": ident, "raw_artifact": store.put(raw), "envelope": envelope})
     for item in sorted(queue.get("items", []), key=lambda i: i["id"]):
+        if item.get("kind") == "promotion":
+            continue  # Retired promotions remain on disk but are not review evidence.
         for index, cycle in enumerate(item.get("cycles", []) + item.get("author_cycles", [])):
             run = str(cycle.get("run_id") or f"{item['id']}:cycle:{index}")
-            kind = "promotion-range" if item.get("kind") == "promotion" else "crq-counted-cycle"
             raw = json.dumps({"item": item["id"], "kind": item["kind"], "cycle": cycle}, sort_keys=True).encode()
             envelope = {"authenticated": True, "repo": ledger.REPO, "producer": "crq-runner-app",
                         "author_cycle": item.get("kind") == "author", "exit_code": None,
@@ -253,7 +254,7 @@ def collect_sources(queue, state, store, *, github=None):
                     value = ledger.loads((rdir / "review-event.json").read_bytes())
                     ledger.validate(value)
                     envelope["review_payload"] = value["payload"]
-            retain(kind, run, raw, envelope)
+            retain("crq-counted-cycle", run, raw, envelope)
     for filename in sorted((state / "receipts").glob("*.json")):
         raw = filename.read_bytes()
         if hashlib.sha256(raw).hexdigest() != filename.stem:
@@ -263,11 +264,6 @@ def collect_sources(queue, state, store, *, github=None):
         retain("merged-current-receipt", str(document.get("run_id") or filename.stem), raw,
                {"authenticated": True, "repo": ledger.REPO, "producer": "crq-runner-app", "exit_code": 0,
                 "completed_at": document.get("started_at"), "receipt_digest": filename.stem})
-    for record in (queue.get("promotion_audit") or {}).get("records", []):
-        raw = json.dumps(record, sort_keys=True).encode()
-        retain("promotion-range", "audit:" + hashlib.sha256(raw).hexdigest(), raw,
-               {"authenticated": True, "repo": ledger.REPO, "producer": "crq-runner-app", "exit_code": 0,
-                "completed_at": record.get("at"), "reason": "promotion membership is not reviewed scope"})
     acquisition = {"local_queue": store.put(json.dumps(queue, sort_keys=True).encode()),
                    "github": "not-acquired" if github is None else "acquired-paginated", "source_classes": list(CLASSES)}
     if github is not None:

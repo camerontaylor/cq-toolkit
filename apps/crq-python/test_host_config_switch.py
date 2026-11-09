@@ -36,7 +36,7 @@ class HostConfigTests(HostConfigFixture, unittest.TestCase):
             host.switch(self.root, self.overlay, self.raw, self.target, self.tag)
         self.assertEqual(self.command('rev-parse', 'HEAD').strip(), self.target)
         self.assertEqual(self.command('status', '--porcelain').rstrip(), ' M ' + host.CONFIG)
-        self.assertEqual(json.loads((self.runner / 'config.json').read_text())['promotion']['hours_trigger'], 9)
+        self.assertEqual(json.loads((self.runner / 'config.json').read_text())['quiet_minutes'], 31)
         self.assertEqual((state / 'queue.json').read_bytes(), b'{"unchanged":true}\n')
         records = [json.loads(p.read_text()) for p in (self.base / 'records').glob('*.json')]
         self.assertEqual({r['operation'] for r in records}, {'switch-before', 'switch-render'})
@@ -51,11 +51,11 @@ class HostConfigTests(HostConfigFixture, unittest.TestCase):
     def test_drift_refuses_before_restoring_or_switching_no_private_values(self):
         self.rendered()
         config = json.loads((self.runner / 'config.json').read_text())
-        config['promotion']['merges_trigger'] = 2
+        config['quiet_minutes'] = 32
         (self.runner / 'config.json').write_bytes(host.encode(config))
         before = (self.runner / 'config.json').read_bytes()
         with mock.patch.object(host, 'run', side_effect=self.stopped):
-            with self.assertRaisesRegex(ValueError, 'promotion.merges_trigger'):
+            with self.assertRaisesRegex(ValueError, 'quiet_minutes'):
                 host.switch(self.root, self.overlay, self.raw, self.target, self.tag)
         self.assertEqual(self.command('rev-parse', 'HEAD').strip(), self.before)
         self.assertEqual((self.runner / 'config.json').read_bytes(), before)

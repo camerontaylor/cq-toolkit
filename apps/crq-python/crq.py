@@ -250,7 +250,12 @@ class Spool:
 
 
 def live_items(q):
-    """Retain historical promotion records on disk, outside the active queue."""
+    """Retain historical promotion records on disk, outside the active queue.
+
+    The production queue still carries retired promotion items. Keep this
+    filter until those records are removed from state; deleting it would make
+    them live again in discovery, admission, harvesting and reporting.
+    """
     return [item for item in q["items"] if item.get("kind") != "promotion"]
 
 
@@ -1853,9 +1858,9 @@ def notify(destination, text: str) -> Dict[str, Any]:
 
 
 def notify_owner(text: str) -> Dict[str, Any]:
-    promotion = CONFIG.get("promotion", {})
-    return notify(dict(paseo_agent_id=promotion.get("alert_agent_id"),
-                       paseo_host=promotion.get("alert_agent_host")), text)
+    alerts = CONFIG.get("alerts", {})
+    return notify(dict(paseo_agent_id=alerts.get("alert_agent_id"),
+                       paseo_host=alerts.get("alert_agent_host")), text)
 
 
 def inflight(q: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -3530,8 +3535,8 @@ def write_heartbeat(q: Dict[str, Any]) -> None:
         tmp = WATCHDOG_HOME / ".heartbeat.json.tmp"
         tmp.write_text(json.dumps({"last_tick": q["last_tick"], "stale_alarm_min": CONFIG.get("stale_alarm_min", 36),
                                    "schedule_id": CONFIG.get("schedule_id"), "root": str(ROOT),
-                                   "alert_agent_id": CONFIG.get("promotion", {}).get("alert_agent_id"),
-                                   "alert_agent_host": CONFIG.get("promotion", {}).get("alert_agent_host")}) + "\n")
+                                   "alert_agent_id": CONFIG.get("alerts", {}).get("alert_agent_id"),
+                                   "alert_agent_host": CONFIG.get("alerts", {}).get("alert_agent_host")}) + "\n")
         tmp.replace(WATCHDOG_HOME / "heartbeat.json")
     except OSError as exc:
         event("heartbeat_failed", error=str(exc)[:200])

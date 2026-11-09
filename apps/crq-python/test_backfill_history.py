@@ -124,10 +124,10 @@ class HistoryTest(unittest.TestCase):
             for ref in result["payload"]["artifacts"]:
                 self.f.store.verify(ref)
 
-    def test_all_four_classes_report_gaps_and_github_requires_exact_authenticated_scope(self):
+    def test_all_three_classes_report_gaps_and_github_requires_exact_authenticated_scope(self):
         catalog = [{"class": kind, "id": str(i), "raw": b"{}", "envelope": {}} for i, kind in enumerate(history.CLASSES)]
         events, report = history.import_catalog(self.f.repo, self.f.store, catalog, AT, [])
-        self.assertEqual(set(report), set(history.CLASSES)); self.assertEqual(len(events), 4)
+        self.assertEqual(set(report), set(history.CLASSES)); self.assertEqual(len(events), 3)
         self.assertTrue(all(r["sources"] == 1 for r in report.values()))
         envelope = self.envelope(); envelope["producer"] = "coderabbitai[bot]"
         raw = ledger.canonical({"id": 123, "commit_id": self.value["payload"]["head"], "user": {"login": "coderabbitai[bot]", "type": "Bot"}})
@@ -153,6 +153,7 @@ class HistoryTest(unittest.TestCase):
         self.assertEqual(fetch.call_count, 2)
         self.assertTrue(all("--paginate" in call.args[0] and "--slurp" in call.args[0] for call in fetch.call_args_list))
         self.assertEqual({s["class"] for s in result["sources"]}, set(history.CLASSES))
+        self.assertNotIn("promotion-range", {s["class"] for s in result["sources"]})
         catalog = []
         for source in result["sources"]:
             self.f.store.verify(source["raw_artifact"])

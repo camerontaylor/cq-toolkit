@@ -250,7 +250,7 @@ def harvest(c, q, item, dry=False):
                 item['state'] = 'done'
                 item['repair_outcome'] = record['state']
                 item['last_error'] = None
-            elif item['kind'] != 'promotion' and item.get('state') == 'repairing':
+            elif item.get('state') == 'repairing':
                 item['state'] = 'repair_failed' if record['state'] == 'failed' else 'done'
             continue
         if record['state'] not in ('queued', 'ready', 'publish_failed'):
@@ -309,11 +309,6 @@ def harvest(c, q, item, dry=False):
             continue
         record['verdicts'] = verdicts
         record['state'] = 'ready'
-        if item['kind'] == 'promotion':
-            for blocker in item.get('blocking', []):
-                related = [v for v in verdicts if v['job'] == blocker.get('repair_job')]
-                if related:
-                    blocker['repair_advice'] = related[-1]['reason']
         fixed = [v for v in verdicts if v['verdict'] == 'FIXED']
         if not fixed:
             record['state'] = 'failed' if any(v['verdict'] == 'FAILED' for v in verdicts) else 'done'
@@ -329,7 +324,7 @@ def harvest(c, q, item, dry=False):
             item['state'] = 'done'
             item['repair_outcome'] = record['state']
             item['last_error'] = None
-        elif item['kind'] != 'promotion':
+        else:
             item['state'] = 'repair_failed' if record['state'] in ('failed', 'publish_failed') else 'done'
         messages.append(item['id'] + ': repair ' + record['state'])
     return messages
@@ -463,8 +458,7 @@ def finalize_publication(c, q, item, run, record, publication):
                        prior_cycles=2 - c.CONFIG['repair'].get('fix_pr_cycles', 1), repair_origin=run,
                        why='verified repair fix PR')
     record['state'] = 'published'
-    if item['kind'] != 'promotion':
-        item['state'] = 'done'
+    item['state'] = 'done'
     c.save_queue(q)
 
 
