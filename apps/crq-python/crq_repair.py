@@ -14,6 +14,7 @@ import time
 from zoneinfo import ZoneInfo
 from crq_repair import atomic, command, git, hack_detector, utc, verify
 from crq_repair.drivers import cq, codex, paseo
+from crq_repair.retain import retain
 from crq_repair.bounded import drain_job, drain_order, require_canonical_delivery, select_job, source_snapshot
 
 ROOT = Path(__file__).resolve().parent
@@ -178,6 +179,7 @@ def dispatch(config, role, job, wt, directory, judge=False):
     baseline = git(wt, 'rev-parse', 'HEAD') if not judge else None
     attempted = False
     seen = set()
+    previous_directory = None
     with correlation(job, judge):
         for candidate in fallback_roles(config, role):
             provider = candidate['model'].split('/', 1)[0]
@@ -192,14 +194,14 @@ def dispatch(config, role, job, wt, directory, judge=False):
             if remaining < 0.001:
                 return {'stop': 'budget', 'summary': 'repair dispatch wall-clock deadline reached'}
             if attempted and not judge:
-                # This is the repair-owned worktree, reset by process() before
-                # dispatch. A throttled fixer may have edited or committed.
+                retain(wt, baseline, previous_directory)
                 git(wt, 'reset', '--hard', baseline)
                 git(wt, 'clean', '-fd')
             attempted = True
             bounded_config = copy.deepcopy(config)
             bounded_config['repair']['budget']['wall_clock_min'] = remaining / 60
-            report = _dispatch(bounded_config, candidate, job, wt, directory / provider, judge)
+            previous_directory = directory / provider
+            report = _dispatch(bounded_config, candidate, job, wt, previous_directory, judge)
             report.update(driver=candidate['driver'], model=candidate['model'])
             if report.get('stop') != 'rate-limit':
                 return report
@@ -251,6 +253,9 @@ def process(config, job, wt):
     if progress_path.exists() and (not result_path.exists() or progress_path.stat().st_mtime_ns > result_path.stat().st_mtime_ns):
         result = json.loads(progress_path.read_text())
         if result.get('dispatch_pending'):
+            saved_wt = Path(result.get('worktree', '')).resolve()
+            if saved_wt == Path(wt).resolve():
+                retain(saved_wt, job['repair_base'], directory / 'interrupted')
             result.update(verdict='FAILED', reason='worker interrupted with unknown outcome; needs human', finished_at=utc())
             result.pop('dispatch_pending', None)
             atomic(result_path, result)
@@ -280,18 +285,28 @@ def process(config, job, wt):
                 if blocked(repair):
                     result['next_rung'] = rung
                     return defer('GLM peak blackout; attempt deferred')
+                retain(wt, base, directory / ('before-A' + str(rung)))
                 if rung == 2:
-                    # Escalation gets a fresh worktree, not A0/A1 files or harness state.
-                    git(config['clone'], 'worktree', 'remove', '--force', str(wt))
-                    git(config['clone'], 'worktree', 'add', '--detach', str(wt), base)
+                    # Preserve the previous tree (including ignored files) and
+                    # give escalation a separate fresh checkout.
+                    wt = Path(str(wt) + '-A2')
+                    if wt.exists():
+                        retain(wt, base, directory / 'before-A2-existing')
+                        git(wt, 'reset', '--hard', base)
+                        git(wt, 'clean', '-fd')
+                    else:
+                        git(config['clone'], 'worktree', 'add', '--detach', str(wt), base)
+                    result['worktree'] = str(wt)
                 else:
                     git(wt, 'reset', '--hard', base)
                     git(wt, 'clean', '-fd')
+                result['worktree'] = str(wt)
                 result['dispatch_pending'] = {'rung': 'A' + str(rung), 'role': role}
                 atomic(progress_path, result)
                 report = dispatch(config, role, current, wt, attempt_dir)
                 result.pop('dispatch_pending', None)
                 if report.get('stop') == 'rate-limit':
+                    retain(wt, base, attempt_dir)
                     result['next_rung'] = rung
                     return defer('provider rate limit; attempt deferred', rate_limit=report)
                 attempt = {'rung': 'A' + str(rung), 'role': 'fixer' if rung < 2 else 'fixer_escalation',
@@ -366,10 +381,21 @@ def process(config, job, wt):
                                            'model': role['model'], 'stop': 'error', 'changed': False})
             else:
                 result['attempts'][-1]['mechanical'] = {'failure': evidence, 'tests': 'suspended'}
+            # If capture fails, never advance to a reset that could erase work.
+            try:
+                retain(wt, base, attempt_dir)
+            except Exception as capture_error:
+                result['reason'] = 'worktree retention failed: ' + str(capture_error)[:600]
+                break
         result['evidence'] = evidence
         result['next_rung'] = rung + 1
         atomic(progress_path, result)
         rung += 1
+    if result.get('verdict') == 'FAILED':
+        try:
+            retain(wt, base, directory / 'final')
+        except Exception as exc:
+            result['reason'] = 'worktree retention failed: ' + str(exc)[:600]
     result['finished_at'] = utc()
     atomic(result_path, result)
     return result
@@ -567,15 +593,9 @@ def drain(config):
 
 
 def process_item(config, jobs):
-    # One item worktree, serial findings; each successful commit range is pinned
-    # and the next finding starts at its verified predecessor.
+    # Each finding has its own worktree; successful commits chain by base.
     item = jobs[0]['item']
-    wt = Path(config['worktree_root']) / ('crq-repair-' + item)
     base = jobs[0]['repair_base']
-    if not wt.exists():
-        p = command(['git', 'worktree', 'add', '--detach', str(wt), base], cwd=config['clone'])
-        if p.returncode:
-            raise RuntimeError('repair worktree creation failed')
     jobs.sort(key=finding_order)
     last_run = None
     for job in jobs:
@@ -592,6 +612,11 @@ def process_item(config, jobs):
             base = job['repair_base']
             last_run = job['run']
         job['repair_base'] = base
+        wt = Path(config['worktree_root']) / ('crq-repair-' + item + '-' + job['job'])
+        if not wt.exists():
+            p = command(['git', 'worktree', 'add', '--detach', str(wt), base], cwd=config['clone'])
+            if p.returncode:
+                raise RuntimeError('repair worktree creation failed')
         res = process(config, job, wt)
         if dispatch_paused(config):
             return 'rate-limit'
@@ -602,12 +627,100 @@ def process_item(config, jobs):
     return None
 
 
+def recover_job(config, job_id):
+    """Revalidate one failed job; the tick still owns preparation and handoff."""
+    import crq as c
+    import repair_tick
+    from crq_repair import recovery
+    from crq_repair.bounded import job_path
+    if config['repair']['roles']['judge_critical'].get('driver') != 'cq':
+        raise ValueError('recovery requires the CQ structured critical judge')
+    job = json.loads(job_path(ROOT, job_id).read_text())
+    def check_owner():
+        queue = c.load_queue()
+        item = next((i for i in queue.get('items', []) if i.get('id') == job.get('item')), None)
+        record = (item or {}).get('repair_runs', {}).get(job.get('run'))
+        if not record or job_id not in record.get('jobs', []):
+            raise ValueError('job lacks tick-owned repair record')
+        if record.get('fix_pr') or record.get('state') in ('published', 'done'):
+            raise ValueError('repair already published or superseded')
+        fid = job.get('canonical_finding_id')
+        if fid:
+            if not isinstance(fid, str) or not re.fullmatch(r'[0-9a-f]{64}', fid):
+                raise ValueError('invalid canonical finding identity')
+            row = json.loads((ROOT / 'state/backfill/findings/triage' / (fid + '.json')).read_text())
+            current = row.get('receipt', {}).get('repair_task')
+            if row.get('status') == 'needs-human':
+                events = repair_tick.finding_inbox(c).publication.retained()
+                event = next((e for e in events if e.get('id') == row.get('previous_event_id')), None)
+                payload = (event or {}).get('payload', {})
+                if (payload.get('actor') != 'crq-repair' or payload.get('finding_id') != fid
+                        or payload.get('evidence', {}).get('repair_task') != job_id):
+                    raise ValueError('finding requires an explicit owner decision')
+            successor = None
+            if current and current != job_id:
+                try:
+                    successor = json.loads(job_path(ROOT, current).read_text())
+                except (OSError, ValueError):
+                    pass
+            if (row.get('status') not in ('delivered', 'needs-human')
+                    or (current != job_id and not (successor and successor.get('origin_job') == job_id
+                        and successor.get('recovery_worktree') is True))):
+                raise ValueError('canonical finding no longer belongs to this repair')
+        if record.get('state') == 'stale':
+            prefix = 'superseded by prepared retry '
+            note = record.get('error', '')
+            candidate = None
+            if isinstance(note, str) and note.startswith(prefix):
+                try:
+                    candidate = json.loads(job_path(ROOT, note[len(prefix):]).read_text())
+                except (OSError, ValueError):
+                    pass
+            if not (candidate and candidate.get('origin_job') == job_id
+                    and candidate.get('recovery_worktree') is True):
+                raise ValueError('repair already superseded')
+    if not c.ran_locked(check_owner):
+        raise RuntimeError('tick busy; recovery deferred')
+    def judge(old, context, directory):
+        request = {'job': old['job'], 'run': old['run'], 'triage_context': context}
+        return dispatch(config, config['repair']['roles']['judge_critical'], request,
+                        config['clone'], directory / 'recovery-judge', judge=True)
+    def prepare(old_id, tip, evidence):
+        output = []
+        def locked():
+            check_owner()
+            output.append(repair_tick.prepare_current_job(c, c.load_queue(), old_id, tip, evidence,
+                                                          preserve_worktree=True))
+        if not c.ran_locked(locked):
+            raise RuntimeError('tick busy; recovery preparation deferred')
+        return output[0]
+    def scan(context, output):
+        patch = context['retained_patch']
+        if patch and not c.secret_scan_diff(patch, output.with_name('recovery-patch-scan.json'))[0]:
+            return False
+        for index, retained in enumerate(context['retained_attempts']):
+            for part, patch in enumerate(retained['patches']):
+                if patch and not c.secret_scan_diff(patch, output.with_name(
+                        'recovery-attempt-' + str(index) + '-' + str(part) + '-scan.json'))[0]:
+                    return False
+        contract = context['current_contract']
+        if contract['text']:
+            path = contract['path']
+            diff = 'diff --git a/' + path + ' b/' + path + '\n@@ -0,0 +1 @@\n'
+            diff += '\n'.join('+' + line for line in contract['text'].splitlines()) + '\n'
+            if not c.secret_scan_diff(diff, output.with_name('recovery-contract-scan.json'))[0]:
+                return False
+        return triage_context_safe(c, context, output)
+    return recovery.recover(ROOT, config, job_id, scan, judge, prepare)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description='Drain eligible repair inbox jobs, or repair one explicit prepared job')
     parser.add_argument('--triage-dry-run', action='store_true')
     parser.add_argument('--job')
     parser.add_argument('--source-sha')
     parser.add_argument('--finding-sha256')
+    parser.add_argument('--recover-job')
     args = parser.parse_args(argv)
     config = json.loads((ROOT / 'config.json').read_text())
     repair = config.get('repair', {})
@@ -619,6 +732,9 @@ def main(argv=None):
         triage_phase(config, dry_run=True)
         return
     selectors = (args.job, args.source_sha, args.finding_sha256)
+    if args.recover_job and (any(selectors) or args.triage_dry_run):
+        print('repair dispatch refused: recovery selects exactly one job')
+        return
     if any(selectors) and not all(selectors):
         print('repair dispatch refused: --job, --source-sha and --finding-sha256 go together')
         return
@@ -649,6 +765,20 @@ def main(argv=None):
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
+            return
+        if args.recover_job:
+            until = dispatch_paused(config)
+            if until:
+                print('repair recovery paused: provider rate limit until ' + until)
+                return
+            error = fetch_clone(config)
+            if error:
+                print('repair recovery deferred: ' + error[:200])
+                return
+            result = recover_job(config, args.recover_job)
+            if result.get('report', {}).get('stop') == 'rate-limit':
+                rate_limit_pause(result['report'], args.recover_job)
+            print('repair recovery: ' + json.dumps(result))
             return
         if all(selectors):
             job = select_job(ROOT, config, args.job, args.source_sha, args.finding_sha256)

@@ -68,6 +68,40 @@ class BoundedRepairTest(unittest.TestCase):
         self.assertEqual(self.prepare()[0], job_id)
         self.assertEqual(self.c.secret_scan_diff.call_count, 1)
 
+    def test_recovery_preparation_is_idempotent_and_marks_isolated_worktree(self):
+        job_id = repair_tick.prepare_current_job(self.c, self.queue, OLD, SOURCE, self.evidence,
+                                                preserve_worktree=True)
+        job = json.loads(bounded.job_path(self.root, job_id).read_text())
+        self.assertTrue(job['recovery_worktree'])
+        self.assertEqual(repair_tick.prepare_current_job(self.c, self.queue, OLD, SOURCE, self.evidence,
+                                                         preserve_worktree=True), job_id)
+        self.assertEqual(self.c.secret_scan_diff.call_count, 1)
+
+    def test_recovery_does_not_stale_a_run_with_sibling_jobs(self):
+        original = self.queue['items'][0]['repair_runs']['old-run']
+        original['jobs'].append('crq-historical-F2')
+        repair_tick.prepare_current_job(self.c, self.queue, OLD, SOURCE, self.evidence,
+                                        preserve_worktree=True)
+        self.assertEqual(original['state'], 'queued')
+        self.assertIn('crq-historical-F2', original['jobs'])
+
+    def test_recovery_worktree_reaches_harvest_verification(self):
+        job_id = repair_tick.prepare_current_job(self.c, self.queue, OLD, SOURCE, self.evidence,
+                                                preserve_worktree=True)
+        job = json.loads(bounded.job_path(self.root, job_id).read_text())
+        self.c.WT_ROOT = self.root / 'wt'
+        self.c.make_worktree = mock.Mock(return_value=(self.root / 'verify', 'branch'))
+        self.c.remove_worktree = mock.Mock()
+        atomic(self.root / 'state/repair' / job_id / 'result.json',
+               {'job': job_id, 'item': job['item'], 'verdict': 'FIXED', 'commits': ['a' * 40],
+                'attempts': [{'rung': 'A0'}], 'source_sha': SOURCE,
+                'finding_sha256': job['finding_sha256'], 'origin_job': OLD,
+                'worktree': str(self.c.WT_ROOT / ('crq-repair-pr1-merged-' + job_id)),
+                'repair_base': SOURCE})
+        with mock.patch.object(repair_tick, 'verify', side_effect=RuntimeError('verification reached')):
+            with self.assertRaisesRegex(RuntimeError, 'verification reached'):
+                repair_tick.harvest(self.c, self.queue, self.queue['items'][0])
+
     def test_prepared_canonical_retry_transfers_durable_delivery_ownership(self):
         self.old['canonical_finding_id'] = 'canonical'
         atomic(bounded.job_path(self.root, OLD), self.old)
@@ -247,6 +281,7 @@ class BoundedRepairTest(unittest.TestCase):
         report = {'stop': 'ok', 'changed': False, 'summary': 'No change warranted', 'commits': []}
         with mock.patch.object(service, 'ROOT', self.root), \
              mock.patch.object(service, 'git', side_effect=lambda wt, *args: SOURCE if args[0] == 'rev-parse' else ''), \
+             mock.patch.object(service, 'retain'), \
              mock.patch.object(bounded, 'command', return_value=SimpleNamespace(returncode=0, stdout='first\nsecond\n')), \
              mock.patch.object(service.cq, 'invoke', return_value=report) as invoke:
             result = service.process(self.config, job, self.root)

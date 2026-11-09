@@ -443,6 +443,154 @@ class RepairDrainTest(unittest.TestCase):
             snapshot.assert_not_called()
             provider.assert_not_called()
 
+    def test_recovery_job_uses_separate_worktree_and_preserves_original(self):
+        original = self.worktree('crq-repair-pr1-merged-crq-run1-F1')
+        (original / 'src/kept.ts').write_text('retained staged edit\n')
+        subprocess.run(['git', 'add', 'src/kept.ts'], cwd=original, check=True)
+        job = json.loads(bounded.job_path(self.root, 'crq-run1-F1').read_text())
+        job['recovery_worktree'] = True
+        job['job'] = 'crq-recovery-F1'
+        with mock.patch.object(service, 'blocked', return_value=False), \
+             mock.patch.object(service, 'dispatch_paused', return_value=None), \
+             mock.patch.object(service, 'process', return_value={'verdict': 'NOT-FIXED'}) as process:
+            service.process_item(self.config, [job])
+        self.assertEqual(process.call_args.args[2].name, 'crq-repair-pr1-merged-crq-recovery-F1')
+        self.assertEqual((original / 'src/kept.ts').read_text(), 'retained staged edit\n')
+        self.assertIn('src/kept.ts', subprocess.run(['git', 'diff', '--cached', '--name-only'], cwd=original,
+                                                    check=True, capture_output=True, text=True).stdout)
+
+    def test_sibling_failure_cannot_contaminate_next_finding(self):
+        jobs = [json.loads(bounded.job_path(self.root, name).read_text())
+                for name in ('crq-run1-F1', 'crq-run1-F2')]
+        seen = []
+        def process(config, job, wt):
+            seen.append(wt)
+            if len(seen) == 1:
+                (wt / 'src/kept.ts').write_text('first finding partial\n')
+                return {'verdict': 'FAILED'}
+            self.assertEqual((wt / 'src/kept.ts').read_text(), 'one\ntwo\n')
+            return {'verdict': 'NOT-FIXED'}
+        with mock.patch.object(service, 'blocked', return_value=False), \
+             mock.patch.object(service, 'dispatch_paused', return_value=None), \
+             mock.patch.object(service, 'process', side_effect=process):
+            service.process_item(self.config, jobs)
+        self.assertEqual(len(seen), 2)
+        self.assertNotEqual(seen[0], seen[1])
+        self.assertEqual((seen[0] / 'src/kept.ts').read_text(), 'first finding partial\n')
+
+    def test_edited_failed_attempt_is_archived_before_next_rung(self):
+        job = bounded.drain_job(self.root, self.config, self.queue, 'crq-run1-F1')[1]
+        wt = self.worktree('crq-repair-pr1-merged-crq-run1-F1')
+        def dispatch(config, role, current, tree, directory, judge=False):
+            if directory.name == 'A0':
+                (tree / 'src/kept.ts').write_text('staged partial\n')
+                subprocess.run(['git', 'add', 'src/kept.ts'], cwd=tree, check=True)
+                (tree / 'new-file').write_text('untracked partial')
+                return {'stop': 'error', 'summary': 'no_outcome'}
+            self.assertEqual((tree / 'src/kept.ts').read_text(), 'one\ntwo\n')
+            self.assertFalse((tree / 'new-file').exists())
+            if directory.name == 'A1':
+                (tree / 'src/kept.ts').write_text('second staged partial\n')
+                subprocess.run(['git', 'add', 'src/kept.ts'], cwd=tree, check=True)
+                return {'stop': 'error', 'summary': 'no_outcome again'}
+            self.assertTrue(tree.name.endswith('-A2'))
+            return {'stop': 'ok', 'changed': False, 'summary': 'no change'}
+        with mock.patch.object(service, 'blocked', return_value=False), \
+             mock.patch.object(service, 'dispatch', side_effect=dispatch):
+            result = service.process(self.config, job, wt)
+        self.assertEqual(result['verdict'], 'NOT-FIXED')
+        paths = list((self.root / 'state/repair' / job['job'] / 'A0').glob('retained-*/manifest.json'))
+        self.assertEqual(len(paths), 1)
+        self.assertIn('+staged partial', (paths[0].parent / 'staged.patch').read_text())
+        import tarfile
+        with tarfile.open(paths[0].parent / 'untracked.tar') as tar:
+            self.assertEqual(tar.extractfile('new-file').read(), b'untracked partial')
+        second = list((self.root / 'state/repair' / job['job'] / 'A1').glob('retained-*/manifest.json'))
+        self.assertEqual(len(second), 1)
+        self.assertIn('+second staged partial', (second[0].parent / 'staged.patch').read_text())
+
+    def test_failed_retention_never_resets_the_worktree(self):
+        job = bounded.drain_job(self.root, self.config, self.queue, 'crq-run1-F1')[1]
+        wt = self.worktree('crq-repair-pr1-merged-crq-run1-F1')
+        (wt / 'src/kept.ts').write_text('do not lose\n')
+        with mock.patch.object(service, 'blocked', return_value=False), \
+             mock.patch.object(service, 'retain', side_effect=OSError('disk full')), \
+             mock.patch.object(service, 'dispatch') as dispatch:
+            result = service.process(self.config, job, wt)
+        self.assertEqual(result['verdict'], 'FAILED')
+        self.assertIn('retention failed', result['reason'])
+        self.assertEqual((wt / 'src/kept.ts').read_text(), 'do not lose\n')
+        dispatch.assert_not_called()
+
+    def test_resumed_legacy_result_records_the_actual_job_worktree(self):
+        job = bounded.drain_job(self.root, self.config, self.queue, 'crq-run1-F1')[1]
+        wt = self.worktree('crq-repair-pr1-merged-crq-run1-F1')
+        atomic(self.root / 'state/repair' / job['job'] / 'result.json',
+               {'job': job['job'], 'item': job['item'], 'repair_base': self.pin,
+                'worktree': str(self.root / 'wt/crq-repair-pr1-merged'), 'verdict': 'FAILED',
+                'attempts': [], 'judge': None, 'retry_after': '2000-01-01T00:00:00Z'})
+        with mock.patch.object(service, 'blocked', return_value=False), \
+             mock.patch.object(service, 'dispatch', return_value={'stop': 'ok', 'changed': False, 'summary': 'no change'}):
+            result = service.process(self.config, job, wt)
+        self.assertEqual(result['worktree'], str(wt))
+
+    def test_recovery_does_not_override_an_owner_disposition(self):
+        import sys
+        job_id = 'crq-run1-F1'
+        path = bounded.job_path(self.root, job_id)
+        job = json.loads(path.read_text())
+        job['canonical_finding_id'] = 'd' * 64
+        atomic(path, job)
+        atomic(self.root / 'state/backfill/findings/triage' / ('d' * 64 + '.json'),
+               {'status': 'needs-human', 'previous_event_id': 'event', 'receipt': {'repair_task': job_id}})
+        c = SimpleNamespace(load_queue=lambda: self.queue, ran_locked=lambda fn: (fn(), True)[1])
+        inbox = mock.Mock()
+        inbox.publication.retained.return_value = [{'id': 'event', 'payload': {
+            'actor': 'operator', 'finding_id': 'd' * 64, 'evidence': {'repair_task': job_id}}}]
+        with mock.patch.dict(sys.modules, {'crq': c}), mock.patch.object(repair_tick, 'finding_inbox', return_value=inbox):
+            with self.assertRaisesRegex(ValueError, 'owner decision'):
+                service.recover_job(self.config, job_id)
+
+    def test_recovery_prepares_and_dispatches_separate_job_without_resetting_old_tree(self):
+        import sys
+        job_id = 'crq-run1-F1'
+        job = json.loads(bounded.job_path(self.root, job_id).read_text())
+        original = self.worktree('crq-repair-pr1-merged-crq-run1-F1')
+        (original / 'src/kept.ts').write_text('unfinished staged work\n')
+        subprocess.run(['git', 'add', 'src/kept.ts'], cwd=original, check=True)
+        atomic(self.root / 'state/repair' / job_id / 'result.json',
+               {'job': job_id, 'item': job['item'], 'repair_base': self.pin,
+                'worktree': str(original), 'verdict': 'FAILED', 'reason': 'driver no_outcome'})
+        self.config['repair']['max_rounds_per_pin'] = 10
+        c = SimpleNamespace(ROOT=self.root, STATE=self.root / 'state', CLONE=self.clone,
+                            CONFIG=self.config, iso=lambda: 'now', load_queue=lambda: self.queue,
+                            ran_locked=lambda fn: (fn(), True)[1],
+                            run=lambda args, **kw: subprocess.run(args, **kw, capture_output=True, text=True, check=True),
+                            secret_scan_diff=mock.Mock(return_value=(True, {})),
+                            save_queue=lambda q: atomic(self.root / 'state/queue.json', q))
+        report = {'stop': 'ok', 'verdict': 'valid', 'reason': 'current source confirms bug',
+                  'current_path': 'src/kept.ts', 'current_lines': [[1, 1]], 'quoted_text': 'one'}
+        with mock.patch.dict(sys.modules, {'crq': c}), \
+             mock.patch.object(service, 'dispatch', return_value=report) as judge:
+            first = service.recover_job(self.config, job_id)
+            second = service.recover_job(self.config, job_id)
+        self.assertEqual(first, second)
+        judge.assert_called_once()
+        original_run = self.queue['items'][0]['repair_runs']['run1']
+        self.assertEqual(original_run['state'], 'queued')
+        self.assertIn('crq-run1-F2', original_run['jobs'])
+        replacement = json.loads(bounded.job_path(self.root, first['replacement_job']).read_text())
+        self.assertTrue(replacement['recovery_worktree'])
+        self.assertEqual(replacement['origin_job'], job_id)
+        with mock.patch.object(service, 'blocked', return_value=False), \
+             mock.patch.object(service, 'dispatch_paused', return_value=None), \
+             mock.patch.object(service, 'process', return_value={'verdict': 'NOT-FIXED'}) as fixer:
+            service.process_item(self.config, [replacement])
+        self.assertNotEqual(fixer.call_args.args[2], original)
+        self.assertEqual((original / 'src/kept.ts').read_text(), 'unfinished staged work\n')
+        self.assertIn('src/kept.ts', subprocess.run(['git', 'diff', '--cached', '--name-only'], cwd=original,
+                                                    check=True, capture_output=True, text=True).stdout)
+
     def test_operator_disposition_prevents_publication_of_finished_job(self):
         item = self.queue['items'][0]
         record = item['repair_runs']['run1']
@@ -722,7 +870,7 @@ class RepairDrainTest(unittest.TestCase):
         until = service.remember_provider_limit('zai', {'summary': 'Your limit will reset at ' + reset.isoformat()})
         self.assertEqual(until, reset.astimezone(dt.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'))
 
-    def test_fallback_discards_throttled_fixers_partial_commits_and_files(self):
+    def test_fallback_archives_throttled_fixers_partial_commits_and_files(self):
         self.config['repair']['fallback_models'] = ['deepseek/deepseek-flash']
         original = self.git('rev-parse', 'HEAD')
         def invoke(config, role, job, wt, directory, judge):
@@ -732,13 +880,23 @@ class RepairDrainTest(unittest.TestCase):
                 (wt / 'partial-untracked').write_text('partial file')
                 return {'stop': 'rate-limit'}
             self.assertEqual(self.git('rev-parse', 'HEAD'), original)
-            self.assertEqual((wt / 'src/kept.ts').read_text(), 'one\ntwo\n')
             self.assertFalse((wt / 'partial-untracked').exists())
             return {'stop': 'ok', 'changed': False}
         with mock.patch.dict(os.environ, {'ZAI_API_KEY': 'fixture', 'DEEPSEEK_API_KEY': 'fixture'}), \
              mock.patch.object(service, '_dispatch', side_effect=invoke):
             result = service.dispatch(self.config, ROLES['fixer'], {'run': 'r', 'job': 'j'}, self.clone, self.root)
         self.assertEqual(result['model'], 'deepseek/deepseek-flash')
+        archives = list((self.root / 'zai').glob('retained-*/manifest.json'))
+        self.assertEqual(len(archives), 1)
+        manifest = json.loads(archives[0].read_text())
+        self.assertTrue(manifest['commits'])
+        self.assertIn('+partial edit', (archives[0].parent / 'committed.patch').read_text())
+        listed = subprocess.run(['git', 'bundle', 'list-heads', str(archives[0].parent / 'commits.bundle')],
+                                cwd=self.clone, check=True, capture_output=True, text=True).stdout
+        self.assertIn(manifest['head'], listed)
+        import tarfile
+        with tarfile.open(archives[0].parent / 'untracked.tar') as tar:
+            self.assertEqual(tar.extractfile('partial-untracked').read(), b'partial file')
 
     def test_remaining_wire_budget_is_integer_milliseconds(self):
         config = {'repair': {'budget': {'wall_clock_min': 0.123456789}}}
