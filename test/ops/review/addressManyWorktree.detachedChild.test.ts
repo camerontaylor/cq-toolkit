@@ -15,10 +15,14 @@ test('detached child work quarantines promptly and prevents another admission', 
       withAddressOwnership(
         { repoRoot: input.repoRoot, git: f.run, source: input.source, production: true },
         async (lease) => {
-          void lease.track(async () => {
+          const task = lease.track(async () => {
             entered.resolve();
             await release.promise;
           });
+          void task.then(
+            () => undefined,
+            () => undefined,
+          );
           await entered.promise;
           return { status: 'needs-human', reason: 'detached fixture' };
         },
