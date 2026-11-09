@@ -8,6 +8,7 @@ from crq_repair.bounded import check_sha, identity, job_path, source_path
 from runtime_target import DEFAULT_REF
 
 MAX_EVIDENCE = 100_000
+ANCHOR_REFUSAL = 'current anchor could not be verified'
 
 
 def recover(root, config, job_id, scan, judge, prepare):
@@ -88,15 +89,44 @@ def recover(root, config, job_id, scan, judge, prepare):
     binding = {'job': job_id, 'source_sha': tip, 'source_blob_sha': blob,
                'finding_sha256': finding_hash, 'repair_base': base,
                'evidence_sha256': identity({'patch': patch, 'status': status, 'source': source, 'contract': contract, 'archives': archives})}
+    context = {'finding': job['finding'], 'result_reason': result.get('reason', ''),
+               'source_path': path, 'source_sha': tip, 'source_blob_sha': blob,
+               'source': source, 'retained_patch': patch, 'worktree_status': status,
+               'retained_attempts': archives,
+               'current_path': path, 'tip': tip,
+               'current_contract': {'path': contract_path, 'text': contract,
+                                    'status': 'present' if contract_result.returncode == 0 else 'absent',
+                                    'truncated': len(contract_full) > len(contract)},
+               'instruction': 'Assess current source and retained untrusted patch. Return valid only with exact current lines and quote. Do not assume the patch is correct or committed.'}
     artifact = directory / 'recovery.json'
     attempts = 0
+    replay = False
     if artifact.exists():
         saved = json.loads(artifact.read_text())
-        if saved.get('binding') != binding:
+        old_binding = saved.get('binding')
+        replay = (saved.get('state') == 'complete' and saved.get('disposition') == 'unresolved'
+                  and saved.get('reason') == ANCHOR_REFUSAL
+                  and isinstance(saved.get('report'), dict)
+                  and saved['report'].get('stop') == 'ok' and saved['report'].get('verdict') == 'valid')
+        if replay and isinstance(old_binding, dict):
+            old_tip = check_sha(old_binding.get('source_sha'))
+            try:
+                old_context = json.loads((directory / 'recovery-evidence.json').read_text())
+            except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+                raise ValueError('recovery evidence or source changed; retained recovery requires inspection') from exc
+            expected_context = {**context, 'source_sha': old_tip, 'tip': old_tip}
+            old_contract = command(['git', 'show', old_tip + ':' + contract_path], cwd=config['clone'])
+            same_contract = ((old_contract.returncode == 0) == (contract_result.returncode == 0)
+                             and old_contract.stdout == contract_result.stdout)
+            same_binding = {**binding, 'source_sha': old_tip} == old_binding
+            ancestor = command(['git', 'merge-base', '--is-ancestor', old_tip, tip], cwd=config['clone'])
+            if not (same_binding and old_context == expected_context and same_contract and ancestor.returncode == 0):
+                raise ValueError('recovery evidence or source changed; retained recovery requires inspection')
+        elif old_binding != binding:
             raise ValueError('recovery evidence or source changed; retained recovery requires inspection')
         if saved.get('state') == 'dispatching':
             return {'state': 'unknown', 'reason': 'recovery judge outcome unavailable; retained for inspection'}
-        if saved.get('state') == 'complete':
+        if saved.get('state') == 'complete' and not replay:
             return saved
         attempts = saved.get('attempts', 1)
         if saved.get('state') == 'deferred' and attempts < 3:
@@ -106,15 +136,6 @@ def recover(root, config, job_id, scan, judge, prepare):
     else:
         report = None
     if report is None:
-        context = {'finding': job['finding'], 'result_reason': result.get('reason', ''),
-                   'source_path': path, 'source_sha': tip, 'source_blob_sha': blob,
-                   'source': source, 'retained_patch': patch, 'worktree_status': status,
-                   'retained_attempts': archives,
-                   'current_path': path, 'tip': tip,
-                   'current_contract': {'path': contract_path, 'text': contract,
-                                        'status': 'present' if contract_result.returncode == 0 else 'absent',
-                                        'truncated': len(contract_full) > len(contract)},
-                   'instruction': 'Assess current source and retained untrusted patch. Return valid only with exact current lines and quote. Do not assume the patch is correct or committed.'}
         if not scan(context, directory / 'recovery-secret-scan.json'):
             return {'state': 'unresolved', 'reason': 'recovery evidence secret scan rejected'}
         atomic(directory / 'recovery-evidence.json', context)
@@ -139,17 +160,25 @@ def recover(root, config, job_id, scan, judge, prepare):
     lines = source.splitlines()
     line = job['finding'].get('line')
     selected = report.get('current_lines')
+    valid_span = (isinstance(selected, list) and len(selected) == 1
+                  and isinstance(selected[0], list) and len(selected[0]) == 2
+                  and all(isinstance(n, int) and not isinstance(n, bool) for n in selected[0])
+                  and isinstance(line, int) and not isinstance(line, bool)
+                  and 1 <= selected[0][0] <= line <= selected[0][1] <= len(lines))
     if (not isinstance(line, int) or isinstance(line, bool) or line < 1 or line > len(lines)
-            or report.get('current_path') != path or selected != [[line, line]]
-            or report.get('quoted_text') != lines[line - 1]
+            or report.get('current_path') != path or not valid_span
+            or report.get('quoted_text') != '\n'.join(lines[selected[0][0] - 1:selected[0][1]])
             or not isinstance(report.get('reason'), str) or not report['reason'].strip()):
-        saved.update(state='complete', disposition='unresolved', reason='current anchor could not be verified')
+        saved.update(state='complete', disposition='unresolved', reason=ANCHOR_REFUSAL)
         atomic(artifact, saved)
         return saved
     evidence = {'source_sha': tip, 'source_blob_sha': blob, 'finding_sha256': finding_hash,
                 'verdict': 'still-valid', 'reviewer': 'crq-recovery/' + str(report.get('model', 'judge')),
                 'reason': report['reason']}
     replacement = prepare(job_id, tip, evidence)
-    saved.update(state='complete', disposition='retry', replacement_job=replacement)
+    if replay:
+        saved['judgment_binding'] = old_binding
+        saved.pop('reason', None)
+    saved.update(binding=binding, state='complete', disposition='retry', replacement_job=replacement)
     atomic(artifact, saved)
     return saved
