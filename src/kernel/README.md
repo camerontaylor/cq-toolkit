@@ -223,14 +223,16 @@ the dual in-flight/dispatch caps. Source: `src/kernel/governor.ts`.
   v1 runs by `at`, then v2 runs by their claimed `seq` (journal v2,
   ADR-0003 annex) — with or without `resume: true` (only the replay-skip
   map is resume-gated): attempts seed as `1 + |prior job-started(jobId)|`,
-  the dispatch count and the usage/`costUSD` rollups seed from
-  job-finished events (a finish counts only when it CLOSES an open start),
-  so a run continues the SAME budget. The seed's open-start dedupe is
-  keyed PER (run, job): a finish closes only its own run's start, so a
-  finish-only re-attestation in a later run can never close (and
-  double-charge) the start of a run that died first. Identity residual
-  (recorded, unreachable from the CLI today): the attempt seed keys on
-  `job.id`, which the PLAN controls — a plan that renames its job ids
+  the dispatch count and usage rollups seed from job-finished events (a
+  finish counts only when it CLOSES an open start); the `costUSD` rollup
+  instead seeds from reservation events for a run with any reservations (an
+  unresolved reservation charges IN FULL — see Fold eras) and from
+  job-finished events otherwise, so a run continues the SAME budget. The
+  seed's open-start dedupe is keyed PER (run, job): a finish closes only its
+  own run's start, so a finish-only re-attestation in a later run can never
+  close (and double-charge) the start of a run that died first. Identity
+  residual (recorded, unreachable from the CLI today): the attempt seed keys
+  on `job.id`, which the PLAN controls — a plan that renames its job ids
   between runs presents as fresh jobs and resets its per-job attempt
   lineage (rename evasion); stable identity needs a plan-external job
   identity, which is not in v1.1. The SAME keying bounds the A12b
