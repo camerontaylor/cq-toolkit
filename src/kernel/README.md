@@ -104,10 +104,9 @@ reason" clause):
   preceding `job-started` (no dispatch happened; the verified inputsHash
   makes the attestation sound). This keeps each run's journal
   self-contained so the per-job fold rule survives chained resumes.
-- `stopOnError` leaving jobs unstarted does NOT set `stoppedEarly`: the
-  frozen `RunEarlyStopReason` only contains `'budget'`, and honest-stop
-  marking is T1.3's — callers read `counts.queued`/`counts.blocked` to see
-  what never ran.
+- `stopOnError` leaving jobs unstarted does NOT set `stoppedEarly`. Callers
+  read `counts.queued`/`counts.blocked` to see what never ran. The frozen
+  `RunEarlyStopReason` contains `'budget'` and `'signal'`.
 
 ## Budget governor (T1.3)
 
