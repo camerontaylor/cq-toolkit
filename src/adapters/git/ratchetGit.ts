@@ -74,8 +74,14 @@ const SCRUBBED_ENV = [
   'GIT_EXTERNAL_DIFF',
   'GIT_PAGER',
   'GIT_CONFIG',
+  'GIT_CONFIG_GLOBAL',
   'GIT_CONFIG_PARAMETERS',
   'GIT_CONFIG_COUNT',
+  'GIT_EXEC_PATH',
+  'GIT_SSH',
+  'GIT_SSH_COMMAND',
+  'GIT_PROXY_COMMAND',
+  'GIT_TRACE_REDACT',
 ];
 
 /** The hardened child env: inherited, minus redirections, plus the pinned switches. */
