@@ -158,6 +158,37 @@ function upsert(worktree: string, listJson: string) {
 }
 
 describe('makeSubprocessBaselinePrEffects', () => {
+  test.skipIf(process.platform === 'win32')(
+    'does not execute git supplied by the scoped checkout',
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'cq-ratchet-path-'));
+      const marker = join(dir, 'hostile-ran');
+      const hostile = join(dir, 'git');
+      writeFileSync(hostile, '#!/bin/sh\ntouch hostile-ran\n');
+      chmodSync(hostile, 0o755);
+      const previousPath = process.env.PATH;
+      process.env.PATH = `.:${previousPath ?? '/usr/bin:/bin'}`;
+      try {
+        const effects = makeSubprocessBaselinePrEffects(dir, 'main');
+        await expect(
+          effects.commitAndUpsertPr({
+            head: 'branch',
+            base: 'main',
+            title: 't',
+            body: 'b',
+            commitMessage: 'm',
+            files: [],
+          }),
+        ).rejects.toThrow();
+        expect(existsSync(marker)).toBe(false);
+      } finally {
+        if (previousPath === undefined) delete process.env.PATH;
+        else process.env.PATH = previousPath;
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
   test('withdrawal comments then closes only the exact head and base', async () => {
     const effects = makeSubprocessBaselinePrEffects(work, 'main');
     process.env.FAKE_GH_PR_LIST = JSON.stringify([

@@ -181,10 +181,15 @@ async function runGit(
 ): Promise<ExecResult> {
   // Hooks are disabled and the automation token is scrubbed: git runs local
   // hooks and filters during checkout/commit/push.
-  const res = await exec('git', ['-c', 'core.hooksPath=/dev/null', ...args], {
-    cwd: repoRoot,
-    env: gitEnv(),
-  });
+  const env = ghSpawnEnv(gitEnv());
+  const res = await exec(
+    resolveWindowsCommand('git', env),
+    ['-c', 'core.hooksPath=/dev/null', ...args],
+    {
+      cwd: repoRoot,
+      env,
+    },
+  );
   if (res.timedOut) {
     throw new Error(`git ${args[0] ?? ''} timed out after ${EXEC_TIMEOUT_MS}ms`);
   }
