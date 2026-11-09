@@ -207,9 +207,9 @@ class Encoder {
 
   private encodeArray(values: readonly unknown[], depth: number): string {
     if (values.length === 0) return '[]';
-    const encoded = values.map((value, index) => {
+    const encoded = Array.from({ length: values.length }, (_, index) => {
       if (!(index in values)) throw new PythonJsonTypeError('sparse arrays are not JSON arrays');
-      return this.encode(value, depth + 1);
+      return this.encode(values[index], depth + 1);
     });
     return this.wrap('[', ']', encoded, depth);
   }

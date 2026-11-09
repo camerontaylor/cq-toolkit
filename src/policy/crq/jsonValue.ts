@@ -16,7 +16,7 @@
  * {@link toPlainJson} materialises ordinary JavaScript values for zod.
  *
  * This is deliberately a JSON parser, not a JSON5/YAML reader: only the
- * RFC 8259 grammar is accepted, matching Python's `json.loads`. Duplicate keys
+ * RFC 8259 grammar is accepted; Python's non-finite constants are deliberately refused. Duplicate keys
  * are the caller's choice because Python's default `json.loads` keeps the last
  * value (and the first key position), while `review_ledger.loads` refuses them.
  */
@@ -59,8 +59,8 @@ export class JsonNumber {
   }
 
   /** Construct a Python `float`, including infinities and NaN. */
-  static float(value: number): JsonNumber {
-    return new JsonNumber('float', pythonNumberText(value), null, value);
+  static float(value: number, raw = pythonNumberText(value)): JsonNumber {
+    return new JsonNumber('float', raw, null, value);
   }
 }
 
@@ -311,7 +311,7 @@ class Parser {
       while (isDigit(this.text[this.index])) this.index += 1;
     }
     const raw = this.text.slice(start, this.index);
-    return fractional || exponent ? JsonNumber.float(Number(raw)) : JsonNumber.int(raw);
+    return fractional || exponent ? JsonNumber.float(Number(raw), raw) : JsonNumber.int(raw);
   }
 
   private parseKeyword<T extends boolean | null>(word: string, value: T): T {

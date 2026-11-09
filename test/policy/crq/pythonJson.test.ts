@@ -232,3 +232,15 @@ test('the phase 0.3 queue-bytes oracle is readable without JSON.parse', () => {
   const family = parseJsonValue(raw) as JsonObject;
   expect(family.get('family') as string).toBe('queue-bytes');
 });
+
+test('rejects sparse arrays in every encoder and preserves float lexemes', () => {
+  for (const encode of [receiptJsonText, ledgerJsonText, atomicJsonText]) {
+    expect(() => encode(new Array(1))).toThrow('sparse arrays');
+    const sparse = [1, 2, 3];
+    delete sparse[1];
+    expect(() => encode(sparse)).toThrow('sparse arrays');
+  }
+  for (const raw of ['1.2300e+02', '-0.00', '1E-3']) {
+    expect((parseJsonValue(raw) as JsonNumber).raw).toBe(raw);
+  }
+});

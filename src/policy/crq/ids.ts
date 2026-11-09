@@ -26,7 +26,7 @@ import { compactUtc, utcFromMillis, UtcInstant } from './utc.js';
 export const CrqSha40 = z.string().regex(/^[0-9a-f]{40}$/);
 export const CrqDigest64 = z.string().regex(/^[0-9a-f]{64}$/);
 export const CrqRequestId = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$/);
-export const CrqRepository = z.string().regex(/^[\w.-]+\/[\w.-]+$/);
+export const CrqRepository = z.string().regex(/^[\p{L}\p{N}_.-]+\/[\p{L}\p{N}_.-]+$/u);
 export const CrqTargetSelector = z.enum(['promoted-main', 'merge-queue']);
 
 export type CrqTargetSelector = z.infer<typeof CrqTargetSelector>;

@@ -1,3 +1,4 @@
+import { pythonSchemaAccepts } from '../../../src/policy/crq/pythonSchema.js';
 import { readFileSync, readdirSync } from 'node:fs';
 import { describe, expect, test } from 'vitest';
 import {
@@ -229,3 +230,11 @@ function assertRejected(result: CrqStateResult): string {
   expect(result.ok).toBe(false);
   return result.ok ? '' : result.issues.join('\n');
 }
+
+test('schema additionalProperties applies to inherited object names', () => {
+  const rule = { type: 'object', properties: {}, additionalProperties: { type: 'string' } };
+  for (const key of ['constructor', 'toString', '__proto__']) {
+    expect(pythonSchemaAccepts(rule, parseJsonValue(`{"${key}":1}`)).accepted).toBe(false);
+    expect(pythonSchemaAccepts(rule, parseJsonValue(`{"${key}":"ok"}`)).accepted).toBe(true);
+  }
+});

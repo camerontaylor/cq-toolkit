@@ -130,3 +130,8 @@ describe('D2 — no-fresh is intentionally NOT Python-parity', () => {
     // reason, so that vector family is deliberately not replayed in phase 1.1.
   });
 });
+
+test('repository grammar accepts Python Unicode word characters', () => {
+  expect(CrqRepository.safeParse('é/仓库').success).toBe(true);
+  expect(CrqRepository.safeParse('é/a b').success).toBe(false);
+});

@@ -123,7 +123,9 @@ export function utcFromMillis(milliseconds: number): UtcInstant {
 function parseIsoLike(text: string): bigint | null {
   const separator = findDateTimeSeparator(text);
   const dateText = separator === -1 ? text : text.slice(0, separator);
-  const timeText = separator === -1 ? '' : text.slice(separator + 1);
+  const timeText =
+    separator === -1 ? '' : text.slice(separator + (text.codePointAt(separator)! > 0xffff ? 2 : 1));
+  if (separator !== -1 && timeText.length === 0) return null;
   const date = parseDate(dateText);
   if (date === null) return null;
   const time = parseTime(timeText);
@@ -138,9 +140,11 @@ function parseIsoLike(text: string): bigint | null {
 }
 
 function findDateTimeSeparator(text: string): number {
-  for (let index = 0; index < text.length; index += 1) {
-    const character = text[index];
-    if (character === 'T' || character === 't' || character === ' ') return index;
+  if (parseDate(text) !== null) return -1;
+  // A date can have several valid prefix lengths (especially week dates).
+  // Prefer the longest valid form, then consume one Unicode separator.
+  for (let index = text.length - 1; index > 0; index -= 1) {
+    if (parseDate(text.slice(0, index)) !== null) return index;
   }
   return -1;
 }

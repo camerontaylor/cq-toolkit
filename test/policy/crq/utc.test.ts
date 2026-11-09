@@ -115,3 +115,11 @@ describe('formatting and ids', () => {
     expect(instant.toDate().toISOString()).toBe('2026-11-08T00:00:00.123Z');
   });
 });
+
+test('accepts arbitrary single separators but refuses a missing time', () => {
+  for (const value of ['2026-11-08X12:34:56', '20261108X123456', '2026-W45-7X12:34:56']) {
+    expect(parseUtc(value)?.iso).toBe('2026-11-08T12:34:56.000000Z');
+  }
+  expect(parseUtc('2026-11-08T')).toBeNull();
+  expect(parseUtc('2026-11-08')?.iso).toBe('2026-11-08T00:00:00.000000Z');
+});

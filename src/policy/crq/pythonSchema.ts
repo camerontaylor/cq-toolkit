@@ -99,7 +99,7 @@ function firstFailure(rule: JsonSchema, value: JsonValue, path: string): string 
         ? (rule['properties'] as Record<string, JsonSchema>)
         : {};
     for (const [key, child] of value.entries) {
-      const childRule = properties[key];
+      const childRule = Object.hasOwn(properties, key) ? properties[key] : undefined;
       if (childRule !== undefined) {
         const failure = firstFailure(childRule, child, `${path}.${key}`);
         if (failure !== null) return failure;
