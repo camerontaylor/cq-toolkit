@@ -311,6 +311,7 @@ def process(config, job, wt):
                 atomic(progress_path, result)
                 report = dispatch(config, role, current, wt, attempt_dir)
                 result.pop('dispatch_pending', None)
+                result.pop('unchanged_evidence', None)
                 if report.get('stop') == 'rate-limit':
                     retain(wt, base, attempt_dir)
                     result['next_rung'] = rung
@@ -351,8 +352,7 @@ def process(config, job, wt):
                         if line > len(source):
                             raise ValueError('unchanged evidence line absent')
                         verified.append({'path': path, 'line': line, 'quoted_text': source[line - 1], 'target': base})
-                    result.update(verdict='NOT-FIXED', reason=reason, unchanged_evidence=verified)
-                    break
+                    result['unchanged_evidence'] = verified
 
             judge_required = bool(result.get('pending_judge')) or job['finding']['severity'] == 'critical' or job.get('recurrence') or random.random() < repair.get('judge_sample_rate', 0)
             if judge_required and result['judge'] is None:

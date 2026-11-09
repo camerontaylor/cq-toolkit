@@ -608,6 +608,21 @@ class RepairDrainTest(unittest.TestCase):
         self.assertEqual(result['unchanged_evidence'][0]['quoted_text'], '  one')
         dispatch.assert_called_once()
 
+    def test_unchanged_critical_keeps_required_judge_and_unresolved_defect(self):
+        job_id = 'crq-run1-F1'
+        self.job(job_id, 'pr1-merged', 'run1', 'src/kept.ts', severity='critical')
+        job = bounded.drain_job(self.root, self.config, self.queue, job_id)[1]
+        wt = self.worktree('crq-repair-pr1-merged-' + job_id)
+        report = {'stop': 'ok', 'changed': False, 'disposition': 'unchanged_with_reason',
+                  'summary': 'No defect', 'evidence': [{'path': 'src/kept.ts', 'line': 1}]}
+        with mock.patch.object(service, 'blocked', return_value=False), \
+             mock.patch.object(service, 'dispatch', side_effect=[report,
+                 {'stop': 'ok', 'verdict': 'valid', 'reason': 'still a defect'}, report]) as dispatch:
+            result = service.process(self.config, job, wt)
+        self.assertEqual(result['verdict'], 'FAILED')
+        self.assertEqual(dispatch.call_count, 3)
+        self.assertTrue(dispatch.call_args_list[1].kwargs['judge'])
+
     def test_unchanged_evidence_projects_to_dismissed(self):
         c = SimpleNamespace(iso=lambda: 'now')
         evidence = [{'path': 'src/kept.ts', 'line': 1, 'target': self.pin, 'quoted_text': 'one'}]
