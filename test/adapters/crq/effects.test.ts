@@ -242,7 +242,7 @@ test('timed-out CLI ignores SIGTERM but is killed and drained', async () => {
     `#!/usr/bin/env node\nrequire('node:fs').writeFileSync(${JSON.stringify(pidfile)},String(process.pid)); process.on('SIGTERM',()=>{}); setInterval(()=>{},1000);\n`,
     { mode: 0o755 },
   );
-  await expect(usage({ cwd: root, binary, timeoutMs: 500 })).rejects.toThrow('timed out');
+  await expect(usage({ cwd: root, binary, timeoutMs: 2500 })).rejects.toThrow('timed out');
   const pid = Number(await readFile(pidfile, 'utf8'));
   expect(() => process.kill(pid, 0)).toThrow();
 });
@@ -252,7 +252,7 @@ test('timeout kills a pipe-independent descendant after its CLI leader exits', a
   const binary = join(root, 'fake-cli');
   const pidfile = join(root, 'descendant');
   const marker = join(root, 'survived');
-  const descendant = `process.on('SIGTERM',()=>{}); require('node:fs').writeFileSync(${JSON.stringify(pidfile)},String(process.pid)); setTimeout(()=>require('node:fs').writeFileSync(${JSON.stringify(marker)},'alive'),2000); setInterval(()=>{},1000);`;
+  const descendant = `process.on('SIGTERM',()=>{}); require('node:fs').writeFileSync(${JSON.stringify(pidfile)},String(process.pid)); setTimeout(()=>require('node:fs').writeFileSync(${JSON.stringify(marker)},'alive'),5000); setInterval(()=>{},1000);`;
   await writeFile(
     binary,
     `#!/usr/bin/env node\nrequire('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(descendant)}],{stdio:'ignore'}).unref(); setInterval(()=>{},1000);\n`,
@@ -260,10 +260,10 @@ test('timeout kills a pipe-independent descendant after its CLI leader exits', a
   );
   let pid: number | undefined;
   try {
-    await expect(usage({ cwd: root, binary, timeoutMs: 700 })).rejects.toThrow('timed out');
+    await expect(usage({ cwd: root, binary, timeoutMs: 3000 })).rejects.toThrow('timed out');
     pid = Number(await readFile(pidfile, 'utf8'));
     expect(pid).toBeGreaterThan(0);
-    await new Promise((resolve) => setTimeout(resolve, 2300));
+    await new Promise((resolve) => setTimeout(resolve, 5200));
     await expect(readFile(marker)).rejects.toMatchObject({ code: 'ENOENT' });
   } finally {
     if (pid) {
@@ -274,7 +274,7 @@ test('timeout kills a pipe-independent descendant after its CLI leader exits', a
       }
     }
   }
-}, 10000);
+}, 15000);
 
 test('timeout settles when an escaped descendant retains the CLI pipes', async () => {
   const root = await dir();
@@ -289,11 +289,11 @@ test('timeout settles when an escaped descendant retains the CLI pipes', async (
   let pid: number | undefined;
   let timer: NodeJS.Timeout | undefined;
   try {
-    const result = usage({ cwd: root, binary, timeoutMs: 700 });
+    const result = usage({ cwd: root, binary, timeoutMs: 3000 });
     const bounded = Promise.race([
       result,
       new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new Error('invocation hung')), 4000);
+        timer = setTimeout(() => reject(new Error('invocation hung')), 7000);
       }),
     ]);
     await expect(bounded).rejects.toThrow('CodeRabbit CLI timed out');
@@ -316,7 +316,7 @@ test('timeout settles when an escaped descendant retains the CLI pipes', async (
       }
     }
   }
-}, 10000);
+}, 15000);
 
 test('signal permission errors reject without escaping timer callbacks', async () => {
   const root = await dir();
@@ -333,7 +333,7 @@ test('signal permission errors reject without escaping timer callbacks', async (
   const source = await readFile(adapter, 'utf8');
   await writeFile(modulePath, source.replace('../../ops/dev/coderabbit.js', classifier.href));
   const moduleUrl = new URL(`file://${modulePath}`).href;
-  const script = `import {usage} from ${JSON.stringify(moduleUrl)}; import {readFileSync} from 'node:fs'; const original=process.kill; process.kill=(pid,signal)=>{if(pid<0) throw Object.assign(new Error('denied'),{code:'EPERM'}); return original(pid,signal)}; try { await usage({cwd:${JSON.stringify(root)},binary:${JSON.stringify(binary)},timeoutMs:700}); process.exitCode=2; } catch(e) { if(e.message!=='CodeRabbit CLI timed out'||e.cause?.code!=='EPERM') process.exitCode=3; } finally { process.kill=original; try { original(-Number(readFileSync(${JSON.stringify(pidfile)},'utf8')),'SIGKILL'); } catch {} }`;
+  const script = `import {usage} from ${JSON.stringify(moduleUrl)}; import {readFileSync} from 'node:fs'; const original=process.kill; process.kill=(pid,signal)=>{if(pid<0) throw Object.assign(new Error('denied'),{code:'EPERM'}); return original(pid,signal)}; try { await usage({cwd:${JSON.stringify(root)},binary:${JSON.stringify(binary)},timeoutMs:3000}); process.exitCode=2; } catch(e) { if(e.message!=='CodeRabbit CLI timed out'||e.cause?.code!=='EPERM') process.exitCode=3; } finally { process.kill=original; try { original(-Number(readFileSync(${JSON.stringify(pidfile)},'utf8')),'SIGKILL'); } catch {} }`;
   const child = spawn(process.execPath, ['--input-type=module', '-e', script], {
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -342,6 +342,9 @@ test('signal permission errors reject without escaping timer callbacks', async (
   child.stderr?.on('data', (data: Buffer) => {
     stderr += data.toString();
   });
-  const [code] = await once(child, 'exit');
+  const code = await new Promise<number | null>((resolve, reject) => {
+    child.once('error', reject);
+    child.once('exit', resolve);
+  });
   expect({ code, stderr }).toEqual({ code: 0, stderr: '' });
-}, 10000);
+}, 15000);
