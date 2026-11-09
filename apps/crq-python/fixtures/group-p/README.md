@@ -61,6 +61,10 @@ byte equality.
   `input.raw`, JSON text that is parsed first. The value records the exact file
   text and its SHA-256. This is the queue.json writer contract: insertion order
   preserved, `indent=2`, `ensure_ascii=True`, one trailing newline.
+- `backfill_inventory.rank` rows carry a manifest plus the exact captured
+  `inputs`. Snapshot `sha256` values are recomputed from those inputs, and the
+  artifact refs are placeholders because `rank` consumes JSON only and never
+  opens a bundle or artifact location. Capture and replay remain Group E.
 
 ## Families
 
