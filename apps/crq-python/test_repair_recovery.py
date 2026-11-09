@@ -1,5 +1,6 @@
 """Offline recovery tests using real Git worktrees and fake judge/transport."""
 import json
+import shutil
 from pathlib import Path
 import subprocess
 import tempfile
@@ -96,6 +97,24 @@ class RecoveryTest(unittest.TestCase):
         attempts = self.scan.call_args.args[0]['retained_attempts']
         self.assertEqual(len(attempts), 1)
         self.assertIn('+unfinished', attempts[0]['patches'][0])
+
+    def test_identical_archives_are_verified_and_counted_once(self):
+        from crq_repair.retain import retain
+        (self.wt / 'a.py').write_text('x' * 55000 + '\n')
+        self.run_git(self.wt, 'add', 'a.py')
+        archive = retain(self.wt, self.base, self.root / 'state/repair/crq-job/A0')
+        other = self.root / 'state/repair/crq-job/A1' / archive.name
+        other.parent.mkdir()
+        shutil.copytree(archive, other)
+        self.run_git(self.wt, 'reset', '--hard', self.base)
+        self.run_git(self.wt, 'clean', '-fd')
+        self.run_recovery()
+        attempts = self.scan.call_args.args[0]['retained_attempts']
+        self.assertEqual(len(attempts), 1)
+        self.assertEqual(len(attempts[0]['duplicate_locations']), 1)
+        (other / 'staged.patch').write_text('tampered')
+        with self.assertRaisesRegex(ValueError, 'digest mismatch'):
+            self.run_recovery()
 
     def test_scan_rejection_never_calls_judge(self):
         self.scan.return_value = False

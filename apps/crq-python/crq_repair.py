@@ -255,7 +255,13 @@ def process(config, job, wt):
         if result.get('dispatch_pending'):
             saved_wt = Path(result.get('worktree', '')).resolve()
             if saved_wt == Path(wt).resolve():
-                retain(saved_wt, job['repair_base'], directory / 'interrupted')
+                try:
+                    retain(saved_wt, job['repair_base'], directory / 'interrupted')
+                except Exception as exc:
+                    result.update(verdict='FAILED', reason='interrupted worktree retention failed: ' + str(exc)[:600], finished_at=utc())
+                    result.pop('dispatch_pending', None)
+                    atomic(result_path, result)
+                    return result
             result.update(verdict='FAILED', reason='worker interrupted with unknown outcome; needs human', finished_at=utc())
             result.pop('dispatch_pending', None)
             atomic(result_path, result)

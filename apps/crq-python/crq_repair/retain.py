@@ -11,6 +11,42 @@ import tempfile
 from crq_repair import atomic, command, git
 
 
+def cleanup_harvested(clone, wt_root, directory, item, job_id, result, *, alternate=False):
+    """Remove only a clean, job-owned tree whose current commit is archived."""
+    if result.get('verdict') not in ('FIXED', 'NOT-FIXED'):
+        return False  # Failed results still need their original tree for recovery.
+    root = Path(wt_root).resolve()
+    raw = Path(result.get('worktree', ''))
+    if raw.is_symlink():
+        return False
+    wt = raw.resolve()
+    name = 'crq-repair-' + item + '-' + job_id
+    if wt.parent != root or wt.name not in (name, name + '-A2'):
+        return False
+    if alternate:
+        wt = root / (name if wt.name.endswith('-A2') else name + '-A2')
+    if wt.is_symlink() or not wt.is_dir():
+        return False
+    status = command(['git', 'status', '--porcelain', '--untracked-files=all', '--ignored'], cwd=wt)
+    if status.returncode or status.stdout:
+        return False
+    head = git(wt, 'rev-parse', 'HEAD')
+    for path in Path(directory).glob('**/retained-*/manifest.json'):
+        try:
+            manifest = json.loads(path.read_text())
+            token = hashlib.sha256(json.dumps(manifest, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+            if path.parent.name != 'retained-' + token or manifest['head'] != head or manifest['base'] != result['repair_base']:
+                continue
+            for name in ('staged.patch', 'unstaged.patch', 'committed.patch', 'untracked.tar', 'commits.bundle'):
+                with (path.parent / name).open('rb') as stream:
+                    if hashlib.file_digest(stream, 'sha256').hexdigest() != manifest['sha256'][name]:
+                        raise ValueError('archive digest mismatch')
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+        return command(['git', 'worktree', 'remove', str(wt)], cwd=clone).returncode == 0
+    return False
+
+
 def retain(wt, base, directory):
     """Capture staged, unstaged, untracked and committed work without changing it.
 
