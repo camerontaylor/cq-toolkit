@@ -7,9 +7,58 @@ import { rm } from 'node:fs/promises';
 import { describe, expect, test } from 'vitest';
 import { DEFAULT_TEST_FILE_PATTERNS } from '../../../src/ops/gates/hackDetector.js';
 import { unitStagePathAllowlist } from '../../../src/plans/sweep.js';
+import { stagedPathsOf } from '../../../src/ops/sweep/stagePaths.js';
 import { UNIT, makeWorld, runUnit } from './unit-scenarios.helpers.js';
 
 describe('sweep unit in-process scenarios', () => {
+  test('name-status parsing preserves both rename/copy paths and unusual filenames', () => {
+    expect(stagedPathsOf('')).toEqual([]);
+    expect(
+      stagedPathsOf(
+        'M\0src/with\nnewline.ts\0R100\0src/old.ts\0src/new.ts\0C75\0src/a.ts\0src/b.ts\0',
+      ),
+    ).toEqual(['src/with\nnewline.ts', 'src/old.ts', 'src/new.ts', 'src/a.ts', 'src/b.ts']);
+  });
+
+  test.each([
+    'M',
+    'R100\0src/old.ts\0',
+    'C75\0src/old.ts',
+    'M\0\0M\0src/a.ts\0',
+    'unexpected\0src/a.ts\0',
+  ])('malformed name-status evidence fails closed: %j', async (capture) => {
+    expect(() => stagedPathsOf(capture)).toThrow(/malformed name-status capture/);
+    const world = await makeWorld([{ failing: true }, { failing: false }]);
+    try {
+      world.staged.nameStatus = capture;
+      const result = await runUnit(world, { stagePathAllowlist: { patterns: ['^src/'] } });
+      expect(result.status).toBe('failed');
+      expect(world.gitCalls.some((args) => args.includes('commit'))).toBe(false);
+      expect(world.pushCalls).toEqual([]);
+      expect(world.checks).toHaveLength(1);
+    } finally {
+      await rm(world.root, { recursive: true, force: true });
+    }
+  });
+
+  test('malformed committed-path evidence refuses the push with a typed failure', async () => {
+    const world = await makeWorld([{ failing: true }, { failing: false }]);
+    const underlying = world.gitFactory();
+    try {
+      const result = await runUnit(world, {
+        git: async (args) =>
+          args.includes('--name-status') && args.includes('HEAD^')
+            ? { code: 0, stdout: 'R100\0src/old.ts\0', stderr: '' }
+            : underlying(args),
+      });
+      expect(result.status).toBe('failed');
+      if (result.status === 'failed') expect(result.error).toMatch(/malformed name-status capture/);
+      expect(world.pushCalls).toEqual([]);
+    } finally {
+      await rm(world.root, { recursive: true, force: true });
+    }
+  });
+
   test('ordinary stage-path allowlist rejection names the exact offending path', async () => {
     const world = await makeWorld([{ failing: true }, { failing: false }]);
     try {

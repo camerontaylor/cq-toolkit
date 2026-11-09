@@ -320,9 +320,13 @@ export class SessionStore {
    * future load — the same brick this recovery exists to prevent).
    */
   private async recoverTornTail(sessionId: string): Promise<void> {
-    let raw: string;
+    // BYTES, not a UTF-16 string: `truncate` takes a BYTE length, and
+    // JSON.stringify leaves non-ASCII unescaped, so any complete line with a
+    // multibyte character makes a character offset smaller than the byte
+    // offset it must be applied to — truncating inside a complete record.
+    let raw: Buffer;
     try {
-      raw = await readFile(this.pathFor(sessionId), 'utf8');
+      raw = await readFile(this.pathFor(sessionId));
     } catch (err) {
       if (isEnoent(err)) {
         throw new Error(
@@ -332,10 +336,10 @@ export class SessionStore {
       }
       throw err;
     }
-    if (raw.endsWith('\n')) {
+    if (raw.length > 0 && raw[raw.length - 1] === 0x0a) {
       return; // complete write = clean tail, nothing torn
     }
-    const lastComplete = raw.lastIndexOf('\n');
+    const lastComplete = raw.lastIndexOf(0x0a);
     if (lastComplete === -1) {
       // No complete line: an all-fragment file OR an EMPTY one — either way
       // create() crashed before the header landed and the session was never

@@ -13,6 +13,9 @@ from unittest import mock
 import crq_repair
 from crq_repair.drivers import cq
 
+SNAPSHOT = {'source_sha': 'a' * 40, 'source_blob_sha': 'b' * 40, 'finding_sha256': 'c' * 64,
+            'path': 'src/a.ts', 'line_start': 1, 'line_end': 1, 'source': '1: x', 'incomplete': False}
+
 ROOT = Path(__file__).resolve().parent
 spec = importlib.util.spec_from_file_location('repair_mechanical_under_test', ROOT / 'crq_repair.py')
 service = importlib.util.module_from_spec(spec)
@@ -105,11 +108,56 @@ class CqDriverTest(unittest.TestCase):
                              'max_context_tokens': 2000}}}
         self.directory = Path(tmp.name)
         job = {'job': 'crq-run1-F1', 'pr': pr, 'finding': {'path': 'src/a.ts', 'line': 1, 'body': 'x'},
-               'source_snapshot': {}}
+               'source_snapshot': SNAPSHOT}
         with mock.patch.object(cq, 'command', return_value=SimpleNamespace(
                 returncode=returncode, stdout=stdout, stderr='')) as command:
             report = cq.invoke(config, {'model': 'zai/glm-5.3-flash'}, job, Path(tmp.name), self.directory)
         return report, command.call_args.args[0]
+
+    def test_invalid_fixer_output_returns_structured_error(self):
+        invalid_results = [json.dumps({'status': 'ok', key: value})
+                           for key in ('value', 'result')
+                           for value in ([], 0, '', False)]
+        for stdout in (*invalid_results, 'not json', '', 'null', '[]', '[1]', '"text"', '42', 'true',
+                       '{"status":"ok","value":[1]}',
+                       '{"status":"ok","result":"text"}'):
+            with self.subTest(stdout=stdout):
+                report, _ = self.invoke(stdout, returncode=0)
+                self.assertEqual(report, {'stop': 'error', 'changed': False,
+                                         'summary': 'invalid cq output', 'commits': []})
+                self.assertIn(stdout, (self.directory / 'driver.log').read_text())
+
+    def test_missing_or_null_fixer_result_defaults_to_object(self):
+        for data in ({'status': 'ok'}, {'status': 'ok', 'value': None},
+                     {'status': 'ok', 'result': None}, {'status': 'ok', 'value': {}},
+                     {'status': 'ok', 'value': None, 'result': {'changed': False}}):
+            with self.subTest(data=data):
+                report, _ = self.invoke(json.dumps(data), returncode=0)
+                self.assertEqual(report['stop'], 'ok')
+
+    def test_judge_output_failures_return_unsure(self):
+        config = {'repair': {'cq_bin': '/unused/cli.js',
+                             'budget': {'wall_clock_min': 1}}}
+        valid = {'verdict': 'valid', 'reason': 'source confirms finding'}
+        cases = [(text, 0) for text in ('not json', '', 'null', '[]', '[1]',
+                                      '"text"', '42', 'true')]
+        cases += [(json.dumps(valid), 1), (json.dumps(valid), 0)]
+        for stdout, returncode in cases:
+            with self.subTest(stdout=stdout, returncode=returncode):
+                with tempfile.TemporaryDirectory() as tmp:
+                    with mock.patch.object(cq, 'command', return_value=SimpleNamespace(
+                            returncode=returncode, stdout=stdout, stderr='judge stderr')):
+                        report = cq.judge(config, {'model': 'example/model'}, {},
+                                          Path(tmp), Path(tmp))
+                    if returncode == 0 and stdout == json.dumps(valid):
+                        self.assertEqual(report, valid)
+                    else:
+                        self.assertEqual(report['stop'], 'error')
+                        self.assertEqual(report['verdict'], 'unsure')
+                        self.assertTrue(report['reason'])
+                    log = (Path(tmp) / 'driver.log').read_text()
+                    self.assertIn(stdout, log)
+                    self.assertIn('judge stderr', log)
 
     def test_quota_exhaustion_pauses_like_a_rate_limit(self):
         # 24 runner-host jobs burned A0..A2 in seconds on Z.ai's weekly limit.
@@ -123,6 +171,15 @@ class CqDriverTest(unittest.TestCase):
         self.assertEqual(report['stop'], 'error')
         report, _ = self.invoke(json.dumps({'status': 'budget-exhausted'}))
         self.assertEqual(report['stop'], 'budget')
+
+    def test_failed_value_verdict_is_not_a_successful_repair(self):
+        for verdict in ('fail', 'failed', 'regression'):
+            with self.subTest(verdict=verdict):
+                report, _ = self.invoke(json.dumps({'status': 'ok', 'value': {
+                    'verdict': verdict, 'changed': True, 'commits': ['abc'], 'summary': 'failed checks'}}),
+                    returncode=0)
+                self.assertEqual((report['stop'], report['changed'], report['commits']), ('error', False, []))
+                self.assertEqual(report['summary'], 'failed checks')
 
     def test_budget_counts_output_and_caps_context(self):
         _, argv = self.invoke('{"status":"ok","value":{"changed":false}}', returncode=0)
@@ -148,7 +205,7 @@ class CqDriverTest(unittest.TestCase):
         config = {'repo': 'example/repo', 'repair': {'cq_bin': '/unused/cli.js', 'budget': {
             'wall_clock_min': 1, 'max_output_tokens': 500, 'max_context_tokens': 2000}}}
         job = {'job': 'crq-run1-F1', 'finding': {'path': 'src/a.ts', 'line': 1, 'body': 'x'},
-               'source_snapshot': {}}
+               'source_snapshot': SNAPSHOT}
         with mock.patch.object(cq, 'command', side_effect=fake):
             return cq.invoke(config, {'model': 'zai/glm-5.3-flash'}, job, Path(tmp.name), Path(tmp.name))
 
@@ -173,10 +230,11 @@ class CqDriverTest(unittest.TestCase):
                 _, argv = self.invoke('{"status":"ok","value":{"changed":false}}', returncode=0, pr=pr)
                 self.assertEqual(next((a for a in argv if a.startswith('--pr=')), None), expected)
 
-    def test_fixer_is_told_its_shell_allowlist(self):
+    def test_fixer_passes_allowlist_as_harness_not_untrusted_review_instructions(self):
         _, argv = self.invoke('{"status":"ok","value":{"changed":false}}', returncode=0)
         body = json.loads(next(a for a in argv if a.startswith('--item='))[len('--item='):])['body']
-        self.assertIn('git grep -n', body)
+        self.assertNotIn('git grep -n', body)
+        self.assertNotIn('Shell: the bash tool', body)
         harness = json.loads(next(a for a in argv if a.startswith('--harness='))[len('--harness='):])
         self.assertEqual(harness['tools']['run']['commandPatterns'][-len(cq.SEARCH_PATTERNS):],
                          cq.SEARCH_PATTERNS)

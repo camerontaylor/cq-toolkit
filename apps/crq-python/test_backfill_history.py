@@ -1,4 +1,4 @@
-"""Four historical source classes are accounted, without inferred path credit."""
+"""Three current source classes are collected; retired catalog rows still import."""
 import copy
 import json
 from pathlib import Path
@@ -124,10 +124,10 @@ class HistoryTest(unittest.TestCase):
             for ref in result["payload"]["artifacts"]:
                 self.f.store.verify(ref)
 
-    def test_all_four_classes_report_gaps_and_github_requires_exact_authenticated_scope(self):
+    def test_all_three_classes_report_gaps_and_github_requires_exact_authenticated_scope(self):
         catalog = [{"class": kind, "id": str(i), "raw": b"{}", "envelope": {}} for i, kind in enumerate(history.CLASSES)]
         events, report = history.import_catalog(self.f.repo, self.f.store, catalog, AT, [])
-        self.assertEqual(set(report), set(history.CLASSES)); self.assertEqual(len(events), 4)
+        self.assertEqual(set(report), set(history.CLASSES)); self.assertEqual(len(events), 3)
         self.assertTrue(all(r["sources"] == 1 for r in report.values()))
         envelope = self.envelope(); envelope["producer"] = "coderabbitai[bot]"
         raw = ledger.canonical({"id": 123, "commit_id": self.value["payload"]["head"], "user": {"login": "coderabbitai[bot]", "type": "Bot"}})
@@ -136,6 +136,36 @@ class HistoryTest(unittest.TestCase):
         envelope["scope_artifact"] = self.f.store.put(self.stream())
         credited, result = history.import_source(self.f.repo, self.f.store, "github-app-review", "123", raw, envelope, AT, [])
         self.assertEqual(result["payload"]["result"], "credited")
+
+    def test_retired_promotion_catalog_rows_import_unverified_and_repeat_is_idempotent(self):
+        catalog = [{"class": "promotion-range", "id": "audit:abc", "raw": b"{}",
+                    "envelope": {"authenticated": True, "repo": ledger.REPO,
+                                 "producer": "crq-runner-app"}}]
+        generated, report = history.import_catalog(self.f.repo, self.f.store, catalog, AT, [])
+        self.assertEqual(len(generated), 1)
+        disposition = generated[0]
+        self.assertEqual(disposition["payload"]["result"], "unverified")
+        self.assertIn("retired promotion source", disposition["payload"]["reason"])
+        self.assertFalse(ledger.creditable(disposition))
+        for ref in disposition["payload"]["artifacts"]:
+            self.f.store.verify(ref)
+        self.assertEqual(report["promotion-range"],
+                         {"sources": 1, "results": {"unverified": 1}})
+        repeated, _ = history.import_catalog(self.f.repo, self.f.store, catalog, AT, generated)
+        self.assertEqual(repeated, [])
+
+    def test_mixed_catalog_imports_current_rows_alongside_retired_rows(self):
+        catalog = [
+            {"class": history.CLASSES[0], "id": "vendor-1", "raw": self.stream(),
+             "envelope": self.envelope()},
+            {"class": "promotion-range", "id": "audit:abc", "raw": b"{}",
+             "envelope": {"authenticated": True}},
+        ]
+        generated, report = history.import_catalog(self.f.repo, self.f.store, catalog, AT, [])
+        self.assertEqual(report[history.CLASSES[0]]["results"], {"credited": 1})
+        self.assertEqual(report["promotion-range"]["results"], {"unverified": 1})
+        self.assertTrue(any(value["event_type"] == "review" for value in generated))
+        ledger.validate_sequence(generated)
 
     def test_collectors_retain_all_classes_and_paginated_api_bytes_without_credit(self):
         state = Path(self.tmp.name) / "state"
@@ -153,6 +183,7 @@ class HistoryTest(unittest.TestCase):
         self.assertEqual(fetch.call_count, 2)
         self.assertTrue(all("--paginate" in call.args[0] and "--slurp" in call.args[0] for call in fetch.call_args_list))
         self.assertEqual({s["class"] for s in result["sources"]}, set(history.CLASSES))
+        self.assertNotIn("promotion-range", {s["class"] for s in result["sources"]})
         catalog = []
         for source in result["sources"]:
             self.f.store.verify(source["raw_artifact"])

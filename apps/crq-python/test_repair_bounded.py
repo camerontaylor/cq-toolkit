@@ -43,7 +43,7 @@ class BoundedRepairTest(unittest.TestCase):
                                      SOURCE if args == ('rev-parse', 'origin/main') else BLOB).start()
         self.addCleanup(mock.patch.stopall)
         self.c = SimpleNamespace(ROOT=self.root, STATE=self.root / 'state', CONFIG=self.config,
-                                 CLONE=Path('/unused'), run=mock.Mock(return_value=SimpleNamespace(stdout='\nfirst\nsecond\n')),
+                                 CLONE=Path('/unused'), iso=lambda: 'now', run=mock.Mock(return_value=SimpleNamespace(stdout='\nfirst\nsecond\n')),
                                  secret_scan_diff=mock.Mock(return_value=(True, {})),
                                  save_queue=lambda q: atomic(self.root / 'state/queue.json', q))
 
@@ -57,6 +57,7 @@ class BoundedRepairTest(unittest.TestCase):
         job_id, job = self.prepare()
         self.assertNotEqual(job_id, OLD)
         self.assertEqual(job['origin_job'], OLD)
+        self.assertEqual(job['source']['run'], 'old-run')
         self.assertEqual(job['source_sha'], SOURCE)
         self.assertEqual(job['repair_base'], SOURCE)
         self.assertIsNone(job['cycle'])
@@ -67,11 +68,70 @@ class BoundedRepairTest(unittest.TestCase):
         self.assertEqual(self.prepare()[0], job_id)
         self.assertEqual(self.c.secret_scan_diff.call_count, 1)
 
+    def test_recovery_preparation_is_idempotent_and_marks_isolated_worktree(self):
+        job_id = repair_tick.prepare_current_job(self.c, self.queue, OLD, SOURCE, self.evidence,
+                                                preserve_worktree=True)
+        job = json.loads(bounded.job_path(self.root, job_id).read_text())
+        self.assertTrue(job['recovery_worktree'])
+        self.assertEqual(repair_tick.prepare_current_job(self.c, self.queue, OLD, SOURCE, self.evidence,
+                                                         preserve_worktree=True), job_id)
+        self.assertEqual(self.c.secret_scan_diff.call_count, 1)
+
+    def test_recovery_does_not_stale_a_run_with_sibling_jobs(self):
+        original = self.queue['items'][0]['repair_runs']['old-run']
+        original['jobs'].append('crq-historical-F2')
+        repair_tick.prepare_current_job(self.c, self.queue, OLD, SOURCE, self.evidence,
+                                        preserve_worktree=True)
+        self.assertEqual(original['state'], 'queued')
+        self.assertIn('crq-historical-F2', original['jobs'])
+
+    def test_recovery_worktree_reaches_harvest_verification(self):
+        job_id = repair_tick.prepare_current_job(self.c, self.queue, OLD, SOURCE, self.evidence,
+                                                preserve_worktree=True)
+        job = json.loads(bounded.job_path(self.root, job_id).read_text())
+        self.c.WT_ROOT = self.root / 'wt'
+        self.c.make_worktree = mock.Mock(return_value=(self.root / 'verify', 'branch'))
+        self.c.remove_worktree = mock.Mock()
+        atomic(self.root / 'state/repair' / job_id / 'result.json',
+               {'job': job_id, 'item': job['item'], 'verdict': 'FIXED', 'commits': ['a' * 40],
+                'attempts': [{'rung': 'A0'}], 'source_sha': SOURCE,
+                'finding_sha256': job['finding_sha256'], 'origin_job': OLD,
+                'worktree': str(self.c.WT_ROOT / ('crq-repair-pr1-merged-' + job_id)),
+                'repair_base': SOURCE})
+        with mock.patch.object(repair_tick, 'verify', side_effect=RuntimeError('verification reached')):
+            with self.assertRaisesRegex(RuntimeError, 'verification reached'):
+                repair_tick.harvest(self.c, self.queue, self.queue['items'][0])
+
+    def test_prepared_canonical_retry_transfers_durable_delivery_ownership(self):
+        self.old['canonical_finding_id'] = 'canonical'
+        atomic(bounded.job_path(self.root, OLD), self.old)
+        self.c.iso = lambda: 'now'
+        inbox = mock.Mock()
+        def handoff(fid, previous, job, at):
+            self.assertEqual((fid, previous, at), ('canonical', OLD, 'now'))
+            self.assertEqual(json.loads(bounded.job_path(self.root, job['job']).read_text()), job)
+        inbox.handoff.side_effect = handoff
+        with mock.patch.object(repair_tick, 'finding_inbox', return_value=inbox):
+            job_id, job = self.prepare()
+            self.assertEqual(self.prepare()[0], job_id)
+        self.assertEqual(inbox.handoff.call_count, 2)
+        self.assertEqual(self.queue['items'][0]['repair_runs']['old-run']['state'], 'stale')
+
     def test_preparation_scans_full_source_at_real_path(self):
         self.prepare()
         patch = self.c.secret_scan_diff.call_args.args[0]
         self.assertIn('+++ b/src/lock.ts', patch)
         self.assertIn('+first\n+second', patch)
+
+    def test_legacy_minor_is_not_prepared_or_drained(self):
+        self.old['finding']['severity'] = 'minor'
+        self.evidence['finding_sha256'] = bounded.identity(self.old['finding'])
+        atomic(bounded.job_path(self.root, OLD), self.old)
+        with self.assertRaisesRegex(ValueError, 'canonical minor'):
+            self.prepare()
+        status, _, reason = bounded.drain_job(self.root, self.config, self.queue, OLD)
+        self.assertEqual(status, 'skip')
+        self.assertIn('canonical minor', reason)
 
     def test_secret_scan_refusal_enrolls_nothing(self):
         self.c.secret_scan_diff.return_value = (False, {})
@@ -101,7 +161,8 @@ class BoundedRepairTest(unittest.TestCase):
         self.queue['items'].append({'id': 'backfill-finding-b', 'pr': 0, 'repair_runs': {
             'b1': {'pin': SOURCE}, 'b2': {'pin': SOURCE}}})
         atomic(bounded.job_path(self.root, OLD), self.old)
-        self.prepare()
+        with mock.patch.object(repair_tick, 'finding_inbox'):
+            self.prepare()
         new_evidence = {**self.evidence, 'reason': 'Independent revalidation of the same finding.'}
         with self.assertRaisesRegex(ValueError, 'ceiling'):
             repair_tick.prepare_current_job(self.c, self.queue, OLD, SOURCE, new_evidence)
@@ -121,6 +182,32 @@ class BoundedRepairTest(unittest.TestCase):
         self.assertEqual(unrelated.read_bytes(), before)
         with self.assertRaisesRegex(ValueError, 'historical jobs'):
             bounded.select_job(self.root, self.config, OLD, SOURCE, self.evidence['finding_sha256'])
+
+    def test_prepared_selector_requires_current_delivered_canonical_owner(self):
+        job_id, job = self.prepare()
+        fid = 'd' * 64
+        job['canonical_finding_id'] = fid
+        atomic(bounded.job_path(self.root, job_id), job)
+        row_path = self.root / 'state/backfill/findings/triage' / (fid + '.json')
+        row = {'status': 'delivered', 'receipt': {'repair_task': job_id}}
+        atomic(row_path, row)
+        self.assertEqual(bounded.select_job(self.root, self.config, job_id, SOURCE,
+                                           self.evidence['finding_sha256'])['job'], job_id)
+        for status in ('superseded', 'dismissed', 'confirmed', 'needs-human', 'fixed'):
+            with self.subTest(status=status):
+                atomic(row_path, {**row, 'status': status})
+                with self.assertRaisesRegex(ValueError, 'canonical'):
+                    bounded.select_job(self.root, self.config, job_id, SOURCE, self.evidence['finding_sha256'])
+        atomic(row_path, {**row, 'receipt': {'repair_task': 'newer-job'}})
+        with self.assertRaisesRegex(ValueError, 'canonical'):
+            bounded.select_job(self.root, self.config, job_id, SOURCE, self.evidence['finding_sha256'])
+        atomic(self.root / 'state/repair' / job_id / 'progress.json', {'attempts': ['historical']})
+        self.assertEqual(bounded.drain_job(self.root, self.config, self.queue, job_id)[0], 'skip')
+        for content in ('[]', '{"status":"delivered","receipt":null}', 'broken'):
+            row_path.write_text(content)
+            self.assertEqual(bounded.drain_job(self.root, self.config, self.queue, job_id)[0], 'skip')
+        row_path.unlink()
+        self.assertEqual(bounded.drain_job(self.root, self.config, self.queue, job_id)[0], 'skip')
 
     def test_wrong_digest_and_orphan_prepared_job_refuse(self):
         job_id, _ = self.prepare()
@@ -164,6 +251,22 @@ class BoundedRepairTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'binding'):
             bounded.source_snapshot(self.config, job)
 
+    def test_snapshot_keeps_anchor_after_large_preceding_lines(self):
+        _, job = self.prepare()
+        job['finding']['line'] = 40
+        job['finding_sha256'] = bounded.identity(job['finding'])
+        text = '\n'.join(['preceding ' * 2000] * 39 + ['anchor', 'following'])
+        with mock.patch.object(bounded, 'command', return_value=SimpleNamespace(returncode=0, stdout=text)):
+            snapshot = bounded.source_snapshot(self.config, job)
+        self.assertIn('40: anchor', snapshot['source'])
+        self.assertIn('41: following', snapshot['source'])
+        self.assertEqual(snapshot['line_start'], 40)
+        self.assertEqual(snapshot['line_end'], 41)
+        self.assertTrue(snapshot['incomplete'])
+        with mock.patch.object(bounded, 'command', return_value=SimpleNamespace(returncode=0, stdout='x\n' * 39 + 'a' * 16001)):
+            with self.assertRaisesRegex(ValueError, 'anchor exceeds'):
+                bounded.source_snapshot(self.config, job)
+
     def test_service_disabled_or_partial_selector_never_dispatch(self):
         atomic(self.root / 'config.json', self.config)
         with mock.patch.object(service, 'ROOT', self.root), \
@@ -194,6 +297,7 @@ class BoundedRepairTest(unittest.TestCase):
         report = {'stop': 'ok', 'changed': False, 'summary': 'No change warranted', 'commits': []}
         with mock.patch.object(service, 'ROOT', self.root), \
              mock.patch.object(service, 'git', side_effect=lambda wt, *args: SOURCE if args[0] == 'rev-parse' else ''), \
+             mock.patch.object(service, 'retain'), \
              mock.patch.object(bounded, 'command', return_value=SimpleNamespace(returncode=0, stdout='first\nsecond\n')), \
              mock.patch.object(service.cq, 'invoke', return_value=report) as invoke:
             result = service.process(self.config, job, self.root)
@@ -206,7 +310,9 @@ class BoundedRepairTest(unittest.TestCase):
 
     def test_cq_fixer_payload_contains_snapshot_and_mechanical_context(self):
         _, job = self.prepare()
-        job['source_snapshot'] = {'source_sha': SOURCE, 'source': '2: pinned code'}
+        job['source_snapshot'] = {'source_sha': SOURCE, 'source_blob_sha': BLOB,
+                                  'finding_sha256': job['finding_sha256'], 'path': 'src/lock.ts',
+                                  'line_start': 2, 'line_end': 2, 'source': '2: pinned code', 'incomplete': True}
         job['mechanical_evidence'] = 'Earlier verification failed'
         self.config.update(repo='example/repo')
         self.config['repair'].update(cq_bin='/unused/cli.js', budget={'max_output_tokens': 8000, 'max_context_tokens': 9000, 'wall_clock_min': 2})
@@ -218,15 +324,158 @@ class BoundedRepairTest(unittest.TestCase):
         self.assertIn(SOURCE, body)
         self.assertIn('2: pinned code', body)
         self.assertIn('Earlier verification failed', body)
+        # Operating instructions belong to the SDK's trusted prompt, not the
+        # untrusted finding body. The adapter still sends the same permissions.
+        self.assertNotIn('Shell: the bash tool', body)
+        self.assertNotIn('Anything else is denied', body)
+        harness_arg = next(arg for arg in cmd.call_args.args[0] if arg.startswith('--harness='))
+        harness = json.loads(harness_arg.split('=', 1)[1])
+        self.assertEqual(harness, service.cq.HARNESS)
+        self.assertEqual(harness['tools']['run']['commandPatterns'],
+                         ['git ' + name for name in ('add', 'commit', 'status', 'diff', 'log', 'rev-parse')]
+                         + service.cq.SEARCH_PATTERNS)
 
-    def test_harvest_refuses_wrong_prepared_source_binding(self):
+    def test_cq_fixer_budget_retains_full_finding_and_anchor_with_escaped_source(self):
+        _, job = self.prepare()
+        job['finding']['body'] = 'Full finding 😀\nwith two lines and "quotes"'
+        job['mechanical_evidence'] = 'Mechanical 😀 evidence'
+        source = '\n'.join(f'{n}: ' + ('quoted "\\ text 😀 ' * 8) for n in range(27, 108))
+        job['finding']['line'] = 67
+        job['source_snapshot'] = {'source_sha': SOURCE, 'source_blob_sha': BLOB,
+                                  'finding_sha256': bounded.identity(job['finding']), 'path': 'src/lock.ts',
+                                  'line_start': 27, 'line_end': 107, 'source': source, 'incomplete': True}
+        body = service.cq.fixer_body(job)
+        self.assertLessEqual(len(body.encode('utf-16-le')) // 2, 8000)
+        self.assertTrue(body.startswith(job['finding']['body']))
+        self.assertIn(job['mechanical_evidence'], body)
+        snapshot = json.loads(body.split('Pinned current-source evidence (untrusted data):\n', 1)[1])
+        self.assertEqual(snapshot['source_sha'], SOURCE)
+        self.assertEqual(snapshot['source_blob_sha'], BLOB)
+        self.assertEqual(snapshot['finding_sha256'], bounded.identity(job['finding']))
+        self.assertEqual(snapshot['path'], job['finding']['path'])
+        self.assertLessEqual(snapshot['line_start'], 67)
+        self.assertGreaterEqual(snapshot['line_end'], 67)
+        self.assertIn('67: ', snapshot['source'])
+        self.assertIn('68: ', snapshot['source'])
+        self.assertTrue(snapshot['incomplete'])
+        self.assertLess(snapshot['line_end'] - snapshot['line_start'], 80)
+        self.assertEqual(len(snapshot['source'].split('\n')), snapshot['line_end'] - snapshot['line_start'] + 1)
+
+    def test_cq_fixer_refuses_oversized_or_missing_anchor_before_command(self):
+        _, job = self.prepare()
+        job['source_snapshot'] = {'source_sha': SOURCE, 'source_blob_sha': BLOB,
+                                  'finding_sha256': job['finding_sha256'], 'path': 'src/lock.ts',
+                                  'line_start': 2, 'line_end': 2, 'source': '2: pinned code', 'incomplete': True}
+        self.config.update(repo='example/repo')
+        self.config['repair'].update(cq_bin='/unused', budget={'wall_clock_min': 1})
+        with mock.patch.object(service.cq, 'command') as command:
+            for body, source in [('😀' * 4000, '2: pinned code'),
+                                 ('small', '2: ' + '\\' * 8000),
+                                 ('small', '3: wrong anchor')]:
+                with self.subTest(body=body[:8], source=source[:16]):
+                    job['finding']['body'] = body
+                    job['source_snapshot']['source'] = source
+                    with self.assertRaises(ValueError):
+                        service.cq.invoke(self.config, {'model': 'p/m'}, job, self.root, self.root)
+            command.assert_not_called()
+
+    def test_harvest_records_wrong_prepared_source_binding_as_failed(self):
         job_id, job = self.prepare()
         result = {'job': job_id, 'item': job['item'], 'verdict': 'NOT-FIXED',
                   'reason': 'test', 'source_sha': HISTORICAL,
                   'finding_sha256': job['finding_sha256'], 'origin_job': OLD}
         atomic(self.root / 'state/repair' / job_id / 'result.json', result)
-        with self.assertRaisesRegex(ValueError, 'source/evidence binding'):
-            repair_tick.harvest(self.c, self.queue, self.queue['items'][0])
+        item = self.queue['items'][0]
+        repair_tick.harvest(self.c, self.queue, item)
+        record = item['repair_runs'][job['run']]
+        self.assertEqual(record['state'], 'failed')
+        self.assertIn('source/evidence binding', record['error'])
+        self.assertEqual(item['state'], 'repair_failed')
+        self.assertEqual(item['last_error'], 'repair_failed; needs human')
+
+    def test_harvest_records_fixed_without_commits_as_failed(self):
+        job_id, job = self.prepare()
+        self.c.WT_ROOT = self.root / 'wt'
+        atomic(self.root / 'state/repair' / job_id / 'result.json',
+               {'job': job_id, 'item': job['item'], 'verdict': 'FIXED', 'commits': [],
+                'worktree': str(self.root / 'wt/crq-repair-pr1-merged'), 'reason': 'test',
+                'repair_base': job['repair_base'], 'attempts': [{'rung': 'A0'}],
+                'source_sha': job['source_sha'], 'finding_sha256': job['finding_sha256'], 'origin_job': OLD})
+        item = self.queue['items'][0]
+        repair_tick.harvest(self.c, self.queue, item)
+        record = item['repair_runs'][job['run']]
+        self.assertEqual(record['state'], 'failed')
+        self.assertIn('without valid commits', record['error'])
+        self.assertEqual(item['state'], 'repair_failed')
+
+    def test_bad_fixed_attempts_fail_once_across_ticks(self):
+        for attempts in (None, [], [{}], [{'rung': 'A3'}], 'invalid'):
+            with self.subTest(attempts=attempts):
+                job_id, job = self.prepare()
+                item = self.queue['items'][0]
+                record = item['repair_runs'][job['run']]
+                record['state'] = 'queued'
+                result = {'job': job_id, 'item': job['item'], 'verdict': 'FIXED',
+                          'commits': ['a' * 40], 'attempts': attempts, 'reason': 'test',
+                          'source_sha': job['source_sha'], 'finding_sha256': job['finding_sha256'],
+                          'origin_job': OLD, 'worktree': str(self.root / 'wt/crq-repair-pr1-merged'),
+                          'repair_base': job['repair_base']}
+                atomic(self.root / 'state/repair' / job_id / 'result.json', result)
+                with mock.patch.object(repair_tick, 'mark_finding_outcome') as mark:
+                    repair_tick.harvest(self.c, self.queue, item)
+                    repair_tick.harvest(self.c, self.queue, item)
+                    self.assertEqual(mark.call_count, 1)
+                    self.assertEqual(mark.call_args.args[2]['verdict'], 'FAILED')
+                self.assertEqual(record['state'], 'failed')
+                self.assertIn('valid final attempt rung', record['error'])
+                self.assertEqual(item['state'], 'repair_failed')
+
+    def test_valid_fixed_rungs_reach_git_verification(self):
+        job_id, job = self.prepare()
+        self.c.WT_ROOT = self.root / 'wt'
+        self.c.make_worktree = mock.Mock(return_value=(self.root / 'verify', 'branch'))
+        self.c.remove_worktree = mock.Mock()
+        item = self.queue['items'][0]
+        for rung in ('A0', 'A1', 'A2'):
+            with self.subTest(rung=rung):
+                atomic(self.root / 'state/repair' / job_id / 'result.json',
+                       {'job': job_id, 'item': job['item'], 'verdict': 'FIXED', 'commits': ['a' * 40],
+                        'attempts': [{'rung': rung}], 'source_sha': job['source_sha'],
+                        'finding_sha256': job['finding_sha256'], 'origin_job': OLD,
+                        'worktree': str(self.c.WT_ROOT / 'crq-repair-pr1-merged'),
+                        'repair_base': job['repair_base']})
+                with mock.patch.object(repair_tick, 'verify', side_effect=RuntimeError('verification reached')):
+                    with self.assertRaisesRegex(RuntimeError, 'verification reached'):
+                        repair_tick.harvest(self.c, self.queue, item)
+                self.assertEqual(item['repair_runs'][job['run']]['state'], 'queued')
+
+    def test_harvest_retains_malformed_json_and_fails_the_prepared_run(self):
+        job_id, job = self.prepare()
+        result = self.root / 'state/repair' / job_id / 'result.json'
+        result.parent.mkdir(parents=True, exist_ok=True)
+        result.write_text('{broken')
+        item = self.queue['items'][0]
+        repair_tick.harvest(self.c, self.queue, item)
+        self.assertEqual(item['repair_runs'][job['run']]['state'], 'failed')
+        self.assertEqual(result.read_text(), '{broken')
+
+    def test_malformed_result_writes_canonical_failed_outcome_once(self):
+        job_id, job = self.prepare()
+        fid = 'd' * 64
+        job['canonical_finding_id'] = fid
+        atomic(bounded.job_path(self.root, job_id), job)
+        atomic(self.root / 'state/backfill/findings/triage' / (fid + '.json'),
+               {'status': 'delivered', 'receipt': {'repair_task': job_id}})
+        result = self.root / 'state/repair' / job_id / 'result.json'
+        result.parent.mkdir(parents=True, exist_ok=True)
+        result.write_text('{broken')
+        item = self.queue['items'][0]
+        with mock.patch.object(repair_tick, 'finding_inbox') as inbox:
+            repair_tick.harvest(self.c, self.queue, item)
+            repair_tick.harvest(self.c, self.queue, item)
+            outcome = inbox.return_value.repair_outcome
+            outcome.assert_called_once()
+            self.assertEqual(outcome.call_args.args[:3], (fid, job_id, 'needs-human'))
 
     def test_service_dispatches_one_selected_job_without_inbox_enumeration(self):
         job_id, job = self.prepare()

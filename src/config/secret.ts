@@ -9,7 +9,6 @@ export const SECRET_ENV_SUFFIXES: readonly string[] = [
   '_KEY',
   '_PASSWORD',
   '_CREDENTIALS',
-  '_URL',
   'PRIVATE_KEY',
 ];
 

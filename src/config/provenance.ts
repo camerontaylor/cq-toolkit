@@ -20,6 +20,7 @@
 import type { ProvenanceConfig } from '../kernel/types.js';
 import { assertCqEnv } from './entry.js';
 import type { CqEnv } from './env.js';
+import { redactIfUrl, redactUrlUserinfo } from '../shared/urlRedact.js';
 import { CQ_ENV_ENTRIES } from './env-registry.js';
 
 const MAX_VALUE_CHARS = 200;
@@ -38,6 +39,11 @@ function render(value: unknown): string {
   return String(value);
 }
 
+/** Show a value through the one shared URL redactor when it is URL-shaped. */
+function show(name: string, text: string): string {
+  return redactIfUrl(name, text);
+}
+
 function cap(text: string): string {
   return text.length <= MAX_VALUE_CHARS
     ? text
@@ -51,12 +57,20 @@ export function provenanceConfig(cqEnv: CqEnv): ProvenanceConfig {
   for (const entry of CQ_ENV_ENTRIES) {
     if (entry.kind === 'identity' || entry.status !== 'live') continue;
     if (cqEnv.sources[entry.name] !== 'env') continue;
-    env[entry.name] = entry.secret ? 'set' : cap(render(cqEnv.values[entry.name]));
+    env[entry.name] = entry.secret
+      ? 'set'
+      : cap(show(entry.name, render(cqEnv.values[entry.name])));
     sources[entry.name] = 'env';
   }
   for (const name of cqEnv.foreignSecretsPresent) {
     env[name] = 'set';
     sources[name] = 'env';
   }
-  return { env, sources, warnings: cqEnv.warnings.map((w) => w.message) };
+  // Registered non-secret foreign URL names (for example ANTHROPIC_BASE_URL): the
+  // snapshot already holds the value redacted by the shared redactor.
+  for (const [name, redacted] of Object.entries(cqEnv.foreignUrls)) {
+    env[name] = cap(redacted);
+    sources[name] = 'env';
+  }
+  return { env, sources, warnings: cqEnv.warnings.map((w) => redactUrlUserinfo(w.message)) };
 }

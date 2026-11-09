@@ -5,7 +5,7 @@ import { realpathSync, statSync } from 'node:fs';
 import type { CqEnv } from '../../config/env.js';
 import { buildChildEnv } from '../../shared/proc.js';
 import { LauncherEnvError, buildSandboxLauncherEnv, harnessRunGate } from '../../sandbox/index.js';
-import { createHarnessSurface, HarnessManifestSchema } from '../surface.js';
+import { createHarnessSurface, parseManifest } from '../surface.js';
 import type { HarnessManifest, HarnessSurface } from '../surface.js';
 
 /** The startup-refusal exit status (sysexits EX_CONFIG). */
@@ -31,7 +31,7 @@ export function checkStartup(argv: readonly string[]): StartupResult {
   }
   let manifest: HarnessManifest;
   try {
-    manifest = HarnessManifestSchema.parse(JSON.parse(argv[0] as string));
+    manifest = parseManifest(JSON.parse(argv[0] as string));
   } catch (err) {
     return { ok: false, reason: `invalid manifest: ${oneLine(err)}` };
   }

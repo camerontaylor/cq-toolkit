@@ -16,9 +16,9 @@ class HostConfigTests(HostConfigFixture, unittest.TestCase):
         (self.runner / 'config.json').write_text('{"not": "committed"}')
         data = host.render(self.root, self.overlay)
         config = json.loads(data)
-        self.assertEqual(config['promotion']['hours_trigger'], 8)
-        self.assertEqual(config['promotion']['merges_trigger'], 1)
-        self.assertEqual(config['promotion']['dispatch_after_min'], 0)
+        self.assertEqual(config['quiet_minutes'], 30)
+        self.assertEqual(config['alerts']['alert_agent_host'],
+                         self.overlay['config']['alerts']['alert_agent_host'])
         self.assertEqual(config['clone'], self.overlay['config']['clone'])
         self.assertFalse(config['repair']['enabled'])
         self.assertEqual(data, host.encode(config))

@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["at", "event"],
+  "properties": {
+    "at": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,9})?Z$"
+    },
+    "event": {
+      "type": "string",
+      "minLength": 1
+    },
+    "item": {
+      "type": "string"
+    },
+    "run": {
+      "type": "string"
+    },
+    "reason": {
+      "type": "string"
+    },
+    "error": {
+      "type": "string"
+    },
+    "outcome": {
+      "type": "string"
+    },
+    "findings": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "severity": {
+      "type": ["object", "string"]
+    },
+    "issue": {
+      "type": "integer"
+    },
+    "pr": {
+      "type": "integer"
+    },
+    "base": {
+      "type": "string"
+    },
+    "head": {
+      "type": "string"
+    },
+    "label": {
+      "type": "string"
+    },
+    "request": {
+      "type": "string"
+    },
+    "last_tick": {
+      "type": ["string", "null"]
+    },
+    "gap_min": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "job": {
+      "type": "string"
+    },
+    "origin_job": {
+      "type": "string"
+    },
+    "source_sha": {
+      "type": "string"
+    },
+    "state": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": true
+}

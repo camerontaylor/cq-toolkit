@@ -113,8 +113,11 @@ def hack_detector(cq_bin, diff, cwd):
     return data
 
 
-def findings(path):
+def findings(path, *, provenance=False):
     result = []
+    if provenance:
+        import pr_review_findings
+        published = pr_review_findings.load_findings(path)
     for line in Path(path).read_text(errors="replace").splitlines():
         try:
             e = json.loads(line)
@@ -127,6 +130,22 @@ def findings(path):
         if suggestion:
             body += '\n' + (suggestion if isinstance(suggestion, str) else json.dumps(suggestion))
         match = re.search(r'(?:around lines?|at line)\s+(\d+)', body, re.I)
-        result.append({'severity': e['severity'], 'path': e.get('fileName'),
-                       'line': int(match[1]) if match else None, 'body': body})
+        finding = {'severity': e['severity'], 'path': e.get('fileName'),
+                   'line': int(match[1]) if match else None, 'body': body}
+        if provenance:
+            source = {key: e[key] for key in ('id', 'source_id', 'review_id', 'thread_id', 'source_thread_id')
+                      if e.get(key) is not None}
+            # Use the publisher's deduplicated ordinal, including lower severities.
+            start, end = pr_review_findings._line(e.get('startLine')), pr_review_findings._line(e.get('endLine'))
+            start, end = start or end, end or start
+            if start and end and start > end:
+                start, end = end, start
+            matches = [n for n, f in enumerate(published, 1)
+                       if (f['path'], f['start'], f['end'], f['title'], f['text']) ==
+                       (e.get('fileName'), start, end, str(e.get('title') or '').strip(),
+                        str(e.get('comment') or e.get('title') or '').strip())]
+            if len(matches) == 1:
+                source['finding_number'] = matches[0]
+            finding['_source'] = source
+        result.append(finding)
     return result

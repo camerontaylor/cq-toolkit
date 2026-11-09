@@ -4,6 +4,7 @@
 // The original modules re-export these, so existing callers are unchanged.
 
 import { isSecretEnvName } from './secret.js';
+import { urlValueRefused } from '../shared/urlRedact.js';
 
 export type SandboxMode = 'off' | 'required';
 /**
@@ -69,8 +70,10 @@ export const ENV_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 /**
  * Names `CQ_RUN_ENV_PASSTHROUGH` may never copy into a run child (Annex B
- * §B.5): credential-shaped names the subprocess allowlist excludes by design,
- * plus `DATABASE_URL`. Registry data: test/config/passthrough.test.ts checks it
+ * §B.5): credential-shaped names the subprocess allowlist excludes by design.
+ * `DATABASE_URL` and every other `*_URL` name are passable by NAME (`_URL` is
+ * not a secret suffix); their VALUE must pass the URL acceptance rule
+ * (`urlValueRefused`). Registry data: test/config/passthrough.test.ts checks it
  * against `DEFAULT_CHILD_ENV_ALLOWLIST` and the vendor names the registry
  * lists. Secret-suffixed names (`isSecretEnvName`), the `AWS_*` family and every
  * `CQ_*` name (a nested cq could read trust config from one) are refused on top
@@ -80,7 +83,6 @@ export const PASSTHROUGH_DENIED_NAMES: readonly string[] = Object.freeze([
   'NPM_TOKEN',
   'SSH_AUTH_SOCK',
   'GOOGLE_APPLICATION_CREDENTIALS',
-  'DATABASE_URL',
   'NODE_OPTIONS',
   'NODE_PATH',
 ]);
@@ -101,6 +103,20 @@ export const TRUSTED_ENV_EXEMPT_NAMES: readonly string[] = Object.freeze(['SSH_A
  * test/harness/env-origin.test.ts; a name needs a stated reason in ADR-0009.
  */
 export const DECLARED_ENV_EXEMPT_NAMES: readonly string[] = Object.freeze([]);
+
+/**
+ * Refuse a passthrough VALUE that carries URL credentials. A `*_URL` name is
+ * allowed by name (`_URL` is not a secret suffix), but a value with userinfo
+ * (`user@host`, `user:pass@host`) is refused, failing closed when it does not
+ * parse. Applies to a URL-named variable and to any value with a scheme
+ * separator. The message names the VARIABLE only, never the value. Returns the
+ * reason text, or `undefined` when the value is fine.
+ */
+export function urlValueRefusal(name: string, value: string): string | undefined {
+  return urlValueRefused(name, value)
+    ? `value of '${name}' is not an acceptable URL (credentials, whitespace, backslash or unparseable); refused`
+    : undefined;
+}
 
 /** True when `name` has the env var NAME shape. */
 export function isEnvName(name: string): boolean {

@@ -33,7 +33,7 @@ import { execFile } from 'node:child_process';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve as pathResolve } from 'node:path';
 import type { CqEnv } from '../../config/env.js';
-import { resolveGhBin } from './ghBin.js';
+import { ghSpawnEnv, resolveGhBin, resolveWindowsCommand } from './ghBin.js';
 import type { BaselinePrEffects } from '../../ops/ratchet/proposeBaselineUpdate.js';
 
 /** Captured child output can be large (a full diff/PR body) — never truncate. */
@@ -157,7 +157,13 @@ async function runGhWith(
   args: readonly string[],
   cqEnv?: CqEnv,
 ): Promise<string> {
-  const res = await exec(resolveGhBin(cqEnv), args, { cwd: repoRoot, env: ghEnv() });
+  const env = ghSpawnEnv(ghEnv());
+  const bin = resolveWindowsCommand(resolveGhBin(cqEnv), env, process.platform, process.env);
+  if (bin === undefined) throw new Error('gh executable not found');
+  const res = await exec(bin, args, {
+    cwd: repoRoot,
+    env,
+  });
   if (res.timedOut) {
     throw new Error(`gh ${args[0] ?? ''} timed out after ${EXEC_TIMEOUT_MS}ms`);
   }
@@ -175,10 +181,19 @@ async function runGit(
 ): Promise<ExecResult> {
   // Hooks are disabled and the automation token is scrubbed: git runs local
   // hooks and filters during checkout/commit/push.
-  const res = await exec('git', ['-c', 'core.hooksPath=/dev/null', ...args], {
-    cwd: repoRoot,
-    env: gitEnv(),
-  });
+  const env = ghSpawnEnv(gitEnv());
+  const bin = resolveWindowsCommand('git', env, process.platform, process.env);
+  const res: ExecResult =
+    bin === undefined
+      ? {
+          ok: false,
+          timedOut: false,
+          stdout: '',
+          stderr: '',
+          errorMessage: 'git executable not found',
+          errorCode: 'ENOENT',
+        }
+      : await exec(bin, ['-c', 'core.hooksPath=/dev/null', ...args], { cwd: repoRoot, env });
   if (res.timedOut) {
     throw new Error(`git ${args[0] ?? ''} timed out after ${EXEC_TIMEOUT_MS}ms`);
   }

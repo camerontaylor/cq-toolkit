@@ -14,6 +14,7 @@ import {
 } from '../../config/env.js';
 import { CQ_ENV_ENTRIES } from '../../config/env-registry.js';
 import type { Op } from '../../kernel/types.js';
+import { redactIfUrl } from '../../shared/urlRedact.js';
 import { processEnv } from '../../config/process-env.js';
 
 export interface ConfigShowInput {
@@ -34,19 +35,30 @@ export interface ConfigShowReport {
   errors: CqEnvDiagnostic[];
 }
 
+/** A non-secret value as shown: URL-shaped strings go through the one shared redactor. */
+function showValue(name: string, value: unknown): unknown {
+  return typeof value === 'string' ? redactIfUrl(name, value) : value;
+}
+
 /** Build the report from an environment (exported for tests). */
 export function buildConfigShowReport(
   env: Readonly<Record<string, string | undefined>> = processEnv(),
 ): ConfigShowReport {
   const snapshot = readCqEnv(env);
-  const keys = CQ_ENV_ENTRIES.filter((e) => e.status === 'live').map((e) => {
+  const keys: ConfigShowKey[] = CQ_ENV_ENTRIES.filter((e) => e.status === 'live').map((e) => {
     const value = snapshot.values[e.name];
     return {
       name: e.name,
-      value: value === undefined ? null : e.secret ? 'set' : value,
+      value: value === undefined ? null : e.secret ? 'set' : showValue(e.name, value),
       source: snapshot.sources[e.name] ?? 'default',
     };
   });
+  // Registered non-secret foreign URL names (for example ANTHROPIC_BASE_URL):
+  // shown with userinfo, query and fragment stripped by the one shared redactor
+  // (the snapshot never holds the raw value).
+  for (const [name, redacted] of Object.entries(snapshot.foreignUrls)) {
+    keys.push({ name, value: redacted, source: 'env' });
+  }
   return { keys, warnings: [...snapshot.warnings], errors: [...snapshot.errors] };
 }
 

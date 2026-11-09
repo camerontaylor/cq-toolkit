@@ -381,41 +381,20 @@ Issues write (top-level PR comments). `self-merge-prs` kept
 `{{SELFHOST_TOKEN}}` at that point; its mint is out of scope here and lands
 in N22.
 
-### N21 — Annex B §B.5 and N15: `_URL` is not a secret suffix for config resolution, journaling and passthrough — diagnostics keep name-based redaction
+### N21 — Annex B §B.5 and N15: `_URL` is not a secret suffix (config, journaling, passthrough and, since 2026-11-09, diagnostics)
 
 Row 6b of issue #291 recorded that the code's config suffix list included
 `_URL`, which §B.5's accepted suffix list (`_API_KEY _TOKEN _AUTH_TOKEN
 _SECRET _KEY _PASSWORD _CREDENTIALS PRIVATE_KEY`) omits.
 
-**Owner ruling (2026-10-11).** `_URL` is **not** a secret suffix for config
-resolution, journaling and passthrough. A URL value is not a secret because
-the credential-URL screen already covers the dangerous case by VALUE,
-independent of the name: a passthrough variable whose value is a URL
-carrying userinfo, a query or a fragment is refused (`credentialUrl` in
-[`src/config/resolve.ts`](https://github.com/camerontaylor/cq-toolkit/blob/bf0682f7/src/config/resolve.ts), the screen §B.5
-describes as `*_URL` names carrying userinfo), foreign base-URL values are
-validated credential-free (`validForeignBaseUrl`), and `DATABASE_URL` stays
-denied by name. So a credential-free `_URL` name no longer refuses its own
-passthrough, and a foreign `_URL` value is journalled by value only when it
-parses with `new URL()` as an absolute http(s) URL with empty userinfo and no
-query or fragment; otherwise the journal keeps name-based redaction (secret
-presence). The non-secret treatment is value-gated: passthrough is allowed and
-the value journalled only when `isSafeJournalableUrl(value)` holds, and every
-other `_URL` value is classified secret exactly as before the ruling
-(passthrough refused, journal records presence); `_URL` suffix matching is
-case-insensitive on all platforms.
+**Owner ruling (2026-10-11), as superseded for the details by the 2026-11-09 update below.** `_URL` is **not** a secret
+suffix for config resolution, journaling and passthrough. A URL value is not a secret because the value screen covers
+the dangerous case independent of the name. (The 2026-10-11 wording described `credentialUrl`/`validForeignBaseUrl`
+in `src/config/resolve.ts`, which no longer exists, a safe-URL journalling gate, and `DATABASE_URL` staying denied by
+name. All three are replaced by the 2026-11-09 rules.)
 
-**Diagnostics deliberately diverge.** Redaction for persisted error text
-KEEPS `_URL` in `SECRET_ENV_SUFFIXES`
-([`src/driver/error-text.ts`](../../src/driver/error-text.ts)): a `_URL` env
-value echoed by a vendor SDK must never reach a persisted `WorkerResult.error`
-or journal record, so URL values stay redacted by name there. `_URL` suffix
-matching is case-insensitive there too, so a lowercase or win32 `metrics_url`
-cannot dodge the redaction. The two suffix
-lists now diverge on purpose, and the old "one suffix list drives naming,
-redaction, journalling and the `vars.*` refusal, and they cannot drift apart"
-formulation of §B.5 is **superseded** by this note; truth for each list lives
-at the two source files above.
+**Diagnostics diverged (2026-10-11) and no longer do.** The 2026-10-11 note kept `_URL` in `SECRET_ENV_SUFFIXES` for
+persisted error text. That divergence is closed below.
 
 **Supersession.** This ruling supersedes the N18 draft of parked PR #305
 (never merged), which removed `_URL` from **both** lists so code and §B.5
@@ -423,6 +402,17 @@ agreed on eight suffixes. The narrow ruling keeps the diagnostics list at
 nine entries. It also closes the `_URL` question N15 deliberately left open:
 N15 aligned §B.4/§B.6/§B.9 and kept "the annex-B `_URL` secret-suffix
 question" out of its scope pending this decision.
+
+**Update (2026-11-09): the divergence is closed.** The owner re-confirmed that `_URL` is not a secret suffix and
+added the value screen. `_URL` is removed from `SECRET_ENV_SUFFIXES` ([`src/config/secret.ts`](../../src/config/secret.ts)),
+so the registry, provenance, `cq config` and the persisted-error-text redaction in
+[`src/driver/error-text.ts`](../../src/driver/error-text.ts) use one list again. URL values are shown through the one
+shared module ([`src/shared/urlRedact.ts`](../../src/shared/urlRedact.ts)): the structured form
+(`protocol//host/pathname` from `new URL()`, or `[redacted-url]`), the free-text form (userinfo to `[redacted]@`, query
+and fragment dropped and marked) and a known env value inside free text (its structured form); see ADR-0009. Passthrough
+allows `*_URL` names (including `DATABASE_URL`) and refuses a value that is not a clean URL: no `@` (raw or `%40`), no
+whitespace or backslash, and a `new URL()` parse with empty username and password. The old safe-URL journalling gate is
+gone: a non-URL value of a `*_URL` variable is now shown as `[redacted-url]`, never raw.
 
 ### N22 — ADR-0004 D-D.2/D-D.3: every remaining automation consumer mints the `cq-automation` App token per run (C3 T3)
 

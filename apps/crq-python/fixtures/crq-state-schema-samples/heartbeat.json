@@ -1,0 +1,8 @@
+{
+  "last_tick": "2026-11-09T09:48:00Z",
+  "stale_alarm_min": 36,
+  "schedule_id": null,
+  "root": "/srv/crq/apps/crq-python",
+  "alert_agent_id": "00000000-0000-4000-8000-000000000004",
+  "alert_agent_host": null
+}

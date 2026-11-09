@@ -296,7 +296,13 @@ const stateCounts = (state: ReviewSummary['state'], config: ClassifyPrConfig): b
  * identity is special.
  */
 const isAcceptableReview = (review: ReviewSummary, ctx: ReviewContext): boolean =>
-  isReviewableEvidence(review, ctx) && stateCounts(review.state, ctx.config);
+  isReviewableEvidence(review, ctx) &&
+  stateCounts(review.state, ctx.config) &&
+  // A bot skip/failure notice is never acceptance, whoever authored it and
+  // whatever automationLogin says (plan data can set automationLogin); the
+  // objection path keeps the narrower exemption so a human's objection with a
+  // bot-shaped body is not suppressed.
+  !matchesSkipPattern(review.body, ctx.config);
 
 /** Review independence is judged by the merging agent, including shared accounts. */
 const hasSameAccountAgentAcceptance = (candidate: PrCandidate, ctx: ReviewContext): boolean => {
@@ -437,11 +443,9 @@ export function classifyPr(
     config.trustedAssociations !== undefined ||
     config.automationLogin !== undefined ||
     config.excludedLogins !== undefined;
-  const foldInput = candidate.reviews.filter((review) => {
-    // COMMENTED/DISMISSED are transparent: they must not mask a standing
-    // verdict from the same actor.
-    if (review.state !== 'APPROVED' && review.state !== 'CHANGES_REQUESTED') return false;
-    if (!policyActive) return true;
+  // Under an active policy a review must be trusted, not an automation skip
+  // notice, and bound to the current head when one is supplied.
+  const screened = (review: ReviewSummary): boolean => {
     if (!isTrustedReviewer(review, ctx)) return false;
     if (
       matchesSkipPattern(review.body, config) &&
@@ -451,6 +455,13 @@ export function classifyPr(
     if (candidate.headRefOid !== undefined)
       return candidate.headRefOid !== null && review.commitOid === candidate.headRefOid;
     return true;
+  };
+  const foldInput = candidate.reviews.filter((review) => {
+    // COMMENTED/DISMISSED are transparent: they must not mask a standing
+    // verdict from the same actor.
+    if (review.state !== 'APPROVED' && review.state !== 'CHANGES_REQUESTED') return false;
+    if (!policyActive) return true;
+    return screened(review);
   });
   const foldedReviews = policyActive ? latestReviewPerActor(foldInput) : candidate.reviews;
   // Row 6 — an OUTSTANDING OBJECTION: a non-author reviewer's
@@ -472,8 +483,15 @@ export function classifyPr(
   // acceptance until someone qualified has spoken about the head state at
   // least once — and no amount of settle time cures evidence that predates
   // the commit.
+  // A configured COMMENTED acceptance state stays usable under policy: screened
+  // COMMENTED reviews count as acceptance evidence only (they never reach the
+  // objection fold above, so they cannot mask a CHANGES_REQUESTED).
+  const commentedEvidence =
+    policyActive && config.acceptReviewStates?.includes('COMMENTED') === true
+      ? candidate.reviews.filter((review) => review.state === 'COMMENTED' && screened(review))
+      : [];
   const hasAcceptableReview =
-    foldedReviews.some((review) => isAcceptableReview(review, ctx)) ||
+    [...foldedReviews, ...commentedEvidence].some((review) => isAcceptableReview(review, ctx)) ||
     hasSameAccountAgentAcceptance(candidate, ctx);
   if (!hasAcceptableReview) {
     return { verdict: 'awaiting', reason: 'no_acceptable_review', unresolvedExternalThreads };

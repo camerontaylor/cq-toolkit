@@ -16,7 +16,7 @@ import { checkoutWriterStdio, trackCheckoutWriter } from '../../shared/checkoutW
 // normalizer) — hoisted here so the seams cannot drift apart.
 import { spawn } from 'node:child_process';
 import type { CqEnv } from '../../config/env.js';
-import { resolveGhBin } from './ghBin.js';
+import { ghMergeEnv, ghSpawnEnv, resolveGhBin, resolveWindowsCommand } from './ghBin.js';
 import { isAbsolute, resolve as pathResolve } from 'node:path';
 
 /** Result of one `gh` invocation: the exit code plus the captured streams. */
@@ -96,17 +96,6 @@ export function makeGhRunner(opts?: {
 }): GhFn {
   return (args: string[]) =>
     new Promise<GhResult>((resolve) => {
-      const rawBin = opts?.bin ?? resolveGhBin(opts?.cqEnv);
-      // Bare names PATH-lookup (cwd-independent), but a RELATIVE bin path
-      // with a separator resolves against the spawn cwd — with a scoped
-      // runner that would silently change which binary runs. Pre-resolve
-      // such paths against the process cwd, the pre-scoping resolution.
-      const bin =
-        rawBin.includes('/') || rawBin.includes('\\')
-          ? isAbsolute(rawBin)
-            ? rawBin
-            : pathResolve(process.cwd(), rawBin)
-          : rawBin;
       const stdoutChunks: Buffer[] = [];
       const stderrChunks: Buffer[] = [];
       let timedOut = false;
@@ -122,10 +111,20 @@ export function makeGhRunner(opts?: {
           if (targets.includes(probe)) delete inherited[name];
         }
       }
-      const child = spawn(bin, args, {
+      const childEnv = ghMergeEnv(inherited, opts?.env);
+      const rawBin = opts?.bin ?? resolveGhBin(opts?.cqEnv);
+      const hasSeparator = rawBin.includes('/') || rawBin.includes('\\');
+      const bin = hasSeparator && !isAbsolute(rawBin) ? pathResolve(process.cwd(), rawBin) : rawBin;
+      const env = ghSpawnEnv(childEnv);
+      const resolvedBin = resolveWindowsCommand(bin, env, process.platform, process.env);
+      if (resolvedBin === undefined) {
+        resolve({ code: 127, stdout: '', stderr: `executable not found: ${bin}` });
+        return;
+      }
+      const child = spawn(resolvedBin, args, {
         stdio: checkoutWriterStdio(['pipe', 'pipe', 'pipe']),
         ...(opts?.cwd !== undefined ? { cwd: opts.cwd } : {}),
-        env: { ...inherited, ...opts?.env },
+        env,
       });
       trackCheckoutWriter(child);
       // The runner — not the child — owns this one wall clock: it bounds a

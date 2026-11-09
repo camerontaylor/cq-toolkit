@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'vitest';
+import { readCqEnv } from '../../../src/config/env.js';
 import { classifyThreads } from '../../../src/ops/review/classifyThreads.js';
 import { classifyPr } from '../../../src/ops/merge/classifyPrs.js';
 import { defaultClassifyConfig } from '../../../src/ops/review/classify.config.js';
@@ -98,11 +99,14 @@ describe('W1.1 reviewer trust and SHA binding', () => {
     const input = ClassifyPrsInputSchema.parse({
       candidate: candidate([review('coderabbitai[bot]', 'APPROVED', HEAD)]),
       nowMs: NOW,
-      config: { trustedAssociations: [], automationLogin: 'cq-automation[bot]' },
+      config: { automationLogin: 'cq-automation[bot]' },
     });
     const entry = mergeRegistry.find((item) => item.name === 'merge.classifyPrs');
     if (entry?.importer === undefined) throw new Error('merge.classifyPrs registry entry missing');
-    const operation = await entry.importer();
+    // The reviewer trust set resolves from config only (CQ_MERGE_TRUSTED_ASSOCIATIONS), never plan data.
+    const operation = await entry.importer({
+      cqEnv: readCqEnv({ CQ_MERGE_TRUSTED_ASSOCIATIONS: 'OWNER' }),
+    });
     const result = await operation(input);
     expect(result).toMatchObject({ status: 'ok', value: { reason: 'no_acceptable_review' } });
   });

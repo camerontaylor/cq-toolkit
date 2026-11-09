@@ -23,6 +23,7 @@ export const metadata = (number: number) => ({
   merged: false,
   draft: false,
   user: { login: 'owner', type: 'User' },
+  base: { ref: 'main' },
   head: { sha: head, ref: `fix-${number}`, repo: { full_name: 'owner/repo' } },
 });
 export const gh = vi.fn(async (args: string[]) => ({

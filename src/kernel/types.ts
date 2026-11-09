@@ -1090,20 +1090,21 @@ export interface OpRegistryEntry<I = unknown, R = unknown> {
    * (stderr stays EMPTY, like every suppressed narration line) and none in
    * human mode, where the library default already writes the same `cq:`
    * stderr line. OPTIONAL: every other caller ignores it (the kernel runner
-   * passes none — plan data never carries a narration contract; the CLI
+   * passes the resolved config snapshot — plan data never carries a narration contract; the CLI
    * wraps the registry-view entries it hands the runner, src/cli/run-plan.ts),
    * and an importer is free to bind its library defaults unchanged.
    */
   importer: (wiring?: {
+    /** Resolved run configuration; supplied by the host, never plan data. */
+    cqEnv?: CqEnv;
     /** Sink for the driver factory's deprecated-alias notice (review-debt #186). */
     onDeprecatedAlias?: (message: string) => void;
-    /** The entry point's frozen CQ_* snapshot, so an op never re-reads the process env. */
-    cqEnv?: CqEnv;
   }) => Promise<Op<I, R>>;
 }
 
 /** Registry entry for one plan. Runtime-only: never persisted. */
 export interface PlanRegistryEntry {
   name: string;
-  importer: () => Promise<Plan>;
+  /** `cqEnv`: the host's resolved config, so a floor can mirror trust config by construction. */
+  importer: (wiring?: { cqEnv?: CqEnv }) => Promise<Plan>;
 }

@@ -36,6 +36,44 @@ import {
 // ---------------------------------------------------------------------------
 
 describe('removePrWorktree', () => {
+  test('linked checkouts resolve and remove trees under the same common git directory', async () => {
+    const mainRoot = await realTmpDir('cq-wt-common-');
+    try {
+      const linkedRoot = join(mainRoot, 'linked');
+      const commonDir = join(mainRoot, '.git');
+      const model = mkModel();
+      const registry = memRegistry();
+      const calls: string[][] = [];
+      const git = fakeGit(model, calls);
+      const run: GhFn = async (args) => {
+        if (args[2] === 'rev-parse' && args.includes('--git-common-dir')) {
+          expect(args).toEqual([
+            '-C',
+            linkedRoot,
+            'rev-parse',
+            '--path-format=absolute',
+            '--git-common-dir',
+          ]);
+          return { code: 0, stdout: `${commonDir}\n`, stderr: '' };
+        }
+        return git(args);
+      };
+      const opts = baseOpts(model, registry, { repoRoot: linkedRoot, run });
+      const created = await resolvePrWorktree(opts);
+      expect(created.path).toBe(join(commonDir, 'cq-review-worktrees', `pr-${PR}-${BRANCH}`));
+      // A second resolution from the linked checkout must classify the
+      // common-root tree as owned, rather than foreign.
+      const reused = await resolvePrWorktree(opts);
+      expect(reused).toEqual({ ...created, reused: true });
+      await removePrWorktree({ ...opts, path: created.path });
+      expect(model.worktrees).toEqual([]);
+      expect(registry.current()).toEqual({});
+      expect(calls).toContainEqual(['-C', linkedRoot, 'worktree', 'remove', created.path]);
+    } finally {
+      await rm(mainRoot, { recursive: true, force: true });
+    }
+  });
+
   test('success removes the tree via git and prunes the registry entry', async () => {
     const calls: string[][] = [];
     const registry = memRegistry({
@@ -139,7 +177,9 @@ describe('removePrWorktree', () => {
     ).rejects.toThrow(/removePrWorktree: refusing to remove.*outside the review worktreeRoot/s);
     // The ONLY git call is the git-dir derivation the boundary check needs;
     // the foreign tree and the registry both intact.
-    expect(calls).toEqual([['-C', '/repo', 'rev-parse', '--absolute-git-dir']]);
+    expect(calls).toEqual([
+      ['-C', '/repo', 'rev-parse', '--path-format=absolute', '--git-common-dir'],
+    ]);
     expect(model.worktrees).toHaveLength(1);
     expect(registry.current()['7']).toBeDefined();
     expect(registry.calls).toEqual([]);

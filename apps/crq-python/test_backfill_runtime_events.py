@@ -7,6 +7,7 @@ test_backfill_runtime_coverage.py, test_backfill_runtime_publish.py,
 test_backfill_runtime_quota.py, test_backfill_runtime_events.py and
 test_backfill_runtime_fixtures.py.
 """
+import json
 import unittest
 
 import backfill_jobs as jobs
@@ -26,6 +27,41 @@ class RuntimeTest(RuntimeTestBase):
         runtime.state_event(self.c, self.q, self.item, "2026-10-30T01:00:00Z", "created")
         self.assertEqual(out.retained(), [original])
         self.assertFalse(out.pending())
+
+    def test_completion_normalizes_vendor_anchors(self):
+        jobs.admission(self.q, self.item, AT, {"successful": True, "remaining": 2, "observed_at": AT}, False)
+        repo, store, _, _ = runtime.services(self.c, self.config)
+        cases = [
+            ({"startLine": 1, "endLine": 2}, [[1, 2]]),
+            ({"startLine": 2}, [[2, 2]]),
+            ({"endLine": 1}, [[1, 1]]),
+            ({"startLine": 2, "endLine": 1}, [[1, 2]]),
+            ({"startLine": True, "endLine": "2"}, []),
+            ({"startLine": 0, "endLine": -1}, []),
+            ({"startLine": 1.5}, []),
+            ({"startLine": "1", "endLine": 2}, []),
+            ({"startLine": -1, "endLine": 2}, []),
+            ({"startLine": True, "endLine": 2}, []),
+            ({"startLine": None, "endLine": 2}, []),
+            ({"startLine": 1, "endLine": "2"}, []),
+            ({"startLine": 1, "endLine": 0}, []),
+            ({"startLine": 1, "endLine": None}, []),
+            ({"startLine": 1_000_001}, []),
+            ({"intervals": [[2, 2]], "startLine": 1}, [[2, 2]]),
+            ({"intervals": [], "startLine": 1}, []),
+            ({"intervals": [[True, 2]], "startLine": 1}, []),
+            ({"intervals": [[2, 1]]}, []),
+        ]
+        for anchor, expected in cases:
+            with self.subTest(anchor=anchor):
+                finding = {"type": "finding", "fileName": "a", "title": "Check this", "comment": "Details", **anchor}
+                terminal = {"type": "complete", "status": "review_completed", "head": self.item["head"],
+                            "reviewedFiles": self.item["scope"]}
+                raw = json.dumps(finding).encode() + b"\n" + ledger.canonical(terminal) + b"\n"
+                event = runtime.completion_event(repo, store, self.item, raw, 0, {"run_id": "vendor-anchor"}, AT)
+                normalized = event["payload"]["findings"][0]
+                self.assertEqual(normalized["intervals"], expected)
+                self.assertEqual(normalized["anchor_status"], "verified" if expected else "unverified")
 
     def test_harvest_accepts_blank_lines_and_float_only_in_vendor_metadata(self):
         jobs.admission(self.q, self.item, AT, {"successful": True, "remaining": 2, "observed_at": AT}, False)

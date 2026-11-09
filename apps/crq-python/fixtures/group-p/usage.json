@@ -1,0 +1,243 @@
+{
+  "schema": "cq.crq-group-p-vector/v1",
+  "family": "usage",
+  "cases": [
+    {
+      "name": "complete-observation",
+      "source": "usage_slots.parse_usage",
+      "input": {
+        "stream": "{\"includedReviews\":{\"state\":\"available\",\"limit\":10,\"remaining\":2,\"rollingWindowMs\":3600000,\"fullCapacityInMs\":50000,\"repository\":\"owner/repo\"}}"
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "remaining": 2,
+          "limit": 10,
+          "rollingWindowMs": 3600000,
+          "fullCapacityInMs": 50000
+        }
+      }
+    },
+    {
+      "name": "partial-observation",
+      "source": "usage_slots.parse_usage",
+      "input": {
+        "stream": "{\"includedReviews\":{\"remaining\":0}}"
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "remaining": 0
+        }
+      }
+    },
+    {
+      "name": "available-without-limit",
+      "source": "usage_slots.parse_usage",
+      "input": {
+        "stream": "{\"includedReviews\":{\"remaining\":10,\"limit\":10}}"
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "remaining": 10,
+          "limit": 10
+        }
+      }
+    },
+    {
+      "name": "unavailable-state",
+      "source": "usage_slots.parse_usage",
+      "input": {
+        "stream": "{\"includedReviews\":{\"state\":\"unavailable\",\"remaining\":3}}"
+      },
+      "expect": {
+        "ok": true,
+        "value": null
+      }
+    },
+    {
+      "name": "boolean-remaining-is-refused",
+      "source": "usage_slots.parse_usage",
+      "input": {
+        "stream": "{\"includedReviews\":{\"remaining\":true}}"
+      },
+      "expect": {
+        "ok": true,
+        "value": null
+      }
+    },
+    {
+      "name": "negative-remaining-is-refused",
+      "source": "usage_slots.parse_usage",
+      "input": {
+        "stream": "{\"includedReviews\":{\"remaining\":-1}}"
+      },
+      "expect": {
+        "ok": true,
+        "value": null
+      }
+    },
+    {
+      "name": "string-remaining-is-refused",
+      "source": "usage_slots.parse_usage",
+      "input": {
+        "stream": "{\"includedReviews\":{\"remaining\":\"2\"}}"
+      },
+      "expect": {
+        "ok": true,
+        "value": null
+      }
+    },
+    {
+      "name": "limit-below-remaining-is-refused",
+      "source": "usage_slots.parse_usage",
+      "input": {
+        "stream": "{\"includedReviews\":{\"limit\":1,\"remaining\":2}}"
+      },
+      "expect": {
+        "ok": true,
+        "value": null
+      }
+    },
+    {
+      "name": "non-object-event-is-skipped",
+      "source": "usage_slots.parse_usage",
+      "input": {
+        "stream": "null\n[]\n{}"
+      },
+      "expect": {
+        "ok": true,
+        "value": null
+      }
+    },
+    {
+      "name": "bad-line-then-valid-event",
+      "source": "usage_slots.parse_usage",
+      "input": {
+        "stream": "bad line\n{\"includedReviews\":{\"remaining\":4}}"
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "remaining": 4
+        }
+      }
+    },
+    {
+      "name": "empty-stream",
+      "source": "usage_slots.parse_usage",
+      "input": {
+        "stream": ""
+      },
+      "expect": {
+        "ok": true,
+        "value": null
+      }
+    },
+    {
+      "name": "no-known-starts-falls-back-to-one-minute",
+      "source": "usage_slots.next_slot",
+      "input": {
+        "starts": [],
+        "at": "2026-10-28T01:01:00Z",
+        "usage": null
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "utc": "2026-10-28T01:02:00.000000Z"
+        }
+      }
+    },
+    {
+      "name": "oldest-known-start-rolls-out-first",
+      "source": "usage_slots.next_slot",
+      "input": {
+        "starts": [
+          "2026-10-28T00:00:00Z",
+          "2026-10-28T00:00:17Z"
+        ],
+        "at": "2026-10-28T01:01:00Z",
+        "usage": {
+          "remaining": 0,
+          "fullCapacityInMs": 300000,
+          "rollingWindowMs": 3600000
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "utc": "2026-10-28T01:02:00.000000Z"
+        }
+      }
+    },
+    {
+      "name": "vendor-full-capacity-is-not-the-next-slot",
+      "source": "usage_slots.next_slot",
+      "input": {
+        "starts": [
+          "2026-10-28T01:00:17Z"
+        ],
+        "at": "2026-10-28T01:01:00Z",
+        "usage": null
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "utc": "2026-10-28T02:00:17.000000Z"
+        }
+      }
+    },
+    {
+      "name": "vendor-reservation-lag-waits-one-minute",
+      "source": "usage_slots.next_slot",
+      "input": {
+        "starts": [
+          "2026-10-28T00:01:00Z",
+          "2026-10-28T00:31:00Z",
+          "2026-10-28T00:31:00Z",
+          "2026-10-28T00:31:00Z",
+          "2026-10-28T00:31:00Z",
+          "2026-10-28T00:31:00Z",
+          "2026-10-28T00:31:00Z",
+          "2026-10-28T00:31:00Z",
+          "2026-10-28T00:31:00Z",
+          "2026-10-28T00:31:00Z"
+        ],
+        "at": "2026-10-28T01:01:00Z",
+        "usage": {
+          "limit": 10,
+          "remaining": 0,
+          "fullCapacityInMs": 1800000
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "utc": "2026-10-28T01:02:00.000000Z"
+        }
+      }
+    },
+    {
+      "name": "usage-just-starts-window",
+      "source": "usage_slots.next_slot",
+      "input": {
+        "starts": [
+          "2026-10-28T00:01:00Z"
+        ],
+        "at": "2026-10-28T01:01:00Z",
+        "usage": {
+          "limit": 10,
+          "remaining": 9
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "utc": "2026-10-28T01:02:00.000000Z"
+        }
+      }
+    }
+  ]
+}

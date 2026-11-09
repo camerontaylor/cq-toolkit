@@ -1,4 +1,5 @@
 // Split from self-review-loop.test.ts (pure move); shared fixtures in ./self-review-loop-fakes.js.
+import { readCqEnv } from '../../src/config/env.js';
 import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -146,6 +147,45 @@ describe('runSelfReviewLoop — real run', () => {
     ]);
     expect(summary.results.map((row) => row.pr)).toEqual([8]);
     expect(calls.map((call) => call.opts.pr)).toEqual([8]); // the loop never ran for 7
+  });
+
+  test('the resolved CQ_MERGE_PROTECTED_BRANCH (either spelling) governs the protected-head exclusion', async () => {
+    const calls: RecordedCall[] = [];
+    const gh = fakeGh([pullRow(7, { ref: 'release' }), pullRow(8)]);
+    const summary = await runSelfReviewLoop(
+      baseDeps(
+        gh,
+        fakeLoop(calls, async (pr) => fakeOutcome(pr)),
+      ),
+      {
+        ...baseCfg({ journalRoot: tempJournalRoot() }),
+        cqEnv: readCqEnv({ CQ_MERGE_PROTECTED_BRANCH: 'refs/heads/release' }),
+      },
+    );
+    expect(summary.excluded).toEqual([expect.objectContaining({ pr: 7 })]);
+    expect(summary.results.map((row) => row.pr)).toEqual([8]);
+  });
+
+  test('an invalid CQ_MERGE_PROTECTED_BRANCH snapshot fails config before any gh call', async () => {
+    const calls: RecordedCall[] = [];
+    const gh = fakeGh([pullRow(7)]);
+    let listed = 0;
+    const counting = ((...args: Parameters<typeof gh>) => {
+      listed += 1;
+      return gh(...args);
+    }) as typeof gh;
+    const err = await runSelfReviewLoop(
+      baseDeps(
+        counting,
+        fakeLoop(calls, async (pr) => fakeOutcome(pr)),
+      ),
+      {
+        ...baseCfg({ journalRoot: tempJournalRoot() }),
+        cqEnv: readCqEnv({ CQ_MERGE_PROTECTED_BRANCH: 'release branch' }),
+      },
+    ).catch((e: unknown) => e);
+    expect((err as { dispatchClass?: string }).dispatchClass).toBe('config');
+    expect(listed).toBe(0);
   });
 
   test('the bounded prune keeps the newest 5 audit dirs and never touches the dispatch logs', async () => {

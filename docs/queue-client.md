@@ -134,7 +134,16 @@ calling principal:
    Do not run the dispatcher with `python3 -I`: it imports its sibling transport
    modules. Never accept these variables from the client (`PermitUserEnvironment`
    stays off). Do not add `CRQ_AUTHOR_*` settings to this queue identity.
-   `PATH` must resolve `git` and `gh`; authenticate `gh` as the queue account.
+   `PATH` must resolve `git`, `gh` and `gitleaks`; authenticate `gh` as the queue account.
+   review-v1 runs the runner's snapshot secret scan (including gitleaks) inside
+   this forced command. A `gitleaks` that is found but exits nonzero (for
+   example a mise shim with no global version and no real binary after it on
+   `PATH`) refuses every unpublished-commit submission with "snapshot secret
+   scanner unavailable". A `gitleaks` that is absent from `PATH` is skipped
+   instead, and the snapshot is admitted on the denylist scan alone, so absence
+   is not a safe failure mode either. Check it with the forced command's exact
+   `PATH` under `env -i`, not from a login shell. The crq systemd units put
+   `~/.local/bin` after the mise shims; the forced command needs the same.
 
 3. Create the policy file (mode 0600) disabled, owned by the queue-state account
    that runs the dispatcher. Verify that account can read it before enabling it.
@@ -312,9 +321,12 @@ repair jobs, then verifies the fix PR head, selected base, merge commit ancestry
 and capture ancestry before retaining merge evidence. With `queue.project_fixed: true`, status preserves the receipt outcome and reports
 `fixed: true` with a compact
 `remediation` reference only for complete receipt-bound evidence. Inventory exposes
-`reviewed`, `consumed` and `fixed` facts separately; its `fixed` state applies only
-before consumption, so the consumed filter retains consumed repairs. Fact filters
-match independently: a consumed repair is returned by both consumed and fixed filters. Partial scope, partial repairs,
+`reviewed`, `consumed` and `fixed` facts separately. `fixed` is an independent
+durable fact about remediation evidence, not a pre-consumption-only state, so it
+survives consumption: a consumed repair still reports `fixed: true`, and the
+`consumed` filter returns it as consumed without clearing its fixed credit.
+Fact filters match independently: a consumed repair is returned by both consumed
+and fixed filters. Partial scope, partial repairs,
 unmerged or stale publication heads, and equivalent receipts reused by another
 subject receive no fixed credit. Reviewed and consumed remain independent facts;
 local `FIXED` verdicts and receipt acknowledgement alone grant no remediation credit.
@@ -432,3 +444,26 @@ queue mutation and never takes tick.lock. An unavailable retry capability return
 is inferred.
 
 Drain returns `state:"unsupported"` immediately on an unsupported capability.
+
+## Local review scope and target freshness
+
+`cq review.submit --repo=owner/repo --target=main` selects the complete committed
+merge-base-to-HEAD diff. A local branch always supplies its own commit, even when
+its configured upstream is newer. When the two differ, `value.targetFreshness`
+reports `local` and `upstream` commit SHAs plus `ahead` and `behind` commit counts.
+This is advisory metadata based on existing local refs: submission does not fetch
+or substitute the upstream. It is saved with the request and preserved on retries.
+Missing upstream refs do not prevent review.
+
+Use `--base=<commit-or-ref>` to choose a specific base. It must resolve to an
+ancestor of HEAD; its resolved commit and trees enter the existing review identity.
+A retry with the same request ID keeps that identity, and a supplied base must
+resolve to the saved base. Omitting base on retry reuses the saved scope. Server
+validation and receipt adequacy still apply; a review with a different base is not
+reusable for a later PR merely because the head matches.
+
+Fully qualified refs such as `--target=refs/remotes/origin/main` are supported.
+For shorthand targets, local branch/tag/remote names must be unambiguous. If no
+such ref exists, a sole `origin/<target>` tracking ref is accepted. Multiple remote
+candidates are refused, as is a lone non-origin candidate; name the full ref in
+those cases. A local branch remains selected when remote tracking refs also exist.

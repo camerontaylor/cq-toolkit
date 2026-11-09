@@ -43,6 +43,14 @@ describe('readCqEnv', () => {
     expect(formatCqEnvDiagnostics(result)[0]).toMatch(/^cq: error: /);
   });
 
+  test('parser diagnostics strip scheme-less credentials', () => {
+    const result = readCqEnv({ CQ_SANDBOX: 'user:ParserCanary@host' });
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0]?.message).toContain('CQ_SANDBOX');
+    expect(result.errors[0]?.message).not.toContain('ParserCanary');
+    expect(result.errors[0]?.message).not.toContain('user:');
+  });
+
   test('two bad values give two errors in one result', () => {
     const result = readCqEnv({ CQ_SANDBOX: 'of', CQ_RUN_TOOL: 'maybe' });
     expect(result.errors.map((e) => e.name)).toEqual(['CQ_RUN_TOOL', 'CQ_SANDBOX']);

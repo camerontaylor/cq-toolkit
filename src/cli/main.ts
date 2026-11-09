@@ -512,10 +512,9 @@ async function dispatchCli(
 
   // The CQ_* environment is read ONCE per process entry, before any dispatch.
   // Errors (invalid values, denied names) are listed together and exit 2;
-  // warnings (unknown/reserved names) are printed once on stderr — also in
-  // --json mode, where stdout still carries exactly one JSON artifact (the
-  // op/run result shapes have no `warnings` slot, so stderr is the only
-  // channel). `cq config` reports the same diagnostics itself, so it is the
+  // warnings (unknown/reserved names) are human narration: printed once on
+  // stderr in human mode only, because I1 keeps stderr EMPTY in machine mode
+  // (--json). `cq config` reports the same diagnostics itself, so it is the
   // one subcommand that skips the gate (it exits 2 after printing its report).
   let cqEnv: CqEnv | undefined;
   // `cq config` still runs when the snapshot carries errors (the report must reach
@@ -539,7 +538,8 @@ async function dispatchCli(
       }
       return EXIT_CODES.usage;
     }
-    for (const line of check.warningLines) io.stderr(`${line}\n`);
+    // I1: machine mode keeps stderr EMPTY; warnings are human narration only.
+    if (rawMode !== 'json') for (const line of check.warningLines) io.stderr(`${line}\n`);
     cqEnv = check.cqEnv;
   }
 
@@ -761,7 +761,8 @@ async function dispatchCli(
   // SUPPRESSED like every narration line in the header's matrix — a silent
   // sink rides the importer into the ops registries' DriverFactoryConfig.
   // Human mode passes none: the library default is byte-identical narration
-  // (one `cq:`-prefixed stderr line).
+  // (one `cq:`-prefixed stderr line). The entry's resolved CQ_* snapshot rides the
+  // same wiring in both modes, so an op never re-reads the process env.
   const importerWiring =
     mode === 'json' || cqEnv !== undefined
       ? {

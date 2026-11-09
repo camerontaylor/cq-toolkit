@@ -147,7 +147,9 @@ export const PrCandidateSchema: z.ZodType<PrCandidate> = PrCandidateObject;
 // ---------------------------------------------------------------------------
 
 /** The JSON-dispatch input of the pure classifier: one candidate + the
- * caller's clock reading (classifyPr steals no time of its own). */
+ * caller's clock reading. classifyPr itself steals no time; the dispatched op
+ * only compares the reading with the real clock and REJECTS (`config`) a
+ * reading later than it, so a verdict is deterministic for any accepted input. */
 const ClassifyPrConfigDataSchema = z
   .object({
     settleWindowMs: z.number().int().nonnegative().optional(),
@@ -445,18 +447,29 @@ export const registry: OpRegistryEntry[] = [
   {
     name: 'merge.classifyPrs',
     inputSchema: ClassifyPrsInputSchema,
-    importer: async () => {
+    importer: async (wiring) => {
       const { classifyPr } = await import('./classifyPrs.js');
       const { defaultClassifyPrConfig } = await import('./classify.config.js');
-      const op: Op<ClassifyPrsInput, PrClassification> = (input) => {
+      const { mergeClassifyConfig, resolveClassifyTrust } = await import('./trustMirrors.js');
+      const { assertPlanClock } = await import('../../shared/planClock.js');
+      const op: Op<ClassifyPrsInput, PrClassification> = async (input) => {
+        // Who counts as a reviewer is a trust input: resolved from config only.
+        const trust = resolveClassifyTrust('merge.classifyPrs', input.config, wiring?.cqEnv);
         const config: ClassifyPrConfig =
-          input.config === undefined
+          input.config === undefined && Object.keys(trust).length === 0
             ? defaultClassifyPrConfig
-            : ({ ...defaultClassifyPrConfig, ...input.config } as ClassifyPrConfig);
-        return Promise.resolve({
+            : (mergeClassifyConfig('merge.classifyPrs', defaultClassifyPrConfig, {
+                ...input.config,
+                ...trust,
+              }) as ClassifyPrConfig);
+        return {
           status: 'ok',
-          value: classifyPr(input.candidate, input.nowMs, config),
-        });
+          value: classifyPr(
+            input.candidate,
+            assertPlanClock('merge.classifyPrs', input.nowMs),
+            config,
+          ),
+        };
       };
       return op as Op<unknown, unknown>;
     },
@@ -464,35 +477,53 @@ export const registry: OpRegistryEntry[] = [
   {
     name: 'merge.planMergeOrder',
     inputSchema: PlanMergeOrderInputSchema,
-    importer: async () => {
+    importer: async (wiring) => {
       const { planMergeOrder } = await import('./planMergeOrder.js');
-      const op: Op<PlanMergeOrderInput, PlanMergeResult> = (input) =>
-        Promise.resolve({
+      const { assertBaseBranchMirror } = await import('./trustMirrors.js');
+      const op: Op<PlanMergeOrderInput, PlanMergeResult> = async (input) => {
+        const baseBranch = assertBaseBranchMirror(
+          'merge.planMergeOrder',
+          input.baseBranch,
+          wiring?.cqEnv,
+        );
+        return {
           status: 'ok',
-          value: planMergeOrder({ baseBranch: input.baseBranch, prs: input.prs }),
-        });
+          value: planMergeOrder({ baseBranch, prs: input.prs }),
+        };
+      };
       return op as Op<unknown, unknown>;
     },
   },
   {
     name: 'merge.executeMerges',
     inputSchema: ExecuteMergesInputSchema,
-    importer: async () => {
+    importer: async (wiring) => {
       const { executeMerges } = await import('./executeMerges.js');
       const { realMergeEffects } = await import('../../adapters/forge-github/mergeEffects.js');
+      const { assertBaseBranchMirror, assertProtectedBranchMirror } =
+        await import('./trustMirrors.js');
       const op: Op<ExecuteMergesInput, ExecutionReport> = async (input) => {
+        // The plan's baseBranch defaults every entry's expected forge base: a mirror of the queue base.
+        const baseBranch = assertBaseBranchMirror(
+          'merge.executeMerges',
+          input.plan.baseBranch,
+          wiring?.cqEnv,
+        );
+        const protectedBranch = assertProtectedBranchMirror(
+          'merge.executeMerges',
+          input.protectedBranch,
+          wiring?.cqEnv,
+        );
         // The effects seam binds PER DISPATCH from the input's plain-JSON
         // repo config — the entry carries no repo state.
         const effects = realMergeEffects({
           repoRoot: input.repoRoot,
-          ...(input.protectedBranch !== undefined
-            ? { protectedBranch: input.protectedBranch }
-            : {}),
+          protectedBranch,
         });
         return {
           status: 'ok',
           value: await executeMerges({
-            plan: input.plan,
+            plan: { ...input.plan, baseBranch },
             effects,
             ...(input.maxRetries !== undefined ? { maxRetries: input.maxRetries } : {}),
           }),
@@ -509,9 +540,12 @@ export const registry: OpRegistryEntry[] = [
         // Dispatch wiring (PR #238 review P2): the host's alias-notice sink
         // rides the default factory's config; absent (every library
         // caller), the library default — one stderr line — is unchanged.
-        wiring?.onDeprecatedAlias !== undefined
-          ? { onDeprecatedAlias: wiring.onDeprecatedAlias }
-          : {},
+        {
+          ...(wiring?.onDeprecatedAlias !== undefined
+            ? { onDeprecatedAlias: wiring.onDeprecatedAlias }
+            : {}),
+          ...(wiring?.cqEnv !== undefined ? { cqEnv: wiring.cqEnv } : {}),
+        },
       ) as Op<unknown, unknown>,
   },
   {
@@ -532,9 +566,12 @@ export const registry: OpRegistryEntry[] = [
         // Dispatch wiring (PR #238 review P2): the host's alias-notice sink
         // rides the default factory's config; absent (every library
         // caller), the library default — one stderr line — is unchanged.
-        wiring?.onDeprecatedAlias !== undefined
-          ? { onDeprecatedAlias: wiring.onDeprecatedAlias }
-          : {},
+        {
+          ...(wiring?.onDeprecatedAlias !== undefined
+            ? { onDeprecatedAlias: wiring.onDeprecatedAlias }
+            : {}),
+          ...(wiring?.cqEnv !== undefined ? { cqEnv: wiring.cqEnv } : {}),
+        },
       ) as Op<unknown, unknown>,
   },
 ];

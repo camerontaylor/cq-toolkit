@@ -26,3 +26,17 @@ export const isPosture = (raw: string): raw is ProtectedPathsPosture =>
 export const BOT_ENTRY_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\[bot\])?$/;
 export const ACCEPT_STATES: readonly string[] = Object.freeze(['APPROVED', 'COMMENTED']);
 export const ASSOCIATIONS: readonly string[] = Object.freeze(['OWNER', 'MEMBER', 'COLLABORATOR']);
+
+/**
+ * Exactly one leading `refs/heads/` is stripped, nothing else: a branch
+ * literally named `heads/x` is `refs/heads/heads/x`, never `x`. Normalise a
+ * configured or supplied branch exactly once with this.
+ */
+export function stripRefsHeads(ref: string): string {
+  return ref.startsWith('refs/heads/') ? ref.slice('refs/heads/'.length) : ref;
+}
+
+/** Tolerant head-ref comparison form (`refs/heads/x` or `heads/x` -> `x`); never for configured values. */
+export function bareBranch(ref: string): string {
+  return ref.replace(/^(?:refs\/)?heads\//, '');
+}

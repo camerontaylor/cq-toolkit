@@ -16,6 +16,8 @@ describe('scrubbedBuildEnv', () => {
       OPENAI_API_KEY: 'c',
       NPM_CONFIG__AUTH: 'd',
       AWS_SECRET_ACCESS_KEY: 'e',
+      ENCRYPTION_KEY: 'f',
+      SIGNING_KEY: 'g',
     });
     expect(env).toEqual({ PATH: '/usr/bin', HOME: '/home/x' });
   });
@@ -29,6 +31,8 @@ describe('scrubbedBuildEnv', () => {
       SENTRY_DSN: 'https://abc@o1.ingest.sentry.io/2',
       // A neutral name carrying userinfo-with-password is still scrubbed by value.
       UPSTREAM: 'https://user:pw@example.com/path',
+      // Userinfo can carry a credential with no colon before the `@`; also scrubbed.
+      DEPLOY_URL: 'https://credential@example.invalid/',
       // Credential-free URLs and non-URL values stay.
       HOMEPAGE: 'https://example.com/a@b',
       CI: 'true',

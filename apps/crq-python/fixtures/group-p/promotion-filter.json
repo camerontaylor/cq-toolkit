@@ -1,0 +1,141 @@
+{
+  "schema": "cq.crq-group-p-vector/v1",
+  "family": "promotion-filter",
+  "cases": [
+    {
+      "name": "mixed-queue-excludes-every-promotion-state",
+      "source": "crq.live_items",
+      "input": {
+        "queue": {
+          "items": [
+            {
+              "id": "promotion-done",
+              "kind": "promotion",
+              "state": "done"
+            },
+            {
+              "id": "open-1",
+              "kind": "open",
+              "state": "pending"
+            },
+            {
+              "id": "promotion-promoting",
+              "kind": "promotion",
+              "state": "promoting"
+            },
+            {
+              "id": "merged-1",
+              "kind": "merged",
+              "state": "pending"
+            },
+            {
+              "id": "promotion-rejected",
+              "kind": "promotion",
+              "state": "rejected"
+            },
+            {
+              "id": "delta-1",
+              "kind": "delta",
+              "state": "pending"
+            }
+          ]
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "live_ids": [
+            "open-1",
+            "merged-1",
+            "delta-1"
+          ]
+        }
+      },
+      "note": "Historical promotion records stay on disk but never become live scheduling work"
+    },
+    {
+      "name": "only-promotion-items-are-empty",
+      "source": "crq.live_items",
+      "input": {
+        "queue": {
+          "items": [
+            {
+              "id": "promotion-1",
+              "kind": "promotion",
+              "state": "promoting"
+            },
+            {
+              "id": "promotion-2",
+              "kind": "promotion",
+              "state": "done"
+            }
+          ]
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "live_ids": []
+        }
+      },
+      "note": "Historical promotion records stay on disk but never become live scheduling work"
+    },
+    {
+      "name": "missing-kind-is-live",
+      "source": "crq.live_items",
+      "input": {
+        "queue": {
+          "items": [
+            {
+              "id": "legacy",
+              "state": "pending"
+            },
+            {
+              "id": "promotion-1",
+              "kind": "promotion",
+              "state": "done"
+            }
+          ]
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "live_ids": [
+            "legacy"
+          ]
+        }
+      },
+      "note": "Historical promotion records stay on disk but never become live scheduling work"
+    },
+    {
+      "name": "only-the-exact-kind-is-excluded",
+      "source": "crq.live_items",
+      "input": {
+        "queue": {
+          "items": [
+            {
+              "id": "promotion-final",
+              "kind": "promotion-final",
+              "state": "pending"
+            },
+            {
+              "id": "promotion",
+              "kind": "promotion",
+              "state": "pending"
+            }
+          ]
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "live_ids": [
+            "promotion-final"
+          ]
+        }
+      },
+      "note": "Historical promotion records stay on disk but never become live scheduling work"
+    }
+  ]
+}

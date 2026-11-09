@@ -280,10 +280,17 @@ def install(snapshot, binding, runner, *, original=False, clone=None, classes=No
             if scan_size > MAX_WIRE:
                 raise AuthorRefused("snapshot scan exceeds bound")
             scan_parts.append(part)
-        ok, _ = runner.secret_scan_diff("\n".join(scan_parts), quarantine / "scan.json",
-                                        base=binding["base"], head=binding["head"],
-                                        **({"classes": classes} if classes is not None else {}))
+        ok, scan = runner.secret_scan_diff("\n".join(scan_parts), quarantine / "scan.json",
+                                           base=binding["base"], head=binding["head"],
+                                           **({"classes": classes} if classes is not None else {}))
         if not ok:
+            # Still fail closed, but a scanner that could not run is an operator
+            # fault, not evidence of a secret: say so instead of "refused".
+            hits = (scan or {}).get("gitleaks_hits") or []
+            if (not (scan or {}).get("denylist_hits") and hits
+                    and all(h.get("rule") == "gitleaks-error" for h in hits)):
+                raise AuthorRefused("snapshot secret scanner unavailable on the runner (gitleaks did not run); "
+                                    "operator must make gitleaks resolvable on the queue identity PATH")
             raise AuthorRefused("snapshot secret scan refused")
         write_objects(clone, objects, "snapshot installation mismatch")
         git(clone, "update-ref", "refs/crq/author-snapshots/v1/" + binding["head"], binding["head"])

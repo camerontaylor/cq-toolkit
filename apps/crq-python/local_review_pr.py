@@ -58,7 +58,9 @@ def observe(q):
                  for r in q.get("review_requests", {}).values()):
             state = "superseded"
         elif item.get("scope_adequate"):
-            state = "findings" if item.get("receipt_id") and item.get("local_run_id") else "completed"
+            # The clean/findings outcome lives in the retained receipt; publish()
+            # replaces this label with it. Never guess "findings" from bookkeeping.
+            state = "completed"
         version = [link["item"], link["head"], link["base"], state, item.get("receipt_id")]
         if link.get("version") != version:
             link.update(version=version, state=state)

@@ -2,13 +2,178 @@
 // governor) and the propagated accounted spend (onSpend, review-debt #186).
 import { describe, expect, test, vi } from 'vitest';
 import { currentJobContext } from '../../src/kernel/governor.js';
-import { completeWorker, defaultWorld, fixLine, NEW_SHA, runLoop } from './review-loop.helpers.js';
+import {
+  actionableThread,
+  completeWorker,
+  defaultWorld,
+  fixLine,
+  NEW_SHA,
+  runLoop,
+} from './review-loop.helpers.js';
 
 // ---------------------------------------------------------------------------
 // The fix-run wall-clock ladder (CodeRabbit KyE, review-debt #137)
 // ---------------------------------------------------------------------------
 
 describe('the fix-run wall-clock ladder (opts.limits → the governor)', () => {
+  test('run cancellation releases a same-file waiter without dispatching it', async () => {
+    const world = defaultWorld();
+    world.threads = [
+      actionableThread('T1', 'src/a.ts', 3, 101),
+      actionableThread('T2', 'src/a.ts', 4, 102),
+    ];
+    const parent = new AbortController();
+    let started!: () => void;
+    const first = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const calls: string[] = [];
+    const running = runLoop(world, {
+      engineConcurrency: 2,
+      signal: parent.signal,
+      driverRun: async () => {
+        const context = currentJobContext()!;
+        calls.push(context.info.jobKey);
+        started();
+        await new Promise<void>((resolve) => {
+          if (context.signal.aborted) resolve();
+          else context.signal.addEventListener('abort', () => resolve(), { once: true });
+        });
+        return completeWorker(fixLine(false, 'Cancelled.', []));
+      },
+    });
+    await first;
+    parent.abort();
+    await running;
+    expect(calls).toEqual(['fix-1']);
+  });
+  test('a detached first worker cannot hold the run or admit a same-file successor', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const world = defaultWorld();
+    world.threads = [
+      actionableThread('T1', 'src/a.ts', 3, 101),
+      actionableThread('T2', 'src/a.ts', 4, 102),
+    ];
+    let firstStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      firstStarted = resolve;
+    });
+    let finishFirst!: () => void;
+    const finish = new Promise<void>((resolve) => {
+      finishFirst = resolve;
+    });
+    const calls: string[] = [];
+    try {
+      const running = runLoop(world, {
+        engineConcurrency: 2,
+        limits: { perJobWallClockMs: 20 },
+        driverRun: async () => {
+          const id = currentJobContext()!.info.jobKey;
+          calls.push(id);
+          if (id === 'fix-1') {
+            firstStarted();
+            await finish;
+          }
+          return completeWorker(fixLine(false, 'No change needed.', []));
+        },
+      });
+      const settled = expect(running).rejects.toThrow('detached work requires quarantine');
+      await started;
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(calls).toEqual(['fix-1']);
+      await settled;
+      expect(calls).toEqual(['fix-1']);
+    } finally {
+      finishFirst();
+      vi.useRealTimers();
+    }
+  });
+  test('a failed first worker releases its same-file successor', async () => {
+    const world = defaultWorld();
+    world.threads = [
+      actionableThread('T1', 'src/a.ts', 3, 101),
+      actionableThread('T2', 'src/a.ts', 4, 102),
+    ];
+    const calls: string[] = [];
+    const { outcome } = await runLoop(world, {
+      engineConcurrency: 2,
+      driverRun: async () => {
+        const id = currentJobContext()!.info.jobKey;
+        calls.push(id);
+        if (id === 'fix-1') throw new Error('fixture worker failure');
+        return completeWorker(fixLine(false, 'No change needed.', []));
+      },
+    });
+    expect(calls).toEqual(['fix-1', 'fix-2']);
+    expect(outcome.fixReport?.jobs[0]?.result.status).not.toBe('ok');
+    expect(outcome.fixReport?.jobs[1]?.result.status).toBe('ok');
+  });
+  test('a budget trip releases waiting jobs without dispatch or extra spend', async () => {
+    const world = defaultWorld();
+    world.threads = [
+      actionableThread('T1', 'src/a.ts', 3, 101),
+      actionableThread('T2', 'src/a.ts', 4, 102),
+    ];
+    const calls: string[] = [];
+    const { outcome } = await runLoop(world, {
+      engineConcurrency: 2,
+      runOptions: { maxUsd: 0.05 },
+      driverRun: async () => {
+        calls.push(currentJobContext()!.info.jobKey);
+        return completeWorker(fixLine(false, 'No change needed.', []), { costUSD: 0.1 });
+      },
+    });
+    expect(calls).toEqual(['fix-1']);
+    expect(outcome.fixReport?.costUSD).toBeCloseTo(0.1);
+    expect(outcome.fixReport?.jobs[1]?.result.status).toBe('budget-exhausted');
+  });
+  test('same-file wait does not consume the second job ladder and disjoint work starts', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const world = defaultWorld();
+    world.threads = [
+      actionableThread('T1', 'src/a.ts', 3, 101),
+      actionableThread('T2', 'src/a.ts', 4, 102),
+      actionableThread('T3', 'src/b.ts', 5, 103),
+    ];
+    const started: string[] = [];
+    const aborted: string[] = [];
+    let firstPairStarted!: () => void;
+    const firstPair = new Promise<void>((resolve) => {
+      firstPairStarted = resolve;
+    });
+    let secondStarted!: () => void;
+    const second = new Promise<void>((resolve) => {
+      secondStarted = resolve;
+    });
+    try {
+      const running = runLoop(world, {
+        engineConcurrency: 2,
+        limits: { perJobWallClockMs: 200 },
+        driverRun: async () => {
+          const context = currentJobContext()!;
+          const id = context.info.jobKey;
+          started.push(id);
+          context.signal.addEventListener('abort', () => aborted.push(id), { once: true });
+          if (started.length === 2) firstPairStarted();
+          if (id === 'fix-2') secondStarted();
+          await new Promise<void>((resolve) => setTimeout(resolve, 150));
+          return completeWorker(fixLine(false, 'No change needed.', []));
+        },
+      });
+      await firstPair;
+      expect(started).toEqual(['fix-1', 'fix-3']);
+      await vi.advanceTimersByTimeAsync(150);
+      await second;
+      await vi.advanceTimersByTimeAsync(150);
+      const { outcome } = await running;
+      expect(started).toEqual(['fix-1', 'fix-3', 'fix-2']);
+      expect(aborted).toEqual([]);
+      expect(outcome.fixReport?.jobs).toHaveLength(3);
+      expect(outcome.fixReport?.jobs.every((row) => row.result.status === 'ok')).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
   test('limits.perJobWallClockMs=20 trips a fixer wedged past it: the governed run records the failure honestly', async () => {
     // The driver waits 200 virtual ms and COOPERATES with the rung-1 signal (a real
     // subprocess fixer is escalated at the later rungs; in-process, the

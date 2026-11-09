@@ -61,8 +61,8 @@ Secret scanning happens before upload; credits are never enabled automatically.
 `crq-repair.path` and a ten-minute fallback timer activate `crq_repair.py`. With
 no arguments it drains the inbox under `service.lock`, critical/major items
 before minor-only items, oldest first within each class. Within an item,
-critical/major findings precede minors. Minor jobs require a non-empty string
-`canonical_finding_id`; ordinary minor, trivial, info and none jobs are skipped. It
+critical/major findings precede minors. Minor jobs require a lowercase 64-character hexadecimal `canonical_finding_id`
+and a matching delivered triage receipt; ordinary minor, trivial, info and none jobs are skipped. It
 owns `state/repair/`, uses one worktree per item and serial findings within that
 item, and runs items serially: the drivers' `CQ_*` session correlation is
 process environment, so concurrent items would need per-dispatch environments
@@ -171,6 +171,18 @@ then escalation at A2; three fixer attempts and one judge are the ceiling.
 Provider rate limits defer without consuming an attempt. Critical findings use
 the critical judge. Recurring NOT-FIXED majors and configured
 sampling trigger a read-only judge; valid findings receive one A2 refix.
+
+For a terminal failed job, `crq_repair.py --recover-job <job-id>` inspects
+the retained worktree without changing it, scans bounded current-source and
+patch evidence, and asks the existing critical judge to reassess the finding.
+Only a verified current anchor can create a replacement through tick-owned
+preparation; the replacement uses a separate worktree. Recovery retains its
+invocation artifact under the original job. An unknown judge outcome is not
+automatically retried; explicit provider deferrals have at most three attempts.
+Owner dispositions and source or evidence changes remain unresolved for
+inspection. Every finding uses its own worktree; staged and unstaged patches,
+untracked files and commits are retained per attempt before retry or fallback.
+Legacy shared worktrees need independent attribution before recovery.
 
 Tests and probes are suspended. No worker or mechanical stage runs them.
 Mechanics verify full commit SHAs, strict base ancestry, HEAD membership,

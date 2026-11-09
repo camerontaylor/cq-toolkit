@@ -137,6 +137,21 @@ test.each([false, true])(
         );
         void first.catch(() => undefined);
         await closed.promise;
+        if (late) {
+          await expect(first).rejects.toThrow('detached child work requires quarantine');
+          await expect(
+            owner.address(
+              {
+                pr: 9,
+                head: f.prs[1].headRefOid,
+                headRepo: 'fixture/base',
+                headRefName: 'open-nine',
+              },
+              { repoRoot: f.repo.root, source: 'pr:9' },
+            ),
+          ).rejects.toThrow();
+          throw new Error('detached child refused');
+        }
         const second = owner.address(
           { pr: 9, head: f.prs[1].headRefOid, headRepo: 'fixture/base', headRefName: 'open-nine' },
           { repoRoot: f.repo.root, source: 'pr:9' },
@@ -155,6 +170,10 @@ test.each([false, true])(
         (value) => ({ value }),
         (error: unknown) => ({ error }),
       );
+      if (late) {
+        release.resolve();
+        await actual;
+      }
       expect(await readFile(reports[0]!.reportPath, 'utf8')).toBe(
         'immutable closed participant report',
       );

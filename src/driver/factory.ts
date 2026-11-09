@@ -32,8 +32,8 @@
 //   - SESSION RETENTION: 'keep' (the default) wraps nothing — session
 //     records are worker evidence. 'reap-on-settle' deletes, after the run
 //     settles WHATEVER the verdict, ONLY the FRESH record that run created:
-//     the run created a record iff it resolved with a sessionId AND the
-//     invocation carried NO sessionRef. A sessionRef-resumed record is
+//     ownership requires a resolved sessionId or a rejected SessionBoundError,
+//     AND the invocation carried NO sessionRef. A sessionRef-resumed record is
 //     NEVER reaped (it predates the run and may carry later turns).
 import { AcpDriver } from './acp/index.js';
 import type { AcpDriverOptions } from './acp/index.js';
@@ -41,7 +41,7 @@ import { AiSdkDriver } from './ai-sdk/index.js';
 import type { AiSdkDriverOptions } from './ai-sdk/index.js';
 import { ClaudeCodeDriver } from './claude-code/index.js';
 import type { ClaudeCodeDriverOptions, ClaudeCodeTransport } from './claude-code/index.js';
-import { DispatchError } from './errors.js';
+import { DispatchError, SessionBoundError } from './errors.js';
 import { nearestKey } from '../shared/nearest.js';
 import { defaultSessionsDir } from './sessions-dir.js';
 import { assertStrictTokenBudgetSupported } from './common/strict-budget.js';
@@ -142,11 +142,14 @@ export type ClaudeCodeLaneTransport = ClaudeCodeTransport;
  * Construction knobs for the ai-sdk lane. `providers` is an in-process
  * factory registry — constructor DATA of a hosted deployment (never plan
  * JSON: it is not serializable), and the injection seam that keeps factory
- * tests offline.
+ * tests offline. `dispatcher` is the same kind of in-process data: the
+ * operator's undici transport (e.g. a proxy agent), passed straight to the
+ * default providers' fetch so a configured proxy is never replaced.
  */
 export type AiSdkLaneConfig = Pick<
   AiSdkDriverOptions,
   | 'providers'
+  | 'dispatcher'
   | 'sandboxConfig'
   | 'sessionsDir'
   | 'strictTokenCapability'
@@ -436,6 +439,7 @@ function constructLane(lane: LaneId, request: DriverRequest, config: DriverFacto
       return new AiSdkDriver({
         ...(request.beforeRequest === undefined ? {} : { beforeRequest: request.beforeRequest }),
         ...(cfg?.providers !== undefined ? { providers: cfg.providers } : {}),
+        ...(cfg?.dispatcher !== undefined ? { dispatcher: cfg.dispatcher } : {}),
         ...(cfg?.sandboxConfig !== undefined ? { sandboxConfig: cfg.sandboxConfig } : {}),
         ...(cfg?.strictTokenCapability !== undefined
           ? { strictTokenCapability: cfg.strictTokenCapability }
@@ -481,8 +485,13 @@ function constructLane(lane: LaneId, request: DriverRequest, config: DriverFacto
  * started" delta would reap OTHER runs' records under overlap). A
  * sessionRef-resumed record predates the run and is never reaped.
  *
- * Rejected runs expose their own created session id; cleanup never scans a
- * shared directory or guesses ownership. Cleanup is
+ * Rejected runs expose their own created session id through an EXPLICIT
+ * ownership marker ({@link SessionBoundError}, which a lane raises only after
+ * its own onSessionCreated path created the record); a foreign throw is never
+ * evidence of ownership just because it carries a `sessionId` member — an
+ * injected provider (or any other hostile object) can throw one before any
+ * record exists, and reaping on that would delete SOMEONE ELSE's session.
+ * Cleanup never scans a shared directory or guesses ownership. Cleanup is
  * best-effort: a reap failure is swallowed, the verdict outranks it (the
  * same posture as the lanes' persistence). A resolved result loses its
  * sessionId only after successful cleanup; a failed cleanup retains the link.
@@ -504,9 +513,13 @@ export function withReapOnSettle(driver: Driver, sessionsDir: string): Driver {
       try {
         result = await driver.run(invocation, options);
       } catch (error) {
-        if (typeof error === 'object' && error !== null && 'sessionId' in error) {
-          await reapFresh(error.sessionId);
-        }
+        // OWNERSHIP EVIDENCE, not a shape probe: only a SessionBoundError
+        // proves the lane created the record it names (the lanes raise it from
+        // their own onSessionCreated path). A bare `sessionId` member on an
+        // arbitrary throw is NOT evidence — an injected ai-sdk provider can
+        // throw such an object BEFORE any record exists, and reaping it would
+        // delete a pre-existing, unrelated session.
+        if (error instanceof SessionBoundError) await reapFresh(error.sessionId);
         throw error;
       }
       if (await reapFresh(result.sessionId)) {

@@ -1,4 +1,5 @@
 // W1.9 — the CQ_MERGE_PROTECTED_PATHS posture resolver (P7/P8, Annex B §B.1).
+import { trustedOptIn } from '../../../src/config/optin.js';
 import { describe, expect, test } from 'vitest';
 import {
   PROTECTED_PATHS_ENV,
@@ -46,7 +47,7 @@ describe('resolveProtectedPathsConfig', () => {
     expect(
       resolveProtectedPathsConfig({
         env: { CQ_MERGE_PROTECTED_PATHS: 'human' },
-        optIn: { 'merge.protectedPaths': 'diff-check' },
+        optIn: trustedOptIn({ 'merge.protectedPaths': 'diff-check' }),
       }),
     ).toEqual({ posture: 'diff-check', layer: 'call' });
   });
@@ -55,7 +56,7 @@ describe('resolveProtectedPathsConfig', () => {
     expect(
       resolveProtectedPathsConfig({
         env: { CQ_MERGE_PROTECTED_PATHS: 'human' },
-        optIn: { 'merge.protectedPaths': 'advisory' },
+        optIn: trustedOptIn({ 'merge.protectedPaths': 'advisory' }),
       }),
     ).toEqual({ posture: 'advisory', layer: 'call' });
   });
@@ -64,7 +65,7 @@ describe('resolveProtectedPathsConfig', () => {
     expect(
       resolveProtectedPathsConfig({
         env: { CQ_MERGE_PROTECTED_PATHS: 'advisory' },
-        optIn: { 'merge.protectedPaths': 'human' },
+        optIn: trustedOptIn({ 'merge.protectedPaths': 'human' }),
       }),
     ).toEqual({ posture: 'human', layer: 'call' });
   });
@@ -73,7 +74,7 @@ describe('resolveProtectedPathsConfig', () => {
     expect(
       resolveProtectedPathsConfig({
         env: { CQ_MERGE_PROTECTED_PATHS: 'diff-check' },
-        optIn: { 'merge.protectedPaths': 'human' },
+        optIn: trustedOptIn({ 'merge.protectedPaths': 'human' }),
       }),
     ).toEqual({ posture: 'human', layer: 'call' });
   });
@@ -82,20 +83,26 @@ describe('resolveProtectedPathsConfig', () => {
     expect(
       resolveProtectedPathsConfig({
         env: { CQ_MERGE_PROTECTED_PATHS: 'bogus' },
-        optIn: { 'merge.protectedPaths': 'human' },
+        optIn: trustedOptIn({ 'merge.protectedPaths': 'human' }),
       }),
     ).toEqual({ posture: 'human', layer: 'call' });
   });
 
   test.each(['', '  ', 'Diff-Check', 'all'])('a blank or unknown opt-in %j throws', (value) => {
     expect(() =>
-      resolveProtectedPathsConfig({ env: {}, optIn: { 'merge.protectedPaths': value } }),
+      resolveProtectedPathsConfig({
+        env: {},
+        optIn: trustedOptIn({ 'merge.protectedPaths': value }),
+      }),
     ).toThrow(/merge\.protectedPaths must be 'human', 'diff-check' or 'advisory'/);
   });
 
   test('an empty opt-in object falls through to the env', () => {
     expect(
-      resolveProtectedPathsConfig({ env: { CQ_MERGE_PROTECTED_PATHS: 'diff-check' }, optIn: {} }),
+      resolveProtectedPathsConfig({
+        env: { CQ_MERGE_PROTECTED_PATHS: 'diff-check' },
+        optIn: trustedOptIn({}),
+      }),
     ).toEqual({ posture: 'diff-check', layer: 'env' });
   });
 
@@ -103,7 +110,10 @@ describe('resolveProtectedPathsConfig', () => {
     expect(Object.isFrozen(resolveProtectedPathsConfig({ env: {} }))).toBe(true);
     expect(
       Object.isFrozen(
-        resolveProtectedPathsConfig({ env: {}, optIn: { 'merge.protectedPaths': 'human' } }),
+        resolveProtectedPathsConfig({
+          env: {},
+          optIn: trustedOptIn({ 'merge.protectedPaths': 'human' }),
+        }),
       ),
     ).toBe(true);
   });
@@ -142,7 +152,7 @@ describe('resolveProtectedPathsConfig with a CqEnv snapshot', () => {
     expect(
       resolveProtectedPathsConfig({
         cqEnv: bad,
-        optIn: { 'merge.protectedPaths': 'human' },
+        optIn: trustedOptIn({ 'merge.protectedPaths': 'human' }),
       }).layer,
     ).toBe('call');
     // An error for an unrelated key does not affect this resolver.

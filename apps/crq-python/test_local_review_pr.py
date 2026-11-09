@@ -39,6 +39,19 @@ class AssociationTests(SnapshotGitFixture, unittest.TestCase):
         pr.observe(self.q)
         self.assertIn("prior coverage", self.q["review_pr_outbox"][crq.REPO + "#7"]["state"])
 
+    def test_completed_link_is_not_labelled_findings_before_publication(self):
+        # A clean completed run with its own receipt was labelled "findings" in the
+        # link/outbox record (live: toolkit-research#25). publish() derives the real
+        # clean/findings outcome from the retained receipt; until then it is "completed".
+        pr.associate(self.c, self.q, crq.REPO, 7, self.base, self.head, False)
+        self.item.update(state="done", scope_adequate=True, receipt_id="r" * 64,
+                         local_run_id="lr-run-20261108T000000Z")
+        pr.observe(self.q)
+        key = crq.REPO + "#7"
+        self.assertEqual(self.q["review_pr_outbox"][key]["state"], "completed")
+        self.assertEqual(self.q["review_pr_links"][key]["state"], "completed")
+        self.assertEqual(self.q["review_pr_links"][key]["version"][3], "completed")
+
     def test_cancel_and_supersede_events(self):
         pr.associate(self.c, self.q, crq.REPO, 7, self.base, self.head, False)
         pr.observe(self.q)

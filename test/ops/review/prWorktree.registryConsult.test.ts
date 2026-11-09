@@ -188,7 +188,7 @@ describe('registry consult', () => {
       // freed the branch hold, and `-B … <expectedSha>` landed the tree AT
       // the fetched truth.
       expect(calls).toEqual([
-        ['-C', repoRoot, 'rev-parse', '--absolute-git-dir'],
+        ['-C', repoRoot, 'rev-parse', '--path-format=absolute', '--git-common-dir'],
         ['-C', repoRoot, 'fetch', 'origin', `+refs/pull/${PR}/head:refs/cq-review/pr-${PR}`],
         ['-C', repoRoot, 'rev-parse', 'refs/cq-review/pr-7'],
         ['-C', stalePath, 'rev-parse', '--abbrev-ref', 'HEAD'],

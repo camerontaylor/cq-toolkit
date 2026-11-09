@@ -1,0 +1,2732 @@
+{
+  "schema": "cq.crq-group-p-vector/v1",
+  "family": "backfill-inventory",
+  "cases": [
+    {
+      "name": "ordering-tier-before-required",
+      "source": "backfill_inventory.rank",
+      "input": {
+        "manifest": {
+          "version": "cq.backfill-inventory/v1",
+          "repo": "example/primary",
+          "target": "1111111111111111111111111111111111111111",
+          "tree": "2222222222222222222222222222222222222222",
+          "ledger_head": "3333333333333333333333333333333333333333",
+          "evaluated_at": "2026-11-09T00:00:00Z",
+          "snapshots": {
+            "queue": {
+              "sha256": "eef46741adfc3a9f76294d3b78f37a45f113092ac9d44ee77c7a038a88ff09a1",
+              "location": "fixture/queue"
+            },
+            "required": {
+              "sha256": "7ff33db1f859822b4131d03be9eea9fdfbfb44a0511efce60abfa11119e966aa",
+              "location": "fixture/required"
+            },
+            "tiers": {
+              "sha256": "2430f1a2ad2982d0067885488a4c89e21ad1d7c83b115ba8f1b20acc88dfaea8",
+              "location": "fixture/tiers"
+            },
+            "limits": {
+              "sha256": "3480336eb349b0761323816549c38b1efc8a7deae0a1ef3d43a952007655f01e",
+              "location": "fixture/limits"
+            },
+            "objects": {
+              "sha256": "4e6c372227099e571f317c7f59aa6d8dfeeb95f47668e7a8c0b8441fc8619694",
+              "location": "fixture/objects"
+            },
+            "required_paths": {
+              "sha256": "c4b50c426a7f23d7871f15cc9f28684336456b803eae9cdf690e2cca6db4c4f9",
+              "location": "fixture/required_paths"
+            },
+            "ledger": {
+              "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+              "location": "fixture/ledger"
+            },
+            "required_members": {
+              "sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+              "location": "fixture/required_members"
+            },
+            "evidence_gaps": {
+              "sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+              "location": "fixture/evidence_gaps"
+            },
+            "protected_policy": {
+              "sha256": "c89a148be40e6752261e3038609a4b68de22fa3bfdaf32f884edffb8480b9bbe",
+              "location": "fixture/protected_policy"
+            }
+          },
+          "git_version": "git version 2.43.0",
+          "blame_options": [
+            "--line-porcelain",
+            "--encoding=UTF-8"
+          ],
+          "construction_version": "fixture-v1",
+          "scoring_version": "fixture-v1",
+          "limits_version": 1,
+          "tiers_version": 1,
+          "git_bundle": {
+            "sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+            "location": "fixture/git.bundle"
+          },
+          "raw_queue": {
+            "sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+            "location": "fixture/raw-queue"
+          },
+          "queue_encoding": "legacy-number-tag/v1",
+          "id": "b75dfe3677fdba566266b160205617e52ba2faa24a905fe8899ed80d721647e6"
+        },
+        "inputs": {
+          "queue": {
+            "items": []
+          },
+          "required": {
+            "version": 1,
+            "rows": [
+              {
+                "row": 1,
+                "pr": 10
+              }
+            ],
+            "explicit_unions": []
+          },
+          "tiers": {
+            "version": 1
+          },
+          "limits": {
+            "version": 1,
+            "construction_version": "fixture-v1",
+            "scoring_version": "fixture-v1",
+            "max_files": 8,
+            "max_file_bytes": 1000,
+            "max_total_bytes": 2000,
+            "reviewer": {
+              "verified": true,
+              "evidence": "fixture",
+              "max_files": 8,
+              "max_diff_bytes": 2000
+            }
+          },
+          "objects": [
+            {
+              "path": "apps/crq-python/a.py",
+              "blob": "548870d6785f1755989d937f6aaa235d41edad7f",
+              "mode": "100644",
+              "bytes": 10,
+              "lines": 2,
+              "disposition": "included",
+              "reason": "",
+              "covered": [
+                [
+                  1,
+                  1
+                ]
+              ],
+              "evidence": [],
+              "churn": 0,
+              "findings": 0,
+              "tier": "T1"
+            },
+            {
+              "path": "src/kernel/b.ts",
+              "blob": "b35635c553497616b4918cea4fa222dd37cd9ec9",
+              "mode": "100644",
+              "bytes": 20,
+              "lines": 3,
+              "disposition": "included",
+              "reason": "",
+              "covered": [],
+              "evidence": [],
+              "churn": 0,
+              "findings": 0,
+              "tier": "T2"
+            },
+            {
+              "path": "src/new.ts",
+              "blob": "f8070f974d7d43ff03f8eb5b9acd11fd8dba83da",
+              "mode": "100644",
+              "bytes": 5,
+              "lines": 1,
+              "disposition": "included",
+              "reason": "",
+              "covered": [],
+              "evidence": [],
+              "churn": 0,
+              "findings": 0,
+              "tier": "T3"
+            }
+          ],
+          "required_paths": {
+            "10": [
+              {
+                "path": "src/kernel/b.ts"
+              }
+            ]
+          },
+          "ledger": [],
+          "required_members": {},
+          "evidence_gaps": {},
+          "protected_policy": "{}"
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "manifest_id": "b75dfe3677fdba566266b160205617e52ba2faa24a905fe8899ed80d721647e6",
+          "target": "1111111111111111111111111111111111111111",
+          "evaluated_at": "2026-11-09T00:00:00Z",
+          "candidates": [
+            {
+              "repo": "example/primary",
+              "kind": "B",
+              "prs": [],
+              "paths": [
+                "apps/crq-python/a.py"
+              ],
+              "target": "1111111111111111111111111111111111111111",
+              "scope_digest": "368e1f0fd8abe45aa9fcecad9e2c9637d698c15c8835f78c2d7db1ee26649ef8",
+              "construction_policy_digest": "3480336eb349b0761323816549c38b1efc8a7deae0a1ef3d43a952007655f01e",
+              "partition": 0,
+              "subject_id": "dade42cfa2658b00b52e1dc7ab14860c368688fd6b099527fd31a13600c62af8",
+              "family": "f6cb5f762316d068404e5155673ab1c654398b7bdce08246b0d94f4c146d0af8",
+              "generation": 0,
+              "retry": false,
+              "row": null,
+              "tier": "T1",
+              "score": 1,
+              "scope": [
+                {
+                  "path": "apps/crq-python/a.py",
+                  "blob": "548870d6785f1755989d937f6aaa235d41edad7f",
+                  "intervals": [
+                    [
+                      2,
+                      2
+                    ]
+                  ]
+                }
+              ],
+              "job_id": "dade42cfa2658b00b52e1dc7ab14860c368688fd6b099527fd31a13600c62af8:0",
+              "path_lineages": {
+                "apps/crq-python/a.py": "apps/crq-python/a.py"
+              },
+              "path_tiers": {
+                "apps/crq-python/a.py": "T1"
+              },
+              "path_scores": {
+                "apps/crq-python/a.py": 1
+              }
+            },
+            {
+              "repo": "example/primary",
+              "kind": "A",
+              "prs": [
+                10
+              ],
+              "paths": [
+                "src/kernel/b.ts"
+              ],
+              "target": "1111111111111111111111111111111111111111",
+              "scope_digest": "2a8ef680026c84203bbab75d8f9a91fe2a3757352cfc8df83b35ee599360fa4e",
+              "construction_policy_digest": "3480336eb349b0761323816549c38b1efc8a7deae0a1ef3d43a952007655f01e",
+              "partition": 0,
+              "subject_id": "9d78bec83abcd326e63d424caa660a2253bbbd76d4a57312a199e6e7c4f2d6c5",
+              "family": "2e7bca9f700c5752fccc765b0c16a810172e49814a394eb328f7b4666de2983a",
+              "generation": 0,
+              "retry": false,
+              "row": 1,
+              "tier": "T2",
+              "score": 3,
+              "scope": [
+                {
+                  "path": "src/kernel/b.ts",
+                  "blob": "b35635c553497616b4918cea4fa222dd37cd9ec9",
+                  "intervals": [
+                    [
+                      1,
+                      3
+                    ]
+                  ]
+                }
+              ],
+              "job_id": "9d78bec83abcd326e63d424caa660a2253bbbd76d4a57312a199e6e7c4f2d6c5:0",
+              "path_lineages": {
+                "src/kernel/b.ts": "src/kernel/b.ts"
+              },
+              "path_tiers": {
+                "src/kernel/b.ts": "T2"
+              },
+              "path_scores": {
+                "src/kernel/b.ts": 3
+              }
+            },
+            {
+              "repo": "example/primary",
+              "kind": "B",
+              "prs": [],
+              "paths": [
+                "src/new.ts"
+              ],
+              "target": "1111111111111111111111111111111111111111",
+              "scope_digest": "e19d1f71109c83dbbddf44f6076f1b821c5da701fe358741f74b7328e866e8af",
+              "construction_policy_digest": "3480336eb349b0761323816549c38b1efc8a7deae0a1ef3d43a952007655f01e",
+              "partition": 0,
+              "subject_id": "e04a24786cef75350b6828740dfbf4dbdb8da6732db4e2e2f84c72d41f9cba58",
+              "family": "cfb80132b38d5f51957339683358538496d14f12213c02eaa01e9db35a82f434",
+              "generation": 0,
+              "retry": false,
+              "row": null,
+              "tier": "T3",
+              "score": 1,
+              "scope": [
+                {
+                  "path": "src/new.ts",
+                  "blob": "f8070f974d7d43ff03f8eb5b9acd11fd8dba83da",
+                  "intervals": [
+                    [
+                      1,
+                      1
+                    ]
+                  ]
+                }
+              ],
+              "job_id": "e04a24786cef75350b6828740dfbf4dbdb8da6732db4e2e2f84c72d41f9cba58:0",
+              "path_lineages": {
+                "src/new.ts": "src/new.ts"
+              },
+              "path_tiers": {
+                "src/new.ts": "T3"
+              },
+              "path_scores": {
+                "src/new.ts": 1
+              }
+            }
+          ],
+          "paths": [
+            {
+              "path": "apps/crq-python/a.py",
+              "blob": "548870d6785f1755989d937f6aaa235d41edad7f",
+              "mode": "100644",
+              "bytes": 10,
+              "lines": 2,
+              "disposition": "included",
+              "reason": "",
+              "covered": [
+                [
+                  1,
+                  1
+                ]
+              ],
+              "evidence": [],
+              "churn": 0,
+              "findings": 0,
+              "tier": "T1",
+              "uncovered": [
+                [
+                  2,
+                  2
+                ]
+              ],
+              "eligible": [
+                [
+                  2,
+                  2
+                ]
+              ],
+              "score": 1
+            },
+            {
+              "path": "src/kernel/b.ts",
+              "blob": "b35635c553497616b4918cea4fa222dd37cd9ec9",
+              "mode": "100644",
+              "bytes": 20,
+              "lines": 3,
+              "disposition": "included",
+              "reason": "",
+              "covered": [],
+              "evidence": [],
+              "churn": 0,
+              "findings": 0,
+              "tier": "T2",
+              "uncovered": [
+                [
+                  1,
+                  3
+                ]
+              ],
+              "eligible": [
+                [
+                  1,
+                  3
+                ]
+              ],
+              "score": 3
+            },
+            {
+              "path": "src/new.ts",
+              "blob": "f8070f974d7d43ff03f8eb5b9acd11fd8dba83da",
+              "mode": "100644",
+              "bytes": 5,
+              "lines": 1,
+              "disposition": "included",
+              "reason": "",
+              "covered": [],
+              "evidence": [],
+              "churn": 0,
+              "findings": 0,
+              "tier": "T3",
+              "uncovered": [
+                [
+                  1,
+                  1
+                ]
+              ],
+              "eligible": [
+                [
+                  1,
+                  1
+                ]
+              ],
+              "score": 1
+            }
+          ],
+          "required": [
+            {
+              "prs": [
+                10
+              ],
+              "row": 1,
+              "missing_source_evidence": [],
+              "paths": [
+                {
+                  "path": "src/kernel/b.ts",
+                  "outcome": "still-pending",
+                  "evidence": [],
+                  "reason": ""
+                }
+              ]
+            }
+          ],
+          "evidence_gaps": {}
+        }
+      }
+    },
+    {
+      "name": "ordering-score-then-retry",
+      "source": "backfill_inventory.rank",
+      "input": {
+        "manifest": {
+          "version": "cq.backfill-inventory/v1",
+          "repo": "example/primary",
+          "target": "1111111111111111111111111111111111111111",
+          "tree": "2222222222222222222222222222222222222222",
+          "ledger_head": "3333333333333333333333333333333333333333",
+          "evaluated_at": "2026-11-09T00:00:00Z",
+          "snapshots": {
+            "queue": {
+              "sha256": "5d96cddec969ee9cad08daa89d990e617ce153345de90501178bf2d35e1514d8",
+              "location": "fixture/queue"
+            },
+            "required": {
+              "sha256": "73c2728ba7feb6c3014b6f38085743a2536b502c80a38f045ce380b7d749fa72",
+              "location": "fixture/required"
+            },
+            "tiers": {
+              "sha256": "2430f1a2ad2982d0067885488a4c89e21ad1d7c83b115ba8f1b20acc88dfaea8",
+              "location": "fixture/tiers"
+            },
+            "limits": {
+              "sha256": "3480336eb349b0761323816549c38b1efc8a7deae0a1ef3d43a952007655f01e",
+              "location": "fixture/limits"
+            },
+            "objects": {
+              "sha256": "f7fe63e6d2ac07e7e377e6e7352a7708fc749a429ff15be83b441d685d389ede",
+              "location": "fixture/objects"
+            },
+            "required_paths": {
+              "sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+              "location": "fixture/required_paths"
+            },
+            "ledger": {
+              "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+              "location": "fixture/ledger"
+            },
+            "required_members": {
+              "sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+              "location": "fixture/required_members"
+            },
+            "evidence_gaps": {
+              "sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+              "location": "fixture/evidence_gaps"
+            },
+            "protected_policy": {
+              "sha256": "c89a148be40e6752261e3038609a4b68de22fa3bfdaf32f884edffb8480b9bbe",
+              "location": "fixture/protected_policy"
+            }
+          },
+          "git_version": "git version 2.43.0",
+          "blame_options": [
+            "--line-porcelain",
+            "--encoding=UTF-8"
+          ],
+          "construction_version": "fixture-v1",
+          "scoring_version": "fixture-v1",
+          "limits_version": 1,
+          "tiers_version": 1,
+          "git_bundle": {
+            "sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+            "location": "fixture/git.bundle"
+          },
+          "raw_queue": {
+            "sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+            "location": "fixture/raw-queue"
+          },
+          "queue_encoding": "legacy-number-tag/v1",
+          "id": "77d733e330bd8d761d8609f7b9502a4842ab3e2919a9a911af62bc288947f751"
+        },
+        "inputs": {
+          "queue": {
+            "items": [],
+            "backfill_families": {
+              "190ca6b6add6e3317400060d0f10ce0b4f9fe55ec428f937f74ac12a63e47362": {
+                "failures": 2
+              }
+            }
+          },
+          "required": {
+            "version": 1,
+            "rows": [],
+            "explicit_unions": []
+          },
+          "tiers": {
+            "version": 1
+          },
+          "limits": {
+            "version": 1,
+            "construction_version": "fixture-v1",
+            "scoring_version": "fixture-v1",
+            "max_files": 8,
+            "max_file_bytes": 1000,
+            "max_total_bytes": 2000,
+            "reviewer": {
+              "verified": true,
+              "evidence": "fixture",
+              "max_files": 8,
+              "max_diff_bytes": 2000
+            }
+          },
+          "objects": [
+            {
+              "path": "alpha/a.py",
+              "blob": "f2c2261a8e200f8f815c63f02a48234212178dad",
+              "mode": "100644",
+              "bytes": 10,
+              "lines": 4,
+              "disposition": "included",
+              "reason": "",
+              "covered": [],
+              "evidence": [],
+              "churn": 0,
+              "findings": 0,
+              "tier": "T3"
+            },
+            {
+              "path": "beta/b.py",
+              "blob": "cc651c14b5a333c056d3bd1b592d64f176203562",
+              "mode": "100644",
+              "bytes": 10,
+              "lines": 2,
+              "disposition": "included",
+              "reason": "",
+              "covered": [],
+              "evidence": [],
+              "churn": 0,
+              "findings": 0,
+              "tier": "T3"
+            },
+            {
+              "path": "gamma/c.py",
+              "blob": "ad77a7258fc52dbe1d23477415bb64d24def9dc8",
+              "mode": "100644",
+              "bytes": 10,
+              "lines": 3,
+              "disposition": "included",
+              "reason": "",
+              "covered": [],
+              "evidence": [],
+              "churn": 0,
+              "findings": 0,
+              "tier": "T3"
+            }
+          ],
+          "required_paths": {},
+          "ledger": [],
+          "required_members": {},
+          "evidence_gaps": {},
+          "protected_policy": "{}"
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "manifest_id": "77d733e330bd8d761d8609f7b9502a4842ab3e2919a9a911af62bc288947f751",
+          "target": "1111111111111111111111111111111111111111",
+          "evaluated_at": "2026-11-09T00:00:00Z",
+          "candidates": [
+            {
+              "repo": "example/primary",
+              "kind": "B",
+              "prs": [],
+              "paths": [
+                "alpha/a.py"
+              ],
+              "target": "1111111111111111111111111111111111111111",
+              "scope_digest": "c45cdb71744475415b2c2ee84332cdfacb1fe468b006ee259847a180132d807f",
+              "construction_policy_digest": "3480336eb349b0761323816549c38b1efc8a7deae0a1ef3d43a952007655f01e",
+              "partition": 0,
+              "subject_id": "c30885140f558157dde1bd2da488d93184587e3175f485b5d6d4dbe61bd83194",
+              "family": "17959762891071fb5c9bfd1630e974a9e80dce29f81b22bea18d68b3f7df9bb6",
+              "generation": 0,
+              "retry": false,
+              "row": null,
+              "tier": "T3",
+              "score": 4,
+              "scope": [
+                {
+                  "path": "alpha/a.py",
+                  "blob": "f2c2261a8e200f8f815c63f02a48234212178dad",
+                  "intervals": [
+                    [
+                      1,
+                      4
+                    ]
+                  ]
+                }
+              ],
+              "job_id": "c30885140f558157dde1bd2da488d93184587e3175f485b5d6d4dbe61bd83194:0",
+              "path_lineages": {
+                "alpha/a.py": "alpha/a.py"
+              },
+              "path_tiers": {
+                "alpha/a.py": "T3"
+              },
+              "path_scores": {
+                "alpha/a.py": 4
+              }
+            },
+            {
+              "repo": "example/primary",
+              "kind": "B",
+              "prs": [],
+              "paths": [
+                "beta/b.py"
+              ],
+              "target": "1111111111111111111111111111111111111111",
+              "scope_digest": "40c480aab1c8798505d6f9056c31a4981a4285d3ae27b2d82beab870b19573c1",
+              "construction_policy_digest": "3480336eb349b0761323816549c38b1efc8a7deae0a1ef3d43a952007655f01e",
+              "partition": 0,
+              "subject_id": "8f5ac03d0ea12fea06566c025b42ba84c8d10f0bdde6d2211d97b0bc06838605",
+              "family": "388bc1757236fe434d6ac0e4f055a24f207c4a003e8fc8c65c1711b46010a67a",
+              "generation": 0,
+              "retry": false,
+              "row": null,
+              "tier": "T3",
+              "score": 2,
+              "scope": [
+                {
+                  "path": "beta/b.py",
+                  "blob": "cc651c14b5a333c056d3bd1b592d64f176203562",
+                  "intervals": [
+                    [
+                      1,
+                      2
+                    ]
+                  ]
+                }
+              ],
+              "job_id": "8f5ac03d0ea12fea06566c025b42ba84c8d10f0bdde6d2211d97b0bc06838605:0",
+              "path_lineages": {
+                "beta/b.py": "beta/b.py"
+              },
+              "path_tiers": {
+                "beta/b.py": "T3"
+              },
+              "path_scores": {
+                "beta/b.py": 2
+              }
+            },
+            {
+              "repo": "example/primary",
+              "kind": "B",
+              "prs": [],
+              "paths": [
+                "gamma/c.py"
+              ],
+              "target": "1111111111111111111111111111111111111111",
+              "scope_digest": "7b9779ed5bed25638f3dc4af5002d6505f161faecf0544a7582c1ec29f4dbbba",
+              "construction_policy_digest": "3480336eb349b0761323816549c38b1efc8a7deae0a1ef3d43a952007655f01e",
+              "partition": 0,
+              "subject_id": "e975605a9bdb48a0981d0714c6af5a51e2918ef7a801ddb93c1d9d9be74f1cf2",
+              "family": "190ca6b6add6e3317400060d0f10ce0b4f9fe55ec428f937f74ac12a63e47362",
+              "generation": 0,
+              "retry": true,
+              "row": null,
+              "tier": "T3",
+              "score": 3,
+              "scope": [
+                {
+                  "path": "gamma/c.py",
+                  "blob": "ad77a7258fc52dbe1d23477415bb64d24def9dc8",
+                  "intervals": [
+                    [
+                      1,
+                      3
+                    ]
+                  ]
+                }
+              ],
+              "job_id": "e975605a9bdb48a0981d0714c6af5a51e2918ef7a801ddb93c1d9d9be74f1cf2:0",
+              "path_lineages": {
+                "gamma/c.py": "gamma/c.py"
+              },
+              "path_tiers": {
+                "gamma/c.py": "T3"
+              },
+              "path_scores": {
+                "gamma/c.py": 3
+              }
+            }
+          ],
+          "paths": [
+            {
+              "path": "alpha/a.py",
+              "blob": "f2c2261a8e200f8f815c63f02a48234212178dad",
+              "mode": "100644",
+              "bytes": 10,
+              "lines": 4,
+              "disposition": "included",
+              "reason": "",
+              "covered": [],
+              "evidence": [],
+              "churn": 0,
+              "findings": 0,
+              "tier": "T3",
+              "uncovered": [
+                [
+                  1,
+                  4
+                ]
+              ],
+              "eligible": [
+                [
+                  1,
+                  4
+                ]
+              ],
+              "score": 4
+            },
+            {
+              "path": "beta/b.py",
+              "blob": "cc651c14b5a333c056d3bd1b592d64f176203562",
+              "mode": "100644",
+              "bytes": 10,
+              "lines": 2,
+              "disposition": "included",
+              "reason": "",
+              "covered": [],
+              "evidence": [],
+              "churn": 0,
+              "findings": 0,
+              "tier": "T3",
+              "uncovered": [
+                [
+                  1,
+                  2
+                ]
+              ],
+              "eligible": [
+                [
+                  1,
+                  2
+                ]
+              ],
+              "score": 2
+            },
+            {
+              "path": "gamma/c.py",
+              "blob": "ad77a7258fc52dbe1d23477415bb64d24def9dc8",
+              "mode": "100644",
+              "bytes": 10,
+              "lines": 3,
+              "disposition": "included",
+              "reason": "",
+              "covered": [],
+              "evidence": [],
+              "churn": 0,
+              "findings": 0,
+              "tier": "T3",
+              "uncovered": [
+                [
+                  1,
+                  3
+                ]
+              ],
+              "eligible": [
+                [
+                  1,
+                  3
+                ]
+              ],
+              "score": 3
+            }
+          ],
+          "required": [],
+          "evidence_gaps": {}
+        }
+      }
+    },
+    {
+      "name": "ownership-subtracts-active-and-mapped-scope",
+      "source": "backfill_inventory.rank",
+      "input": {
+        "manifest": {
+          "version": "cq.backfill-inventory/v1",
+          "repo": "example/primary",
+          "target": "1111111111111111111111111111111111111111",
+          "tree": "2222222222222222222222222222222222222222",
+          "ledger_head": "3333333333333333333333333333333333333333",
+          "evaluated_at": "2026-11-09T00:00:00Z",
+          "snapshots": {
+            "queue": {
+              "sha256": "67fff4913b35311160625e97573ca6a6b499f755ef3f7bd9d00d9ae1c9fc6206",
+              "location": "fixture/queue"
+            },
+            "required": {
+              "sha256": "73c2728ba7feb6c3014b6f38085743a2536b502c80a38f045ce380b7d749fa72",
+              "location": "fixture/required"
+            },
+            "tiers": {
+              "sha256": "2430f1a2ad2982d0067885488a4c89e21ad1d7c83b115ba8f1b20acc88dfaea8",
+              "location": "fixture/tiers"
+            },
+            "limits": {
+              "sha256": "3480336eb349b0761323816549c38b1efc8a7deae0a1ef3d43a952007655f01e",
+              "location": "fixture/limits"
+            },
+            "objects": {
+              "sha256": "7575c956bd3bdb3d4fd7d4238bb8b73fe6fbcb4eb5e7471c1757104b223e62f7",
+              "location": "fixture/objects"
+            },
+            "required_paths": {
+              "sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+              "location": "fixture/required_paths"
+            },
+            "ledger": {
+              "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+              "location": "fixture/ledger"
+            },
+            "required_members": {
+              "sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+              "location": "fixture/required_members"
+            },
+            "evidence_gaps": {
+              "sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+              "location": "fixture/evidence_gaps"
+            },
+            "protected_policy": {
+              "sha256": "c89a148be40e6752261e3038609a4b68de22fa3bfdaf32f884edffb8480b9bbe",
+              "location": "fixture/protected_policy"
+            }
+          },
+          "git_version": "git version 2.43.0",
+          "blame_options": [
+            "--line-porcelain",
+            "--encoding=UTF-8"
+          ],
+          "construction_version": "fixture-v1",
+          "scoring_version": "fixture-v1",
+          "limits_version": 1,
+          "tiers_version": 1,
+          "git_bundle": {
+            "sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+            "location": "fixture/git.bundle"
+          },
+          "raw_queue": {
+            "sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+            "location": "fixture/raw-queue"
+          },
+          "queue_encoding": "legacy-number-tag/v1",
+          "id": "90b790b3585036997378f5a8d0d27b9663f34ade29f8748b15782b8467dbcad3"
+        },
+        "inputs": {
+          "queue": {
+            "items": [
+              {
+                "id": "active",
+                "state": "reviewing",
+                "target": "1111111111111111111111111111111111111111",
+                "scope": [
+                  {
+                    "path": "src/a.py",
+                    "blob": "c3af91a021460c70551c41811a9d6a5d90d5acb4",
+                    "intervals": [
+                      [
+                        3,
+                        3
+                      ]
+                    ]
+                  }
+                ]
+              }
+            ],
+            "backfill_mapped_ownership": [
+              {
+                "target": "1111111111111111111111111111111111111111",
+                "path": "src/a.py",
+                "blob": "c3af91a021460c70551c41811a9d6a5d90d5acb4",
+                "intervals": [
+                  [
+                    4,
+                    5
+                  ]
+                ]
+              },
+              {
+                "target": "1111111111111111111111111111111111111111",
+                "path": "src/b.py",
+                "blob": "89aa9b9d4bf73c066c43287eaefa9355b22431b5",
+                "intervals": [
+                  [
+                    1,
+                    3
+                  ]
+                ]
+              }
+            ]
+          },
+          "required": {
+            "version": 1,
+            "rows": [],
+            "explicit_unions": []
+          },
+          "tiers": {
+            "version": 1
+          },
+          "limits": {
+            "version": 1,
+            "construction_version": "fixture-v1",
+            "scoring_version": "fixture-v1",
+            "max_files": 8,
+            "max_file_bytes": 1000,
+            "max_total_bytes": 2000,
+            "reviewer": {
+              "verified": true,
+              "evidence": "fixture",
+              "max_files": 8,
+              "max_diff_bytes": 2000
+            }
+          },
+          "objects": [
+            {
+              "path": "src/a.py",
+              "blob": "c3af91a021460c70551c41811a9d6a5d90d5acb4",
+              "mode": "100644",
+              "bytes": 10,
+              "lines": 6,
+              "disposition": "included",
+              "reason": "",
+              "covered": [
+                [
+                  1,
+                  2
+                ]
+              ],
+              "evidence": [],
+              "churn": 0,
+              "findings": 0,
+              "tier": "T3"
+            },
+            {
+              "path": "src/b.py",
+              "blob": "89aa9b9d4bf73c066c43287eaefa9355b22431b5",
+              "mode": "100644",
+              "bytes": 10,
+              "lines": 3,
+              "disposition": "included",
+              "reason": "",
+              "covered": [],
+              "evidence": [],
+              "churn": 0,
+              "findings": 0,
+              "tier": "T3"
+            }
+          ],
+          "required_paths": {},
+          "ledger": [],
+          "required_members": {},
+          "evidence_gaps": {},
+          "protected_policy": "{}"
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "manifest_id": "90b790b3585036997378f5a8d0d27b9663f34ade29f8748b15782b8467dbcad3",
+          "target": "1111111111111111111111111111111111111111",
+          "evaluated_at": "2026-11-09T00:00:00Z",
+          "candidates": [
+            {
+              "repo": "example/primary",
+              "kind": "B",
+              "prs": [],
+              "paths": [
+                "src/a.py"
+              ],
+              "target": "1111111111111111111111111111111111111111",
+              "scope_digest": "fc7cdfca82f766939a5e1260652eedbd514a0b0be617d89b6ab04e77fae8fd75",
+              "construction_policy_digest": "3480336eb349b0761323816549c38b1efc8a7deae0a1ef3d43a952007655f01e",
+              "partition": 0,
+              "subject_id": "8a1b7d2245830fb1d8e3f8d467180205028885acd8c2c090b378bdb8e6e25771",
+              "family": "e08f66c7fe6c649679a411e77a4a86eb4a9552fe9a7c29f159a407e569c3c132",
+              "generation": 0,
+              "retry": false,
+              "row": null,
+              "tier": "T3",
+              "score": 4,
+              "scope": [
+                {
+                  "path": "src/a.py",
+                  "blob": "c3af91a021460c70551c41811a9d6a5d90d5acb4",
+                  "intervals": [
+                    [
+                      6,
+                      6
+                    ]
+                  ]
+                }
+              ],
+              "job_id": "8a1b7d2245830fb1d8e3f8d467180205028885acd8c2c090b378bdb8e6e25771:0",
+              "path_lineages": {
+                "src/a.py": "src/a.py"
+              },
+              "path_tiers": {
+                "src/a.py": "T3"
+              },
+              "path_scores": {
+                "src/a.py": 4
+              }
+            }
+          ],
+          "paths": [
+            {
+              "path": "src/a.py",
+              "blob": "c3af91a021460c70551c41811a9d6a5d90d5acb4",
+              "mode": "100644",
+              "bytes": 10,
+              "lines": 6,
+              "disposition": "included",
+              "reason": "",
+              "covered": [
+                [
+                  1,
+                  2
+                ]
+              ],
+              "evidence": [],
+              "churn": 0,
+              "findings": 0,
+              "tier": "T3",
+              "uncovered": [
+                [
+                  3,
+                  6
+                ]
+              ],
+              "eligible": [
+                [
+                  6,
+                  6
+                ]
+              ],
+              "score": 4
+            },
+            {
+              "path": "src/b.py",
+              "blob": "89aa9b9d4bf73c066c43287eaefa9355b22431b5",
+              "mode": "100644",
+              "bytes": 10,
+              "lines": 3,
+              "disposition": "included",
+              "reason": "",
+              "covered": [],
+              "evidence": [],
+              "churn": 0,
+              "findings": 0,
+              "tier": "T3",
+              "uncovered": [
+                [
+                  1,
+                  3
+                ]
+              ],
+              "eligible": [],
+              "score": 3
+            }
+          ],
+          "required": [],
+          "evidence_gaps": {}
+        }
+      }
+    },
+    {
+      "name": "quarantine-and-future-eligibility-suppress",
+      "source": "backfill_inventory.rank",
+      "input": {
+        "manifest": {
+          "version": "cq.backfill-inventory/v1",
+          "repo": "example/primary",
+          "target": "1111111111111111111111111111111111111111",
+          "tree": "2222222222222222222222222222222222222222",
+          "ledger_head": "3333333333333333333333333333333333333333",
+          "evaluated_at": "2026-11-09T00:00:00Z",
+          "snapshots": {
+            "queue": {
+              "sha256": "604bbd434bb4221d75ae4ade0b3afa59a335758821adb68b935f2aa37a1db764",
+              "location": "fixture/queue"
+            },
+            "required": {
+              "sha256": "73c2728ba7feb6c3014b6f38085743a2536b502c80a38f045ce380b7d749fa72",
+              "location": "fixture/required"
+            },
+            "tiers": {
+              "sha256": "2430f1a2ad2982d0067885488a4c89e21ad1d7c83b115ba8f1b20acc88dfaea8",
+              "location": "fixture/tiers"
+            },
+            "limits": {
+              "sha256": "3480336eb349b0761323816549c38b1efc8a7deae0a1ef3d43a952007655f01e",
+              "location": "fixture/limits"
+            },
+            "objects": {
+              "sha256": "22ac059bcbebda77e5b36f548debde1fe41a57cef37841634371162854d8f9c0",
+              "location": "fixture/objects"
+            },
+            "required_paths": {
+              "sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+              "location": "fixture/required_paths"
+            },
+            "ledger": {
+              "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+              "location": "fixture/ledger"
+            },
+            "required_members": {
+              "sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+              "location": "fixture/required_members"
+            },
+            "evidence_gaps": {
+              "sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+              "location": "fixture/evidence_gaps"
+            },
+            "protected_policy": {
+              "sha256": "c89a148be40e6752261e3038609a4b68de22fa3bfdaf32f884edffb8480b9bbe",
+              "location": "fixture/protected_policy"
+            }
+          },
+          "git_version": "git version 2.43.0",
+          "blame_options": [
+            "--line-porcelain",
+            "--encoding=UTF-8"
+          ],
+          "construction_version": "fixture-v1",
+          "scoring_version": "fixture-v1",
+          "limits_version": 1,
+          "tiers_version": 1,
+          "git_bundle": {
+            "sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+            "location": "fixture/git.bundle"
+          },
+          "raw_queue": {
+            "sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+            "location": "fixture/raw-queue"
+          },
+          "queue_encoding": "legacy-number-tag/v1",
+          "id": "5300303d8debe60b322da66ad8b51d7ea51876d6030adb942698dd0ea47b12e4"
+        },
+        "inputs": {
+          "queue": {
+            "items": [],
+            "backfill_families": {
+              "17959762891071fb5c9bfd1630e974a9e80dce29f81b22bea18d68b3f7df9bb6": {
+                "quarantined": true
+              },
+              "388bc1757236fe434d6ac0e4f055a24f207c4a003e8fc8c65c1711b46010a67a": {
+                "next_eligible_at": "2026-12-01T00:00:00Z"
+              },
+              "82f6bc2f6f3f25467f8adb2581c4e542419458211fec666c16ff838de1eff51d": {
+                "next_eligible_at": "2026-10-01T00:00:00Z"
+              }
+            },
+            "backfill_scope_failures": {
+              "gamma/c.py": {
+                "quarantined": true
+              }
+            }
+          },
+          "required": {
+            "version": 1,
+            "rows": [],
+            "explicit_unions": []
+          },
+          "tiers": {
+            "version": 1
+          },
+          "limits": {
+            "version": 1,
+            "construction_version": "fixture-v1",
+            "scoring_version": "fixture-v1",
+            "max_files": 8,
+            "max_file_bytes": 1000,
+            "max_total_bytes": 2000,
+            "reviewer": {
+              "verified": true,
+              "evidence": "fixture",
+              "max_files": 8,
+              "max_diff_bytes": 2000
+            }
+          },
+          "objects": [
+            {
+              "path": "alpha/a.py",
+              "blob": "f2c2261a8e200f8f815c63f02a48234212178dad",
+              "mode": "100644",
+              "bytes": 10,
+              "lines": 1,
+              "disposition": "included",
+              "reason": "",
+              "covered": [],
+              "evidence": [],
+              "churn": 0,
+              "findings": 0,
+              "tier": "T3"
+            },
+            {
+              "path": "beta/b.py",
+              "blob": "cc651c14b5a333c056d3bd1b592d64f176203562",
+              "mode": "100644",
+              "bytes": 10,
+              "lines": 1,
+              "disposition": "included",
+              "reason": "",
+              "covered": [],
+              "evidence": [],
+              "churn": 0,
+              "findings": 0,
+              "tier": "T3"
+            },
+            {
+              "path": "gamma/c.py",
+              "blob": "ad77a7258fc52dbe1d23477415bb64d24def9dc8",
+              "mode": "100644",
+              "bytes": 10,
+              "lines": 1,
+              "disposition": "included",
+              "reason": "",
+              "covered": [],
+              "evidence": [],
+              "churn": 0,
+              "findings": 0,
+              "tier": "T3"
+            },
+            {
+              "path": "delta/d.py",
+              "blob": "c5824c6990c2c4c5b14e8c198faaca169232bbba",
+              "mode": "100644",
+              "bytes": 10,
+              "lines": 1,
+              "disposition": "included",
+              "reason": "",
+              "covered": [],
+              "evidence": [],
+              "churn": 0,
+              "findings": 0,
+              "tier": "T3"
+            }
+          ],
+          "required_paths": {},
+          "ledger": [],
+          "required_members": {},
+          "evidence_gaps": {},
+          "protected_policy": "{}"
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "manifest_id": "5300303d8debe60b322da66ad8b51d7ea51876d6030adb942698dd0ea47b12e4",
+          "target": "1111111111111111111111111111111111111111",
+          "evaluated_at": "2026-11-09T00:00:00Z",
+          "candidates": [
+            {
+              "repo": "example/primary",
+              "kind": "B",
+              "prs": [],
+              "paths": [
+                "delta/d.py"
+              ],
+              "target": "1111111111111111111111111111111111111111",
+              "scope_digest": "01565081596ccaa823746ef97ad2f383cb0e8adaa055c0d6f40d9f1f2e684cb4",
+              "construction_policy_digest": "3480336eb349b0761323816549c38b1efc8a7deae0a1ef3d43a952007655f01e",
+              "partition": 0,
+              "subject_id": "6a818001aa5a58b0f2f99e8f5ea0e440b215990ef166070da3e75adb0ed98a54",
+              "family": "82f6bc2f6f3f25467f8adb2581c4e542419458211fec666c16ff838de1eff51d",
+              "generation": 0,
+              "retry": false,
+              "row": null,
+              "tier": "T3",
+              "score": 1,
+              "scope": [
+                {
+                  "path": "delta/d.py",
+                  "blob": "c5824c6990c2c4c5b14e8c198faaca169232bbba",
+                  "intervals": [
+                    [
+                      1,
+                      1
+                    ]
+                  ]
+                }
+              ],
+              "job_id": "6a818001aa5a58b0f2f99e8f5ea0e440b215990ef166070da3e75adb0ed98a54:0",
+              "path_lineages": {
+                "delta/d.py": "delta/d.py"
+              },
+              "path_tiers": {
+                "delta/d.py": "T3"
+              },
+              "path_scores": {
+                "delta/d.py": 1
+              }
+            }
+          ],
+          "paths": [
+            {
+              "path": "alpha/a.py",
+              "blob": "f2c2261a8e200f8f815c63f02a48234212178dad",
+              "mode": "100644",
+              "bytes": 10,
+              "lines": 1,
+              "disposition": "included",
+              "reason": "",
+              "covered": [],
+              "evidence": [],
+              "churn": 0,
+              "findings": 0,
+              "tier": "T3",
+              "uncovered": [
+                [
+                  1,
+                  1
+                ]
+              ],
+              "eligible": [
+                [
+                  1,
+                  1
+                ]
+              ],
+              "score": 1
+            },
+            {
+              "path": "beta/b.py",
+              "blob": "cc651c14b5a333c056d3bd1b592d64f176203562",
+              "mode": "100644",
+              "bytes": 10,
+              "lines": 1,
+              "disposition": "included",
+              "reason": "",
+              "covered": [],
+              "evidence": [],
+              "churn": 0,
+              "findings": 0,
+              "tier": "T3",
+              "uncovered": [
+                [
+                  1,
+                  1
+                ]
+              ],
+              "eligible": [
+                [
+                  1,
+                  1
+                ]
+              ],
+              "score": 1
+            },
+            {
+              "path": "delta/d.py",
+              "blob": "c5824c6990c2c4c5b14e8c198faaca169232bbba",
+              "mode": "100644",
+              "bytes": 10,
+              "lines": 1,
+              "disposition": "included",
+              "reason": "",
+              "covered": [],
+              "evidence": [],
+              "churn": 0,
+              "findings": 0,
+              "tier": "T3",
+              "uncovered": [
+                [
+                  1,
+                  1
+                ]
+              ],
+              "eligible": [
+                [
+                  1,
+                  1
+                ]
+              ],
+              "score": 1
+            },
+            {
+              "path": "gamma/c.py",
+              "blob": "ad77a7258fc52dbe1d23477415bb64d24def9dc8",
+              "mode": "100644",
+              "bytes": 10,
+              "lines": 1,
+              "disposition": "included",
+              "reason": "",
+              "covered": [],
+              "evidence": [],
+              "churn": 0,
+              "findings": 0,
+              "tier": "T3",
+              "uncovered": [
+                [
+                  1,
+                  1
+                ]
+              ],
+              "eligible": [
+                [
+                  1,
+                  1
+                ]
+              ],
+              "score": 1
+            }
+          ],
+          "required": [],
+          "evidence_gaps": {}
+        }
+      }
+    },
+    {
+      "name": "partition-file-limit-skips-oversize-file",
+      "source": "backfill_inventory.rank",
+      "input": {
+        "manifest": {
+          "version": "cq.backfill-inventory/v1",
+          "repo": "example/primary",
+          "target": "1111111111111111111111111111111111111111",
+          "tree": "2222222222222222222222222222222222222222",
+          "ledger_head": "3333333333333333333333333333333333333333",
+          "evaluated_at": "2026-11-09T00:00:00Z",
+          "snapshots": {
+            "queue": {
+              "sha256": "eef46741adfc3a9f76294d3b78f37a45f113092ac9d44ee77c7a038a88ff09a1",
+              "location": "fixture/queue"
+            },
+            "required": {
+              "sha256": "73c2728ba7feb6c3014b6f38085743a2536b502c80a38f045ce380b7d749fa72",
+              "location": "fixture/required"
+            },
+            "tiers": {
+              "sha256": "2430f1a2ad2982d0067885488a4c89e21ad1d7c83b115ba8f1b20acc88dfaea8",
+              "location": "fixture/tiers"
+            },
+            "limits": {
+              "sha256": "642f4d7af1375593ebb51c7dcc764c8690bed3d8ad5b53b99c14f0c12f3f1781",
+              "location": "fixture/limits"
+            },
+            "objects": {
+              "sha256": "93ec1167516878dbd6b2a1db6c1e168ee4ef60cbd7dd134ccea6f0a9e28f897a",
+              "location": "fixture/objects"
+            },
+            "required_paths": {
+              "sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+              "location": "fixture/required_paths"
+            },
+            "ledger": {
+              "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+              "location": "fixture/ledger"
+            },
+            "required_members": {
+              "sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+              "location": "fixture/required_members"
+            },
+            "evidence_gaps": {
+              "sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+              "location": "fixture/evidence_gaps"
+            },
+            "protected_policy": {
+              "sha256": "c89a148be40e6752261e3038609a4b68de22fa3bfdaf32f884edffb8480b9bbe",
+              "location": "fixture/protected_policy"
+            }
+          },
+          "git_version": "git version 2.43.0",
+          "blame_options": [
+            "--line-porcelain",
+            "--encoding=UTF-8"
+          ],
+          "construction_version": "fixture-v1",
+          "scoring_version": "fixture-v1",
+          "limits_version": 1,
+          "tiers_version": 1,
+          "git_bundle": {
+            "sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+            "location": "fixture/git.bundle"
+          },
+          "raw_queue": {
+            "sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+            "location": "fixture/raw-queue"
+          },
+          "queue_encoding": "legacy-number-tag/v1",
+          "id": "900db0a67f06b994bfdb0ed8855f2651499a25954c58557933a8d16c302b2ac9"
+        },
+        "inputs": {
+          "queue": {
+            "items": []
+          },
+          "required": {
+            "version": 1,
+            "rows": [],
+            "explicit_unions": []
+          },
+          "tiers": {
+            "version": 1
+          },
+          "limits": {
+            "version": 1,
+            "construction_version": "fixture-v1",
+            "scoring_version": "fixture-v1",
+            "max_files": 2,
+            "max_file_bytes": 50,
+            "max_total_bytes": 1000,
+            "reviewer": {
+              "verified": true,
+              "evidence": "fixture",
+              "max_files": 2,
+              "max_diff_bytes": 2000
+            }
+          },
+          "objects": [
+            {
+              "path": "src/a.py",
+              "blob": "c3af91a021460c70551c41811a9d6a5d90d5acb4",
+              "mode": "100644",
+              "bytes": 10,
+              "lines": 1,
+              "disposition": "included",
+              "reason": "",
+              "covered": [],
+              "evidence": [],
+              "churn": 0,
+              "findings": 0,
+              "tier": "T3"
+            },
+            {
+              "path": "src/b.py",
+              "blob": "89aa9b9d4bf73c066c43287eaefa9355b22431b5",
+              "mode": "100644",
+              "bytes": 10,
+              "lines": 1,
+              "disposition": "included",
+              "reason": "",
+              "covered": [],
+              "evidence": [],
+              "churn": 0,
+              "findings": 0,
+              "tier": "T3"
+            },
+            {
+              "path": "src/c.py",
+              "blob": "1c8b0f57187b9a0f94220b84ebf614865b015aba",
+              "mode": "100644",
+              "bytes": 10,
+              "lines": 1,
+              "disposition": "included",
+              "reason": "",
+              "covered": [],
+              "evidence": [],
+              "churn": 0,
+              "findings": 0,
+              "tier": "T3"
+            },
+            {
+              "path": "src/huge.py",
+              "blob": "2f5b93b5a552691e5b6653987a45dd0f9df414df",
+              "mode": "100644",
+              "bytes": 60,
+              "lines": 1,
+              "disposition": "included",
+              "reason": "",
+              "covered": [],
+              "evidence": [],
+              "churn": 0,
+              "findings": 0,
+              "tier": "T3"
+            }
+          ],
+          "required_paths": {},
+          "ledger": [],
+          "required_members": {},
+          "evidence_gaps": {},
+          "protected_policy": "{}"
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "manifest_id": "900db0a67f06b994bfdb0ed8855f2651499a25954c58557933a8d16c302b2ac9",
+          "target": "1111111111111111111111111111111111111111",
+          "evaluated_at": "2026-11-09T00:00:00Z",
+          "candidates": [
+            {
+              "repo": "example/primary",
+              "kind": "B",
+              "prs": [],
+              "paths": [
+                "src/a.py",
+                "src/b.py"
+              ],
+              "target": "1111111111111111111111111111111111111111",
+              "scope_digest": "44742bddd1c22278991db1c796ddba3c17d7fd7f782126831011df1393b7591a",
+              "construction_policy_digest": "642f4d7af1375593ebb51c7dcc764c8690bed3d8ad5b53b99c14f0c12f3f1781",
+              "partition": 0,
+              "subject_id": "9f1c891031719ef136e3b3b7d884545696c79ad13c54bf59d31a69dcde6b863f",
+              "family": "a8e656894988047d37a5ec218109b7c7478a0cb07368eb6ab07d3bc022c6c41a",
+              "generation": 0,
+              "retry": false,
+              "row": null,
+              "tier": "T3",
+              "score": 2,
+              "scope": [
+                {
+                  "path": "src/a.py",
+                  "blob": "c3af91a021460c70551c41811a9d6a5d90d5acb4",
+                  "intervals": [
+                    [
+                      1,
+                      1
+                    ]
+                  ]
+                },
+                {
+                  "path": "src/b.py",
+                  "blob": "89aa9b9d4bf73c066c43287eaefa9355b22431b5",
+                  "intervals": [
+                    [
+                      1,
+                      1
+                    ]
+                  ]
+                }
+              ],
+              "job_id": "9f1c891031719ef136e3b3b7d884545696c79ad13c54bf59d31a69dcde6b863f:0",
+              "path_lineages": {
+                "src/a.py": "src/a.py",
+                "src/b.py": "src/b.py"
+              },
+              "path_tiers": {
+                "src/a.py": "T3",
+                "src/b.py": "T3"
+              },
+              "path_scores": {
+                "src/a.py": 1,
+                "src/b.py": 1
+              }
+            },
+            {
+              "repo": "example/primary",
+              "kind": "B",
+              "prs": [],
+              "paths": [
+                "src/c.py"
+              ],
+              "target": "1111111111111111111111111111111111111111",
+              "scope_digest": "a7efe27c59b1041775197109fa189b62e3d898d66dbccb05b233112ddf8221e4",
+              "construction_policy_digest": "642f4d7af1375593ebb51c7dcc764c8690bed3d8ad5b53b99c14f0c12f3f1781",
+              "partition": 1,
+              "subject_id": "90959fc0144c5b722116ac0b2343c5fe14b192106397a86a09fc08a29dda2e5e",
+              "family": "a8e656894988047d37a5ec218109b7c7478a0cb07368eb6ab07d3bc022c6c41a",
+              "generation": 0,
+              "retry": false,
+              "row": null,
+              "tier": "T3",
+              "score": 1,
+              "scope": [
+                {
+                  "path": "src/c.py",
+                  "blob": "1c8b0f57187b9a0f94220b84ebf614865b015aba",
+                  "intervals": [
+                    [
+                      1,
+                      1
+                    ]
+                  ]
+                }
+              ],
+              "job_id": "90959fc0144c5b722116ac0b2343c5fe14b192106397a86a09fc08a29dda2e5e:0",
+              "path_lineages": {
+                "src/c.py": "src/c.py"
+              },
+              "path_tiers": {
+                "src/c.py": "T3"
+              },
+              "path_scores": {
+                "src/c.py": 1
+              }
+            }
+          ],
+          "paths": [
+            {
+              "path": "src/a.py",
+              "blob": "c3af91a021460c70551c41811a9d6a5d90d5acb4",
+              "mode": "100644",
+              "bytes": 10,
+              "lines": 1,
+              "disposition": "included",
+              "reason": "",
+              "covered": [],
+              "evidence": [],
+              "churn": 0,
+              "findings": 0,
+              "tier": "T3",
+              "uncovered": [
+                [
+                  1,
+                  1
+                ]
+              ],
+              "eligible": [
+                [
+                  1,
+                  1
+                ]
+              ],
+              "score": 1
+            },
+            {
+              "path": "src/b.py",
+              "blob": "89aa9b9d4bf73c066c43287eaefa9355b22431b5",
+              "mode": "100644",
+              "bytes": 10,
+              "lines": 1,
+              "disposition": "included",
+              "reason": "",
+              "covered": [],
+              "evidence": [],
+              "churn": 0,
+              "findings": 0,
+              "tier": "T3",
+              "uncovered": [
+                [
+                  1,
+                  1
+                ]
+              ],
+              "eligible": [
+                [
+                  1,
+                  1
+                ]
+              ],
+              "score": 1
+            },
+            {
+              "path": "src/c.py",
+              "blob": "1c8b0f57187b9a0f94220b84ebf614865b015aba",
+              "mode": "100644",
+              "bytes": 10,
+              "lines": 1,
+              "disposition": "included",
+              "reason": "",
+              "covered": [],
+              "evidence": [],
+              "churn": 0,
+              "findings": 0,
+              "tier": "T3",
+              "uncovered": [
+                [
+                  1,
+                  1
+                ]
+              ],
+              "eligible": [
+                [
+                  1,
+                  1
+                ]
+              ],
+              "score": 1
+            },
+            {
+              "path": "src/huge.py",
+              "blob": "2f5b93b5a552691e5b6653987a45dd0f9df414df",
+              "mode": "100644",
+              "bytes": 60,
+              "lines": 1,
+              "disposition": "included",
+              "reason": "",
+              "covered": [],
+              "evidence": [],
+              "churn": 0,
+              "findings": 0,
+              "tier": "T3",
+              "uncovered": [
+                [
+                  1,
+                  1
+                ]
+              ],
+              "eligible": [
+                [
+                  1,
+                  1
+                ]
+              ],
+              "score": 1
+            }
+          ],
+          "required": [],
+          "evidence_gaps": {}
+        }
+      }
+    },
+    {
+      "name": "partition-byte-limit-splits-cluster",
+      "source": "backfill_inventory.rank",
+      "input": {
+        "manifest": {
+          "version": "cq.backfill-inventory/v1",
+          "repo": "example/primary",
+          "target": "1111111111111111111111111111111111111111",
+          "tree": "2222222222222222222222222222222222222222",
+          "ledger_head": "3333333333333333333333333333333333333333",
+          "evaluated_at": "2026-11-09T00:00:00Z",
+          "snapshots": {
+            "queue": {
+              "sha256": "eef46741adfc3a9f76294d3b78f37a45f113092ac9d44ee77c7a038a88ff09a1",
+              "location": "fixture/queue"
+            },
+            "required": {
+              "sha256": "73c2728ba7feb6c3014b6f38085743a2536b502c80a38f045ce380b7d749fa72",
+              "location": "fixture/required"
+            },
+            "tiers": {
+              "sha256": "2430f1a2ad2982d0067885488a4c89e21ad1d7c83b115ba8f1b20acc88dfaea8",
+              "location": "fixture/tiers"
+            },
+            "limits": {
+              "sha256": "cfeb386b436de7f2ba6638019af2922c49a35b916cf662707b0a89dce96ce3b7",
+              "location": "fixture/limits"
+            },
+            "objects": {
+              "sha256": "a03f4d3faba46f263ad13d00060ee9cbbd570a0aefe00ce65b23c1fd7125381e",
+              "location": "fixture/objects"
+            },
+            "required_paths": {
+              "sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+              "location": "fixture/required_paths"
+            },
+            "ledger": {
+              "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+              "location": "fixture/ledger"
+            },
+            "required_members": {
+              "sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+              "location": "fixture/required_members"
+            },
+            "evidence_gaps": {
+              "sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+              "location": "fixture/evidence_gaps"
+            },
+            "protected_policy": {
+              "sha256": "c89a148be40e6752261e3038609a4b68de22fa3bfdaf32f884edffb8480b9bbe",
+              "location": "fixture/protected_policy"
+            }
+          },
+          "git_version": "git version 2.43.0",
+          "blame_options": [
+            "--line-porcelain",
+            "--encoding=UTF-8"
+          ],
+          "construction_version": "fixture-v1",
+          "scoring_version": "fixture-v1",
+          "limits_version": 1,
+          "tiers_version": 1,
+          "git_bundle": {
+            "sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+            "location": "fixture/git.bundle"
+          },
+          "raw_queue": {
+            "sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+            "location": "fixture/raw-queue"
+          },
+          "queue_encoding": "legacy-number-tag/v1",
+          "id": "765748bcc5067a5e6807a634c2554f5db899baa3951d1b2e456bb7c2e4529815"
+        },
+        "inputs": {
+          "queue": {
+            "items": []
+          },
+          "required": {
+            "version": 1,
+            "rows": [],
+            "explicit_unions": []
+          },
+          "tiers": {
+            "version": 1
+          },
+          "limits": {
+            "version": 1,
+            "construction_version": "fixture-v1",
+            "scoring_version": "fixture-v1",
+            "max_files": 8,
+            "max_file_bytes": 1000,
+            "max_total_bytes": 100,
+            "reviewer": {
+              "verified": true,
+              "evidence": "fixture",
+              "max_files": 8,
+              "max_diff_bytes": 2000
+            }
+          },
+          "objects": [
+            {
+              "path": "src/a.py",
+              "blob": "c3af91a021460c70551c41811a9d6a5d90d5acb4",
+              "mode": "100644",
+              "bytes": 60,
+              "lines": 1,
+              "disposition": "included",
+              "reason": "",
+              "covered": [],
+              "evidence": [],
+              "churn": 0,
+              "findings": 0,
+              "tier": "T3"
+            },
+            {
+              "path": "src/b.py",
+              "blob": "89aa9b9d4bf73c066c43287eaefa9355b22431b5",
+              "mode": "100644",
+              "bytes": 60,
+              "lines": 1,
+              "disposition": "included",
+              "reason": "",
+              "covered": [],
+              "evidence": [],
+              "churn": 0,
+              "findings": 0,
+              "tier": "T3"
+            },
+            {
+              "path": "src/c.py",
+              "blob": "1c8b0f57187b9a0f94220b84ebf614865b015aba",
+              "mode": "100644",
+              "bytes": 30,
+              "lines": 1,
+              "disposition": "included",
+              "reason": "",
+              "covered": [],
+              "evidence": [],
+              "churn": 0,
+              "findings": 0,
+              "tier": "T3"
+            }
+          ],
+          "required_paths": {},
+          "ledger": [],
+          "required_members": {},
+          "evidence_gaps": {},
+          "protected_policy": "{}"
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "manifest_id": "765748bcc5067a5e6807a634c2554f5db899baa3951d1b2e456bb7c2e4529815",
+          "target": "1111111111111111111111111111111111111111",
+          "evaluated_at": "2026-11-09T00:00:00Z",
+          "candidates": [
+            {
+              "repo": "example/primary",
+              "kind": "B",
+              "prs": [],
+              "paths": [
+                "src/b.py",
+                "src/c.py"
+              ],
+              "target": "1111111111111111111111111111111111111111",
+              "scope_digest": "a9df8b4a6da9dc93acff92d708a6c0ed6eb946ef478049b4e4822a803c971b83",
+              "construction_policy_digest": "cfeb386b436de7f2ba6638019af2922c49a35b916cf662707b0a89dce96ce3b7",
+              "partition": 1,
+              "subject_id": "9fc618c37f2914e58f0fc19bb004cdca89e1d589668fa1b7ec0cd7ba01855ded",
+              "family": "632b9e53a5bd5d5ecb3de3b0ff05bf897445a38acf8ce2da236d9867e0c98093",
+              "generation": 0,
+              "retry": false,
+              "row": null,
+              "tier": "T3",
+              "score": 2,
+              "scope": [
+                {
+                  "path": "src/b.py",
+                  "blob": "89aa9b9d4bf73c066c43287eaefa9355b22431b5",
+                  "intervals": [
+                    [
+                      1,
+                      1
+                    ]
+                  ]
+                },
+                {
+                  "path": "src/c.py",
+                  "blob": "1c8b0f57187b9a0f94220b84ebf614865b015aba",
+                  "intervals": [
+                    [
+                      1,
+                      1
+                    ]
+                  ]
+                }
+              ],
+              "job_id": "9fc618c37f2914e58f0fc19bb004cdca89e1d589668fa1b7ec0cd7ba01855ded:0",
+              "path_lineages": {
+                "src/b.py": "src/b.py",
+                "src/c.py": "src/c.py"
+              },
+              "path_tiers": {
+                "src/b.py": "T3",
+                "src/c.py": "T3"
+              },
+              "path_scores": {
+                "src/b.py": 1,
+                "src/c.py": 1
+              }
+            },
+            {
+              "repo": "example/primary",
+              "kind": "B",
+              "prs": [],
+              "paths": [
+                "src/a.py"
+              ],
+              "target": "1111111111111111111111111111111111111111",
+              "scope_digest": "cda813f2c29f2e980134e965131e9413865442a8f3940b094d80130ad104ade4",
+              "construction_policy_digest": "cfeb386b436de7f2ba6638019af2922c49a35b916cf662707b0a89dce96ce3b7",
+              "partition": 0,
+              "subject_id": "1f0989408b45d8f7cf678f6a796c8b84aab050f6f5ecc3bd9350b0b3fa94ba97",
+              "family": "632b9e53a5bd5d5ecb3de3b0ff05bf897445a38acf8ce2da236d9867e0c98093",
+              "generation": 0,
+              "retry": false,
+              "row": null,
+              "tier": "T3",
+              "score": 1,
+              "scope": [
+                {
+                  "path": "src/a.py",
+                  "blob": "c3af91a021460c70551c41811a9d6a5d90d5acb4",
+                  "intervals": [
+                    [
+                      1,
+                      1
+                    ]
+                  ]
+                }
+              ],
+              "job_id": "1f0989408b45d8f7cf678f6a796c8b84aab050f6f5ecc3bd9350b0b3fa94ba97:0",
+              "path_lineages": {
+                "src/a.py": "src/a.py"
+              },
+              "path_tiers": {
+                "src/a.py": "T3"
+              },
+              "path_scores": {
+                "src/a.py": 1
+              }
+            }
+          ],
+          "paths": [
+            {
+              "path": "src/a.py",
+              "blob": "c3af91a021460c70551c41811a9d6a5d90d5acb4",
+              "mode": "100644",
+              "bytes": 60,
+              "lines": 1,
+              "disposition": "included",
+              "reason": "",
+              "covered": [],
+              "evidence": [],
+              "churn": 0,
+              "findings": 0,
+              "tier": "T3",
+              "uncovered": [
+                [
+                  1,
+                  1
+                ]
+              ],
+              "eligible": [
+                [
+                  1,
+                  1
+                ]
+              ],
+              "score": 1
+            },
+            {
+              "path": "src/b.py",
+              "blob": "89aa9b9d4bf73c066c43287eaefa9355b22431b5",
+              "mode": "100644",
+              "bytes": 60,
+              "lines": 1,
+              "disposition": "included",
+              "reason": "",
+              "covered": [],
+              "evidence": [],
+              "churn": 0,
+              "findings": 0,
+              "tier": "T3",
+              "uncovered": [
+                [
+                  1,
+                  1
+                ]
+              ],
+              "eligible": [
+                [
+                  1,
+                  1
+                ]
+              ],
+              "score": 1
+            },
+            {
+              "path": "src/c.py",
+              "blob": "1c8b0f57187b9a0f94220b84ebf614865b015aba",
+              "mode": "100644",
+              "bytes": 30,
+              "lines": 1,
+              "disposition": "included",
+              "reason": "",
+              "covered": [],
+              "evidence": [],
+              "churn": 0,
+              "findings": 0,
+              "tier": "T3",
+              "uncovered": [
+                [
+                  1,
+                  1
+                ]
+              ],
+              "eligible": [
+                [
+                  1,
+                  1
+                ]
+              ],
+              "score": 1
+            }
+          ],
+          "required": [],
+          "evidence_gaps": {}
+        }
+      }
+    },
+    {
+      "name": "required-union-evidence-outcomes-and-missing",
+      "source": "backfill_inventory.rank",
+      "input": {
+        "manifest": {
+          "version": "cq.backfill-inventory/v1",
+          "repo": "example/primary",
+          "target": "1111111111111111111111111111111111111111",
+          "tree": "2222222222222222222222222222222222222222",
+          "ledger_head": "3333333333333333333333333333333333333333",
+          "evaluated_at": "2026-11-09T00:00:00Z",
+          "snapshots": {
+            "queue": {
+              "sha256": "eef46741adfc3a9f76294d3b78f37a45f113092ac9d44ee77c7a038a88ff09a1",
+              "location": "fixture/queue"
+            },
+            "required": {
+              "sha256": "18ff669ba572e14ce957ae0f48ce08d6acc0138df52114ecefa6e77f28fef6d4",
+              "location": "fixture/required"
+            },
+            "tiers": {
+              "sha256": "2430f1a2ad2982d0067885488a4c89e21ad1d7c83b115ba8f1b20acc88dfaea8",
+              "location": "fixture/tiers"
+            },
+            "limits": {
+              "sha256": "3480336eb349b0761323816549c38b1efc8a7deae0a1ef3d43a952007655f01e",
+              "location": "fixture/limits"
+            },
+            "objects": {
+              "sha256": "ac65f79ed6d5ed9553171d42f8fc6326f40a2db4a572ad308d8e35e5db751a46",
+              "location": "fixture/objects"
+            },
+            "required_paths": {
+              "sha256": "d3851856cd9f4c90677a994491d358cbf251a832590c13d5b4788720a9d98e19",
+              "location": "fixture/required_paths"
+            },
+            "ledger": {
+              "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+              "location": "fixture/ledger"
+            },
+            "required_members": {
+              "sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+              "location": "fixture/required_members"
+            },
+            "evidence_gaps": {
+              "sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+              "location": "fixture/evidence_gaps"
+            },
+            "protected_policy": {
+              "sha256": "c89a148be40e6752261e3038609a4b68de22fa3bfdaf32f884edffb8480b9bbe",
+              "location": "fixture/protected_policy"
+            }
+          },
+          "git_version": "git version 2.43.0",
+          "blame_options": [
+            "--line-porcelain",
+            "--encoding=UTF-8"
+          ],
+          "construction_version": "fixture-v1",
+          "scoring_version": "fixture-v1",
+          "limits_version": 1,
+          "tiers_version": 1,
+          "git_bundle": {
+            "sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+            "location": "fixture/git.bundle"
+          },
+          "raw_queue": {
+            "sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+            "location": "fixture/raw-queue"
+          },
+          "queue_encoding": "legacy-number-tag/v1",
+          "id": "5d49184258ea5664dc948a19cd99aa54dfff99c576841dfb95bcbd56bd518b8a"
+        },
+        "inputs": {
+          "queue": {
+            "items": []
+          },
+          "required": {
+            "version": 1,
+            "rows": [
+              {
+                "row": 1,
+                "pr": 10
+              },
+              {
+                "row": 2,
+                "pr": 11
+              },
+              {
+                "row": 3,
+                "pr": 12
+              }
+            ],
+            "explicit_unions": [
+              [
+                10,
+                11
+              ]
+            ]
+          },
+          "tiers": {
+            "version": 1
+          },
+          "limits": {
+            "version": 1,
+            "construction_version": "fixture-v1",
+            "scoring_version": "fixture-v1",
+            "max_files": 8,
+            "max_file_bytes": 1000,
+            "max_total_bytes": 2000,
+            "reviewer": {
+              "verified": true,
+              "evidence": "fixture",
+              "max_files": 8,
+              "max_diff_bytes": 2000
+            }
+          },
+          "objects": [
+            {
+              "path": "src/a.py",
+              "blob": "c3af91a021460c70551c41811a9d6a5d90d5acb4",
+              "mode": "100644",
+              "bytes": 10,
+              "lines": 2,
+              "disposition": "included",
+              "reason": "",
+              "covered": [],
+              "evidence": [],
+              "churn": 0,
+              "findings": 0,
+              "tier": "T3"
+            },
+            {
+              "path": "src/b.py",
+              "blob": "89aa9b9d4bf73c066c43287eaefa9355b22431b5",
+              "mode": "100644",
+              "bytes": 0,
+              "lines": 0,
+              "disposition": "empty",
+              "reason": "",
+              "covered": [],
+              "evidence": [],
+              "churn": 0,
+              "findings": 0,
+              "tier": "T3"
+            },
+            {
+              "path": "src/c.py",
+              "blob": "1c8b0f57187b9a0f94220b84ebf614865b015aba",
+              "mode": "100644",
+              "bytes": 10,
+              "lines": 1,
+              "disposition": "unsupported",
+              "reason": "",
+              "covered": [],
+              "evidence": [],
+              "churn": 0,
+              "findings": 0,
+              "tier": "T3"
+            }
+          ],
+          "required_paths": {
+            "10": [
+              {
+                "path": "src/a.py"
+              },
+              {
+                "path": "docs/deleted.md",
+                "disposition": "deleted",
+                "deletion_evidence": [
+                  "commit:fixture"
+                ]
+              }
+            ],
+            "11": [
+              {
+                "path": "src/b.py"
+              },
+              {
+                "path": "src/c.py"
+              }
+            ]
+          },
+          "ledger": [],
+          "required_members": {},
+          "evidence_gaps": {},
+          "protected_policy": "{}"
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "manifest_id": "5d49184258ea5664dc948a19cd99aa54dfff99c576841dfb95bcbd56bd518b8a",
+          "target": "1111111111111111111111111111111111111111",
+          "evaluated_at": "2026-11-09T00:00:00Z",
+          "candidates": [
+            {
+              "repo": "example/primary",
+              "kind": "A",
+              "prs": [
+                10,
+                11
+              ],
+              "paths": [
+                "src/a.py"
+              ],
+              "target": "1111111111111111111111111111111111111111",
+              "scope_digest": "bc588b6732f2eca7e7943578c66f994e5d3f233d1cc433727b868c61fa1d2d0d",
+              "construction_policy_digest": "3480336eb349b0761323816549c38b1efc8a7deae0a1ef3d43a952007655f01e",
+              "partition": 0,
+              "subject_id": "ffaf0d4aba976342251777455887a85bbadd39f299856c6d08ea6b361440fc3c",
+              "family": "51ccee13b95ee03a2fe6f7756c007625b2a7dac8f075ca3492eb4e09defcd150",
+              "generation": 0,
+              "retry": false,
+              "row": 1,
+              "tier": "T3",
+              "score": 2,
+              "scope": [
+                {
+                  "path": "src/a.py",
+                  "blob": "c3af91a021460c70551c41811a9d6a5d90d5acb4",
+                  "intervals": [
+                    [
+                      1,
+                      2
+                    ]
+                  ]
+                }
+              ],
+              "job_id": "ffaf0d4aba976342251777455887a85bbadd39f299856c6d08ea6b361440fc3c:0",
+              "path_lineages": {
+                "src/a.py": "src/a.py"
+              },
+              "path_tiers": {
+                "src/a.py": "T3"
+              },
+              "path_scores": {
+                "src/a.py": 2
+              }
+            }
+          ],
+          "paths": [
+            {
+              "path": "src/a.py",
+              "blob": "c3af91a021460c70551c41811a9d6a5d90d5acb4",
+              "mode": "100644",
+              "bytes": 10,
+              "lines": 2,
+              "disposition": "included",
+              "reason": "",
+              "covered": [],
+              "evidence": [],
+              "churn": 0,
+              "findings": 0,
+              "tier": "T3",
+              "uncovered": [
+                [
+                  1,
+                  2
+                ]
+              ],
+              "eligible": [
+                [
+                  1,
+                  2
+                ]
+              ],
+              "score": 2
+            },
+            {
+              "path": "src/b.py",
+              "blob": "89aa9b9d4bf73c066c43287eaefa9355b22431b5",
+              "mode": "100644",
+              "bytes": 0,
+              "lines": 0,
+              "disposition": "empty",
+              "reason": "",
+              "covered": [],
+              "evidence": [],
+              "churn": 0,
+              "findings": 0,
+              "tier": "T3",
+              "uncovered": [],
+              "eligible": [],
+              "score": 0
+            },
+            {
+              "path": "src/c.py",
+              "blob": "1c8b0f57187b9a0f94220b84ebf614865b015aba",
+              "mode": "100644",
+              "bytes": 10,
+              "lines": 1,
+              "disposition": "unsupported",
+              "reason": "",
+              "covered": [],
+              "evidence": [],
+              "churn": 0,
+              "findings": 0,
+              "tier": "T3",
+              "uncovered": [
+                [
+                  1,
+                  1
+                ]
+              ],
+              "eligible": [
+                [
+                  1,
+                  1
+                ]
+              ],
+              "score": 1
+            }
+          ],
+          "required": [
+            {
+              "prs": [
+                10,
+                11
+              ],
+              "row": 1,
+              "missing_source_evidence": [],
+              "paths": [
+                {
+                  "path": "src/a.py",
+                  "outcome": "still-pending",
+                  "evidence": [],
+                  "reason": ""
+                },
+                {
+                  "path": "docs/deleted.md",
+                  "outcome": "no-current-code",
+                  "evidence": [
+                    "commit:fixture"
+                  ]
+                },
+                {
+                  "path": "src/b.py",
+                  "outcome": "no-current-code",
+                  "evidence": [],
+                  "reason": ""
+                },
+                {
+                  "path": "src/c.py",
+                  "outcome": "accounted-with-exceptions",
+                  "evidence": [],
+                  "reason": ""
+                }
+              ]
+            },
+            {
+              "prs": [
+                12
+              ],
+              "row": 3,
+              "missing_source_evidence": [
+                12
+              ],
+              "paths": []
+            }
+          ],
+          "evidence_gaps": {}
+        }
+      }
+    },
+    {
+      "name": "previous-job-increments-generation",
+      "source": "backfill_inventory.rank",
+      "input": {
+        "manifest": {
+          "version": "cq.backfill-inventory/v1",
+          "repo": "example/primary",
+          "target": "1111111111111111111111111111111111111111",
+          "tree": "2222222222222222222222222222222222222222",
+          "ledger_head": "3333333333333333333333333333333333333333",
+          "evaluated_at": "2026-11-09T00:00:00Z",
+          "snapshots": {
+            "queue": {
+              "sha256": "a5671a4dee00cc0cb69acb3393151e58b994d884d9d7b424f4ebcb8be03c0ac0",
+              "location": "fixture/queue"
+            },
+            "required": {
+              "sha256": "73c2728ba7feb6c3014b6f38085743a2536b502c80a38f045ce380b7d749fa72",
+              "location": "fixture/required"
+            },
+            "tiers": {
+              "sha256": "2430f1a2ad2982d0067885488a4c89e21ad1d7c83b115ba8f1b20acc88dfaea8",
+              "location": "fixture/tiers"
+            },
+            "limits": {
+              "sha256": "3480336eb349b0761323816549c38b1efc8a7deae0a1ef3d43a952007655f01e",
+              "location": "fixture/limits"
+            },
+            "objects": {
+              "sha256": "3add3e294fa62567e1c3cbfcfcb63e25edff2ecc63c90d17be15e671b246bfe3",
+              "location": "fixture/objects"
+            },
+            "required_paths": {
+              "sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+              "location": "fixture/required_paths"
+            },
+            "ledger": {
+              "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+              "location": "fixture/ledger"
+            },
+            "required_members": {
+              "sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+              "location": "fixture/required_members"
+            },
+            "evidence_gaps": {
+              "sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+              "location": "fixture/evidence_gaps"
+            },
+            "protected_policy": {
+              "sha256": "c89a148be40e6752261e3038609a4b68de22fa3bfdaf32f884edffb8480b9bbe",
+              "location": "fixture/protected_policy"
+            }
+          },
+          "git_version": "git version 2.43.0",
+          "blame_options": [
+            "--line-porcelain",
+            "--encoding=UTF-8"
+          ],
+          "construction_version": "fixture-v1",
+          "scoring_version": "fixture-v1",
+          "limits_version": 1,
+          "tiers_version": 1,
+          "git_bundle": {
+            "sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+            "location": "fixture/git.bundle"
+          },
+          "raw_queue": {
+            "sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+            "location": "fixture/raw-queue"
+          },
+          "queue_encoding": "legacy-number-tag/v1",
+          "id": "4f1e0c4b2ce08ce2b816550348ef855e7b62a2173948fc5b51387de940521ffd"
+        },
+        "inputs": {
+          "queue": {
+            "items": [
+              {
+                "id": "old-job",
+                "state": "blocked",
+                "inventory_subject_id": "d0758b64c53a4dcbc078141cd8b1bb19134bf1ba1f10abad60031198fc2a2fa5",
+                "generation": 0
+              }
+            ],
+            "backfill_families": {
+              "e08f66c7fe6c649679a411e77a4a86eb4a9552fe9a7c29f159a407e569c3c132": {
+                "failures": 1
+              }
+            }
+          },
+          "required": {
+            "version": 1,
+            "rows": [],
+            "explicit_unions": []
+          },
+          "tiers": {
+            "version": 1
+          },
+          "limits": {
+            "version": 1,
+            "construction_version": "fixture-v1",
+            "scoring_version": "fixture-v1",
+            "max_files": 8,
+            "max_file_bytes": 1000,
+            "max_total_bytes": 2000,
+            "reviewer": {
+              "verified": true,
+              "evidence": "fixture",
+              "max_files": 8,
+              "max_diff_bytes": 2000
+            }
+          },
+          "objects": [
+            {
+              "path": "src/a.py",
+              "blob": "c3af91a021460c70551c41811a9d6a5d90d5acb4",
+              "mode": "100644",
+              "bytes": 10,
+              "lines": 2,
+              "disposition": "included",
+              "reason": "",
+              "covered": [],
+              "evidence": [],
+              "churn": 0,
+              "findings": 0,
+              "tier": "T3"
+            }
+          ],
+          "required_paths": {},
+          "ledger": [],
+          "required_members": {},
+          "evidence_gaps": {},
+          "protected_policy": "{}"
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "manifest_id": "4f1e0c4b2ce08ce2b816550348ef855e7b62a2173948fc5b51387de940521ffd",
+          "target": "1111111111111111111111111111111111111111",
+          "evaluated_at": "2026-11-09T00:00:00Z",
+          "candidates": [
+            {
+              "repo": "example/primary",
+              "kind": "B",
+              "prs": [],
+              "paths": [
+                "src/a.py"
+              ],
+              "target": "1111111111111111111111111111111111111111",
+              "scope_digest": "bc588b6732f2eca7e7943578c66f994e5d3f233d1cc433727b868c61fa1d2d0d",
+              "construction_policy_digest": "3480336eb349b0761323816549c38b1efc8a7deae0a1ef3d43a952007655f01e",
+              "partition": 0,
+              "subject_id": "d0758b64c53a4dcbc078141cd8b1bb19134bf1ba1f10abad60031198fc2a2fa5",
+              "family": "e08f66c7fe6c649679a411e77a4a86eb4a9552fe9a7c29f159a407e569c3c132",
+              "generation": 1,
+              "retry": true,
+              "row": null,
+              "tier": "T3",
+              "score": 2,
+              "scope": [
+                {
+                  "path": "src/a.py",
+                  "blob": "c3af91a021460c70551c41811a9d6a5d90d5acb4",
+                  "intervals": [
+                    [
+                      1,
+                      2
+                    ]
+                  ]
+                }
+              ],
+              "job_id": "d0758b64c53a4dcbc078141cd8b1bb19134bf1ba1f10abad60031198fc2a2fa5:1",
+              "path_lineages": {
+                "src/a.py": "src/a.py"
+              },
+              "path_tiers": {
+                "src/a.py": "T3"
+              },
+              "path_scores": {
+                "src/a.py": 2
+              }
+            }
+          ],
+          "paths": [
+            {
+              "path": "src/a.py",
+              "blob": "c3af91a021460c70551c41811a9d6a5d90d5acb4",
+              "mode": "100644",
+              "bytes": 10,
+              "lines": 2,
+              "disposition": "included",
+              "reason": "",
+              "covered": [],
+              "evidence": [],
+              "churn": 0,
+              "findings": 0,
+              "tier": "T3",
+              "uncovered": [
+                [
+                  1,
+                  2
+                ]
+              ],
+              "eligible": [
+                [
+                  1,
+                  2
+                ]
+              ],
+              "score": 2
+            }
+          ],
+          "required": [],
+          "evidence_gaps": {}
+        }
+      }
+    }
+  ]
+}

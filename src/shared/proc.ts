@@ -42,7 +42,7 @@ import { checkoutWriterStdio, trackCheckoutWriter } from './checkoutWriterContex
 // SPAWN FAILURES ARE DATA, NOT THROWS: a missing binary (ENOENT) surfaces
 // on `close` as `spawnError` — the driver maps it to a stopReason 'error'
 // WorkerResult and NEVER throws past the frozen seam once spawned.
-import { ENV_NAME_PATTERN, parsePassthrough } from '../config/parsers.js';
+import { ENV_NAME_PATTERN, parsePassthrough, urlValueRefusal } from '../config/parsers.js';
 import { processSignalCleanupStarted, registerProcessSignalCleanup } from './process-signals.js';
 import { spawn } from 'node:child_process';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
@@ -243,9 +243,17 @@ export function buildChildEnv(
   const child = Object.create(null) as Record<string, string>;
   // The ONE passthrough grammar and deny set (src/config/parsers.ts).
   const configuredAllowlist = parsePassthrough(parentEnv[ENV_PASSTHROUGH]);
+  const operatorNames = new Set([...extraAllowlist, ...configuredAllowlist]);
   for (const name of [...DEFAULT_CHILD_ENV_ALLOWLIST, ...extraAllowlist, ...configuredAllowlist]) {
     const value = parentEnv[name];
-    if (value !== undefined) child[name] = value;
+    if (value === undefined) continue;
+    // A passthrough value that carries URL credentials is refused, naming the
+    // variable (never the value).
+    if (operatorNames.has(name)) {
+      const refusal = urlValueRefusal(name, value);
+      if (refusal !== undefined) throw new Error(`child env: ${refusal}`);
+    }
+    child[name] = value;
   }
   if (overrides !== undefined) {
     for (const [name, value] of Object.entries(overrides)) child[name] = value;

@@ -1,0 +1,30 @@
+{
+  "run_id": "backfill-0123456789abcdef-g0-20261109T091200Z",
+  "item_id": "backfill-0123456789abcdef-g0",
+  "pr": 0,
+  "kind": "backfill",
+  "repo": "camerontaylor/cq-toolkit",
+  "workId": "crq:backfill-0123456789abcdef-g0-20261109T091200Z",
+  "label": "backfill subject 0123456789abcdef",
+  "cycle": 1,
+  "base": "1818181818181818181818181818181818181818",
+  "head": "1919191919191919191919191919191919191919",
+  "pr_head": "1919191919191919191919191919191919191919",
+  "review_pin": "1818181818181818181818181818181818181818",
+  "target": "origin/main",
+  "pr_branch": null,
+  "worktree": "/srv/crq/apps/crq-python/state/../worktrees/coderabbit-queue-wt-backfill-0123456789abcdef-g0-20261109T091200Z",
+  "wt_branch": "crq/wt-backfill-0123456789abcdef-g0-20261109T091200Z",
+  "dirty_diff": "clean tree",
+  "range_policy": null,
+  "band": "background",
+  "started_at": "2026-11-09T09:12:00Z",
+  "cmd": ["coderabbit", "review", "--agent", "--deep", "--committed", "--base-commit", "1818181818181818181818181818181818181818"],
+  "backfill": {
+    "subject_id": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "job_id": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef:0",
+    "attempt_id": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef:0:1",
+    "target": "origin/main",
+    "scope_digest": "1111111111111111111111111111111111111111111111111111111111111111"
+  }
+}

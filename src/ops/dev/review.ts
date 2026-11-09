@@ -453,10 +453,14 @@ function makeReviewCycle(
           ...(configuredReviewers === undefined ? {} : { configuredReviewers }),
         });
         if (selection === null) return;
-        if (effects.reviewLogSha256 === undefined) {
-          throw new Error('retained review log validation is unavailable');
+        if (effects.reviewLogSha256 === undefined) return;
+        let retainedDigest: string;
+        try {
+          retainedDigest = await effects.reviewLogSha256(selection.cycle.logPath);
+        } catch {
+          // An unreadable log cannot be reused, but a fresh review can replace it.
+          return;
         }
-        const retainedDigest = await effects.reviewLogSha256(selection.cycle.logPath);
         if (
           selection.cycle.logSha256 !== undefined &&
           retainedDigest !== selection.cycle.logSha256

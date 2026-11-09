@@ -1,7 +1,7 @@
 """Conservative, idempotent history accounting with retained source bytes.
 
 Source collectors pass authenticated transport envelopes, not prose judgements.
-All four classes get an import result even when artifacts establish no scope.
+All three classes get an import result even when artifacts establish no scope.
 No provider review is launched to fill historical evidence gaps.
 """
 import copy
@@ -15,7 +15,10 @@ from backfill_accounting import ranges
 
 REVIEWER_FORMATS = {"0.8.2": "coderabbit-agent-0.8.2", "0.9.2": "coderabbit-agent-0.9.2"}
 
-CLASSES = ("crq-counted-cycle", "merged-current-receipt", "promotion-range", "github-app-review")
+CLASSES = ("crq-counted-cycle", "merged-current-receipt", "github-app-review")
+# Collection stopped with the promotion retirement, but catalogs saved before
+# that change must still import: keep their rows as explicit unverified results.
+RETIRED_CLASSES = ("promotion-range",)
 
 
 def vendor_events(raw):
@@ -43,6 +46,30 @@ def vendor_events(raw):
             raise ledger.IntegrityError("vendor event must be an object")
         result.append(value)
     return result
+
+
+def finding_intervals(value):
+    """Normalize explicit or CodeRabbit line anchors; invalid anchors stay unverified."""
+    lines = set()
+    try:
+        vendor_intervals = value.get("intervals")
+        if "intervals" not in value:
+            start, end = value.get("startLine"), value.get("endLine")
+            for key in ("startLine", "endLine"):
+                if key in value and (type(value[key]) is not int or not 1 <= value[key] <= 1_000_000):
+                    raise ValueError("invalid vendor endpoint")
+            start, end = start or end, end or start
+            vendor_intervals = [[min(start, end), max(start, end)]] if start and end else []
+        for start, end in vendor_intervals or []:
+            if type(start) is not int or type(end) is not int or not 1 <= start <= end <= 1_000_000:
+                raise ValueError("invalid vendor interval")
+            lines.update(range(start, end + 1))
+            if len(lines) > 1_000_000:
+                raise ValueError("vendor interval bound")
+        intervals = ranges(lines)
+    except (TypeError, ValueError):
+        intervals = []
+    return intervals
 
 
 def terminal_scope(raw, expected_head):
@@ -108,7 +135,7 @@ def adapted_terminal_scope(repo, raw, item, meta, proof):
 
 
 def import_source(repo, store, source_class, source_id, raw, envelope, at, existing):
-    if source_class not in CLASSES:
+    if source_class not in CLASSES and source_class not in RETIRED_CLASSES:
         raise ledger.IntegrityError("unsupported history source class")
     source_digest = hashlib.sha256(raw).hexdigest()
     reference = store.put(raw)
@@ -121,6 +148,12 @@ def import_source(repo, store, source_class, source_id, raw, envelope, at, exist
     previous = next((v for v in existing if v["source_key"] == result_key), None)
     if previous:
         return [], previous
+    if source_class in RETIRED_CLASSES:
+        disposition = ledger.event("import-result", result_key, at, {
+            "source": source, "source_digest": source_digest, "result": "unverified",
+            "reason": "retired promotion source retained for catalog compatibility",
+            "review_id": None, "duplicate_id": None, "artifacts": [reference, proof]})
+        return [disposition], disposition
     review, outcome, reason, duplicate = None, "unverified", "explicit reviewed scope unavailable", None
     try:
         if envelope.get("author_cycle") or envelope.get("source_type") == "author-cli":
@@ -186,7 +219,7 @@ def import_catalog(repo, store, catalog, at, existing):
         raw = source["raw"]
         new, result = import_source(repo, store, source["class"], source["id"], raw, source["envelope"], at, events)
         events.extend(new); generated.extend(new)
-        row = report[source["class"]]; row["sources"] += 1
+        row = report.setdefault(source["class"], {"sources": 0, "results": {}}); row["sources"] += 1
         outcome = result["payload"]["result"]
         row["results"][outcome] = row["results"].get(outcome, 0) + 1
     return generated, report
@@ -206,9 +239,10 @@ def collect_sources(queue, state, store, *, github=None):
     def retain(kind, ident, raw, envelope):
         catalog.append({"class": kind, "id": ident, "raw_artifact": store.put(raw), "envelope": envelope})
     for item in sorted(queue.get("items", []), key=lambda i: i["id"]):
+        if item.get("kind") == "promotion":
+            continue  # Retired promotions remain on disk but are not review evidence.
         for index, cycle in enumerate(item.get("cycles", []) + item.get("author_cycles", [])):
             run = str(cycle.get("run_id") or f"{item['id']}:cycle:{index}")
-            kind = "promotion-range" if item.get("kind") == "promotion" else "crq-counted-cycle"
             raw = json.dumps({"item": item["id"], "kind": item["kind"], "cycle": cycle}, sort_keys=True).encode()
             envelope = {"authenticated": True, "repo": ledger.REPO, "producer": "crq-runner-app",
                         "author_cycle": item.get("kind") == "author", "exit_code": None,
@@ -229,7 +263,7 @@ def collect_sources(queue, state, store, *, github=None):
                     value = ledger.loads((rdir / "review-event.json").read_bytes())
                     ledger.validate(value)
                     envelope["review_payload"] = value["payload"]
-            retain(kind, run, raw, envelope)
+            retain("crq-counted-cycle", run, raw, envelope)
     for filename in sorted((state / "receipts").glob("*.json")):
         raw = filename.read_bytes()
         if hashlib.sha256(raw).hexdigest() != filename.stem:
@@ -239,11 +273,6 @@ def collect_sources(queue, state, store, *, github=None):
         retain("merged-current-receipt", str(document.get("run_id") or filename.stem), raw,
                {"authenticated": True, "repo": ledger.REPO, "producer": "crq-runner-app", "exit_code": 0,
                 "completed_at": document.get("started_at"), "receipt_digest": filename.stem})
-    for record in (queue.get("promotion_audit") or {}).get("records", []):
-        raw = json.dumps(record, sort_keys=True).encode()
-        retain("promotion-range", "audit:" + hashlib.sha256(raw).hexdigest(), raw,
-               {"authenticated": True, "repo": ledger.REPO, "producer": "crq-runner-app", "exit_code": 0,
-                "completed_at": record.get("at"), "reason": "promotion membership is not reviewed scope"})
     acquisition = {"local_queue": store.put(json.dumps(queue, sort_keys=True).encode()),
                    "github": "not-acquired" if github is None else "acquired-paginated", "source_classes": list(CLASSES)}
     if github is not None:

@@ -14,13 +14,14 @@ op input. `secret` values are never printed.
 | --- | --- | --- | --- | --- | --- | --- |
 | `CQ_APPROVAL_SIGNERS` | config | yes | conservative | live | no | Operator-ledger signers allowed to approve. |
 | `CQ_AUTHOR_REPO` | config | no | neutral | live | no | Repository path the review-transport author side works in. |
-| `CQ_AUTHOR_SNAPSHOT_SCANNER` | config | no | neutral | live | no | Snapshot scanner command for the review transport. |
+| `CQ_AUTHOR_SNAPSHOT_SCANNER` | config | no | neutral | live | no | Snapshot scanner command for the review transport and review.submit (an explicit scanner input wins). |
 | `CQ_AUTHOR_SSH_ALIAS` | config | no | neutral | live | no | SSH alias of the author host for the review transport. |
 | `CQ_AUTOMATION_TOKEN` | config | yes | conservative | live | yes | Automation credential mapped to GH_TOKEN for gh (no ambient fallback). |
 | `CQ_DIST_PREPARED` | test | no | neutral | live | no | Set to 1 by the repo test runners when dist is already fresh (read by test/global-setup.ts). |
 | `CQ_GH_BIN` | config | no | neutral | live | no | Path or name of the gh binary (default gh). |
 | `CQ_MERGE_ACCEPT_REVIEW_STATES` | config | yes | conservative | live | no | Review states that count as acceptance (blank: APPROVED only). |
 | `CQ_MERGE_BASE_BRANCH` | config | yes | conservative | live | no | Base branch the self-merge flow targets. |
+| `CQ_MERGE_PROTECTED_BRANCH` | config | yes | conservative | live | no | Branch merge pushes may never target; plan data cannot override it (blank: main). |
 | `CQ_MERGE_PROTECTED_PATHS` | config | yes | conservative | live | no | Protected-paths posture: human, diff-check or advisory (blank: human). |
 | `CQ_MERGE_TRUSTED_ASSOCIATIONS` | config | yes | conservative | live | no | Trusted author associations (blank: OWNER, MEMBER, COLLABORATOR). |
 | `CQ_MERGE_TRUSTED_BOTS` | config | yes | conservative | live | no | Trusted bot logins (blank: none). |
@@ -47,15 +48,16 @@ op input. `secret` values are never printed.
 
 ## Foreign names
 
-Read by drivers, forge adapters and selfhost entries. They are never warned on; secret presence is
-all that is recorded.
+Read by drivers, forge adapters and selfhost entries. They are never warned on. A secret name records
+presence only. `_URL` is not a secret suffix: a URL value is shown and recorded with userinfo, query and
+fragment stripped, or `[redacted-url]` when it does not parse (ADR-0009).
 
 | Name | Secret | Description |
 | --- | --- | --- |
 | `ANTHROPIC_API_KEY` | yes | Anthropic API key (claude-code and ai-sdk drivers). |
 | `ANTHROPIC_AUTH_TOKEN` | yes | Anthropic auth token injected into claude-code children. |
-| `ANTHROPIC_BASE_URL` | yes | Anthropic endpoint override. |
-| `DEEPSEEK_ANTHROPIC_BASE_URL` | yes | DeepSeek Anthropic-compatible endpoint override. |
+| `ANTHROPIC_BASE_URL` | no | Anthropic endpoint override. |
+| `DEEPSEEK_ANTHROPIC_BASE_URL` | no | DeepSeek Anthropic-compatible endpoint override. |
 | `DEEPSEEK_API_KEY` | yes | DeepSeek API key. |
 | `GH_REPOSITORY` | no | Repository slug default for selfhost entries. |
 | `GH_TOKEN` | yes | GitHub token read by gh. |
@@ -64,8 +66,8 @@ all that is recorded.
 | `NPM_TOKEN` | yes | npm publish token (kept out of child environments). |
 | `OPENAI_API_KEY` | yes | OpenAI API key. |
 | `OPENCODE_GO_API_KEY` | yes | OpenCode Go API key. |
-| `OPENCODE_GO_BASE_URL` | yes | OpenCode Go endpoint (required, no default). |
+| `OPENCODE_GO_BASE_URL` | no | OpenCode Go endpoint (required, no default). |
 | `PASEO_AGENT_ID` | no | Current Paseo agent notification destination. |
-| `ZAI_ANTHROPIC_BASE_URL` | yes | Z.ai Anthropic-compatible endpoint override. |
+| `ZAI_ANTHROPIC_BASE_URL` | no | Z.ai Anthropic-compatible endpoint override. |
 | `ZAI_API_KEY` | yes | Z.ai API key. |
-| `ZAI_BASE_URL` | yes | Z.ai ai-sdk endpoint override. |
+| `ZAI_BASE_URL` | no | Z.ai ai-sdk endpoint override. |

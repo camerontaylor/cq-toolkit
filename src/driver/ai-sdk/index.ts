@@ -270,7 +270,8 @@ import type {
 import type { ModelSpec, OpInvocation } from '../types.js';
 import type { OutputSchema, ProviderSignals, WorkerErrorClass } from '../types.js';
 import { defaultSessionsDir } from '../sessions-dir.js';
-import { createStepFetch } from './step-fetch.js';
+import { createStepFetch, STEP_FETCH_MARGIN_MS } from './step-fetch.js';
+import type { Dispatcher } from 'undici';
 
 // ---------------------------------------------------------------------------
 // Public surface
@@ -353,6 +354,17 @@ export interface AiSdkDriverOptions {
    * 2_147_483_647 (Node's timer ceiling), inclusive.
    */
   stepTimeoutMs?: number;
+  /**
+   * The undici dispatcher the DEFAULT providers' fetch pairs with — the
+   * transport seam for deployments that must not connect directly (e.g. an
+   * undici `ProxyAgent`/`EnvHttpProxyAgent` in a proxy-only environment).
+   * The driver applies per-request socket timeouts while preserving this
+   * transport. Absent: the process-global undici dispatcher is used, including
+   * a proxy installed through Node startup settings or setGlobalDispatcher.
+   * Never serializable config — in-process construction data
+   * only. Injected `providers` are untouched either way.
+   */
+  dispatcher?: Dispatcher;
   /**
    * Runs before every provider send, including retries and repairs. The
    * optional context distinguishes a model request from scanned tool output;
@@ -461,8 +473,11 @@ export class AiSdkDriver implements Driver {
       );
     this.stepTimeoutMs = stepTimeoutMs;
     // The production providers fetch through a transport bounded by the same
-    // step bound (step-fetch.ts); injected providers are left untouched.
-    this.providers = options.providers ?? defaultProviders(createStepFetch(stepTimeoutMs));
+    // step bound (step-fetch.ts); injected providers are left untouched. An
+    // operator-supplied dispatcher takes precedence over the process global.
+    this.providers =
+      options.providers ??
+      defaultProviders(createStepFetch(stepTimeoutMs, STEP_FETCH_MARGIN_MS, options.dispatcher));
     this.pricing = options.pricing ?? priceOf;
     this.strictTokenCapability = options.strictTokenCapability;
     this.strictTokenReservationHook = options.strictTokenReservationHook;
@@ -484,8 +499,8 @@ export class AiSdkDriver implements Driver {
     } catch (error) {
       // A throw AFTER the record was created (prompt append, tool surface
       // build, any other setup before the generateText try) must still name
-      // the freshest record: withReapOnSettle reaps only a rejection that
-      // carries `sessionId`, so a bare rethrow would leave the fresh record
+      // the freshest record: withReapOnSettle reaps only a rejection wrapped
+      // in SessionBoundError, so a bare rethrow would leave the fresh record
       // on disk (the claude-code lane binds the same way).
       if (sessionId !== undefined) throw new SessionBoundError(error, sessionId);
       throw error;
@@ -1143,7 +1158,10 @@ export class AiSdkDriver implements Driver {
             meteredSteps.push(usageFromSdk(step.usage));
             if (meterStop === undefined) {
               meterStop = tokenMeterVerdict(budget, meteredSteps);
-              if (meterStop !== undefined) {
+              if (
+                meterStop !== undefined &&
+                (meterStop.cause !== 'context' || step.finishReason === 'tool-calls')
+              ) {
                 await store.appendBudgetStop(record.sessionId, {
                   type: 'budget-stop',
                   cause: meterStop.cause,
@@ -1236,7 +1254,10 @@ export class AiSdkDriver implements Driver {
             mainUsage: stepUsage,
             mainUsageEvidence: usageEvidence,
             mainSteps: completedSteps,
-            meterStopped: meterStop !== undefined,
+            meterStopped:
+              meterStop !== undefined &&
+              (meterStop.cause !== 'context' || err.finishReason === 'tool-calls'),
+            contextBlocked: meterStop?.cause === 'context',
             servedModel:
               typeof err.response?.modelId === 'string' && err.response.modelId !== ''
                 ? err.response.modelId
@@ -1310,7 +1331,10 @@ export class AiSdkDriver implements Driver {
             mainUsage: usage,
             mainUsageEvidence: resolvedUsageMeasured,
             mainSteps: completedSteps,
-            meterStopped: meterStop !== undefined,
+            meterStopped:
+              meterStop !== undefined &&
+              (meterStop.cause !== 'context' || finishReason === 'tool-calls'),
+            contextBlocked: meterStop?.cause === 'context',
             servedModel,
             responseHeaders: result.response.headers,
             finishReason,
@@ -1343,7 +1367,10 @@ export class AiSdkDriver implements Driver {
         aborted: signalAborted(abortSignal),
         tokenBudget: budget.maxTokens,
         totalTokens: totalTokensOf(usage),
-        meterStopped: meterStop !== undefined,
+        // Context limits the next request, not a valid terminal response.
+        meterStopped:
+          meterStop !== undefined &&
+          (meterStop.cause !== 'context' || finishReason === 'tool-calls'),
       });
       // PRODUCER RULE (ADR §2.2): every error verdict this lane returns
       // carries errorClass. A resolved run whose final step finished
@@ -1507,6 +1534,7 @@ export class AiSdkDriver implements Driver {
     mainSteps: number;
     /** The output-only cap or context ceiling stopped the main loop. */
     meterStopped: boolean;
+    contextBlocked: boolean;
     servedModel: string | undefined;
     responseHeaders: Record<string, string> | undefined;
     finishReason: FinishReason;
@@ -1619,6 +1647,22 @@ export class AiSdkDriver implements Driver {
           `ai-sdk driver: the run ended with finishReason '${String(finishReason)}' before a schema-valid object (${rejection})`,
         ),
         errorClass: finishReasonErrorClass(finishReason),
+        ...verdictSignals(),
+      };
+    }
+
+    if (inputs.contextBlocked) {
+      return {
+        ...(servedModel !== undefined ? { model: servedModel } : {}),
+        ...verdictExtras(mainUsage, mainUsageEvidence),
+        sessionId: record.sessionId,
+        denials,
+        ...capabilityEvidence,
+        stopReason: 'error',
+        error: boundedErrorText(
+          `ai-sdk driver: structured output invalid and the context ceiling prevents repair — ${rejection}`,
+        ),
+        errorClass: 'output-invalid',
         ...verdictSignals(),
       };
     }
@@ -2356,6 +2400,16 @@ export function tokenMeterVerdict(
   budget: Pick<Budget, 'maxOutputTokens' | 'maxContextTokens'>,
   steps: readonly Usage[],
 ): TokenMeterVerdict | undefined {
+  // Output is a consumed budget; it must win even when context also trips.
+  if (budget.maxOutputTokens !== undefined) {
+    const output = steps.reduce((sum, step) => sum + step.output, 0);
+    if (output >= budget.maxOutputTokens) {
+      return {
+        cause: 'output-tokens',
+        detail: `output budget: ${String(output)} output tokens over ${String(steps.length)} steps (cap ${String(budget.maxOutputTokens)})`,
+      };
+    }
+  }
   const last = steps.at(-1);
   if (budget.maxContextTokens !== undefined && last !== undefined) {
     const context = last.input + last.cacheRead + last.cacheWrite;
@@ -2363,15 +2417,6 @@ export function tokenMeterVerdict(
       return {
         cause: 'context',
         detail: `context ceiling: step ${String(steps.length)} carried ${String(context)} input tokens (ceiling ${String(budget.maxContextTokens)})`,
-      };
-    }
-  }
-  if (budget.maxOutputTokens !== undefined) {
-    const output = steps.reduce((sum, step) => sum + step.output, 0);
-    if (output >= budget.maxOutputTokens) {
-      return {
-        cause: 'output-tokens',
-        detail: `output budget: ${String(output)} output tokens over ${String(steps.length)} steps (cap ${String(budget.maxOutputTokens)})`,
       };
     }
   }

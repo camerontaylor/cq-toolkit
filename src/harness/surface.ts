@@ -162,7 +162,7 @@ export type HarnessManifest = z.infer<typeof HarnessManifestSchema>;
  * position and the reason, never any part of the offending value (the schema's
  * raw multi-line ZodError is what this replaces).
  */
-function parseManifest(raw: unknown): HarnessManifest {
+export function parseManifest(raw: unknown): HarnessManifest {
   const result = HarnessManifestSchema.safeParse(raw);
   if (result.success) return result.data;
   const [first] = result.error.issues;
