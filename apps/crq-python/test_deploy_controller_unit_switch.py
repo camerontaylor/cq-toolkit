@@ -83,6 +83,34 @@ class UnitSwitchTests(ControllerFixture):
         self.assertFalse(adapter.running)
         self.assertEqual(json.loads(path.read_text())["phase"], "activation_pending")
 
+    def test_ambiguous_activation_drains_owned_work_in_adapter_fake(self):
+        class Crash(BaseException):
+            pass
+
+        class OwnedWorkAdapter(Adapter):
+            def __init__(self):
+                super().__init__("python")
+                self.owned = []
+                self.unrelated = ["unrelated-session"]
+
+            def start(self, unit):
+                self.owned.append("new-unit-work")
+                raise Crash()
+
+            def stop_and_drain(self, unit):
+                self.owned.clear()
+                super().stop_and_drain(unit)
+
+        adapter = OwnedWorkAdapter()
+        with self.assertRaises(Crash):
+            dc.switch_unit(self.effects, adapter, "crq-tick.service", "node:" + "a" * 40)
+        path = next(self.record_dir.glob("controller-*.json"))
+        self.assertEqual(adapter.owned, ["new-unit-work"])
+        with self.assertRaises(dc.RecoveryRequired):
+            dc.recover_unit(self.effects, adapter, path)
+        self.assertEqual(adapter.owned, [])
+        self.assertEqual(adapter.unrelated, ["unrelated-session"])
+
     def test_crash_releasing_rollback_activation_is_not_replayed(self):
         class Crash(BaseException):
             pass
@@ -139,14 +167,31 @@ class UnitSwitchTests(ControllerFixture):
         with self.assertRaisesRegex(dc.Refused, "unfinished unit switch"):
             dc.rollback_plan(self.effects, None, {}, self.overlay_path)
 
-    def test_pending_checkout_blocks_unit_switch_before_mutation(self):
-        self.effects.journal_append({"operation": "deploy_pending", "outcome": "pending"})
-        adapter = Adapter("python")
-        with self.assertRaisesRegex(dc.Refused, "unfinished checkout switch"):
-            dc.switch_unit(self.effects, adapter, "crq-tick.service", "node:" + "a" * 40)
-        self.assertTrue(adapter.running)
+    def test_resolution_prose_cannot_clear_pending_unit_intent(self):
+        path = self.effects.journal_append({"operation": "unit_switch", "outcome": "pending"})
+        note = self.record_dir / "OPERATOR-RESOLUTION.md"
+        for contents in ("Resolution for controller-foreign.json: done.\n",
+                         path.name + "\n"):
+            note.write_text(contents)
+            with self.assertRaisesRegex(dc.Refused, "unfinished unit switch"):
+                dc.switch_unit(self.effects, Adapter("python"), "crq-slot.service",
+                               "node:" + "b" * 40)
 
-    def test_pending_checkout_blocks_unit_recovery_before_mutation(self):
+    def test_historical_checkout_recovery_and_resolution_remain_untouched(self):
+        path = self.effects.journal_append({"operation": "recovery_required",
+                                            "outcome": "recovery_required"})
+        original = path.read_bytes()
+        note = self.record_dir / "OPERATOR-RESOLUTION.md"
+        note.write_text("Legacy operator resolution: no deployment change was made.\n")
+        note_before = note.read_bytes()
+        adapter = Adapter("python")
+        result = dc.switch_unit(self.effects, adapter, "crq-tick.service", "node:" + "a" * 40)
+        self.assertEqual(result["outcome"], "completed")
+        self.assertTrue(adapter.running)
+        self.assertEqual(path.read_bytes(), original)
+        self.assertEqual(note.read_bytes(), note_before)
+
+    def test_unit_recovery_does_not_interpret_checkout_history(self):
         class Crash(BaseException):
             pass
 
@@ -158,11 +203,12 @@ class UnitSwitchTests(ControllerFixture):
             dc.switch_unit(self.effects, InterruptedAdapter("python"), "crq-tick.service",
                            "node:" + "a" * 40)
         path = next(self.record_dir.glob("controller-*.json"))
-        self.effects.journal_append({"operation": "rollback_pending", "outcome": "pending"})
+        retained = self.effects.journal_append({"operation": "rollback_pending", "outcome": "pending"})
+        retained_before = retained.read_bytes()
         adapter = Adapter("python")
-        with self.assertRaisesRegex(dc.Refused, "unfinished checkout switch"):
-            dc.recover_unit(self.effects, adapter, path)
+        self.assertEqual(dc.recover_unit(self.effects, adapter, path)["outcome"], "rolled_back")
         self.assertTrue(adapter.running)
+        self.assertEqual(retained.read_bytes(), retained_before)
 
     def test_crash_during_initial_drain_recovers_without_stale_baseline(self):
         class Crash(BaseException):

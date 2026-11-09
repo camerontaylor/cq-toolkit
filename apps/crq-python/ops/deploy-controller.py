@@ -1292,7 +1292,6 @@ def recover_unit(effects, adapter, path):
                            and not _hex(_HEX64, record["state"]["preserved/" + rel]))
                        for rel in PRESERVED))):
             raise Refused("invalid unit recovery record")
-        refuse_unfinished_checkout_switches(effects)
         adapter.validate_snapshot(record["unit"], record["snapshot"])
         try:
             adapter.stop_and_drain(record["unit"])
@@ -1328,21 +1327,6 @@ def refuse_unfinished_unit_switches(effects):
             raise Refused("unfinished unit switch requires recovery: " + path.name)
 
 
-def refuse_unfinished_checkout_switches(effects):
-    """A retained checkout mutation invalidates assumptions of a unit switch."""
-    for path in effects.record_dir.glob("controller-*.json"):
-        if path.is_symlink() or not path.is_file():
-            raise Refused("invalid controller journal entry: " + path.name)
-        try:
-            record = json.loads(path.read_text())
-        except (OSError, ValueError) as exc:
-            raise Refused("unreadable controller journal entry: " + path.name) from exc
-        if not isinstance(record, dict):
-            raise Refused("invalid controller journal entry: " + path.name)
-        if record.get("operation") in ("deploy_pending", "rollback_pending", "recovery_required"):
-            raise Refused("unfinished checkout switch requires recovery: " + path.name)
-
-
 def switch_unit(effects, adapter, unit, runtime):
     """Execute one unit transaction using a trusted, injected host adapter.
 
@@ -1359,7 +1343,6 @@ def switch_unit(effects, adapter, unit, runtime):
     with effects.controller_lock():
         effects.record_preflight()
         refuse_unfinished_unit_switches(effects)
-        refuse_unfinished_checkout_switches(effects)
         prior = adapter.preflight(unit, runtime)
         if not isinstance(prior, dict) or not _unit_runtime(prior.get("runtime")):
             raise Refused("invalid prior runtime")

@@ -78,7 +78,10 @@ No VM reboot or power-loss test has been performed.
    restore the snapshot. It persists `restore_activation_pending` before
    releasing prior activation, and records rollback only afterwards. A crash
    in either activation-pending phase is ambiguous: stop/drain, retain the
-   intent and investigate rather than blindly replay or restore. Queue data is
+   intent and investigate rather than blindly replay or restore. That drain
+   can interrupt live work launched after activation; the adapter must identify
+   owned work without stopping unrelated sessions. The fake adapter test does
+   not establish real process ownership or systemd behavior. Queue data is
    never restored from the snapshot. Actual controller retries and interruption
    at each phase require VM proof; synthetic recovery is not that proof.
 
@@ -90,12 +93,16 @@ The exact inventory and the proof that it is complete remain open. Release of
 each activator and the service must be controlled and crash-tested; the seam's
 single `start` call is not evidence that production release is safe.
 
-Checkout deploy and rollback now refuse unresolved unit intents, and unit
-switch/recovery refuses unresolved checkout intents, in the supplied journal
-directory. This does not protect against a caller choosing a different record
-directory or an older controller bypassing the checks. The CLI currently permits
-different directories, so a shared, discoverable journal identity and handling
-of pre-existing records remain unresolved before a host adapter can be enabled.
+Checkout deploy and rollback refuse unresolved unit intents in the supplied
+journal directory. The unit seam does not consume prior checkout intents: the
+documented operator resolution is free-form, and the observed legacy record
+does not retain enough identity to verify the resolution mechanically. It
+would be unsafe to treat arbitrary prose as a resolution or block all historical
+records permanently. Cross-operation interoperability therefore remains
+unresolved. The guard also cannot discover intents in a different caller-chosen
+directory, and older controllers can bypass it. A shared, discoverable journal
+identity and compatible treatment of existing records need a reviewed solution
+before a host adapter can be enabled; retained evidence must not be rewritten.
 
 ## Durable fence boundaries requiring proof
 
