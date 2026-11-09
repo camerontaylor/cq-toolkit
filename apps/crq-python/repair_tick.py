@@ -694,6 +694,35 @@ def merge_head_evidence(c, record, actual_head):
     return evidence
 
 
+def canonical_fixed_events(c, record, info):
+    """Project existing terminal ledger truth; never create a disposition."""
+    fixed = [v['job'] for v in record.get('verdicts', []) if v['verdict'] == 'FIXED']
+    if not fixed:
+        return None
+    jobs = [json.loads((c.STATE / 'repair/inbox' / (j + '.json')).read_text()) for j in fixed]
+    if not all(isinstance(j.get('canonical_finding_id'), str)
+               and re.fullmatch(r'[0-9a-f]{64}', j['canonical_finding_id'])
+               and (c.STATE / 'backfill/findings/triage' / (j['canonical_finding_id'] + '.json')).exists()
+               for j in jobs):
+        return None
+    merge = (info.get('mergeCommit') or {}).get('oid')
+    inbox = finding_inbox(c)
+    events = {}
+    for job_id, job in zip(fixed, jobs):
+        if job.get('job') != job_id or job_id not in record['jobs']:
+            raise ValueError('canonical fixed repair job identity mismatch')
+        event_id = inbox.current_fixed_event(job, merge)
+        if not event_id:
+            return None
+        events[job_id] = event_id
+    published = record.get('publication', {}).get('head')
+    actual = info.get('headRefOid')
+    if (info.get('number') != record['fix_pr']['number'] or not published or not actual
+            or not c.is_ancestor(published, actual)):
+        raise ValueError('canonical fixed repair PR lineage mismatch')
+    return {'published_head': published, 'actual_head': actual, 'canonical_fixed_events': events}
+
+
 def reconcile_fix_prs(c, q):
     for item in q['items']:
         if item['kind'] == review_receipt.KIND:
@@ -720,7 +749,12 @@ def reconcile_fix_prs(c, q):
                 if not merge or not c.is_ancestor(merge, c.git('rev-parse', DEFAULT_REF)):
                     continue
                 try:
-                    proof = merge_head_evidence(c, record, info.get('headRefOid'))
+                    proof = canonical_fixed_events(c, record, info)
+                    projected = proof is not None
+                    if not projected:
+                        proof = merge_head_evidence(c, record, info.get('headRefOid'))
+                    elif canonical_fixed_events(c, record, info) != proof:
+                        raise ValueError('canonical fixed finding changed before source feedback')
                 except Exception as exc:
                     record['source_publication_error'] = str(exc)[:300]
                     continue
@@ -731,11 +765,14 @@ def reconcile_fix_prs(c, q):
                     if job in fixed:
                         expected = json.loads((c.STATE / 'repair/inbox' / (job + '.json')).read_text())
                         result = next(v for v in record['verdicts'] if v['job'] == job)
-                        mark_finding_outcome(c, expected, result, merge, pr.get('url'))
+                        if not projected:
+                            mark_finding_outcome(c, expected, result, merge, pr.get('url'))
                         for blocker in item.get('blocking', []):
                             if blocker.get('repair_job') == job:
                                 blocker['resolution'] = {'fix_pr': pr['number'], 'merge': merge, 'at': c.iso()}
                 try:
+                    if projected and canonical_fixed_events(c, record, info) != proof:
+                        raise ValueError('canonical fixed finding changed before source feedback')
                     publish_source_resolution(c, record, merge)
                 except Exception as exc:
                     record['source_publication_error'] = str(exc)[:300]

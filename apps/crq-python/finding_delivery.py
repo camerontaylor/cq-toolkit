@@ -2,6 +2,7 @@
 import copy
 import json
 import hashlib
+import re
 from pathlib import Path
 
 import review_ledger as ledger
@@ -168,6 +169,46 @@ class Inbox:
             self.publication.spool(value)
             row.update(status="delivered", previous_event_id=value["id"], receipt=receipt)
             ledger.atomic(filename, ledger.canonical(row))
+
+    def current_fixed_event(self, job, fixing_commit):
+        """Read the existing authoritative fixed disposition for this receipt."""
+        fid = job.get("canonical_finding_id")
+        if not isinstance(fid, str) or not re.fullmatch(r"[0-9a-f]{64}", fid):
+            return None
+        self.recover(self.publication.retained())
+        with ledger.locked(self.root / "findings.lock"):
+            filename = self.root / "triage" / (fid + ".json")
+            if not filename.exists():
+                return None
+            row = ledger.loads(filename.read_bytes())
+            if row.get("status") != "fixed":
+                return None
+            if (row.get("canonical_id") != fid or row.get("finding", {}).get("id") != fid
+                    or row.get("review_id") != job.get("review_id")
+                    or row.get("receipt", {}).get("repair_task") != job.get("job")):
+                raise ledger.IntegrityError("current fixed finding identity does not match repair")
+            retained = self.publication.retained()
+            # A writer may have spooled a successor after recovery but before
+            # this lock. Never project the cached predecessor in that window.
+            if any(v.get("event_type") == "finding-event"
+                   and v["payload"].get("finding_id") == fid
+                   and v["payload"].get("previous_event_id") == row.get("previous_event_id")
+                   for v in retained):
+                raise ledger.IntegrityError("current fixed finding has a retained successor")
+            events = [v for v in retained if v.get("id") == row.get("previous_event_id")]
+            if len(events) != 1:
+                raise ledger.IntegrityError("current fixed finding event is unavailable")
+            value = events[0]
+            ledger.validate(value)
+            p = value["payload"]
+            evidence = p.get("evidence", {})
+            verification = evidence.get("verification")
+            if (value["event_type"] != "finding-event" or p.get("action") != "fixed"
+                    or p.get("finding_id") != fid or p.get("review_id") != job.get("review_id")
+                    or evidence.get("fixing_commit") != fixing_commit
+                    or not isinstance(verification, str) or not verification.strip()):
+                raise ledger.IntegrityError("current fixed finding evidence does not match merged repair")
+            return value["id"]
 
     def repair_outcome(self, fid, job, action, reason, at, *, fixing_commit=None, fix_pr=None):
         """Idempotently publish a repair result through the existing event chain."""
