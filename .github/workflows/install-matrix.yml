@@ -49,8 +49,8 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
-      - name: Exercise synthetic user units
-        run: sudo bash scripts/systemd-mask-probe.sh
+      - name: Diagnose disposable user managers
+        run: sudo bash scripts/systemd-manager-diagnosis.sh
 
   without-peer:
     name: build+test without the optional agent SDK peer
