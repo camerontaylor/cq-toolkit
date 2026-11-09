@@ -12,7 +12,9 @@ It supersedes the old 3× full-gate rule everywhere that rule was stated.
 
 pnpm is the package manager (`packageManager` in package.json); install
 with `pnpm install`. `pnpm-workspace.yaml` enables the global virtual store,
-so a warm install in a fresh worktree is a symlink pass.
+so a warm install in a fresh worktree is a symlink pass. Paseo runs
+`scripts/init-worktree.mjs` (via `paseo.json`) in every worktree it creates;
+in a plain `git worktree add` worktree, run `node scripts/init-worktree.mjs`.
 
 Your local duty, on a coherent change:
 
