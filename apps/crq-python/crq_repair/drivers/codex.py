@@ -44,16 +44,21 @@ def _stream_codex(argv, cwd, env, timeout, log_path):
                                    start_new_session=True)
 
         def pump(stream, sink):
+            """Drain a pipe even when logging or its failure report is unwritable."""
             # A failed log write must never stop the drain: a pump that exits
             # while the child still writes blocks the child on a full pipe until
             # the wall clock. Report it once and keep reading.
             log_failed = [False]
 
             def report_failure(exc):
+                """Attempt one diagnostic per pipe without interrupting its drain."""
                 if log_failed[0]:
                     return
                 log_failed[0] = True
-                print('codex driver.log write failed: ' + str(exc)[:200], file=sys.stderr, flush=True)
+                try:
+                    print('codex driver.log write failed: ' + str(exc)[:200], file=sys.stderr, flush=True)
+                except (OSError, ValueError):
+                    pass  # Reporting is best effort; draining must continue.
 
             for raw in stream:
                 try:
