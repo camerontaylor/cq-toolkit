@@ -470,7 +470,7 @@ function makeReviewAddressManyCore(
             ) {
               result = {
                 status: 'needs-human',
-                reason: 'PR eligibility or head changed before dispatch',
+                reason: 'PR eligibility, head or base changed before dispatch',
               };
             } else {
               dispatched = true;

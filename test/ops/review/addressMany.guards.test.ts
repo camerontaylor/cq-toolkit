@@ -29,6 +29,10 @@ test('base movement during clone refuses dispatch', async () => {
     },
   })({ ...input, pulls: [1] });
   expect(result.status).toBe('needs-human');
+  expect(result.report?.rows[0]?.result).toMatchObject({
+    status: 'needs-human',
+    reason: 'PR eligibility, head or base changed before dispatch',
+  });
   expect(address).not.toHaveBeenCalled();
 });
 
