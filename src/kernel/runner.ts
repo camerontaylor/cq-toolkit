@@ -1857,14 +1857,36 @@ async function runPlanUnderLease(
           // Catch immediately, including while the producer awaits a replay
           // emit, so no rejected job promise can become unhandled before the
           // wave's drain attaches. failRun preserves the original rejection.
-          submissions.push(
-            limit(async () => {
+          let scheduledClosed = false;
+          let scheduledStarted = false;
+          let dispatched: Promise<void> | undefined;
+          const runLimited = () => {
+            if (scheduledClosed || scheduledStarted)
+              return Promise.reject(new Error('runPlan: scheduled job already consumed'));
+            scheduledStarted = true;
+            dispatched = limit(async () => {
               try {
                 await runOne(job);
               } catch (error) {
                 failRun(error);
               }
-            }),
+            });
+            return dispatched;
+          };
+          const scheduled =
+            governedDispatch && gov?.scheduleJob
+              ? gov.scheduleJob(job.id, runLimited)
+              : runLimited();
+          submissions.push(
+            scheduled
+              .finally(async () => {
+                scheduledClosed = true;
+                await dispatched;
+              })
+              .then(() => {
+                if (!scheduledStarted) throw new Error('runPlan: scheduled job was not invoked');
+              })
+              .catch((error: unknown) => failRun(error)),
           );
         }
       } catch (error) {
