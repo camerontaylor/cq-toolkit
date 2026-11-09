@@ -1877,15 +1877,22 @@ async function runPlanUnderLease(
             governedDispatch && gov?.scheduleJob
               ? gov.scheduleJob(job.id, runLimited)
               : runLimited();
+          const closeScheduled = async () => {
+            scheduledClosed = true;
+            await dispatched;
+          };
           submissions.push(
             scheduled
-              .finally(async () => {
-                scheduledClosed = true;
-                await dispatched;
-              })
-              .then(() => {
-                if (!scheduledStarted) throw new Error('runPlan: scheduled job was not invoked');
-              })
+              .then(
+                async () => {
+                  await closeScheduled();
+                  if (!scheduledStarted) throw new Error('runPlan: scheduled job was not invoked');
+                },
+                async (error: unknown) => {
+                  await closeScheduled();
+                  throw error;
+                },
+              )
               .catch((error: unknown) => failRun(error)),
           );
         }
