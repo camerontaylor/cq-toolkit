@@ -127,7 +127,7 @@ describe('D2 — no-fresh is intentionally NOT Python-parity', () => {
     // Python's group-P classify vector records this same run as a terminal
     // `skipped`. The plan's owner ruling D2 says the port keeps the TS
     // blocked/retriable semantics and records an explicit `skipped:no-fresh`
-    // reason, so that vector family is deliberately not replayed in phase 1.1.
+    // reason. The vector runner checks this difference explicitly.
   });
 });
 

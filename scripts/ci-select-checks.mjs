@@ -20,6 +20,12 @@ export function classifyPaths(paths) {
       // Root prose allowlist.
     } else if (/^(?:src|test)\/.+\.(?:ts|tsx|js|mjs|json)$/.test(path)) {
       typescript = true;
+      if (
+        /^(?:src|test)\/(?:policy|ops)\/crq\//.test(path) ||
+        path === 'src/ops/dev/coderabbit.ts' ||
+        path === 'test/ops/dev/coderabbit.test.ts'
+      )
+        python = true;
     } else {
       return { typescript: true, python: true };
     }
