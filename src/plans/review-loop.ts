@@ -785,7 +785,7 @@ type CommitVerificationFailure =
  * every cited `{path, line}` must name a FILE (a blob, never a directory) in
  * the tree at `tip`, read through the git seam (`git cat-file -t` and `-s`,
  * then `git show <tip>:<path>`), at most MAX_EVIDENCE_BLOB_BYTES long, with
- * at least `line` lines.
+ * at least `line` lines, where `line` is itself a 1-based safe integer.
  */
 const MAX_EVIDENCE_BLOB_BYTES = 2_000_000;
 
@@ -799,6 +799,12 @@ const evidenceFailure = async (
     return 'the worktree tip is unreadable';
   }
   for (const { path, line } of evidence) {
+    // A 1-BASED INTEGER, checked here because this is the publication
+    // boundary: `line > lines.length` alone accepts 0, negatives and
+    // non-integers (even on an empty blob, where there is no line to cite).
+    if (!Number.isSafeInteger(line) || line < 1) {
+      return `${path}:${String(line)} is not a valid 1-based line`;
+    }
     // A FILE, not a tree: `git show <tip>:<dir>` succeeds on a directory too.
     const kind = await git(['-C', worktreePath, 'cat-file', '-t', `${tip}:${path}`]);
     if (kind.code !== 0 || kind.stdout.trim() !== 'blob') {
