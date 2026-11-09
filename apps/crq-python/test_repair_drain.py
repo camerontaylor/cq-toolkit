@@ -501,6 +501,7 @@ class RepairDrainTest(unittest.TestCase):
             second = service.recover_job(self.config, job_id)
         self.assertEqual(first, second)
         judge.assert_called_once()
+        self.assertEqual(self.queue['items'][0]['repair_runs']['run1']['state'], 'stale')
         replacement = json.loads(bounded.job_path(self.root, first['replacement_job']).read_text())
         self.assertTrue(replacement['recovery_worktree'])
         self.assertEqual(replacement['origin_job'], job_id)

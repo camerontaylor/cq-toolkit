@@ -659,8 +659,18 @@ def recover_job(config, job_id):
                     or (current != job_id and not (successor and successor.get('origin_job') == job_id
                         and successor.get('recovery_worktree') is True))):
                 raise ValueError('canonical finding no longer belongs to this repair')
-        if record.get('state') == 'stale' and not (fid and current != job_id and successor):
-            raise ValueError('repair already superseded')
+        if record.get('state') == 'stale':
+            prefix = 'superseded by prepared retry '
+            note = record.get('error', '')
+            candidate = None
+            if isinstance(note, str) and note.startswith(prefix):
+                try:
+                    candidate = json.loads(job_path(ROOT, note[len(prefix):]).read_text())
+                except (OSError, ValueError):
+                    pass
+            if not (candidate and candidate.get('origin_job') == job_id
+                    and candidate.get('recovery_worktree') is True):
+                raise ValueError('repair already superseded')
     if not c.ran_locked(check_owner):
         raise RuntimeError('tick busy; recovery deferred')
     def judge(old, context, directory):
@@ -680,6 +690,13 @@ def recover_job(config, job_id):
         patch = context['retained_patch']
         if patch and not c.secret_scan_diff(patch, output.with_name('recovery-patch-scan.json'))[0]:
             return False
+        contract = context['current_contract']
+        if contract['text']:
+            path = contract['path']
+            diff = 'diff --git a/' + path + ' b/' + path + '\n@@ -0,0 +1 @@\n'
+            diff += '\n'.join('+' + line for line in contract['text'].splitlines()) + '\n'
+            if not c.secret_scan_diff(diff, output.with_name('recovery-contract-scan.json'))[0]:
+                return False
         return triage_context_safe(c, context, output)
     return recovery.recover(ROOT, config, job_id, scan, judge, prepare)
 

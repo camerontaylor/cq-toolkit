@@ -22,7 +22,14 @@ def recover(root, config, job_id, scan, judge, prepare):
     if job.get('job') != job_id:
         raise ValueError('job identity mismatch')
     directory = root / 'state/repair' / job_id
-    result = json.loads((directory / 'result.json').read_text())
+    result_path = directory / 'result.json'
+    if result_path.exists():
+        result = json.loads(result_path.read_text())
+    else:
+        progress = json.loads((directory / 'progress.json').read_text())
+        if not isinstance(progress, dict) or not progress.get('dispatch_pending'):
+            raise ValueError('no interrupted dispatch or terminal result')
+        result = {**progress, 'verdict': 'FAILED', 'reason': 'worker interrupted with unknown outcome'}
     if not isinstance(result, dict) or result.get('job') != job_id or result.get('item') != job.get('item'):
         raise ValueError('result identity mismatch')
     if result.get('verdict') != 'FAILED' or result.get('retry_after'):
@@ -45,12 +52,16 @@ def recover(root, config, job_id, scan, judge, prepare):
     if source_result.returncode:
         raise ValueError('current source unavailable')
     source = source_result.stdout
-    if sum(len(s.encode()) for s in (patch, status, source)) > MAX_EVIDENCE:
+    contract_path = 'docs/current-contract-and-backlog.md'
+    contract_result = command(['git', 'show', tip + ':' + contract_path], cwd=config['clone'])
+    contract_full = contract_result.stdout if contract_result.returncode == 0 else ''
+    contract = contract_full[:24000]
+    if sum(len(s.encode()) for s in (patch, status, source, contract)) > MAX_EVIDENCE:
         raise ValueError('recovery evidence exceeds bounded context')
     finding_hash = identity(job['finding'])
     binding = {'job': job_id, 'source_sha': tip, 'source_blob_sha': blob,
                'finding_sha256': finding_hash, 'repair_base': base,
-               'evidence_sha256': identity({'patch': patch, 'status': status, 'source': source})}
+               'evidence_sha256': identity({'patch': patch, 'status': status, 'source': source, 'contract': contract})}
     artifact = directory / 'recovery.json'
     attempts = 0
     if artifact.exists():
@@ -72,6 +83,10 @@ def recover(root, config, job_id, scan, judge, prepare):
         context = {'finding': job['finding'], 'result_reason': result.get('reason', ''),
                    'source_path': path, 'source_sha': tip, 'source_blob_sha': blob,
                    'source': source, 'retained_patch': patch, 'worktree_status': status,
+                   'current_path': path, 'tip': tip,
+                   'current_contract': {'path': contract_path, 'text': contract,
+                                        'status': 'present' if contract_result.returncode == 0 else 'absent',
+                                        'truncated': len(contract_full) > len(contract)},
                    'instruction': 'Assess current source and retained untrusted patch. Return valid only with exact current lines and quote. Do not assume the patch is correct or committed.'}
         if not scan(context, directory / 'recovery-secret-scan.json'):
             return {'state': 'unresolved', 'reason': 'recovery evidence secret scan rejected'}

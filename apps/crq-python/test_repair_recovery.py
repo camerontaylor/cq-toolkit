@@ -63,11 +63,33 @@ class RecoveryTest(unittest.TestCase):
         self.judge.assert_called_once()
         self.prepare.assert_called_once()
 
+    def test_interrupted_progress_without_result_can_be_recovered(self):
+        directory = self.root / 'state/repair/crq-job'
+        result = json.loads((directory / 'result.json').read_text())
+        (directory / 'result.json').unlink()
+        atomic(directory / 'progress.json', {**result, 'dispatch_pending': {'rung': 'A0'}})
+        self.assertEqual(self.run_recovery()['replacement_job'], 'crq-replacement')
+        self.assertFalse((directory / 'result.json').exists())
+        self.assertIn('unfinished', (self.wt / 'a.py').read_text())
+
     def test_scan_rejection_never_calls_judge(self):
         self.scan.return_value = False
         self.assertEqual(self.run_recovery()['state'], 'unresolved')
         self.judge.assert_not_called()
         self.prepare.assert_not_called()
+
+    def test_current_contract_is_in_scanned_evidence(self):
+        path = self.repo / 'docs/current-contract-and-backlog.md'
+        path.parent.mkdir()
+        path.write_text('current obligations\n')
+        self.run_git(self.repo, 'add', str(path.relative_to(self.repo)))
+        self.run_git(self.repo, 'commit', '-qm', 'contract')
+        self.run_git(self.repo, 'update-ref', 'refs/remotes/origin/main',
+                     self.run_git(self.repo, 'rev-parse', 'HEAD'))
+        self.run_recovery()
+        contract = self.scan.call_args.args[0]['current_contract']
+        self.assertEqual(contract['text'], 'current obligations\n')
+        self.assertFalse(contract['truncated'])
 
     def test_owner_decision_and_missing_outcome_do_not_prepare(self):
         self.judge.return_value = {'stop': 'ok', 'verdict': 'unsure', 'reason': 'owner must choose behavior'}
