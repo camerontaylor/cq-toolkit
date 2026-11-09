@@ -45,13 +45,15 @@
 // for the rest — see main.ts's error matrix) and nothing on stderr.
 //
 // GOVERNED COMPOSITION (ADR-0003 §2, kernel README "Budget governor"): the
-// CLI opts into governance exactly when the operator sets a cap
-// (--max-usd/--max-tokens). A capped run carries a per-run governor
-// (createGovernor over governorConfig(runOptions, {})) and runPlan ITSELF
+// CLI opts into governance when the operator sets a cap
+// (--max-usd/--max-tokens) or passes a governance opt-in. Such a run carries
+// a per-run governor (createGovernor over governorConfig(runOptions, {})) and
+// runPlan ITSELF
 // performs admission, spend observation, the honest stop (I9 — its return is
 // the final report; no post-pass), and the v2 journal; resume/ledger
 // seeding is the runner's fold over the journal dir, not a CLI step. An
-// UNCAPPED run stays v1-identical: no governor, no ledger, no v2 journal.
+// uncapped, opt-in-free run stays v1-identical: no governor, no ledger, no
+// v2 journal.
 import { readFile, stat } from 'node:fs/promises';
 import type { Stats } from 'node:fs';
 import { z } from 'zod';

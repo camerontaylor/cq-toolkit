@@ -256,8 +256,9 @@ settings." The frozen `ToolPolicy` is DECLARATIVE
 (an allowlist match, or any request under mode `unrestricted`) selects
 the `allow_once` option when one is offered, else the `allow_always`
 option (`{ outcome: 'selected', optionId }` of the chosen option;
-`allow_always` is harmless per-run — the session dies with the process,
-so there is no cross-run memory to honor). A DENY decision (an allowlist
+`allow_always` can be remembered by the agent beyond this run; its
+scope and duration are agent-defined. Prefer `allow_once` to avoid granting
+a broader remembered permission). A DENY decision (an allowlist
 miss, or any request under mode `none`) selects the `reject_once` option
 when one is offered, else the `reject_always` option; a deny with NO
 reject option offered FAILS THE RUN with an error naming the vendor's
