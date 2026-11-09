@@ -8,6 +8,9 @@
 // Scaled down: a local server that stalls before sending headers stands in
 // for the provider, and short bounds stand in for 300 s / 20 min.
 import { createServer } from 'node:http';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { pathToFileURL } from 'node:url';
 import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -33,9 +36,9 @@ vi.mock('undici', async (importOriginal) => {
 });
 
 const { AiSdkDriver } = await import('../../src/driver/ai-sdk/index.js');
+const { getGlobalDispatcher, setGlobalDispatcher } = await import('undici');
 const { createDriverFactory } = await import('../../src/driver/factory.js');
-const { createStepFetch, STEP_FETCH_MARGIN_MS } =
-  await import('../../src/driver/ai-sdk/step-fetch.js');
+const { createStepFetch } = await import('../../src/driver/ai-sdk/step-fetch.js');
 
 const servers: Server[] = [];
 const scratch: string[] = [];
@@ -105,6 +108,59 @@ describe('createStepFetch', () => {
     // …and the configured bound replaces it.
     const response = await createStepFetch(6_000, 0)(url);
     expect(response.status).toBe(200);
+  });
+
+  test('honors Node startup proxy settings in a fresh process', async () => {
+    let connects = 0;
+    const proxy = createServer();
+    proxy.on('connect', (_request, socket) => {
+      connects++;
+      socket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+      socket.once('data', () =>
+        socket.end('HTTP/1.1 200 OK\r\nContent-Length: 7\r\nConnection: close\r\n\r\nproxied'),
+      );
+    });
+    servers.push(proxy);
+    await new Promise<void>((done) => proxy.listen(0, '127.0.0.1', done));
+    const { port } = proxy.address() as AddressInfo;
+    const moduleUrl = pathToFileURL(join(process.cwd(), 'src/driver/ai-sdk/step-fetch.ts')).href;
+    const source = `import { createStepFetch } from ${JSON.stringify(moduleUrl)}; const r = await createStepFetch(2000)('http://proxy-only.invalid/'); console.log(await r.text());`;
+    const result = await promisify(execFile)(
+      process.execPath,
+      ['--experimental-transform-types', '--input-type=module', '-e', source],
+      {
+        env: {
+          ...process.env,
+          NODE_USE_ENV_PROXY: '1',
+          HTTP_PROXY: `http://127.0.0.1:${String(port)}`,
+          http_proxy: `http://127.0.0.1:${String(port)}`,
+          NO_PROXY: '',
+          no_proxy: '',
+        },
+        timeout: 10_000,
+      },
+    );
+    expect(result.stdout.trim()).toBe('proxied');
+    expect(connects).toBe(1);
+  });
+
+  test('uses the configured global dispatcher', async () => {
+    const previous = getGlobalDispatcher();
+    const transport = new agents.MockAgent();
+    transport.disableNetConnect();
+    transport
+      .get('http://global-proxy.invalid')
+      .intercept({ path: '/', method: 'GET' })
+      .reply(200, 'global');
+    setGlobalDispatcher(transport);
+    try {
+      const response = await createStepFetch(1_000, 0)('http://global-proxy.invalid');
+      expect(await response.text()).toBe('global');
+      transport.assertNoPendingInterceptors();
+    } finally {
+      setGlobalDispatcher(previous);
+      await transport.close();
+    }
   });
 
   test('a supplied transport is used as is, never replaced by a minted Agent', async () => {
@@ -188,12 +244,7 @@ describe('ai-sdk default providers', () => {
     expect((await driver.run(invocation)).stopReason).toBe('complete');
     expect((await driver.run(invocation)).stopReason).toBe('complete');
     expect(server.hits()).toBe(2);
-    expect(agents.options).toEqual([
-      expect.objectContaining({
-        headersTimeout: 1_500 + STEP_FETCH_MARGIN_MS,
-        bodyTimeout: 1_500 + STEP_FETCH_MARGIN_MS,
-      }),
-    ]);
+    expect(agents.options).toEqual([]);
   });
 
   test('a provider that never answers is stopped by the step bound, not the socket', async () => {

@@ -21,57 +21,49 @@
 // step bound indefinitely. Such escaped-abort, steady-drip responses are NOT
 // covered by this backstop; ending them needs a total-body-time deadline.
 //
-// TRANSPORT (never silently discarded): the dispatcher is either an
-// OPERATOR-SUPPLIED one (`transport` — AiSdkDriverOptions.dispatcher, e.g.
-// undici's ProxyAgent/EnvHttpProxyAgent in a proxy-only environment) or the
-// driver-owned Agent below. A supplied dispatcher is used AS IS, so the
-// configured transport survives; the socket timeouts then belong to IT (set
-// `headersTimeout`/`bodyTimeout` to `stepTimeoutMs + STEP_FETCH_MARGIN_MS`
-// on that dispatcher). Minting a fresh Agent unconditionally would replace a
-// proxy-only deployment's transport with a direct connection and fail every
-// provider call. `setGlobalDispatcher` is NOT consulted here — this fetch
-// always passes an explicit per-request dispatcher, which wins over the
-// global one — so a proxy transport is supplied through the explicit
-// `transport` argument instead.
-import { Agent, fetch as undiciFetch } from 'undici';
-import type { Dispatcher } from 'undici';
+// Use the process global dispatcher unless one is explicitly supplied. Node's
+// startup proxy configuration and undici's setGlobalDispatcher both install
+// their transport there. Per-request timeouts are applied at dispatch without
+// replacing the configured dispatcher.
+import { Dispatcher, fetch as undiciFetch, getGlobalDispatcher } from 'undici';
 
 /** Socket-timeout slack over the step bound, so `timeout.stepMs` always fires first. */
 export const STEP_FETCH_MARGIN_MS = 5_000;
 
-/**
- * A fetch for the ai-sdk providers whose undici dispatcher waits up to
- * `stepTimeoutMs + marginMs` for headers and between body chunks. When
- * `transport` is given (an operator-configured dispatcher such as a
- * ProxyAgent) it is used UNCHANGED — the configured transport is preserved,
- * and its own socket timeouts apply. Otherwise the driver-owned dispatcher
- * is created on first use, once per returned fetch (one per driver
- * instance). That owned Agent is never explicitly closed: the Driver seam
- * has no dispose path, and an idle undici Agent holds only keep-alive
- * sockets that it closes itself after `keepAliveTimeout` (4 s default), so a
- * dropped driver leaves nothing open. Abort signals pass through unchanged.
- */
+/** A request-time wrapper that leaves ownership and lifecycle of the underlying transport alone. */
+class TimedDispatcher extends Dispatcher {
+  constructor(
+    private readonly delegate: Dispatcher,
+    private readonly timeoutMs: number,
+  ) {
+    super();
+  }
+
+  override dispatch(
+    options: Dispatcher.DispatchOptions,
+    handler: Dispatcher.DispatchHandler,
+  ): boolean {
+    return this.delegate.dispatch(
+      { ...options, headersTimeout: this.timeoutMs, bodyTimeout: this.timeoutMs },
+      handler,
+    );
+  }
+}
+
+/** Apply per-request socket timeouts while preserving the supplied or process-global transport. */
 export function createStepFetch(
   stepTimeoutMs: number,
   marginMs: number = STEP_FETCH_MARGIN_MS,
   transport?: Dispatcher,
 ): typeof globalThis.fetch {
-  let dispatcher: Agent | undefined;
   return (input, init) => {
-    // The configured transport wins outright; the driver-owned Agent (and its
-    // socket timeouts) is minted only when no transport was supplied.
-    const selected =
-      transport ??
-      (dispatcher ??= new Agent({
-        headersTimeout: stepTimeoutMs + marginMs,
-        bodyTimeout: stepTimeoutMs + marginMs,
-      }));
-    // undici's own fetch pairs with its own Agent (the bundled global fetch
-    // is a different undici copy); its Request/Response types are the
-    // WHATWG shapes the providers consume.
+    const dispatcher = new TimedDispatcher(
+      transport ?? getGlobalDispatcher(),
+      stepTimeoutMs + marginMs,
+    );
     return undiciFetch(input as Parameters<typeof undiciFetch>[0], {
       ...(init as Parameters<typeof undiciFetch>[1]),
-      dispatcher: selected,
+      dispatcher,
     }) as unknown as Promise<Response>;
   };
 }

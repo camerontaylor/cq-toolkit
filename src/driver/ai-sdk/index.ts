@@ -358,12 +358,10 @@ export interface AiSdkDriverOptions {
    * The undici dispatcher the DEFAULT providers' fetch pairs with — the
    * transport seam for deployments that must not connect directly (e.g. an
    * undici `ProxyAgent`/`EnvHttpProxyAgent` in a proxy-only environment).
-   * Used AS IS: it is never replaced by the driver's own Agent, so a
-   * configured proxy transport survives. Its own socket timeouts apply, so
-   * set `headersTimeout`/`bodyTimeout` to `stepTimeoutMs +
-   * STEP_FETCH_MARGIN_MS` on it to keep the step bound winning. Absent: the
-   * driver mints its own timeout-bounded Agent (per-provider direct
-   * connections). Never serializable config — in-process construction data
+   * The driver applies per-request socket timeouts while preserving this
+   * transport. Absent: the process-global undici dispatcher is used, including
+   * a proxy installed through Node startup settings or setGlobalDispatcher.
+   * Never serializable config — in-process construction data
    * only. Injected `providers` are untouched either way.
    */
   dispatcher?: Dispatcher;
@@ -476,9 +474,7 @@ export class AiSdkDriver implements Driver {
     this.stepTimeoutMs = stepTimeoutMs;
     // The production providers fetch through a transport bounded by the same
     // step bound (step-fetch.ts); injected providers are left untouched. An
-    // operator-supplied dispatcher (proxy transport) is threaded straight
-    // through and used AS IS — the socket timeouts are then its own knobs,
-    // documented on the option.
+    // operator-supplied dispatcher takes precedence over the process global.
     this.providers =
       options.providers ??
       defaultProviders(createStepFetch(stepTimeoutMs, STEP_FETCH_MARGIN_MS, options.dispatcher));

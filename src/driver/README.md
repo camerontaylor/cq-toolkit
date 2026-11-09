@@ -232,14 +232,10 @@ step bound plus `STEP_FETCH_MARGIN_MS`: Node's bundled fetch otherwise gives
 up on a non-streaming request after undici's default 300 s, below the step
 bound (S7 attempt F). These socket timeouts apply to each HTTP request and
 cannot fire before the step bound, even on a retry: the SDK's step timer
-spans the retry. Injected providers keep their own transport. A
-configured transport is never discarded: `AiSdkDriverOptions.dispatcher`
-(also `lanes.aiSdk.dispatcher`) supplies the undici dispatcher the default
-providers use — a proxy-only deployment passes its `ProxyAgent` there and
-it is used as is, so its own socket-timeout knobs apply (set them to the
-step bound plus `STEP_FETCH_MARGIN_MS`). The fetch always passes an
-explicit per-request dispatcher, so undici's `setGlobalDispatcher` is NOT
-consulted; a proxy transport goes through the `dispatcher` option. The
+spans the retry. Injected providers keep their own transport. The process-global undici dispatcher is preserved, including Node's startup
+proxy configuration and `setGlobalDispatcher`. `AiSdkDriverOptions.dispatcher`
+(also `lanes.aiSdk.dispatcher`) can override it. Per-request socket timeouts
+are applied without replacing the chosen transport. The
 factory takes the bound from `DriverRequest.stepTimeoutMs` or per
 lane (`lanes.aiSdk.stepTimeoutMs`); the agent reviewer passes cq.json
 `budgets.step.wallMs`, capped at the remaining review wall time.
