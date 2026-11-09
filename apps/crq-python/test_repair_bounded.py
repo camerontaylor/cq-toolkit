@@ -89,6 +89,16 @@ class BoundedRepairTest(unittest.TestCase):
         self.assertIn('+++ b/src/lock.ts', patch)
         self.assertIn('+first\n+second', patch)
 
+    def test_legacy_minor_is_not_prepared_or_drained(self):
+        self.old['finding']['severity'] = 'minor'
+        self.evidence['finding_sha256'] = bounded.identity(self.old['finding'])
+        atomic(bounded.job_path(self.root, OLD), self.old)
+        with self.assertRaisesRegex(ValueError, 'canonical minor'):
+            self.prepare()
+        status, _, reason = bounded.drain_job(self.root, self.config, self.queue, OLD)
+        self.assertEqual(status, 'skip')
+        self.assertIn('canonical minor', reason)
+
     def test_secret_scan_refusal_enrolls_nothing(self):
         self.c.secret_scan_diff.return_value = (False, {})
         with self.assertRaisesRegex(ValueError, 'secret scan'):
