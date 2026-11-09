@@ -587,6 +587,61 @@ class RepairDrainTest(unittest.TestCase):
         repair_tick.harvest(c, self.queue, item)
         self.assertFalse(wt.exists())
 
+    def test_process_captures_terminal_tree_for_later_harvest_cleanup(self):
+        item = self.queue['items'][0]
+        record = item['repair_runs']['run1']
+        c = SimpleNamespace(STATE=self.root / 'state', WT_ROOT=self.root / 'wt', CLONE=self.clone,
+                            ROOT=ROOT, CONFIG=self.config,
+                            make_worktree=lambda name, sha: (self.root, 'verify'),
+                            remove_worktree=lambda wt, branch: None)
+        for job_id, changed in (('crq-run1-F1', True), ('crq-run1-F2', False)):
+            with self.subTest(verdict='FIXED' if changed else 'NOT-FIXED'):
+                record.update(jobs=[job_id], state='queued', base=self.pin)
+                self.job(job_id, 'pr1-merged', 'run1', 'src/kept.ts')
+                job = bounded.drain_job(self.root, self.config, self.queue, job_id)[1]
+                wt = self.worktree('crq-repair-pr1-merged-' + job_id)
+                def dispatch(config, role, current, tree, directory, judge=False):
+                    if not changed:
+                        return {'stop': 'ok', 'changed': False, 'summary': 'not a defect'}
+                    (tree / 'src/kept.ts').write_text('fixed\n')
+                    subprocess.run(['git', 'commit', '-qam', job_id], cwd=tree, check=True)
+                    sha = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=tree, check=True,
+                                         capture_output=True, text=True).stdout.strip()
+                    return {'stop': 'ok', 'changed': True, 'commits': [sha]}
+                with mock.patch.object(service, 'blocked', return_value=False), \
+                     mock.patch.object(service, 'dispatch', side_effect=dispatch), \
+                     mock.patch.object(service, 'mechanical', return_value={}):
+                    result = service.process(self.config, job, wt)
+                self.assertEqual(result['verdict'], 'FIXED' if changed else 'NOT-FIXED')
+                self.assertTrue(list((self.root / 'state/repair' / job_id / 'final').glob('retained-*/manifest.json')))
+                fake_module = SimpleNamespace(mechanical=lambda *args: None)
+                fake_spec = SimpleNamespace(loader=SimpleNamespace(exec_module=lambda module: None))
+                with mock.patch.object(repair_tick, 'mark_finding_outcome'), \
+                     mock.patch.object(repair_tick, 'verify'), \
+                     mock.patch.object(repair_tick, 'publish', side_effect=lambda c, q, i, r, rec, f: rec.update(state='published')), \
+                     mock.patch('importlib.util.spec_from_file_location', return_value=fake_spec), \
+                     mock.patch('importlib.util.module_from_spec', return_value=fake_module):
+                    repair_tick.harvest(c, self.queue, item)
+                self.assertTrue(wt.exists())
+                repair_tick.harvest(c, self.queue, item)
+                self.assertFalse(wt.exists())
+
+    def test_terminal_archive_failure_keeps_tree_and_reports_failure(self):
+        from crq_repair.retain import retain
+        job = bounded.drain_job(self.root, self.config, self.queue, 'crq-run1-F1')[1]
+        wt = self.worktree('crq-repair-pr1-merged-crq-run1-F1')
+        def capture(tree, base, directory, **kwargs):
+            if kwargs.get('include_clean'):
+                raise OSError('archive disk full')
+            return retain(tree, base, directory, **kwargs)
+        with mock.patch.object(service, 'blocked', return_value=False), \
+             mock.patch.object(service, 'dispatch', return_value={'stop': 'ok', 'changed': False}), \
+             mock.patch.object(service, 'retain', side_effect=capture):
+            result = service.process(self.config, job, wt)
+        self.assertEqual(result['verdict'], 'FAILED')
+        self.assertIn('archive disk full', result['reason'])
+        self.assertTrue(wt.exists())
+
     def test_resumed_legacy_result_records_the_actual_job_worktree(self):
         job = bounded.drain_job(self.root, self.config, self.queue, 'crq-run1-F1')[1]
         wt = self.worktree('crq-repair-pr1-merged-crq-run1-F1')

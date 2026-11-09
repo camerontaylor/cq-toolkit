@@ -397,11 +397,13 @@ def process(config, job, wt):
         result['next_rung'] = rung + 1
         atomic(progress_path, result)
         rung += 1
-    if result.get('verdict') == 'FAILED':
-        try:
-            retain(wt, base, directory / 'final')
-        except Exception as exc:
-            result['reason'] = 'worktree retention failed: ' + str(exc)[:600]
+    try:
+        # Even a clean, unchanged terminal tree needs a verifiable snapshot:
+        # harvest may retire it only after this capture succeeds.
+        retain(wt, base, directory / 'final', include_clean=True)
+    except Exception as exc:
+        result['verdict'] = 'FAILED'
+        result['reason'] = 'worktree retention failed: ' + str(exc)[:600]
     result['finished_at'] = utc()
     atomic(result_path, result)
     return result

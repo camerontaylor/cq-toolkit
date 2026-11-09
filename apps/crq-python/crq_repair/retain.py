@@ -47,7 +47,7 @@ def cleanup_harvested(clone, wt_root, directory, item, job_id, result, *, altern
     return False
 
 
-def retain(wt, base, directory):
+def retain(wt, base, directory, *, include_clean=False):
     """Capture staged, unstaged, untracked and committed work without changing it.
 
     A failed or interrupted capture raises before the caller may reset. Each
@@ -66,7 +66,7 @@ def retain(wt, base, directory):
     names = raw('ls-files', '--others', '--exclude-standard', '-z').split(b'\0')
     names = [os.fsdecode(name) for name in names if name]
     commits = git(wt, 'rev-list', '--reverse', base + '..' + head).splitlines()
-    if not staged and not unstaged and not names and not commits:
+    if not include_clean and not staged and not unstaged and not names and not commits:
         return None
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
