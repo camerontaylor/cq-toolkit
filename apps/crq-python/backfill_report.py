@@ -88,17 +88,24 @@ def summary(repo, ranked, queue, original=None, *, findings_root=None):
                 else:
                     baseline_result["unresolved_baseline_objects"].append({**row, "reason": "unverified baseline lineage"})
                 continue
-            if row["lines"] is None or row["disposition"] in ("unsupported", "ambiguous"):
-                present = current.get(name)
-                if not present or present["lines"] is None or present["disposition"] in ("unsupported", "ambiguous") or present["uncovered"]:
-                    baseline_result["unresolved_baseline_objects"].append(row)
+            present = current.get(name)
+            unmeasurable = not present or present["lines"] is None or present["disposition"] in ("unsupported", "ambiguous")
+            unmeasured_baseline = row["lines"] is None or row["disposition"] in ("unsupported", "ambiguous")
             _, mapped_all = repo.carry(original["target"], ranked["target"], row["path"], set(range(1, (row["lines"] or 0) + 1))) if row["lines"] else (None, set())
             _, mapped_debt = repo.carry(original["target"], ranked["target"], row["path"], old_debt) if old_debt else (None, set())
             if name:
                 surviving_all[name].update(mapped_all)
-            remaining = mapped_debt & ledger.intervals(current.get(name, {}).get("uncovered", []))
-            baseline_result["surviving_T1_debt"] += len(remaining)
-            baseline_result["baseline_T1_reviewed_since"] += len(mapped_debt - remaining)
+            if unmeasurable:
+                # An unmeasurable current object records no uncovered intervals, so
+                # carried baseline debt there is unverified, never reviewed.
+                if unmeasured_baseline or mapped_debt:
+                    baseline_result["unresolved_baseline_objects"].append(row)
+            else:
+                remaining = mapped_debt & ledger.intervals(present.get("uncovered", []))
+                baseline_result["surviving_T1_debt"] += len(remaining)
+                baseline_result["baseline_T1_reviewed_since"] += len(mapped_debt - remaining)
+                if unmeasured_baseline and present["uncovered"]:
+                    baseline_result["unresolved_baseline_objects"].append(row)
             baseline_result["baseline_T1_removed_or_superseded"] += len(old_debt) - len(mapped_debt)
         for name, row in current.items():
             if row["tier"] == "T1":

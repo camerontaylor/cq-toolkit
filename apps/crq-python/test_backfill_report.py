@@ -82,6 +82,26 @@ class ReportTest(unittest.TestCase):
             self.assertFalse(result["unresolved_baseline_objects"])
             self.assertEqual(result["target_status"], "baseline-zero")
 
+    def test_unmeasurable_current_object_keeps_baseline_debt_unresolved(self):
+        with tempfile.TemporaryDirectory() as td:
+            f = Fixture(Path(td) / "repo")
+            old = f.commit({"a": b"one\ntwo\n"})
+            row = {"path": "a", "blob": f.repo.entries(old)["a"]["blob"], "tier": "T1", "lines": 2,
+                   "uncovered": [[1, 2]], "disposition": "included", "reason": "text"}
+            def rank(target, paths):
+                return {"target": target, "manifest_id": "m", "paths": paths, "candidates": [], "required": [], "evidence_gaps": []}
+            original = reporting.baseline(f.repo, rank(old, [row]), "p", "l", "2026-10-30T00:00:00Z")
+            # Same text, but now unmeasurable (over the per-file limit): no uncovered intervals.
+            head = f.commit({"a": b"one\ntwo\n", "other": b"x\n"})
+            current = {**row, "blob": f.repo.entries(head)["a"]["blob"], "lines": None, "uncovered": [],
+                       "disposition": "unsupported", "reason": "current content exceeds per-file limit"}
+            result = reporting.summary(f.repo, rank(head, [current]), {"items": []}, original)["baseline"]
+            self.assertTrue(result["unresolved_baseline_objects"])
+            self.assertEqual(result["surviving_T1_debt"], 0)
+            self.assertEqual(result["baseline_T1_reviewed_since"], 0)
+            self.assertEqual(result["baseline_T1_removed_or_superseded"], 0)
+            self.assertEqual(result["target_status"], "pending")
+
     def test_nonancestor_baseline_lineage_remains_unknown(self):
         with tempfile.TemporaryDirectory() as td:
             f = Fixture(Path(td) / "repo")
