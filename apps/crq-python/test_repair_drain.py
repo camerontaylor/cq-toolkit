@@ -522,6 +522,18 @@ class RepairDrainTest(unittest.TestCase):
         self.assertEqual((wt / 'src/kept.ts').read_text(), 'do not lose\n')
         dispatch.assert_not_called()
 
+    def test_resumed_legacy_result_records_the_actual_job_worktree(self):
+        job = bounded.drain_job(self.root, self.config, self.queue, 'crq-run1-F1')[1]
+        wt = self.worktree('crq-repair-pr1-merged-crq-run1-F1')
+        atomic(self.root / 'state/repair' / job['job'] / 'result.json',
+               {'job': job['job'], 'item': job['item'], 'repair_base': self.pin,
+                'worktree': str(self.root / 'wt/crq-repair-pr1-merged'), 'verdict': 'FAILED',
+                'attempts': [], 'judge': None, 'retry_after': '2000-01-01T00:00:00Z'})
+        with mock.patch.object(service, 'blocked', return_value=False), \
+             mock.patch.object(service, 'dispatch', return_value={'stop': 'ok', 'changed': False, 'summary': 'no change'}):
+            result = service.process(self.config, job, wt)
+        self.assertEqual(result['worktree'], str(wt))
+
     def test_recovery_does_not_override_an_owner_disposition(self):
         import sys
         job_id = 'crq-run1-F1'

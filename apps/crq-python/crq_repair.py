@@ -300,6 +300,7 @@ def process(config, job, wt):
                 else:
                     git(wt, 'reset', '--hard', base)
                     git(wt, 'clean', '-fd')
+                result['worktree'] = str(wt)
                 result['dispatch_pending'] = {'rung': 'A' + str(rung), 'role': role}
                 atomic(progress_path, result)
                 report = dispatch(config, role, current, wt, attempt_dir)
