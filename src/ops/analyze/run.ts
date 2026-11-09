@@ -44,6 +44,7 @@ import { pathAnalysisFileStore } from './analysisStore.js';
 import type { Cluster, ClusterConfidence, ClusterErrorsReport } from './clusterErrors.js';
 import { clusterErrorsOp } from './clusterErrors.js';
 import { collectFailuresOp } from './collectFailures.js';
+import type { CqCheck } from './cqConfig.js';
 import { CQ_CONFIG_FILE, parseCqConfig } from './cqConfig.js';
 import { makeRenderAnalysisReport } from './renderAnalysisReport.js';
 
@@ -111,9 +112,25 @@ export interface AnalysisSnapshot {
   outsideDirFiles: string[];
 }
 
+/** The refusal when every resolved check is address-only (finding-file scope only). */
+const NO_REPOSITORY_CHECKS =
+  'analyze.run: no repository checks configured (address-only checks require finding-file scope)';
+
+/**
+ * `addressOnly` is config-only metadata: such a check needs review.address's
+ * explicit finding-file scope, so a repository-wide consumer must skip it. The
+ * strict check-runner input does not declare the field, but a caller may hand
+ * over the very `CqCheck[]` the config path reads — read it defensively.
+ */
+function isAddressOnly(check: CheckRunnerInput): boolean {
+  return (check as Partial<CqCheck>).addressOnly === true;
+}
+
 /**
  * Resolve the checks for a run: the explicit list, else the config file.
- * A missing or invalid config is a `failed` reason naming `analyze.init`.
+ * Address-only checks are filtered from BOTH paths (neither can supply the
+ * finding-file scope they need), and an empty remainder is a refusal. A
+ * missing or invalid config is a `failed` reason naming `analyze.init`.
  */
 export function resolveChecks(
   dir: string,
@@ -123,7 +140,12 @@ export function resolveChecks(
     if (input.checks.length === 0) {
       return { ok: false, error: 'analyze.run: `checks` is empty — pass at least one check' };
     }
-    return { ok: true, checks: input.checks };
+    // A caller may hand over the same configured `CqCheck[]` the config path
+    // reads, so the address-only rule applies here too: those checks need
+    // review.address's finding-file scope and cannot run repository-wide.
+    const explicit = input.checks.filter((check) => !isAddressOnly(check));
+    if (explicit.length === 0) return { ok: false, error: NO_REPOSITORY_CHECKS };
+    return { ok: true, checks: explicit };
   }
   const configPath = resolve(dir, input.configPath ?? CQ_CONFIG_FILE);
   let text: string;
@@ -143,14 +165,9 @@ export function resolveChecks(
     };
   }
   const checks = parsed.config.checks
-    .filter((check) => check.addressOnly !== true)
+    .filter((check) => !isAddressOnly(check))
     .map(({ adapter, command }) => ({ adapter, command }));
-  if (checks.length === 0)
-    return {
-      ok: false,
-      error:
-        'analyze.run: no repository checks configured (address-only checks require finding-file scope)',
-    };
+  if (checks.length === 0) return { ok: false, error: NO_REPOSITORY_CHECKS };
   return {
     ok: true,
     checks,
