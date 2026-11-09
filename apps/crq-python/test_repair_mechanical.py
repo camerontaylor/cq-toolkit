@@ -13,6 +13,9 @@ from unittest import mock
 import crq_repair
 from crq_repair.drivers import cq
 
+SNAPSHOT = {'source_sha': 'a' * 40, 'source_blob_sha': 'b' * 40, 'finding_sha256': 'c' * 64,
+            'path': 'src/a.ts', 'line_start': 1, 'line_end': 1, 'source': '1: x', 'incomplete': False}
+
 ROOT = Path(__file__).resolve().parent
 spec = importlib.util.spec_from_file_location('repair_mechanical_under_test', ROOT / 'crq_repair.py')
 service = importlib.util.module_from_spec(spec)
@@ -105,7 +108,7 @@ class CqDriverTest(unittest.TestCase):
                              'max_context_tokens': 2000}}}
         self.directory = Path(tmp.name)
         job = {'job': 'crq-run1-F1', 'pr': pr, 'finding': {'path': 'src/a.ts', 'line': 1, 'body': 'x'},
-               'source_snapshot': {}}
+               'source_snapshot': SNAPSHOT}
         with mock.patch.object(cq, 'command', return_value=SimpleNamespace(
                 returncode=returncode, stdout=stdout, stderr='')) as command:
             report = cq.invoke(config, {'model': 'zai/glm-5.3-flash'}, job, Path(tmp.name), self.directory)
@@ -202,7 +205,7 @@ class CqDriverTest(unittest.TestCase):
         config = {'repo': 'example/repo', 'repair': {'cq_bin': '/unused/cli.js', 'budget': {
             'wall_clock_min': 1, 'max_output_tokens': 500, 'max_context_tokens': 2000}}}
         job = {'job': 'crq-run1-F1', 'finding': {'path': 'src/a.ts', 'line': 1, 'body': 'x'},
-               'source_snapshot': {}}
+               'source_snapshot': SNAPSHOT}
         with mock.patch.object(cq, 'command', side_effect=fake):
             return cq.invoke(config, {'model': 'zai/glm-5.3-flash'}, job, Path(tmp.name), Path(tmp.name))
 

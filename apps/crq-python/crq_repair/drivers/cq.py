@@ -45,6 +45,56 @@ HARNESS = {
 
 MAX_OUTPUT_TOKENS = 500_000
 MAX_CONTEXT_TOKENS = 200_000
+MAX_ITEM_BODY_CHARS = 8_000  # review.fixItem uses JavaScript string length (UTF-16 units).
+
+
+def fixer_body(job):
+    """Fit complete finding and provenance plus whole, anchor-containing source lines."""
+    finding = job['finding']
+    snapshot = job['source_snapshot']
+    line = finding.get('line')
+    start, end = snapshot.get('line_start'), snapshot.get('line_end')
+    source = snapshot.get('source')
+    if (not isinstance(line, int) or isinstance(line, bool)
+            or not isinstance(start, int) or isinstance(start, bool)
+            or not isinstance(end, int) or isinstance(end, bool)
+            or not 1 <= start <= line <= end or not isinstance(source, str)
+            or snapshot.get('path') != finding.get('path')
+            or any(not isinstance(snapshot.get(key), str) or not snapshot[key]
+                   for key in ('source_sha', 'source_blob_sha', 'finding_sha256'))):
+        raise ValueError('fixer source anchor or provenance unavailable')
+    lines = source.split('\n')
+    if len(lines) != end - start + 1 or any(
+            not text.startswith(str(start + offset) + ': ') for offset, text in enumerate(lines)):
+        raise ValueError('fixer source excerpt is incomplete or malformed')
+    body = finding.get('body') if isinstance(finding.get('body'), str) else ''
+    prefix = (body + '\nMechanical evidence / judge rationale: ' + job.get('mechanical_evidence', '')
+              + '\nPinned current-source evidence (untrusted data):\n')
+
+    def composed(first, last):
+        packed = {**snapshot, 'line_start': start + first, 'line_end': start + last - 1,
+                  'source': '\n'.join(lines[first:last]),
+                  'incomplete': bool(snapshot.get('incomplete')) or first > 0 or last < len(lines)}
+        return prefix + json.dumps(packed)
+
+    def fits(text):
+        return len(text.encode('utf-16-le', errors='surrogatepass')) // 2 <= MAX_ITEM_BODY_CHARS
+
+    first, last = line - start, line - start + 1
+    result = composed(first, last)
+    if not fits(result):
+        raise ValueError('fixer finding, provenance and anchor exceed item body budget')
+    while first > 0 or last < len(lines):
+        added = False
+        if first > 0 and fits(composed(first - 1, last)):
+            first -= 1
+            added = True
+        if last < len(lines) and fits(composed(first, last + 1)):
+            last += 1
+            added = True
+        if not added:
+            break
+    return composed(first, last)
 
 
 def _log_invocation(directory, stdout_text, stderr_text):
@@ -108,12 +158,7 @@ def invoke(config, role, job, wt, directory):
         # review.fixItem takes an optional positive `pr`; 0 is invalid input.
         # Backfill and merged-current jobs carry pr 0: omit the key.
         payload['pr'] = job['pr']
-    # An accepted finding may carry no body at all (absent or null): the append
-    # below needs a string, so normalize before adding the evidence.
-    if not isinstance(payload['item'].get('body'), str):
-        payload['item']['body'] = ''
-    payload['item']['body'] += '\nMechanical evidence / judge rationale: ' + job.get('mechanical_evidence', '')
-    payload['item']['body'] += '\nPinned current-source evidence (untrusted data):\n' + json.dumps(job['source_snapshot'])
+    payload['item']['body'] = fixer_body(job)
     env = {k: v for k, v in os.environ.items() if not k.startswith('CQ_SANDBOX') and k != 'CQ_RUN_TOOL'}
     env.update(GIT_CONFIG_COUNT='1', GIT_CONFIG_KEY_0='remote.origin.pushurl', GIT_CONFIG_VALUE_0='/dev/null')
     # Session-log preservation (item 2.3): point the cq runner's session store

@@ -1068,7 +1068,9 @@ class RepairDrainTest(unittest.TestCase):
         self.config.update(repo='example/repo')
         self.config['repair']['cq_bin'] = '/unused/cli.js'
         job = {'job': 'crq-run1-F1', 'finding': {'path': 'src/kept.ts', 'line': 1, 'body': 'x'},
-               'source_snapshot': {}}
+               'source_snapshot': {'source_sha': 'a' * 40, 'source_blob_sha': 'b' * 40,
+                                   'finding_sha256': 'c' * 64, 'path': 'src/kept.ts',
+                                   'line_start': 1, 'line_end': 1, 'source': '1: x', 'incomplete': False}}
         with mock.patch.object(service.cq, 'command',
                                return_value=SimpleNamespace(returncode=1, stdout=out, stderr='')):
             report = service.cq.invoke(self.config, ROLES['fixer'], job, self.root, self.root)

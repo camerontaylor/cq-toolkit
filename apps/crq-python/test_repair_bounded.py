@@ -251,6 +251,22 @@ class BoundedRepairTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'binding'):
             bounded.source_snapshot(self.config, job)
 
+    def test_snapshot_keeps_anchor_after_large_preceding_lines(self):
+        _, job = self.prepare()
+        job['finding']['line'] = 40
+        job['finding_sha256'] = bounded.identity(job['finding'])
+        text = '\n'.join(['preceding ' * 2000] * 39 + ['anchor', 'following'])
+        with mock.patch.object(bounded, 'command', return_value=SimpleNamespace(returncode=0, stdout=text)):
+            snapshot = bounded.source_snapshot(self.config, job)
+        self.assertIn('40: anchor', snapshot['source'])
+        self.assertIn('41: following', snapshot['source'])
+        self.assertEqual(snapshot['line_start'], 40)
+        self.assertEqual(snapshot['line_end'], 41)
+        self.assertTrue(snapshot['incomplete'])
+        with mock.patch.object(bounded, 'command', return_value=SimpleNamespace(returncode=0, stdout='x\n' * 39 + 'a' * 16001)):
+            with self.assertRaisesRegex(ValueError, 'anchor exceeds'):
+                bounded.source_snapshot(self.config, job)
+
     def test_service_disabled_or_partial_selector_never_dispatch(self):
         atomic(self.root / 'config.json', self.config)
         with mock.patch.object(service, 'ROOT', self.root), \
@@ -294,7 +310,9 @@ class BoundedRepairTest(unittest.TestCase):
 
     def test_cq_fixer_payload_contains_snapshot_and_mechanical_context(self):
         _, job = self.prepare()
-        job['source_snapshot'] = {'source_sha': SOURCE, 'source': '2: pinned code'}
+        job['source_snapshot'] = {'source_sha': SOURCE, 'source_blob_sha': BLOB,
+                                  'finding_sha256': job['finding_sha256'], 'path': 'src/lock.ts',
+                                  'line_start': 2, 'line_end': 2, 'source': '2: pinned code', 'incomplete': True}
         job['mechanical_evidence'] = 'Earlier verification failed'
         self.config.update(repo='example/repo')
         self.config['repair'].update(cq_bin='/unused/cli.js', budget={'max_output_tokens': 8000, 'max_context_tokens': 9000, 'wall_clock_min': 2})
@@ -316,6 +334,50 @@ class BoundedRepairTest(unittest.TestCase):
         self.assertEqual(harness['tools']['run']['commandPatterns'],
                          ['git ' + name for name in ('add', 'commit', 'status', 'diff', 'log', 'rev-parse')]
                          + service.cq.SEARCH_PATTERNS)
+
+    def test_cq_fixer_budget_retains_full_finding_and_anchor_with_escaped_source(self):
+        _, job = self.prepare()
+        job['finding']['body'] = 'Full finding 😀\nwith two lines and "quotes"'
+        job['mechanical_evidence'] = 'Mechanical 😀 evidence'
+        source = '\n'.join(f'{n}: ' + ('quoted "\\ text 😀 ' * 8) for n in range(27, 108))
+        job['finding']['line'] = 67
+        job['source_snapshot'] = {'source_sha': SOURCE, 'source_blob_sha': BLOB,
+                                  'finding_sha256': bounded.identity(job['finding']), 'path': 'src/lock.ts',
+                                  'line_start': 27, 'line_end': 107, 'source': source, 'incomplete': True}
+        body = service.cq.fixer_body(job)
+        self.assertLessEqual(len(body.encode('utf-16-le')) // 2, 8000)
+        self.assertTrue(body.startswith(job['finding']['body']))
+        self.assertIn(job['mechanical_evidence'], body)
+        snapshot = json.loads(body.split('Pinned current-source evidence (untrusted data):\n', 1)[1])
+        self.assertEqual(snapshot['source_sha'], SOURCE)
+        self.assertEqual(snapshot['source_blob_sha'], BLOB)
+        self.assertEqual(snapshot['finding_sha256'], bounded.identity(job['finding']))
+        self.assertEqual(snapshot['path'], job['finding']['path'])
+        self.assertLessEqual(snapshot['line_start'], 67)
+        self.assertGreaterEqual(snapshot['line_end'], 67)
+        self.assertIn('67: ', snapshot['source'])
+        self.assertIn('68: ', snapshot['source'])
+        self.assertTrue(snapshot['incomplete'])
+        self.assertLess(snapshot['line_end'] - snapshot['line_start'], 80)
+        self.assertEqual(len(snapshot['source'].split('\n')), snapshot['line_end'] - snapshot['line_start'] + 1)
+
+    def test_cq_fixer_refuses_oversized_or_missing_anchor_before_command(self):
+        _, job = self.prepare()
+        job['source_snapshot'] = {'source_sha': SOURCE, 'source_blob_sha': BLOB,
+                                  'finding_sha256': job['finding_sha256'], 'path': 'src/lock.ts',
+                                  'line_start': 2, 'line_end': 2, 'source': '2: pinned code', 'incomplete': True}
+        self.config.update(repo='example/repo')
+        self.config['repair'].update(cq_bin='/unused', budget={'wall_clock_min': 1})
+        with mock.patch.object(service.cq, 'command') as command:
+            for body, source in [('😀' * 4000, '2: pinned code'),
+                                 ('small', '2: ' + '\\' * 8000),
+                                 ('small', '3: wrong anchor')]:
+                with self.subTest(body=body[:8], source=source[:16]):
+                    job['finding']['body'] = body
+                    job['source_snapshot']['source'] = source
+                    with self.assertRaises(ValueError):
+                        service.cq.invoke(self.config, {'model': 'p/m'}, job, self.root, self.root)
+            command.assert_not_called()
 
     def test_harvest_records_wrong_prepared_source_binding_as_failed(self):
         job_id, job = self.prepare()
