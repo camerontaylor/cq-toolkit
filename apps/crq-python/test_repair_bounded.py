@@ -333,6 +333,25 @@ class BoundedRepairTest(unittest.TestCase):
                 self.assertIn('valid final attempt rung', record['error'])
                 self.assertEqual(item['state'], 'repair_failed')
 
+    def test_valid_fixed_rungs_reach_git_verification(self):
+        job_id, job = self.prepare()
+        self.c.WT_ROOT = self.root / 'wt'
+        self.c.make_worktree = mock.Mock(return_value=(self.root / 'verify', 'branch'))
+        self.c.remove_worktree = mock.Mock()
+        item = self.queue['items'][0]
+        for rung in ('A0', 'A1', 'A2'):
+            with self.subTest(rung=rung):
+                atomic(self.root / 'state/repair' / job_id / 'result.json',
+                       {'job': job_id, 'item': job['item'], 'verdict': 'FIXED', 'commits': ['a' * 40],
+                        'attempts': [{'rung': rung}], 'source_sha': job['source_sha'],
+                        'finding_sha256': job['finding_sha256'], 'origin_job': OLD,
+                        'worktree': str(self.c.WT_ROOT / 'crq-repair-pr1-merged'),
+                        'repair_base': job['repair_base']})
+                with mock.patch.object(repair_tick, 'verify', side_effect=RuntimeError('verification reached')):
+                    with self.assertRaisesRegex(RuntimeError, 'verification reached'):
+                        repair_tick.harvest(self.c, self.queue, item)
+                self.assertEqual(item['repair_runs'][job['run']]['state'], 'queued')
+
     def test_harvest_retains_malformed_json_and_fails_the_prepared_run(self):
         job_id, job = self.prepare()
         result = self.root / 'state/repair' / job_id / 'result.json'
