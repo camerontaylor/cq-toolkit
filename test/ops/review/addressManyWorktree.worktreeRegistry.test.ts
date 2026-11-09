@@ -12,9 +12,9 @@ import * as loopModule from '../../../src/plans/review-loop.js';
 
 import { NOW, deferred, fixture } from './addressManyWorktree.helpers.js';
 
-test.each([false, true])(
+test.each(['unpublished', 'published', 'invalid-callback'] as const)(
   'child head advances only after publication callback: %s',
-  async (published) => {
+  async (publication) => {
     const f = await fixture();
     const pr = f.prs[0];
     const loop = vi.spyOn(loopModule, 'runReviewLoop').mockImplementation(async (opts) => {
@@ -24,9 +24,13 @@ test.each([false, true])(
       f.repo.git('-C', checkout.path, 'add', '--', 'README.md');
       f.repo.git('-C', checkout.path, 'commit', '-q', '-m', 'round one');
       const head = f.repo.git('-C', checkout.path, 'rev-parse', 'HEAD').trim();
-      if (published) {
+      if (publication !== 'unpublished') {
         f.repo.git('-C', checkout.path, 'push', '-q', 'origin', `${head}:refs/heads/feature/x`);
-        await opts.onPublished!(head);
+        if (publication === 'invalid-callback') {
+          await expect(opts.onPublished!(pr.headRefOid)).rejects.toThrow();
+        } else {
+          await opts.onPublished!(head);
+        }
       }
       return {} as Awaited<ReturnType<typeof loopModule.runReviewLoop>>;
     });
@@ -46,7 +50,7 @@ test.each([false, true])(
             } as Parameters<typeof runAddressReviewLoop>[1]);
             const head = f.repo.git('-C', checkout!.path, 'rev-parse', 'HEAD').trim();
             const second = lease.claimCheckout({ ...checkout!, head });
-            if (published) await expect(second).resolves.toBeUndefined();
+            if (publication === 'published') await expect(second).resolves.toBeUndefined();
             else await expect(second).rejects.toThrow('resolved identity changed');
             return { status: 'needs-human', reason: 'fixture' };
           },
