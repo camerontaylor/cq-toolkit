@@ -206,9 +206,9 @@ def republish(c, q, item):
         reference = store.put(receipts.canonical(document))
         reference["kind"] = operation.RECEIPT_KIND
         facts = item["identity_inputs"]
-        payload = dict(repo=facts["repo"], subject_id=item["identity"], job_id=item["local_run_id"],
+        payload = dict(repo=c.REPO, subject_id=item["identity"], job_id=item["local_run_id"],
             attempt_id=item["local_run_id"],
-            source=dict(repo=facts["repo"], producer="author-queue", type="author-queue",
+            source=dict(repo=c.REPO, producer="author-queue", type="author-queue",
                         id=item["local_run_id"], authenticated=True),
             base=facts["base_commit"], head=facts["head_commit"], head_tree=facts["head_tree"],
             target=facts["head_commit"], target_tree=facts["head_tree"],
@@ -218,7 +218,7 @@ def republish(c, q, item):
                             exit_code=document["observed"]["exit_code"],
                             errors=["per-line scope unverified: full-diff adapter supplies no line-scope proof"]),
             outcome="unverified", artifacts=[reference], findings=[])
-        value = ledger.event("review", f"{facts['repo']}:author-queue:{item['local_run_id']}",
+        value = ledger.event("review", f"{c.REPO}:author-queue:{item['local_run_id']}",
                              item["completed_at"], payload)
         outbox.spool(value)
         pending = (outbox.root / "ack" / (value["id"] + ".json")).exists() is False
