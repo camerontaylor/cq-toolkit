@@ -460,13 +460,13 @@ async function terminalGit(
   return output;
 }
 
-async function terminalPath(root: string, file: string) {
+async function terminalPath(root: string, file: string, allowGlob = false) {
   if (
     !file ||
     isAbsolute(file) ||
     file.startsWith('-') ||
     file.split(/[\\/]/).some((part) => part === '..') ||
-    /[*?\[\]{}]/.test(file)
+    (!allowGlob && /[*?\[\]{}]/.test(file))
   )
     throw new Error('terminal literal file refused');
   const canonical = await realpath(root);
@@ -794,7 +794,9 @@ export async function settleAddressTerminalEvidence(
         cursor = end + 1;
         const file = entry[3]!;
         if (paths.has(`${attempt.root}\0${file}`)) continue;
-        const foreign = await terminalPath(attempt.root, file);
+        // Foreign tracked paths only get read and hashed: never interpreted by
+        // git pathspecs here, so glob characters in real file names are safe.
+        const foreign = await terminalPath(attempt.root, file, true);
         const mode = foreign.stat.mode & 0o111 ? '100755' : '100644';
         if (
           mode !== entry[1] ||
