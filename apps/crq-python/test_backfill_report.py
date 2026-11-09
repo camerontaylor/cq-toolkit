@@ -82,6 +82,31 @@ class ReportTest(unittest.TestCase):
             self.assertFalse(result["unresolved_baseline_objects"])
             self.assertEqual(result["target_status"], "baseline-zero")
 
+    def test_unmeasurable_current_object_keeps_baseline_debt_unresolved(self):
+        with tempfile.TemporaryDirectory() as td:
+            f = Fixture(Path(td) / "repo")
+            old = f.commit({"a": b"one\ntwo\n"})
+            row = {"path": "a", "blob": f.repo.entries(old)["a"]["blob"], "tier": "T1", "lines": 2,
+                   "uncovered": [[1, 2]], "disposition": "included", "reason": "text"}
+            def rank(target, paths):
+                return {"target": target, "manifest_id": "m", "paths": paths, "candidates": [], "required": [], "evidence_gaps": []}
+            original = reporting.baseline(f.repo, rank(old, [row]), "p", "l", "2026-10-30T00:00:00Z")
+            # Unreadable and oversized current objects both leave coverage unverified.
+            head = f.commit({"a": b"one\ntwo\n", "other": b"x\n"})
+            for lines, uncovered, reason in ((None, [], "unreadable blob"),
+                    (2, [[1, 2]], "current content exceeds per-file limit")):
+                with self.subTest(lines=lines):
+                    current = {**row, "blob": f.repo.entries(head)["a"]["blob"], "lines": lines,
+                               "uncovered": uncovered, "disposition": "unsupported", "reason": reason}
+                    result = reporting.summary(f.repo, rank(head, [current]), {"items": []}, original)["baseline"]
+                    self.assertEqual(result["unresolved_baseline_objects"],
+                                     [{**row, "reason": "unmeasurable current object"}])
+                    self.assertEqual(result["surviving_T1_debt"], 0)
+                    self.assertEqual(result["baseline_T1_reviewed_since"], 0)
+                    self.assertEqual(result["baseline_T1_removed_or_superseded"], 0)
+                    self.assertEqual(result["new_T1_debt"], 0)
+                    self.assertEqual(result["target_status"], "pending")
+
     def test_nonancestor_baseline_lineage_remains_unknown(self):
         with tempfile.TemporaryDirectory() as td:
             f = Fixture(Path(td) / "repo")
