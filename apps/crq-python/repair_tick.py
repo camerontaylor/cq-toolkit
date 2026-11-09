@@ -753,6 +753,8 @@ def reconcile_fix_prs(c, q):
                     projected = proof is not None
                     if not projected:
                         proof = merge_head_evidence(c, record, info.get('headRefOid'))
+                    elif canonical_fixed_events(c, record, info) != proof:
+                        raise ValueError('canonical fixed finding changed before source feedback')
                 except Exception as exc:
                     record['source_publication_error'] = str(exc)[:300]
                     continue

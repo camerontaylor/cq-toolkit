@@ -1112,6 +1112,8 @@ class CanonicalFixedProjectionTest(unittest.TestCase):
                 self.assertEqual(self.journal.read_bytes(), self.original_journal)
 
     def test_source_feedback_rechecks_current_fixed_disposition(self):
+        blocker = {'repair_job': self.job_id}
+        self.queue['items'][0]['blocking'] = [blocker]
         original = self.inbox.current_fixed_event
         calls = []
         def changed(job, merge):
@@ -1130,6 +1132,8 @@ class CanonicalFixedProjectionTest(unittest.TestCase):
             source.assert_not_called()
         self.assertEqual(len(calls), 2)
         self.assertNotIn('fix_merged', self.record)
+        self.assertNotIn('resolution', blocker)
+        self.assertNotIn('validated_merge_head', self.record)
         self.assertIn('changed before source feedback', self.record['source_publication_error'])
         self.assertEqual(self.journal.read_bytes(), self.original_journal)
 
