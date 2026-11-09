@@ -96,10 +96,10 @@ def summary(repo, ranked, queue, original=None, *, findings_root=None):
             if name:
                 surviving_all[name].update(mapped_all)
             if unmeasurable:
-                # An unmeasurable current object records no uncovered intervals, so
-                # carried baseline debt there is unverified, never reviewed.
+                # Current coverage is unverified for an unmeasurable object,
+                # even when the inventory retains countable lines.
                 if unmeasured_baseline or mapped_debt:
-                    baseline_result["unresolved_baseline_objects"].append(row)
+                    baseline_result["unresolved_baseline_objects"].append({**row, "reason": "unmeasurable current object"})
             else:
                 remaining = mapped_debt & ledger.intervals(present.get("uncovered", []))
                 baseline_result["surviving_T1_debt"] += len(remaining)

@@ -91,16 +91,21 @@ class ReportTest(unittest.TestCase):
             def rank(target, paths):
                 return {"target": target, "manifest_id": "m", "paths": paths, "candidates": [], "required": [], "evidence_gaps": []}
             original = reporting.baseline(f.repo, rank(old, [row]), "p", "l", "2026-10-30T00:00:00Z")
-            # Same text, but now unmeasurable (over the per-file limit): no uncovered intervals.
+            # Unreadable and oversized current objects both leave coverage unverified.
             head = f.commit({"a": b"one\ntwo\n", "other": b"x\n"})
-            current = {**row, "blob": f.repo.entries(head)["a"]["blob"], "lines": None, "uncovered": [],
-                       "disposition": "unsupported", "reason": "current content exceeds per-file limit"}
-            result = reporting.summary(f.repo, rank(head, [current]), {"items": []}, original)["baseline"]
-            self.assertTrue(result["unresolved_baseline_objects"])
-            self.assertEqual(result["surviving_T1_debt"], 0)
-            self.assertEqual(result["baseline_T1_reviewed_since"], 0)
-            self.assertEqual(result["baseline_T1_removed_or_superseded"], 0)
-            self.assertEqual(result["target_status"], "pending")
+            for lines, uncovered, reason in ((None, [], "unreadable blob"),
+                    (2, [[1, 2]], "current content exceeds per-file limit")):
+                with self.subTest(lines=lines):
+                    current = {**row, "blob": f.repo.entries(head)["a"]["blob"], "lines": lines,
+                               "uncovered": uncovered, "disposition": "unsupported", "reason": reason}
+                    result = reporting.summary(f.repo, rank(head, [current]), {"items": []}, original)["baseline"]
+                    self.assertEqual(result["unresolved_baseline_objects"],
+                                     [{**row, "reason": "unmeasurable current object"}])
+                    self.assertEqual(result["surviving_T1_debt"], 0)
+                    self.assertEqual(result["baseline_T1_reviewed_since"], 0)
+                    self.assertEqual(result["baseline_T1_removed_or_superseded"], 0)
+                    self.assertEqual(result["new_T1_debt"], 0)
+                    self.assertEqual(result["target_status"], "pending")
 
     def test_nonancestor_baseline_lineage_remains_unknown(self):
         with tempfile.TemporaryDirectory() as td:
