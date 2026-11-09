@@ -100,9 +100,10 @@ export interface PlannedTaskRow {
  * (planned tasks plus never-run units); `attempted` counts rows the run
  * dispatched at least one worker or rescue invocation for; `fixed` counts
  * rows with a verified commit; `skipped` counts rows resolved without an
- * attempt by an earlier verified sibling; `unresolved = planned - fixed`
- * counts every row still needing work. Rescue counting is separate, never a
- * ratio: `rescueAttempts` counts rescue-tier rounds recorded by tasks with
+ * attempt by an earlier verified sibling; `unresolved = planned - fixed -
+ * skipped` counts every row still needing work (a sibling-resolved row needs
+ * none). Rescue counting is separate, never a ratio: `rescueAttempts` counts
+ * rescue-tier rounds recorded by tasks with
  * round evidence, `rescueFixes` counts fixed rows whose attempts include a
  * rescue tier. No cross-run state participates.
  */
@@ -247,12 +248,13 @@ export function neverStartedRow(
 export function fixRunCounters(rows: readonly PlannedTaskRow[]): FixRunCounters {
   const attempted = rows.filter((row) => row.attempts.length > 0).length;
   const fixed = rows.filter((row) => row.outcome === 'fixed' && row.commits.length > 0).length;
+  const skipped = rows.filter((row) => row.outcome === 'fixed' && row.commits.length === 0).length;
   return {
     planned: rows.length,
     attempted,
     fixed,
-    skipped: rows.filter((row) => row.outcome === 'fixed' && row.commits.length === 0).length,
-    unresolved: rows.length - fixed,
+    skipped,
+    unresolved: rows.length - fixed - skipped,
     rescueAttempts: rows
       .flatMap((row) => row.rounds ?? [])
       .filter((round) => round.tier === 'rescue').length,
