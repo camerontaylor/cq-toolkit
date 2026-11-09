@@ -1057,7 +1057,15 @@ function makeDevCycleCore(
                     verdict: 'fault',
                     detail: 'its dependency inputs differ and the reserve cannot cover a reinstall',
                   };
-                await installDeps(tmp, AbortSignal.timeout(reinstallMs));
+                try {
+                  await installDeps(tmp, AbortSignal.timeout(reinstallMs));
+                } catch (err) {
+                  return {
+                    commit,
+                    verdict: 'fault',
+                    detail: `dependency reinstall failed: ${(err instanceof Error ? err.message : String(err)).slice(0, 300)}`,
+                  };
+                }
                 installedAt = commit;
               }
             }
