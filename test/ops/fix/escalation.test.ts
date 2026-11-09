@@ -100,6 +100,22 @@ test('atomic concurrent reservations obey shared pool and package caps including
       .tier,
   ).toBe('human');
 });
+test('malformed injected policies are rejected instead of silently disabling rescue accounting', () => {
+  const state = createEscalationState();
+  for (const malformed of [
+    { rescuePerFixed: 0 },
+    { rescuePerFixed: -10 },
+    { rescuePerFixed: 1.5 },
+    { rescuePerFixed: NaN },
+    { rescueBase: -1 },
+    { rescueBase: Infinity },
+    { rescuePerPackageCap: -1 },
+  ])
+    expect(() => nextEscalation(state, { ...policy, ...malformed }, request)).toThrow(
+      'escalation',
+    );
+  expect(() => rescueAllocation(state, { ...policy, rescuePerFixed: 0 })).toThrow('rescuePerFixed');
+});
 test('occurrence fingerprints preserve multiplicity and distinguish signatures rather than counting task rows', () => {
   const before = failures(1);
   before.failures.push({ ...before.failures[0]! });
