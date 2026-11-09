@@ -52,6 +52,7 @@ import type { Driver, ModelSpec, WorkerResult } from './types.js';
 import type { HarnessConfig } from '../harness/config.js';
 import { SessionStore } from '../harness/session.js';
 import { processEnv } from '../config/process-env.js';
+import type { CqEnv } from '../config/env.js';
 
 // ---------------------------------------------------------------------------
 // Public surface
@@ -159,6 +160,8 @@ export type AiSdkLaneConfig = Pick<
 
 /** Factory configuration — plain data a deployment composes (never plan JSON). */
 export interface DriverFactoryConfig {
+  /** Run-owned environment snapshot; absent preserves per-resolve ambient reads. */
+  cqEnv?: CqEnv;
   /** Role → provider → lane overrides ('*' = any provider). Absent roles fall back to the conservative defaults. */
   bindings?: Readonly<Record<string, Readonly<Record<string, LaneId>>>>;
   /** Sessions directory for the backing SessionStore, when a lane config does not name its own. */
@@ -230,15 +233,18 @@ const DEFAULT_SESSIONS_DIR = () => defaultSessionsDir();
 
 /**
  * The session-logs OFF probe (item 1.6): config `sessionLogs.enabled:
- * false` XOR the env override `CQ_SESSION_LOGS=off` (read at resolve time,
- * like every deployment knob here — a test can flip it per invocation).
+ * false` or the env override `CQ_SESSION_LOGS=off`. A supplied run snapshot
+ * takes precedence; otherwise the environment is read on each resolve.
  * Anything else (absent, any other value) is ON: preservation is the
  * default (feature R1).
  */
 function sessionLogsOff(config: DriverFactoryConfig): boolean {
   if (config.sessionLogs?.enabled === false) return true;
-  const env = processEnv()['CQ_SESSION_LOGS'];
-  return env !== undefined && env.trim().toLowerCase() === 'off';
+  const env =
+    config.cqEnv === undefined
+      ? processEnv()['CQ_SESSION_LOGS']
+      : config.cqEnv.values['CQ_SESSION_LOGS'];
+  return typeof env === 'string' && env.trim().toLowerCase() === 'off';
 }
 
 /**

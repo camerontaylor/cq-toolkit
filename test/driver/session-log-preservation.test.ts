@@ -30,6 +30,47 @@ import {
   inboundParentWorkId,
 } from '../../src/driver/correlation-env.js';
 import { sessionsOfResult } from '../../src/kernel/runner.js';
+import { readCqEnv } from '../../src/config/env.js';
+import { AiSdkDriver } from '../../src/driver/ai-sdk/index.js';
+import { SessionBoundError } from '../../src/driver/errors.js';
+import { createDriverFactory } from '../../src/driver/factory.js';
+import { SessionStore } from '../../src/harness/session.js';
+
+describe('session log switch snapshot', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+  });
+
+  test('uses a supplied snapshot and preserves dynamic bare-factory reads', async () => {
+    vi.spyOn(AiSdkDriver.prototype, 'run').mockRejectedValue(new SessionBoundError('stop', 's'));
+    const remove = vi.spyOn(SessionStore.prototype, 'remove').mockResolvedValue(undefined);
+    const request = { role: 'fixer', modelSpec: { provider: 'openai', model: 'm' } };
+    const invocation = {
+      prompt: 'test',
+      modelSpec: request.modelSpec,
+      toolPolicy: { allow: [], mode: 'none' as const },
+      sandboxPolicy: { level: 'none' as const },
+      budget: {},
+    };
+    const unset = createDriverFactory({ cqEnv: readCqEnv({}) });
+    const off = createDriverFactory({ cqEnv: readCqEnv({ CQ_SESSION_LOGS: 'off' }) });
+    const forced = createDriverFactory({ cqEnv: readCqEnv({}), sessionLogs: { enabled: false } });
+    const bare = createDriverFactory();
+    const check = async (factory: typeof bare, expected: number) => {
+      remove.mockClear();
+      await expect(factory.resolve(request).driver.run(invocation)).rejects.toThrow('stop');
+      expect(remove).toHaveBeenCalledTimes(expected);
+    };
+    vi.stubEnv('CQ_SESSION_LOGS', 'off');
+    await check(unset, 0);
+    await check(bare, 1);
+    vi.stubEnv('CQ_SESSION_LOGS', 'on');
+    await check(off, 1);
+    await check(forced, 1);
+    await check(bare, 0);
+  });
+});
 
 describe('1.1 defaultSessionsDir', () => {
   // The production helper, driven through vi.stubEnv (restored after each
