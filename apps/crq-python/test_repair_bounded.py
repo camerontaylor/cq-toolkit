@@ -68,6 +68,15 @@ class BoundedRepairTest(unittest.TestCase):
         self.assertEqual(self.prepare()[0], job_id)
         self.assertEqual(self.c.secret_scan_diff.call_count, 1)
 
+    def test_recovery_preparation_is_idempotent_and_marks_isolated_worktree(self):
+        job_id = repair_tick.prepare_current_job(self.c, self.queue, OLD, SOURCE, self.evidence,
+                                                preserve_worktree=True)
+        job = json.loads(bounded.job_path(self.root, job_id).read_text())
+        self.assertTrue(job['recovery_worktree'])
+        self.assertEqual(repair_tick.prepare_current_job(self.c, self.queue, OLD, SOURCE, self.evidence,
+                                                         preserve_worktree=True), job_id)
+        self.assertEqual(self.c.secret_scan_diff.call_count, 1)
+
     def test_prepared_canonical_retry_transfers_durable_delivery_ownership(self):
         self.old['canonical_finding_id'] = 'canonical'
         atomic(bounded.job_path(self.root, OLD), self.old)

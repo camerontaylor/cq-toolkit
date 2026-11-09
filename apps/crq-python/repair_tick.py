@@ -9,7 +9,7 @@ from crq_repair import atomic, findings, git as wt_git, hack_detector, verify
 from crq_repair.bounded import JOB_ID, identity, job_path, require_canonical_delivery, source_path, validate_revalidation
 
 
-def prepare_current_job(c, q, old_job_id, source_sha, evidence):
+def prepare_current_job(c, q, old_job_id, source_sha, evidence, *, preserve_worktree=False):
     """Locked operator preparation, not dispatch or a historical-job disposition."""
     old = json.loads(job_path(c.ROOT, old_job_id).read_text())
     if old.get('job') != old_job_id:
@@ -19,8 +19,10 @@ def prepare_current_job(c, q, old_job_id, source_sha, evidence):
     old_record = item.get('repair_runs', {}).get(old['run'])
     if not old_record or old_job_id not in old_record.get('jobs', []):
         raise ValueError('historical finding lacks tick-owned repair evidence')
-    token = identity({'origin_job': old_job_id, 'source_sha': source_sha,
-                      'evidence': evidence})[:24]
+    binding = {'origin_job': old_job_id, 'source_sha': source_sha, 'evidence': evidence}
+    if preserve_worktree:
+        binding['preserve_worktree'] = True
+    token = identity(binding)[:24]
     run = 'revalidated-' + token
     job_id = 'crq-' + run + '-F1'
     existing = item.get('repair_runs', {}).get(run)
@@ -53,6 +55,8 @@ def prepare_current_job(c, q, old_job_id, source_sha, evidence):
            'finding_sha256': identity(old['finding']), 'revalidation': evidence,
            'prior': None, 'recurrence': False,
            'source': {**old.get('source', {}), 'run': old.get('source', {}).get('run', old['run'])}}
+    if preserve_worktree:
+        job['recovery_worktree'] = True
     atomic(job_path(c.ROOT, job_id), job)
     if old.get('canonical_finding_id'):
         finding_inbox(c).handoff(old['canonical_finding_id'], old_job_id, job, c.iso())
@@ -280,7 +284,8 @@ def harvest(c, q, item, dry=False):
             if result.get('verdict') == 'FIXED':
                 wt = Path(result['worktree']).resolve()
                 root = c.WT_ROOT.resolve()
-                if wt.parent != root or wt.name != 'crq-repair-' + item['id']:
+                expected_name = 'crq-repair-' + item['id'] + ('-' + job_id if expected.get('recovery_worktree') else '')
+                if wt.parent != root or wt.name != expected_name:
                     raise ValueError('repair result worktree outside owned path')
                 if result.get('repair_base') != predecessor:
                     raise ValueError('repair predecessor mismatch')

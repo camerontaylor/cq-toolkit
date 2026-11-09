@@ -443,6 +443,39 @@ class RepairDrainTest(unittest.TestCase):
             snapshot.assert_not_called()
             provider.assert_not_called()
 
+    def test_recovery_job_uses_separate_worktree_and_preserves_original(self):
+        original = self.worktree()
+        (original / 'src/kept.ts').write_text('retained staged edit\n')
+        subprocess.run(['git', 'add', 'src/kept.ts'], cwd=original, check=True)
+        job = json.loads(bounded.job_path(self.root, 'crq-run1-F1').read_text())
+        job['recovery_worktree'] = True
+        job['job'] = 'crq-recovery-F1'
+        with mock.patch.object(service, 'blocked', return_value=False), \
+             mock.patch.object(service, 'dispatch_paused', return_value=None), \
+             mock.patch.object(service, 'process', return_value={'verdict': 'NOT-FIXED'}) as process:
+            service.process_item(self.config, [job])
+        self.assertEqual(process.call_args.args[2].name, 'crq-repair-pr1-merged-crq-recovery-F1')
+        self.assertEqual((original / 'src/kept.ts').read_text(), 'retained staged edit\n')
+        self.assertIn('src/kept.ts', subprocess.run(['git', 'diff', '--cached', '--name-only'], cwd=original,
+                                                    check=True, capture_output=True, text=True).stdout)
+
+    def test_recovery_does_not_override_an_owner_disposition(self):
+        import sys
+        job_id = 'crq-run1-F1'
+        path = bounded.job_path(self.root, job_id)
+        job = json.loads(path.read_text())
+        job['canonical_finding_id'] = 'd' * 64
+        atomic(path, job)
+        atomic(self.root / 'state/backfill/findings/triage' / ('d' * 64 + '.json'),
+               {'status': 'needs-human', 'previous_event_id': 'event', 'receipt': {'repair_task': job_id}})
+        c = SimpleNamespace(load_queue=lambda: self.queue, ran_locked=lambda fn: (fn(), True)[1])
+        inbox = mock.Mock()
+        inbox.publication.retained.return_value = [{'id': 'event', 'payload': {
+            'actor': 'operator', 'finding_id': 'd' * 64, 'evidence': {'repair_task': job_id}}}]
+        with mock.patch.dict(sys.modules, {'crq': c}), mock.patch.object(repair_tick, 'finding_inbox', return_value=inbox):
+            with self.assertRaisesRegex(ValueError, 'owner decision'):
+                service.recover_job(self.config, job_id)
+
     def test_operator_disposition_prevents_publication_of_finished_job(self):
         item = self.queue['items'][0]
         record = item['repair_runs']['run1']
@@ -722,7 +755,7 @@ class RepairDrainTest(unittest.TestCase):
         until = service.remember_provider_limit('zai', {'summary': 'Your limit will reset at ' + reset.isoformat()})
         self.assertEqual(until, reset.astimezone(dt.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'))
 
-    def test_fallback_discards_throttled_fixers_partial_commits_and_files(self):
+    def test_fallback_preserves_throttled_fixers_partial_commits_and_files(self):
         self.config['repair']['fallback_models'] = ['deepseek/deepseek-flash']
         original = self.git('rev-parse', 'HEAD')
         def invoke(config, role, job, wt, directory, judge):
@@ -731,14 +764,13 @@ class RepairDrainTest(unittest.TestCase):
                 self.git('commit', '-qam', 'partial fixer commit')
                 (wt / 'partial-untracked').write_text('partial file')
                 return {'stop': 'rate-limit'}
-            self.assertEqual(self.git('rev-parse', 'HEAD'), original)
-            self.assertEqual((wt / 'src/kept.ts').read_text(), 'one\ntwo\n')
-            self.assertFalse((wt / 'partial-untracked').exists())
-            return {'stop': 'ok', 'changed': False}
+            self.fail('fallback must not overwrite retained work')
         with mock.patch.dict(os.environ, {'ZAI_API_KEY': 'fixture', 'DEEPSEEK_API_KEY': 'fixture'}), \
              mock.patch.object(service, '_dispatch', side_effect=invoke):
             result = service.dispatch(self.config, ROLES['fixer'], {'run': 'r', 'job': 'j'}, self.clone, self.root)
-        self.assertEqual(result['model'], 'deepseek/deepseek-flash')
+        self.assertEqual(result['stop'], 'error')
+        self.assertNotEqual(self.git('rev-parse', 'HEAD'), original)
+        self.assertEqual((self.clone / 'partial-untracked').read_text(), 'partial file')
 
     def test_remaining_wire_budget_is_integer_milliseconds(self):
         config = {'repair': {'budget': {'wall_clock_min': 0.123456789}}}
