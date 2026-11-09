@@ -353,19 +353,6 @@
         }
       ]
     },
-    "1365": {
-      "tuple": {
-        "head": "56daf8edf86442ca5116296232670e120a25581b",
-        "base": "673005574815c9dc56cb6b65c43bedd1866bb43d",
-        "forcePushEpoch": 0
-      },
-      "observations": [
-        {
-          "observedAt": "2026-11-09T16:43:13.467Z",
-          "by": "self-merge-prs:observe"
-        }
-      ]
-    },
     "1366": {
       "tuple": {
         "head": "e61be21344f5e60e927332ec5ea31905411607b8",
@@ -394,13 +381,13 @@
     },
     "1369": {
       "tuple": {
-        "head": "30e0980454274c81aea7b40b593e4c633b8082b8",
+        "head": "ed1098988947faf1b6fb039f73e101710faaa61d",
         "base": "3c33db6824ba2665a63117820899344e0185381d",
         "forcePushEpoch": 0
       },
       "observations": [
         {
-          "observedAt": "2026-11-09T16:49:04.065Z",
+          "observedAt": "2026-11-09T17:09:21.201Z",
           "by": "self-merge-prs:observe"
         }
       ]
