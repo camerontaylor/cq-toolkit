@@ -178,6 +178,17 @@ describe('makeGhRunner', () => {
     expect(env.Path).toBe(`"C:\\Program Files\\a;b";"C:\\caller\\rel;part";C:\\x\\..\\bin`);
   });
 
+  test('Windows drive-relative and UNC-rooted PATH entries retain their roots and components', () => {
+    const drives = ghSpawnEnv(
+      { Path: 'C:tools\\..\\bin;D:tools\\..\\bin', '=D:': 'D:\\work\\deep' },
+      'win32',
+      'C:\\caller',
+    );
+    expect(drives.Path).toBe('C:\\caller\\tools\\..\\bin;D:\\work\\deep\\tools\\..\\bin');
+    const unc = ghSpawnEnv({ Path: '\\tools\\..\\bin' }, 'win32', '\\\\server\\share\\caller');
+    expect(unc.Path).toBe('\\\\server\\share\\tools\\..\\bin');
+  });
+
   test('Windows current-directory opt-out skips the cwd probe', () => {
     const seen: string[] = [];
     const result = resolveWindowsCommand(

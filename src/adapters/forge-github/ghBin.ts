@@ -78,13 +78,30 @@ export function ghSpawnEnv(
       // Empty Windows PATH entries are skipped by libuv. POSIX treats them as cwd.
       if (windows && entry === '') return '';
       const rootedWithoutDrive = windows && /^[\\/](?![\\/])/.test(entry);
-      const anchored = rootedWithoutDrive
-        ? `${cwd.slice(0, 2)}${entry}`
-        : entry === ''
-          ? cwd
-          : pathApi.isAbsolute(entry)
-            ? entry
-            : `${cwd}${pathApi.sep}${entry}`;
+      const driveRelative = windows ? /^([a-z]:)(?![\\/])/i.exec(entry) : null;
+      let anchored: string;
+      if (rootedWithoutDrive) {
+        const root = win32.parse(cwd).root.replace(/[\\/]+$/, '');
+        anchored = `${root}${entry}`;
+      } else if (driveRelative !== null) {
+        const drive = driveRelative[1] as string;
+        const currentDrive = win32.parse(cwd).root.slice(0, 2);
+        const key = Object.keys(env).find(
+          (name) => name.toUpperCase() === `=${drive.toUpperCase()}`,
+        );
+        const driveCwd =
+          currentDrive.toUpperCase() === drive.toUpperCase()
+            ? cwd
+            : key === undefined
+              ? win32.resolve(`${drive}.`)
+              : (env[key] ?? win32.resolve(`${drive}.`));
+        const suffix = entry.slice(2);
+        anchored =
+          suffix === '' ? driveCwd : `${driveCwd}${driveCwd.endsWith('\\') ? '' : '\\'}${suffix}`;
+      } else {
+        anchored =
+          entry === '' ? cwd : pathApi.isAbsolute(entry) ? entry : `${cwd}${pathApi.sep}${entry}`;
+      }
       return windows && anchored.includes(';') ? `"${anchored}"` : anchored;
     })
     .join(windows ? ';' : ':');
