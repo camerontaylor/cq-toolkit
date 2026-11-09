@@ -76,6 +76,8 @@ def invoke(source, inputs):
             if inputs["ndjson"] is not None:
                 path.write_text(inputs["ndjson"])
             return crq.classify(path, inputs["exit_code"])
+    if source == "crq.live_items":
+        return {"live_ids": [item["id"] for item in crq.live_items(inputs["queue"])]}
     if source == "merged_reconcile.normalize_interval":
         return merged_reconcile.normalize_interval(inputs["after"], inputs["before"])
     if source == "merged_reconcile.normalize_page_budget":
@@ -190,6 +192,7 @@ class VectorFileTest(unittest.TestCase):
                         "usage_slots.parse_usage",
                         "usage_slots.next_slot",
                         "crq.classify",
+                        "crq.live_items",
                         "merged_reconcile.normalize_interval",
                         "merged_reconcile.normalize_page_budget",
                         "merged_reconcile.record_identity",
@@ -293,6 +296,20 @@ class StateFixtureTest(unittest.TestCase):
                                  review_receipt.digest(capture["paths"]))
                 self.assertEqual(capture["equivalence"],
                                  review_receipt.current_equivalence(capture))
+
+    def test_historical_promotion_items_stay_excluded(self):
+        promotion = [item for item in self.queue["items"]
+                     if item["kind"] == "promotion"]
+        self.assertEqual({item["state"] for item in promotion}, {"done", "promoting"})
+        promotion_ids = {item["id"] for item in promotion}
+        live_ids = {item["id"] for item in crq.live_items(self.queue)}
+        self.assertFalse(live_ids & promotion_ids)
+        summary = status_summary.summarize(
+            json.loads((STATE_FIXTURE / "status.json").read_text()),
+            self.queue, self.heartbeat, self.config, self.events, 1794225600)
+        self.assertNotIn("promotion", {row["kind"] for row in summary["pending_items"]})
+        promotion_prs = {item["pr"] for item in promotion}
+        self.assertFalse(promotion_prs & {row["pr"] for row in summary["pending_items"]})
 
     def test_summary_and_utilization_accept_the_fixture(self):
         summary = status_summary.summarize(

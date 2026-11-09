@@ -25,7 +25,7 @@ live host.
 
 | path | shape source |
 |---|---|
-| `queue.json` | deployed `state/queue.json`: top-level counters, one item of each common kind (open, merged, merged-current, coverage, local-review, backfill), coverage ledger, merged discovery/reconcile summaries, usage, backfill reservations and admissions |
+| `queue.json` | deployed `state/queue.json`: top-level counters, one item of each common kind (open, merged, merged-current, coverage, local-review, backfill), two historical `promotion` items in `done` and `promoting` states, coverage ledger, merged discovery/reconcile summaries, usage, backfill reservations and admissions |
 | `heartbeat.json` | `~/.local/state/crq/heartbeat.json` |
 | `next-review-at` | `state/next-review-at` |
 | `status.json` | deployed `state/status.json` |

@@ -296,6 +296,70 @@
       "run": null,
       "wait_reason": null,
       "last_error": null
+    },
+    {
+      "id": "promotion-promoting-002",
+      "pr": 202,
+      "kind": "promotion",
+      "order": 0,
+      "state": "promoting",
+      "cycles": [],
+      "attempts": [],
+      "base_sha": "1111111111111111111111111111111111111111",
+      "batch_sha": "3333333333333333333333333333333333333333",
+      "reviewed_sha": null,
+      "blocking": [],
+      "merges": 1,
+      "notes": [
+        "historical promotion record retained on disk"
+      ],
+      "run": null,
+      "wait_reason": null,
+      "statuses": [
+        {
+          "at": "2026-10-02T00:00:00Z",
+          "sha": "3333333333333333333333333333333333333333",
+          "state": "pending",
+          "description": "historical promotion record",
+          "id": 1
+        }
+      ],
+      "failures": 0,
+      "last_error": null,
+      "success_at": null,
+      "repair_runs": {}
+    },
+    {
+      "id": "promotion-done-001",
+      "pr": 201,
+      "kind": "promotion",
+      "order": 90,
+      "state": "done",
+      "cycles": [],
+      "attempts": [],
+      "base_sha": "1111111111111111111111111111111111111111",
+      "batch_sha": "4444444444444444444444444444444444444444",
+      "reviewed_sha": "4444444444444444444444444444444444444444",
+      "blocking": [],
+      "merges": 1,
+      "notes": [
+        "historical promotion record retained on disk"
+      ],
+      "run": null,
+      "wait_reason": null,
+      "statuses": [
+        {
+          "at": "2026-10-01T00:00:00Z",
+          "sha": "4444444444444444444444444444444444444444",
+          "state": "success",
+          "description": "historical promotion record",
+          "id": 2
+        }
+      ],
+      "failures": 0,
+      "last_error": null,
+      "success_at": "2026-10-01T00:00:00Z",
+      "repair_runs": {}
     }
   ],
   "starts": [

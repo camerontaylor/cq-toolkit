@@ -71,11 +71,12 @@ byte equality.
 | `time.json` | `queue_time.parse_utc`, `crq.parse_iso` | Zulu, numeric offsets, naive-as-UTC, compact run suffix, `.000` stripping, refused fractional/offset/date-only forms |
 | `usage.json` | `usage_slots.parse_usage`, `usage_slots.next_slot` | partial usage, refused shapes, rolling window, full-capacity fallback, reservation lag |
 | `classify.json` | `crq.classify` | completion, findings, rate limit and `waitTime`, auth, action required, malformed streams, missing exit, unknown status, transient exits |
+| `promotion-filter.json` | `crq.live_items` | historical `promotion` items stay out of live scheduling in every state; exact-kind and missing-kind edges |
 | `merged-reconcile.json` | `merged_reconcile.normalize_interval`, `normalize_page_budget`, `record_identity`, `checkpoint_digest`, `new_checkpoint`, `reconcile_page`, `load_checkpoint` | exact timestamps, Unicode digits, page folds, duplicates, outside-window records, sealed checkpoint loading and refusals |
 | `coverage.json` | `coverage.utilization_digest`, `coverage.coverage_candidate`, `coverage.record_opportunity` | 24 h window, unknown observations, cooldown floor, oldest-region selection, active-item exclusion |
 | `backfill.json` | `backfill_accounting.ranges`, `admission_history.summarize`, `backfill_jobs.admission` | range coalescing, bounded diagnostics, ordinary/usage/reserve/inflight decisions |
 | `ledger.json` | `review_ledger.timestamp`, `path`, `intervals`, `scope`, `validate`, `validate_sequence`, `creditable` | exact UTC, canonical paths, interval overlap, scope duplicates, event hash, quarantine operator requirement, credit authority |
-| `summary.json` | `status_summary.summarize` | backlog, bounded pending preview, 24 h outcomes, merged discovery, invalid tick refusal |
+| `summary.json` | `status_summary.summarize` | backlog, bounded pending preview, 24 h outcomes, merged discovery, historical promotion exclusion, invalid tick refusal |
 
 ## Decision D2
 

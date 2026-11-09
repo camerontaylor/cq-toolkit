@@ -275,6 +275,46 @@ def classify_vectors() -> Dict[str, Any]:
     return _family("classify", cases)
 
 
+# --------------------------------------------------------------- promotion filter
+
+
+def promotion_filter_vectors() -> Dict[str, Any]:
+    def live(name: str, items: List[Dict[str, Any]]) -> Dict[str, Any]:
+        inputs = {"queue": {"items": items}}
+
+        def call() -> Dict[str, Any]:
+            return {"live_ids": [item["id"] for item in
+                                  crq.live_items({"items": items})]}
+        case = _capture(name, "crq.live_items", inputs, call)
+        case["note"] = ("Historical promotion records stay on disk but never "
+                        "become live scheduling work")
+        return case
+
+    cases = [
+        live("mixed-queue-excludes-every-promotion-state", [
+            {"id": "promotion-done", "kind": "promotion", "state": "done"},
+            {"id": "open-1", "kind": "open", "state": "pending"},
+            {"id": "promotion-promoting", "kind": "promotion", "state": "promoting"},
+            {"id": "merged-1", "kind": "merged", "state": "pending"},
+            {"id": "promotion-rejected", "kind": "promotion", "state": "rejected"},
+            {"id": "delta-1", "kind": "delta", "state": "pending"},
+        ]),
+        live("only-promotion-items-are-empty", [
+            {"id": "promotion-1", "kind": "promotion", "state": "promoting"},
+            {"id": "promotion-2", "kind": "promotion", "state": "done"},
+        ]),
+        live("missing-kind-is-live", [
+            {"id": "legacy", "state": "pending"},
+            {"id": "promotion-1", "kind": "promotion", "state": "done"},
+        ]),
+        live("only-the-exact-kind-is-excluded", [
+            {"id": "promotion-final", "kind": "promotion-final", "state": "pending"},
+            {"id": "promotion", "kind": "promotion", "state": "pending"},
+        ]),
+    ]
+    return _family("promotion-filter", cases)
+
+
 # --------------------------------------------------------------- queue bytes
 
 
@@ -798,6 +838,37 @@ def summary_vectors() -> Dict[str, Any]:
     cases.append(_capture("invalid-last-tick-is-refused", "status_summary.summarize",
                           {**inputs, "heartbeat": {"last_tick": "not-a-timestamp"}},
                           invalid_tick))
+
+    promotion_inputs = {
+        "status": {"generated_at": "2026-11-09T11:55:00Z"},
+        "queue": {"items": [
+            {"id": "promotion-done", "kind": "promotion", "state": "done",
+             "order": 0, "cycles": []},
+            {"id": "promotion-promoting", "kind": "promotion", "state": "promoting",
+             "order": 1, "cycles": []},
+            {"id": "open-1", "repo": "example/primary", "pr": 101,
+             "kind": "open", "state": "pending", "order": 2, "cycles": []},
+        ], "starts": [], "paused": False,
+           "last_tick": "2026-11-09T11:50:00Z"},
+        "heartbeat": {"last_tick": "2026-11-09T11:50:00Z"},
+        "config": {"repo": "example/primary", "max_starts_per_hour": 5},
+        "events": [],
+        "now": 1794225600,
+    }
+
+    def promotion_summary() -> Dict[str, Any]:
+        return status_summary.summarize(
+            promotion_inputs["status"], promotion_inputs["queue"],
+            promotion_inputs["heartbeat"], promotion_inputs["config"],
+            promotion_inputs["events"], promotion_inputs["now"])
+
+    promotion_case = _capture(
+        "historical-promotion-items-stay-out-of-summary",
+        "status_summary.summarize", promotion_inputs, promotion_summary)
+    promotion_case["note"] = (
+        "Ceres retains 70 historical promotion items; none may appear as "
+        "pending scheduling work or backlog")
+    cases.append(promotion_case)
     return _family("summary", cases)
 
 
@@ -810,6 +881,7 @@ BUILDERS: Dict[str, Callable[[], Dict[str, Any]]] = {
     "time": time_vectors,
     "usage": usage_vectors,
     "classify": classify_vectors,
+    "promotion-filter": promotion_filter_vectors,
     "merged-reconcile": merged_reconcile_vectors,
     "coverage": coverage_vectors,
     "backfill": backfill_vectors,
