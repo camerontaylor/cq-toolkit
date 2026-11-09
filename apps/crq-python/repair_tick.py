@@ -9,6 +9,11 @@ from crq_repair import atomic, findings, git as wt_git, hack_detector, verify
 from crq_repair.bounded import JOB_ID, identity, job_path, require_canonical_delivery, source_path, validate_revalidation
 
 
+# The fixer ladder crq_repair.process runs is exactly A0-A2; digest keys its
+# fixed counts on these rungs, so nothing else may be recorded as a fix.
+FIXED_RUNGS = ('A0', 'A1', 'A2')
+
+
 def prepare_current_job(c, q, old_job_id, source_sha, evidence):
     """Locked operator preparation, not dispatch or a historical-job disposition."""
     old = json.loads(job_path(c.ROOT, old_job_id).read_text())
@@ -286,6 +291,10 @@ def harvest(c, q, item, dry=False):
                             or not all(isinstance(sha, str) and re.fullmatch(r'[0-9a-fA-F]{40}', sha)
                                        for sha in commits)):
                         raise ValueError('repair result claims FIXED without valid commits')
+                    attempts = result.get('attempts')
+                    final = attempts[-1] if isinstance(attempts, list) and attempts else None
+                    if not isinstance(final, dict) or final.get('rung') not in FIXED_RUNGS:
+                        raise ValueError('repair fixed result lacks a valid final attempt rung')
                     wt = Path(result['worktree']).resolve()
                     root = c.WT_ROOT.resolve()
                     if wt.parent != root or wt.name != 'crq-repair-' + item['id']:
@@ -298,6 +307,7 @@ def harvest(c, q, item, dry=False):
                 # A deterministic artifact defect can never pass on a later tick,
                 # so record it as a terminal failure instead of blocking the item.
                 if not dry:
+                    mark_finding_outcome(c, expected, {'verdict': 'FAILED', 'reason': 'invalid repair result: ' + str(exc)[:300]})
                     record.update(state='failed', error=str(exc)[:300])
                     if item['kind'] == review_receipt.KIND:
                         item['state'] = 'done'
