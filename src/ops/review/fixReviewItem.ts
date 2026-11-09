@@ -494,6 +494,7 @@ const composeUserPrompt = (input: FixReviewItemInput): { text: string; truncated
     );
     lines.push(
       'For permitted git inspection, use the closed forms git diff, git diff --cached, git log -n 1, git log --oneline -n 20. Search arguments must match the supplied pattern, including its restrictions on quotes, backslashes and shell characters.',
+      'The worktree cwd is already set. Submit one permitted command per call; do not prefix it with cd or add command chaining or pipes unless the supplied patterns explicitly permit them. If a search needs unsupported quotes or shell syntax, use the exposed read tool instead of trying denied shape variants.',
     );
   } else {
     lines.push('Bash is absent from the capped caller harness; do not attempt shell commands.');
