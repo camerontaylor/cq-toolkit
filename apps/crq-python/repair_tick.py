@@ -65,7 +65,10 @@ def prepare_current_job(c, q, old_job_id, source_sha, evidence, *, preserve_work
     atomic(job_path(c.ROOT, job_id), job)
     if old.get('canonical_finding_id'):
         finding_inbox(c).handoff(old['canonical_finding_id'], old_job_id, job, c.iso())
-    if (old.get('canonical_finding_id') or preserve_worktree) and old_record.get('state') in ('queued', 'ready', 'publish_failed') and not old_record.get('fix_pr'):
+    if ((old.get('canonical_finding_id') or preserve_worktree)
+            and old_record.get('jobs') == [old_job_id]
+            and old_record.get('state') in ('queued', 'ready', 'publish_failed')
+            and not old_record.get('fix_pr')):
         old_record.update(state='stale', error='superseded by prepared retry ' + job_id)
     item.setdefault('repair_runs', {})[run] = {
         'jobs': [job_id], 'pin': source_sha, 'base': source_sha, 'branch': None,

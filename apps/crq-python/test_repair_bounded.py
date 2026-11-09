@@ -77,6 +77,14 @@ class BoundedRepairTest(unittest.TestCase):
                                                          preserve_worktree=True), job_id)
         self.assertEqual(self.c.secret_scan_diff.call_count, 1)
 
+    def test_recovery_does_not_stale_a_run_with_sibling_jobs(self):
+        original = self.queue['items'][0]['repair_runs']['old-run']
+        original['jobs'].append('crq-historical-F2')
+        repair_tick.prepare_current_job(self.c, self.queue, OLD, SOURCE, self.evidence,
+                                        preserve_worktree=True)
+        self.assertEqual(original['state'], 'queued')
+        self.assertIn('crq-historical-F2', original['jobs'])
+
     def test_recovery_worktree_reaches_harvest_verification(self):
         job_id = repair_tick.prepare_current_job(self.c, self.queue, OLD, SOURCE, self.evidence,
                                                 preserve_worktree=True)
