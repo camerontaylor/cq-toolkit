@@ -104,7 +104,7 @@ describe('fixReviewItem factory request', () => {
   test('harness passthrough: the input harness rides the request; absent → defaultHarnessConfig', async () => {
     const { op, requests } = scriptedOp([completeWorker(UNCHANGED), completeWorker(UNCHANGED)]);
     const custom = harnessWith((h) => {
-      h.tools.bash.commandPatterns = ['git *'];
+      h.tools.bash.commandPatterns = ['git add'];
     });
     await op(baseInput({ harness: custom }));
     await op(baseInput());

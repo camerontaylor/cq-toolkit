@@ -218,10 +218,11 @@ class CqDriverTest(unittest.TestCase):
                 _, argv = self.invoke('{"status":"ok","value":{"changed":false}}', returncode=0, pr=pr)
                 self.assertEqual(next((a for a in argv if a.startswith('--pr=')), None), expected)
 
-    def test_fixer_is_told_its_shell_allowlist(self):
+    def test_fixer_passes_allowlist_as_harness_not_untrusted_review_instructions(self):
         _, argv = self.invoke('{"status":"ok","value":{"changed":false}}', returncode=0)
         body = json.loads(next(a for a in argv if a.startswith('--item='))[len('--item='):])['body']
-        self.assertIn('git grep -n', body)
+        self.assertNotIn('git grep -n', body)
+        self.assertNotIn('Shell: the bash tool', body)
         harness = json.loads(next(a for a in argv if a.startswith('--harness='))[len('--harness='):])
         self.assertEqual(harness['tools']['run']['commandPatterns'][-len(cq.SEARCH_PATTERNS):],
                          cq.SEARCH_PATTERNS)
