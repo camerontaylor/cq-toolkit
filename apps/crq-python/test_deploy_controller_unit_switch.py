@@ -56,6 +56,9 @@ class UnitSwitchTests(ControllerFixture):
             dc.switch_unit(self.effects, adapter, "crq-tick.service", "node:" + "a" * 40)
         path = next(self.record_dir.glob("controller-*.json"))
         self.assertEqual(json.loads(path.read_text())["outcome"], "pending")
+        with self.assertRaisesRegex(dc.Refused, "unfinished unit switch"):
+            dc.switch_unit(self.effects, Adapter("python"), "crq-slot.service",
+                           "node:" + "b" * 40)
         # A new adapter has no in-memory snapshot from the interrupted call.
         restarted = Adapter(adapter.runtime)
         restarted.running = adapter.running

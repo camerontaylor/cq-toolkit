@@ -1287,6 +1287,22 @@ def recover_unit(effects, adapter, path):
         return record
 
 
+def refuse_unfinished_unit_switches(effects):
+    """Do not start a new transaction while an interrupted one needs recovery."""
+    for path in effects.record_dir.glob("controller-*.json"):
+        if path.is_symlink() or not path.is_file():
+            raise Refused("invalid controller journal entry: " + path.name)
+        try:
+            record = json.loads(path.read_text())
+        except (OSError, ValueError) as exc:
+            raise Refused("unreadable controller journal entry: " + path.name) from exc
+        if not isinstance(record, dict):
+            raise Refused("invalid controller journal entry: " + path.name)
+        if (record.get("operation") == "unit_switch"
+                and record.get("outcome") in {"pending", "recovery_required"}):
+            raise Refused("unfinished unit switch requires recovery: " + path.name)
+
+
 def switch_unit(effects, adapter, unit, runtime):
     """Execute one unit transaction using a trusted, injected host adapter.
 
@@ -1301,6 +1317,7 @@ def switch_unit(effects, adapter, unit, runtime):
         raise Refused("no runtime-bound completion evidence provider for unit")
     with effects.controller_lock():
         effects.record_preflight()
+        refuse_unfinished_unit_switches(effects)
         prior = adapter.preflight(unit, runtime)
         if not isinstance(prior, dict) or not _unit_runtime(prior.get("runtime")):
             raise Refused("invalid prior runtime")
