@@ -52,6 +52,8 @@ export function createAreaReviewPlan(input: CreateReviewPlanInput): ReviewPlan {
     sessions.push({ id: 'cross-area', prompt, placements: [], tools: true, contextOnly: true });
   }
   original.sessions = sessions;
+  for (const limitation of new Set(plans.flatMap((plan) => plan.limitations)))
+    if (!original.limitations.includes(limitation)) original.limitations.push(limitation);
   original.coverage.mode = 'partitioned';
   original.coverage.modeReason = `area review: ${areas.areas.length} areas; cross-area pass ${areas.crossAreaPass.required ? 'required' : 'not required'}`;
   original.advisories.push(original.coverage.modeReason);
