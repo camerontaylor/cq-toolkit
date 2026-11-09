@@ -15,7 +15,7 @@ for mode in inherited hermetic; do
   ctl() { runuser -u "$user" -- env HOME="$user_home" USER="$user" LOGNAME="$user" XDG_CONFIG_HOME="$user_home/.config" XDG_DATA_HOME="$user_home/.local/share" XDG_RUNTIME_DIR="/run/user/$uid" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" systemctl --user "$@"; }
   echo "CASE $mode uid=$uid home=$user_home"
   systemctl show "user@$uid.service" -p ActiveState -p SubState -p MainPID -p Result
-  ctl show-environment 2>/dev/null | rg "$filter" || true
+  ctl show-environment 2>/dev/null | grep -E "$filter" || true
   ctl cat dbus.socket gpg-agent-ssh.socket || true
   ctl show dbus.socket gpg-agent-ssh.socket -p FragmentPath -p DropInPaths -p Before -p After -p Requires -p Wants -p Listen -p ExecStartPre -p ExecStartPost -p ActiveState -p SubState || true
   ls -ld "$user_home" "/run/user/$uid" "/run/user/$uid/bus" || true
@@ -25,7 +25,7 @@ for mode in inherited hermetic; do
   systemctl show "user@$uid.service" -p ActiveState -p SubState -p MainPID -p Result
   ps -u "$user" -o pid,ppid,state,wchan:24,args || true
   pid=$(systemctl show "user@$uid.service" -p MainPID --value)
-  if test "$pid" != 0 && test -r "/proc/$pid/environ"; then tr '\0' '\n' < "/proc/$pid/environ" | rg "$filter" || true; fi
+  if test "$pid" != 0 && test -r "/proc/$pid/environ"; then tr '\0' '\n' < "/proc/$pid/environ" | grep -E "$filter" || true; fi
   timeout 3 runuser -u "$user" -- env HOME="$user_home" XDG_RUNTIME_DIR="/run/user/$uid" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" systemctl --user list-jobs --no-pager || true
   ls -ld "$user_home" "/run/user/$uid" "/run/user/$uid/bus" || true
   if wait "$restart_pid"; then echo "CASE $mode restart PASS"; else echo "CASE $mode restart FAILED"; fi
