@@ -24,10 +24,14 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 console.log(`init-worktree: ${repoRoot}`);
 
-const install = spawnSync('pnpm', ['install', '--frozen-lockfile', '--ignore-scripts', '--ignore-pnpmfile'], {
-  cwd: repoRoot,
-  stdio: 'inherit',
-});
+const install = spawnSync(
+  'pnpm',
+  ['install', '--frozen-lockfile', '--ignore-scripts', '--ignore-pnpmfile'],
+  {
+    cwd: repoRoot,
+    stdio: 'inherit',
+  },
+);
 
 if (install.error) {
   console.error(`init-worktree: could not run pnpm (${install.error.message}).`);
