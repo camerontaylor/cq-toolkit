@@ -83,13 +83,12 @@ function independentTextUrls(run: string, hits: readonly SchemeHit[]): SchemeHit
       if (ch === '?' || ch === '#') inQuery = true;
       scan++;
     }
-    // Whitespace already separates runs. Inside one run, a new URL needs a
-    // prose delimiter outside the enclosing authority/query. A scheme in a
-    // password or a query parameter is data, never an independent URL.
-    if (
-      independent.length === 0 ||
-      (!inAuthority && !inQuery && '\"\',;)>]}'.includes(run[hit.start - 1] ?? ''))
-    ) {
+    // Whitespace already separates runs. Inside one run, a hit outside the
+    // enclosing authority and query starts a new URL: a scheme in a password or
+    // a query parameter is data, never an independent URL, while one nested in
+    // a path (e.g. `https://archive.test/web/https://u:p@host/`) must still be
+    // redacted on its own.
+    if (independent.length === 0 || (!inAuthority && !inQuery)) {
       independent.push(hit);
       scan = hit.authority;
       inAuthority = true;

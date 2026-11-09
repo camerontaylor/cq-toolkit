@@ -409,6 +409,20 @@ describe('redactUrlUserinfo (cases from PR #1235)', () => {
     expect(boundedErrorText(input)).toBe(expected);
   });
 
+  test.each([
+    [
+      'https://web.archive.org/web/2020/https://u:p@host.test/',
+      'https://web.archive.org/web/2020/https://[redacted]@host.test/',
+    ],
+    [
+      'a=https://x.test/,b=https://u:p@y.test/',
+      'a=https://x.test/,b=https://[redacted]@y.test/',
+    ],
+  ])('redacts a URL nested in an earlier URL path: %s', (input, expected) => {
+    expect(redactUrlUserinfo(input)).toBe(expected);
+    expect(boundedErrorText(input)).toBe(expected);
+  });
+
   test('handles long credential-free output without repeated scheme or authority scans', () => {
     const inputs = [
       'a'.repeat(40_000),
