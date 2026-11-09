@@ -63,6 +63,33 @@ class WorkRecordTest(unittest.TestCase):
         self.assertEqual(ev.call_args.args[0], 'work_record_failed')
 
 
+class CodexLogFailureTest(unittest.TestCase):
+    def test_broken_log_and_stderr_do_not_interrupt_either_pipe(self):
+        """Keep every line when both the log and failure diagnostic reject writes."""
+        for log_error in (OSError, ValueError):
+            for report_error in (OSError, ValueError):
+                with self.subTest(log_error=log_error, report_error=report_error):
+                    lines = ['event-one\n', 'event-two\n']
+                    errors = ['error-one\n', 'error-two\n']
+                    process = mock.Mock(stdout=io.StringIO(''.join(lines)),
+                                        stderr=io.StringIO(''.join(errors)), returncode=0)
+                    log = mock.MagicMock()
+                    log.__enter__.return_value = log
+                    log.write.side_effect = [None] + [log_error('broken log')] * 4
+                    stderr = mock.Mock()
+                    stderr.write.side_effect = report_error('broken stderr')
+                    with mock.patch.object(codex, 'open', return_value=log), \
+                         mock.patch.object(codex.subprocess, 'Popen', return_value=process), \
+                         mock.patch.object(codex.os, 'killpg'), \
+                         mock.patch.object(codex.sys, 'stderr', stderr), \
+                         mock.patch.object(threading, 'excepthook') as thread_error:
+                        result = codex._stream_codex([], None, None, 1, 'driver.log')
+                    self.assertEqual(result, (0, lines, ''.join(errors), False))
+                    self.assertEqual(log.write.call_count, 5)
+                    self.assertEqual(stderr.write.call_count, 2)
+                    thread_error.assert_not_called()
+
+
 class CodexStreamTest(unittest.TestCase):
     """_stream_codex against a REAL tiny process — no mocks on the I/O path."""
 
