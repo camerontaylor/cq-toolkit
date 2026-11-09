@@ -1,0 +1,49 @@
+{
+  "manifest_id": "2424242424242424242424242424242424242424242424242424242424242424",
+  "target": "origin/main",
+  "tiers": {
+    "T1": {
+      "covered_lines": 0,
+      "uncovered_lines": 0,
+      "unresolved_objects": [],
+      "empty_files": 0
+    },
+    "T2": {
+      "covered_lines": 36,
+      "uncovered_lines": 84,
+      "unresolved_objects": [],
+      "empty_files": 0
+    },
+    "T3": {
+      "covered_lines": 0,
+      "uncovered_lines": 0,
+      "unresolved_objects": [],
+      "empty_files": 0
+    },
+    "T4": {
+      "covered_lines": 0,
+      "uncovered_lines": 0,
+      "unresolved_objects": [],
+      "empty_files": 0
+    }
+  },
+  "baseline": null,
+  "required": [],
+  "states": {
+    "pending": 2
+  },
+  "publication_pending": 0,
+  "quarantined_families": 0,
+  "finding_triage": {
+    "counts": {},
+    "needs_human": []
+  },
+  "finding_delivery_backlog": {
+    "status": "not-collected"
+  },
+  "spare_quota_admissions": [],
+  "daily_capacity": {},
+  "idle_with_coverage_candidate": 0,
+  "strict_T1_zero": true,
+  "operational_target": "zero surviving baseline T1 debt within 14 days, conditional on spare included quota and no unresolved exclusions"
+}
