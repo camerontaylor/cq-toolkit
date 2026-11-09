@@ -86,7 +86,7 @@ export function mainWith(argv: readonly string[], deps: VerifyMainDeps): Promise
       },
       args,
     );
-  }, deps.write);
+  }, deps.write, { ...(deps.env === undefined ? {} : { env: deps.env }) });
 }
 
 const invokedDirectly =

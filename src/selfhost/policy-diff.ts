@@ -66,7 +66,7 @@ export function mainWith(argv: readonly string[], deps: PolicyDiffMainDeps): Pro
       return { status: 'failed', error: error instanceof Error ? error.message : String(error) };
     }
     return (deps.create ?? createPolicyDiff)(config, { settleStatePath: SETTLE_STATE_PATH })(input);
-  }, deps.write);
+  }, deps.write, { env: deps.env });
 }
 
 const invokedDirectly =
