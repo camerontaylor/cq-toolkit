@@ -476,6 +476,43 @@ class RepairDrainTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'owner decision'):
                 service.recover_job(self.config, job_id)
 
+    def test_recovery_prepares_and_dispatches_separate_job_without_resetting_old_tree(self):
+        import sys
+        job_id = 'crq-run1-F1'
+        job = json.loads(bounded.job_path(self.root, job_id).read_text())
+        original = self.worktree()
+        (original / 'src/kept.ts').write_text('unfinished staged work\n')
+        subprocess.run(['git', 'add', 'src/kept.ts'], cwd=original, check=True)
+        atomic(self.root / 'state/repair' / job_id / 'result.json',
+               {'job': job_id, 'item': job['item'], 'repair_base': self.pin,
+                'worktree': str(original), 'verdict': 'FAILED', 'reason': 'driver no_outcome'})
+        self.config['repair']['max_rounds_per_pin'] = 10
+        c = SimpleNamespace(ROOT=self.root, STATE=self.root / 'state', CLONE=self.clone,
+                            CONFIG=self.config, iso=lambda: 'now', load_queue=lambda: self.queue,
+                            ran_locked=lambda fn: (fn(), True)[1],
+                            run=lambda args, **kw: subprocess.run(args, **kw, capture_output=True, text=True, check=True),
+                            secret_scan_diff=mock.Mock(return_value=(True, {})),
+                            save_queue=lambda q: atomic(self.root / 'state/queue.json', q))
+        report = {'stop': 'ok', 'verdict': 'valid', 'reason': 'current source confirms bug',
+                  'current_path': 'src/kept.ts', 'current_lines': [[1, 1]], 'quoted_text': 'one'}
+        with mock.patch.dict(sys.modules, {'crq': c}), \
+             mock.patch.object(service, 'dispatch', return_value=report) as judge:
+            first = service.recover_job(self.config, job_id)
+            second = service.recover_job(self.config, job_id)
+        self.assertEqual(first, second)
+        judge.assert_called_once()
+        replacement = json.loads(bounded.job_path(self.root, first['replacement_job']).read_text())
+        self.assertTrue(replacement['recovery_worktree'])
+        self.assertEqual(replacement['origin_job'], job_id)
+        with mock.patch.object(service, 'blocked', return_value=False), \
+             mock.patch.object(service, 'dispatch_paused', return_value=None), \
+             mock.patch.object(service, 'process', return_value={'verdict': 'NOT-FIXED'}) as fixer:
+            service.process_item(self.config, [replacement])
+        self.assertNotEqual(fixer.call_args.args[2], original)
+        self.assertEqual((original / 'src/kept.ts').read_text(), 'unfinished staged work\n')
+        self.assertIn('src/kept.ts', subprocess.run(['git', 'diff', '--cached', '--name-only'], cwd=original,
+                                                    check=True, capture_output=True, text=True).stdout)
+
     def test_operator_disposition_prevents_publication_of_finished_job(self):
         item = self.queue['items'][0]
         record = item['repair_runs']['run1']
