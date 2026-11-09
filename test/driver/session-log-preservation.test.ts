@@ -55,7 +55,10 @@ describe('session log switch snapshot', () => {
     };
     const unset = createDriverFactory({ cqEnv: readCqEnv({}) });
     const off = createDriverFactory({ cqEnv: readCqEnv({ CQ_SESSION_LOGS: 'off' }) });
-    const forced = createDriverFactory({ cqEnv: readCqEnv({}), sessionLogs: { enabled: false } });
+    const forced = createDriverFactory({
+      cqEnv: readCqEnv({ CQ_SESSION_LOGS: 'on' }),
+      sessionLogs: { enabled: false },
+    });
     const bare = createDriverFactory();
     const check = async (factory: typeof bare, expected: number) => {
       remove.mockClear();
