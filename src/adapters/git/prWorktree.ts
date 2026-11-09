@@ -11,7 +11,7 @@
 // invocation-level, not tree-level).
 //
 // DOMAIN BOUNDARY (asserted, not incidental): this is the REVIEW-OPS
-// worktree — keyed by PR, rooted at `<repoRoot>/.git/cq-review-worktrees`. It is
+// worktree — keyed by PR, rooted at `<git-common-dir>/cq-review-worktrees`. It is
 // NOT the package-keyed sweep worktree: `createOrReuseWorktree` in the sweep
 // ops family is a different domain with different keys and a different
 // lifetime, and review ops must never consult it (and vice versa). The test
@@ -49,6 +49,15 @@
 //      — the create fails with git's stderr naming the holder, and the
 //      human must free the branch (remove/relocate the holder) or point
 //      worktreeRoot at the existing tree.
+//
+// Upgrading from the old linked-checkout default: review trees may remain
+// under `<main>/.git/worktrees/<id>/cq-review-worktrees`. They are now foreign
+// and are deliberately never removed automatically. Before removing the
+// parent linked checkout, preserve any dirty files and unpushed commits
+// OUTSIDE that entire admin directory (including a durable rescue branch
+// for commits). Then use `git worktree remove <legacy-review-tree>` without
+// --force and retry resolution. Do not delete/prune the parent checkout
+// while a legacy review tree still contains work you need.
 //
 // The `[A-Za-z0-9._-]` sanitization: branch names are user data ("release/
 // 1.0 +fix me") and the worktree directory name must stay one path segment —
@@ -676,7 +685,7 @@ export async function resolvePrWorktree(opts: PrWorktreeOpts): Promise<{
     const add = await opts.run(addArgs);
     if (add.code !== 0) {
       throw gitFail(
-        `worktree add -B ${reviewBranch} ${wtPath} ${expectedSha} failed`,
+        `worktree add -B ${reviewBranch} ${wtPath} ${expectedSha} failed. If an old linked-checkout review tree holds the branch, preserve its dirty files and unpushed commits outside the linked checkout's admin directory first (use a durable rescue branch for commits), then git worktree remove <legacy-review-tree> without --force and retry. Do not remove/prune the parent linked checkout before preserving that work`,
         add.code,
         add.stderr,
         addArgs,
