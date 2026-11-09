@@ -26,3 +26,16 @@ activation state, and retain the pending intent if any step fails. Its fence
 and crash behavior need proof on a disposable VM, including timer, path, direct
 activation, surviving processes, and interruption at each mutation boundary.
 The current CLI has no unit recovery adapter or production switch provider.
+
+On 2026-11-10 an offline packaging exercise on pluto (Linux x64, Node
+24.21.0, pnpm 12.8.1) used clean checkout
+`4baffebd42cbe8c37d7bbdb9c143d0416aa93595`. The frozen offline install,
+`fs-ext` rebuild, runner build, and offline production deploy to a separate
+staging directory succeeded. The lockfile SHA-256 was
+`75a1bc501a6bc22081ec1ca949f7a29d37f9598941f2486df2a792cac380c20e`.
+The resulting local archive SHA-256 was
+`97d6adb51b4020860d23ede0320286a3a861dc2d50682785b1d0c92dc827646a`.
+After extraction, all 3,609 inventoried entries matched and Node loaded
+`fs-ext` 2.1.1 and successfully performed flock and unlock. The extracted
+runner refused the unimplemented tick as expected. This is evidence for that
+specific build, not a reproducible-build guarantee or a cutover approval.
