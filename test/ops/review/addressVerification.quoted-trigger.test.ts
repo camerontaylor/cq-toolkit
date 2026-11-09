@@ -11,6 +11,23 @@ import {
 } from './addressVerification.helpers.js';
 
 describe('review.address closure evidence verifier', () => {
+  test('a surviving quoted function name is ambiguous after the cited literal is removed', () => {
+    const packet = makePacket();
+    packet.finding.text = '"load" accepts retired switch "PARTIAL_MODE"';
+    const result = verifyClosureEvidence(packet);
+    expect(result.verdict).toBe('uncertain');
+    expectLastCheck(result, { check: 'trigger-removed', outcome: 'unavailable' });
+  });
+
+  test('a surviving cited trigger takes precedence over an ambiguous name', () => {
+    const packet = makePacket({
+      dependencies: [{ path: 'src/legacy.ts', role: 'consumer', text: "load('PARTIAL_MODE');" }],
+    });
+    packet.finding.text = '"load" accepts retired switch "PARTIAL_MODE"';
+    const result = verifyClosureEvidence(packet);
+    expect(result.verdict).toBe('unresolved');
+    expect(result.reason).toBe('deleted-trigger-survives');
+  });
   test('a quoted trigger surviving only in a cited consumer is unresolved', () => {
     // The changed file no longer passes PARTIAL_MODE, but the cited consumer
     // still does: closure evidence must sweep every cited dependency.
