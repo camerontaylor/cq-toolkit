@@ -96,6 +96,14 @@ export class CheckoutWriterContext {
           entry.metadata = { version: 1, state: 'unbound', incomplete: false };
         } else {
           if (info.isSymbolicLink()) throw new Error('bound checkout alias refused');
+          const gitInfo = await lstat(metadata.checkoutGitDir).catch((error: unknown) => {
+            if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+            throw new Error(
+              `bound checkout Git directory missing: ${metadata.checkoutGitDir}; checkout preserved: ${metadata.checkoutPath}`,
+              { cause: error },
+            );
+          });
+          if (gitInfo.isSymbolicLink()) throw new Error('bound checkout alias refused');
           entry.binding = await this.captureBinding(metadata);
         }
       }

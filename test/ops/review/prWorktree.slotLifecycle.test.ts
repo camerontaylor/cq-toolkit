@@ -1,6 +1,15 @@
 import { withAddressOwnership } from '../../../src/ops/review/internal/addressCheckoutOwnership.js';
 import { expect, test } from 'vitest';
-import { readFile, writeFile, mkdir, stat, symlink, readdir, realpath } from 'node:fs/promises';
+import {
+  readFile,
+  writeFile,
+  mkdir,
+  stat,
+  symlink,
+  readdir,
+  realpath,
+  rename,
+} from 'node:fs/promises';
 import { join } from 'node:path';
 import { resolvePrWorktree, removePrWorktree } from '../../../src/adapters/git/prWorktree.js';
 import { slotWorktreeRegistry } from '../../../src/adapters/git/slotWorktreeRegistry.js';
@@ -509,3 +518,36 @@ test.each(['same-head', 'stale-head'] as const)(
     }
   },
 );
+
+test('missing bound Git directory has a named refusal without changing checkout state (mutation: omit Git directory diagnostic)', async () => {
+  const f = await fixture();
+  let originalDir = '',
+    backupDir = '',
+    moved = false;
+  try {
+    const checkout = await resolvePrWorktree(f.opts);
+    const metadata = await readSlotMetadata(f.metadataPath);
+    if (metadata?.state !== 'bound') throw new Error('expected bound metadata');
+    originalDir = metadata.checkoutGitDir;
+    backupDir = join(f.common, 'operator-held-admin');
+    const before = await readFile(f.metadataPath, 'utf8');
+    const source = await readFile(join(checkout.path, 'README.md'));
+    // Reversibly model partial admin deletion, never remove the checkout.
+    await rename(originalDir, backupDir);
+    moved = true;
+    for (let refusal = 0; refusal < 2; refusal++) {
+      await expect(resolvePrWorktree(f.opts)).rejects.toThrow(
+        `bound checkout Git directory missing: ${originalDir}; checkout preserved: ${checkout.path}`,
+      );
+      expect(await readFile(f.metadataPath, 'utf8')).toBe(before);
+      expect(await readFile(join(checkout.path, 'README.md'))).toEqual(source);
+    }
+    await rename(backupDir, originalDir);
+    moved = false;
+    expect((await resolvePrWorktree(f.opts)).reused).toBe(true);
+    expect((await readSlotMetadata(f.metadataPath))?.incomplete).toBe(false);
+  } finally {
+    if (moved) await rename(backupDir, originalDir);
+    await f.repo.cleanup();
+  }
+});
