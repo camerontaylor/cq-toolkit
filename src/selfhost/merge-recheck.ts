@@ -926,6 +926,7 @@ const sameAccountAgentAccepted = (
     // alternative: a plain comment counts from the PR author (shared-account
     // design) or a User holding a trusted association, never from an excluded login.
     if (!isReviewAppAuthor(review.authorType, login)) {
+      if (snapshot.authorLogin === null || snapshot.authorLogin === '') continue;
       if ([...policy.excludedLogins].some((entry) => bareName(entry) === name)) continue;
       if (review.authorType !== 'User') continue;
       const isAuthor = snapshot.authorLogin !== null && bareName(snapshot.authorLogin) === name;
