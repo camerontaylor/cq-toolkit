@@ -244,6 +244,10 @@ export class PythonSectionScanner {
   }
 
   private trackDefs(code: string): void {
+    // A line that starts with a closing bracket (`):`, `) -> None:`, `]`, `}`)
+    // closes a multi-line signature or call, so it continues the enclosing def
+    // rather than ending it: its own indent must not pop the def stack.
+    if (/^\s*[)\]}]/.test(code)) return;
     const indent = /^\s*/.exec(code)![0].length;
     while (this.defs.length > 0 && this.defs.at(-1)!.indent >= indent) {
       this.defs.pop();

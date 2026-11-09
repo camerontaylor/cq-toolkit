@@ -146,6 +146,42 @@ describe('hackDetector: Python skip/xfail markers (#774)', () => {
     ).toEqual([]);
   });
 
+  test('a multi-line def signature keeps the test body visible to importorskip', async () => {
+    expect(
+      await markersOf(
+        pyDiff([
+          'def test_x(',
+          '    fixture_a,',
+          '):',
+          '    pytest.importorskip("numpy")',
+        ]),
+      ),
+    ).toEqual(['pytest.importorskip']);
+    // The same for a return-annotated signature and for a method in a class.
+    expect(
+      await markersOf(
+        pyDiff([
+          'def test_x(',
+          '    fixture_a: int,',
+          ') -> None:',
+          '    pytest.importorskip("numpy")',
+        ]),
+      ),
+    ).toEqual(['pytest.importorskip']);
+    expect(
+      await markersOf(
+        pyDiff([
+          'class TestX:',
+          '    def test_x(',
+          '        self,',
+          '        fixture_a,',
+          '    ):',
+          '        pytest.importorskip("numpy")',
+        ]),
+      ),
+    ).toEqual(['pytest.importorskip']);
+  });
+
   test.each([
     ['# @pytest.mark.skip until fixed'],
     ['x = 1  # pytest.skip("later")'],
