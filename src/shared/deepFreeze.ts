@@ -10,11 +10,20 @@
  * ops review share the helper itself.)
  */
 export function deepFreeze<T>(value: T): T {
-  if (value !== null && typeof value === 'object' && !Object.isFrozen(value)) {
-    for (const key of Object.keys(value as Record<string, unknown>)) {
-      deepFreeze((value as Record<string, unknown>)[key]);
+  const visited = new WeakSet<object>();
+  function freeze(current: unknown): void {
+    if (current === null || typeof current !== 'object' || visited.has(current)) return;
+    visited.add(current);
+    // `Object.freeze` is shallow, so an already-frozen object can still hold
+    // mutable children: always traverse them, and only skip the redundant
+    // final freeze of a value that is already frozen.
+    for (const key of Object.keys(current)) {
+      freeze((current as Record<string, unknown>)[key]);
     }
-    Object.freeze(value);
+    if (!Object.isFrozen(current)) {
+      Object.freeze(current);
+    }
   }
+  freeze(value);
   return value;
 }
