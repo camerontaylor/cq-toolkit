@@ -1,5 +1,5 @@
 import { expect, test, vi } from 'vitest';
-import { chmod, mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readFile, readdir, writeFile, symlink, lstat } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
   makeReviewAddressMany,
@@ -178,6 +178,32 @@ test('clean deleted clone leaves unbound complete slot (mutation: omit final unb
       expect(await readdir(join(f.common, 'cq-address-many-clones'))).toEqual([]);
     }
     expect(new Set(f.roots).size).toBe(2);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('bulk alias clone root cleanup leaves a reusable original slot (mutation: notify cleanup with raw alias)', async () => {
+  const f = await bulkFixture();
+  try {
+    const directory = join(f.root, 'physical-clones'),
+      alias = join(f.root, 'clone-alias');
+    await mkdir(directory);
+    await symlink(directory, alias, 'dir');
+    for (let round = 0; round < 2; round++) {
+      const result = await makeReviewAddressMany({ gh: f.gh, address: (input) => f.child(input) })({
+        ...f.input,
+        cloneRoot: alias,
+      });
+      expect(await readSlotMetadata(join(f.common, 'cq-review/slots/pr-7.json'))).toEqual({
+        version: 1,
+        state: 'unbound',
+        incomplete: false,
+      });
+      expect(result.status, JSON.stringify(result)).toBe('ok');
+      expect(await readdir(directory)).toEqual([]);
+      await expect(lstat(f.roots[round]!)).rejects.toMatchObject({ code: 'ENOENT' });
+    }
   } finally {
     await f.cleanup();
   }

@@ -48,13 +48,16 @@ describe('registry consult', () => {
         baseOpts(model, registry, { repoRoot, run: fakeGit(model, calls) }),
       );
       expect(result).toEqual({ path: entryDir, reused: true, branch: LABEL, foreign: [] });
-      // fetch → FETCH_HEAD → the entry's branch rev-parse → its sha
-      // rev-parse — no scan, no add.
+      // Fetch truth, reject bad labels, then pin the checkout before fresh
+      // branch/HEAD safety probes. No scan or add.
       expect(calls.map((args) => args[2])).toEqual([
         'rev-parse',
         'fetch',
         'rev-parse',
+        'symbolic-ref',
         'rev-parse',
+        'rev-parse',
+        'symbolic-ref',
         'rev-parse',
         'rev-parse',
         'rev-parse',
@@ -63,8 +66,13 @@ describe('registry consult', () => {
         'ls-files',
       ]);
       expect(calls[2]).toEqual(['-C', repoRoot, 'rev-parse', 'refs/cq-review/pr-7']);
-      expect(calls[3]).toEqual(['-C', entryDir, 'rev-parse', '--abbrev-ref', 'HEAD']);
-      expect(calls[4]).toEqual(['-C', entryDir, 'rev-parse', 'HEAD']);
+      expect(calls.slice(3, 8)).toEqual([
+        ['-C', entryDir, 'symbolic-ref', 'HEAD'],
+        ['-C', entryDir, 'rev-parse', '--absolute-git-dir'],
+        ['-C', entryDir, 'rev-parse', '--path-format=absolute', '--git-common-dir'],
+        ['-C', entryDir, 'symbolic-ref', 'HEAD'],
+        ['-C', entryDir, 'rev-parse', 'HEAD'],
+      ]);
       // Rebinding persists bound/incomplete metadata before reuse.
       expect(registry.calls).toEqual(['load', 'update:7']);
     } finally {
@@ -97,7 +105,12 @@ describe('registry consult', () => {
     // the ghost); after FETCH_HEAD comes the porcelain scan, then the
     // sha probe against the candidate.
     expect(calls[3]).toEqual(['-C', `${REPO}`, 'worktree', 'list', '--porcelain']);
-    expect(calls[4]).toEqual(['-C', candidate, 'rev-parse', 'HEAD']);
+    expect(calls.slice(4, 8)).toEqual([
+      ['-C', candidate, 'rev-parse', '--absolute-git-dir'],
+      ['-C', candidate, 'rev-parse', '--path-format=absolute', '--git-common-dir'],
+      ['-C', candidate, 'symbolic-ref', 'HEAD'],
+      ['-C', candidate, 'rev-parse', 'HEAD'],
+    ]);
   });
 
   test('a registry entry pointing OUTSIDE the current worktreeRoot is stale by definition — resolution recreates INSIDE', async () => {
@@ -135,7 +148,7 @@ describe('registry consult', () => {
     try {
       const calls: string[][] = [];
       // The stale tree EXISTS on disk INSIDE the worktreeRoot but holds the
-      // wrong branch — the rev-parse check is what exposes it (it passes
+      // wrong branch — the symbolic-ref check is what exposes it (it passes
       // the ownership gate first).
       const staleDir = join(repoRoot, '.git', 'cq-review-worktrees', 'stale-tree');
       await mkdir(staleDir, { recursive: true });
@@ -155,8 +168,8 @@ describe('registry consult', () => {
       expect(registry.current()['7']?.path).toBe(
         join(repoRoot, '.git', 'cq-review-worktrees', `pr-${PR}-${BRANCH}`),
       );
-      // rev-parse ran against the stale tree and exposed the wrong branch.
-      expect(calls[3]).toEqual(['-C', staleDir, 'rev-parse', '--abbrev-ref', 'HEAD']);
+      // symbolic-ref ran against the stale tree and exposed the wrong branch.
+      expect(calls[3]).toEqual(['-C', staleDir, 'symbolic-ref', 'HEAD']);
       expect(calls.some((args) => args.includes('add'))).toBe(true);
     } finally {
       await rm(repoRoot, { recursive: true, force: true });
@@ -197,9 +210,15 @@ describe('registry consult', () => {
         ['-C', repoRoot, 'rev-parse', '--absolute-git-dir'],
         ['-C', repoRoot, 'fetch', 'origin', `+refs/pull/${PR}/head:refs/cq-review/pr-${PR}`],
         ['-C', repoRoot, 'rev-parse', 'refs/cq-review/pr-7'],
-        ['-C', stalePath, 'rev-parse', '--abbrev-ref', 'HEAD'],
+        ['-C', stalePath, 'symbolic-ref', 'HEAD'],
+        ['-C', stalePath, 'rev-parse', '--absolute-git-dir'],
+        ['-C', stalePath, 'rev-parse', '--path-format=absolute', '--git-common-dir'],
+        ['-C', stalePath, 'symbolic-ref', 'HEAD'],
         ['-C', stalePath, 'rev-parse', 'HEAD'],
         ['-C', repoRoot, 'worktree', 'list', '--porcelain'],
+        ['-C', stalePath, 'rev-parse', '--absolute-git-dir'],
+        ['-C', stalePath, 'rev-parse', '--path-format=absolute', '--git-common-dir'],
+        ['-C', stalePath, 'symbolic-ref', 'HEAD'],
         ['-C', stalePath, 'rev-parse', 'HEAD'],
         ['-C', stalePath, 'rev-list', '--count', `${SHA_B}..HEAD`],
         ['-C', stalePath, 'rev-parse', '--absolute-git-dir'],

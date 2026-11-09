@@ -669,8 +669,9 @@ function makeReviewAddressManyCore(
                     if (refs.stdout.split('\n').some((ref) => ref.includes('/failed/')))
                       throw new Error(`dirty or failed-attempt clone retained: ${isolatedRoot}`);
                     await lifetime.beforeRemove();
-                    await rm(dirname(isolatedRoot), { recursive: true, force: true });
-                    await lifetime.removed(isolatedRoot);
+                    const canonicalRoot = await realpath(isolatedRoot);
+                    await rm(dirname(canonicalRoot), { recursive: true, force: true });
+                    await lifetime.removed(canonicalRoot);
                     preservedClones.splice(
                       preservedClones.findIndex((entry) => entry.path === isolatedRoot),
                       1,

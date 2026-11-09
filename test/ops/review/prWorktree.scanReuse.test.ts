@@ -53,13 +53,21 @@ describe('existing-worktree scan reuse (LABEL match AND SHA match, INSIDE the ro
       'worktree',
       'rev-parse',
       'rev-parse',
+      'symbolic-ref',
+      'rev-parse',
+      'rev-parse',
       'rev-parse',
       'diff',
       'diff',
       'ls-files',
     ]);
     expect(calls[3]).toEqual(['-C', `${REPO}`, 'worktree', 'list', '--porcelain']);
-    expect(calls[4]).toEqual(['-C', ownPath, 'rev-parse', 'HEAD']);
+    expect(calls.slice(4, 8)).toEqual([
+      ['-C', ownPath, 'rev-parse', '--absolute-git-dir'],
+      ['-C', ownPath, 'rev-parse', '--path-format=absolute', '--git-common-dir'],
+      ['-C', ownPath, 'symbolic-ref', 'HEAD'],
+      ['-C', ownPath, 'rev-parse', 'HEAD'],
+    ]);
     expect(calls.some((args) => args.includes('add'))).toBe(false);
     expect(registry.current()).toEqual({
       '7': { path: ownPath, branch: LABEL, createdAt: NOW },

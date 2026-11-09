@@ -1,3 +1,4 @@
+import { withAddressOwnership } from '../../../src/ops/review/internal/addressCheckoutOwnership.js';
 import { expect, test } from 'vitest';
 import { readFile, writeFile, mkdir, stat, symlink, readdir, realpath } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -440,3 +441,71 @@ test('settled refusal proof cannot be replayed after a checkout mutation (mutati
     await f.repo.cleanup();
   }
 });
+
+test.each(['same-head', 'stale-head'] as const)(
+  'checkout safety probes exclude a finishing local writer: %s (mutation: inspect before checkout lock)',
+  async (mode) => {
+    const f = await fixture(),
+      entered = deferred(),
+      release = deferred();
+    let local: Promise<void> | undefined,
+      localHead = '',
+      inspected = false;
+    try {
+      const first = await resolvePrWorktree(f.opts);
+      if (mode === 'stale-head') {
+        await f.repo.write('remote-only', 'remote branch advance');
+        f.repo.commitAll('advance PR head');
+        f.repo.git('push', '-q', 'origin', 'HEAD:refs/pull/7/head');
+      }
+      local = withAddressOwnership(
+        { repoRoot: first.path, git: f.run, source: 'local', production: true },
+        async (lease) => {
+          entered.resolve();
+          await release.promise;
+          await lease.track(async () => {
+            await writeFile(join(first.path, 'README.md'), 'local unpublished work');
+            expect((await f.run(['-C', first.path, 'add', 'README.md'])).code).toBe(0);
+            expect(
+              (await f.run(['-C', first.path, 'commit', '-qm', 'local unpublished commit'])).code,
+            ).toBe(0);
+            localHead = (await f.run(['-C', first.path, 'rev-parse', 'HEAD'])).stdout.trim();
+          });
+        },
+      );
+      await entered.promise;
+      const contender = await resolvePrWorktree({
+        ...f.opts,
+        run: async (args) => {
+          const result = await f.run(args);
+          const headProbe =
+            args[1] === first.path && args.at(-2) === 'rev-parse' && args.at(-1) === 'HEAD';
+          const aheadProbe = args.includes('rev-list') && args.includes('--count');
+          if (headProbe || aheadProbe) {
+            inspected = true;
+            if ((mode === 'same-head' && headProbe) || (mode === 'stale-head' && aheadProbe)) {
+              release.resolve();
+              await local;
+            }
+          }
+          return result;
+        },
+      }).then(
+        (value) => ({ value }),
+        (error: unknown) => ({ error }),
+      );
+      expect(inspected, 'safety probes must wait for checkout exclusion').toBe(false);
+      expect('error' in contender && String(contender.error)).toMatch(/Slot busy:/);
+      release.resolve();
+      await local;
+      expect(f.repo.git('rev-parse', 'refs/heads/cq-review/pr-7').trim()).toBe(localHead);
+      expect(await readFile(join(first.path, 'README.md'), 'utf8')).toBe('local unpublished work');
+      await expect(resolvePrWorktree(f.opts)).rejects.toThrow(/unpushed|ahead/);
+      expect(f.repo.git('rev-parse', 'refs/heads/cq-review/pr-7').trim()).toBe(localHead);
+    } finally {
+      release.resolve();
+      await local;
+      await f.repo.cleanup();
+    }
+  },
+);

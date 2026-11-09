@@ -30,7 +30,7 @@ import {
 //      THROW: the PR head's truth is unavailable and nothing must be guessed.
 //   b. Registry consult: an entry for the pr that still POINTS AT TRUTH
 //      (directory exists AND is inside worktreeRoot AND `git -C <entryPath>
-//      rev-parse --abbrev-ref HEAD` prints OUR LABEL (cq-review/pr-<n>) AND
+//      symbolic-ref HEAD` prints refs/heads/cq-review/pr-<n> AND
 //      `git -C <entryPath> rev-parse HEAD` prints the fetched sha) → reuse
 //      it. A STALE entry is left in place until a fresh resolution succeeds
 //      — the prune happens only AFTER a successful create/register (the
@@ -582,11 +582,17 @@ async function resolveLockedPrWorktree(opts: PrWorktreeOpts, phase: ResolutionPh
         // by definition, resolution proceeds to (re)create inside the root.
         (await isInsideRoot(entry.path, worktreeRoot)) &&
         (await (async () => {
-          const branchArgs = ['-C', entry.path, 'rev-parse', '--abbrev-ref', 'HEAD'];
+          const branchArgs = ['-C', entry.path, 'symbolic-ref', 'HEAD'];
           const branch = await opts.run(branchArgs);
-          if (branch.code !== 0 || branch.stdout.trim() !== reviewBranch) {
+          if (branch.code !== 0 || branch.stdout.trim() !== `refs/heads/${reviewBranch}`) {
             return false;
           }
+          // The first label read only rejects bad hints. Positive identity
+          // and all safety probes must be observed under checkout exclusion.
+          await bindCheckout(opts, entry.path, false, phase);
+          const heldBranch = await opts.run(branchArgs);
+          if (heldBranch.code !== 0 || heldBranch.stdout.trim() !== `refs/heads/${reviewBranch}`)
+            return false;
           const headArgs = ['-C', entry.path, 'rev-parse', 'HEAD'];
           const head = await opts.run(headArgs);
           return head.code === 0 && head.stdout.trim() === expectedSha;
@@ -636,15 +642,26 @@ async function resolveLockedPrWorktree(opts: PrWorktreeOpts, phase: ResolutionPh
         continue;
       }
       const headArgs = ['-C', candidate.path, 'rev-parse', 'HEAD'];
-      const head = await opts.run(headArgs);
-      const atSha = head.code === 0 && head.stdout.trim() === expectedSha;
       if (!(await isInsideRoot(candidate.path, worktreeRoot))) {
-        if (candidate.branch === reviewBranch && atSha) {
+        const head = await opts.run(headArgs);
+        if (
+          candidate.branch === reviewBranch &&
+          head.code === 0 &&
+          head.stdout.trim() === expectedSha
+        )
           foreign.push({ path: candidate.path, branch: candidate.branch });
-        }
         continue;
       }
-      if (candidate.branch === reviewBranch && atSha) {
+      await bindCheckout(opts, candidate.path, false, phase);
+      const branch = await opts.run(['-C', candidate.path, 'symbolic-ref', 'HEAD']);
+      const currentBranch =
+        branch.code === 0 && branch.stdout.trim().startsWith('refs/heads/')
+          ? branch.stdout.trim().slice('refs/heads/'.length)
+          : null;
+      if (currentBranch !== reviewBranch && !atTargetPath) continue;
+      const head = await opts.run(headArgs);
+      const atSha = head.code === 0 && head.stdout.trim() === expectedSha;
+      if (currentBranch === reviewBranch && atSha) {
         existing = candidate;
         break;
       }
