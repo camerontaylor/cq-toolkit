@@ -638,13 +638,16 @@ export function findReusableCycle(
   // A retained matching enrollment can later authorize debt readiness. Do not
   // reuse an agent cycle that readiness would reject for missing coverage;
   // queue verification remains readiness's responsibility.
-  const enrollment = readCurrentEnrollment(
-    { version: DEV_LEDGER_VERSION, branch: 'reuse-selection', records: [...records] },
-    { head: input.head, base: input.base, dirtySha256: input.dirtySha256 },
-    input.target,
-  );
+  const enrollment =
+    input.debtValid === undefined && selected.reviewer.startsWith('agent:')
+      ? readCurrentEnrollment(
+          { version: DEV_LEDGER_VERSION, branch: 'reuse-selection', records: [...records] },
+          { head: input.head, base: input.base, dirtySha256: input.dirtySha256 },
+          input.target,
+        )
+      : undefined;
   const debtCandidate =
-    enrollment.kind === 'enrollment' &&
+    enrollment?.kind === 'enrollment' &&
     configured.has('coderabbit') &&
     configured.has('agent') &&
     [...configured].every((reviewer) => reviewer === 'coderabbit' || reviewer === 'agent') &&
