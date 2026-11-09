@@ -782,7 +782,18 @@ export function checkDiffMonotonicity(diff: string): DiffVerdict {
       violations.push({ path, why: 'unparsable baseline diff' });
       continue;
     }
-    if (carriesMalformedStringField(minus, plus, context)) {
+    const sides = [
+      section.filter(
+        (line) => line.startsWith(' ') || (line.startsWith('-') && !line.startsWith('---')),
+      ),
+      section.filter(
+        (line) => line.startsWith(' ') || (line.startsWith('+') && !line.startsWith('+++')),
+      ),
+    ];
+    if (
+      sides.some((side) => ESCAPED_KEY_RE.test(side.map((line) => line.slice(1)).join('\n'))) ||
+      carriesMalformedStringField(minus, plus, context)
+    ) {
       violations.push({ path, why: 'unparsable baseline diff' });
       continue;
     }
