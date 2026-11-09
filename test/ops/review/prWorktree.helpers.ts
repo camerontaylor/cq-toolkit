@@ -159,9 +159,10 @@ export const fakeGit =
       const count = ancestor ? '0' : '1';
       return { code: 0, stdout: `${count}\n`, stderr: '' };
     }
-    if (sub === 'rev-parse' && args[3] === '--absolute-git-dir') {
-      // Real git resolves a linked-worktree .git FILE to the real dir; the
-      // model answers <repoRoot>/.git like a plain checkout.
+    if (sub === 'rev-parse' && args.includes('--git-common-dir')) {
+      // Real git answers the COMMON git dir: <repoRoot>/.git for a plain
+      // checkout, and still <main>/.git from a linked worktree (its own git
+      // dir is <main>/.git/worktrees/<id>, which the module must NOT use).
       return { code: 0, stdout: `${join(args[1] ?? '', '.git')}\n`, stderr: '' };
     }
     if (sub === 'rev-parse') {

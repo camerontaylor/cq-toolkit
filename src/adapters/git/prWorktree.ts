@@ -441,15 +441,21 @@ export async function resolvePrWorktree(opts: PrWorktreeOpts): Promise<{
   // worktreeRoot across two real locations (one per resolver). Absolute
   // everywhere means one location, whichever cwd the caller runs from.
   const repoRoot = pathResolve(opts.repoRoot);
-  // The default root lives under the GIT DIR, not under repoRoot: a linked
-  // worktree or submodule checkout has a .git FILE, and mkdir under a file
-  // is ENOTDIR — `rev-parse --absolute-git-dir` names the real git dir in
-  // every layout. Explicit worktreeRoot stays fully caller-controlled.
-  const gitDirArgs = ['-C', repoRoot, 'rev-parse', '--absolute-git-dir'];
+  // The default root lives under the COMMON git dir, not under repoRoot: a
+  // linked worktree or submodule checkout has a .git FILE, and mkdir under a
+  // file is ENOTDIR. `--absolute-git-dir` would name the PER-WORKTREE dir
+  // (`<main>/.git/worktrees/<id>` for a linked checkout), so the root would
+  // move with whichever checkout the caller runs from — a tree created from
+  // the main checkout would then look FOREIGN here — and the review trees
+  // would nest inside git's admin directory for that worktree, where
+  // `git worktree remove <linked>`/`prune` deletes them recursively.
+  // `--git-common-dir` is the stable dir in every layout (git ≥ 2.31 for
+  // `--path-format`). Explicit worktreeRoot stays fully caller-controlled.
+  const gitDirArgs = ['-C', repoRoot, 'rev-parse', '--path-format=absolute', '--git-common-dir'];
   const gitDir = await opts.run(gitDirArgs);
   if (gitDir.code !== 0) {
     throw gitFail(
-      'rev-parse --absolute-git-dir failed — repoRoot is not a git repository',
+      'rev-parse --git-common-dir failed — repoRoot is not a git repository',
       gitDir.code,
       gitDir.stderr,
       gitDirArgs,
@@ -706,18 +712,25 @@ export async function removePrWorktree(opts: PrWorktreeOpts & { path: string }):
   // Absolute everywhere (see resolvePrWorktree): mkdir/`-C`/paths must not
   // straddle two resolvers.
   const repoRoot = pathResolve(opts.repoRoot);
-  // Same derivation as resolvePrWorktree (git dir, not <repoRoot>/.git — a
-  // linked worktree's .git is a file): the boundary check must agree with
-  // where resolution actually creates trees.
+  // Same derivation as resolvePrWorktree (the COMMON git dir, not the
+  // per-worktree one — a linked worktree's .git is a file and its git dir is
+  // `<main>/.git/worktrees/<id>`): the boundary check must agree with where
+  // resolution actually creates trees.
   let worktreeRoot: string;
   if (opts.worktreeRoot !== undefined) {
     worktreeRoot = pathResolve(opts.worktreeRoot);
   } else {
-    const gitDirArgs = ['-C', repoRoot, 'rev-parse', '--absolute-git-dir'];
+    const gitDirArgs = [
+      '-C',
+      repoRoot,
+      'rev-parse',
+      '--path-format=absolute',
+      '--git-common-dir',
+    ];
     const gitDir = await opts.run(gitDirArgs);
     if (gitDir.code !== 0) {
       throw gitFail(
-        'rev-parse --absolute-git-dir failed — repoRoot is not a git repository',
+        'rev-parse --git-common-dir failed — repoRoot is not a git repository',
         gitDir.code,
         gitDir.stderr,
         gitDirArgs,

@@ -139,7 +139,9 @@ describe('removePrWorktree', () => {
     ).rejects.toThrow(/removePrWorktree: refusing to remove.*outside the review worktreeRoot/s);
     // The ONLY git call is the git-dir derivation the boundary check needs;
     // the foreign tree and the registry both intact.
-    expect(calls).toEqual([['-C', '/repo', 'rev-parse', '--absolute-git-dir']]);
+    expect(calls).toEqual([
+      ['-C', '/repo', 'rev-parse', '--path-format=absolute', '--git-common-dir'],
+    ]);
     expect(model.worktrees).toHaveLength(1);
     expect(registry.current()['7']).toBeDefined();
     expect(registry.calls).toEqual([]);

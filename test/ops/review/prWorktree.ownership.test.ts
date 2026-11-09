@@ -119,7 +119,7 @@ describe('domain boundary vs the sweep ops worktree', () => {
       // fetched sha. No sweep path is ever probed (no branch-matching
       // candidate), returned, or registered.
       expect(calls).toEqual([
-        ['-C', repoRoot, 'rev-parse', '--absolute-git-dir'],
+        ['-C', repoRoot, 'rev-parse', '--path-format=absolute', '--git-common-dir'],
         ['-C', repoRoot, 'fetch', 'origin', `+refs/pull/${PR}/head:refs/cq-review/pr-${PR}`],
         ['-C', repoRoot, 'rev-parse', 'refs/cq-review/pr-7'],
         ['-C', repoRoot, 'worktree', 'list', '--porcelain'],
