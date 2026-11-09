@@ -270,7 +270,8 @@ import type {
 import type { ModelSpec, OpInvocation } from '../types.js';
 import type { OutputSchema, ProviderSignals, WorkerErrorClass } from '../types.js';
 import { defaultSessionsDir } from '../sessions-dir.js';
-import { createStepFetch } from './step-fetch.js';
+import { createStepFetch, STEP_FETCH_MARGIN_MS } from './step-fetch.js';
+import type { Dispatcher } from 'undici';
 
 // ---------------------------------------------------------------------------
 // Public surface
@@ -353,6 +354,17 @@ export interface AiSdkDriverOptions {
    * 2_147_483_647 (Node's timer ceiling), inclusive.
    */
   stepTimeoutMs?: number;
+  /**
+   * The undici dispatcher the DEFAULT providers' fetch pairs with — the
+   * transport seam for deployments that must not connect directly (e.g. an
+   * undici `ProxyAgent`/`EnvHttpProxyAgent` in a proxy-only environment).
+   * The driver applies per-request socket timeouts while preserving this
+   * transport. Absent: the process-global undici dispatcher is used, including
+   * a proxy installed through Node startup settings or setGlobalDispatcher.
+   * Never serializable config — in-process construction data
+   * only. Injected `providers` are untouched either way.
+   */
+  dispatcher?: Dispatcher;
   /**
    * Runs before every provider send, including retries and repairs. The
    * optional context distinguishes a model request from scanned tool output;
@@ -461,8 +473,11 @@ export class AiSdkDriver implements Driver {
       );
     this.stepTimeoutMs = stepTimeoutMs;
     // The production providers fetch through a transport bounded by the same
-    // step bound (step-fetch.ts); injected providers are left untouched.
-    this.providers = options.providers ?? defaultProviders(createStepFetch(stepTimeoutMs));
+    // step bound (step-fetch.ts); injected providers are left untouched. An
+    // operator-supplied dispatcher takes precedence over the process global.
+    this.providers =
+      options.providers ??
+      defaultProviders(createStepFetch(stepTimeoutMs, STEP_FETCH_MARGIN_MS, options.dispatcher));
     this.pricing = options.pricing ?? priceOf;
     this.strictTokenCapability = options.strictTokenCapability;
     this.strictTokenReservationHook = options.strictTokenReservationHook;
