@@ -63,6 +63,19 @@ test('missing fresh engine proof blocks otherwise authorized debt readiness', as
   if (!missingProof.ready)
     expect(missingProof.gaps.map((gap) => gap.field)).toEqual(['agent-coverage']);
 });
+test('reuse dispatches a fresh agent when a matching debt candidate lacks coverage', async () => {
+  const f = await fixture();
+  const request = {
+    ...f.identity,
+    reviewer: 'agent:reviewer',
+    target: 'main',
+    scope: 'full' as const,
+  };
+  expect(findReusableCycle(f.ledger.records, request)?.cycle.cycleId).toBe(f.agent.cycleId);
+  delete f.agent.agentCoverage;
+  expect(findReusableCycle(f.ledger.records, request)).toBeNull();
+  expect(findReusableCycle([f.agent], request)?.cycle.cycleId).toBe(f.agent.cycleId);
+});
 test('fresh engine proof cannot replace authorized current vendor debt', async () => {
   const f = await fixture();
   expect(f.assemble().ready).toBe(true);
