@@ -204,12 +204,21 @@ export function fileWorktreeRegistry(path: string): WorktreeRegistry {
     try {
       release = await lock(path, {
         stale: 10_000,
-        retries: { retries: 5, minTimeout: 25, maxTimeout: 200 },
+        // The section this lock guards is NOT a small file write: it runs
+        // `git worktree list`, per-candidate `rev-parse`/`rev-list`,
+        // `git worktree remove`, a full `git worktree add` checkout and the
+        // caller's callback. A waiter must therefore outlive that section,
+        // not a few hundred ms (concurrent jobs for DIFFERENT PRs are a
+        // supported case, so a live holder is the ordinary contention). The
+        // holder refreshes the lock every stale/2 = 5s, so it stays live
+        // while waiting; the backoff accumulates ~100s (100·1.5^n capped at
+        // 2s per attempt), i.e. tens of seconds of real section time.
+        retries: { retries: 60, factor: 1.5, minTimeout: 100, maxTimeout: 2_000 },
         realpath: false,
       });
     } catch (err) {
       throw new Error(
-        `fileWorktreeRegistry: could not acquire the registry lock ${JSON.stringify(`${path}.lock`)} within the retry bound — refusing to write unserialized; clear the stale lock and re-run`,
+        `fileWorktreeRegistry: could not acquire the registry lock ${JSON.stringify(`${path}.lock`)} within the retry bound — another process still HOLDS it (a live holder, or a crashed holder's lock that has not aged out); refusing to write unserialized. Do NOT delete a live lock (that breaks serialization) — wait for the holder to finish and re-run`,
         { cause: err },
       );
     }
