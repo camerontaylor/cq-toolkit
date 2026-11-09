@@ -8,7 +8,7 @@
 // spawns may run with cwd=repoRoot, which would otherwise silently change
 // which binary a relative CQ_GH_BIN names. Bare names keep PATH lookup;
 // absolute paths pass through.
-import { isAbsolute, resolve as pathResolve } from 'node:path';
+import { delimiter, isAbsolute, resolve as pathResolve } from 'node:path';
 import type { CqEnv } from '../../config/env.js';
 import { currentCqEnv } from '../../config/run-env.js';
 
@@ -20,4 +20,21 @@ export function resolveGhBin(cqEnv?: CqEnv): string {
       ? rawBin
       : pathResolve(process.cwd(), rawBin)
     : rawBin;
+}
+
+/** Anchor PATH entries before any subprocess changes cwd, preserving native search semantics. */
+export function ghSpawnEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const result = { ...env };
+  const key = Object.keys(result)
+    .sort()
+    .find((name) =>
+      process.platform === 'win32' ? name.toUpperCase() === 'PATH' : name === 'PATH',
+    );
+  const path =
+    key === undefined ? (process.platform === 'win32' ? '' : '/usr/bin:/bin') : (result[key] ?? '');
+  result[key ?? 'PATH'] = path
+    .split(delimiter)
+    .map((entry) => pathResolve(entry))
+    .join(delimiter);
+  return result;
 }

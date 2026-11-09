@@ -33,7 +33,7 @@ import { execFile } from 'node:child_process';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve as pathResolve } from 'node:path';
 import type { CqEnv } from '../../config/env.js';
-import { resolveGhBin } from './ghBin.js';
+import { ghSpawnEnv, resolveGhBin } from './ghBin.js';
 import type { BaselinePrEffects } from '../../ops/ratchet/proposeBaselineUpdate.js';
 
 /** Captured child output can be large (a full diff/PR body) — never truncate. */
@@ -157,7 +157,7 @@ async function runGhWith(
   args: readonly string[],
   cqEnv?: CqEnv,
 ): Promise<string> {
-  const res = await exec(resolveGhBin(cqEnv), args, { cwd: repoRoot, env: ghEnv() });
+  const res = await exec(resolveGhBin(cqEnv), args, { cwd: repoRoot, env: ghSpawnEnv(ghEnv()) });
   if (res.timedOut) {
     throw new Error(`gh ${args[0] ?? ''} timed out after ${EXEC_TIMEOUT_MS}ms`);
   }

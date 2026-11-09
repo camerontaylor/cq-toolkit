@@ -31,7 +31,7 @@
 // captured gh JSON shapes.
 import { execFile } from 'node:child_process';
 import type { CqEnv } from '../../config/env.js';
-import { resolveGhBin } from './ghBin.js';
+import { ghSpawnEnv, resolveGhBin } from './ghBin.js';
 import type {
   PrChecks,
   PrEffects,
@@ -123,7 +123,7 @@ function runGhWith(
         maxBuffer: GH_OUTPUT_MAX_BUFFER_BYTES,
         timeout: timeoutMs,
         killSignal: 'SIGKILL',
-        env: { ...process.env, GH_PROMPT_DISABLED: '1' },
+        env: ghSpawnEnv({ ...process.env, GH_PROMPT_DISABLED: '1' }),
       },
       (error, stdout, stderr) => {
         if (error !== null) {

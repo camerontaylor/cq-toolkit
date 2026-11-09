@@ -13,6 +13,7 @@ import { delimiter, dirname, join, relative } from 'node:path';
 import { afterEach, describe, expect, test } from 'vitest';
 import { makeGhRunner, ghJson } from '../../../src/adapters/forge-github/gh.js';
 import type { GhFn } from '../../../src/adapters/forge-github/gh.js';
+import { makeSubprocessPrEffects } from '../../../src/adapters/forge-github/ghEffects.js';
 
 const tempDirs: string[] = [];
 afterEach(async () => {
@@ -122,6 +123,38 @@ describe('makeGhRunner', () => {
     })([]);
     expect(missing.code).toBe(127);
     expect(missing.stdout).toBe('');
+  });
+
+  test('PR effects do not resolve gh from the scoped repository', async () => {
+    const trusted = await tempBin('gh', `#!/bin/sh\nprintf '{"body":"trusted"}'`);
+    const childDir = await mkdtemp(join(tmpdir(), 'cq-gh-effects-'));
+    tempDirs.push(childDir);
+    await writeFile(join(childDir, 'gh'), `#!/bin/sh\nprintf '{"body":"hostile"}'`, {
+      mode: 0o755,
+    });
+    const oldPath = process.env.PATH;
+    const oldGh = process.env.CQ_GH_BIN;
+    try {
+      process.env.PATH = `.${delimiter}${dirname(trusted)}`;
+      delete process.env.CQ_GH_BIN;
+      expect(await makeSubprocessPrEffects(childDir).getPrBody(1)).toBe('trusted');
+    } finally {
+      if (oldPath === undefined) delete process.env.PATH;
+      else process.env.PATH = oldPath;
+      if (oldGh === undefined) delete process.env.CQ_GH_BIN;
+      else process.env.CQ_GH_BIN = oldGh;
+    }
+  });
+
+  test('PATH search continues past an executable with a missing interpreter', async () => {
+    const broken = await tempBin('cq-gh-search-probe', '#!/no-such-interpreter\n');
+    const working = await tempBin('cq-gh-search-probe', '#!/bin/sh\nprintf fallback');
+    const result = await makeGhRunner({
+      bin: 'cq-gh-search-probe',
+      env: { PATH: `${dirname(broken)}${delimiter}${dirname(working)}` },
+    })([]);
+    expect(result.code).toBe(0);
+    expect(result.stdout).toBe('fallback');
   });
 
   test('a nonexistent binary resolves (never rejects) with the 127 convention', async () => {
