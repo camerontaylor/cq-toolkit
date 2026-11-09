@@ -275,3 +275,73 @@ test('timeout kills a pipe-independent descendant after its CLI leader exits', a
     }
   }
 }, 10000);
+
+test('timeout settles when an escaped descendant retains the CLI pipes', async () => {
+  const root = await dir();
+  const binary = join(root, 'fake-cli');
+  const pidfile = join(root, 'escaped');
+  const descendant = `require('node:fs').writeFileSync(${JSON.stringify(pidfile)},String(process.pid)); setInterval(()=>{},1000);`;
+  await writeFile(
+    binary,
+    `#!/usr/bin/env node\nrequire('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(descendant)}],{detached:true,stdio:['ignore',1,2]}).unref(); setInterval(()=>{},1000);\n`,
+    { mode: 0o755 },
+  );
+  let pid: number | undefined;
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    const result = usage({ cwd: root, binary, timeoutMs: 700 });
+    const bounded = Promise.race([
+      result,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error('invocation hung')), 4000);
+      }),
+    ]);
+    await expect(bounded).rejects.toThrow('CodeRabbit CLI timed out');
+    pid = Number(await readFile(pidfile, 'utf8'));
+    expect(pid).toBeGreaterThan(0);
+  } finally {
+    if (timer) clearTimeout(timer);
+    if (!pid) {
+      try {
+        pid = Number(await readFile(pidfile, 'utf8'));
+      } catch {
+        /* not started */
+      }
+    }
+    if (pid) {
+      try {
+        process.kill(-pid, 'SIGKILL');
+      } catch {
+        /* already gone */
+      }
+    }
+  }
+}, 10000);
+
+test('signal permission errors reject without escaping timer callbacks', async () => {
+  const root = await dir();
+  const binary = join(root, 'fake-cli');
+  const pidfile = join(root, 'pid');
+  await writeFile(
+    binary,
+    `#!/usr/bin/env node\nrequire('node:fs').writeFileSync(${JSON.stringify(pidfile)},String(process.pid)); setInterval(()=>{},1000);\n`,
+    { mode: 0o755 },
+  );
+  const adapter = new URL('../../../src/adapters/crq/coderabbit.ts', import.meta.url);
+  const classifier = new URL('../../../src/ops/dev/coderabbit.ts', import.meta.url);
+  const modulePath = join(root, 'adapter.ts');
+  const source = await readFile(adapter, 'utf8');
+  await writeFile(modulePath, source.replace('../../ops/dev/coderabbit.js', classifier.href));
+  const moduleUrl = new URL(`file://${modulePath}`).href;
+  const script = `import {usage} from ${JSON.stringify(moduleUrl)}; import {readFileSync} from 'node:fs'; const original=process.kill; process.kill=(pid,signal)=>{if(pid<0) throw Object.assign(new Error('denied'),{code:'EPERM'}); return original(pid,signal)}; try { await usage({cwd:${JSON.stringify(root)},binary:${JSON.stringify(binary)},timeoutMs:700}); process.exitCode=2; } catch(e) { if(e.message!=='CodeRabbit CLI timed out'||e.cause?.code!=='EPERM') process.exitCode=3; } finally { process.kill=original; try { original(-Number(readFileSync(${JSON.stringify(pidfile)},'utf8')),'SIGKILL'); } catch {} }`;
+  const child = spawn(process.execPath, ['--input-type=module', '-e', script], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  children.push(child);
+  let stderr = '';
+  child.stderr?.on('data', (data: Buffer) => {
+    stderr += data.toString();
+  });
+  const [code] = await once(child, 'exit');
+  expect({ code, stderr }).toEqual({ code: 0, stderr: '' });
+}, 10000);

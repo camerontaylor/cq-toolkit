@@ -21,13 +21,16 @@ async function invoke(
   const exitCode = await new Promise<number | null>((resolve, reject) => {
     let timedOut = false;
     let spawnError: Error | undefined;
-    let escalated = false;
+    let signalError: unknown;
     let closed = false;
+    let escalated = false;
+    let drainTimer: NodeJS.Timeout | undefined;
     let exitCode: number | null = null;
     const finish = () => {
       if (!closed || (timedOut && !escalated)) return;
-      if (spawnError) reject(spawnError);
-      else if (timedOut) reject(new Error('CodeRabbit CLI timed out'));
+      if (drainTimer) clearTimeout(drainTimer);
+      if (timedOut) reject(new Error('CodeRabbit CLI timed out', { cause: signalError }));
+      else if (spawnError) reject(spawnError);
       else resolve(exitCode);
     };
     const signal = (value: NodeJS.Signals) => {
@@ -36,7 +39,7 @@ async function invoke(
           process.kill(-child.pid, value);
         else child.kill(value);
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
+        if ((error as NodeJS.ErrnoException).code !== 'ESRCH') signalError ??= error;
       }
     };
     const timer = setTimeout(() => {
@@ -44,7 +47,13 @@ async function invoke(
       signal('SIGTERM');
       setTimeout(() => {
         signal('SIGKILL');
+        child.stdout.destroy();
+        child.stderr.destroy();
         escalated = true;
+        drainTimer = setTimeout(() => {
+          child.unref();
+          reject(new Error('CodeRabbit CLI timed out', { cause: signalError }));
+        }, 250);
         finish();
       }, 1000);
     }, options.timeoutMs ?? 20_000);
