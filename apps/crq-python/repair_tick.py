@@ -272,33 +272,53 @@ def harvest(c, q, item, dry=False):
                     record.update(state='stale', error=str(exc))
                     item['state'] = 'done'
                 break  # Retain the result artifact without publishing an obsolete fix.
-            if result.get('job') != job_id or result.get('item') != item['id']:
-                raise ValueError('repair result identity mismatch')
-            if expected.get('source_sha') and any(result.get(k) != expected.get(k)
-                    for k in ('source_sha', 'finding_sha256', 'origin_job')):
-                raise ValueError('prepared repair result source/evidence binding mismatch')
+            try:
+                if result.get('job') != job_id or result.get('item') != item['id']:
+                    raise ValueError('repair result identity mismatch')
+                if expected.get('source_sha') and any(result.get(k) != expected.get(k)
+                        for k in ('source_sha', 'finding_sha256', 'origin_job')):
+                    raise ValueError('prepared repair result source/evidence binding mismatch')
+                if result.get('verdict') == 'FIXED':
+                    commits = result.get('commits')
+                    if (not isinstance(commits, list) or not commits
+                            or not all(isinstance(sha, str) and re.fullmatch(r'[0-9a-fA-F]{40}', sha)
+                                       for sha in commits)):
+                        raise ValueError('repair result claims FIXED without valid commits')
+                    wt = Path(result['worktree']).resolve()
+                    root = c.WT_ROOT.resolve()
+                    if wt.parent != root or wt.name != 'crq-repair-' + item['id']:
+                        raise ValueError('repair result worktree outside owned path')
+                    if result.get('repair_base') != predecessor:
+                        raise ValueError('repair predecessor mismatch')
+                elif result.get('verdict') not in ('NOT-FIXED', 'FAILED', 'STALE'):
+                    raise ValueError('unknown repair verdict')
+            except (ValueError, IndexError, KeyError, TypeError) as exc:
+                # A deterministic artifact defect can never pass on a later tick,
+                # so record it as a terminal failure instead of blocking the item.
+                if not dry:
+                    record.update(state='failed', error=str(exc)[:300])
+                    if item['kind'] == review_receipt.KIND:
+                        item['state'] = 'done'
+                        item['repair_outcome'] = record['state']
+                        item['last_error'] = None
+                    else:
+                        item['state'] = 'repair_failed'
+                        item['last_error'] = 'repair_failed; needs human'
+                break
             if result.get('verdict') == 'FIXED':
-                wt = Path(result['worktree']).resolve()
-                root = c.WT_ROOT.resolve()
-                if wt.parent != root or wt.name != 'crq-repair-' + item['id']:
-                    raise ValueError('repair result worktree outside owned path')
-                if result.get('repair_base') != predecessor:
-                    raise ValueError('repair predecessor mismatch')
                 # Later findings move the shared HEAD; validate each immutable
                 # claimed range through a separate detached verification worktree.
-                check_wt, branch = c.make_worktree('verify-' + job_id, result['commits'][-1])
+                check_wt, branch = c.make_worktree('verify-' + job_id, commits[-1])
                 try:
-                    verify(check_wt, predecessor, result['commits'], job_id)
+                    verify(check_wt, predecessor, commits, job_id)
                     from importlib import util
                     spec = util.spec_from_file_location('crq_repair_service', c.ROOT / 'crq_repair.py')
                     module = util.module_from_spec(spec)
                     spec.loader.exec_module(module)
-                    module.mechanical(c.CONFIG, check_wt, predecessor, result['commits'], job_id, path.parent)
+                    module.mechanical(c.CONFIG, check_wt, predecessor, commits, job_id, path.parent)
                 finally:
                     c.remove_worktree(check_wt, branch)
-                predecessor = result['commits'][-1]
-            elif result.get('verdict') not in ('NOT-FIXED', 'FAILED', 'STALE'):
-                raise ValueError('unknown repair verdict')
+                predecessor = commits[-1]
             if not dry:
                 mark_finding_outcome(c, expected, result)
             verdicts.append({**result, 'finding': expected['finding']})
