@@ -169,9 +169,10 @@ def phase(inbox, repo, tip, judge, transport, at, *, maximum=6, seconds=600, dry
         except (subprocess.TimeoutExpired, OSError):
             stopped = 'deferred'; break
         if report.get('stop') != 'ok':
-            if row.get('_escalate') and report.get('stop') == 'error' and report.get('errorClass') == 'output-invalid':
+            if report.get('stop') == 'error' and report.get('errorClass') == 'output-invalid':
                 row['_triage_model'] = report.get('model', 'judge')
-                plans.append((row, 'needs-human', 'escalation returned invalid structured output', {}))
+                stage = 'escalation' if row.get('_escalate') else 'judge'
+                plans.append((row, 'needs-human', stage + ' returned invalid structured output', {}))
                 judged += 1
                 continue
             stopped = report.get('stop', 'error'); stopped_report = report; break
