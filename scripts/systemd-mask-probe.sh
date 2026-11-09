@@ -169,7 +169,24 @@ for boundary in intent mask reload drain restore unmask; do
 done
 # Restart the disposable user's manager while masked, not the VM.
 mask
-if ! systemctl restart "user@$uid.service"; then
+echo 'MANAGER ENVIRONMENT BEFORE RESTART (selected paths only)'
+ctl show-environment | rg '^(HOME|XDG_(CONFIG_HOME|DATA_HOME|RUNTIME_DIR)|DBUS_SESSION_BUS_ADDRESS)=' || true
+ctl cat dbus.socket gpg-agent-ssh.socket || true
+ctl show dbus.socket gpg-agent-ssh.socket -p FragmentPath -p DropInPaths -p Before -p After -p Requires -p Wants -p ExecStartPre -p ExecStartPost -p ActiveState -p SubState || true
+systemctl cat "user@$uid.service" || true
+systemctl restart "user@$uid.service" &
+restart_pid=$!
+sleep 10
+echo 'MANAGER STARTUP SAMPLE'
+systemctl show "user@$uid.service" -p ActiveState -p SubState -p Result -p MainPID -p ControlGroup || true
+ps -u "$probe_user" -o pid,ppid,state,wchan:24,args || true
+manager_pid=$(systemctl show "user@$uid.service" -p MainPID --value)
+if test "$manager_pid" != 0 && test -r "/proc/$manager_pid/environ"; then
+  tr '\0' '\n' < "/proc/$manager_pid/environ" | rg '^(HOME|XDG_(CONFIG_HOME|DATA_HOME|RUNTIME_DIR)|DBUS_SESSION_BUS_ADDRESS)=' || true
+fi
+timeout 3 runuser -u "$probe_user" -- env XDG_RUNTIME_DIR="/run/user/$uid" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" systemctl --user list-jobs --no-pager || true
+ls -la "/run/user/$uid" "/run/user/$uid/bus" || true
+if ! wait "$restart_pid"; then
   echo 'RESTART DIAGNOSTICS'
   systemctl status "user@$uid.service" --no-pager -l || true
   systemctl show "user@$uid.service" -p ActiveState -p SubState -p Result -p TimeoutStopUSec -p ControlGroup -p MainPID || true
