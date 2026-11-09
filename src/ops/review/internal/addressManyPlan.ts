@@ -665,6 +665,7 @@ export interface AddressManyRow {
   reason?: string;
   /** Counted only from a head-attributed report; the original value stays in `result`. */
   fixesPerRun: number;
+  /** `absent` only from a trusted report that records none; otherwise `unknown`. */
   deferredVendorDebt: 'absent' | 'present' | 'unknown';
   /** No structured publication producer exists; never derived from fixes or prose. */
   publication: 'unknown';
@@ -840,7 +841,9 @@ export function aggregateAddressMany(input: {
         attribution: 'absent',
         reason: outcome.exception,
         fixesPerRun: 0,
-        deferredVendorDebt: 'absent',
+        // A leg that threw may have begun work and left durable author debt; with
+        // no report there is no evidence either way, so debt is `unknown`.
+        deferredVendorDebt: 'unknown',
       });
       continue;
     }
@@ -921,17 +924,22 @@ export function aggregateAddressMany(input: {
 
     const fixesPerRun = trusted ? report.fixesPerRun : 0;
     totals.fixesPerRun += fixesPerRun;
+    // Debt is `absent` only with evidence: a trusted report that records none. A
+    // leg that settled without a report (or was not attributable) may have left
+    // durable author debt, so its debt state is `unknown`, never asserted absent.
     const debt: AddressManyRow['deferredVendorDebt'] =
-      report === undefined
-        ? 'absent'
-        : trusted
-          ? report.deferredVendorDebt === undefined
-            ? 'absent'
-            : 'present'
-          : 'unknown';
+      trusted && report !== undefined
+        ? report.deferredVendorDebt === undefined
+          ? 'absent'
+          : 'present'
+        : 'unknown';
     if (debt === 'present') reasons.push(`#${candidate.number} carries deferred vendor debt`);
     if (debt === 'unknown')
-      reasons.push(`#${candidate.number} debt state unknowable at an unattributed head`);
+      reasons.push(
+        report === undefined
+          ? `#${candidate.number} debt state unknowable; the leg produced no report`
+          : `#${candidate.number} debt state unknowable at an unattributed head`,
+      );
     if (enrollment.state !== 'not-requested')
       reasons.push(`#${candidate.number} enrollment ${enrollment.state}`);
 
