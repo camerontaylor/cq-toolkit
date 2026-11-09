@@ -7,12 +7,18 @@
 //
 // The spawned helpers are generated at runtime into a temp dir (not repo
 // fixtures) and run through the real makeGhRunner seam.
-import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, relative } from 'node:path';
+import { delimiter, dirname, join, relative } from 'node:path';
 import { afterEach, describe, expect, test } from 'vitest';
 import { makeGhRunner, ghJson } from '../../../src/adapters/forge-github/gh.js';
 import type { GhFn } from '../../../src/adapters/forge-github/gh.js';
+import {
+  ghMergeEnv,
+  ghSpawnEnv,
+  resolveWindowsCommand,
+} from '../../../src/adapters/forge-github/ghBin.js';
+import { makeSubprocessPrEffects } from '../../../src/adapters/forge-github/ghEffects.js';
 
 const tempDirs: string[] = [];
 afterEach(async () => {
@@ -100,6 +106,127 @@ describe('makeGhRunner', () => {
     expect(res.code).toBe(0);
     expect(res.stdout).toBe('resolved-ok');
   }, 10_000);
+
+  test('bare binary resolves explicit relative PATH against caller cwd, never child cwd', async () => {
+    const trusted = await tempBin('cq-gh-path-probe', '#!/bin/sh\nprintf trusted');
+    const childDir = await mkdtemp(join(tmpdir(), 'cq-gh-scoped-'));
+    tempDirs.push(childDir);
+    await writeFile(join(childDir, 'cq-gh-path-probe'), '#!/bin/sh\nprintf hostile', {
+      mode: 0o755,
+    });
+    const result = await makeGhRunner({
+      bin: 'cq-gh-path-probe',
+      cwd: childDir,
+      env: { PATH: `${relative(process.cwd(), dirname(trusted))}${delimiter}/bin` },
+    })([]);
+    expect(result.code).toBe(0);
+    expect(result.stdout).toBe('trusted');
+    const missing = await makeGhRunner({
+      bin: 'cq-gh-path-probe',
+      cwd: childDir,
+      env: { PATH: '' },
+    })([]);
+    expect(missing.code).toBe(127);
+    expect(missing.stdout).toBe('');
+  });
+
+  test('PR effects do not resolve gh from the scoped repository', async () => {
+    const trusted = await tempBin('gh', `#!/bin/sh\nprintf '{"body":"trusted"}'`);
+    const childDir = await mkdtemp(join(tmpdir(), 'cq-gh-effects-'));
+    tempDirs.push(childDir);
+    await writeFile(join(childDir, 'gh'), `#!/bin/sh\nprintf '{"body":"hostile"}'`, {
+      mode: 0o755,
+    });
+    const oldPath = process.env.PATH;
+    const oldGh = process.env.CQ_GH_BIN;
+    try {
+      process.env.PATH = `.${delimiter}${dirname(trusted)}`;
+      delete process.env.CQ_GH_BIN;
+      expect(await makeSubprocessPrEffects(childDir).getPrBody(1)).toBe('trusted');
+    } finally {
+      if (oldPath === undefined) delete process.env.PATH;
+      else process.env.PATH = oldPath;
+      if (oldGh === undefined) delete process.env.CQ_GH_BIN;
+      else process.env.CQ_GH_BIN = oldGh;
+    }
+  });
+
+  test('Windows explicit environment overrides inherited keys case-insensitively', () => {
+    expect(
+      ghMergeEnv({ PATH: 'inherited', Other: 'value' }, { Path: 'explicit' }, 'win32'),
+    ).toEqual({ Path: 'explicit', Other: 'value' });
+  });
+
+  test('Windows executable resolution searches caller PATH without consulting child cwd', async () => {
+    const trusted = await tempBin('cq-windows-probe.exe', 'placeholder');
+    const found = resolveWindowsCommand('cq-windows-probe', { Path: dirname(trusted) }, 'win32');
+    expect(found).toBe(trusted);
+    const missing = resolveWindowsCommand(
+      'cq-windows-missing',
+      { Path: dirname(trusted) },
+      'win32',
+    );
+    expect(missing).toBeUndefined();
+  });
+
+  test('Windows PATH quoting and semicolons are anchored without lexical normalization', () => {
+    const env = ghSpawnEnv(
+      { Path: `"C:\\Program Files\\a;b";'rel;part';C:\\x\\..\\bin` },
+      'win32',
+      'C:\\caller',
+    );
+    expect(env.Path).toBe(`"C:\\Program Files\\a;b";"C:\\caller\\rel;part";C:\\x\\..\\bin`);
+  });
+
+  test('Windows current-directory opt-out skips the cwd probe', () => {
+    const seen: string[] = [];
+    const result = resolveWindowsCommand(
+      'gh',
+      { Path: '/trusted' },
+      'win32',
+      { NoDefaultCurrentDirectoryInExePath: '' },
+      '/caller',
+      (candidate) => {
+        seen.push(candidate);
+        return candidate === '/trusted/gh.exe';
+      },
+    );
+    expect(result).toBe('/trusted/gh.exe');
+    expect(seen.every((candidate) => !candidate.startsWith('/caller/'))).toBe(true);
+  });
+
+  test.skipIf(process.platform === 'win32')(
+    'preserves symlink traversal in PATH entries',
+    async () => {
+      const root = await mkdtemp(join(tmpdir(), 'cq-gh-symlink-'));
+      tempDirs.push(root);
+      await mkdir(join(root, 'other', 'deep'), { recursive: true });
+      await mkdir(join(root, 'other', 'bin'));
+      await mkdir(join(root, 'bin'));
+      await symlink(join(root, 'other', 'deep'), join(root, 'link'));
+      await writeFile(join(root, 'other', 'bin', 'cq-symlink-probe'), '#!/bin/sh\nprintf correct', {
+        mode: 0o755,
+      });
+      await writeFile(join(root, 'bin', 'cq-symlink-probe'), '#!/bin/sh\nprintf wrong', {
+        mode: 0o755,
+      });
+      for (const path of [`${root}/link/../bin`, `${relative(process.cwd(), root)}/link/../bin`]) {
+        const result = await makeGhRunner({ bin: 'cq-symlink-probe', env: { PATH: path } })([]);
+        expect(result.stdout).toBe('correct');
+      }
+    },
+  );
+
+  test('PATH search continues past an executable with a missing interpreter', async () => {
+    const broken = await tempBin('cq-gh-search-probe', '#!/no-such-interpreter\n');
+    const working = await tempBin('cq-gh-search-probe', '#!/bin/sh\nprintf fallback');
+    const result = await makeGhRunner({
+      bin: 'cq-gh-search-probe',
+      env: { PATH: `${dirname(broken)}${delimiter}${dirname(working)}` },
+    })([]);
+    expect(result.code).toBe(0);
+    expect(result.stdout).toBe('fallback');
+  });
 
   test('a nonexistent binary resolves (never rejects) with the 127 convention', async () => {
     const run = makeGhRunner({ bin: '/nonexistent-cq-gh-probe' });
