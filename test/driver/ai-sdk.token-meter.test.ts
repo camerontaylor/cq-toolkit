@@ -6,6 +6,8 @@ import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
+import { z } from 'zod';
+import { toOutputSchema } from '../../src/driver/common/structured.js';
 import { MockLanguageModelV4 } from 'ai/test';
 import type { LanguageModelV4GenerateResult } from '@ai-sdk/provider';
 import { AiSdkDriver, stopReasonOf, tokenMeterVerdict } from '../../src/driver/ai-sdk/index.js';
@@ -41,6 +43,12 @@ describe('tokenMeterVerdict', () => {
       cause: 'context',
       detail: 'context ceiling: step 1 carried 200000 input tokens (ceiling 200000)',
     });
+  });
+
+  test('output cap takes priority when both limits trip', () => {
+    expect(
+      tokenMeterVerdict({ maxOutputTokens: 10, maxContextTokens: 100 }, [step(100, 10)])?.cause,
+    ).toBe('output-tokens');
   });
 
   test('no caps, no verdict', () => {
@@ -134,6 +142,45 @@ async function runLoop(
 }
 
 describe('ai-sdk driver token meter', () => {
+  test.each([
+    [{ maxContextTokens: 100 }, 'complete'],
+    [{ maxContextTokens: 100, maxOutputTokens: 10 }, 'budget'],
+    [{ maxContextTokens: 100, maxTokens: 110 }, 'budget'],
+  ] as const)('terminal structured answer respects consumed caps: %o', async (budget, expected) => {
+    const scratch = await mkdtemp(join(tmpdir(), 'aidrv-final-meter-'));
+    const model = new MockLanguageModelV4({
+      modelId: 'mock-1',
+      doGenerate: async () => ({
+        content: [{ type: 'text', text: '{"answer":"ok"}' }],
+        finishReason: { unified: 'stop', raw: undefined },
+        usage: {
+          inputTokens: { total: 100, noCache: 100, cacheRead: 0, cacheWrite: 0 },
+          outputTokens: { total: 10, text: 10, reasoning: 0 },
+        },
+        warnings: [],
+      }),
+    });
+    try {
+      const driver = new AiSdkDriver({
+        providers: { mock: () => model },
+        sessionsDir: join(scratch, 'sessions'),
+        harnessConfig: conformanceHarnessConfig(scratch),
+      });
+      const result = await driver.run(
+        invocation({
+          budget,
+          outputSchema: toOutputSchema('answer', z.object({ answer: z.string() })),
+        }),
+      );
+      expect(result.stopReason).toBe(expected);
+      expect(result.structuredOutput).toEqual(
+        expected === 'complete' ? { answer: 'ok' } : undefined,
+      );
+    } finally {
+      await rm(scratch, { recursive: true, force: true });
+    }
+  });
+
   test('context ceiling stops the loop before the next request and records why', async () => {
     const { result, calls, stops } = await runLoop({ maxContextTokens: 200_000 }, [
       { input: 50_000, cacheRead: 0, output: 100 },

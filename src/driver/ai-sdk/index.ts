@@ -1343,7 +1343,9 @@ export class AiSdkDriver implements Driver {
         aborted: signalAborted(abortSignal),
         tokenBudget: budget.maxTokens,
         totalTokens: totalTokensOf(usage),
-        meterStopped: meterStop !== undefined,
+        // Context limits the next request, not a valid terminal response.
+        meterStopped:
+          meterStop !== undefined && !(meterStop.cause === 'context' && finishReason === 'stop'),
       });
       // PRODUCER RULE (ADR §2.2): every error verdict this lane returns
       // carries errorClass. A resolved run whose final step finished
@@ -2356,6 +2358,16 @@ export function tokenMeterVerdict(
   budget: Pick<Budget, 'maxOutputTokens' | 'maxContextTokens'>,
   steps: readonly Usage[],
 ): TokenMeterVerdict | undefined {
+  // Output is a consumed budget; it must win even when context also trips.
+  if (budget.maxOutputTokens !== undefined) {
+    const output = steps.reduce((sum, step) => sum + step.output, 0);
+    if (output >= budget.maxOutputTokens) {
+      return {
+        cause: 'output-tokens',
+        detail: `output budget: ${String(output)} output tokens over ${String(steps.length)} steps (cap ${String(budget.maxOutputTokens)})`,
+      };
+    }
+  }
   const last = steps.at(-1);
   if (budget.maxContextTokens !== undefined && last !== undefined) {
     const context = last.input + last.cacheRead + last.cacheWrite;
@@ -2363,15 +2375,6 @@ export function tokenMeterVerdict(
       return {
         cause: 'context',
         detail: `context ceiling: step ${String(steps.length)} carried ${String(context)} input tokens (ceiling ${String(budget.maxContextTokens)})`,
-      };
-    }
-  }
-  if (budget.maxOutputTokens !== undefined) {
-    const output = steps.reduce((sum, step) => sum + step.output, 0);
-    if (output >= budget.maxOutputTokens) {
-      return {
-        cause: 'output-tokens',
-        detail: `output budget: ${String(output)} output tokens over ${String(steps.length)} steps (cap ${String(budget.maxOutputTokens)})`,
       };
     }
   }
