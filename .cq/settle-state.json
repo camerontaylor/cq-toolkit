@@ -67,19 +67,6 @@
         }
       ]
     },
-    "1280": {
-      "tuple": {
-        "head": "16217bcf5018d3cc96cf8777d7476dd69671d946",
-        "base": "43cc6aa7c3ddc5e79dc8e9f65d529ec70831d9d8",
-        "forcePushEpoch": 0
-      },
-      "observations": [
-        {
-          "observedAt": "2026-11-09T01:42:52.373Z",
-          "by": "self-merge-prs:observe"
-        }
-      ]
-    },
     "1281": {
       "tuple": {
         "head": "34d9feb3dd02d3cbc97e7a5cf92bef97cebc6fb4",
