@@ -20,5 +20,5 @@ available; a failed hash read keeps the cycle and its findings without
 integrity metadata. Reuse rescans current content under current scanner policy
 before selecting a retained cycle; scanner policy is not frozen in its identity.
 
-A missing or altered retained log, or content the current scanner now forbids,
-refuses reuse without vendor dispatch.
+An unreadable retained log prevents reuse and causes a fresh dispatch. An altered
+log or content the current scanner now forbids refuses review without dispatch.

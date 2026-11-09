@@ -154,8 +154,8 @@ describe('dev.review cycle', () => {
     ).toBe(false);
   });
 
-  test.each(['missing', 'altered'])(
-    'retained %s log refuses without vendor dispatch',
+  test.each(['missing', 'unavailable', 'altered'])(
+    'retained %s log does not reuse',
     async (fault) => {
       await seed(repo);
       let vendorCalls = 0;
@@ -167,6 +167,7 @@ describe('dev.review cycle', () => {
         effects.reviewLogSha256 = async () => {
           throw new Error('missing log');
         };
+      else if (fault === 'unavailable') delete effects.reviewLogSha256;
       else {
         await effects.openLedger('feature/x').mutate((ledger) => ({
           ledger: {
@@ -179,8 +180,8 @@ describe('dev.review cycle', () => {
         }));
       }
       const result = await cycleReview(effects, stubScanner())({ repoRoot: repo.root });
-      expect(result.status).toBe('needs-human');
-      expect(vendorCalls).toBe(0);
+      expect(result.status).toBe(fault === 'altered' ? 'needs-human' : 'ok');
+      expect(vendorCalls).toBe(fault === 'altered' ? 0 : 1);
       expect(
         effects
           .openLedger('feature/x')
