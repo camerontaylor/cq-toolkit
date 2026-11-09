@@ -720,13 +720,7 @@ export async function removePrWorktree(opts: PrWorktreeOpts & { path: string }):
   if (opts.worktreeRoot !== undefined) {
     worktreeRoot = pathResolve(opts.worktreeRoot);
   } else {
-    const gitDirArgs = [
-      '-C',
-      repoRoot,
-      'rev-parse',
-      '--path-format=absolute',
-      '--git-common-dir',
-    ];
+    const gitDirArgs = ['-C', repoRoot, 'rev-parse', '--path-format=absolute', '--git-common-dir'];
     const gitDir = await opts.run(gitDirArgs);
     if (gitDir.code !== 0) {
       throw gitFail(
