@@ -93,7 +93,11 @@ def budget_stop(sessions_dir, names):
             except ValueError:
                 continue
             if isinstance(entry, dict) and entry.get('type') == 'budget-stop':
-                return str(entry.get('detail') or entry.get('cause'))[:300]
+                # A line without detail/cause must read as "no reason" so the
+                # caller's fallback text applies: str(None) is truthy ('None').
+                reason = entry.get('detail') or entry.get('cause')
+                if reason:
+                    return str(reason)[:300]
     return None
 
 
