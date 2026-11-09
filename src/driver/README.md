@@ -578,8 +578,9 @@ open in `yolo`, which never asks, so the driver pins
 ANY prompt (a failed pin is a pre-prompt error verdict); the permission
 answer table selects by option KIND (optionIds are vendor strings) and
 never answers `cancelled`; the NEVER-ASKS TRIPWIRE records a
-`tool_call` with no preceding permission request as ungated-execution
-evidence and fails the run; `WorkerResult.model` reads the
+`tool_call` or `tool_call_update` reaching `in_progress`, `completed` or
+`failed` before any permission request as ungated-execution evidence and
+fails the run; a `pending` announcement alone is not evidence; `WorkerResult.model` reads the
 POST-MATERIALIZATION `config_option_update` value only (the `session/new`
 entry is the lazy default); usage folds only `PromptResponse.usage`
 (`cachedWriteTokens` folds; `reasoning` is never emitted — thoughtTokens

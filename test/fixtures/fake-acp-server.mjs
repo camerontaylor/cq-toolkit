@@ -112,6 +112,8 @@
 //                         reference vendor's SUCCESS shape, applied to
 //                         failures too) — the failed tool's denial reason
 //                         must still come from the blocks' text (Codex P2)
+//   FAKE_ACP_BEFORE_ASK_STATUS  tool flows emit a tool_call with this status
+//                         before requesting permission for the same id
 //   FAKE_ACP_PLACEHOLDER_CARD  when '1' (tool flows), the fixture emits
 //                         the probe-recorded PLACEHOLDER card while the
 //                         request_permission is still pending: a tool_call
@@ -252,6 +254,7 @@ const CLOSE_STDIN_ON_PERMISSION = process.env.FAKE_ACP_CLOSE_STDIN_ON_PERMISSION
 const IGNORE_CANCEL = process.env.FAKE_ACP_IGNORE_CANCEL === '1';
 const STOP_READ_BEFORE_PROMPT = process.env.FAKE_ACP_STOP_READ_BEFORE_PROMPT === '1';
 const OMIT_RAW_OUTPUT = process.env.FAKE_ACP_OMIT_RAW_OUTPUT === '1';
+const BEFORE_ASK_STATUS = process.env.FAKE_ACP_BEFORE_ASK_STATUS;
 const PLACEHOLDER_CARD = process.env.FAKE_ACP_PLACEHOLDER_CARD === '1';
 const BIG_FRAME = process.env.FAKE_ACP_BIG_FRAME === '1';
 const IGNORE_MODE_PIN = process.env.FAKE_ACP_IGNORE_MODE_PIN === '1';
@@ -716,6 +719,19 @@ async function toolFlow({ alwaysFail }) {
   const title = `${TOOL}: ${toolSummary(input)}`;
   const options = offeredOptions();
 
+  if (BEFORE_ASK_STATUS) {
+    notifyUpdate({
+      sessionUpdate: 'tool_call',
+      toolCallId,
+      title,
+      kind: toolKind(TOOL),
+      status: BEFORE_ASK_STATUS,
+      content: [],
+      locations: [],
+      rawInput: input,
+    });
+  }
+
   await new Promise((answered) => {
     let settled = false;
     const answer = (result) => {
@@ -762,7 +778,7 @@ async function toolFlow({ alwaysFail }) {
     const allowed = typeof kind === 'string' && kind.startsWith('allow');
 
     // The tool_call card follows the answered request (the probed order:
-    // the ask precedes every tool_call for its id).
+    // the ask precedes execution unless BEFORE_ASK_STATUS overrides it).
     notifyUpdate({
       sessionUpdate: 'tool_call',
       toolCallId,

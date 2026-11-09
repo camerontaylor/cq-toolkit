@@ -79,14 +79,14 @@
 // THE NEVER-ASKS TRIWIRE (§2.1): the spec makes asking the AGENT's
 // decision, so a protocol-legal vendor that executes tools WITHOUT asking
 // is possible. The driver OBSERVES the tool_call stream: a tool_call (or
-// tool_call_update) whose toolCallId was NEVER preceded by a
+// tool_call_update) reaching in_progress, completed or failed BEFORE a
 // session/request_permission for the same id is recorded as evidence of
 // UNGATED EXECUTION and the verdict is 'error' — fail loud, because a
 // policy that cannot be enforced is not silently soft. (Evaluation happens
-// AT SETTLE, FIRST-WRITE-WINS per id: a tool_call that arrived BEFORE any
-// gate for its id is the bypass evidence — a gate firing only afterward
-// never reclassifies it — while an id whose gate fired FIRST stays gated,
-// whatever arrives later.)
+// AT SETTLE, FIRST-WRITE-WINS per id: a pending announcement leaves the
+// slot free; execution reported BEFORE any gate is bypass evidence — a
+// gate firing only afterward never reclassifies it — while an id whose
+// gate fired FIRST stays gated, whatever arrives later.)
 //
 // USAGE (the step-2-corrected fold): ONLY the PromptResponse.usage folds —
 // `usage_update` frames are context-window telemetry and are dropped
@@ -164,10 +164,11 @@
 //     'tool' message per IN-POLICY tool execution (an allow-answered id
 //     that reached a terminal status — { input, ok, output } plain JSON);
 //     the assistant transcript text (when any); narration + stderr under
-//     toolName 'acp-narration'. Denied-at-the-answer and UNGATED tool
-//     activity is narration-only: the record reflects the governed
-//     surface. Persist errors after dispatch are swallowed: the honest
-//     verdict outranks the record.
+//     toolName 'acp-narration'. Ids denied at the answer and ids without
+//     an allow answer are narration-only. A later allow answer permits terminal-result
+//     persistence even if execution preceded permission; the never-asks
+//     error remains latched. Persist errors after dispatch are swallowed:
+//     the honest verdict outranks the record.
 //
 // I8 SEAM — the driver owns NO wall clock. The run's ONLY cancellation
 // SOURCE is `RunOptions.signal` (seam v2, ADR-0002 §2.1) — the caller
@@ -2180,9 +2181,11 @@ function sessionIdOf(params: unknown): string | undefined {
  * Post-settle persistence (OUR vocabulary, in order): the ACP-session
  * sidecar (when newly observed — the NEXT run's session/load handle), ONE
  * role 'tool' message per IN-POLICY tool execution (an allow-answered id
- * that reached a terminal status; { input, ok, output } plain JSON —
- * denied-at-the-answer and UNGATED activity stays narration-only, per the
- * header's governed-surface rule), the assistant transcript (when any),
+ * that reached a terminal status; { input, ok, output } plain JSON).
+ * Ids denied at the answer and ids without an allow answer stay
+ * narration-only; a later allow answer permits persistence without
+ * clearing never-asks evidence.
+ * Next comes the assistant transcript (when any),
  * and narration + stderr diagnostics (when any). Never fabricates an
  * assistant turn: a run that produced no text records none.
  */

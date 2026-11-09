@@ -129,11 +129,12 @@ deduped per toolCallId.
 
 **The never-asks tripwire:** the spec makes asking the AGENT's decision,
 so a vendor that executes tools without asking is protocol-legal. The
-driver watches the `tool_call` stream: a tool call whose id was never
-preceded by a `session/request_permission` is recorded as evidence of
-UNGATED EXECUTION (session narration, `cq: 'never-asks'`) and the run
-verdict is **`error`** — a policy that cannot be enforced is never
-silently soft.
+driver watches the `tool_call` stream: a call reaching `in_progress`,
+`completed` or `failed` before a `session/request_permission` for its id
+is recorded as evidence of UNGATED EXECUTION (session narration,
+`cq: 'never-asks'`) and the run verdict is **`error`** — a policy that
+cannot be enforced is never silently soft. A `pending` announcement alone
+is not evidence.
 
 The mirror failure through the answer channel — a DENIED tool that
 nevertheless reports a completed execution (the harness asked, was told

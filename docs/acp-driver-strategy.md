@@ -299,13 +299,19 @@ enforcement on `session/request_permission` ARRIVING — but the spec
 makes asking the AGENT's decision, not a client-enforceable MUST, so a
 protocol-legal vendor that executes tools WITHOUT asking is possible.
 The driver does not assume it away: it OBSERVES the `tool_call` stream
-inside the session/update filter (§1.1 item 4), and a `tool_call`
-arriving with NO preceding permission request for that tool call is
-recorded as evidence of UNGATED EXECUTION and the run verdict is
-`error` — fail loud, because a policy that cannot be enforced is not
-silently soft. That is what keeps the "only gate we own" claim above
-honest: if the gate never fires, the run record says so instead of
-passing a policy-void run as green.
+inside the session/update filter (§1.1 item 4) and tracks each call
+through its permission and EXECUTION states — the announcement alone is
+not a verdict. A `tool_call` reported `pending` is NOT evidence: the
+spec permits a pending call while input is still streaming or approval
+is still pending, and an agent may report the call BEFORE it sends its
+permission request, so treating that report as ungated would fail a run
+the driver actually governs. Only a call that reaches an EXECUTING or
+terminal status (`in_progress`, `completed`, `failed`) with NO preceding
+permission request for its id is recorded as evidence of UNGATED
+EXECUTION and the run verdict is `error` — fail loud, because a policy
+that cannot be enforced is not silently soft. That is what keeps the
+"only gate we own" claim above honest: if the gate never fires, the run
+record says so instead of passing a policy-void run as green.
 
 ### 2.2 `sandboxPolicy` → nothing, and that is the answer, stated plainly
 
