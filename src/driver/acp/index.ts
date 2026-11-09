@@ -164,10 +164,11 @@
 //     'tool' message per IN-POLICY tool execution (an allow-answered id
 //     that reached a terminal status — { input, ok, output } plain JSON);
 //     the assistant transcript text (when any); narration + stderr under
-//     toolName 'acp-narration'. Denied-at-the-answer and UNGATED tool
-//     activity is narration-only: the record reflects the governed
-//     surface. Persist errors after dispatch are swallowed: the honest
-//     verdict outranks the record.
+//     toolName 'acp-narration'. Denied ids and ids without an allow answer
+//     are narration-only. A later allow answer permits terminal-result
+//     persistence even if execution preceded permission; the never-asks
+//     error remains latched. Persist errors after dispatch are swallowed:
+//     the honest verdict outranks the record.
 //
 // I8 SEAM — the driver owns NO wall clock. The run's ONLY cancellation
 // SOURCE is `RunOptions.signal` (seam v2, ADR-0002 §2.1) — the caller
@@ -2163,9 +2164,10 @@ function sessionIdOf(params: unknown): string | undefined {
  * Post-settle persistence (OUR vocabulary, in order): the ACP-session
  * sidecar (when newly observed — the NEXT run's session/load handle), ONE
  * role 'tool' message per IN-POLICY tool execution (an allow-answered id
- * that reached a terminal status; { input, ok, output } plain JSON —
- * denied-at-the-answer and UNGATED activity stays narration-only, per the
- * header's governed-surface rule), the assistant transcript (when any),
+ * that reached a terminal status; { input, ok, output } plain JSON).
+ * Denied ids and ids without an allow answer stay narration-only; a later
+ * allow answer permits persistence without clearing never-asks evidence.
+ * Next comes the assistant transcript (when any),
  * and narration + stderr diagnostics (when any). Never fabricates an
  * assistant turn: a run that produced no text records none.
  */
