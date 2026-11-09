@@ -318,6 +318,45 @@ describe('safeArgs — the I3 guard, one test per forbidden shape', () => {
     ]);
   });
 
+  test('round-4: a glob push refspec is refused — git EXPANDS it at push time', () => {
+    // `refs/heads/*:refs/heads/*` IS an explicit src:dst, and its literal
+    // destination never equals the protected branch — yet the push updates
+    // it. No glob metacharacter may ride a push refspec.
+    expect(() => safeArgs(['push', 'origin', 'refs/heads/*:refs/heads/*'])).toThrow(
+      /contains a glob/,
+    );
+    expect(() => safeArgs(['push', 'origin', 'feat:refs/heads/*'])).toThrow(UnsafeMergeArgsError);
+    expect(() => safeArgs(['push', 'origin', 'refs/heads/*:refs/heads/main'])).toThrow(
+      UnsafeMergeArgsError,
+    );
+    expect(() => safeArgs(['push', 'origin', 'feat:refs/heads/?ain'])).toThrow(
+      UnsafeMergeArgsError,
+    );
+    expect(() => safeArgs(['push', 'origin', 'feat:refs/heads/[m]ain'])).toThrow(
+      UnsafeMergeArgsError,
+    );
+    // The glob-free explicit push stays legal.
+    expect(safeArgs(['push', 'origin', 'feat:refs/heads/feat'])).toEqual([
+      'push',
+      'origin',
+      'feat:refs/heads/feat',
+    ]);
+  });
+
+  test('round-4: the heads/<branch> partial-name alias is the protected branch too', () => {
+    expect(() => safeArgs(['push', 'origin', 'feat:heads/main'])).toThrow(UnsafeMergeArgsError);
+    expect(() => safeArgs(['push', 'origin', 'heads/main'])).toThrow(UnsafeMergeArgsError);
+    expect(() =>
+      safeArgs(['push', 'origin', 'feat:heads/deliver'], { protectedBranch: 'deliver' }),
+    ).toThrow(UnsafeMergeArgsError);
+    // An unrelated branch under the alias spelling stays legal.
+    expect(safeArgs(['push', 'origin', 'feat:heads/feat'])).toEqual([
+      'push',
+      'origin',
+      'feat:heads/feat',
+    ]);
+  });
+
   test('round-3: worktree list/remove are flag-free — --force is refused', () => {
     expect(() => safeArgs(['worktree', 'remove', '--force', '/wt/pr-7'])).toThrow(
       /flags are not part of the documented worktree remove shape/,

@@ -71,16 +71,27 @@ export const DEFAULT_PROTECTED_BRANCH = 'main';
 
 /** Options for the I3 guard's configurable side. */
 export interface SafeArgsOpts {
-  /** The branch pushes may never land on, under either spelling; default
-   * DEFAULT_PROTECTED_BRANCH ('main'). */
+  /** The branch pushes may never land on, under any spelling git accepts
+   * (bare name, `refs/heads/<branch>`, or the `heads/<branch>` alias);
+   * default DEFAULT_PROTECTED_BRANCH ('main'). */
   protectedBranch?: string;
 }
 
-/** True when `ref` is the protected branch under EITHER spelling — the bare
- * branch name or its `refs/heads/<branch>` form (the two shapes a push
- * refspec destination takes). */
+/** True when `ref` is the protected branch under ANY spelling git accepts —
+ * the bare branch name, its fully-qualified `refs/heads/<branch>` form, or the
+ * partial-name alias `heads/<branch>` (git resolves the alias to the same
+ * ref, so string equality on the other two alone leaves a bypass). */
 const isProtectedRef = (ref: string, protectedBranch: string): boolean =>
-  ref === protectedBranch || ref === `refs/heads/${protectedBranch}`;
+  ref === protectedBranch ||
+  ref === `refs/heads/${protectedBranch}` ||
+  ref === `heads/${protectedBranch}`;
+
+/** True when a refspec carries a glob metacharacter. Git EXPANDS a wildcard
+ * push refspec at push time, so a string-equality destination check cannot
+ * see where it lands: `refs/heads/*:refs/heads/*` updates the protected
+ * branch like any other. */
+const hasGlob = (refspec: string): boolean =>
+  refspec.includes('*') || refspec.includes('?') || refspec.includes('[');
 
 /**
  * THE I3 GUARD — AN ALLOWLIST (round 2): only the argv shapes this family
@@ -104,8 +115,12 @@ const isProtectedRef = (ref: string, protectedBranch: string): boolean =>
  *       remote branch — refused), no '+' force marker (round 2 — I3
  *       forbids force, period), NO flags anywhere in the tail (round 3:
  *       the documented shape carries none, so `push origin --force
- *       feat:x` cannot ride a discarded-flag blind spot), and the
- *       destination must not be the protected branch
+ *       feat:x` cannot ride a discarded-flag blind spot), NO glob
+ *       metacharacter anywhere in the refspec (round 4: git EXPANDS a
+ *       wildcard refspec at push time, so `refs/heads/*:refs/heads/*`
+ *       reaches the protected branch while its literal destination does
+ *       not name it), and the destination must not be the protected
+ *       branch
  *   gh pr merge <n> --merge [--match-head-commit <sha>]  — the ONLY merge
  *       method (I3); the head-commit pin is allowed only as a 40-hex sha
  *       (review-debt #186)
@@ -113,7 +128,8 @@ const isProtectedRef = (ref: string, protectedBranch: string): boolean =>
  *   gh pr view <n> --json baseRefName         — the base-ref read
  *       (review-debt #193; the read-only forge-metadata probe)
  * opts.protectedBranch (default 'main') names the branch pushes may never
- * land on, under either spelling.
+ * land on, under any spelling git accepts (bare name, `refs/heads/<branch>`,
+ * or the `heads/<branch>` partial-name alias).
  */
 export function safeArgs(args: readonly string[], opts: SafeArgsOpts = {}): readonly string[] {
   const protectedBranch = opts.protectedBranch ?? DEFAULT_PROTECTED_BRANCH;
@@ -190,6 +206,16 @@ export function safeArgs(args: readonly string[], opts: SafeArgsOpts = {}): read
       // choose the destination — possibly the protected branch.
       if (tail.length < 2) throw unknown();
       for (const refspec of tail.slice(1)) {
+        if (hasGlob(refspec)) {
+          // Glob bypass, closed (round 4): git EXPANDS a wildcard refspec at
+          // push time, so `refs/heads/*:refs/heads/*` is an explicit src:dst
+          // whose literal destination never equals the protected branch —
+          // yet the push updates it. No glob may ride a push refspec.
+          throw new UnsafeMergeArgsError(
+            args,
+            `push refspec ${JSON.stringify(refspec)} contains a glob — wildcard pushes can reach the protected branch`,
+          );
+        }
         if (refspec.startsWith('+')) {
           // Force-marker bypass, closed (round 2): a '+'-marked PUSH
           // refspec is a force-push — I3 forbids force outright, whatever
