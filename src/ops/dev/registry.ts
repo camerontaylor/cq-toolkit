@@ -229,7 +229,7 @@ export const registry: OpRegistryEntry[] = [
     // transport input carries no repoRoot); the cycle branch binds the
     // subprocess effects and the two-layer secret scanner from the
     // dispatched repoRoot.
-    importer: () =>
+    importer: (wiring) =>
       Promise.all([
         import('./review.js'),
         import('./review-transport.js'),
@@ -283,7 +283,15 @@ export const registry: OpRegistryEntry[] = [
                 configuredReviewers = policy.reviewers;
               }
             }
-            const drivers = driverFactory.createDriverFactory();
+            // Dispatch wiring (PR #238 review P2): the host's alias-notice
+            // sink rides the factory config so `--json` keeps stderr EMPTY;
+            // absent (every library caller), the library default — one
+            // stderr line — is unchanged.
+            const drivers = driverFactory.createDriverFactory(
+              wiring?.onDeprecatedAlias === undefined
+                ? {}
+                : { onDeprecatedAlias: wiring.onDeprecatedAlias },
+            );
             return m.makeDevReview({
               effects: dev,
               scanSecrets,
@@ -334,15 +342,16 @@ export const registry: OpRegistryEntry[] = [
     // Every construction is inert (closure-only; processes spawn only when
     // an effect is CALLED), so resolving the entry never touches env, the
     // network, or the filesystem.
-    importer: () =>
+    importer: (wiring) =>
       Promise.all([
         import('./cycle.js'),
         import('./effects.js'),
         import('../../adapters/forge-github/ghEffects.js'),
         import('../dev/denylist.js'),
         import('node:fs/promises'),
+        import('../../driver/factory.js'),
       ]).then(
-        ([m, effects, ghEffects, denylist, fs]) =>
+        ([m, effects, ghEffects, denylist, fs, driverFactory]) =>
           (async (input: DevCycleCompositionInput) => {
             const dev = effects.makeSubprocessDevEffects(input.repoRoot);
             // The secret scanner a check leg binds: the SAME two-layer
@@ -365,6 +374,16 @@ export const registry: OpRegistryEntry[] = [
               .catch(() => false);
             return m.makeDevCycle({
               effects: dev,
+              // Dispatch wiring (PR #238 review P2): the cycle's review and
+              // address legs resolve roles through THIS factory, so the
+              // host's alias-notice sink rides it — `--json` keeps stderr
+              // EMPTY; absent (every library caller), the library default —
+              // one stderr line — is unchanged.
+              drivers: driverFactory.createDriverFactory(
+                wiring?.onDeprecatedAlias === undefined
+                  ? {}
+                  : { onDeprecatedAlias: wiring.onDeprecatedAlias },
+              ),
               gh: ghEffects.makeSubprocessPrEffects(input.repoRoot),
               ...(scanSecrets === undefined ? {} : { scanSecrets }),
               effectsFor: (root: string) => effects.makeSubprocessDevEffects(root),
