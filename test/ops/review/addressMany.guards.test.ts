@@ -8,6 +8,30 @@ import { expect, test, vi } from 'vitest';
 import { makeReviewAddressMany } from '../../../src/ops/review/addressMany.js';
 import { gh, head, input, metadata, report } from './addressMany.helpers.js';
 
+test('base movement during clone refuses dispatch', async () => {
+  let moved = false;
+  const read = async (args: string[]) =>
+    args[0] === 'repo'
+      ? gh(args)
+      : {
+          code: 0,
+          stderr: '',
+          stdout: JSON.stringify({ ...metadata(1), base: { ref: moved ? 'other' : 'release' } }),
+        };
+  const address = vi.fn();
+  const result = await makeReviewAddressMany({
+    coordinationRoot: '/unused-test-coordination',
+    gh: read,
+    address,
+    isolate: async (root) => {
+      moved = true;
+      return root;
+    },
+  })({ ...input, pulls: [1] });
+  expect(result.status).toBe('needs-human');
+  expect(address).not.toHaveBeenCalled();
+});
+
 test('changed head before dispatch refuses and never invokes the address engine', async () => {
   let calls = 0;
   const changingGh = async (args: string[]) => ({
