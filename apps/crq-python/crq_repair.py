@@ -390,7 +390,8 @@ def process(config, job, wt):
                 from crq_repair.triage import missing_evidence
                 if (judged.get('stop') == 'ok' and judged.get('verdict') == 'unsure'
                         and missing_evidence(judged.get('reason')) and rung < 2):
-                    result['evidence'] = judged['reason']
+                    evidence = judged['reason']
+                    result['evidence'] = evidence
                     result['next_rung'] = 2
                     atomic(progress_path, result)
                     rung = 2

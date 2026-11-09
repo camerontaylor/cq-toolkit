@@ -145,8 +145,7 @@ def phase(inbox, repo, tip, judge, transport, at, *, maximum=6, seconds=600, dry
             continue
         escalation = (row['status'] == 'needs-human'
                       and str(prior.get('actor', '')).startswith('crq-triage/')
-                      and not str(prior.get('actor', '')).startswith('crq-triage/escalation/')
-                      and not str(prior.get('evidence', {}).get('reason', '')).startswith('fixer investigation:'))
+                      and not str(prior.get('actor', '')).startswith('crq-triage/escalation/'))
         if row['status'] not in PENDING and not escalation and not (row['status'] == 'confirmed' and row.get('target_current') != tip):
             continue
         if escalation:

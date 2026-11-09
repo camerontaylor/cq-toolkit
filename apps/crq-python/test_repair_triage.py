@@ -37,6 +37,43 @@ class PhaseTest(FindingTest):
         self.assertIn(old, self.out.retained())
         self.assertEqual(self.run_phase()[0]['delivered'], 0)
 
+    def test_failed_investigation_anchor_keeps_bounded_judge_escalation(self):
+        self.inbox.triage(self.fid, self.f.repo, self.t, 'needs-human',
+                          'crq-triage/escalation/old', 'insufficient evidence', AT)
+        self.t = self.f.commit({'a': b'changed\ntwo\n'})
+        first, _, judge = self.run_phase()
+        judge.assert_not_called()
+        self.assertEqual(first['counts'], {'needs-human': 1})
+        result, _, judge = self.run_phase({'stop': 'ok', 'verdict': 'valid', 'reason': 'verified',
+            'current_path': 'a', 'current_lines': [[1, 1]], 'quoted_text': 'changed'})
+        judge.assert_called_once()
+        self.assertEqual(result['delivered'], 1)
+        self.assertEqual(self.run_phase()[0]['delivered'], 0)
+
+    def add_pending_candidate(self):
+        import copy
+        path = self.inbox.root / 'triage' / (self.fid + '.json')
+        row = copy.deepcopy(ledger.loads(path.read_bytes()))
+        row['finding'].update(id='f' * 64, title='Second distinct finding', severity='minor')
+        row.update(status='untriaged', previous_event_id=None, canonical_id='f' * 64)
+        ledger.atomic(path.parent / ('f' * 64 + '.json'), ledger.canonical(row))
+
+    def test_legacy_investigation_admission_consumes_maximum(self):
+        self.inbox.triage(self.fid, self.f.repo, self.t, 'needs-human',
+                          'crq-triage/judge', 'insufficient evidence', AT)
+        self.add_pending_candidate()
+        result, _, judge = self.run_phase(maximum=1)
+        judge.assert_not_called()
+        self.assertEqual(result['delivered'], 1)
+
+    def test_fresh_investigation_judgments_are_counted_once(self):
+        self.add_pending_candidate()
+        result, _, judge = self.run_phase({'stop': 'ok', 'verdict': 'unsure',
+                                         'reason': 'missing evidence'}, maximum=2)
+        self.assertEqual(judge.call_count, 2)
+        self.assertEqual(result['judged'], 2)
+        self.assertEqual(result['delivered'], 2)
+
     def test_real_delivery_and_replay_are_idempotent(self):
         self.assertEqual(self.value['payload']['findings'][0]['severity'], 'major')
         result, queue, _ = self.run_phase()

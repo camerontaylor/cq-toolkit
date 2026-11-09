@@ -623,6 +623,23 @@ class RepairDrainTest(unittest.TestCase):
         self.assertEqual(dispatch.call_count, 3)
         self.assertTrue(dispatch.call_args_list[1].kwargs['judge'])
 
+    def test_evidence_short_judge_rationale_reaches_a2(self):
+        job_id = 'crq-run1-F1'
+        self.job(job_id, 'pr1-merged', 'run1', 'src/kept.ts', severity='critical')
+        job = bounded.drain_job(self.root, self.config, self.queue, job_id)[1]
+        wt = self.worktree('crq-repair-pr1-merged-' + job_id)
+        report = {'stop': 'ok', 'changed': False, 'disposition': 'unchanged_with_reason',
+                  'summary': 'No defect', 'evidence': [{'path': 'src/kept.ts', 'line': 1}]}
+        reason = 'missing source evidence for the consumer'
+        observed = []
+        def dispatch(*args, **kwargs):
+            observed.append(args[2]['mechanical_evidence'])
+            return {'stop': 'ok', 'verdict': 'unsure', 'reason': reason} if kwargs.get('judge') else report
+        with mock.patch.object(service, 'blocked', return_value=False), \
+             mock.patch.object(service, 'dispatch', side_effect=dispatch):
+            service.process(self.config, job, wt)
+        self.assertEqual(observed, ['', '', reason])
+
     def test_unchanged_evidence_projects_to_dismissed(self):
         c = SimpleNamespace(iso=lambda: 'now')
         evidence = [{'path': 'src/kept.ts', 'line': 1, 'target': self.pin, 'quoted_text': 'one'}]
