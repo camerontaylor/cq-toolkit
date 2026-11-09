@@ -93,4 +93,68 @@ ctl is-enabled probe.timer
 ctl is-active probe.timer && { echo 'FAIL timer became active'; exit 1; }
 ctl start probe.service
 printf 'PASS: direct/dependency mask, in-flight stop, repeated restoration, mixed activation\n'
-printf 'NOT TESTED: queued start race, crash boundaries, manager restart, reboot, power loss\n'
+printf 'Initial primitive restoration checks complete\n'
+# A queued target waits behind a synthetic oneshot ordering dependency.
+cat > "$dir/probe-blocker.service" <<'UNIT'
+[Service]
+Type=oneshot
+ExecStart=/bin/sleep 12
+UNIT
+mkdir -p "$dir/probe.service.d"
+cat > "$dir/probe.service.d/queue.conf" <<'UNIT'
+[Unit]
+Requires=probe-blocker.service
+After=probe-blocker.service
+UNIT
+chown -R "$probe_user:$probe_user" "$dir/probe.service.d" "$dir/probe-blocker.service"
+ctl daemon-reload
+ctl start --no-block probe.service
+sleep 1
+queued=$(ctl show probe.service -p Job --value)
+test -n "$queued" || { echo 'FAIL target job was not queued'; exit 1; }
+echo "QUEUED before mask: $queued"
+mask
+ctl show probe.service -p LoadState -p ActiveState -p Job
+ctl stop probe.service probe-blocker.service
+ctl show probe.service -p LoadState -p ActiveState -p Job
+restore
+mv "$dir/probe.service.d/queue.conf" "$probe_home/state/queue.conf"
+ctl daemon-reload
+# Concurrent start attempts during masking: report count; then assert fence after reload.
+for _ in {1..15}; do ctl start --no-block probe.service >/dev/null 2>&1 || true; done &
+racer=$!
+mask
+wait "$racer"
+ctl stop probe.service
+before=$(wc -l < "$probe_home/state/runs")
+for _ in {1..5}; do
+  if ctl start --no-block probe.service; then echo 'FAIL masked race follow-up accepted'; exit 1; fi
+done
+test "$(wc -l < "$probe_home/state/runs")" = "$before"
+echo 'PASS race followed by masked rejection and drain'
+restore
+# Recover twice after real SIGKILL at each durable transition.
+for boundary in intent mask reload drain restore unmask; do
+  set +e
+  python3 scripts/systemd-mask-crash-probe.py "$probe_home" "$probe_user" "$uid" "$boundary"
+  result=$?
+  set -e
+  test "$result" -eq 137 || { echo "FAIL crash $boundary exit $result"; exit 1; }
+  for _ in 1 2; do
+    python3 scripts/systemd-mask-crash-probe.py "$probe_home" "$probe_user" "$uid" recover
+    cmp "$probe_home/state/original" "$dir/probe.service"
+    ctl is-active probe.path
+    ctl is-enabled probe.timer
+    if ctl is-active --quiet probe.timer; then echo 'FAIL timer active'; exit 1; fi
+  done
+  echo "PASS SIGKILL recovery $boundary"
+done
+# Restart the disposable user's manager while masked, not the VM.
+mask
+systemctl restart "user@$uid.service"
+for _ in {1..30}; do ctl show-environment >/dev/null 2>&1 && break; sleep 1; done
+ctl show probe.service -p LoadState
+if ctl start probe.service; then echo 'FAIL mask after manager restart'; exit 1; fi
+restore
+ctl start probe.service
+echo 'PASS user-manager restart with persistent mask; NOT a machine reboot'
