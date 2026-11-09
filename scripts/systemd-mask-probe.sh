@@ -113,9 +113,27 @@ sleep 1
 queued=$(ctl show probe.service -p Job --value)
 test -n "$queued" || { echo 'FAIL target job was not queued'; exit 1; }
 echo "QUEUED before mask: $queued"
+before=$(wc -l < "$probe_home/state/runs")
 mask
 ctl show probe.service -p LoadState -p ActiveState -p Job
+sleep 14
+echo "RELEASE without stop: runs before=$before after=$(wc -l < "$probe_home/state/runs")"
+ctl show probe.service -p LoadState -p ActiveState -p Job -p Result
 ctl stop probe.service probe-blocker.service
+restore
+ctl reset-failed probe.service probe-blocker.service
+ctl start --no-block probe.service
+sleep 1
+queued=$(ctl show probe.service -p Job --value)
+test -n "$queued" || { echo 'FAIL second target job was not queued'; exit 1; }
+before=$(wc -l < "$probe_home/state/runs")
+mask
+ctl stop probe.service
+ctl show probe.service -p LoadState -p ActiveState -p Job
+sleep 14
+test "$(wc -l < "$probe_home/state/runs")" = "$before" || { echo 'FAIL drained job ran'; exit 1; }
+echo 'PASS stop queued target then allow blocker to complete: no target run'
+ctl stop probe-blocker.service
 ctl show probe.service -p LoadState -p ActiveState -p Job
 restore
 mv "$dir/probe.service.d/queue.conf" "$probe_home/state/queue.conf"
@@ -151,7 +169,15 @@ for boundary in intent mask reload drain restore unmask; do
 done
 # Restart the disposable user's manager while masked, not the VM.
 mask
-systemctl restart "user@$uid.service"
+if ! systemctl restart "user@$uid.service"; then
+  echo 'RESTART DIAGNOSTICS'
+  systemctl status "user@$uid.service" --no-pager -l || true
+  systemctl show "user@$uid.service" -p ActiveState -p SubState -p Result -p TimeoutStopUSec -p ControlGroup -p MainPID || true
+  journalctl -u "user@$uid.service" --no-pager -n 100 || true
+  ps -u "$probe_user" -o pid,ppid,state,args || true
+  ls -la "/run/user/$uid" "/run/user/$uid/bus" || true
+  exit 1
+fi
 for _ in {1..30}; do ctl show-environment >/dev/null 2>&1 && break; sleep 1; done
 ctl show probe.service -p LoadState
 if ctl start probe.service; then echo 'FAIL mask after manager restart'; exit 1; fi
