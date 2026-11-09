@@ -160,7 +160,7 @@ def phase(inbox, repo, tip, judge, transport, at, *, maximum=6, seconds=600, dry
         for path in sorted((inbox.root / 'triage').glob('*.json')):
             row = ledger.loads(path.read_bytes())
             if (row['status'] == 'confirmed' and row.get('target_current') == tip
-                    and row['finding']['severity'] in ('critical', 'major')):
+                    and row['finding']['severity'] in ('critical', 'major', 'minor')):
                 try:
                     inbox.deliver(row['finding']['id'], transport, at); delivered += 1
                 except (RuntimeError, OSError):

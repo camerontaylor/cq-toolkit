@@ -10,6 +10,7 @@ import finding_delivery as delivery
 import review_ledger as ledger
 from crq_repair.triage import phase
 from test_finding_delivery import FindingTest, AT
+from test_review_ledger import rehash
 
 
 class PhaseTest(FindingTest):
@@ -22,12 +23,80 @@ class PhaseTest(FindingTest):
         return result, queue, judge
 
     def test_real_delivery_and_replay_are_idempotent(self):
+        self.assertEqual(self.value['payload']['findings'][0]['severity'], 'major')
         result, queue, _ = self.run_phase()
         self.assertEqual(result['delivered'], 1)
         self.assertEqual(len(queue['items']), 1)
         job = next((self.root / 'state/repair/inbox').glob('*.json'))
         self.assertEqual(ledger.loads(job.read_bytes())['canonical_finding_id'], self.fid)
         self.assertEqual(self.run_phase()[0]['delivered'], 0)
+
+    def use_minor_finding(self):
+        finding = delivery.normalize('crq-runner-app', 'minor-run', {
+            'severity': 'minor', 'path': 'a', 'blob': self.f.repo.entries(self.t)['a']['blob'],
+            'intervals': [[1, 1]], 'title': 'Minor issue', 'body': 'Details'})
+        self.value['payload']['findings'] = [finding]; rehash(self.value)
+        self.fid = finding['id']
+        self.out = ledger.Outbox(self.root / 'minor-outbox', self.f.store)
+        self.inbox = delivery.Inbox(self.root / 'state/backfill/findings', self.out)
+        self.inbox.ingest(self.value)
+
+    def test_already_confirmed_minor_delivers_without_rejudgment(self):
+        self.use_minor_finding()
+        self.inbox.triage(self.fid, self.f.repo, self.t, 'confirmed', 'judge', 'valid', AT)
+        result, queue, judge = self.run_phase(maximum=0)
+        judge.assert_not_called()
+        self.assertEqual(result['delivered'], 1)
+        self.assertEqual(len(queue['items']), 1)
+        job = next((self.root / 'state/repair/inbox').glob('*.json'))
+        self.assertEqual(ledger.loads(job.read_bytes())['canonical_finding_id'], self.fid)
+        self.f.repo.git('update-ref', 'refs/remotes/origin/main', self.t)
+        config = {'clone': str(self.f.repo.root), 'repair': {'max_rounds_per_pin': 2}}
+        self.assertEqual(drain_job(self.root, config, queue, job.stem)[0], 'run')
+        self.assertEqual(self.run_phase(maximum=0)[0]['delivered'], 0)
+        self.inbox.triage(self.fid, self.f.repo, self.t, 'dismissed', 'operator', 'invalid', AT)
+        self.assertEqual(drain_job(self.root, config, queue, job.stem)[0], 'skip')
+
+    def test_unconfirmed_minor_does_not_deliver(self):
+        self.use_minor_finding()
+        result, queue, judge = self.run_phase(maximum=0)
+        judge.assert_not_called()
+        self.assertEqual(result['delivered'], 0)
+        self.assertEqual(queue['items'], [])
+
+    def test_newly_confirmed_minor_delivers(self):
+        self.use_minor_finding()
+        result, queue, judge = self.run_phase()
+        judge.assert_called_once()
+        self.assertEqual(result['counts'], {'confirmed': 1})
+        self.assertEqual(result['delivered'], 1)
+        self.assertEqual(len(queue['items']), 1)
+
+    def test_delivered_minor_can_use_existing_prepared_selector(self):
+        import subprocess
+        from crq_repair.bounded import identity, select_job
+        self.use_minor_finding()
+        _, queue, _ = self.run_phase()
+        origin = next((self.root / 'state/repair/inbox').glob('*.json')).stem
+        self.f.repo.git('update-ref', 'refs/remotes/origin/main', self.t)
+        job = ledger.loads((self.root / 'state/repair/inbox' / (origin + '.json')).read_bytes())
+        evidence = {'source_sha': self.t, 'finding_sha256': identity(job['finding']),
+                    'source_blob_sha': self.f.repo.entries(self.t)['a']['blob'],
+                    'verdict': 'still-valid', 'reviewer': 'fixture', 'reason': 'Verified pinned source'}
+        config = {'clone': str(self.f.repo.root), 'repair': {'max_rounds_per_pin': 2}}
+        c = SimpleNamespace(ROOT=self.root, STATE=self.root / 'state', CONFIG=config,
+                            CLONE=self.f.repo.root, iso=lambda: AT,
+                            run=lambda args, **kw: subprocess.run(args, **kw, capture_output=True, text=True, check=True),
+                            secret_scan_diff=mock.Mock(return_value=(True, {})),
+                            save_queue=lambda q: atomic(self.root / 'state/queue.json', q))
+        with mock.patch.object(repair_tick, 'finding_inbox', return_value=self.inbox):
+            prepared = repair_tick.prepare_current_job(c, queue, origin, self.t, evidence)
+        self.assertEqual(select_job(self.root, config, prepared, self.t, evidence['finding_sha256'])['origin_job'], origin)
+        self.assertEqual(drain_job(self.root, config, queue, prepared)[0], 'run')
+        self.inbox.triage(self.fid, self.f.repo, self.t, 'dismissed', 'operator', 'invalid', AT)
+        with self.assertRaisesRegex(ValueError, 'canonical'):
+            select_job(self.root, config, prepared, self.t, evidence['finding_sha256'])
+
 
     def test_dry_run_preserves_every_byte_and_never_delivers(self):
         before = {str(p): p.read_bytes() for p in self.root.rglob('*.json')}
