@@ -385,6 +385,8 @@ describe('distIsFresh (the runner skips the build only when this holds)', () => 
     for (const file of inputs) put(file, 1_000);
     for (const file of outputs) put(file, 2_000);
     copyFileSync(lib, join(root, 'scripts/ratchet-lib.mjs'));
+    mkdirSync(join(root, 'scripts/lib'), { recursive: true });
+    copyFileSync(join(dirname(lib), 'lib/build-env.mjs'), join(root, 'scripts/lib/build-env.mjs'));
     const mod = (await import(pathToFileURL(join(root, 'scripts/ratchet-lib.mjs')).href)) as {
       distIsFresh: () => boolean;
       invalidateBuild: () => void;

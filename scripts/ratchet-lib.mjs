@@ -29,6 +29,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
+import { scrubbedBuildEnv } from './lib/build-env.mjs';
 
 /** Repo root (this file lives in scripts/). */
 export const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -202,6 +203,7 @@ export function ensureDist() {
   }
   const res = spawnSync('pnpm', ['run', 'build'], {
     cwd: ROOT,
+    env: scrubbedBuildEnv(process.env),
     encoding: 'utf8',
     maxBuffer: MAX_BUFFER,
     shell: SHELL_ON_WINDOWS,
