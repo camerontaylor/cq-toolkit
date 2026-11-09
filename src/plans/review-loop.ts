@@ -782,10 +782,12 @@ type CommitVerificationFailure =
 
 /**
  * Why an unchanged answer's EVIDENCE does not verify, or null when it does:
- * every cited `{path, line}` must name a FILE (a blob, never a directory) in
- * the tree at `tip`, read through the git seam (`git cat-file -t` and `-s`,
- * then `git show <tip>:<path>`), at most MAX_EVIDENCE_BLOB_BYTES long, with
- * at least `line` lines.
+ * at least one citation must be present, and every cited `{path, line}` must
+ * name a FILE (a blob, never a directory) in the tree at `tip`, read through
+ * the git seam (`git cat-file -t` and `-s`, then `git show <tip>:<path>`), at
+ * most MAX_EVIDENCE_BLOB_BYTES long, with at least `line` lines — `line` being
+ * a 1-based integer. This is the LAST gate before a settling reply posts, so
+ * it enforces the citation rule itself rather than trusting the parser's.
  */
 const MAX_EVIDENCE_BLOB_BYTES = 2_000_000;
 
@@ -798,7 +800,17 @@ const evidenceFailure = async (
   if (!COMMIT_SHA_RE.test(tip)) {
     return 'the worktree tip is unreadable';
   }
+  // An unchanged answer must cite something: an empty list skips the loop
+  // below and would post a settling reply with nothing behind it.
+  if (evidence.length === 0) {
+    return 'no evidence cited';
+  }
   for (const { path, line } of evidence) {
+    // 1-based integer only: a fractional, zero, or negative line passes the
+    // `line > lines.length` bound below without proving any line exists.
+    if (!Number.isSafeInteger(line) || line < 1) {
+      return `${path}:${String(line)} is not a valid line (lines are 1-based integers)`;
+    }
     // A FILE, not a tree: `git show <tip>:<dir>` succeeds on a directory too.
     const kind = await git(['-C', worktreePath, 'cat-file', '-t', `${tip}:${path}`]);
     if (kind.code !== 0 || kind.stdout.trim() !== 'blob') {
