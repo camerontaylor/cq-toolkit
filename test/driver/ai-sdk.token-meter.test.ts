@@ -202,7 +202,11 @@ describe('ai-sdk driver token meter', () => {
           calls++;
           return {
             content: [{ type: 'text', text }],
-            finishReason: { unified: finishReason, raw: undefined },
+            // Exercise a nonstandard provider reason as well as the SDK's declared values.
+            finishReason: {
+              unified: finishReason as LanguageModelV4GenerateResult['finishReason']['unified'],
+              raw: undefined,
+            },
             usage: {
               inputTokens: { total: 100, noCache: 100, cacheRead: 0, cacheWrite: 0 },
               outputTokens: { total: 10, text: 10, reasoning: 0 },
