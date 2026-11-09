@@ -2,6 +2,7 @@
 from unittest import mock
 
 import finding_delivery as delivery
+import backfill_report
 import review_ledger as ledger
 from crq_repair import triage
 from test_finding_delivery import FindingTest, AT
@@ -83,3 +84,39 @@ class ContextIsolationTest(FindingTest):
                   for fid in rows}
         self.assertEqual(states[broken], 'untriaged')
         self.assertEqual(states[healthy], 'delivered')
+        status = backfill_report.finding_triage(inbox.root, strict=False, limit=32)
+        self.assertEqual(status['context_failures_count'], 1)
+        failure = status['context_failures'][0]
+        self.assertEqual((failure['id'], failure['status']), (broken, 'untriaged'))
+        self.assertEqual(failure['context_error'], {'type': 'KeyError', 'target': self.t})
+        self.assertNotIn('missing blob', str(failure))
+        retry = triage.phase(inbox, self.f.repo, self.t, lambda *_: report, transport, AT)
+        self.assertEqual(retry['delivered'], 1)
+        self.assertNotIn('context_failures', backfill_report.finding_triage(inbox.root))
+
+    def test_context_diagnostic_respects_newer_disposition(self):
+        row_path = self.inbox.root / 'triage' / (self.fid + '.json')
+        snapshot = ledger.loads(row_path.read_bytes())
+        self.inbox.triage(self.fid, self.f.repo, self.t, 'needs-human', 'operator', 'review', AT)
+        current = row_path.read_bytes()
+        self.assertFalse(self.inbox.context_error(self.fid, snapshot['previous_event_id'],
+                                                  {'type': 'KeyError', 'target': self.t}))
+        self.assertFalse(self.inbox.context_error(self.fid, snapshot['previous_event_id'], None))
+        self.assertEqual(row_path.read_bytes(), current)
+
+    def test_context_error_does_not_consume_escalation(self):
+        self.inbox.triage(self.fid, self.f.repo, self.t, 'needs-human',
+                          'crq-triage/fixture', 'uncertain', AT)
+        path = self.inbox.root / 'triage' / (self.fid + '.json')
+        previous = ledger.loads(path.read_bytes())['previous_event_id']
+        with mock.patch.object(triage, 'context', side_effect=TypeError('private source text')):
+            triage.phase(self.inbox, self.f.repo, self.t, mock.Mock(), mock.Mock(), AT)
+        row = ledger.loads(path.read_bytes())
+        self.assertEqual((row['status'], row['previous_event_id']), ('needs-human', previous))
+        self.assertEqual(row['context_error']['type'], 'TypeError')
+        judge = mock.Mock(return_value={'stop': 'ok', 'verdict': 'invalid', 'reason': 'not valid'})
+        triage.phase(self.inbox, self.f.repo, self.t, judge, mock.Mock(), AT)
+        self.assertTrue(judge.call_args.args[0]['_escalate'])
+        row = ledger.loads(path.read_bytes())
+        self.assertEqual(row['status'], 'dismissed')
+        self.assertNotIn('context_error', row)

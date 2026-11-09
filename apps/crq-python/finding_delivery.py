@@ -46,6 +46,22 @@ class Inbox:
                     continue
                 ledger.atomic(filename, ledger.canonical(value))
 
+    def context_error(self, fid, expected_previous_event_id, error):
+        """Update a diagnostic only if this snapshot still owns the row."""
+        with ledger.locked(self.root / "findings.lock"):
+            filename = self.root / "triage" / (fid + ".json")
+            row = ledger.loads(filename.read_bytes())
+            if row["previous_event_id"] != expected_previous_event_id:
+                return False
+            if error is None:
+                if "context_error" not in row:
+                    return True
+                row.pop("context_error")
+            else:
+                row["context_error"] = error
+            ledger.atomic(filename, ledger.canonical(row))
+            return True
+
     def recovered_anchor(self, row, repo, reviews):
         """Recover only a unique exact occurrence in its verified retained raw run.
 
@@ -143,6 +159,7 @@ class Inbox:
             row.update(status=action, previous_event_id=value["id"], target_current=promoted,
                        mapped_path=name, mapped_intervals=ranges(lines),
                        canonical_id=canonical_id if action == "duplicate" else row["canonical_id"])
+            row.pop("context_error", None)
             if recovered:
                 row["recovered_anchor"] = recovered
             ledger.atomic(filename, ledger.canonical(row))
@@ -302,6 +319,7 @@ class Inbox:
         if row["previous_event_id"] != p["previous_event_id"]:
             return False
         row.update(status=p["action"], previous_event_id=value["id"])
+        row.pop("context_error", None)
         if p["evidence"].get("recovered_anchor"):
             row["recovered_anchor"] = p["evidence"]["recovered_anchor"]
         if p["action"] == "delivered":

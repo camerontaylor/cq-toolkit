@@ -9,7 +9,8 @@ def finding_triage(root, *, strict=True, limit=None):
     """Read atomic rows; status may expose partial counts with explicit errors."""
     counts = collections.Counter()
     needs_human = []
-    human_count = error_count = 0
+    context_failures = []
+    human_count = error_count = context_failure_count = 0
     errors = []
     for filename in sorted((Path(root) / "triage").glob("*.json")):
         try:
@@ -33,11 +34,19 @@ def finding_triage(root, *, strict=True, limit=None):
                 errors.append({"file": filename.name, "error": type(exc).__name__})
             continue
         counts[status] += 1
+        if isinstance(row.get("context_error"), dict):
+            context_failure_count += 1
+            if limit is None or len(context_failures) < limit:
+                context_failures.append({**detail, "status": status, "context_error": row["context_error"]})
         if status == "needs-human":
             human_count += 1
             if limit is None or len(needs_human) < limit:
                 needs_human.append(detail)
     result = {"counts": dict(sorted(counts.items())), "needs_human": needs_human}
+    if context_failure_count:
+        result["context_failures"] = context_failures
+        result["context_failures_count"] = context_failure_count
+        result["context_failures_omitted"] = context_failure_count - len(context_failures)
     if not strict or limit is not None:
         result.update(counts_complete=error_count == 0, error_count=error_count,
                       errors=errors, errors_omitted=error_count - len(errors),
