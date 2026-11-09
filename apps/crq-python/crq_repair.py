@@ -480,7 +480,8 @@ def triage_phase(config, dry_run=False):
             return {'stop': 'ok', 'verdict': 'unsure', 'reason': 'triage context secret scan rejected'}
         bounded_config = copy.deepcopy(config)
         bounded_config['repair']['budget']['wall_clock_min'] = remaining / 60
-        return dispatch(bounded_config, role, job, config['clone'],
+        selected = options.get('escalation_role', config['repair']['roles']['judge_critical']) if row.get('_escalate') else role
+        return dispatch(bounded_config, selected, job, config['clone'],
                         state / 'repair/triage' / row['finding']['id'], judge=True)
     def transport(key, request):
         receipt = []
