@@ -149,7 +149,10 @@ def invoke(config, role, job, wt, directory):
     # session exists. `review.fixItem` does not put the worker sessionId in
     # its JSON value, so the job-local store is the source of truth: it holds
     # one `<sessionId>.jsonl` per session this job's runner created. A
-    # value-level sessionId (if a later runner returns one) wins.
+    # value-level sessionId (if a later runner returns one) wins, and the
+    # current session is taken from `created` only: a deferred rung that
+    # retries in the same directory and then fails before creating a session
+    # must not claim an earlier run's session.
     result = data.get('value')
     if result is None:
         result = data.get('result')
@@ -161,8 +164,8 @@ def invoke(config, role, job, wt, directory):
     try:  # best-effort: the session link never outranks the verdict
         stored = sorted(f.stem for f in sessions_dir.glob('*.jsonl')) if sessions_dir.is_dir() else []
         sid = result.get('sessionId')
-        if not (isinstance(sid, str) and sid) and len(stored) == 1:
-            sid = stored[0]
+        if not (isinstance(sid, str) and sid) and len(created) == 1:
+            sid = Path(next(iter(created))).stem
         _atomic(Path(directory) / 'session.json', {
             'harness': 'cq', 'sessionId': sid if isinstance(sid, str) and sid else None,
             'sessionIds': stored,
