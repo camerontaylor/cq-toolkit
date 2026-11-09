@@ -427,7 +427,14 @@ async function runTaskLoopInner(
         };
         failedModel = resolved.modelSpec;
         if (decision.tier === 'rescue' && priorRound?.failedAttempt !== undefined) {
-          priorFailedFeedback = await failedAttemptFeedback(git, priorRound.failedAttempt);
+          try {
+            priorFailedFeedback = await failedAttemptFeedback(git, priorRound.failedAttempt);
+          } catch {
+            // Prior-attempt feedback is advisory: an unscannable failed attempt
+            // (binary/oversized file, U+FFFD content, oversized patch) must not
+            // consume the rescue reservation without invoking the model.
+            priorFailedFeedback = undefined;
+          }
         }
         const prompt = `${bindings.prompt(unit, worktree)}\nTier: ${decision.tier}; attempt: ${decision.attempt}; reason: ${decision.reason}\nPrevious attempt: ${JSON.stringify(promptRound(priorRound, accepted.failureSet))}${priorFailedFeedback === undefined ? '' : `\nPrior failed-attempt patch (engine-owned feedback; do not repeat rejected changes):\n${priorFailedFeedback.patch}`}\nTask: ${JSON.stringify(task)}\nRelated argv: ${JSON.stringify([related.command, ...related.args])}\nDo not stage or commit. Return outcome (broken-test, code-bug, todo), summary and confidence (0 to 1) as structured output.`;
         const invoke = async (
