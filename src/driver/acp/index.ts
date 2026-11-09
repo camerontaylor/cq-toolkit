@@ -79,14 +79,14 @@
 // THE NEVER-ASKS TRIWIRE (§2.1): the spec makes asking the AGENT's
 // decision, so a protocol-legal vendor that executes tools WITHOUT asking
 // is possible. The driver OBSERVES the tool_call stream: a tool_call (or
-// tool_call_update) whose toolCallId was NEVER preceded by a
+// tool_call_update) reaching in_progress, completed or failed BEFORE a
 // session/request_permission for the same id is recorded as evidence of
 // UNGATED EXECUTION and the verdict is 'error' — fail loud, because a
 // policy that cannot be enforced is not silently soft. (Evaluation happens
-// AT SETTLE, FIRST-WRITE-WINS per id: a tool_call that arrived BEFORE any
-// gate for its id is the bypass evidence — a gate firing only afterward
-// never reclassifies it — while an id whose gate fired FIRST stays gated,
-// whatever arrives later.)
+// AT SETTLE, FIRST-WRITE-WINS per id: a pending announcement leaves the
+// slot free; execution reported BEFORE any gate is bypass evidence — a
+// gate firing only afterward never reclassifies it — while an id whose
+// gate fired FIRST stays gated, whatever arrives later.)
 //
 // USAGE (the step-2-corrected fold): ONLY the PromptResponse.usage folds —
 // `usage_update` frames are context-window telemetry and are dropped
