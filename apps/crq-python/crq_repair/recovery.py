@@ -178,6 +178,7 @@ def recover(root, config, job_id, scan, judge, prepare):
     replacement = prepare(job_id, tip, evidence)
     if replay:
         saved['judgment_binding'] = old_binding
+        saved.pop('reason', None)
     saved.update(binding=binding, state='complete', disposition='retry', replacement_job=replacement)
     atomic(artifact, saved)
     return saved

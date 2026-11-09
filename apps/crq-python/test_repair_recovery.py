@@ -200,7 +200,8 @@ class RecoveryTest(unittest.TestCase):
     def test_cached_unresolved_replays_after_unrelated_tip_advance(self):
         self.retain_old_unresolved()
         artifact = self.root / 'state/repair/crq-job/recovery.json'
-        old_binding = json.loads(artifact.read_text())['binding']
+        old_saved = json.loads(artifact.read_text())
+        old_binding = old_saved['binding']
         result_path = self.root / 'state/repair/crq-job/result.json'
         original = result_path.read_bytes()
         (self.repo / 'unrelated').write_text('new\n')
@@ -212,8 +213,22 @@ class RecoveryTest(unittest.TestCase):
         self.assertEqual(result['disposition'], 'retry')
         self.assertEqual(result['binding']['source_sha'], tip)
         self.assertEqual(result['judgment_binding'], old_binding)
+        self.assertEqual(result['report'], old_saved['report'])
+        self.assertNotIn('reason', result)
         self.assertEqual(result_path.read_bytes(), original)
         self.assertEqual(self.run_recovery(), result)
+        self.judge.assert_called_once()
+        self.prepare.assert_called_once()
+
+    def test_failed_replay_preparation_preserves_refusal_artifact(self):
+        self.retain_old_unresolved()
+        artifact = self.root / 'state/repair/crq-job/recovery.json'
+        before = artifact.read_bytes()
+        self.prepare.side_effect = RuntimeError('preparation failed')
+        with self.assertRaisesRegex(RuntimeError, 'preparation failed'):
+            self.run_recovery()
+        self.assertEqual(artifact.read_bytes(), before)
+        self.assertEqual(json.loads(before)['reason'], 'current anchor could not be verified')
         self.judge.assert_called_once()
         self.prepare.assert_called_once()
 
