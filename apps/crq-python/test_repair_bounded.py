@@ -273,6 +273,7 @@ class BoundedRepairTest(unittest.TestCase):
         report = {'stop': 'ok', 'changed': False, 'summary': 'No change warranted', 'commits': []}
         with mock.patch.object(service, 'ROOT', self.root), \
              mock.patch.object(service, 'git', side_effect=lambda wt, *args: SOURCE if args[0] == 'rev-parse' else ''), \
+             mock.patch.object(service, 'retain'), \
              mock.patch.object(bounded, 'command', return_value=SimpleNamespace(returncode=0, stdout='first\nsecond\n')), \
              mock.patch.object(service.cq, 'invoke', return_value=report) as invoke:
             result = service.process(self.config, job, self.root)

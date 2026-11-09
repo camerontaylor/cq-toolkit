@@ -176,8 +176,9 @@ preparation; the replacement uses a separate worktree. Recovery retains its
 invocation artifact under the original job. An unknown judge outcome is not
 automatically retried; explicit provider deferrals have at most three attempts.
 Owner dispositions and source or evidence changes remain unresolved for
-inspection. Throttled fixers that left edits or commits keep their worktree
-for recovery instead of resetting it for fallback.
+inspection. Every finding uses its own worktree; staged and unstaged patches,
+untracked files and commits are retained per attempt before retry or fallback.
+Legacy shared worktrees need independent attribution before recovery.
 
 Tests and probes are suspended. No worker or mechanical stage runs them.
 Mechanics verify full commit SHAs, strict base ancestry, HEAD membership,

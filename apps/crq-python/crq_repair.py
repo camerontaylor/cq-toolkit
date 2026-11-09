@@ -14,6 +14,7 @@ import time
 from zoneinfo import ZoneInfo
 from crq_repair import atomic, command, git, hack_detector, utc, verify
 from crq_repair.drivers import cq, codex, paseo
+from crq_repair.retain import retain
 from crq_repair.bounded import drain_job, drain_order, require_canonical_delivery, select_job, source_snapshot
 
 ROOT = Path(__file__).resolve().parent
@@ -178,6 +179,7 @@ def dispatch(config, role, job, wt, directory, judge=False):
     baseline = git(wt, 'rev-parse', 'HEAD') if not judge else None
     attempted = False
     seen = set()
+    previous_directory = None
     with correlation(job, judge):
         for candidate in fallback_roles(config, role):
             provider = candidate['model'].split('/', 1)[0]
@@ -192,14 +194,14 @@ def dispatch(config, role, job, wt, directory, judge=False):
             if remaining < 0.001:
                 return {'stop': 'budget', 'summary': 'repair dispatch wall-clock deadline reached'}
             if attempted and not judge:
-                # A throttled fixer may have left valuable edits or commits.
-                # Keep them for recovery instead of resetting for fallback.
-                if git(wt, 'status', '--porcelain') or git(wt, 'rev-parse', 'HEAD') != baseline:
-                    return {'stop': 'error', 'summary': 'throttled fixer left recoverable work'}
+                retain(wt, baseline, previous_directory)
+                git(wt, 'reset', '--hard', baseline)
+                git(wt, 'clean', '-fd')
             attempted = True
             bounded_config = copy.deepcopy(config)
             bounded_config['repair']['budget']['wall_clock_min'] = remaining / 60
-            report = _dispatch(bounded_config, candidate, job, wt, directory / provider, judge)
+            previous_directory = directory / provider
+            report = _dispatch(bounded_config, candidate, job, wt, previous_directory, judge)
             report.update(driver=candidate['driver'], model=candidate['model'])
             if report.get('stop') != 'rate-limit':
                 return report
@@ -251,6 +253,9 @@ def process(config, job, wt):
     if progress_path.exists() and (not result_path.exists() or progress_path.stat().st_mtime_ns > result_path.stat().st_mtime_ns):
         result = json.loads(progress_path.read_text())
         if result.get('dispatch_pending'):
+            saved_wt = Path(result.get('worktree', '')).resolve()
+            if saved_wt == Path(wt).resolve():
+                retain(saved_wt, job['repair_base'], directory / 'interrupted')
             result.update(verdict='FAILED', reason='worker interrupted with unknown outcome; needs human', finished_at=utc())
             result.pop('dispatch_pending', None)
             atomic(result_path, result)
@@ -280,12 +285,18 @@ def process(config, job, wt):
                 if blocked(repair):
                     result['next_rung'] = rung
                     return defer('GLM peak blackout; attempt deferred')
-                if git(wt, 'status', '--porcelain') or git(wt, 'rev-parse', 'HEAD') != base:
-                    raise ValueError('repair worktree contains retained work; recovery required')
+                retain(wt, base, directory / ('before-A' + str(rung)))
                 if rung == 2:
-                    # Escalation gets a fresh worktree, not A0/A1 files or harness state.
-                    git(config['clone'], 'worktree', 'remove', '--force', str(wt))
-                    git(config['clone'], 'worktree', 'add', '--detach', str(wt), base)
+                    # Preserve the previous tree (including ignored files) and
+                    # give escalation a separate fresh checkout.
+                    wt = Path(str(wt) + '-A2')
+                    if wt.exists():
+                        retain(wt, base, directory / 'before-A2-existing')
+                        git(wt, 'reset', '--hard', base)
+                        git(wt, 'clean', '-fd')
+                    else:
+                        git(config['clone'], 'worktree', 'add', '--detach', str(wt), base)
+                    result['worktree'] = str(wt)
                 else:
                     git(wt, 'reset', '--hard', base)
                     git(wt, 'clean', '-fd')
@@ -294,6 +305,7 @@ def process(config, job, wt):
                 report = dispatch(config, role, current, wt, attempt_dir)
                 result.pop('dispatch_pending', None)
                 if report.get('stop') == 'rate-limit':
+                    retain(wt, base, attempt_dir)
                     result['next_rung'] = rung
                     return defer('provider rate limit; attempt deferred', rate_limit=report)
                 attempt = {'rung': 'A' + str(rung), 'role': 'fixer' if rung < 2 else 'fixer_escalation',
@@ -368,17 +380,21 @@ def process(config, job, wt):
                                            'model': role['model'], 'stop': 'error', 'changed': False})
             else:
                 result['attempts'][-1]['mechanical'] = {'failure': evidence, 'tests': 'suspended'}
+            # If capture fails, never advance to a reset that could erase work.
             try:
-                retained = bool(git(wt, 'status', '--porcelain')) or git(wt, 'rev-parse', 'HEAD') != base
-            except Exception:
-                retained = True
-            if retained:
-                result['reason'] = evidence + '; retained work requires recovery'
+                retain(wt, base, attempt_dir)
+            except Exception as capture_error:
+                result['reason'] = 'worktree retention failed: ' + str(capture_error)[:600]
                 break
         result['evidence'] = evidence
         result['next_rung'] = rung + 1
         atomic(progress_path, result)
         rung += 1
+    if result.get('verdict') == 'FAILED':
+        try:
+            retain(wt, base, directory / 'final')
+        except Exception as exc:
+            result['reason'] = 'worktree retention failed: ' + str(exc)[:600]
     result['finished_at'] = utc()
     atomic(result_path, result)
     return result
@@ -576,24 +592,9 @@ def drain(config):
 
 
 def process_item(config, jobs):
-    # One item worktree, serial findings; each successful commit range is pinned
-    # and the next finding starts at its verified predecessor.
-    if len(jobs) > 1 and any(job.get('recovery_worktree') for job in jobs):
-        ordinary = [job for job in jobs if not job.get('recovery_worktree')]
-        groups = ([ordinary] if ordinary else []) + [[job] for job in jobs if job.get('recovery_worktree')]
-        for group in groups:
-            outcome = process_item(config, group)
-            if outcome:
-                return outcome
-        return None
+    # Each finding has its own worktree; successful commits chain by base.
     item = jobs[0]['item']
-    suffix = '-' + jobs[0]['job'] if jobs[0].get('recovery_worktree') else ''
-    wt = Path(config['worktree_root']) / ('crq-repair-' + item + suffix)
     base = jobs[0]['repair_base']
-    if not wt.exists():
-        p = command(['git', 'worktree', 'add', '--detach', str(wt), base], cwd=config['clone'])
-        if p.returncode:
-            raise RuntimeError('repair worktree creation failed')
     jobs.sort(key=finding_order)
     last_run = None
     for job in jobs:
@@ -610,6 +611,11 @@ def process_item(config, jobs):
             base = job['repair_base']
             last_run = job['run']
         job['repair_base'] = base
+        wt = Path(config['worktree_root']) / ('crq-repair-' + item + '-' + job['job'])
+        if not wt.exists():
+            p = command(['git', 'worktree', 'add', '--detach', str(wt), base], cwd=config['clone'])
+            if p.returncode:
+                raise RuntimeError('repair worktree creation failed')
         res = process(config, job, wt)
         if dispatch_paused(config):
             return 'rate-limit'
@@ -691,6 +697,11 @@ def recover_job(config, job_id):
         patch = context['retained_patch']
         if patch and not c.secret_scan_diff(patch, output.with_name('recovery-patch-scan.json'))[0]:
             return False
+        for index, retained in enumerate(context['retained_attempts']):
+            for part, patch in enumerate(retained['patches']):
+                if patch and not c.secret_scan_diff(patch, output.with_name(
+                        'recovery-attempt-' + str(index) + '-' + str(part) + '-scan.json'))[0]:
+                    return False
         contract = context['current_contract']
         if contract['text']:
             path = contract['path']

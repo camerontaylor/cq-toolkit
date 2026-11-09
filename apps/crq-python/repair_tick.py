@@ -301,8 +301,9 @@ def harvest(c, q, item, dry=False):
                         raise ValueError('repair fixed result lacks a valid final attempt rung')
                     wt = Path(result['worktree']).resolve()
                     root = c.WT_ROOT.resolve()
-                    expected_name = 'crq-repair-' + item['id'] + ('-' + job_id if expected.get('recovery_worktree') else '')
-                    if wt.parent != root or wt.name != expected_name:
+                    legacy_name = 'crq-repair-' + item['id']
+                    scoped_name = legacy_name + '-' + job_id
+                    if wt.parent != root or wt.name not in (legacy_name, scoped_name, scoped_name + '-A2'):
                         raise ValueError('repair result worktree outside owned path')
                     if result.get('repair_base') != predecessor:
                         raise ValueError('repair predecessor mismatch')

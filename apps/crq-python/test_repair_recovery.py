@@ -25,7 +25,7 @@ class RecoveryTest(unittest.TestCase):
         self.run_git(self.repo, 'commit', '-qm', 'base')
         self.base = self.run_git(self.repo, 'rev-parse', 'HEAD')
         self.run_git(self.repo, 'update-ref', 'refs/remotes/origin/main', self.base)
-        self.wt = self.root / 'worktrees/crq-repair-item'
+        self.wt = self.root / 'worktrees/crq-repair-item-crq-job'
         self.wt.parent.mkdir()
         self.run_git(self.repo, 'worktree', 'add', '--detach', str(self.wt), self.base)
         (self.wt / 'a.py').write_text('unfinished\n')
@@ -71,6 +71,31 @@ class RecoveryTest(unittest.TestCase):
         self.assertEqual(self.run_recovery()['replacement_job'], 'crq-replacement')
         self.assertFalse((directory / 'result.json').exists())
         self.assertIn('unfinished', (self.wt / 'a.py').read_text())
+
+    def test_a_failed_replacement_is_also_recoverable(self):
+        self.job.update(origin_job='crq-older', recovery_worktree=True)
+        atomic(self.root / 'state/repair/inbox/crq-job.json', self.job)
+        self.assertEqual(self.run_recovery()['replacement_job'], 'crq-replacement')
+        self.prepare.assert_called_once()
+
+    def test_legacy_shared_worktree_is_not_attributed_to_a_job(self):
+        result_path = self.root / 'state/repair/crq-job/result.json'
+        result = json.loads(result_path.read_text())
+        result['worktree'] = str(self.wt.parent / 'crq-repair-item')
+        atomic(result_path, result)
+        with self.assertRaisesRegex(ValueError, 'owned repair worktree'):
+            self.run_recovery()
+        self.judge.assert_not_called()
+
+    def test_recovery_reads_only_own_retained_attempt_after_reset(self):
+        from crq_repair.retain import retain
+        retain(self.wt, self.base, self.root / 'state/repair/crq-job/A0')
+        self.run_git(self.wt, 'reset', '--hard', self.base)
+        self.run_git(self.wt, 'clean', '-fd')
+        self.run_recovery()
+        attempts = self.scan.call_args.args[0]['retained_attempts']
+        self.assertEqual(len(attempts), 1)
+        self.assertIn('+unfinished', attempts[0]['patches'][0])
 
     def test_scan_rejection_never_calls_judge(self):
         self.scan.return_value = False
