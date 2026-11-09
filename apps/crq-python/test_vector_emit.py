@@ -184,8 +184,7 @@ def invoke(source, inputs):
                                        inputs["ranked"], inputs["queue"],
                                        inputs["original"])
     if source == "status_summary.timestamp":
-        parsed = status_summary.timestamp(inputs["value"])
-        return {"epoch": None if parsed is None else int(parsed)}
+        return {"epoch": status_summary.timestamp(inputs["value"])}
     if source == "status_summary.merged_current":
         return status_summary.merged_current(inputs["queue"])
     if source == "status_summary.repos_summary":
@@ -314,6 +313,15 @@ class VectorFileTest(unittest.TestCase):
                     self.assertNotIn(marker, text)
             for match in re.findall(r'"canonical": "([^"]*)"', text):
                 self.assertNotRegex(match, r"\bgh[pousr]_[A-Za-z0-9]{20,}\b")
+
+    def test_fractional_timestamp_vector_keeps_the_fraction(self):
+        document = json.loads((FIXTURE_ROOT / "status-helpers.json").read_text())
+        case = next(row for row in document["cases"] if row["name"] == "fraction-accepted")
+        value = status_summary.timestamp(case["input"]["value"])
+        self.assertIsInstance(value, float)
+        self.assertEqual(value, 1794182400.5)
+        self.assertEqual(case["expect"]["value"], {"epoch": value})
+        self.assertNotEqual(case["expect"]["value"]["epoch"], int(value))
 
     def test_every_recorded_result_replays_against_the_python_source(self):
         for family in FAMILIES:

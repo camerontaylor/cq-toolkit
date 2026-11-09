@@ -11,7 +11,7 @@
       "expect": {
         "ok": true,
         "value": {
-          "epoch": 1794182400
+          "epoch": 1794182400.0
         }
       }
     },
@@ -24,7 +24,7 @@
       "expect": {
         "ok": true,
         "value": {
-          "epoch": 1794182400
+          "epoch": 1794182400.5
         }
       }
     },
@@ -37,7 +37,7 @@
       "expect": {
         "ok": true,
         "value": {
-          "epoch": 1794182400
+          "epoch": 1794182400.0
         }
       }
     },

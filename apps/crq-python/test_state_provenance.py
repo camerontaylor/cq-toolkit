@@ -153,6 +153,11 @@ class ProvenanceExtractorTest(unittest.TestCase):
                 "notes": "TOP SECRET FINDING",
                 "paths": ["/home/alice/private.ts"],
                 "secret": "ghp_" + "a" * 30,
+            }, {
+                "id": "PRIVATE-KIND",
+                "kind": "mystery",
+                "state": "pending",
+                "secret": "ghp_" + "b" * 30,
             }],
             "private_map": {"private-key": "secret-value"},
         }
@@ -192,6 +197,7 @@ class ProvenanceExtractorTest(unittest.TestCase):
             "worktree": "/home/alice/private",
         }))
         (run / "findings.md").write_text("TOP SECRET FINDING\n")
+        (run / "private-artifact.bin").write_text("TOP SECRET\n")
         return {
             "--queue": str(root / "queue.json"),
             "--summary": str(root / "summary.json"),
@@ -223,14 +229,40 @@ class ProvenanceExtractorTest(unittest.TestCase):
 
             projection = json.loads(result.stdout)
             top = projection["queue"]["top_level_keys"]
-            self.assertGreater(top["_unknown_key_count"], 0)
+            self.assertEqual(top["_unknown_key_count"], "1-9")
             self.assertNotIn("private_map", top)
             item = projection["queue"]["item_keys_by_kind"]["open"]
-            self.assertGreater(item["_unknown_key_count"], 0)
+            self.assertEqual(item["_unknown_key_count"], "1-9")
             self.assertNotIn("secret", item)
             self.assertNotIn("private-key", result.stdout)
+            self.assertEqual(projection["queue"]["unknown_kind_count"], "1-9")
+            self.assertNotIn("mystery", result.stdout)
+            self.assertEqual(projection["unknown_run_file_count"], "1-9")
+            self.assertNotIn("private-artifact", result.stdout)
             self.assertEqual(projection["event_type_count_bucket"], "1-9")
             self.assertNotIn("private_event", result.stdout)
+
+    def test_full_log_tails_are_scanned(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            args = self.source_tree(root)
+            events = [json.dumps({"at": "2026-11-09T00:00:00Z",
+                                  "event": "started"}) for _ in range(1000)]
+            events.append(json.dumps({"at": "2026-11-09T00:00:01Z",
+                                      "event": "finished", "verdict": "pass"}))
+            (root / "events.jsonl").write_text("\n".join(events) + "\n")
+            work = [json.dumps({"at": "2026-11-09T00:00:00Z"})
+                    for _ in range(1000)]
+            work.append(json.dumps({"at": "2026-11-09T00:00:01Z",
+                                    "task": "tail"}))
+            (root / "work.jsonl").write_text("\n".join(work) + "\n")
+            result = self.run_extractor(
+                [item for pair in args.items() for item in pair])
+            self.assertEqual(result.returncode, 0, result.stderr)
+            projection = json.loads(result.stdout)
+            self.assertEqual(projection["event_keys"]["verdict"], "str")
+            self.assertEqual(projection["work_keys"]["task"], "str")
+            self.assertEqual(projection["event_type_count_bucket"], "1-9")
 
     def test_projection_is_deterministic_and_checkable(self):
         with tempfile.TemporaryDirectory() as tmp:

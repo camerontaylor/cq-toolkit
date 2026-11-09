@@ -13,14 +13,17 @@ On 2026-11-09 the deployed state was inspected read-only at
 
 - allowlisted schema key names that are present, and their JSON value types;
 - item kinds and code-enum item states;
-- bucketed counts (not exact totals);
+- bucketed counts (not exact totals; exact zero is retained for unknown-key
+  diagnostics, nonzero counts are bucketed);
 - run artifact file names and their key/type shape;
 - a SHA-256 of the structural projection.
 
 It never emits a scalar value. Repository slugs, PR numbers, commit and tree
 IDs, item/run/job IDs, paths, host names, timestamps, finding text, notes,
-credentials and config entries are dropped. Unknown keys are counted, not
+credentials and config entries are dropped. Unknown keys are bucketed, not
 named, so a corrupt or private dynamic key cannot leak through the projection.
+`events.jsonl` and `work.jsonl` are scanned end to end, not sampled, so a key
+that first appears in the tail is still reported.
 `assert_safe` refuses output containing known private markers, and
 `test_state_provenance.py` runs the extractor over a synthetic tree with planted
 private values and asserts none of them survive.
@@ -42,7 +45,7 @@ the pull request.
 
 | path | shape source |
 |---|---|
-| `provenance.json` | emitted by `state_fixture_provenance.py` from the deployed state on 2026-11-09; keys, types, states and buckets only |
+| `provenance.json` | emitted by `state_fixture_provenance.py` from the deployed state on 2026-11-09; keys, types, states and bucketed counts only |
 | `queue.json` | deployed `state/queue.json`: every top-level key, one item of each real kind (author, backfill, coverage, delta, local-review, merged, merged-current, open, promotion, push-current), coverage ledger, merged discovery/reconcile summaries, usage, backfill reservations and admissions |
 | `summary.json` | `~/.local/state/crq/summary.json`: every published summary key, generated from the fixture and filled with fixture values |
 | `heartbeat.json` | `~/.local/state/crq/heartbeat.json` |

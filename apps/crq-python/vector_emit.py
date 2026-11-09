@@ -1156,8 +1156,7 @@ def status_helpers_vectors() -> Dict[str, Any]:
                         ("offset-accepted", "2026-11-09T10:00:00+10:00"),
                         ("none-invalid", None), ("number-invalid", 1)]:
         cases.append(_capture(name, "status_summary.timestamp", {"value": value},
-                              lambda value=value: {"epoch": (None if (parsed := status_summary.timestamp(value)) is None
-                                                              else int(parsed))}))
+                              lambda value=value: {"epoch": status_summary.timestamp(value)}))
 
     merged_cases = {
         "pending-reviewing-blocked": {

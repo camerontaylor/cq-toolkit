@@ -3,10 +3,13 @@
 
 The output is deliberately not a redacted state snapshot. It contains only
 allowlisted schema keys, JSON value types, code-enum item states and bucketed
-counts. No scalar value from the source is written: no repository slug, PR or
-commit identifier, path, host, timestamp, free text, credential or config
-entry. That makes the projection safe to publish and lets the checked-in
-synthetic fixture be validated against the real schema.
+counts. Exact zero is kept for unknown-key diagnostics; nonzero counts are
+bucketed. `events.jsonl` and `work.jsonl` are scanned end to end, never
+sampled, so a key that first appears in the tail is still reported. No scalar
+value from the source is written: no repository slug, PR or commit identifier,
+path, host, timestamp, free text, credential or config entry. That makes the
+projection safe to publish and lets the checked-in synthetic fixture be
+validated against the real schema.
 
 Run it against a deployed state tree, or against a synthetic tree in tests:
 
@@ -38,8 +41,9 @@ QUEUE_TOP_LEVEL = frozenset({
     "archived_tick_runs", "author_requests", "backfill_admission_history_version",
     "backfill_admissions", "backfill_capacity_runs", "backfill_coverage_reconciled",
     "backfill_daily_capacity", "backfill_families", "backfill_finding_backlog",
-    "backfill_history_import", "backfill_last_manifest", "backfill_operator_events",
-    "backfill_ordinary_exhausted", "backfill_reservations", "backfill_scope_failures",
+    "backfill_halt_operation", "backfill_halted", "backfill_history_import",
+    "backfill_last_manifest", "backfill_operator_events", "backfill_ordinary_exhausted",
+    "backfill_publication_error", "backfill_reservations", "backfill_scope_failures",
     "backfill_starts_at_observation", "backfill_state_events",
     "backfill_unsupported_construction", "backfill_usage", "backfill_usage_probe_at",
     "cleanup_backlog", "client_health", "cooldown_until", "coverage", "created_at",
@@ -106,9 +110,13 @@ HEARTBEAT_KEYS = frozenset({"alert_agent_host", "alert_agent_id", "last_tick",
                             "root", "schedule_id", "stale_alarm_min"})
 
 EVENT_KEYS = frozenset({
-    "agent", "at", "base", "cycle", "description", "error", "event", "findings",
-    "from", "head", "item", "label", "outcome", "reason", "reasons", "run",
-    "severity", "sha", "state", "status", "to", "verdict",
+    "acknowledged_at", "agent", "at", "audit_at", "base", "batch", "blocking",
+    "body_only", "cycle", "description", "error", "event", "finding_id",
+    "findings", "from", "gap_min", "head", "inline", "issue", "item", "job",
+    "label", "last_tick", "mode", "notes", "notified", "ordinary_gate",
+    "origin_job", "outcome", "posted_state", "pr", "reason", "reasons", "repo",
+    "request", "review", "reviewed_tip", "run", "severity", "sha", "source_sha",
+    "state", "status", "target", "text", "tip", "to", "verdict", "workflow",
 })
 
 WORK_KEYS = frozenset({"at", "harness", "head", "host", "pr", "repo", "role",
@@ -162,6 +170,20 @@ def bucket(count: int) -> str:
     return "1000+"
 
 
+def unknown_count(count: int) -> Any:
+    """Keep an exact zero diagnostic; bucket every nonzero count."""
+    return 0 if count == 0 else bucket(count)
+
+
+def _types(found: Dict[str, set], unknown: int) -> Dict[str, Any]:
+    result: Dict[str, Any] = {}
+    for key in sorted(found):
+        kinds = sorted(found[key])
+        result[key] = kinds[0] if len(kinds) == 1 else kinds
+    result["_unknown_key_count"] = unknown_count(unknown)
+    return result
+
+
 def key_types(objects: Iterable[Any], allowed: frozenset) -> Dict[str, Any]:
     found: Dict[str, set] = collections.defaultdict(set)
     unknown = 0
@@ -173,12 +195,7 @@ def key_types(objects: Iterable[Any], allowed: frozenset) -> Dict[str, Any]:
                 found[key].add(type_name(item))
             else:
                 unknown += 1
-    result: Dict[str, Any] = {}
-    for key in sorted(found):
-        kinds = sorted(found[key])
-        result[key] = kinds[0] if len(kinds) == 1 else kinds
-    result["_unknown_key_count"] = unknown
-    return result
+    return _types(found, unknown)
 
 
 def read_json(path: str | None) -> Any:
@@ -187,22 +204,32 @@ def read_json(path: str | None) -> Any:
     return json.loads(Path(path).read_text())
 
 
-def read_jsonl(path: str | None, limit: int = 1000) -> List[Any]:
-    if not path:
-        return []
-    rows = []
-    with Path(path).open(errors="replace") as stream:
-        for line in stream:
-            if len(rows) >= limit:
-                break
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                rows.append(json.loads(line))
-            except ValueError:
-                continue
-    return rows
+def scan_jsonl(path: str | None, allowed: frozenset,
+               event_field: str | None = None) -> tuple[Dict[str, Any], set]:
+    """Aggregate key/type shape across the whole log, retaining no values."""
+    found: Dict[str, set] = collections.defaultdict(set)
+    unknown = 0
+    event_types = set()
+    if path:
+        with Path(path).open(errors="replace") as stream:
+            for line in stream:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(row, dict):
+                    continue
+                for key, item in row.items():
+                    if key in allowed:
+                        found[key].add(type_name(item))
+                    else:
+                        unknown += 1
+                if event_field and isinstance(row.get(event_field), str):
+                    event_types.add(row[event_field])
+    return _types(found, unknown), event_types
 
 
 def project(args: argparse.Namespace) -> Dict[str, Any]:
@@ -239,8 +266,8 @@ def project(args: argparse.Namespace) -> Dict[str, Any]:
     summary = read_json(args.summary)
     status = read_json(args.status)
     heartbeat = read_json(args.heartbeat)
-    events = read_jsonl(args.events)
-    work = read_jsonl(args.work)
+    event_keys, event_types = scan_jsonl(args.events, EVENT_KEYS, "event")
+    work_keys, _ = scan_jsonl(args.work, WORK_KEYS)
     cooldowns = read_json(args.cooldowns)
 
     cooldown_shape = None
@@ -274,13 +301,15 @@ def project(args: argparse.Namespace) -> Dict[str, Any]:
         "source": "deployed crq state, read-only schema inspection",
         "policy": (
             "Only allowlisted schema keys, JSON value types, code-enum item states "
-            "and bucketed counts are retained. No scalar value, identifier, path, "
-            "host, timestamp, free text, credential or config entry is written."
+            "and bucketed counts are retained. Exact zero is retained for "
+            "unknown-key diagnostics; nonzero counts are bucketed. No scalar "
+            "value, identifier, path, host, timestamp, free text, credential or "
+            "config entry is written."
         ),
         "queue": {
             "top_level_keys": key_types([queue], QUEUE_TOP_LEVEL),
             "item_kinds": sorted(by_kind),
-            "unknown_kind_count": unknown_kinds,
+            "unknown_kind_count": unknown_count(unknown_kinds),
             "item_states": sorted(all_states),
             "item_keys_by_kind": item_keys,
             "item_states_by_kind": item_states,
@@ -289,13 +318,12 @@ def project(args: argparse.Namespace) -> Dict[str, Any]:
         "summary_keys": key_types([summary], SUMMARY_KEYS) if isinstance(summary, dict) else None,
         "status_keys": key_types([status], STATUS_KEYS) if isinstance(status, dict) else None,
         "heartbeat_keys": key_types([heartbeat], HEARTBEAT_KEYS) if isinstance(heartbeat, dict) else None,
-        "event_keys": key_types(events, EVENT_KEYS),
-        "event_type_count_bucket": bucket(len({e.get("event") for e in events
-                                                if isinstance(e, dict) and isinstance(e.get("event"), str)})),
-        "work_keys": key_types(work, WORK_KEYS),
+        "event_keys": event_keys,
+        "event_type_count_bucket": bucket(len(event_types)),
+        "work_keys": work_keys,
         "repair_cooldowns": cooldown_shape,
         "run_files": run_files,
-        "unknown_run_file_count": unknown_run_files,
+        "unknown_run_file_count": unknown_count(unknown_run_files),
         "redaction": {
             "dropped_value_classes": [
                 "repository slugs", "PR numbers", "commit and tree object IDs",
@@ -306,7 +334,8 @@ def project(args: argparse.Namespace) -> Dict[str, Any]:
             ],
             "retained_value_classes": [
                 "allowlisted schema key names", "JSON type names",
-                "code-enum item kinds and states", "bucketed counts",
+                "code-enum item kinds and states",
+                "bucketed counts and exact-zero unknown-key diagnostics",
             ],
         },
     }

@@ -1,37 +1,70 @@
 {
   "event_keys": {
     "_unknown_key_count": 0,
+    "acknowledged_at": "str",
     "agent": "str",
     "at": "str",
+    "audit_at": "str",
     "base": "str",
+    "batch": "str",
+    "blocking": [
+      "null",
+      "object"
+    ],
+    "body_only": "int",
     "cycle": "int",
     "description": "str",
     "error": "str",
     "event": "str",
+    "finding_id": "str",
     "findings": "int",
     "from": "str",
+    "gap_min": "int",
     "head": "str",
+    "inline": "int",
+    "issue": "int",
     "item": [
       "null",
       "str"
     ],
+    "job": "str",
     "label": "str",
+    "last_tick": "str",
+    "mode": "str",
+    "notes": "list",
+    "notified": "object",
+    "ordinary_gate": "object",
+    "origin_job": "str",
     "outcome": "str",
+    "posted_state": "str",
+    "pr": "int",
     "reason": [
       "null",
       "str"
     ],
     "reasons": "list",
+    "repo": "str",
+    "request": "str",
+    "review": [
+      "int",
+      "null"
+    ],
+    "reviewed_tip": "str",
     "run": "str",
     "severity": "object",
     "sha": "str",
+    "source_sha": "str",
     "state": "str",
     "status": [
       "object",
       "str"
     ],
+    "target": "str",
+    "text": "str",
+    "tip": "str",
     "to": "str",
-    "verdict": "str"
+    "verdict": "str",
+    "workflow": "str"
   },
   "event_type_count_bucket": "10-99",
   "heartbeat_keys": {
@@ -44,8 +77,8 @@
     "stale_alarm_min": "int"
   },
   "observed_on": "2026-11-09",
-  "policy": "Only allowlisted schema keys, JSON value types, code-enum item states and bucketed counts are retained. No scalar value, identifier, path, host, timestamp, free text, credential or config entry is written.",
-  "projection_sha256": "ddc24d08dd62cd42c53d9c9f0c43b1793b3abf17b8e1fe20abe0930c59ea4a29",
+  "policy": "Only allowlisted schema keys, JSON value types, code-enum item states and bucketed counts are retained. Exact zero is retained for unknown-key diagnostics; nonzero counts are bucketed. No scalar value, identifier, path, host, timestamp, free text, credential or config entry is written.",
+  "projection_sha256": "54b6d585fd95659b53e141dcd73b2af76a7d3859e4cf48787a230c8d1b49eab0",
   "queue": {
     "item_count_bucket": "1000+",
     "item_keys_by_kind": {
@@ -110,10 +143,7 @@
           "int",
           "null"
         ],
-        "run": [
-          "null",
-          "object"
-        ],
+        "run": "null",
         "scope": "list",
         "scope_digest": "str",
         "score": "int",
@@ -338,10 +368,7 @@
         "repair_origin": "str",
         "repair_runs": "object",
         "repo": "str",
-        "run": [
-          "null",
-          "object"
-        ],
+        "run": "null",
         "state": "str",
         "target_ref": "str",
         "tier": "int",
@@ -443,12 +470,10 @@
       "no-current-code",
       "pending",
       "promoting",
-      "publication-pending",
       "quarantined",
       "rejected",
       "repair_failed",
       "retried",
-      "reviewing",
       "skipped"
     ],
     "item_states_by_kind": {
@@ -458,9 +483,7 @@
       "backfill": [
         "done",
         "pending",
-        "publication-pending",
-        "quarantined",
-        "reviewing"
+        "quarantined"
       ],
       "coverage": [
         "blocked",
@@ -494,7 +517,6 @@
         "done",
         "pending",
         "repair_failed",
-        "reviewing",
         "skipped"
       ],
       "promotion": [
@@ -582,7 +604,7 @@
       "allowlisted schema key names",
       "JSON type names",
       "code-enum item kinds and states",
-      "bucketed counts"
+      "bucketed counts and exact-zero unknown-key diagnostics"
     ]
   },
   "repair_cooldowns": {
@@ -701,7 +723,10 @@
     "harness": "str",
     "head": "str",
     "host": "str",
-    "pr": "int",
+    "pr": [
+      "int",
+      "null"
+    ],
     "repo": "str",
     "role": "str",
     "runId": "str",
