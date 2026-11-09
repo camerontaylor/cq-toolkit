@@ -659,7 +659,7 @@ export interface AddressManyRow {
   detail?: string;
   scope: { repo: string; number: number; headOid: string };
   status: AddressManyRowStatus;
-  /** `trusted` only when the report's first reviewed head equals the admitted head. */
+  /** `trusted` only when the report's immutable `admissionHead` equals the admitted head. */
   attribution: 'trusted' | 'unattributed' | 'absent';
   result?: ReviewAddressResult;
   reason?: string;
