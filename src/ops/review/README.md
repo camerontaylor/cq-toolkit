@@ -103,8 +103,10 @@ returns that identity to the loop, which verifies its ancestry before validating
 citations or stamping replies. Git operations use literal pathspecs and path lists
 use NUL delimiters, retaining pathspec-like names, Unicode, whitespace, newlines
 and quotes as literal filenames. Terminal cancellation settlement is the
-exception: it refuses a name containing a glob character (`*?[]{}`) instead of
-treating it literally. Parent cancellation reaches baseline, related and broader check
+exception for the attempted file: it refuses a name containing a glob character
+(`*?[]{}`) instead of treating it literally. Foreign tracked names may contain
+glob characters because settlement only reads and hashes them, without using
+them as Git pathspecs. Parent cancellation reaches baseline, related and broader check
 subprocesses; the engine awaits child termination before candidate cleanup,
 restoration or releasing its serial validation boundary.
 
@@ -164,10 +166,12 @@ unit, tier/model, ordinal, outcome, gate, reason, parent and execution head. Eac
 editing attempt and fix retains its failure history; unresolved findings carry
 an evidence pointer. Cancelled exits still write retained pointers to the report
 when terminal settlement succeeds. Settlement refuses rather than trusts any
-tracked entry other than the cancelled file whose path contains `*?[]{}`, starts
+tracked entry other than the cancelled file whose path starts
 with `-`, contains a `..` component, resolves through an alias or symlink, or has
 a link count above one, or whose index mode is not `100644`/`100755` or disagrees
-with the file (for example `pages/[id].tsx`); any settlement failure quarantines
+with the file. Glob characters (`*?[]{}`) remain refused in the cancelled file's
+name, but are accepted in foreign tracked names such as `pages/[id].tsx`, which
+are only read and hashed. Any settlement failure quarantines
 the ownership guard for attended recovery and persists no report.
 
 PR replies and thread resolution use the current authenticated identity,
