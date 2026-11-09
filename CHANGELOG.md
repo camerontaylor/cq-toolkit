@@ -9,6 +9,9 @@ Links default to the
 
 ## Unreleased
 
+- Slot-based selfhost rollout waits for old-writer drain and E migration of the
+  restored journal cache before the first sweep. See the [rollout sequence](docs/review-address-slot-rollout.md).
+
 - Breaking source API: `PrWorktreeOpts.registry` and `ReviewLoopOpts.registry`
   now accept the per-PR `SlotWorktreeRegistry` facade. Use
   `slotWorktreeRegistry(commonDir)` instead of a shared registry map. The old

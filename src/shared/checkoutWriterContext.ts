@@ -10,10 +10,12 @@ type Hooks = {
   admit(terminal: boolean): void;
   track(close: Promise<void>): void;
   removed?(path: string): Promise<void>;
+  canSettleAdmission?(): boolean;
 };
 type Entry = {
   slot: Slot;
   metadata: SlotMetadata;
+  absentPath?: string;
   binding?: {
     path: string;
     gitDir: string;
@@ -32,6 +34,7 @@ export class CheckoutWriterContext {
   readonly #children = new Set<Promise<void>>();
   private retired = false;
   private mutated = false;
+  private checkoutMutated = false;
   private readonly begun = new Set<Slot>();
   private readonly acquireSlot: SlotFactory;
   private readonly parent: CheckoutWriterContext | undefined;
@@ -82,7 +85,20 @@ export class CheckoutWriterContext {
           : { version: 1, state: 'bound', incomplete: false, ...key });
       this.assertLive();
       const entry: Entry = { slot, metadata };
-      if (metadata.state === 'bound') entry.binding = await this.captureBinding(metadata);
+      if (metadata.state === 'bound') {
+        // lstat distinguishes a removed checkout from a dangling/repointed alias.
+        const info = await lstat(metadata.checkoutPath).catch((error: unknown) => {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+          return undefined;
+        });
+        if (!info) {
+          entry.absentPath = metadata.checkoutPath;
+          entry.metadata = { version: 1, state: 'unbound', incomplete: false };
+        } else {
+          if (info.isSymbolicLink()) throw new Error('bound checkout alias refused');
+          entry.binding = await this.captureBinding(metadata);
+        }
+      }
       this.slots.set(name, entry);
       return this.methods(entry);
     } catch (error) {
@@ -95,7 +111,7 @@ export class CheckoutWriterContext {
     return this.slots.get(key) ?? this.parent?.find(key);
   }
   private get hasMutated(): boolean {
-    return this.mutated || Boolean(this.parent?.hasMutated);
+    return this.mutated || this.checkoutMutated || Boolean(this.parent?.hasMutated);
   }
   private async captureBinding(metadata: Extract<SlotMetadata, { state: 'bound' }>) {
     const [path, gitDir] = await Promise.all([
@@ -109,14 +125,49 @@ export class CheckoutWriterContext {
       throw new Error('bound checkout identity unavailable');
     return { path, gitDir, dev: tree.dev, ino: tree.ino, gitDev: git.dev, gitIno: git.ino };
   }
+  private async assertAbsent(path: string | undefined): Promise<void> {
+    if (!path) return; // Fresh unbound slots have never named a checkout.
+    try {
+      await lstat(path);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+      throw error;
+    }
+    throw new Error(`unbound checkout still exists: ${path}`);
+  }
+  markCheckoutMutation(): void {
+    this.assertLive();
+    this.checkoutMutated = true;
+    this.parent?.markCheckoutMutation();
+  }
+  /** Captured before resolver commands; used only for its non-writing refusals. */
+  admissionSettlement(): () => boolean {
+    const eligible =
+      !this.parent &&
+      !this.checkoutMutated &&
+      !this.#children.size &&
+      (this.hooks?.canSettleAdmission?.() ?? !this.mutated);
+    return () =>
+      eligible &&
+      !this.checkoutMutated &&
+      !this.#children.size &&
+      (this.hooks?.canSettleAdmission?.() ?? true);
+  }
   private methods(entry: Entry): Omit<Slot, 'fd' | 'close'> {
     const { fd: _fd, close: _close, ...methods } = entry.slot;
     return {
       ...methods,
       writeMetadata: async (metadata) => {
         this.assertLive();
-        if (metadata.state === 'bound') entry.binding = await this.captureBinding(metadata);
-        else delete entry.binding;
+        if (metadata.state === 'bound') {
+          entry.binding = await this.captureBinding(metadata);
+          delete entry.absentPath;
+        } else {
+          const path = entry.binding?.path ?? entry.absentPath;
+          await this.assertAbsent(path);
+          if (path) entry.absentPath = path;
+          delete entry.binding;
+        }
         await entry.slot.writeMetadata(metadata);
       },
     };
@@ -175,6 +226,7 @@ export class CheckoutWriterContext {
         )
           throw new Error(`checkout identity changed: ${entry.slot.metadataPath}`);
       }
+      if (metadata.state === 'unbound') await this.assertAbsent(entry.absentPath);
       await entry.slot.writeMetadata({ ...metadata, incomplete: false });
     }
   }
@@ -192,8 +244,11 @@ export class CheckoutWriterContext {
       for (const entry of this.slots.values()) {
         const current = await entry.slot.readMetadata();
         if (current?.incomplete && this.begun.has(entry.slot)) continue; // our admitted slot, already begun
+        const admission =
+          entry.absentPath && !entry.binding ? entry.metadata : (current ?? entry.metadata);
+        if (admission.state === 'unbound') await this.assertAbsent(entry.absentPath);
         written.push(entry);
-        await entry.slot.writeMetadata({ ...(current ?? entry.metadata), incomplete: true });
+        await entry.slot.writeMetadata({ ...admission, incomplete: true });
         this.begun.add(entry.slot);
       }
     } catch (error) {

@@ -3,6 +3,9 @@ import { readFile, writeFile, mkdir, stat, symlink, readdir, realpath } from 'no
 import { join } from 'node:path';
 import { resolvePrWorktree, removePrWorktree } from '../../../src/adapters/git/prWorktree.js';
 import { slotWorktreeRegistry } from '../../../src/adapters/git/slotWorktreeRegistry.js';
+import { CheckoutWriterContext } from '../../../src/shared/checkoutWriterContext.js';
+import { acquireSlot } from '../../../src/adapters/lock/slotLock.js';
+import { lstat } from 'node:fs/promises';
 import { readSlotMetadata } from '../../../src/adapters/lock/slotLock.js';
 import type { GhFn } from '../../../src/adapters/forge-github/gh.js';
 import { identityRepo, deferred } from './addressManyWorktree.helpers.js';
@@ -274,6 +277,165 @@ test('standalone slot facade completes each successful callback (mutation: omit 
         incomplete: false,
       });
     }
+  } finally {
+    await f.repo.cleanup();
+  }
+});
+
+test('completed missing checkout is recreated through the resolver (mutation: eager realpath binding at admission)', async () => {
+  const f = await fixture();
+  try {
+    const first = await resolvePrWorktree(f.opts);
+    f.repo.git('worktree', 'remove', first.path);
+    const result = await resolvePrWorktree(f.opts).then(
+      (value) => ({ value }),
+      (error: unknown) => ({ error }),
+    );
+    expect('value' in result, 'missing completed checkout must reach recreation').toBe(true);
+    if (!('value' in result)) return;
+    expect(result.value).toMatchObject({ path: first.path, reused: false });
+    expect(await readSlotMetadata(f.metadataPath)).toMatchObject({
+      state: 'bound',
+      incomplete: false,
+      checkoutPath: first.path,
+    });
+  } finally {
+    await f.repo.cleanup();
+  }
+});
+
+test('a dangling checkout alias remains refused (mutation: use following stat to infer absence)', async () => {
+  const f = await fixture();
+  try {
+    const first = await resolvePrWorktree(f.opts);
+    f.repo.git('worktree', 'remove', first.path);
+    await symlink(join(f.common, 'missing-checkout'), first.path, 'dir');
+    const before = await readFile(f.metadataPath, 'utf8');
+    await expect(resolvePrWorktree(f.opts)).rejects.toThrow('bound checkout alias refused');
+    expect((await lstat(first.path)).isSymbolicLink()).toBe(true);
+    expect(await readFile(f.metadataPath, 'utf8')).toBe(before);
+  } finally {
+    await f.repo.cleanup();
+  }
+});
+
+test('closed failed fetch restores fresh admission and permits retry (mutation: skip settled resolver completion)', async () => {
+  const f = await fixture();
+  try {
+    await expect(
+      resolvePrWorktree({
+        ...f.opts,
+        run: (args) =>
+          args.includes('fetch')
+            ? f.run(['-C', f.opts.repoRoot, 'fetch', 'missing-fixture-remote'])
+            : f.run(args),
+      }),
+    ).rejects.toThrow(/fetch/);
+    expect(await readSlotMetadata(f.metadataPath)).toEqual({
+      version: 1,
+      state: 'unbound',
+      incomplete: false,
+    });
+    expect((await resolvePrWorktree(f.opts)).reused).toBe(false);
+  } finally {
+    await f.repo.cleanup();
+  }
+});
+
+test('dirty refusal restores bound admission and permits a clean retry (mutation: skip settled resolver completion)', async () => {
+  const f = await fixture();
+  try {
+    const first = await resolvePrWorktree(f.opts);
+    const before = await readFile(f.metadataPath, 'utf8');
+    const source = await readFile(join(first.path, 'README.md'));
+    await writeFile(join(first.path, 'README.md'), 'user dirty bytes');
+    await expect(resolvePrWorktree(f.opts)).rejects.toThrow(/dirty/);
+    expect(await readFile(f.metadataPath, 'utf8')).toBe(before);
+    expect(await readFile(join(first.path, 'README.md'), 'utf8')).toBe('user dirty bytes');
+    await writeFile(join(first.path, 'README.md'), source);
+    expect((await resolvePrWorktree(f.opts)).reused).toBe(true);
+  } finally {
+    await f.repo.cleanup();
+  }
+});
+
+test('failure after worktree add retains incomplete and its checkout (mutation: allow settlement after add)', async () => {
+  const f = await fixture();
+  try {
+    await expect(
+      resolvePrWorktree({
+        ...f.opts,
+        onCreated: () => {
+          throw new Error('after-add failure');
+        },
+      }),
+    ).rejects.toThrow('after-add failure');
+    const metadata = await readSlotMetadata(f.metadataPath);
+    expect(metadata).toMatchObject({ state: 'bound', incomplete: true });
+    if (metadata?.state !== 'bound') throw new Error('expected created pointer');
+    expect(await readFile(join(metadata.checkoutPath, 'README.md'), 'utf8')).toContain('fixture');
+    await expect(resolvePrWorktree(f.opts)).rejects.toThrow(/Incomplete slot/);
+  } finally {
+    await f.repo.cleanup();
+  }
+});
+
+test('unbound writes and completion recheck checkout absence (mutation: omit unbound completion lstat)', async () => {
+  const f = await fixture(),
+    context = new CheckoutWriterContext(acquireSlot);
+  try {
+    const first = await resolvePrWorktree(f.opts);
+    const gitDir = f.repo.git('-C', first.path, 'rev-parse', '--absolute-git-dir').trim();
+    await context.acquire(f.common, 7);
+    const checkout = await context.acquire(f.common, {
+      checkoutPath: first.path,
+      checkoutGitDir: gitDir,
+    });
+    await context.begin();
+    await expect(
+      checkout.writeMetadata({ version: 1, state: 'unbound', incomplete: true }),
+    ).rejects.toThrow('unbound checkout still exists');
+    f.repo.git('worktree', 'remove', first.path);
+    await context.removed(first.path);
+    await mkdir(first.path);
+    await writeFile(join(first.path, 'private'), 'recreated bytes');
+    await expect(context.complete()).rejects.toThrow('unbound checkout still exists');
+    expect((await checkout.readMetadata())?.incomplete).toBe(true);
+    expect(await readFile(join(first.path, 'private'), 'utf8')).toBe('recreated bytes');
+  } finally {
+    await context.close();
+    await f.repo.cleanup();
+  }
+});
+
+test('settled refusal proof cannot be replayed after a checkout mutation (mutation: propagate an older refusal proof)', async () => {
+  const f = await fixture();
+  try {
+    const refusal = await resolvePrWorktree({
+      ...f.opts,
+      run: (args) =>
+        args.includes('fetch')
+          ? f.run(['-C', f.opts.repoRoot, 'fetch', 'missing-fixture-remote'])
+          : f.run(args),
+    }).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    expect(refusal).toBeInstanceOf(Error);
+    expect((await readSlotMetadata(f.metadataPath))?.incomplete).toBe(false);
+    await expect(
+      resolvePrWorktree({
+        ...f.opts,
+        onCreated: () => {
+          throw refusal;
+        },
+      }),
+    ).rejects.toThrow(/fetch/);
+    expect(await readSlotMetadata(f.metadataPath)).toMatchObject({
+      state: 'bound',
+      incomplete: true,
+    });
+    await expect(resolvePrWorktree(f.opts)).rejects.toThrow(/Incomplete slot/);
   } finally {
     await f.repo.cleanup();
   }

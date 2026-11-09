@@ -115,7 +115,7 @@ import type { FixEvidence } from '../ops/review/fixReviewItem.js';
 import type { PlanBatchConfig, PlannedBatch } from '../ops/review/planReviewBatch.js';
 import { defaultPlanBatchConfig, planReviewBatch } from '../ops/review/planReviewBatch.js';
 import type { SlotWorktreeRegistry } from '../adapters/git/slotWorktreeRegistry.js';
-import { resolvePrWorktree } from '../adapters/git/prWorktree.js';
+import { resolvePrWorktree, isPrWorktreeAdmissionRefusal } from '../adapters/git/prWorktree.js';
 import type { ReplyAndResolveResult, ReviewAction } from '../ops/review/replyAndResolve.js';
 import { fileDispatchLog } from '../adapters/store/dispatchLog.js';
 import { replyAndResolve } from '../ops/review/replyAndResolve.js';
@@ -982,13 +982,20 @@ async function runOwnedReviewLoop(
   } catch (error) {
     if (
       !(error instanceof Error) ||
-      error.message !== 'PR fetched head changed since admission; checkout left untouched'
+      (error.message !== 'PR fetched head changed since admission; checkout left untouched' &&
+        !isPrWorktreeAdmissionRefusal(error))
     )
       throw error;
     return {
       status: 'needs-human',
-      reasons: ['PR head changed before dispatch'],
-      headRefused: true,
+      reasons: [
+        error.message === 'PR fetched head changed since admission; checkout left untouched'
+          ? 'PR head changed before dispatch'
+          : error.message,
+      ],
+      ...(error.message === 'PR fetched head changed since admission; checkout left untouched'
+        ? { headRefused: true }
+        : {}),
       // No checkout was admitted or resolved.
       worktree: { path: '', branch: '', reused: false },
       batches: [],

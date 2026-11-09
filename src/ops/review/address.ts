@@ -3129,6 +3129,13 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                     journalDir: resolve(journalDir, `pr-round-${round}`),
                   },
                 });
+                if (!loop.worktree.path) {
+                  report.reasons.push(...loop.reasons);
+                  return await finish(
+                    'needs-human',
+                    loop.headRefused ? 'PR head changed before dispatch' : loop.reasons.join('; '),
+                  );
+                }
                 root = loop.worktree.path;
                 workerRoot = root;
                 publishBranch = meta.headRefName;

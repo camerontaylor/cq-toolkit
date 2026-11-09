@@ -11,6 +11,7 @@ import { readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { realTmpDir } from '../../helpers/tmp-dir.js';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
+import { readSlotMetadata } from '../../../src/adapters/lock/slotLock.js';
 import { makeReviewAddress } from '../../../src/ops/review/address.js';
 import { makeGhRunner, type GhFn, type GhResult } from '../../../src/adapters/forge-github/gh.js';
 import type { DriverFactory } from '../../../src/driver/factory.js';
@@ -38,7 +39,7 @@ const namespace = createHash('sha256')
   .update(JSON.stringify(['octo', 'widget', 7, 'main', null, 'octo/widget', 'feature/x', 'author']))
   .digest('hex');
 
-test('a failed re-request is recovered on the next invocation', async () => {
+async function runPersistedCase(mode: 'rerequest' | 'resolve-valid' | 'resolve-forged') {
   const repo = await makeTestRepo();
   const journal = await realTmpDir('cq-address-rerequest-');
   const role = { provider: 'scripted', model: 'worker' };
@@ -77,7 +78,10 @@ test('a failed re-request is recovered on the next invocation', async () => {
     const replies: Array<{ id: number; in_reply_to_id: number; body: string }> = [];
     const reRequested = new Set<string>();
     // Run 1's re-review works; only the reviewer-request API fails.
-    let failReRequest = true;
+    let failReRequest = mode === 'rerequest';
+    let failResolution = mode !== 'rerequest';
+    let replyLogin = 'author';
+    let workerInvocations = 0;
     const threads = () => [
       {
         id: 'T1',
@@ -109,6 +113,11 @@ test('a failed re-request is recovered on the next invocation', async () => {
       const flag = (key: string) =>
         args.find((arg) => arg.startsWith(`${key}=`))?.slice(key.length + 1) ?? '';
       if (args.some((arg) => arg.includes('mutation') && arg.includes('resolveReviewThread'))) {
+        if (failResolution) {
+          failResolution = false;
+          actions.push('resolve-failed');
+          return { code: 1, stdout: '', stderr: 'resolution service unavailable' };
+        }
         resolvedThreads.add(flag('threadId'));
         actions.push('resolve');
         return ok({
@@ -163,7 +172,7 @@ test('a failed re-request is recovered on the next invocation', async () => {
           })),
           ...replies.map((reply) => ({
             ...reply,
-            user: { login: 'author' },
+            user: { login: replyLogin },
             created_at: new Date().toISOString(),
           })),
         ]);
@@ -199,6 +208,7 @@ test('a failed re-request is recovered on the next invocation', async () => {
                 denials: [],
               };
             if (!input.prompt.startsWith('related-check feedback')) {
+              workerInvocations++;
               workerRoot = input.workspace!.path;
               await writeFile(
                 join(input.workspace!.path, 'src/a.ts'),
@@ -240,6 +250,38 @@ test('a failed re-request is recovered on the next invocation', async () => {
       'pending-rerequests.json',
     );
 
+    if (mode !== 'rerequest') {
+      const first = await invoke();
+      expect(first.status).toBe('needs-human');
+      expect(actions).toContain('resolve-failed');
+      expect(actions.filter((action) => action === 'reply')).toHaveLength(1);
+      expect(resolvedThreads.has('T1')).toBe(false);
+      expect(
+        (await readSlotMetadata(join(repo.root, '.git/cq-review/slots/pr-7.json')))?.incomplete,
+      ).toBe(false);
+      const beforeWorkers = workerInvocations,
+        beforeActions = actions.length;
+      if (mode === 'resolve-forged') replyLogin = 'mallory';
+      advancePrHead();
+      const second = await invoke();
+      const report = second.status === 'ok' ? second.value : second.report!;
+      if (mode === 'resolve-valid') {
+        expect(second.status, JSON.stringify(second)).toBe('ok');
+        expect(actions.slice(beforeActions).filter((action) => action !== 'rerequest')).toEqual([
+          'resolve',
+        ]);
+        expect(workerInvocations).toBe(beforeWorkers);
+        expect(resolvedThreads.has('T1')).toBe(true);
+        expect(report.fixesPerRun).toBe(0);
+      } else {
+        expect(second.status, JSON.stringify(second)).toBe('needs-human');
+        expect(resolvedThreads.has('T1')).toBe(false);
+        expect(actions.slice(beforeActions)).not.toContain('resolve');
+        expect(workerInvocations).toBeGreaterThan(beforeWorkers);
+      }
+      expect(actions.filter((action) => action === 'reply')).toHaveLength(1);
+      return;
+    }
     // Run 1: the fix lands, the re-review is fine, the re-request API fails.
     const first = await invoke();
     expect(first.status).toBe('needs-human');
@@ -262,4 +304,11 @@ test('a failed re-request is recovered on the next invocation', async () => {
     await repo.cleanup();
     await rm(journal, { recursive: true, force: true });
   }
-});
+}
+
+test('a failed re-request is recovered on the next invocation', () =>
+  runPersistedCase('rerequest'));
+test.each(['resolve-valid', 'resolve-forged'] as const)(
+  'SDK pending resolution checks authenticated receipt: %s (mutation: omit carry or accept forged author)',
+  (mode) => runPersistedCase(mode),
+);

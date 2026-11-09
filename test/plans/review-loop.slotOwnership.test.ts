@@ -1,7 +1,7 @@
 import { expect, test } from 'vitest';
 import { readSlotMetadata } from '../../src/adapters/lock/slotLock.js';
 import * as checkoutOwner from '../../src/ops/review/internal/addressCheckoutOwnership.js';
-import { symlink } from 'node:fs/promises';
+import { symlink, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { runReviewLoop } from '../../src/plans/review-loop.js';
 import {
@@ -138,3 +138,38 @@ test('head refusal preserves complete bound metadata and permits the next run (m
 test('owner API removes the obsolete child-signal stub (mutation: restore undefined child-signal export)', () => {
   expect(checkoutOwner).not.toHaveProperty('addressChildSignal');
 });
+
+test.each(['fetch', 'identity', 'dirty'] as const)(
+  'settled %s refusal is needs-human and leaves reusable slots (mutation: skip refusal classification)',
+  async (kind) => {
+    const f = await slotFixture();
+    try {
+      const first = kind === 'fetch' ? undefined : await runReviewLoop(f.opts());
+      const source = first ? await readFile(join(first.worktree.path, 'README.md')) : undefined;
+      if (kind === 'dirty') await writeFile(join(first!.worktree.path, 'README.md'), 'dirty bytes');
+      const outcome = await runReviewLoop({
+        ...f.opts(),
+        git: (args) => {
+          if (kind === 'fetch' && args.includes('fetch'))
+            return f.run(['-C', f.repo.root, 'fetch', 'missing-fixture-remote']);
+          if (kind === 'identity' && args.includes('--absolute-git-dir'))
+            return f.run(['-C', f.repo.root, 'rev-parse', '--verify', 'missing-fixture-ref']);
+          return f.run(args);
+        },
+      }).then(
+        (value) => ({ value }),
+        (error: unknown) => ({ error }),
+      );
+      expect('value' in outcome, 'settled refusal must use needs-human surface').toBe(true);
+      if (!('value' in outcome)) return;
+      expect(outcome.value.status).toBe('needs-human');
+      expect(
+        (await readSlotMetadata(join(f.common, 'cq-review/slots/pr-7.json')))?.incomplete,
+      ).toBe(false);
+      if (kind === 'dirty') await writeFile(join(first!.worktree.path, 'README.md'), source!);
+      expect((await runReviewLoop(f.opts())).status).toBe('ok');
+    } finally {
+      await f.repo.cleanup();
+    }
+  },
+);

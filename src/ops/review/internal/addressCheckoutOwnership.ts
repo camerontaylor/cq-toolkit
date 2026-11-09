@@ -100,6 +100,7 @@ export class AddressCheckoutOwnership extends AddressRunLifecycle {
     this.resolverCommon = resolverCommon;
     this.context = new CheckoutWriterContext(acquireSlot, parent, {
       admit: (terminal) => {
+        if (this.active) this.context.markCheckoutMutation();
         if (terminal) {
           if (!this.active || this.compromised || this.terminalFailure)
             throw new Error('terminal writer after retirement');
@@ -120,6 +121,17 @@ export class AddressCheckoutOwnership extends AddressRunLifecycle {
           );
         }
       },
+      canSettleAdmission: () =>
+        !this.active &&
+        !this.stopping &&
+        !this.signal.aborted &&
+        !this.compromised &&
+        !this.terminalFailure &&
+        !this.terminalAdmissionRefusal &&
+        !this.tasks.size &&
+        !this.terminalProcesses.size &&
+        !this.terminalOperations.size &&
+        ![...this.participants].some((p) => p.opaqueDispatched),
       removed: async (path) => {
         if (this.checkout?.path !== path) return;
         await this.disposeTerminalSession();

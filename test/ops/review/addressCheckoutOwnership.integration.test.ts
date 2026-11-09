@@ -1,6 +1,7 @@
+import { createHash } from 'node:crypto';
 import { expect, test } from 'vitest';
 import { join } from 'node:path';
-import { readFile, writeFile, lstat } from 'node:fs/promises';
+import { readFile, writeFile, lstat, realpath } from 'node:fs/promises';
 import { runReviewLoop } from '../../../src/plans/review-loop.js';
 import {
   withAddressOwnership,
@@ -121,7 +122,19 @@ test('local and direct PR address share actual checkout exclusion (mutation: byp
       (error: unknown) => ({ error }),
     );
     expect(resolved, 'second invocation reached the owned checkout').toBe(false);
-    expect('error' in outcome && String(outcome.error)).toMatch(/busy/i);
+    expect('value' in outcome, 'settled checkout contention must return needs-human').toBe(true);
+    if (!('value' in outcome)) return;
+    expect(outcome.value.status).toBe('needs-human');
+    const gitDir = await realpath(f.repo.git('rev-parse', '--absolute-git-dir').trim());
+    const lock = join(
+      common,
+      'cq-review/slots',
+      `checkout-${createHash('sha256').update(gitDir).digest('hex')}.lock`,
+    );
+    expect(outcome.value.reasons).toEqual([`Slot busy: ${lock}`]);
+    expect((await readSlotMetadata(join(common, 'cq-review/slots/pr-7.json')))?.incomplete).toBe(
+      false,
+    );
     expect(await readFile(join(f.repo.root, 'src/a.ts'), 'utf8')).toContain('BAD');
   } finally {
     gate.resolve();
