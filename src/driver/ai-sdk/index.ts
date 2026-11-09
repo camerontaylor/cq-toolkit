@@ -270,7 +270,8 @@ import type {
 import type { ModelSpec, OpInvocation } from '../types.js';
 import type { OutputSchema, ProviderSignals, WorkerErrorClass } from '../types.js';
 import { defaultSessionsDir } from '../sessions-dir.js';
-import { createStepFetch } from './step-fetch.js';
+import { createStepFetch, STEP_FETCH_MARGIN_MS } from './step-fetch.js';
+import type { Dispatcher } from 'undici';
 
 // ---------------------------------------------------------------------------
 // Public surface
@@ -353,6 +354,19 @@ export interface AiSdkDriverOptions {
    * 2_147_483_647 (Node's timer ceiling), inclusive.
    */
   stepTimeoutMs?: number;
+  /**
+   * The undici dispatcher the DEFAULT providers' fetch pairs with — the
+   * transport seam for deployments that must not connect directly (e.g. an
+   * undici `ProxyAgent`/`EnvHttpProxyAgent` in a proxy-only environment).
+   * Used AS IS: it is never replaced by the driver's own Agent, so a
+   * configured proxy transport survives. Its own socket timeouts apply, so
+   * set `headersTimeout`/`bodyTimeout` to `stepTimeoutMs +
+   * STEP_FETCH_MARGIN_MS` on it to keep the step bound winning. Absent: the
+   * driver mints its own timeout-bounded Agent (per-provider direct
+   * connections). Never serializable config — in-process construction data
+   * only. Injected `providers` are untouched either way.
+   */
+  dispatcher?: Dispatcher;
   /**
    * Runs before every provider send, including retries and repairs. The
    * optional context distinguishes a model request from scanned tool output;
@@ -461,8 +475,13 @@ export class AiSdkDriver implements Driver {
       );
     this.stepTimeoutMs = stepTimeoutMs;
     // The production providers fetch through a transport bounded by the same
-    // step bound (step-fetch.ts); injected providers are left untouched.
-    this.providers = options.providers ?? defaultProviders(createStepFetch(stepTimeoutMs));
+    // step bound (step-fetch.ts); injected providers are left untouched. An
+    // operator-supplied dispatcher (proxy transport) is threaded straight
+    // through and used AS IS — the socket timeouts are then its own knobs,
+    // documented on the option.
+    this.providers =
+      options.providers ??
+      defaultProviders(createStepFetch(stepTimeoutMs, STEP_FETCH_MARGIN_MS, options.dispatcher));
     this.pricing = options.pricing ?? priceOf;
     this.strictTokenCapability = options.strictTokenCapability;
     this.strictTokenReservationHook = options.strictTokenReservationHook;

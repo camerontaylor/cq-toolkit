@@ -15,9 +15,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 
-const agents = vi.hoisted(() => ({ options: [] as unknown[] }));
+const agents = vi.hoisted(() => ({
+  options: [] as unknown[],
+  /** The real MockAgent (a supplied transport stand-in), captured before it is replaced. */
+  MockAgent: undefined as unknown as typeof import('undici').MockAgent,
+}));
 vi.mock('undici', async (importOriginal) => {
   const actual = await importOriginal<typeof import('undici')>();
+  agents.MockAgent = actual.MockAgent;
   class RecordingAgent extends actual.Agent {
     constructor(options?: ConstructorParameters<typeof actual.Agent>[0]) {
       agents.options.push(options);
@@ -28,6 +33,7 @@ vi.mock('undici', async (importOriginal) => {
 });
 
 const { AiSdkDriver } = await import('../../src/driver/ai-sdk/index.js');
+const { createDriverFactory } = await import('../../src/driver/factory.js');
 const { createStepFetch, STEP_FETCH_MARGIN_MS } =
   await import('../../src/driver/ai-sdk/step-fetch.js');
 
@@ -100,6 +106,23 @@ describe('createStepFetch', () => {
     const response = await createStepFetch(6_000, 0)(url);
     expect(response.status).toBe(200);
   });
+
+  test('a supplied transport is used as is, never replaced by a minted Agent', async () => {
+    // A supplied dispatcher (an operator's proxy agent, stood in for by a
+    // MockAgent) must carry the request itself: the driver must not mint its
+    // own Agent, which in a proxy-only environment would connect directly.
+    const transport = new agents.MockAgent();
+    transport.disableNetConnect();
+    transport
+      .get('http://proxy-only.invalid')
+      .intercept({ path: '/', method: 'GET' })
+      .reply(200, 'via-configured-transport');
+    const response = await createStepFetch(1_000, 0, transport)('http://proxy-only.invalid');
+    expect(await response.text()).toBe('via-configured-transport');
+    // No omission fallback: the owned Agent was never constructed.
+    expect(agents.options).toEqual([]);
+    await transport.close();
+  });
 });
 
 describe('ai-sdk default providers', () => {
@@ -118,6 +141,46 @@ describe('ai-sdk default providers', () => {
     };
     return { driver, invocation };
   };
+
+  test('factory forwards the configured dispatcher to the default provider', async () => {
+    vi.stubEnv('ZAI_API_KEY', 'test-key');
+    vi.stubEnv('ZAI_BASE_URL', 'http://proxy-only.invalid');
+    const dir = await mkdtemp(join(tmpdir(), 'aidrv-proxy-'));
+    scratch.push(dir);
+    const transport = new agents.MockAgent();
+    transport.disableNetConnect();
+    transport
+      .get('http://proxy-only.invalid')
+      .intercept({ path: '/chat/completions', method: 'POST' })
+      .reply(200, {
+        id: 'chatcmpl-1',
+        object: 'chat.completion',
+        created: 0,
+        model: 'glm-test',
+        choices: [
+          { index: 0, message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' },
+        ],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      });
+    try {
+      const modelSpec = { provider: 'zai', model: 'glm-test' };
+      const factory = createDriverFactory({
+        lanes: { aiSdk: { dispatcher: transport, sessionsDir: join(dir, 'sessions') } },
+      });
+      const result = await factory.resolve({ role: 'fixer', modelSpec }).driver.run({
+        prompt: 'say ok',
+        modelSpec,
+        toolPolicy: { allow: [], mode: 'none' },
+        sandboxPolicy: { level: 'none' },
+        budget: {},
+      });
+      expect(result.stopReason).toBe('complete');
+      expect(agents.options).toEqual([]);
+      transport.assertNoPendingInterceptors();
+    } finally {
+      await transport.close();
+    }
+  });
 
   test('fetch through one dispatcher per driver bounded by stepTimeoutMs + margin', async () => {
     const server = await stallingServer(0);

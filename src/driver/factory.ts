@@ -142,11 +142,14 @@ export type ClaudeCodeLaneTransport = ClaudeCodeTransport;
  * Construction knobs for the ai-sdk lane. `providers` is an in-process
  * factory registry — constructor DATA of a hosted deployment (never plan
  * JSON: it is not serializable), and the injection seam that keeps factory
- * tests offline.
+ * tests offline. `dispatcher` is the same kind of in-process data: the
+ * operator's undici transport (e.g. a proxy agent), passed straight to the
+ * default providers' fetch so a configured proxy is never replaced.
  */
 export type AiSdkLaneConfig = Pick<
   AiSdkDriverOptions,
   | 'providers'
+  | 'dispatcher'
   | 'sandboxConfig'
   | 'sessionsDir'
   | 'strictTokenCapability'
@@ -436,6 +439,7 @@ function constructLane(lane: LaneId, request: DriverRequest, config: DriverFacto
       return new AiSdkDriver({
         ...(request.beforeRequest === undefined ? {} : { beforeRequest: request.beforeRequest }),
         ...(cfg?.providers !== undefined ? { providers: cfg.providers } : {}),
+        ...(cfg?.dispatcher !== undefined ? { dispatcher: cfg.dispatcher } : {}),
         ...(cfg?.sandboxConfig !== undefined ? { sandboxConfig: cfg.sandboxConfig } : {}),
         ...(cfg?.strictTokenCapability !== undefined
           ? { strictTokenCapability: cfg.strictTokenCapability }
