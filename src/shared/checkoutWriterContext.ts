@@ -187,7 +187,6 @@ export class CheckoutWriterContext {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     }
     for (const entry of this.slots.values()) {
-      if ((await entry.slot.readMetadata())?.state !== 'bound') continue;
       const metadata = await entry.slot.readMetadata();
       if (metadata?.state === 'bound' && metadata.checkoutPath === path) {
         await this.methods(entry).writeMetadata({ version: 1, state: 'unbound', incomplete: true });

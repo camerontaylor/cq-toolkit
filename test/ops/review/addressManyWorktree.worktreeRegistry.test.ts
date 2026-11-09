@@ -59,37 +59,51 @@ test('concurrent PRs sharing a head ref retain distinct exact-head worktrees and
     await f.repo.cleanup();
   }
 });
-test('expected fetched-head fence preserves dirty stale checkout and bound pointer', async () => {
+test('settled fetched-head fence preserves dirty checkout and permits corrected retry (mutation: skip settled completion)', async () => {
   const f = await fixture();
   try {
     const checkout = await f.resolve(f.prs[0]);
+    const original = await readFile(join(checkout.path, 'README.md'));
     await writeFile(join(checkout.path, 'README.md'), 'private stale edit\n');
     const before = await readFile(
       join(f.repo.root, '.git', 'cq-review', 'slots', 'pr-7.json'),
       'utf8',
     );
     f.repo.git('push', '-q', 'origin', `${f.prs[1].headRefOid}:refs/pull/7/head`);
-    await expect(
-      resolvePrWorktree({
-        repoRoot: f.repo.root,
-        pr: 7,
-        headRefName: 'feature/x',
-        expectedHead: f.prs[0].headRefOid,
-        run: f.run,
-        registry: slotWorktreeRegistry(
-          f.repo.git('rev-parse', '--path-format=absolute', '--git-common-dir').trim(),
-        ),
-        worktreeRoot: f.worktreeRoot,
-        nowMs: NOW,
-      }),
-    ).rejects.toThrow('changed since admission');
-    expect(
-      JSON.parse(
-        await readFile(join(f.repo.root, '.git', 'cq-review', 'slots', 'pr-7.json'), 'utf8'),
+    const options = {
+      repoRoot: f.repo.root,
+      pr: 7,
+      headRefName: 'feature/x',
+      expectedHead: f.prs[0].headRefOid,
+      run: f.run,
+      registry: slotWorktreeRegistry(
+        f.repo.git('rev-parse', '--path-format=absolute', '--git-common-dir').trim(),
       ),
-    ).toEqual({ ...JSON.parse(before), incomplete: true });
+      worktreeRoot: f.worktreeRoot,
+      nowMs: NOW,
+    };
+    for (let refusal = 0; refusal < 2; refusal++) {
+      await expect(resolvePrWorktree(options)).rejects.toThrow('changed since admission');
+      // The gate did not admit a checkout writer. Preserve both the exact
+      // completed pointer and the user's bytes, without operator repair.
+      expect(await readFile(join(f.repo.root, '.git/cq-review/slots/pr-7.json'), 'utf8')).toBe(
+        before,
+      );
+    }
     expect(await readFile(join(checkout.path, 'README.md'), 'utf8')).toBe('private stale edit\n');
     expect(f.repo.git('-C', checkout.path, 'rev-parse', 'HEAD').trim()).toBe(f.prs[0].headRefOid);
+    await writeFile(join(checkout.path, 'README.md'), original);
+    const retry = await resolvePrWorktree({ ...options, expectedHead: f.prs[1].headRefOid });
+    expect(retry).toMatchObject({ path: checkout.path, reused: false });
+    expect(f.repo.git('-C', retry.path, 'rev-parse', 'HEAD').trim()).toBe(f.prs[1].headRefOid);
+    const metadata = await discoverWorktreeSlots(
+      f.repo.git('rev-parse', '--path-format=absolute', '--git-common-dir').trim(),
+    );
+    expect(metadata.get(7)).toMatchObject({
+      state: 'bound',
+      incomplete: false,
+      checkoutPath: retry.path,
+    });
   } finally {
     await f.repo.cleanup();
   }

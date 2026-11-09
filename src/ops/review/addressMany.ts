@@ -372,6 +372,10 @@ function makeReviewAddressManyCore(
       const pending = [...selection.candidates];
       const faults: string[] = [];
       const preservedClones: Array<{ number: number; path: string }> = [];
+      const forgetPreservedClone = (path: string) => {
+        const index = preservedClones.findIndex((entry) => entry.path === path);
+        if (index >= 0) preservedClones.splice(index, 1);
+      };
       const requestedEnrollment = (number: number): AddressManyEnrollment =>
         input.enrollments?.some((r) => r.number === number)
           ? { state: 'unavailable', reason: 'Requested but leg not dispatched' }
@@ -615,10 +619,7 @@ function makeReviewAddressManyCore(
                       await lstat(isolatedRoot);
                     } catch (error) {
                       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-                      preservedClones.splice(
-                        preservedClones.findIndex((entry) => entry.path === isolatedRoot),
-                        1,
-                      );
+                      forgetPreservedClone(isolatedRoot);
                       return;
                     }
                     if (!(await lifetime.canRemove()))
@@ -672,10 +673,7 @@ function makeReviewAddressManyCore(
                     const canonicalRoot = await realpath(isolatedRoot);
                     await rm(dirname(canonicalRoot), { recursive: true, force: true });
                     await lifetime.removed(canonicalRoot);
-                    preservedClones.splice(
-                      preservedClones.findIndex((entry) => entry.path === isolatedRoot),
-                      1,
-                    );
+                    forgetPreservedClone(isolatedRoot);
                   } catch (error) {
                     lifetime.retainIncomplete();
                     faults.push(`PR #${candidate.number} cleanup failed: ${String(error)}`);
