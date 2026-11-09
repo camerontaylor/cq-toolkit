@@ -10,9 +10,9 @@
 // link (provider keys come from the host environment, never the checkout), apps/crq-python is
 // stdlib-only, and `pnpm test:narrow` builds dist itself when a selected test needs it.
 //
-// Automatic setup skips dependency lifecycle scripts and pnpm hooks: the checkout may be
-// untrusted while the host environment contains credentials. This means native addons such as
-// fs-ext are not built by setup. In a trusted checkout, run pnpm rebuild fs-ext if needed.
+// Automatic setup skips dependency lifecycle scripts and pnpm hooks to avoid exposing host
+// credentials to those install hooks. This script itself runs from the checkout and must be
+// trusted. Native addons such as fs-ext are not built by setup; run pnpm rebuild fs-ext if needed.
 //
 // Node rather than shell because Paseo lifecycle commands run through a non-login script shell;
 // see Paseo docs/development.md "paseo.json service scripts".
