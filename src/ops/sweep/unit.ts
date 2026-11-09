@@ -1480,8 +1480,18 @@ async function enforceStagePathAllowlist(
       message: `sweep.unit ${unit.package}: git diff --cached --name-status failed — ${listed.stderr.trim()}`,
     };
   }
+  let stagedPaths: string[];
+  try {
+    stagedPaths = stagedPathsOf(listed.stdout);
+  } catch (err) {
+    return {
+      kind: 'infra',
+      paths: [],
+      message: `sweep.unit ${unit.package}: ${messageOf(err)}`,
+    };
+  }
   const verdict = classifyStagePaths(
-    stagedPathsOf(listed.stdout),
+    stagedPaths,
     bindings.stagePathAllowlist,
     bindings.proposeOnly === true,
   );
@@ -2152,8 +2162,14 @@ async function verifyScannedTip(
       `sweep.unit ${unit.package}: git diff HEAD^..HEAD name-status failed — ${committedPaths.stderr.trim()}`,
     );
   }
+  let parsedCommittedPaths: string[];
+  try {
+    parsedCommittedPaths = stagedPathsOf(committedPaths.stdout);
+  } catch (err) {
+    return tagged('infra', `sweep.unit ${unit.package}: ${messageOf(err)}`);
+  }
   const protectedPaths = classifyStagePaths(
-    stagedPathsOf(committedPaths.stdout),
+    parsedCommittedPaths,
     undefined,
     false,
     bindings.taskLoop === undefined || bindings.taskLoop.protectTests === true,
