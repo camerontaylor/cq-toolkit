@@ -116,8 +116,13 @@ function runGhWith(
 ): Promise<string> {
   return new Promise((resolve, reject) => {
     const env = ghSpawnEnv({ ...process.env, GH_PROMPT_DISABLED: '1' });
+    const bin = resolveWindowsCommand(resolveGhBin(cqEnv), env, process.platform, process.env);
+    if (bin === undefined) {
+      reject(new Error('gh executable not found'));
+      return;
+    }
     const child = execFile(
-      resolveWindowsCommand(resolveGhBin(cqEnv), env),
+      bin,
       args,
       {
         cwd,

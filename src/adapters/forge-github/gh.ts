@@ -116,7 +116,12 @@ export function makeGhRunner(opts?: {
       const hasSeparator = rawBin.includes('/') || rawBin.includes('\\');
       const bin = hasSeparator && !isAbsolute(rawBin) ? pathResolve(process.cwd(), rawBin) : rawBin;
       const env = ghSpawnEnv(childEnv);
-      const child = spawn(resolveWindowsCommand(bin, env), args, {
+      const resolvedBin = resolveWindowsCommand(bin, env, process.platform, process.env);
+      if (resolvedBin === undefined) {
+        resolve({ code: 127, stdout: '', stderr: `executable not found: ${bin}` });
+        return;
+      }
+      const child = spawn(resolvedBin, args, {
         stdio: checkoutWriterStdio(['pipe', 'pipe', 'pipe']),
         ...(opts?.cwd !== undefined ? { cwd: opts.cwd } : {}),
         env,

@@ -158,7 +158,9 @@ async function runGhWith(
   cqEnv?: CqEnv,
 ): Promise<string> {
   const env = ghSpawnEnv(ghEnv());
-  const res = await exec(resolveWindowsCommand(resolveGhBin(cqEnv), env), args, {
+  const bin = resolveWindowsCommand(resolveGhBin(cqEnv), env, process.platform, process.env);
+  if (bin === undefined) throw new Error('gh executable not found');
+  const res = await exec(bin, args, {
     cwd: repoRoot,
     env,
   });

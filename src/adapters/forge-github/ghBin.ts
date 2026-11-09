@@ -9,7 +9,7 @@
 // which binary a relative CQ_GH_BIN names. Bare names keep PATH lookup;
 // absolute paths pass through.
 import { statSync } from 'node:fs';
-import { delimiter, isAbsolute, join, resolve as pathResolve } from 'node:path';
+import { isAbsolute, resolve as pathResolve, sep, win32, posix } from 'node:path';
 import type { CqEnv } from '../../config/env.js';
 import { currentCqEnv } from '../../config/run-env.js';
 
@@ -37,20 +37,57 @@ export function ghMergeEnv(
   return { ...result, ...overrides };
 }
 
-/** Anchor PATH entries before any subprocess changes cwd, preserving native search semantics. */
-export function ghSpawnEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+/** Split Windows PATH the way libuv does: quoted entries may contain semicolons. */
+function splitWindowsPath(path: string): string[] {
+  const entries: string[] = [];
+  let start = 0;
+  while (start <= path.length) {
+    const quote = path[start] === '"' || path[start] === "'" ? path[start] : undefined;
+    const endQuote = quote === undefined ? -1 : path.indexOf(quote, start + 1);
+    const separator =
+      quote !== undefined && endQuote === -1
+        ? -1
+        : path.indexOf(';', endQuote === -1 ? start : endQuote + 1);
+    const end = separator === -1 ? path.length : separator;
+    let entry = path.slice(start, end);
+    if (entry[0] === '"' || entry[0] === "'") entry = entry.slice(1);
+    if (entry.at(-1) === '"' || entry.at(-1) === "'") entry = entry.slice(0, -1);
+    entries.push(entry);
+    if (separator === -1) break;
+    start = separator + 1;
+  }
+  return entries;
+}
+
+/** Anchor PATH without collapsing components: symlinks can change the meaning of `..`. */
+export function ghSpawnEnv(
+  env: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform = process.platform,
+  cwd: string = process.cwd(),
+): NodeJS.ProcessEnv {
   const result = { ...env };
+  const windows = platform === 'win32';
   const key = Object.keys(result)
     .sort()
-    .find((name) =>
-      process.platform === 'win32' ? name.toUpperCase() === 'PATH' : name === 'PATH',
-    );
-  const path =
-    key === undefined ? (process.platform === 'win32' ? '' : '/usr/bin:/bin') : (result[key] ?? '');
-  result[key ?? 'PATH'] = path
-    .split(delimiter)
-    .map((entry) => pathResolve(entry))
-    .join(delimiter);
+    .find((name) => (windows ? name.toUpperCase() === 'PATH' : name === 'PATH'));
+  const path = key === undefined ? (windows ? '' : '/usr/bin:/bin') : (result[key] ?? '');
+  const parts = windows ? splitWindowsPath(path) : path.split(':');
+  const pathApi = windows ? win32 : posix;
+  result[key ?? 'PATH'] = parts
+    .map((entry) => {
+      // Empty Windows PATH entries are skipped by libuv. POSIX treats them as cwd.
+      if (windows && entry === '') return '';
+      const rootedWithoutDrive = windows && /^[\\/](?![\\/])/.test(entry);
+      const anchored = rootedWithoutDrive
+        ? `${cwd.slice(0, 2)}${entry}`
+        : entry === ''
+          ? cwd
+          : pathApi.isAbsolute(entry)
+            ? entry
+            : `${cwd}${pathApi.sep}${entry}`;
+      return windows && anchored.includes(';') ? `"${anchored}"` : anchored;
+    })
+    .join(windows ? ';' : ':');
   return result;
 }
 
@@ -59,24 +96,30 @@ export function resolveWindowsCommand(
   bin: string,
   env: NodeJS.ProcessEnv,
   platform: NodeJS.Platform = process.platform,
-): string {
+  callerEnv: NodeJS.ProcessEnv = {},
+  cwd: string = process.cwd(),
+  probe: (candidate: string) => boolean = (candidate) => statSync(candidate).isFile(),
+): string | undefined {
   if (platform !== 'win32' || bin.includes('/') || bin.includes('\\')) return bin;
   const key = Object.keys(env)
     .sort()
     .find((name) => name.toUpperCase() === 'PATH');
-  const paths = (key === undefined ? '' : (env[key] ?? '')).split(';');
-  const hasExtension = /\.[^.]+$/.test(bin);
-  const names = [...(hasExtension ? [bin] : []), `${bin}.com`, `${bin}.exe`];
-  for (const dir of [process.cwd(), ...paths]) {
+  const paths = splitWindowsPath(key === undefined ? '' : (env[key] ?? '')).filter(
+    (entry) => entry !== '',
+  );
+  const skipCwd = Object.keys(callerEnv).some(
+    (name) => name.toUpperCase() === 'NODEFAULTCURRENTDIRECTORYINEXEPATH',
+  );
+  const names = [...(/\.[^.]+$/.test(bin) ? [bin] : []), `${bin}.com`, `${bin}.exe`];
+  for (const dir of [...(skipCwd ? [] : [cwd]), ...paths]) {
     for (const name of names) {
-      const candidate = pathResolve(join(dir || process.cwd(), name));
+      const candidate = `${dir}${dir.endsWith(sep) ? '' : sep}${name}`;
       try {
-        if (statSync(candidate).isFile()) return candidate;
+        if (probe(candidate)) return candidate;
       } catch {
         /* search the next candidate */
       }
     }
   }
-  // An absolute missing path fails closed instead of falling back to child cwd.
-  return pathResolve(process.cwd(), bin);
+  return undefined;
 }

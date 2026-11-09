@@ -7,13 +7,17 @@
 //
 // The spawned helpers are generated at runtime into a temp dir (not repo
 // fixtures) and run through the real makeGhRunner seam.
-import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { delimiter, dirname, join, relative } from 'node:path';
 import { afterEach, describe, expect, test } from 'vitest';
 import { makeGhRunner, ghJson } from '../../../src/adapters/forge-github/gh.js';
 import type { GhFn } from '../../../src/adapters/forge-github/gh.js';
-import { ghMergeEnv, resolveWindowsCommand } from '../../../src/adapters/forge-github/ghBin.js';
+import {
+  ghMergeEnv,
+  ghSpawnEnv,
+  resolveWindowsCommand,
+} from '../../../src/adapters/forge-github/ghBin.js';
 import { makeSubprocessPrEffects } from '../../../src/adapters/forge-github/ghEffects.js';
 
 const tempDirs: string[] = [];
@@ -162,8 +166,55 @@ describe('makeGhRunner', () => {
       { Path: dirname(trusted) },
       'win32',
     );
-    expect(missing).toBe(join(process.cwd(), 'cq-windows-missing'));
+    expect(missing).toBeUndefined();
   });
+
+  test('Windows PATH quoting and semicolons are anchored without lexical normalization', () => {
+    const env = ghSpawnEnv(
+      { Path: `"C:\\Program Files\\a;b";'rel;part';C:\\x\\..\\bin` },
+      'win32',
+      'C:\\caller',
+    );
+    expect(env.Path).toBe(`"C:\\Program Files\\a;b";"C:\\caller\\rel;part";C:\\x\\..\\bin`);
+  });
+
+  test('Windows current-directory opt-out skips the cwd probe', () => {
+    const seen: string[] = [];
+    const result = resolveWindowsCommand(
+      'gh',
+      { Path: '/trusted' },
+      'win32',
+      { NoDefaultCurrentDirectoryInExePath: '' },
+      '/caller',
+      (candidate) => {
+        seen.push(candidate);
+        return candidate === '/trusted/gh.exe';
+      },
+    );
+    expect(result).toBe('/trusted/gh.exe');
+    expect(seen.every((candidate) => !candidate.startsWith('/caller/'))).toBe(true);
+  });
+
+  test.skipIf(process.platform === 'win32')(
+    'preserves symlink traversal in PATH entries',
+    async () => {
+      const root = await mkdtemp(join(tmpdir(), 'cq-gh-symlink-'));
+      tempDirs.push(root);
+      await mkdir(join(root, 'other', 'deep'), { recursive: true });
+      await mkdir(join(root, 'other', 'bin'));
+      await mkdir(join(root, 'bin'));
+      await symlink(join(root, 'other', 'deep'), join(root, 'link'));
+      await writeFile(join(root, 'other', 'bin', 'cq-symlink-probe'), '#!/bin/sh\nprintf correct', {
+        mode: 0o755,
+      });
+      await writeFile(join(root, 'bin', 'cq-symlink-probe'), '#!/bin/sh\nprintf wrong', {
+        mode: 0o755,
+      });
+      const path = `${root}/link/../bin`;
+      const result = await makeGhRunner({ bin: 'cq-symlink-probe', env: { PATH: path } })([]);
+      expect(result.stdout).toBe('correct');
+    },
+  );
 
   test('PATH search continues past an executable with a missing interpreter', async () => {
     const broken = await tempBin('cq-gh-search-probe', '#!/no-such-interpreter\n');
