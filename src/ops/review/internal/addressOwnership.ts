@@ -134,6 +134,7 @@ async function prepare(path: string, bytes: Uint8Array): Promise<void> {
 interface Child {
   owner: AddressOwnership;
   selection: AddressSelection;
+  currentHead: string;
   consumed: boolean;
   keys: Set<string>;
   tasks: Set<Promise<unknown>>;
@@ -896,6 +897,7 @@ export class AddressOwnership extends AddressRunLifecycle {
     const child: Child = {
       owner: this,
       selection,
+      currentHead: selection.head,
       consumed: false,
       keys: new Set(),
       tasks: new Set(),
@@ -1020,10 +1022,7 @@ export class AddressOwnership extends AddressRunLifecycle {
         if (!this.admitting) throw new Error('address ownership: admissions closed');
         await this.assertOwned();
         if (!child) return;
-        if (
-          info.branch !== reviewBranchFor(child.selection.pr) ||
-          info.head !== child.selection.head
-        )
+        if (info.branch !== reviewBranchFor(child.selection.pr) || info.head !== child.currentHead)
           throw new Error('address ownership: resolved identity changed');
         const root = await realpath(info.path);
         const common = await commonDirectory({ repoRoot: root, git: this.opts.git });
@@ -1065,9 +1064,47 @@ export async function runAddressReviewLoop(
   await lease.assertOwned();
   if ((await commonDirectory(opts)) !== owner.commonDir)
     throw new Error('address ownership: loop identity changed');
+  const child = childContext.getStore();
+  if (child && child.owner !== owner) throw new Error('address ownership: loop child changed');
+  let checkout: { path: string; branch: string } | undefined;
   return loopContext.run({ lease, consumed: false }, async () => {
     const { runReviewLoop } = await import('../../../plans/review-loop.js');
-    return runReviewLoop(opts);
+    return runReviewLoop({
+      ...opts,
+      onWorktreeResolved: async (info) => {
+        await opts.onWorktreeResolved?.(info);
+        checkout = info;
+      },
+      onPublished: async (sha) => {
+        await opts.onPublished?.(sha);
+        if (child) {
+          if (!checkout) throw new Error('address ownership: published checkout unavailable');
+          await lease.assertOwned();
+          const root = await realpath(checkout.path);
+          const common = await commonDirectory({ repoRoot: root, git: opts.git });
+          const gitDir = await realpath(
+            resolve(
+              root,
+              await gitText(opts.git, root, ['rev-parse', '--path-format=absolute', '--git-dir']),
+            ),
+          );
+          if (
+            checkout.branch !== reviewBranchFor(child.selection.pr) ||
+            common !== owner.commonDir ||
+            !child.keys.has(`checkout:${root}`) ||
+            !child.keys.has(`git-dir:${gitDir}`) ||
+            (await gitText(opts.git, root, ['symbolic-ref', 'HEAD'])) !==
+              `refs/heads/${checkout.branch}` ||
+            (await gitText(opts.git, root, ['rev-parse', 'HEAD'])) !== sha ||
+            (await opts.git(['-C', root, 'merge-base', '--is-ancestor', child.currentHead, sha]))
+              .code !== 0
+          )
+            throw new Error('address ownership: published successor identity changed');
+          await lease.assertOwned();
+          child.currentHead = sha;
+        }
+      },
+    });
   });
 }
 

@@ -393,8 +393,8 @@ export interface ReviewLoopOpts {
    * Same-repo callers omit it: the push targets 'origin' as before.
    */
   headRepo?: string;
-  /** Fires per confirmed push, including re-assertion; independent of final outcome. Must not throw. */
-  onPublished?: (sha: string) => void;
+  /** Fires per confirmed push, including re-assertion; independent of final outcome. */
+  onPublished?: (sha: string) => void | Promise<void>;
   /** The checked-out repository root resolvePrWorktree anchors to. */
   repoRoot: string;
   /** The gh transport — review reads, replies, and resolves ride it. */
@@ -1626,7 +1626,7 @@ async function runOwnedReviewLoop(
     );
     if (result.code === 0) {
       expectedPublishedHead = worktreeTip;
-      opts.onPublished?.(worktreeTip);
+      await opts.onPublished?.(worktreeTip);
     } else publicationFailed = true;
     return result;
   };
