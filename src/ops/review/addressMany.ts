@@ -74,13 +74,27 @@ export type ReviewAddressManyResult = OpResult<
 
 class IsolationRefusal extends Error {}
 
+/**
+ * Bounded, non-interactive options for clone-setup Git calls. Git asks for
+ * credentials through `/dev/tty`, not stdin, so a private remote without a
+ * usable credential would otherwise stall the worker (and its reservation)
+ * forever; the timeout bounds hangs that no prompt explains.
+ */
+const gitSubprocess = (): { timeout: number; env: NodeJS.ProcessEnv } => ({
+  timeout: 300_000,
+  env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+});
+
 /** Independent object store and common directory; caller receipts remain durable. */
 export async function isolateAddressMany(
   repoRoot: string,
   number: number,
   options: { cloneRoot: string; target?: string },
 ): Promise<string> {
-  const git = checkoutWriterContext() ? checkoutWriterCommand : promisify(execFile);
+  const run = promisify(execFile);
+  const git = checkoutWriterContext()
+    ? (file: string, args: string[]) => checkoutWriterCommand(file, args, gitSubprocess())
+    : (file: string, args: string[]) => run(file, args, gitSubprocess());
   // Inspect key names only: helpers, HTTP headers and signing values may contain credentials.
   const scopes = ['--local'];
   try {
@@ -336,7 +350,8 @@ function makeReviewAddressManyCore(
         return { status: 'needs-human', reason: JSON.stringify(selection.refusal) };
       if (!selection.candidates.length)
         return { status: 'needs-human', reason: 'No eligible PRs in selection' };
-      const git = promisify(execFile);
+      const run = promisify(execFile);
+      const git = (file: string, args: string[]) => run(file, args, gitSubprocess());
       const coordinationRoot =
         deps.coordinationRoot ??
         (await realpath(
