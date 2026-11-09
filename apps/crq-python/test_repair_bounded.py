@@ -298,9 +298,11 @@ class BoundedRepairTest(unittest.TestCase):
 
     def test_harvest_records_fixed_without_commits_as_failed(self):
         job_id, job = self.prepare()
+        self.c.WT_ROOT = self.root / 'wt'
         atomic(self.root / 'state/repair' / job_id / 'result.json',
                {'job': job_id, 'item': job['item'], 'verdict': 'FIXED', 'commits': [],
                 'worktree': str(self.root / 'wt/crq-repair-pr1-merged'), 'reason': 'test',
+                'repair_base': job['repair_base'], 'attempts': [{'rung': 'A0'}],
                 'source_sha': job['source_sha'], 'finding_sha256': job['finding_sha256'], 'origin_job': OLD})
         item = self.queue['items'][0]
         repair_tick.harvest(self.c, self.queue, item)
@@ -308,6 +310,47 @@ class BoundedRepairTest(unittest.TestCase):
         self.assertEqual(record['state'], 'failed')
         self.assertIn('without valid commits', record['error'])
         self.assertEqual(item['state'], 'repair_failed')
+
+    def test_bad_fixed_attempts_fail_once_across_ticks(self):
+        for attempts in (None, [], [{}], [{'rung': 'A3'}], 'invalid'):
+            with self.subTest(attempts=attempts):
+                job_id, job = self.prepare()
+                item = self.queue['items'][0]
+                record = item['repair_runs'][job['run']]
+                record['state'] = 'queued'
+                result = {'job': job_id, 'item': job['item'], 'verdict': 'FIXED',
+                          'commits': ['a' * 40], 'attempts': attempts, 'reason': 'test',
+                          'source_sha': job['source_sha'], 'finding_sha256': job['finding_sha256'],
+                          'origin_job': OLD, 'worktree': str(self.root / 'wt/crq-repair-pr1-merged'),
+                          'repair_base': job['repair_base']}
+                atomic(self.root / 'state/repair' / job_id / 'result.json', result)
+                with mock.patch.object(repair_tick, 'mark_finding_outcome') as mark:
+                    repair_tick.harvest(self.c, self.queue, item)
+                    repair_tick.harvest(self.c, self.queue, item)
+                    self.assertEqual(mark.call_count, 1)
+                    self.assertEqual(mark.call_args.args[2]['verdict'], 'FAILED')
+                self.assertEqual(record['state'], 'failed')
+                self.assertIn('valid final attempt rung', record['error'])
+                self.assertEqual(item['state'], 'repair_failed')
+
+    def test_valid_fixed_rungs_reach_git_verification(self):
+        job_id, job = self.prepare()
+        self.c.WT_ROOT = self.root / 'wt'
+        self.c.make_worktree = mock.Mock(return_value=(self.root / 'verify', 'branch'))
+        self.c.remove_worktree = mock.Mock()
+        item = self.queue['items'][0]
+        for rung in ('A0', 'A1', 'A2'):
+            with self.subTest(rung=rung):
+                atomic(self.root / 'state/repair' / job_id / 'result.json',
+                       {'job': job_id, 'item': job['item'], 'verdict': 'FIXED', 'commits': ['a' * 40],
+                        'attempts': [{'rung': rung}], 'source_sha': job['source_sha'],
+                        'finding_sha256': job['finding_sha256'], 'origin_job': OLD,
+                        'worktree': str(self.c.WT_ROOT / 'crq-repair-pr1-merged'),
+                        'repair_base': job['repair_base']})
+                with mock.patch.object(repair_tick, 'verify', side_effect=RuntimeError('verification reached')):
+                    with self.assertRaisesRegex(RuntimeError, 'verification reached'):
+                        repair_tick.harvest(self.c, self.queue, item)
+                self.assertEqual(item['repair_runs'][job['run']]['state'], 'queued')
 
     def test_harvest_retains_malformed_json_and_fails_the_prepared_run(self):
         job_id, job = self.prepare()
@@ -318,6 +361,24 @@ class BoundedRepairTest(unittest.TestCase):
         repair_tick.harvest(self.c, self.queue, item)
         self.assertEqual(item['repair_runs'][job['run']]['state'], 'failed')
         self.assertEqual(result.read_text(), '{broken')
+
+    def test_malformed_result_writes_canonical_failed_outcome_once(self):
+        job_id, job = self.prepare()
+        fid = 'd' * 64
+        job['canonical_finding_id'] = fid
+        atomic(bounded.job_path(self.root, job_id), job)
+        atomic(self.root / 'state/backfill/findings/triage' / (fid + '.json'),
+               {'status': 'delivered', 'receipt': {'repair_task': job_id}})
+        result = self.root / 'state/repair' / job_id / 'result.json'
+        result.parent.mkdir(parents=True, exist_ok=True)
+        result.write_text('{broken')
+        item = self.queue['items'][0]
+        with mock.patch.object(repair_tick, 'finding_inbox') as inbox:
+            repair_tick.harvest(self.c, self.queue, item)
+            repair_tick.harvest(self.c, self.queue, item)
+            outcome = inbox.return_value.repair_outcome
+            outcome.assert_called_once()
+            self.assertEqual(outcome.call_args.args[:3], (fid, job_id, 'needs-human'))
 
     def test_service_dispatches_one_selected_job_without_inbox_enumeration(self):
         job_id, job = self.prepare()
