@@ -115,6 +115,34 @@ class PhaseTest(FindingTest):
                                      'current_path': 'a', 'current_lines': [[1, 1]], 'quoted_text': 'wrong'})
         self.assertEqual(result['counts'], {'needs-human': 1})
 
+    def test_escalates_once_with_pinned_extra_source_and_keeps_validation(self):
+        first, _, _ = self.run_phase({'stop': 'ok', 'verdict': 'unsure', 'reason': 'need source'})
+        self.assertEqual(first['counts'], {'needs-human': 1})
+        second, _, judge = self.run_phase({'stop': 'ok', 'verdict': 'valid', 'reason': 'asserted',
+                                          'current_path': 'a', 'current_lines': [[1, 1]], 'quoted_text': 'wrong'})
+        self.assertEqual(second['counts'], {'needs-human': 1})
+        self.assertEqual(judge.call_args.args[1]['additional_sources'][0]['text'], 'one\ntwo\n')
+        third, _, judge = self.run_phase()
+        judge.assert_not_called()
+        self.assertEqual(third['judged'], 0)
+        events = [e for e in self.out.retained() if e['event_type'] == 'finding-event']
+        self.assertEqual(len(events), 2)
+        self.assertEqual(sum(e['payload']['actor'].startswith('crq-triage/escalation/') for e in events), 1)
+
+    def test_escalation_can_confirm_and_deliver(self):
+        self.run_phase({'stop': 'ok', 'verdict': 'unsure', 'reason': 'missing context'})
+        result, queue, _ = self.run_phase()
+        self.assertEqual(result['counts'], {'confirmed': 1})
+        self.assertEqual(result['delivered'], 1)
+        self.assertEqual(len(queue['items']), 1)
+
+    def test_failed_escalation_is_not_repeated_on_each_pass(self):
+        self.run_phase({'stop': 'ok', 'verdict': 'unsure', 'reason': 'missing context'})
+        result, _, _ = self.run_phase({'stop': 'error', 'reason': 'incomplete output'})
+        self.assertEqual(result['counts'], {'needs-human': 1})
+        _, _, judge = self.run_phase()
+        judge.assert_not_called()
+
     def test_zero_limit_leaves_unjudged(self):
         result, _, judge = self.run_phase(maximum=0)
         judge.assert_not_called()
