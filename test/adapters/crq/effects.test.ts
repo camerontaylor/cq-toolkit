@@ -191,3 +191,58 @@ test('no fresh review stays blocked with the migration reason', async () => {
   expect(result.verdict.kind).toBe('blocked');
   expect(result.reason).toBe('skipped:no-fresh');
 });
+
+test('multiple blocking waiters do not starve the holder filesystem release', async () => {
+  const path = join(await dir(), 'tick.lock');
+  let release!: () => void;
+  let held!: () => void;
+  const ready = new Promise<void>((resolve) => {
+    held = resolve;
+  });
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const holder = withLock(path, { wait: true }, async () => {
+    held();
+    await gate;
+  });
+  await ready;
+  let running = 0;
+  let count = 0;
+  const waiters = Array.from({ length: 5 }, () =>
+    withLock(path, { wait: true }, async () => {
+      expect(++running).toBe(1);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      count++;
+      running--;
+    }),
+  );
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  release();
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    await Promise.race([
+      Promise.all([holder, ...waiters]),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error('waiters deadlocked')), 3000);
+      }),
+    ]);
+    expect(count).toBe(5);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+});
+
+test('timed-out CLI ignores SIGTERM but is killed and drained', async () => {
+  const root = await dir();
+  const binary = join(root, 'fake-cli');
+  const pidfile = join(root, 'pid');
+  await writeFile(
+    binary,
+    `#!/usr/bin/env node\nrequire('node:fs').writeFileSync(${JSON.stringify(pidfile)},String(process.pid)); process.on('SIGTERM',()=>{}); setInterval(()=>{},1000);\n`,
+    { mode: 0o755 },
+  );
+  await expect(usage({ cwd: root, binary, timeoutMs: 500 })).rejects.toThrow('timed out');
+  const pid = Number(await readFile(pidfile, 'utf8'));
+  expect(() => process.kill(pid, 0)).toThrow();
+});

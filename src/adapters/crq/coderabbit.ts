@@ -8,7 +8,7 @@ async function invoke(
   const child = spawn(options.binary ?? 'coderabbit', args, {
     cwd: options.cwd,
     stdio: ['ignore', 'pipe', 'pipe'],
-    signal: AbortSignal.timeout(options.timeoutMs ?? 20_000),
+    detached: process.platform !== 'win32',
   });
   let stdout = '';
   let stderr = '';
@@ -19,8 +19,33 @@ async function invoke(
     stderr += chunk;
   });
   const exitCode = await new Promise<number | null>((resolve, reject) => {
-    child.once('error', reject);
-    child.once('close', resolve);
+    let timedOut = false;
+    let spawnError: Error | undefined;
+    let escalation: NodeJS.Timeout | undefined;
+    const signal = (value: NodeJS.Signals) => {
+      try {
+        if (process.platform !== 'win32' && child.pid !== undefined)
+          process.kill(-child.pid, value);
+        else child.kill(value);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
+      }
+    };
+    const timer = setTimeout(() => {
+      timedOut = true;
+      signal('SIGTERM');
+      escalation = setTimeout(() => signal('SIGKILL'), 1000);
+    }, options.timeoutMs ?? 20_000);
+    child.once('error', (error) => {
+      spawnError = error;
+    });
+    child.once('close', (code) => {
+      clearTimeout(timer);
+      if (escalation) clearTimeout(escalation);
+      if (spawnError) reject(spawnError);
+      else if (timedOut) reject(new Error('CodeRabbit CLI timed out'));
+      else resolve(code);
+    });
   });
   return { stdout, stderr, exitCode };
 }

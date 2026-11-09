@@ -25,14 +25,15 @@ export async function withLock<T>(
   }
   const file = await open(path, constants.O_CREAT | constants.O_RDWR | constants.O_NOFOLLOW, 0o600);
   try {
-    await new Promise<void>((resolve, reject) =>
-      flock(file.fd, options.wait ? 'ex' : 'exnb', (error) => {
-        if (!error) resolve();
-        else if (error.code === 'EAGAIN' || error.code === 'EWOULDBLOCK')
-          reject(new SlotBusyError(`Lock busy: ${path}`));
-        else reject(error);
-      }),
-    );
+    for (;;) {
+      const error = await new Promise<NodeJS.ErrnoException | null>((resolve) =>
+        flock(file.fd, 'exnb', resolve),
+      );
+      if (!error) break;
+      if (error.code !== 'EAGAIN' && error.code !== 'EWOULDBLOCK') throw error;
+      if (!options.wait) throw new SlotBusyError(`Lock busy: ${path}`);
+      await new Promise<void>((resolve) => setTimeout(resolve, 25));
+    }
     const [held, named] = await Promise.all([file.stat(), lstat(path)]);
     if (!named.isFile() || held.nlink !== 1 || held.dev !== named.dev || held.ino !== named.ino)
       throw new Error(`Lock inode replaced: ${path}`);
