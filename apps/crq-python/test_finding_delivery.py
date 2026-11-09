@@ -26,6 +26,17 @@ class FindingTest(unittest.TestCase):
         self.inbox = delivery.Inbox(self.root / "findings", self.out)
         self.inbox.ingest(self.value)
 
+    def test_unchanged_source_evidence_survives_event_replay(self):
+        evidence = [{"path": "a", "line": 1, "quoted_text": "one", "target": self.t}]
+        self.inbox.repair_outcome(self.fid, "unchanged", "dismissed", "not a defect", AT,
+                                  source_evidence=evidence)
+        event = next(v for v in self.out.retained() if v["event_type"] == "finding-event")
+        self.assertEqual(event["payload"]["evidence"]["source_evidence"], evidence)
+        before = self.out.retained()
+        self.inbox.repair_outcome(self.fid, "unchanged", "dismissed", "not a defect", AT,
+                                  source_evidence=evidence)
+        self.assertEqual(self.out.retained(), before)
+
     def test_repair_outcome_is_durable_idempotent_and_recoverable(self):
         filename = self.root / "findings/triage" / (self.fid + ".json")
         chain = [self.value]

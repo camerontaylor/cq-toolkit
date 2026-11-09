@@ -311,6 +311,7 @@ def process(config, job, wt):
                 atomic(progress_path, result)
                 report = dispatch(config, role, current, wt, attempt_dir)
                 result.pop('dispatch_pending', None)
+                result.pop('unchanged_evidence', None)
                 if report.get('stop') == 'rate-limit':
                     retain(wt, base, attempt_dir)
                     result['next_rung'] = rung
@@ -334,6 +335,25 @@ def process(config, job, wt):
                 if git(wt, 'status', '--porcelain') or git(wt, 'rev-parse', 'HEAD') != base:
                     raise ValueError('unchanged report left repository changes')
                 reason = report.get('summary') or 'no change proposed'
+                if report.get('disposition') == 'unchanged_with_reason':
+                    citations = report.get('evidence')
+                    if not isinstance(citations, list) or not citations:
+                        raise ValueError('unchanged outcome requires source evidence')
+                    verified = []
+                    for citation in citations:
+                        path, line = citation['path'], citation['line']
+                        if (not isinstance(path, str) or path.startswith('/') or '..' in path.split('/')
+                                or not isinstance(line, int) or isinstance(line, bool) or line < 1):
+                            raise ValueError('invalid unchanged evidence anchor')
+                        blob = command(['git', 'cat-file', 'blob', base + ':' + path], cwd=wt)
+                        if blob.returncode:
+                            raise ValueError('unchanged evidence blob absent')
+                        source = blob.stdout.splitlines()
+                        if line > len(source):
+                            raise ValueError('unchanged evidence line absent')
+                        verified.append({'path': path, 'line': line, 'quoted_text': source[line - 1], 'target': base})
+                    result['unchanged_evidence'] = verified
+
             judge_required = bool(result.get('pending_judge')) or job['finding']['severity'] == 'critical' or job.get('recurrence') or random.random() < repair.get('judge_sample_rate', 0)
             if judge_required and result['judge'] is None:
                 judge_role = roles['judge_critical' if job['finding']['severity'] == 'critical' else 'judge']
@@ -362,6 +382,15 @@ def process(config, job, wt):
                         result.update(verdict='FAILED', reason='judge-confirmed defect; escalation already exhausted; needs human')
                         break
                     evidence = judged.get('reason', '')
+                    result['evidence'] = evidence
+                    result['next_rung'] = 2
+                    atomic(progress_path, result)
+                    rung = 2
+                    continue
+                from crq_repair.triage import missing_evidence
+                if (judged.get('stop') == 'ok' and judged.get('verdict') == 'unsure'
+                        and missing_evidence(judged.get('reason')) and rung < 2):
+                    evidence = judged['reason']
                     result['evidence'] = evidence
                     result['next_rung'] = 2
                     atomic(progress_path, result)

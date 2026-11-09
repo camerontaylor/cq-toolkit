@@ -22,6 +22,58 @@ class PhaseTest(FindingTest):
         result = phase(self.inbox, self.f.repo, self.t, judge, transport, AT, dry_run=dry, maximum=maximum)
         return result, queue, judge
 
+    def test_missing_evidence_enters_fixer_queue_once(self):
+        result, queue, _ = self.run_phase({'stop': 'ok', 'verdict': 'unsure', 'reason': 'missing source evidence'})
+        self.assertEqual(result['delivered'], 1)
+        self.assertEqual(len(queue['items']), 1)
+        self.assertEqual(self.run_phase()[0]['delivered'], 0)
+
+    def test_legacy_missing_evidence_is_routed_once_with_history_intact(self):
+        old = self.inbox.triage(self.fid, self.f.repo, self.t, 'needs-human',
+                                'crq-triage/escalation/old', 'insufficient evidence', AT)
+        result, queue, judge = self.run_phase()
+        judge.assert_not_called()
+        self.assertEqual(result['delivered'], 1)
+        self.assertIn(old, self.out.retained())
+        self.assertEqual(self.run_phase()[0]['delivered'], 0)
+
+    def test_failed_investigation_anchor_keeps_bounded_judge_escalation(self):
+        self.inbox.triage(self.fid, self.f.repo, self.t, 'needs-human',
+                          'crq-triage/escalation/old', 'insufficient evidence', AT)
+        self.t = self.f.commit({'a': b'changed\ntwo\n'})
+        first, _, judge = self.run_phase()
+        judge.assert_not_called()
+        self.assertEqual(first['counts'], {'needs-human': 1})
+        result, _, judge = self.run_phase({'stop': 'ok', 'verdict': 'valid', 'reason': 'verified',
+            'current_path': 'a', 'current_lines': [[1, 1]], 'quoted_text': 'changed'})
+        judge.assert_called_once()
+        self.assertEqual(result['delivered'], 1)
+        self.assertEqual(self.run_phase()[0]['delivered'], 0)
+
+    def add_pending_candidate(self):
+        import copy
+        path = self.inbox.root / 'triage' / (self.fid + '.json')
+        row = copy.deepcopy(ledger.loads(path.read_bytes()))
+        row['finding'].update(id='f' * 64, title='Second distinct finding', severity='minor')
+        row.update(status='untriaged', previous_event_id=None, canonical_id='f' * 64)
+        ledger.atomic(path.parent / ('f' * 64 + '.json'), ledger.canonical(row))
+
+    def test_legacy_investigation_admission_consumes_maximum(self):
+        self.inbox.triage(self.fid, self.f.repo, self.t, 'needs-human',
+                          'crq-triage/judge', 'insufficient evidence', AT)
+        self.add_pending_candidate()
+        result, _, judge = self.run_phase(maximum=1)
+        judge.assert_not_called()
+        self.assertEqual(result['delivered'], 1)
+
+    def test_fresh_investigation_judgments_are_counted_once(self):
+        self.add_pending_candidate()
+        result, _, judge = self.run_phase({'stop': 'ok', 'verdict': 'unsure',
+                                         'reason': 'missing evidence'}, maximum=2)
+        self.assertEqual(judge.call_count, 2)
+        self.assertEqual(result['judged'], 2)
+        self.assertEqual(result['delivered'], 2)
+
     def test_real_delivery_and_replay_are_idempotent(self):
         self.assertEqual(self.value['payload']['findings'][0]['severity'], 'major')
         result, queue, _ = self.run_phase()
@@ -116,7 +168,7 @@ class PhaseTest(FindingTest):
         self.assertEqual(result['counts'], {'needs-human': 1})
 
     def test_escalates_once_with_pinned_extra_source_and_keeps_validation(self):
-        first, _, _ = self.run_phase({'stop': 'ok', 'verdict': 'unsure', 'reason': 'need source'})
+        first, _, _ = self.run_phase({'stop': 'ok', 'verdict': 'unsure', 'reason': 'owner requirements ambiguous'})
         self.assertEqual(first['counts'], {'needs-human': 1})
         second, _, judge = self.run_phase({'stop': 'ok', 'verdict': 'valid', 'reason': 'asserted',
                                           'current_path': 'a', 'current_lines': [[1, 1]], 'quoted_text': 'wrong'})
@@ -130,14 +182,14 @@ class PhaseTest(FindingTest):
         self.assertEqual(sum(e['payload']['actor'].startswith('crq-triage/escalation/') for e in events), 1)
 
     def test_escalation_can_confirm_and_deliver(self):
-        self.run_phase({'stop': 'ok', 'verdict': 'unsure', 'reason': 'missing context'})
+        self.run_phase({'stop': 'ok', 'verdict': 'unsure', 'reason': 'owner requirements ambiguous'})
         result, queue, _ = self.run_phase()
         self.assertEqual(result['counts'], {'confirmed': 1})
         self.assertEqual(result['delivered'], 1)
         self.assertEqual(len(queue['items']), 1)
 
     def test_transient_escalation_failures_defer_until_service_recovers(self):
-        self.run_phase({'stop': 'ok', 'verdict': 'unsure', 'reason': 'missing context'})
+        self.run_phase({'stop': 'ok', 'verdict': 'unsure', 'reason': 'owner requirements ambiguous'})
         for stop in ('configuration', 'budget', 'error', 'rate-limit'):
             with self.subTest(stop=stop):
                 result, _, judge = self.run_phase({'stop': stop})
@@ -149,7 +201,7 @@ class PhaseTest(FindingTest):
 
     def test_timed_out_escalation_remains_eligible(self):
         import subprocess
-        self.run_phase({'stop': 'ok', 'verdict': 'unsure', 'reason': 'missing context'})
+        self.run_phase({'stop': 'ok', 'verdict': 'unsure', 'reason': 'owner requirements ambiguous'})
         judge = mock.Mock(side_effect=subprocess.TimeoutExpired('judge', 1))
         result = phase(self.inbox, self.f.repo, self.t, judge, mock.Mock(), AT)
         self.assertEqual(result['counts'], {})
@@ -159,7 +211,7 @@ class PhaseTest(FindingTest):
 
     def test_outage_does_not_consume_other_escalation_rows(self):
         import copy
-        self.run_phase({'stop': 'ok', 'verdict': 'unsure', 'reason': 'missing context'})
+        self.run_phase({'stop': 'ok', 'verdict': 'unsure', 'reason': 'owner requirements ambiguous'})
         path = self.inbox.root / 'triage' / (self.fid + '.json')
         row = copy.deepcopy(ledger.loads(path.read_bytes()))
         row['finding'].update(id='f' * 64, title='Another finding')
@@ -173,7 +225,7 @@ class PhaseTest(FindingTest):
 
     def test_invalid_completed_output_is_terminal_and_later_rows_progress(self):
         import copy
-        self.run_phase({'stop': 'ok', 'verdict': 'unsure', 'reason': 'missing context'})
+        self.run_phase({'stop': 'ok', 'verdict': 'unsure', 'reason': 'owner requirements ambiguous'})
         path = self.inbox.root / 'triage' / (self.fid + '.json')
         row = copy.deepcopy(ledger.loads(path.read_bytes()))
         row['finding'].update(id='f' * 64, title='Another finding', severity='minor')

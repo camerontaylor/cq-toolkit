@@ -209,12 +209,13 @@ def mark_finding_outcome(c, job, result, merge=None, fix_pr=None):
     action = 'fixed' if merge and verdict == 'FIXED' else {
         'STALE': 'needs-retriage', 'FAILED': 'needs-human'}.get(verdict)
     if verdict == 'NOT-FIXED':
-        action = 'dismissed' if (result.get('judge') or {}).get('verdict') == 'invalid' else 'needs-human'
+        action = 'dismissed' if result.get('unchanged_evidence') or (result.get('judge') or {}).get('verdict') == 'invalid' else 'needs-human'
     if not action:
         return
     inbox = finding_inbox(c)
     inbox.repair_outcome(fid, job['job'], action, result.get('reason') or verdict,
-                         c.iso(), fixing_commit=merge, fix_pr=fix_pr)
+                         c.iso(), fixing_commit=merge, fix_pr=fix_pr,
+                         **({'source_evidence': result['unchanged_evidence']} if result.get('unchanged_evidence') else {}))
 
 
 def repair_provenance(c, record, run):

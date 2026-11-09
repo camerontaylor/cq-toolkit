@@ -587,6 +587,69 @@ class RepairDrainTest(unittest.TestCase):
         repair_tick.harvest(c, self.queue, item)
         self.assertFalse(wt.exists())
 
+    def test_unchanged_contract_verifies_and_preserves_source_evidence(self):
+        (self.clone / 'src/kept.ts').write_text('\n  one\n\n')
+        self.git('commit', '-qam', 'leading blank lines')
+        self.pin = self.git('rev-parse', 'HEAD')
+        self.git('push', '-q', 'origin', self.pin + ':refs/heads/main')
+        self.git('fetch', '-q', 'origin')
+        self.queue['items'][0]['repair_runs']['run1']['base'] = self.pin
+        job_id = 'crq-run1-F1'
+        self.job(job_id, 'pr1-merged', 'run1', 'src/kept.ts')
+        job = bounded.drain_job(self.root, self.config, self.queue, job_id)[1]
+        wt = self.worktree('crq-repair-pr1-merged-' + job_id)
+        report = {'stop': 'ok', 'changed': False, 'disposition': 'unchanged_with_reason',
+                  'summary': 'No defect in pinned code', 'evidence': [{'path': 'src/kept.ts', 'line': 2}]}
+        with mock.patch.object(service, 'blocked', return_value=False), \
+             mock.patch.object(service, 'dispatch', return_value=report) as dispatch:
+            result = service.process(self.config, job, wt)
+        self.assertEqual(result['verdict'], 'NOT-FIXED')
+        self.assertEqual(result['unchanged_evidence'][0]['target'], self.pin)
+        self.assertEqual(result['unchanged_evidence'][0]['quoted_text'], '  one')
+        dispatch.assert_called_once()
+
+    def test_unchanged_critical_keeps_required_judge_and_unresolved_defect(self):
+        job_id = 'crq-run1-F1'
+        self.job(job_id, 'pr1-merged', 'run1', 'src/kept.ts', severity='critical')
+        job = bounded.drain_job(self.root, self.config, self.queue, job_id)[1]
+        wt = self.worktree('crq-repair-pr1-merged-' + job_id)
+        report = {'stop': 'ok', 'changed': False, 'disposition': 'unchanged_with_reason',
+                  'summary': 'No defect', 'evidence': [{'path': 'src/kept.ts', 'line': 1}]}
+        with mock.patch.object(service, 'blocked', return_value=False), \
+             mock.patch.object(service, 'dispatch', side_effect=[report,
+                 {'stop': 'ok', 'verdict': 'valid', 'reason': 'still a defect'}, report]) as dispatch:
+            result = service.process(self.config, job, wt)
+        self.assertEqual(result['verdict'], 'FAILED')
+        self.assertEqual(dispatch.call_count, 3)
+        self.assertTrue(dispatch.call_args_list[1].kwargs['judge'])
+
+    def test_evidence_short_judge_rationale_reaches_a2(self):
+        job_id = 'crq-run1-F1'
+        self.job(job_id, 'pr1-merged', 'run1', 'src/kept.ts', severity='critical')
+        job = bounded.drain_job(self.root, self.config, self.queue, job_id)[1]
+        wt = self.worktree('crq-repair-pr1-merged-' + job_id)
+        report = {'stop': 'ok', 'changed': False, 'disposition': 'unchanged_with_reason',
+                  'summary': 'No defect', 'evidence': [{'path': 'src/kept.ts', 'line': 1}]}
+        reason = 'missing source evidence for the consumer'
+        observed = []
+        def dispatch(*args, **kwargs):
+            observed.append(args[2]['mechanical_evidence'])
+            return {'stop': 'ok', 'verdict': 'unsure', 'reason': reason} if kwargs.get('judge') else report
+        with mock.patch.object(service, 'blocked', return_value=False), \
+             mock.patch.object(service, 'dispatch', side_effect=dispatch):
+            service.process(self.config, job, wt)
+        self.assertEqual(observed, ['', '', reason])
+
+    def test_unchanged_evidence_projects_to_dismissed(self):
+        c = SimpleNamespace(iso=lambda: 'now')
+        evidence = [{'path': 'src/kept.ts', 'line': 1, 'target': self.pin, 'quoted_text': 'one'}]
+        with mock.patch.object(repair_tick, 'finding_inbox') as inbox:
+            repair_tick.mark_finding_outcome(c, {'job': 'j', 'canonical_finding_id': 'f'},
+                {'verdict': 'NOT-FIXED', 'reason': 'No defect', 'unchanged_evidence': evidence})
+        call = inbox.return_value.repair_outcome.call_args
+        self.assertEqual(call.args[2], 'dismissed')
+        self.assertEqual(call.kwargs['source_evidence'], evidence)
+
     def test_process_captures_terminal_tree_for_later_harvest_cleanup(self):
         item = self.queue['items'][0]
         record = item['repair_runs']['run1']

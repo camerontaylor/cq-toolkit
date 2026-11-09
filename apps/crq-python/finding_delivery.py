@@ -227,7 +227,7 @@ class Inbox:
                 raise ledger.IntegrityError("current fixed finding evidence does not match merged repair")
             return value["id"]
 
-    def repair_outcome(self, fid, job, action, reason, at, *, fixing_commit=None, fix_pr=None):
+    def repair_outcome(self, fid, job, action, reason, at, *, fixing_commit=None, fix_pr=None, source_evidence=None):
         """Idempotently publish a repair result through the existing event chain."""
         self.recover(self.publication.retained())
         with ledger.locked(self.root / "findings.lock"):
@@ -239,6 +239,8 @@ class Inbox:
             evidence = {"repair_task": job, "reason": reason, "fix_pr": fix_pr}
             if fixing_commit:
                 evidence.update(fixing_commit=fixing_commit, verification=reason)
+            if source_evidence:
+                evidence["source_evidence"] = source_evidence
             token = ledger.digest({"job": job, "action": action, "evidence": evidence})
             # Retained outbox records survive acknowledgment and caller crashes.
             if any(v["event_type"] == "finding-event" and
