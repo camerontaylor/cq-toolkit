@@ -179,7 +179,15 @@ const UNIT_RE = /"unit"\s*:\s*"((?:[^"\\]|\\.)*)"/g;
 // A property KEY containing any escape: JSON.parse decodes `"val\u0075e"` to
 // `value`, invisible to every literal-key regex above (and the last duplicate
 // key wins). Rendered baselines never escape keys — fail closed.
-const ESCAPED_KEY_RE = /(?:^|[,{])\s*"(?:[^"\\]|\\.)*\\(?:[^"\\]|\\.)*"\s*:/;
+// LINEAR SHAPE (review): the escape is spelled ONCE, after an escape-free
+// prefix (`[^"\\]*\\.`) and before a single `(?:[^"\\]|\\.)*` tail. The
+// previous `(?:[^"\\]|\\.)*\\(?:[^"\\]|\\.)*` had two adjacent star groups
+// that both accept `\\.`, so a single escape could be claimed by either and
+// the engine re-scanned the tail at every split point — O(n²) per start
+// position on a crafted diff line (PR-author controlled, few hundred KB
+// stalls the gate). Match semantics are unchanged: a key must still contain
+// at least one escape anywhere in its body.
+const ESCAPED_KEY_RE = /(?:^|[,{])\s*"[^"\\]*\\.(?:[^"\\]|\\.)*"\s*:/;
 
 /**
  * Decode one captured JSON string body (the capture EXCLUDES the quotes):
