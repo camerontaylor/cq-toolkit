@@ -13,6 +13,7 @@ import { delimiter, dirname, join, relative } from 'node:path';
 import { afterEach, describe, expect, test } from 'vitest';
 import { makeGhRunner, ghJson } from '../../../src/adapters/forge-github/gh.js';
 import type { GhFn } from '../../../src/adapters/forge-github/gh.js';
+import { resolveWindowsCommand } from '../../../src/adapters/forge-github/ghBin.js';
 import { makeSubprocessPrEffects } from '../../../src/adapters/forge-github/ghEffects.js';
 
 const tempDirs: string[] = [];
@@ -144,6 +145,18 @@ describe('makeGhRunner', () => {
       if (oldGh === undefined) delete process.env.CQ_GH_BIN;
       else process.env.CQ_GH_BIN = oldGh;
     }
+  });
+
+  test('Windows executable resolution searches caller PATH without consulting child cwd', async () => {
+    const trusted = await tempBin('cq-windows-probe.exe', 'placeholder');
+    const found = resolveWindowsCommand('cq-windows-probe', { Path: dirname(trusted) }, 'win32');
+    expect(found).toBe(trusted);
+    const missing = resolveWindowsCommand(
+      'cq-windows-missing',
+      { Path: dirname(trusted) },
+      'win32',
+    );
+    expect(missing).toBe(join(process.cwd(), 'cq-windows-missing'));
   });
 
   test('PATH search continues past an executable with a missing interpreter', async () => {

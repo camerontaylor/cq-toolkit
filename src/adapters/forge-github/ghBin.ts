@@ -8,7 +8,8 @@
 // spawns may run with cwd=repoRoot, which would otherwise silently change
 // which binary a relative CQ_GH_BIN names. Bare names keep PATH lookup;
 // absolute paths pass through.
-import { delimiter, isAbsolute, resolve as pathResolve } from 'node:path';
+import { statSync } from 'node:fs';
+import { delimiter, isAbsolute, join, resolve as pathResolve } from 'node:path';
 import type { CqEnv } from '../../config/env.js';
 import { currentCqEnv } from '../../config/run-env.js';
 
@@ -37,4 +38,31 @@ export function ghSpawnEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
     .map((entry) => pathResolve(entry))
     .join(delimiter);
   return result;
+}
+
+/** Windows searches child cwd before PATH; resolve there using the caller's cwd instead. */
+export function resolveWindowsCommand(
+  bin: string,
+  env: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform = process.platform,
+): string {
+  if (platform !== 'win32' || bin.includes('/') || bin.includes('\\')) return bin;
+  const key = Object.keys(env)
+    .sort()
+    .find((name) => name.toUpperCase() === 'PATH');
+  const paths = (key === undefined ? '' : (env[key] ?? '')).split(';');
+  const hasExtension = /\.[^.]+$/.test(bin);
+  const names = [...(hasExtension ? [bin] : []), `${bin}.com`, `${bin}.exe`];
+  for (const dir of [process.cwd(), ...paths]) {
+    for (const name of names) {
+      const candidate = pathResolve(join(dir || process.cwd(), name));
+      try {
+        if (statSync(candidate).isFile()) return candidate;
+      } catch {
+        /* search the next candidate */
+      }
+    }
+  }
+  // An absolute missing path fails closed instead of falling back to child cwd.
+  return pathResolve(process.cwd(), bin);
 }

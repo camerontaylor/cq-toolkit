@@ -16,7 +16,7 @@ import { checkoutWriterStdio, trackCheckoutWriter } from '../../shared/checkoutW
 // normalizer) — hoisted here so the seams cannot drift apart.
 import { spawn } from 'node:child_process';
 import type { CqEnv } from '../../config/env.js';
-import { ghSpawnEnv, resolveGhBin } from './ghBin.js';
+import { ghSpawnEnv, resolveGhBin, resolveWindowsCommand } from './ghBin.js';
 import { isAbsolute, resolve as pathResolve } from 'node:path';
 
 /** Result of one `gh` invocation: the exit code plus the captured streams. */
@@ -115,10 +115,11 @@ export function makeGhRunner(opts?: {
       const rawBin = opts?.bin ?? resolveGhBin(opts?.cqEnv);
       const hasSeparator = rawBin.includes('/') || rawBin.includes('\\');
       const bin = hasSeparator && !isAbsolute(rawBin) ? pathResolve(process.cwd(), rawBin) : rawBin;
-      const child = spawn(bin, args, {
+      const env = ghSpawnEnv(childEnv);
+      const child = spawn(resolveWindowsCommand(bin, env), args, {
         stdio: checkoutWriterStdio(['pipe', 'pipe', 'pipe']),
         ...(opts?.cwd !== undefined ? { cwd: opts.cwd } : {}),
-        env: ghSpawnEnv(childEnv),
+        env,
       });
       trackCheckoutWriter(child);
       // The runner — not the child — owns this one wall clock: it bounds a
