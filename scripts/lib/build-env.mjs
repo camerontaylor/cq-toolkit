@@ -1,8 +1,8 @@
 // The environment for a `pnpm run build` child: the parent's minus every
 // credential-bearing variable. Live workflows scope tokens to the live test;
-// the build needs none of them. Shared by both build paths — the Vitest
-// global setup (test/global-setup.ts) and the narrow runner
-// (scripts/test-narrow.mjs) — so they can never scrub differently.
+// the build needs none of them. Shared by the Vitest global setup
+// (test/global-setup.ts), the narrow runner (scripts/test-narrow.mjs), and
+// the ratchet engine build (scripts/ratchet-lib.mjs) so they scrub alike.
 
 /**
  * Names that carry credentials; the build needs none of them. A bare `_KEY`
