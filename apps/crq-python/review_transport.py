@@ -50,7 +50,7 @@ def profile(config, base):
 
 def clone_for(runner, repo):
     """Clone configuration locates objects; policy authorization is separate."""
-    if repo == runner.REPO:
+    if repo_registry.same_repo(repo, runner.REPO):
         return Path(runner.CLONE)
     cfg = repo_registry.by_repo(getattr(runner, "REPOS", []), repo)
     if cfg is None:
@@ -103,7 +103,7 @@ def handle(raw, runner, *, principal, policy):
     if op == "submit":
         inputs = req["inputs"]
         allowed = [policy["repo"], *policy.get("repos", [])]
-        configured = inputs["repo"] == runner.REPO or repo_registry.by_repo(getattr(runner, "REPOS", []), inputs["repo"]) is not None
+        configured = repo_registry.same_repo(inputs["repo"], runner.REPO) or repo_registry.by_repo(getattr(runner, "REPOS", []), inputs["repo"]) is not None
         if inputs["repo"] not in allowed or not configured:
             return review_receipt.canonical(dict(v=1, action="observed", state="unsupported", reason="unsupported-repo"))
         if inputs["target"] not in policy.get("branches", []):
@@ -112,7 +112,7 @@ def handle(raw, runner, *, principal, policy):
         result = admission.retry(q, req["request_id"], key)
         if result is None:
             clone = clone_for(runner, inputs["repo"])
-            if inputs["repo"] != runner.REPO:
+            if not repo_registry.same_repo(inputs["repo"], runner.REPO):
                 needed = [inputs["base_commit"]] if "snapshot" in req else [inputs["base_commit"], inputs["head_commit"]]
                 try:
                     for commit in needed:
@@ -124,7 +124,7 @@ def handle(raw, runner, *, principal, policy):
                     raise ValueError("snapshot tree mismatch")
                 cfg = repo_registry.by_repo(getattr(runner, "REPOS", []), inputs["repo"])
                 classes = (runner.UNIVERSAL_SCAN_CLASSES | set(cfg.get("scan_extra_classes", []))
-                           if inputs["repo"] != runner.REPO else None)
+                           if not repo_registry.same_repo(inputs["repo"], runner.REPO) else None)
                 author_snapshot.install(req["snapshot"], dict(base=inputs["base_commit"], head=inputs["head_commit"]),
                                         runner, original=True, clone=clone, classes=classes)
             stored = profile(runner.CONFIG, inputs["base_commit"])

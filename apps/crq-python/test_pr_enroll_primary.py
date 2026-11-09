@@ -39,6 +39,18 @@ class PrTest(PrTestBase, unittest.TestCase):
                 self.assertEqual(item, {"id": "infra-pr7", "repo": FOREIGN, "kind": kind, "pr": 7})
                 self.assertFalse((crq.STATE / "repair").exists())
 
+    def test_primary_case_variant_is_seen_by_enrollment_and_repair(self):
+        cycle = {"run_id": "primary", "head": "a" * 40, "completed_at": "2026-11-01T00:00:00Z", "findings": 1}
+        item = {"id": "pr7", "repo": PRIMARY.upper(), "kind": "open", "pr": 7,
+                "state": "done", "cycles": [cycle]}
+        q = {"items": [item]}
+        self.assertEqual(crq.last_reviewed(q, 7), cycle)
+        with mock.patch.object(crq.repair_tick, "findings", return_value=[]) as findings:
+            self.assertFalse(crq.repair_tick.enqueue(crq, q, item, {"run_id": "primary"}, self.root))
+        findings.assert_called_once()
+        crq.repair_tick.backfill(crq, q)
+        self.assertEqual(q["legacy_repair_missing"], [{"item": "pr7", "run": "primary"}])
+
     def test_legacy_repair_backfill_ignores_foreign_cycles(self):
         q = {"items": [{"id": "push-infra-legacy", "repo": FOREIGN, "kind": "push-current",
                         "cycles": [{"run_id": "run-missing", "findings": 1}]}]}

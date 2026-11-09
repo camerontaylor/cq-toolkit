@@ -1,5 +1,6 @@
 """Tick-owned inbox, result harvesting and publication. No model dispatch."""
 from runtime_target import DEFAULT_BRANCH, DEFAULT_REF
+import repo_registry
 import review_receipt
 import copy
 import json
@@ -86,7 +87,7 @@ def enqueue(c, q, item, meta, rdir):
             or any(cycle.get('source') == 'local-review' and cycle.get('run_id') == meta.get('run_id')
                    for cycle in item.get('cycles', []))):
         return False
-    if c.item_repo(item) != c.REPO:
+    if not repo_registry.same_repo(c.item_repo(item), c.REPO):
         # The repair drain never runs for non-primary repositories.
         return False
     if item['kind'] == review_receipt.KIND:
@@ -515,7 +516,7 @@ def backfill(c, q):
         return
     missing = []
     for item in q['items']:
-        if c.item_repo(item) != c.REPO:
+        if not repo_registry.same_repo(c.item_repo(item), c.REPO):
             # Foreign cycles are review evidence, never legacy repair debt.
             continue
         for cycle in item.get('cycles', []):

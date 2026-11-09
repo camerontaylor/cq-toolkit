@@ -1883,7 +1883,7 @@ def launch(q: Dict[str, Any], item: Dict[str, Any], plan: Dict[str, Any]) -> str
         # Universal secret shapes plus this repo's configured extra classes;
         # the primary repo's publish classes stay out of foreign scans.
         scan_classes = UNIVERSAL_SCAN_CLASSES | set(cfg["scan_extra_classes"])
-    elif item["kind"] in ("open", "delta", local_review_runtime.KIND) and item_repo(item) != REPO:
+    elif item["kind"] in ("open", "delta", local_review_runtime.KIND) and not repo_registry.same_repo(item_repo(item), REPO):
         # Foreign open/delta review (docs/multi-repo.md discovery pr): scan and
         # worktree run in that repo's clone with the same universal secret-shape
         # set as push items. These reviews scan the raw base..head range — not a
@@ -2546,7 +2546,7 @@ def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
         q.get("backfill_reservations", {}).get(item["attempt_id"], {})["terminal_at"] = iso()
     # A foreign open/delta review's worktree branch lives in that repo's clone.
     cleanup_clone = None
-    if item["kind"] in ("open", "delta") and item_repo(item) != REPO:
+    if item["kind"] in ("open", "delta") and not repo_registry.same_repo(item_repo(item), REPO):
         cfg = repo_registry.by_repo(REPOS, item_repo(item))
         cleanup_clone = Path(cfg["clone"]) if cfg else None
     remove_worktree(Path(meta["worktree"]), meta["wt_branch"], clone=cleanup_clone)
@@ -2575,7 +2575,7 @@ def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
         if item["kind"] in ("open", "delta") and item.get("pr") and cls["findings"]:
             # All repos use the same durable, bounded PR-review delivery.
             _request_pr_review(item, r["run_id"], meta, rdir, cls)
-        if item["kind"] in ("open", "delta") and item_repo(item) != REPO:
+        if item["kind"] in ("open", "delta") and not repo_registry.same_repo(item_repo(item), REPO):
             # Foreign cycles are real evidence; coverage and repair stay primary-only.
             item["state"] = "done"
             return f"{item['id']}: completed ({cls['findings']} findings)"
@@ -2763,7 +2763,7 @@ def sort_key(item: Dict[str, Any]) -> Tuple:
 def last_reviewed(q: Dict[str, Any], pr: int) -> Optional[Dict[str, Any]]:
     """Newest completed CLI review of the PR's own head (open cycles and deltas)."""
     recs = [c for i in live_items(q) if i["pr"] == pr and i["kind"] in ("open", "delta")
-            and item_repo(i) == REPO for c in i.get("cycles", [])]
+            and repo_registry.same_repo(item_repo(i), REPO) for c in i.get("cycles", [])]
     return max(recs, key=lambda c: c["completed_at"]) if recs else None
 
 
@@ -2815,7 +2815,7 @@ def enroll(q: Dict[str, Any], dry: bool) -> List[str]:
         if p["isDraft"] or not chains_to_target(p, by_head):
             continue
         mine = [i for i in live_items(q) if i["pr"] == n and i["kind"] in ("open", "delta")
-                and item_repo(i) == REPO]
+                and repo_registry.same_repo(item_repo(i), REPO)]
         pin = None
         try:
             if not ensure_commit(n, head):

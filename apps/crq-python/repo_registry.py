@@ -35,6 +35,11 @@ def _identity(slug: Any) -> str:
     return slug.casefold() if isinstance(slug, str) else ""
 
 
+def same_repo(left: Any, right: Any) -> bool:
+    """Compare non-empty repository identities without changing their spelling."""
+    return bool(_identity(left)) and _identity(left) == _identity(right)
+
+
 def _refuse(entry: Any, why: str) -> None:
     slug = entry.get("repo") if isinstance(entry, dict) else None
     raise ValueError(f"repos entry {slug if isinstance(slug, str) else '?'}: {why}")
