@@ -246,3 +246,32 @@ test('timed-out CLI ignores SIGTERM but is killed and drained', async () => {
   const pid = Number(await readFile(pidfile, 'utf8'));
   expect(() => process.kill(pid, 0)).toThrow();
 });
+
+test('timeout kills a pipe-independent descendant after its CLI leader exits', async () => {
+  const root = await dir();
+  const binary = join(root, 'fake-cli');
+  const pidfile = join(root, 'descendant');
+  const marker = join(root, 'survived');
+  const descendant = `process.on('SIGTERM',()=>{}); require('node:fs').writeFileSync(${JSON.stringify(pidfile)},String(process.pid)); setTimeout(()=>require('node:fs').writeFileSync(${JSON.stringify(marker)},'alive'),2000); setInterval(()=>{},1000);`;
+  await writeFile(
+    binary,
+    `#!/usr/bin/env node\nrequire('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(descendant)}],{stdio:'ignore'}).unref(); setInterval(()=>{},1000);\n`,
+    { mode: 0o755 },
+  );
+  let pid: number | undefined;
+  try {
+    await expect(usage({ cwd: root, binary, timeoutMs: 700 })).rejects.toThrow('timed out');
+    pid = Number(await readFile(pidfile, 'utf8'));
+    expect(pid).toBeGreaterThan(0);
+    await new Promise((resolve) => setTimeout(resolve, 2300));
+    await expect(readFile(marker)).rejects.toMatchObject({ code: 'ENOENT' });
+  } finally {
+    if (pid) {
+      try {
+        process.kill(pid, 'SIGKILL');
+      } catch {
+        /* already gone */
+      }
+    }
+  }
+}, 10000);

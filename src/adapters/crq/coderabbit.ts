@@ -21,7 +21,15 @@ async function invoke(
   const exitCode = await new Promise<number | null>((resolve, reject) => {
     let timedOut = false;
     let spawnError: Error | undefined;
-    let escalation: NodeJS.Timeout | undefined;
+    let escalated = false;
+    let closed = false;
+    let exitCode: number | null = null;
+    const finish = () => {
+      if (!closed || (timedOut && !escalated)) return;
+      if (spawnError) reject(spawnError);
+      else if (timedOut) reject(new Error('CodeRabbit CLI timed out'));
+      else resolve(exitCode);
+    };
     const signal = (value: NodeJS.Signals) => {
       try {
         if (process.platform !== 'win32' && child.pid !== undefined)
@@ -34,17 +42,20 @@ async function invoke(
     const timer = setTimeout(() => {
       timedOut = true;
       signal('SIGTERM');
-      escalation = setTimeout(() => signal('SIGKILL'), 1000);
+      setTimeout(() => {
+        signal('SIGKILL');
+        escalated = true;
+        finish();
+      }, 1000);
     }, options.timeoutMs ?? 20_000);
     child.once('error', (error) => {
       spawnError = error;
     });
     child.once('close', (code) => {
       clearTimeout(timer);
-      if (escalation) clearTimeout(escalation);
-      if (spawnError) reject(spawnError);
-      else if (timedOut) reject(new Error('CodeRabbit CLI timed out'));
-      else resolve(code);
+      closed = true;
+      exitCode = code;
+      finish();
     });
   });
   return { stdout, stderr, exitCode };
