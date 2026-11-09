@@ -5,7 +5,8 @@ import { mkdtemp, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { describe, expect, test, vi } from 'vitest';
 import { DispatchError, errorClassOf } from '../../src/driver/errors.js';
-import { createDriverFactory } from '../../src/driver/factory.js';
+import { createDriverFactory, withReapOnSettle } from '../../src/driver/factory.js';
+import type { Driver } from '../../src/driver/types.js';
 import { SessionStore } from '../../src/harness/session.js';
 import * as harnessSurface from '../../src/harness/surface.js';
 import { invocation, scratch, stubKey, subprocessConfig, temporary } from './factory.helpers.js';
@@ -118,6 +119,30 @@ describe('driver factory — wrapping', () => {
       ).toHaveLength(1);
     },
   );
+
+  test('a foreign throw carrying a sessionId is NOT ownership: an existing session survives', async () => {
+    const dir = await scratch();
+    const sessionsDir = join(dir, 'sessions');
+    const store = new SessionStore(sessionsDir);
+    const workspace = await mkdtemp(join(dir, 'ws-'));
+    temporary.push(workspace);
+    // A record that predates the run — NOT this run's handle.
+    const existing = await store.create(workspace);
+    // An injected provider (or any hostile object) throws a plausible-looking
+    // rejection BEFORE any record exists. A shape probe on `sessionId` would
+    // reap the pre-existing record; ownership evidence is required instead.
+    const hostile: Driver = {
+      async run() {
+        throw Object.assign(new Error('provider blew up'), { sessionId: existing.sessionId });
+      },
+    };
+    const error = await withReapOnSettle(hostile, sessionsDir)
+      .run(invocation())
+      .catch((err: unknown) => err);
+    expect((error as Error).message).toBe('provider blew up');
+    await expect(store.load(existing.sessionId)).resolves.toBeDefined();
+    expect((await readdir(sessionsDir)).filter((name) => name.endsWith('.jsonl'))).toHaveLength(1);
+  });
 
   test('a sessionRef-resumed record is NEVER reaped', async () => {
     stubKey();
