@@ -808,19 +808,6 @@
         }
       ]
     },
-    "1414": {
-      "tuple": {
-        "head": "8526d3443a896d94806bef4878024e9fd7a37f61",
-        "base": "64c57afca20d26d8a19c9cbe8c2fd05a3798e129",
-        "forcePushEpoch": 0
-      },
-      "observations": [
-        {
-          "observedAt": "2026-11-09T21:27:56.606Z",
-          "by": "self-merge-prs:observe"
-        }
-      ]
-    },
     "1415": {
       "tuple": {
         "head": "05c130255bf31193b7ff60d6726f499e0705aa0a",
