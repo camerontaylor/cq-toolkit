@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from test_pr_enroll_fixtures import COMPLETE, FOREIGN, PrTestBase, crq
+from test_pr_enroll_fixtures import COMPLETE, FOREIGN, PRIMARY, PrTestBase, crq
 
 
 class PrTest(PrTestBase, unittest.TestCase):
@@ -62,6 +62,35 @@ class PrTest(PrTestBase, unittest.TestCase):
         self.assertIn("pr_review_attempt_at", item)
         remove.assert_called_once()
         self.assertEqual(remove.call_args.kwargs["clone"], Path(self.foreign))
+
+    def test_primary_case_variant_launch_and_harvest_uses_primary_policy(self):
+        head = self.git(self.repo, "rev-parse", "HEAD")
+        item = {"id": "case-pr5", "repo": PRIMARY.upper(), "kind": "open", "pr": 5,
+                "state": "pending", "cycles": [], "tier": 1, "prior_cycles": 0}
+        self.q["items"].append(item)
+        plan = {"base": head, "head": head, "cycle": 1, "label": "review", "target": "main", "branch": "feature"}
+        with mock.patch.object(crq, "secret_scan", return_value=(True, {})) as scan, \
+             mock.patch.object(crq, "make_worktree", return_value=(self.root / "wt", "fixture")), \
+             self.fake_spawn():
+            crq.launch(self.q, item, plan)
+        self.assertIsNone(scan.call_args.kwargs["clone"])
+        self.assertIsNone(scan.call_args.kwargs["classes"])
+        self.terminal_artifacts(item, [COMPLETE])
+        with mock.patch.object(crq, "pid_alive", return_value=False), \
+             mock.patch.object(crq, "group_alive", return_value=False), \
+             mock.patch.object(crq, "remove_worktree") as remove, \
+             mock.patch.object(crq.repair_tick, "enqueue", return_value=False) as repair, \
+             mock.patch.object(crq.coverage, "record_review", return_value={}) as record:
+            crq.harvest_review(self.q, item, False)
+        self.assertIsNone(remove.call_args.kwargs["clone"])
+        record.assert_called_once()
+        repair.assert_called_once()
+        self.assertEqual(item["state"], "done")
+
+    def test_unconfigured_foreign_launch_is_rejected(self):
+        item = {"id": "unknown", "repo": "unknown/repo", "kind": "open"}
+        with self.assertRaisesRegex(RuntimeError, "unconfigured repo"):
+            crq.launch(self.q, item, {"base": "a", "head": "b"})
 
     def test_legacy_issue_request_without_range_falls_back_to_the_subject(self):
         (self.root / "findings.md").write_text("- finding\n")

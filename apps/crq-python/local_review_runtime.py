@@ -10,6 +10,7 @@ import json
 import subprocess
 from pathlib import Path
 
+import repo_registry
 import review_admission as admission
 import review_operation as operation
 import review_receipt as receipts
@@ -23,7 +24,7 @@ KIND = operation.KIND
 
 def facts(c, base, head, profile, repo=None):
     repo = repo or c.REPO
-    kwargs = {} if repo == c.REPO else dict(cwd=transport.clone_for(c, repo))
+    kwargs = {} if repo_registry.same_repo(repo, c.REPO) else dict(cwd=transport.clone_for(c, repo))
     inputs = dict(repo=repo, target="main", base_commit=base, head_commit=head,
                   base_tree=c.git("rev-parse", base + "^{tree}", **kwargs),
                   head_tree=c.git("rev-parse", head + "^{tree}", **kwargs), projection="full-diff")
@@ -79,7 +80,7 @@ def reconcile_pr(c, q, item, plan, dry):
 
 def prepare(c, q, item, dry, *, completed_only=False):
     wanted = item["identity_inputs"]
-    if wanted["repo"] != c.REPO:
+    if not repo_registry.same_repo(wanted["repo"], c.REPO):
         clone = transport.clone_for(c, wanted["repo"])
         if not all(c.object_present(wanted[end + "_commit"], clone=clone) for end in ("base", "head")):
             c.fetch(clone=clone)
@@ -189,7 +190,7 @@ def complete(c, q, item, rdir, run_id, cls, ended_at, exit_code):
 
 def republish(c, q, item):
     """Remote publication is independent of local completion and exact reuse."""
-    if item["identity_inputs"]["repo"] != c.REPO:
+    if not repo_registry.same_repo(item["identity_inputs"]["repo"], c.REPO):
         item.update(publication_pending=False, publication_reason="multi-repo publication unsupported")
         c.save_queue(q)
         return

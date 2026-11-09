@@ -80,6 +80,29 @@ class ReviewTransportTests(SnapshotTransportFixture, unittest.TestCase):
         self.assertEqual(self.call_review(self.review)["reason"], "unsupported-repo")
         self.assertEqual(self.saved["items"], [])
 
+    def test_primary_case_variant_submit_requires_exact_policy_admission(self):
+        variant = self.runner.REPO.upper()
+        self.review["inputs"]["repo"] = variant
+        # Repository identity does not expand the explicit wire allowlist.
+        self.assertEqual(self.call_review(self.review)["reason"], "unsupported-repo")
+        self.policy["repos"] = [variant]
+        with mock.patch.object(author_snapshot, "install", wraps=author_snapshot.install) as install:
+            self.assertEqual(self.call_review(self.review)["action"], "created")
+        self.assertEqual(install.call_args.kwargs["clone"], self.destination)
+        self.assertIsNone(install.call_args.kwargs["classes"])
+        self.assertEqual(self.saved["items"][0]["identity_inputs"]["repo"], variant)
+        import local_review_runtime as runtime
+        item = self.saved["items"][0]
+        with mock.patch("backfill_runtime.settings", return_value=None):
+            runtime.republish(self.runner, self.saved, item)
+        self.assertEqual(item["publication_reason"], "publication-disabled")
+
+    def test_allowlisted_unconfigured_foreign_repo_is_rejected(self):
+        self.review["inputs"]["repo"] = "foreign/unconfigured"
+        self.policy["repos"] = ["foreign/unconfigured"]
+        self.assertEqual(self.call_review(self.review)["reason"], "unsupported-repo")
+        self.assertEqual(self.saved["items"], [])
+
     def test_six_mib_reader_and_additive_dispatch(self):
         raw = b'{"v":1,"op":"capabilities"}'
         self.assertEqual(transport.decode(raw + b" " * (transport.MAX_BYTES - len(raw)))["op"], "capabilities")
