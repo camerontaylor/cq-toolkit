@@ -76,8 +76,8 @@ export function hashInputs(op: string, input: unknown): string {
 }
 
 /**
- * Reject op inputs the canonical hash cannot represent losslessly, naming the
- * job that owns them. A non-finite number (a plan file's `1e400` parses to
+ * Snapshot and validate each input member in one traversal, naming the
+ * job that owns invalid input. A non-finite number (`1e400` parses to
  * `Infinity`) survives the `structuredClone` snapshot but hashes as `null`,
  * so a resume could reuse a result for a different input; non-plain objects
  * (Date, Map, class instances) are outside the op-input contract and would
@@ -85,27 +85,49 @@ export function hashInputs(op: string, input: unknown): string {
  * and sparse-array holes (read as `undefined`) stay allowed — both are
  * documented canonical forms.
  */
-function assertHashableInput(jobId: string, value: unknown, path = 'input'): void {
-  if (value === null) return;
+function snapshotHashableInput(
+  jobId: string,
+  value: unknown,
+  path = 'input',
+  seen = new WeakMap<object, unknown>(),
+): unknown {
+  if (value === null) return value;
   if (typeof value === 'number') {
     if (!Number.isFinite(value)) {
       throw new Error(`manifest: job '${jobId}' ${path} is a non-finite number (${String(value)})`);
     }
-    return;
+    return value;
   }
-  if (typeof value !== 'object') return;
+  if (typeof value !== 'object') return value;
+  if (seen.has(value)) return seen.get(value);
   if (Array.isArray(value)) {
-    for (let i = 0; i < value.length; i++) assertHashableInput(jobId, value[i], `${path}[${i}]`);
-    return;
+    const snapshot: unknown[] = new Array(value.length);
+    seen.set(value, snapshot);
+    for (const [key, member] of Object.entries(value)) {
+      Object.defineProperty(snapshot, key, {
+        value: snapshotHashableInput(jobId, member, `${path}[${key}]`, seen),
+        enumerable: true,
+        configurable: true,
+        writable: true,
+      });
+    }
+    return snapshot;
   }
   const proto: unknown = Object.getPrototypeOf(value);
   if (proto !== Object.prototype && proto !== null) {
     throw new Error(`manifest: job '${jobId}' ${path} is not plain JSON data`);
   }
+  const snapshot: Record<string, unknown> = {};
+  seen.set(value, snapshot);
   for (const [key, member] of Object.entries(value)) {
-    if (member === undefined) continue;
-    assertHashableInput(jobId, member, `${path}.${key}`);
+    Object.defineProperty(snapshot, key, {
+      value: snapshotHashableInput(jobId, member, `${path}.${key}`, seen),
+      enumerable: true,
+      configurable: true,
+      writable: true,
+    });
   }
+  return snapshot;
 }
 
 /**
@@ -116,19 +138,26 @@ function assertHashableInput(jobId: string, value: unknown, path = 'input'): voi
  * so a structuredClone snapshot is lossless) — meaning a committed run cannot
  * be changed by mutating the plan afterwards, and the hash committed at
  * manifest time stays the hash of the input that will be dispatched. Inputs
- * the canonical hash cannot represent losslessly are rejected here, before
- * the snapshot is taken (see {@link assertHashableInput}).
+ * the canonical hash cannot represent losslessly are rejected here (see
+ * {@link snapshotHashableInput}).
+ *
+ * Input prototypes are validated while each member is read once into a
+ * snapshot. The committed `input` and `inputsHash` use that same snapshot —
+ * never the
+ * plan-owned object again. Otherwise an accessor could answer differently on
+ * each read, so the validated data, the stored input, and the hash could
+ * disagree.
  */
 export function makeManifest(plan: Plan): RunManifest {
   return {
     planId: plan.id,
     jobs: plan.jobs.map((job) => {
-      assertHashableInput(job.id, job.input);
+      const input: unknown = structuredClone(snapshotHashableInput(job.id, job.input));
       return {
         id: job.id,
         op: job.op,
-        input: structuredClone(job.input),
-        inputsHash: hashInputs(job.op, job.input),
+        input,
+        inputsHash: hashInputs(job.op, input),
         dependsOn: [...(job.dependsOn ?? [])],
       };
     }),
