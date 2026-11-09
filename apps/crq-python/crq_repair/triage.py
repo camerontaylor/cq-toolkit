@@ -159,8 +159,20 @@ def phase(inbox, repo, tip, judge, transport, at, *, maximum=6, seconds=600, dry
         except (KeyError, TypeError, ValueError, ledger.IntegrityError,
                 subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
             # Leave this row pending; another row's context can still be valid.
-            context_errors.append({'finding_id': row['finding']['id'], 'error': str(exc)[:300]})
+            error = {'type': type(exc).__name__[:80], 'target': tip}
+            context_errors.append({'finding_id': row['finding']['id'], **error})
+            if not dry_run:
+                try:
+                    inbox.context_error(row['finding']['id'], row['previous_event_id'], error)
+                except (OSError, ValueError, KeyError):
+                    pass  # A damaged or unavailable row must not stop other findings.
             continue
+        if not dry_run:
+            try:
+                if not inbox.context_error(row['finding']['id'], row['previous_event_id'], None):
+                    continue
+            except (OSError, ValueError, KeyError):
+                continue
         try:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
