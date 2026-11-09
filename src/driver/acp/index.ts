@@ -164,8 +164,8 @@
 //     'tool' message per IN-POLICY tool execution (an allow-answered id
 //     that reached a terminal status — { input, ok, output } plain JSON);
 //     the assistant transcript text (when any); narration + stderr under
-//     toolName 'acp-narration'. Denied ids and ids without an allow answer
-//     are narration-only. A later allow answer permits terminal-result
+//     toolName 'acp-narration'. Ids denied at the answer and ids without
+//     an allow answer are narration-only. A later allow answer permits terminal-result
 //     persistence even if execution preceded permission; the never-asks
 //     error remains latched. Persist errors after dispatch are swallowed:
 //     the honest verdict outranks the record.
@@ -2165,8 +2165,9 @@ function sessionIdOf(params: unknown): string | undefined {
  * sidecar (when newly observed — the NEXT run's session/load handle), ONE
  * role 'tool' message per IN-POLICY tool execution (an allow-answered id
  * that reached a terminal status; { input, ok, output } plain JSON).
- * Denied ids and ids without an allow answer stay narration-only; a later
- * allow answer permits persistence without clearing never-asks evidence.
+ * Ids denied at the answer and ids without an allow answer stay
+ * narration-only; a later allow answer permits persistence without
+ * clearing never-asks evidence.
  * Next comes the assistant transcript (when any),
  * and narration + stderr diagnostics (when any). Never fabricates an
  * assistant turn: a run that produced no text records none.
