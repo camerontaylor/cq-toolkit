@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["acknowledgement", "repair_task"],
+  "properties": {
+    "acknowledgement": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "repair_task": {
+      "type": "string",
+      "pattern": "^crq-[A-Za-z0-9._-]+$"
+    }
+  },
+  "additionalProperties": true
+}

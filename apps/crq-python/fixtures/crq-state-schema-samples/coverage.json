@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "paths": {
+    "src/shared/proc.ts": {
+      "review_count": 1,
+      "last_reviewed_at": "2026-11-09T09:36:00Z",
+      "last_run": "coverage-0123456789abcdef-20261109T093600Z",
+      "reviewed_sha": "fedcba9876543210fedcba9876543210fedcba98"
+    }
+  },
+  "runs": {
+    "coverage-0123456789abcdef-20261109T093600Z": {
+      "completed_at": "2026-11-09T09:47:00Z",
+      "paths": [
+        "src/shared/proc.ts"
+      ]
+    }
+  },
+  "observations": {
+    "2026-11-09T09:48:00Z": {
+      "started": false,
+      "pending": true,
+      "candidate_exists": true,
+      "blocked_reason": "inflight"
+    },
+    "2026-11-09T09:36:00Z": {
+      "started": true,
+      "pending": true,
+      "candidate_exists": true,
+      "blocked_reason": null
+    }
+  }
+}

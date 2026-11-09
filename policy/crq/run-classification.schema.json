@@ -1,0 +1,112 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": [
+    "exit",
+    "events",
+    "bad_lines",
+    "findings",
+    "severity_counts",
+    "outcome",
+    "failure_provenance",
+    "counted"
+  ],
+  "properties": {
+    "exit": {
+      "type": ["integer", "null"]
+    },
+    "events": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "bad_lines": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "findings": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "severity_counts": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "integer",
+        "minimum": 0
+      }
+    },
+    "outcome": {
+      "enum": [
+        "completed",
+        "skipped",
+        "rate_limited",
+        "action_required",
+        "auth",
+        "error",
+        "interrupted",
+        "malformed"
+      ]
+    },
+    "message": {
+      "type": "string"
+    },
+    "wait_seconds": {
+      "type": ["integer", "null"],
+      "minimum": 0
+    },
+    "reviewed_files": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "counted": {
+      "type": "boolean"
+    },
+    "failure_provenance": {
+      "type": "object",
+      "required": ["version", "complete", "causes"],
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "complete": {
+          "type": "boolean"
+        },
+        "causes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["source", "category", "code"],
+            "properties": {
+              "source": {
+                "enum": ["vendor", "queue"]
+              },
+              "category": {
+                "type": "string",
+                "minLength": 1
+              },
+              "code": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "additionalProperties": true
+          }
+        }
+      },
+      "additionalProperties": true
+    },
+    "retry_transient": {
+      "type": "object",
+      "required": ["version", "category"],
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "category": {
+          "enum": ["vendor-rate-limited", "transport", "timeout", "interrupted"]
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

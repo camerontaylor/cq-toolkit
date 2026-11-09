@@ -1,0 +1,23 @@
+{
+  "run_id": "pr1304-20261109T082400Z",
+  "item_id": "pr1304",
+  "pr": 1304,
+  "kind": "open",
+  "repo": "camerontaylor/cq-toolkit",
+  "workId": "crq:pr1304-20261109T082400Z",
+  "label": "PR #1304 cycle 1",
+  "cycle": 1,
+  "base": "0123456789abcdef0123456789abcdef01234567",
+  "head": "89abcdef0123456789abcdef0123456789abcdef",
+  "pr_head": "89abcdef0123456789abcdef0123456789abcdef",
+  "review_pin": "0123456789abcdef0123456789abcdef01234567",
+  "target": "origin/main",
+  "pr_branch": "camerontaylor/crq-ts-plan",
+  "worktree": "/srv/crq/apps/crq-python/state/../worktrees/coderabbit-queue-wt-pr1304-20261109T082400Z",
+  "wt_branch": "crq/wt-pr1304-20261109T082400Z",
+  "dirty_diff": "clean tree",
+  "range_policy": "full-range-once-v1",
+  "band": "foreground",
+  "started_at": "2026-11-09T08:24:00Z",
+  "cmd": ["coderabbit", "review", "--agent", "--deep", "--base-commit", "0123456789abcdef0123456789abcdef01234567"]
+}

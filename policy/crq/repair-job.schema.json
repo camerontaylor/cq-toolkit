@@ -1,0 +1,130 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": [
+    "job",
+    "item",
+    "kind",
+    "pr",
+    "run",
+    "repair_base",
+    "branch",
+    "finding",
+    "repair_round"
+  ],
+  "properties": {
+    "job": {
+      "type": "string",
+      "pattern": "^crq-[A-Za-z0-9._-]+$"
+    },
+    "item": {
+      "type": "string",
+      "minLength": 1
+    },
+    "kind": {
+      "type": "string",
+      "minLength": 1
+    },
+    "pr": {
+      "type": ["integer", "null"],
+      "minimum": 0
+    },
+    "run": {
+      "type": "string",
+      "minLength": 1
+    },
+    "cycle": {
+      "type": ["integer", "null"]
+    },
+    "repair_base": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "source_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "finding_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "canonical_finding_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "branch": {
+      "type": ["string", "null"]
+    },
+    "finding": {
+      "type": "object",
+      "required": ["severity", "path", "body"],
+      "properties": {
+        "severity": {
+          "enum": ["critical", "major", "minor", "trivial", "info", "none"]
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "line": {
+          "type": ["integer", "null"],
+          "minimum": 1
+        },
+        "body": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    },
+    "repair_round": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "prior": {
+      "type": ["object", "null"]
+    },
+    "recurrence": {
+      "type": "boolean"
+    },
+    "review_diff": {
+      "type": "string"
+    },
+    "source": {
+      "type": "object",
+      "required": ["run"],
+      "properties": {
+        "run": {
+          "type": "string",
+          "minLength": 1
+        },
+        "id": {
+          "type": "string"
+        },
+        "source_id": {
+          "type": "string"
+        },
+        "review_id": {
+          "type": "string"
+        },
+        "thread_id": {
+          "type": "string"
+        },
+        "source_thread_id": {
+          "type": "string"
+        },
+        "finding_number": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "additionalProperties": true
+    },
+    "origin_job": {
+      "type": "string"
+    },
+    "revalidation": {
+      "type": "object"
+    }
+  },
+  "additionalProperties": true
+}

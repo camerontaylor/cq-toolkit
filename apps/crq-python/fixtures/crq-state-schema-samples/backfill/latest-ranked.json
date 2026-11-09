@@ -1,0 +1,102 @@
+{
+  "manifest_id": "2424242424242424242424242424242424242424242424242424242424242424",
+  "target": "origin/main",
+  "evaluated_at": "2026-11-09T06:00:00Z",
+  "candidates": [
+    {
+      "repo": "camerontaylor/cq-toolkit",
+      "kind": "A",
+      "prs": [
+        1304
+      ],
+      "paths": [
+        "src/ops/crq/tick.ts"
+      ],
+      "target": "origin/main",
+      "scope_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+      "construction_policy_digest": "2222222222222222222222222222222222222222222222222222222222222222",
+      "partition": 0,
+      "subject_id": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "family": "3333333333333333333333333333333333333333333333333333333333333333",
+      "generation": 0,
+      "retry": false,
+      "row": 1,
+      "tier": "T2",
+      "score": 420,
+      "scope": [
+        {
+          "path": "src/ops/crq/tick.ts",
+          "blob": "abcdef0123456789abcdef0123456789abcdef01",
+          "intervals": [
+            [
+              1,
+              84
+            ]
+          ]
+        }
+      ],
+      "job_id": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef:0",
+      "path_lineages": {
+        "src/ops/crq/tick.ts": "src/ops/crq/tick.ts"
+      },
+      "path_tiers": {
+        "src/ops/crq/tick.ts": "T2"
+      },
+      "path_scores": {
+        "src/ops/crq/tick.ts": 420
+      }
+    }
+  ],
+  "paths": [
+    {
+      "path": "src/ops/crq/tick.ts",
+      "blob": "abcdef0123456789abcdef0123456789abcdef01",
+      "lines": 120,
+      "bytes": 4096,
+      "churn": 3,
+      "findings": 1,
+      "tier": "T2",
+      "disposition": "included",
+      "reason": null,
+      "evidence": [
+        "3131313131313131313131313131313131313131313131313131313131313131"
+      ],
+      "covered": [
+        [
+          85,
+          120
+        ]
+      ],
+      "uncovered": [
+        [
+          1,
+          84
+        ]
+      ],
+      "eligible": [
+        [
+          1,
+          84
+        ]
+      ],
+      "score": 420
+    }
+  ],
+  "required": [
+    {
+      "prs": [
+        1304
+      ],
+      "row": 1,
+      "missing_source_evidence": [],
+      "paths": [
+        {
+          "path": "src/ops/crq/tick.ts",
+          "outcome": "still-pending",
+          "reason": "uncovered"
+        }
+      ]
+    }
+  ],
+  "evidence_gaps": []
+}

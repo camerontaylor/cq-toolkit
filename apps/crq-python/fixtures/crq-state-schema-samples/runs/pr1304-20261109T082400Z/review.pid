@@ -1,0 +1,9 @@
+{
+  "run_id": "pr1304-20261109T082400Z",
+  "pid": 4242,
+  "ppid": 4240,
+  "pgid": 4242,
+  "sid": 4240,
+  "group_owner": "foreground-v1",
+  "cli_pid": 4243
+}

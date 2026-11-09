@@ -1,0 +1,38 @@
+{
+  "job": "crq-pr1304-20261109T082400Z-F1",
+  "item": "pr1304",
+  "repair_base": "89abcdef0123456789abcdef0123456789abcdef",
+  "source_sha": "89abcdef0123456789abcdef0123456789abcdef",
+  "finding_sha256": "2121212121212121212121212121212121212121212121212121212121212121",
+  "origin_job": null,
+  "verdict": "FIXED",
+  "reason": "keeper added; admission revalidated",
+  "commits": [
+    "2222222222222222222222222222222222222222"
+  ],
+  "attempts": [
+    {
+      "rung": "A0",
+      "role": "fixer",
+      "driver": "cq",
+      "model": "zai/glm-5.3-flash",
+      "stop": "ok",
+      "changed": true,
+      "mechanical": {
+        "verify": "ok",
+        "hack": "ok",
+        "tests": "suspended"
+      }
+    }
+  ],
+  "judge": {
+    "stop": "ok",
+    "verdict": "valid",
+    "reason": "the guard is present and the test covers it",
+    "driver": "cq",
+    "model": "zai/glm-5.3-flash"
+  },
+  "worktree": "/srv/crq/worktrees/fix-crq-pr1304",
+  "started_at": "2026-11-09T09:50:00Z",
+  "finished_at": "2026-11-09T10:04:00Z"
+}

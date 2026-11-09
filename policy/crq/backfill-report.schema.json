@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": [
+    "manifest_id",
+    "target",
+    "tiers",
+    "baseline",
+    "required",
+    "states",
+    "publication_pending",
+    "quarantined_families",
+    "finding_triage",
+    "finding_delivery_backlog",
+    "spare_quota_admissions",
+    "daily_capacity",
+    "idle_with_coverage_candidate",
+    "strict_T1_zero",
+    "operational_target"
+  ],
+  "properties": {
+    "manifest_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "target": {
+      "type": "string"
+    },
+    "tiers": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["covered_lines", "uncovered_lines", "unresolved_objects", "empty_files"],
+        "properties": {
+          "covered_lines": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "uncovered_lines": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "unresolved_objects": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "empty_files": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "baseline": {
+      "type": ["object", "null"]
+    },
+    "required": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "states": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "integer",
+        "minimum": 0
+      }
+    },
+    "publication_pending": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "quarantined_families": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "finding_triage": {
+      "type": "object"
+    },
+    "finding_delivery_backlog": {
+      "type": "object"
+    },
+    "spare_quota_admissions": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "daily_capacity": {
+      "type": "object"
+    },
+    "idle_with_coverage_candidate": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "strict_T1_zero": {
+      "type": "boolean"
+    },
+    "operational_target": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": true
+}
