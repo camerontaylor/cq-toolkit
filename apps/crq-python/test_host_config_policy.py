@@ -44,6 +44,23 @@ class HostConfigTests(HostConfigFixture, unittest.TestCase):
         with self.assertRaises(ValueError):
             host.validate(overlay)
 
+    def test_transition_legacy_record_template_is_checked_before_render(self):
+        for template in ['http://queue.example.invalid/{item',
+                         'http://queue.example.invalid/{unknown}', '{0}',
+                         '{item.missing}', '{item:d}', '{item[999]}']:
+            with self.subTest(template=template):
+                overlay = copy.deepcopy(self.overlay)
+                overlay['config']['promotion'] = {'record_url_template': template}
+                with self.assertRaisesRegex(ValueError, 'record URL template'):
+                    host.validate(overlay)
+        for template in ['http://queue.example.invalid/{item}',
+                         'http://queue.example.invalid/{{literal}}/{item!s}',
+                         'http://queue.example.invalid/records']:
+            with self.subTest(template=template):
+                overlay = copy.deepcopy(self.overlay)
+                overlay['config']['promotion'] = {'record_url_template': template}
+                host.validate(overlay)
+
     def test_alert_agent_id_is_optional_and_rendered(self):
         host.validate(self.overlay)  # absent: the committed recipient stays
         overlay = copy.deepcopy(self.overlay)
@@ -57,6 +74,18 @@ class HostConfigTests(HostConfigFixture, unittest.TestCase):
                 overlay['config']['alerts']['alert_agent_id'] = bad
                 with self.assertRaisesRegex(ValueError, 'alert_agent_id'):
                     host.validate(overlay)
+
+    def test_transition_legacy_alert_recipient_renders_the_current_shape(self):
+        overlay = copy.deepcopy(self.overlay)
+        del overlay['config']['alerts']
+        agent = '5626afa6-1349-4051-ae3a-e39d42cf8daa'
+        overlay['config']['promotion'] = {'alert_agent_id': agent,
+                                          'alert_agent_host': 'worker.example.invalid:6767'}
+        host.validate(overlay)
+        config = json.loads(host.render(self.root, overlay))
+        self.assertNotIn('promotion', config)
+        self.assertEqual(config['alerts']['alert_agent_id'], agent)
+        self.assertEqual(config['alerts']['alert_agent_host'], 'worker.example.invalid:6767')
 
 
 if __name__ == '__main__':

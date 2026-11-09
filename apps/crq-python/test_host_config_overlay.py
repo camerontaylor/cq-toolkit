@@ -111,10 +111,26 @@ class HostConfigTests(HostConfigFixture, unittest.TestCase):
                    'operator@host;true', 'operator@@host', 'operator@host/path']
         for alias in valid + invalid:
             with self.subTest(alias=alias):
-                spool = {'ssh_alias': alias, 'ssh_key': '/fixture/key'}
+                overlay = copy.deepcopy(self.overlay)
+                spool = overlay['config'].setdefault('promotion', {}).setdefault(
+                    'signer', {}).setdefault('spool', {})
+                spool['ssh_alias'] = alias
+                spool['ssh_key'] = '/fixture/key'
                 if alias in valid:
+                    host.validate(overlay)
                     self.assertIsNone(crq.Spool(spool).refused)
                 else:
+                    with self.assertRaisesRegex(ValueError, 'literal user@host'):
+                        host.validate(overlay)
                     self.assertIsNotNone(crq.Spool(spool).refused)
+        for alias in ['', None, 123, []]:
+            with self.subTest(alias=alias):
+                overlay = copy.deepcopy(self.overlay)
+                spool = overlay['config'].setdefault('promotion', {}).setdefault(
+                    'signer', {}).setdefault('spool', {})
+                spool['ssh_alias'] = alias
+                with self.assertRaisesRegex(ValueError, 'literal user@host'):
+                    host.validate(overlay)
+
 if __name__ == '__main__':
     unittest.main()

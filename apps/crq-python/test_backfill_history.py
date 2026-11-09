@@ -1,4 +1,4 @@
-"""Four historical source classes are accounted, without inferred path credit."""
+"""Three current source classes are collected; retired catalog rows still import."""
 import copy
 import json
 from pathlib import Path
@@ -136,6 +136,36 @@ class HistoryTest(unittest.TestCase):
         envelope["scope_artifact"] = self.f.store.put(self.stream())
         credited, result = history.import_source(self.f.repo, self.f.store, "github-app-review", "123", raw, envelope, AT, [])
         self.assertEqual(result["payload"]["result"], "credited")
+
+    def test_retired_promotion_catalog_rows_import_unverified_and_repeat_is_idempotent(self):
+        catalog = [{"class": "promotion-range", "id": "audit:abc", "raw": b"{}",
+                    "envelope": {"authenticated": True, "repo": ledger.REPO,
+                                 "producer": "crq-runner-app"}}]
+        generated, report = history.import_catalog(self.f.repo, self.f.store, catalog, AT, [])
+        self.assertEqual(len(generated), 1)
+        disposition = generated[0]
+        self.assertEqual(disposition["payload"]["result"], "unverified")
+        self.assertIn("retired promotion source", disposition["payload"]["reason"])
+        self.assertFalse(ledger.creditable(disposition))
+        for ref in disposition["payload"]["artifacts"]:
+            self.f.store.verify(ref)
+        self.assertEqual(report["promotion-range"],
+                         {"sources": 1, "results": {"unverified": 1}})
+        repeated, _ = history.import_catalog(self.f.repo, self.f.store, catalog, AT, generated)
+        self.assertEqual(repeated, [])
+
+    def test_mixed_catalog_imports_current_rows_alongside_retired_rows(self):
+        catalog = [
+            {"class": history.CLASSES[0], "id": "vendor-1", "raw": self.stream(),
+             "envelope": self.envelope()},
+            {"class": "promotion-range", "id": "audit:abc", "raw": b"{}",
+             "envelope": {"authenticated": True}},
+        ]
+        generated, report = history.import_catalog(self.f.repo, self.f.store, catalog, AT, [])
+        self.assertEqual(report[history.CLASSES[0]]["results"], {"credited": 1})
+        self.assertEqual(report["promotion-range"]["results"], {"unverified": 1})
+        self.assertTrue(any(value["event_type"] == "review" for value in generated))
+        ledger.validate_sequence(generated)
 
     def test_collectors_retain_all_classes_and_paginated_api_bytes_without_credit(self):
         state = Path(self.tmp.name) / "state"

@@ -61,6 +61,62 @@ class HostConfigTests(HostConfigFixture, unittest.TestCase):
         self.assertEqual((self.runner / 'config.json').read_bytes(), before)
         self.assertFalse((self.base / 'records').exists())
 
+    def test_switch_upgrades_a_legacy_source_with_the_transition_overlay(self):
+        # The deployed source predates the alerts rename. switch() renders that
+        # source under the new overlay before checkout, so its host values must
+        # still be reproducible byte-for-byte or the drift fence blocks upgrade.
+        new_config = json.loads((self.runner / 'config.json').read_text())
+        new_config['quiet_minutes'] = 31
+        new_bytes = host.encode(new_config)
+        legacy = {key: value for key, value in new_config.items() if key != 'alerts'}
+        legacy['quiet_minutes'] = 30
+        legacy['promotion'] = {
+            'record_url_template': None, 'alert_agent_id': None, 'alert_agent_host': None,
+            'signer': {'spool': {'ssh_alias': '@HOST_SPOOL_SSH_ALIAS@', 'ssh_key': None}},
+        }
+        (self.runner / 'config.json').write_bytes(host.encode(legacy))
+        self.command('commit', '-qam', 'legacy source')
+        source = self.command('rev-parse', 'HEAD').strip()
+        (self.runner / 'config.json').write_bytes(new_bytes)
+        self.command('commit', '-qam', 'phase 0.1 target')
+        target = self.command('rev-parse', 'HEAD').strip()
+        self.command('update-ref', 'refs/remotes/origin/main', target)
+        tag = 'crq-runner/20261109-1'
+        self.command('tag', '-a', tag, target, '-m', 'upgrade fixture approval')
+        self.command('checkout', '-q', '--detach', source)
+
+        overlay = {
+            'schema_version': 1, 'deploy_root': str(self.root),
+            'record_dir': str(self.base / 'records'),
+            'fleet_reader': {'ssh_host': 'queue.example.invalid',
+                             'source': '/srv/state/crq/summary.json'},
+            'config': {
+                'clone': str(self.base / 'runtime'),
+                'worktree_root': str(self.base / 'worktrees'),
+                'timeout_bin': '/usr/bin/timeout',
+                'paseo_hosts': ['worker.example.invalid:6767', '127.0.0.1:6767'],
+                'promotion': {
+                    'record_url_template': 'http://queue.example.invalid:6778/promotion/{item}',
+                    'alert_agent_host': 'worker.example.invalid:6767',
+                    'alert_agent_id': '5626afa6-1349-4051-ae3a-e39d42cf8daa',
+                    'signer': {'spool': {'ssh_alias': 'operator@127.0.0.1',
+                                         'ssh_key': '~/.ssh/crq-spool-ed25519'}},
+                },
+                'repair': {'enabled': False, 'cq_bin': str(self.base / 'runtime/dist/cli.js'),
+                           'paseo_host': '127.0.0.1:6767'},
+            },
+        }
+        raw = host.encode(overlay)
+        (self.runner / 'config.json').write_bytes(host.encode(host.apply(legacy, overlay)))
+        with mock.patch.object(host, 'run', side_effect=self.stopped):
+            host.switch(self.root, overlay, raw, target, tag)
+        final = json.loads((self.runner / 'config.json').read_text())
+        self.assertNotIn('promotion', final)
+        self.assertEqual(final['alerts']['alert_agent_id'],
+                         '5626afa6-1349-4051-ae3a-e39d42cf8daa')
+        self.assertEqual(final['alerts']['alert_agent_host'], 'worker.example.invalid:6767')
+        self.assertEqual(final['quiet_minutes'], 31)
+
     def test_active_units_dirty_checkout_and_bad_tags_refuse(self):
         self.rendered()
         def active(argv):

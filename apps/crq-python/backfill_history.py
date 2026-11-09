@@ -16,6 +16,9 @@ from backfill_accounting import ranges
 REVIEWER_FORMATS = {"0.8.2": "coderabbit-agent-0.8.2", "0.9.2": "coderabbit-agent-0.9.2"}
 
 CLASSES = ("crq-counted-cycle", "merged-current-receipt", "github-app-review")
+# Collection stopped with the promotion retirement, but catalogs saved before
+# that change must still import: keep their rows as explicit unverified results.
+RETIRED_CLASSES = ("promotion-range",)
 
 
 def vendor_events(raw):
@@ -132,7 +135,7 @@ def adapted_terminal_scope(repo, raw, item, meta, proof):
 
 
 def import_source(repo, store, source_class, source_id, raw, envelope, at, existing):
-    if source_class not in CLASSES:
+    if source_class not in CLASSES and source_class not in RETIRED_CLASSES:
         raise ledger.IntegrityError("unsupported history source class")
     source_digest = hashlib.sha256(raw).hexdigest()
     reference = store.put(raw)
@@ -145,6 +148,12 @@ def import_source(repo, store, source_class, source_id, raw, envelope, at, exist
     previous = next((v for v in existing if v["source_key"] == result_key), None)
     if previous:
         return [], previous
+    if source_class in RETIRED_CLASSES:
+        disposition = ledger.event("import-result", result_key, at, {
+            "source": source, "source_digest": source_digest, "result": "unverified",
+            "reason": "retired promotion source retained for catalog compatibility",
+            "review_id": None, "duplicate_id": None, "artifacts": [reference, proof]})
+        return [disposition], disposition
     review, outcome, reason, duplicate = None, "unverified", "explicit reviewed scope unavailable", None
     try:
         if envelope.get("author_cycle") or envelope.get("source_type") == "author-cli":
@@ -210,7 +219,7 @@ def import_catalog(repo, store, catalog, at, existing):
         raw = source["raw"]
         new, result = import_source(repo, store, source["class"], source["id"], raw, source["envelope"], at, events)
         events.extend(new); generated.extend(new)
-        row = report[source["class"]]; row["sources"] += 1
+        row = report.setdefault(source["class"], {"sources": 0, "results": {}}); row["sources"] += 1
         outcome = result["payload"]["result"]
         row["results"][outcome] = row["results"].get(outcome, 0) + 1
     return generated, report

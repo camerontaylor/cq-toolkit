@@ -93,6 +93,12 @@ endpoint, and all other config leaves above are required. The runtime clone and
 worktree root must be separate from the deployment clone. The renderer maps the
 alert leaves back onto a pre-Phase-0.1 target's `promotion` block so a rollback
 still delivers alerts.
+An overlay written for a pre-Phase-0.1 deployment may keep its
+`promotion.record_url_template`, `promotion.alert_agent_*` and
+`promotion.signer.spool.*` leaves. They let `switch` reproduce the live source
+config byte-for-byte for its drift check; the new config keeps the alert
+recipient and ignores the retired template and spool values. Remove them after
+the source has switched.
 The overlay also supplies the fleet-reader's source host and absolute source path;
 `fleet-reader.py --overlay /private/host.json` reads only that summary via SSH.
 Render launchd templates with `preview`; install from a retained detached toolkit
