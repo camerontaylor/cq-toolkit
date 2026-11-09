@@ -76,6 +76,22 @@ test('reuse dispatches a fresh agent when a matching debt candidate lacks covera
   expect(findReusableCycle(f.ledger.records, request)).toBeNull();
   expect(findReusableCycle([f.agent], request)?.cycle.cycleId).toBe(f.agent.cycleId);
 });
+test('a retained debt candidate cannot hide a later vendor cycle at a different head', async () => {
+  const f = await fixture();
+  f.ledger.records.push(
+    cycleRecord({ ...f.identity, cycleId: 'c003-vendor', head: 'd'.repeat(40) }),
+  );
+  const request = {
+    ...f.identity,
+    reviewer: 'agent:reviewer',
+    target: 'main',
+    scope: 'full' as const,
+  };
+  expect(findReusableCycle(f.ledger.records, request)).toBeNull();
+  expect(findReusableCycle(f.ledger.records, { ...request, debtValid: true })?.cycle.cycleId).toBe(
+    f.agent.cycleId,
+  );
+});
 test('fresh engine proof cannot replace authorized current vendor debt', async () => {
   const f = await fixture();
   expect(f.assemble().ready).toBe(true);

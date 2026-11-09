@@ -652,9 +652,9 @@ export function findReusableCycle(
       enrollment.enrollment.snapshot.originAttempt,
       records.filter((record): record is DevCycleRecord => record.kind === 'cycle'),
     );
-  const debtValid = input.debtValid ?? debtCandidate;
+  const coverageRequired = input.debtValid ?? debtCandidate;
   if (
-    debtValid &&
+    coverageRequired &&
     selected.reviewer.startsWith('agent:') &&
     (!selected.agentCoverage ||
       !isCoverageV2Complete(selected.agentCoverage) ||
@@ -696,6 +696,7 @@ export function findReusableCycle(
   // terminal cycle eligible for the current readiness mode carries a
   // differing identity (target, base, head, dirtySha256 — reviewer excluded,
   // so a same-identity agent/coderabbit pair still resolves).
+  const debtValid = input.debtValid ?? false;
   const laterAnchor = [...laterCycles]
     .reverse()
     .find(
