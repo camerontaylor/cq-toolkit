@@ -1,5 +1,6 @@
 """Reproducibility and Python-oracle tests for the group-P vector fixtures."""
 import copy
+import base64
 import hashlib
 import json
 import os
@@ -14,6 +15,7 @@ import admission_history
 import backfill_accounting
 import backfill_inventory
 import backfill_jobs
+import backfill_report
 import coverage
 import crq
 import crq_repair
@@ -35,6 +37,36 @@ FAMILIES = list(vector_emit.BUILDERS)
 
 def utc(value):
     return None if value is None else value.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+class _ReportRepo:
+    """Minimal replay stub matching the documented report vector inputs."""
+
+    def __init__(self, spec):
+        self.trees = dict(spec.get("tree", {}))
+        self.lineages = {(row["old"], row["new"], row["path"]): row.get("result")
+                         for row in spec.get("lineage", [])}
+        self.deleted = {(row["old"], row["new"], row["path"]): bool(row.get("result"))
+                        for row in spec.get("proven_deleted", [])}
+        self.carries = {(row["old"], row["new"], row["path"]):
+                        (row.get("result"), {int(k): int(v) for k, v in row.get("mapped", [])})
+                        for row in spec.get("carry", [])}
+
+    def tree(self, target):
+        return self.trees[target]
+
+    def lineage(self, old, new, path):
+        return self.lineages.get((old, new, path))
+
+    def proven_deleted(self, old, new, path):
+        return self.deleted.get((old, new, path), False)
+
+    def carry(self, old, new, path, lines):
+        found = self.carries.get((old, new, path))
+        if found is None:
+            return None, set()
+        mapped, matches = found
+        return mapped, {matches[number] for number in lines if number in matches}
 
 
 def invoke(source, inputs):
@@ -129,6 +161,36 @@ def invoke(source, inputs):
         return {"decision": decision, "queue": queue, "item": item}
     if source == "backfill_inventory.rank":
         return backfill_inventory.rank(inputs["manifest"], inputs["inputs"])
+    if source == "backfill_accounting.line_bytes":
+        return [base64.b64encode(row).decode("ascii") for row in
+                backfill_accounting.line_bytes(base64.b64decode(inputs["base64"]))]
+    if source == "backfill_accounting._int":
+        return backfill_accounting._int(inputs["value"], inputs["low"])
+    if source == "backfill_accounting._opt_str":
+        return backfill_accounting._opt_str(inputs["value"])
+    if source == "backfill_accounting._rows":
+        return backfill_accounting._rows(inputs["value"])
+    if source == "backfill_accounting._hexstr":
+        return backfill_accounting._hexstr(inputs["value"])
+    if source == "backfill_accounting.FACT_SHAPES":
+        return backfill_accounting.FACT_SHAPES[inputs["kind"]](inputs["value"])
+    if source == "backfill_report.baseline":
+        repo = _ReportRepo({"tree": {inputs["ranked"]["target"]: inputs["tree"]}})
+        return backfill_report.baseline(repo, inputs["ranked"],
+                                        inputs["policy_digest"],
+                                        inputs["ledger_head"], inputs["at"])
+    if source == "backfill_report.summary":
+        return backfill_report.summary(_ReportRepo(inputs["repo"]),
+                                       inputs["ranked"], inputs["queue"],
+                                       inputs["original"])
+    if source == "status_summary.timestamp":
+        parsed = status_summary.timestamp(inputs["value"])
+        return {"epoch": None if parsed is None else int(parsed)}
+    if source == "status_summary.merged_current":
+        return status_summary.merged_current(inputs["queue"])
+    if source == "status_summary.repos_summary":
+        return status_summary.repos_summary(inputs["queue"], inputs["primary"],
+                                            inputs["configured"])
     if source == "review_ledger.timestamp":
         return review_ledger.timestamp(inputs["value"]).isoformat()
     if source == "review_ledger.path":
@@ -210,6 +272,17 @@ class VectorFileTest(unittest.TestCase):
                         "admission_history.summarize",
                         "backfill_jobs.admission",
                         "backfill_inventory.rank",
+                        "backfill_accounting.line_bytes",
+                        "backfill_accounting._int",
+                        "backfill_accounting._opt_str",
+                        "backfill_accounting._rows",
+                        "backfill_accounting._hexstr",
+                        "backfill_accounting.FACT_SHAPES",
+                        "backfill_report.baseline",
+                        "backfill_report.summary",
+                        "status_summary.timestamp",
+                        "status_summary.merged_current",
+                        "status_summary.repos_summary",
                         "review_ledger.timestamp",
                         "review_ledger.path",
                         "review_ledger.intervals",

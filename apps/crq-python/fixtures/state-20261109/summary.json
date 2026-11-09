@@ -1,0 +1,185 @@
+{
+  "backfill_reserved_slots": 1,
+  "completed_24h_by_work": {
+    "open": 1,
+    "recent_merge": 0,
+    "backfill": 0,
+    "other": 0
+  },
+  "pending_items": [
+    {
+      "repo": "example/primary",
+      "pr": 102,
+      "title": null,
+      "kind": "coverage",
+      "band": "background",
+      "generation": null,
+      "aging_deadline": null,
+      "reason": null,
+      "approximate_position": 1
+    },
+    {
+      "repo": "example/primary",
+      "pr": 101,
+      "title": null,
+      "kind": "backfill",
+      "band": "background",
+      "generation": 0,
+      "aging_deadline": null,
+      "reason": null,
+      "approximate_position": 2
+    }
+  ],
+  "merged_current": {
+    "natural_discovery": {
+      "after": "2026-11-09T11:40:00Z",
+      "before": "2026-11-09T11:50:00Z",
+      "complete": true
+    },
+    "discovery": {
+      "after": "2026-11-02T00:00:00Z",
+      "before": "2026-11-09T00:00:00Z",
+      "complete": true,
+      "complete_through": "2026-11-09T00:00:00Z",
+      "next_cursor": null,
+      "represented": 1,
+      "intents": 1,
+      "unsupported": 0,
+      "duplicates_seen": 0,
+      "records_read": 1,
+      "inventory_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "pages_read": 1,
+      "transient_failures": 0
+    },
+    "watermark": "2026-11-09T00:00:00Z",
+    "receipts": {
+      "pending": 0,
+      "reviewing": 0,
+      "blocked": 0,
+      "unverified": 1,
+      "proven_terminal": 0,
+      "no_current_code": 0,
+      "partial_scope": 0,
+      "unsupported": 0
+    },
+    "path_exclusions": {},
+    "captured_targets": [],
+    "additional_captured_targets": 0,
+    "coverage_at_today_target": "unverified",
+    "legacy_done_is_review_proof": false
+  },
+  "last_tick": "2026-11-09T11:50:00Z",
+  "status_as_of": "2026-11-09T11:50:00Z",
+  "paused": false,
+  "cooldown_until": "2026-11-09T12:15:00Z",
+  "starts_60m": 2,
+  "starts_cap": 10,
+  "in_flight": 0,
+  "outcomes_24h": {
+    "completed": 1,
+    "interrupted": 0,
+    "error": 0
+  },
+  "other_outcomes_24h": 0,
+  "backlog": {
+    "open": 0,
+    "delta": 0,
+    "merged": 0,
+    "coverage": 1,
+    "merged-current": 0,
+    "backfill": 1
+  },
+  "repos": {
+    "example/other": {
+      "pending": 0,
+      "reviewing": 0,
+      "blocked": 0,
+      "other": 1,
+      "reviewed_tip": "2222222222222222222222222222222222222222"
+    }
+  },
+  "schema_version": 2,
+  "systemd_services": {},
+  "systemd_timers": {
+    "crq-tick.timer": {
+      "active": true,
+      "active_state": "active",
+      "load_state": "loaded",
+      "last_trigger": "2026-11-09T11:00:00Z",
+      "next_elapse": "2026-11-09T12:00:00Z"
+    },
+    "crq-watchdog.timer": {
+      "active": true,
+      "active_state": "active",
+      "load_state": "loaded",
+      "last_trigger": "2026-11-09T11:00:00Z",
+      "next_elapse": "2026-11-09T12:00:00Z"
+    },
+    "crq-slot.timer": {
+      "active": true,
+      "active_state": "active",
+      "load_state": "loaded",
+      "last_trigger": "2026-11-09T11:00:00Z",
+      "next_elapse": "2026-11-09T12:00:00Z"
+    },
+    "crq-backfill.timer": {
+      "active": true,
+      "active_state": "active",
+      "load_state": "loaded",
+      "last_trigger": "2026-11-09T11:00:00Z",
+      "next_elapse": "2026-11-09T12:00:00Z"
+    },
+    "crq-repair.timer": {
+      "active": true,
+      "active_state": "active",
+      "load_state": "loaded",
+      "last_trigger": "2026-11-09T11:00:00Z",
+      "next_elapse": "2026-11-09T12:00:00Z"
+    }
+  },
+  "utilization": {
+    "starts_24h": 1,
+    "nominal_cap_24h": 120,
+    "nominal_utilization": 0.0083,
+    "cooldown_minutes": 15,
+    "observed_ticks_24h": 1,
+    "available_start_opportunities_24h": 1,
+    "idle_while_pending_24h": 0,
+    "idle_with_coverage_candidate_24h": 0,
+    "coverage_reviewed_paths": 1
+  },
+  "repair": {
+    "verdicts": {
+      "fixed@A0": 0,
+      "fixed@A1": 0,
+      "fixed@A2": 0,
+      "not-fixed": 0,
+      "stale": 0,
+      "judged-valid": 0,
+      "judged-invalid": 0,
+      "failed": 0
+    },
+    "inbox": 0,
+    "oldest_age_minutes": 0,
+    "jobs_in_flight": 0,
+    "rate_limit_deferred": 0,
+    "orphaned": 0,
+    "fix_prs": [],
+    "source_publication_errors": []
+  },
+  "finding_triage": {
+    "counts": {},
+    "needs_human": [],
+    "counts_complete": true,
+    "error_count": 0,
+    "errors": [],
+    "errors_omitted": 0,
+    "needs_human_count": 0,
+    "needs_human_omitted": 0
+  },
+  "schedule": {
+    "id": "fixture-schedule",
+    "state": "active"
+  },
+  "generated_at": "2026-11-09T00:00:00Z"
+}

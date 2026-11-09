@@ -17,6 +17,7 @@ No timestamp, host, path or Python version is recorded.
 from __future__ import annotations
 
 import argparse
+import base64
 import copy
 import datetime as dt
 import hashlib
@@ -28,6 +29,7 @@ from typing import Any, Callable, Dict, List
 import backfill_accounting
 import backfill_inventory
 import backfill_jobs
+import backfill_report
 import coverage
 import crq
 import crq_repair
@@ -853,6 +855,369 @@ def backfill_inventory_vectors() -> Dict[str, Any]:
     return _family("backfill-inventory", cases)
 
 
+# --------------------------------------------------------------- backfill accounting
+
+
+def _b64(value: bytes) -> str:
+    return base64.b64encode(value).decode("ascii")
+
+
+def backfill_accounting_vectors() -> Dict[str, Any]:
+    cases: List[Dict[str, Any]] = []
+
+    for name, data in [
+        ("empty", b""),
+        ("single-newline", b"\n"),
+        ("one-line-trailing-newline", b"a\n"),
+        ("one-line-without-newline", b"a"),
+        ("blank-line-preserved", b"a\n\n"),
+        ("crlf-keeps-carriage-return", b"a\r\n"),
+        ("non-utf8-bytes", b"\xff\n"),
+    ]:
+        cases.append(_capture(name, "backfill_accounting.line_bytes",
+                              {"base64": _b64(data)},
+                              lambda data=data: [_b64(row) for row in
+                                                 backfill_accounting.line_bytes(data)]))
+
+    for name, value, low in [
+        ("zero-is-int", 0, 0), ("one-is-int", 1, 0), ("negative-is-not", -1, 0),
+        ("boolean-is-not-int", True, 0), ("float-is-not-int", 1.0, 0),
+        ("string-is-not-int", "1", 0), ("none-is-not-int", None, 0),
+        ("low-bound-is-inclusive", 2, 2), ("below-low-bound", 1, 2),
+    ]:
+        cases.append(_capture(name, "backfill_accounting._int",
+                              {"value": value, "low": low},
+                              lambda value=value, low=low: backfill_accounting._int(value, low)))
+
+    for name, value in [("none-is-optional", None), ("string-is-optional", "x"),
+                        ("number-is-not", 1), ("boolean-is-not", True),
+                        ("list-is-not", [])]:
+        cases.append(_capture(name, "backfill_accounting._opt_str", {"value": value},
+                              lambda value=value: backfill_accounting._opt_str(value)))
+
+    for name, value in [
+        ("valid-rows", [[1, 2], [3, 5]]), ("zero-start-invalid", [[0, 1]]),
+        ("zero-end-invalid", [[1, 0]]), ("three-columns-invalid", [[1, 2, 3]]),
+        ("boolean-invalid", [[True, 2]]), ("not-a-list-invalid", "x"),
+        ("empty-is-valid", []),
+    ]:
+        cases.append(_capture(name, "backfill_accounting._rows", {"value": value},
+                              lambda value=value: backfill_accounting._rows(value)))
+
+    for name, value in [("empty-hex-is-valid", ""), ("one-byte-hex", "00"),
+                        ("two-byte-hex", "abcd"), ("odd-length-invalid", "abc"),
+                        ("uppercase-invalid", "ABCD"), ("non-hex-invalid", "zz"),
+                        ("space-invalid", "ab cd")]:
+        cases.append(_capture(name, "backfill_accounting._hexstr", {"value": value},
+                              lambda value=value: backfill_accounting._hexstr(value)))
+
+    def fact(name: str, kind: str, value: Any) -> Dict[str, Any]:
+        return _capture(name, "backfill_accounting.FACT_SHAPES",
+                        {"kind": kind, "value": value},
+                        lambda kind=kind, value=value:
+                        backfill_accounting.FACT_SHAPES[kind](value))
+
+    cases += [
+        fact("blame-valid", "blame", [["a" * 40, 1, "abcd", "ef01"]]),
+        fact("blame-wrong-width", "blame", [["a" * 40, 1, "abcd"]]),
+        fact("blame-boolean-line", "blame", [["a" * 40, True, "abcd", "ef01"]]),
+        fact("blame-odd-hex", "blame", [["a" * 40, 1, "abc", "ef01"]]),
+        fact("lineage-step-valid", "lineage_step",
+             {"parent": "a" * 40, "changes": [["R100", "old.py", "new.py"],
+                                              ["D", "gone.py", None]]}),
+        fact("lineage-step-extra-key", "lineage_step",
+             {"parent": "a" * 40, "changes": [], "extra": 1}),
+        fact("lineage-step-bad-change", "lineage_step",
+             {"parent": "a" * 40, "changes": [["D", "gone.py"]]}),
+        fact("lineage-null-valid", "lineage", {"path": None}),
+        fact("lineage-string-valid", "lineage", {"path": "src/a.py"}),
+        fact("lineage-extra-key", "lineage", {"path": "src/a.py", "extra": 1}),
+        fact("carry-valid", "carry",
+             {"path": "src/a.py", "old_lines": 3, "matches": [[1, 2], [3, 4]]}),
+        fact("carry-start-beyond-old-lines", "carry",
+             {"path": "src/a.py", "old_lines": 2, "matches": [[3, 4]]}),
+        fact("carry-boolean-line", "carry",
+             {"path": "src/a.py", "old_lines": 3, "matches": [[True, 2]]}),
+        fact("coverage-valid", "coverage",
+             {"covered": {"src/a.py": [[1, 2]]},
+              "evidence": {"src/a.py": ["finding-1"]}}),
+        fact("coverage-bad-interval", "coverage",
+             {"covered": {"src/a.py": [[0, 2]]}, "evidence": {}}),
+        fact("coverage-bad-evidence", "coverage",
+             {"covered": {}, "evidence": {"src/a.py": [1]}}),
+        fact("verified-review-valid", "verified_review", {"src/a.py": [[1, 2]]}),
+        fact("verified-review-bad-row", "verified_review", {"src/a.py": [[1]]}),
+    ]
+    return _family("backfill-accounting", cases)
+
+
+# --------------------------------------------------------------- backfill report
+
+
+class _ReportRepo:
+    """Deterministic repository stub for report vector inputs.
+
+    The vector carries the answers the report needs, so the report's pure
+    accounting can be replayed without Git. Real capture and repository effects
+    remain Group E.
+    """
+
+    def __init__(self, spec: Dict[str, Any]):
+        self.trees = dict(spec.get("tree", {}))
+        self.lineages = {(row["old"], row["new"], row["path"]): row.get("result")
+                         for row in spec.get("lineage", [])}
+        self.deleted = {(row["old"], row["new"], row["path"]): bool(row.get("result"))
+                        for row in spec.get("proven_deleted", [])}
+        self.carries = {(row["old"], row["new"], row["path"]):
+                        (row.get("result"), {int(k): int(v) for k, v in row.get("mapped", [])})
+                        for row in spec.get("carry", [])}
+
+    def tree(self, target: str) -> str:
+        return self.trees[target]
+
+    def lineage(self, old: str, new: str, path: str):
+        return self.lineages.get((old, new, path))
+
+    def proven_deleted(self, old: str, new: str, path: str) -> bool:
+        return self.deleted.get((old, new, path), False)
+
+    def carry(self, old: str, new: str, path: str, lines):
+        found = self.carries.get((old, new, path))
+        if found is None:
+            return None, set()
+        mapped, matches = found
+        return mapped, {matches[number] for number in lines if number in matches}
+
+
+def _report_baseline(ranked: Dict[str, Any], *, tree: str, policy_digest: str,
+                     ledger_head: str, at: str) -> Dict[str, Any]:
+    repo = _ReportRepo({"tree": {ranked["target"]: tree}})
+    return backfill_report.baseline(repo, ranked, policy_digest, ledger_head, at)
+
+
+def backfill_report_vectors() -> Dict[str, Any]:
+    baseline_ranked = {
+        "manifest_id": "a" * 64, "target": "1" * 40,
+        "evaluated_at": "2026-11-09T00:00:00Z",
+        "candidates": [{"tier": "T1"}, {"tier": "T2"}],
+        "required": [{"prs": [10], "row": 1, "missing_source_evidence": [],
+                      "paths": []}],
+        "evidence_gaps": {},
+        "paths": [
+            {"path": "src/a.py", "blob": "b" * 40, "tier": "T1",
+             "lines": 4, "uncovered": [[1, 2]], "disposition": "included",
+             "reason": "tracked regular UTF8 text"},
+            {"path": "src/c.py", "blob": "c" * 40, "tier": "T2",
+             "lines": 3, "uncovered": [], "disposition": "included",
+             "reason": "tracked regular UTF8 text"},
+        ],
+    }
+    baseline_case = _capture(
+        "baseline-projects-row-shape-and-digest", "backfill_report.baseline",
+        {"ranked": baseline_ranked, "policy_digest": "d" * 64,
+         "ledger_head": "e" * 40, "at": "2026-11-09T00:00:00Z",
+         "tree": "2" * 40},
+        lambda: _report_baseline(baseline_ranked, tree="2" * 40,
+                                 policy_digest="d" * 64, ledger_head="e" * 40,
+                                 at="2026-11-09T00:00:00Z"))
+
+    mixed_ranked = {
+        "manifest_id": "f" * 64, "target": "1" * 40,
+        "evaluated_at": "2026-11-09T00:00:00Z",
+        "candidates": [{"tier": "T1"}, {"tier": "T2"}],
+        "required": [], "evidence_gaps": {},
+        "paths": [
+            {"path": "src/a.py", "tier": "T1", "lines": 4,
+             "uncovered": [[1, 2]], "disposition": "included",
+             "reason": "tracked"},
+            {"path": "src/b.py", "tier": "T2", "lines": 3,
+             "uncovered": [], "disposition": "included", "reason": "tracked"},
+            {"path": "src/c.py", "tier": "T1", "lines": 2,
+             "uncovered": [[1, 1]], "disposition": "unsupported",
+             "reason": "binary"},
+            {"path": "src/d.py", "tier": "T3", "lines": 0,
+             "uncovered": [], "disposition": "empty", "reason": "empty"},
+        ],
+    }
+    mixed_queue = {
+        "items": [
+            {"kind": "backfill", "state": "pending"},
+            {"kind": "backfill", "state": "publication-pending"},
+            {"kind": "coverage", "state": "quarantined"},
+            {"kind": "open", "state": "pending"},
+        ],
+        "backfill_families": {"f1": {"quarantined": True},
+                              "f2": {"quarantined": False}},
+        "backfill_finding_backlog": {"untriaged": 2},
+        "backfill_admissions": [{"at": "2026-11-09T00:00:00Z", "decision": "admit"}],
+        "backfill_daily_capacity": {"2026-11-09": {"completed_partitions": 2}},
+        "backfill_idle_with_candidate": 1,
+    }
+    mixed_case = _capture(
+        "summary-mixed-tiers-and-operational-counts", "backfill_report.summary",
+        {"ranked": mixed_ranked, "queue": mixed_queue, "original": None,
+         "repo": {"tree": {}}},
+        lambda: backfill_report.summary(_ReportRepo({"tree": {}}), mixed_ranked,
+                                        mixed_queue, None))
+
+    original_target = "1" * 40
+    current_target = "5" * 40
+    original_paths = [
+        {"path": "src/a.py", "blob": "b" * 40, "tier": "T1", "lines": 4,
+         "uncovered": [[1, 2]], "disposition": "included", "reason": "tracked"},
+        {"path": "src/old.py", "blob": "c" * 40, "tier": "T1", "lines": 2,
+         "uncovered": [[1, 2]], "disposition": "included", "reason": "tracked"},
+        {"path": "src/gone.py", "blob": "d" * 40, "tier": "T1", "lines": 1,
+         "uncovered": [[1, 1]], "disposition": "included", "reason": "tracked"},
+        {"path": "src/unknown.py", "blob": "e" * 40, "tier": "T1", "lines": 1,
+         "uncovered": [[1, 1]], "disposition": "included", "reason": "tracked"},
+        {"path": "src/bad.py", "blob": "f" * 40, "tier": "T1", "lines": None,
+         "uncovered": [], "disposition": "unsupported", "reason": "binary"},
+    ]
+    original_ranked = {"manifest_id": "a" * 64, "target": original_target,
+                       "evaluated_at": "2026-11-08T00:00:00Z",
+                       "candidates": [], "required": [], "evidence_gaps": {},
+                       "paths": original_paths}
+    original = _report_baseline(original_ranked, tree="7" * 40,
+                                policy_digest="8" * 64, ledger_head="9" * 40,
+                                at="2026-11-08T00:00:00Z")
+
+    baseline_ranked = {
+        "manifest_id": "a" * 64, "target": current_target,
+        "evaluated_at": "2026-11-09T00:00:00Z",
+        "candidates": [{"tier": "T1"}, {"tier": "T1"}, {"tier": "T2"}],
+        "required": [], "evidence_gaps": {},
+        "paths": [
+            {"path": "src/a.py", "tier": "T1", "lines": 4,
+             "uncovered": [[2, 3]], "disposition": "included", "reason": "tracked"},
+            {"path": "src/renamed.py", "tier": "T1", "lines": 2,
+             "uncovered": [[1, 2]], "disposition": "included", "reason": "tracked"},
+            {"path": "src/new.py", "tier": "T1", "lines": 2,
+             "uncovered": [[1, 2]], "disposition": "included", "reason": "tracked"},
+            {"path": "src/bad.py", "tier": "T1", "lines": None,
+             "uncovered": [], "disposition": "unsupported", "reason": "binary"},
+        ],
+    }
+    report_repo = {
+        "tree": {current_target: "6" * 40},
+        "lineage": [
+            {"old": original_target, "new": current_target, "path": "src/a.py",
+             "result": "src/a.py"},
+            {"old": original_target, "new": current_target, "path": "src/old.py",
+             "result": "src/renamed.py"},
+            {"old": original_target, "new": current_target, "path": "src/gone.py",
+             "result": None},
+            {"old": original_target, "new": current_target, "path": "src/unknown.py",
+             "result": None},
+            {"old": original_target, "new": current_target, "path": "src/bad.py",
+             "result": "src/bad.py"},
+        ],
+        "proven_deleted": [
+            {"old": original_target, "new": current_target, "path": "src/gone.py",
+             "result": True},
+            {"old": original_target, "new": current_target, "path": "src/unknown.py",
+             "result": False},
+        ],
+        "carry": [
+            {"old": original_target, "new": current_target, "path": "src/a.py",
+             "result": "src/a.py",
+             "mapped": [[1, 1], [2, 2], [3, 3], [4, 4]]},
+            {"old": original_target, "new": current_target, "path": "src/old.py",
+             "result": "src/renamed.py", "mapped": [[1, 1], [2, 2]]},
+            {"old": original_target, "new": current_target, "path": "src/bad.py",
+             "result": "src/bad.py", "mapped": []},
+        ],
+    }
+    baseline_queue = {
+        "items": [{"kind": "backfill", "state": "pending"}],
+        "backfill_daily_capacity": {
+            "2026-11-08": {"completed_partitions": 2},
+            "2026-11-09": {"completed_partitions": 2},
+        },
+    }
+    baseline_case_two = _capture(
+        "summary-baseline-surviving-reviewed-removed-and-new",
+        "backfill_report.summary",
+        {"ranked": baseline_ranked, "queue": baseline_queue,
+         "original": original, "repo": report_repo},
+        lambda: backfill_report.summary(_ReportRepo(report_repo), baseline_ranked,
+                                        baseline_queue, original))
+
+    return _family("backfill-report", [baseline_case, mixed_case, baseline_case_two])
+
+
+# --------------------------------------------------------------- status helpers
+
+
+def status_helpers_vectors() -> Dict[str, Any]:
+    cases: List[Dict[str, Any]] = []
+    for name, value in [("exact-utc", "2026-11-09T00:00:00Z"),
+                        ("fraction-accepted", "2026-11-09T00:00:00.5Z"),
+                        ("offset-accepted", "2026-11-09T10:00:00+10:00"),
+                        ("none-invalid", None), ("number-invalid", 1)]:
+        cases.append(_capture(name, "status_summary.timestamp", {"value": value},
+                              lambda value=value: {"epoch": (None if (parsed := status_summary.timestamp(value)) is None
+                                                              else int(parsed))}))
+
+    merged_cases = {
+        "pending-reviewing-blocked": {
+            "items": [
+                {"kind": "merged-current", "state": "pending"},
+                {"kind": "merged-current", "state": "reviewing"},
+                {"kind": "merged-current", "state": "blocked"},
+                {"kind": "open", "state": "pending"},
+            ],
+            "merged_discovery": {"after": "2026-11-08T00:00:00Z",
+                                 "before": "2026-11-09T00:00:00Z",
+                                 "complete": True},
+            "merged_reconcile": {"after": "2026-11-08T00:00:00Z",
+                                 "before": "2026-11-09T00:00:00Z",
+                                 "complete": True, "pages_read": 2,
+                                 "inventory_digest": "a" * 64},
+            "merged_watermark": "2026-11-09T00:00:00Z",
+        },
+        "terminal-without-retained-receipts": {
+            "items": [
+                {"kind": "merged-current", "state": "done", "receipt_id": "b" * 64},
+                {"kind": "merged-current", "state": "no-current-code",
+                 "receipt_id": "c" * 64},
+                {"kind": "merged-current", "state": "unsupported",
+                 "receipt_id": "d" * 64},
+            ],
+            "merged_discovery": {"complete": False, "reason": "budget"},
+        },
+    }
+    for name, queue in merged_cases.items():
+        cases.append(_capture("merged-" + name, "status_summary.merged_current",
+                              {"queue": queue},
+                              lambda queue=queue: status_summary.merged_current(queue)))
+
+    repos_queue = {
+        "items": [
+            {"id": "a", "repo": "example/primary", "state": "pending"},
+            {"id": "b", "repo": "example/other", "state": "pending"},
+            {"id": "c", "repo": "example/other", "state": "reviewing"},
+            {"id": "d", "repo": "example/other", "state": "blocked"},
+            {"id": "e", "repo": "example/other", "state": "done"},
+            {"id": "f", "repo": "example/other", "state": "mystery"},
+            {"id": "g", "repo": "example/third", "state": "pending"},
+        ],
+        "push_discovery": {"example/pushonly": {"reviewed_tip": "a" * 40},
+                          "example/primary": {"reviewed_tip": "b" * 40}},
+    }
+    cases.append(_capture(
+        "repos-counts-configured-push-and-other-states", "status_summary.repos_summary",
+        {"queue": repos_queue, "primary": "example/primary",
+         "configured": [{"repo": "example/other"},
+                        {"repo": "example/primary"},
+                        {"repo": "example/configured"}]},
+        lambda: status_summary.repos_summary(
+            repos_queue, "example/primary",
+            [{"repo": "example/other"}, {"repo": "example/primary"},
+             {"repo": "example/configured"}])))
+    return _family("status-helpers", cases)
+
+
 # --------------------------------------------------------------- ledger
 
 
@@ -1077,6 +1442,9 @@ BUILDERS: Dict[str, Callable[[], Dict[str, Any]]] = {
     "coverage": coverage_vectors,
     "backfill": backfill_vectors,
     "backfill-inventory": backfill_inventory_vectors,
+    "backfill-accounting": backfill_accounting_vectors,
+    "backfill-report": backfill_report_vectors,
+    "status-helpers": status_helpers_vectors,
     "ledger": ledger_vectors,
     "summary": summary_vectors,
 }
