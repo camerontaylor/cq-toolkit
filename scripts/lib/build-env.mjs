@@ -14,8 +14,13 @@ const CREDENTIAL_NAME = /token|secret|password|passwd|credential|api_?key|privat
  */
 const CONNECTION_NAME = /(?:^|_)(?:database|db|redis|mongo(?:db)?|amqp|broker|dsn)(?:_|$)/i;
 
-/** A URL whose userinfo carries a password (`scheme://user:pass@host`), whatever the variable is named. */
-const URL_WITH_PASSWORD = /[a-z][a-z0-9+.-]*:\/\/[^\s/@:]*:[^\s/@]+@/i;
+/**
+ * A URL whose userinfo carries a credential, whatever the variable is named:
+ * `scheme://user:pass@host` and equally `scheme://credential@host`, since URL
+ * userinfo can hold a token with no colon before the `@`. The userinfo must sit
+ * at the start of the authority, so `@` in a path (`https://host/a@b`) stays.
+ */
+const URL_WITH_CREDENTIAL = /[a-z][a-z0-9+.-]*:\/\/[^\s/?#@]+@/i;
 
 /** The parent environment minus credential-bearing variables. */
 export function scrubbedBuildEnv(env) {
@@ -24,7 +29,7 @@ export function scrubbedBuildEnv(env) {
       ([name, value]) =>
         !CREDENTIAL_NAME.test(name) &&
         !CONNECTION_NAME.test(name) &&
-        !(value !== undefined && URL_WITH_PASSWORD.test(value)),
+        !(value !== undefined && URL_WITH_CREDENTIAL.test(value)),
     ),
   );
 }
