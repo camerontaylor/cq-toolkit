@@ -379,7 +379,7 @@ describe('distIsFresh (the runner skips the build only when this holds)', () => 
     const root = mkdtempSync(join(tmpdir(), 'dist-fresh-'));
     const put = (file: string, seconds: number) => {
       mkdirSync(dirname(join(root, file)), { recursive: true });
-      writeFileSync(join(root, file), '');
+      writeFileSync(join(root, file), file === 'package.json' ? '{}' : '');
       utimesSync(join(root, file), seconds, seconds);
     };
     for (const file of inputs) put(file, 1_000);
