@@ -231,7 +231,8 @@ export function readPythonReport(stderr) {
   const last = matches.at(-1);
   if (last === undefined || Number(last[1]) === 0) return null;
   const total = Number(last[1]);
-  const count = (key) => Number(new RegExp(`\\b${key}=(\\d+)`).exec(last[3] ?? '')?.[1] ?? 0);
+  const count = (key) =>
+    Number(new RegExp(`(?:^|, )${key}=(\\d+)`).exec(last[3] ?? '')?.[1] ?? 0);
   const failed = count('failures') + count('errors') + count('unexpected successes');
   const skipped = count('skipped') + count('expected failures');
   return { total, passed: total - failed - skipped, failed, skipped };

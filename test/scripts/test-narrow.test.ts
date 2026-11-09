@@ -651,6 +651,17 @@ describe('Python narrow selection and evidence', () => {
     expect(readPythonReport('Ran 0 tests in 0.01s\n\nOK\n')).toBeNull();
     expect(readPythonReport('no summary')).toBeNull();
   });
+  it('does not read `expected failures` as real failures', () => {
+    expect(readPythonReport('Ran 1 test in 0.01s\n\nOK (expected failures=1)\n')).toEqual({
+      total: 1,
+      passed: 0,
+      failed: 0,
+      skipped: 1,
+    });
+    expect(readPythonReport('Ran 2 tests in 0.01s\n\nOK (skipped=1, expected failures=1)\n')).toEqual(
+      { total: 2, passed: 0, failed: 0, skipped: 2 },
+    );
+  });
 });
 
 describe('childEnv (internal runner markers never reach a child)', () => {
