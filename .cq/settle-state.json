@@ -443,6 +443,32 @@
           "by": "self-merge-prs:observe"
         }
       ]
+    },
+    "1356": {
+      "tuple": {
+        "head": "278772c4553bfdc22a733e292b10594c9bb48d27",
+        "base": "01b8326eb6e608fd9b20e36d6c2f56583a22bc87",
+        "forcePushEpoch": 0
+      },
+      "observations": [
+        {
+          "observedAt": "2026-11-09T15:46:05.824Z",
+          "by": "self-merge-prs:observe"
+        }
+      ]
+    },
+    "1357": {
+      "tuple": {
+        "head": "a6c6d897ea209e80982f10a2494a1b3d01a0bde5",
+        "base": "01b8326eb6e608fd9b20e36d6c2f56583a22bc87",
+        "forcePushEpoch": 0
+      },
+      "observations": [
+        {
+          "observedAt": "2026-11-09T15:46:05.824Z",
+          "by": "self-merge-prs:observe"
+        }
+      ]
     }
   }
 }
