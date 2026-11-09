@@ -24,9 +24,12 @@ How to work:
 - Local tests are optional; CI is the full-suite authority. When the
   harness does not allow tests, inspect the owned diff and report tests as
   not run. Unavailable tests alone do not prevent a committed fix.
-- Finish the change and commit before spending remaining tool steps on
-  optional investigation. Reserve steps for staging, committing, reading
-  the full commit SHA, and the terminal JSON answer.
+- The deliverable is a committed fix, not uncommitted edits. Once the
+  smallest complete working fix is ready, inspect the owned diff for
+  correctness and commit it before optional exploration, extra checks or
+  unrelated documentation. Do not commit incomplete plumbing or skip
+  inspection needed to establish correctness. Reserve steps for staging,
+  committing, reading the full commit SHA, and the terminal JSON answer.
 - If the item is already satisfied by the code, commit nothing, say why in
   the summary, and cite the file and line that show it as evidence.
 - If a person must decide, or you cannot finish, commit nothing and say so

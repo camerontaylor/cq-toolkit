@@ -37,6 +37,18 @@ describe('trusted fixer operating instructions', () => {
     expect(prompt).toContain('After a denied command, use a supported tool');
     expect(prompt).toContain('stage only explicit');
     expect(prompt).toContain('git rev-parse HEAD');
+    const deliverable = 'The deliverable is a committed fix, not uncommitted edits.';
+    expect(prompt).toContain(deliverable);
+    expect(prompt.indexOf(deliverable)).toBeLessThan(
+      prompt.indexOf('----- UNTRUSTED REVIEW CONTENT BEGIN'),
+    );
+    expect(prompt.replace(/\s+/g, ' ')).toContain(
+      'smallest complete working fix is ready, inspect the owned diff',
+    );
+    expect(prompt).toContain('Do not commit incomplete plumbing');
+    expect(prompt).toContain('The worktree cwd is already set.');
+    expect(prompt).toContain('Submit one permitted command per call');
+    expect(prompt).toContain('use the exposed read tool instead of trying denied shape variants.');
     expect(prompt).toContain('Configured tools (capped caller harness): ["read","edit","bash"].');
     expect(prompt).not.toContain(
       'Configured tools (capped caller harness): ["read","edit","write"',
