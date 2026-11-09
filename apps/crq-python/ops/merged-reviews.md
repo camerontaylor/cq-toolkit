@@ -346,9 +346,12 @@ repair jobs, then verifies the fix PR head, selected base, merge commit ancestry
 and capture ancestry before retaining merge evidence. With `queue.project_fixed: true`, status preserves the receipt outcome and reports
 `fixed: true` with a compact
 `remediation` reference only for complete receipt-bound evidence. Inventory exposes
-`reviewed`, `consumed` and `fixed` facts separately; its `fixed` state applies only
-before consumption, so the consumed filter retains consumed repairs. Fact filters
-match independently: a consumed repair is returned by both consumed and fixed filters. Partial scope, partial repairs,
+`reviewed`, `consumed` and `fixed` facts separately. `fixed` is an independent
+durable fact about remediation evidence, not a pre-consumption-only state, so it
+survives consumption: a consumed repair still reports `fixed: true`, and the
+`consumed` filter returns it as consumed without clearing its fixed credit.
+Fact filters match independently: a consumed repair is returned by both consumed
+and fixed filters. Partial scope, partial repairs,
 unmerged or stale publication heads, and equivalent receipts reused by another
 subject receive no fixed credit. Reviewed and consumed remain independent facts;
 local `FIXED` verdicts and receipt acknowledgement alone grant no remediation credit.
