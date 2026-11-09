@@ -1227,7 +1227,10 @@ async function runOwnedReviewLoop(
                   if (actual !== undefined) {
                     const early = executionHeads.get(input.item.id);
                     if (!COMMIT_SHA_RE.test(actual) || !early)
-                      return { status: 'needs-human', reason: 'engine execution head unavailable' };
+                      return {
+                        status: 'needs-human' as const,
+                        reason: 'engine execution head unavailable',
+                      };
                     // An admission wait may cross verified sibling commits. The
                     // actual identity must remain inside the observed ancestry;
                     // it cannot borrow an unrelated tree for a rejection citation.
@@ -1245,7 +1248,7 @@ async function runOwnedReviewLoop(
                       ]);
                       if (proof.code !== 0)
                         return {
-                          status: 'needs-human',
+                          status: 'needs-human' as const,
                           reason: 'engine execution head ancestry changed',
                         };
                     }
