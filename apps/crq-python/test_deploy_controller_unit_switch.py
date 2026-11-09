@@ -115,3 +115,29 @@ class UnitSwitchTests(ControllerFixture):
             dc.recover_unit(self.effects, BrokenRecovery("python"), path)
         self.assertEqual(failure.exception.recovery["record_path"], str(path))
         self.assertEqual(json.loads(path.read_text())["outcome"], "pending")
+
+    def test_recovery_refuses_incomplete_preservation_evidence_before_mutation(self):
+        class Crash(BaseException):
+            pass
+
+        class InterruptedAdapter(Adapter):
+            def install(self, unit, runtime):
+                raise Crash()
+
+        with self.assertRaises(Crash):
+            dc.switch_unit(self.effects, InterruptedAdapter("python"), "crq-tick.service",
+                           "node:" + "a" * 40)
+        path = next(self.record_dir.glob("controller-*.json"))
+        record = json.loads(path.read_text())
+        del record["state"]["preserved/heartbeat.json"]
+        path.write_text(json.dumps(record))
+        adapter = Adapter("node:" + "a" * 40)
+        with self.assertRaisesRegex(dc.Refused, "invalid unit recovery record"):
+            dc.recover_unit(self.effects, adapter, path)
+        self.assertTrue(adapter.running)
+        self.assertEqual(adapter.runtime, "node:" + "a" * 40)
+        record["outcome"] = ["unexpected"]
+        path.write_text(json.dumps(record))
+        with self.assertRaisesRegex(dc.Refused, "unfinished unit switch"):
+            dc.switch_unit(self.effects, Adapter("python"), "crq-slot.service",
+                           "node:" + "b" * 40)

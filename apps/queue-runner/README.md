@@ -30,6 +30,8 @@ activation state, and retain the pending intent if any step fails. Its fence
 and crash behavior need proof on a disposable VM, including timer, path, direct
 activation, surviving processes, and interruption at each mutation boundary.
 The current CLI has no unit recovery adapter or production switch provider.
+The [unit-switch design](../crq-python/ops/UNIT-SWITCH-DESIGN.md) records the
+VM probe evidence and the unproven manager-restart and reboot boundaries.
 
 On 2026-11-10 an offline packaging exercise on pluto (Linux x64, Node
 24.21.0, pnpm 12.8.1) used clean checkout

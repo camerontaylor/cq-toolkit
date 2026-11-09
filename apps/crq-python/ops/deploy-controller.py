@@ -1271,9 +1271,21 @@ def recover_unit(effects, adapter, path):
         except (OSError, ValueError) as exc:
             raise Refused("unreadable unit recovery record") from exc
         if (not isinstance(record, dict) or record.get("operation") != "unit_switch"
-                or record.get("outcome") not in {"pending", "recovery_required"}
-                or record.get("unit") not in UNIT_RUNTIMES
-                or "snapshot" not in record or not isinstance(record.get("state"), dict)):
+                or record.get("outcome") not in ("pending", "recovery_required")
+                or type(record.get("schema_version")) is not int
+                or record["schema_version"] != JOURNAL_SCHEMA
+                or not isinstance(record.get("transaction_id"), str)
+                or not re.fullmatch(r"[0-9a-f]{32}", record["transaction_id"])
+                or not isinstance(record.get("unit"), str)
+                or record["unit"] not in UNIT_RUNTIMES
+                or not _unit_runtime(record.get("runtime"))
+                or not _unit_runtime(record.get("prior_runtime"))
+                or record["runtime"] == record["prior_runtime"]
+                or "snapshot" not in record or not isinstance(record.get("state"), dict)
+                or any("preserved/" + rel not in record["state"]
+                       or (record["state"]["preserved/" + rel] is not None
+                           and not _hex(_HEX64, record["state"]["preserved/" + rel]))
+                       for rel in PRESERVED)):
             raise Refused("invalid unit recovery record")
         try:
             adapter.stop_and_drain(record["unit"])
@@ -1299,7 +1311,7 @@ def refuse_unfinished_unit_switches(effects):
         if not isinstance(record, dict):
             raise Refused("invalid controller journal entry: " + path.name)
         if (record.get("operation") == "unit_switch"
-                and record.get("outcome") in {"pending", "recovery_required"}):
+                and record.get("outcome") not in ("completed", "rolled_back")):
             raise Refused("unfinished unit switch requires recovery: " + path.name)
 
 
