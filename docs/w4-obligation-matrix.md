@@ -449,35 +449,49 @@ attempt, not the macOS run. Under the landed layout, row 5b makes
 (`workflow_run`, `types: completed`), and that attempt's deadline starts after
 the run has already finished. The 15-minute `schedule` sweep (`gate.yml:73-74`)
 also starts a fresh deciding attempt each time (§5.1). So the successor can
-promote a tip whose macOS leg ran longer than 20 minutes. Only the legacy gate
-is bound by **max < 20 min**, because it makes one attempt per promotion
-review status or dispatch (`merge-queue-gate.yml:24-29`). It is the only
-promoter under the batch policy (S7 is report-only), so a timed-out attempt
+promote a tip whose macOS leg ran longer than 20 minutes — **pre-batch only**:
+under the batch policy (§1.1) S7 is report-only, so a fresh S7 attempt proves
+nothing for promotion. Only the legacy gate promotes, and it is bound by
+**max < 20 min**, because it makes one attempt per promotion
+review status or dispatch (`merge-queue-gate.yml:24-29`). A timed-out attempt
 leaves that reviewed sha unpromoted until a re-dispatch or a fresh review
-status retries it. A slow macOS leg costs
-latency and refusal noise (a timed-out attempt per earlier wake), not
-promotion. Measured headroom on the Linux legs today is ~4.4× (4m35s binding
+status retries it, and neither the row 5b wake nor the `schedule` sweep re-arms
+it — both start only `cq-gate`. So a slow macOS leg costs
+latency, refusal noise (a timed-out attempt per earlier wake) **and promotion**,
+until a human re-dispatch or a new review status arrives; the fresh-deadline
+attempts above do not absorb it, because they all belong to the report-only
+gate. Measured headroom on the Linux legs today is ~4.4× (4m35s binding
 leg on the candidate push). The spec expects an unmodified suite to exceed
 15 min on a macOS runner if the trace's per-spawn hypothesis holds, which is
 why the promotion clock starts only after E's top-10 reduction merges.
 
-**Recommendation: do not pre-emptively raise the wait, and do not treat a
-pilot max ≥ 15 min as a reason to raise it by itself.** Raise
+**Recommendation: decide the wait from the pilot's measured max, never
+pre-emptively, and do not shrink the decision to the spec's 15-minute
+expectation.** Raise
 `{{GATE_TIMEOUT_MIN}}` (both instances, `policy/templates/instances.json:34`
 and `:59`, and therefore both templates) **in the same change** as the macOS
-promotion, and only if the 10-candidate pilot shows a cost that the wake path
-does not absorb. One example is decide-time spent waiting while the next wake
-is already guaranteed. Another is the legacy gate's single attempt refusing
-candidates that the successor then promotes only after a long delay. The
-successor's fresh-deadline attempts already tolerate a slow run, and there
-are two further reasons:
+promotion, if the 10-candidate pilot shows a max macOS leg plus queueing that
+the single promoting attempt does not absorb. One example is a refused attempt
+per wake with nothing left to absorb it — S7's decide-time is report latency
+only, since it no longer promotes. Another is the legacy gate's single attempt
+refusing a candidate that then waits for a human re-dispatch, because under the
+batch policy no other promoter exists to rescue it. Re-derived for that
+policy, the test is arithmetic, not the 15-minute expectation: promotion is one
+20-minute attempt, so the pilot's **max** macOS leg — not its p90 — must fit
+inside that attempt with margin. A max far inside the deadline is absorbed; a
+max that approaches it is itself the evidence that raises the wait, with a
+legacy-gate re-dispatch as the stopgap in the meantime. The
+successor's fresh-deadline attempts cannot be counted as tolerance for a slow
+run under that policy — they precede no promotion — so the wait must be sized
+from the pilot's max in the same change, not assumed absorbed. There are two
+further reasons:
 (i) a raised wait is a weaker gate for every other obligation, so paying for it
 before the evidence is a pure cost; (ii) `gate.yml`'s `decide` job has a fixed
 40-minute timeout (`gate.yml:143`) and `policy/templates/README.md:53` warns
 that the wait plus checkout/install/build must stay inside it — raising the wait
 without re-deriving that bound trades one fail-closed mode (a clear refusal) for
-another (a killed job with no report). Both instances must move together while
-both promoters are live; they are the same token in two files, and **nothing
+another (a killed job with no report). Both instances must act together while
+the batch policy holds; they are the same token in two files, and **nothing
 enforces that**: the render test
 (`test/workflows/template-render.test.ts:145-160`) reads only the `gate.yml`
 instance and bounds it at ≤ 25, never comparing it with the
