@@ -16,6 +16,8 @@ describe('scrubbedBuildEnv', () => {
       OPENAI_API_KEY: 'c',
       NPM_CONFIG__AUTH: 'd',
       AWS_SECRET_ACCESS_KEY: 'e',
+      ENCRYPTION_KEY: 'f',
+      SIGNING_KEY: 'g',
     });
     expect(env).toEqual({ PATH: '/usr/bin', HOME: '/home/x' });
   });
