@@ -96,7 +96,7 @@ async function runRclone(command, args) {
 /** Read the bundle manifest without following links or mutating the bundle. */
 async function readBundle(bundleDir) {
   if (typeof bundleDir !== 'string' || !bundleDir)
-    return { state: 'rejected', reason: 'no bundle directory was supplied' };
+    return { state: 'rejected', usage: true, reason: 'no bundle directory was supplied' };
   let handle;
   try {
     const root = await realpath(resolve(bundleDir));
@@ -192,13 +192,20 @@ export async function runMeasurementArchive(input = {}) {
     localBundle: null,
     archive: { state: 'unknown', reason: 'the existing session archive was not checked' },
   };
+  // `usage` marks an input-validation failure — a misconfigured invocation —
+  // so the CLI can exit 2 for it, as invariant I1 reserves, while a genuine
+  // archive or transport failure stays exit 1.
   if (!validTarget(target))
-    return { ...result, reason: 'measurement archive: no valid rclone target' };
+    return { ...result, usage: true, reason: 'measurement archive: no valid rclone target' };
   if (typeof host !== 'string' || !SAFE_NAME.test(host))
-    return { ...result, reason: 'measurement archive: the host name is invalid' };
+    return { ...result, usage: true, reason: 'measurement archive: the host name is invalid' };
   const bundle = await readBundle(input.bundleDir);
   if (bundle.state !== 'present')
-    return { ...result, reason: `measurement archive: ${bundle.reason}` };
+    return {
+      ...result,
+      ...(bundle.usage ? { usage: true } : {}),
+      reason: `measurement archive: ${bundle.reason}`,
+    };
   // Before any remote call: a symlink (or FIFO/device node) anywhere in the
   // tree is silently skipped by the rclone local backend, so it would never
   // reach the archive yet would not fail the copy either.
@@ -343,5 +350,5 @@ if (
     host: option('--host'),
   });
   console.log(JSON.stringify(result));
-  if (result.state !== 'archived') process.exitCode = 1;
+  if (result.state !== 'archived') process.exitCode = result.usage ? 2 : 1;
 }

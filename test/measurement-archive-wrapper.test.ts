@@ -81,9 +81,12 @@ describe('measurement archive CLI entry guard', () => {
       );
       expect(result.error).toBeUndefined();
       expect(result.stderr).toBe('');
-      expect(result.status).toBe(1);
+      // A missing --target is a CLI usage error, which I1 maps to exit 2; only
+      // a thrown/transport failure exits 1.
+      expect(result.status).toBe(2);
       expect(JSON.parse(result.stdout)).toMatchObject({
         state: 'failed',
+        usage: true,
         reason: 'measurement archive: no valid rclone target',
       });
     },
