@@ -28,4 +28,4 @@ const report = await driver.run({prompt:request.prompt, modelSpec:request.modelS
     required:['verdict','reason']}}});
 console.log(JSON.stringify({...report.structuredOutput,
   stop:report.stopReason === 'complete' ? 'ok' : ['rate-limit','quota'].includes(report.errorClass) ? 'rate-limit' : report.stopReason,
-  usage:report.usage,providerSignals:report.providerSignals,reason:report.structuredOutput?.reason ?? report.error}));
+  usage:report.usage,errorClass:report.errorClass,providerSignals:report.providerSignals,reason:report.structuredOutput?.reason ?? report.error}));

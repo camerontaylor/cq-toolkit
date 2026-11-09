@@ -160,6 +160,11 @@ def phase(inbox, repo, tip, judge, transport, at, *, maximum=6, seconds=600, dry
         except (subprocess.TimeoutExpired, OSError):
             stopped = 'deferred'; break
         if report.get('stop') != 'ok':
+            if row.get('_escalate') and report.get('stop') == 'error' and report.get('errorClass') == 'output-invalid':
+                row['_triage_model'] = report.get('model', 'judge')
+                plans.append((row, 'needs-human', 'escalation returned invalid structured output', {}))
+                judged += 1
+                continue
             stopped = report.get('stop', 'error'); stopped_report = report; break
         row['_triage_model'] = report.get('model', 'judge')
         action, reason, kwargs = decision(repo, row, tip, report)

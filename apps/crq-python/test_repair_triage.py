@@ -171,6 +171,23 @@ class PhaseTest(FindingTest):
         self.assertEqual(ledger.loads(path.read_bytes())['status'], 'needs-human')
         self.assertEqual(ledger.loads((path.parent / ('f' * 64 + '.json')).read_bytes())['status'], 'needs-human')
 
+    def test_invalid_completed_output_is_terminal_and_later_rows_progress(self):
+        import copy
+        self.run_phase({'stop': 'ok', 'verdict': 'unsure', 'reason': 'missing context'})
+        path = self.inbox.root / 'triage' / (self.fid + '.json')
+        row = copy.deepcopy(ledger.loads(path.read_bytes()))
+        row['finding'].update(id='f' * 64, title='Another finding', severity='minor')
+        row.update(canonical_id='f' * 64, status='untriaged', previous_event_id=None)
+        ledger.atomic(path.parent / ('f' * 64 + '.json'), ledger.canonical(row))
+        judge = mock.Mock(side_effect=[{'stop': 'error', 'errorClass': 'output-invalid'},
+                                      {'stop': 'ok', 'verdict': 'invalid', 'reason': 'not a defect'}])
+        result = phase(self.inbox, self.f.repo, self.t, judge, mock.Mock(), AT)
+        self.assertEqual(result['counts'], {'needs-human': 1, 'dismissed': 1})
+        self.assertEqual(judge.call_count, 2)
+        for _ in range(3):
+            _, _, next_judge = self.run_phase({'stop': 'error', 'errorClass': 'output-invalid'})
+            next_judge.assert_not_called()
+
     def test_escalation_reads_referenced_path_followed_by_period(self):
         from crq_repair.triage import context
         tip = self.f.commit({'docs/other.md': b'linked evidence\n'})
@@ -457,6 +474,15 @@ class PhaseTest(FindingTest):
         self.assertIn('absent or truncated', request['prompt'])
         self.assertEqual(request['schema'], 'crq.triage/v1')
 
+    def test_judge_adapter_preserves_structured_error_class(self):
+        from crq_repair.drivers import cq
+        config = {'repair': {'cq_bin': '/unused/cli.js', 'budget': {'wall_clock_min': 1}}}
+        result = SimpleNamespace(returncode=0, stdout='{"stop":"error","errorClass":"output-invalid"}', stderr='')
+        with mock.patch.object(cq, 'command', return_value=result):
+            report = cq.judge(config, {'model': 'opencode-go/deepseek-v4.1-flash'},
+                              {'triage_context': {}}, self.f.root, self.root)
+        self.assertEqual(report['errorClass'], 'output-invalid')
+
     def test_bridge_accepts_contract_sized_triage_prompt_with_finite_isolated_cap(self):
         import json
         import subprocess
@@ -472,6 +498,7 @@ export class AiSdkDriver {
   async run(request) {
     if(request.prompt.length>this.cap) throw Error('prompt budget exceeded');
     if(request.toolPolicy.mode!=='none'||request.sandboxPolicy.level!=='read-only') throw Error('authority changed');
+    if(request.prompt==='invalid') return {stopReason:'error',errorClass:'output-invalid',error:'bad output'};
     return {stopReason:'complete',structuredOutput:{verdict:'unsure',reason:JSON.stringify({cap:this.cap,budget:request.budget,schema:request.outputSchema.name})}};
   }
 }
@@ -494,3 +521,8 @@ export class AiSdkDriver {
         self.assertEqual(ordinary.returncode, 0, ordinary.stderr)
         self.assertEqual(json.loads(json.loads(ordinary.stdout)['reason'])['cap'], 20000)
         self.assertNotEqual(invoke('crq.triage/v1', 128001).returncode, 0)
+        request = {'cq_bin': str(dist / 'cli.js'), 'schema': 'crq.triage/v1', 'prompt': 'invalid',
+                   'modelSpec': {'provider': 'unused', 'model': 'offline'}, 'budget': budget}
+        request_path.write_text(json.dumps(request))
+        invalid = subprocess.run(['node', str(bridge), str(request_path)], capture_output=True, text=True, timeout=20)
+        self.assertEqual(json.loads(invalid.stdout)['errorClass'], 'output-invalid')
