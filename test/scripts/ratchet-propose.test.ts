@@ -239,10 +239,7 @@ describe('ratchet-propose: happy path against a local main origin', () => {
       join(ROOT, 'scripts', 'ratchet-lib.mjs'),
       join(repo, 'scripts', 'ratchet-lib.mjs'),
     );
-    copyFileSync(
-      join(ROOT, 'scripts/lib/build-env.mjs'),
-      join(repo, 'scripts/lib/build-env.mjs'),
-    );
+    copyFileSync(join(ROOT, 'scripts/lib/build-env.mjs'), join(repo, 'scripts/lib/build-env.mjs'));
     symlinkSync(join(ROOT, 'dist'), join(repo, 'dist'));
     // This source-free fixture intentionally reuses the shared prebuilt dist.
     // Generate a marker for this fixture's actual input inventory and linked
