@@ -113,7 +113,11 @@ import {
   harnessToolName,
   qualifiedToolName,
 } from '../../harness/surface.js';
-import type { ExpectedInitSurface, HarnessSurface } from '../../harness/surface.js';
+import type {
+  ExpectedInitSurface,
+  HarnessManifest,
+  HarnessSurface,
+} from '../../harness/surface.js';
 import { SessionStore, tempWorkspace } from '../../harness/session.js';
 import type { SessionMessage, SessionRecord } from '../../harness/session.js';
 import { toolAliases } from '../../harness/tools.js';
@@ -401,8 +405,6 @@ export class ClaudeCodeSdkTransport implements Driver {
         : await resumedRecordOrThrow(store, sessionRef, boundWorkspace, 'claude-code driver');
     const workspace = record.workspace;
 
-    await store.appendMessage(record.sessionId, { role: 'user', content: prompt, at: nowIso() });
-
     // --- Tool surface: the SHARED CORE (src/harness/surface.ts) — the one
     // manifest constructor binds the workspace realpath, the sandbox level,
     // harness ∩ per-op ToolPolicy and the harness config; the bound surface
@@ -410,15 +412,31 @@ export class ClaudeCodeSdkTransport implements Driver {
     // serves the SAME core over stdio (two-level parity test). An empty
     // selection yields no manifest and no server. Built-ins are disabled
     // wholesale (the governed surface is the WHOLE surface, header).
-    const manifest = await buildManifest({
-      workspace,
-      sandbox: sandboxPolicy.level,
-      toolPolicy,
-      harness: this.harnessConfig,
-      envNames: this.envAllowlist,
-    });
+    //
+    // Built BEFORE the prompt is appended: a resumed record may name a
+    // workspace that has since been removed (`resumedRecordOrThrow` keeps
+    // that path so unbound resume still works), and `buildManifest` realpaths
+    // it — a failure there is a pre-dispatch CONFIG defect, never an
+    // unclassified throw that leaves an orphan user turn behind.
+    let manifest: HarnessManifest | undefined;
+    try {
+      manifest = await buildManifest({
+        workspace,
+        sandbox: sandboxPolicy.level,
+        toolPolicy,
+        harness: this.harnessConfig,
+        envNames: this.envAllowlist,
+      });
+    } catch (err) {
+      throw new DispatchError(
+        'config',
+        `claude-code driver: workspace '${workspace}' cannot host the harness surface — ${describeError(err)}`,
+      );
+    }
     const surface = manifest === undefined ? undefined : createHarnessSurface(manifest);
     const allowed = manifest?.tools ?? [];
+
+    await store.appendMessage(record.sessionId, { role: 'user', content: prompt, at: nowIso() });
 
     // --- Agent-level resume: the substrate session id recorded in the
     // SESSIONS STORE sidecar by a prior run (absent → workspace-only
