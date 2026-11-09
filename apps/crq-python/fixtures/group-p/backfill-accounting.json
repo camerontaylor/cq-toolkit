@@ -1,0 +1,794 @@
+{
+  "schema": "cq.crq-group-p-vector/v1",
+  "family": "backfill-accounting",
+  "cases": [
+    {
+      "name": "empty",
+      "source": "backfill_accounting.line_bytes",
+      "input": {
+        "base64": ""
+      },
+      "expect": {
+        "ok": true,
+        "value": []
+      }
+    },
+    {
+      "name": "single-newline",
+      "source": "backfill_accounting.line_bytes",
+      "input": {
+        "base64": "Cg=="
+      },
+      "expect": {
+        "ok": true,
+        "value": [
+          ""
+        ]
+      }
+    },
+    {
+      "name": "one-line-trailing-newline",
+      "source": "backfill_accounting.line_bytes",
+      "input": {
+        "base64": "YQo="
+      },
+      "expect": {
+        "ok": true,
+        "value": [
+          "YQ=="
+        ]
+      }
+    },
+    {
+      "name": "one-line-without-newline",
+      "source": "backfill_accounting.line_bytes",
+      "input": {
+        "base64": "YQ=="
+      },
+      "expect": {
+        "ok": true,
+        "value": [
+          "YQ=="
+        ]
+      }
+    },
+    {
+      "name": "blank-line-preserved",
+      "source": "backfill_accounting.line_bytes",
+      "input": {
+        "base64": "YQoK"
+      },
+      "expect": {
+        "ok": true,
+        "value": [
+          "YQ==",
+          ""
+        ]
+      }
+    },
+    {
+      "name": "crlf-keeps-carriage-return",
+      "source": "backfill_accounting.line_bytes",
+      "input": {
+        "base64": "YQ0K"
+      },
+      "expect": {
+        "ok": true,
+        "value": [
+          "YQ0="
+        ]
+      }
+    },
+    {
+      "name": "non-utf8-bytes",
+      "source": "backfill_accounting.line_bytes",
+      "input": {
+        "base64": "/wo="
+      },
+      "expect": {
+        "ok": true,
+        "value": [
+          "/w=="
+        ]
+      }
+    },
+    {
+      "name": "zero-is-int",
+      "source": "backfill_accounting._int",
+      "input": {
+        "value": 0,
+        "low": 0
+      },
+      "expect": {
+        "ok": true,
+        "value": true
+      }
+    },
+    {
+      "name": "one-is-int",
+      "source": "backfill_accounting._int",
+      "input": {
+        "value": 1,
+        "low": 0
+      },
+      "expect": {
+        "ok": true,
+        "value": true
+      }
+    },
+    {
+      "name": "negative-is-not",
+      "source": "backfill_accounting._int",
+      "input": {
+        "value": -1,
+        "low": 0
+      },
+      "expect": {
+        "ok": true,
+        "value": false
+      }
+    },
+    {
+      "name": "boolean-is-not-int",
+      "source": "backfill_accounting._int",
+      "input": {
+        "value": true,
+        "low": 0
+      },
+      "expect": {
+        "ok": true,
+        "value": false
+      }
+    },
+    {
+      "name": "float-is-not-int",
+      "source": "backfill_accounting._int",
+      "input": {
+        "value": 1.0,
+        "low": 0
+      },
+      "expect": {
+        "ok": true,
+        "value": false
+      }
+    },
+    {
+      "name": "string-is-not-int",
+      "source": "backfill_accounting._int",
+      "input": {
+        "value": "1",
+        "low": 0
+      },
+      "expect": {
+        "ok": true,
+        "value": false
+      }
+    },
+    {
+      "name": "none-is-not-int",
+      "source": "backfill_accounting._int",
+      "input": {
+        "value": null,
+        "low": 0
+      },
+      "expect": {
+        "ok": true,
+        "value": false
+      }
+    },
+    {
+      "name": "low-bound-is-inclusive",
+      "source": "backfill_accounting._int",
+      "input": {
+        "value": 2,
+        "low": 2
+      },
+      "expect": {
+        "ok": true,
+        "value": true
+      }
+    },
+    {
+      "name": "below-low-bound",
+      "source": "backfill_accounting._int",
+      "input": {
+        "value": 1,
+        "low": 2
+      },
+      "expect": {
+        "ok": true,
+        "value": false
+      }
+    },
+    {
+      "name": "none-is-optional",
+      "source": "backfill_accounting._opt_str",
+      "input": {
+        "value": null
+      },
+      "expect": {
+        "ok": true,
+        "value": true
+      }
+    },
+    {
+      "name": "string-is-optional",
+      "source": "backfill_accounting._opt_str",
+      "input": {
+        "value": "x"
+      },
+      "expect": {
+        "ok": true,
+        "value": true
+      }
+    },
+    {
+      "name": "number-is-not",
+      "source": "backfill_accounting._opt_str",
+      "input": {
+        "value": 1
+      },
+      "expect": {
+        "ok": true,
+        "value": false
+      }
+    },
+    {
+      "name": "boolean-is-not",
+      "source": "backfill_accounting._opt_str",
+      "input": {
+        "value": true
+      },
+      "expect": {
+        "ok": true,
+        "value": false
+      }
+    },
+    {
+      "name": "list-is-not",
+      "source": "backfill_accounting._opt_str",
+      "input": {
+        "value": []
+      },
+      "expect": {
+        "ok": true,
+        "value": false
+      }
+    },
+    {
+      "name": "valid-rows",
+      "source": "backfill_accounting._rows",
+      "input": {
+        "value": [
+          [
+            1,
+            2
+          ],
+          [
+            3,
+            5
+          ]
+        ]
+      },
+      "expect": {
+        "ok": true,
+        "value": true
+      }
+    },
+    {
+      "name": "zero-start-invalid",
+      "source": "backfill_accounting._rows",
+      "input": {
+        "value": [
+          [
+            0,
+            1
+          ]
+        ]
+      },
+      "expect": {
+        "ok": true,
+        "value": false
+      }
+    },
+    {
+      "name": "zero-end-invalid",
+      "source": "backfill_accounting._rows",
+      "input": {
+        "value": [
+          [
+            1,
+            0
+          ]
+        ]
+      },
+      "expect": {
+        "ok": true,
+        "value": false
+      }
+    },
+    {
+      "name": "three-columns-invalid",
+      "source": "backfill_accounting._rows",
+      "input": {
+        "value": [
+          [
+            1,
+            2,
+            3
+          ]
+        ]
+      },
+      "expect": {
+        "ok": true,
+        "value": false
+      }
+    },
+    {
+      "name": "boolean-invalid",
+      "source": "backfill_accounting._rows",
+      "input": {
+        "value": [
+          [
+            true,
+            2
+          ]
+        ]
+      },
+      "expect": {
+        "ok": true,
+        "value": false
+      }
+    },
+    {
+      "name": "not-a-list-invalid",
+      "source": "backfill_accounting._rows",
+      "input": {
+        "value": "x"
+      },
+      "expect": {
+        "ok": true,
+        "value": false
+      }
+    },
+    {
+      "name": "empty-is-valid",
+      "source": "backfill_accounting._rows",
+      "input": {
+        "value": []
+      },
+      "expect": {
+        "ok": true,
+        "value": true
+      }
+    },
+    {
+      "name": "empty-hex-is-valid",
+      "source": "backfill_accounting._hexstr",
+      "input": {
+        "value": ""
+      },
+      "expect": {
+        "ok": true,
+        "value": true
+      }
+    },
+    {
+      "name": "one-byte-hex",
+      "source": "backfill_accounting._hexstr",
+      "input": {
+        "value": "00"
+      },
+      "expect": {
+        "ok": true,
+        "value": true
+      }
+    },
+    {
+      "name": "two-byte-hex",
+      "source": "backfill_accounting._hexstr",
+      "input": {
+        "value": "abcd"
+      },
+      "expect": {
+        "ok": true,
+        "value": true
+      }
+    },
+    {
+      "name": "odd-length-invalid",
+      "source": "backfill_accounting._hexstr",
+      "input": {
+        "value": "abc"
+      },
+      "expect": {
+        "ok": true,
+        "value": false
+      }
+    },
+    {
+      "name": "uppercase-invalid",
+      "source": "backfill_accounting._hexstr",
+      "input": {
+        "value": "ABCD"
+      },
+      "expect": {
+        "ok": true,
+        "value": false
+      }
+    },
+    {
+      "name": "non-hex-invalid",
+      "source": "backfill_accounting._hexstr",
+      "input": {
+        "value": "zz"
+      },
+      "expect": {
+        "ok": true,
+        "value": false
+      }
+    },
+    {
+      "name": "space-invalid",
+      "source": "backfill_accounting._hexstr",
+      "input": {
+        "value": "ab cd"
+      },
+      "expect": {
+        "ok": true,
+        "value": false
+      }
+    },
+    {
+      "name": "blame-valid",
+      "source": "backfill_accounting.FACT_SHAPES",
+      "input": {
+        "kind": "blame",
+        "value": [
+          [
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            1,
+            "abcd",
+            "ef01"
+          ]
+        ]
+      },
+      "expect": {
+        "ok": true,
+        "value": true
+      }
+    },
+    {
+      "name": "blame-wrong-width",
+      "source": "backfill_accounting.FACT_SHAPES",
+      "input": {
+        "kind": "blame",
+        "value": [
+          [
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            1,
+            "abcd"
+          ]
+        ]
+      },
+      "expect": {
+        "ok": true,
+        "value": false
+      }
+    },
+    {
+      "name": "blame-boolean-line",
+      "source": "backfill_accounting.FACT_SHAPES",
+      "input": {
+        "kind": "blame",
+        "value": [
+          [
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            true,
+            "abcd",
+            "ef01"
+          ]
+        ]
+      },
+      "expect": {
+        "ok": true,
+        "value": false
+      }
+    },
+    {
+      "name": "blame-odd-hex",
+      "source": "backfill_accounting.FACT_SHAPES",
+      "input": {
+        "kind": "blame",
+        "value": [
+          [
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            1,
+            "abc",
+            "ef01"
+          ]
+        ]
+      },
+      "expect": {
+        "ok": true,
+        "value": false
+      }
+    },
+    {
+      "name": "lineage-step-valid",
+      "source": "backfill_accounting.FACT_SHAPES",
+      "input": {
+        "kind": "lineage_step",
+        "value": {
+          "parent": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "changes": [
+            [
+              "R100",
+              "old.py",
+              "new.py"
+            ],
+            [
+              "D",
+              "gone.py",
+              null
+            ]
+          ]
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": true
+      }
+    },
+    {
+      "name": "lineage-step-extra-key",
+      "source": "backfill_accounting.FACT_SHAPES",
+      "input": {
+        "kind": "lineage_step",
+        "value": {
+          "parent": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "changes": [],
+          "extra": 1
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": false
+      }
+    },
+    {
+      "name": "lineage-step-bad-change",
+      "source": "backfill_accounting.FACT_SHAPES",
+      "input": {
+        "kind": "lineage_step",
+        "value": {
+          "parent": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "changes": [
+            [
+              "D",
+              "gone.py"
+            ]
+          ]
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": false
+      }
+    },
+    {
+      "name": "lineage-null-valid",
+      "source": "backfill_accounting.FACT_SHAPES",
+      "input": {
+        "kind": "lineage",
+        "value": {
+          "path": null
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": true
+      }
+    },
+    {
+      "name": "lineage-string-valid",
+      "source": "backfill_accounting.FACT_SHAPES",
+      "input": {
+        "kind": "lineage",
+        "value": {
+          "path": "src/a.py"
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": true
+      }
+    },
+    {
+      "name": "lineage-extra-key",
+      "source": "backfill_accounting.FACT_SHAPES",
+      "input": {
+        "kind": "lineage",
+        "value": {
+          "path": "src/a.py",
+          "extra": 1
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": false
+      }
+    },
+    {
+      "name": "carry-valid",
+      "source": "backfill_accounting.FACT_SHAPES",
+      "input": {
+        "kind": "carry",
+        "value": {
+          "path": "src/a.py",
+          "old_lines": 3,
+          "matches": [
+            [
+              1,
+              2
+            ],
+            [
+              3,
+              4
+            ]
+          ]
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": true
+      }
+    },
+    {
+      "name": "carry-start-beyond-old-lines",
+      "source": "backfill_accounting.FACT_SHAPES",
+      "input": {
+        "kind": "carry",
+        "value": {
+          "path": "src/a.py",
+          "old_lines": 2,
+          "matches": [
+            [
+              3,
+              4
+            ]
+          ]
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": false
+      }
+    },
+    {
+      "name": "carry-boolean-line",
+      "source": "backfill_accounting.FACT_SHAPES",
+      "input": {
+        "kind": "carry",
+        "value": {
+          "path": "src/a.py",
+          "old_lines": 3,
+          "matches": [
+            [
+              true,
+              2
+            ]
+          ]
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": false
+      }
+    },
+    {
+      "name": "coverage-valid",
+      "source": "backfill_accounting.FACT_SHAPES",
+      "input": {
+        "kind": "coverage",
+        "value": {
+          "covered": {
+            "src/a.py": [
+              [
+                1,
+                2
+              ]
+            ]
+          },
+          "evidence": {
+            "src/a.py": [
+              "finding-1"
+            ]
+          }
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": true
+      }
+    },
+    {
+      "name": "coverage-bad-interval",
+      "source": "backfill_accounting.FACT_SHAPES",
+      "input": {
+        "kind": "coverage",
+        "value": {
+          "covered": {
+            "src/a.py": [
+              [
+                0,
+                2
+              ]
+            ]
+          },
+          "evidence": {}
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": false
+      }
+    },
+    {
+      "name": "coverage-bad-evidence",
+      "source": "backfill_accounting.FACT_SHAPES",
+      "input": {
+        "kind": "coverage",
+        "value": {
+          "covered": {},
+          "evidence": {
+            "src/a.py": [
+              1
+            ]
+          }
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": false
+      }
+    },
+    {
+      "name": "verified-review-valid",
+      "source": "backfill_accounting.FACT_SHAPES",
+      "input": {
+        "kind": "verified_review",
+        "value": {
+          "src/a.py": [
+            [
+              1,
+              2
+            ]
+          ]
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": true
+      }
+    },
+    {
+      "name": "verified-review-bad-row",
+      "source": "backfill_accounting.FACT_SHAPES",
+      "input": {
+        "kind": "verified_review",
+        "value": {
+          "src/a.py": [
+            [
+              1
+            ]
+          ]
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": false
+      }
+    }
+  ]
+}

@@ -65,6 +65,13 @@ byte equality.
   `inputs`. Snapshot `sha256` values are recomputed from those inputs, and the
   artifact refs are placeholders because `rank` consumes JSON only and never
   opens a bundle or artifact location. Capture and replay remain Group E.
+- `backfill_accounting.line_bytes` rows carry base64 input and base64 output
+  chunks so non-UTF8 blobs survive the JSON boundary. Shape predicates and
+  `FACT_SHAPES` rows record booleans.
+- `backfill_report` rows carry a `repo` stub spec with `tree`, `lineage`,
+  `proven_deleted` and `carry` answers. `carry.mapped` is a list of
+  `[old_line, new_line]` pairs. The report's pure projection and accounting run
+  against that stub; real Git and filesystem capture remain Group E.
 
 ## Families
 
@@ -80,6 +87,9 @@ byte equality.
 | `coverage.json` | `coverage.utilization_digest`, `coverage.coverage_candidate`, `coverage.record_opportunity` | 24 h window, unknown observations, cooldown floor, oldest-region selection, active-item exclusion |
 | `backfill.json` | `backfill_accounting.ranges`, `admission_history.summarize`, `backfill_jobs.admission` | range coalescing, bounded diagnostics, ordinary/usage/reserve/inflight decisions |
 | `backfill-inventory.json` | `backfill_inventory.rank` | tier/retry/score ordering, active and mapped ownership subtraction, family and path quarantine/eligibility, file/byte partition limits, required unions and evidence outcomes |
+| `backfill-accounting.json` | `backfill_accounting.line_bytes`, `_int`, `_opt_str`, `_rows`, `_hexstr`, `FACT_SHAPES` | byte splitting, non-UTF8 input, integer/boolean/row/hex validation, every persisted fact shape including valid and malformed rows |
+| `backfill-report.json` | `backfill_report.baseline`, `backfill_report.summary` | baseline row projection and digest, tier totals, empty/unsupported objects, operational counts, surviving/reviewed/removed/new T1 debt, unverified lineage, unmeasurable objects and capacity estimate |
+| `status-helpers.json` | `status_summary.timestamp`, `merged_current`, `repos_summary` | epoch parsing, receipt-less merged-current counts, discovery passthrough, configured/push-only repo visibility and per-state counts |
 | `ledger.json` | `review_ledger.timestamp`, `path`, `intervals`, `scope`, `validate`, `validate_sequence`, `creditable` | exact UTC, canonical paths, interval overlap, scope duplicates, event hash, quarantine operator requirement, credit authority |
 | `summary.json` | `status_summary.summarize` | backlog, bounded pending preview, 24 h outcomes, merged discovery, historical promotion exclusion, invalid tick refusal |
 
@@ -93,8 +103,10 @@ comparison generally.
 
 ## Gaps
 
-Not vectorized here because they need effect doubles, filesystem state or a
-repository adapter: `backfill_report.summary` and `finding_triage` (repository
-lineage/carry effects), `status_summary.publish` (systemd and home filesystem),
-and the tick/slot launch and harvest loops. Group E fixtures seeded from
-`fixtures/state-<date>/` cover those in Phase 1.
+Not vectorized here because they need real effect doubles, filesystem state
+or live repository objects: `backfill_report.finding_triage` and
+`status_summary.finding_triage` (directory reads), `status_summary.publish`
+(systemd and home filesystem), real Git lineage/carry capture, receipt reading
+and the tick/slot launch and harvest loops. The report's accounting is
+vectorized against a documented repository stub. Group E fixtures seeded from
+`fixtures/state-<date>/` cover the remaining effects in Phase 1.
