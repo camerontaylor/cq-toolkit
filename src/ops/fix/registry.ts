@@ -52,11 +52,12 @@ export const registry: OpRegistryEntry[] = [
     importer: async (wiring) => {
       const { makeFixRun } = await import('./runFix.js');
       const { createDriverFactory } = await import('../../driver/factory.js');
-      const drivers = createDriverFactory(
-        wiring?.onDeprecatedAlias === undefined
-          ? {}
-          : { onDeprecatedAlias: wiring.onDeprecatedAlias },
-      );
+      const drivers = createDriverFactory({
+        ...(wiring?.onDeprecatedAlias !== undefined
+          ? { onDeprecatedAlias: wiring.onDeprecatedAlias }
+          : {}),
+        ...(wiring?.cqEnv !== undefined ? { cqEnv: wiring.cqEnv } : {}),
+      });
       return async (raw) => makeFixRun({ drivers })(raw as FixRunInput);
     },
   },

@@ -1,5 +1,7 @@
-import { describe, expect, test } from 'vitest';
-import { FixRunInputSchema } from '../../../src/ops/fix/registry.js';
+import { describe, expect, test, vi } from 'vitest';
+import { FixRunInputSchema, registry } from '../../../src/ops/fix/registry.js';
+import { readCqEnv } from '../../../src/config/env.js';
+import * as factory from '../../../src/driver/factory.js';
 import {
   failureRowsOf,
   fixRunCounters,
@@ -10,6 +12,17 @@ import {
 } from '../../../src/ops/fix/report.js';
 import type { FixTaskReport } from '../../../src/ops/sweep/taskLoop.js';
 import { SweepUnitDispatchInputSchema } from '../../../src/ops/sweep/registry.js';
+
+test('fix.run passes its run snapshot to the driver factory', async () => {
+  const cqEnv = readCqEnv({ CQ_SESSION_LOGS: 'off' });
+  const spy = vi.spyOn(factory, 'createDriverFactory');
+  try {
+    await registry[0]!.importer({ cqEnv });
+    expect(spy).toHaveBeenCalledWith({ cqEnv });
+  } finally {
+    spy.mockRestore();
+  }
+});
 
 test('fix.run defaults to local gated work and requires an explicit selector', () => {
   const input = { repoRoot: '/fixture', source: 'tests', selector: { mode: 'workspace-all' } };
