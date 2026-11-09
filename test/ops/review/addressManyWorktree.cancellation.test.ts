@@ -113,48 +113,53 @@ test.each([
     await f.repo.cleanup();
   }
 });
-test('cancellation adopts the ordinary report and removes an owned candidate after admissions stop', async () => {
-  const f = await fixture();
-  const parent = new AbortController();
-  const report = terminalReport(join(f.root, 'ordinary-cancel.json'));
-  const candidate = join(f.root, 'owned-candidate');
-  try {
-    const result = await withAddressOwnership(
-      {
-        repoRoot: f.repo.root,
-        git: f.run,
-        source: 'local',
-        production: false,
-        signal: parent.signal,
-      },
-      async (lease) => {
-        await ownershipModule.bindAddressTerminalReport(lease, report);
-        const binding = ownershipModule.addressTerminalWorkerBinding(lease);
-        const attempt = await ownershipModule.recordAddressTerminalAttempt(
-          binding,
-          terminalInput(f.repo),
-        );
-        f.repo.git('worktree', 'add', '--detach', candidate, 'HEAD');
-        await ownershipModule.addressTerminalCandidate(binding, f.repo.root, candidate, false);
-        const bytes = JSON.stringify(report);
-        // The abort lands before the ordinary write promise returns to finish().
-        await writeFile(report.reportPath, bytes).then(() => parent.abort());
-        await ownershipModule.addressOrdinaryReport(lease, report.reportPath, bytes);
-        ownershipModule.deferAddressTerminalAttempt(binding, attempt);
-        await ownershipModule.addressTerminalCandidate(binding, f.repo.root, candidate, true);
-        return ownershipModule.addressCancelledResult(lease);
-      },
-    );
-    expect(result.status).toBe('needs-human');
-    expect(
-      (JSON.parse(await readFile(report.reportPath, 'utf8')) as ReviewAddressReport).reasons,
-    ).toContain('parent cancelled');
-    await expect(lstat(candidate)).rejects.toMatchObject({ code: 'ENOENT' });
-    expect(f.repo.git('worktree', 'list', '--porcelain')).not.toContain(candidate);
-  } finally {
-    await f.repo.cleanup();
-  }
-});
+test.each(['direct', 'aliased-parent'])(
+  'cancellation adopts the ordinary report through %s and removes an owned candidate',
+  async (mode) => {
+    const f = await fixture();
+    const parent = new AbortController();
+    const alias = join(f.root, 'report-alias');
+    if (mode === 'aliased-parent') await symlink(f.root, alias, 'dir');
+    const report = terminalReport(join(mode === 'direct' ? f.root : alias, 'ordinary-cancel.json'));
+    const candidate = join(f.root, 'owned-candidate');
+    try {
+      const result = await withAddressOwnership(
+        {
+          repoRoot: f.repo.root,
+          git: f.run,
+          source: 'local',
+          production: false,
+          signal: parent.signal,
+        },
+        async (lease) => {
+          await ownershipModule.bindAddressTerminalReport(lease, report);
+          const binding = ownershipModule.addressTerminalWorkerBinding(lease);
+          const attempt = await ownershipModule.recordAddressTerminalAttempt(
+            binding,
+            terminalInput(f.repo),
+          );
+          f.repo.git('worktree', 'add', '--detach', candidate, 'HEAD');
+          await ownershipModule.addressTerminalCandidate(binding, f.repo.root, candidate, false);
+          const bytes = JSON.stringify(report);
+          // The abort lands before the ordinary write promise returns to finish().
+          await writeFile(report.reportPath, bytes).then(() => parent.abort());
+          await ownershipModule.addressOrdinaryReport(lease, report.reportPath, bytes);
+          ownershipModule.deferAddressTerminalAttempt(binding, attempt);
+          await ownershipModule.addressTerminalCandidate(binding, f.repo.root, candidate, true);
+          return ownershipModule.addressCancelledResult(lease);
+        },
+      );
+      expect(result.status).toBe('needs-human');
+      expect(
+        (JSON.parse(await readFile(report.reportPath, 'utf8')) as ReviewAddressReport).reasons,
+      ).toContain('parent cancelled');
+      await expect(lstat(candidate)).rejects.toMatchObject({ code: 'ENOENT' });
+      expect(f.repo.git('worktree', 'list', '--porcelain')).not.toContain(candidate);
+    } finally {
+      await f.repo.cleanup();
+    }
+  },
+);
 test('a failing sibling restore may rewrite index stats before cancellation', async () => {
   const f = await fixture();
   const parent = new AbortController();
