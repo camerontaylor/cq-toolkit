@@ -351,8 +351,16 @@ def publish(c, q, item, run, record, fixed):
         translated = []
         for v in fixed:
             before = wt_git(wt, 'rev-parse', 'HEAD')
-            for sha in v['commits']:
-                wt_git(wt, 'cherry-pick', sha)
+            try:
+                for sha in v['commits']:
+                    wt_git(wt, 'cherry-pick', sha)
+            except Exception as exc:
+                # The target only moves forward, so a repair that no longer
+                # applies can never be replayed: a terminal stale outcome, not
+                # a publish_failed that every later tick re-attempts forever.
+                record.update(state='stale',
+                              error='repair does not apply to current target: ' + str(exc)[:200])
+                return
             claims = wt_git(wt, 'rev-list', '--reverse', before + '..HEAD').splitlines()
             verify(wt, before, claims, v['job'])
             translated.extend(claims)
