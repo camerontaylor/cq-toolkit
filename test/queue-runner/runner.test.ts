@@ -58,7 +58,10 @@ it('executes the built CLI dry-run against a queue without changing its bytes', 
   const queue = '{"items":[],"last_tick":"old"}\n';
   await writeFile(join(root, 'queue.json'), queue);
   const cli = fileURLToPath(new URL('../../dist/queue-runner/crq.js', import.meta.url));
-  const result = spawnSync(process.execPath, [cli, 'tick', '--dry-run'], { cwd: root, encoding: 'utf8' });
+  const result = spawnSync(process.execPath, [cli, 'tick', '--dry-run'], {
+    cwd: root,
+    encoding: 'utf8',
+  });
   expect(result.status).toBe(1);
   expect(JSON.parse(result.stdout).status).toBe('indeterminate');
   const files = await readdir(join(root, 'shadow'));

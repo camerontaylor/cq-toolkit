@@ -105,7 +105,10 @@ export async function run(
       plan.value.complete === false
     ) {
       return {
-        artifact: { status: 'indeterminate', detail: 'Shadow plan is incomplete and cannot be used for parity comparison' },
+        artifact: {
+          status: 'indeterminate',
+          detail: 'Shadow plan is incomplete and cannot be used for parity comparison',
+        },
         exitCode: 1,
       };
     }
