@@ -386,13 +386,21 @@ def publish(c, q, item, run, record, fixed):
             try:
                 for sha in v['commits']:
                     wt_git(wt, 'cherry-pick', sha)
-            except Exception as exc:
-                # The target only moves forward, so a repair that no longer
-                # applies can never be replayed: a terminal stale outcome, not
-                # a publish_failed that every later tick re-attempts forever.
-                record.update(state='stale',
-                              error='repair does not apply to current target: ' + str(exc)[:200])
-                return
+            except RuntimeError as exc:
+                # Only a recorded cherry-pick with conflicts or an empty index
+                # proves a deterministic replay failure. Spawn, timeout, hook,
+                # and other git failures must remain retryable.
+                try:
+                    wt_git(wt, 'rev-parse', '--verify', 'CHERRY_PICK_HEAD')
+                except RuntimeError:
+                    raise exc
+                conflicts = wt_git(wt, 'diff', '--name-only', '--diff-filter=U')
+                staged = wt_git(wt, 'diff', '--cached', '--name-only')
+                if conflicts or not staged:
+                    record.update(state='stale',
+                                  error='repair does not apply to current target: ' + str(exc)[:200])
+                    return
+                raise
             claims = wt_git(wt, 'rev-list', '--reverse', before + '..HEAD').splitlines()
             verify(wt, before, claims, v['job'])
             translated.extend(claims)

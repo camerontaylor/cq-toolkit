@@ -398,6 +398,29 @@ class CqSessionsDirTest(unittest.TestCase):
         session, _ = self._run(True, value_sid='s-value')
         self.assertEqual(session['sessionId'], 's-value')
 
+    def test_retry_attributes_only_the_new_session(self):
+        cqd = _load('crq_cq_retry_driver', ROOT / 'crq_repair' / 'drivers' / 'cq.py')
+        config = {'repo': 'o/r', 'repair': {'cq_bin': 'cq.js',
+                  'budget': {'max_tokens': 1, 'wall_clock_min': 1}}}
+        job = {'job': 'j', 'finding': {'path': 'a', 'line': 1, 'body': 'b'}, 'source_snapshot': {}}
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            sessions = directory / 'sessions'
+            sessions.mkdir()
+            (sessions / 'old.jsonl').write_text('{}\n')
+            def run(create):
+                def command(*args, **kwargs):
+                    if create:
+                        (sessions / 'new.jsonl').write_text('{}\n')
+                    return mock.Mock(returncode=0, stdout='{"status":"ok","value":{}}', stderr='')
+                with mock.patch.object(cqd, 'command', command):
+                    cqd.invoke(config, {'model': 'p/m'}, job, directory, directory)
+                return json.loads((directory / 'session.json').read_text())
+            self.assertIsNone(run(False)['sessionId'])
+            session = run(True)
+            self.assertEqual(session['sessionId'], 'new')
+            self.assertEqual(session['sessionIds'], ['new', 'old'])
+
 
 class CqTimeoutLogTest(unittest.TestCase):
     """A wall-clock kill keeps its invocation output in driver.log."""

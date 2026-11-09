@@ -148,11 +148,20 @@ def phase(inbox, repo, tip, judge, transport, at, *, maximum=6, seconds=600, dry
     judged = 0
     stopped = None
     stopped_report = {}
-    for row in candidates[:maximum]:
+    context_errors = []
+    for row in candidates:
+        if judged >= maximum:
+            break
         if time.monotonic() >= deadline:
             stopped = 'deadline'; break
         try:
             packed = context(repo, row, tip)
+        except (KeyError, TypeError, ValueError, ledger.IntegrityError,
+                subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
+            # Leave this row pending; another row's context can still be valid.
+            context_errors.append({'finding_id': row['finding']['id'], 'error': str(exc)[:300]})
+            continue
+        try:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 stopped = 'deadline'; break
@@ -160,9 +169,10 @@ def phase(inbox, repo, tip, judge, transport, at, *, maximum=6, seconds=600, dry
         except (subprocess.TimeoutExpired, OSError):
             stopped = 'deferred'; break
         if report.get('stop') != 'ok':
-            if row.get('_escalate') and report.get('stop') == 'error' and report.get('errorClass') == 'output-invalid':
+            if report.get('stop') == 'error' and report.get('errorClass') == 'output-invalid':
                 row['_triage_model'] = report.get('model', 'judge')
-                plans.append((row, 'needs-human', 'escalation returned invalid structured output', {}))
+                stage = 'escalation' if row.get('_escalate') else 'judge'
+                plans.append((row, 'needs-human', stage + ' returned invalid structured output', {}))
                 judged += 1
                 continue
             stopped = report.get('stop', 'error'); stopped_report = report; break
@@ -194,4 +204,5 @@ def phase(inbox, repo, tip, judge, transport, at, *, maximum=6, seconds=600, dry
                     delivery_deferred += 1
     return {'total': len(rows), 'judged': judged, 'unjudged': len(candidates) - judged,
             'counts': dict(collections.Counter(o['action'] for o in outcomes)),
-            'delivered': delivered, 'delivery_deferred': delivery_deferred, 'stop_report': stopped_report, 'stopped': stopped, 'dry_run': dry_run, 'outcomes': outcomes}
+            'delivered': delivered, 'delivery_deferred': delivery_deferred, 'context_errors': context_errors,
+            'stop_report': stopped_report, 'stopped': stopped, 'dry_run': dry_run, 'outcomes': outcomes}

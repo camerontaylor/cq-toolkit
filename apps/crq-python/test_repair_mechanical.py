@@ -169,6 +169,15 @@ class CqDriverTest(unittest.TestCase):
         report, _ = self.invoke(json.dumps({'status': 'budget-exhausted'}))
         self.assertEqual(report['stop'], 'budget')
 
+    def test_failed_value_verdict_is_not_a_successful_repair(self):
+        for verdict in ('fail', 'failed', 'regression'):
+            with self.subTest(verdict=verdict):
+                report, _ = self.invoke(json.dumps({'status': 'ok', 'value': {
+                    'verdict': verdict, 'changed': True, 'commits': ['abc'], 'summary': 'failed checks'}}),
+                    returncode=0)
+                self.assertEqual((report['stop'], report['changed'], report['commits']), ('error', False, []))
+                self.assertEqual(report['summary'], 'failed checks')
+
     def test_budget_counts_output_and_caps_context(self):
         _, argv = self.invoke('{"status":"ok","value":{"changed":false}}', returncode=0)
         sent = json.loads(next(a for a in argv if a.startswith('--budget='))[len('--budget='):])

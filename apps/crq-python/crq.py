@@ -338,7 +338,7 @@ def make_worktree(name: str, commit: str, *, clone: Optional[Path] = None) -> Tu
     try:
         git("-c", "filter.lfs.smudge=", "-c", "filter.lfs.process=",
             "worktree", "add", "--quiet", "-B", branch, str(path), commit, cwd=clone, env=env)
-    except RuntimeError:
+    except (RuntimeError, subprocess.TimeoutExpired):
         remove_worktree(path, branch, clone=clone)
         raise
     return path, branch
@@ -1920,7 +1920,7 @@ def launch(q: Dict[str, Any], item: Dict[str, Any], plan: Dict[str, Any]) -> str
         return run_id
     try:
         wt, wbranch = make_worktree(f"wt-{run_id}", plan["head"], clone=repo_clone)
-    except RuntimeError as exc:
+    except (RuntimeError, subprocess.TimeoutExpired) as exc:
         if item["kind"] == author_quota.AUTHOR_KIND:
             # An admitted author head the clone cannot check out (e.g. a runner-configured
             # required smudge filter) stays ungranted and waits for its lease deadline, which

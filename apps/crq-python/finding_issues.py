@@ -15,7 +15,9 @@ from typing import Any, Callable, Dict, List, Optional
 # Mirrors repo_registry.DEFAULT_FINDINGS; kept local so this module stays pure
 # (plain data in, no app imports — it must be importable standalone).
 DEFAULT_FINDINGS = "issue"
-GH_TIMEOUT = 120  # seconds, the same ceiling every other gh call in crq gets
+# At most two calls per issue and two issues per tick, before admission.
+# A stalled forge therefore costs at most 40 seconds and is retried later.
+GH_TIMEOUT = 10
 FOOTER = "Auto-filed by crq (CodeRabbit review queue). No auto-fix runs for this repository; triage manually."
 # GitHub rejects an issue body over this many characters, and a rejected create
 # leaves issue_pending set, so every tick would retry the identical oversized
