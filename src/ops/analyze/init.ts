@@ -28,7 +28,7 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import type { Op } from '../../kernel/types.js';
 import { messageOf } from '../../shared/messageOf.js';
 import type { CheckRunnerInput } from '../gates/checkRunner.js';
@@ -179,10 +179,10 @@ export function makeAnalyzeInit(): Op<AnalyzeInitInput, AnalyzeInitReport> {
       try {
         // A killed migration can leave its private staging directory behind.
         // Keep recent directories (another migration may still be using one).
-        for (const entry of readdirSync(input.dir, { withFileTypes: true })) {
+        for (const entry of readdirSync(dirname(configPath), { withFileTypes: true })) {
           if (!entry.isDirectory() || !/^\.cq-config-migrate-[A-Za-z0-9]{6}$/.test(entry.name))
             continue;
-          const scratch = join(input.dir, entry.name);
+          const scratch = join(dirname(configPath), entry.name);
           try {
             if (Date.now() - lstatSync(scratch).mtimeMs > 24 * 60 * 60 * 1000) {
               rmSync(scratch, { recursive: true, force: true });
@@ -199,7 +199,9 @@ export function makeAnalyzeInit(): Op<AnalyzeInitInput, AnalyzeInitReport> {
             error: `analyze.init: cannot migrate '${configPath}': ${migrated.reason}`,
           };
         if (migrated.changed) {
-          const scratch = mkdtempSync(join(input.dir, '.cq-config-migrate-'));
+          // Stage next to the target so the final rename stays on one
+          // filesystem (renameSync throws EXDEV across mounts).
+          const scratch = mkdtempSync(join(dirname(configPath), '.cq-config-migrate-'));
           try {
             const temporary = join(scratch, CQ_CONFIG_FILE);
             writeFileSync(temporary, `${JSON.stringify(migrated.config, null, 2)}\n`, {
