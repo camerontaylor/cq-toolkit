@@ -1,5 +1,6 @@
 """Automatic repair drain: selection, stale skip, GLM blackout. Real local Git, no models."""
 import datetime as dt
+import copy
 import fcntl
 import importlib.util
 import json
@@ -15,6 +16,10 @@ from unittest import mock
 from crq_repair import atomic
 from crq_repair import bounded
 import repair_tick
+import finding_delivery
+import review_ledger as ledger
+from test_backfill_accounting import Fixture
+from test_review_ledger import rehash
 
 ROOT = Path(__file__).resolve().parent
 spec = importlib.util.spec_from_file_location('repair_drain_under_test', ROOT / 'crq_repair.py')
@@ -977,6 +982,155 @@ class RepairDrainTest(unittest.TestCase):
         self.assertEqual(repair['budget'], {'wall_clock_min': 20, 'max_tokens': 400000,
                                             'max_output_tokens': 500000, 'max_context_tokens': 200000})
         self.assertEqual(repair['max_rounds_per_pin'], 2)
+
+
+class CanonicalFixedProjectionTest(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.f = Fixture(self.root / 'repo')
+        self.published = self.f.commit({'a': b'original repair\n'})
+        self.actual = self.f.commit({'a': b'reviewed implementation correction\n'})
+        self.merge = self.f.commit({'merged': b'merge evidence\n'})
+        self.unrelated = self.f.git('commit-tree', self.f.repo.tree(self.published), '-m', 'unrelated root')
+        self.f.git('update-ref', 'refs/remotes/origin/main', self.merge)
+        self.review = self.f.full_review(self.published, 'a', [[1, 1]])
+        finding = finding_delivery.normalize('crq-runner-app', 'projection', {
+            'severity': 'major', 'path': 'a', 'blob': self.f.repo.entries(self.published)['a']['blob'],
+            'intervals': [[1, 1]], 'title': 'Repair', 'body': 'Original finding'})
+        self.review['payload']['findings'] = [finding]
+        rehash(self.review)
+        self.fid = finding['id']
+        self.out = ledger.Outbox(self.root / 'outbox', self.f.store)
+        self.out.spool(self.review)
+        self.inbox = finding_delivery.Inbox(self.root / 'state/backfill/findings', self.out)
+        self.inbox.ingest(self.review)
+        self.at = '2026-11-09T00:00:00Z'
+        confirmed = self.inbox.triage(self.fid, self.f.repo, self.published,
+                                      'confirmed', 'fixture', 'valid source', self.at)
+        self.queue = {'items': []}
+        transport = finding_delivery.repair_transport(self.root, self.queue, lambda _: None, lambda *_: True)
+        receipt = self.inbox.deliver(self.fid, transport, self.at)
+        self.job_id = receipt['repair_task']
+        self.record = next(iter(self.queue['items'][0]['repair_runs'].values()))
+        self.publication = {'head': self.published, 'commits': [self.published]}
+        self.record.update(state='published', publication=copy.deepcopy(self.publication),
+                           fix_pr={'number': 99, 'url': 'https://github.com/example/repo/pull/99'},
+                           verdicts=[{'job': self.job_id, 'verdict': 'FIXED', 'reason': 'original worker fix'}])
+        self.journal = self.root / 'state/repair' / self.job_id / 'publication.json'
+        atomic(self.journal, self.publication)
+        self.original_journal = self.journal.read_bytes()
+        self.row_file = self.root / 'state/backfill/findings/triage' / (self.fid + '.json')
+        delivered = next(v for v in self.out.retained() if v['payload'].get('action') == 'delivered')
+        self.fixed = self.inbox.triage(self.fid, self.f.repo, self.merge, 'fixed', 'fixture',
+                                     'Verified original finding on the reviewed merged implementation',
+                                     self.at, fixing_commit=self.merge)
+        ledger.validate_sequence([self.review, confirmed, delivered, self.fixed])
+        self.info = {'number': 99, 'state': 'MERGED', 'headRefOid': self.actual,
+                     'mergeCommit': {'oid': self.merge}}
+        self.c = SimpleNamespace(STATE=self.root / 'state', iso=lambda: self.at,
+                                 pr_info=lambda _: self.info, git=self.f.git,
+                                 is_ancestor=lambda a, b: subprocess.run(
+                                     ['git', '-C', str(self.f.root), 'merge-base', '--is-ancestor', a, b],
+                                     capture_output=True).returncode == 0)
+        patcher = mock.patch.object(repair_tick, 'finding_inbox', return_value=self.inbox)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_current_fixed_event_completes_projection_and_retries_without_append(self):
+        retained = self.out.retained()
+        original_row = self.row_file.read_bytes()
+        publish = repair_tick.publish_source_resolution
+        calls = []
+        def source_feedback(c, record, merge):
+            calls.append(merge)
+            if len(calls) == 1:
+                raise RuntimeError('forge unavailable')
+            return publish(c, record, merge)
+        with self.assertRaisesRegex(ValueError, 'source changed'):
+            repair_tick.merge_head_evidence(self.c, self.record, self.actual)
+        with mock.patch.object(self.inbox, 'repair_outcome') as outcome, \
+             mock.patch.object(self.out, 'spool', wraps=self.out.spool) as spool, \
+             mock.patch.object(repair_tick, 'publish_source_resolution',
+                               side_effect=source_feedback) as source:
+            repair_tick.reconcile_fix_prs(self.c, self.queue)
+            self.assertNotIn('fix_merged', self.record)
+            self.assertEqual(self.record['source_publication_error'], 'forge unavailable')
+            repair_tick.reconcile_fix_prs(self.c, self.queue)
+            repair_tick.reconcile_fix_prs(self.c, self.queue)
+            outcome.assert_not_called()
+            spool.assert_not_called()
+            self.assertEqual(source.call_count, 2)
+        self.assertEqual(self.record['fix_merged'], self.at)
+        self.assertNotIn('source_publication_error', self.record)
+        self.assertEqual(self.record['validated_merge_head'], {
+            'published_head': self.published, 'actual_head': self.actual,
+            'merge_commit': self.merge, 'canonical_fixed_events': {self.job_id: self.fixed['id']}})
+        self.assertEqual(self.out.retained(), retained)
+        self.assertEqual(self.row_file.read_bytes(), original_row)
+        self.assertEqual(self.journal.read_bytes(), self.original_journal)
+        self.assertEqual(self.record['publication']['head'], self.published)
+        self.assertEqual(self.record['publication']['commits'], [self.published])
+
+    def test_noncurrent_or_mismatched_fixed_evidence_cannot_complete(self):
+        original_row = ledger.loads(self.row_file.read_bytes())
+        retained = self.out.retained()
+        for case in ('merge', 'receipt', 'row-review', 'row-finding', 'event-review',
+                     'event-finding', 'event-id', 'event-hash', 'verification', 'delivered',
+                     'pr', 'lineage', 'merge-not-main'):
+            with self.subTest(case=case):
+                row = copy.deepcopy(original_row)
+                values = copy.deepcopy(retained)
+                value = next(v for v in values if v['id'] == self.fixed['id'])
+                if case == 'merge': value['payload']['evidence']['fixing_commit'] = self.published
+                if case == 'receipt': row['receipt']['repair_task'] = 'new-generation'
+                if case == 'row-review': row['review_id'] = 'd' * 64
+                if case == 'row-finding': row['finding']['id'] = 'd' * 64
+                if case == 'event-review': value['payload']['review_id'] = 'd' * 64
+                if case == 'event-finding': value['payload']['finding_id'] = 'd' * 64
+                if case == 'verification': value['payload']['evidence']['verification'] = '  '
+                if case == 'delivered': row['status'] = 'delivered'
+                if case == 'event-hash': value['payload']['actor'] = 'changed without rehash'
+                else: rehash(value); row['previous_event_id'] = value['id']
+                if case == 'event-id': row['previous_event_id'] = 'e' * 64
+                self.info.update(number=98 if case == 'pr' else 99,
+                                 headRefOid=self.unrelated if case == 'lineage' else self.actual)
+                self.info['mergeCommit'] = {'oid': self.unrelated if case == 'merge-not-main' else self.merge}
+                ledger.atomic(self.row_file, ledger.canonical(row))
+                for key in ('fix_merged', 'source_publication_error', 'validated_merge_head'):
+                    self.record.pop(key, None)
+                with mock.patch.object(self.out, 'retained', return_value=values), \
+                     mock.patch.object(repair_tick, 'mark_finding_outcome') as mark, \
+                     mock.patch.object(repair_tick, 'publish_source_resolution') as source:
+                    repair_tick.reconcile_fix_prs(self.c, self.queue)
+                    mark.assert_not_called()
+                    source.assert_not_called()
+                self.assertNotIn('fix_merged', self.record)
+                if case != 'merge-not-main':
+                    self.assertIn('source_publication_error', self.record)
+                self.assertEqual(self.journal.read_bytes(), self.original_journal)
+
+    def test_source_feedback_rechecks_current_fixed_disposition(self):
+        original = self.inbox.current_fixed_event
+        calls = []
+        def changed(job, merge):
+            calls.append(job['job'])
+            if len(calls) == 2:
+                row = ledger.loads(self.row_file.read_bytes())
+                row['status'] = 'superseded'
+                ledger.atomic(self.row_file, ledger.canonical(row))
+            return original(job, merge)
+        with mock.patch.object(self.inbox, 'current_fixed_event', side_effect=changed), \
+             mock.patch.object(self.inbox, 'repair_outcome') as outcome, \
+             mock.patch.object(repair_tick, 'publish_source_resolution') as source:
+            repair_tick.reconcile_fix_prs(self.c, self.queue)
+            outcome.assert_not_called()
+            source.assert_not_called()
+        self.assertEqual(len(calls), 2)
+        self.assertNotIn('fix_merged', self.record)
+        self.assertIn('changed before source feedback', self.record['source_publication_error'])
+        self.assertEqual(self.journal.read_bytes(), self.original_journal)
 
 
 if __name__ == '__main__':
