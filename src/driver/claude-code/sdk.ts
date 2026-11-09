@@ -442,6 +442,25 @@ export class ClaudeCodeSdkTransport implements Driver {
       internalTools: outputSchema === undefined ? [] : [STRUCTURED_OUTPUT_TOOL],
     };
 
+    // --- In-flight harness handlers (post-settle race): the SDK can fail or
+    // settle the query while a handler is still executing. That handler
+    // appends to the session and pushes into `observation.denials` AFTER
+    // `run()` returned — the caller would miss the denial. Every dispatch is
+    // tracked here and settled before the observation is persisted and the
+    // verdict built.
+    const inFlightCalls = new Set<Promise<void>>();
+    const trackHarnessCall = (call: Promise<SdkToolCallResult>): Promise<SdkToolCallResult> => {
+      // A settlement-only twin: the handler's own rejection belongs to the
+      // SDK's tool loop, never to the settle wait.
+      inFlightCalls.add(
+        call.then(
+          () => undefined,
+          () => undefined,
+        ),
+      );
+      return call;
+    };
+
     // --- The one SDK call: options assembly. ------------------------------
     const sandbox = sandboxOption(sandboxPolicy.level);
     const sdkTools = (surface?.tools ?? []).map((harnessTool) => {
@@ -452,17 +471,19 @@ export class ClaudeCodeSdkTransport implements Driver {
         // validates calls with its strict compatibility schema.
         harnessTool.inputSchema.shape,
         (args: unknown, extra: unknown): Promise<SdkToolCallResult> =>
-          runHarnessTool(
-            surface as HarnessSurface,
-            harnessTool.name,
-            args,
-            store,
-            record,
-            observation.denials,
-            // Cancellation reaches the executor: the governed signal (I8 —
-            // forwarded, never decided here) and the SDK's per-call signal,
-            // whichever fires first; `run` then kills its process group.
-            callSignal(signal, extra),
+          trackHarnessCall(
+            runHarnessTool(
+              surface as HarnessSurface,
+              harnessTool.name,
+              args,
+              store,
+              record,
+              observation.denials,
+              // Cancellation reaches the executor: the governed signal (I8 —
+              // forwarded, never decided here) and the SDK's per-call signal,
+              // whichever fires first; `run` then kills its process group.
+              callSignal(signal, extra),
+            ),
           ),
       );
       const toolDefinition = asRecord(definition);
@@ -526,14 +547,16 @@ export class ClaudeCodeSdkTransport implements Driver {
                 sdk.createSdkMcpServer({ name: MCP_SERVER_NAME, tools: sdkTools }),
                 surface,
                 (name, args, extra) =>
-                  runHarnessTool(
-                    surface,
-                    name,
-                    args,
-                    store,
-                    record,
-                    observation.denials,
-                    callSignal(signal, extra),
+                  trackHarnessCall(
+                    runHarnessTool(
+                      surface,
+                      name,
+                      args,
+                      store,
+                      record,
+                      observation.denials,
+                      callSignal(signal, extra),
+                    ),
                   ),
               ),
             },
@@ -596,6 +619,14 @@ export class ClaudeCodeSdkTransport implements Driver {
     // state is captured.
     aborted = aborted || abortRoot?.controller.signal.aborted === true;
     abortRoot?.dispose();
+
+    // Settle the harness handlers the SDK left in flight: a query that failed
+    // (or settled) while a call was executing still has a handler that will
+    // append its tool message and push its denial. Wait for those settlements
+    // — bounded by each call's own cancellation (the governed and per-call
+    // signals) — so the persisted observation and the returned verdict see
+    // the COMPLETE denial set instead of a race-dependent subset.
+    await Promise.allSettled([...inFlightCalls]);
 
     // Fail closed: a run whose SDK never reported an init surface ran
     // unverified — whatever it reports is not a model outcome.
