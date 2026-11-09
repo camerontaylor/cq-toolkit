@@ -269,7 +269,7 @@ export interface PrWorktreeOpts {
   registry: WorktreeRegistry;
   /** The injected clock stamping registry entries — never Date.now. */
   nowMs: number;
-  /** Root for created worktrees; defaults to `<repoRoot>/.git/cq-review-worktrees`. */
+  /** Root for created worktrees; defaults to `<git-common-dir>/cq-review-worktrees`. */
   worktreeRoot?: string;
   /**
    * Invoked only when THIS call itself created the per-PR worktree (never on

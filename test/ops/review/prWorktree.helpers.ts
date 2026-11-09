@@ -30,7 +30,7 @@
 //      holding the branch refuses the create (git's double-checkout
 //      refusal) and the throw names it — freeing it is the human's call.
 //   5. The create path: `pr-<pr>-<sanitized-branch>` under worktreeRoot
-//      (default `<repoRoot>/.git/cq-review-worktrees`), added with
+//      (default `<git-common-dir>/cq-review-worktrees`), added with
 //      `-B <branch> <path> <expectedSha>` so the new tree sits AT the
 //      fetched sha, registered with the injected clock, reused=false; an
 //      add FAILURE throws with git's stderr and leaves the registry (and
