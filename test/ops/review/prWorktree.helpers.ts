@@ -30,7 +30,7 @@
 //      holding the branch refuses the create (git's double-checkout
 //      refusal) and the throw names it — freeing it is the human's call.
 //   5. The create path: `pr-<pr>-<sanitized-branch>` under worktreeRoot
-//      (default `<repoRoot>/.git/cq-review-worktrees`), added with
+//      (default `<git-common-dir>/cq-review-worktrees`), added with
 //      `-B <branch> <path> <expectedSha>` so the new tree sits AT the
 //      fetched sha, registered with the injected clock, reused=false; an
 //      add FAILURE throws with git's stderr and leaves the registry (and
@@ -159,9 +159,10 @@ export const fakeGit =
       const count = ancestor ? '0' : '1';
       return { code: 0, stdout: `${count}\n`, stderr: '' };
     }
-    if (sub === 'rev-parse' && args[3] === '--absolute-git-dir') {
-      // Real git resolves a linked-worktree .git FILE to the real dir; the
-      // model answers <repoRoot>/.git like a plain checkout.
+    if (sub === 'rev-parse' && args.includes('--git-common-dir')) {
+      // Real git answers the COMMON git dir: <repoRoot>/.git for a plain
+      // checkout, and still <main>/.git from a linked worktree (its own git
+      // dir is <main>/.git/worktrees/<id>, which the module must NOT use).
       return { code: 0, stdout: `${join(args[1] ?? '', '.git')}\n`, stderr: '' };
     }
     if (sub === 'rev-parse') {

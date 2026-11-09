@@ -31,6 +31,39 @@ import {
 // ---------------------------------------------------------------------------
 
 describe('ownership boundary — foreign trees are surfaced, never claimed', () => {
+  test('a legacy linked-root tree is preserved and the refusal explains operator recovery', async () => {
+    const repoRoot = await realTmpDir('cq-wt-legacyhold-');
+    try {
+      const legacyPath = join(
+        repoRoot,
+        '.git',
+        'worktrees',
+        'linked',
+        'cq-review-worktrees',
+        'pr-7',
+      );
+      const model = mkModel([{ path: legacyPath, branch: LABEL, head: SHA_A }]);
+      const registry = memRegistry({
+        '7': { path: legacyPath, branch: LABEL, createdAt: NOW - 1000 },
+      });
+      const calls: string[][] = [];
+      const resolution = resolvePrWorktree(
+        baseOpts(model, registry, { repoRoot, run: fakeGit(model, calls) }),
+      );
+      await expect(resolution).rejects.toThrow(/preserve its dirty files and unpushed commits/);
+      await expect(resolution).rejects.toThrow(/durable rescue branch/);
+      await expect(resolution).rejects.toThrow(
+        /worktree remove <legacy-review-tree> without --force/,
+      );
+      await expect(resolution).rejects.toThrow(/Do not remove\/prune the parent linked checkout/);
+      expect(calls.some((args) => args.includes('remove'))).toBe(false);
+      expect(registry.current()['7']?.path).toBe(legacyPath);
+      expect(model.headOf[legacyPath]?.head).toBe(SHA_A);
+    } finally {
+      await rm(repoRoot, { recursive: true, force: true });
+    }
+  });
+
   test('a branch+sha-valid tree OUTSIDE the root is returned in foreign[] and never claimed — an OWN valid tree is still reused', async () => {
     const calls: string[][] = [];
     const registry = memRegistry();
@@ -119,7 +152,7 @@ describe('domain boundary vs the sweep ops worktree', () => {
       // fetched sha. No sweep path is ever probed (no branch-matching
       // candidate), returned, or registered.
       expect(calls).toEqual([
-        ['-C', repoRoot, 'rev-parse', '--absolute-git-dir'],
+        ['-C', repoRoot, 'rev-parse', '--path-format=absolute', '--git-common-dir'],
         ['-C', repoRoot, 'fetch', 'origin', `+refs/pull/${PR}/head:refs/cq-review/pr-${PR}`],
         ['-C', repoRoot, 'rev-parse', 'refs/cq-review/pr-7'],
         ['-C', repoRoot, 'worktree', 'list', '--porcelain'],

@@ -11,7 +11,7 @@
 // invocation-level, not tree-level).
 //
 // DOMAIN BOUNDARY (asserted, not incidental): this is the REVIEW-OPS
-// worktree — keyed by PR, rooted at `<repoRoot>/.git/cq-review-worktrees`. It is
+// worktree — keyed by PR, rooted at `<git-common-dir>/cq-review-worktrees`. It is
 // NOT the package-keyed sweep worktree: `createOrReuseWorktree` in the sweep
 // ops family is a different domain with different keys and a different
 // lifetime, and review ops must never consult it (and vice versa). The test
@@ -49,6 +49,15 @@
 //      — the create fails with git's stderr naming the holder, and the
 //      human must free the branch (remove/relocate the holder) or point
 //      worktreeRoot at the existing tree.
+//
+// Upgrading from the old linked-checkout default: review trees may remain
+// under `<main>/.git/worktrees/<id>/cq-review-worktrees`. They are now foreign
+// and are deliberately never removed automatically. Before removing the
+// parent linked checkout, preserve any dirty files and unpushed commits
+// OUTSIDE that entire admin directory (including a durable rescue branch
+// for commits). Then use `git worktree remove <legacy-review-tree>` without
+// --force and retry resolution. Do not delete/prune the parent checkout
+// while a legacy review tree still contains work you need.
 //
 // The `[A-Za-z0-9._-]` sanitization: branch names are user data ("release/
 // 1.0 +fix me") and the worktree directory name must stay one path segment —
@@ -273,7 +282,7 @@ export interface PrWorktreeOpts {
   registry: WorktreeRegistry;
   /** The injected clock stamping registry entries — never Date.now. */
   nowMs: number;
-  /** Root for created worktrees; defaults to `<repoRoot>/.git/cq-review-worktrees`. */
+  /** Root for created worktrees; defaults to `<git-common-dir>/cq-review-worktrees`. */
   worktreeRoot?: string;
   /**
    * Invoked only when THIS call itself created the per-PR worktree (never on
@@ -454,15 +463,21 @@ export async function resolvePrWorktree(opts: PrWorktreeOpts): Promise<{
   // worktreeRoot across two real locations (one per resolver). Absolute
   // everywhere means one location, whichever cwd the caller runs from.
   const repoRoot = pathResolve(opts.repoRoot);
-  // The default root lives under the GIT DIR, not under repoRoot: a linked
-  // worktree or submodule checkout has a .git FILE, and mkdir under a file
-  // is ENOTDIR — `rev-parse --absolute-git-dir` names the real git dir in
-  // every layout. Explicit worktreeRoot stays fully caller-controlled.
-  const gitDirArgs = ['-C', repoRoot, 'rev-parse', '--absolute-git-dir'];
+  // The default root lives under the COMMON git dir, not under repoRoot: a
+  // linked worktree or submodule checkout has a .git FILE, and mkdir under a
+  // file is ENOTDIR. `--absolute-git-dir` would name the PER-WORKTREE dir
+  // (`<main>/.git/worktrees/<id>` for a linked checkout), so the root would
+  // move with whichever checkout the caller runs from — a tree created from
+  // the main checkout would then look FOREIGN here — and the review trees
+  // would nest inside git's admin directory for that worktree, where
+  // `git worktree remove <linked>`/`prune` deletes them recursively.
+  // `--git-common-dir` is the stable dir in every layout (git ≥ 2.31 for
+  // `--path-format`). Explicit worktreeRoot stays fully caller-controlled.
+  const gitDirArgs = ['-C', repoRoot, 'rev-parse', '--path-format=absolute', '--git-common-dir'];
   const gitDir = await opts.run(gitDirArgs);
   if (gitDir.code !== 0) {
     throw gitFail(
-      'rev-parse --absolute-git-dir failed — repoRoot is not a git repository',
+      'rev-parse --git-common-dir failed — repoRoot is not a git repository',
       gitDir.code,
       gitDir.stderr,
       gitDirArgs,
@@ -683,7 +698,7 @@ export async function resolvePrWorktree(opts: PrWorktreeOpts): Promise<{
     const add = await opts.run(addArgs);
     if (add.code !== 0) {
       throw gitFail(
-        `worktree add -B ${reviewBranch} ${wtPath} ${expectedSha} failed`,
+        `worktree add -B ${reviewBranch} ${wtPath} ${expectedSha} failed. If an old linked-checkout review tree holds the branch, preserve its dirty files and unpushed commits outside the linked checkout's admin directory first (use a durable rescue branch for commits), then git worktree remove <legacy-review-tree> without --force and retry. Do not remove/prune the parent linked checkout before preserving that work`,
         add.code,
         add.stderr,
         addArgs,
@@ -719,18 +734,19 @@ export async function removePrWorktree(opts: PrWorktreeOpts & { path: string }):
   // Absolute everywhere (see resolvePrWorktree): mkdir/`-C`/paths must not
   // straddle two resolvers.
   const repoRoot = pathResolve(opts.repoRoot);
-  // Same derivation as resolvePrWorktree (git dir, not <repoRoot>/.git — a
-  // linked worktree's .git is a file): the boundary check must agree with
-  // where resolution actually creates trees.
+  // Same derivation as resolvePrWorktree (the COMMON git dir, not the
+  // per-worktree one — a linked worktree's .git is a file and its git dir is
+  // `<main>/.git/worktrees/<id>`): the boundary check must agree with where
+  // resolution actually creates trees.
   let worktreeRoot: string;
   if (opts.worktreeRoot !== undefined) {
     worktreeRoot = pathResolve(opts.worktreeRoot);
   } else {
-    const gitDirArgs = ['-C', repoRoot, 'rev-parse', '--absolute-git-dir'];
+    const gitDirArgs = ['-C', repoRoot, 'rev-parse', '--path-format=absolute', '--git-common-dir'];
     const gitDir = await opts.run(gitDirArgs);
     if (gitDir.code !== 0) {
       throw gitFail(
-        'rev-parse --absolute-git-dir failed — repoRoot is not a git repository',
+        'rev-parse --git-common-dir failed — repoRoot is not a git repository',
         gitDir.code,
         gitDir.stderr,
         gitDirArgs,
