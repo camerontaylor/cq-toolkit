@@ -834,10 +834,12 @@ export function createProposeBaselineUpdate(
     if (applied.length === 0) {
       // Only usable, non-tightening readings justify withdrawal. Missing or
       // corrupt baselines are not evidence that an existing proposal is stale.
-      if (
-        judged.length > 0 &&
-        skipped.every((entry) => entry.reason.includes('not a tightening'))
-      ) {
+      // `restored` gains an entry ONLY on the non-tightening branch, and with
+      // nothing applied every judged measurement yields exactly one skip, so
+      // counting restored entries selects those cases without matching skip
+      // wording — several reasons embed file-derived text (a baseline's own
+      // target, a parse error), which must never close a proposal.
+      if (judged.length > 0 && restored.length === judged.length) {
         const comment =
           'Closing this baseline proposal: the latest measurements no longer tighten the committed baselines.\n\n' +
           judged.map((entry) => `${entry.target}/${entry.metric}: ${entry.value}`).join('\n');
