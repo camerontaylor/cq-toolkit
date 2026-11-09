@@ -90,8 +90,8 @@ edit inside a later goal.
 
 `src/driver/types.ts` sits INSIDE the vendor-import ban (eslint rule
 `cq/no-vendor-sdk-in-kernel`, same scope as `src/kernel/**`). The three
-driver implementations under `src/driver/drivers/` (in-process SDK,
-the Claude Code CLI/SDK transports, ACP) adopt vendors deliberately and are NOT covered.
+driver implementations under `src/driver/ai-sdk/`, `src/driver/claude-code/` and
+`src/driver/acp/` adopt vendors deliberately and are NOT covered.
 
 ## First-party driver: `ai-sdk` (T1.4)
 
