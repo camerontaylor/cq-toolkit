@@ -702,7 +702,9 @@ export function makeSweepUnitOp(bindings: SweepUnitBindings): Op<WorkUnit, Sweep
           const fault = await recordScannedCommitSha(bindings, segments, sha);
           if (fault !== null) throw new Error(fault);
           if (bindings.cancelled?.()) throw new Error('enclosing job cancelled before push');
-          await bindings.pushBranch?.(bindings.repoRoot, segments.branch);
+          const pushBranch = bindings.pushBranch;
+          if (pushBranch === undefined) throw new Error('push binding unavailable');
+          await pushBranch(bindings.repoRoot, segments.branch);
           const marker = await writeCommittedMarker(bindings, segments, unit);
           if (marker !== null) throw new Error(marker);
         },

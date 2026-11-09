@@ -35,6 +35,9 @@ test('verified local task commits retain scanned authorization for publication r
     ) as { sha: string };
     expect(record.sha).toBe(sha);
     expect(world.pushCalls).toEqual([]);
+    expect(result.value.pushed).toBe(false);
+    const markerPath = join(runStateDir, 'committed', 'fix', 'alpha.json');
+    await expect(readFile(markerPath, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
     const original = world.gitFactory();
     const retry = await runUnit(world, {
       taskLoop: {},
@@ -45,6 +48,7 @@ test('verified local task commits retain scanned authorization for publication r
     });
     expect(retry.status).toBe('ok');
     expect(world.pushCalls).toHaveLength(1);
+    await expect(readFile(markerPath, 'utf8')).resolves.toContain('alpha');
     const moved = await runUnit(world, {
       taskLoop: {},
       runStateDir,
