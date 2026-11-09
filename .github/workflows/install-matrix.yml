@@ -23,6 +23,11 @@ on:
   schedule:
     - cron: '23 18 * * *'
   workflow_dispatch:
+    inputs:
+      systemd_probe:
+        description: Run the disposable systemd mask experiment
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -34,6 +39,19 @@ env:
   PNPM_CONFIG_VIRTUAL_STORE_TYPE: project
 
 jobs:
+  systemd-mask-probe:
+    if: github.event_name == 'workflow_dispatch' && inputs.systemd_probe
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - name: Exercise synthetic user units
+        run: sudo bash scripts/systemd-mask-probe.sh
+
   without-peer:
     name: build+test without the optional agent SDK peer
     runs-on: ubuntu-latest
