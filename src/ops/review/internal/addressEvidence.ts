@@ -948,7 +948,7 @@ export async function persistAddressTerminalReport(
   let estimate = 0;
   const seen = new Set<object>();
   const visit = (value: unknown, depth: number) => {
-    if (depth > 64 || estimate > REPORT_CAP) throw new Error('terminal report bound reached');
+    if (depth > 64) throw new Error('terminal report bound reached');
     if (typeof value === 'string') estimate += Buffer.byteLength(value) * 6 + 2;
     else if (value && typeof value === 'object') {
       if (seen.has(value)) throw new Error('terminal report cycle refused');
@@ -961,6 +961,7 @@ export async function persistAddressTerminalReport(
         }
       seen.delete(value);
     } else estimate += 32;
+    if (estimate > REPORT_CAP) throw new Error('terminal report bound reached');
   };
   visit(report, 0);
   const bytes = Buffer.from(`${JSON.stringify(report, null, 2)}\n`);
