@@ -212,6 +212,7 @@
       "owed_per_audit": 1,
       "merge_commit": "3333333333333333333333333333333333333333",
       "merged_at": "2026-11-08T20:00:00Z",
+      "source": "manual",
       "state": "done",
       "cycles": [],
       "attempts": [],

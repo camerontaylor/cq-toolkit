@@ -79,16 +79,16 @@ ITEM_KEYS = frozenset({
     "partition", "path_lineages", "path_scores", "path_tiers", "paths",
     "pinned_base", "pr", "pr_branch", "pr_head", "pr_observers", "pr_review",
     "pr_review_attempt_at", "pr_review_attempts", "pr_review_pending",
-    "pr_review_request", "prior_base", "prior_cycles", "profile",
+    "pr_review_request", "prior_base", "prior_cycles", "profile", "prs",
     "publication_event_id", "publication_pending", "publication_reason",
     "published_event_id", "receipt_id", "refs", "remediation_state", "repair_origin",
     "repair_runs", "repeat_requested", "repo", "request", "request_id",
-    "requested_at", "residual", "reviewed_sha", "reviewed_tip", "reused_from",
-    "row", "run", "scope", "scope_adequate", "scope_digest", "score", "signer",
-    "signer_result", "since", "state", "statuses", "subject", "subject_id",
-    "subject_kind", "success_at", "tier", "tier_importance", "target",
-    "target_ref", "target_tree", "vendor_state", "voided_cycles",
-    "voided_prior_cycles", "wait_reason",
+    "requested_at", "residual", "retry", "reviewed_sha", "reviewed_tip",
+    "reused_from", "row", "run", "scope", "scope_adequate", "scope_digest",
+    "score", "signer", "signer_result", "since", "source", "state", "statuses",
+    "subject", "subject_id", "subject_kind", "success_at", "tier",
+    "tier_importance", "target", "target_ref", "target_tree", "vendor_state",
+    "voided_cycles", "voided_prior_cycles", "wait_reason",
 })
 
 SUMMARY_KEYS = frozenset({
@@ -116,14 +116,14 @@ WORK_KEYS = frozenset({"at", "harness", "head", "host", "pr", "repo", "role",
 
 RUN_FILE_KEYS = {
     "classification.json": frozenset({
-        "bad_lines", "counted", "events", "exit", "findings", "message", "outcome",
-        "reviewed_files", "severity_counts"}),
+        "bad_lines", "counted", "events", "exit", "failure_provenance", "findings",
+        "message", "outcome", "reviewed_files", "severity_counts"}),
     "exit.json": frozenset({"ended_at", "exit", "timed_out"}),
     "meta.json": frozenset({
         "author", "base", "cmd", "coverage_paths", "coverage_sha", "cycle",
         "dirty_diff", "head", "item_id", "kind", "label", "planned_paths", "pr",
-        "pr_branch", "pr_head", "review_pin", "reviewed_tip", "run_id",
-        "started_at", "target", "worktree", "wt_branch"}),
+        "pr_branch", "pr_head", "range_policy", "repo", "review_pin", "reviewed_tip",
+        "run_id", "started_at", "target", "workId", "worktree", "wt_branch"}),
     "secret-scan.json": frozenset({
         "base", "denylist_hits", "denylist_rules", "diff_bytes", "gitleaks",
         "gitleaks_hits", "head"}),

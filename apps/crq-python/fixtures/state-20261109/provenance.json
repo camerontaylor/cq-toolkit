@@ -45,7 +45,7 @@
   },
   "observed_on": "2026-11-09",
   "policy": "Only allowlisted schema keys, JSON value types, code-enum item states and bucketed counts are retained. No scalar value, identifier, path, host, timestamp, free text, credential or config entry is written.",
-  "projection_sha256": "4ac4718a01fc9eb94ac595851e874eceb257221448395863925d884552e67791",
+  "projection_sha256": "ddc24d08dd62cd42c53d9c9f0c43b1793b3abf17b8e1fe20abe0930c59ea4a29",
   "queue": {
     "item_count_bucket": "1000+",
     "item_keys_by_kind": {
@@ -68,7 +68,7 @@
         "wait_reason": "null"
       },
       "backfill": {
-        "_unknown_key_count": 2304,
+        "_unknown_key_count": 0,
         "attempt": "int",
         "attempt_id": "str",
         "attempts": "list",
@@ -99,16 +99,21 @@
         "path_tiers": "object",
         "paths": "list",
         "pr": "int",
+        "prs": "list",
         "publication_event_id": "str",
         "published_event_id": "str",
         "refs": "str",
         "repo": "str",
         "residual": "bool",
+        "retry": "bool",
         "row": [
           "int",
           "null"
         ],
-        "run": "null",
+        "run": [
+          "null",
+          "object"
+        ],
         "scope": "list",
         "scope_digest": "str",
         "score": "int",
@@ -230,7 +235,7 @@
         "wait_reason": "null"
       },
       "merged": {
-        "_unknown_key_count": 245,
+        "_unknown_key_count": 0,
         "attempts": "list",
         "cycles": "list",
         "failures": "int",
@@ -253,6 +258,7 @@
         "pr": "int",
         "repair_runs": "object",
         "run": "null",
+        "source": "str",
         "state": "str",
         "tier": "int",
         "wait_reason": [
@@ -282,10 +288,7 @@
         "remediation_state": "str",
         "request_id": "str",
         "reused_from": "str",
-        "run": [
-          "null",
-          "object"
-        ],
+        "run": "null",
         "state": "str",
         "subject": "object",
         "wait_reason": [
@@ -335,7 +338,10 @@
         "repair_origin": "str",
         "repair_runs": "object",
         "repo": "str",
-        "run": "null",
+        "run": [
+          "null",
+          "object"
+        ],
         "state": "str",
         "target_ref": "str",
         "tier": "int",
@@ -437,6 +443,7 @@
       "no-current-code",
       "pending",
       "promoting",
+      "publication-pending",
       "quarantined",
       "rejected",
       "repair_failed",
@@ -451,7 +458,9 @@
       "backfill": [
         "done",
         "pending",
-        "quarantined"
+        "publication-pending",
+        "quarantined",
+        "reviewing"
       ],
       "coverage": [
         "blocked",
@@ -478,14 +487,14 @@
       "merged-current": [
         "blocked",
         "done",
-        "no-current-code",
-        "reviewing"
+        "no-current-code"
       ],
       "open": [
         "blocked",
         "done",
         "pending",
         "repair_failed",
+        "reviewing",
         "skipped"
       ],
       "promotion": [
@@ -583,11 +592,12 @@
   },
   "run_files": {
     "classification.json": {
-      "_unknown_key_count": 1,
+      "_unknown_key_count": 0,
       "bad_lines": "int",
       "counted": "bool",
       "events": "int",
       "exit": "int",
+      "failure_provenance": "object",
       "findings": "int",
       "outcome": "str",
       "reviewed_files": "int",
@@ -603,7 +613,7 @@
       "type": "text"
     },
     "meta.json": {
-      "_unknown_key_count": 3,
+      "_unknown_key_count": 0,
       "base": "str",
       "cmd": "list",
       "cycle": "int",
@@ -615,10 +625,13 @@
       "pr": "int",
       "pr_branch": "str",
       "pr_head": "str",
+      "range_policy": "str",
+      "repo": "str",
       "review_pin": "str",
       "run_id": "str",
       "started_at": "str",
       "target": "str",
+      "workId": "str",
       "worktree": "str",
       "wt_branch": "str"
     },
