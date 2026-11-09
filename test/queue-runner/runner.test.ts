@@ -18,6 +18,7 @@ describe('queue runner skeleton', () => {
     expect(result).toEqual({ artifact: { status: 'ok', value: 'planned' }, exitCode: 0 });
     expect(JSON.parse(await readFile(join(root, 'shadow', 'tick-1.json'), 'utf8'))).toEqual({
       command: 'tick',
+      value: 'planned',
       mutations: [{ operation: 'write', target: 'queue.json', value: { x: 1 } }],
     });
     expect(await readdir(root)).toEqual(['shadow']);
@@ -47,4 +48,25 @@ describe('queue runner skeleton', () => {
       ).exitCode,
     ).toBe(1);
   });
+});
+
+it('executes the built CLI dry-run against a queue without changing its bytes', async () => {
+  const { spawnSync } = await import('node:child_process');
+  const { writeFile } = await import('node:fs/promises');
+  const { fileURLToPath } = await import('node:url');
+  const root = await mkdtemp(join(tmpdir(), 'crq-cli-'));
+  const queue = '{"items":[],"last_tick":"old"}\n';
+  await writeFile(join(root, 'queue.json'), queue);
+  const cli = fileURLToPath(new URL('../../dist/queue-runner/crq.js', import.meta.url));
+  const result = spawnSync(process.execPath, [cli, 'tick', '--dry-run'], { cwd: root, encoding: 'utf8' });
+  expect(result.status).toBe(1);
+  expect(JSON.parse(result.stdout).status).toBe('indeterminate');
+  const files = await readdir(join(root, 'shadow'));
+  expect(files).toHaveLength(1);
+  const shadow = JSON.parse(await readFile(join(root, 'shadow', files[0]!), 'utf8'));
+  expect(shadow.value.complete).toBe(false);
+  expect(shadow.mutations).toEqual([
+    { operation: 'set', target: 'queue.json#/last_tick', value: expect.any(String) },
+  ]);
+  expect(await readFile(join(root, 'queue.json'), 'utf8')).toBe(queue);
 });
