@@ -258,6 +258,19 @@ def harvest(c, q, item, dry=False):
     messages = []
     for run, record in item.get('repair_runs', {}).items():
         if record['state'] in ('published', 'done', 'failed', 'stale'):
+            if not dry and record.get('verdicts') and hasattr(c, 'WT_ROOT') and hasattr(c, 'CLONE'):
+                from crq_repair.retain import cleanup_harvested
+                for result in record['verdicts']:
+                    if not isinstance(result, dict):
+                        continue
+                    job_id = result.get('job', '')
+                    if isinstance(job_id, str) and JOB_ID.fullmatch(job_id):
+                        try:
+                            for alternate in (False, True):
+                                cleanup_harvested(c.CLONE, c.WT_ROOT, c.STATE / 'repair' / job_id,
+                                                  item['id'], job_id, result, alternate=alternate)
+                        except (OSError, ValueError, KeyError, TypeError, RuntimeError) as exc:
+                            messages.append('repair cleanup ' + job_id + ': ' + str(exc)[:300])
             # Reconcile atomically persisted publication after a caller crash.
             if item['kind'] == review_receipt.KIND:
                 item['state'] = 'done'

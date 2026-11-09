@@ -51,9 +51,14 @@ def recover(root, config, job_id, scan, judge, prepare):
     patch = git(worktree, 'diff', '--no-ext-diff', '--no-textconv', '--binary', base, '--')
     status = git(worktree, 'status', '--porcelain', '--untracked-files=all')
     archives = []
+    seen = {}
     for manifest_path in sorted(directory.glob('**/retained-*/manifest.json')):
         manifest = json.loads(manifest_path.read_text())
-        retained = {'location': str(manifest_path.relative_to(directory)), 'manifest': manifest, 'patches': []}
+        token = hashlib.sha256(json.dumps(manifest, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+        if manifest_path.parent.name != 'retained-' + token:
+            raise ValueError('retained attempt manifest digest mismatch')
+        location = str(manifest_path.relative_to(directory))
+        retained = {'location': location, 'manifest': manifest, 'patches': []}
         for name in ('staged.patch', 'unstaged.patch', 'committed.patch', 'untracked.tar', 'commits.bundle'):
             file = manifest_path.parent / name
             with file.open('rb') as stream:
@@ -64,7 +69,11 @@ def recover(root, config, job_id, scan, judge, prepare):
                 if file.stat().st_size > MAX_EVIDENCE:
                     raise ValueError('retained patch exceeds bounded context')
                 retained['patches'].append(file.read_bytes().decode(errors='replace'))
-        archives.append(retained)
+        if token in seen:
+            seen[token].setdefault('duplicate_locations', []).append(location)
+        else:
+            archives.append(retained)
+            seen[token] = retained
     source_result = command(['git', 'show', tip + ':' + path], cwd=config['clone'])
     if source_result.returncode:
         raise ValueError('current source unavailable')

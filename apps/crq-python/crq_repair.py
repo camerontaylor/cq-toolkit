@@ -255,7 +255,13 @@ def process(config, job, wt):
         if result.get('dispatch_pending'):
             saved_wt = Path(result.get('worktree', '')).resolve()
             if saved_wt == Path(wt).resolve():
-                retain(saved_wt, job['repair_base'], directory / 'interrupted')
+                try:
+                    retain(saved_wt, job['repair_base'], directory / 'interrupted')
+                except Exception as exc:
+                    result.update(verdict='FAILED', reason='interrupted worktree retention failed: ' + str(exc)[:600], finished_at=utc())
+                    result.pop('dispatch_pending', None)
+                    atomic(result_path, result)
+                    return result
             result.update(verdict='FAILED', reason='worker interrupted with unknown outcome; needs human', finished_at=utc())
             result.pop('dispatch_pending', None)
             atomic(result_path, result)
@@ -391,11 +397,13 @@ def process(config, job, wt):
         result['next_rung'] = rung + 1
         atomic(progress_path, result)
         rung += 1
-    if result.get('verdict') == 'FAILED':
-        try:
-            retain(wt, base, directory / 'final')
-        except Exception as exc:
-            result['reason'] = 'worktree retention failed: ' + str(exc)[:600]
+    try:
+        # Even a clean, unchanged terminal tree needs a verifiable snapshot:
+        # harvest may retire it only after this capture succeeds.
+        retain(wt, base, directory / 'final', include_clean=True)
+    except Exception as exc:
+        result['verdict'] = 'FAILED'
+        result['reason'] = 'worktree retention failed: ' + str(exc)[:600]
     result['finished_at'] = utc()
     atomic(result_path, result)
     return result
