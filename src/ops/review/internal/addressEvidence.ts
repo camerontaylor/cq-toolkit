@@ -12,7 +12,7 @@ import {
   readdir,
   rmdir,
 } from 'node:fs/promises';
-import { delimiter, dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { basename, delimiter, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { GIT_HARDEN, HARDENED_DIFF_FLAGS } from '../../../shared/gitHarden.js';
 import {
@@ -534,6 +534,7 @@ const ordinaryReports = new WeakMap<
 >();
 export async function noteAddressOrdinaryReport(token: object, path: string, bytes: string) {
   await validateAddressTerminalAuthority(token);
+  path = join(await realpath(dirname(path)), basename(path));
   const stat = await lstat(path);
   const digest = digestBytes(Buffer.from(bytes));
   if (
