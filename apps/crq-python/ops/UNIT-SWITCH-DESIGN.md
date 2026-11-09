@@ -28,13 +28,26 @@ controller, test interruption during recovery, or establish restoration of
 all file metadata and symlinks. [Synthetic crash probe](https://github.com/camerontaylor/cq-toolkit/actions/runs/42718527065/job/129506220673).
 The overall job failed at the later manager-restart step.
 
+A [bounded recovery probe](https://github.com/camerontaylor/cq-toolkit/actions/runs/42721329538/job/129515746878)
+on an already-running CI user manager tested a synthetic service symlink to a
+0640 backing file with an enabled and active timer. After SIGKILL at six
+recovery boundaries, two retries at each boundary restored the tested bytes,
+backing-file mode and uid/gid, service symlink target and uid/gid, enablement
+link target, and timer enabled/active state. This used synthetic recovery logic
+and same-user ownership, not the controller or arbitrary privileged ownership;
+it did not test enablement-link ownership/mode, xattrs, ACLs, or power loss.
+It covered one state combination and did not restart the manager or reboot.
+[Earlier repeated starts](https://github.com/camerontaylor/cq-toolkit/actions/runs/42721244160/job/129515458405)
+hit the timer start limit; the passing fixture disabled that limit only for its
+synthetic timer. It does not show that production repeated activation avoids
+rate limits.
+
 Both synthetic user-manager restarts timed out during startup. The diagnostic
 job is green because it recorded the failures as data; it is not a restart pass.
 Socket startup helpers blocked while setting the manager environment; the cause
 was not established and the initial environment comparison was not fully
 hermetic. [Restart diagnosis](https://github.com/camerontaylor/cq-toolkit/actions/runs/42720216729/job/129511976423).
-No VM reboot or power-loss test has been performed. A further bounded probe of
-metadata and recovery interruption on an already-running manager is underway.
+No VM reboot or power-loss test has been performed.
 
 ## Proposed stable-manager sequence
 
