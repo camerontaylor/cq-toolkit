@@ -587,6 +587,21 @@ export class ClaudeCodeCliTransport implements Driver {
         ),
       );
     }
+    // --- Post-setup governed-cancellation recheck (I8): the session record,
+    // manifest, CLI-resume-id and MCP-config awaits above can span an abort
+    // that fires after the pre-dispatch check — never launch a child (client
+    // spend) for a run cancelled while those were in flight.
+    if (signalAborted(signal)) {
+      await removeMcpConfig(mcpConfigPath);
+      return {
+        usage: zeroUsage(),
+        usageProvenance: 'unmeasured',
+        sessionId: record.sessionId,
+        denials: [],
+        stopReason: 'aborted',
+      };
+    }
+
     let child: ManagedChild;
     try {
       child = this.spawnImpl({
