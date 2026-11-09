@@ -89,11 +89,15 @@ const isProtectedRef = (ref: string, protectedBranch: string): boolean =>
  * the guard through however innocuous its tokens look. The eight shapes
  * (after the `-C <path>` prefix is stripped):
  *   rev-parse <flags/ref>…                    — ref resolution (≥1 arg)
- *   fetch <remote> <refspec>…                 — refspecs may carry the '+'
- *       in-place marker, but a ':'-refspec whose (+-stripped) DESTINATION
- *       names the protected branch is a forced update of that branch —
- *       refused; colon-less refspecs land in FETCH_HEAD only and cannot
- *       move a branch, so they need no destination check
+ *   fetch <remote> <refspec>…                 — FLAG-FREE and GLOB-FREE
+ *       (round 4: the documented shape carries neither, so `fetch origin
+ *       --upload-pack=<cmd>` — the remote slot included — and a glob
+ *       refspec whose '*' destination would hide the protected branch are
+ *       refused like any other undocumented token). Refspecs may carry the
+ *       '+' in-place marker, but a ':'-refspec whose (+-stripped)
+ *       DESTINATION names the protected branch is a forced update of that
+ *       branch — refused; colon-less refspecs land in FETCH_HEAD only and
+ *       cannot move a branch, so they need no destination check
  *   worktree add -B <label> <path> <ref>      — the exact prepare shape
  *   worktree list|remove <arg>…               — rough arity, FLAG-FREE
  *       (round 3: the documented shapes carry no flags, so `worktree
@@ -134,6 +138,21 @@ export function safeArgs(args: readonly string[], opts: SafeArgsOpts = {}): read
     case 'fetch': {
       const tail = rest.slice(1);
       if (tail.length < 2) throw unknown(); // remote + ≥1 refspec
+      // FLAG-FREE and GLOB-FREE (round 4), the same rule push and worktree
+      // already carry: the documented fetch shape carries no flags, and the
+      // remote slot is not exempt — `fetch origin --upload-pack=<cmd>` and
+      // `fetch --upload-pack=<cmd> origin x` are refused on sight. A glob in
+      // a refspec (`+refs/heads/*:refs/heads/*`) names no single destination,
+      // so the protected-branch check below could not see the forced update
+      // it authorizes — refused too.
+      for (const arg of tail) {
+        if (arg.startsWith('-') || /[*?[\\]/.test(arg)) {
+          throw new UnsafeMergeArgsError(
+            args,
+            `flags and globs are not part of the documented fetch shape — refused ${JSON.stringify(arg)}`,
+          );
+        }
+      }
       for (const refspec of tail.slice(1)) {
         if (refspec.includes(':')) {
           const dst = pushDestination(refspec.replace(/^\+/, ''));
