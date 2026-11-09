@@ -213,11 +213,17 @@ export const registry: OpRegistryEntry[] = [
               import('./denylist.js'),
               import('node:fs/promises'),
             ]);
-            const dev = effects.makeSubprocessDevEffects(input.repoRoot);
-            const scanSecrets = await denylist.checkScannerFor(input.repoRoot, dev, (path) =>
-              fs.readFile(path, 'utf8'),
-            );
-            return m.makeDevCheck(dev, scanSecrets)(input);
+            // The setup reads the repository (the scanner probe), so it runs
+            // only AFTER the guard parsed the dispatched input: an SDK caller
+            // passing a null input or an empty repoRoot gets the `failed`
+            // taxonomy, never a rejection or a read of `/cq.json`.
+            return effects.guardDevOp('dev.check', DevCheckInputSchema, async (parsed) => {
+              const dev = effects.makeSubprocessDevEffects(parsed.repoRoot);
+              const scanSecrets = await denylist.checkScannerFor(parsed.repoRoot, dev, (path) =>
+                fs.readFile(path, 'utf8'),
+              );
+              return m.makeDevCheck(dev, scanSecrets)(parsed);
+            })(input);
           }) as Op<unknown, unknown>,
       ),
   },
@@ -256,47 +262,53 @@ export const registry: OpRegistryEntry[] = [
         ]) =>
           (async (input: DevReviewInput) => {
             if (m.isAdmissionInput(input)) return admission.envAuthorAdmission(input);
-            const { repoRoot } = input as DevCycleInput;
-            const dev = effects.makeSubprocessDevEffects(repoRoot);
-            // Portable default: gitleaks' built-in rules apply everywhere.
-            // A repo-specific scanner is added only when cq.json configures
-            // its optional patterns file; missing toolkit policy is never a
-            // prerequisite for an adopter review.
-            const readFile = (path: string) => fs.readFile(path, 'utf8');
-            const configText = await readFile(`${repoRoot}/cq.json`).catch(() => null);
-            const packageName = await agentReview.readPackageName(readFile, repoRoot);
-            const scanSecrets = denylist.makePortableReviewScanner(
-              repoRoot,
-              dev,
-              configText,
-              packageName,
-            );
-            let patternsFile: string | undefined;
-            let configuredReviewers: readonly string[] | undefined;
-            if (configText !== null) {
-              const parsed = cqConfig.parseCqConfig(configText, repoRoot);
-              if (parsed.ok) {
-                const policy = cqDefaults.resolveCqConfigDefaults(parsed.config, {
-                  packageName,
-                }).review;
-                patternsFile = policy.denylistPatternsFile;
-                configuredReviewers = policy.reviewers;
-              }
-            }
-            const drivers = driverFactory.createDriverFactory();
-            return m.makeDevReview({
-              effects: dev,
-              scanSecrets,
-              ...(patternsFile === undefined ? {} : { patternsFile }),
-              ...(configuredReviewers === undefined ? {} : { configuredReviewers }),
-              runAgentReviewer: agentReview.makeAgentReviewRunner({
+            // The cycle branch's setup READS the repository (cq.json,
+            // package.json, the scanner probe), so it stays behind the guard:
+            // an SDK caller passing null or an empty repoRoot gets the
+            // `failed` taxonomy, never a rejection or a read of `/cq.json`.
+            return effects.guardDevOp('dev.review', DevCycleInputSchema, async (parsed) => {
+              const { repoRoot } = parsed;
+              const dev = effects.makeSubprocessDevEffects(repoRoot);
+              // Portable default: gitleaks' built-in rules apply everywhere.
+              // A repo-specific scanner is added only when cq.json configures
+              // its optional patterns file; missing toolkit policy is never a
+              // prerequisite for an adopter review.
+              const readFile = (path: string) => fs.readFile(path, 'utf8');
+              const configText = await readFile(`${repoRoot}/cq.json`).catch(() => null);
+              const packageName = await agentReview.readPackageName(readFile, repoRoot);
+              const scanSecrets = denylist.makePortableReviewScanner(
                 repoRoot,
-                readFile,
-                drivers,
+                dev,
+                configText,
+                packageName,
+              );
+              let patternsFile: string | undefined;
+              let configuredReviewers: readonly string[] | undefined;
+              if (configText !== null) {
+                const config = cqConfig.parseCqConfig(configText, repoRoot);
+                if (config.ok) {
+                  const policy = cqDefaults.resolveCqConfigDefaults(config.config, {
+                    packageName,
+                  }).review;
+                  patternsFile = policy.denylistPatternsFile;
+                  configuredReviewers = policy.reviewers;
+                }
+              }
+              const drivers = driverFactory.createDriverFactory();
+              return m.makeDevReview({
+                effects: dev,
                 scanSecrets,
-                run: agentReviewer.runAgentReviewer,
-              }),
-            })(input);
+                ...(patternsFile === undefined ? {} : { patternsFile }),
+                ...(configuredReviewers === undefined ? {} : { configuredReviewers }),
+                runAgentReviewer: agentReview.makeAgentReviewRunner({
+                  repoRoot,
+                  readFile,
+                  drivers,
+                  scanSecrets,
+                  run: agentReviewer.runAgentReviewer,
+                }),
+              })(parsed);
+            })(input as DevCycleInput);
           }) as Op<unknown, unknown>,
       ),
   },
@@ -344,48 +356,58 @@ export const registry: OpRegistryEntry[] = [
       ]).then(
         ([m, effects, ghEffects, denylist, fs]) =>
           (async (input: DevCycleCompositionInput) => {
-            const dev = effects.makeSubprocessDevEffects(input.repoRoot);
-            // The secret scanner a check leg binds: the SAME two-layer
-            // portable composition the dev.check entry carries (gitleaks
-            // defaults; the repo's optional cq.json patterns file rides
-            // makePortableReviewScanner) — built for one checkout ROOT, so the
-            // #536 probe worktree gets its own, from its own configuration.
-            const readFile = (path: string) => fs.readFile(path, 'utf8');
-            const scannerFor = async (root: string, rootEffects: typeof dev) =>
-              denylist.checkScannerFor(root, rootEffects, readFile);
-            const scanSecrets = await scannerFor(input.repoRoot, dev);
-            // #536: the red-final-gate fallback's probe worktree binds its own
-            // effects (same construction as `dev`). Its dependency install is
-            // wired ONLY for a pnpm-locked repository: an offline, frozen
-            // install from the existing store — bounded, abortable, no
-            // network and no fallback. Without a lockfile the fallback is off.
-            const pnpmLocked = await fs
-              .access(`${input.repoRoot}/pnpm-lock.yaml`)
-              .then(() => true)
-              .catch(() => false);
-            return m.makeDevCycle({
-              effects: dev,
-              gh: ghEffects.makeSubprocessPrEffects(input.repoRoot),
-              ...(scanSecrets === undefined ? {} : { scanSecrets }),
-              effectsFor: (root: string) => effects.makeSubprocessDevEffects(root),
-              scanSecretsFor: scannerFor,
-              ...(pnpmLocked
-                ? {
-                    installDeps: async (root: string, signal: AbortSignal) => {
-                      const installed = await effects
-                        .makeSubprocessDevEffects(root)
-                        .runCommand('pnpm', ['install', '--offline', '--frozen-lockfile'], {
-                          timeoutMs: m.GREEN_PREFIX_INSTALL_TIMEOUT_MS,
-                          signal,
-                        });
-                      if (installed.exitCode !== 0)
-                        throw new Error(
-                          `pnpm install --offline --frozen-lockfile ${installed.timedOut ? 'timed out' : `exited ${String(installed.exitCode)}`}: ${installed.stderr.trim().slice(-300)}`,
-                        );
-                    },
-                  }
-                : {}),
-            })(input);
+            // The setup READS the repository (the secret scanner probe and
+            // the lockfile probe below), so it stays behind the guard: an SDK
+            // caller passing null or an empty repoRoot gets the `failed`
+            // taxonomy, never a rejection or a read of `/pnpm-lock.yaml`.
+            return effects.guardDevOp(
+              'dev.cycle',
+              DevCycleCompositionInputSchema,
+              async (parsed) => {
+                const dev = effects.makeSubprocessDevEffects(parsed.repoRoot);
+                // The secret scanner a check leg binds: the SAME two-layer
+                // portable composition the dev.check entry carries (gitleaks
+                // defaults; the repo's optional cq.json patterns file rides
+                // makePortableReviewScanner) — built for one checkout ROOT, so the
+                // #536 probe worktree gets its own, from its own configuration.
+                const readFile = (path: string) => fs.readFile(path, 'utf8');
+                const scannerFor = async (root: string, rootEffects: typeof dev) =>
+                  denylist.checkScannerFor(root, rootEffects, readFile);
+                const scanSecrets = await scannerFor(parsed.repoRoot, dev);
+                // #536: the red-final-gate fallback's probe worktree binds its own
+                // effects (same construction as `dev`). Its dependency install is
+                // wired ONLY for a pnpm-locked repository: an offline, frozen
+                // install from the existing store — bounded, abortable, no
+                // network and no fallback. Without a lockfile the fallback is off.
+                const pnpmLocked = await fs
+                  .access(`${parsed.repoRoot}/pnpm-lock.yaml`)
+                  .then(() => true)
+                  .catch(() => false);
+                return m.makeDevCycle({
+                  effects: dev,
+                  gh: ghEffects.makeSubprocessPrEffects(parsed.repoRoot),
+                  ...(scanSecrets === undefined ? {} : { scanSecrets }),
+                  effectsFor: (root: string) => effects.makeSubprocessDevEffects(root),
+                  scanSecretsFor: scannerFor,
+                  ...(pnpmLocked
+                    ? {
+                        installDeps: async (root: string, signal: AbortSignal) => {
+                          const installed = await effects
+                            .makeSubprocessDevEffects(root)
+                            .runCommand('pnpm', ['install', '--offline', '--frozen-lockfile'], {
+                              timeoutMs: m.GREEN_PREFIX_INSTALL_TIMEOUT_MS,
+                              signal,
+                            });
+                          if (installed.exitCode !== 0)
+                            throw new Error(
+                              `pnpm install --offline --frozen-lockfile ${installed.timedOut ? 'timed out' : `exited ${String(installed.exitCode)}`}: ${installed.stderr.trim().slice(-300)}`,
+                            );
+                        },
+                      }
+                    : {}),
+                })(parsed);
+              },
+            )(input);
           }) as Op<unknown, unknown>,
       ),
   },
