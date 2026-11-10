@@ -239,7 +239,11 @@ was quiet: load1 0.05 at start and 0.62 at finish, with 14,564,640 KiB and
 13,802,748 KiB `MemAvailable` respectively. The harness window was 15:43:09Z to
 15:44:33Z (84 s); that is an observation under that load, not a performance
 claim. The guest had 2 vCPU and 2048 MiB, and the QEMU process stayed at PID
-396121 across the reboot with its start identity verified.
+396121 across the reboot with its start identity verified. The stricter
+host-only snapshot validator at `270b7e955` (host script SHA-256
+`04757807a7af3de2824054e9dd79ba3b706c109e62498f8ec5dd56a44362b996`, unchanged
+guest bytes `11041fbc...`) was run against this same raw report and `verify`
+still returned `{"problems": []}`; no guest rerun was required.
 
 Earlier runs are retained for history. `20261110T142207Z-8c1668ea` predates
 schema 2 and has no executed-script/commit binding; `20261110T144209Z-75683132`
@@ -280,7 +284,7 @@ snapshot requirements; its host script was `469b04d2...` and source commit
 | QEMU PID/start identity unchanged across the guest reboot | yes: PID 396121, identity verified |
 | timer and path state recorded after reboot | both `inactive`/`enabled`, `SubState=dead`; target service still masked |
 | no new fixture service run after reboot | yes; run log delta empty |
-| unit/backing/enablement metadata restored | yes; every required snapshot path is present with its applicable metadata, and the install and post-unmask snapshots compare with no changes (the synthetic trigger file is excluded) |
+| unit/backing/enablement metadata restored | yes; every required installed path exists with its expected type and applicable metadata, the optional backup paths are allowed to be absent, and the install and post-unmask snapshots compare with no changes (the synthetic trigger file is excluded) |
 | unit/backing/enablement metadata unchanged across reboot | yes; the same required paths and fields are present in both reboot snapshots and compare with no changes (trigger excluded) |
 | unmask starts the fixture again | yes, unmask delta `["service"]` |
 | executed bytes bound and verified | yes; source commit plus host/guest SHA-256, retained copies and remote guest digest all match |
