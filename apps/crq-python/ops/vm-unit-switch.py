@@ -150,6 +150,17 @@ def _load(name, path):
 
 vm = _load("crq_vm_feasibility", OPS / "vm-feasibility.py")
 RECORDS_DIR = "/home/%s/records" % vm.GUEST_USER
+FIXTURE_DIR = "/home/%s/fixture" % vm.GUEST_USER
+UNIT_DIR = "/home/%s/.config/systemd/user" % vm.GUEST_USER
+SERVICE_PATH = UNIT_DIR + "/crq-tick.service"
+TIMER_PATH = UNIT_DIR + "/crq-tick.timer"
+WANTS_PATH = UNIT_DIR + "/timers.target.wants/crq-tick.timer"
+STAGED_PATH = UNIT_DIR + "/.crq-tick.service.staged"
+COMPLETIONS_PATH = FIXTURE_DIR + "/completions.jsonl"
+HISTORY_PATH = RECORDS_DIR + "/controller-" + "a" * 32 + ".json"
+CASE_RECORD_DIRS = (RECORDS_DIR + "/ambiguity-manager-restart",
+                    RECORDS_DIR + "/ambiguity-guest-reboot")
+RECORD_ROOTS = (RECORDS_DIR,) + CASE_RECORD_DIRS
 adapter_mod = _load("crq_unit_switch_adapter", OPS / "unit-switch-adapter.py")
 
 
@@ -818,16 +829,116 @@ def _cleanup_never_signalled(phase):
                     for item in cleanup))
 
 
+def _record_path_ok(value):
+    if not isinstance(value, str) or not value.endswith(".json"):
+        return False
+    for root in RECORD_ROOTS:
+        prefix = root + "/"
+        if value.startswith(prefix):
+            name = value[len(prefix):]
+            if "/" not in name and name.startswith("controller-"):
+                return True
+    return False
+
+
 def _path_list_ok(value):
     return (isinstance(value, list) and bool(value)
-            and all(isinstance(item, str) and bool(item) for item in value))
+            and all(_record_path_ok(item) for item in value))
 
 
-def _record_list_ok(value):
-    return (isinstance(value, list) and bool(value)
+def _record_list_ok(value, allow_empty=False):
+    return (isinstance(value, list) and (allow_empty or bool(value))
             and all(isinstance(item, dict) and _sha_present(item)
-                    and isinstance(item.get("path"), str) and bool(item["path"])
+                    and _record_path_ok(item.get("path"))
+                    and type(item.get("bytes")) is int and item["bytes"] > 0
                     for item in value))
+
+
+def _all_records_ok(value):
+    if not isinstance(value, dict) or set(value) != set(RECORD_ROOTS):
+        return False
+    return (_record_list_ok(value.get(RECORDS_DIR))
+            and all(_record_list_ok(value.get(root), allow_empty=True)
+                    for root in CASE_RECORD_DIRS))
+
+
+def _path_entry_ok(entry, path, allowed, expected_sha=None, *,
+                   with_bytes=False, require_path=False,
+                   require_xattrs=False):
+    if not isinstance(entry, dict) or entry.get("type") not in allowed:
+        return False
+    if require_path and entry.get("path") != path:
+        return False
+    state = entry["type"]
+    if state == "missing":
+        keys = {"type", "path"} if require_path else {"type"}
+        return set(entry) == keys
+    if not (type(entry.get("mode")) is int and entry["mode"] >= 0
+            and type(entry.get("uid")) is int and entry["uid"] >= 0
+            and type(entry.get("gid")) is int and entry["gid"] >= 0):
+        return False
+    if require_xattrs and not (
+            isinstance(entry.get("xattrs"), list)
+            and all(isinstance(item, str) for item in entry["xattrs"])):
+        return False
+    if state == "file":
+        size = entry.get("size")
+        digest = entry.get("sha256")
+        if not _sha256_text(digest) or type(size) is not int or size <= 0:
+            return False
+        if with_bytes:
+            encoded = entry.get("bytes_b64")
+            if not isinstance(encoded, str) or not encoded:
+                return False
+            try:
+                raw = base64.b64decode(encoded, validate=True)
+            except (ValueError, TypeError):
+                return False
+            if len(raw) != size or sha256_bytes(raw) != digest:
+                return False
+        return expected_sha is None or digest == expected_sha
+    if state == "symlink":
+        target = entry.get("target")
+        if not isinstance(target, str) or not target:
+            return False
+        return target == "../crq-tick.timer" if path == WANTS_PATH else True
+    return False
+
+
+METADATA_TYPES = {
+    SERVICE_PATH: ("file",),
+    TIMER_PATH: ("file",),
+    WANTS_PATH: ("symlink",),
+    STAGED_PATH: ("missing", "file"),
+}
+FILE_TYPES = {
+    SERVICE_PATH: ("file",),
+    TIMER_PATH: ("file",),
+    WANTS_PATH: ("symlink",),
+    STAGED_PATH: ("missing", "file"),
+    COMPLETIONS_PATH: ("missing", "file"),
+    HISTORY_PATH: ("file",),
+}
+
+
+def _metadata_ok(metadata, service_sha=None):
+    if not isinstance(metadata, dict) or set(metadata) != set(METADATA_TYPES):
+        return False
+    return all(
+        _path_entry_ok(metadata[path], path, allowed,
+                       service_sha if path == SERVICE_PATH else None,
+                       with_bytes=True, require_xattrs=True)
+        for path, allowed in METADATA_TYPES.items())
+
+
+def _files_ok(files, service_sha=None):
+    if not isinstance(files, dict) or set(files) != set(FILE_TYPES):
+        return False
+    return all(
+        _path_entry_ok(files[path], path, allowed,
+                       service_sha if path == SERVICE_PATH else None,
+                       require_path=True)
+        for path, allowed in FILE_TYPES.items())
 
 
 def _process_ok(value, alive):
@@ -883,7 +994,7 @@ def _liveness_ok(phase, state):
             and liveness[0].get("item") == item)
 
 
-def _snapshot_preservation_ok(snapshot):
+def _snapshot_preservation_ok(snapshot, service_sha=None):
     if not isinstance(snapshot, dict):
         return False
     state = snapshot.get("state")
@@ -900,45 +1011,43 @@ def _snapshot_preservation_ok(snapshot):
             and _sha256_text(state.get("heartbeat.json"))):
         return False
     if not (isinstance(units, dict)
-            and isinstance(units.get("crq-tick.service"), dict)
-            and isinstance(units.get("crq-tick.timer"), dict)):
+            and set(units) == {"crq-tick.service", "crq-tick.timer"}):
         return False
-    for name in ("crq-tick.service", "crq-tick.timer"):
+    for name, path, file_state in (
+            ("crq-tick.service", SERVICE_PATH, "static"),
+            ("crq-tick.timer", TIMER_PATH, "enabled")):
         unit = units[name]
+        if not isinstance(unit, dict):
+            return False
         for key in ("LoadState", "ActiveState", "SubState", "UnitFileState",
                     "FragmentPath", "Result"):
             if not isinstance(unit.get(key), str) or not unit[key]:
                 return False
         if not isinstance(unit.get("InvocationID"), str):
             return False
-    if not (isinstance(metadata, dict) and metadata):
+        if (unit["FragmentPath"] != path
+                or unit["UnitFileState"] != file_state):
+            return False
+    if not _metadata_ok(metadata, service_sha):
         return False
-    suffixes = ("crq-tick.service", "crq-tick.timer",
-                "timers.target.wants/crq-tick.timer",
-                ".crq-tick.service.staged")
-    for suffix in suffixes:
-        if not any(key.endswith("/" + suffix) for key in metadata):
-            return False
-    for value in metadata.values():
-        if not isinstance(value, dict):
-            return False
-        if value.get("type") == "file":
-            if not (_sha256_text(value.get("sha256"))
-                    and type(value.get("mode")) is int
-                    and type(value.get("uid")) is int
-                    and type(value.get("gid")) is int):
-                return False
-        elif value.get("type") == "symlink":
-            if not isinstance(value.get("target"), str) or not value["target"]:
-                return False
-        elif value.get("type") != "missing":
+    if not _files_ok(files, service_sha):
+        return False
+    for path in (SERVICE_PATH, TIMER_PATH):
+        if metadata[path].get("sha256") != files[path].get("sha256"):
             return False
     if not isinstance(jobs, list) or not _record_list_ok(records):
         return False
-    if not (isinstance(all_records, dict)
-            and _record_list_ok(all_records.get(RECORDS_DIR))):
+    if not _all_records_ok(all_records):
         return False
-    if not _sha_present(history):
+    if all_records[RECORDS_DIR] != records:
+        return False
+    if not (_sha_present(history)
+            and _record_path_ok(history.get("path"))
+            and any(item["path"] == history["path"]
+                    and item["sha256"] == history["sha256"]
+                    for item in records)):
+        return False
+    if files[HISTORY_PATH].get("sha256") != history["sha256"]:
         return False
     if not isinstance(completions, list):
         return False
@@ -946,12 +1055,12 @@ def _snapshot_preservation_ok(snapshot):
                and type(entry.get("sequence")) is int
                for entry in completions):
         return False
-    return isinstance(files, dict) and bool(files)
+    return True
 
 
-def _snapshot_preserved(before, after):
-    if not (_snapshot_preservation_ok(before)
-            and _snapshot_preservation_ok(after)):
+def _snapshot_preserved(before, after, service_sha=None):
+    if not (_snapshot_preservation_ok(before, service_sha)
+            and _snapshot_preservation_ok(after, service_sha)):
         return False
     return all(before.get(key) == after.get(key)
                for key in ("state", "units", "metadata", "jobs", "records",
@@ -991,8 +1100,12 @@ def _drain_refusal_ok(phase, kind):
     drain = phase.get("drain") or {}
     seeded_run = (phase.get("seeded") or {}).get("run_id")
     owned = (phase.get("processes") or {}).get("owned")
+    runtime = phase.get("current_runtime")
+    service_sha = (_sha(expected_unit(runtime))
+                   if runtime in (NODE_RUNTIME, PYTHON_RUNTIME) else None)
     return (
         cli.get("rc") == 2
+        and service_sha is not None
         and "queue-owned work" in (phase.get("refused") or "")
         and _blocked_observation_ok(observation)
         and _blocked_observation_ok(drain)
@@ -1006,7 +1119,7 @@ def _drain_refusal_ok(phase, kind):
         and phase.get("records_before") == phase.get("records_after")
         and _count_ok(phase.get("completions_before"))
         and phase.get("completions_before") == phase.get("completions_after")
-        and _snapshot_preserved(before, after)
+        and _snapshot_preserved(before, after, service_sha)
         and (("owned" in (phase.get("processes") or {})
               and owned is None) if kind == "ambiguous"
              else _owned_alive_ok(phase))
@@ -1064,7 +1177,8 @@ def _drain_harvest_ok(phase):
         and _process_ok(completed, False)
         and completed["pid"] == seeded_process.get("pid")
         and completed["starttime"] == seeded_process.get("starttime")
-        and _snapshot_preservation_ok(after)
+        and _snapshot_preservation_ok(
+            after, _sha(expected_unit(PYTHON_RUNTIME)))
         and (after.get("units") or {}).get(
             "crq-tick.timer", {}).get("ActiveState") == "inactive"
         and _sha256_text(seeded.get("queue.json"))
@@ -1106,7 +1220,7 @@ def _recovery_drain_refusal_ok(phase, service_path, baseline_queue):
         and drain == observation
         and _liveness_ok(phase, "alive")
         and isinstance(phase.get("record_path"), str)
-        and bool(phase["record_path"])
+        and _record_path_ok(phase["record_path"])
         and _record_summary_ok(before)
         and _record_summary_ok(after)
         and before["path"] == phase["record_path"]

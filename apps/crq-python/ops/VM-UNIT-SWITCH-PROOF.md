@@ -178,7 +178,10 @@ outside the worktree.
 
 The tightened preservation checks were then re-run against both retained
 reports with host script
-``a1404cf07861d540c6525abff26fdb530fa25d4770c5100b2d73db42f7876df9``. Both
+``d7047bd56ea2ed6a5a7a7857fed0e17f2c35dbd8ba8930929ad4b8cd19ffc5ad``. That
+validator binds the snapshot to the expected guest unit, timer, enablement and
+staged paths, their installed types and metadata fields, the history record and
+the expected record roots. Both
 still returned ``problems: []``, with ``guest_matches_run: true``,
 ``host_matches_run: false`` and ``validator_only: true``: only the validator
 changed; the guest script, report and raw evidence are unchanged. This is a
