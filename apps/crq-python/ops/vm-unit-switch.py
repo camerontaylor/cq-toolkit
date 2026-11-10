@@ -101,6 +101,7 @@ def phase_names(mode="base"):
 
 HEX40 = re.compile(r"[0-9a-f]{40}\Z")
 HEX64 = re.compile(r"[0-9a-f]{64}\Z")
+HEX32 = re.compile(r"[0-9a-f]{32}\Z")
 LIMITATIONS = [
     "One representative harmless fixture is installed under the allowlisted "
     "unit name crq-tick.service; no production template is rendered.",
@@ -148,6 +149,7 @@ def _load(name, path):
 
 
 vm = _load("crq_vm_feasibility", OPS / "vm-feasibility.py")
+RECORDS_DIR = "/home/%s/records" % vm.GUEST_USER
 adapter_mod = _load("crq_unit_switch_adapter", OPS / "unit-switch-adapter.py")
 
 
@@ -816,36 +818,199 @@ def _cleanup_never_signalled(phase):
                     for item in cleanup))
 
 
+def _path_list_ok(value):
+    return (isinstance(value, list) and bool(value)
+            and all(isinstance(item, str) and bool(item) for item in value))
+
+
+def _record_list_ok(value):
+    return (isinstance(value, list) and bool(value)
+            and all(isinstance(item, dict) and _sha_present(item)
+                    and isinstance(item.get("path"), str) and bool(item["path"])
+                    for item in value))
+
+
+def _process_ok(value, alive):
+    return (isinstance(value, dict)
+            and type(value.get("pid")) is int and value["pid"] > 0
+            and value.get("alive") is alive
+            and isinstance(value.get("starttime"), str)
+            and bool(value["starttime"]))
+
+
+def _same_live_process(before, after):
+    return (_process_ok(before, True) and _process_ok(after, True)
+            and before["pid"] == after["pid"]
+            and before["starttime"] == after["starttime"])
+
+
+def _owned_alive_ok(phase):
+    seeded = ((phase.get("seeded") or {}).get("process") or {})
+    owned = (phase.get("processes") or {}).get("owned")
+    return (_process_ok(owned, True)
+            and owned["pid"] == seeded.get("pid")
+            and owned["starttime"] == seeded.get("starttime"))
+
+
+def _unrelated_alive_ok(phase):
+    unrelated = (phase.get("processes") or {}).get("unrelated") or {}
+    return _same_live_process(unrelated.get("before"), unrelated.get("after"))
+
+
+def _blocked_observation_ok(value):
+    return (isinstance(value, dict)
+            and value.get("drained") is False
+            and isinstance(value.get("blocked"), list)
+            and bool(value["blocked"])
+            and all(isinstance(entry, dict)
+                    and entry.get("state") in ("alive", "ambiguous")
+                    and isinstance(entry.get("run"), str) and bool(entry["run"])
+                    and isinstance(entry.get("item"), str) and bool(entry["item"])
+                    for entry in value["blocked"]))
+
+
+def _liveness_ok(phase, state):
+    seeded = phase.get("seeded") or {}
+    liveness = phase.get("liveness")
+    run_id = seeded.get("run_id")
+    item = (seeded.get("item") or {}).get("id")
+    return (isinstance(liveness, list) and len(liveness) == 1
+            and isinstance(liveness[0], dict)
+            and liveness[0].get("state") == state
+            and isinstance(run_id, str) and bool(run_id)
+            and isinstance(item, str) and bool(item)
+            and liveness[0].get("run_id") == run_id
+            and liveness[0].get("item") == item)
+
+
+def _snapshot_preservation_ok(snapshot):
+    if not isinstance(snapshot, dict):
+        return False
+    state = snapshot.get("state")
+    units = snapshot.get("units")
+    metadata = snapshot.get("metadata")
+    jobs = snapshot.get("jobs")
+    records = snapshot.get("records")
+    all_records = snapshot.get("all_records")
+    history = snapshot.get("history")
+    completions = snapshot.get("completions")
+    files = snapshot.get("files")
+    if not (isinstance(state, dict)
+            and _sha256_text(state.get("queue.json"))
+            and _sha256_text(state.get("heartbeat.json"))):
+        return False
+    if not (isinstance(units, dict)
+            and isinstance(units.get("crq-tick.service"), dict)
+            and isinstance(units.get("crq-tick.timer"), dict)):
+        return False
+    for name in ("crq-tick.service", "crq-tick.timer"):
+        unit = units[name]
+        for key in ("LoadState", "ActiveState", "SubState", "UnitFileState",
+                    "FragmentPath", "Result"):
+            if not isinstance(unit.get(key), str) or not unit[key]:
+                return False
+        if not isinstance(unit.get("InvocationID"), str):
+            return False
+    if not (isinstance(metadata, dict) and metadata):
+        return False
+    suffixes = ("crq-tick.service", "crq-tick.timer",
+                "timers.target.wants/crq-tick.timer",
+                ".crq-tick.service.staged")
+    for suffix in suffixes:
+        if not any(key.endswith("/" + suffix) for key in metadata):
+            return False
+    for value in metadata.values():
+        if not isinstance(value, dict):
+            return False
+        if value.get("type") == "file":
+            if not (_sha256_text(value.get("sha256"))
+                    and type(value.get("mode")) is int
+                    and type(value.get("uid")) is int
+                    and type(value.get("gid")) is int):
+                return False
+        elif value.get("type") == "symlink":
+            if not isinstance(value.get("target"), str) or not value["target"]:
+                return False
+        elif value.get("type") != "missing":
+            return False
+    if not isinstance(jobs, list) or not _record_list_ok(records):
+        return False
+    if not (isinstance(all_records, dict)
+            and _record_list_ok(all_records.get(RECORDS_DIR))):
+        return False
+    if not _sha_present(history):
+        return False
+    if not isinstance(completions, list):
+        return False
+    if not all(isinstance(entry, dict)
+               and type(entry.get("sequence")) is int
+               for entry in completions):
+        return False
+    return isinstance(files, dict) and bool(files)
+
+
+def _snapshot_preserved(before, after):
+    if not (_snapshot_preservation_ok(before)
+            and _snapshot_preservation_ok(after)):
+        return False
+    return all(before.get(key) == after.get(key)
+               for key in ("state", "units", "metadata", "jobs", "records",
+                           "all_records", "history", "completions", "files"))
+
+
+def _queue_restored_ok(queue, before_key, after_key=None):
+    after_key = after_key or before_key
+    return (_sha256_text(queue.get(before_key))
+            and _sha256_text(queue.get(after_key))
+            and _sha256_text(queue.get("baseline_sha256"))
+            and _sha256_text(queue.get("restored_sha256"))
+            and queue[before_key] == queue[after_key]
+            and queue["baseline_sha256"] == queue["restored_sha256"]
+            and queue[before_key] != queue["restored_sha256"])
+
+
+def _count_ok(value, *, positive=False):
+    return (type(value) is int and value >= 0
+            and (value > 0 if positive else True))
+
+
+def _record_summary_ok(value):
+    return (_sha_present(value)
+            and type(value.get("bytes")) is int and value["bytes"] > 0
+            and isinstance(value.get("path"), str) and bool(value["path"])
+            and value.get("outcome") == "pending"
+            and value.get("phase") == "drained")
+
+
 def _drain_refusal_ok(phase, kind):
     cli = phase.get("cli") or {}
     queue = phase.get("queue") or {}
     before = phase.get("before") or {}
     after = phase.get("after") or {}
-    liveness = phase.get("liveness") or [{}]
-    processes = phase.get("processes") or {}
-    owned = processes.get("owned")
-    unrelated = (processes.get("unrelated") or {}).get("after") or {}
     observation = phase.get("observation") or {}
     drain = phase.get("drain") or {}
+    seeded_run = (phase.get("seeded") or {}).get("run_id")
+    owned = (phase.get("processes") or {}).get("owned")
     return (
         cli.get("rc") == 2
         and "queue-owned work" in (phase.get("refused") or "")
-        and observation.get("drained") is False
-        and drain.get("blocked") == observation.get("blocked")
+        and _blocked_observation_ok(observation)
+        and _blocked_observation_ok(drain)
+        and drain == observation
         and any(entry.get("state") == kind
-                and entry.get("run") == (phase.get("seeded") or {}).get("run_id")
-                for entry in observation.get("blocked") or [])
-        and liveness[0].get("state") == kind
-        and queue.get("before_sha256") == queue.get("after_sha256")
-        and isinstance(queue.get("restored_sha256"), str)
-        and (phase.get("records_before") or [])
-        == (phase.get("records_after") or [])
+                and entry.get("run") == seeded_run
+                for entry in observation["blocked"])
+        and _liveness_ok(phase, kind)
+        and _queue_restored_ok(queue, "before_sha256", "after_sha256")
+        and _path_list_ok(phase.get("records_before"))
+        and phase.get("records_before") == phase.get("records_after")
+        and _count_ok(phase.get("completions_before"))
         and phase.get("completions_before") == phase.get("completions_after")
-        and (before.get("metadata") == after.get("metadata"))
-        and (before.get("units") == after.get("units"))
-        and (before.get("jobs") == after.get("jobs"))
-        and (owned is None or owned.get("alive") is True)
-        and unrelated.get("alive") is True
+        and _snapshot_preserved(before, after)
+        and (("owned" in (phase.get("processes") or {})
+              and owned is None) if kind == "ambiguous"
+             else _owned_alive_ok(phase))
+        and _unrelated_alive_ok(phase)
         and _cleanup_never_signalled(phase)
         and phase.get("baseline_restored") is True
     )
@@ -853,9 +1018,14 @@ def _drain_refusal_ok(phase, kind):
 
 def _completion_pair(value):
     evidence = value or {}
-    sequences = evidence.get("sequences") or []
-    invocations = evidence.get("invocations") or []
-    return (len(sequences) == 2 and sequences[0] < sequences[1]
+    sequences = evidence.get("sequences")
+    invocations = evidence.get("invocations")
+    return (isinstance(sequences, list) and len(sequences) == 2
+            and all(type(item) is int for item in sequences)
+            and sequences[0] < sequences[1]
+            and isinstance(invocations, list) and len(invocations) == 2
+            and all(isinstance(item, str) and HEX32.fullmatch(item)
+                    for item in invocations)
             and len(set(invocations)) == 2)
 
 
@@ -863,18 +1033,23 @@ def _drain_harvest_ok(phase):
     queue = phase.get("queue") or {}
     processes = phase.get("processes") or {}
     observation = phase.get("observation") or {}
-    liveness = phase.get("liveness") or [{}]
     node = phase.get("node") or {}
     python = phase.get("python") or {}
     node_record = node.get("record") or {}
     python_record = python.get("record") or {}
     preserved = phase.get("preserved") or {}
     seeded = preserved.get("state") or {}
+    after = phase.get("after") or {}
+    seeded_process = (phase.get("seeded") or {}).get("process") or {}
+    unrelated = processes.get("unrelated") or {}
+    completed = processes.get("completed")
     return (
         observation == {"drained": True, "blocked": []}
-        and liveness[0].get("state") == "harvest"
-        and queue.get("seeded_sha256") == queue.get("after_node_sha256")
-        and queue.get("seeded_sha256") == queue.get("after_python_sha256")
+        and _liveness_ok(phase, "harvest")
+        and all(_sha256_text(queue.get(key)) for key in (
+            "seeded_sha256", "after_node_sha256", "after_python_sha256"))
+        and queue["seeded_sha256"] == queue["after_node_sha256"]
+        and queue["seeded_sha256"] == queue["after_python_sha256"]
         and ((node.get("cli") or {}).get("rc") == 0)
         and ((python.get("cli") or {}).get("rc") == 0)
         and _completion_pair(node.get("completions"))
@@ -885,18 +1060,32 @@ def _drain_harvest_ok(phase):
         and python_record.get("outcome") == "completed"
         and python_record.get("runtime") == PYTHON_RUNTIME
         and python_record.get("prior_runtime") == NODE_RUNTIME
-        and (processes.get("unrelated") or {}).get("after", {}).get(
-            "alive") is True
-        and (processes.get("completed") or {}).get("alive") is False
-        and ((phase.get("after") or {}).get("units") or {}).get(
+        and _same_live_process(unrelated.get("before"), unrelated.get("after"))
+        and _process_ok(completed, False)
+        and completed["pid"] == seeded_process.get("pid")
+        and completed["starttime"] == seeded_process.get("starttime")
+        and _snapshot_preservation_ok(after)
+        and (after.get("units") or {}).get(
             "crq-tick.timer", {}).get("ActiveState") == "inactive"
-        and seeded.get("queue.json") == queue.get("seeded_sha256")
+        and _sha256_text(seeded.get("queue.json"))
+        and _sha256_text(seeded.get("heartbeat.json"))
+        and seeded["queue.json"] == queue["seeded_sha256"]
+        and seeded["queue.json"] == (after.get("state") or {}).get(
+            "queue.json")
+        and seeded["heartbeat.json"] == (after.get("state") or {}).get(
+            "heartbeat.json")
+        and _sha256_text(preserved.get("history_sha256"))
+        and preserved["history_sha256"] == (after.get("history") or {}).get(
+            "sha256")
+        and type(preserved.get("record_count")) is int
+        and preserved["record_count"] > 0
+        and preserved["record_count"] == len(after.get("records") or [])
         and _cleanup_never_signalled(phase)
         and phase.get("baseline_restored") is True
     )
 
 
-def _recovery_drain_refusal_ok(phase, service_path):
+def _recovery_drain_refusal_ok(phase, service_path, baseline_queue):
     cli = phase.get("cli") or {}
     queue = phase.get("queue") or {}
     before = phase.get("record_before") or {}
@@ -905,27 +1094,47 @@ def _recovery_drain_refusal_ok(phase, service_path):
     timer = phase.get("timer") or {}
     observation = phase.get("observation") or {}
     drain = phase.get("drain") or {}
-    processes = phase.get("processes") or {}
-    unrelated = (processes.get("unrelated") or {}).get("after") or {}
+    service_before = service.get("before") or {}
+    service_after = service.get("after") or {}
+    timer_before = timer.get("before") or {}
+    timer_after = timer.get("after") or {}
     return (
         cli.get("rc") == 2
         and "queue-owned work" in (phase.get("refused") or "")
-        and observation.get("drained") is False
-        and drain.get("blocked") == observation.get("blocked")
-        and (phase.get("liveness") or [{}])[0].get("state") == "alive"
+        and _blocked_observation_ok(observation)
+        and _blocked_observation_ok(drain)
+        and drain == observation
+        and _liveness_ok(phase, "alive")
+        and isinstance(phase.get("record_path"), str)
+        and bool(phase["record_path"])
+        and _record_summary_ok(before)
+        and _record_summary_ok(after)
+        and before["path"] == phase["record_path"]
+        and after["path"] == phase["record_path"]
         and before.get("sha256") == after.get("sha256")
-        and after.get("outcome") == "pending"
-        and after.get("phase") == "drained"
-        and queue.get("before_sha256") == queue.get("after_sha256")
-        and isinstance(queue.get("restored_sha256"), str)
+        and before["bytes"] == after["bytes"]
+        and _sha256_text(queue.get("before_sha256"))
+        and _sha256_text(queue.get("after_sha256"))
+        and _sha256_text(queue.get("restored_sha256"))
+        and _sha256_text(baseline_queue)
+        and queue["before_sha256"] == queue["after_sha256"]
+        and queue["restored_sha256"] == baseline_queue
+        and queue["restored_sha256"] != queue["before_sha256"]
+        and _count_ok(phase.get("completions_before"), positive=True)
         and phase.get("completions_before") == phase.get("completions_after")
-        and (service.get("before") or {}).get("LoadState") == "masked"
-        and (service.get("after") or {}).get("LoadState") == "masked"
-        and (service.get("before") or {}).get("FragmentPath") == service_path
-        and service.get("before") == service.get("after")
-        and timer.get("before") == timer.get("after")
-        and (processes.get("owned") or {}).get("alive") is True
-        and unrelated.get("alive") is True
+        and service_before.get("LoadState") == "masked"
+        and service_after.get("LoadState") == "masked"
+        and service_before.get("FragmentPath") == service_path
+        and service_after.get("FragmentPath") == service_path
+        and isinstance(service_before.get("ActiveState"), str)
+        and service_before == service_after
+        and timer_before.get("ActiveState") in ("inactive", "failed")
+        and timer_after.get("ActiveState") in ("inactive", "failed")
+        and isinstance(timer_before.get("LoadState"), str)
+        and isinstance(timer_after.get("LoadState"), str)
+        and timer_before == timer_after
+        and _owned_alive_ok(phase)
+        and _unrelated_alive_ok(phase)
         and _cleanup_never_signalled(phase)
         and phase.get("baseline_restored") is True
     )
@@ -991,7 +1200,8 @@ def build_checks(phases, restarts=None, reboots=None, mode="base"):
         checks["recovery_drain_refused"] = False
     else:
         checks["recovery_drain_refused"] = _recovery_drain_refusal_ok(
-            recovery_drain, service_path)
+            recovery_drain, service_path,
+            (prepared.get("state") or {}).get("queue.json"))
 
     for name, runtime, prior in (("switch-node", NODE_RUNTIME, PYTHON_RUNTIME),
                                  ("switch-python", PYTHON_RUNTIME, NODE_RUNTIME)):
@@ -1042,7 +1252,9 @@ def build_checks(phases, restarts=None, reboots=None, mode="base"):
         before = recover_kill.get("record_before") or {}
         after = recover_kill.get("record_after") or {}
         checks["recovery_interruption_preserved_record"] = (
-            before.get("sha256") == after.get("sha256")
+            _sha_present(before)
+            and _sha_present(after)
+            and before["sha256"] == after["sha256"]
             and after.get("outcome") == "pending"
             and after.get("phase") == "drained")
 
@@ -1823,7 +2035,7 @@ def cmd_verify(args):
         "retained_guest_script_sha256": retained_guest,
         "host_matches_run": host_matches,
         "guest_matches_run": guest_matches,
-        "validator_only": mode == "matrix" and guest_matches and not host_matches,
+        "validator_only": guest_matches and not host_matches,
         "run": report.get("run"),
         "run_source_commit": report.get("source_commit"),
         "report_sha256": sha256_bytes(pathlib.Path(args.report).read_bytes()),

@@ -33,7 +33,7 @@ NODE = harness.NODE_RUNTIME
 PYTHON = harness.PYTHON_RUNTIME
 SERVICE = "/home/probe/.config/systemd/user/crq-tick.service"
 WANTS = "/home/probe/.config/systemd/user/timers.target.wants/crq-tick.timer"
-STATE = {"queue.json": "q" * 64, "heartbeat.json": "h" * 64}
+STATE = {"queue.json": "c" * 64, "heartbeat.json": "d" * 64}
 HISTORY = "a" * 64
 BOOT_BEFORE = "11111111-1111-1111-1111-111111111111"
 BOOT_AFTER = "22222222-2222-2222-2222-222222222222"
@@ -95,30 +95,72 @@ def phases():
                       "run": "e" * 32}]
     blocked_ambiguous = [{"item": "drain-ambiguous", "state": "ambiguous",
                           "run": "f" * 32}]
-    quiet = {"metadata": {"service": "unchanged"},
-             "units": {"crq-tick.service": {"LoadState": "loaded"}},
-             "jobs": []}
+    history_record = {"path": "/home/probe/records/controller-history.json",
+                      "sha256": HISTORY, "bytes": 1}
+
+    def observation():
+        metadata = {
+            SERVICE: {"type": "file", "sha256": python_sha, "mode": 0o644,
+                      "uid": 1000, "gid": 1000},
+            "/home/probe/.config/systemd/user/crq-tick.timer": {
+                "type": "file", "sha256": _sha("timer"), "mode": 0o644,
+                "uid": 1000, "gid": 1000},
+            WANTS: {"type": "symlink", "target": "../crq-tick.timer"},
+            "/home/probe/.config/systemd/user/.crq-tick.service.staged": {
+                "type": "missing"},
+        }
+        units = {
+            "crq-tick.service": {
+                "LoadState": "loaded", "ActiveState": "inactive",
+                "SubState": "dead", "UnitFileState": "static",
+                "FragmentPath": SERVICE, "InvocationID": "",
+                "Result": "success"},
+            "crq-tick.timer": {
+                "LoadState": "loaded", "ActiveState": "inactive",
+                "SubState": "dead", "UnitFileState": "enabled",
+                "FragmentPath": "/home/probe/.config/systemd/user/"
+                                "crq-tick.timer",
+                "InvocationID": "", "Result": "success"},
+        }
+        return {
+            "state": dict(STATE),
+            "units": units,
+            "metadata": metadata,
+            "jobs": [],
+            "records": [history_record],
+            "all_records": {"/home/probe/records": [history_record]},
+            "history": history_record,
+            "completions": completion_entries(4),
+            "files": {SERVICE: {"type": "file", "sha256": python_sha},
+                      WANTS: {"type": "symlink"}},
+        }
+
+    quiet = observation()
     drain_alive = {
         "kind": "alive", "target_runtime": NODE, "current_runtime": PYTHON,
         "cli": {"rc": 2, "stdout": "{\"refused\": \"queue-owned work\"}",
                 "stderr": ""},
         "refused": "queue-owned work is alive or ambiguous; refusing",
-        "drain": {"blocked": blocked_alive},
+        "drain": {"drained": False, "blocked": blocked_alive},
         "observation": {"drained": False, "blocked": blocked_alive},
         "liveness": [{"item": "drain-alive", "run_id": "e" * 32,
                       "has_exit": False, "state": "alive"}],
         "seeded": {"run_id": "e" * 32, "item": {"id": "drain-alive"},
                    "identity": {"exit": False},
-                   "process": {"pid": 4001, "alive": True}},
+                   "process": {"pid": 4001, "alive": True,
+                               "starttime": "100"}},
         "queue": {"before_sha256": "1" * 64, "after_sha256": "1" * 64,
                   "baseline_sha256": "0" * 64, "restored_sha256": "0" * 64},
         "records_before": ["/home/probe/records/controller-history.json"],
         "records_after": ["/home/probe/records/controller-history.json"],
         "completions_before": 4, "completions_after": 4,
         "before": quiet, "after": dict(quiet),
-        "processes": {"owned": {"pid": 4001, "alive": True},
-                      "unrelated": {"before": {"pid": 4002, "alive": True},
-                                    "after": {"pid": 4002, "alive": True}}},
+        "processes": {"owned": {"pid": 4001, "alive": True,
+                                "starttime": "100"},
+                      "unrelated": {"before": {"pid": 4002, "alive": True,
+                                               "starttime": "101"},
+                                    "after": {"pid": 4002, "alive": True,
+                                              "starttime": "101"}}},
         "cleanup": [{"terminated": True, "controller_signalled": False},
                     {"terminated": True, "controller_signalled": False}],
         "baseline_restored": True,
@@ -128,7 +170,7 @@ def phases():
         "kind": "ambiguous", "target_runtime": PYTHON,
         "current_runtime": NODE,
         "refused": "queue-owned work is alive or ambiguous; refusing",
-        "drain": {"blocked": blocked_ambiguous},
+        "drain": {"drained": False, "blocked": blocked_ambiguous},
         "observation": {"drained": False, "blocked": blocked_ambiguous},
         "liveness": [{"item": "drain-ambiguous", "run_id": "f" * 32,
                       "has_exit": False, "state": "ambiguous"}],
@@ -136,8 +178,10 @@ def phases():
                    "identity": {"exit": False}, "process": {"pid": None,
                                                             "alive": False}},
         "processes": {"owned": None,
-                      "unrelated": {"before": {"pid": 4003, "alive": True},
-                                    "after": {"pid": 4003, "alive": True}}},
+                      "unrelated": {"before": {"pid": 4003, "alive": True,
+                                               "starttime": "102"},
+                                    "after": {"pid": 4003, "alive": True,
+                                              "starttime": "102"}}},
         "queue": {"before_sha256": "2" * 64, "after_sha256": "2" * 64,
                   "baseline_sha256": "0" * 64, "restored_sha256": "0" * 64},
     }
@@ -153,7 +197,8 @@ def phases():
                       "has_exit": True, "state": "harvest"}],
         "seeded": {"run_id": "1" * 32, "item": {"id": "drain-harvest"},
                    "identity": {"exit": True},
-                   "process": {"pid": 3999, "alive": False}},
+                   "process": {"pid": 3999, "alive": False,
+                               "starttime": "99"}},
         "queue": {"seeded_sha256": "3" * 64,
                   "after_node_sha256": "3" * 64,
                   "after_python_sha256": "3" * 64},
@@ -165,15 +210,19 @@ def phases():
                    "record": harvest_python,
                    "completions": {"sequences": [7, 8],
                                    "invocations": ["1" * 32, "2" * 32]}},
-        "processes": {"unrelated": {"before": {"pid": 4004, "alive": True},
-                                    "after": {"pid": 4004, "alive": True}},
-                      "completed": {"pid": 3999, "alive": False}},
-        "after": {"units": {"crq-tick.timer": {
-            "ActiveState": "inactive"}}},
+        "processes": {"unrelated": {"before": {"pid": 4004, "alive": True,
+                                               "starttime": "103"},
+                                    "after": {"pid": 4004, "alive": True,
+                                              "starttime": "103"}},
+                      "completed": {"pid": 3999, "alive": False,
+                                    "starttime": "99"}},
+        "after": {**quiet, "state": {
+            "queue.json": "3" * 64,
+            "heartbeat.json": STATE["heartbeat.json"]}},
         "completions_before": 4, "completions_after": 8,
         "preserved": {"state": {"queue.json": "3" * 64,
                                 "heartbeat.json": STATE["heartbeat.json"]},
-                      "history_sha256": HISTORY, "record_count": 4},
+                      "history_sha256": HISTORY, "record_count": 1},
         "cleanup": [{"terminated": True, "controller_signalled": False}],
         "baseline_restored": True,
     }
@@ -215,25 +264,33 @@ def phases():
         "cli": {"rc": 2, "stdout": "{\"refused\": \"queue-owned work\"}",
                 "stderr": ""},
         "refused": "queue-owned work is alive or ambiguous; refusing",
-        "drain": {"blocked": blocked_alive},
+        "drain": {"drained": False, "blocked": blocked_alive},
         "observation": {"drained": False, "blocked": blocked_alive},
         "liveness": [{"item": "drain-alive", "run_id": "e" * 32,
                       "has_exit": False, "state": "alive"}],
         "seeded": {"run_id": "e" * 32, "item": {"id": "drain-alive"},
                    "identity": {"exit": False},
-                   "process": {"pid": 4010, "alive": True}},
+                   "process": {"pid": 4010, "alive": True,
+                               "starttime": "200"}},
         "queue": {"before_sha256": "4" * 64, "after_sha256": "4" * 64,
-                  "restored_sha256": "0" * 64},
+                  "restored_sha256": STATE["queue.json"]},
         "service": {"before": {"LoadState": "masked",
+                                "ActiveState": "inactive",
                                 "FragmentPath": SERVICE},
                     "after": {"LoadState": "masked",
+                              "ActiveState": "inactive",
                               "FragmentPath": SERVICE}},
-        "timer": {"before": {"ActiveState": "inactive"},
-                  "after": {"ActiveState": "inactive"}},
+        "timer": {"before": {"ActiveState": "inactive",
+                             "LoadState": "loaded"},
+                  "after": {"ActiveState": "inactive",
+                            "LoadState": "loaded"}},
         "completions_before": 8, "completions_after": 8,
-        "processes": {"owned": {"pid": 4010, "alive": True},
-                      "unrelated": {"before": {"pid": 4011, "alive": True},
-                                    "after": {"pid": 4011, "alive": True}}},
+        "processes": {"owned": {"pid": 4010, "alive": True,
+                                "starttime": "200"},
+                      "unrelated": {"before": {"pid": 4011, "alive": True,
+                                               "starttime": "201"},
+                                    "after": {"pid": 4011, "alive": True,
+                                              "starttime": "201"}}},
         "cleanup": [{"terminated": True, "controller_signalled": False},
                     {"terminated": True, "controller_signalled": False}],
         "baseline_restored": True,
@@ -562,6 +619,149 @@ class HarnessCheckTests(unittest.TestCase):
         checks, problems = harness.build_checks(value)
         self.assertFalse(checks["drain_harvest_proceeds"])
         self.assertTrue(problems)
+
+    def test_drain_refusal_rejects_absent_before_and_after_fields(self):
+        for side in ("before", "after"):
+            for field in ("state", "units", "metadata", "jobs", "records",
+                          "all_records", "history", "completions", "files"):
+                with self.subTest(side=side, field=field):
+                    value = phases()
+                    value["drain-alive"][side].pop(field)
+                    checks, problems = harness.build_checks(value)
+                    self.assertFalse(checks["drain_alive_refused"])
+                    self.assertTrue(problems)
+
+    def test_drain_refusal_rejects_null_and_wrong_typed_observations(self):
+        mutations = (
+            ("units", lambda phase: phase["before"].__setitem__("units", None)),
+            ("jobs", lambda phase: phase["before"].__setitem__("jobs", None)),
+            ("records", lambda phase: phase["before"].__setitem__(
+                "records", [{}])),
+            ("all_records", lambda phase: phase["before"].__setitem__(
+                "all_records", [])),
+            ("history", lambda phase: phase["before"].__setitem__(
+                "history", {"sha256": None})),
+            ("completions", lambda phase: phase["after"].__setitem__(
+                "completions", [True])),
+            ("metadata", lambda phase: phase["after"].__setitem__(
+                "metadata", {"crq-tick.service": "unchanged"})),
+            ("state", lambda phase: phase["after"]["state"].__setitem__(
+                "queue.json", "q" * 64)),
+        )
+        for label, mutate in mutations:
+            with self.subTest(field=label):
+                value = phases()
+                mutate(value["drain-alive"])
+                checks, problems = harness.build_checks(value)
+                self.assertFalse(checks["drain_alive_refused"])
+                self.assertTrue(problems)
+
+    def test_drain_refusal_requires_queue_and_process_identity(self):
+        mutations = (
+            ("baseline_sha256", lambda phase: phase["queue"].pop(
+                "baseline_sha256")),
+            ("restored_sha256", lambda phase: phase["queue"].pop(
+                "restored_sha256")),
+            ("before_sha256", lambda phase: phase["queue"].pop(
+                "before_sha256")),
+            ("after_sha256", lambda phase: phase["queue"].pop(
+                "after_sha256")),
+            ("owned_starttime", lambda phase: phase["processes"]["owned"].pop(
+                "starttime")),
+            ("seeded_starttime", lambda phase: phase["seeded"][
+                "process"].pop("starttime")),
+            ("unrelated_starttime", lambda phase: phase["processes"][
+                "unrelated"]["after"].pop("starttime")),
+            ("completions_after", lambda phase: phase.pop(
+                "completions_after")),
+            ("records_after", lambda phase: phase.pop("records_after")),
+        )
+        for label, mutate in mutations:
+            with self.subTest(field=label):
+                value = phases()
+                mutate(value["drain-alive"])
+                checks, problems = harness.build_checks(value)
+                self.assertFalse(checks["drain_alive_refused"])
+                self.assertTrue(problems)
+
+    def test_harvest_and_recovery_reject_absent_preservation_fields(self):
+        for label, mutate in (
+                ("record_count", lambda phase: phase["preserved"].pop(
+                    "record_count")),
+                ("after_records", lambda phase: phase["after"].pop("records")),
+                ("seeded_queue", lambda phase: phase["preserved"][
+                    "state"].pop("queue.json")),
+                ("timer_service", lambda phase: phase["after"]["units"].pop(
+                    "crq-tick.service"))):
+            with self.subTest(harvest=label):
+                value = phases()
+                mutate(value["drain-harvest"])
+                checks, problems = harness.build_checks(value)
+                self.assertFalse(checks["drain_harvest_proceeds"])
+                self.assertTrue(problems)
+        for label, mutate in (
+                ("service_active", lambda phase: phase["service"]["after"].pop(
+                    "ActiveState")),
+                ("timer_load", lambda phase: phase["timer"]["before"].pop(
+                    "LoadState")),
+                ("restored", lambda phase: phase["queue"].pop(
+                    "restored_sha256")),
+                ("record_bytes", lambda phase: phase["record_after"].pop(
+                    "bytes"))):
+            with self.subTest(recovery=label):
+                value = phases()
+                mutate(value["recover-drain-alive"])
+                checks, problems = harness.build_checks(value)
+                self.assertFalse(checks["recovery_drain_refused"])
+                self.assertTrue(problems)
+
+    def test_liveness_and_interrupted_record_require_identity(self):
+        for field in ("run_id", "item"):
+            with self.subTest(harvest_seeded=field):
+                value = phases()
+                value["drain-harvest"]["seeded"].pop(field)
+                checks, problems = harness.build_checks(value)
+                self.assertFalse(checks["drain_harvest_proceeds"])
+                self.assertTrue(problems)
+        for side in ("record_before", "record_after"):
+            with self.subTest(interrupted=side):
+                value = phases()
+                value["recover-kill"][side].pop("sha256")
+                checks, problems = harness.build_checks(value)
+                self.assertFalse(checks["recovery_interruption_preserved_record"])
+                self.assertTrue(problems)
+
+    def test_ambiguous_ownership_and_snapshot_shapes_are_required(self):
+        value = phases()
+        value["drain-ambiguous"]["processes"].pop("owned")
+        checks, problems = harness.build_checks(value)
+        self.assertFalse(checks["drain_ambiguous_refused"])
+        self.assertTrue(problems)
+        for field in ("LoadState", "ActiveState", "SubState", "UnitFileState",
+                      "FragmentPath", "Result"):
+            with self.subTest(unit_field=field):
+                value = phases()
+                value["drain-alive"]["before"]["units"][
+                    "crq-tick.service"][field] = ""
+                checks, problems = harness.build_checks(value)
+                self.assertFalse(checks["drain_alive_refused"])
+                self.assertTrue(problems)
+
+    def test_recovery_record_must_match_its_path_and_size(self):
+        for side in ("record_before", "record_after"):
+            with self.subTest(path=side):
+                value = phases()
+                value["recover-drain-alive"][side]["path"] = (
+                    "/home/probe/records/other.json")
+                checks, problems = harness.build_checks(value)
+                self.assertFalse(checks["recovery_drain_refused"])
+                self.assertTrue(problems)
+            with self.subTest(bytes=side):
+                value = phases()
+                value["recover-drain-alive"][side]["bytes"] += 1
+                checks, problems = harness.build_checks(value)
+                self.assertFalse(checks["recovery_drain_refused"])
+                self.assertTrue(problems)
 
     def test_recovery_drain_refusal_must_keep_record_bytes(self):
         value = phases()

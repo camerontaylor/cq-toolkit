@@ -176,6 +176,14 @@ at ``~/crq-vm-feasibility/state/runs/20261110T220347Z-4db17be7/`` and
 ``~/crq-vm-feasibility/state/runs/20261110T220604Z-c9b62fa0/`` on Pluto,
 outside the worktree.
 
+The tightened preservation checks were then re-run against both retained
+reports with host script
+``a1404cf07861d540c6525abff26fdb530fa25d4770c5100b2d73db42f7876df9``. Both
+still returned ``problems: []``, with ``guest_matches_run: true``,
+``host_matches_run: false`` and ``validator_only: true``: only the validator
+changed; the guest script, report and raw evidence are unchanged. This is a
+validator-only re-verification, not a fresh guest run.
+
 ### Earlier base-mode run (historical)
 
 One earlier base-mode run completed on Pluto (KVM, Ubuntu noble guest ``crq-probe``)

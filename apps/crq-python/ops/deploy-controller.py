@@ -498,7 +498,8 @@ def queue_drain_gate(effects: Effects) -> dict:
     refusal leaves installed units, activation, preserved queue bytes and
     retained records unchanged. Both the switch and recovery entry points call
     it independently; the guest adapter observes the same queue again after its
-    systemd fence to close the dispatch race.
+    systemd fence. That second point-in-time observation narrows the dispatch
+    window but does not close it.
     """
     drain = runner_queue_drain(effects)
     if not drain["drained"]:
