@@ -198,6 +198,7 @@ def safe_handle(raw, runner, *, principal, policy):
 
 def main():
     from author_transport import supervised
+    from author_quota import AuthorRefused
     def expired(signum, frame):
         raise ValueError("review snapshot/install deadline")
     signal.signal(signal.SIGALRM, expired)
@@ -213,7 +214,12 @@ def main():
         principal = os.environ["CRQ_QUEUE_PRINCIPAL"]
         import crq
         work = lambda runner: safe_handle(raw, runner, principal=principal, policy=policy)
-        result = work(crq) if req["op"] in ("capabilities", "status", "result") else supervised(work, crq, lock_wait=2)
+        try:
+            result = work(crq) if req["op"] in ("capabilities", "status", "result") else supervised(work, crq, lock_wait=2)
+        except (AuthorRefused, ValueError):
+            # Supervision failures do not prove whether a write committed.
+            # Keep the request id so retry can recover its durable receipt.
+            result = error("unavailable", "review worker outcome unavailable; retry the same request id", True)
         if result is None:
             result = error("busy", "review queue lock busy; retry the same request id", True)
         sys.stdout.buffer.write(result)

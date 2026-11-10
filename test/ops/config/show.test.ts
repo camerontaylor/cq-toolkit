@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
+import { readCqEnv } from '../../../src/config/env.js';
 import { registry } from '../../../src/ops/config/registry.js';
-import { buildConfigShowReport } from '../../../src/ops/config/show.js';
+import { buildConfigShowReport, type ConfigShowReport } from '../../../src/ops/config/show.js';
 
 // The runner may export unrelated CQ_* names; start every test from a clean slate.
 beforeEach(() => {
@@ -49,6 +50,24 @@ describe('config op', () => {
     const result = (await run({})) as { status: string; value: { warnings: unknown[] } };
     expect(result.status).toBe('ok');
     expect(result.value.warnings).toHaveLength(1);
+  });
+
+  test('binds the supplied snapshot for values and strict diagnostics', async () => {
+    const snapshot = readCqEnv({ CQ_SANDBOX: 'off', CQ_SANBOX: 'off' });
+    vi.stubEnv('CQ_SANDBOX', 'docker');
+    const op = await registry[0]!.importer({ cqEnv: snapshot });
+    const result = (await op({})) as { status: string; value: ConfigShowReport };
+    expect(result.status).toBe('ok');
+    expect(result.value.keys.find((key) => key.name === 'CQ_SANDBOX')).toEqual({
+      name: 'CQ_SANDBOX',
+      value: 'off',
+      source: 'env',
+    });
+    expect(result.value.warnings).toEqual(snapshot.warnings);
+    expect(await op({ strict: true })).toMatchObject({ status: 'failed' });
+    const clean = await registry[0]!.importer({ cqEnv: readCqEnv({}) });
+    vi.stubEnv('CQ_SANBOX', 'off');
+    expect(await clean({ strict: true })).toMatchObject({ status: 'ok' });
   });
 
   test('strict fails on warnings', async () => {

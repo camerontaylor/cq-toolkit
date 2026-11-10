@@ -551,3 +551,47 @@ test('missing bound Git directory has a named refusal without changing checkout 
     await f.repo.cleanup();
   }
 });
+
+test('missing own registration is removed without pruning a foreign registration', async () => {
+  const f = await fixture();
+  try {
+    const first = await resolvePrWorktree(f.opts);
+    const foreign = join(f.repo.root, 'foreign-tree');
+    f.repo.git('worktree', 'add', '-b', 'foreign', foreign);
+    await rename(foreign, foreign + '-saved');
+    await rename(first.path, first.path + '-saved');
+    const calls: string[][] = [];
+    const result = await resolvePrWorktree({
+      ...f.opts,
+      run: async (args) => {
+        calls.push([...args]);
+        return f.run(args);
+      },
+    });
+    expect(result).toMatchObject({ path: first.path, reused: false });
+    expect(calls).toContainEqual(['-C', f.repo.root, 'worktree', 'remove', first.path]);
+    expect(calls.some((args) => args.includes('prune') || args.includes('--force'))).toBe(false);
+    expect(f.repo.git('worktree', 'list', '--porcelain')).toContain(`worktree ${foreign}\n`);
+  } finally {
+    await f.repo.cleanup();
+  }
+});
+
+test('missing own registration preserves unpushed commits', async () => {
+  const f = await fixture();
+  try {
+    const first = await resolvePrWorktree(f.opts);
+    await writeFile(join(first.path, 'README.md'), 'unpublished change\n');
+    f.repo.git('-C', first.path, 'add', 'README.md');
+    f.repo.git('-C', first.path, 'commit', '-m', 'unpublished');
+    const unpublished = f.repo.git('-C', first.path, 'rev-parse', 'HEAD').trim();
+    await rename(first.path, first.path + '-saved');
+    await expect(resolvePrWorktree(f.opts)).rejects.toThrow(/unpushed/);
+    expect(f.repo.git('rev-parse', '--verify', 'refs/heads/cq-review/pr-7').trim()).toBe(
+      unpublished,
+    );
+    expect(f.repo.git('worktree', 'list', '--porcelain')).toContain(`worktree ${first.path}\n`);
+  } finally {
+    await f.repo.cleanup();
+  }
+});
