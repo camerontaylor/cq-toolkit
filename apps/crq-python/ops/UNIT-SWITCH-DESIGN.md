@@ -8,8 +8,9 @@ independent design review and disposable-VM proof.
 
 A bounded proof vehicle now exercises the actual ``switch_unit``/``recover_unit``
 seam against one harmless fixture in a disposable KVM guest; run
-``20261110T170322Z-9e8c5133`` passed both directions, preactivation
-interruption, interrupted recovery and repeat-recovery refusal. It is
+``20261110T173225Z-de36ec18`` passed both directions, preactivation
+interruption, interrupted recovery, repeat-recovery refusal and the
+activation-fence probe. It is
 fixture-only evidence, not production enablement: production journal
 interoperability, a real runtime-bound completion provider, and the
 manager-restart/reboot matrix remain open. See
