@@ -202,24 +202,43 @@ The recorded run adds three activator facts that the adapter must handle:
    harness, and require a changed kernel `boot_id` before re-inspecting.
 8. Unmask and prove the fixture runs again. `destroy` stops only the retained
    QEMU process after matching its `/proc` start time and command line against
-   the run's recorded identity; `--purge` moves this run's overlay, seed and
-   key into `state/trash/`, never deleting the shared image or evidence.
+   the run's recorded identity, and treats the process as stopped once it no
+   longer matches; `--purge` moves this run's overlay, seed and key into
+   `state/trash/`, never deleting the shared image or evidence.
 
 All commands and results are recorded in `commands.jsonl`; phase payloads are
 saved under `phases/`; the final report is `report.json` and carries host load
-and memory stamps for any timing claim.
+and memory stamps for any timing claim. The report schema is 2. It records the
+source commit and the SHA-256 of the executed host and guest scripts, keeps
+byte copies as `executed-host-script.py` and `executed-guest-probe.py`, and
+records the digest observed on the guest after upload. `verify` recomputes
+every check from the raw `phases`, `manager_restart` and `reboot` observations,
+rejects a saved report whose stored checks disagree, and re-hashes the retained
+script bytes. A run without this binding is not accepted as evidence for this
+revision.
 
 ## Recorded evidence
 
-Run `20261110T142207Z-8c1668ea` on `pluto` (Linux 6.12.63, systemd 255
+Run `20261110T144209Z-75683132` on `pluto` (Linux 6.12.63, systemd 255
 `255.4-1ubuntu8.18`, Ubuntu 24.04 noble guest) produced
-`state/runs/20261110T142207Z-8c1668ea/report.json`; `verify` returned
-`{"problems": []}`. The host was busy: load1 15.53 at start and 16.18 at
-finish, with 7.3 GiB and 6.6 GiB `MemAvailable` respectively. The harness
-window was 14:22:07Z to 14:23:48Z (about 101 s); that is an observation under
-that load, not a performance claim. The guest had 2 vCPU and 2048 MiB, and the
-QEMU process stayed at PID 376820 across the reboot with its start identity
-verified.
+`state/runs/20261110T144209Z-75683132/report.json`; `verify` returned
+`{"problems": []}` by recomputing the checks from the raw phase files and
+re-hashing the retained scripts. The report is bound to source commit
+`8dd2c59beb856d7166ed6b155df74054dac253c2`; the executed host script SHA-256 is
+`11df141bf4f8b4ec0665e06c6591aed8389028980d58affc08ba98ae458399ea`, the
+executed guest script SHA-256 is
+`458f67d45a5199e46047e7449c615875269486143107aac761c5ef2d359b626e`, and the
+guest reported the same guest digest after upload. The report SHA-256 is
+`972e22699733fc01434a1b734a14883f4a7de409137f0fbe2710548cdbfad1c7`. The host
+was busy: load1 12.32 at start and 15.68 at finish, with 7,265,088 KiB and
+6,590,996 KiB `MemAvailable` respectively. The harness window was 14:42:06Z to
+14:43:52Z (about 103 s); that is an observation under that load, not a
+performance claim. The guest had 2 vCPU and 2048 MiB, and the QEMU process
+stayed at PID 381631 across the reboot with its start identity verified.
+
+The earlier run `20261110T142207Z-8c1668ea` is retained for history, but it
+predates schema 2 and has no executed-script/commit binding; it is not evidence
+for the current revision.
 
 | Check | Result |
 |---|---|
@@ -235,17 +254,19 @@ verified.
 | mask link target `/dev/null` | yes |
 | timer active/enabled while service fenced | active and enabled before the fence; starting it while fenced failed rc 1 |
 | path active/enabled while service fenced | active and enabled before the fence; starting it while fenced failed rc 1; a trigger after fencing produced no service run and left the path `failed` after stop |
+| queued setup proved in both rounds | yes: both blocker and wrapper starts returned 0, and each round recorded `crq-queued-fixture.service` in `start waiting` |
 | queued job behavior recorded | the wrapper ran (`["queued"]`); `queued-fixture` did not run |
 | queued job behavior after explicit stop recorded | explicit stop rc 0; the wrapper ran (`["queued"]`); `queued-fixture` did not run |
-| user-manager PID and invocation changed | yes: PID 1001 to 1545, invocation `918e5da8...` to `52153fd4...` |
+| user-manager PID and invocation changed | yes: PID 1003 to 1539, invocation `ff4d0ba5...` to `b05be57d...` |
 | mask persisted over manager restart | yes, `LoadState=masked` after the new manager was ready, and direct/dependency starts were refused |
-| guest `boot_id` changed after reboot | yes: `d25c9b44-bd4d-4041-bc4e-5ad617db3bc1` to `80516d13-9733-4294-b9cd-6ae7f6a7f772` |
-| QEMU PID/start identity unchanged across the guest reboot | yes: PID 376820, identity verified |
+| guest `boot_id` changed after reboot | yes: `1e4d25d0-65b1-4337-81e2-eae1320c4794` to `8bfb02a5-8ca1-414c-b56b-73be37d9e683` |
+| QEMU PID/start identity unchanged across the guest reboot | yes: PID 381631, identity verified |
 | timer and path state recorded after reboot | both `inactive`/`enabled`, `SubState=dead`; target service still masked |
 | no new fixture service run after reboot | yes; run log delta empty |
 | unit/backing/enablement metadata restored | yes; install and post-unmask file snapshots compared with no changes (the synthetic trigger file is excluded) |
 | unit/backing/enablement metadata unchanged across reboot | yes; no changes in the reboot before/after snapshots (trigger excluded) |
 | unmask starts the fixture again | yes, unmask delta `["service"]` |
+| executed bytes bound and verified | yes; source commit plus host/guest SHA-256, retained copies and remote guest digest all match |
 
 All required checks in the report are true. The two queued checks are recorded
 as `false` because the `queued-fixture` unit did not execute; that is the

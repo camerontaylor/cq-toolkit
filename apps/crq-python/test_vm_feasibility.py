@@ -354,6 +354,20 @@ class LifecycleTests(unittest.TestCase):
             self.assertTrue(entry["timeout"])
             json.dumps(entry)
 
+    def test_upload_refuses_a_guest_digest_mismatch(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            run = pathlib.Path(temporary) / "r1"
+            run.mkdir()
+            recorder = vm.Recorder(run)
+            with mock.patch.object(
+                    vm, "guest_ssh",
+                    side_effect=[{"rc": 0}, {"rc": 0,
+                                             "stdout": "deadbeef  /tmp/probe.py\n"}]):
+                with self.assertRaises(RuntimeError):
+                    vm.upload_guest_probe(
+                        {"run_id": "r1", "path": str(run)}, recorder,
+                        source=b"exact bytes")
+
     def test_uptime_is_not_a_pid(self):
         with tempfile.TemporaryDirectory() as temporary:
             path = pathlib.Path(temporary) / "uptime"
