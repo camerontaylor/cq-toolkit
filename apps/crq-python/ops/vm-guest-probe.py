@@ -419,6 +419,7 @@ def activation():
     result["jobs2_after_stop"] = jobs()
     result["mask2"] = mask_unit("crq-queued-fixture.service")
     result["reload2"] = systemctl("daemon-reload")
+    result["masked_state2"] = unit_state("crq-queued-fixture.service")
     result["jobs2_after_release"] = wait_jobs("crq-blocker.service", False, 40)
     result["queued_jobs2_after_release"] = wait_jobs_settle(
         ("crq-queued.service", "crq-queued-fixture.service"), 40)

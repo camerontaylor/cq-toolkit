@@ -44,7 +44,26 @@ IMAGE_NAME = "noble-server-cloudimg-amd64.img"
 SUMS_NAME = "SHA256SUMS"
 DEFAULT_STATE = pathlib.Path.home() / "crq-vm-feasibility"
 GUEST_USER = "probe"
-TRIGGER_PATH = "/home/%s/fixture/trigger" % GUEST_USER
+GUEST_HOME = pathlib.Path("/home/%s" % GUEST_USER)
+UNIT_DIR = GUEST_HOME / ".config/systemd/user"
+FIXTURE_DIR = GUEST_HOME / "fixture"
+TRIGGER_PATH = str(FIXTURE_DIR / "trigger")
+SNAPSHOT_PATHS = (
+    UNIT_DIR / "crq-fixture.service",
+    UNIT_DIR / "crq-fixture.timer",
+    UNIT_DIR / "crq-fixture.path",
+    UNIT_DIR / "crq-dependent.service",
+    UNIT_DIR / "crq-alias.service",
+    UNIT_DIR / "crq-blocker.service",
+    UNIT_DIR / "crq-queued.service",
+    UNIT_DIR / "crq-queued-fixture.service",
+    UNIT_DIR / "timers.target.wants/crq-fixture.timer",
+    UNIT_DIR / "default.target.wants/crq-fixture.path",
+    FIXTURE_DIR / "crq-alias.service.unit",
+    FIXTURE_DIR / "original-crq-fixture.service",
+    FIXTURE_DIR / "original-crq-alias.service.link",
+    FIXTURE_DIR / "record.sh",
+)
 GUEST_RAM_MB = 2048
 GUEST_VCPUS = 2
 OVERLAY_SIZE = "8G"
@@ -355,7 +374,7 @@ def report_problems(report: dict, *, require_evidence: bool = False) -> list[str
                  "run_after_trigger_observed", "no_run_after_trigger",
                  "activator_states_after_reboot", "run_log_observed_after_reboot",
                  "metadata_observed", "queued_observations_present",
-                 "queued_setup_proven", "queued_stop_proven",
+                 "queued_setup_proven", "queued_mask_proven", "queued_stop_proven",
                  "queued_jobs_settled_after_mask",
                  "queued_jobs_settled_after_stop",
                  "queued_wrapper_ran_after_mask",
@@ -770,6 +789,34 @@ def masked_state(snapshot: dict) -> dict:
     return {"unit": unit, "path": path}
 
 
+def snapshot_entry_observed(entry) -> bool:
+    """A snapshot entry must carry the metadata its own type promises."""
+    if entry is None:
+        return True
+    if not isinstance(entry, dict):
+        return False
+    if entry.get("type") not in ("file", "symlink"):
+        return False
+    if not isinstance(entry.get("mode"), str):
+        return False
+    if not isinstance(entry.get("uid"), int) or not isinstance(entry.get("gid"), int):
+        return False
+    if entry["type"] == "file":
+        digest = entry.get("sha256")
+        return isinstance(digest, str) and DIGEST_RE.fullmatch(digest) is not None
+    target = entry.get("link_target")
+    return isinstance(target, str) and bool(target)
+
+
+def snapshot_files_observed(snapshot: dict) -> bool:
+    """A snapshot that omits an expected path cannot prove preservation."""
+    files = snapshot.get("files")
+    if not isinstance(files, dict):
+        return False
+    return all(str(path) in files and snapshot_entry_observed(files[str(path)])
+               for path in SNAPSHOT_PATHS)
+
+
 def build_checks(phases: dict, manager: dict, reboot: dict) -> dict:
     install = phases.get("install") or {}
     activation = phases.get("activation") or {}
@@ -815,6 +862,11 @@ def build_checks(phases: dict, manager: dict, reboot: dict) -> dict:
         and succeeded(activation.get("queue2_start"))
         and waiting(activation.get("jobs_before_mask"), "crq-queued-fixture.service")
         and waiting(activation.get("jobs2_before_stop"), "crq-queued-fixture.service"))
+    queued_mask_proven = (
+        succeeded(activation.get("reload"))
+        and succeeded(activation.get("reload2"))
+        and (activation.get("masked_state") or {}).get("LoadState") == "masked"
+        and (activation.get("masked_state2") or {}).get("LoadState") == "masked")
     stop_jobs = activation.get("jobs2_after_stop")
     queued_stop_proven = (
         succeeded(activation.get("stop_queued_fixture"))
@@ -854,15 +906,16 @@ def build_checks(phases: dict, manager: dict, reboot: dict) -> dict:
         "run_log_observed_after_reboot": (
             isinstance((reboot.get("before") or {}).get("runs"), list)
             and isinstance((reboot.get("after") or {}).get("runs"), list)),
-        "metadata_observed": (
-            isinstance((install.get("snapshot") or {}).get("files"), dict)
-            and isinstance((unmask.get("snapshot") or {}).get("files"), dict)
-            and isinstance((reboot.get("before") or {}).get("files"), dict)
-            and isinstance((reboot.get("after") or {}).get("files"), dict)),
+        "metadata_observed": bool(
+            snapshot_files_observed(install.get("snapshot") or {})
+            and snapshot_files_observed(unmask.get("snapshot") or {})
+            and snapshot_files_observed(reboot.get("before") or {})
+            and snapshot_files_observed(reboot.get("after") or {})),
         "queued_observations_present": (
             isinstance(activation.get("queued_run_delta"), list)
             and isinstance(activation.get("queued2_run_delta"), list)),
         "queued_setup_proven": queued_setup_proven,
+        "queued_mask_proven": queued_mask_proven,
         "queued_stop_proven": queued_stop_proven,
         "queued_jobs_settled_after_mask": settled(
             activation.get("queued_jobs_after_release")),

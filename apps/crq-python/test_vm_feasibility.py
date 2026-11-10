@@ -29,6 +29,26 @@ guest = _load("crq_vm_guest_probe", OPS / "vm-guest-probe.py")
 DIGEST = "a" * 64
 SUM = "%s  noble-server-cloudimg-amd64.img\n" % DIGEST
 
+GUEST_HOME = pathlib.Path("/home/probe")
+GUEST_UNIT_DIR = GUEST_HOME / ".config/systemd/user"
+GUEST_FIXTURE = GUEST_HOME / "fixture"
+SNAPSHOT_PATHS = (
+    GUEST_UNIT_DIR / "crq-fixture.service",
+    GUEST_UNIT_DIR / "crq-fixture.timer",
+    GUEST_UNIT_DIR / "crq-fixture.path",
+    GUEST_UNIT_DIR / "crq-dependent.service",
+    GUEST_UNIT_DIR / "crq-alias.service",
+    GUEST_UNIT_DIR / "crq-blocker.service",
+    GUEST_UNIT_DIR / "crq-queued.service",
+    GUEST_UNIT_DIR / "crq-queued-fixture.service",
+    GUEST_UNIT_DIR / "timers.target.wants/crq-fixture.timer",
+    GUEST_UNIT_DIR / "default.target.wants/crq-fixture.path",
+    GUEST_FIXTURE / "crq-alias.service.unit",
+    GUEST_FIXTURE / "original-crq-fixture.service",
+    GUEST_FIXTURE / "original-crq-alias.service.link",
+    GUEST_FIXTURE / "record.sh",
+)
+
 
 class SumsTests(unittest.TestCase):
     def test_single_entry(self):
@@ -501,18 +521,28 @@ class LifecycleTests(unittest.TestCase):
 class EvidenceTests(unittest.TestCase):
     def _snapshot(self, pid, invocation, boot, load_state="masked",
                   link="/dev/null", active="active"):
+        files = {}
+        for path in SNAPSHOT_PATHS:
+            key = str(path)
+            if key == str(GUEST_UNIT_DIR / "crq-fixture.service"):
+                files[key] = {"type": "symlink", "mode": "0o777", "uid": 1000,
+                              "gid": 1000, "link_target": link}
+            elif key.endswith(("crq-alias.service", ".wants/crq-fixture.timer",
+                               ".wants/crq-fixture.path")):
+                files[key] = {"type": "symlink", "mode": "0o777", "uid": 1000,
+                              "gid": 1000, "link_target": "target"}
+            elif key.endswith("original-crq-fixture.service"):
+                files[key] = None
+            elif key.endswith("original-crq-alias.service.link"):
+                files[key] = None
+            else:
+                files[key] = {"type": "file", "mode": "0o640", "uid": 1000,
+                              "gid": 1000, "sha256": "b" * 64}
         return {
             "boot_id": boot,
             "manager": {"pid": pid, "invocation_id": invocation},
             "runs": [],
-            "files": {
-                "/home/probe/.config/systemd/user/crq-fixture.service": {
-                    "type": "symlink", "mode": "0o777", "uid": 1000, "gid": 1000,
-                    "link_target": link},
-                "/home/probe/fixture/record.sh": {
-                    "type": "file", "mode": "0o750", "uid": 1000, "gid": 1000,
-                    "sha256": "b" * 64},
-            },
+            "files": files,
             "units": {
                 "crq-fixture.service": {"LoadState": load_state},
                 "crq-fixture.timer": {"ActiveState": active,
@@ -524,6 +554,17 @@ class EvidenceTests(unittest.TestCase):
 
     def _refusals(self):
         return {"direct": {"rc": 1}, "dependency": {"rc": 1}}
+
+    def _boundaries(self):
+        return ({"before": self._snapshot(10, "i1", "boot-1"),
+                 "after": self._snapshot(11, "i2", "boot-1"),
+                 "after_phase": self._refusals()},
+                {"before": self._snapshot(11, "i2", "boot-1"),
+                 "after": self._snapshot(12, "i3", "boot-2"),
+                 "after_phase": self._refusals(),
+                 "boot_id_before": "boot-1", "boot_id_after": "boot-2",
+                 "qemu_pid_before": 99, "qemu_pid_after": 99,
+                 "qemu_identity_verified": True})
 
     def _jobs(self, *lines):
         return {"ok": True, "rc": 0, "timeout": False,
@@ -555,7 +596,11 @@ class EvidenceTests(unittest.TestCase):
                                "settled": True, "query_ok": True,
                                "rc": 0, "jobs": []},
                            "queued_run_delta": ["queued"],
-                           "queued2_run_delta": ["queued"]},
+                           "queued2_run_delta": ["queued"],
+                           "reload": {"rc": 0},
+                           "masked_state": {"LoadState": "masked"},
+                           "reload2": {"rc": 0},
+                           "masked_state2": {"LoadState": "masked"}},
             "mask": {"native_mask": {"rc": 1},
                      "alias_native_mask": {"rc": 1},
                      "alias_direct": {"rc": 1},
@@ -749,6 +794,79 @@ class EvidenceTests(unittest.TestCase):
             "settled": True, "query_ok": False, "rc": 1, "jobs": []}
         checks = vm.build_checks(phases, manager, reboot)
         self.assertFalse(checks["queued_jobs_settled_after_mask"])
+
+    def test_queued_rounds_require_reload_and_masked_state(self):
+        phases = self._phases()
+        manager, reboot = self._boundaries()
+        self.assertTrue(vm.build_checks(phases, manager, reboot)
+                        .get("queued_mask_proven"))
+        phases["activation"]["reload"] = {"rc": 1}
+        checks = vm.build_checks(phases, manager, reboot)
+        self.assertFalse(checks.get("queued_mask_proven"))
+        report = {"schema_version": vm.REPORT_SCHEMA,
+                  "image": {"sha256": DIGEST, "sums_verified": True,
+                            "signature_verified": False},
+                  "checks": checks, "limitations": ["limited"]}
+        self.assertIn("check not proven: queued_mask_proven",
+                      vm.report_problems(report))
+        phases["activation"]["reload"] = {"rc": 0}
+        phases["activation"]["masked_state"] = {"LoadState": "loaded"}
+        self.assertFalse(vm.build_checks(phases, manager, reboot)
+                         .get("queued_mask_proven"))
+        phases["activation"]["masked_state"] = {"LoadState": "masked"}
+        phases["activation"]["reload2"] = {"rc": 1}
+        self.assertFalse(vm.build_checks(phases, manager, reboot)
+                         .get("queued_mask_proven"))
+        phases["activation"]["reload2"] = {"rc": 0}
+        phases["activation"].pop("masked_state2")
+        self.assertFalse(vm.build_checks(phases, manager, reboot)
+                         .get("queued_mask_proven"))
+
+    def test_metadata_preservation_requires_expected_paths(self):
+        phases = self._phases()
+        manager, reboot = self._boundaries()
+        checks = vm.build_checks(phases, manager, reboot)
+        self.assertTrue(checks["metadata_observed"])
+        phases["install"]["snapshot"]["files"] = {}
+        phases["unmask"]["snapshot"]["files"] = {}
+        checks = vm.build_checks(phases, manager, reboot)
+        self.assertFalse(checks["metadata_observed"])
+        self.assertTrue(checks["metadata_equal"])
+        report = {"schema_version": vm.REPORT_SCHEMA,
+                  "image": {"sha256": DIGEST, "sums_verified": True,
+                            "signature_verified": False},
+                  "checks": checks, "limitations": ["limited"]}
+        self.assertIn("check not proven: metadata_observed",
+                      vm.report_problems(report))
+
+    def test_reboot_preservation_requires_alias_and_enablement_paths(self):
+        phases = self._phases()
+        manager, reboot = self._boundaries()
+        self.assertTrue(vm.build_checks(phases, manager, reboot)
+                        ["metadata_observed"])
+        for snapshot in (manager["before"], manager["after"],
+                         reboot["before"], reboot["after"]):
+            for path in (
+                    GUEST_UNIT_DIR / "crq-alias.service",
+                    GUEST_UNIT_DIR / "default.target.wants/crq-fixture.path",
+                    GUEST_FIXTURE / "crq-alias.service.unit",
+                    GUEST_FIXTURE / "original-crq-fixture.service"):
+                snapshot["files"].pop(str(path))
+        checks = vm.build_checks(phases, manager, reboot)
+        self.assertFalse(checks["metadata_observed"])
+        self.assertTrue(checks["mask_metadata_equal"])
+
+    def test_metadata_preservation_requires_applicable_fields(self):
+        phases = self._phases()
+        manager, reboot = self._boundaries()
+        self.assertTrue(vm.build_checks(phases, manager, reboot)
+                        ["metadata_observed"])
+        record = str(GUEST_FIXTURE / "record.sh")
+        phases["install"]["snapshot"]["files"][record].pop("sha256")
+        phases["unmask"]["snapshot"]["files"][record].pop("sha256")
+        checks = vm.build_checks(phases, manager, reboot)
+        self.assertFalse(checks["metadata_observed"])
+        self.assertTrue(checks["metadata_equal"])
 
     def test_queued_jobs_must_settle_before_sampling_runs(self):
         phases = self._phases()
