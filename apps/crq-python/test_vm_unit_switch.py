@@ -55,6 +55,7 @@ def _record(name, fields, raw_fields=None):
 
 def phases():
     RECORDS.clear()
+    MATRIX_RECORDS.clear()
     python_sha = _sha(harness.expected_unit(PYTHON))
     node_sha = _sha(harness.expected_unit(NODE))
     preserved = {"state": STATE, "history_sha256": HISTORY}
@@ -180,6 +181,174 @@ def phases():
             "inspect": inspect, "fence": fence}
 
 
+MATRIX_RECORDS = {}
+
+
+def _matrix_record(case, fields, raw_fields=None, store=False):
+    spec = harness.MATRIX_CASES[case]
+    directory = spec["record_dir"]
+    filename = "controller-" + hashlib.md5(case.encode()).hexdigest() + ".json"
+    raw = json.dumps(raw_fields if raw_fields is not None else fields,
+                     sort_keys=True).encode()
+    if store:
+        MATRIX_RECORDS[(directory, filename)] = raw
+    data = json.dumps(fields, sort_keys=True).encode()
+    return {**fields,
+            "path": "/home/probe/" + directory + "/" + filename,
+            "sha256": hashlib.sha256(data).hexdigest(), "bytes": len(data)}
+
+
+def matrix_evidence():
+    phases_value = phases()
+    MATRIX_RECORDS.clear()
+    preserved = {"state": STATE, "history_sha256": HISTORY}
+    restarts = {}
+    reboots = {}
+    for case in harness.MATRIX_ORDER:
+        spec = harness.MATRIX_CASES[case]
+        pending_phase = ("activation_pending"
+                         if spec["boundary"] == "activation_pending"
+                         else "drained")
+        pending = {"outcome": "pending", "phase": pending_phase,
+                   "runtime": spec["runtime"],
+                   "prior_runtime": spec["prior_runtime"]}
+        pending_summary = _matrix_record(
+            case, pending, store=(pending_phase == "activation_pending"))
+        rolled = {"outcome": "rolled_back",
+                  "phase": "restore_activation_pending",
+                  "runtime": spec["runtime"],
+                  "prior_runtime": spec["prior_runtime"]}
+        rolled_summary = _matrix_record(
+            case, rolled, store=(pending_phase != "activation_pending"))
+        if spec["boundary"] == "drained":
+            staged = {"type": "missing"}
+        elif spec["boundary"] == "restore_staged":
+            staged = {"type": "file", "runtime": spec["prior_runtime"]}
+        else:
+            staged = {"type": "file", "runtime": spec["runtime"]}
+        boundary = {
+            "case": case, "kind": spec["kind"],
+            "boundary": spec["boundary"], "runtime": spec["runtime"],
+            "prior_runtime": spec["prior_runtime"],
+            "record_dir": "/home/probe/" + spec["record_dir"],
+            "record_path": pending_summary["path"],
+            "record": pending_summary, "cli": {"rc": -9},
+            "recovery_kill": ({"rc": -9}
+                              if spec["boundary"] == "restore_staged"
+                              else None),
+            "snapshot": {"boot_id": "b0",
+                         "manager": {"pid": "1",
+                                     "invocation_id": "a" * 32}},
+            "metadata": {},
+            "fence": {"service": {"LoadState": "masked",
+                                   "FragmentPath": SERVICE},
+                      "direct_start": {"rc": 1,
+                                       "stderr": "Unit is masked."},
+                      "timer": {"ActiveState": "inactive"}},
+            "staged": staged, "owned": {"main_pid": 0, "pids": []},
+            "jobs": [], "completions_before": 4,
+            "completions_after": 4, "preserved": preserved,
+        }
+        observe = {
+            "case": case, "kind": spec["kind"],
+            "boundary": spec["boundary"], "runtime": spec["runtime"],
+            "prior_runtime": spec["prior_runtime"],
+            "record_dir": "/home/probe/" + spec["record_dir"],
+            "record_path": pending_summary["path"],
+            "record_before": pending_summary,
+            "record_after": pending_summary,
+            "snapshot": {}, "before": boundary["snapshot"],
+            "identity": {
+                "boot_id_before": "b0",
+                "boot_id_after": ("b1" if spec["kind"] == "reboot" else "b0"),
+                "boot_id_changed": spec["kind"] == "reboot",
+                "manager_before": {"pid": "1",
+                                   "invocation_id": "a" * 32},
+                "manager_after": {"pid": "2",
+                                  "invocation_id": "b" * 32},
+                "manager_changed": True},
+            "metadata": {}, "metadata_match": True,
+            "fence": {"service": {"LoadState": "masked",
+                                   "FragmentPath": SERVICE},
+                      "direct_start": {"rc": 1,
+                                       "stderr": "Unit is masked."}},
+            "staged": staged, "owned": {"main_pid": 0, "pids": []},
+            "jobs": [], "completions_before": 4,
+            "completions_after": 4, "preserved": preserved,
+        }
+        if pending_phase == "activation_pending":
+            observe["recovery"] = {
+                "cli": {"rc": 3}, "record_before": pending_summary,
+                "record_after": pending_summary}
+            observe["repeat"] = {
+                "cli": {"rc": 3}, "record_before": pending_summary,
+                "record_after": pending_summary}
+        else:
+            observe["recovery"] = {
+                "cli": {"rc": 0}, "record": rolled_summary,
+                "record_before": pending_summary,
+                "record_after": rolled_summary,
+                "restored": {"runtime": spec["prior_runtime"],
+                             "staged": {"type": "missing"}}}
+            observe["repeat"] = {
+                "cli": {"rc": 2, "stdout": "{\"refused\": \"invalid record\"}"},
+                "record_before": rolled_summary,
+                "record_after": rolled_summary}
+        phases_value[case] = boundary
+        phases_value[case + "-observe"] = observe
+        if spec["kind"] == "manager":
+            restarts[case] = {
+                "kind": "user_manager_restart",
+                "command": {"argv": ["ssh", "probe@guest",
+                                      "sudo -n systemctl restart "
+                                      "user@$(id -u).service"], "rc": 0},
+                "ready": {"state": "running"},
+                "before": boundary["snapshot"],
+                "after": {"boot_id": "b0",
+                          "manager": {"pid": "2",
+                                      "invocation_id": "b" * 32}},
+                "boot_id_changed": False,
+                "manager_invocation_changed": True,
+                "qemu_identity_verified": True}
+        else:
+            reboots[case] = {
+                "kind": "guest_reboot",
+                "issued": {"argv": ["ssh", "probe@guest",
+                                      "sudo -n systemctl reboot"], "rc": -1},
+                "boot_id_before": "b0", "boot_id_after": "b1",
+                "ssh_ready": {"attempts": 1},
+                "manager_ready": {"state": "running"},
+                "before": boundary["snapshot"],
+                "after": {"boot_id": "b1",
+                          "manager": {"pid": "2",
+                                      "invocation_id": "b" * 32}},
+                "boot_id_changed": True,
+                "manager_invocation_changed": True,
+                "qemu_identity_verified": True}
+
+    switch_record = _record("matrix-switch-node", {
+        "outcome": "completed", "phase": "activation_pending",
+        "runtime": NODE, "prior_runtime": PYTHON})
+    phases_value["matrix-switch-node"] = {"cli": {"rc": 0},
+                                          "record": switch_record}
+    for reset, after in (("matrix-reset-python",
+                          "matrix-restart-ambiguity-observe"),
+                         ("matrix-reset-python-final",
+                          "matrix-reboot-ambiguity-observe")):
+        observe = phases_value[after]
+        phases_value[reset] = {
+            "after_phase": after, "record_path": observe["record_path"],
+            "record_dir": observe["record_dir"],
+            "record_before": observe["record_after"],
+            "record_after": observe["record_after"],
+            "runtime": PYTHON,
+            "service": {"LoadState": "loaded", "ActiveState": "inactive"},
+            "timer": {"LoadState": "loaded", "ActiveState": "inactive",
+                      "UnitFileState": "enabled"},
+            "preserved": preserved}
+    return phases_value, restarts, reboots
+
+
 class HarnessCheckTests(unittest.TestCase):
     def test_complete_evidence_passes(self):
         checks, problems = harness.build_checks(phases())
@@ -262,6 +431,122 @@ class HarnessCheckTests(unittest.TestCase):
         self.assertIn("- git", text)
         self.assertIn("- nodejs", text)
         self.assertIn("enable-linger", text)
+
+
+class MatrixHarnessCheckTests(unittest.TestCase):
+    def _checks(self):
+        phases_value, restarts, reboots = matrix_evidence()
+        return phases_value, restarts, reboots, harness.build_checks(
+            phases_value, restarts, reboots, "matrix")
+
+    def test_matrix_evidence_passes(self):
+        _, _, _, (checks, problems) = self._checks()
+        self.assertEqual(problems, [])
+        self.assertTrue(checks)
+        self.assertTrue(all(value is True for value in checks.values()))
+
+    def test_missing_matrix_phase_fails_closed(self):
+        phases_value, restarts, reboots, _ = self._checks()
+        del phases_value["matrix-restart-drained-observe"]
+        checks, problems = harness.build_checks(phases_value, restarts,
+                                                reboots, "matrix")
+        self.assertFalse(checks["matrix-restart-drained_identity"])
+        self.assertTrue(problems)
+
+    def test_manager_restart_must_keep_boot_id(self):
+        phases_value, restarts, reboots, _ = self._checks()
+        restarts["matrix-restart-drained"]["boot_id_changed"] = True
+        checks, problems = harness.build_checks(phases_value, restarts,
+                                                reboots, "matrix")
+        self.assertFalse(checks["matrix-restart-drained_identity"])
+        self.assertFalse(checks["matrix_manager_restart_is_not_reload"])
+        self.assertTrue(problems)
+
+    def test_reboot_must_change_boot_id(self):
+        phases_value, restarts, reboots, _ = self._checks()
+        reboots["matrix-reboot-drained"]["boot_id_changed"] = False
+        checks, problems = harness.build_checks(phases_value, restarts,
+                                                reboots, "matrix")
+        self.assertFalse(checks["matrix-reboot-drained_identity"])
+        self.assertFalse(checks["matrix_guest_reboot_changes_boot_id"])
+        self.assertTrue(problems)
+
+    def test_daemon_reload_is_not_a_restart(self):
+        phases_value, restarts, reboots, _ = self._checks()
+        restarts["matrix-restart-drained"]["command"]["argv"][-1] = (
+            "sudo -n systemctl daemon-reload")
+        checks, problems = harness.build_checks(phases_value, restarts,
+                                                reboots, "matrix")
+        self.assertFalse(checks["matrix-restart-drained_identity"])
+        self.assertFalse(checks["matrix_manager_restart_is_not_reload"])
+        self.assertTrue(problems)
+
+    def test_changed_journal_fails(self):
+        phases_value, restarts, reboots, _ = self._checks()
+        observe = phases_value["matrix-restart-drained-observe"]
+        observe["record_after"] = {**observe["record_after"],
+                                    "sha256": "3" * 64}
+        checks, problems = harness.build_checks(phases_value, restarts,
+                                                reboots, "matrix")
+        self.assertFalse(checks["matrix-restart-drained_journal_metadata_fence"])
+        self.assertTrue(problems)
+
+    def test_changed_metadata_fails(self):
+        phases_value, restarts, reboots, _ = self._checks()
+        phases_value["matrix-reboot-drained-observe"]["metadata_match"] = False
+        checks, problems = harness.build_checks(phases_value, restarts,
+                                                reboots, "matrix")
+        self.assertFalse(checks["matrix-reboot-drained_journal_metadata_fence"])
+        self.assertTrue(problems)
+
+    def test_owned_work_after_restart_fails(self):
+        phases_value, restarts, reboots, _ = self._checks()
+        phases_value["matrix-restart-drained-observe"]["owned"] = {
+            "main_pid": 42, "pids": [42]}
+        checks, problems = harness.build_checks(phases_value, restarts,
+                                                reboots, "matrix")
+        self.assertFalse(checks["matrix-restart-drained_journal_metadata_fence"])
+        self.assertTrue(problems)
+
+    def test_recovery_must_restore_the_prior_runtime(self):
+        phases_value, restarts, reboots, _ = self._checks()
+        recovery = phases_value["matrix-reboot-drained-observe"]["recovery"]
+        recovery["restored"] = {"runtime": PYTHON,
+                                "staged": {"type": "missing"}}
+        checks, problems = harness.build_checks(phases_value, restarts,
+                                                reboots, "matrix")
+        self.assertFalse(checks["matrix-reboot-drained_recovery_outcome"])
+        self.assertTrue(problems)
+
+    def test_ambiguity_must_refuse(self):
+        phases_value, restarts, reboots, _ = self._checks()
+        phases_value["matrix-restart-ambiguity-observe"]["recovery"]["cli"] = {
+            "rc": 0}
+        checks, problems = harness.build_checks(phases_value, restarts,
+                                                reboots, "matrix")
+        self.assertFalse(checks["matrix-restart-ambiguity_recovery_outcome"])
+        self.assertFalse(checks["matrix_ambiguity_retained"])
+        self.assertTrue(problems)
+
+    def test_restore_staged_requires_an_interrupted_recovery(self):
+        phases_value, restarts, reboots, _ = self._checks()
+        phases_value["matrix-restart-restore-staged"]["recovery_kill"] = {
+            "rc": 0}
+        checks, problems = harness.build_checks(phases_value, restarts,
+                                                reboots, "matrix")
+        self.assertFalse(
+            checks["matrix-restart-restore-staged_boundary"])
+        self.assertTrue(problems)
+
+    def test_staged_target_must_match_the_boundary(self):
+        phases_value, restarts, reboots, _ = self._checks()
+        phases_value["matrix-restart-restore-staged-observe"]["staged"] = {
+            "type": "file", "runtime": NODE}
+        checks, problems = harness.build_checks(phases_value, restarts,
+                                                reboots, "matrix")
+        self.assertFalse(
+            checks["matrix-restart-restore-staged_journal_metadata_fence"])
+        self.assertTrue(problems)
 
 
 class VerifyTests(unittest.TestCase):
@@ -517,6 +802,146 @@ class VerifyTests(unittest.TestCase):
         status, payload = self._verify()
         self.assertEqual(status, 1)
         self.assertTrue(any("host module artifact digest does not match" in item
+                            for item in payload["problems"]))
+
+
+class MatrixVerifyTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="crq-proof-verify-")
+        self.addCleanup(self.temp.cleanup)
+        self.run_dir = pathlib.Path(self.temp.name)
+        self.host = self.run_dir / "executed-host-script.py"
+        self.feasibility = self.run_dir / "executed-host-vm-feasibility.py"
+        self.guest = self.run_dir / "executed-guest-probe.py"
+        self.raw = self.run_dir / "raw-guest-evidence.tar.gz"
+        self.host.write_bytes(b"host")
+        self.feasibility.write_bytes(b"feasibility")
+        self.guest.write_bytes(b"guest")
+        self.upload_data = {name: ("upload:" + name).encode()
+                            for name in harness.UPLOADS}
+        self.phases, self.restarts, self.reboots = matrix_evidence()
+        self.report = {
+            "schema_version": harness.SCHEMA_VERSION,
+            "kind": harness.KIND,
+            "mode": "matrix",
+            "path": str(self.run_dir),
+            "source_commit": SOURCE_COMMIT,
+            "phases": self.phases,
+            "restarts": self.restarts,
+            "reboots": self.reboots,
+            "checks": {},
+            "problems": [],
+            "provenance": {
+                "source_commit": SOURCE_COMMIT,
+                "host_script": {"artifact": self.host.name,
+                                "sha256": harness.sha256_bytes(b"host")},
+                "host_modules": {
+                    "vm-unit-switch.py": {
+                        "artifact": self.host.name,
+                        "sha256": harness.sha256_bytes(b"host")},
+                    "vm-feasibility.py": {
+                        "artifact": self.feasibility.name,
+                        "sha256": harness.sha256_bytes(b"feasibility")},
+                },
+                "guest_script": {"artifact": self.guest.name,
+                                 "sha256": harness.sha256_bytes(b"guest")},
+                "guest_report": self.guest.name,
+                "uploads": {
+                    name: {"sha256": harness.sha256_bytes(data),
+                           "remote_sha256": harness.sha256_bytes(data),
+                           "bytes": len(data), "verified": True}
+                    for name, data in self.upload_data.items()},
+            },
+            "raw": {"raw_tar": self.raw.name},
+        }
+        self._rebuild_raw()
+        checks, problems = harness.build_checks(
+            self.phases, self.restarts, self.reboots, "matrix")
+        self.report["checks"] = checks
+        self.report["problems"] = problems
+
+    def _add(self, archive, name, data, mode=0o644):
+        info = tarfile.TarInfo(name)
+        info.size = len(data)
+        info.mode = mode
+        archive.addfile(info, io.BytesIO(data))
+
+    def _rebuild_raw(self):
+        buffer = io.BytesIO()
+        with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
+            for name in harness.phase_names("matrix"):
+                data = (json.dumps(self.phases[name], indent=2,
+                                   sort_keys=True) + "\n").encode()
+                self._add(archive, "fixture/phases/" + name + ".json", data)
+            for name, data in RECORDS.items():
+                filename = ("controller-"
+                            + hashlib.md5(name.encode()).hexdigest() + ".json")
+                self._add(archive, "records/" + filename, data, mode=0o600)
+            for (directory, filename), data in MATRIX_RECORDS.items():
+                self._add(archive, directory + "/" + filename, data, mode=0o600)
+            for name, data in self.upload_data.items():
+                self._add(archive, "proof-bin/" + name, data)
+            mask = tarfile.TarInfo(
+                ".config/systemd/user/crq-tick.service")
+            mask.type = tarfile.SYMTYPE
+            mask.linkname = "/dev/null"
+            archive.addfile(mask)
+            self._add(archive, ".config/systemd/user/.crq-tick.service.staged",
+                      harness.expected_unit(NODE).encode())
+        data = buffer.getvalue()
+        self.raw.write_bytes(data)
+        self.report["raw"]["tar_sha256"] = harness.sha256_bytes(data)
+        self.report["raw"]["tar_bytes"] = len(data)
+
+    def _write(self):
+        path = self.run_dir / "report.json"
+        path.write_text(json.dumps(self.report))
+        return path
+
+    def _verify(self):
+        report = self._write()
+        import contextlib
+        stream = io.StringIO()
+        with contextlib.redirect_stdout(stream):
+            status = harness.cmd_verify(type("Args", (), {"report": report})())
+        return status, json.loads(stream.getvalue())
+
+    def test_matrix_report_verifies(self):
+        status, payload = self._verify()
+        self.assertEqual(status, 0, payload)
+        self.assertEqual(payload["problems"], [])
+
+    def test_matrix_phase_contradicting_raw_is_rejected(self):
+        self.report["phases"]["matrix-reboot-drained"]["cli"]["rc"] = 0
+        status, payload = self._verify()
+        self.assertEqual(status, 1)
+        self.assertTrue(any("does not match retained raw guest evidence" in item
+                            for item in payload["problems"]))
+
+    def test_matrix_journal_contradiction_is_rejected(self):
+        phase = self.report["phases"]["matrix-reboot-drained-observe"]
+        phase["recovery"]["record"]["outcome"] = "completed"
+        self._rebuild_raw()
+        status, payload = self._verify()
+        self.assertEqual(status, 1)
+        self.assertTrue(any("contradicts retained evidence" in item
+                            for item in payload["problems"]))
+
+    def test_matrix_missing_phase_is_rejected(self):
+        del self.report["phases"]["matrix-restart-ambiguity-observe"]
+        status, payload = self._verify()
+        self.assertEqual(status, 1)
+        self.assertTrue(any("matrix-restart-ambiguity-observe" in item
+                            for item in payload["problems"]))
+
+    def test_matrix_missing_case_record_is_rejected(self):
+        for key in list(MATRIX_RECORDS):
+            if key[0] == "records/ambiguity-manager-restart":
+                del MATRIX_RECORDS[key]
+        self._rebuild_raw()
+        status, payload = self._verify()
+        self.assertEqual(status, 1)
+        self.assertTrue(any("retained record is missing" in item
                             for item in payload["problems"]))
 
 
