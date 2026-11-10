@@ -288,6 +288,23 @@ def summarize_family() -> Dict[str, Any]:
                 now="2026-10-31T00:00:00Z",
             )
         )
+    for usage, label in (
+        ({"limit": 9007199254740991}, "usage-limit-safe-neighbor-is-kept"),
+        ({"limit": -9007199254740993}, "usage-limit-large-negative-falls-back"),
+        ({"limit": 9007199254740992}, "usage-limit-large-exact-int-is-kept"),
+        ({"limit": 9007199254740993}, "usage-limit-large-unrepresentable-int-is-kept"),
+        ({"limit": 9007199254740992.0}, "usage-limit-large-exact-float-falls-back"),
+        ({"limit": 9007199254740993.0}, "usage-limit-large-integral-float-falls-back"),
+    ):
+        cases.append(
+            summarize(
+                label,
+                queue={"items": [], "usage": usage},
+                config={"max_starts_per_hour": 10},
+                generated_at="2026-10-31T00:00:00Z",
+                now="2026-10-31T00:00:00Z",
+            )
+        )
     cases.append(
         summarize(
             "local-review-generation-bool-is-one",

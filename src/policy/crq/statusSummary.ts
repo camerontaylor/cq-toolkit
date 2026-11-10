@@ -104,6 +104,13 @@ export interface PendingItemView {
   readonly label?: string;
 }
 
+/**
+ * A summary integer rendered exactly like Python. Values that a JavaScript
+ * number holds exactly stay numbers; larger Python ints keep the lossless
+ * {@link JsonNumber} so a writer using `pythonJson` emits the exact digits.
+ */
+export type SummaryInteger = number | JsonNumber;
+
 export interface StatusSummaryView {
   readonly backfill_reserved_slots: 1;
   readonly completed_24h_by_work: Readonly<
@@ -116,7 +123,7 @@ export interface StatusSummaryView {
   readonly paused: boolean;
   readonly cooldown_until: unknown;
   readonly starts_60m: number;
-  readonly starts_cap: number;
+  readonly starts_cap: SummaryInteger;
   readonly in_flight: number;
   readonly outcomes_24h: Readonly<Record<'completed' | 'interrupted' | 'error', number>>;
   readonly other_outcomes_24h: number;
@@ -252,7 +259,7 @@ export function summarize(
   const limit = pythonIntValue(usageLimit(usage));
   // The configured cap is a conservative scheduler fallback, not an account quota.
   const startsCap =
-    limit !== null && limit > 0
+    limit !== null && positiveInteger(limit)
       ? limit
       : requireNumber(get(config, 'max_starts_per_hour'), 'max_starts_per_hour');
 
@@ -830,17 +837,30 @@ function requireString(value: unknown, what: string): string {
 /**
  * Python's `type(value) is int` for a materialised value, or for a
  * {@link JsonNumber} kept lossless by a caller that parsed queue bytes itself.
- * Bools, floats, numeric strings and unsafe integers are refused; `null`
- * means "not a Python int".
+ * Bools, floats and numeric strings are refused; `null` means "not a Python
+ * int". An integer outside the safe integer range is returned as its lossless
+ * {@link JsonNumber}, because JSON writers refuse unsafe plain numbers.
  */
-export function pythonIntValue(value: unknown): number | null {
+export function pythonIntValue(value: unknown): SummaryInteger | null {
   if (value instanceof JsonNumber) {
     if (value.kind !== 'int' || value.integer === null) return null;
-    const converted = Number(value.integer);
-    return Number.isSafeInteger(converted) ? converted : null;
+    // JSON writers refuse unsafe plain numbers, so any integer outside the
+    // safe range stays lossless even when this particular double is exact.
+    return value.integer > MAX_SAFE_INTEGER || value.integer < MIN_SAFE_INTEGER
+      ? value
+      : Number(value.integer);
   }
-  if (typeof value === 'number' && Number.isSafeInteger(value)) return value;
+  if (typeof value === 'number' && Number.isInteger(value)) {
+    return Number.isSafeInteger(value) ? value : JsonNumber.int(BigInt(value));
+  }
   return null;
+}
+
+const MAX_SAFE_INTEGER = BigInt(Number.MAX_SAFE_INTEGER);
+const MIN_SAFE_INTEGER = BigInt(Number.MIN_SAFE_INTEGER);
+
+function positiveInteger(value: SummaryInteger): boolean {
+  return value instanceof JsonNumber ? (value.integer as bigint) > 0n : value > 0;
 }
 
 /**

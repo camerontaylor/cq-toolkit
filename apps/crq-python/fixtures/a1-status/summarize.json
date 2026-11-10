@@ -1814,6 +1814,462 @@
       }
     },
     {
+      "name": "usage-limit-safe-neighbor-is-kept",
+      "source": "status_summary.summarize",
+      "input": {
+        "status": {
+          "generated_at": "2026-10-31T00:00:00Z"
+        },
+        "queue": {
+          "items": [],
+          "usage": {
+            "limit": 9007199254740991
+          }
+        },
+        "heartbeat": {},
+        "config": {
+          "max_starts_per_hour": 10
+        },
+        "events": [],
+        "now": 1793404800.0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "backfill_reserved_slots": 1,
+          "completed_24h_by_work": {
+            "open": 0,
+            "recent_merge": 0,
+            "backfill": 0,
+            "other": 0
+          },
+          "pending_items": [],
+          "merged_current": {
+            "natural_discovery": {},
+            "discovery": {},
+            "watermark": null,
+            "receipts": {
+              "pending": 0,
+              "reviewing": 0,
+              "blocked": 0,
+              "unverified": 0,
+              "proven_terminal": 0,
+              "no_current_code": 0,
+              "partial_scope": 0,
+              "unsupported": 0
+            },
+            "path_exclusions": {},
+            "captured_targets": [],
+            "additional_captured_targets": 0,
+            "coverage_at_today_target": "unverified",
+            "legacy_done_is_review_proof": false
+          },
+          "last_tick": null,
+          "status_as_of": "2026-10-31T00:00:00Z",
+          "paused": false,
+          "cooldown_until": null,
+          "starts_60m": 0,
+          "starts_cap": 9007199254740991,
+          "in_flight": 0,
+          "outcomes_24h": {
+            "completed": 0,
+            "interrupted": 0,
+            "error": 0
+          },
+          "other_outcomes_24h": 0,
+          "backlog": {
+            "open": 0,
+            "delta": 0,
+            "merged": 0,
+            "coverage": 0,
+            "merged-current": 0,
+            "backfill": 0
+          },
+          "repos": {}
+        }
+      }
+    },
+    {
+      "name": "usage-limit-large-negative-falls-back",
+      "source": "status_summary.summarize",
+      "input": {
+        "status": {
+          "generated_at": "2026-10-31T00:00:00Z"
+        },
+        "queue": {
+          "items": [],
+          "usage": {
+            "limit": -9007199254740993
+          }
+        },
+        "heartbeat": {},
+        "config": {
+          "max_starts_per_hour": 10
+        },
+        "events": [],
+        "now": 1793404800.0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "backfill_reserved_slots": 1,
+          "completed_24h_by_work": {
+            "open": 0,
+            "recent_merge": 0,
+            "backfill": 0,
+            "other": 0
+          },
+          "pending_items": [],
+          "merged_current": {
+            "natural_discovery": {},
+            "discovery": {},
+            "watermark": null,
+            "receipts": {
+              "pending": 0,
+              "reviewing": 0,
+              "blocked": 0,
+              "unverified": 0,
+              "proven_terminal": 0,
+              "no_current_code": 0,
+              "partial_scope": 0,
+              "unsupported": 0
+            },
+            "path_exclusions": {},
+            "captured_targets": [],
+            "additional_captured_targets": 0,
+            "coverage_at_today_target": "unverified",
+            "legacy_done_is_review_proof": false
+          },
+          "last_tick": null,
+          "status_as_of": "2026-10-31T00:00:00Z",
+          "paused": false,
+          "cooldown_until": null,
+          "starts_60m": 0,
+          "starts_cap": 10,
+          "in_flight": 0,
+          "outcomes_24h": {
+            "completed": 0,
+            "interrupted": 0,
+            "error": 0
+          },
+          "other_outcomes_24h": 0,
+          "backlog": {
+            "open": 0,
+            "delta": 0,
+            "merged": 0,
+            "coverage": 0,
+            "merged-current": 0,
+            "backfill": 0
+          },
+          "repos": {}
+        }
+      }
+    },
+    {
+      "name": "usage-limit-large-exact-int-is-kept",
+      "source": "status_summary.summarize",
+      "input": {
+        "status": {
+          "generated_at": "2026-10-31T00:00:00Z"
+        },
+        "queue": {
+          "items": [],
+          "usage": {
+            "limit": 9007199254740992
+          }
+        },
+        "heartbeat": {},
+        "config": {
+          "max_starts_per_hour": 10
+        },
+        "events": [],
+        "now": 1793404800.0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "backfill_reserved_slots": 1,
+          "completed_24h_by_work": {
+            "open": 0,
+            "recent_merge": 0,
+            "backfill": 0,
+            "other": 0
+          },
+          "pending_items": [],
+          "merged_current": {
+            "natural_discovery": {},
+            "discovery": {},
+            "watermark": null,
+            "receipts": {
+              "pending": 0,
+              "reviewing": 0,
+              "blocked": 0,
+              "unverified": 0,
+              "proven_terminal": 0,
+              "no_current_code": 0,
+              "partial_scope": 0,
+              "unsupported": 0
+            },
+            "path_exclusions": {},
+            "captured_targets": [],
+            "additional_captured_targets": 0,
+            "coverage_at_today_target": "unverified",
+            "legacy_done_is_review_proof": false
+          },
+          "last_tick": null,
+          "status_as_of": "2026-10-31T00:00:00Z",
+          "paused": false,
+          "cooldown_until": null,
+          "starts_60m": 0,
+          "starts_cap": 9007199254740992,
+          "in_flight": 0,
+          "outcomes_24h": {
+            "completed": 0,
+            "interrupted": 0,
+            "error": 0
+          },
+          "other_outcomes_24h": 0,
+          "backlog": {
+            "open": 0,
+            "delta": 0,
+            "merged": 0,
+            "coverage": 0,
+            "merged-current": 0,
+            "backfill": 0
+          },
+          "repos": {}
+        }
+      }
+    },
+    {
+      "name": "usage-limit-large-unrepresentable-int-is-kept",
+      "source": "status_summary.summarize",
+      "input": {
+        "status": {
+          "generated_at": "2026-10-31T00:00:00Z"
+        },
+        "queue": {
+          "items": [],
+          "usage": {
+            "limit": 9007199254740993
+          }
+        },
+        "heartbeat": {},
+        "config": {
+          "max_starts_per_hour": 10
+        },
+        "events": [],
+        "now": 1793404800.0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "backfill_reserved_slots": 1,
+          "completed_24h_by_work": {
+            "open": 0,
+            "recent_merge": 0,
+            "backfill": 0,
+            "other": 0
+          },
+          "pending_items": [],
+          "merged_current": {
+            "natural_discovery": {},
+            "discovery": {},
+            "watermark": null,
+            "receipts": {
+              "pending": 0,
+              "reviewing": 0,
+              "blocked": 0,
+              "unverified": 0,
+              "proven_terminal": 0,
+              "no_current_code": 0,
+              "partial_scope": 0,
+              "unsupported": 0
+            },
+            "path_exclusions": {},
+            "captured_targets": [],
+            "additional_captured_targets": 0,
+            "coverage_at_today_target": "unverified",
+            "legacy_done_is_review_proof": false
+          },
+          "last_tick": null,
+          "status_as_of": "2026-10-31T00:00:00Z",
+          "paused": false,
+          "cooldown_until": null,
+          "starts_60m": 0,
+          "starts_cap": 9007199254740993,
+          "in_flight": 0,
+          "outcomes_24h": {
+            "completed": 0,
+            "interrupted": 0,
+            "error": 0
+          },
+          "other_outcomes_24h": 0,
+          "backlog": {
+            "open": 0,
+            "delta": 0,
+            "merged": 0,
+            "coverage": 0,
+            "merged-current": 0,
+            "backfill": 0
+          },
+          "repos": {}
+        }
+      }
+    },
+    {
+      "name": "usage-limit-large-exact-float-falls-back",
+      "source": "status_summary.summarize",
+      "input": {
+        "status": {
+          "generated_at": "2026-10-31T00:00:00Z"
+        },
+        "queue": {
+          "items": [],
+          "usage": {
+            "limit": 9007199254740992.0
+          }
+        },
+        "heartbeat": {},
+        "config": {
+          "max_starts_per_hour": 10
+        },
+        "events": [],
+        "now": 1793404800.0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "backfill_reserved_slots": 1,
+          "completed_24h_by_work": {
+            "open": 0,
+            "recent_merge": 0,
+            "backfill": 0,
+            "other": 0
+          },
+          "pending_items": [],
+          "merged_current": {
+            "natural_discovery": {},
+            "discovery": {},
+            "watermark": null,
+            "receipts": {
+              "pending": 0,
+              "reviewing": 0,
+              "blocked": 0,
+              "unverified": 0,
+              "proven_terminal": 0,
+              "no_current_code": 0,
+              "partial_scope": 0,
+              "unsupported": 0
+            },
+            "path_exclusions": {},
+            "captured_targets": [],
+            "additional_captured_targets": 0,
+            "coverage_at_today_target": "unverified",
+            "legacy_done_is_review_proof": false
+          },
+          "last_tick": null,
+          "status_as_of": "2026-10-31T00:00:00Z",
+          "paused": false,
+          "cooldown_until": null,
+          "starts_60m": 0,
+          "starts_cap": 10,
+          "in_flight": 0,
+          "outcomes_24h": {
+            "completed": 0,
+            "interrupted": 0,
+            "error": 0
+          },
+          "other_outcomes_24h": 0,
+          "backlog": {
+            "open": 0,
+            "delta": 0,
+            "merged": 0,
+            "coverage": 0,
+            "merged-current": 0,
+            "backfill": 0
+          },
+          "repos": {}
+        }
+      }
+    },
+    {
+      "name": "usage-limit-large-integral-float-falls-back",
+      "source": "status_summary.summarize",
+      "input": {
+        "status": {
+          "generated_at": "2026-10-31T00:00:00Z"
+        },
+        "queue": {
+          "items": [],
+          "usage": {
+            "limit": 9007199254740992.0
+          }
+        },
+        "heartbeat": {},
+        "config": {
+          "max_starts_per_hour": 10
+        },
+        "events": [],
+        "now": 1793404800.0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "backfill_reserved_slots": 1,
+          "completed_24h_by_work": {
+            "open": 0,
+            "recent_merge": 0,
+            "backfill": 0,
+            "other": 0
+          },
+          "pending_items": [],
+          "merged_current": {
+            "natural_discovery": {},
+            "discovery": {},
+            "watermark": null,
+            "receipts": {
+              "pending": 0,
+              "reviewing": 0,
+              "blocked": 0,
+              "unverified": 0,
+              "proven_terminal": 0,
+              "no_current_code": 0,
+              "partial_scope": 0,
+              "unsupported": 0
+            },
+            "path_exclusions": {},
+            "captured_targets": [],
+            "additional_captured_targets": 0,
+            "coverage_at_today_target": "unverified",
+            "legacy_done_is_review_proof": false
+          },
+          "last_tick": null,
+          "status_as_of": "2026-10-31T00:00:00Z",
+          "paused": false,
+          "cooldown_until": null,
+          "starts_60m": 0,
+          "starts_cap": 10,
+          "in_flight": 0,
+          "outcomes_24h": {
+            "completed": 0,
+            "interrupted": 0,
+            "error": 0
+          },
+          "other_outcomes_24h": 0,
+          "backlog": {
+            "open": 0,
+            "delta": 0,
+            "merged": 0,
+            "coverage": 0,
+            "merged-current": 0,
+            "backfill": 0
+          },
+          "repos": {}
+        }
+      }
+    },
+    {
       "name": "local-review-generation-bool-is-one",
       "source": "status_summary.summarize",
       "input": {

@@ -32,7 +32,7 @@ trailing newline; fixed timestamps only, so the bytes are host-independent.
 
 | file | sources | covers |
 |---|---|---|
-| `summarize.json` | `status_summary.summarize` | local-review aging and the config window, invalid age tolerance, foreign open PR rank, operator-priority ordering, 24 h completion grouping and the 10-row preview, `starts_cap` (`3` kept, `3.0`/`3e0` fallback, `0`, `true`, `"8"`, missing, remaining-only), generation `true` equality, open cycles, re-harvested runs, review_finished timestamp refusals, 60-minute window boundaries, global in-flight, configured repos before their first item |
+| `summarize.json` | `status_summary.summarize` | local-review aging and the config window, invalid age tolerance, foreign open PR rank, operator-priority ordering, 24 h completion grouping and the 10-row preview, `starts_cap` (`3` kept, `3.0`/`3e0` fallback, 2^53 and 2^53+1 kept exactly, large negative and float fallbacks, `0`, `true`, `"8"`, missing, remaining-only), generation `true` equality, open cycles, re-harvested runs, review_finished timestamp refusals, 60-minute window boundaries, global in-flight, configured repos before their first item |
 | `merged-current.json` | `status_summary.merged_current` | verified no-current-code / partial-scope / terminal / unsupported, deleted and excluded-path counts, receipt-less and tampered receipts, missing receipt, retained reuse lineage (verified, missing parent, cycle, capture-target mismatch), empty path list, sorted and bounded captured targets (+34 case), discovery passthrough |
 | `client-health.json` | `client_health.snapshot` | completed age (frozen clock), missing/empty completed_at, invalid and non-string refusals, non-object health and item refusals, pending/blocked counts |
 
@@ -63,3 +63,13 @@ splice, so the oracle `3.0` case runs through the serialized queue shape; the
 end-to-end test also covers the other float lexemes and the missing-usage
 fallback. A plain `JSON.parse` result cannot preserve the distinction, and
 `toPlainJson` alone erases it.
+
+A Python int that a JavaScript number cannot hold exactly stays a
+`JsonNumber` in `starts_cap` (`SummaryInteger` is `number | JsonNumber`). For
+example 2^53 and 2^53+1 both keep the exact `JsonNumber` (the JSON writer
+refuses unsafe plain numbers), 2^53-1 stays a number, a large negative int
+falls back, and a float with the same value falls back. The summary is not a
+`JSON.stringify` wire value: a future writer must serialise it with
+`pythonJson`/`receiptJsonText`, which emits `JsonNumber` as its exact digits.
+The oracle test compares the canonical `starts_cap` bytes for these cases, not
+the rounded materialisation.

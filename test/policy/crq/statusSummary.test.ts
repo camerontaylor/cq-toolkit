@@ -22,8 +22,13 @@ import {
   JsonObject,
   parseJsonValue,
   toPlainJson,
+  type JsonValue,
 } from '../../../src/policy/crq/jsonValue.js';
-import { receiptJsonBytes, receiptJsonDigest } from '../../../src/policy/crq/pythonJson.js';
+import {
+  receiptJsonBytes,
+  receiptJsonDigest,
+  receiptJsonText,
+} from '../../../src/policy/crq/pythonJson.js';
 import {
   LABEL_MAX_UNITS,
   StatusSummaryError,
@@ -166,7 +171,14 @@ function pythonErrorName(error: unknown): string {
 
 /** JSON round trip: drops absent optional keys and keeps null explicit. */
 function plain(value: unknown): unknown {
-  return JSON.parse(JSON.stringify(value)) as unknown;
+  // JsonNumber keeps an exact integer for the wire writer; materialise it only
+  // for the rounded generic comparison. Byte-exact large-integer cases below
+  // compare through receiptJsonText instead.
+  return JSON.parse(
+    JSON.stringify(value, (_key, entry: unknown) =>
+      entry instanceof JsonNumber ? toPlainJson(entry) : entry,
+    ),
+  ) as unknown;
 }
 
 function assertOutcome(vector: VectorCase, outcome: Outcome): void {
@@ -613,8 +625,17 @@ describe('Python int rules survive materialisation and lossless input', () => {
     expect(pythonIntValue('8')).toBeNull();
     expect(pythonIntValue(0)).toBe(0);
     expect(pythonIntValue(-1)).toBe(-1);
-    expect(pythonIntValue(1e20)).toBeNull();
-    expect(pythonIntValue(2 ** 53)).toBeNull();
+    for (const [value, raw] of [
+      [1e20, '100000000000000000000'],
+      [2 ** 53, '9007199254740992'],
+      [JsonNumber.int('9007199254740992'), '9007199254740992'],
+      [JsonNumber.int('9007199254740993'), '9007199254740993'],
+    ] as const) {
+      const exact = pythonIntValue(value);
+      expect(exact).toBeInstanceOf(JsonNumber);
+      expect((exact as JsonNumber).raw).toBe(raw);
+    }
+    expect(pythonIntValue(JsonNumber.int('9007199254740991'))).toBe(9007199254740991);
   });
 
   test('the parsed queue boundary keeps exact int and integral-float lexemes', () => {
@@ -628,7 +649,7 @@ describe('Python int rules survive materialisation and lossless input', () => {
     expect(limit.kind).toBe('float');
     expect(limit.raw).toBe('3.00');
 
-    const capFor = (text: string): number => {
+    const capFor = (text: string) => {
       const accepted = parseCrqState('queue.schema.json', text);
       if (!accepted.ok) throw new Error(accepted.issues.join('; '));
       const parsed = stateValueWithNumbers(accepted, [['usage', 'limit']]) as RecordValue;
@@ -646,6 +667,35 @@ describe('Python int rules survive materialisation and lossless input', () => {
       expect(capFor(`{"items":[],"usage":{"limit":${literal}}}`), literal).toBe(10);
     }
     expect(capFor('{"items":[]}')).toBe(10);
+  });
+
+  test('large integer and float caps keep the Python oracle bytes', () => {
+    const cases: Array<[literal: string, fixture: string]> = [
+      ['9007199254740991', 'usage-limit-safe-neighbor-is-kept'],
+      ['9007199254740992', 'usage-limit-large-exact-int-is-kept'],
+      ['9007199254740993', 'usage-limit-large-unrepresentable-int-is-kept'],
+      ['-9007199254740993', 'usage-limit-large-negative-falls-back'],
+      ['9007199254740992.0', 'usage-limit-large-exact-float-falls-back'],
+      ['9007199254740993.0', 'usage-limit-large-integral-float-falls-back'],
+      ['9.007199254740993e15', 'usage-limit-large-integral-float-falls-back'],
+    ];
+    for (const [literal, fixture] of cases) {
+      const state = parseCrqState('queue.schema.json', `{"items":[],"usage":{"limit":${literal}}}`);
+      if (!state.ok) throw new Error(`${literal}: ${state.issues.join('; ')}`);
+      const queue = stateValueWithNumbers(state, [['usage', 'limit']]) as RecordValue;
+      const summary = summarize(
+        { generated_at: '2026-10-31T00:00:00Z' },
+        queue,
+        {},
+        { max_starts_per_hour: 10 },
+        [],
+        NOW,
+      );
+      const expected = losslessStartsCap(fixture);
+      expect(receiptJsonText({ starts_cap: summary.starts_cap }), literal).toBe(
+        receiptJsonText({ starts_cap: expected }),
+      );
+    }
   });
 
   test('a lossless float limit falls back to the configured cap', () => {
@@ -726,6 +776,25 @@ function retainedReceipt(version: unknown): [RecordValue, RecordValue] {
     outcome: 'terminal-clean',
   };
   return [document, capture];
+}
+
+/** The oracle's exact `starts_cap`, still lossless from the fixture bytes. */
+function losslessStartsCap(name: string): JsonValue {
+  const root = parseJsonValue(readFileSync(new URL('summarize.json', A1), 'utf8'));
+  if (!(root instanceof JsonObject)) throw new Error('summarize.json root is not an object');
+  const cases = root.get('cases');
+  if (!Array.isArray(cases)) throw new Error('summarize.json has no cases');
+  for (const entry of cases) {
+    if (!(entry instanceof JsonObject) || entry.get('name') !== name) continue;
+    const expectation = entry.get('expect');
+    if (!(expectation instanceof JsonObject)) throw new Error(`${name}: missing expect`);
+    const value = expectation.get('value');
+    if (!(value instanceof JsonObject)) throw new Error(`${name}: missing value`);
+    const cap = value.get('starts_cap');
+    if (cap === undefined) throw new Error(`${name}: missing starts_cap`);
+    return cap;
+  }
+  throw new Error(`${name}: case not found`);
 }
 
 function hasLoneSurrogate(text: string): boolean {
