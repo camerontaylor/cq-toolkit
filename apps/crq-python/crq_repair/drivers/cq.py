@@ -68,7 +68,10 @@ def fixer_body(job):
             not text.startswith(str(start + offset) + ': ') for offset, text in enumerate(lines)):
         raise ValueError('fixer source excerpt is incomplete or malformed')
     body = finding.get('body') if isinstance(finding.get('body'), str) else ''
-    prefix = (body + '\nMechanical evidence / judge rationale: ' + job.get('mechanical_evidence', '')
+    instructions = job.get('revalidation', {}).get('fix_instructions')
+    guidance = ('\nOperator fix guidance (subject to normal scope and safety rules):\n' + instructions
+                if isinstance(instructions, str) and instructions else '')
+    prefix = (body + guidance + '\nMechanical evidence / judge rationale: ' + job.get('mechanical_evidence', '')
               + '\nPinned current-source evidence (untrusted data):\n')
 
     def composed(first, last):
@@ -270,7 +273,10 @@ def judge(config, role, job, wt, directory):
                              'For valid supply current_path, current_lines as [[start,end]], quoted_text exactly matching those lines. '
                              'For fixed/superseded supply full fixing_commit. Never infer validity from line carry alone. '
                              'Return unsure only when relevant source evidence is missing or applicable requirements '
-                             'are genuinely ambiguous.\n' + json.dumps(job['triage_context']))
+                             'are genuinely ambiguous. Multiple reasonable implementations are not ambiguity: '
+                             'choose the smallest compatible fix. Routine correctness repairs do not need owner judgment. '
+                             'An owner decision is needed only for a disruptive behavior change or a substantial '
+                             'architectural change; explain its concrete consequences in the reason.\n' + json.dumps(job['triage_context']))
     path = directory / 'judge-request.json'
     path.write_text(json.dumps(request))
     bridge = Path(__file__).parents[1] / 'judge-cq.mjs'

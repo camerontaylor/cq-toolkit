@@ -20,7 +20,7 @@ or a held activation are historical; no committed role uses those drivers now.
 
 ## Prepare a new current-tip job
 
-After independent source review and desk approval, the sole tick owner may run:
+After verifying the finding against the current tip, an operator agent may run:
 
 ```sh
 python3 crq.py repair-prepare <historical-job-id> \
@@ -28,11 +28,21 @@ python3 crq.py repair-prepare <historical-job-id> \
   --revalidation <private-reviewed-evidence-json>
 ```
 
+Add `--instructions-file <utf8-file>` to attach up to 2,000 characters of concrete
+fix guidance. It is retained as `revalidation.fix_instructions`, contributes to
+the retry identity, and is secret-scanned before enrollment. CQ includes it in
+the bounded fixer body; other fixer drivers receive the revalidation payload.
+Guidance does not expand scope, bypass checks, or authorize publishing. Changing
+it creates a new retry subject to the existing per-pin round ceiling.
+
 The existing tick lock covers preparation. Evidence must bind `source_sha`,
 `finding_sha256` (SHA256 of canonical sorted compact finding JSON),
 `source_blob_sha`, `verdict: "still-valid"`, a named `reviewer`, and a concrete
 `reason`. Structural binding is not proof the reviewer is independent or the
-reason technically correct. The desk must approve that evidence explicitly.
+reason technically correct. Routine implementation choices belong to the agent;
+escalate to the owner only when resolution entails a substantial architectural
+change or disruptive behavior. Multiple acceptable fixes do not require an
+owner decision.
 
 The historical inbox file, source pin, run, verdict and queue state are not
 rewritten. A deterministic NEW job and NEW repair-run record link `origin_job`
@@ -106,3 +116,26 @@ only the existing encrypted-secret render path into a private CQ-only
 broader secret environments, print values, store plaintext in Git or alter signer
 units, custody, keys or transport. Confirm names/presence and modes only. The
 repair service currently has no such verified environment wiring.
+
+## Operational recovery versus owner decisions
+
+`needs-human` currently also holds operational failures. It is not evidence
+that owner judgment is required. Check the latest finding event and retained
+repair artifacts before deciding what to do:
+
+- Missing source or invalid quoted lines: investigate the pinned source. Triage
+  includes cited late-file regions on escalation and can recover an exact quote
+  at a unique current location. It still refuses ambiguous or changed quotes.
+- Scanner refusal: inspect the scan report and repair the context or source;
+  never bypass the scan or send rejected bytes to a model.
+- Connection failures or exhausted worker steps: preserve the original result
+  and worktree, then revalidate and prepare a bounded retry with concrete guidance.
+- An unchanged or already-satisfied report: verify source evidence and record the
+  disposition rather than treating the worker's prose alone as proof of a fix.
+- Protected configuration: use an ordinary reviewed feature branch and the
+  canonical template; a repair-worker refusal does not imply a policy decision.
+
+The existing terminal exclusion and per-pin ceiling remain. Automated routing
+still needs to distinguish these operational cases from disruptive changes,
+reuse retained-work recovery, and reconcile evidenced unchanged outcomes.
+Do not turn every terminal failure back into an unlimited model retry.

@@ -3712,6 +3712,7 @@ def main() -> int:
     p.add_argument("job")
     p.add_argument("--source-sha", required=True)
     p.add_argument("--revalidation", required=True, help="JSON evidence binding finding digest, source SHA/blob and named reviewer")
+    p.add_argument("--instructions-file", help="UTF-8 fix guidance, at most 2000 characters; retained with revalidation")
     p = sub.add_parser("tick")
     p.add_argument("--dry-run", action="store_true")
     p = sub.add_parser("start", help="tick restricted to one item (still honours cap/cooldown/secret scan)")
@@ -3812,6 +3813,8 @@ def main() -> int:
     elif args.cmd == "repair-prepare":
         def prepare():
             evidence = json.loads(Path(args.revalidation).read_text())
+            if args.instructions_file:
+                evidence["fix_instructions"] = Path(args.instructions_file).read_text(encoding="utf-8")
             job_id = repair_tick.prepare_current_job(sys.modules[__name__], load_queue(),
                                                     args.job, args.source_sha, evidence)
             event("repair_prepared", origin_job=args.job, job=job_id, source_sha=args.source_sha)

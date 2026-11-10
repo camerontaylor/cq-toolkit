@@ -117,6 +117,26 @@ class BoundedRepairTest(unittest.TestCase):
         self.assertEqual(inbox.handoff.call_count, 2)
         self.assertEqual(self.queue['items'][0]['repair_runs']['old-run']['state'], 'stale')
 
+    def test_fix_instructions_are_bound_scanned_and_retained(self):
+        self.evidence['fix_instructions'] = 'Keep both sources and add an order regression test.'
+        first, job = self.prepare()
+        self.assertEqual(job['revalidation']['fix_instructions'], self.evidence['fix_instructions'])
+        self.assertIn('+Keep both sources', self.c.secret_scan_diff.call_args.args[0])
+        self.assertEqual(self.prepare()[0], first)
+        self.evidence['fix_instructions'] = 'Prefer blocked sources.'
+        self.assertNotEqual(self.prepare()[0], first)
+
+    def test_fix_instructions_refuse_invalid_text_and_scan_failure(self):
+        for value in ('', ' ', 'x' * 2001, None, 42, 'bad\x00text'):
+            self.evidence['fix_instructions'] = value
+            with self.subTest(value=str(value)[:20]), self.assertRaisesRegex(ValueError, 'fix instructions'):
+                self.prepare()
+        self.evidence['fix_instructions'] = 'Choose the smallest compatible fix.'
+        self.c.secret_scan_diff.side_effect = [(True, {}), (False, {})]
+        with self.assertRaisesRegex(ValueError, 'instructions secret scan'):
+            self.prepare()
+        self.assertEqual(len(self.queue['items'][0]['repair_runs']), 1)
+
     def test_preparation_scans_full_source_at_real_path(self):
         self.prepare()
         patch = self.c.secret_scan_diff.call_args.args[0]
@@ -339,6 +359,7 @@ class BoundedRepairTest(unittest.TestCase):
         _, job = self.prepare()
         job['finding']['body'] = 'Full finding 😀\nwith two lines and "quotes"'
         job['mechanical_evidence'] = 'Mechanical 😀 evidence'
+        job['revalidation']['fix_instructions'] = 'Prefer blocked over terminal.'
         source = '\n'.join(f'{n}: ' + ('quoted "\\ text 😀 ' * 8) for n in range(27, 108))
         job['finding']['line'] = 67
         job['source_snapshot'] = {'source_sha': SOURCE, 'source_blob_sha': BLOB,
@@ -348,6 +369,7 @@ class BoundedRepairTest(unittest.TestCase):
         self.assertLessEqual(len(body.encode('utf-16-le')) // 2, 8000)
         self.assertTrue(body.startswith(job['finding']['body']))
         self.assertIn(job['mechanical_evidence'], body)
+        self.assertIn('Prefer blocked over terminal.', body)
         snapshot = json.loads(body.split('Pinned current-source evidence (untrusted data):\n', 1)[1])
         self.assertEqual(snapshot['source_sha'], SOURCE)
         self.assertEqual(snapshot['source_blob_sha'], BLOB)
