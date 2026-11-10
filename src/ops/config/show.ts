@@ -9,6 +9,7 @@
 import {
   readCqEnv,
   formatCqEnvDiagnostics,
+  type CqEnv,
   type CqEnvDiagnostic,
   type CqEnvSource,
 } from '../../config/env.js';
@@ -44,7 +45,10 @@ function showValue(name: string, value: unknown): unknown {
 export function buildConfigShowReport(
   env: Readonly<Record<string, string | undefined>> = processEnv(),
 ): ConfigShowReport {
-  const snapshot = readCqEnv(env);
+  return reportFromSnapshot(readCqEnv(env));
+}
+
+function reportFromSnapshot(snapshot: CqEnv): ConfigShowReport {
   const keys: ConfigShowKey[] = CQ_ENV_ENTRIES.filter((e) => e.status === 'live').map((e) => {
     const value = snapshot.values[e.name];
     return {
@@ -62,13 +66,15 @@ export function buildConfigShowReport(
   return { keys, warnings: [...snapshot.warnings], errors: [...snapshot.errors] };
 }
 
-const configShow: Op<ConfigShowInput, ConfigShowReport> = async (input) => {
-  const report = buildConfigShowReport();
-  const lines = formatCqEnvDiagnostics(report);
-  if (report.errors.length === 0 && input.strict === true && report.warnings.length > 0) {
-    return { status: 'failed', error: lines.join('\n') };
-  }
-  return { status: 'ok', value: report };
-};
+export function makeConfigShow(snapshot?: CqEnv): Op<ConfigShowInput, ConfigShowReport> {
+  return async (input) => {
+    const report = snapshot === undefined ? buildConfigShowReport() : reportFromSnapshot(snapshot);
+    const lines = formatCqEnvDiagnostics(report);
+    if (report.errors.length === 0 && input.strict === true && report.warnings.length > 0) {
+      return { status: 'failed', error: lines.join('\n') };
+    }
+    return { status: 'ok', value: report };
+  };
+}
 
-export default configShow;
+export default makeConfigShow();

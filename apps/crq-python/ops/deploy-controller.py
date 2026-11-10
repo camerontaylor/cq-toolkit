@@ -1197,6 +1197,15 @@ def _refuse_if_unchanged(effects: Effects, identity: dict, state: dict,
                           + where, refused) from exc
 
 
+def runner_units_stopped(helper_module, root):
+    """Freeze new dispatch before observing the drain, using the helper's check."""
+    try:
+        helper_module.inactive(root)
+    except Exception as exc:
+        raise Refused("runner units must be stopped before checking drain: "
+                      + (str(exc) or type(exc).__name__)[:200]) from exc
+
+
 def deploy_plan(effects: Effects, helper_module, target: str, tag: str,
                 overlay_path: Path, helper_sha256: str | None = None) -> dict:
     """Preflight -> drain -> durable intent -> helper -> proofs -> completion.
@@ -1210,6 +1219,7 @@ def deploy_plan(effects: Effects, helper_module, target: str, tag: str,
         pre = preflight(effects, target, tag)
         prior_tag = prior_tag_for(effects, pre["state"]["prior_head"])
         plan = {"preflight": pre, "steps": [], "helper_sha256": helper_sha256}
+        runner_units_stopped(helper_module, effects.root)
         drain = drain_check(effects, _runner_liveness(effects))
         plan["steps"].append({"step": "drain", **drain})
         if not drain["drained"]:
@@ -1532,6 +1542,7 @@ def rollback_plan(effects: Effects, helper_module, prior: dict,
                           "cannot provably read; operator recovery required "
                           "(never restore old queue snapshots or start "
                           "incompatible binaries)")
+        runner_units_stopped(helper_module, effects.root)
         drain = drain_check(effects, _runner_liveness(effects))
         if not drain["drained"]:
             raise Refused("cannot roll back with live/ambiguous reviews: "

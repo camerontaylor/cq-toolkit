@@ -13,6 +13,26 @@ CONTRACT_PATH = 'docs/current-contract-and-backlog.md'
 CONTRACT_MAX_CHARS = 24000
 
 
+def source_excerpt(content, path, body, primary=False):
+    """Spend the existing 8k allowance on cited lines before a file prefix."""
+    citations = re.findall(re.escape(path) + r':(\d+)', body)
+    if primary:
+        citations += re.findall(r'(?i)lines?\s+(\d+)', body)
+    lines = content.splitlines(keepends=True)
+    starts = list(dict.fromkeys(max(0, int(n) - 21) for n in citations))[:4]
+    if not starts or len(content) <= 8000:
+        return {'text': content[:8000], 'truncated': len(content) > 8000}
+    regions = []
+    remaining = 8000
+    for start in starts:
+        if start >= len(lines):
+            continue
+        text = ''.join(lines[start:start + 41])[:min(2000, remaining)]
+        regions.append({'start_line': start + 1, 'text': text})
+        remaining -= len(text)
+    return {'text': '', 'regions': regions, 'truncated': True}
+
+
 def context(repo, row, tip):
     finding = row['finding']
     anchor = row.get('recovered_anchor') or finding
@@ -48,8 +68,8 @@ def context(repo, row, tip):
             if path not in entries or len(extra) >= 3:
                 continue
             content = repo.git('cat-file', 'blob', entries[path]['blob']).decode(errors='replace')
-            extra.append({'path': path, 'blob': entries[path]['blob'], 'text': content[:8000],
-                          'truncated': len(content) > 8000})
+            extra.append({'path': path, 'blob': entries[path]['blob'],
+                          **source_excerpt(content, path, body, primary=path == name)})
     return {'current_contract': contract, 'original_region': original, 'content_search': search, 'finding': finding, 'target': row['target'], 'tip': tip, 'current_path': name, 'additional_sources': extra,
             'region': [{'line': i + 1, 'text': text[i]} for i in range(start, end)],
             'history': repo.git('log', '-n', '40', '--format=%H %s', row['target'] + '..' + tip, '--', finding['path']).decode(errors='replace')[:16000]}
@@ -90,10 +110,19 @@ def decision(repo, row, tip, report):
             blob = repo.entries(tip)[path]['blob']
             text = repo.git('cat-file', 'blob', blob).decode().splitlines()
             quote = report.get('quoted_text')
+            if not isinstance(quote, str) or not quote.strip():
+                raise ValueError('quote missing')
             if (not selected or min(selected) < 1 or max(selected) > len(text)
-                    or not isinstance(quote, str) or not quote.strip()
                     or '\n'.join(text[i - 1] for i in sorted(selected)) != quote):
-                raise ValueError('quote mismatch')
+                # Recover line-number drift only from an exact, unique whole-line
+                # match in the pinned blob. Ambiguous/edited quotes still fail.
+                quoted = quote.split('\n')
+                matches = [i for i in range(len(text) - len(quoted) + 1)
+                           if text[i:i + len(quoted)] == quoted]
+                if len(matches) != 1:
+                    raise ValueError('quote mismatch')
+                start = matches[0] + 1
+                report = {**report, 'current_lines': [[start, start + len(quoted) - 1]]}
         except (KeyError, TypeError, ValueError, UnicodeError, ledger.IntegrityError):
             return 'needs-human', 'judge current anchor failed verification: ' + reason, {}
         return 'confirmed', reason, {k: report.get(k) for k in ('current_path', 'current_lines', 'quoted_text')}

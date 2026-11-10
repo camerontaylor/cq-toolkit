@@ -249,6 +249,32 @@ class PhaseTest(FindingTest):
         packed = context(self.f.repo, row, tip)
         self.assertIn('docs/other.md', [v['path'] for v in packed['additional_sources']])
 
+    def test_escalation_includes_late_cited_source_with_line_numbers(self):
+        from crq_repair.triage import source_excerpt
+        content = 'prefix padding\n' * 1000 + 'important evidence\n'
+        packed = source_excerpt(content, 'src/a.ts', 'See src/a.ts:1001')
+        self.assertEqual(packed['text'], '')
+        self.assertTrue(packed['truncated'])
+        self.assertIn('important evidence', packed['regions'][0]['text'])
+        self.assertEqual(packed['regions'][0]['start_line'], 981)
+        self.assertLessEqual(sum(len(r['text']) for r in packed['regions']), 8000)
+
+    def test_unique_exact_quote_recovers_wrong_line_number(self):
+        result, queue, _ = self.run_phase({'stop': 'ok', 'verdict': 'valid',
+            'reason': 'source confirms', 'current_path': 'a',
+            'current_lines': [[999, 999]], 'quoted_text': 'two'})
+        self.assertEqual(result['delivered'], 1)
+        row = ledger.loads((self.inbox.root / 'triage' / (self.fid + '.json')).read_bytes())
+        self.assertEqual(row['mapped_intervals'], [[2, 2]])
+
+    def test_repeated_exact_quote_does_not_recover_wrong_line_number(self):
+        self.t = self.f.commit({'a': b'one\none\ntwo\n'})
+        result, queue, _ = self.run_phase({'stop': 'ok', 'verdict': 'valid',
+            'reason': 'source confirms', 'current_path': 'a',
+            'current_lines': [[999, 999]], 'quoted_text': 'one'})
+        self.assertEqual(result['counts'], {'needs-human': 1})
+        self.assertEqual(queue['items'], [])
+
     def test_zero_limit_leaves_unjudged(self):
         result, _, judge = self.run_phase(maximum=0)
         judge.assert_not_called()
