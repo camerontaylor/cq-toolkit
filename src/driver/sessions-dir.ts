@@ -16,7 +16,7 @@
 // ignored rather than honored (a blank path must never become the store).
 
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import { processEnv } from '../config/process-env.js';
 
 /**
@@ -29,7 +29,7 @@ export function defaultSessionsDir(): string {
   }
   const stateHome = processEnv()['XDG_STATE_HOME'];
   const base =
-    stateHome !== undefined && stateHome.trim() !== ''
+    stateHome !== undefined && stateHome.trim() !== '' && isAbsolute(stateHome)
       ? stateHome
       : join(homedir(), '.local', 'state');
   return join(base, 'cq', 'sessions');
