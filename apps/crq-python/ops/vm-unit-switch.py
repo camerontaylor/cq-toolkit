@@ -23,6 +23,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import tempfile
 import time
 
 OPS = pathlib.Path(__file__).resolve().parent
@@ -38,7 +39,7 @@ UPLOADS = (
     "vm-unit-switch-guest.py",
 )
 GUEST_PHASES = ("prepare", "switch-node", "switch-python", "interrupt",
-                "recover-kill", "recover", "recover-repeat", "inspect")
+                "recover-kill", "recover", "recover-repeat", "inspect", "fence")
 NODE_RUNTIME = "node:" + "b" * 40
 PYTHON_RUNTIME = "python"
 LIMITATIONS = [
@@ -175,6 +176,7 @@ def fetch_raw(run, recorder):
     remote = ("cd /home/%s && tar -czf - fixture records proof-bin "
               "checkout/apps/crq-python/state "
               ".config/systemd/user/crq-tick.service "
+              ".config/systemd/user/.crq-tick.service.staged "
               ".config/systemd/user/crq-tick.timer "
               ".config/systemd/user/timers.target.wants/crq-tick.timer "
               "| base64 -w0" % vm.GUEST_USER)
@@ -189,13 +191,28 @@ def fetch_raw(run, recorder):
     raw_path.write_bytes(data)
     extracted = run_dir / "raw"
     extracted.mkdir(exist_ok=True)
+    extract_raw_archive(raw_path, extracted)
+    return {"tar_sha256": sha256_bytes(data), "tar_bytes": len(data),
+            "raw_tar": raw_path.name}
+
+
+def extract_raw_archive(raw_path, destination):
+    """Extract retained evidence fail-closed; no unfiltered tar extraction."""
+    destination = pathlib.Path(destination)
+    destination.mkdir(parents=True, exist_ok=True)
+
+    def evidence_filter(member, dest_path):
+        if (member.issym()
+                and member.name == ".config/systemd/user/crq-tick.service"
+                and member.linkname == "/dev/null"):
+            return member
+        return tarfile.data_filter(member, dest_path)
+
     with tarfile.open(raw_path, "r:gz") as archive:
         if not hasattr(tarfile, "data_filter"):
             raise RuntimeError("tarfile extraction filters unavailable; "
                                "refusing unfiltered extraction")
-        archive.extractall(extracted, filter="data")
-    return {"tar_sha256": sha256_bytes(data), "tar_bytes": len(data),
-            "raw_tar": raw_path.name}
+        archive.extractall(destination, filter=evidence_filter)
 
 
 def expected_unit(runtime):
@@ -351,6 +368,37 @@ def build_checks(phases):
             and (final.get("state") or {}).get("heartbeat.json")
             == prepared.get("state", {}).get("heartbeat.json"))
 
+    fence = phases.get("fence") or {}
+    if not _ok_phase(fence, "fence", problems):
+        checks["activation_fence_held"] = False
+    else:
+        fence_record = fence.get("record") or {}
+        fence_after = fence.get("after") or {}
+        fence_service = (fence_after.get("files") or {}).get(service_path) or {}
+        fence_units = fence_after.get("units") or {}
+        direct = fence.get("direct_start") or {}
+        direct_text = ((direct.get("stdout") or "")
+                       + (direct.get("stderr") or "")).lower()
+        checks["activation_fence_held"] = (
+            (fence.get("cli") or {}).get("rc") not in (0, None)
+            and fence_record.get("outcome") == "pending"
+            and fence_record.get("phase") == "activation_pending"
+            and fence_record.get("runtime") == NODE_RUNTIME
+            and fence_record.get("prior_runtime") == PYTHON_RUNTIME
+            and fence_service.get("type") == "symlink"
+            and fence_service.get("target") == "/dev/null"
+            and (fence_units.get("crq-tick.service") or {}).get("LoadState")
+            == "masked"
+            and (fence_units.get("crq-tick.timer") or {}).get("ActiveState")
+            in ("inactive", "failed")
+            and direct.get("rc") not in (0, None)
+            and "masked" in direct_text
+            and (fence.get("staged") or {}).get("runtime") == NODE_RUNTIME
+            and fence.get("completions_before") == fence.get("completions_after")
+            and (fence.get("recovery") or {}).get("rc") == 3
+            and (fence.get("record_after_refusal") or {}).get("sha256")
+            == fence_record.get("sha256"))
+
     for key, value in checks.items():
         if value is not True:
             problems.append(key + " is not satisfied")
@@ -457,6 +505,133 @@ def cmd_run(args):
     return 0 if not problems else 1
 
 
+def _retained_record_problem(summary, raw_records, label, problems):
+    if not isinstance(summary, dict) or not summary:
+        problems.append(label + " has no retained record summary")
+        return
+    path = summary.get("path")
+    if not isinstance(path, str) or not path:
+        problems.append(label + " has no retained record path")
+        return
+    name = pathlib.PurePosixPath(path).name
+    if not name.startswith("controller-") or not name.endswith(".json"):
+        problems.append(label + " record path is not a controller journal")
+        return
+    raw_path = raw_records / name
+    if raw_path.is_symlink() or not raw_path.is_file():
+        problems.append(label + " retained record is missing")
+        return
+    data = raw_path.read_bytes()
+    if summary.get("sha256") != vm.sha256_bytes(data):
+        problems.append(label + " record digest does not match retained evidence")
+    if summary.get("bytes") is not None and summary.get("bytes") != len(data):
+        problems.append(label + " record size does not match retained evidence")
+    try:
+        record = json.loads(data)
+    except ValueError:
+        problems.append(label + " retained record is not JSON")
+        return
+    for key, value in summary.items():
+        if key in ("path", "sha256", "bytes"):
+            continue
+        if record.get(key) != value:
+            problems.append(label + " record field " + key
+                            + " contradicts retained evidence")
+
+
+def _phase_cli(phase, label, problems):
+    cli = (phase or {}).get("cli")
+    if not isinstance(cli, dict):
+        problems.append(label + " has no retained CLI result")
+        return None
+    return cli
+
+
+def verify_raw_evidence(report, raw_root):
+    """Compare a report with the retained raw phases, uploads and journals."""
+    problems = []
+    phases = report.get("phases")
+    if not isinstance(phases, dict):
+        return ["report phases are not an object"]
+    if set(phases) != set(GUEST_PHASES):
+        problems.append("report phases do not match the proof phase set")
+    raw_phases = raw_root / "fixture" / "phases"
+    for name in GUEST_PHASES:
+        raw_path = raw_phases / (name + ".json")
+        if raw_path.is_symlink() or not raw_path.is_file():
+            problems.append("raw phase is missing: " + name)
+            continue
+        try:
+            retained = json.loads(raw_path.read_text())
+        except (OSError, ValueError):
+            problems.append("raw phase is unreadable: " + name)
+            continue
+        if retained != phases.get(name):
+            problems.append("phase " + name
+                            + " does not match retained raw guest evidence")
+
+    raw_records = raw_root / "records"
+    for name in ("switch-node", "switch-python", "interrupt", "recover-kill",
+                 "recover", "recover-repeat", "fence"):
+        phase = phases.get(name) or {}
+        for key in ("record", "record_before", "record_after",
+                    "record_after_refusal"):
+            if key in phase:
+                _retained_record_problem(phase[key], raw_records,
+                                         name + "." + key, problems)
+
+    inspect = phases.get("inspect") or {}
+    snapshot = inspect.get("snapshot") or {}
+    for index, summary in enumerate(snapshot.get("records") or []):
+        _retained_record_problem(summary, raw_records,
+                                 "inspect.snapshot.records[%d]" % index, problems)
+    if isinstance(snapshot.get("history"), dict):
+        _retained_record_problem(snapshot["history"], raw_records,
+                                 "inspect.snapshot.history", problems)
+
+    expected_rc = {
+        "switch-node": lambda rc: rc == 0,
+        "switch-python": lambda rc: rc == 0,
+        "interrupt": lambda rc: rc not in (0, None),
+        "recover-kill": lambda rc: rc not in (0, None),
+        "recover": lambda rc: rc == 0,
+        "recover-repeat": lambda rc: rc == 2,
+        "fence": lambda rc: rc not in (0, None),
+    }
+    for name, predicate in expected_rc.items():
+        cli = _phase_cli(phases.get(name) or {}, name, problems)
+        if cli is not None and not predicate(cli.get("rc")):
+            problems.append(name + " CLI result contradicts the proof outcome")
+    fence = phases.get("fence") or {}
+    recovery_cli = fence.get("recovery")
+    if not isinstance(recovery_cli, dict) or recovery_cli.get("rc") != 3:
+        problems.append("fence recovery refusal is not retained")
+
+    fence_service = raw_root / ".config/systemd/user/crq-tick.service"
+    if not fence_service.is_symlink() or os.readlink(fence_service) != "/dev/null":
+        problems.append("raw evidence does not retain the durable service mask")
+    staged = raw_root / ".config/systemd/user/.crq-tick.service.staged"
+    if staged.is_symlink() or not staged.is_file():
+        problems.append("raw evidence does not retain the staged target")
+    elif vm.sha256_file(staged) != _sha(expected_unit(NODE_RUNTIME)):
+        problems.append("staged target bytes do not match the requested runtime")
+
+    uploads = (report.get("provenance") or {}).get("uploads") or {}
+    if not isinstance(uploads, dict):
+        problems.append("upload provenance is not an object")
+    else:
+        for name, entry in uploads.items():
+            if pathlib.PurePosixPath(name).name != name:
+                problems.append("upload provenance name is unsafe: " + str(name))
+                continue
+            raw_path = raw_root / "proof-bin" / name
+            if raw_path.is_symlink() or not raw_path.is_file():
+                problems.append("raw upload is missing: " + name)
+            elif vm.sha256_file(raw_path) != (entry or {}).get("sha256"):
+                problems.append("raw upload digest does not match: " + name)
+    return problems
+
+
 def cmd_verify(args):
     report = json.loads(pathlib.Path(args.report).read_text())
     problems = []
@@ -488,6 +663,14 @@ def cmd_verify(args):
         problems.append("raw guest evidence is missing")
     elif vm.sha256_file(raw_path) != raw.get("tar_sha256"):
         problems.append("raw guest evidence digest does not match")
+    if raw.get("raw_tar") and raw_path.is_file():
+        try:
+            with tempfile.TemporaryDirectory(prefix="crq-proof-verify-") as scratch:
+                raw_root = pathlib.Path(scratch) / "raw"
+                extract_raw_archive(raw_path, raw_root)
+                problems.extend(verify_raw_evidence(report, raw_root))
+        except (OSError, tarfile.TarError, RuntimeError) as exc:
+            problems.append("raw guest evidence is unreadable: " + str(exc)[:200])
     print(json.dumps({"report": str(args.report), "problems": problems},
                      indent=2, sort_keys=True))
     return 0 if not problems else 1

@@ -5,9 +5,11 @@ the evidence checks, provenance binding and fail-closed report verification.
 The real guest run is recorded separately and is not part of the unit suite.
 """
 import importlib.util
+import io
 import json
 import pathlib
 import tempfile
+import tarfile
 import unittest
 import hashlib
 
@@ -30,13 +32,24 @@ SERVICE = "/home/probe/.config/systemd/user/crq-tick.service"
 WANTS = "/home/probe/.config/systemd/user/timers.target.wants/crq-tick.timer"
 STATE = {"queue.json": "q" * 64, "heartbeat.json": "h" * 64}
 HISTORY = "a" * 64
+RECORDS = {}
 
 
 def _sha(text):
     return hashlib.sha256(text.encode()).hexdigest()
 
 
+def _record(name, fields):
+    data = json.dumps(fields, sort_keys=True).encode()
+    RECORDS[name] = data
+    return {**fields,
+            "path": "/home/probe/records/controller-"
+                    + hashlib.md5(name.encode()).hexdigest() + ".json",
+            "sha256": hashlib.sha256(data).hexdigest(), "bytes": len(data)}
+
+
 def phases():
+    RECORDS.clear()
     python_sha = _sha(harness.expected_unit(PYTHON))
     node_sha = _sha(harness.expected_unit(NODE))
     preserved = {"state": STATE, "history_sha256": HISTORY}
@@ -53,56 +66,87 @@ def phases():
         },
     }
     node_phase = {
-        "record": {"outcome": "completed", "runtime": NODE,
-                   "prior_runtime": PYTHON},
+        "cli": {"rc": 0},
+        "record": _record("switch-node", {
+            "outcome": "completed", "phase": "activation_pending",
+            "runtime": NODE, "prior_runtime": PYTHON}),
         "completions": {"sequences": [1, 2], "invocations": ["a" * 32, "b" * 32]},
         "installed_runtime": NODE,
         "after": {"files": {SERVICE: {"type": "file", "sha256": node_sha}}},
         "preserved": preserved,
     }
     python_phase = {
-        "record": {"outcome": "completed", "runtime": PYTHON,
-                   "prior_runtime": NODE},
+        "cli": {"rc": 0},
+        "record": _record("switch-python", {
+            "outcome": "completed", "phase": "activation_pending",
+            "runtime": PYTHON, "prior_runtime": NODE}),
         "completions": {"sequences": [3, 4], "invocations": ["c" * 32, "d" * 32]},
         "installed_runtime": PYTHON,
         "after": {"files": {SERVICE: {"type": "file", "sha256": python_sha}}},
         "preserved": preserved,
     }
     interrupt = {
-        "record": {"outcome": "pending", "phase": "drained", "runtime": NODE,
-                   "prior_runtime": PYTHON},
+        "cli": {"rc": -9},
+        "record": _record("interrupt", {
+            "outcome": "pending", "phase": "drained", "runtime": NODE,
+            "prior_runtime": PYTHON}),
         "after": {"files": {SERVICE: {"type": "symlink", "target": "/dev/null"}},
                   "units": {"crq-tick.timer": {"ActiveState": "inactive"}}},
         "preserved": preserved,
     }
+    recover_kill_record = _record("recover-kill", {
+        "outcome": "pending", "phase": "drained"})
     recover_kill = {
-        "record_before": {"sha256": "1" * 64, "outcome": "pending",
-                          "phase": "drained"},
-        "record_after": {"sha256": "1" * 64, "outcome": "pending",
-                         "phase": "drained"},
+        "cli": {"rc": -9},
+        "record_before": dict(recover_kill_record),
+        "record_after": dict(recover_kill_record),
     }
     recover = {
-        "record": {"outcome": "rolled_back",
-                   "phase": "restore_activation_pending"},
+        "cli": {"rc": 0},
+        "record": _record("recover", {
+            "outcome": "rolled_back", "phase": "restore_activation_pending"}),
         "after": {"files": {SERVICE: {"type": "file", "sha256": python_sha}},
                   "units": {"crq-tick.timer": {"UnitFileState": "enabled",
                                                "ActiveState": "inactive"}}},
         "preserved": preserved,
     }
+    repeat_record = _record("recover-repeat", {
+        "outcome": "rolled_back", "phase": "restore_activation_pending"})
     repeat = {
         "cli": {"rc": 2, "stdout": "{\"refused\": \"invalid record\"}"},
-        "record_before": {"sha256": "2" * 64},
-        "record_after": {"sha256": "2" * 64},
+        "record_before": dict(repeat_record),
+        "record_after": dict(repeat_record),
+    }
+    fence_record = _record("fence", {
+        "outcome": "pending", "phase": "activation_pending",
+        "runtime": NODE, "prior_runtime": PYTHON})
+    fence = {
+        "cli": {"rc": -9},
+        "record": dict(fence_record),
+        "record_after_refusal": dict(fence_record),
+        "recovery": {"rc": 3},
+        "direct_start": {"rc": 1,
+                         "stderr": "Unit crq-tick.service is masked."},
+        "staged": {"runtime": NODE},
+        "completions_before": 4, "completions_after": 4,
+        "after": {
+            "files": {SERVICE: {"type": "symlink", "target": "/dev/null"}},
+            "units": {"crq-tick.service": {"LoadState": "masked"},
+                      "crq-tick.timer": {"ActiveState": "inactive"}},
+        },
+        "preserved": preserved,
     }
     inspect = {"snapshot": {
         "files": {SERVICE: {"type": "file", "sha256": python_sha},
                   WANTS: {"type": "symlink"}},
         "state": STATE,
+        "records": [node_phase["record"], python_phase["record"],
+                    interrupt["record"], recover["record"], fence_record],
     }}
     return {"prepare": prepare, "switch-node": node_phase,
             "switch-python": python_phase, "interrupt": interrupt,
             "recover-kill": recover_kill, "recover": recover,
-            "recover-repeat": repeat, "inspect": inspect}
+            "recover-repeat": repeat, "inspect": inspect, "fence": fence}
 
 
 class HarnessCheckTests(unittest.TestCase):
@@ -177,7 +221,6 @@ class VerifyTests(unittest.TestCase):
         self.raw = self.run_dir / "raw-guest-evidence.tar.gz"
         self.host.write_bytes(b"host")
         self.guest.write_bytes(b"guest")
-        self.raw.write_bytes(b"raw")
         self.report = {
             "schema_version": harness.SCHEMA_VERSION,
             "kind": harness.KIND,
@@ -191,12 +234,40 @@ class VerifyTests(unittest.TestCase):
                 "guest_script": {"artifact": self.guest.name,
                                  "sha256": harness.sha256_bytes(b"guest")},
             },
-            "raw": {"raw_tar": self.raw.name,
-                    "tar_sha256": harness.sha256_bytes(b"raw")},
+            "raw": {"raw_tar": self.raw.name},
         }
+        self._rebuild_raw()
         checks, problems = harness.build_checks(self.report["phases"])
         self.report["checks"] = checks
         self.report["problems"] = problems
+
+    def _add(self, archive, name, data, mode=0o644):
+        info = tarfile.TarInfo(name)
+        info.size = len(data)
+        info.mode = mode
+        archive.addfile(info, io.BytesIO(data))
+
+    def _rebuild_raw(self):
+        buffer = io.BytesIO()
+        with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
+            for name in harness.GUEST_PHASES:
+                data = (json.dumps(self.report["phases"][name], indent=2,
+                                   sort_keys=True) + "\n").encode()
+                self._add(archive, "fixture/phases/" + name + ".json", data)
+            for name, data in RECORDS.items():
+                filename = ("controller-"
+                            + hashlib.md5(name.encode()).hexdigest() + ".json")
+                self._add(archive, "records/" + filename, data, mode=0o600)
+            mask = tarfile.TarInfo(
+                ".config/systemd/user/crq-tick.service")
+            mask.type = tarfile.SYMTYPE
+            mask.linkname = "/dev/null"
+            archive.addfile(mask)
+            self._add(archive, ".config/systemd/user/.crq-tick.service.staged",
+                      harness.expected_unit(NODE).encode())
+        data = buffer.getvalue()
+        self.raw.write_bytes(data)
+        self.report["raw"]["tar_sha256"] = harness.sha256_bytes(data)
 
     def _write(self):
         path = self.run_dir / "report.json"
@@ -247,6 +318,23 @@ class VerifyTests(unittest.TestCase):
         status, payload = self._verify()
         self.assertEqual(status, 1)
         self.assertTrue(any("raw" in item for item in payload["problems"]))
+
+    def test_phase_contradicting_raw_cli_is_rejected(self):
+        self.report["phases"]["recover"]["cli"]["rc"] = 1
+        status, payload = self._verify()
+        self.assertEqual(status, 1)
+        self.assertTrue(any("does not match retained raw guest evidence" in item
+                            for item in payload["problems"]))
+
+    def test_phase_contradicting_retained_journal_is_rejected(self):
+        self.report["phases"]["recover"]["record"]["outcome"] = "completed"
+        # Keep the phase JSON consistent with the tampered report so only the
+        # raw controller journal can expose the contradiction.
+        self._rebuild_raw()
+        status, payload = self._verify()
+        self.assertEqual(status, 1)
+        self.assertTrue(any("contradicts retained evidence" in item
+                            for item in payload["problems"]))
 
 
 if __name__ == "__main__":

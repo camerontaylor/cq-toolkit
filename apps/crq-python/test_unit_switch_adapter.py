@@ -8,10 +8,13 @@ import base64
 import copy
 import importlib.util
 import json
+import os
 import pathlib
+import subprocess
 import tempfile
 import unittest
 import uuid
+from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parent
 OPS = ROOT / "ops"
@@ -234,9 +237,16 @@ class AdapterTests(unittest.TestCase):
         self.assertTrue(self.service.is_symlink())
         self.assertEqual(self.fake.masked, True)
         self.adapter.install(UNIT, NODE)
-        self.assertFalse(self.service.is_symlink())
-        self.assertEqual(self.fake.runtime(), NODE)
+        self.assertTrue(self.service.is_symlink())
+        self.assertEqual(os.readlink(self.service), "/dev/null")
+        self.assertEqual(self.fake.masked, True)
+        self.assertIsNone(self.fake.runtime())
+        staged = self.unit_dir / (".crq-tick.service.staged")
+        self.assertTrue(staged.is_file())
         self.adapter.start(UNIT)
+        self.assertFalse(self.service.is_symlink())
+        self.assertFalse(staged.exists())
+        self.assertEqual(self.fake.runtime(), NODE)
         first = self.adapter.completion(UNIT, NODE, 0)
         second = self.adapter.completion(UNIT, NODE, first["sequence"])
         self.assertLess(first["sequence"], second["sequence"])
@@ -247,6 +257,38 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(self.service.stat().st_mode & 0o777, 0o644)
         self.assertEqual(self.fake.runtime(), "python")
         self.assertFalse(self.fake.timer_active)
+
+    def test_install_keeps_direct_start_fenced_until_release(self):
+        snapshot = self._snapshot()
+        self.adapter.stop_and_drain(UNIT)
+        self.adapter.install(UNIT, NODE)
+        direct = self.fake.run(
+            ["systemctl", "--user", "start", UNIT], 60)
+        self.assertNotEqual(direct["rc"], 0)
+        self.assertIn("masked", direct["stderr"].lower())
+        self.assertFalse(self.completions.exists())
+        self.assertTrue((self.unit_dir / (".crq-tick.service.staged")).is_file())
+        self.adapter.restore(UNIT, snapshot)
+        self.assertFalse((self.unit_dir / (".crq-tick.service.staged")).exists())
+        self.assertEqual(self.fake.runtime(), "python")
+
+    def test_timeout_output_is_decoded_and_json_serializable(self):
+        expired = subprocess.TimeoutExpired(["systemctl", "--user", "start", UNIT], 1)
+        expired.stdout = b"partial output \xff"
+        expired.stderr = b"timeout boom"
+        with mock.patch.object(adapter_mod.subprocess, "run", side_effect=expired):
+            self.adapter.runner = self.adapter._subprocess_runner
+            switch = self.adapter.run_command(
+                ["systemctl", "--user", "start", UNIT], timeout=1)
+            recovery = self.adapter.run_command(
+                ["systemctl", "--user", "stop", TIMER], timeout=1)
+        self.assertTrue(switch["timeout"])
+        self.assertTrue(recovery["timeout"])
+        self.assertIsInstance(switch["stdout"], str)
+        self.assertIsInstance(recovery["stderr"], str)
+        self.assertIn("partial output", switch["stdout"])
+        self.assertIn("timeout boom", recovery["stderr"])
+        json.dumps({"commands": self.adapter.commands})
 
     def test_stop_drain_refuses_unsafe_service_mode(self):
         self._snapshot()

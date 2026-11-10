@@ -41,6 +41,7 @@ UNIT = "crq-tick.service"
 TIMER = "crq-tick.timer"
 WANTS = UNIT_DIR / "timers.target.wants" / TIMER
 SERVICE = UNIT_DIR / UNIT
+STAGED_SERVICE = UNIT_DIR / ("." + UNIT + ".staged")
 TIMER_PATH = UNIT_DIR / TIMER
 INVOCATION = re.compile(r"[0-9a-f]{32}\Z")
 NODE_RUNTIME = "node:" + "b" * 40
@@ -79,8 +80,16 @@ def run(argv, timeout=120, extra_env=None):
                 "stderr": result.stderr[-12000:], "timeout": False}
     except subprocess.TimeoutExpired as exc:
         return {"argv": [str(item) for item in argv], "rc": None,
-                "stdout": (exc.stdout or "")[-12000:],
-                "stderr": (exc.stderr or "")[-12000:], "timeout": True}
+                "stdout": _text_output(exc.stdout)[-12000:],
+                "stderr": _text_output(exc.stderr)[-12000:], "timeout": True}
+
+
+def _text_output(value):
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", "replace")
+    return value if isinstance(value, str) else str(value)
 
 
 def systemctl(*args, timeout=90):
@@ -260,7 +269,7 @@ def prepare_fixture(adapter):
     WANTS.parent.mkdir(parents=True, exist_ok=True)
     FIXTURE.mkdir(parents=True, exist_ok=True)
     PHASE_DIR.mkdir(parents=True, exist_ok=True)
-    for path in (SERVICE, TIMER_PATH, WANTS):
+    for path in (SERVICE, TIMER_PATH, WANTS, STAGED_SERVICE):
         if path.is_symlink() or path.exists():
             path.unlink()
     _write(SERVICE, adapter.render_unit(PYTHON_RUNTIME), 0o644)
@@ -434,7 +443,8 @@ def switch_phase(runtime):
                      if entry.get("unit") == UNIT]
     require(records_after and records_after[-1].get("runtime") == runtime,
             "fixture completion log does not end at the requested runtime")
-    return {"cli": {"command": payload.get("command"),
+    return {"cli": {"rc": result["rc"],
+                    "command": payload.get("command"),
                     "record": payload.get("record")},
             "record_path": str(record_path),
             "record": record_summary(record_path),
@@ -541,11 +551,74 @@ def recover_repeat_phase(args):
     return payload
 
 
+def fence_phase(args):
+    saved = baseline()
+    before = snapshot()
+    before_paths = [str(path) for path in records()]
+    result = cli("switch", ["--runtime", NODE_RUNTIME], kill="start")
+    require(result["rc"] not in (0, None),
+            "fence probe switch unexpectedly returned success")
+    created = new_records(before_paths)
+    require(len(created) == 1, "fence probe did not leave one journal record")
+    record_path = created[0]
+    record = json.loads(record_path.read_text())
+    require(record["outcome"] == "pending"
+            and record["phase"] == "activation_pending",
+            "fence probe did not retain activation ambiguity")
+    require(record["runtime"] == NODE_RUNTIME
+            and record["prior_runtime"] == saved["python_runtime"],
+            "fence probe runtime identity is wrong")
+    after = snapshot()
+    require(SERVICE.is_symlink() and os.readlink(SERVICE) == "/dev/null",
+            "fence probe lost the durable service mask before release")
+    service = show(UNIT, ["LoadState", "ActiveState", "FragmentPath"])
+    require(service["LoadState"] == "masked"
+            and service["FragmentPath"] == str(SERVICE),
+            "fence probe did not leave the service masked")
+    timer = show(TIMER, ["ActiveState", "LoadState"])
+    require(timer["LoadState"] == "loaded"
+            and timer["ActiveState"] in ("inactive", "failed"),
+            "fence probe left the timer activator active")
+    direct = systemctl("start", UNIT)
+    require(direct["rc"] not in (0, None),
+            "masked service accepted a direct start during activation ambiguity")
+    direct_text = ((direct.get("stdout") or "") + (direct.get("stderr") or "")).lower()
+    require("masked" in direct_text,
+            "direct start refusal was not an explicit mask refusal: "
+            + direct_text[:300])
+    require(STAGED_SERVICE.is_file() and not STAGED_SERVICE.is_symlink(),
+            "fence probe did not stage the target behind the mask")
+    adapter = load_adapter().GuestFixtureAdapter(
+        unit_dir=UNIT_DIR, fixture_dir=FIXTURE, unit=UNIT,
+        proof_root=PROOF_BIN, guest_only=True)
+    require(adapter._runtime_from_unit(STAGED_SERVICE) == NODE_RUNTIME,
+            "fence probe staged the wrong target runtime")
+    require(len(after["completions"]) == len(before["completions"]),
+            "fence probe target ran behind the durable mask")
+    record_before = record_summary(record_path)
+    recovered = cli("recover", ["--record", str(record_path)])
+    require(recovered["rc"] == 3,
+            "ambiguous fence recovery did not require investigation")
+    record_after = record_summary(record_path)
+    require(record_after["sha256"] == record_before["sha256"],
+            "refused ambiguous recovery changed the retained record")
+    return {"cli": result, "record_path": str(record_path),
+            "record": record_before, "record_after_refusal": record_after,
+            "recovery": recovered, "direct_start": direct,
+            "service": service, "timer": timer,
+            "staged": {"path": str(STAGED_SERVICE),
+                       "runtime": adapter._runtime_from_unit(STAGED_SERVICE)},
+            "completions_before": len(before["completions"]),
+            "completions_after": len(after["completions"]),
+            "before": before, "after": after,
+            "preserved": check_preserved("fence")}
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("phase", choices=("prepare", "switch-node", "switch-python",
                                          "interrupt", "recover-kill", "recover",
-                                         "recover-repeat", "inspect"))
+                                         "recover-repeat", "inspect", "fence"))
     parser.add_argument("--record")
     args = parser.parse_args(argv)
     try:
@@ -563,6 +636,8 @@ def main(argv=None):
             payload = recover_complete_phase(args)
         elif args.phase == "recover-repeat":
             payload = recover_repeat_phase(args)
+        elif args.phase == "fence":
+            payload = fence_phase(args)
         else:
             payload = {"snapshot": snapshot()}
         PHASE_DIR.mkdir(parents=True, exist_ok=True)

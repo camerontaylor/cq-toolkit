@@ -61,6 +61,15 @@ def sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def _text_output(value) -> str:
+    """Normalize captured command output; TimeoutExpired may retain bytes."""
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", "replace")
+    return value if isinstance(value, str) else str(value)
+
+
 def valid_runtime(value) -> bool:
     return isinstance(value, str) and RUNTIME_RE.fullmatch(value) is not None
 
@@ -105,20 +114,20 @@ class GuestFixtureAdapter:
                     "stderr": result.stderr[-8000:], "timeout": False}
         except subprocess.TimeoutExpired as exc:
             return {"argv": list(argv), "rc": None, "timeout": True,
-                    "stdout": (exc.stdout or "")[-8000:],
-                    "stderr": (exc.stderr or "")[-8000:]}
+                    "stdout": _text_output(exc.stdout)[-8000:],
+                    "stderr": _text_output(exc.stderr)[-8000:]}
 
     def run_command(self, argv, timeout=60):
         result = self.runner([str(item) for item in argv], timeout)
         if not isinstance(result, dict) or "rc" not in result:
             self.refuse("command runner returned an unreadable result")
         result.setdefault("timeout", False)
-        result.setdefault("stdout", "")
-        result.setdefault("stderr", "")
+        result["stdout"] = _text_output(result.get("stdout"))
+        result["stderr"] = _text_output(result.get("stderr"))
         self.commands.append({"argv": result["argv"], "rc": result["rc"],
                               "timeout": bool(result["timeout"]),
-                              "stdout": result.get("stdout", "")[-2000:],
-                              "stderr": result.get("stderr", "")[-2000:]})
+                              "stdout": result["stdout"][-2000:],
+                              "stderr": result["stderr"][-2000:]})
         return result
 
     def systemctl(self, *args, timeout=60):
@@ -193,6 +202,10 @@ class GuestFixtureAdapter:
             "timer": self.unit_dir / SUPPORTED_UNITS[self.unit]["timer"],
             "wants": self.unit_dir / SUPPORTED_UNITS[self.unit]["wants"],
         }
+
+    def _staged_service_path(self, service):
+        service = pathlib.Path(service)
+        return service.with_name("." + service.name + ".staged")
 
     def _validate_layout(self):
         if self.unit not in SUPPORTED_UNITS:
@@ -698,6 +711,9 @@ class GuestFixtureAdapter:
         current = self._show(self.unit, ["LoadState"])
         if current["LoadState"] != "masked":
             self.refuse("install requires an established durable service mask")
+        fenced = self._usable_current_service(paths["service"])
+        if fenced["type"] != "symlink" or fenced["target"] != "/dev/null":
+            self.refuse("install requires the durable /dev/null service fence")
         snapshot = self._snapshot
         for key in ("timer", "wants"):
             path = paths[key]
@@ -705,25 +721,29 @@ class GuestFixtureAdapter:
                 self.refuse("activator path changed during the fenced interval: "
                             + key)
         text = self.render_unit(runtime)
-        self._write_bytes(paths["service"], text.encode())
-        os.chmod(paths["service"], 0o644)
-        self._fsync_dir(paths["service"].parent)
-        self._ok(self.systemctl("daemon-reload"), "daemon reload after install")
-        loaded = self._show(self.unit, ["LoadState", "FragmentPath"])
-        if loaded["LoadState"] != "loaded" \
-                or loaded["FragmentPath"] != str(paths["service"]):
-            self.refuse("installed unit did not load from the expected path")
-        observed = self._runtime_from_unit(paths["service"])
+        staged = self._staged_service_path(paths["service"])
+        self._write_bytes(staged, text.encode())
+        os.chmod(staged, 0o644)
+        self._fsync_dir(staged.parent)
+        state = self._path_state(staged)
+        if state["type"] != "file" or state["mode"] != 0o644 \
+                or state["uid"] != os.getuid() or state["xattrs"]:
+            self.refuse("staged unit metadata is not the isolated proof shape")
+        observed = self._runtime_from_unit(staged)
         if observed != runtime:
-            self.refuse("installed unit runtime marker does not match the request")
-        state = self._path_state(paths["service"])
-        if state["uid"] != os.getuid() or state["xattrs"] or state["type"] != "file":
-            self.refuse("installed unit metadata is not the isolated proof shape")
+            self.refuse("staged unit runtime marker does not match the request")
+        fenced = self._usable_current_service(paths["service"])
+        if fenced["type"] != "symlink" or fenced["target"] != "/dev/null":
+            self.refuse("install released the durable service fence")
+        current = self._show(self.unit, ["LoadState", "FragmentPath"])
+        if current["LoadState"] != "masked" \
+                or current["FragmentPath"] != str(paths["service"]):
+            self.refuse("staged install changed the masked service state")
         for key in ("timer", "wants"):
             path = paths[key]
             if self._path_state(path) != snapshot["paths"][str(path)]:
                 self.refuse("install changed an activator path: " + key)
-        self.last_install = {"runtime": runtime, "load": loaded,
+        self.last_install = {"runtime": runtime, "staged": str(staged),
                              "sha256": state["sha256"]}
         return self.last_install
 
@@ -732,9 +752,38 @@ class GuestFixtureAdapter:
         if unit != self.unit:
             self.refuse("unit is not supported by this proof adapter")
         self._maybe_kill("start")
-        state = self._show(self.unit, ["LoadState", "ActiveState"])
-        if state["LoadState"] != "loaded":
-            self.refuse("start requires an unmasked loaded service")
+        paths = self._unit_paths()
+        staged = self._staged_service_path(paths["service"])
+        installed = self.last_install
+        if not isinstance(installed, dict) \
+                or installed.get("staged") != str(staged) \
+                or not valid_runtime(installed.get("runtime")):
+            self.refuse("start requires a staged target from this adapter")
+        fenced = self._usable_current_service(paths["service"])
+        if fenced["type"] != "symlink" or fenced["target"] != "/dev/null":
+            self.refuse("start requires the durable /dev/null service fence")
+        state = self._show(self.unit, ["LoadState", "FragmentPath"])
+        if state["LoadState"] != "masked" \
+                or state["FragmentPath"] != str(paths["service"]):
+            self.refuse("start requires the service to remain masked")
+        staged_state = self._path_state(staged)
+        if staged_state["type"] != "file" \
+                or staged_state["sha256"] != installed["sha256"] \
+                or self._runtime_from_unit(staged) != installed["runtime"]:
+            self.refuse("staged target changed before release")
+        os.replace(staged, paths["service"])
+        self._fsync_dir(paths["service"].parent)
+        self._ok(self.systemctl("daemon-reload"), "daemon reload after release")
+        loaded = self._show(self.unit, ["LoadState", "FragmentPath"])
+        if loaded["LoadState"] != "loaded" \
+                or loaded["FragmentPath"] != str(paths["service"]):
+            self.refuse("released unit did not load from the expected path")
+        released = self._path_state(paths["service"])
+        if released["type"] != "file" or released["mode"] != 0o644 \
+                or released["uid"] != os.getuid() or released["xattrs"] \
+                or released["sha256"] != installed["sha256"] \
+                or self._runtime_from_unit(paths["service"]) != installed["runtime"]:
+            self.refuse("released unit metadata does not match the staged target")
         self._ok(self.systemctl("start", self.unit, timeout=60),
                  "fixture service release")
         self._ok(self.systemctl("start", TIMER, timeout=60),
@@ -821,6 +870,8 @@ class GuestFixtureAdapter:
         self.validate_snapshot(unit, snapshot)
         self._maybe_kill("restore")
         paths = self._unit_paths()
+        self._staged_service_path(paths["service"]).unlink(missing_ok=True)
+        self._fsync_dir(paths["service"].parent)
         self.systemctl("stop", TIMER)
         self.systemctl("reset-failed", TIMER)
         for key in ("service", "timer", "wants"):
