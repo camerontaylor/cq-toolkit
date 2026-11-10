@@ -1,14 +1,17 @@
-import { readFile, symlink, writeFile } from 'node:fs/promises';
+import {
+  withAddressOwnership as withCheckoutOwnership,
+  runAddressReviewLoop as runCheckoutReviewLoop,
+} from '../../../src/ops/review/internal/addressCheckoutOwnership.js';
+import { slotWorktreeRegistry } from '../../../src/adapters/git/slotWorktreeRegistry.js';
+import { readFile, rename, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { expect, test, vi } from 'vitest';
-import { fileWorktreeRegistry } from '../../../src/adapters/git/prWorktree.js';
 import * as addressModule from '../../../src/ops/review/address.js';
 import { runReviewLoop, type ReviewLoopOpts } from '../../../src/plans/review-loop.js';
 import type { OpRegistryEntry } from '../../../src/kernel/types.js';
 import { FixReviewItemInputSchema } from '../../../src/ops/review/registry.js';
 import {
   makeAddressOwnership,
-  runAddressReviewLoop,
   withAddressOwnership,
 } from '../../../src/ops/review/internal/addressOwnership.js';
 
@@ -18,7 +21,6 @@ test('direct loop owns lifetime; only a live private bridge reenters and inherit
   for (const viaAddress of [false, true]) {
     const f = await fixture();
     try {
-      const owner = await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run });
       let stale: (() => Promise<unknown>) | undefined;
       let visited = false;
       const opts: ReviewLoopOpts = {
@@ -31,43 +33,40 @@ test('direct loop owns lifetime; only a live private bridge reenters and inherit
         gh: async () => {
           throw new Error('forge must not dispatch');
         },
-        registry: fileWorktreeRegistry(f.registryPath),
+        registry: slotWorktreeRegistry(
+          f.repo.git('rev-parse', '--path-format=absolute', '--git-common-dir').trim(),
+        ),
         driver: { provider: 'test', model: 'test' },
         nowMs: NOW,
         dispatchLogPath: join(f.root, 'dispatch.jsonl'),
         beforeWorktreeResolve: async () => {
           visited = true;
-          await expect(runReviewLoop(opts)).rejects.toThrow(/consumed|active or quarantined/);
-          await expect(
-            withAddressOwnership(
-              { repoRoot: f.repo.root, git: f.run, source: 'local', production: false },
-              async () => undefined,
-            ),
-          ).rejects.toThrow('active or quarantined');
+          await expect(runReviewLoop(opts)).rejects.toThrow(/permit|busy/i);
+          await withCheckoutOwnership(
+            { repoRoot: f.repo.root, git: f.run, source: 'local', production: false },
+            async () => undefined,
+          );
           throw new Error('stop before mutable resolution');
         },
       };
       if (viaAddress) {
         await expect(
-          owner.withLock(async () => {
-            const lease = owner.lease();
-            stale = () => runAddressReviewLoop(lease, opts);
-            await expect(runAddressReviewLoop({ ...lease }, opts)).rejects.toThrow(
-              'forged loop lease',
-            );
-            await expect(runReviewLoop(opts)).rejects.toThrow('active or quarantined');
-            return runAddressReviewLoop(lease, opts);
-          }),
+          withCheckoutOwnership(
+            { repoRoot: f.repo.root, git: f.run, source: 'pr:7', production: true },
+            async (lease) => {
+              stale = () => runCheckoutReviewLoop(lease, opts);
+              await expect(runCheckoutReviewLoop({ ...lease }, opts)).rejects.toThrow(
+                'forged loop lease',
+              );
+              await expect(runReviewLoop(opts)).rejects.toThrow(/busy/i);
+              return runCheckoutReviewLoop(lease, opts);
+            },
+          ),
         ).rejects.toThrow('stop before mutable resolution');
-        await expect(stale!()).rejects.toThrow(/owner inactive|admissions closed/);
-        await expect(owner.withLock(async () => undefined)).rejects.toThrow(
-          'lifetime already consumed',
-        );
-      } else {
-        await expect(runReviewLoop(opts)).rejects.toThrow('stop before mutable resolution');
-      }
+        await expect(stale!()).rejects.toThrow(/inactive|admissions closed/);
+      } else await expect(runReviewLoop(opts)).rejects.toThrow('stop before mutable resolution');
       expect(visited).toBe(true);
-      expect((await authorityState(owner.guardPath)).state).toBe('quarantined');
+      await expect(runReviewLoop(opts)).rejects.toThrow(/incomplete/i);
     } finally {
       await f.repo.cleanup();
     }
@@ -144,7 +143,9 @@ test.each(['detach', 'parent-abort', 'parent-and-owner-loss'] as const)(
         if (args.some((arg) => arg.startsWith('repos/fixture/base/'))) return json([]);
         throw new Error('unexpected scripted forge call');
       },
-      registry: fileWorktreeRegistry(f.registryPath),
+      registry: slotWorktreeRegistry(
+        f.repo.git('rev-parse', '--path-format=absolute', '--git-common-dir').trim(),
+      ),
       driver: { provider: 'test', model: 'test' },
       driverRegistryView: {
         get: (name) =>
@@ -185,19 +186,17 @@ test.each(['detach', 'parent-abort', 'parent-and-owner-loss'] as const)(
       if (mode !== 'detach') {
         await entered.promise;
         if (mode === 'parent-and-owner-loss') {
-          const owner = await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run });
-          await writeFile(
-            owner.guardPath,
-            JSON.stringify({ version: 1, epoch: 'foreign', state: 'active', resources: [] }),
-          );
+          const path = join(f.repo.root, '.git/cq-review/slots/pr-7.lock');
+          await rename(path, path + '.replaced');
+          await writeFile(path, 'foreign inode');
         }
         parent.abort();
         release.resolve();
         if (mode === 'parent-and-owner-loss') {
-          await expect(pending).rejects.toThrow(/lost owner|owner inactive/);
+          await expect(pending).rejects.toThrow(/inode replaced/i);
           await expect(
             runReviewLoop({ ...opts, git: f.run, signal: new AbortController().signal }),
-          ).rejects.toThrow('active or quarantined');
+          ).rejects.toThrow(/busy|incomplete/i);
         } else {
           const outcome = await pending;
           expect(outcome.status).toBe('needs-human');
@@ -214,13 +213,13 @@ test.each(['detach', 'parent-abort', 'parent-and-owner-loss'] as const)(
         expect(postAbortCommands).toBe(0);
         return;
       }
-      await expect(pending).rejects.toThrow('detached work requires quarantine');
+      await expect(pending).rejects.toThrow('checkout actual writer drain unresolved');
       expect(started).toBe(true);
-      await expect(runReviewLoop(opts)).rejects.toThrow('active or quarantined');
+      await expect(runReviewLoop(opts)).rejects.toThrow(/busy|incomplete/i);
       release.resolve();
       await finished.promise;
       expect(await readFile(join(checkout, 'late-write.txt'), 'utf8')).toBe('survivor edit\n');
-      await expect(runReviewLoop(opts)).rejects.toThrow('active or quarantined');
+      await expect(runReviewLoop(opts)).rejects.toThrow(/busy|incomplete/i);
     } finally {
       release.resolve();
       if (started) await finished.promise;

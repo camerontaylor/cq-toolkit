@@ -9,7 +9,7 @@ describe('review.address candidate isolation', () => {
   test.each(['unused', 'unsafe'] as const)(
     'an %s worker leaves no asynchronous lock setup beyond its lifetime',
     async (mode) => {
-      const f = await fixture(undefined, '', { indexIdentityUnavailable: true });
+      const f = await fixture();
       try {
         if (mode !== 'unused') {
           const item = finding(mode === 'unsafe' ? '../outside.ts' : undefined);
@@ -19,7 +19,7 @@ describe('review.address candidate isolation', () => {
         }
         // Let constructor-started I/O settle before the fixture is disposed.
         await new Promise<void>((resolve) => setTimeout(resolve, 30));
-        expect(f.identityRequests()).toBe(0);
+        expect(f.identityRequests()).toBe(mode === 'unused' ? 0 : 1);
         expect(f.calls()).toBe(0);
         expect(f.repo.git('rev-parse', 'HEAD').trim()).toBe(f.initial);
       } finally {
@@ -35,9 +35,8 @@ describe('review.address candidate isolation', () => {
     // calls fix without withVerifiedHead) takes the same memoized initialize
     // admission and defers with the verified head instead of refusing; the
     // composition-level outcome is covered by address-local.full-cycle. The
-    // lock setup settles within the fix call's lifetime: identity is
-    // requested once (the checkout mutex is memoized across the admission
-    // and the head read), nothing leaks after.
+    // The surrounding checkout lifetime verifies identity once at admission;
+    // the worker FIFO does not create an independent cross-process mutex.
     const f = await fixture();
     try {
       const item = finding();
@@ -58,15 +57,9 @@ describe('review.address candidate isolation', () => {
   test('unavailable checkout identity refuses every mutation and worker dispatch', async () => {
     const f = await fixture(undefined, '', { indexIdentityUnavailable: true });
     try {
-      const results = await Promise.all([
-        f.engine.fix(finding(), 1),
-        f.engine.fix(finding('src/b.ts'), 1),
-      ]);
-      for (const result of results) {
-        expect(result.finding.status).toBe('deferred');
-        expect(result.reason).toContain('checkout index identity unavailable');
-        expect(result.commit).toBeUndefined();
-      }
+      await expect(
+        Promise.all([f.engine.fix(finding(), 1), f.engine.fix(finding('src/b.ts'), 1)]),
+      ).rejects.toThrow('checkout ownership Git identity unavailable');
       expect(f.identityRequests()).toBe(1);
       expect(f.calls()).toBe(0);
       expect(f.repo.git('rev-parse', 'HEAD').trim()).toBe(f.initial);

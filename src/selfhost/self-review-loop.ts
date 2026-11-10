@@ -90,7 +90,8 @@ import type { OpRegistryView } from '../kernel/runner.js';
 import { GhError, ghJson } from '../adapters/forge-github/gh.js';
 import type { GhFn } from '../adapters/forge-github/gh.js';
 import { makeGhRunner } from '../adapters/forge-github/gh.js';
-import { fileWorktreeRegistry } from '../adapters/git/prWorktree.js';
+import { slotWorktreeRegistry } from '../adapters/git/slotWorktreeRegistry.js';
+import { readSlotMetadata } from '../adapters/lock/slotLock.js';
 import { fetchReviewState } from '../adapters/forge-github/fetchReviewState.js';
 import { runReviewLoop, totalTokens } from '../plans/review-loop.js';
 import type { ReviewLoopOutcome, ReviewLoopOpts } from '../plans/review-loop.js';
@@ -193,7 +194,7 @@ const AUDIT_DIRS_KEPT = 5;
  * unreadable journal root (a first run) or a failed removal must never fail
  * an honest run — the next run's prune retries.
  */
-const pruneAuditDirs = (journalRoot: string): void => {
+const pruneAuditDirs = async (journalRoot: string, commonDir: string): Promise<void> => {
   let dirs: string[];
   try {
     dirs = readdirSync(journalRoot, { withFileTypes: true })
@@ -210,6 +211,11 @@ const pruneAuditDirs = (journalRoot: string): void => {
   );
   for (const name of dirs.filter((n) => !keptStamps.has(stampOf(n)))) {
     try {
+      const pr = name.slice(0, name.indexOf('-'));
+      const metadata = await readSlotMetadata(
+        join(commonDir, 'cq-review', 'slots', `pr-${pr}.json`),
+      );
+      if (metadata?.incomplete) continue;
       rmSync(join(journalRoot, name), { recursive: true, force: true });
     } catch {
       // retried by the next run's prune — never a run-failing effect
@@ -493,7 +499,6 @@ export async function runSelfReviewLoop(
   // (the real-run path creates the ROOT itself first, see the mkdir below);
   // the direct filesystem touches here are that root creation and
   // pruneAuditDirs' bounded cleanup of the audit dirs prior runs left behind.
-  const registry = fileWorktreeRegistry(join(journalRoot, 'worktree-registry.json'));
   const worktreeRoot = join(cfg.repoRoot, '.selfhost', 'worktrees');
 
   const protectedBranch = checkedProtectedBranch('selfhost.reviewLoop', cfg.cqEnv);
@@ -536,6 +541,23 @@ export async function runSelfReviewLoop(
       usage: buildSweepUsage(cfg.maxTokens ?? SelfhostDefaults.maxTokens, []),
     };
   }
+
+  const commonResult = await deps.git([
+    '-C',
+    cfg.repoRoot,
+    'rev-parse',
+    '--path-format=absolute',
+    '--git-common-dir',
+  ]);
+  if (commonResult.code !== 0 || !commonResult.stdout.trim())
+    throw new Error('selfhost Git common directory unavailable');
+  const commonDir = commonResult.stdout.trim();
+  const registry = slotWorktreeRegistry(commonDir, {
+    legacySources: [
+      join(commonDir, 'cq-review-address-worktrees.json'),
+      join(journalRoot, 'worktree-registry.json'),
+    ],
+  });
 
   // THE run's start instant: the ENTRY's single clock read when it threaded
   // one through (main() captures it before the credential preflight), so the
@@ -656,6 +678,7 @@ export async function runSelfReviewLoop(
       gh: deps.gh,
       git: deps.git,
       registry,
+      legacySources: [join(journalRoot, 'worktree-registry.json')],
       driver,
       // classifyConfig deliberately ABSENT: defaultLoopClassifyConfig rides
       // unchanged (bot-authored suppression ON — see the module doc).
@@ -738,7 +761,7 @@ export async function runSelfReviewLoop(
   // Bounded journal growth: the workflow's cache save persists everything
   // under journalRoot, so drop all but the newest per-run audit dirs before
   // this run's state is saved (the flat dispatch logs ride untouched).
-  pruneAuditDirs(journalRoot);
+  await pruneAuditDirs(journalRoot, commonDir);
   return {
     results,
     failures,

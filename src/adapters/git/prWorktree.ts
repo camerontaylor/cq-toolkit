@@ -1,3 +1,9 @@
+import { acquireSlot } from '../lock/slotLock.js';
+import type { SlotWorktreeRegistry } from './slotWorktreeRegistry.js';
+import {
+  CheckoutWriterContext,
+  checkoutWriterContext,
+} from '../../shared/checkoutWriterContext.js';
 // prWorktree — E3 slice 3 (goal E3; UC §2 row 38): resolve THE worktree for
 // a PR — reuse the tree already checked out on the PR's review branch, else
 // create one. The PR'S HEAD REF IS TRUTH: `refs/pull/<pr>/head` is fetched
@@ -17,12 +23,14 @@
 // lifetime, and review ops must never consult it (and vice versa). The test
 // suite pins this rule by name.
 //
+// The persistent PR slot spans this entire walk, including fetch. Each existing
+// target also holds its canonical checkout slot before reuse or removal.
 // Resolution order (each step pinned by a test):
 //   a. `git -C <repoRoot> fetch origin refs/pull/<pr>/head` — nonzero →
 //      THROW: the PR head's truth is unavailable and nothing must be guessed.
 //   b. Registry consult: an entry for the pr that still POINTS AT TRUTH
 //      (directory exists AND is inside worktreeRoot AND `git -C <entryPath>
-//      rev-parse --abbrev-ref HEAD` prints OUR LABEL (cq-review/pr-<n>) AND
+//      symbolic-ref HEAD` prints refs/heads/cq-review/pr-<n> AND
 //      `git -C <entryPath> rev-parse HEAD` prints the fetched sha) → reuse
 //      it. A STALE entry is left in place until a fresh resolution succeeds
 //      — the prune happens only AFTER a successful create/register (the
@@ -75,9 +83,9 @@
 // that runner spawns with the PROCESS cwd, repoRoot has effect only through
 // explicit `-C <repoRoot>` prefixes (and `-C <entryPath>` for the registry
 // rev-parse) — the module never assumes where it runs. All persistence goes
-// through the injected WorktreeRegistry; the clock is injected (nowMs,
-// never Date.now); the only direct fs touch is the worktreeRoot mkdir and
-// the registry entry's directory-existence check.
+// through the injected SlotWorktreeRegistry; the adapter validates canonical
+// checkout identities before persisting bindings. Legacy map exports below
+// remain uncalled by participating paths until the migration/removal change.
 import { mkdir, readFile, realpath, rename, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname, join, resolve as pathResolve, sep } from 'node:path';
 import { lock } from 'proper-lockfile';
@@ -261,6 +269,44 @@ export function fileWorktreeRegistry(path: string): WorktreeRegistry {
   return { load, save, update, withLock };
 }
 
+type ResolutionPhase = { checkoutMutation: boolean; metadataWrite: boolean };
+const admissionRefusals = new WeakSet<Error>();
+/** A resolver-proven, settled refusal; message text alone cannot forge this proof. */
+export function isPrWorktreeAdmissionRefusal(error: unknown): error is Error {
+  return error instanceof Error && admissionRefusals.has(error);
+}
+async function withAdmission<T>(
+  opts: PrWorktreeOpts,
+  action: (phase: ResolutionPhase) => Promise<T>,
+): Promise<T> {
+  return withResolverContext(() =>
+    opts.registry.withPrLock(opts.pr, async () => {
+      const phase = { checkoutMutation: false, metadataWrite: false };
+      const settled = checkoutWriterContext()!.admissionSettlement();
+      try {
+        return await action(phase);
+      } catch (error) {
+        // Owner ruling on D5.4: a closed fetch/check is not an unaccounted writer.
+        // Add/remove/config/worker failures and incomplete metadata writes remain unsafe.
+        if (
+          error instanceof Error &&
+          !phase.checkoutMutation &&
+          !phase.metadataWrite &&
+          settled()
+        ) {
+          const refusal = new Error(error.message, { cause: error });
+          admissionRefusals.add(refusal);
+          throw refusal;
+        }
+        // A refusal proof is for this attempt; replaying an older error after
+        // a mutator must not turn that new failure into a settled admission.
+        if (isPrWorktreeAdmissionRefusal(error)) throw new Error(error.message, { cause: error });
+        throw error;
+      }
+    }),
+  );
+}
+
 /** What resolvePrWorktree/removePrWorktree need — everything injected. */
 export interface PrWorktreeOpts {
   /** The checked-out repository the PR branch belongs to (git -C target). */
@@ -279,8 +325,9 @@ export interface PrWorktreeOpts {
    */
   run: GhFn;
   /** The PR → worktree registry (persistence seam). */
-  registry: WorktreeRegistry;
-  /** The injected clock stamping registry entries — never Date.now. */
+  registry: SlotWorktreeRegistry;
+  isBookkeepingPath?: (path: string, root: string) => Promise<boolean>;
+  /** Caller clock retained for resolver API compatibility. */
   nowMs: number;
   /** Root for created worktrees; defaults to `<git-common-dir>/cq-review-worktrees`. */
   worktreeRoot?: string;
@@ -457,6 +504,10 @@ export async function resolvePrWorktree(opts: PrWorktreeOpts): Promise<{
   foreign: Array<{ path: string; branch: string }>;
 }> {
   validateOpts(opts);
+  return withAdmission(opts, (phase) => resolveLockedPrWorktree(opts, phase));
+}
+
+async function resolveLockedPrWorktree(opts: PrWorktreeOpts, phase: ResolutionPhase) {
   // ALL paths are resolved ABSOLUTE before use: mkdir() resolves from the
   // process cwd while `git -C <repoRoot> <relative-path>` resolves from
   // INSIDE repoRoot — a relative repoRoot would otherwise split the same
@@ -487,7 +538,6 @@ export async function resolvePrWorktree(opts: PrWorktreeOpts): Promise<{
     opts.worktreeRoot !== undefined
       ? pathResolve(opts.worktreeRoot)
       : join(gitDir.stdout.trim(), 'cq-review-worktrees');
-  const key = String(opts.pr);
 
   // (a) THE PR'S HEAD REF IS TRUTH — fetched from the BASE repo before any
   // decision: `refs/pull/<pr>/head` exists for EVERY PR, fork or same-repo
@@ -533,18 +583,15 @@ export async function resolvePrWorktree(opts: PrWorktreeOpts): Promise<{
   )
     throw new Error('PR fetched head changed since admission; checkout left untouched');
 
-  // CRITICAL SECTION — the consult → scan → create walk runs under the
-  // registry's lock: two jobs resolving the SAME PR concurrently would
-  // otherwise both finish the scan before either creates the target (one
-  // add succeeds, the other wedges on the occupied slot). The save/update
-  // calls inside are the registry's UNLOCKED primitives. The fetch above
-  // is per-PR and stays outside.
-  return opts.registry.withLock(async () => {
+  // The same persistent PR slot held before fetch protects consult, scan,
+  // targeted removal, creation and registration. Metadata updates require
+  // that live context; no shared registry-map lock participates.
+  {
     const expectedSha = fetchHead.stdout.trim();
     // The LOCAL branch label we own (keyed by PR) — see reviewBranchFor.
     const reviewBranch = reviewBranchFor(opts.pr);
 
-    const map = await opts.registry.load();
+    const metadata = await opts.registry.read(opts.pr);
 
     // (b) Registry consult — the entry must still POINT AT TRUTH: the
     // directory exists AND git says OUR LABEL (reviewBranch) is checked out
@@ -553,7 +600,7 @@ export async function resolvePrWorktree(opts: PrWorktreeOpts): Promise<{
     // here: the prune is the successful re-registration at the end (the
     // overwrite) — pruning up-front would destroy the machine-readable
     // pointer precisely when the run is about to wedge on a refused add.
-    const entry = map[key];
+    const entry = metadata?.state === 'bound' ? { path: metadata.checkoutPath } : undefined;
     if (entry !== undefined) {
       const valid =
         (await directoryExists(entry.path)) &&
@@ -563,16 +610,24 @@ export async function resolvePrWorktree(opts: PrWorktreeOpts): Promise<{
         // by definition, resolution proceeds to (re)create inside the root.
         (await isInsideRoot(entry.path, worktreeRoot)) &&
         (await (async () => {
-          const branchArgs = ['-C', entry.path, 'rev-parse', '--abbrev-ref', 'HEAD'];
+          const branchArgs = ['-C', entry.path, 'symbolic-ref', 'HEAD'];
           const branch = await opts.run(branchArgs);
-          if (branch.code !== 0 || branch.stdout.trim() !== reviewBranch) {
+          if (branch.code !== 0 || branch.stdout.trim() !== `refs/heads/${reviewBranch}`) {
             return false;
           }
+          // The first label read only rejects bad hints. Positive identity
+          // and all safety probes must be observed under checkout exclusion.
+          await bindCheckout(opts, entry.path, false, phase);
+          const heldBranch = await opts.run(branchArgs);
+          if (heldBranch.code !== 0 || heldBranch.stdout.trim() !== `refs/heads/${reviewBranch}`)
+            return false;
           const headArgs = ['-C', entry.path, 'rev-parse', 'HEAD'];
           const head = await opts.run(headArgs);
           return head.code === 0 && head.stdout.trim() === expectedSha;
         })());
       if (valid) {
+        await bindCheckout(opts, entry.path, true, phase);
+        await assertCleanCheckout(opts, entry.path);
         return { path: entry.path, reused: true, branch: reviewBranch, foreign: [] };
       }
     }
@@ -615,15 +670,26 @@ export async function resolvePrWorktree(opts: PrWorktreeOpts): Promise<{
         continue;
       }
       const headArgs = ['-C', candidate.path, 'rev-parse', 'HEAD'];
-      const head = await opts.run(headArgs);
-      const atSha = head.code === 0 && head.stdout.trim() === expectedSha;
       if (!(await isInsideRoot(candidate.path, worktreeRoot))) {
-        if (candidate.branch === reviewBranch && atSha) {
+        const head = await opts.run(headArgs);
+        if (
+          candidate.branch === reviewBranch &&
+          head.code === 0 &&
+          head.stdout.trim() === expectedSha
+        )
           foreign.push({ path: candidate.path, branch: candidate.branch });
-        }
         continue;
       }
-      if (candidate.branch === reviewBranch && atSha) {
+      await bindCheckout(opts, candidate.path, false, phase);
+      const branch = await opts.run(['-C', candidate.path, 'symbolic-ref', 'HEAD']);
+      const currentBranch =
+        branch.code === 0 && branch.stdout.trim().startsWith('refs/heads/')
+          ? branch.stdout.trim().slice('refs/heads/'.length)
+          : null;
+      if (currentBranch !== reviewBranch && !atTargetPath) continue;
+      const head = await opts.run(headArgs);
+      const atSha = head.code === 0 && head.stdout.trim() === expectedSha;
+      if (currentBranch === reviewBranch && atSha) {
         existing = candidate;
         break;
       }
@@ -649,6 +715,10 @@ export async function resolvePrWorktree(opts: PrWorktreeOpts): Promise<{
           unpushedArgs,
         );
       }
+      const canonicalPath = await realpath(candidate.path);
+      await bindCheckout(opts, canonicalPath, true, phase);
+      phase.checkoutMutation = true;
+      checkoutWriterContext()!.markCheckoutMutation();
       const removeArgs = ['-C', repoRoot, 'worktree', 'remove', candidate.path];
       let remove = await opts.run(removeArgs);
       if (remove.code !== 0 && opts.onStaleRefresh) {
@@ -672,13 +742,12 @@ export async function resolvePrWorktree(opts: PrWorktreeOpts): Promise<{
           removeArgs,
         );
       }
+      await checkoutWriterContext()!.removed(canonicalPath);
+      await opts.registry.update(opts.pr, { version: 1, state: 'unbound', incomplete: true });
     }
     if (existing !== null) {
-      await opts.registry.update(key, {
-        path: existing.path,
-        branch: reviewBranch,
-        createdAt: opts.nowMs,
-      });
+      await bindCheckout(opts, existing.path, true, phase);
+      await assertCleanCheckout(opts, existing.path);
       return { path: existing.path, reused: true, branch: reviewBranch, foreign };
     }
 
@@ -692,6 +761,8 @@ export async function resolvePrWorktree(opts: PrWorktreeOpts): Promise<{
     // stderr (git's refusal names any foreign branch-holder) — nothing is
     // registered for a tree that does not exist, and any stale registry
     // entry was never pruned, so the pointer survives for the next run.
+    phase.checkoutMutation = true;
+    checkoutWriterContext()!.markCheckoutMutation();
     await mkdir(worktreeRoot, { recursive: true });
     const wtPath = targetPath;
     const addArgs = ['-C', repoRoot, 'worktree', 'add', '-B', reviewBranch, wtPath, expectedSha];
@@ -704,14 +775,12 @@ export async function resolvePrWorktree(opts: PrWorktreeOpts): Promise<{
         addArgs,
       );
     }
-    // The post-success prune: registering the fresh tree OVERWRITES any stale
-    // entry — only now, with the new truth on disk, is the old pointer retired
-    // (the update is a per-key load-merge-save: concurrent resolves for other
-    // PRs never lose their entries to this write).
-    await opts.registry.update(key, { path: wtPath, branch: reviewBranch, createdAt: opts.nowMs });
+    // Bind this PR's metadata to the verified new checkout. Other PRs own
+    // separate files, so this cannot overwrite their pointers.
+    await bindCheckout(opts, wtPath, true, phase);
     await opts.onCreated?.({ path: wtPath, branch: reviewBranch, head: expectedSha });
     return { path: wtPath, reused: false, branch: reviewBranch, foreign };
-  });
+  }
 }
 
 /**
@@ -731,6 +800,12 @@ export async function resolvePrWorktree(opts: PrWorktreeOpts): Promise<{
  */
 export async function removePrWorktree(opts: PrWorktreeOpts & { path: string }): Promise<void> {
   validateOpts(opts);
+  return withAdmission(opts, (phase) => removeLockedPrWorktree(opts, phase));
+}
+async function removeLockedPrWorktree(
+  opts: PrWorktreeOpts & { path: string },
+  phase: ResolutionPhase,
+): Promise<void> {
   // Absolute everywhere (see resolvePrWorktree): mkdir/`-C`/paths must not
   // straddle two resolvers.
   const repoRoot = pathResolve(opts.repoRoot);
@@ -759,6 +834,10 @@ export async function removePrWorktree(opts: PrWorktreeOpts & { path: string }):
       `removePrWorktree: refusing to remove ${JSON.stringify(opts.path)} — it is outside the review worktreeRoot ${JSON.stringify(worktreeRoot)}; review ops removes only trees it created under its own root`,
     );
   }
+  const canonicalPath = await realpath(opts.path);
+  await bindCheckout(opts, canonicalPath, false, phase);
+  phase.checkoutMutation = true;
+  checkoutWriterContext()!.markCheckoutMutation();
   const removeArgs = ['-C', repoRoot, 'worktree', 'remove', opts.path];
   const result = await opts.run(removeArgs);
   if (result.code !== 0) {
@@ -769,21 +848,78 @@ export async function removePrWorktree(opts: PrWorktreeOpts & { path: string }):
       removeArgs,
     );
   }
-  const key = String(opts.pr);
-  // The registry tail is a read-modify-write, so it runs UNDER THE LOCK
-  // (review-debt #121): update() is the documented UNLOCKED primitive, and
-  // unlocked, two overlapping cleanups — or a cleanup racing
-  // resolvePrWorktree's critical section — can interleave the steps BETWEEN
-  // their writes and drop or resurrect entries. The check RE-LOADS inside
-  // the lock so it reads post-other-writer state; per-key merge-on-write is
-  // unchanged (update() still merges), and the prune stays conditional on
-  // the entry still pointing at THE removed path.
-  await opts.registry.withLock(async () => {
-    const map = await opts.registry.load();
-    if (map[key]?.path === opts.path) {
-      // Per-key merge-on-write: other PRs' entries are re-read fresh and
-      // preserved (a whole-map delete+save would drop them).
-      await opts.registry.update(key, null);
+  await checkoutWriterContext()!.removed(canonicalPath);
+  const metadata = await opts.registry.read(opts.pr);
+  if (metadata?.state === 'bound' && metadata.checkoutPath === canonicalPath) {
+    await opts.registry.update(opts.pr, { version: 1, state: 'unbound', incomplete: true });
+  }
+}
+
+async function bindCheckout(
+  opts: PrWorktreeOpts,
+  path: string,
+  register = true,
+  phase?: ResolutionPhase,
+): Promise<void> {
+  const root = await realpath(path);
+  const git = await opts.run(['-C', root, 'rev-parse', '--absolute-git-dir']);
+  const common = await opts.run([
+    '-C',
+    root,
+    'rev-parse',
+    '--path-format=absolute',
+    '--git-common-dir',
+  ]);
+  if (git.code !== 0 || common.code !== 0) throw new Error('checkout Git identity unavailable');
+  const checkoutGitDir = await realpath(git.stdout.trim());
+  const context = checkoutWriterContext();
+  if (!context) throw new Error('checkout lifetime missing');
+  const slot = await context.acquire(await realpath(common.stdout.trim()), {
+    checkoutGitDir,
+    checkoutPath: root,
+  });
+  if (phase) phase.metadataWrite = true;
+  await context.begin();
+  const metadata = {
+    version: 1 as const,
+    state: 'bound' as const,
+    incomplete: true,
+    checkoutPath: root,
+    checkoutGitDir,
+  };
+  await slot.writeMetadata(metadata);
+  if (register) await opts.registry.update(opts.pr, metadata);
+  if (phase) phase.metadataWrite = false;
+}
+async function assertCleanCheckout(opts: PrWorktreeOpts, path: string): Promise<void> {
+  for (const args of [
+    ['diff', '--quiet'],
+    ['diff', '--cached', '--quiet'],
+  ]) {
+    const result = await opts.run(['-C', path, ...args]);
+    if (result.code !== 0) throw new Error('dirty tracked/index checkout requires reconciliation');
+  }
+  const files = await opts.run(['-C', path, 'ls-files', '--others', '-z']);
+  if (files.code !== 0) throw new Error('checkout untracked/ignored state unavailable');
+  for (const file of files.stdout.split('\0').filter(Boolean)) {
+    if (!(await opts.isBookkeepingPath?.(file, await realpath(path))))
+      throw new Error(`unowned untracked/ignored checkout path: ${file}`);
+  }
+}
+
+async function withResolverContext<T>(action: () => Promise<T>): Promise<T> {
+  if (checkoutWriterContext()) return action();
+  const context = new CheckoutWriterContext(acquireSlot);
+  return context.run(async () => {
+    try {
+      const result = await action();
+      await context.complete();
+      return result;
+    } catch (error) {
+      if (isPrWorktreeAdmissionRefusal(error)) await context.complete();
+      throw error;
+    } finally {
+      if (!context.pendingChildren) await context.close();
     }
   });
 }

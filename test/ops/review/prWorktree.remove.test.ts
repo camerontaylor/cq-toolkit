@@ -1,3 +1,6 @@
+import type { SlotWorktreeRegistry } from '../../../src/adapters/git/slotWorktreeRegistry.js';
+import type { SlotMetadata } from '../../../src/adapters/lock/slotLock.js';
+import { REPO } from './prWorktree.helpers.js';
 // Split provenance: test/ops/review/prWorktree.test.ts was split into
 // prWorktree.helpers.ts (shared fixtures) and prWorktree.fetchFirst.test.ts,
 // prWorktree.registryConsult.test.ts, prWorktree.scanReuse.test.ts,
@@ -8,7 +11,7 @@
 // Shared fixtures and the fake git model (with the full pinned-behavior
 // header) live in prWorktree.helpers.ts.
 import { describe, expect, test } from 'vitest';
-import { rm } from 'node:fs/promises';
+import { mkdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { realTmpDir } from '../../helpers/tmp-dir.js';
 import { removePrWorktree, resolvePrWorktree } from '../../../src/adapters/git/prWorktree.js';
@@ -44,12 +47,16 @@ describe('removePrWorktree', () => {
       const model = mkModel();
       const registry = memRegistry();
       const calls: string[][] = [];
-      const git = fakeGit(model, calls);
+      const git = fakeGit(model, calls, { commonDir });
       const run: GhFn = async (args) => {
         if (args[2] === 'rev-parse' && args.includes('--git-common-dir')) {
+          expect([
+            linkedRoot,
+            join(commonDir, 'cq-review-worktrees', `pr-${PR}-${BRANCH}`),
+          ]).toContain(args[1]);
           expect(args).toEqual([
             '-C',
-            linkedRoot,
+            args[1],
             'rev-parse',
             '--path-format=absolute',
             '--git-common-dir',
@@ -78,24 +85,24 @@ describe('removePrWorktree', () => {
     const calls: string[][] = [];
     const registry = memRegistry({
       '7': {
-        path: '/repo/.git/cq-review-worktrees/pr-7-pr-7-fix',
+        path: `${REPO}/.git/cq-review-worktrees/pr-7-pr-7-fix`,
         branch: LABEL,
         createdAt: NOW - 1000,
       },
     });
     const model = mkModel([
-      { path: '/repo/.git/cq-review-worktrees/pr-7-pr-7-fix', branch: LABEL, head: SHA_B },
+      { path: `${REPO}/.git/cq-review-worktrees/pr-7-pr-7-fix`, branch: LABEL, head: SHA_B },
     ]);
     await removePrWorktree({
       ...baseOpts(model, registry, { run: fakeGit(model, calls) }),
-      path: '/repo/.git/cq-review-worktrees/pr-7-pr-7-fix',
+      path: `${REPO}/.git/cq-review-worktrees/pr-7-pr-7-fix`,
     });
     expect(calls[calls.length - 1]).toEqual([
       '-C',
-      '/repo',
+      `${REPO}`,
       'worktree',
       'remove',
-      '/repo/.git/cq-review-worktrees/pr-7-pr-7-fix',
+      `${REPO}/.git/cq-review-worktrees/pr-7-pr-7-fix`,
     ]);
     // No --force anywhere: review ops never silently destroys trees.
     expect(calls.some((args) => args.includes('--force'))).toBe(false);
@@ -107,13 +114,13 @@ describe('removePrWorktree', () => {
     const calls: string[][] = [];
     const registry = memRegistry({
       '7': {
-        path: '/repo/.git/cq-review-worktrees/pr-7-pr-7-fix',
+        path: `${REPO}/.git/cq-review-worktrees/pr-7-pr-7-fix`,
         branch: LABEL,
         createdAt: NOW - 1000,
       },
     });
     const model = mkModel(
-      [{ path: '/repo/.git/cq-review-worktrees/pr-7-pr-7-fix', branch: LABEL, head: SHA_B }],
+      [{ path: `${REPO}/.git/cq-review-worktrees/pr-7-pr-7-fix`, branch: LABEL, head: SHA_B }],
       {
         removeFails: {
           code: 128,
@@ -124,7 +131,7 @@ describe('removePrWorktree', () => {
     await expect(
       removePrWorktree({
         ...baseOpts(model, registry, { run: fakeGit(model, calls) }),
-        path: '/repo/.git/cq-review-worktrees/pr-7-pr-7-fix',
+        path: `${REPO}/.git/cq-review-worktrees/pr-7-pr-7-fix`,
       }),
     ).rejects.toThrow(/worktree remove.*failed.*contains modified or untracked files/s);
     // The tree stays, and the registry entry STAYS (truth on disk unchanged).
@@ -136,8 +143,8 @@ describe('removePrWorktree', () => {
     const calls: string[][] = [];
     // The entry describes a RE-CREATED tree at a new location; the caller
     // is removing a DIFFERENT (old) in-root path.
-    const entryPath = '/repo/.git/cq-review-worktrees/pr-7-pr-7-fix';
-    const oldPath = '/repo/.git/cq-review-worktrees/pr-7-pr-7-fix.old';
+    const entryPath = `${REPO}/.git/cq-review-worktrees/pr-7-pr-7-fix`;
+    const oldPath = `${REPO}/.git/cq-review-worktrees/pr-7-pr-7-fix.old`;
     const registry = memRegistry({
       '7': { path: entryPath, branch: LABEL, createdAt: NOW - 1000 },
     });
@@ -147,7 +154,7 @@ describe('removePrWorktree', () => {
       path: oldPath,
     });
     // git removed the requested tree…
-    expect(calls[calls.length - 1]).toEqual(['-C', '/repo', 'worktree', 'remove', oldPath]);
+    expect(calls[calls.length - 1]).toEqual(['-C', `${REPO}`, 'worktree', 'remove', oldPath]);
     expect(model.worktrees).toEqual([]);
     // …but the registry entry describes a DIFFERENT path and SURVIVES
     // (load ran; save never did — nothing was pruned).
@@ -163,7 +170,7 @@ describe('removePrWorktree', () => {
     const calls: string[][] = [];
     const registry = memRegistry({
       '7': {
-        path: '/repo/.git/cq-review-worktrees/pr-7-pr-7-fix',
+        path: `${REPO}/.git/cq-review-worktrees/pr-7-pr-7-fix`,
         branch: LABEL,
         createdAt: NOW - 1000,
       },
@@ -178,7 +185,7 @@ describe('removePrWorktree', () => {
     // The ONLY git call is the git-dir derivation the boundary check needs;
     // the foreign tree and the registry both intact.
     expect(calls).toEqual([
-      ['-C', '/repo', 'rev-parse', '--path-format=absolute', '--git-common-dir'],
+      ['-C', REPO, 'rev-parse', '--path-format=absolute', '--git-common-dir'],
     ]);
     expect(model.worktrees).toHaveLength(1);
     expect(registry.current()['7']).toBeDefined();
@@ -213,7 +220,7 @@ const deferredGate = (): { reached: Promise<void>; release: () => void } => {
 const mutexRegistry = (
   initial: RegistryMap = {},
 ): {
-  registry: WorktreeRegistry;
+  registry: WorktreeRegistry & SlotWorktreeRegistry;
   calls: string[];
   current: () => RegistryMap;
   pauseNextSave: () => { reached: Promise<void>; release: () => void };
@@ -223,7 +230,7 @@ const mutexRegistry = (
   let queue: Promise<unknown> = Promise.resolve();
   let depth = 0;
   let hooked: { reached: () => void; gate: Promise<void> } | null = null;
-  const registry: WorktreeRegistry = {
+  const registry: WorktreeRegistry & SlotWorktreeRegistry = {
     load: async () => {
       calls.push(`load@${String(depth)}`);
       return { ...stored };
@@ -239,7 +246,27 @@ const mutexRegistry = (
       calls.push('save');
       stored = { ...map };
     },
-    update: async (key: string, entry: WorktreeRegistryEntry | null) => {
+    read: async (pr) => {
+      const map = await registry.load();
+      const entry = map[String(pr)];
+      return entry
+        ? {
+            version: 1,
+            state: 'bound',
+            incomplete: false,
+            checkoutPath: entry.path,
+            checkoutGitDir: join(entry.path, '.git'),
+          }
+        : undefined;
+    },
+    withPrLock: async (_pr, action) => registry.withLock(action),
+    update: async (key: string | number, value: WorktreeRegistryEntry | SlotMetadata | null) => {
+      const entry =
+        value && 'state' in value
+          ? value.state === 'bound'
+            ? { path: value.checkoutPath, branch: LABEL, createdAt: NOW }
+            : null
+          : value;
       calls.push(`${entry === null ? `update:${key}:null` : `update:${key}`}@${String(depth)}`);
       const merged: RegistryMap = { ...stored };
       if (entry === null) {
@@ -280,7 +307,7 @@ const mutexRegistry = (
 
 describe('removePrWorktree lock discipline (review-debt #121)', () => {
   test('the registry tail (load + conditional update) runs entirely under withLock', async () => {
-    const path = '/repo/.git/cq-review-worktrees/pr-7-pr-7-fix';
+    const path = `${REPO}/.git/cq-review-worktrees/pr-7-pr-7-fix`;
     const harness = mutexRegistry({ '7': { path, branch: LABEL, createdAt: NOW - 1000 } });
     const model = mkModel([{ path, branch: LABEL, head: SHA_B }]);
     await removePrWorktree({
@@ -294,8 +321,8 @@ describe('removePrWorktree lock discipline (review-debt #121)', () => {
   });
 
   test('two racing removes for DIFFERENT PRs serialize under the lock — neither removal is lost', async () => {
-    const path7 = '/repo/.git/cq-review-worktrees/pr-7-pr-7-fix';
-    const path9 = '/repo/.git/cq-review-worktrees/pr-9-pr-9-fix';
+    const path7 = `${REPO}/.git/cq-review-worktrees/pr-7-pr-7-fix`;
+    const path9 = `${REPO}/.git/cq-review-worktrees/pr-9-pr-9-fix`;
     const harness = mutexRegistry({
       '7': { path: path7, branch: LABEL, createdAt: NOW - 1000 },
       '9': { path: path9, branch: LABEL, createdAt: NOW - 1000 },
@@ -359,16 +386,19 @@ describe('removePrWorktree lock discipline (review-debt #121)', () => {
       });
       // The entry points at a GONE tree (the remove's target); no listed
       // trees, so the resolve must (re)create the fresh one and register it.
-      const model = mkModel();
+      const model = mkModel([{ path: oldPath, branch: LABEL, head: SHA_A }]);
       const calls: string[][] = [];
+      await mkdir(oldPath, { recursive: true });
       // Deterministic interleave: the remove's git worktree-remove parks on
       // a gate while the resolve runs to completion (registering the fresh
       // tree); then the remove resumes — its IN-LOCK re-load must see the
       // fresh registration and leave it alone (path differs → no prune).
       const removeGate = deferredGate();
+      const removeEntered = deferredGate();
       const ungated = fakeGit(model, calls);
       const gatedRun: GhFn = async (args) => {
         if (args[2] === 'worktree' && args[3] === 'remove') {
+          removeEntered.release();
           await removeGate.reached;
         }
         return ungated(args);
@@ -377,19 +407,27 @@ describe('removePrWorktree lock discipline (review-debt #121)', () => {
         ...baseOpts(model, harness.registry, { repoRoot, run: gatedRun }),
         path: oldPath,
       });
-      const resolved = await resolvePrWorktree(
+      await removeEntered.reached;
+      let resolvedEarly = false;
+      const resolvePromise = resolvePrWorktree(
         baseOpts(model, harness.registry, { repoRoot, run: ungated }),
-      );
-      expect(resolved.path).toBe(freshPath);
+      ).then((value) => {
+        resolvedEarly = true;
+        return value;
+      });
+      await new Promise<void>((done) => setImmediate(done));
+      expect(resolvedEarly).toBe(false);
       removeGate.release();
       await removePromise;
+      const resolved = await resolvePromise;
+      expect(resolved.path).toBe(freshPath);
       // One consistent tree: the fresh registration survived; no stale prune.
       expect(harness.current()['7']).toEqual({
         path: freshPath,
         branch: LABEL,
         createdAt: NOW,
       });
-      expect(harness.calls).not.toContain('update:7:null@1');
+      expect(harness.calls).toContain('update:7:null@1');
     } finally {
       await rm(repoRoot, { recursive: true, force: true });
     }

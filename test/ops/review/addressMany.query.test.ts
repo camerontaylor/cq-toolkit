@@ -1,3 +1,4 @@
+import { coordinationRoot } from './addressMany.helpers.js';
 // Split provenance: test/ops/review/addressMany.test.ts was split into this
 // file plus addressMany.helpers.ts, addressMany.registry.test.ts,
 // addressMany.dispatch.test.ts, addressMany.guards.test.ts,
@@ -34,7 +35,7 @@ test.each([true, false])(
         : gh(args);
     const { pulls: _, ...queryInput } = input;
     const result = await makeReviewAddressMany({
-      coordinationRoot: '/unused-test-coordination',
+      coordinationRoot: coordinationRoot(),
       gh: searchGh,
       address,
     })({
@@ -70,7 +71,7 @@ test('complete query dispatches eligible PRs', async () => {
       : gh(args);
   const { pulls: _, ...queryInput } = input;
   const result = await makeReviewAddressMany({
-    coordinationRoot: '/unused-test-coordination',
+    coordinationRoot: coordinationRoot(),
     gh: searchGh,
     address,
     isolate: async (root) => root,
@@ -111,7 +112,7 @@ test('query requests every page through one paginate+slurp call before dispatchi
   };
   const { pulls: _, ...queryInput } = input;
   const result = await makeReviewAddressMany({
-    coordinationRoot: '/unused-test-coordination',
+    coordinationRoot: coordinationRoot(),
     gh: pagedGh,
     address,
     isolate: async (root) => root,
@@ -159,7 +160,7 @@ test.each(['cap', 'changing-total', 'foreign', 'duplicate', 'exit', 'facts'])(
     };
     const { pulls: _, ...rest } = input;
     const result = await makeReviewAddressMany({
-      coordinationRoot: '/unused-test-coordination',
+      coordinationRoot: coordinationRoot(),
       gh: queryGh,
       address,
     })({ ...rest, query: 'is:open' });

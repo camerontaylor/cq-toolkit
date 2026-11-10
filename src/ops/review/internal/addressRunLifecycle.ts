@@ -1,3 +1,4 @@
+import type { SlotWorktreeRegistry } from '../../../adapters/git/slotWorktreeRegistry.js';
 import { boundedFile, same, type Identity } from './addressFileIdentity.js';
 import type { ReviewAddressResult, ReviewAddressReport } from '../address.js';
 import {
@@ -15,6 +16,27 @@ import {
 } from './addressEvidence.js';
 import { lstat, realpath } from 'node:fs/promises';
 import { basename, dirname, resolve } from 'node:path';
+export interface AddressSelection {
+  pr: number;
+  head: string;
+  headRepo: string;
+  headRefName: string;
+}
+
+export interface AddressLease {
+  signal: AbortSignal;
+  expectedHead?: string;
+  incompleteReason?(): string | undefined;
+  registry?: SlotWorktreeRegistry;
+  assertOwned(): Promise<void>;
+  /** Track actual work even when an outer governor abandons its promise. */
+  track<T>(action: () => Promise<T>): Promise<T>;
+  /** Called before resolution, including before stale checkout removal. */
+  assertSelection(selection: Omit<AddressSelection, 'head'>): Promise<void>;
+  /** Confirms canonical checkout and administrative git-dir before driver work. */
+  claimCheckout(info: { path: string; branch: string; head: string }): Promise<void>;
+}
+
 /** Minimal capability surface; checkout registry and durable claims stay with the owner. */
 export interface AddressRunLease {
   readonly signal: AbortSignal;
@@ -83,6 +105,9 @@ function createAddressRunContext(owner: AddressRunAuthority, internals: Terminal
     activate() {
       terminalAuthorities.set(token, owner);
     },
+    deactivate() {
+      terminalAuthorities.delete(token);
+    },
     registerLease(lease: AddressRunLease) {
       if (liveLeases.has(lease)) throw new Error('address terminal: reused lease');
       liveLeases.set(lease, owner);
@@ -150,9 +175,8 @@ export abstract class AddressRunLifecycle implements AddressRunAuthority {
     this.runContext = createAddressRunContext(this, {
       checkpoint: (root, head, expected) =>
         checkpointAddressTerminalEvidence(terminalToken(this), root, head, expected),
-      bookkeeping: (root, entries) =>
-        noteAddressTerminalBookkeeping(terminalToken(this), root, entries),
-      ordinaryReport: (path, bytes) => noteAddressOrdinaryReport(terminalToken(this), path, bytes),
+      bookkeeping: (root, entries) => this.terminalBookkeeping(root, entries),
+      ordinaryReport: (path, bytes) => this.ordinaryReport(path, bytes),
       candidate: async (root, path, remove) => {
         await this.validateTerminal();
         if (!remove) {
@@ -199,6 +223,15 @@ export abstract class AddressRunLifecycle implements AddressRunAuthority {
         releaseAddressTerminalEvidence(attempt);
       },
     });
+  }
+  protected async ordinaryReport(path: string, bytes: string): Promise<void> {
+    await noteAddressOrdinaryReport(terminalToken(this), path, bytes);
+  }
+  protected async terminalBookkeeping(
+    root: string,
+    entries: ReadonlyMap<string, string>,
+  ): Promise<void> {
+    await noteAddressTerminalBookkeeping(terminalToken(this), root, entries);
   }
   protected async disposeTerminalSession(): Promise<void> {
     await disposeAddressTerminalSession(terminalToken(this));

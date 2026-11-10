@@ -1,7 +1,7 @@
 // Split provenance: test/plans/review-loop.helpers.ts was split by subject;
 // this module carries the loop runner (fresh scratch, scripted driver, wired
 // seams) and its scratch-dir cleanup.
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach } from 'vitest';
@@ -11,30 +11,22 @@ import type { GovernanceOptIn, OpRegistryEntry } from '../../src/kernel/types.js
 import { makeFixReviewItem, type FixReviewItemInput } from '../../src/ops/review/fixReviewItem.js';
 import { FixReviewItemInputSchema } from '../../src/ops/review/registry.js';
 import type { GhFn } from '../../src/adapters/forge-github/gh.js';
-import type { RegistryMap, WorktreeRegistry } from '../../src/adapters/git/prWorktree.js';
+import type { SlotWorktreeRegistry } from '../../src/adapters/git/slotWorktreeRegistry.js';
+import type { SlotMetadata } from '../../src/adapters/lock/slotLock.js';
 import { runReviewLoop, type ReviewLoopOutcome } from '../../src/plans/review-loop.js';
 import { COORDS, HEAD_REF, NOW, SHA, type LoopWorld } from './review-loop.fixtures.js';
 import { fakeGh } from './review-loop.gh-fake.js';
 import { fakeGit } from './review-loop.git-fake.js';
 
 /** An unsynchronized in-memory WorktreeRegistry (single-threaded tests). */
-const memoryRegistry = (): WorktreeRegistry => {
-  let map: RegistryMap = {};
+const memoryRegistry = (): SlotWorktreeRegistry => {
+  const map = new Map<number, SlotMetadata>();
   return {
-    load: async () => ({ ...map }),
-    save: async (next) => {
-      map = { ...next };
+    read: async (pr) => map.get(pr),
+    update: async (pr, entry) => {
+      map.set(pr, entry);
     },
-    update: async (key, entry) => {
-      const next = { ...map };
-      if (entry === null) {
-        delete next[key];
-      } else {
-        next[key] = entry;
-      }
-      map = next;
-    },
-    withLock: async (fn) => fn(),
+    withPrLock: async (_pr, action) => action(),
   };
 };
 
@@ -89,6 +81,7 @@ export const runLoop = async (
   const scratch = await mkdtemp(join(tmpdir(), 'cq-review-loop-'));
   scratchDirs.push(scratch);
   const worktreePath = join(scratch, 'pr-7-pr-7-fix');
+  await mkdir(join(worktreePath, '.git'), { recursive: true });
   const ghLog = o.ghLog ?? [];
   const gitLog = o.gitLog ?? [];
   world.executionHead ??= world.worktreeHead ?? (world.worktreeFollowsOrigin ? world.sha : SHA);
@@ -134,7 +127,7 @@ export const runLoop = async (
           } as unknown as OpRegistryEntry<never, never>)
         : undefined,
   };
-  const gitRunner = fakeGit(world, gitLog, worktreePath);
+  const gitRunner = fakeGit(world, gitLog, worktreePath, { ownershipIdentityReads: 2 });
   const ghRunner = fakeGh(world, ghLog);
   const outcome = await runReviewLoop({
     owner: COORDS.owner,

@@ -5,7 +5,7 @@ import { expect, test, vi } from 'vitest';
 import * as addressModule from '../../../src/ops/review/address.js';
 import { makeAddressOwnership } from '../../../src/ops/review/internal/addressOwnership.js';
 
-import * as ownershipModule from '../../../src/ops/review/internal/addressOwnership.js';
+import * as ownershipModule from '../../../src/ops/review/internal/addressCheckoutOwnership.js';
 import { OpResultArtifactSchema } from '../../../src/kernel/schema.js';
 import { exitCodeForOpResult } from '../../../src/cli/exit.js';
 import type { CqConfig } from '../../../src/ops/analyze/cqConfig.js';
@@ -154,10 +154,12 @@ test.each([
   else if (mode === 'nested-admission')
     spy.mockImplementation((opts, action) =>
       original(opts, async (lease) => {
-        const contender = await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run });
         let refusal: unknown;
         try {
-          await contender.withLock(async () => undefined);
+          await original(
+            { repoRoot: f.repo.root, git: f.run, source: 'local', production: false },
+            async () => undefined,
+          );
         } catch (error) {
           refusal = error;
         }
@@ -170,11 +172,11 @@ test.each([
       }),
     );
   else {
-    spy.mockImplementation(original);
-    mutexFaults.afterRelease = async () => {
+    spy.mockImplementation(async (opts, action) => {
+      await original(opts, action);
       closed = true;
       throw cause;
-    };
+    });
   }
   try {
     const result = await addressModule.makeReviewAddress({

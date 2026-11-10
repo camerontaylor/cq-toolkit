@@ -1,3 +1,4 @@
+import { coordinationRoot } from './addressMany.helpers.js';
 // Split provenance: test/ops/review/addressMany.test.ts was split into this
 // file plus addressMany.helpers.ts, addressMany.registry.test.ts,
 // addressMany.dispatch.test.ts, addressMany.guards.test.ts,
@@ -15,7 +16,7 @@ test('enrollment transport failure remains advisory on the attributed row', asyn
     throw new Error('transport unavailable');
   });
   const result = await makeReviewAddressMany({
-    coordinationRoot: '/unused-test-coordination',
+    coordinationRoot: coordinationRoot(),
     gh,
     address,
     enqueue,
@@ -77,7 +78,7 @@ test('an ineligible enrolled PR remains advisory while eligible siblings dispatc
   };
   const address = vi.fn(async () => ({ status: 'ok' as const, value: report() }));
   const result = await makeReviewAddressMany({
-    coordinationRoot: '/unused-test-coordination',
+    coordinationRoot: coordinationRoot(),
     gh: metadataGh,
     address,
     isolate: async (root) => root,

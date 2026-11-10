@@ -4,7 +4,11 @@ import { lstat, readFile, readdir, rename, unlink, writeFile } from 'node:fs/pro
 import { dirname, join } from 'node:path';
 import { expect, test, vi } from 'vitest';
 import * as addressModule from '../../../src/ops/review/address.js';
-import { makeAddressOwnership } from '../../../src/ops/review/internal/addressOwnership.js';
+import * as checkoutOwnership from '../../../src/ops/review/internal/addressCheckoutOwnership.js';
+import {
+  makeAddressOwnership,
+  withAddressOwnership as withLegacyOwnership,
+} from '../../../src/ops/review/internal/addressOwnership.js';
 
 import {
   FOREIGN_GUARD,
@@ -610,8 +614,12 @@ test('partially deleted older generation cannot confirm predecessor completion',
   }
 });
 
-test('bootstrap debris retention reports advisories to callers and journals without stderr', async () => {
+test('regression: legacy bootstrap debris reports advisories to callers and journals without stderr', async () => {
   const f = await fixture();
+  // The retired store remains testable until E; shipped address entrypoints use slots.
+  const legacy = vi
+    .spyOn(checkoutOwnership, 'withAddressOwnership')
+    .mockImplementation(withLegacyOwnership);
   const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
   try {
     const owner = await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run });
@@ -683,6 +691,7 @@ test('bootstrap debris retention reports advisories to callers and journals with
     ).toBe(false);
   } finally {
     fsFaults.open = fsFaults.remove = undefined;
+    legacy.mockRestore();
     warning.mockRestore();
     vi.unstubAllEnvs();
     await f.repo.cleanup();

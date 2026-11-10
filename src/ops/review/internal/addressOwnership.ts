@@ -1,3 +1,6 @@
+import type { AddressSelection, AddressLease } from './addressRunLifecycle.js';
+export type { AddressSelection, AddressLease } from './addressRunLifecycle.js';
+import { slotWorktreeRegistry } from '../../../adapters/git/slotWorktreeRegistry.js';
 import { boundedFile, same, type Identity } from './addressFileIdentity.js';
 import { addressRunLeaseAuthority, AddressRunLifecycle } from './addressRunLifecycle.js';
 export {
@@ -21,7 +24,7 @@ import { constants } from 'node:fs';
 import { link, lstat, mkdir, open, opendir, realpath, rename, rm } from 'node:fs/promises';
 import { basename, resolve } from 'node:path';
 import type { GhFn } from '../../../adapters/forge-github/gh.js';
-import { fileWorktreeRegistry, reviewBranchFor } from '../../../adapters/git/prWorktree.js';
+import { reviewBranchFor } from '../../../adapters/git/prWorktree.js';
 import { makeGitMutex } from '../../../shared/gitMutex.js';
 import { boundedErrorText, describeError } from '../../../driver/error-text.js';
 import type { ReviewAddressInput, ReviewAddressResult } from '../address.js';
@@ -30,13 +33,6 @@ import type { ReviewLoopOpts, ReviewLoopOutcome } from '../../../plans/review-lo
 /** No capability is serialized or accepted from an op input or dependency object. */
 const childContext = new AsyncLocalStorage<Child>();
 const loopContext = new AsyncLocalStorage<{ lease: AddressLease; consumed: boolean }>();
-
-export interface AddressSelection {
-  pr: number;
-  head: string;
-  headRepo: string;
-  headRefName: string;
-}
 
 // Private format. Bounds also apply before allocating/JSON-parsing file contents.
 const MAX_RECORDS = 64;
@@ -140,19 +136,6 @@ interface Child {
   tasks: Set<Promise<unknown>>;
 }
 
-export interface AddressLease {
-  signal: AbortSignal;
-  expectedHead?: string;
-  registry?: ReturnType<typeof fileWorktreeRegistry>;
-  assertOwned(): Promise<void>;
-  /** Track actual work even when an outer governor abandons its promise. */
-  track<T>(action: () => Promise<T>): Promise<T>;
-  /** Called before resolution, including before stale checkout removal. */
-  assertSelection(selection: Omit<AddressSelection, 'head'>): Promise<void>;
-  /** Confirms canonical checkout and administrative git-dir before driver work. */
-  claimCheckout(info: { path: string; branch: string; head: string }): Promise<void>;
-}
-
 interface OwnershipOptions {
   repoRoot: string;
   git: GhFn;
@@ -229,7 +212,7 @@ export class AddressOwnership extends AddressRunLifecycle {
   ) {
     super(opts);
     this.guardPath = resolve(commonDir, 'cq-review-address-ownership.owner.json');
-    this.registry = fileWorktreeRegistry(resolve(commonDir, 'cq-review-address-worktrees.json'));
+    this.registry = slotWorktreeRegistry(commonDir);
   }
 
   runParticipant<T>(lease: AddressLease, action: () => Promise<T>): Promise<T> {

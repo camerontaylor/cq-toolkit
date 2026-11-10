@@ -1,4 +1,7 @@
-import { checkoutWriterStdio, trackCheckoutWriter } from '../../../shared/checkoutWriterContext.js';
+import {
+  checkoutTerminalWriterStdio as checkoutWriterStdio,
+  trackCheckoutWriter,
+} from '../../../shared/checkoutWriterContext.js';
 import { spawn } from 'node:child_process';
 import { constants } from 'node:fs';
 import {
