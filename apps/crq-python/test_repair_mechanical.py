@@ -217,6 +217,12 @@ class CqDriverTest(unittest.TestCase):
         self.assertEqual(report['summary'],
                          'budget-exhausted: context ceiling: step 8 carried 201000 input tokens (ceiling 200000)')
 
+    def test_budget_stop_without_detail_or_cause_uses_fallback(self):
+        report = self.budget_run([json.dumps({'type': 'budget-stop'})])
+        self.assertEqual(report['stop'], 'budget')
+        self.assertEqual(report['summary'],
+                         'budget-exhausted: token or wall-clock cap (no budget-stop line)')
+
     def test_an_earlier_runs_budget_stop_is_never_reported(self):
         report = self.budget_run([])
         self.assertEqual(report['summary'],
