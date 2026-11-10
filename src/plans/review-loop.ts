@@ -544,9 +544,9 @@ export interface ReviewLoopOutcome {
   plan: Plan;
   /**
    * The governed fix-run report. Absent ONLY when the loop refused before
-   * the fix stage (the step-2 truncated-classification refusal) — no fix
-   * run existed to report on, and a fabricated zero-report would pretend
-   * one did.
+   * the fix stage (the `headRefused` expected-head refusal, or the step-2
+   * truncated-classification refusal) — no fix run existed to report on,
+   * and a fabricated zero-report would pretend one did.
    */
   fixReport?: RunReport;
   /**
