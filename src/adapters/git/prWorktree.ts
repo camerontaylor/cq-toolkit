@@ -86,7 +86,7 @@ import {
 // through the injected SlotWorktreeRegistry; the adapter validates canonical
 // checkout identities before persisting bindings. Legacy map exports below
 // remain uncalled by participating paths until the migration/removal change.
-import { mkdir, readFile, realpath, rename, stat, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, readFile, realpath, rename, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname, join, resolve as pathResolve, sep } from 'node:path';
 import { lock } from 'proper-lockfile';
 import type { GhFn } from '../forge-github/gh.js';
@@ -368,6 +368,8 @@ const gitFail = (why: string, code: number, stderr: string, args: string[]): Err
 /** One parsed `worktree list --porcelain` block. */
 interface PorcelainWorktree {
   path: string;
+  head: string | null;
+  prunable: boolean;
   /** refs/heads/ branch name, or null when detached/bare. */
   branch: string | null;
 }
@@ -376,7 +378,7 @@ interface PorcelainWorktree {
  * Parse `git worktree list --porcelain` output: blank-line-separated
  * blocks of `worktree <path>` / `HEAD <sha>` / `branch refs/heads/<name>`
  * (or `detached`/`bare` — no branch). Only the path and the heads/-stripped
- * branch are read; blocks without a worktree line are ignored.
+ * branch, HEAD and prunable status are read; blocks without a worktree line are ignored.
  */
 const parseWorktreeList = (text: string): PorcelainWorktree[] => {
   const out: PorcelainWorktree[] = [];
@@ -385,15 +387,21 @@ const parseWorktreeList = (text: string): PorcelainWorktree[] => {
     if (lines.length === 0) continue;
     let path: string | null = null;
     let branch: string | null = null;
+    let head: string | null = null;
+    let prunable = false;
     for (const line of lines) {
       if (line.startsWith('worktree ')) {
         path = line.slice('worktree '.length);
+      } else if (line.startsWith('HEAD ')) {
+        head = line.slice('HEAD '.length);
+      } else if (line === 'prunable' || line.startsWith('prunable ')) {
+        prunable = true;
       } else if (line.startsWith('branch refs/heads/')) {
         branch = line.slice('branch refs/heads/'.length);
       }
     }
     if (path !== null) {
-      out.push({ path, branch });
+      out.push({ path, branch, head, prunable });
     }
   }
   return out;
@@ -679,6 +687,51 @@ async function resolveLockedPrWorktree(opts: PrWorktreeOpts, phase: ResolutionPh
         )
           foreign.push({ path: candidate.path, branch: candidate.branch });
         continue;
+      }
+      if (candidate.prunable) {
+        const absent = await lstat(candidate.path).then(
+          () => false,
+          (error: unknown) => {
+            if ((error as NodeJS.ErrnoException).code === 'ENOENT') return true;
+            throw error;
+          },
+        );
+        if (absent) {
+          // The PR slot excludes competing resolvers. Remove only this missing
+          // registration; a global prune could touch foreign worktrees. Its
+          // branch may still hold unpushed commits even though its files vanished.
+          if (!candidate.head || !/^[a-f0-9]{40,64}$/.test(candidate.head))
+            throw new Error('missing worktree HEAD unavailable; registration preserved');
+          const aheadArgs = [
+            '-C',
+            repoRoot,
+            'rev-list',
+            '--count',
+            `${expectedSha}..${candidate.head}`,
+          ];
+          const ahead = await opts.run(aheadArgs);
+          if (ahead.code !== 0 || !/^0\s*$/.test(ahead.stdout))
+            throw gitFail(
+              'missing worktree may hold unpushed work; registration preserved',
+              ahead.code || 1,
+              ahead.stderr,
+              aheadArgs,
+            );
+          phase.checkoutMutation = true;
+          checkoutWriterContext()!.markCheckoutMutation();
+          const removeArgs = ['-C', repoRoot, 'worktree', 'remove', candidate.path];
+          const remove = await opts.run(removeArgs);
+          if (remove.code !== 0)
+            throw gitFail(
+              'missing worktree registration removal failed',
+              remove.code,
+              remove.stderr,
+              removeArgs,
+            );
+          await checkoutWriterContext()!.removed(candidate.path);
+          await opts.registry.update(opts.pr, { version: 1, state: 'unbound', incomplete: true });
+          continue;
+        }
       }
       await bindCheckout(opts, candidate.path, false, phase);
       const branch = await opts.run(['-C', candidate.path, 'symbolic-ref', 'HEAD']);
