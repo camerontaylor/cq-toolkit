@@ -44,6 +44,16 @@ class HostConfigTests(HostConfigFixture, unittest.TestCase):
         with self.assertRaises(ValueError):
             host.validate(overlay)
 
+    def test_missing_overlay_parent_is_a_refusal_not_a_created_block(self):
+        # The accepted legacy baseline carries no repair.blackout object.
+        committed = host.committed(self.root)
+        del committed['repair']['blackout']
+        overlay = copy.deepcopy(self.overlay)
+        overlay['config']['repair']['blackout'] = {'enabled': True}
+        host.validate(overlay)
+        with self.assertRaisesRegex(ValueError, r'repair\.blackout'):
+            host.apply(committed, overlay)
+
     def test_transition_legacy_record_template_is_checked_before_render(self):
         for template in ['http://queue.example.invalid/{item',
                          'http://queue.example.invalid/{unknown}', '{0}',
