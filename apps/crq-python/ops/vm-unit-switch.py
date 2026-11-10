@@ -571,11 +571,19 @@ def verify_raw_evidence(report, raw_root):
                             + " does not match retained raw guest evidence")
 
     raw_records = raw_root / "records"
-    for name in ("switch-node", "switch-python", "interrupt", "recover-kill",
-                 "recover", "recover-repeat", "fence"):
+    # Only final journal states can be compared with the retained record set.
+    # Earlier phase summaries are historical; their raw phase JSON is the
+    # authoritative snapshot and is compared above.
+    final_keys = {
+        "switch-node": ("record",),
+        "switch-python": ("record",),
+        "recover": ("record",),
+        "recover-repeat": ("record_before", "record_after"),
+        "fence": ("record", "record_after_refusal"),
+    }
+    for name, keys in final_keys.items():
         phase = phases.get(name) or {}
-        for key in ("record", "record_before", "record_after",
-                    "record_after_refusal"):
+        for key in keys:
             if key in phase:
                 _retained_record_problem(phase[key], raw_records,
                                          name + "." + key, problems)
