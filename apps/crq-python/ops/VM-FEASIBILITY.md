@@ -224,29 +224,31 @@ revision.
 
 ## Recorded evidence
 
-Run `20261110T150956Z-f4129247` on `pluto` (Linux 6.12.63, systemd 255
+Run `20261110T152535Z-b1704bdd` on `pluto` (Linux 6.12.63, systemd 255
 `255.4-1ubuntu8.18`, Ubuntu 24.04 noble guest) produced
-`state/runs/20261110T150956Z-f4129247/report.json`; `verify` returned
+`state/runs/20261110T152535Z-b1704bdd/report.json`; `verify` returned
 `{"problems": []}` by recomputing the checks from the raw phase files and
 re-hashing the retained scripts. The report is bound to source commit
-`b5b70086388941a2585b5fee1afefd80efa51fa0`; the executed host script SHA-256 is
-`d9dad85092484f8875fbe481ffd9f680bd0851c192089b49f66e8db617d1266c`, the
+`2dc651baefeec25ad953c31f3a45e6003476ef03`; the executed host script SHA-256 is
+`469b04d20091153f47550971d5b43b01789b37f80bda33b63907da0c9539978a`, the
 executed guest script SHA-256 is
-`b7241d5b71eed434cf780af7c14c3dd0682845df712daa9bf6919860bd5e00ce`, and the
+`84f870c97bb2d80d0638b0c0c3df9b6300b9b564f194f0d54dd2c8f4e33897cc`, and the
 guest reported the same guest digest after upload. The report SHA-256 is
-`b6c240893fbd720caa199673f192bee7be20437e744fd6d656f9d124ae3f8bc8`. The host
-was busy: load1 16.46 at start and 15.84 at finish, with 7,267,324 KiB and
-6,482,976 KiB `MemAvailable` respectively. The harness window was 15:09:56Z to
-15:11:36Z (100 s); that is an observation under that load, not a performance
+`7bd97de11022e32d6b9de4d00316bfbf83239a6d0a21774516f84c3045a7d67c`. The host
+was busy: load1 5.67 at start and 4.00 at finish, with 14,376,280 KiB and
+13,326,476 KiB `MemAvailable` respectively. The harness window was 15:25:35Z to
+15:27:02Z (87 s); that is an observation under that load, not a performance
 claim. The guest had 2 vCPU and 2048 MiB, and the QEMU process stayed at PID
-388124 across the reboot with its start identity verified.
+391789 across the reboot with its start identity verified.
 
 Earlier runs are retained for history. `20261110T142207Z-8c1668ea` predates
 schema 2 and has no executed-script/commit binding; `20261110T144209Z-75683132`
 predates the settled-queue and manager-restart run-log checks.
 `20261110T145335Z-af76415d` predates the explicit-stop proof and refreshed
 manifest; its host script was `c2ac65de...` and source commit `441d7238...`.
-None is evidence for the current revision.
+`20261110T150956Z-f4129247` predates the explicit job-query success binding;
+its host script was `d9dad850...` and source commit `b5b7008...`. None is
+evidence for the current revision.
 
 | Check | Result |
 |---|---|
@@ -263,15 +265,16 @@ None is evidence for the current revision.
 | timer active/enabled while service fenced | active and enabled before the fence; starting it while fenced failed rc 1 |
 | path active/enabled while service fenced | active and enabled before the fence; starting it while fenced failed rc 1; a trigger after fencing produced no service run and left the path `failed` after stop |
 | queued setup proved in both rounds | yes: both blocker and wrapper starts returned 0, and each round recorded `crq-queued-fixture.service` in `start waiting`; both settle checks are true with empty job lists |
-| explicit stop proved in the second round | yes: stop rc 0; the post-stop job list contains the blocker and wrapper but no `crq-queued-fixture.service` job, so `queued_stop_proven` is true |
+| job queries succeeded before absence was asserted | yes: the post-stop observation and both settlement observations record `ok`/`query_ok` true and rc 0; failed `list-jobs` results are represented as `ok: false` and fail the checks |
+| explicit stop proved in the second round | yes: stop rc 0; the successful post-stop job query contains the blocker and wrapper but no `crq-queued-fixture.service` job, so `queued_stop_proven` is true |
 | queued wrapper ran after mask and after stop | yes: `["queued"]` in both rounds |
 | queued job behavior recorded | the wrapper ran (`["queued"]`); `queued-fixture` did not run |
 | queued job behavior after explicit stop recorded | explicit stop rc 0; the wrapper ran (`["queued"]`); `queued-fixture` did not run |
-| user-manager PID and invocation changed | yes: PID 1002 to 1546, invocation `dd3d141e...` to `83582f43...` |
+| user-manager PID and invocation changed | yes: PID 993 to 1543, invocation `1dd69c5a...` to `c10d7da9...` |
 | mask persisted over manager restart | yes, `LoadState=masked` after the new manager was ready, and direct/dependency starts were refused |
 | no new fixture service run after manager restart | yes; both snapshots contain five run entries and the delta is empty |
-| guest `boot_id` changed after reboot | yes: `1d13b77b-8bf7-40eb-8903-355547694239` to `f4abfb5a-d9a0-4236-9856-7ba12642b5c4` |
-| QEMU PID/start identity unchanged across the guest reboot | yes: PID 388124, identity verified |
+| guest `boot_id` changed after reboot | yes: `e05f1cba-36aa-4344-85bb-a174726edbce` to `88f5ba12-dc80-4a72-95ca-9071a4b2210b` |
+| QEMU PID/start identity unchanged across the guest reboot | yes: PID 391789, identity verified |
 | timer and path state recorded after reboot | both `inactive`/`enabled`, `SubState=dead`; target service still masked |
 | no new fixture service run after reboot | yes; run log delta empty |
 | unit/backing/enablement metadata restored | yes; install and post-unmask file snapshots compared with no changes (the synthetic trigger file is excluded) |
