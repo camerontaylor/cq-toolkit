@@ -213,8 +213,10 @@ class LifecycleTests(unittest.TestCase):
             (run / "process.json").write_text(json.dumps(
                 {"pid": 999999, "starttime": "1",
                  "scope_unit": "crq-vm-test.scope"}))
-            payload = vm.stop_owned_process(
-                {"run_id": "r1", "path": str(run)}, purge=True)
+            with mock.patch.object(vm.subprocess, "run") as subprocess_run:
+                payload = vm.stop_owned_process(
+                    {"run_id": "r1", "path": str(run)}, purge=True)
+            subprocess_run.assert_not_called()
             self.assertTrue(payload["stopped"])
             self.assertFalse((run / "overlay.qcow2").exists())
 
@@ -228,6 +230,35 @@ class LifecycleTests(unittest.TestCase):
                  mock.patch.object(vm, "upload_guest_probe"):
                 self.assertEqual(vm.cmd_boot(args), 0)
                 boot.assert_called_once()
+
+    def test_cmd_boot_cleans_up_when_readiness_fails(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state, run = self._prepared(temporary)
+            args = type("Args", (), {"state_dir": str(state), "run_id": "r1",
+                                     "tools": None})()
+            with mock.patch.object(vm, "boot", return_value={"pid": 1}), \
+                 mock.patch.object(vm, "wait_ssh",
+                                   side_effect=RuntimeError("SSH never ready")), \
+                 mock.patch.object(vm, "stop_owned_process",
+                                   return_value={"stopped": True}) as stop:
+                with self.assertRaises(RuntimeError):
+                    vm.cmd_boot(args)
+                stop.assert_called_once()
+
+    def test_cmd_boot_cleans_up_when_upload_fails(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state, run = self._prepared(temporary)
+            args = type("Args", (), {"state_dir": str(state), "run_id": "r1",
+                                     "tools": None})()
+            with mock.patch.object(vm, "boot", return_value={"pid": 1}), \
+                 mock.patch.object(vm, "wait_ssh", return_value={}), \
+                 mock.patch.object(vm, "upload_guest_probe",
+                                   side_effect=RuntimeError("upload failed")), \
+                 mock.patch.object(vm, "stop_owned_process",
+                                   return_value={"stopped": True}) as stop:
+                with self.assertRaises(RuntimeError):
+                    vm.cmd_boot(args)
+                stop.assert_called_once()
 
     def test_destroy_refuses_mismatched_live_process(self):
         with tempfile.TemporaryDirectory() as temporary:

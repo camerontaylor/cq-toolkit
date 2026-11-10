@@ -858,9 +858,17 @@ def cmd_boot(args) -> int:
         save_json(pathlib.Path(run["path"]) / "run.json", run)
     recorder = Recorder(pathlib.Path(run["path"]))
     stamp = host_stamp()
-    info = boot(run, recorder, args.tools, stamp)
-    info["ssh"] = wait_ssh(run, recorder)
-    upload_guest_probe(run, recorder)
+    try:
+        info = boot(run, recorder, args.tools, stamp)
+        info["ssh"] = wait_ssh(run, recorder)
+        upload_guest_probe(run, recorder)
+    except BaseException:
+        try:
+            stop_owned_process(run, purge=False)
+        except Exception as cleanup_error:
+            print("cleanup after failed boot did not complete: %s"
+                  % cleanup_error, file=sys.stderr)
+        raise
     print(json.dumps(info, indent=2, sort_keys=True))
     return 0
 
@@ -979,10 +987,6 @@ def stop_owned_process(run: dict, *, purge: bool) -> dict:
             while time.time() < deadline and pathlib.Path("/proc/%d" % pid).exists():
                 time.sleep(0.5)
             stopped = not pathlib.Path("/proc/%d" % pid).exists()
-        elif scope_unit:
-            result = subprocess.run(["systemctl", "--user", "stop", scope_unit],
-                                    capture_output=True, text=True)
-            stop_rc = result.returncode
     trashed = None
     if purge and stopped:
         trash = (run_dir.parent.parent / "trash"
