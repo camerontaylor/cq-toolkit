@@ -328,6 +328,8 @@ def extract_runner_source(archive):
         require(members, "runner source archive is empty")
         for member in members:
             parts = pathlib.PurePosixPath(member.name).parts
+            if member.name == "apps" and member.isdir():
+                continue  # git archive's parent directory entry
             require(parts and parts[0] == "apps" and len(parts) > 1,
                     "runner archive member escapes apps/: " + member.name)
             require(".." not in parts and not member.name.startswith("/"),

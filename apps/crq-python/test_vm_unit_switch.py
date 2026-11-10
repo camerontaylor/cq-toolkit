@@ -27,6 +27,7 @@ def _load(name, path):
 
 
 harness = _load("crq_vm_unit_switch", OPS / "vm-unit-switch.py")
+guest = _load("crq_vm_unit_switch_guest", OPS / "vm-unit-switch-guest.py")
 
 NODE = harness.NODE_RUNTIME
 PYTHON = harness.PYTHON_RUNTIME
@@ -1353,6 +1354,67 @@ class SourceCommitTests(unittest.TestCase):
         with mock.patch.object(harness.subprocess, "run", side_effect=fake):
             with self.assertRaisesRegex(ValueError, "runner source"):
                 harness.source_commit_check(pathlib.Path("/repo"), SOURCE_COMMIT)
+
+
+class RunnerSourceArchiveTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="crq-runner-source-")
+        self.addCleanup(self.temp.cleanup)
+        self.root = pathlib.Path(self.temp.name)
+        self.checkout = self.root / "checkout"
+        self.checkout.mkdir()
+        patcher = mock.patch.multiple(
+            guest, CHECKOUT=self.checkout,
+            RUNNER_ROOT=self.checkout / "apps/crq-python")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _archive(self, entries):
+        path = self.root / "runner.tar.gz"
+        with tarfile.open(path, "w:gz") as archive:
+            for name, data, kind in entries:
+                info = tarfile.TarInfo(name)
+                if kind == "dir":
+                    info.type = tarfile.DIRTYPE
+                    info.mode = 0o755
+                    archive.addfile(info)
+                else:
+                    info.size = len(data)
+                    archive.addfile(info, io.BytesIO(data))
+        return path
+
+    def _valid_entries(self, extra=()):
+        return [("apps", b"", "dir"),
+                ("apps/crq-python", b"", "dir"),
+                ("apps/crq-python/crq.py", b"runner", "file"),
+                ("apps/crq-python/author_quota.py", b"quota", "file"),
+                *extra]
+
+    def test_accepts_git_archive_parent_directory(self):
+        archive = self._archive(self._valid_entries())
+        value = guest.extract_runner_source(archive)
+        self.assertTrue((self.checkout / "apps/crq-python/crq.py").is_file())
+        self.assertEqual(value["crq_sha256"],
+                         hashlib.sha256(b"runner").hexdigest())
+
+    def test_rejects_top_level_member(self):
+        archive = self._archive(self._valid_entries(
+            [("etc/passwd", b"x", "file")]))
+        with self.assertRaisesRegex(RuntimeError, "escapes apps"):
+            guest.extract_runner_source(archive)
+
+    def test_rejects_parent_escape(self):
+        archive = self._archive(self._valid_entries(
+            [("apps/../evil", b"x", "file")]))
+        with self.assertRaisesRegex(RuntimeError, "unsafe path"):
+            guest.extract_runner_source(archive)
+
+    def test_requires_runner_and_quota_sources(self):
+        archive = self._archive([("apps", b"", "dir"),
+                                 ("apps/crq-python/crq.py", b"runner",
+                                  "file")])
+        with self.assertRaisesRegex(RuntimeError, "author_quota.py"):
+            guest.extract_runner_source(archive)
 
 
 if __name__ == "__main__":
