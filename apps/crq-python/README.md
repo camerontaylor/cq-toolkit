@@ -63,10 +63,10 @@ no arguments it drains the inbox under `service.lock`, items with pending runnab
 critical/major work before items with none, oldest first within each class. Within an item,
 critical/major findings precede minors. Minor jobs require a lowercase 64-character hexadecimal `canonical_finding_id`
 and a matching delivered triage receipt; ordinary minor, trivial, info and none jobs are skipped. It
-owns `state/repair/`, uses one worktree per item and serial findings within that
-item, and runs items serially: the drivers' `CQ_*` session correlation is
-process environment, so concurrent items would need per-dispatch environments
-first. It never writes the queue, pushes or calls the GitHub API; each drain
+owns `state/repair/`, gives each finding job its own worktree and serializes
+findings within an item, and runs items serially: the drivers' `CQ_*` session
+correlation is process environment, so concurrent items would need per-dispatch
+environments first. It never writes the queue, pushes or calls the GitHub API; each drain
 pass starts with `git fetch --prune origin` in the review clone (a failed fetch
 skips the pass). A job is drained only while its tick-owned repair run is
 `queued`. A job not yet started is skipped as `STALE` (terminal, no model call)
@@ -180,9 +180,11 @@ preparation; the replacement uses a separate worktree. Recovery retains its
 invocation artifact under the original job. An unknown judge outcome is not
 automatically retried; explicit provider deferrals have at most three attempts.
 Owner dispositions and source or evidence changes remain unresolved for
-inspection. Every finding uses its own worktree; staged and unstaged patches,
-untracked files and commits are retained per attempt before retry or fallback.
-Legacy shared worktrees need independent attribution before recovery.
+inspection. Every finding job has its own worktree, named
+`crq-repair-<item>-<job>`, so a retained worktree belongs to exactly one finding;
+staged and unstaged patches, untracked files and commits are retained per attempt
+before retry or fallback. Legacy shared per-item worktrees predate this layout and
+need independent attribution before recovery.
 
 Tests and probes are suspended. No worker or mechanical stage runs them.
 Mechanics verify full commit SHAs, strict base ancestry, HEAD membership,
