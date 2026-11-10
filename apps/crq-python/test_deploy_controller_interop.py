@@ -309,6 +309,24 @@ class InteropTests(DeployPlanFixture):
         for entry, original in history_originals.items():
             self.assertEqual(entry.read_bytes(), original)
 
+    def test_recovered_unit_record_is_history_for_later_scans(self):
+        with self.assertRaises(Crash):
+            dc.switch_unit(self.effects, InterruptedAdapter("python"),
+                           "crq-tick.service", NODE)
+        path = next(self.record_dir.glob("controller-*.json"))
+        adapter = Adapter("python")
+        recovered = dc.recover_unit(self.effects, adapter, path)
+        self.assertEqual(recovered["outcome"], "rolled_back")
+        self.assertNotIn("reason", recovered)
+        original = path.read_bytes()
+        # The successful recovery record must itself be accepted as history,
+        # or completing recovery would block every later controller operation.
+        dc.refuse_unfinished_transactions(self.effects)
+        result = dc.switch_unit(self.effects, Adapter("python"),
+                                "crq-slot.service", NODE)
+        self.assertEqual(result["outcome"], "completed")
+        self.assertEqual(path.read_bytes(), original)
+
     def test_unit_recovery_blocks_on_another_unit_intent(self):
         with self.assertRaises(Crash):
             dc.switch_unit(self.effects, InterruptedAdapter("python"),
