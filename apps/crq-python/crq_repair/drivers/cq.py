@@ -146,7 +146,7 @@ def budget_stop(sessions_dir, names):
             except ValueError:
                 continue
             if isinstance(entry, dict) and entry.get('type') == 'budget-stop':
-                return str(entry.get('detail') or entry.get('cause'))[:300]
+                return str(entry.get('detail') or entry.get('cause') or '')[:300]
     return None
 
 
