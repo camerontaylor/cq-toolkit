@@ -367,12 +367,21 @@ export async function restoreMeasurementBundle(bundleDir) {
     throw new Error(`measurement-bundle: unsupported bundleVersion ${manifest?.bundleVersion}`);
   const files = [];
   for (const entry of manifest.files ?? []) {
-    if (entry.state !== 'present' || typeof entry.pointer !== 'string') files.push({ ...entry });
+    if (entry.state !== 'present') files.push({ ...entry });
+    else if (typeof entry.pointer !== 'string')
+      files.push({
+        ...entry,
+        state: 'unavailable',
+        reason: 'manifest entry lacks a bundle pointer',
+      });
     else files.push({ ...entry, ...(await resolveStored(root, entry)) });
   }
   let sessionIndex = { ...manifest.sessionIndex };
   if (sessionIndex.state === 'present') {
-    const resolved = await resolveStored(root, sessionIndex);
+    const resolved =
+      typeof sessionIndex.pointer === 'string'
+        ? await resolveStored(root, sessionIndex)
+        : { state: 'unavailable', reason: 'manifest entry lacks a bundle pointer' };
     sessionIndex =
       resolved.state === 'present'
         ? { ...sessionIndex, ...resolved }
