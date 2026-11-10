@@ -87,6 +87,13 @@ def mechanical(config, wt, base, commits, job, directory):
     return {'verify': 'ok', 'hack': 'ok', 'tests': 'suspended'}
 
 
+def failure_class_for_stop(config, job, report):
+    """Classify from the driver's typed stop, never from error prose."""
+    if report.get('stop') in ('rate-limit', 'configuration'):
+        return 'transient'
+    return 'exhausted'
+
+
 @contextlib.contextmanager
 def correlation(job, judge):
     """Session-log preservation (item 2.5): pin the drivers' CQ_* identity
@@ -311,6 +318,15 @@ def process(config, job, wt):
                 atomic(progress_path, result)
                 report = dispatch(config, role, current, wt, attempt_dir)
                 result.pop('dispatch_pending', None)
+                disposition = report.get('worker_disposition') or report.get('disposition')
+                if (report.get('stop') in ('ok', 'error') and disposition == 'needs_human'
+                        and str(report.get('summary') or '').strip()):
+                    result.update(verdict='FAILED', failure_class='owner-decision', reason=report.get('summary') or 'worker requested owner decision')
+                    break
+                result['failure_class'] = failure_class_for_stop(config, job, report)
+                if (report.get('stop') not in ('rate-limit', 'configuration', 'budget')
+                        and disposition in ('no_outcome', 'unchanged_with_reason') and not report.get('evidence')):
+                    result['failure_class'] = 'exhausted'
                 result.pop('unchanged_evidence', None)
                 if report.get('stop') == 'rate-limit':
                     retain(wt, base, attempt_dir)
@@ -387,9 +403,8 @@ def process(config, job, wt):
                     atomic(progress_path, result)
                     rung = 2
                     continue
-                from crq_repair.triage import missing_evidence
                 if (judged.get('stop') == 'ok' and judged.get('verdict') == 'unsure'
-                        and missing_evidence(judged.get('reason')) and rung < 2):
+                        and judged.get('reason') and rung < 2):
                     evidence = judged['reason']
                     result['evidence'] = evidence
                     result['next_rung'] = 2
@@ -398,6 +413,10 @@ def process(config, job, wt):
                     continue
                 result.update(verdict='NOT-FIXED' if judged.get('verdict') == 'invalid' and judged.get('stop') == 'ok' else 'FAILED',
                               reason=judged.get('reason') or 'judge unsure; needs human')
+                if judged.get('stop') in ('rate-limit', 'configuration'):
+                    result['failure_class'] = 'transient'
+                else:
+                    result['failure_class'] = 'evidence' if judged.get('stop') == 'ok' and judged.get('verdict') == 'unsure' else 'exhausted'
                 break
             confirmed = (result.get('judge') or {}).get('verdict') == 'valid'
             result.update(verdict='FAILED' if confirmed else 'NOT-FIXED',
@@ -520,6 +539,7 @@ def triage_phase(config, dry_run=False):
     import crq as c
     import backfill_runtime as runtime
     import finding_delivery
+    import repair_tick
     from crq_repair.triage import phase
     from runtime_target import DEFAULT_REF
     state = ROOT / 'state'
@@ -541,7 +561,7 @@ def triage_phase(config, dry_run=False):
         directory = state / 'repair/triage' / row['finding']['id']
         directory.mkdir(parents=True, exist_ok=True)
         if not triage_context_safe(c, context, directory / 'context-scan.json'):
-            return {'stop': 'ok', 'verdict': 'unsure', 'reason': 'triage context secret scan rejected'}
+            return {'stop': 'ok', 'verdict': 'unsure', 'context_scan_refused': True, 'reason': 'triage context secret scan rejected'}
         bounded_config = copy.deepcopy(config)
         bounded_config['repair']['budget']['wall_clock_min'] = remaining / 60
         selected = options.get('escalation_role', config['repair']['roles']['judge_critical']) if row.get('_escalate') else role
@@ -554,7 +574,10 @@ def triage_phase(config, dry_run=False):
             def scan(target, name):
                 base, head = runtime.subjects.projection(repo, target, [name])
                 return c.secret_scan(base, head, state / 'backfill/repair-scan.json')[0]
-            accept = finding_delivery.repair_transport(ROOT, queue, c.save_queue, scan)
+            def scan_instructions(instructions, target):
+                repair_tick.scan_fix_instructions(c, instructions, target, state / 'backfill/repair-instructions-scan.json')
+                return True
+            accept = finding_delivery.repair_transport(ROOT, queue, c.save_queue, scan, config['repair'].get('max_rounds_per_pin', 2), scan_instructions)
             receipt.append(accept(key, request))
         if not c.ran_locked(deliver_locked):
             raise RuntimeError('tick busy; confirmed delivery will retry')

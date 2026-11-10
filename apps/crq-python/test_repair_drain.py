@@ -79,11 +79,11 @@ class RepairDrainTest(unittest.TestCase):
         self.addCleanup(patcher.stop)
 
     def test_harvest_writeback_maps_nonfixed_outcomes(self):
-        c = SimpleNamespace(STATE=self.root / 'state', iso=lambda: 'now')
+        c = SimpleNamespace(STATE=self.root / 'state', CONFIG=self.config, iso=lambda: 'now')
         job = {'job': 'job', 'canonical_finding_id': 'finding'}
         with mock.patch('backfill_runtime.settings', return_value={'durable_artifact_root': str(self.root / 'artifacts')}), mock.patch('finding_delivery.Inbox') as inbox:
             for verdict, judge, expected in [('STALE', None, 'needs-retriage'),
-                    ('FAILED', None, 'needs-human'), ('NOT-FIXED', {'verdict': 'invalid'}, 'dismissed'),
+                    ('FAILED', None, 'needs-retriage'), ('NOT-FIXED', {'verdict': 'invalid'}, 'needs-retriage'),
                     ('FIXED', None, 'fixed')]:
                 repair_tick.mark_finding_outcome(c, job, {'verdict': verdict, 'judge': judge, 'reason': 'evidence'},
                                                 self.tip if verdict == 'FIXED' else None)
@@ -509,6 +509,25 @@ class RepairDrainTest(unittest.TestCase):
         self.assertEqual(len(second), 1)
         self.assertIn('+second staged partial', (second[0].parent / 'staged.patch').read_text())
 
+    def test_explicit_fixer_owner_decision_is_preserved(self):
+        job = bounded.drain_job(self.root, self.config, self.queue, 'crq-run1-F1')[1]
+        wt = self.worktree('crq-repair-pr1-merged-crq-run1-F1')
+        report = {'stop': 'error', 'worker_disposition': 'needs_human',
+                  'summary': 'A disruptive architecture choice is required'}
+        with mock.patch.object(service, 'blocked', return_value=False), \
+             mock.patch.object(service, 'dispatch', return_value=report):
+            result = service.process(self.config, job, wt)
+        self.assertEqual(result['failure_class'], 'owner-decision')
+        self.assertEqual(result['verdict'], 'FAILED')
+        self.assertNotIn('dispatch_pending', result)
+
+    def test_stops_are_classified_without_inference_from_protected_path(self):
+        job = {'repair_base': self.tip, 'finding': {'path': 'policy/protected-paths.json'}}
+        for stop in ('rate-limit', 'configuration'):
+            self.assertEqual(service.failure_class_for_stop(self.config, job, {'stop': stop}), 'transient')
+        for stop in ('error', 'budget'):
+            self.assertEqual(service.failure_class_for_stop(self.config, job, {'stop': stop}), 'exhausted')
+
     def test_failed_retention_never_resets_the_worktree(self):
         job = bounded.drain_job(self.root, self.config, self.queue, 'crq-run1-F1')[1]
         wt = self.worktree('crq-repair-pr1-merged-crq-run1-F1')
@@ -641,7 +660,7 @@ class RepairDrainTest(unittest.TestCase):
         self.assertEqual(observed, ['', '', reason])
 
     def test_unchanged_evidence_projects_to_dismissed(self):
-        c = SimpleNamespace(iso=lambda: 'now')
+        c = SimpleNamespace(CONFIG=self.config, iso=lambda: 'now')
         evidence = [{'path': 'src/kept.ts', 'line': 1, 'target': self.pin, 'quoted_text': 'one'}]
         with mock.patch.object(repair_tick, 'finding_inbox') as inbox:
             repair_tick.mark_finding_outcome(c, {'job': 'j', 'canonical_finding_id': 'f'},

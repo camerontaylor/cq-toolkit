@@ -10,6 +10,10 @@ import backfill_history as history
 from backfill_accounting import ranges, line_bytes
 
 
+class RepairRoundCeiling(RuntimeError):
+    """This finding has consumed its bounded repair generations at this pin."""
+
+
 _UNSET = object()
 
 def occurrence(producer, run_id, finding):
@@ -106,7 +110,7 @@ class Inbox:
         except (OSError, ValueError, TypeError, KeyError, ledger.IntegrityError):
             return None
 
-    def triage(self, fid, repo, promoted, action, actor, reason, at, *, fixing_commit=None, canonical_id=None, reviews=(), current_path=None, current_lines=None, quoted_text=None, expected_previous_event_id=_UNSET):
+    def triage(self, fid, repo, promoted, action, actor, reason, at, *, fixing_commit=None, canonical_id=None, reviews=(), current_path=None, current_lines=None, quoted_text=None, failure_class=None, expected_previous_event_id=_UNSET):
         """Mapping confirms the anchor only; actor must confirm substantive validity."""
         retained = self.publication.retained()
         self.recover(retained)
@@ -133,6 +137,8 @@ class Inbox:
                     name, lines = None, set()
             evidence = {"target": promoted, "reason": reason, "anchor_verified": bool(name and lines and (current_path is not None or len(lines) == len(ledger.intervals(anchor["intervals"])))) }
             evidence.update(mapped_path=name, mapped_intervals=ranges(lines))
+            if failure_class:
+                evidence["failure_class"] = failure_class
             if current_path is not None and evidence["anchor_verified"]:
                 evidence["quoted_text"] = quoted_text
             if recovered:
@@ -141,6 +147,8 @@ class Inbox:
                 raise ledger.IntegrityError("triage requires actor and reason")
             if action == "confirmed" and not evidence["anchor_verified"]:
                 action = "needs-human"
+                if failure_class:
+                    evidence["failure_class"] = "evidence"
             if action in ("fixed", "already-fixed"):
                 if not fixing_commit:
                     raise ledger.IntegrityError("fixing commit required")
@@ -159,6 +167,7 @@ class Inbox:
             row.update(status=action, previous_event_id=value["id"], target_current=promoted,
                        mapped_path=name, mapped_intervals=ranges(lines),
                        canonical_id=canonical_id if action == "duplicate" else row["canonical_id"])
+            row["failure_class"] = evidence.get("failure_class")
             row.pop("context_error", None)
             if recovered:
                 row["recovered_anchor"] = recovered
@@ -227,7 +236,7 @@ class Inbox:
                 raise ledger.IntegrityError("current fixed finding evidence does not match merged repair")
             return value["id"]
 
-    def repair_outcome(self, fid, job, action, reason, at, *, fixing_commit=None, fix_pr=None, source_evidence=None):
+    def repair_outcome(self, fid, job, action, reason, at, *, fixing_commit=None, fix_pr=None, source_evidence=None, failure_class=None, max_finding_retries=2, repair_base=None):
         """Idempotently publish a repair result through the existing event chain."""
         self.recover(self.publication.retained())
         with ledger.locked(self.root / "findings.lock"):
@@ -237,6 +246,28 @@ class Inbox:
             if current and (current != job or row.get("status") != "delivered"):
                 return  # Preserve newer generations and operator dispositions.
             evidence = {"repair_task": job, "reason": reason, "fix_pr": fix_pr}
+            if repair_base:
+                evidence["repair_base"] = repair_base
+            if failure_class:
+                evidence["failure_class"] = failure_class
+            if action == "needs-retriage" and failure_class and failure_class != "owner-decision":
+                events = {v["id"]: v for v in self.publication.retained() if v.get("event_type") == "finding-event"}
+                previous = row.get("previous_event_id")
+                count = 0
+                seen = set()
+                while previous in events and previous not in seen:
+                    seen.add(previous)
+                    payload = events[previous]["payload"]
+                    klass = payload.get("evidence", {}).get("failure_class")
+                    if (str(payload.get("actor", "")).startswith("crq-")
+                            and payload.get("action") in ("needs-human", "needs-retriage")
+                            and klass and klass != "owner-decision"):
+                        count += 1
+                    previous = payload.get("previous_event_id")
+                if previous is not None:
+                    raise ledger.IntegrityError("finding retry history is incomplete or cyclic")
+                if count >= max_finding_retries:
+                    action = "needs-human"
             if fixing_commit:
                 evidence.update(fixing_commit=fixing_commit, verification=reason)
             if source_evidence:
@@ -253,6 +284,7 @@ class Inbox:
                                   "evidence": evidence, "actor": "crq-repair"})
             self.publication.spool(value)
             row.update(status=action, previous_event_id=value["id"])
+            row["failure_class"] = evidence.get("failure_class")
             ledger.atomic(filename, ledger.canonical(row))
 
     def deliver(self, fid, transport, at):
@@ -268,6 +300,44 @@ class Inbox:
             request = {"canonical_id": row["canonical_id"], "finding_id": fid, "review_id": row["review_id"],
                        "target": row["target_current"], "path": row["mapped_path"], "intervals": row["mapped_intervals"],
                        "finding": row["finding"]}
+            previous_job = row.get("receipt", {}).get("repair_task")
+            if previous_job:
+                if not isinstance(previous_job, str) or not re.fullmatch(r"crq-[A-Za-z0-9._-]+", previous_job):
+                    raise ledger.IntegrityError("invalid previous repair task")
+                events = {v["id"]: v for v in self.publication.retained() if v.get("event_type") == "finding-event"}
+                previous = row.get("previous_event_id")
+                seen = set()
+                while previous in events and previous not in seen:
+                    seen.add(previous)
+                    payload = events[previous]["payload"]
+                    evidence = payload.get("evidence", {})
+                    if payload.get("actor") == "crq-repair" and evidence.get("repair_task") == previous_job:
+                        manifests = sorted((self.root.parent.parent / "repair" / previous_job).glob("**/retained-*/manifest.json"))
+                        summary = []
+                        for path in manifests[:10]:
+                            manifest = ledger.loads(path.read_bytes())
+                            token = hashlib.sha256(json.dumps(manifest, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+                            if path.parent.name != 'retained-' + token or manifest.get('base') != evidence.get('repair_base'):
+                                raise ledger.IntegrityError("retained manifest source binding mismatch")
+                            sizes = []
+                            paths = []
+                            for name in ("committed.patch", "staged.patch", "unstaged.patch"):
+                                if (path.parent / name).stat().st_size > 2_000_000:
+                                    raise ledger.IntegrityError("retained diff exceeds bounded context")
+                                data = (path.parent / name).read_bytes()
+                                if hashlib.sha256(data).hexdigest() != manifest["sha256"][name]:
+                                    raise ledger.IntegrityError("retained diff digest mismatch")
+                                sizes.append(len(data))
+                                paths.extend(line[11:] for line in data[:200000].decode(errors="replace").splitlines()
+                                             if line.startswith("diff --git "))
+                            summary.append("retained diff bytes committed/staged/unstaged: %s; %d untracked paths" %
+                                           ("/".join(map(str, sizes)), len(manifest.get("untracked", [])))
+                                           + "; changed paths: " + ", ".join(paths[:10]))
+                        request["retry_instructions"] = ("Prior attempt reason: " + str(evidence.get("reason") or "unavailable")[:1200]
+                            + "\nRetained diff summary: " + ("; ".join(summary) or "no retained snapshot found"))[:2000].replace("\x00", "")
+                        request["prior_repair_task"] = previous_job
+                        break
+                    previous = payload.get("previous_event_id")
             delivery_key = row["canonical_id"]
             if row.get("receipt"):
                 delivery_key = ledger.digest({"canonical": delivery_key, "confirmation": row["previous_event_id"]})
@@ -321,6 +391,7 @@ class Inbox:
         if row["previous_event_id"] != p["previous_event_id"]:
             return False
         row.update(status=p["action"], previous_event_id=value["id"])
+        row["failure_class"] = p["evidence"].get("failure_class")
         row.pop("context_error", None)
         if p["evidence"].get("recovered_anchor"):
             row["recovered_anchor"] = p["evidence"]["recovered_anchor"]
@@ -335,7 +406,30 @@ class Inbox:
         return True
 
 
-def repair_transport(root, queue, save_queue, scan):
+def canonical_rounds(root, queue, canonical_id, pin, *, exclude_job=None):
+    """Count tick-owned generations for a canonical finding at one source pin."""
+    root = Path(root)
+    rounds = 0
+    for item in queue["items"]:
+        for record in item.get("repair_runs", {}).values():
+            if record.get("pin") != pin:
+                continue
+            canonical = record.get("canonical_finding_id")
+            for old_id in record.get("jobs", []):
+                if old_id == exclude_job:
+                    continue
+                old_path = root / "state/repair/inbox" / (old_id + ".json")
+                if old_path.exists():
+                    canonical = ledger.loads(old_path.read_bytes()).get("canonical_finding_id") or canonical
+                elif canonical is None and item.get("id", "").startswith("backfill-finding-"):
+                    raise ledger.IntegrityError("repair history lacks canonical binding")
+                if canonical == canonical_id:
+                    rounds += 1
+                    break
+    return rounds
+
+
+def repair_transport(root, queue, save_queue, scan, max_rounds_per_pin=2, scan_instructions=None):
     """Adapter to the existing tick-owned repair inbox; never dispatches a fixer."""
     root = Path(root)
     def accept(key, request):
@@ -343,22 +437,36 @@ def repair_transport(root, queue, save_queue, scan):
         item_id = "backfill-finding-" + key
         filename = root / "state/repair/inbox" / (job_id + ".json")
         run = "backfill-" + key
+        existing = ledger.loads(filename.read_bytes()) if filename.exists() else None
+        rounds = canonical_rounds(root, queue, request["canonical_id"], request["target"], exclude_job=job_id)
+        if existing is None and rounds >= max_rounds_per_pin:
+            raise RepairRoundCeiling("repair round ceiling reached for current source pin")
         finding = {"severity": request["finding"]["severity"], "path": request["path"],
                    "line": request["intervals"][0][0], "body": request["finding"]["title"] + "\n" + request["finding"]["body"]}
         if not scan(request["target"], request["path"]):
             raise ledger.IntegrityError("repair source secret scan rejected")
+        instructions = request.get("retry_instructions")
+        if instructions is not None and (not scan_instructions or not scan_instructions(instructions, request["target"])):
+            raise ledger.IntegrityError("fix instructions secret scan failed")
         job = {"job": job_id, "item": item_id, "kind": "merged", "pr": 0, "run": run, "cycle": None,
-               "repair_base": request["target"], "branch": None, "finding": finding, "repair_round": 1,
+               "repair_base": request["target"], "branch": None, "finding": finding, "repair_round": rounds + 1,
                "prior": None, "recurrence": False, "review_diff": "", "review_id": request["review_id"],
                "canonical_finding_id": request["canonical_id"]}
-        if filename.exists() and ledger.loads(filename.read_bytes()) != job:
+        if instructions is not None:
+            job["fix_instructions"] = instructions
+            job["prior_repair_task"] = request["prior_repair_task"]
+        if existing is not None:
+            job["repair_round"] = existing.get("repair_round")
+        if existing is not None and existing != job:
             raise ledger.IntegrityError("repair inbox idempotency conflict")
-        ledger.atomic(filename, ledger.canonical(job))
+        if existing is None:
+            ledger.atomic(filename, ledger.canonical(job))
         item = next((i for i in queue["items"] if i["id"] == item_id), None)
         if item is None:
             queue["items"].append({"id": item_id, "kind": "merged", "pr": 0, "state": "repairing", "cycles": [],
                                    "repair_runs": {run: {"jobs": [job_id], "pin": request["target"], "base": request["target"],
-                                                         "branch": None, "open_pr": False, "round": 1, "state": "queued"}}})
+                                                         "branch": None, "open_pr": False, "round": job["repair_round"], "state": "queued",
+                                                         "canonical_finding_id": request["canonical_id"]}}})
         for old_item in queue["items"]:
             for old_run in old_item.get("repair_runs", {}).values():
                 if old_run.get("state") not in ("queued", "ready", "publish_failed") or old_run.get("fix_pr") or old_run.get("fix_merged"):

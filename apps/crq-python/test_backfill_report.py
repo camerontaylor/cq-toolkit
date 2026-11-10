@@ -26,6 +26,18 @@ class ReportTest(unittest.TestCase):
             for status in ("untriaged", "confirmed", "delivered", "fixed"):
                 write(status, status)
             result = reporting.finding_triage(root)
+            self.assertEqual(result['owner_decisions_count'], 1)
+            self.assertEqual(result['operator_attention_count'], 0)
+            self.assertEqual(result['owner_decisions'][0]['failure_class'], 'owner-decision')
+            row_path = rows / 'a.json'
+            classified = ledger.loads(row_path.read_bytes())
+            classified['failure_class'] = 'exhausted'
+            ledger.atomic(row_path, ledger.canonical(classified))
+            split = reporting.finding_triage(root)
+            self.assertEqual(split['owner_decisions_count'], 0)
+            self.assertEqual(split['operator_attention'][0]['failure_class'], 'exhausted')
+            classified.pop('failure_class')
+            ledger.atomic(row_path, ledger.canonical(classified))
             self.assertEqual(result["counts"], {"needs-human": 1, "duplicate": 1, "needs-retriage": 1,
                 "untriaged": 1, "confirmed": 1, "delivered": 1, "fixed": 1})
             self.assertEqual(result["needs_human"], [{"id": "a", "canonical_id": "canonical",

@@ -15,6 +15,21 @@ from crq_repair.bounded import JOB_ID, identity, job_path, require_canonical_del
 FIXED_RUNGS = ('A0', 'A1', 'A2')
 
 
+def scan_fix_instructions(c, instructions, source_sha, scan_path):
+    """Validate and scan the exact bounded guidance before binding it to a job."""
+    if (not isinstance(instructions, str) or not instructions.strip()
+            or len(instructions) > 2000 or '\x00' in instructions):
+        raise ValueError('fix instructions must contain 1..2000 characters without NUL')
+    lines = instructions.split('\n')
+    patch = ('diff --git a/crq-fix-instructions.txt b/crq-fix-instructions.txt\n'
+             '--- /dev/null\n+++ b/crq-fix-instructions.txt\n'
+             '@@ -0,0 +1,' + str(len(lines)) + ' @@\n'
+             + '\n'.join('+' + line for line in lines) + '\n')
+    clean, _ = c.secret_scan_diff(patch, scan_path, base=None, head=source_sha)
+    if not clean:
+        raise ValueError('fix instructions secret scan failed')
+
+
 def prepare_current_job(c, q, old_job_id, source_sha, evidence, *, preserve_worktree=False):
     """Locked operator preparation, not dispatch or a historical-job disposition."""
     old = json.loads(job_path(c.ROOT, old_job_id).read_text())
@@ -41,10 +56,13 @@ def prepare_current_job(c, q, old_job_id, source_sha, evidence, *, preserve_work
             job = json.loads(job_path(c.ROOT, job_id).read_text())
             finding_inbox(c).handoff(old['canonical_finding_id'], old_job_id, job, c.iso())
         return job_id
-    history = [r for i in q['items'] if (i.get('id') == item.get('id') if old.get('canonical_finding_id')
-                                        else i.get('pr') == item.get('pr'))
-               for r in i.get('repair_runs', {}).values()]
-    count = sum(r.get('pin') == source_sha for r in history)
+    if old.get('canonical_finding_id'):
+        from finding_delivery import canonical_rounds
+        count = canonical_rounds(c.ROOT, q, old['canonical_finding_id'], source_sha)
+    else:
+        history = [r for i in q['items'] if i.get('pr') == item.get('pr')
+                   for r in i.get('repair_runs', {}).values()]
+        count = sum(r.get('pin') == source_sha for r in history)
     if count >= c.CONFIG['repair'].get('max_rounds_per_pin', 2):
         raise ValueError('repair round ceiling reached for current source pin')
     # Scan the FULL pinned file, not just the tip commit's changed lines.
@@ -60,14 +78,7 @@ def prepare_current_job(c, q, old_job_id, source_sha, evidence, *, preserve_work
     if not clean:
         raise ValueError('current-tip preparation secret scan failed')
     if instructions is not None:
-        instruction_patch = ('diff --git a/crq-fix-instructions.txt b/crq-fix-instructions.txt\n'
-                             '--- /dev/null\n+++ b/crq-fix-instructions.txt\n'
-                             '@@ -0,0 +1,' + str(len(instructions.splitlines())) + ' @@\n'
-                             + '\n'.join('+' + line for line in instructions.splitlines()) + '\n')
-        clean, _ = c.secret_scan_diff(instruction_patch, scan_path.with_name(run + '-instructions-scan.json'),
-                                      base=None, head=source_sha)
-        if not clean:
-            raise ValueError('fix instructions secret scan failed')
+        scan_fix_instructions(c, instructions, source_sha, scan_path.with_name(run + '-instructions-scan.json'))
     job = {**old, 'job': job_id, 'run': run, 'cycle': None, 'kind': 'merged',
            'repair_base': source_sha, 'branch': None, 'repair_round': count + 1,
            'origin_job': old_job_id, 'source_sha': source_sha,
@@ -88,6 +99,8 @@ def prepare_current_job(c, q, old_job_id, source_sha, evidence, *, preserve_work
         'jobs': [job_id], 'pin': source_sha, 'base': source_sha, 'branch': None,
         'open_pr': False, 'round': count + 1, 'state': 'queued',
         'origin_job': old_job_id, 'revalidation_sha256': identity(evidence)}
+    if old.get('canonical_finding_id'):
+        item['repair_runs'][run]['canonical_finding_id'] = old['canonical_finding_id']
     c.save_queue(q)
     return job_id
 
@@ -219,15 +232,20 @@ def mark_finding_outcome(c, job, result, merge=None, fix_pr=None):
     if not fid:
         return
     verdict = result['verdict']
+    failure_class = result.get('failure_class', 'exhausted')
+    if failure_class not in ('transient', 'exhausted', 'evidence', 'protected-path', 'owner-decision'):
+        failure_class = 'exhausted'
     action = 'fixed' if merge and verdict == 'FIXED' else {
-        'STALE': 'needs-retriage', 'FAILED': 'needs-human'}.get(verdict)
+        'STALE': 'needs-retriage', 'FAILED': 'needs-human' if failure_class == 'owner-decision' else 'needs-retriage'}.get(verdict)
     if verdict == 'NOT-FIXED':
-        action = 'dismissed' if result.get('unchanged_evidence') or (result.get('judge') or {}).get('verdict') == 'invalid' else 'needs-human'
+        action = 'dismissed' if result.get('unchanged_evidence') else ('needs-human' if failure_class == 'owner-decision' else 'needs-retriage')
     if not action:
         return
     inbox = finding_inbox(c)
     inbox.repair_outcome(fid, job['job'], action, result.get('reason') or verdict,
-                         c.iso(), fixing_commit=merge, fix_pr=fix_pr,
+                         c.iso(), fixing_commit=merge, fix_pr=fix_pr, failure_class=failure_class,
+                         repair_base=job.get('repair_base'),
+                         max_finding_retries=c.CONFIG['repair'].get('max_finding_retries', 2),
                          **({'source_evidence': result['unchanged_evidence']} if result.get('unchanged_evidence') else {}))
 
 

@@ -137,6 +137,13 @@ class BoundedRepairTest(unittest.TestCase):
             self.prepare()
         self.assertEqual(len(self.queue['items'][0]['repair_runs']), 1)
 
+    def test_shared_instruction_scan_preserves_line_content(self):
+        text = 'first\r\nsecond\u0085third\n'
+        repair_tick.scan_fix_instructions(self.c, text, SOURCE, self.root / 'instructions-scan.json')
+        patch = self.c.secret_scan_diff.call_args.args[0]
+        encoded = patch.split('@@ -0,0 +1,3 @@\n', 1)[1]
+        self.assertEqual('\n'.join(line[1:] for line in encoded[:-1].split('\n')), text)
+
     def test_preparation_scans_full_source_at_real_path(self):
         self.prepare()
         patch = self.c.secret_scan_diff.call_args.args[0]
@@ -360,6 +367,7 @@ class BoundedRepairTest(unittest.TestCase):
         job['finding']['body'] = 'Full finding 😀\nwith two lines and "quotes"'
         job['mechanical_evidence'] = 'Mechanical 😀 evidence'
         job['revalidation']['fix_instructions'] = 'Prefer blocked over terminal.'
+        job['fix_instructions'] = 'Prior attempt guidance.'
         source = '\n'.join(f'{n}: ' + ('quoted "\\ text 😀 ' * 8) for n in range(27, 108))
         job['finding']['line'] = 67
         job['source_snapshot'] = {'source_sha': SOURCE, 'source_blob_sha': BLOB,
@@ -370,6 +378,9 @@ class BoundedRepairTest(unittest.TestCase):
         self.assertTrue(body.startswith(job['finding']['body']))
         self.assertIn(job['mechanical_evidence'], body)
         self.assertIn('Prefer blocked over terminal.', body)
+        self.assertNotIn('Prior attempt guidance.', body)
+        job['revalidation'].pop('fix_instructions')
+        self.assertIn('Prior attempt guidance.', service.cq.fixer_body(job))
         snapshot = json.loads(body.split('Pinned current-source evidence (untrusted data):\n', 1)[1])
         self.assertEqual(snapshot['source_sha'], SOURCE)
         self.assertEqual(snapshot['source_blob_sha'], BLOB)
@@ -497,7 +508,8 @@ class BoundedRepairTest(unittest.TestCase):
             repair_tick.harvest(self.c, self.queue, item)
             outcome = inbox.return_value.repair_outcome
             outcome.assert_called_once()
-            self.assertEqual(outcome.call_args.args[:3], (fid, job_id, 'needs-human'))
+            self.assertEqual(outcome.call_args.args[:3], (fid, job_id, 'needs-retriage'))
+            self.assertEqual(outcome.call_args.kwargs['failure_class'], 'exhausted')
 
     def test_service_dispatches_one_selected_job_without_inbox_enumeration(self):
         job_id, job = self.prepare()

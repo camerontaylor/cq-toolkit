@@ -26,6 +26,78 @@ class FindingTest(unittest.TestCase):
         self.inbox = delivery.Inbox(self.root / "findings", self.out)
         self.inbox.ingest(self.value)
 
+    def test_retry_chain_terminates_and_replays_without_extra_jobs(self):
+        queue = {"items": []}
+        transport = delivery.repair_transport(self.root, queue, lambda q: None, lambda *_: True,
+                                              max_rounds_per_pin=4, scan_instructions=lambda *_: True)
+        for attempt in range(3):
+            self.inbox.triage(self.fid, self.f.repo, self.t, "confirmed", "crq-triage/judge", "valid", AT,
+                              failure_class="evidence")
+            receipt = self.inbox.deliver(self.fid, transport, AT)
+            self.assertEqual(self.inbox.deliver(self.fid, transport, AT), receipt)
+            self.inbox.repair_outcome(self.fid, receipt["repair_task"], "needs-retriage", "attempt failed", AT,
+                                      failure_class="exhausted", max_finding_retries=2)
+            row = ledger.loads((self.inbox.root / "triage" / (self.fid + ".json")).read_bytes())
+            self.assertEqual(row["status"], "needs-human" if attempt == 2 else "needs-retriage")
+        self.assertEqual(len(queue["items"]), 3)
+        self.assertEqual(row["failure_class"], "exhausted")
+
+    def test_per_pin_ceiling_and_existing_job_replay(self):
+        queue = {"items": []}
+        transport = delivery.repair_transport(self.root, queue, lambda q: None, lambda *_: True,
+                                              max_rounds_per_pin=2, scan_instructions=lambda *_: True)
+        self.inbox.triage(self.fid, self.f.repo, self.t, "confirmed", "judge", "valid", AT)
+        first = self.inbox.deliver(self.fid, transport, AT)
+        first_request = ledger.loads((self.inbox.root / "delivery" / (self.fid + ".json")).read_bytes())
+        self.inbox.repair_outcome(self.fid, first["repair_task"], "needs-retriage", "failed", AT,
+                                  failure_class="exhausted")
+        self.inbox.triage(self.fid, self.f.repo, self.t, "confirmed", "judge", "valid", AT)
+        second = self.inbox.deliver(self.fid, transport, AT)
+        self.assertEqual(transport(self.fid, first_request), first)
+        self.inbox.repair_outcome(self.fid, second["repair_task"], "needs-retriage", "failed again", AT,
+                                  failure_class="exhausted")
+        self.inbox.triage(self.fid, self.f.repo, self.t, "confirmed", "judge", "valid", AT)
+        with self.assertRaises(delivery.RepairRoundCeiling):
+            self.inbox.deliver(self.fid, transport, AT)
+        self.assertEqual(len(queue["items"]), 2)
+        other = {**first_request, "canonical_id": "f" * 64, "finding_id": "f" * 64}
+        self.assertTrue(transport("other", other)["repair_task"])
+        new_pin = {**first_request, "target": "a" * 40}
+        self.assertTrue(transport("new-pin", new_pin)["repair_task"])
+
+    def test_retry_guidance_scan_refusal_does_not_create_job(self):
+        queue = {"items": []}
+        transport = delivery.repair_transport(self.root, queue, lambda q: None, lambda *_: True,
+                                              scan_instructions=lambda *_: False)
+        self.inbox.triage(self.fid, self.f.repo, self.t, "confirmed", "judge", "valid", AT)
+        first = self.inbox.deliver(self.fid, transport, AT)
+        self.inbox.repair_outcome(self.fid, first["repair_task"], "needs-retriage", "prior attempt", AT,
+                                  failure_class="exhausted")
+        self.inbox.triage(self.fid, self.f.repo, self.t, "confirmed", "judge", "valid", AT)
+        with self.assertRaisesRegex(ledger.IntegrityError, "instructions secret scan"):
+            self.inbox.deliver(self.fid, transport, AT)
+        self.assertEqual(len(list((self.root / "state/repair/inbox").glob("*.json"))), 1)
+
+    def test_retry_rejects_retained_manifest_with_wrong_source(self):
+        import hashlib
+        import json
+        self.inbox = delivery.Inbox(self.root / 'state/backfill/findings', self.out)
+        self.inbox.ingest(self.value)
+        queue = {"items": []}
+        transport = delivery.repair_transport(self.root, queue, lambda q: None, lambda *_: True,
+                                              scan_instructions=lambda *_: True)
+        self.inbox.triage(self.fid, self.f.repo, self.t, 'confirmed', 'judge', 'valid', AT)
+        job = self.inbox.deliver(self.fid, transport, AT)['repair_task']
+        self.inbox.repair_outcome(self.fid, job, 'needs-retriage', 'failed', AT,
+                                  failure_class='exhausted', repair_base=self.t)
+        manifest = {'base': 'f' * 40, 'commits': [], 'untracked': [], 'sha256': {}}
+        token = hashlib.sha256(json.dumps(manifest, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+        path = self.root / 'state/repair' / job / ('retained-' + token) / 'manifest.json'
+        ledger.atomic(path, ledger.canonical(manifest))
+        self.inbox.triage(self.fid, self.f.repo, self.t, 'confirmed', 'judge', 'valid', AT)
+        with self.assertRaisesRegex(ledger.IntegrityError, 'source binding'):
+            self.inbox.deliver(self.fid, transport, AT)
+
     def test_unchanged_source_evidence_survives_event_replay(self):
         evidence = [{"path": "a", "line": 1, "quoted_text": "one", "target": self.t}]
         self.inbox.repair_outcome(self.fid, "unchanged", "dismissed", "not a defect", AT,
@@ -59,7 +131,8 @@ class FindingTest(unittest.TestCase):
     def test_retriage_delivery_creates_fresh_job_preserving_canonical_provenance(self):
         self.inbox.triage(self.fid, self.f.repo, self.t, "confirmed", "judge", "valid", AT)
         queue = {"items": []}
-        transport = delivery.repair_transport(self.root, queue, lambda q: None, lambda *_: True)
+        transport = delivery.repair_transport(self.root, queue, lambda q: None, lambda *_: True,
+                                              scan_instructions=lambda *_: True)
         first = self.inbox.deliver(self.fid, transport, AT)
         self.inbox.repair_outcome(self.fid, first["repair_task"], "needs-retriage", "stale", AT)
         self.inbox.triage(self.fid, self.f.repo, self.t, "confirmed", "judge", "valid again", AT)
@@ -68,6 +141,9 @@ class FindingTest(unittest.TestCase):
         self.assertEqual(self.inbox.deliver(self.fid, transport, AT), second)
         job = ledger.loads((self.root / "state/repair/inbox" / (second["repair_task"] + ".json")).read_bytes())
         self.assertEqual(job["canonical_finding_id"], self.fid)
+        self.assertIn("Prior attempt reason: stale", job["fix_instructions"])
+        self.assertIn("Retained diff summary:", job["fix_instructions"])
+        self.assertEqual(job["prior_repair_task"], first["repair_task"])
         self.assertEqual(len(queue["items"]), 2)
         self.assertEqual(next(iter(queue["items"][0]["repair_runs"].values()))["state"], "stale")
         before = self.out.retained()
