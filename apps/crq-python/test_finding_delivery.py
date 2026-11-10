@@ -55,6 +55,31 @@ class FindingTest(unittest.TestCase):
         job_doc = ledger.loads((self.root / 'state/repair/inbox' / (second['repair_task'] + '.json')).read_bytes())
         self.assertIn('retained diff bytes', job_doc['fix_instructions'])
 
+    def test_legacy_missing_job_skips_unbound_retained_snapshot(self):
+        from crq_repair.retain import retain
+        self.inbox = delivery.Inbox(self.root / 'state/backfill/findings', self.out)
+        self.inbox.ingest(self.value)
+        queue = {'items': []}
+        transport = delivery.repair_transport(self.root, queue, lambda q: None, lambda *_: True,
+            scan_finding=lambda *_: True, scan_instructions=lambda *_: True)
+        self.inbox.triage(self.fid, self.f.repo, self.t, 'confirmed', 'judge', 'valid', AT)
+        first = self.inbox.deliver(self.fid, transport, AT)
+        job = first['repair_task']
+        (self.f.repo.root / 'untrusted-marker').write_text('fixture data')
+        retain(self.f.repo.root, self.t, self.root / 'state/repair' / job / 'final', include_clean=True)
+        self.inbox.repair_outcome(self.fid, job, 'needs-retriage', 'legacy result', AT)
+        old_job = self.root / 'state/repair/inbox' / (job + '.json')
+        old_job.rename(old_job.with_suffix('.saved'))
+        self.inbox.triage(self.fid, self.f.repo, self.t, 'confirmed', 'judge', 'valid again', AT)
+        second = self.inbox.deliver(self.fid, transport, AT)
+        self.assertEqual(self.inbox.deliver(self.fid, transport, AT), second)
+        job_doc = ledger.loads((self.root / 'state/repair/inbox' / (second['repair_task'] + '.json')).read_bytes())
+        guidance = job_doc['fix_instructions']
+        self.assertIn('Prior attempt reason: legacy result', guidance)
+        self.assertIn('no retained snapshot found', guidance)
+        self.assertNotIn('untrusted-marker', guidance)
+        self.assertNotIn('retained diff bytes', guidance)
+
     def test_cli_delivers_retry_with_shared_scanners(self):
         import backfill
         from types import SimpleNamespace
