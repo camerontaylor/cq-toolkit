@@ -269,6 +269,26 @@ describe('ledger records are pure and self-describing', () => {
     expect(() => ledgerTimestamp('٢٠٢٦-١١-٠٩T٠٠:٠٠:٠٠Z')).toThrow(LedgerTimestampError);
   });
 
+  test('a record whose id does not match its digest is refused', () => {
+    const event = vectors.find(
+      (vector) => vector.family === 'validate' && vector.name === 'valid-review',
+    );
+    if (event === undefined) throw new Error('valid-review vector missing');
+    const record = requireObject(valueAt(event.input, 'value'), 'record');
+    const valid = capture(() => ledgerValidate(record));
+    expect(valid.ok, valid.ok ? undefined : valid.message).toBe(true);
+
+    const tampered = new JsonObject(
+      record.entries.map(([key, value]): readonly [string, JsonValue] => [
+        key,
+        key === 'id' ? '0'.repeat(64) : value,
+      ]),
+    );
+    const refused = capture(() => ledgerValidate(tampered));
+    expect(refused.ok).toBe(false);
+    if (!refused.ok) expect(refused.pythonError).toBe('IntegrityError');
+  });
+
   test('record paths zero-pad the year and month', () => {
     const record = requireObject(
       parseJsonValue('{"occurred_at":"0001-01-02T00:00:00Z","id":"d"}'),

@@ -2174,117 +2174,13 @@
                   }
                 ]
               },
-              "id": "5842a64449aba75e776ad5d2a6902c4c6a9069479bc314899718cc71734a1948"
+              "id": "0000000000000000000000000000000000000000000000000000000000000000"
             }
           },
           "expect": {
-            "ok": true,
-            "value": {
-              "schema": "cq.review-ledger/v1",
-              "event_type": "review",
-              "source_key": "camerontaylor/cq-toolkit:crq-runner-app:run-1",
-              "occurred_at": "2026-10-30T00:00:00Z",
-              "payload": {
-                "repo": "camerontaylor/cq-toolkit",
-                "subject_id": "subject",
-                "job_id": "subject:0",
-                "attempt_id": "subject:0:1",
-                "source": {
-                  "repo": "camerontaylor/cq-toolkit",
-                  "producer": "crq-runner-app",
-                  "type": "crq-run",
-                  "id": "run-1",
-                  "authenticated": true
-                },
-                "base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                "head_tree": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                "target_tree": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                "policy_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-                "scope_digest": "c38ff74dbe52efc3cc353a69aaeec07f6315d2a02cf02c64c4809b0f89a53c78",
-                "paths": [
-                  {
-                    "path": "src/\u96ea.ts",
-                    "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                    "mode": "100644",
-                    "disposition": "included",
-                    "reason": "verified",
-                    "baseline": {}
-                  }
-                ],
-                "requested_scope": [
-                  {
-                    "path": "src/\u96ea.ts",
-                    "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                    "intervals": [
-                      [
-                        1,
-                        2
-                      ]
-                    ]
-                  }
-                ],
-                "input_scope": [
-                  {
-                    "path": "src/\u96ea.ts",
-                    "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                    "intervals": [
-                      [
-                        1,
-                        2
-                      ]
-                    ]
-                  }
-                ],
-                "reviewed_scope": [
-                  {
-                    "path": "src/\u96ea.ts",
-                    "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                    "intervals": [
-                      [
-                        1,
-                        2
-                      ]
-                    ]
-                  }
-                ],
-                "completion": {
-                  "terminal": true,
-                  "skipped": false,
-                  "scope_verified": true,
-                  "exit_code": 0,
-                  "errors": []
-                },
-                "outcome": "completed",
-                "artifacts": [
-                  {
-                    "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-                    "location": "/fixtures/artifacts/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
-                  }
-                ],
-                "findings": [
-                  {
-                    "id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
-                    "severity": "major",
-                    "source_id": null,
-                    "path": "src/\u96ea.ts",
-                    "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                    "intervals": [
-                      [
-                        1,
-                        1
-                      ]
-                    ],
-                    "title": "\u6807\u9898 \ud83d\ude00",
-                    "body": "details \u0001 with control",
-                    "status": "untriaged",
-                    "anchor_status": "verified"
-                  }
-                ]
-              },
-              "id": "5842a64449aba75e776ad5d2a6902c4c6a9069479bc314899718cc71734a1948"
-            }
+            "ok": false,
+            "error": "IntegrityError",
+            "message": "event hash mismatch"
           }
         },
         {
@@ -2687,7 +2583,7 @@
                 "next_eligible_at": null,
                 "reason": "inventory enqueue"
               },
-              "id": "795948736be23ada03be8814b02fabf980124862ad0e1a6a745c625d91202e77"
+              "id": "6e006a1410e5debd4de39cd85b34c186057bee4c2ac6d8a6378074ee52d86a19"
             }
           },
           "expect": {

@@ -13,6 +13,7 @@ import sys
 import unittest
 
 import ledger_vector_emit_b1 as emitter
+import review_ledger as ledger
 
 
 class LedgerVectorTest(unittest.TestCase):
@@ -51,6 +52,41 @@ class LedgerVectorTest(unittest.TestCase):
         self.assertNotIn("/home/", emitter.render())
         self.assertNotIn("/tmp/", emitter.render())
         self.assertNotIn(os.environ.get("HOME", "\0"), emitter.render())
+
+    def test_tampered_id_case_keeps_the_hash_defect(self):
+        family = _family("validate")
+        case = next(case for case in family["cases"] if case["name"] == "tampered-id")
+        value = case["input"]["value"]
+        self.assertFalse(case["expect"]["ok"])
+        self.assertEqual(case["expect"]["error"], "IntegrityError")
+        self.assertNotEqual(value["id"], ledger.digest(
+            {key: item for key, item in value.items() if key != "id"}))
+        with self.assertRaises(ledger.IntegrityError):
+            ledger.validate(value)
+
+    def test_validate_cases_keep_only_their_named_defect(self):
+        # A rehash silently repaired the original tampered-id case. Every other
+        # validate case must keep a consistent id so the named mutation is the
+        # only defect. float-in-integer is exempt because canonical() refuses
+        # floats, so its prior id cannot be regenerated.
+        for case in _family("validate")["cases"]:
+            if case["name"] in ("tampered-id", "float-in-integer"):
+                continue
+            value = case["input"]["value"]
+            self.assertEqual(value["id"], ledger.digest(
+                {key: item for key, item in value.items() if key != "id"}), case["name"])
+
+    def test_sequence_members_are_individually_valid(self):
+        # Sequence refusals must come from cross-record rules, not an accidental
+        # invalid member that would fail earlier for the wrong reason.
+        for case in _family("sequence")["cases"]:
+            for value in case["input"]["values"]:
+                ledger.validate(value)
+
+
+def _family(name: str):
+    document = json.loads(emitter.render())
+    return next(family for family in document["families"] if family["family"] == name)
 
 
 if __name__ == "__main__":

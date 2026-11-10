@@ -71,14 +71,24 @@ def _rehash(value: Dict[str, Any]) -> Dict[str, Any]:
     return value
 
 
-def _change(value: Dict[str, Any], change: Callable[[Dict[str, Any]], None]) -> Dict[str, Any]:
+def _changed(value: Dict[str, Any], change: Callable[[Dict[str, Any]], None]) -> Dict[str, Any]:
+    """Copy an existing record and apply a change without recomputing its id.
+
+    Use this when the recorded identity itself is the defect. Rehashing here
+    would silently repair the case under test.
+    """
     bad = copy.deepcopy(value)
     change(bad)
     return bad
 
 
-def _mutate(value: Dict[str, Any], change: Callable[[Dict[str, Any]], None]) -> Dict[str, Any]:
-    return _rehash(_change(value, change))
+def _regenerated(value: Dict[str, Any], change: Callable[[Dict[str, Any]], None]) -> Dict[str, Any]:
+    """Copy, apply a change, then recompute the id.
+
+    Use this only when the mutation targets a check that runs after the hash
+    check, so the named semantic condition is the only defect.
+    """
+    return _rehash(_changed(value, change))
 
 
 def _review(*, source: str = "run-1", path: str = "src/a.ts", findings: List[Dict[str, Any]] | None = None,
@@ -354,47 +364,51 @@ def validate_vectors() -> Dict[str, Any]:
         ("valid-finding-event", finding_event),
         ("valid-job-state", job),
         ("valid-import-result", imported),
-        ("tampered-id", _mutate(review, lambda v: v.__setitem__("id", "0" * 64))),
-        ("unknown-field", _mutate(review, lambda v: v.__setitem__("extra", 1))),
-        ("missing-required", _mutate(review, lambda v: v.pop("source_key"))),
-        ("schema-version", _mutate(review, lambda v: v.__setitem__("schema", "cq.review-ledger/v2"))),
-        ("float-in-integer", _change(job, lambda v: v["payload"].__setitem__("generation", 0.0))),
-        ("boolean-in-integer", _change(job, lambda v: v["payload"].__setitem__("attempt", True))),
-        ("source-identity-mismatch", _mutate(review, lambda v: v.__setitem__("source_key", "wrong"))),
+        # Keep the original id: the id/hash mismatch is the defect under test.
+        ("tampered-id", _changed(review, lambda v: v.__setitem__("id", "0" * 64))),
+        ("unknown-field", _regenerated(review, lambda v: v.__setitem__("extra", 1))),
+        ("missing-required", _regenerated(review, lambda v: v.pop("source_key"))),
+        ("schema-version", _regenerated(review, lambda v: v.__setitem__("schema", "cq.review-ledger/v2"))),
+        # canonical() refuses floats, so the id cannot be recomputed here. The
+        # schema type check runs before the hash check and is the defect under
+        # test.
+        ("float-in-integer", _changed(job, lambda v: v["payload"].__setitem__("generation", 0.0))),
+        ("boolean-in-integer", _regenerated(job, lambda v: v["payload"].__setitem__("attempt", True))),
+        ("source-identity-mismatch", _regenerated(review, lambda v: v.__setitem__("source_key", "wrong"))),
         ("scope-digest-mismatch",
-         _mutate(review, lambda v: v["payload"].__setitem__("scope_digest", "0" * 64))),
+         _regenerated(review, lambda v: v["payload"].__setitem__("scope_digest", "0" * 64))),
         ("reviewed-exceeds-requested",
-         _mutate(review, lambda v: v["payload"]["reviewed_scope"][0].__setitem__("intervals", [[1, 3]]))),
+         _regenerated(review, lambda v: v["payload"]["reviewed_scope"][0].__setitem__("intervals", [[1, 3]]))),
         ("reviewed-exceeds-input",
-         _mutate(review, lambda v: v["payload"]["input_scope"][0].__setitem__("intervals", [[2, 2]]))),
+         _regenerated(review, lambda v: v["payload"]["input_scope"][0].__setitem__("intervals", [[2, 2]]))),
         ("duplicate-path-disposition",
-         _mutate(review, lambda v: v["payload"]["paths"].append(copy.deepcopy(v["payload"]["paths"][0])))),
+         _regenerated(review, lambda v: v["payload"]["paths"].append(copy.deepcopy(v["payload"]["paths"][0])))),
         ("credit-on-excluded-path",
-         _mutate(review, lambda v: v["payload"]["paths"][0].__setitem__("disposition", "deleted"))),
+         _regenerated(review, lambda v: v["payload"]["paths"][0].__setitem__("disposition", "deleted"))),
         ("verified-finding-without-anchor",
-         _mutate(review, lambda v: v["payload"]["findings"][0]["intervals"].clear())),
+         _regenerated(review, lambda v: v["payload"]["findings"][0]["intervals"].clear())),
         ("completed-not-creditable",
-         _mutate(review, lambda v: v["payload"]["completion"].__setitem__("errors", ["error"]))),
-        ("missing-evidence", _mutate(finding_event, lambda v: v["payload"].__setitem__("evidence", {}))),
+         _regenerated(review, lambda v: v["payload"]["completion"].__setitem__("errors", ["error"]))),
+        ("missing-evidence", _regenerated(finding_event, lambda v: v["payload"].__setitem__("evidence", {}))),
         ("fixed-without-verification",
-         _mutate(finding_event, lambda v: v["payload"].update(
+         _regenerated(finding_event, lambda v: v["payload"].update(
              {"action": "fixed", "evidence": {"fixing_commit": SHA}}))),
         ("delivered-without-task",
-         _mutate(finding_event, lambda v: v["payload"].update(
+         _regenerated(finding_event, lambda v: v["payload"].update(
              {"action": "delivered", "evidence": {"acknowledgement": "ok"}}))),
         ("confirmed-without-anchor",
-         _mutate(finding_event, lambda v: v["payload"].update(
+         _regenerated(finding_event, lambda v: v["payload"].update(
              {"action": "confirmed", "evidence": {"target": SHA}}))),
         ("quarantine-without-operator",
-         _mutate(job, lambda v: v["payload"].__setitem__("state", "quarantine-released"))),
+         _regenerated(job, lambda v: v["payload"].__setitem__("state", "quarantine-released"))),
         ("bad-next-eligible",
-         _mutate(job, lambda v: v["payload"].__setitem__("next_eligible_at", "night"))),
+         _regenerated(job, lambda v: v["payload"].__setitem__("next_eligible_at", "night"))),
         ("import-credited-without-review",
-         _mutate(imported, lambda v: v["payload"].__setitem__("result", "credited"))),
+         _regenerated(imported, lambda v: v["payload"].__setitem__("result", "credited"))),
         ("import-duplicate-without-duplicate",
-         _mutate(imported, lambda v: v["payload"].__setitem__("result", "duplicate"))),
+         _regenerated(imported, lambda v: v["payload"].__setitem__("result", "duplicate"))),
         ("occurred-at-invalid",
-         _mutate(review, lambda v: v.__setitem__("occurred_at", "2026-02-30T00:00:00Z"))),
+         _regenerated(review, lambda v: v.__setitem__("occurred_at", "2026-02-30T00:00:00Z"))),
     ]
     return _family("validate", [
         _capture(name, "review_ledger.validate", {"value": value},
@@ -427,12 +441,12 @@ def creditable_vectors() -> Dict[str, Any]:
     job = _job_state()
 
     def variant(change: Callable[[Dict[str, Any]], None]) -> Dict[str, Any]:
-        return _mutate(review, change)
+        return _regenerated(review, change)
 
     values = (
         ("crq-run-completed", review),
         ("github-review-completed", github),
-        ("author-cli-not-creditable", _mutate(review, lambda v: v["payload"]["source"].update(
+        ("author-cli-not-creditable", _regenerated(review, lambda v: v["payload"]["source"].update(
             {"type": "author-cli", "producer": "author"}))),
         ("not-terminal", variant(lambda v: v["payload"]["completion"].__setitem__("terminal", False))),
         ("skipped", variant(lambda v: v["payload"]["completion"].__setitem__("skipped", True))),
@@ -461,7 +475,7 @@ def independence_vectors() -> Dict[str, Any]:
         ("unverified", unverified), ("rejected", rejected),
         ("credited-not-independent", linked),
         ("review-id-present-not-independent",
-         _mutate(unverified, lambda v: v["payload"].__setitem__("review_id", "f" * 64))),
+         _regenerated(unverified, lambda v: v["payload"].__setitem__("review_id", "f" * 64))),
     ]
     enrollment_cases = [
         ("initial-enrollment", enrollment),
@@ -516,7 +530,7 @@ def sequence_vectors() -> Dict[str, Any]:
     def same_review_twice() -> List[Dict[str, Any]]:
         return [review, ledger.loads(ledger.canonical(review))]
 
-    conflict = _mutate(review, lambda v: v.__setitem__("occurred_at", "2026-10-31T00:00:00Z"))
+    conflict = _regenerated(review, lambda v: v.__setitem__("occurred_at", "2026-10-31T00:00:00Z"))
 
     collision_review = _review(source="run-2", findings=[_finding()])
 
