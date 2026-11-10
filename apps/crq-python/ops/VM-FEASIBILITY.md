@@ -5,6 +5,10 @@ production unit, journal, controller, signer or credential, or establish
 controller acceptance. The phase-1.5 proof vehicle remains a later, separately
 reviewed slice.
 
+That separate slice now exists as the bounded fixture proof vehicle in
+[VM-UNIT-SWITCH-PROOF.md](VM-UNIT-SWITCH-PROOF.md). It does not change this
+feasibility evidence or enable a host adapter.
+
 The harness is `ops/vm-feasibility.py`; its guest fixture is
 `ops/vm-guest-probe.py`; offline characterization is
 `apps/crq-python/test_vm_feasibility.py`. Runtime artifacts and the raw report

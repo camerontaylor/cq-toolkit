@@ -93,8 +93,12 @@ packages:
   - nodejs
 runcmd:
   - [loginctl, enable-linger, {user}]
-  - [mkdir, -p, /home/{user}/fixture /home/{user}/proof-bin /home/{user}/records]
-  - [chown, {user}:{user}, /home/{user}/fixture, /home/{user}/proof-bin, /home/{user}/records]
+  - [mkdir, -p, /home/{user}/fixture]
+  - [mkdir, -p, /home/{user}/proof-bin]
+  - [mkdir, -p, /home/{user}/records]
+  - [chown, {user}:{user}, /home/{user}/fixture]
+  - [chown, {user}:{user}, /home/{user}/proof-bin]
+  - [chown, {user}:{user}, /home/{user}/records]
 """.format(user=vm.GUEST_USER, key=key)
 
 
