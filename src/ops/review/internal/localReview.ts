@@ -2,6 +2,7 @@ import type { z } from 'zod';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { SnapshotConfigError } from '../../dev/internal/snapshot.js';
+import { processEnv } from '../../../config/process-env.js';
 import type { Op } from '../../../kernel/types.js';
 import { messageOf } from '../../../shared/messageOf.js';
 import {
@@ -15,13 +16,18 @@ import {
 import type { QueueTransport } from './queueProtocol.js';
 
 export type ReviewClient = ReturnType<typeof makeReviewClient>;
-export const git = async (cwd: string, ...args: string[]) =>
-  (
+export const git = async (cwd: string, ...args: string[]) => {
+  // The ambient PATH is how `git` is located (a Nix or custom toolchain path is not on the execvp default search
+  // path), and HOME keeps the child's view of the environment the caller's, not an empty one.
+  const { PATH, HOME } = processEnv();
+  return (
     await promisify(execFile)('git', ['--no-replace-objects', ...args], {
       cwd,
       timeout: 30000,
       maxBuffer: 6 * 1024 * 1024,
       env: {
+        PATH,
+        HOME,
         GIT_CONFIG_NOSYSTEM: '1',
         GIT_CONFIG_GLOBAL: '/dev/null',
         GIT_NO_REPLACE_OBJECTS: '1',
@@ -29,6 +35,7 @@ export const git = async (cwd: string, ...args: string[]) =>
       },
     })
   ).stdout.trim();
+};
 export function reviewOp<S extends z.ZodType, O>(
   schema: S,
   fn: (input: z.output<S>, client: () => ReviewClient) => Promise<O>,
