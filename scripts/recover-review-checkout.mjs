@@ -7,6 +7,29 @@ import { createHash } from 'node:crypto';
 
 const exec = promisify(execFile);
 
+async function canonicalizeMissing(path, io) {
+  let current = path;
+  const missing = [];
+  for (;;) {
+    try {
+      return join(await io.realpath(current), ...missing);
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+      // A dangling symlink is not an absent path and must not certify removal.
+      try {
+        await io.lstat(current);
+        throw new Error(`Unresolvable path alias: ${current}`);
+      } catch (failure) {
+        if (failure.code !== 'ENOENT') throw failure;
+      }
+      const parent = dirname(current);
+      if (parent === current) throw error;
+      missing.unshift(basename(current));
+      current = parent;
+    }
+  }
+}
+
 /** Run recovery with injectable IO; all metadata writes use the slot protocol. */
 export async function recoverReviewCheckout(env, io) {
   if (!env.CQ_RECOVERY_LOCKS || !env.CQ_RECOVERY_CHECKOUT)
@@ -71,7 +94,7 @@ export async function recoverReviewCheckout(env, io) {
     for (const slot of slots) await slot.assertIdentity();
     let next;
     if (mode === 'removed') {
-      if ((await io.realpath(dirname(checkout))) !== dirname(checkout))
+      if ((await canonicalizeMissing(dirname(checkout), io)) !== dirname(checkout))
         throw new Error(`Checkout parent alias refused: ${checkout}`);
       if (metadata.some((entry) => entry.state === 'bound' && entry.checkoutPath !== checkout))
         throw new Error('Removed checkout does not match prior bound identity');

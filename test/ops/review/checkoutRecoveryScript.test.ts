@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, lstat, realpath, rename } from 'node:fs/promises';
+import { mkdtemp, mkdir, lstat, realpath, rename, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { expect, test } from 'vitest';
@@ -141,11 +141,49 @@ test('removed Git-dir recovery locks original persistent inode', async () => {
   await held.close();
 });
 
+test('removed recovery accepts a missing checkout parent while holding the original slot', async () => {
+  const f = await recoveryFixture();
+  const parent = join(dirname(dirname(dirname(f.paths[0]!))), 'removed-parent');
+  const checkout = join(parent, 'checkout');
+  const gitDir = join(parent, 'admin');
+  await mkdir(checkout, { recursive: true });
+  await mkdir(gitDir);
+  const slot = attachSlotMetadata(await acquireFileLock(f.paths[0]!));
+  await slot.writeMetadata({
+    version: 1,
+    state: 'bound',
+    incomplete: true,
+    checkoutPath: checkout,
+    checkoutGitDir: gitDir,
+  });
+  await slot.close();
+  await rename(parent, `${parent}-saved`);
+  await recoverReviewCheckout({ ...f.env, CQ_RECOVERY_CHECKOUT: checkout }, f.io);
+  expect(await f.read(f.paths[0]!)).toEqual({ version: 1, state: 'unbound', incomplete: false });
+});
+
 test('missing acknowledgement preserves incomplete metadata', async () => {
   const f = await recoveryFixture();
   await recoverReviewCheckout(f.env, { ...f.io, acknowledge: async () => '' });
   for (const path of f.paths) expect((await f.read(path))?.incomplete).toBe(true);
 });
+
+test.each(['existing', 'dangling'] as const)(
+  'removed recovery refuses a %s ancestor alias even when descendants are missing',
+  async (kind) => {
+    const f = await recoveryFixture();
+    const base = dirname(dirname(dirname(f.paths[0]!)));
+    const alias = join(base, 'alias');
+    await symlink(kind === 'existing' ? base : join(base, 'missing'), alias);
+    await expect(
+      recoverReviewCheckout(
+        { ...f.env, CQ_RECOVERY_CHECKOUT: join(alias, 'missing', 'checkout') },
+        f.io,
+      ),
+    ).rejects.toThrow(/alias/i);
+    for (const path of f.paths) expect((await f.read(path))?.incomplete).toBe(true);
+  },
+);
 
 test('removed mode refuses a different bound checkout', async () => {
   const f = await recoveryFixture();

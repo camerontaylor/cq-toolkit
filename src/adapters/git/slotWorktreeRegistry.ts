@@ -14,6 +14,10 @@ export interface SlotWorktreeRegistry {
   legacyHint?(pr: number): LegacyReviewHint | undefined;
 }
 
+// Hints belong to an admitted context and slot, not a particular facade. Separate
+// facades can participate in the same lifetime (notably selfhost's resolver).
+const admissionHints = new WeakMap<CheckoutWriterContext, Map<string, LegacyReviewHint>>();
+
 /** Discovery is only a hint. Admission always reads again under the kernel lock. */
 export async function discoverWorktreeSlots(
   commonDir: string,
@@ -49,7 +53,7 @@ export function slotWorktreeRegistry(
     CheckoutWriterContext,
     Map<number, Awaited<ReturnType<CheckoutWriterContext['acquire']>>>
   >();
-  const hints = new WeakMap<CheckoutWriterContext, Map<number, LegacyReviewHint>>();
+  const keys = new WeakMap<CheckoutWriterContext, Map<number, string>>();
   const current = (pr: number) => {
     const context = checkoutWriterContext();
     const slot = context && held.get(context)?.get(pr);
@@ -61,7 +65,8 @@ export function slotWorktreeRegistry(
     update: (pr, metadata) => current(pr).writeMetadata(metadata),
     legacyHint: (pr) => {
       const context = checkoutWriterContext();
-      return context ? hints.get(context)?.get(pr) : undefined;
+      const key = context && keys.get(context)?.get(pr);
+      return context && key ? admissionHints.get(context)?.get(key) : undefined;
     },
     async withPrLock(pr, action) {
       const inherited = checkoutWriterContext();
@@ -69,6 +74,13 @@ export function slotWorktreeRegistry(
       return context.run(async () => {
         const common = await realpath(commonDir);
         const slot = await context.acquire(common, pr);
+        const key = `${common}:${pr}`;
+        let contextKeys = keys.get(context);
+        if (!contextKeys) {
+          contextKeys = new Map();
+          keys.set(context, contextKeys);
+        }
+        contextKeys.set(pr, key);
         let entries = held.get(context);
         if (!entries) {
           entries = new Map();
@@ -79,12 +91,12 @@ export function slotWorktreeRegistry(
           if (!(await slot.readMetadata())) {
             const hint = await readLegacyReviewHint(opts.legacySources ?? [], pr);
             if (hint) {
-              let entries = hints.get(context);
+              let entries = admissionHints.get(context);
               if (!entries) {
                 entries = new Map();
-                hints.set(context, entries);
+                admissionHints.set(context, entries);
               }
-              entries.set(pr, hint);
+              entries.set(key, hint);
             }
           }
           await context.begin();

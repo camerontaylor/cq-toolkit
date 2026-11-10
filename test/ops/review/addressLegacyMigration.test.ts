@@ -1,9 +1,13 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { expect, test } from 'vitest';
 import { makeGhRunner } from '../../../src/adapters/forge-github/gh.js';
 import { resolvePrWorktree } from '../../../src/adapters/git/prWorktree.js';
 import { slotWorktreeRegistry } from '../../../src/adapters/git/slotWorktreeRegistry.js';
+import {
+  runAddressReviewLoop,
+  withAddressOwnership,
+} from '../../../src/ops/review/internal/addressCheckoutOwnership.js';
 import { identityRepo } from './addressManyWorktree.helpers.js';
 
 async function fixture() {
@@ -22,6 +26,54 @@ async function fixture() {
   };
   return { repo, common, root, opts };
 }
+
+test('legacy hint survives separate owner and resolver facades without pruning stale checkout', async () => {
+  const f = await fixture();
+  try {
+    const path = join(f.root, 'pr-7-feature');
+    f.repo.git('worktree', 'add', '-b', 'cq-review/pr-7', path, 'HEAD');
+    const source = join(f.repo.root, 'worktree-registry.json');
+    const bytes = JSON.stringify({ 7: { path, branch: 'cq-review/pr-7' } });
+    await writeFile(source, bytes);
+    await writeFile(join(f.repo.root, 'new-file'), 'new head');
+    f.repo.git('add', 'new-file');
+    f.repo.git('commit', '-m', 'advance head');
+    f.repo.git('push', '-q', 'origin', 'HEAD:refs/pull/7/head');
+    const registry = slotWorktreeRegistry(f.common, { legacySources: [source] });
+    const outcome = await withAddressOwnership(
+      {
+        repoRoot: f.repo.root,
+        git: f.opts.run,
+        source: 'pr:7',
+        production: true,
+        legacySources: [source],
+      },
+      async (lease) =>
+        runAddressReviewLoop(lease, {
+          owner: 'fixture',
+          repo: 'base',
+          pr: 7,
+          headRefName: 'feature',
+          repoRoot: f.repo.root,
+          git: f.opts.run,
+          gh: async () => {
+            throw new Error('forge must not dispatch');
+          },
+          registry,
+          worktreeRoot: f.root,
+          nowMs: 1,
+          driver: { provider: 'mock', model: 'offline' },
+          dispatchLogPath: join(f.repo.root, 'dispatch.jsonl'),
+        }),
+    );
+    expect(outcome.status).toBe('needs-human');
+    expect(outcome.reasons.join(' ')).toMatch(/identity or head mismatch/);
+    expect((await lstat(path)).isDirectory()).toBe(true);
+    expect(await readFile(source, 'utf8')).toBe(bytes);
+  } finally {
+    await f.repo.cleanup();
+  }
+});
 
 test.each(['common', 'address-journal', 'selfhost-journal'])(
   'valid requested legacy checkout imports without shared-map mutation: %s',

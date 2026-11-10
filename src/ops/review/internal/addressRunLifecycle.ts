@@ -149,7 +149,6 @@ export abstract class AddressRunLifecycle implements AddressRunAuthority {
   readonly signal: AbortSignal;
   protected readonly controller: AbortController;
   protected readonly tasks = new Set<Promise<unknown>>();
-  protected readonly retentionAdvisories: string[] = [];
   protected readonly runContext: ReturnType<typeof createAddressRunContext>;
   protected readonly participants = new Set<Participant>();
   protected readonly terminalProcesses = new Set<Promise<void>>();
@@ -294,9 +293,6 @@ export abstract class AddressRunLifecycle implements AddressRunAuthority {
       !this.participants.has(participant)
     )
       throw new Error('address terminal: report binding refused');
-    if (this.retentionAdvisories.length) {
-      report.advisories = [...new Set([...(report.advisories ?? []), ...this.retentionAdvisories])];
-    }
     // Resolve aliases without creating a missing journal directory. Remember
     // the existing ancestor inode, so a later replacement is not adopted.
     let ancestor = dirname(resolve(report.reportPath));
