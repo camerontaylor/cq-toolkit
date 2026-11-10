@@ -76,7 +76,12 @@ The report records all 19 checks true and ``problems: []``; a second
 ``verify`` recomputed the checks and re-hashed both retained artifacts with
 ``problems: []``, including comparison of every phase with the retained raw
 guest phase JSON, the retained controller journals and the uploaded script
-bytes. Artifacts stay at
+bytes. Provenance verification requires the exact six uploaded controller and
+fixture scripts, nonempty matching local and remote digests, verified upload
+status, the recorded source commit and the report directory path. A
+host-validator-only change may re-run this check against the retained report
+when the guest scripts are byte-identical; that is a validator re-run, not a
+new guest run. Artifacts stay at
 ``~/crq-vm-feasibility/state/runs/20261110T173225Z-de36ec18/`` on Pluto,
 outside the worktree. The earlier retained run
 ``20261110T170322Z-9e8c5133`` remains on Pluto; it predates the fence probe

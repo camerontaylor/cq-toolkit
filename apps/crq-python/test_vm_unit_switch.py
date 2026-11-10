@@ -32,6 +32,7 @@ SERVICE = "/home/probe/.config/systemd/user/crq-tick.service"
 WANTS = "/home/probe/.config/systemd/user/timers.target.wants/crq-tick.timer"
 STATE = {"queue.json": "q" * 64, "heartbeat.json": "h" * 64}
 HISTORY = "a" * 64
+SOURCE_COMMIT = "c" * 40
 RECORDS = {}
 
 
@@ -225,18 +226,28 @@ class VerifyTests(unittest.TestCase):
         self.raw = self.run_dir / "raw-guest-evidence.tar.gz"
         self.host.write_bytes(b"host")
         self.guest.write_bytes(b"guest")
+        self.upload_data = {name: ("upload:" + name).encode()
+                            for name in harness.UPLOADS}
         self.report = {
             "schema_version": harness.SCHEMA_VERSION,
             "kind": harness.KIND,
             "path": str(self.run_dir),
+            "source_commit": SOURCE_COMMIT,
             "phases": phases(),
             "checks": {},
             "problems": [],
             "provenance": {
+                "source_commit": SOURCE_COMMIT,
                 "host_script": {"artifact": self.host.name,
                                 "sha256": harness.sha256_bytes(b"host")},
                 "guest_script": {"artifact": self.guest.name,
                                  "sha256": harness.sha256_bytes(b"guest")},
+                "guest_report": self.guest.name,
+                "uploads": {
+                    name: {"sha256": harness.sha256_bytes(data),
+                           "remote_sha256": harness.sha256_bytes(data),
+                           "bytes": len(data), "verified": True}
+                    for name, data in self.upload_data.items()},
             },
             "raw": {"raw_tar": self.raw.name},
         }
@@ -262,6 +273,8 @@ class VerifyTests(unittest.TestCase):
                 filename = ("controller-"
                             + hashlib.md5(name.encode()).hexdigest() + ".json")
                 self._add(archive, "records/" + filename, data, mode=0o600)
+            for name, data in self.upload_data.items():
+                self._add(archive, "proof-bin/" + name, data)
             mask = tarfile.TarInfo(
                 ".config/systemd/user/crq-tick.service")
             mask.type = tarfile.SYMTYPE
@@ -272,6 +285,7 @@ class VerifyTests(unittest.TestCase):
         data = buffer.getvalue()
         self.raw.write_bytes(data)
         self.report["raw"]["tar_sha256"] = harness.sha256_bytes(data)
+        self.report["raw"]["tar_bytes"] = len(data)
 
     def _write(self):
         path = self.run_dir / "report.json"
@@ -338,6 +352,82 @@ class VerifyTests(unittest.TestCase):
         status, payload = self._verify()
         self.assertEqual(status, 1)
         self.assertTrue(any("contradicts retained evidence" in item
+                            for item in payload["problems"]))
+
+    def test_empty_upload_provenance_is_rejected(self):
+        self.report["provenance"]["uploads"] = {}
+        status, payload = self._verify()
+        self.assertEqual(status, 1)
+        self.assertTrue(any("upload provenance set" in item
+                            or "raw upload is missing" in item
+                            for item in payload["problems"]))
+
+    def test_partial_upload_provenance_is_rejected(self):
+        self.report["provenance"]["uploads"].pop(harness.UPLOADS[0])
+        status, payload = self._verify()
+        self.assertEqual(status, 1)
+        self.assertTrue(any("upload provenance" in item
+                            for item in payload["problems"]))
+
+    def test_extra_upload_provenance_is_rejected(self):
+        entry = dict(next(iter(self.report["provenance"]["uploads"].values())))
+        self.report["provenance"]["uploads"]["extra.py"] = entry
+        status, payload = self._verify()
+        self.assertEqual(status, 1)
+        self.assertTrue(any("upload provenance set" in item
+                            for item in payload["problems"]))
+
+    def test_empty_upload_digest_is_rejected(self):
+        entry = self.report["provenance"]["uploads"][harness.UPLOADS[0]]
+        entry["sha256"] = ""
+        entry["remote_sha256"] = ""
+        status, payload = self._verify()
+        self.assertEqual(status, 1)
+        self.assertTrue(any("upload digest is invalid" in item
+                            for item in payload["problems"]))
+
+    def test_unverified_upload_is_rejected(self):
+        entry = self.report["provenance"]["uploads"][harness.UPLOADS[0]]
+        entry["verified"] = False
+        status, payload = self._verify()
+        self.assertEqual(status, 1)
+        self.assertTrue(any("upload is not verified" in item
+                            for item in payload["problems"]))
+
+    def test_remote_upload_digest_mismatch_is_rejected(self):
+        entry = self.report["provenance"]["uploads"][harness.UPLOADS[0]]
+        entry["remote_sha256"] = "d" * 64
+        status, payload = self._verify()
+        self.assertEqual(status, 1)
+        self.assertTrue(any("local and remote digests differ" in item
+                            for item in payload["problems"]))
+
+    def test_missing_provenance_is_rejected(self):
+        del self.report["provenance"]
+        status, payload = self._verify()
+        self.assertEqual(status, 1)
+        self.assertTrue(any("provenance is not an object" in item
+                            for item in payload["problems"]))
+
+    def test_source_commit_mismatch_is_rejected(self):
+        self.report["provenance"]["source_commit"] = "d" * 40
+        status, payload = self._verify()
+        self.assertEqual(status, 1)
+        self.assertTrue(any("does not match the report" in item
+                            for item in payload["problems"]))
+
+    def test_report_path_mismatch_is_rejected(self):
+        self.report["path"] = str(self.run_dir / "elsewhere")
+        status, payload = self._verify()
+        self.assertEqual(status, 1)
+        self.assertTrue(any("does not name the report directory" in item
+                            for item in payload["problems"]))
+
+    def test_raw_size_mismatch_is_rejected(self):
+        self.report["raw"]["tar_bytes"] += 1
+        status, payload = self._verify()
+        self.assertEqual(status, 1)
+        self.assertTrue(any("raw guest evidence size does not match" in item
                             for item in payload["problems"]))
 
 

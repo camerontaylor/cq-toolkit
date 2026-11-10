@@ -19,6 +19,7 @@ import importlib.util
 import json
 import os
 import pathlib
+import re
 import shutil
 import subprocess
 import sys
@@ -42,6 +43,8 @@ GUEST_PHASES = ("prepare", "switch-node", "switch-python", "interrupt",
                 "recover-kill", "recover", "recover-repeat", "inspect", "fence")
 NODE_RUNTIME = "node:" + "b" * 40
 PYTHON_RUNTIME = "python"
+HEX40 = re.compile(r"[0-9a-f]{40}\Z")
+HEX64 = re.compile(r"[0-9a-f]{64}\Z")
 LIMITATIONS = [
     "One representative harmless fixture is installed under the allowlisted "
     "unit name crq-tick.service; no production template is rendered.",
@@ -624,28 +627,163 @@ def verify_raw_evidence(report, raw_root):
     elif vm.sha256_file(staged) != _sha(expected_unit(NODE_RUNTIME)):
         problems.append("staged target bytes do not match the requested runtime")
 
-    uploads = (report.get("provenance") or {}).get("uploads") or {}
+    provenance = report.get("provenance")
+    uploads = provenance.get("uploads") if isinstance(provenance, dict) else None
     if not isinstance(uploads, dict):
         problems.append("upload provenance is not an object")
     else:
-        for name, entry in uploads.items():
-            if pathlib.PurePosixPath(name).name != name:
-                problems.append("upload provenance name is unsafe: " + str(name))
-                continue
-            raw_path = raw_root / "proof-bin" / name
+        proof_bin = raw_root / "proof-bin"
+        retained = ({entry.name for entry in proof_bin.iterdir()
+                     if entry.is_file() and not entry.is_symlink()}
+                    if proof_bin.is_dir() else set())
+        if retained != set(UPLOADS):
+            problems.append("raw upload set does not match the expected "
+                            "controller and fixture scripts")
+        for name in UPLOADS:
+            entry = uploads.get(name)
+            raw_path = proof_bin / name
             if raw_path.is_symlink() or not raw_path.is_file():
                 problems.append("raw upload is missing: " + name)
-            elif vm.sha256_file(raw_path) != (entry or {}).get("sha256"):
+            elif not isinstance(entry, dict) \
+                    or not _sha256_text(entry.get("sha256")):
+                continue
+            elif vm.sha256_file(raw_path) != entry["sha256"]:
                 problems.append("raw upload digest does not match: " + name)
     return problems
 
 
+def _sha256_text(value):
+    return isinstance(value, str) and HEX64.fullmatch(value) is not None
+
+
+def _commit_text(value):
+    return isinstance(value, str) and HEX40.fullmatch(value) is not None
+
+
+def _artifact_path(run_dir, name):
+    if not isinstance(name, str) or not name:
+        return None
+    if pathlib.PurePosixPath(name).name != name:
+        return None
+    path = pathlib.Path(run_dir) / name
+    if path.is_symlink() or not path.is_file():
+        return None
+    return path
+
+
+def validate_provenance(report, run_dir):
+    """Require complete, nonempty and source-bound report provenance."""
+    problems = []
+    raw_path = None
+    declared = report.get("path")
+    if not isinstance(declared, str) or not declared:
+        problems.append("report path is missing")
+    else:
+        try:
+            if pathlib.Path(declared).resolve() != pathlib.Path(run_dir).resolve():
+                problems.append("report path does not name the report directory")
+        except OSError:
+            problems.append("report path is invalid")
+
+    provenance = report.get("provenance")
+    if not isinstance(provenance, dict):
+        problems.append("report provenance is not an object")
+        provenance = {}
+    commit = report.get("source_commit")
+    described_commit = provenance.get("source_commit")
+    if not _commit_text(commit):
+        problems.append("report source commit is invalid")
+    if not _commit_text(described_commit):
+        problems.append("provenance source commit is invalid")
+    elif _commit_text(commit) and described_commit != commit:
+        problems.append("provenance source commit does not match the report")
+
+    guest_artifact = None
+    for name in ("host_script", "guest_script"):
+        entry = provenance.get(name)
+        if not isinstance(entry, dict):
+            problems.append(name + " provenance is missing")
+            continue
+        if set(entry) != {"artifact", "sha256"}:
+            problems.append(name + " provenance has the wrong fields")
+            continue
+        artifact = entry["artifact"]
+        digest = entry["sha256"]
+        if not _sha256_text(digest):
+            problems.append(name + " digest is invalid")
+        path = _artifact_path(run_dir, artifact)
+        if path is None:
+            problems.append(name + " artifact is missing")
+        elif _sha256_text(digest) and vm.sha256_file(path) != digest:
+            problems.append(name + " artifact digest does not match")
+        if name == "guest_script":
+            guest_artifact = artifact
+    if provenance.get("guest_report") != guest_artifact:
+        problems.append("guest report provenance does not match the guest script")
+
+    uploads = provenance.get("uploads")
+    if not isinstance(uploads, dict):
+        problems.append("upload provenance is not an object")
+    else:
+        if set(uploads) != set(UPLOADS):
+            problems.append("upload provenance set does not match the expected "
+                            "controller and fixture scripts")
+        for name in UPLOADS:
+            entry = uploads.get(name)
+            if not isinstance(entry, dict):
+                problems.append("upload provenance is missing: " + name)
+                continue
+            if set(entry) != {"sha256", "remote_sha256", "bytes", "verified"}:
+                problems.append("upload provenance fields are wrong: " + name)
+                continue
+            local, remote = entry["sha256"], entry["remote_sha256"]
+            if not _sha256_text(local) or not _sha256_text(remote):
+                problems.append("upload digest is invalid: " + name)
+            elif local != remote:
+                problems.append("upload local and remote digests differ: " + name)
+            if type(entry["bytes"]) is not int or entry["bytes"] <= 0:
+                problems.append("upload size is invalid: " + name)
+            if entry["verified"] is not True:
+                problems.append("upload is not verified: " + name)
+
+    raw = report.get("raw")
+    if not isinstance(raw, dict):
+        problems.append("report raw evidence is not an object")
+    elif set(raw) != {"tar_sha256", "tar_bytes", "raw_tar"}:
+        problems.append("report raw evidence has the wrong fields")
+    else:
+        if not _sha256_text(raw["tar_sha256"]):
+            problems.append("raw evidence digest is invalid")
+        if type(raw["tar_bytes"]) is not int or raw["tar_bytes"] <= 0:
+            problems.append("raw evidence size is invalid")
+        raw_path = _artifact_path(run_dir, raw["raw_tar"])
+        if raw_path is None:
+            problems.append("raw guest evidence is missing")
+        else:
+            if _sha256_text(raw["tar_sha256"]) \
+                    and vm.sha256_file(raw_path) != raw["tar_sha256"]:
+                problems.append("raw guest evidence digest does not match")
+            if type(raw["tar_bytes"]) is int \
+                    and raw_path.stat().st_size != raw["tar_bytes"]:
+                problems.append("raw guest evidence size does not match")
+    return problems, raw_path
+
+
 def cmd_verify(args):
     report = json.loads(pathlib.Path(args.report).read_text())
+    if not isinstance(report, dict):
+        print(json.dumps({"report": str(args.report),
+                          "problems": ["report is not an object"]},
+                         indent=2, sort_keys=True))
+        return 1
     problems = []
     if report.get("schema_version") != SCHEMA_VERSION or report.get("kind") != KIND:
         problems.append("report schema or kind is not this proof")
-    checks, recomputed = build_checks(report.get("phases") or {})
+    phases = report.get("phases")
+    if not isinstance(phases, dict):
+        problems.append("report phases are not an object")
+        phases = {}
+    checks, recomputed = build_checks(phases)
     if checks != report.get("checks"):
         problems.append("stored checks do not match recomputed checks")
     if recomputed != report.get("problems"):
@@ -653,25 +791,10 @@ def cmd_verify(args):
     for problem in recomputed:
         if problem not in problems:
             problems.append(problem)
-    run_dir = pathlib.Path(report.get("path") or args.report)
-    provenance = report.get("provenance") or {}
-    for name, expected in (("host_script", report.get("provenance", {}).get(
-            "host_script", {}).get("artifact")),
-                           ("guest_script", report.get("provenance", {}).get(
-                               "guest_script", {}).get("artifact"))):
-        entry = provenance.get(name) or {}
-        artifact = run_dir / (expected or "")
-        if not expected or not artifact.is_file():
-            problems.append(name + " artifact is missing")
-        elif vm.sha256_file(artifact) != entry.get("sha256"):
-            problems.append(name + " artifact digest does not match")
-    raw = report.get("raw") or {}
-    raw_path = run_dir / (raw.get("raw_tar") or "")
-    if not raw.get("raw_tar") or not raw_path.is_file():
-        problems.append("raw guest evidence is missing")
-    elif vm.sha256_file(raw_path) != raw.get("tar_sha256"):
-        problems.append("raw guest evidence digest does not match")
-    if raw.get("raw_tar") and raw_path.is_file():
+    run_dir = pathlib.Path(args.report).resolve().parent
+    provenance_problems, raw_path = validate_provenance(report, run_dir)
+    problems.extend(provenance_problems)
+    if raw_path is not None:
         try:
             with tempfile.TemporaryDirectory(prefix="crq-proof-verify-") as scratch:
                 raw_root = pathlib.Path(scratch) / "raw"
