@@ -133,7 +133,10 @@ const FIX_CONTRACT_OUTPUT_SCHEMA = toOutputSchema('review.fixItem/v2', FixOutput
  * (fixReviewItem module doc). Deterministic: same input → same text. The
  * untrusted review content (body, comments) rides inside labeled fences.
  * Reports whether any composition cap fired (body or comment head-caps —
- * the `truncated` signal).
+ * the `truncated` signal). `capComments: false` makes the prior comments
+ * ride whole; review.fixFinding uses it so clipped review content can never
+ * reach the worker, and the whole-request bound refuses an oversized
+ * request before dispatch instead. review.fixItem keeps the historical cap.
  *
  * `instructions` is the caller's already-scanned guidance (review.fixFinding
  * bounds and NUL-checks it before calling). It is TRUSTED caller data, so it
@@ -143,6 +146,7 @@ const FIX_CONTRACT_OUTPUT_SCHEMA = toOutputSchema('review.fixItem/v2', FixOutput
 const composeUserPrompt = (
   input: FixReviewItemInput,
   instructions: string | undefined,
+  capComments: boolean,
 ): { text: string; truncated: boolean } => {
   const lines: string[] = ['Fix the reviewed item below.'];
   if (input.repo !== undefined) {
@@ -217,11 +221,15 @@ const composeUserPrompt = (
     let index = 0;
     for (const comment of input.item.comments) {
       index += 1;
-      const capped = headCapped(comment.body, MAX_COMMENT_CHARS);
-      truncated = truncated || capped.truncated;
       const author = comment.authorLogin ?? 'unknown author';
       const at = comment.createdAt ?? 'unknown time';
-      lines.push(defangFenceLines(`${index}. ${author} (${at}): ${capped.text}`));
+      if (capComments) {
+        const capped = headCapped(comment.body, MAX_COMMENT_CHARS);
+        truncated = truncated || capped.truncated;
+        lines.push(defangFenceLines(`${index}. ${author} (${at}): ${capped.text}`));
+      } else {
+        lines.push(defangFenceLines(`${index}. ${author} (${at}): ${comment.body}`));
+      }
     }
     lines.push(FENCE_END);
   }
@@ -310,6 +318,13 @@ interface RunFixWorkerOptions {
   /** Trusted caller guidance, already bounded by the calling op. */
   instructions?: string;
   /**
+   * Head-cap prior comments at MAX_COMMENT_CHARS. Defaults to true (the
+   * historical review.fixItem behavior). review.fixFinding passes false so
+   * every accepted comment is dispatched whole; an oversized request is
+   * then refused by `maxSerializedChars` before `driver.run`.
+   */
+  capComments?: boolean;
+  /**
    * Whole-request bound in UTF-16 code units. When set, the seam measures
    * the exact `{ normalizedInput, invocation }` JSON object it is about to
    * hand the driver and returns `request-refused` BEFORE `driver.run`.
@@ -353,14 +368,14 @@ export const serializedDispatchChars = (
 export function prepareFixWorker(
   input: FixReviewItemInput,
   resolved: ResolvedDriver,
-  options: Pick<RunFixWorkerOptions, 'instructions'> = {},
+  options: Pick<RunFixWorkerOptions, 'instructions' | 'capComments'> = {},
 ): FixWorkerPreparation {
   const harness = input.harness ?? defaultHarnessConfig;
   const system = headCapped(
     input.promptOverride ?? defaultFixPrompt,
     harness.promptBudget.maxSystemPromptChars,
   );
-  const user = composeUserPrompt(input, options.instructions);
+  const user = composeUserPrompt(input, options.instructions, options.capComments ?? true);
   return {
     invocation: {
       prompt: `${system.text}\n\n${user.text}`,

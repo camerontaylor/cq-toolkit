@@ -31,8 +31,9 @@ describe('review.fixFinding non-ok mapping', () => {
     const result = await op(findingInput());
     expect(result.status).toBe('failed');
     if (result.status === 'failed') {
-      expect(result.error).toContain('no parseable fix contract');
-      expect(result.error).toContain('store-1');
+      expect(result.error).toBe('fixFinding: complete run carried no parseable fix contract');
+      expect(result.error).not.toContain('store-1');
+      expect(result.error).not.toContain('nonsense');
     }
     expect(reportOf(result)).toEqual({
       failureClass: 'evidence',
@@ -74,8 +75,8 @@ describe('review.fixFinding non-ok mapping', () => {
     const result = await op(findingInput());
     expect(result.status).toBe('indeterminate');
     if (result.status === 'indeterminate') {
-      expect(result.detail).toContain('driver aborted the run');
-      expect(result.detail).toContain('store-1');
+      expect(result.detail).toBe('fixFinding: driver aborted the run');
+      expect(result.detail).not.toContain('store-1');
     }
     expect(reportOf(result)).toEqual({
       failureClass: 'transient',
@@ -99,8 +100,9 @@ describe('review.fixFinding non-ok mapping', () => {
     const result = await op(findingInput());
     expect(result.status).toBe('failed');
     if (result.status === 'failed') {
-      expect(result.error).toContain('errorClass=rate-limit');
-      expect(result.error).toContain('429 with retry-after');
+      expect(result.error).toBe('fixFinding: driver reported an error stop; errorClass=rate-limit');
+      expect(result.error).not.toContain('429 with retry-after');
+      expect(result.error).not.toContain('store-1');
     }
     expect(reportOf(result)).toEqual({
       failureClass: 'transient',
@@ -145,8 +147,10 @@ describe('review.fixFinding non-ok mapping', () => {
     const result = await op(findingInput());
     expect(result.status).toBe('needs-human');
     if (result.status === 'needs-human') {
-      expect(result.reason).toContain('the fix worker could not dispatch');
-      expect(result.reason).toContain('no lane binding for role fixer');
+      expect(result.reason).toBe(
+        'fixFinding: the fix worker could not dispatch (driver resolution failed)',
+      );
+      expect(result.reason).not.toContain('no lane binding');
     }
     expect(reportOf(result)).toEqual({ failureClass: 'transient' });
   });
@@ -157,7 +161,8 @@ describe('review.fixFinding non-ok mapping', () => {
     const result = await op(findingInput());
     expect(result.status).toBe('needs-human');
     if (result.status === 'needs-human') {
-      expect(result.reason).toContain('driver could not dispatch the worker');
+      expect(result.reason).toBe('fixFinding: the driver could not dispatch the worker');
+      expect(result.reason).not.toContain('scriptedFactory');
     }
     expect(reportOf(result)).toEqual({ failureClass: 'transient' });
   });
@@ -183,8 +188,67 @@ describe('review.fixFinding non-ok mapping', () => {
     expect(outcome.outcome).toBe('completed');
     if (outcome.outcome === 'completed') {
       expect(outcome.value.status).toBe('indeterminate');
+      if (outcome.value.status === 'indeterminate') {
+        expect(outcome.value.detail).toBe('fixFinding: the driver run was cancelled');
+        expect(outcome.value.detail).not.toContain('scriptedFactory');
+      }
       expect(reportOf(outcome.value)).toEqual({ failureClass: 'transient' });
     }
+  });
+
+  test('a run throw carrying the invocation prompt does not leak it into the artifact', async () => {
+    const marker = 'SECRET_INSTRUCTION_MARKER';
+    const op = makeFixFinding({
+      drivers: {
+        resolve: (req) => ({
+          driver: {
+            run: async (invocation) => {
+              throw new Error(`driver exploded: ${invocation.prompt}`);
+            },
+          },
+          lane: 'ai-sdk',
+          modelSpec: req.modelSpec,
+        }),
+      },
+    });
+    const result = await op(findingInput({ instructions: marker }));
+    expect(result.status).toBe('needs-human');
+    if (result.status === 'needs-human') {
+      expect(result.reason).toBe('fixFinding: the driver could not dispatch the worker');
+      expect(result.reason).not.toContain(marker);
+      expect(result.reason).not.toContain('driver exploded');
+    }
+    expect(reportOf(result)).toEqual({ failureClass: 'transient' });
+  });
+
+  test('an error stop carrying request text exposes only the typed errorClass', async () => {
+    const marker = 'SECRET_ERROR_MARKER';
+    const { op } = scriptedFindingOp([
+      completeWorker(undefined, {
+        stopReason: 'error',
+        errorClass: 'provider-error',
+        error: `upstream failed: ${marker}`,
+        usage: EVIDENCE,
+        denials: DENIALS,
+        sessionId: 'session-SECRET',
+      }),
+    ]);
+    const result = await op(findingInput());
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed') {
+      expect(result.error).toBe(
+        'fixFinding: driver reported an error stop; errorClass=provider-error',
+      );
+      expect(result.error).not.toContain(marker);
+      expect(result.error).not.toContain('session-SECRET');
+    }
+    expect(reportOf(result)).toEqual({
+      failureClass: 'exhausted',
+      errorClass: 'provider-error',
+      usage: EVIDENCE,
+      denials: DENIALS,
+      sessionId: 'session-SECRET',
+    });
   });
 
   test('an ok result carries no report envelope', async () => {

@@ -2,9 +2,9 @@
 //
 // Hermetic by construction: the DriverFactory seam is the same scripted fake
 // the fixReviewItem suites use — no network, no spawned processes, no
-// filesystem writes. The measurement helpers build the EXACT invocation with
-// the production seam helpers, so the bound tests do not duplicate prompt
-// composition.
+// filesystem writes. The bound tests capture the ACTUAL invocation from the
+// scripted driver and serialize it independently, so the measurement oracle
+// is not the production measurement.
 import type { WorkerResult } from '../../../src/driver/types.js';
 import { defaultHarnessConfig } from '../../../src/harness/config.js';
 import type {
@@ -13,12 +13,6 @@ import type {
   FixFindingOp,
 } from '../../../src/ops/review/fixFinding.js';
 import { makeFixFinding } from '../../../src/ops/review/fixFinding.js';
-import { normalizeReviewFixInput } from '../../../src/ops/review/fixReviewItem.js';
-import type { FixReviewItemInput } from '../../../src/ops/review/fixReviewItem.js';
-import {
-  prepareFixWorker,
-  serializedDispatchChars,
-} from '../../../src/ops/review/internal/fixWorker.js';
 import type { FixFindingReport, FixFindingResult } from '../../../src/ops/review/fixFinding.js';
 import { baseInput, scriptedFactory } from './fixReviewItem.helpers.js';
 
@@ -65,24 +59,6 @@ export const reportOf = (result: Awaited<ReturnType<FixFindingOp>>): FixFindingR
     throw new Error(`expected a report envelope on '${result.status}'`);
   }
   return result.report as FixFindingReport;
-};
-
-/**
- * Measure the production whole-request envelope for this input: the same
- * normalized input object and the same prepared invocation the op hands the
- * driver. Uses the production seam helpers, never a re-derivation.
- */
-export const measureDispatch = (input: FixFindingInput): number => {
-  const normalized = normalizeReviewFixInput(input) as FixReviewItemInput;
-  const resolved = scriptedFactory([]).drivers.resolve({
-    role: 'fixer',
-    modelSpec: input.driver,
-    harness: input.harness ?? defaultHarnessConfig,
-  });
-  const prepared = prepareFixWorker(normalized, resolved, {
-    ...(input.instructions !== undefined ? { instructions: input.instructions } : {}),
-  });
-  return serializedDispatchChars(normalized, prepared.invocation);
 };
 
 /** A harness with the system-prompt cap raised so bound tests stay linear. */

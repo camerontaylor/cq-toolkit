@@ -167,10 +167,6 @@ const refused = (error: string): OpResultArtifact<FixFindingResult> => ({
   report: { failureClass: 'evidence' } satisfies FixFindingReport,
 });
 
-/** The pinned ` (session X)` fragment; undefined means no fragment. */
-const sessionOf = (sessionId: string | undefined): string =>
-  sessionId === undefined ? '' : ` (session ${sessionId})`;
-
 /**
  * Preserve the worker's typed spend/session evidence on a non-ok report.
  * `denials` and `usage` are present whenever the driver produced a
@@ -191,26 +187,34 @@ const failureReport = (
     : {}),
 });
 
-/** Cancellation detail per dispatch phase (no prose inference). */
+/**
+ * Cancellation detail per dispatch phase. The raw throwable message is
+ * deliberately NOT copied: a driver may put the invocation, request text or
+ * a secret in it, and the artifact is persisted by the CLI/runner.
+ */
 const cancelledDetail = (run: Extract<FixWorkerRun, { kind: 'cancelled' }>): string => {
   if (run.phase === 'resolve') {
-    return `fixFinding: the fix worker could not be resolved (cancelled): ${run.message}`;
+    return 'fixFinding: the fix worker was cancelled before dispatch (driver resolution)';
   }
   if (run.phase === 'prompt') {
-    return `fixFinding: prompt preparation cancelled: ${run.message}`;
+    return 'fixFinding: the fix worker was cancelled before dispatch (prompt preparation)';
   }
-  return `fixFinding: driver crashed: ${run.message}`;
+  return 'fixFinding: the driver run was cancelled';
 };
 
-/** Pre-dispatch environment-gap reason per phase (no prose inference). */
+/**
+ * Pre-dispatch environment-gap reason per phase. Like the cancellation
+ * detail, this is a fixed diagnostic: no raw throwable text, request content
+ * or secret reaches the persisted artifact.
+ */
 const dispatchGapReason = (run: Extract<FixWorkerRun, { kind: 'dispatch-gap' }>): string => {
   if (run.phase === 'resolve') {
-    return `fixFinding: the fix worker could not dispatch: ${run.message}`;
+    return 'fixFinding: the fix worker could not dispatch (driver resolution failed)';
   }
   if (run.phase === 'prompt') {
-    return `fixFinding: invalid harness for prompt preparation: ${run.message}`;
+    return 'fixFinding: the fix worker could not dispatch (prompt preparation failed)';
   }
-  return `fixFinding: driver could not dispatch the worker: ${run.message}`;
+  return 'fixFinding: the driver could not dispatch the worker';
 };
 
 /**
@@ -258,6 +262,9 @@ export function makeFixFinding(deps: FixFindingDeps): FixFindingOp {
 
     const run = await runFixWorker(normalized, deps, {
       ...(normalized.instructions !== undefined ? { instructions: normalized.instructions } : {}),
+      // No truncated review content: prior comments ride whole, and an
+      // oversized request is refused by the bound below before dispatch.
+      capComments: false,
       maxSerializedChars: MAX_SERIALIZED_DISPATCH_CHARS,
       serializedInput: normalized,
     });
@@ -292,16 +299,17 @@ export function makeFixFinding(deps: FixFindingDeps): FixFindingOp {
     if (run.kind === 'aborted') {
       return {
         status: 'indeterminate',
-        detail: `fixFinding: driver aborted the run${sessionOf(run.worker.sessionId)}`,
+        detail: 'fixFinding: driver aborted the run',
         report: failureReport('transient', run.worker),
       };
     }
     if (run.kind === 'error') {
-      const detail = run.errorText === undefined ? '' : `: ${run.errorText}`;
       const classText = run.errorClass === undefined ? '' : `; errorClass=${run.errorClass}`;
       return {
         status: 'failed',
-        error: `fixFinding: driver reported an error stop${sessionOf(run.worker.sessionId)}${classText}${detail}`,
+        // Typed class only: the driver's raw error text may contain request
+        // content or a secret, and this error is persisted.
+        error: `fixFinding: driver reported an error stop${classText}`,
         report: failureReport(failureClassForError(run.errorClass), run.worker, run.errorClass),
       };
     }
@@ -310,7 +318,7 @@ export function makeFixFinding(deps: FixFindingDeps): FixFindingOp {
     if (contract.kind === 'invalid') {
       return {
         status: 'failed',
-        error: `fixFinding: complete run carried no parseable fix contract${sessionOf(run.worker.sessionId)}`,
+        error: 'fixFinding: complete run carried no parseable fix contract',
         report: failureReport('evidence', run.worker),
       };
     }
