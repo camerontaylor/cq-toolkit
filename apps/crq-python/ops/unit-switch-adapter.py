@@ -387,6 +387,8 @@ class GuestFixtureAdapter:
             self.refuse("snapshot path parent escapes the unit directory")
 
     def validate_snapshot(self, unit, snapshot):
+        self._validate_layout()
+        self._check_guest()
         if unit != self.unit:
             self.refuse("snapshot unit does not match the adapter unit")
         if not isinstance(snapshot, dict) or set(snapshot) != {

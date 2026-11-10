@@ -462,6 +462,9 @@ def cmd_verify(args):
         problems.append("stored checks do not match recomputed checks")
     if recomputed != report.get("problems"):
         problems.append("stored problems do not match recomputed problems")
+    for problem in recomputed:
+        if problem not in problems:
+            problems.append(problem)
     run_dir = pathlib.Path(report.get("path") or args.report)
     provenance = report.get("provenance") or {}
     for name, expected in (("host_script", report.get("provenance", {}).get(

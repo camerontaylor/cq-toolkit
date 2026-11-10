@@ -263,6 +263,14 @@ class AdapterTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             gated.preflight(UNIT, NODE)
 
+    def test_validate_snapshot_enforces_guest_gate(self):
+        snapshot = self._snapshot()
+        gated = adapter_mod.GuestFixtureAdapter(
+            self.unit_dir, self.fixture_dir, proof_root=self.proof_root,
+            guest_only=True, runner=self.fake.run)
+        with self.assertRaises(RuntimeError):
+            gated.validate_snapshot(UNIT, snapshot)
+
     def test_sequence_rejects_malformed_log(self):
         self.completions.write_text("{not json}\n")
         with self.assertRaises(RuntimeError):

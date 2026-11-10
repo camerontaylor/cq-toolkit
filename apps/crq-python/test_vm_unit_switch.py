@@ -225,6 +225,16 @@ class VerifyTests(unittest.TestCase):
         self.assertEqual(status, 1)
         self.assertTrue(any("checks" in item for item in payload["problems"]))
 
+    def test_failed_checks_are_rejected_even_when_stored_problems_match(self):
+        self.report["phases"]["switch-node"]["installed_runtime"] = PYTHON
+        checks, problems = harness.build_checks(self.report["phases"])
+        self.report["checks"] = checks
+        self.report["problems"] = problems
+        status, payload = self._verify()
+        self.assertEqual(status, 1)
+        self.assertTrue(any("switch-node_completed" in item
+                            for item in payload["problems"]))
+
     def test_missing_raw_evidence_is_rejected(self):
         self.raw.unlink()
         status, payload = self._verify()
