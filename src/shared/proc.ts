@@ -392,6 +392,19 @@ function createCollector(
   const restBuf = { text: '', bytes: 0 }; // the pending unterminated line
   let droppedBytes = 0;
   let oversizedLine = false;
+  // Dispatch one line to every listener under isolation (same pattern as
+  // `fireRung`): a driver-supplied listener that throws must neither abort
+  // collection of the remaining lines nor escape the 'close' handler — a
+  // throw from `flush()` there would skip `settleClose` and hang `close`.
+  const emit = (line: string): void => {
+    for (const listener of listeners) {
+      try {
+        listener(line);
+      } catch {
+        // deliberately swallowed — a listener throw must not break collection
+      }
+    }
+  };
   // Trim a buffer back under the cap, cutting whole CODE POINTS off the
   // head (a cut between the halves of an astral pair would leave a lone
   // surrogate — corruption at the head of retained evidence) and measuring
@@ -428,7 +441,7 @@ function createCollector(
         if (Buffer.byteLength(line) > maxRetainedBytes) oversizedLine = true;
         restBuf.text = restBuf.text.slice(index + 1);
         restBuf.bytes -= Buffer.byteLength(line) + 1; // + the consumed '\n'
-        for (const listener of listeners) listener(line);
+        emit(line);
         index = restBuf.text.indexOf('\n');
       }
       // Bound the PENDING line — a single unterminated line must not grow
@@ -452,7 +465,7 @@ function createCollector(
         if (Buffer.byteLength(finalLine) > maxRetainedBytes) oversizedLine = true;
         restBuf.text = '';
         restBuf.bytes = 0;
-        for (const listener of listeners) listener(finalLine);
+        emit(finalLine);
       }
     },
     get text(): string {
