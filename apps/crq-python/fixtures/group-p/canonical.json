@@ -28,6 +28,25 @@
       }
     },
     {
+      "name": "receipt-key-order-is-code-point-not-utf16be",
+      "source": "review_receipt.canonical+digest",
+      "input": {
+        "value": {
+          "\uffff": 1,
+          "\ud800\udc00": 2,
+          "a": 3,
+          "\u00e9": 4
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "canonical": "{\"a\":3,\"\\u00e9\":4,\"\\uffff\":1,\"\\ud800\\udc00\":2}",
+          "sha256": "204208c99307f25a0f31257c47be233c77f2034ad19196f864aa5eaa6e7cea8f"
+        }
+      }
+    },
+    {
       "name": "receipt-ascii-escapes-unicode",
       "source": "review_receipt.canonical+digest",
       "input": {
@@ -61,6 +80,22 @@
       }
     },
     {
+      "name": "receipt-escapes-del-and-unicode-separators",
+      "source": "review_receipt.canonical+digest",
+      "input": {
+        "value": {
+          "text": "\u0000\u0001\b\u000b\f\u001f\u007f\u0080\u2028\u2029\"\\/"
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "canonical": "{\"text\":\"\\u0000\\u0001\\b\\u000b\\f\\u001f\\u007f\\u0080\\u2028\\u2029\\\"\\\\/\"}",
+          "sha256": "6c5a28a8783d0f34feeff51011076fa7752ab4062a2db342f020e9c81da1cd1e"
+        }
+      }
+    },
+    {
       "name": "receipt-python-float-repr-is-preserved",
       "source": "review_receipt.canonical+digest",
       "input": {
@@ -76,6 +111,29 @@
         "value": {
           "canonical": "{\"exponent\":1e+20,\"float\":1.0,\"negative_zero\":-0.0,\"small\":0.1}",
           "sha256": "3fb781c9de5dc6be458d6cf72c4235b8a87c88fcc1249cdfc65bf5f9ae0aca4d"
+        }
+      }
+    },
+    {
+      "name": "receipt-float-repr-boundaries",
+      "source": "review_receipt.canonical+digest",
+      "input": {
+        "value": {
+          "fixed_high": 1000000000000000.0,
+          "scientific_high": 1e+16,
+          "fixed_low": 0.0001,
+          "scientific_low": 1e-05,
+          "subnormal": 5e-324,
+          "maximum": 1.7976931348623157e+308,
+          "integer_valued": 1234567890123456.0,
+          "shortest_round_trip": 0.30000000000000004
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "canonical": "{\"fixed_high\":1000000000000000.0,\"fixed_low\":0.0001,\"integer_valued\":1234567890123456.0,\"maximum\":1.7976931348623157e+308,\"scientific_high\":1e+16,\"scientific_low\":1e-05,\"shortest_round_trip\":0.30000000000000004,\"subnormal\":5e-324}",
+          "sha256": "1de5017d6f6630196a2d972f8886cefe2639532fb939bc8e4e823d71b462427b"
         }
       }
     },
@@ -171,6 +229,41 @@
         "value": {
           "canonical": "{\"control\":\"\\u0001\",\"emoji\":\"\ud83d\ude00\",\"unicode\":\"\u96ea\"}",
           "sha256": "a028ec0202315ebef0a30f54c020a963fb0c89f3733641201ccf6f0d4439cb9c"
+        }
+      }
+    },
+    {
+      "name": "ledger-escapes-controls-and-del",
+      "source": "review_ledger.canonical+digest",
+      "input": {
+        "value": {
+          "text": "\u0000\u0001\b\u000b\f\u001f\u007f\u0080\u2028\u2029\"\\/"
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "canonical": "{\"text\":\"\\u0000\\u0001\\b\\u000b\\f\\u001f\u007f\u0080\u2028\u2029\\\"\\\\/\"}",
+          "sha256": "f2e5bd45131de8d9a66a13c496c5ce344cf7ab7ff96c2b1392d869e2f84e588b"
+        }
+      }
+    },
+    {
+      "name": "ledger-astral-and-bmp-scalars-stay-literal",
+      "source": "review_ledger.canonical+digest",
+      "input": {
+        "value": {
+          "emoji": "\ud83d\ude00",
+          "unicode": "\u96ea",
+          "del": "\u007f",
+          "separator": "\u2028"
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "canonical": "{\"del\":\"\u007f\",\"emoji\":\"\ud83d\ude00\",\"separator\":\"\u2028\",\"unicode\":\"\u96ea\"}",
+          "sha256": "c8b0daf34712cde9fc77536694bbec1020e2ffa1c74c41e09f8825031bcd834c"
         }
       }
     },
