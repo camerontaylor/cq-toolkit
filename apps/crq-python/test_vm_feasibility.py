@@ -419,8 +419,12 @@ class EvidenceTests(unittest.TestCase):
                            "jobs2_before_stop": [
                                "116 crq-queued.service start waiting",
                                "135 crq-queued-fixture.service start waiting"],
-                           "queued_run_delta": [],
-                           "queued2_run_delta": []},
+                           "queued_jobs_after_release": {
+                               "settled": True, "jobs": []},
+                           "queued_jobs2_after_release": {
+                               "settled": True, "jobs": []},
+                           "queued_run_delta": ["queued"],
+                           "queued2_run_delta": ["queued"]},
             "mask": {"native_mask": {"rc": 1},
                      "alias_native_mask": {"rc": 1},
                      "alias_direct": {"rc": 1},
@@ -540,6 +544,37 @@ class EvidenceTests(unittest.TestCase):
                   "qemu_identity_verified": True}
         checks = vm.build_checks(phases, manager, reboot)
         self.assertFalse(checks["queued_setup_proven"])
+
+    def test_queued_jobs_must_settle_before_sampling_runs(self):
+        phases = self._phases()
+        phases["activation"]["queued_jobs_after_release"] = {
+            "settled": False, "jobs": ["96 crq-queued-fixture.service start running"]}
+        manager = {"before": self._snapshot(10, "i1", "boot-1"),
+                   "after": self._snapshot(11, "i2", "boot-1"),
+                   "after_phase": self._refusals()}
+        reboot = {"before": self._snapshot(11, "i2", "boot-1"),
+                  "after": self._snapshot(12, "i3", "boot-2"),
+                  "after_phase": self._refusals(),
+                  "boot_id_before": "boot-1", "boot_id_after": "boot-2",
+                  "qemu_pid_before": 99, "qemu_pid_after": 99,
+                  "qemu_identity_verified": True}
+        checks = vm.build_checks(phases, manager, reboot)
+        self.assertFalse(checks["queued_jobs_settled_after_mask"])
+
+    def test_manager_restart_run_log_detects_a_new_service(self):
+        phases = self._phases()
+        before = self._snapshot(10, "i1", "boot-1")
+        after = self._snapshot(11, "i2", "boot-1")
+        after["runs"] = [{"label": "service"}]
+        manager = {"before": before, "after": after,
+                   "after_phase": self._refusals()}
+        reboot = {"before": after, "after": self._snapshot(12, "i3", "boot-2"),
+                  "after_phase": self._refusals(),
+                  "boot_id_before": "boot-1", "boot_id_after": "boot-2",
+                  "qemu_pid_before": 99, "qemu_pid_after": 99,
+                  "qemu_identity_verified": True}
+        checks = vm.build_checks(phases, manager, reboot)
+        self.assertFalse(checks["no_new_service_after_manager_restart"])
 
     def _bound_report(self, base):
         phases = self._phases()

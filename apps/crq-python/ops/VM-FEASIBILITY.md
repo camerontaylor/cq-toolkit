@@ -299,14 +299,18 @@ service is the property under test.
 
 ```sh
 # On a Linux host with writable /dev/kvm, qemu and cloud-localds.
+commit=$(git rev-parse HEAD)
 python3 apps/crq-python/ops/vm-feasibility.py --state-dir ~/crq-vm-feasibility/state plan
 python3 apps/crq-python/ops/vm-feasibility.py --state-dir ~/crq-vm-feasibility/state \
-  --tools ~/crq-vm-feasibility/tools run
+  --tools ~/crq-vm-feasibility/tools --source-commit "$commit" run
 python3 apps/crq-python/ops/vm-feasibility.py --state-dir ~/crq-vm-feasibility/state \
   verify ~/crq-vm-feasibility/state/runs/<run>/report.json
 python3 apps/crq-python/ops/vm-feasibility.py --state-dir ~/crq-vm-feasibility/state \
   destroy --run-id <run>
 ```
+
+`CRQ_VM_SOURCE_COMMIT` may supply the commit instead of the flag; an unbound
+`run` is refused.
 
 Run the named tests locally:
 

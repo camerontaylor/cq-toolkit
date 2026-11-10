@@ -355,7 +355,13 @@ def report_problems(report: dict, *, require_evidence: bool = False) -> list[str
                  "run_after_trigger_observed", "no_run_after_trigger",
                  "activator_states_after_reboot", "run_log_observed_after_reboot",
                  "metadata_observed", "queued_observations_present",
-                 "queued_setup_proven", "no_new_service_after_reboot"):
+                 "queued_setup_proven", "queued_jobs_settled_after_mask",
+                 "queued_jobs_settled_after_stop",
+                 "queued_wrapper_ran_after_mask",
+                 "queued_wrapper_ran_after_stop",
+                 "run_log_observed_after_manager_restart",
+                 "no_new_service_after_manager_restart",
+                 "no_new_service_after_reboot"):
         if checks.get(name) is not True:
             problems.append("check not proven: " + name)
     if checks.get("queued_job_executed_after_mask") is None:
@@ -775,6 +781,9 @@ def build_checks(phases: dict, manager: dict, reboot: dict) -> dict:
     def succeeded(result):
         return isinstance(result, dict) and result.get("rc") == 0
 
+    def settled(result):
+        return isinstance(result, dict) and result.get("settled") is True
+
     queued_setup_proven = (
         succeeded(activation.get("queue_blocker"))
         and succeeded(activation.get("queue_start"))
@@ -824,6 +833,14 @@ def build_checks(phases: dict, manager: dict, reboot: dict) -> dict:
             isinstance(activation.get("queued_run_delta"), list)
             and isinstance(activation.get("queued2_run_delta"), list)),
         "queued_setup_proven": queued_setup_proven,
+        "queued_jobs_settled_after_mask": settled(
+            activation.get("queued_jobs_after_release")),
+        "queued_jobs_settled_after_stop": settled(
+            activation.get("queued_jobs2_after_release")),
+        "queued_wrapper_ran_after_mask":
+        "queued" in (activation.get("queued_run_delta") or []),
+        "queued_wrapper_ran_after_stop":
+        "queued" in (activation.get("queued2_run_delta") or []),
         "queued_job_executed_after_mask": None,
         "queued_job_executed_after_stop": None,
         "native_mask_refused": (mask.get("native_mask") or {}).get("rc") not in (0, None),
@@ -873,12 +890,18 @@ def build_checks(phases: dict, manager: dict, reboot: dict) -> dict:
     delta2 = activation.get("queued2_run_delta")
     if isinstance(delta2, list):
         checks["queued_job_executed_after_stop"] = "queued-fixture" in delta2
-    before_runs = (reboot.get("before") or {}).get("runs")
-    after_runs = (reboot.get("after") or {}).get("runs")
-    if isinstance(before_runs, list) and isinstance(after_runs, list):
-        new_runs = after_runs[len(before_runs):] if len(after_runs) >= len(before_runs) else after_runs
-        checks["no_new_service_after_reboot"] = not any(
-            entry.get("label") in ("service", "dependent", "alias") for entry in new_runs)
+    for label, before_snapshot, after_snapshot in (
+            ("manager_restart", manager.get("before"), manager.get("after")),
+            ("reboot", reboot.get("before"), reboot.get("after"))):
+        before_runs = (before_snapshot or {}).get("runs")
+        after_runs = (after_snapshot or {}).get("runs")
+        if isinstance(before_runs, list) and isinstance(after_runs, list):
+            observed = len(after_runs) >= len(before_runs)
+            new_runs = after_runs[len(before_runs):] if observed else after_runs
+            checks["run_log_observed_after_" + label] = observed
+            checks["no_new_service_after_" + label] = not any(
+                entry.get("label") in ("service", "dependent", "alias")
+                for entry in new_runs)
     return checks
 
 

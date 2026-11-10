@@ -357,6 +357,17 @@ def wait_jobs(unit, present, timeout):
     return jobs()
 
 
+def wait_jobs_settle(units, timeout):
+    """Wait until none of the queued wrapper/fixture jobs remain."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        lines = jobs()
+        if not any(unit in line for line in lines for unit in units):
+            return {"settled": True, "jobs": lines}
+        time.sleep(0.25)
+    return {"settled": False, "jobs": jobs()}
+
+
 def activation():
     result = {"direct": start_ok("direct", "crq-fixture.service"),
               "dependency": start_ok("dependency", "crq-dependent.service")}
@@ -376,6 +387,8 @@ def activation():
     result["masked_state"] = unit_state("crq-queued-fixture.service")
     result["jobs_after_mask"] = jobs()
     result["jobs_after_release"] = wait_jobs("crq-blocker.service", False, 40)
+    result["queued_jobs_after_release"] = wait_jobs_settle(
+        ("crq-queued.service", "crq-queued-fixture.service"), 40)
     result["queued_run_delta"] = [entry.get("label") for entry in runs()[before:]]
     result["queued_state"] = unit_state("crq-queued.service")
     result["queued_fixture_state"] = unit_state("crq-queued-fixture.service")
@@ -394,6 +407,8 @@ def activation():
     result["mask2"] = mask_unit("crq-queued-fixture.service")
     result["reload2"] = systemctl("daemon-reload")
     result["jobs2_after_release"] = wait_jobs("crq-blocker.service", False, 40)
+    result["queued_jobs2_after_release"] = wait_jobs_settle(
+        ("crq-queued.service", "crq-queued-fixture.service"), 40)
     result["queued2_run_delta"] = [entry.get("label") for entry in runs()[before:]]
     result["restore_queued_fixture2"] = restore_unit("crq-queued-fixture.service")
     result["reload2_after_restore"] = systemctl("daemon-reload")
