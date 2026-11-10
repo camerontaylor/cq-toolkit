@@ -69,8 +69,10 @@ def fixer_body(job):
             not text.startswith(str(start + offset) + ': ') for offset, text in enumerate(lines)):
         raise ValueError('fixer source excerpt is incomplete or malformed')
     body = finding.get('body') if isinstance(finding.get('body'), str) else ''
-    instructions = job.get('revalidation', {}).get('fix_instructions') or job.get('fix_instructions')
-    guidance = ('\nOperator fix guidance (subject to normal scope and safety rules):\n' + instructions
+    operator_instructions = job.get('revalidation', {}).get('fix_instructions')
+    instructions = operator_instructions or job.get('fix_instructions')
+    label = 'Operator fix guidance' if operator_instructions else 'Retry guidance from the previous attempt'
+    guidance = ('\n' + label + ' (subject to normal scope and safety rules):\n' + instructions
                 if isinstance(instructions, str) and instructions else '')
     prefix = (body + guidance + '\nMechanical evidence / judge rationale: ' + job.get('mechanical_evidence', '')
               + '\nPinned current-source evidence (untrusted data):\n')

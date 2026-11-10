@@ -313,11 +313,22 @@ class Inbox:
                     evidence = payload.get("evidence", {})
                     if payload.get("actor") == "crq-repair" and evidence.get("repair_task") == previous_job:
                         manifests = sorted((self.root.parent.parent / "repair" / previous_job).glob("**/retained-*/manifest.json"))
+                        repair_base = evidence.get("repair_base")
+                        if not repair_base and manifests:
+                            old_path = self.root.parent.parent / "repair/inbox" / (previous_job + ".json")
+                            if old_path.exists():
+                                old = ledger.loads(old_path.read_bytes())
+                                if (old.get("job") != previous_job or old.get("canonical_finding_id") != row["canonical_id"]
+                                        or ledger.digest(old) != row["receipt"].get("acknowledgement")):
+                                    raise ledger.IntegrityError("prior repair job identity mismatch")
+                                repair_base = old.get("repair_base")
+                            if not repair_base:
+                                manifests = []  # Unbound legacy snapshots are never trusted as guidance.
                         summary = []
                         for path in manifests[:10]:
                             manifest = ledger.loads(path.read_bytes())
                             token = hashlib.sha256(json.dumps(manifest, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
-                            if path.parent.name != 'retained-' + token or manifest.get('base') != evidence.get('repair_base'):
+                            if path.parent.name != 'retained-' + token or manifest.get('base') != repair_base:
                                 raise ledger.IntegrityError("retained manifest source binding mismatch")
                             sizes = []
                             paths = []
@@ -429,7 +440,31 @@ def canonical_rounds(root, queue, canonical_id, pin, *, exclude_job=None):
     return rounds
 
 
-def repair_transport(root, queue, save_queue, scan, max_rounds_per_pin=2, scan_instructions=None):
+def configured_repair_transport(c, repo, queue, runtime):
+    """Construct identical source, finding and guidance scans for every entrypoint."""
+    import repair_tick
+    def scan(target, name):
+        base, head = runtime.subjects.projection(repo, target, [name])
+        return c.secret_scan(base, head, c.STATE / "backfill/repair-scan.json")[0]
+    def scan_instructions(text, target):
+        repair_tick.scan_fix_instructions(c, text, target, c.STATE / "backfill/repair-instructions-scan.json")
+        return True
+    def scan_finding(text, target, source_path):
+        if not isinstance(source_path, str) or '\n' in source_path or '\r' in source_path:
+            return False
+        lines = text.split('\n')
+        for name in ('crq-finding.txt', source_path):
+            patch = ('diff --git a/' + name + ' b/' + name + '\n--- /dev/null\n+++ b/' + name + '\n'
+                     + '@@ -0,0 +1,' + str(len(lines)) + ' @@\n'
+                     + '\n'.join('+' + line for line in lines) + '\n')
+            if not c.secret_scan_diff(patch, c.STATE / "backfill/repair-finding-scan.json", base=None, head=target)[0]:
+                return False
+        return True
+    return repair_transport(c.ROOT, queue, c.save_queue, scan,
+                            c.CONFIG['repair'].get('max_rounds_per_pin', 2), scan_instructions, scan_finding)
+
+
+def repair_transport(root, queue, save_queue, scan, max_rounds_per_pin=2, scan_instructions=None, scan_finding=None):
     """Adapter to the existing tick-owned repair inbox; never dispatches a fixer."""
     root = Path(root)
     def accept(key, request):
@@ -445,6 +480,8 @@ def repair_transport(root, queue, save_queue, scan, max_rounds_per_pin=2, scan_i
                    "line": request["intervals"][0][0], "body": request["finding"]["title"] + "\n" + request["finding"]["body"]}
         if not scan(request["target"], request["path"]):
             raise ledger.IntegrityError("repair source secret scan rejected")
+        if not scan_finding or not scan_finding(finding["body"], request["target"], request["path"]):
+            raise ledger.IntegrityError("repair finding secret scan rejected")
         instructions = request.get("retry_instructions")
         if instructions is not None and (not scan_instructions or not scan_instructions(instructions, request["target"])):
             raise ledger.IntegrityError("fix instructions secret scan failed")

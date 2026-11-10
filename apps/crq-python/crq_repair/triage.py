@@ -273,7 +273,7 @@ def phase(inbox, repo, tip, judge, transport, at, *, maximum=6, seconds=600, dry
                 except RepairRoundCeiling as exc:
                     inbox.triage(row['finding']['id'], repo, tip, 'needs-human', 'crq-triage/delivery', str(exc), at,
                                  failure_class='exhausted', expected_previous_event_id=row['previous_event_id'])
-                except (RuntimeError, OSError):
+                except (RuntimeError, OSError, ValueError):
                     delivery_deferred += 1
     return {'total': len(rows), 'judged': judged, 'unjudged': len(candidates) - judged,
             'counts': dict(collections.Counter(o['action'] for o in outcomes)),

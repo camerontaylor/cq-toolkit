@@ -1448,7 +1448,7 @@ class CanonicalFixedProjectionTest(unittest.TestCase):
         confirmed = self.inbox.triage(self.fid, self.f.repo, self.published,
                                       'confirmed', 'fixture', 'valid source', self.at)
         self.queue = {'items': []}
-        transport = finding_delivery.repair_transport(self.root, self.queue, lambda _: None, lambda *_: True)
+        transport = finding_delivery.repair_transport(self.root, self.queue, lambda _: None, lambda *_: True, scan_finding=lambda *_: True)
         receipt = self.inbox.deliver(self.fid, transport, self.at)
         self.job_id = receipt['repair_task']
         self.record = next(iter(self.queue['items'][0]['repair_runs'].values()))

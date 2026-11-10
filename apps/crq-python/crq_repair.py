@@ -539,7 +539,6 @@ def triage_phase(config, dry_run=False):
     import crq as c
     import backfill_runtime as runtime
     import finding_delivery
-    import repair_tick
     from crq_repair.triage import phase
     from runtime_target import DEFAULT_REF
     state = ROOT / 'state'
@@ -571,13 +570,7 @@ def triage_phase(config, dry_run=False):
         receipt = []
         def deliver_locked():
             queue = c.load_queue()
-            def scan(target, name):
-                base, head = runtime.subjects.projection(repo, target, [name])
-                return c.secret_scan(base, head, state / 'backfill/repair-scan.json')[0]
-            def scan_instructions(instructions, target):
-                repair_tick.scan_fix_instructions(c, instructions, target, state / 'backfill/repair-instructions-scan.json')
-                return True
-            accept = finding_delivery.repair_transport(ROOT, queue, c.save_queue, scan, config['repair'].get('max_rounds_per_pin', 2), scan_instructions)
+            accept = finding_delivery.configured_repair_transport(c, repo, queue, runtime)
             receipt.append(accept(key, request))
         if not c.ran_locked(deliver_locked):
             raise RuntimeError('tick busy; confirmed delivery will retry')

@@ -16,7 +16,7 @@ from test_review_ledger import rehash
 class PhaseTest(FindingTest):
     def run_phase(self, report=None, dry=False, maximum=6):
         queue = {'items': []}
-        transport = delivery.repair_transport(self.root, queue, lambda q: None, lambda *_: True)
+        transport = delivery.repair_transport(self.root, queue, lambda q: None, lambda *_: True, scan_finding=lambda *_: True)
         judge = mock.Mock(return_value=report or {'stop': 'ok', 'verdict': 'valid', 'reason': 'source confirms',
                         'current_path': 'a', 'current_lines': [[1, 1]], 'quoted_text': 'one'})
         result = phase(self.inbox, self.f.repo, self.t, judge, transport, AT, dry_run=dry, maximum=maximum)
@@ -49,9 +49,80 @@ class PhaseTest(FindingTest):
         event = next(e for e in self.out.retained() if e['payload'].get('action') == 'confirmed')
         self.assertEqual(event['payload']['evidence']['failure_class'], 'evidence')
 
-    def test_pin_ceiling_terminates_and_does_not_rejudge(self):
+    def test_refused_context_cannot_upload_rejected_finding_text(self):
+        queue = {'items': []}
+        calls = []
+        def scan_diff(patch, *args, **kwargs):
+            calls.append(patch)
+            return (False, {})
+        c = SimpleNamespace(ROOT=self.root, STATE=self.root / 'state', CONFIG={'repair': {}},
+                            save_queue=lambda q: None, secret_scan=mock.Mock(return_value=(True, {})),
+                            secret_scan_diff=scan_diff)
+        runtime = SimpleNamespace(subjects=SimpleNamespace(projection=lambda *args: ('base', 'head')))
+        transport = delivery.configured_repair_transport(c, self.f.repo, queue, runtime)
+        judge = mock.Mock(return_value={'stop': 'ok', 'verdict': 'unsure',
+                                        'context_scan_refused': True, 'reason': 'scan rejected'})
+        result = phase(self.inbox, self.f.repo, self.t, judge, transport, AT)
+        self.assertEqual(result['delivery_deferred'], 1)
+        self.assertEqual(result['delivered'], 0)
+        self.assertEqual(queue['items'], [])
+        self.assertFalse(list((self.root / 'state/repair/inbox').glob('*.json')))
+        self.assertEqual(len(calls), 1)
+        self.assertIn('+Issue\n+Details', calls[0])
+
+    def test_delivery_integrity_failure_does_not_block_other_confirmed_finding(self):
+        self.add_pending_candidate()
+        for fid in (self.fid, 'f' * 64):
+            self.inbox.triage(fid, self.f.repo, self.t, 'confirmed', 'judge', 'verified', AT)
         queue = {'items': []}
         transport = delivery.repair_transport(self.root, queue, lambda q: None, lambda *_: True,
+                                              scan_finding=lambda *_: True)
+        actual = self.inbox.deliver
+        def deliver(fid, *args):
+            if fid == self.fid:
+                raise ValueError('instruction scanner refused')
+            return actual(fid, *args)
+        judge = mock.Mock()
+        with mock.patch.object(self.inbox, 'deliver', side_effect=deliver):
+            result = phase(self.inbox, self.f.repo, self.t, judge, transport, AT)
+            repeated = phase(self.inbox, self.f.repo, self.t, judge, transport, AT)
+        self.assertEqual((result['delivery_deferred'], result['delivered']), (1, 1))
+        self.assertEqual((repeated['delivery_deferred'], repeated['delivered']), (1, 0))
+        judge.assert_not_called()
+        self.assertEqual(len(queue['items']), 1)
+
+    def test_unbound_legacy_manifest_does_not_block_another_finding(self):
+        from crq_repair.retain import retain
+        self.inbox = delivery.Inbox(self.root / 'state/backfill/findings', self.out)
+        self.inbox.ingest(self.value)
+        queue = {'items': []}
+        transport = delivery.repair_transport(self.root, queue, lambda q: None, lambda *_: True,
+                         scan_finding=lambda *_: True, scan_instructions=lambda *_: True)
+        self.inbox.triage(self.fid, self.f.repo, self.t, 'confirmed', 'judge', 'valid', AT)
+        first = self.inbox.deliver(self.fid, transport, AT)
+        job_id = first['repair_task']
+        retain(self.f.repo.root, self.t, self.root / 'state/repair' / job_id / 'final', include_clean=True)
+        self.inbox.repair_outcome(self.fid, job_id, 'needs-retriage', 'legacy failure', AT)
+        job_path = self.root / 'state/repair/inbox' / (job_id + '.json')
+        old = ledger.loads(job_path.read_bytes()); old['repair_base'] = 'f' * 40
+        ledger.atomic(job_path, ledger.canonical(old))
+        self.inbox.triage(self.fid, self.f.repo, self.t, 'confirmed', 'judge', 'valid again', AT)
+        self.add_pending_candidate()
+        other_path = self.inbox.root / 'triage' / ('f' * 64 + '.json')
+        other = ledger.loads(other_path.read_bytes()); other.pop('receipt', None)
+        ledger.atomic(other_path, ledger.canonical(other))
+        self.inbox.triage('f' * 64, self.f.repo, self.t, 'confirmed', 'judge', 'valid', AT)
+        judge = mock.Mock()
+        result = phase(self.inbox, self.f.repo, self.t, judge, transport, AT)
+        repeated = phase(self.inbox, self.f.repo, self.t, judge, transport, AT)
+        self.assertEqual((result['delivery_deferred'], result['delivered']), (1, 1))
+        self.assertEqual((repeated['delivery_deferred'], repeated['delivered']), (1, 0))
+        judge.assert_not_called()
+        self.assertEqual(len(queue['items']), 2)
+
+    def test_pin_ceiling_terminates_and_does_not_rejudge(self):
+        queue = {'items': []}
+        transport = delivery.repair_transport(self.root, queue, lambda q: None, lambda *_: True, scan_finding=lambda *_: True,
                                               max_rounds_per_pin=1, scan_instructions=lambda *_: True)
         judge = mock.Mock(return_value={'stop': 'ok', 'verdict': 'valid', 'reason': 'verified',
                             'current_path': 'a', 'current_lines': [[1, 1]], 'quoted_text': 'one'})
