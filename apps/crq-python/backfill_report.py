@@ -9,6 +9,9 @@ def finding_triage(root, *, strict=True, limit=None):
     """Read atomic rows; status may expose partial counts with explicit errors."""
     counts = collections.Counter()
     needs_human = []
+    owner_decisions = []
+    operator_attention = []
+    owner_count = operator_count = 0
     context_failures = []
     human_count = error_count = context_failure_count = 0
     errors = []
@@ -40,9 +43,20 @@ def finding_triage(root, *, strict=True, limit=None):
                 context_failures.append({**detail, "status": status, "context_error": row["context_error"]})
         if status == "needs-human":
             human_count += 1
+            failure_class = row.get("failure_class") or "owner-decision"
+            target = owner_decisions if failure_class == "owner-decision" else operator_attention
+            if failure_class == "owner-decision":
+                owner_count += 1
+            else:
+                operator_count += 1
+            if limit is None or len(target) < limit:
+                target.append({**detail, "failure_class": failure_class})
             if limit is None or len(needs_human) < limit:
                 needs_human.append(detail)
     result = {"counts": dict(sorted(counts.items())), "needs_human": needs_human}
+    if human_count:
+        result.update(owner_decisions=owner_decisions, operator_attention=operator_attention,
+                      owner_decisions_count=owner_count, operator_attention_count=operator_count)
     if context_failure_count:
         result["context_failures"] = context_failures
         result["context_failures_count"] = context_failure_count

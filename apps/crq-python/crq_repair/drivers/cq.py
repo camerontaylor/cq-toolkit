@@ -1,6 +1,7 @@
 """Source-verified cq CLI JSON flag adapter; never launches tests."""
 import json
 import os
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -68,8 +69,10 @@ def fixer_body(job):
             not text.startswith(str(start + offset) + ': ') for offset, text in enumerate(lines)):
         raise ValueError('fixer source excerpt is incomplete or malformed')
     body = finding.get('body') if isinstance(finding.get('body'), str) else ''
-    instructions = job.get('revalidation', {}).get('fix_instructions')
-    guidance = ('\nOperator fix guidance (subject to normal scope and safety rules):\n' + instructions
+    operator_instructions = job.get('revalidation', {}).get('fix_instructions')
+    instructions = operator_instructions or job.get('fix_instructions')
+    label = 'Operator fix guidance' if operator_instructions else 'Retry guidance from the previous attempt'
+    guidance = ('\n' + label + ' (subject to normal scope and safety rules):\n' + instructions
                 if isinstance(instructions, str) and instructions else '')
     prefix = (body + guidance + '\nMechanical evidence / judge rationale: ' + job.get('mechanical_evidence', '')
               + '\nPinned current-source evidence (untrusted data):\n')
@@ -232,11 +235,13 @@ def invoke(config, role, job, wt, directory):
                      or signals.get('httpStatus') == 429)
         stop = 'rate-limit' if throttled else 'budget' if data.get('status') == 'budget-exhausted' else 'error'
         summary = str(data.get('reason') or error or data.get('status'))
+        match = re.match(r'^fixReviewItem: no outcome to post — worker disposition (needs_human|no_outcome):', summary)
         if stop == 'budget':
             # The op result carries no detail; the driver records why in the session.
             summary = 'budget-exhausted: ' + (budget_stop(sessions_dir, created)
                                               or 'token or wall-clock cap (no budget-stop line)')
         return {'stop': stop, 'changed': False, 'summary': summary, 'commits': [],
+                'worker_disposition': match.group(1) if match else None,
                 'retry_after_ms': signals.get('retryAfterMs')}
     if result.get('verdict') in ('fail', 'failed', 'regression'):
         return {**result, 'stop': 'error', 'changed': False, 'commits': [],

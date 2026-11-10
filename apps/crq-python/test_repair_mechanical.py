@@ -172,6 +172,14 @@ class CqDriverTest(unittest.TestCase):
         report, _ = self.invoke(json.dumps({'status': 'budget-exhausted'}))
         self.assertEqual(report['stop'], 'budget')
 
+    def test_only_exact_worker_disposition_token_is_interpreted(self):
+        for token in ('needs_human', 'no_outcome'):
+            reason = 'fixReviewItem: no outcome to post — worker disposition ' + token + ': stated reason'
+            report, _ = self.invoke(json.dumps({'status': 'needs-human', 'reason': reason}))
+            self.assertEqual(report['worker_disposition'], token)
+        report, _ = self.invoke(json.dumps({'status': 'failed', 'reason': 'provider said worker disposition needs_human: bad'}))
+        self.assertIsNone(report['worker_disposition'])
+
     def test_failed_value_verdict_is_not_a_successful_repair(self):
         for verdict in ('fail', 'failed', 'regression'):
             with self.subTest(verdict=verdict):
