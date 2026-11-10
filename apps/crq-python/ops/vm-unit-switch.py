@@ -941,6 +941,29 @@ def _files_ok(files, service_sha=None):
         for path, allowed in FILE_TYPES.items())
 
 
+def _views_agree(metadata, files):
+    for path in (SERVICE_PATH, TIMER_PATH, WANTS_PATH, STAGED_PATH):
+        meta = metadata[path]
+        file = files[path]
+        if meta["type"] != file["type"]:
+            return False
+        if meta["type"] == "missing":
+            continue
+        for field in ("mode", "uid", "gid"):
+            if (type(meta[field]) is not int
+                    or type(file[field]) is not int
+                    or meta[field] != file[field]):
+                return False
+        if meta["type"] == "file":
+            if (meta["size"] != file["size"]
+                    or meta["sha256"] != file["sha256"]):
+                return False
+        elif meta["type"] == "symlink":
+            if meta["target"] != file["target"]:
+                return False
+    return True
+
+
 def _process_ok(value, alive):
     return (isinstance(value, dict)
             and type(value.get("pid")) is int and value["pid"] > 0
@@ -1007,6 +1030,7 @@ def _snapshot_preservation_ok(snapshot, service_sha=None):
     completions = snapshot.get("completions")
     files = snapshot.get("files")
     if not (isinstance(state, dict)
+            and set(state) == {"queue.json", "heartbeat.json"}
             and _sha256_text(state.get("queue.json"))
             and _sha256_text(state.get("heartbeat.json"))):
         return False
@@ -1032,9 +1056,8 @@ def _snapshot_preservation_ok(snapshot, service_sha=None):
         return False
     if not _files_ok(files, service_sha):
         return False
-    for path in (SERVICE_PATH, TIMER_PATH):
-        if metadata[path].get("sha256") != files[path].get("sha256"):
-            return False
+    if not _views_agree(metadata, files):
+        return False
     if not isinstance(jobs, list) or not _record_list_ok(records):
         return False
     if not _all_records_ok(all_records):

@@ -839,6 +839,87 @@ class HarnessCheckTests(unittest.TestCase):
         self.assertFalse(checks["drain_alive_refused"])
         self.assertTrue(problems)
 
+        value = phases()
+        value["drain-alive"]["before"]["state"][
+            "/unrelated/queue.json"] = "f" * 64
+        checks, problems = harness.build_checks(value)
+        self.assertFalse(checks["drain_alive_refused"])
+        self.assertTrue(problems)
+
+    def test_drain_snapshot_rejects_contradictory_views(self):
+        for field in ("mode", "uid", "gid"):
+            with self.subTest(field=field):
+                value = phases()
+                for side in ("before", "after"):
+                    value["drain-alive"][side]["files"][
+                        harness.SERVICE_PATH][field] += 1
+                checks, problems = harness.build_checks(value)
+                self.assertFalse(checks["drain_alive_refused"])
+                self.assertTrue(problems)
+
+        value = phases()
+        for side in ("before", "after"):
+            value["drain-alive"][side]["files"][
+                harness.SERVICE_PATH]["size"] += 1
+        checks, problems = harness.build_checks(value)
+        self.assertFalse(checks["drain_alive_refused"])
+        self.assertTrue(problems)
+
+        value = phases()
+        for side in ("before", "after"):
+            value["drain-alive"][side]["files"][
+                harness.TIMER_PATH]["sha256"] = _sha("other-timer")
+        checks, problems = harness.build_checks(value)
+        self.assertFalse(checks["drain_alive_refused"])
+        self.assertTrue(problems)
+
+        value = phases()
+        for side in ("before", "after"):
+            value["drain-alive"][side]["files"][
+                harness.SERVICE_PATH]["mode"] = True
+        checks, problems = harness.build_checks(value)
+        self.assertFalse(checks["drain_alive_refused"])
+        self.assertTrue(problems)
+
+        value = phases()
+        staged = value["drain-alive"]["before"]["metadata"][harness.TIMER_PATH]
+        for side in ("before", "after"):
+            value["drain-alive"][side]["metadata"][
+                harness.STAGED_PATH] = json.loads(json.dumps(staged))
+        checks, problems = harness.build_checks(value)
+        self.assertFalse(checks["drain_alive_refused"])
+        self.assertTrue(problems)
+
+        value = phases()
+        value["drain-alive"]["after"] = json.loads(json.dumps(
+            value["drain-alive"]["after"]))
+        value["drain-alive"]["after"]["metadata"][
+            harness.SERVICE_PATH]["mode"] += 1
+        value["drain-alive"]["after"]["files"][
+            harness.SERVICE_PATH]["mode"] += 1
+        checks, problems = harness.build_checks(value)
+        self.assertFalse(checks["drain_alive_refused"])
+        self.assertTrue(problems)
+
+    def test_drain_snapshot_allows_consistent_optional_paths(self):
+        value = phases()
+        for side in ("before", "after"):
+            snap = value["drain-alive"][side]
+            staged = json.loads(json.dumps(snap["metadata"][harness.TIMER_PATH]))
+            snap["metadata"][harness.STAGED_PATH] = staged
+            snap["files"][harness.STAGED_PATH] = {
+                "path": harness.STAGED_PATH, "type": "file",
+                "mode": staged["mode"], "uid": staged["uid"],
+                "gid": staged["gid"], "sha256": staged["sha256"],
+                "size": staged["size"]}
+            snap["files"][harness.COMPLETIONS_PATH] = {
+                "path": harness.COMPLETIONS_PATH, "type": "file",
+                "mode": 0o644, "uid": 1000, "gid": 1000,
+                "sha256": _sha("completions"), "size": 1}
+        checks, problems = harness.build_checks(value)
+        self.assertTrue(checks["drain_alive_refused"], problems)
+        self.assertFalse(problems)
+
     def test_recovery_record_must_match_its_path_and_size(self):
         for side in ("record_before", "record_after"):
             with self.subTest(path=side):
