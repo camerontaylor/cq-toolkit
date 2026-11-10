@@ -47,6 +47,43 @@ class Adapter:
         self.running = snapshot[1]
 
 
+def pending_unit_switch():
+    return {
+        "schema_version": dc.JOURNAL_SCHEMA,
+        "transaction_id": "a" * 32,
+        "operation": "unit_switch",
+        "unit": "crq-slot.service",
+        "runtime": "node:" + "b" * 40,
+        "prior_runtime": "python",
+        "outcome": "pending",
+        "at": "2026-10-27T00:00:00Z",
+        "snapshot": {},
+        "state": None,
+        "phase": "snapshot",
+    }
+
+
+def pending_checkout(operation):
+    return {
+        "schema_version": dc.JOURNAL_SCHEMA,
+        "transaction_id": "b" * 32,
+        "operation": operation,
+        "outcome": "pending",
+        "at": "2026-10-27T00:00:00Z",
+        "intended_operation": ("rollback" if operation.startswith("rollback")
+                               else "deploy"),
+        "prior_state": {},
+        "prior_head": "a" * 40,
+        "prior_config_sha256": None,
+        "prior_tag": None,
+        "target": "c" * 40,
+        "tag": "crq-runner/20261027-1",
+        "helper_sha256": "ab" * 32,
+        "automatic_rollback_permitted": False,
+        "rollback_compatibility": {},
+    }
+
+
 class UnitSwitchTests(ControllerFixture):
     def test_preservation_baseline_is_captured_after_drain(self):
         self.write_state("queue.json", {"version": "before"})
@@ -195,17 +232,14 @@ class UnitSwitchTests(ControllerFixture):
             dc.recover_unit(self.effects, adapter, path)
 
     def test_pending_unit_intent_blocks_deploy_and_rollback(self):
-        self.effects.journal_append({"schema_version": dc.JOURNAL_SCHEMA,
-                                     "operation": "unit_switch", "outcome": "pending"})
+        self.effects.journal_append(pending_unit_switch())
         with self.assertRaisesRegex(dc.Refused, "unfinished unit switch"):
             dc.deploy_plan(self.effects, None, "", "", self.overlay_path)
         with self.assertRaisesRegex(dc.Refused, "unfinished unit switch"):
             dc.rollback_plan(self.effects, None, {}, self.overlay_path)
 
     def test_resolution_prose_cannot_clear_pending_unit_intent(self):
-        path = self.effects.journal_append({"schema_version": dc.JOURNAL_SCHEMA,
-                                            "operation": "unit_switch",
-                                            "outcome": "pending"})
+        path = self.effects.journal_append(pending_unit_switch())
         note = self.record_dir / "OPERATOR-RESOLUTION.md"
         for contents in ("Resolution for controller-foreign.json: done.\n",
                          path.name + "\n"):
@@ -241,9 +275,7 @@ class UnitSwitchTests(ControllerFixture):
             dc.switch_unit(self.effects, InterruptedAdapter("python"), "crq-tick.service",
                            "node:" + "a" * 40)
         path = next(self.record_dir.glob("controller-*.json"))
-        retained = self.effects.journal_append({"schema_version": dc.JOURNAL_SCHEMA,
-                                                "operation": "rollback_pending",
-                                                "outcome": "pending"})
+        retained = self.effects.journal_append(pending_checkout("rollback_pending"))
         retained_before = retained.read_bytes()
         adapter = Adapter("python")
         with self.assertRaisesRegex(dc.Refused, "unfinished checkout switch"):

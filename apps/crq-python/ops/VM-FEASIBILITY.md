@@ -109,30 +109,33 @@ Implemented in the existing controller (2026-11-11; no second store):
 
 - `refuse_unfinished_transactions(effects, exclude=None)` is the one guard for
   checkout deploy/rollback and unit switch/recovery. It classifies every
-  `controller-*.json` by `(operation, outcome)`:
+  `controller-*.json` by its producer-specific operation, outcome and minimum
+  identity:
   - `deploy_pending`/`rollback_pending` and `unit_switch` with `pending` or
     `recovery_required` block every new transaction;
   - completed `deploy`/`rollback` (including the first producer's outcome-less
     completed journals), `deploy_refused`/`rollback_refused`, and
     completed/rolled-back `unit_switch` records are history and do not block;
-  - a `recovery_required` record is history only when its retained
-    `prior_state` has the exact captured-state shape and
-    `no_change_observation` still matches HEAD, config bytes, checkout status,
-    installed CRQ user units and preserved state; changed or unobservable
-    surfaces are unfinished, and a legacy record without that identity is an
-    unsupported legacy resolution;
-  - unreadable, non-object, wrong-schema, unknown-operation and invalid-outcome
-    records refuse naming the record.
+  - a `recovery_required` record is never resolved from its retained
+    `prior_state`: those digests cover file bytes and link targets only, not
+    unit metadata, activation or live work, so it remains unfinished. A record
+    without the producer identity is an unsupported legacy record. Both refuse;
+    neither is silently treated as history;
+  - classification reads only the record, never later host state, so an
+    unrelated transaction cannot turn accepted history into a blocker;
+  - unreadable, non-object, wrong-schema, unknown-operation, invalid-outcome
+    and incomplete completed/refused records refuse naming the record.
 - `recover_unit` calls the same guard with `exclude=<its own record>`, so a
   legitimate recovery does not block itself while any other unfinished
-  transaction still does.
+  transaction still does. Unrelated completed/refused history does not block.
 - The guard only reads. `OPERATOR-RESOLUTION.md` prose is never consumed and
   every pre-existing record's bytes are unchanged. The owner rejected a
   separate `controller-<id>.resolution.json` store; none was added.
 - `test_deploy_controller_interop.py` covers pending deploy/rollback blocking
-  unit switch and checkout operations, unresolved checkout recovery,
-  verifiably unchanged recovery history, legacy recovery without identity,
-  completed/refused history, unit-recovery self-exclusion, malformed/unknown
+  unit switch and checkout operations, unresolved checkout recovery (including
+  matching digests that are not resolution), classification stability across
+  later state, legacy recovery without identity, completed/refused history,
+  unit-recovery self-exclusion with unrelated history, malformed/incomplete
   records, prepare-host render-intent records, and byte preservation.
 
 Remaining gaps (not fixed here): the CLI still accepts an arbitrary

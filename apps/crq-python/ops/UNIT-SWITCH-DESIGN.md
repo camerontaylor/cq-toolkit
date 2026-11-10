@@ -105,16 +105,20 @@ single `start` call is not evidence that production release is safe.
 
 Checkout deploy/rollback and unit switch/recovery now share one symmetric
 unfinished-transaction guard in the supplied journal directory. It classifies
-every ``controller-*.json`` record by ``(operation, outcome)``: pending
-deploy/rollback and pending or recovery-required unit transactions block both
-seams; completed deploy/rollback, ``refused_no_change``, completed/rolled-back
-unit switches, and a ``recovery_required`` record whose retained prior identity
-still matches the physical state are history and do not block. ``recover_unit``
+every ``controller-*.json`` record by its producer-specific operation, outcome
+and minimum identity: pending deploy/rollback and pending or recovery-required
+unit transactions block both seams; completed deploy/rollback,
+``refused_no_change``, and completed/rolled-back unit switches are history and
+do not block. A ``recovery_required`` record is never resolved from its stored
+digests: those cover file bytes and link targets only, not unit metadata,
+activation or live work, so it remains unfinished (or an unsupported legacy
+record when its producer identity is incomplete). Classification reads only the
+record, so it is stable across later unrelated transactions. ``recover_unit``
 excludes exactly the record it is recovering, so a legitimate recovery does not
-block itself. Unreadable, malformed, unknown, unsupported-schema and legacy
-recovery records without a verifiable prior identity refuse with the record
-named; ``OPERATOR-RESOLUTION.md`` prose is never consumed and original record
-bytes are never rewritten.
+block itself. Unreadable, malformed, unknown, unsupported-schema and
+unsupported-legacy records refuse with the record named;
+``OPERATOR-RESOLUTION.md`` prose is never consumed and original record bytes are
+never rewritten.
 
 The remaining gaps are unchanged: the guard only sees the caller-supplied
 directory (the CLI still accepts an arbitrary ``--record-dir``), older binaries

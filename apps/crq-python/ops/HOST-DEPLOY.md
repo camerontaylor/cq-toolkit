@@ -348,21 +348,22 @@ or infer automatic rollback permission from a pending/recovery receipt.
 
 Records are never rewritten after their outcome is final (only the pending
 intent is replaced by its outcome). A single symmetric preflight classifies
-every `controller-*.json` record before checkout deploy/rollback or unit
-switch/recovery. `deploy_pending`/`rollback_pending` and pending or
+every `controller-*.json` record by its producer-specific operation, outcome and
+minimum identity. `deploy_pending`/`rollback_pending` and pending or
 recovery-required unit switches block both seams. Completed `deploy`/`rollback`
 (including the first producer's outcome-less completed journals),
-`deploy_refused`/`rollback_refused`, completed/rolled-back unit switches, and a
-`recovery_required` record whose retained `prior_state` still matches the
-physical state (HEAD, config bytes, checkout status, installed CRQ user units
-and preserved state) do not block. A `recovery_required` record whose surfaces
-changed, or a legacy record without a verifiable `prior_state`, refuses with the
-record named; `OPERATOR-RESOLUTION.md` prose is not read and is not a
-resolution. `recover_unit` excludes exactly the record it is recovering. Every
-pre-existing record's bytes are unchanged. The guard still only sees the
-supplied `--record-dir`; a second directory and older binaries can bypass it,
-and the lock is checkout-local. Production reconciliation of the actual record
-root and old callers remains parent-owned.
+`deploy_refused`/`rollback_refused`, and completed/rolled-back unit switches are
+history and do not block. A `recovery_required` record is not history even when
+its retained `prior_state` still matches HEAD, config bytes, checkout status,
+installed CRQ user units and preserved state: those digests do not cover unit
+metadata, activation or live work, so a recovery record remains unfinished (or
+an unsupported legacy record when its producer identity is incomplete).
+Classification reads only the record, so a later unrelated transaction cannot
+turn accepted history into a blocker. `recover_unit` excludes exactly the record
+it is recovering. Every pre-existing record's bytes are unchanged. The guard
+still only sees the supplied `--record-dir`; a second directory and older
+binaries can bypass it, and the lock is checkout-local. Production
+reconciliation of the actual record root and old callers remains parent-owned.
 
 A completed journal is written only after the checks and durable completion
 write succeed. Pending/recovery/unknown outcomes are not rollback inputs;

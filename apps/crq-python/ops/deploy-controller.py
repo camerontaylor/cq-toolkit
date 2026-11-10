@@ -1322,48 +1322,181 @@ def recover_unit(effects, adapter, path):
         return completed
 
 
-def _retained_prior_state(record):
-    """The exact captured-state identity this controller wrote before mutation.
-
-    Returns the validated dict, or None when the record does not retain enough
-    identity to verify a stale recovery mechanically. The shape is exact: a
-    missing or extra surface would go unobserved, and an unobserved surface is
-    never absence proof. This validates the record; it never writes one.
-    """
-    state = record.get("prior_state")
-    if not isinstance(state, dict):
-        return None
-    expected = {"prior_head", "prior_config_sha256", "checkout_status", "units"}
-    expected.update("preserved/" + rel for rel in PRESERVED)
-    if set(state) != expected:
-        return None
-    if not _hex(SHA_RE, state["prior_head"]):
-        return None
-    if (state["prior_config_sha256"] is not None
-            and not _hex(_HEX64, state["prior_config_sha256"])):
-        return None
-    if not isinstance(state["checkout_status"], str):
-        return None
-    if (not isinstance(state["units"], dict)
-            or any(not isinstance(key, str) or not isinstance(value, str)
-                   for key, value in state["units"].items())):
-        return None
-    for rel in PRESERVED:
-        value = state["preserved/" + rel]
-        if value is not None and not _hex(_HEX64, value):
-            return None
-    return state
+_TX_RE = re.compile(r"[0-9a-f]{32}")
+_PHASES = ("snapshot", "drained", "activation_pending",
+           "restore_activation_pending")
 
 
-def _classify_record(effects, path):
-    """Classify one retained controller record as finished or unfinished.
+def _tx_id(value):
+    return _hex(_TX_RE, value)
 
-    ``finished`` covers completed/rolled-back history, refused no-change
-    history and a checkout recovery record whose retained prior identity still
-    matches the physical state. ``unfinished`` covers pending intents and
-    recovery records whose surfaces changed or cannot be verified. Unreadable,
-    malformed, unknown, unsupported-schema and unsupported-legacy records raise
-    ``Refused`` naming the record; prose resolution notes are never read.
+
+def _tag(value):
+    return isinstance(value, str) and TAG_RE.fullmatch(value) is not None
+
+
+def _tag_or_none(value):
+    return value is None or _tag(value)
+
+
+def _hex64_or_none(value):
+    return value is None or _hex(_HEX64, value)
+
+
+def _plan_shape(value):
+    return (isinstance(value, dict)
+            and isinstance(value.get("preflight"), dict)
+            and isinstance(value.get("steps"), list))
+
+
+def _checkout_identity(record):
+    """The minimum identity every checkout intent/outcome writer emits."""
+    return (
+        _tx_id(record.get("transaction_id"))
+        and _text(record.get("at"))
+        and record.get("intended_operation") in ("deploy", "rollback")
+        and isinstance(record.get("prior_state"), dict)
+        and _hex(SHA_RE, record.get("prior_head"))
+        and _hex64_or_none(record.get("prior_config_sha256"))
+        and _tag_or_none(record.get("prior_tag"))
+        and _hex(SHA_RE, record.get("target"))
+        and _tag(record.get("tag"))
+        and _hex64_or_none(record.get("helper_sha256"))
+        and record.get("automatic_rollback_permitted") is False
+        and isinstance(record.get("rollback_compatibility"), dict)
+    )
+
+
+def _checkout_refusal_shape(record):
+    return (
+        _checkout_identity(record)
+        and _text(record.get("failed_phase"))
+        and _text(record.get("reason"))
+        and isinstance(record.get("observations"), dict)
+        and isinstance(record.get("record_path"), str)
+        and isinstance(record.get("record_persisted"), bool)
+    )
+
+
+def _checkout_recovery_shape(record):
+    return (
+        _checkout_identity(record)
+        and _text(record.get("failed_phase"))
+        and _text(record.get("reason"))
+        and isinstance(record.get("record_path"), str)
+        and isinstance(record.get("record_persisted"), bool)
+        and ("observed_head" not in record
+             or _hex(SHA_RE, record["observed_head"]))
+        and ("head_observation_error" not in record
+             or isinstance(record["head_observation_error"], str))
+        and ("record_write_error" not in record
+             or isinstance(record["record_write_error"], str))
+    )
+
+
+def _completed_deploy_shape(record):
+    return (
+        _tx_id(record.get("transaction_id"))
+        and _text(record.get("at"))
+        and _hex(SHA_RE, record.get("prior_head"))
+        and _hex64_or_none(record.get("prior_config_sha256"))
+        and _tag_or_none(record.get("prior_tag"))
+        and _hex(SHA_RE, record.get("target"))
+        and _tag(record.get("tag"))
+        and _hex64_or_none(record.get("helper_sha256"))
+        and isinstance(record.get("rollback_compatibility"), dict)
+        and isinstance(record.get("automatic_rollback_permitted"), bool)
+        and _plan_shape(record.get("plan"))
+    )
+
+
+def _legacy_completed_deploy_shape(record):
+    return _text(record.get("at")) and _plan_shape(record.get("plan"))
+
+
+def _completed_rollback_shape(record):
+    return (
+        _tx_id(record.get("transaction_id"))
+        and _text(record.get("at"))
+        and _hex(SHA_RE, record.get("to"))
+        and _tag(record.get("tag"))
+        and _hex64_or_none(record.get("helper_sha256"))
+    )
+
+
+def _legacy_completed_rollback_shape(record):
+    return (
+        _text(record.get("at"))
+        and _hex(SHA_RE, record.get("to"))
+        and _tag(record.get("tag"))
+    )
+
+
+def _completion_shape(value):
+    return (
+        isinstance(value, dict)
+        and isinstance(value.get("unit"), str)
+        and _unit_runtime(value.get("runtime"))
+        and value.get("success") is True
+        and type(value.get("sequence")) is int
+    )
+
+
+def _unit_switch_identity(record):
+    state = record.get("state")
+    phase = record.get("phase")
+    return (
+        _tx_id(record.get("transaction_id"))
+        and _text(record.get("at"))
+        and isinstance(record.get("unit"), str)
+        and record["unit"] in UNIT_RUNTIMES
+        and _unit_runtime(record.get("runtime"))
+        and _unit_runtime(record.get("prior_runtime"))
+        and record["runtime"] != record["prior_runtime"]
+        and "snapshot" in record
+        and (state is None or isinstance(state, dict))
+        and phase in _PHASES
+        and ((phase == "snapshot" and state is None)
+             or (phase in ("drained", "activation_pending")
+                 and isinstance(state, dict))
+             or (phase == "restore_activation_pending"
+                 and (state is None or isinstance(state, dict))))
+    )
+
+
+def _unit_switch_shape(record, outcome):
+    if not _unit_switch_identity(record):
+        return False
+    if outcome == "pending":
+        return True
+    if outcome == "completed":
+        completions = record.get("completions")
+        return (
+            isinstance(completions, list)
+            and len(completions) == 2
+            and all(_completion_shape(item) for item in completions)
+            and all(item["unit"] == record["unit"] for item in completions)
+            and all(item["runtime"] == record["runtime"] for item in completions)
+            and completions[0]["sequence"] < completions[1]["sequence"]
+        )
+    if outcome == "rolled_back":
+        return _text(record.get("reason"))
+    if outcome == "recovery_required":
+        return (_text(record.get("reason"))
+                and isinstance(record.get("record_path"), str))
+    return False
+
+
+def _classify_record(path):
+    """Classify one retained controller record by its producer-specific shape.
+
+    Classification depends only on the retained record, never on later host
+    state: a record cannot become a blocker (or cease to be one) because an
+    unrelated transaction changed a unit or the checkout. Pending intents and
+    unresolved recovery records are unfinished. Completed/refused history is
+    finished only when it matches the minimum identity its producer wrote.
+    Unreadable, malformed, unknown, unsupported-schema and unsupported-legacy
+    records raise ``Refused`` naming the record; prose notes are never read.
     """
     if path.is_symlink() or not path.is_file():
         raise Refused("invalid controller journal entry: " + path.name)
@@ -1379,37 +1512,49 @@ def _classify_record(effects, path):
     operation = record.get("operation")
     outcome = record.get("outcome")
     if operation == "unit_switch":
-        if outcome in ("completed", "rolled_back"):
-            return "finished", operation
+        if outcome not in ("pending", "completed", "rolled_back",
+                          "recovery_required"):
+            raise Refused("invalid unit switch outcome: " + path.name)
+        if not _unit_switch_shape(record, outcome):
+            raise Refused("invalid unit switch journal: " + path.name)
         if outcome in ("pending", "recovery_required"):
             return "unfinished", operation
-        raise Refused("invalid unit switch outcome: " + path.name)
-    if operation in ("deploy", "rollback"):
-        # The first producer wrote completed checkout journals with no outcome.
-        if outcome is None or outcome == "completed":
+        return "finished", operation
+    if operation == "deploy":
+        if outcome is None:
+            if not _legacy_completed_deploy_shape(record):
+                raise Refused("invalid completed checkout journal: " + path.name)
+            return "finished", operation
+        if outcome == "completed":
+            if not _completed_deploy_shape(record):
+                raise Refused("invalid completed checkout journal: " + path.name)
+            return "finished", operation
+        raise Refused("invalid checkout journal outcome: " + path.name)
+    if operation == "rollback":
+        if outcome is None:
+            if not _legacy_completed_rollback_shape(record):
+                raise Refused("invalid completed checkout journal: " + path.name)
+            return "finished", operation
+        if outcome == "completed":
+            if not _completed_rollback_shape(record):
+                raise Refused("invalid completed checkout journal: " + path.name)
             return "finished", operation
         raise Refused("invalid checkout journal outcome: " + path.name)
     if operation in ("deploy_pending", "rollback_pending"):
-        if outcome != "pending":
+        if outcome != "pending" or not _checkout_identity(record):
             raise Refused("invalid pending checkout journal: " + path.name)
         return "unfinished", operation
     if operation in ("deploy_refused", "rollback_refused"):
-        if outcome != "refused_no_change":
+        if outcome != "refused_no_change" or not _checkout_refusal_shape(record):
             raise Refused("invalid refused checkout journal: " + path.name)
         return "finished", operation
     if operation == "recovery_required":
         if outcome != "recovery_required":
             raise Refused("invalid checkout recovery journal: " + path.name)
-        state = _retained_prior_state(record)
-        if state is None:
+        if not _checkout_recovery_shape(record):
             raise Refused("unsupported legacy checkout recovery record "
-                          "(no verifiable prior identity): " + path.name)
-        try:
-            observation = no_change_observation(effects, state)
-        except Exception as exc:  # unobservable is never absence proof
-            raise Refused("cannot verify checkout recovery record " + path.name
-                          + ": " + (str(exc) or type(exc).__name__)[:200]) from exc
-        return ("finished" if observation["unchanged"] else "unfinished"), operation
+                          "(no verifiable producer identity): " + path.name)
+        return "unfinished", operation
     raise Refused("unknown controller journal operation: " + path.name)
 
 
@@ -1420,13 +1565,16 @@ def refuse_unfinished_transactions(effects, exclude=None):
     and a pending or unresolved unit transaction blocks checkout deploy/
     rollback. ``exclude`` names exactly the record the caller is about to
     recover, so a legitimate recovery does not block itself. Completed,
-    refused/no-change and verifiably unchanged recovery history does not block.
-    The guard only reads records and observations; record bytes are unchanged.
+    refused/no-change and completed/rolled-back unit history does not block.
+    A ``recovery_required`` record is never resolved from stored digests: those
+    do not cover unit metadata, activation or live work. It remains unfinished
+    (or unsupported legacy when its producer identity is incomplete). The guard
+    only reads records; record bytes are unchanged.
     """
     for path in sorted(effects.record_dir.glob("controller-*.json")):
         if exclude is not None and path.resolve() == exclude.resolve():
             continue
-        status, operation = _classify_record(effects, path)
+        status, operation = _classify_record(path)
         if status == "finished":
             continue
         if operation == "unit_switch":
@@ -1434,7 +1582,7 @@ def refuse_unfinished_transactions(effects, exclude=None):
         if operation in ("deploy_pending", "rollback_pending"):
             raise Refused("unfinished checkout switch requires recovery: " + path.name)
         if operation == "recovery_required":
-            raise Refused("unresolved checkout recovery requires physical "
+            raise Refused("unresolved checkout recovery requires out-of-band "
                           "reconciliation: " + path.name)
         raise Refused("unfinished controller transaction: " + path.name)
 
