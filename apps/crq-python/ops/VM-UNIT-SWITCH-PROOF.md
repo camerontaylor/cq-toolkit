@@ -51,22 +51,22 @@ Files:
 ## Recorded evidence
 
 One run completed on Pluto (KVM, Ubuntu noble guest ``crq-probe``) from source
-commit ``4062483f374eb41e4ffd48ed89fdea469e1a75c8``:
+commit ``b81453efc2bd4a6a9eb86ca170175ed07d8e78c7``:
 
-- run ``20261110T165618Z-170efa69``
+- run ``20261110T170322Z-9e8c5133``
 - ``report.json`` SHA-256
-  ``3b92d972b940f555bcd392bd2acd8ad5efc15cc8ea92fb32e775b6c821f7ea91``
+  ``789e674a594edbb027ce4aed8332eeeb0f3083aeb49372daf14d402d6bb85c6b``
 - ``raw-guest-evidence.tar.gz`` SHA-256
-  ``70618f51cafe2c02c85789603ca801098361a4af29f6bd577a682d64505a2387``
+  ``a15ffe890713c018879739651c4e2ceecb50a22500d1aa90c68be5ee5e2ba9b8``
 - host script ``executed-host-script.py`` SHA-256
-  ``bfbe2cf106eb4fd7e9c9fc6170a89d146e21372a5d165709c2ee35282bdbff1a``
+  ``581bebd5c3e91dd7f9732775567c457fd50d9ce8a60e08b8e85545b791ea24c0``
 - guest script ``executed-guest-probe.py`` SHA-256
   ``42ac97bb9247bb4e7164136fec9de004a50e5c04942b46d0fad2c9c65e8bf51b``
 
 The report records all 18 checks true and ``problems: []``; a second
 ``verify`` recomputed the checks and re-hashed both retained artifacts with
 ``problems: []``. Artifacts stay at
-``~/crq-vm-feasibility/state/runs/20261110T165618Z-170efa69/`` on
+``~/crq-vm-feasibility/state/runs/20261110T170322Z-9e8c5133/`` on
 Pluto, outside the worktree.
 
 The run produced:
@@ -75,8 +75,8 @@ The run produced:
 |---|---|
 | ``switch-node`` | completed; sequences ``1,2`` with distinct invocation IDs; ``node:bbbb…``; queue/heartbeat/history unchanged; ``record_count`` 2 |
 | ``switch-python`` | completed; sequences ``3,4`` with distinct invocation IDs; ``python``; queue/heartbeat/history unchanged; ``record_count`` 3 |
-| ``interrupt`` | CLI rc ``-9``; pending ``drained`` record ``controller-974b…``; service left as the durable ``/dev/null`` mask; timer inactive and enabled |
-| ``recover-kill`` | CLI rc ``-9``; record SHA-256 ``72e19f98…`` identical before and after; queue/heartbeat/history unchanged |
+| ``interrupt`` | CLI rc ``-9``; pending ``drained`` record ``controller-1a34…``; service left as the durable ``/dev/null`` mask; timer inactive and enabled |
+| ``recover-kill`` | CLI rc ``-9``; record SHA-256 ``ebf8526c…`` identical before and after; queue/heartbeat/history unchanged |
 | ``recover`` | CLI rc ``0``; ``rolled_back`` at ``restore_activation_pending``; prior Python bytes/mode/uid/gid and timer enablement restored exactly |
 | ``recover-repeat`` | CLI rc ``2``; ``invalid unit recovery record``; no further mutation |
 | ``inspect`` | final Python service SHA-256 ``a8a0e280…``; timer SHA-256 ``3edf2fd6…``; four retained records; seeded queue, heartbeat and historical record bytes unchanged |
