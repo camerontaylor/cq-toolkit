@@ -372,7 +372,7 @@ def harvest(c, q, item, dry=False):
                         item['state'] = 'repair_failed'
                         item['last_error'] = 'repair_failed; needs human'
                 break
-            if result.get('verdict') == 'FIXED':
+            if result.get('verdict') == 'FIXED' and not dry:
                 # Later findings move the shared HEAD; validate each immutable
                 # claimed range through a separate detached verification worktree.
                 check_wt, branch = c.make_worktree('verify-' + job_id, commits[-1])
@@ -385,6 +385,7 @@ def harvest(c, q, item, dry=False):
                     module.mechanical(c.CONFIG, check_wt, predecessor, commits, job_id, path.parent)
                 finally:
                     c.remove_worktree(check_wt, branch)
+            if result.get('verdict') == 'FIXED':
                 predecessor = commits[-1]
             if not dry:
                 mark_finding_outcome(c, expected, result)
