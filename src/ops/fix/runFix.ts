@@ -1027,7 +1027,11 @@ export function makeFixRun(deps: FixRunDeps = {}) {
         const known = unstartedUnits.some(
           (entry) => entry.unit.package === unit.package && entry.unit.fixer === unit.fixer,
         );
-        if (row.result.status !== 'ok' && !known) {
+        // Governance can replace a job result after the unit returned `ok`
+        // (e.g. marking it `budget-exhausted`): a unit with collected
+        // evidence already has its real task rows in `report.tasks`, so a
+        // "never started" row here would double count it.
+        if (row.result.status !== 'ok' && row.report === undefined && !known) {
           unstartedUnits.push({
             unit,
             segments: dispatchSegments(unit),
@@ -1201,7 +1205,8 @@ export function makeFixRun(deps: FixRunDeps = {}) {
             const known = unstartedUnits.some(
               (entry) => entry.unit.package === unit.package && entry.unit.fixer === unit.fixer,
             );
-            if (row.result.status === 'ok' || known) cancelledIds.delete(row.jobId);
+            if (row.result.status === 'ok' || row.report !== undefined || known)
+              cancelledIds.delete(row.jobId);
           }
           for (const entry of plan.jobs) {
             if (entry.op !== 'sweep.unit' || !cancelledIds.has(entry.id)) continue;
