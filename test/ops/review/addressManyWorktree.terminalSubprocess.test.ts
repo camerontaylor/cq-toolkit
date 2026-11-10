@@ -1,16 +1,13 @@
 import type { ChildProcess, SpawnOptions } from 'node:child_process';
-import { lstat, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { expect, test, vi } from 'vitest';
-import {
-  makeAddressOwnership,
-  withAddressOwnership,
-} from '../../../src/ops/review/internal/addressOwnership.js';
+import { withAddressOwnership } from '../../../src/ops/review/internal/addressCheckoutOwnership.js';
+import { readSlotMetadata } from '../../../src/adapters/lock/slotLock.js';
 
-import * as ownershipModule from '../../../src/ops/review/internal/addressOwnership.js';
+import * as ownershipModule from '../../../src/ops/review/internal/addressCheckoutOwnership.js';
 
 import {
-  authorityState,
   boundedFixtureProcess,
   deferred,
   fixture,
@@ -152,10 +149,12 @@ test.each([
       if (mode === 'no-close') {
         longTimers[0]!(); // Availability failure is not process settlement.
         expect(await outcome).toHaveProperty('error');
-        const retry = await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run });
-        await expect(retry.withLock(async () => undefined)).rejects.toThrow(
-          'active or quarantined',
-        );
+        await expect(
+          withAddressOwnership(
+            { repoRoot: f.repo.root, git: f.run, source: 'local', production: false },
+            async () => undefined,
+          ),
+        ).rejects.toThrow(/busy|incomplete/i);
       }
       if (mode !== 'spawn-failure') {
         if (mode !== 'no-close') expect(resultSettled).toBe(false);
@@ -170,10 +169,11 @@ test.each([
       releaseClose.resolve();
       const result = await outcome;
       expect(result).toHaveProperty('error');
-      expect(
-        (await authorityState(join(f.repo.root, '.git', 'cq-review-address-ownership.owner.json')))
-          .state,
-      ).not.toBe('quiescent');
+      const dir = join(f.repo.root, '.git', 'cq-review', 'slots');
+      const names = (await readdir(dir)).filter((name) => name.endsWith('.json'));
+      expect(names.length).toBeGreaterThan(0);
+      for (const name of names)
+        expect((await readSlotMetadata(join(dir, name)))?.incomplete).toBe(true);
       expect(await readFile(join(f.repo.root, 'src/a.ts'))).not.toEqual(baseline);
     } finally {
       terminalProcessFaults.spawn = undefined;

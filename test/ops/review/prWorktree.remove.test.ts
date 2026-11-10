@@ -1,5 +1,4 @@
 import type { SlotWorktreeRegistry } from '../../../src/adapters/git/slotWorktreeRegistry.js';
-import type { SlotMetadata } from '../../../src/adapters/lock/slotLock.js';
 import { REPO } from './prWorktree.helpers.js';
 // Split provenance: test/ops/review/prWorktree.test.ts was split into
 // prWorktree.helpers.ts (shared fixtures) and prWorktree.fetchFirst.test.ts,
@@ -15,11 +14,7 @@ import { mkdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { realTmpDir } from '../../helpers/tmp-dir.js';
 import { removePrWorktree, resolvePrWorktree } from '../../../src/adapters/git/prWorktree.js';
-import type {
-  RegistryMap,
-  WorktreeRegistry,
-  WorktreeRegistryEntry,
-} from '../../../src/adapters/git/prWorktree.js';
+import type { RegistryMap } from './legacyRegistryTypes.js';
 import type { GhFn } from '../../../src/adapters/forge-github/gh.js';
 import {
   NOW,
@@ -220,7 +215,7 @@ const deferredGate = (): { reached: Promise<void>; release: () => void } => {
 const mutexRegistry = (
   initial: RegistryMap = {},
 ): {
-  registry: WorktreeRegistry & SlotWorktreeRegistry;
+  registry: SlotWorktreeRegistry;
   calls: string[];
   current: () => RegistryMap;
   pauseNextSave: () => { reached: Promise<void>; release: () => void };
@@ -230,25 +225,10 @@ const mutexRegistry = (
   let queue: Promise<unknown> = Promise.resolve();
   let depth = 0;
   let hooked: { reached: () => void; gate: Promise<void> } | null = null;
-  const registry: WorktreeRegistry & SlotWorktreeRegistry = {
-    load: async () => {
-      calls.push(`load@${String(depth)}`);
-      return { ...stored };
-    },
-    save: async (map: RegistryMap) => {
-      if (hooked !== null) {
-        const hook = hooked;
-        hooked = null;
-        calls.push('save:paused');
-        hook.reached();
-        await hook.gate;
-      }
-      calls.push('save');
-      stored = { ...map };
-    },
+  const registry: SlotWorktreeRegistry = {
     read: async (pr) => {
-      const map = await registry.load();
-      const entry = map[String(pr)];
+      calls.push(`load@${String(depth)}`);
+      const entry = stored[String(pr)];
       return entry
         ? {
             version: 1,
@@ -259,24 +239,7 @@ const mutexRegistry = (
           }
         : undefined;
     },
-    withPrLock: async (_pr, action) => registry.withLock(action),
-    update: async (key: string | number, value: WorktreeRegistryEntry | SlotMetadata | null) => {
-      const entry =
-        value && 'state' in value
-          ? value.state === 'bound'
-            ? { path: value.checkoutPath, branch: LABEL, createdAt: NOW }
-            : null
-          : value;
-      calls.push(`${entry === null ? `update:${key}:null` : `update:${key}`}@${String(depth)}`);
-      const merged: RegistryMap = { ...stored };
-      if (entry === null) {
-        delete merged[key];
-      } else {
-        merged[key] = { ...entry };
-      }
-      await registry.save(merged);
-    },
-    withLock: <T>(fn: () => Promise<T>): Promise<T> => {
+    withPrLock: <T>(_pr: number, fn: () => Promise<T>): Promise<T> => {
       const run = queue.then(async () => {
         depth += 1;
         try {
@@ -290,6 +253,23 @@ const mutexRegistry = (
         () => undefined,
       );
       return run;
+    },
+    update: async (key, value) => {
+      const entry =
+        value.state === 'bound'
+          ? { path: value.checkoutPath, branch: LABEL, createdAt: NOW }
+          : null;
+      calls.push(`${entry === null ? `update:${key}:null` : `update:${key}`}@${String(depth)}`);
+      if (hooked !== null) {
+        const hook = hooked;
+        hooked = null;
+        calls.push('save:paused');
+        hook.reached();
+        await hook.gate;
+      }
+      calls.push('save');
+      if (entry === null) delete stored[key];
+      else stored[key] = entry;
     },
   };
   return {

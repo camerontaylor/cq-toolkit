@@ -10,6 +10,8 @@ import {
 } from './addressRunLifecycle.js';
 import { CheckoutWriterContext } from '../../../shared/checkoutWriterContext.js';
 import { slotWorktreeRegistry } from '../../../adapters/git/slotWorktreeRegistry.js';
+import { readLegacyReviewHint } from '../../../adapters/git/legacyReviewRegistry.js';
+import { isPrWorktreeIncompleteRefusal } from '../../../adapters/git/prWorktree.js';
 import type { GhFn } from '../../../adapters/forge-github/gh.js';
 import type { ReviewLoopOpts, ReviewLoopOutcome } from '../../../plans/review-loop.js';
 export * from './addressRunLifecycle.js';
@@ -35,7 +37,10 @@ const bulkContext = new AsyncLocalStorage<{
   retained: CheckoutWriterContext[];
 }>();
 export function isAddressCheckoutIncomplete(value: unknown): boolean {
-  return typeof value === 'object' && value !== null && incompleteRefusals.has(value);
+  return (
+    (typeof value === 'object' && value !== null && incompleteRefusals.has(value)) ||
+    isPrWorktreeIncompleteRefusal(value)
+  );
 }
 export function isAddressOwnershipAdmissionRefusal(value: unknown): boolean {
   return typeof value === 'object' && value !== null && refusals.has(value);
@@ -225,17 +230,7 @@ export class AddressCheckoutOwnership extends AddressRunLifecycle {
       const original = await coordinationDirectory(
         this.opts.coordinationRoot ?? this.resolverCommon,
       );
-      const originalSlot = await this.context.acquire(original, pr);
-      if (!(await originalSlot.readMetadata())) {
-        try {
-          const path = resolve(original, 'cq-review-address-worktrees.json');
-          await lstat(path);
-          throw new Error(`legacy review registry requires migration: ${path}`);
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-        }
-        // The resolver facade checks the complete exact source list before begin.
-      }
+      await this.context.acquire(original, pr);
       await this.context.acquire(this.resolverCommon, pr);
       // Legacy refusal must precede the first new metadata write.
       await this.registry.withPrLock(pr, async () => {});
@@ -312,7 +307,8 @@ export class AddressCheckoutOwnership extends AddressRunLifecycle {
       try {
         await this.beginCoordination(source);
       } catch (error) {
-        if (error instanceof Error) refusals.add(error);
+        if (error instanceof Error && !(this.signal.aborted && error === this.signal.reason))
+          refusals.add(error);
         await this.context.close();
         throw error;
       }
@@ -346,6 +342,11 @@ export class AddressCheckoutOwnership extends AddressRunLifecycle {
           incompleteRefusals.add(error);
           throw error;
         }
+        if (source.startsWith('pr:') && this.registry.legacyHint?.(Number(source.slice(3)))) {
+          const error = new Error('legacy review checkout requires reconciliation');
+          incompleteRefusals.add(error);
+          throw error;
+        }
         await this.assertIdentity();
         await this.disposeTerminalSession();
         await this.context.complete();
@@ -372,6 +373,8 @@ export async function withAddressOwnership<T>(
   opts: Options & { source: string; production: boolean },
   action: (lease: AddressLease) => Promise<T>,
 ): Promise<T> {
+  opts.controller?.signal.throwIfAborted();
+  opts.signal?.throwIfAborted();
   const parent = bulkContext.getStore();
   if (parent) {
     if (parent.consumed || opts.source !== `pr:${parent.pr}`)
@@ -446,11 +449,12 @@ export async function withAddressManyCheckout<T>(
     try {
       if (!(await slot.readMetadata())) {
         const path = resolve(opts.commonDir, 'cq-review-address-worktrees.json');
-        try {
-          await lstat(path);
-          throw new Error(`legacy review registry requires migration: ${path}`);
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        if (await readLegacyReviewHint([path], opts.pr)) {
+          // A bulk clone cannot reconcile the original checkout. Refuse before
+          // creating metadata so a direct invocation can still import it.
+          const error = new Error('legacy review checkout requires direct reconciliation');
+          incompleteRefusals.add(error);
+          throw error;
         }
       }
       await context.begin();

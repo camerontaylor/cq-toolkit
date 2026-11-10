@@ -2,10 +2,10 @@ import { createHash } from 'node:crypto';
 import { lstat, mkdir, readFile, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { expect, test } from 'vitest';
-import { withAddressOwnership } from '../../../src/ops/review/internal/addressOwnership.js';
+import { withAddressOwnership } from '../../../src/ops/review/internal/addressCheckoutOwnership.js';
 
 import type { ReviewAddressReport } from '../../../src/ops/review/address.js';
-import * as ownershipModule from '../../../src/ops/review/internal/addressOwnership.js';
+import * as ownershipModule from '../../../src/ops/review/internal/addressCheckoutOwnership.js';
 
 import { deferred, fixture, terminalInput, terminalReport } from './addressManyWorktree.helpers.js';
 

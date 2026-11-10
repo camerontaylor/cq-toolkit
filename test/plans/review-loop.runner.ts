@@ -71,6 +71,7 @@ export const runLoop = async (
     engineConcurrency?: number;
     /** Explicit publication opt-in (the composition passes `input.push === true`). */
     publish?: boolean;
+    onPublished?: (sha: string) => void | Promise<void>;
   } = {},
 ): Promise<{
   outcome: ReviewLoopOutcome;
@@ -160,6 +161,7 @@ export const runLoop = async (
     // publishable default, `opts.publish !== false`); only an explicit
     // opt-in mirrors the composition's `input.push === true` shape.
     ...(o.publish !== undefined ? { publish: o.publish } : {}),
+    ...(o.onPublished !== undefined ? { onPublished: o.onPublished } : {}),
     nowMs: NOW,
     dispatchLogPath: o.dispatchLogPath ?? join(scratch, 'dispatch.jsonl'),
     worktreeRoot: scratch,

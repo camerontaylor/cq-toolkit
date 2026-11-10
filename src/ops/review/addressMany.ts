@@ -1,4 +1,7 @@
-import { withAddressManyCheckout } from './internal/addressCheckoutOwnership.js';
+import {
+  isAddressCheckoutIncomplete,
+  withAddressManyCheckout,
+} from './internal/addressCheckoutOwnership.js';
 import { checkoutWriterContext } from '../../shared/checkoutWriterContext.js';
 import { checkoutWriterCommand } from '../../shared/checkoutWriterCommand.js';
 import { z } from 'zod';
@@ -699,12 +702,16 @@ function makeReviewAddressManyCore(
                 usage: { kind: 'known', tokens: 0 },
               }).state;
             }
-            faults.push(`PR #${candidate.number} slot lifetime refused: ${String(error)}`);
+            const legacyRefusal = isAddressCheckoutIncomplete(error);
+            if (!legacyRefusal)
+              faults.push(`PR #${candidate.number} slot lifetime refused: ${String(error)}`);
             if (!outcomes.some((row) => row.number === candidate.number))
               outcomes.push({
                 number: candidate.number,
                 headOid: candidate.headOid,
-                exception: String(error),
+                ...(legacyRefusal && error instanceof Error
+                  ? { result: { status: 'needs-human' as const, reason: error.message } }
+                  : { exception: String(error) }),
                 enrollment: requestedEnrollment(candidate.number),
               });
           }

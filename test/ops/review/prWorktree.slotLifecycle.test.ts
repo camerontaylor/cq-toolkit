@@ -190,7 +190,7 @@ test.each(['tracked', 'index', 'untracked', 'ignored', 'authenticated'] as const
 );
 
 test.each(['common', 'address-journal', 'selfhost-journal'])(
-  'requested legacy registry requires migration in D: %s (mutation: omit stat-only legacy refusal)',
+  'unrelated legacy registry entry permits resolution: %s',
   async (kind) => {
     const f = await fixture();
     try {
@@ -203,7 +203,8 @@ test.each(['common', 'address-journal', 'selfhost-journal'])(
               kind === 'selfhost-journal' ? 'worktree-registry.json' : 'worktrees.json',
             );
       await mkdir(join(source, '..'), { recursive: true });
-      await writeFile(source, 'unparsed legacy bytes');
+      const bytes = JSON.stringify({ 8: { path: '/other', branch: 'cq-review/pr-8' } });
+      await writeFile(source, bytes);
       let fetched = false;
       await expect(
         resolvePrWorktree({
@@ -214,14 +215,34 @@ test.each(['common', 'address-journal', 'selfhost-journal'])(
             return f.run(args);
           },
         }),
-      ).rejects.toThrow('legacy review registry requires migration');
-      expect(fetched).toBe(false);
-      expect(await readFile(source, 'utf8')).toBe('unparsed legacy bytes');
+      ).resolves.toMatchObject({ reused: false });
+      expect(fetched).toBe(true);
+      expect(await readFile(source, 'utf8')).toBe(bytes);
     } finally {
       await f.repo.cleanup();
     }
   },
 );
+
+test('requested legacy checkout is reused without rewriting the registry', async () => {
+  const f = await fixture();
+  try {
+    await mkdir(f.opts.worktreeRoot, { recursive: true });
+    const path = join(f.opts.worktreeRoot, 'legacy');
+    f.repo.git('worktree', 'add', '-b', 'cq-review/pr-7', path, 'HEAD');
+    const source = join(f.common, 'cq-review-address-worktrees.json');
+    const bytes = JSON.stringify({ 7: { path, branch: 'cq-review/pr-7', createdAt: 1 } });
+    await writeFile(source, bytes);
+    const result = await resolvePrWorktree({
+      ...f.opts,
+      registry: slotWorktreeRegistry(f.common, { legacySources: [source] }),
+    });
+    expect(result).toMatchObject({ path, reused: true });
+    expect(await readFile(source, 'utf8')).toBe(bytes);
+  } finally {
+    await f.repo.cleanup();
+  }
+});
 
 test('alias-spelled removal unbinds every deleted checkout pointer (mutation: notify removal with raw alias)', async () => {
   const f = await fixture();

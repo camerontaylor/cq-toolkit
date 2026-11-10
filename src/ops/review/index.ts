@@ -79,17 +79,8 @@ export type {
 export type { ProgressReason, VerifyOutcome } from './verifyReviewOutcome.js';
 export { snapshotPrState } from '../../adapters/forge-github/snapshotPrState.js';
 export { verifyPrOutcome } from './verifyReviewOutcome.js';
-export type {
-  PrWorktreeOpts,
-  RegistryMap,
-  WorktreeRegistry,
-  WorktreeRegistryEntry,
-} from '../../adapters/git/prWorktree.js';
-export {
-  fileWorktreeRegistry,
-  removePrWorktree,
-  resolvePrWorktree,
-} from '../../adapters/git/prWorktree.js';
+export type { PrWorktreeOpts } from '../../adapters/git/prWorktree.js';
+export { removePrWorktree, resolvePrWorktree } from '../../adapters/git/prWorktree.js';
 // E4 — the agentic fix half of the loop: fixReviewItem drives ONE worker
 // over ONE review item in the resolved per-PR worktree through the injected
 // Driver seam (conservative harness-derived tool allowlist, head-capped

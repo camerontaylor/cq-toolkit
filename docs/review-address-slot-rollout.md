@@ -1,9 +1,9 @@
 # Review-address slot rollout
 
-This is the D6 deployment sequence for the slot ownership redesign. Merging D
-is a code change; it does not authorize starting the new selfhost sweep over
-old state. D retains the D2 stat-only refusal for every applicable legacy
-registry. D never parses, imports or deletes that registry.
+This is the D6 deployment sequence for the slot ownership redesign. E provides
+the read-only requested-key importer described below; deploying it does not
+authorize starting a selfhost sweep before old writers have drained. D-only
+builds retain the stat-only refusal and do not import legacy registries.
 
 ## Selected sequence: E before the first slot-based selfhost sweep
 
@@ -29,9 +29,9 @@ registry. D never parses, imports or deletes that registry.
    workflow save the unchanged legacy file and repeat the refusal. Do not run
    the old binary over switched slot state.
 
-Thus cached `worktree-registry.json` is handled **before the first D selfhost
-sweep by sequencing E first**, rather than changing D's mandatory refusal.
-There is no D importer, automatic cache deletion or migration-complete marker.
+Thus cached `worktree-registry.json` is handled before the first slot-based
+selfhost sweep by deploying E first. There is no automatic cache deletion or
+migration-complete marker.
 
 ## Settled refusals are not crash recovery
 
