@@ -520,15 +520,18 @@ describe('R3S additive evidence payload', () => {
   });
 });
 
-it.each([false, true])('keeps a blocked observation of the same cycle regardless of merge order (%s)', (reverse) => {
-  const terminal = record('agent', 'terminal');
-  const blocked = record('agent', 'blocked');
-  terminal.sources[0]!.cycleId = 'same-cycle';
-  blocked.sources[0]!.cycleId = 'same-cycle';
-  const merged = merge(reverse ? [blocked, terminal] : [terminal, blocked]);
-  expect(merged.sources).toEqual(blocked.sources);
-  expect(isComplete(merged, ['agent'])).toBe(false);
-});
+it.each([false, true])(
+  'keeps a blocked observation of the same cycle regardless of merge order (%s)',
+  (reverse) => {
+    const terminal = record('agent', 'terminal');
+    const blocked = record('agent', 'blocked');
+    terminal.sources[0]!.cycleId = 'same-cycle';
+    blocked.sources[0]!.cycleId = 'same-cycle';
+    const merged = merge(reverse ? [blocked, terminal] : [terminal, blocked]);
+    expect(merged.sources).toEqual(blocked.sources);
+    expect(isComplete(merged, ['agent'])).toBe(false);
+  },
+);
 
 it('retains independent cycles when one is blocked', () => {
   const terminal = record('agent', 'terminal');
