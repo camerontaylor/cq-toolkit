@@ -442,7 +442,7 @@ test.each(['cli', 'sdk'] as const)(
         }),
         sdkLoader: async () => ({
           tool: () => ({}),
-          createSdkMcpServer: () => ({}),
+          createSdkMcpServer: () => ({ instance: { server: { setRequestHandler() {} } } }),
           query: async function* () {
             yield* frames;
           },

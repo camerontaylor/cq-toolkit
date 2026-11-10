@@ -31,6 +31,17 @@ describe('AnalyzeFixInputSchema', () => {
     );
   });
 
+  test('irreversible numeric cluster ids explain how to preserve the raw id', () => {
+    for (const clusterId of [0, Infinity, 1234560000000]) {
+      const result = AnalyzeFixInputSchema.safeParse({ dir: '.', clusterId });
+      expect(result.success).toBe(false);
+      if (!result.success) expect(result.error.issues[0]?.message).toContain('--clusterId=');
+    }
+    for (const clusterId of ['0e123456', '12e45678', '123456e7']) {
+      expect(AnalyzeFixInputSchema.parse({ dir: '.', clusterId }).clusterId).toBe(clusterId);
+    }
+  });
+
   test('a JSON-object rule (what the CLI parses) becomes rule text', () => {
     const parsed = AnalyzeFixInputSchema.parse({ dir: '.', rule: { id: 'r' }, files: ['a.ts'] });
     expect(parsed.rule).toBe('{"id":"r"}');

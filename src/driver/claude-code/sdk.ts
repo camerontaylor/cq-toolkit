@@ -237,7 +237,10 @@ export function installNativeToolCallAdapter(
   const protocol = asRecord(instance)?.['server'];
   const setHandler = asRecord(protocol)?.['setRequestHandler'];
   if (typeof setHandler !== 'function') {
-    throw new Error('native SDK MCP server lacks the tools/call request-handler seam');
+    throw new DispatchError(
+      'config',
+      'native SDK MCP server lacks the tools/call request-handler seam',
+    );
   }
   setHandler.call(
     protocol,
@@ -401,8 +404,6 @@ export class ClaudeCodeSdkTransport implements Driver {
         : await resumedRecordOrThrow(store, sessionRef, boundWorkspace, 'claude-code driver');
     const workspace = record.workspace;
 
-    await store.appendMessage(record.sessionId, { role: 'user', content: prompt, at: nowIso() });
-
     // --- Tool surface: the SHARED CORE (src/harness/surface.ts) — the one
     // manifest constructor binds the workspace realpath, the sandbox level,
     // harness ∩ per-op ToolPolicy and the harness config; the bound surface
@@ -416,6 +417,11 @@ export class ClaudeCodeSdkTransport implements Driver {
       toolPolicy,
       harness: this.harnessConfig,
       envNames: this.envAllowlist,
+    }).catch((err: unknown) => {
+      throw new DispatchError(
+        'config',
+        `claude-code driver: tool surface setup failed: ${describeError(err)}`,
+      );
     });
     const surface = manifest === undefined ? undefined : createHarnessSurface(manifest);
     const allowed = manifest?.tools ?? [];
@@ -466,7 +472,8 @@ export class ClaudeCodeSdkTransport implements Driver {
           ),
       );
       const toolDefinition = asRecord(definition);
-      if (!toolDefinition) throw new Error('Claude SDK tool() returned an invalid tool definition');
+      if (!toolDefinition)
+        throw new DispatchError('config', 'Claude SDK tool() returned an invalid tool definition');
       // SDK tool() types accept only a raw shape, but createSdkMcpServer
       // passes this definition to MCP registerTool, which accepts a Zod
       // object. Keep the strict object so tools/list advertises the same
@@ -554,6 +561,7 @@ export class ClaudeCodeSdkTransport implements Driver {
           }
         : {}),
     };
+    await store.appendMessage(record.sessionId, { role: 'user', content: prompt, at: nowIso() });
     const abortRoot = abortRootFollowing(signal); // ./process.ts — the wiring only
     if (abortRoot !== undefined) {
       queryOptions['abortController'] = abortRoot.controller;
@@ -903,7 +911,20 @@ function asAgentSdkModule(loaded: unknown): AgentSdkModule {
         `(${missing.join(', ')}) — capability detection is feature-based, never version-based`,
     );
   }
-  return rec as unknown as AgentSdkModule;
+  const sdk = rec as unknown as AgentSdkModule;
+  try {
+    const probe = sdk.createSdkMcpServer({ name: MCP_SERVER_NAME, tools: [] });
+    const server = asRecord(asRecord(probe)?.['instance'])?.['server'];
+    if (typeof asRecord(server)?.['setRequestHandler'] !== 'function') {
+      throw new Error('native SDK MCP server lacks the tools/call request-handler seam');
+    }
+  } catch (err) {
+    throw new DispatchError(
+      'config',
+      `claude-code driver: MCP server capability check failed: ${describeError(err)}`,
+    );
+  }
+  return sdk;
 }
 
 /** The resolved route's key VALUE, read from the host env AT RUN TIME. */
