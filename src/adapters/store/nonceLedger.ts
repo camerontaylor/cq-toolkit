@@ -137,7 +137,19 @@ export function makeFileNonceLedger(
     // a record that is not a well-formed nonce is CORRUPTION and the whole
     // read fails closed — refusing every consume beats reading history wrong.
     if (!existsSync(path)) return;
-    const lines = readFileSync(path, 'utf8').split('\n');
+    // ONE read, and the tail is validated on THAT SAME string BEFORE any
+    // record enters `known`. A second read would both cache a record the
+    // read then rejects (memory and file disagreeing on a nonce that was
+    // never committed) and race a concurrent appender between the two
+    // reads — a spurious throw on a read-only `spent()`/`isSpent()` probe,
+    // which takes no append lock.
+    const contents = readFileSync(path, 'utf8');
+    if (contents !== '' && !contents.endsWith('\n')) {
+      throw new Error(
+        `approval ledger: '${path}' ends with an unterminated record — the ledger is fail-closed until an operator inspects and repairs it`,
+      );
+    }
+    const lines = contents.split('\n');
     lines.forEach((line, index) => {
       const record = line.trim();
       if (record === '') return;
@@ -148,12 +160,6 @@ export function makeFileNonceLedger(
       }
       known.add(record);
     });
-    // Validate before ANY spent lookup, including read-only inspection.
-    if (hasUnterminatedTail(path)) {
-      throw new Error(
-        `approval ledger: '${path}' ends with an unterminated record — the ledger is fail-closed until an operator inspects and repairs it`,
-      );
-    }
   };
   // LEDGER-WIDE append lock. The per-workspace mutation lock does not
   // serialize two DIFFERENT workspaces that share one operator ledger, and a
@@ -353,13 +359,6 @@ const NONCE_PATTERN = /^[0-9a-f]{32}$/;
 
 /** The same shape, as prose, for error messages. */
 const NONCE_SHAPE = '32 lowercase hex characters';
-
-/** True when the ledger file exists, is non-empty, and lacks its final newline. */
-function hasUnterminatedTail(path: string): boolean {
-  if (!existsSync(path)) return false;
-  const contents = readFileSync(path, 'utf8');
-  return contents !== '' && !contents.endsWith('\n');
-}
 
 /** The default write seam: node:fs, whose short-count behaviour is the reason for the loop. */
 const defaultWrite: NonNullable<FileNonceLedgerConfig['write']> = (
