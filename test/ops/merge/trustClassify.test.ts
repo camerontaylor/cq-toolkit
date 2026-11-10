@@ -237,6 +237,20 @@ describe('classify trust defaults are independent per key', () => {
     });
   });
 
+  test('a comma-only trust list counts as unset, the way the acceptance flow reads it', () => {
+    const t = (v: Record<string, string>) => resolveClassifyTrust('t', undefined, env(v));
+    expect(t({ CQ_MERGE_ACCEPT_REVIEW_STATES: ',' })).toEqual({});
+    const commaOnly = {
+      CQ_MERGE_ACCEPT_REVIEW_STATES: ' , ',
+      CQ_MERGE_TRUSTED_BOTS: 'good[bot]',
+    };
+    expect(t(commaOnly)).toEqual({
+      trustedBots: ['good[bot]'],
+      trustedAssociations: ['OWNER', 'MEMBER', 'COLLABORATOR'],
+      acceptReviewStates: ['APPROVED'],
+    });
+  });
+
   test('a configured COMMENTED acceptance state is usable under the resolved policy, and never masks an objection', async () => {
     const cqEnv = env({ CQ_MERGE_ACCEPT_REVIEW_STATES: 'COMMENTED' });
     const commented = (state: 'COMMENTED' | 'CHANGES_REQUESTED', at: string) => ({

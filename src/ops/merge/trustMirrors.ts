@@ -136,8 +136,10 @@ export function resolveClassifyTrust(
         `${op}: invalid ${key} — ${bad.map((d) => d.message).join('; ')}`,
       );
     }
+    // A comma-only value parses to an empty list: the acceptance flow reads that as the
+    // key being unset, so the classifier must too (an empty list never blanks a field).
     const raw = snapshot.values[key] as readonly string[] | undefined;
-    if (raw !== undefined) raws[field] = raw;
+    if (raw !== undefined && raw.length > 0) raws[field] = raw;
   }
   const anySet = fields.some((f) => raws[f] !== undefined);
   const effective: Partial<Record<ClassifyTrustField, string[]>> = {};
