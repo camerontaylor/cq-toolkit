@@ -1325,6 +1325,8 @@ def recover_unit(effects, adapter, path):
 _TX_RE = re.compile(r"[0-9a-f]{32}")
 _PHASES = ("snapshot", "drained", "activation_pending",
            "restore_activation_pending")
+_UNIT_TERMINAL_PHASES = {"completed": "activation_pending",
+                         "rolled_back": "restore_activation_pending"}
 
 
 def _tx_id(value):
@@ -1466,6 +1468,9 @@ def _unit_switch_identity(record):
 
 def _unit_switch_shape(record, outcome):
     if not _unit_switch_identity(record):
+        return False
+    terminal_phase = _UNIT_TERMINAL_PHASES.get(outcome)
+    if terminal_phase is not None and record.get("phase") != terminal_phase:
         return False
     if outcome == "pending":
         return True

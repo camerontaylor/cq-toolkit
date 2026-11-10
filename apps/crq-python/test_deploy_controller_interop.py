@@ -349,6 +349,81 @@ class InteropTests(DeployPlanFixture):
         self.assertEqual(result["outcome"], "completed")
         self.assertEqual(path.read_bytes(), original)
 
+    def test_impossible_terminal_unit_phases_refuse(self):
+        cases = [
+            ("completed", "snapshot", None),
+            ("completed", "drained", {}),
+            ("completed", "restore_activation_pending", {}),
+            ("rolled_back", "snapshot", None),
+            ("rolled_back", "drained", {}),
+            ("rolled_back", "activation_pending", {}),
+        ]
+        for outcome, phase, state in cases:
+            with self.subTest(outcome=outcome, phase=phase):
+                if outcome == "completed":
+                    dc.switch_unit(self.effects, Adapter("python"),
+                                   "crq-tick.service", NODE)
+                else:
+                    with self.assertRaises(dc.RecoveryRequired):
+                        dc.switch_unit(self.effects, EmptyReasonInterrupt("python"),
+                                       "crq-tick.service", NODE)
+                path = next(self.record_dir.glob("controller-*.json"))
+                try:
+                    record = json.loads(path.read_text())
+                    self.assertEqual(record["outcome"], outcome)
+                    # Change only the terminal phase; state is adjusted only
+                    # to satisfy that phase's own state rule, so the remaining
+                    # invalidity is the phase/outcome combination.
+                    record["phase"] = phase
+                    record["state"] = state
+                    path.write_text(json.dumps(record) + "\n")
+                    original = path.read_bytes()
+                    with self.assertRaisesRegex(
+                            dc.Refused, "invalid unit switch journal"):
+                        dc.refuse_unfinished_transactions(self.effects)
+                    self.assertEqual(path.read_bytes(), original)
+                finally:
+                    path.unlink()
+
+    def test_pending_and_recovery_unit_phases_are_unfinished_not_malformed(self):
+        cases = [
+            ("pending", "snapshot", None),
+            ("pending", "drained", {}),
+            ("pending", "activation_pending", {}),
+            ("pending", "restore_activation_pending", {}),
+            ("recovery_required", "snapshot", None),
+            ("recovery_required", "drained", {}),
+            ("recovery_required", "activation_pending", {}),
+            ("recovery_required", "restore_activation_pending", {}),
+        ]
+        for outcome, phase, state in cases:
+            with self.subTest(outcome=outcome, phase=phase):
+                record = {
+                    "schema_version": dc.JOURNAL_SCHEMA,
+                    "transaction_id": uuid.uuid4().hex,
+                    "operation": "unit_switch",
+                    "outcome": outcome,
+                    "unit": "crq-slot.service",
+                    "runtime": NODE,
+                    "prior_runtime": "python",
+                    "at": "2026-10-27T00:00:00Z",
+                    "snapshot": {"proof": True},
+                    "state": state,
+                    "phase": phase,
+                }
+                if outcome == "recovery_required":
+                    record["reason"] = "interrupted before completion"
+                    record["record_path"] = ""
+                path = self.effects.journal_append(record)
+                original = path.read_bytes()
+                try:
+                    with self.assertRaisesRegex(
+                            dc.Refused, "unfinished unit switch"):
+                        dc.refuse_unfinished_transactions(self.effects)
+                    self.assertEqual(path.read_bytes(), original)
+                finally:
+                    path.unlink()
+
     def test_unit_recovery_blocks_on_another_unit_intent(self):
         with self.assertRaises(Crash):
             dc.switch_unit(self.effects, InterruptedAdapter("python"),
