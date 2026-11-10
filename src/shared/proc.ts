@@ -47,6 +47,11 @@ import { processSignalCleanupStarted, registerProcessSignalCleanup } from './pro
 import { spawn } from 'node:child_process';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 
+/** A fresh, PATH-only environment for isolated child executable lookup. */
+export function pathOnlyChildEnv(): { PATH: string } {
+  return { PATH: process.env.PATH ?? '' };
+}
+
 /** POSIX gets process-group semantics; Windows has no Job Object in v1 (header). */
 const POSIX = process.platform !== 'win32';
 
