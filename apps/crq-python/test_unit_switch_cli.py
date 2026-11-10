@@ -121,6 +121,40 @@ class CliTests(unittest.TestCase):
         self.assertEqual(status, 2)
         self.assertIn("--proof-fixture", output)
 
+    def test_record_dir_refusals_are_json_not_tracebacks(self):
+        link = self.records.parent / "records-link"
+        link.symlink_to(self.records, target_is_directory=True)
+        cases = (
+            ["switch", "--root", str(self.root), "--record-dir", str(link),
+             "--runtime", NODE, "--proof-fixture"],
+            ["recover", "--root", str(self.root), "--record-dir", str(link),
+             "--record", str(link / "controller-x.json"), "--proof-fixture"],
+        )
+        for argv in cases:
+            with self.subTest(command=argv[0]):
+                status, output = self._run(argv)
+                self.assertEqual(status, 2)
+                payload = json.loads(output)
+                self.assertIn("symlink", payload["refused"])
+
+    def test_record_dir_oserror_is_json_not_traceback(self):
+        with mock.patch.object(cli, "_prepare_records",
+                               side_effect=OSError("permission denied")):
+            for argv in (
+                ["switch", "--root", str(self.root),
+                 "--record-dir", str(self.records), "--runtime", NODE,
+                 "--proof-fixture"],
+                ["recover", "--root", str(self.root),
+                 "--record-dir", str(self.records),
+                 "--record", str(self.records / "controller-x.json"),
+                 "--proof-fixture"],
+            ):
+                with self.subTest(command=argv[0]):
+                    status, output = self._run(argv)
+                    self.assertEqual(status, 2)
+                    payload = json.loads(output)
+                    self.assertIn("unusable", payload["refused"])
+
     def test_switch_calls_the_actual_controller_seam(self):
         with mock.patch.object(cli.adapter_mod, "GuestFixtureAdapter", FakeAdapter):
             status, output = self._run([

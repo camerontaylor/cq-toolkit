@@ -190,10 +190,10 @@ def fetch_raw(run, recorder):
     extracted = run_dir / "raw"
     extracted.mkdir(exist_ok=True)
     with tarfile.open(raw_path, "r:gz") as archive:
-        try:
-            archive.extractall(extracted, filter="data")
-        except TypeError:  # Python before the extraction filter parameter
-            archive.extractall(extracted)
+        if not hasattr(tarfile, "data_filter"):
+            raise RuntimeError("tarfile extraction filters unavailable; "
+                               "refusing unfiltered extraction")
+        archive.extractall(extracted, filter="data")
     return {"tar_sha256": sha256_bytes(data), "tar_bytes": len(data),
             "raw_tar": raw_path.name}
 
@@ -227,6 +227,11 @@ def build_checks(phases):
         return checks, problems
     snapshot = prepare.get("snapshot") or {}
     prepared = prepare.get("prepared") or {}
+    if not isinstance(prepared, dict) or not prepared.get("state") \
+            or not prepared.get("history_sha256"):
+        problems.append("prepare evidence has no preserved state or history digest")
+        checks["prepared_baseline_present"] = False
+        return checks, problems
     service_path = "/home/%s/.config/systemd/user/crq-tick.service" % vm.GUEST_USER
     timer_path = "/home/%s/.config/systemd/user/crq-tick.timer" % vm.GUEST_USER
     wants_path = ("/home/%s/.config/systemd/user/timers.target.wants/"

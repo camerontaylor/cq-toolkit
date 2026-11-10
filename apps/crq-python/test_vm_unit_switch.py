@@ -119,6 +119,13 @@ class HarnessCheckTests(unittest.TestCase):
         self.assertTrue(problems)
         self.assertFalse(checks.get("switch-python_completed", False))
 
+    def test_missing_prepared_baseline_fails_closed(self):
+        value = phases()
+        value["prepare"]["prepared"].pop("state")
+        checks, problems = harness.build_checks(value)
+        self.assertFalse(checks["prepared_baseline_present"])
+        self.assertTrue(problems)
+
     def test_wrong_completion_runtime_fails(self):
         value = phases()
         value["switch-node"]["record"]["runtime"] = PYTHON

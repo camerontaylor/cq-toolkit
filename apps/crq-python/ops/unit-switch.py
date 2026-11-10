@@ -73,7 +73,14 @@ def run_switch(args):
                        "refused": "the proof adapter requires --proof-fixture; "
                                   "no production unit-switch adapter is available"},
                       2)
-    record_dir = _prepare_records(args.record_dir)
+    try:
+        record_dir = _prepare_records(args.record_dir)
+    except dc.Refused as exc:
+        return _print({"command": "switch", "refused": str(exc)}, 2)
+    except OSError as exc:
+        return _print({"command": "switch",
+                       "refused": "record directory is unusable: "
+                                  + str(exc)[:160]}, 2)
     root = args.root.resolve()
     effects = dc.Effects(root, record_dir.resolve())
     adapter = _adapter(args)
@@ -100,7 +107,14 @@ def run_recover(args):
                        "refused": "the proof adapter requires --proof-fixture; "
                                   "no production unit-switch adapter is available"},
                       2)
-    record_dir = _prepare_records(args.record_dir)
+    try:
+        record_dir = _prepare_records(args.record_dir)
+    except dc.Refused as exc:
+        return _print({"command": "recover", "refused": str(exc)}, 2)
+    except OSError as exc:
+        return _print({"command": "recover",
+                       "refused": "record directory is unusable: "
+                                  + str(exc)[:160]}, 2)
     root = args.root.resolve()
     effects = dc.Effects(root, record_dir.resolve())
     adapter = _adapter(args)

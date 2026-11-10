@@ -421,6 +421,9 @@ class GuestFixtureAdapter:
                 or activators["service_active"] not in ACTIVE_STATES \
                 or activators["timer_unit_file_state"] not in UNIT_FILE_STATES:
             self.refuse("snapshot activator observation is unknown")
+        if activators["timer_active"] not in ("active", "inactive") \
+                or activators["service_active"] not in ("active", "inactive"):
+            self.refuse("snapshot activator state is not restorable")
         self._snapshot = snapshot
 
     def _snapshot_required(self):
@@ -620,8 +623,11 @@ class GuestFixtureAdapter:
             self.refuse("timer activator is still active during fence")
         if not (paths["service"].is_symlink()
                 and os.readlink(paths["service"]) == "/dev/null"):
-            paths["service"].unlink(missing_ok=True)
-            paths["service"].symlink_to("/dev/null")
+            temporary = paths["service"].with_name(
+                "." + paths["service"].name + ".mask")
+            temporary.unlink(missing_ok=True)
+            temporary.symlink_to("/dev/null")
+            os.replace(temporary, paths["service"])
             self._fsync_dir(paths["service"].parent)
         self._ok(self.systemctl("daemon-reload"), "daemon reload after mask")
         masked = self._show(self.unit, ["LoadState", "FragmentPath"])

@@ -204,6 +204,13 @@ class AdapterTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.adapter.validate_snapshot(UNIT, tampered)
 
+    def test_snapshot_rejects_non_restorable_activator_state(self):
+        snapshot = self._snapshot()
+        tampered = copy.deepcopy(snapshot)
+        tampered["activators"]["service_active"] = "failed"
+        with self.assertRaises(RuntimeError):
+            self.adapter.validate_snapshot(UNIT, tampered)
+
     def test_snapshot_rejects_digest_mismatch(self):
         snapshot = self._snapshot()
         tampered = copy.deepcopy(snapshot)

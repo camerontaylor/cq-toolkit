@@ -3,9 +3,9 @@
 //
 // Invoked by a systemd oneshot unit installed under crq-tick.service in a
 // disposable guest. It performs no CRQ work: it appends one runtime-bound
-// completion record under an exclusive directory lock and exits. The
-// controller's proof adapter consumes those records as fake (fixture-only)
-// completion evidence.
+// completion record and exits. The controller's proof adapter consumes those
+// records as fake (fixture-only) completion evidence. systemd serializes runs
+// of this oneshot unit, so no cross-process lock is required.
 
 import fs from "node:fs";
 import path from "node:path";
@@ -67,40 +67,24 @@ function main() {
   }
   const completions = path.resolve(args.completions);
   fs.mkdirSync(path.dirname(completions), { recursive: true });
-  const lock = `${completions}.lockdir`;
-  for (;;) {
-    try {
-      fs.mkdirSync(lock);
-      break;
-    } catch (error) {
-      if (error.code !== "EEXIST") {
-        throw error;
-      }
-      sleep(10);
-    }
-  }
+  const sequence = readSequence(completions) + 1;
+  const record = {
+    unit: args.unit,
+    runtime: args.runtime,
+    success: true,
+    sequence,
+    invocation,
+    at: new Date().toISOString().replace(/\.\d{3}Z$/, "Z"),
+    boot_id: fs
+      .readFileSync("/proc/sys/kernel/random/boot_id", "utf8")
+      .trim(),
+  };
+  const descriptor = fs.openSync(completions, "a");
   try {
-    const sequence = readSequence(completions) + 1;
-    const record = {
-      unit: args.unit,
-      runtime: args.runtime,
-      success: true,
-      sequence,
-      invocation,
-      at: new Date().toISOString().replace(/\.\d{3}Z$/, "Z"),
-      boot_id: fs
-        .readFileSync("/proc/sys/kernel/random/boot_id", "utf8")
-        .trim(),
-    };
-    const descriptor = fs.openSync(completions, "a");
-    try {
-      fs.writeSync(descriptor, `${JSON.stringify(record)}\n`);
-      fs.fsyncSync(descriptor);
-    } finally {
-      fs.closeSync(descriptor);
-    }
+    fs.writeSync(descriptor, `${JSON.stringify(record)}\n`);
+    fs.fsyncSync(descriptor);
   } finally {
-    fs.rmdirSync(lock);
+    fs.closeSync(descriptor);
   }
   sleep(200);
 }
