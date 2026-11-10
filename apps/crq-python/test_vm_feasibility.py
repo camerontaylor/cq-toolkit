@@ -24,6 +24,7 @@ def _load(name, path):
 
 
 vm = _load("crq_vm_feasibility", OPS / "vm-feasibility.py")
+guest = _load("crq_vm_guest_probe", OPS / "vm-guest-probe.py")
 
 DIGEST = "a" * 64
 SUM = "%s  noble-server-cloudimg-amd64.img\n" % DIGEST
@@ -155,6 +156,32 @@ class FetchImageTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     vm.fetch_image(state, vm.Recorder(state))
             self.assertFalse((images / vm.IMAGE_NAME).exists())
+
+
+class GuestJobObservationTests(unittest.TestCase):
+    def test_failed_list_jobs_is_an_explicit_failure(self):
+        with mock.patch.object(guest, "systemctl", return_value={
+                "rc": 1, "stdout": "", "stderr": "manager unavailable"}):
+            observation = guest.jobs()
+            self.assertFalse(observation["ok"])
+            self.assertEqual(observation["lines"], [])
+            self.assertFalse(guest.wait_jobs("crq-x.service", False, 0)["ok"])
+            settled = guest.wait_jobs_settle(("crq-x.service",), 0)
+            self.assertFalse(settled["settled"])
+            self.assertFalse(settled["query_ok"])
+
+    def test_successful_list_jobs_observes_the_queue(self):
+        with mock.patch.object(guest, "systemctl", return_value={
+                "rc": 0, "stdout": "7 crq-x.service start waiting\n",
+                "stderr": ""}):
+            observation = guest.jobs()
+            self.assertTrue(observation["ok"])
+            self.assertEqual(observation["lines"],
+                             ["7 crq-x.service start waiting"])
+            self.assertTrue(guest.wait_jobs("crq-x.service", True, 0)["ok"])
+            settled = guest.wait_jobs_settle(("crq-x.service",), 0)
+            self.assertFalse(settled["settled"])
+            self.assertTrue(settled["query_ok"])
 
 
 class CloudInitTests(unittest.TestCase):
@@ -498,6 +525,11 @@ class EvidenceTests(unittest.TestCase):
     def _refusals(self):
         return {"direct": {"rc": 1}, "dependency": {"rc": 1}}
 
+    def _jobs(self, *lines):
+        return {"ok": True, "rc": 0, "timeout": False,
+                "lines": list(lines), "stdout": "\n".join(lines),
+                "stderr": ""}
+
     def _phases(self):
         return {
             "install": {"snapshot": self._snapshot(10, "i1", "boot-1",
@@ -506,20 +538,22 @@ class EvidenceTests(unittest.TestCase):
                            "dependency": {"run_delta": ["service", "dependent"]},
                            "queue_blocker": {"rc": 0},
                            "queue_start": {"rc": 0},
-                           "jobs_before_mask": [
+                           "jobs_before_mask": self._jobs(
                                "77 crq-queued.service start waiting",
-                               "96 crq-queued-fixture.service start waiting"],
+                               "96 crq-queued-fixture.service start waiting"),
                            "queue2_blocker": {"rc": 0},
                            "queue2_start": {"rc": 0},
-                           "jobs2_before_stop": [
+                           "jobs2_before_stop": self._jobs(
                                "116 crq-queued.service start waiting",
-                               "135 crq-queued-fixture.service start waiting"],
+                               "135 crq-queued-fixture.service start waiting"),
                            "stop_queued_fixture": {"rc": 0},
-                           "jobs2_after_stop": [],
+                           "jobs2_after_stop": self._jobs(),
                            "queued_jobs_after_release": {
-                               "settled": True, "jobs": []},
+                               "settled": True, "query_ok": True,
+                               "rc": 0, "jobs": []},
                            "queued_jobs2_after_release": {
-                               "settled": True, "jobs": []},
+                               "settled": True, "query_ok": True,
+                               "rc": 0, "jobs": []},
                            "queued_run_delta": ["queued"],
                            "queued2_run_delta": ["queued"]},
             "mask": {"native_mask": {"rc": 1},
@@ -629,7 +663,7 @@ class EvidenceTests(unittest.TestCase):
     def test_queued_setup_requires_success_and_a_waiting_fixture(self):
         phases = self._phases()
         phases["activation"]["queue_start"] = {"rc": 1}
-        phases["activation"]["jobs_before_mask"] = []
+        phases["activation"]["jobs_before_mask"] = self._jobs()
         manager = {"before": self._snapshot(10, "i1", "boot-1"),
                    "after": self._snapshot(11, "i2", "boot-1"),
                    "after_phase": self._refusals()}
@@ -656,8 +690,8 @@ class EvidenceTests(unittest.TestCase):
         self.assertTrue(vm.build_checks(phases, manager, reboot)
                         ["queued_stop_proven"])
         phases["activation"]["stop_queued_fixture"] = {"rc": 1}
-        phases["activation"]["jobs2_after_stop"] = [
-            "135 crq-queued-fixture.service start waiting"]
+        phases["activation"]["jobs2_after_stop"] = self._jobs(
+            "135 crq-queued-fixture.service start waiting")
         checks = vm.build_checks(phases, manager, reboot)
         self.assertFalse(checks["queued_stop_proven"])
         report = {"schema_version": vm.REPORT_SCHEMA,
@@ -669,6 +703,52 @@ class EvidenceTests(unittest.TestCase):
         phases["activation"]["stop_queued_fixture"] = {"rc": 0}
         checks = vm.build_checks(phases, manager, reboot)
         self.assertFalse(checks["queued_stop_proven"])
+
+    def test_stop_round_requires_a_successful_job_query(self):
+        phases = self._phases()
+        manager = {"before": self._snapshot(10, "i1", "boot-1"),
+                   "after": self._snapshot(11, "i2", "boot-1"),
+                   "after_phase": self._refusals()}
+        reboot = {"before": self._snapshot(11, "i2", "boot-1"),
+                  "after": self._snapshot(12, "i3", "boot-2"),
+                  "after_phase": self._refusals(),
+                  "boot_id_before": "boot-1", "boot_id_after": "boot-2",
+                  "qemu_pid_before": 99, "qemu_pid_after": 99,
+                  "qemu_identity_verified": True}
+        self.assertTrue(vm.build_checks(phases, manager, reboot)
+                        ["queued_stop_proven"])
+        phases["activation"]["jobs2_after_stop"] = []
+        checks = vm.build_checks(phases, manager, reboot)
+        self.assertFalse(checks["queued_stop_proven"])
+        report = {"schema_version": vm.REPORT_SCHEMA,
+                  "image": {"sha256": DIGEST, "sums_verified": True,
+                            "signature_verified": False},
+                  "checks": checks, "limitations": ["limited"]}
+        self.assertIn("check not proven: queued_stop_proven",
+                      vm.report_problems(report))
+        phases["activation"]["jobs2_after_stop"] = {
+            "ok": False, "rc": 1, "lines": [], "stdout": "",
+            "stderr": "Failed to list jobs"}
+        checks = vm.build_checks(phases, manager, reboot)
+        self.assertFalse(checks["queued_stop_proven"])
+
+    def test_settlement_requires_a_successful_job_query(self):
+        phases = self._phases()
+        manager = {"before": self._snapshot(10, "i1", "boot-1"),
+                   "after": self._snapshot(11, "i2", "boot-1"),
+                   "after_phase": self._refusals()}
+        reboot = {"before": self._snapshot(11, "i2", "boot-1"),
+                  "after": self._snapshot(12, "i3", "boot-2"),
+                  "after_phase": self._refusals(),
+                  "boot_id_before": "boot-1", "boot_id_after": "boot-2",
+                  "qemu_pid_before": 99, "qemu_pid_after": 99,
+                  "qemu_identity_verified": True}
+        self.assertTrue(vm.build_checks(phases, manager, reboot)
+                        ["queued_jobs_settled_after_mask"])
+        phases["activation"]["queued_jobs_after_release"] = {
+            "settled": True, "query_ok": False, "rc": 1, "jobs": []}
+        checks = vm.build_checks(phases, manager, reboot)
+        self.assertFalse(checks["queued_jobs_settled_after_mask"])
 
     def test_queued_jobs_must_settle_before_sampling_runs(self):
         phases = self._phases()

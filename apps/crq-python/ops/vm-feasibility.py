@@ -787,16 +787,26 @@ def build_checks(phases: dict, manager: dict, reboot: dict) -> dict:
     files_after = (reboot.get("after") or {}).get("files") or {}
     reboot_changes = compare_files(files_before, files_after,
                                    ignore=(TRIGGER_PATH,))
-    def waiting(jobs, unit):
-        return (isinstance(jobs, list)
+    def job_query_ok(observation):
+        return (isinstance(observation, dict)
+                and observation.get("ok") is True
+                and observation.get("rc") == 0
+                and isinstance(observation.get("lines"), list))
+
+    def waiting(observation, unit):
+        return (job_query_ok(observation)
                 and any(unit in str(line) and "start waiting" in str(line)
-                        for line in jobs))
+                        for line in observation["lines"]))
 
     def succeeded(result):
         return isinstance(result, dict) and result.get("rc") == 0
 
     def settled(result):
-        return isinstance(result, dict) and result.get("settled") is True
+        return (isinstance(result, dict)
+                and result.get("settled") is True
+                and result.get("query_ok") is True
+                and result.get("rc") == 0
+                and isinstance(result.get("jobs"), list))
 
     queued_setup_proven = (
         succeeded(activation.get("queue_blocker"))
@@ -805,11 +815,12 @@ def build_checks(phases: dict, manager: dict, reboot: dict) -> dict:
         and succeeded(activation.get("queue2_start"))
         and waiting(activation.get("jobs_before_mask"), "crq-queued-fixture.service")
         and waiting(activation.get("jobs2_before_stop"), "crq-queued-fixture.service"))
+    stop_jobs = activation.get("jobs2_after_stop")
     queued_stop_proven = (
         succeeded(activation.get("stop_queued_fixture"))
-        and isinstance(activation.get("jobs2_after_stop"), list)
+        and job_query_ok(stop_jobs)
         and not any("crq-queued-fixture.service" in str(line)
-                    for line in activation["jobs2_after_stop"]))
+                    for line in stop_jobs["lines"]))
     checks = {
         "direct_start_ran": "service" in (activation.get("direct", {}).get("run_delta") or []),
         "dependency_start_ran": "dependent" in

@@ -161,8 +161,14 @@ def unit_state(name):
 
 def jobs():
     result = systemctl("list-jobs", "--no-legend", "--no-pager")
-    lines = [line for line in (result.get("stdout") or "").splitlines() if line.strip()]
-    return lines
+    stdout = result.get("stdout")
+    ok = (result.get("rc") == 0 and not result.get("timeout")
+          and isinstance(stdout, str))
+    lines = [line for line in stdout.splitlines() if line.strip()] if ok else []
+    return {"ok": ok, "rc": result.get("rc"),
+            "timeout": bool(result.get("timeout")),
+            "lines": lines, "stdout": stdout or "",
+            "stderr": result.get("stderr") or ""}
 
 
 def runs():
@@ -349,23 +355,30 @@ def restore_unit(name):
 
 def wait_jobs(unit, present, timeout):
     deadline = time.time() + timeout
-    while time.time() < deadline:
-        lines = jobs()
-        if any(unit in line for line in lines) == present:
-            return lines
+    while True:
+        observation = jobs()
+        if (observation["ok"]
+                and (any(unit in line for line in observation["lines"]) == present)):
+            return observation
+        if time.time() >= deadline:
+            return observation
         time.sleep(0.25)
-    return jobs()
 
 
 def wait_jobs_settle(units, timeout):
     """Wait until none of the queued wrapper/fixture jobs remain."""
     deadline = time.time() + timeout
-    while time.time() < deadline:
-        lines = jobs()
-        if not any(unit in line for line in lines for unit in units):
-            return {"settled": True, "jobs": lines}
+    while True:
+        observation = jobs()
+        if (observation["ok"]
+                and not any(unit in line for line in observation["lines"]
+                            for unit in units)):
+            return {"settled": True, "query_ok": True,
+                    "rc": observation["rc"], "jobs": observation["lines"]}
+        if time.time() >= deadline:
+            return {"settled": False, "query_ok": observation["ok"],
+                    "rc": observation["rc"], "jobs": observation["lines"]}
         time.sleep(0.25)
-    return {"settled": False, "jobs": jobs()}
 
 
 def activation():
