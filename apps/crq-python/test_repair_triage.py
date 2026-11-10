@@ -8,7 +8,7 @@ from crq_repair import atomic
 from crq_repair.bounded import drain_job
 import finding_delivery as delivery
 import review_ledger as ledger
-from crq_repair.triage import phase
+from crq_repair.triage import context, phase
 from test_finding_delivery import FindingTest, AT
 from test_review_ledger import rehash
 
@@ -21,6 +21,20 @@ class PhaseTest(FindingTest):
                         'current_path': 'a', 'current_lines': [[1, 1]], 'quoted_text': 'one'})
         result = phase(self.inbox, self.f.repo, self.t, judge, transport, AT, dry_run=dry, maximum=maximum)
         return result, queue, judge
+
+    def test_content_search_uses_renamed_path_after_blame_loss(self):
+        target = self.f.commit({'a': b'unique-long-needle-text\nsecond line\n'})
+        self.f.git('mv', 'a', 'renamed')
+        self.f.git('commit', '-qm', 'rename')
+        filler = b''.join(('filler line %03d\n' % i).encode() for i in range(1, 60))
+        tip = self.f.commit({'renamed': filler + b'prefix unique-long-needle-text suffix\n'})
+        row = {'target': target, 'finding': {'path': 'a', 'intervals': [[1, 2]],
+                                              'anchor_status': 'verified'}}
+        self.assertEqual(self.f.repo.carry(target, tip, 'a', {1, 2}), ('renamed', set()))
+        result = context(self.f.repo, row, tip)
+        self.assertEqual(result['current_path'], 'renamed')
+        self.assertIn(':renamed:60:prefix unique-long-needle-text suffix', result['content_search'])
+        self.assertNotIn('unique-long-needle-text', str(result['region']))
 
     def test_missing_evidence_enters_fixer_queue_once(self):
         result, queue, _ = self.run_phase({'stop': 'ok', 'verdict': 'unsure', 'reason': 'missing source evidence'})
