@@ -64,12 +64,13 @@ end-to-end test also covers the other float lexemes and the missing-usage
 fallback. A plain `JSON.parse` result cannot preserve the distinction, and
 `toPlainJson` alone erases it.
 
-A Python int that a JavaScript number cannot hold exactly stays a
-`JsonNumber` in `starts_cap` (`SummaryInteger` is `number | JsonNumber`). For
-example 2^53 and 2^53+1 both keep the exact `JsonNumber` (the JSON writer
-refuses unsafe plain numbers), 2^53-1 stays a number, a large negative int
-falls back, and a float with the same value falls back. The summary is not a
-`JSON.stringify` wire value: a future writer must serialise it with
-`pythonJson`/`receiptJsonText`, which emits `JsonNumber` as its exact digits.
-The oracle test compares the canonical `starts_cap` bytes for these cases, not
-the rounded materialisation.
+`starts_cap` is a `SummaryInteger` (`number | JsonNumber`) chosen by
+JavaScript's safe integer range, not by what one double happens to hold. A
+Python int within `-(2^53-1)`..`2^53-1` stays a number; any int outside that
+range keeps the exact `JsonNumber`, so 2^53 (exactly representable as a double)
+and 2^53+1 are both tagged because JSON writers refuse unsafe plain numbers.
+2^53-1 stays a number, a large negative int falls back, and a float with the
+same value falls back. The summary is not a `JSON.stringify` wire value: a
+future writer must serialise it with `pythonJson`/`receiptJsonText`, which
+emits `JsonNumber` as its exact digits. The oracle test compares the canonical
+`starts_cap` bytes for these cases, not the rounded materialisation.

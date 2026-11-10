@@ -105,9 +105,11 @@ export interface PendingItemView {
 }
 
 /**
- * A summary integer rendered exactly like Python. Values that a JavaScript
- * number holds exactly stay numbers; larger Python ints keep the lossless
- * {@link JsonNumber} so a writer using `pythonJson` emits the exact digits.
+ * A summary integer rendered exactly like Python. Values inside JavaScript's
+ * safe integer range (`-(2^53-1)` to `2^53-1`) stay numbers; any Python int
+ * outside that range keeps the lossless {@link JsonNumber}, including `2^53`
+ * which a double happens to hold exactly, so a writer using `pythonJson`
+ * emits the exact digits.
  */
 export type SummaryInteger = number | JsonNumber;
 
