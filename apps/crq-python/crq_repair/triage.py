@@ -30,7 +30,7 @@ def context(repo, row, tip):
         original = '\n'.join(old[i - 1] for i in indices if 1 <= i <= len(old))[:16000]
         needle = next((line.strip() for line in original.splitlines() if len(line.strip()) >= 12), '')
         if needle and not lines:
-            search = repo.git('grep', '-n', '-F', '-e', needle[:200], tip, '--', finding['path'], check=False).decode(errors='replace')[:16000]
+            search = repo.git('grep', '-n', '-F', '-e', needle[:200], tip, '--', name, check=False).decode(errors='replace')[:16000]
     contract_entry = entries.get(CONTRACT_PATH)
     contract_text = repo.git('cat-file', 'blob', contract_entry['blob']).decode(errors='replace') if contract_entry else ''
     contract = {'path': CONTRACT_PATH, 'tip': tip, 'blob': contract_entry['blob'] if contract_entry else None,
