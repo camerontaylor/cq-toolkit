@@ -81,9 +81,18 @@ and the manifest inventoried 4,047 paths. An independent
 loaded `fs-ext` 2.1.1, proved flock contention, and observed the runner's
 indeterminate `tick --dry-run` refusal (exit 1).
 
+The verifier at `b99837295838053cf53e4ac6619ecfedd80f6ac5` re-verified that
+same preserved archive: the archive and content digests and all 4,047 paths
+matched, `fs-ext` 2.1.1 flock contention held, and the runner returned exit 1,
+status `indeterminate`, and the incomplete-plan detail. A negative run with a
+fake Node that emitted valid `fs-ext` JSON but exited 0 with status `success`
+failed at the smoke check with `runner smoke expected exit 1, got 0`, so a
+failed or regressed runner cannot pass verification.
+
 Evidence is preserved outside the code worktree at
 `~/crq-artifact-runs/c76666d07/` on pluto: the archive, sidecar,
 provenance file, build report, independent verification report, and staging
-tree. This is reusable route evidence, not a bit-for-bit reproducible-build
-guarantee or a cutover approval. The earlier `4baffebd` one-off is superseded
-and was never reusable provenance.
+tree, plus the exact-head re-verification and negative reports. This is
+reusable route evidence, not a bit-for-bit reproducible-build guarantee or a
+cutover approval. The earlier `4baffebd` one-off is superseded and was never
+reusable provenance.
