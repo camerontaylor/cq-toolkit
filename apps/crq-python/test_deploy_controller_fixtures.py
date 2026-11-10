@@ -97,6 +97,9 @@ class ControllerFixture(unittest.TestCase):
         self.floor = mock.patch.object(host, "POLICY_FLOOR", self.before)
         self.floor.start()
         self.addCleanup(self.floor.stop)
+        stopped_units = mock.patch.object(host, "run", side_effect=self.stopped)
+        stopped_units.start()
+        self.addCleanup(stopped_units.stop)
         self.effects = dc.Effects(self.root, self.record_dir)
         # Installed-unit observation reads an isolated user config, never the
         # real one; the CLI subprocess inherits the same environment.
