@@ -1261,11 +1261,15 @@ def rollback_fence_phase(args):
     require(switched["rc"] not in (0, None),
             "rollback fence switch unexpectedly returned success")
     created = new_records(before_paths)
+    try:
+        refusal = json.loads(switched.get("stdout") or "").get("refused")
+    except (TypeError, ValueError):
+        refusal = None
     require(len(created) == 1,
             "rollback fence switch did not leave one journal record: rc=%r "
-            "created=%r stdout=%s stderr=%s"
+            "created=%r refused=%r stderr=%s"
             % (switched["rc"], [path.name for path in created],
-               (switched.get("stdout") or "")[:800],
+               (refusal or (switched.get("stdout") or ""))[:600],
                (switched.get("stderr") or "")[:800]))
     record_path = created[0]
     record = json.loads(record_path.read_text())
