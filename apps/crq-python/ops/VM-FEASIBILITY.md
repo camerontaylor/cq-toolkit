@@ -105,34 +105,42 @@ not merely an unknown record location.
    `:215-226`), so an older controller or a different `--record-dir` bypasses
    the guard without touching the same lock.
 
-Implementation plan, in the existing controller rather than a second store:
+Implemented in the existing controller (2026-11-11; no second store):
 
-- Derive the transaction root from the private overlay's `record_dir`; refuse
-  when `--record-dir` resolves to a different real path. Do not create a new
-  journal.
-- Replace the one-sided guard with `refuse_unfinished_transactions(effects)`
-  that classifies every `controller-*.json` by `(operation, outcome)` and fails
-  closed on malformed or unknown records:
-  - block a unit switch on `deploy_pending`, `rollback_pending`, checkout or
-    unit `recovery_required`, and unfinished `unit_switch`;
-  - block deploy and rollback on the same set;
-  - keep completed `deploy`/`rollback` and refused/no-change outcomes as
-    history, not blockers.
-- Add a separate `controller-<id>.resolution.json` for a resolved pending
-  record. It names the transaction id, records the observed HEAD, config,
-  unit and preserved-state digests, the decision, and the SHA-256 of the
-  original record. The guard accepts it only when the digest and every
-  observation match the retained record and the current physical state.
-  `OPERATOR-RESOLUTION.md` prose is never consumed. The original record is
-  never rewritten.
-- Record the resolved `record_dir` real path, controller version and helper
-  SHA-256 in every transaction; refuse new transactions when existing records
-  were written under a different recorded root or schema.
-- Add `test_deploy_controller_interop.py`: pending deploy blocks a unit
-  switch; pending rollback blocks; checkout `recovery_required` blocks;
-  completed deploy history does not block; a resolution with a wrong record
-  digest or mismatched physical state does not clear; malformed or unknown
-  operations refuse; a different record root is rejected by the binding.
+- `refuse_unfinished_transactions(effects, exclude=None)` is the one guard for
+  checkout deploy/rollback and unit switch/recovery. It classifies every
+  `controller-*.json` by `(operation, outcome)`:
+  - `deploy_pending`/`rollback_pending` and `unit_switch` with `pending` or
+    `recovery_required` block every new transaction;
+  - completed `deploy`/`rollback` (including the first producer's outcome-less
+    completed journals), `deploy_refused`/`rollback_refused`, and
+    completed/rolled-back `unit_switch` records are history and do not block;
+  - a `recovery_required` record is history only when its retained
+    `prior_state` has the exact captured-state shape and
+    `no_change_observation` still matches HEAD, config bytes, checkout status,
+    installed CRQ user units and preserved state; changed or unobservable
+    surfaces are unfinished, and a legacy record without that identity is an
+    unsupported legacy resolution;
+  - unreadable, non-object, wrong-schema, unknown-operation and invalid-outcome
+    records refuse naming the record.
+- `recover_unit` calls the same guard with `exclude=<its own record>`, so a
+  legitimate recovery does not block itself while any other unfinished
+  transaction still does.
+- The guard only reads. `OPERATOR-RESOLUTION.md` prose is never consumed and
+  every pre-existing record's bytes are unchanged. The owner rejected a
+  separate `controller-<id>.resolution.json` store; none was added.
+- `test_deploy_controller_interop.py` covers pending deploy/rollback blocking
+  unit switch and checkout operations, unresolved checkout recovery,
+  verifiably unchanged recovery history, legacy recovery without identity,
+  completed/refused history, unit-recovery self-exclusion, malformed/unknown
+  records, prepare-host render-intent records, and byte preservation.
+
+Remaining gaps (not fixed here): the CLI still accepts an arbitrary
+`--record-dir`; the guard sees only that directory, the lock is checkout-local,
+and older binaries or a second directory can bypass it. Records do not carry
+the record root or controller version, so cross-checkout identity and the
+production inventory of old records remain parent-owned. A host adapter is
+still not enabled.
 
 The one input that cannot be derived from source is the actual deployed record
 root, the controller versions in use, and the inventory of existing pending or

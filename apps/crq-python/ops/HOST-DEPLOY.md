@@ -347,16 +347,22 @@ if record storage is unavailable. Do not rerun blindly, restore queue snapshots,
 or infer automatic rollback permission from a pending/recovery receipt.
 
 Records are never rewritten after their outcome is final (only the pending
-intent is replaced by its outcome); resolution notes are separate files. To
-close a stale `recovery_required` record (for
-example one written before `refused_no_change` existed, such as a pre-checkout
-tag refusal), verify the physical state against the record's prior identity:
-HEAD equals `prior_head`, config bytes match `prior_config_sha256` (and any
-retained baselines), and unit enablement and preserved state are unchanged.
-Then write a separate `OPERATOR-RESOLUTION.md` beside the retained record that
-names the record, the observations and the decision. Earlier intent, recovery
-and refusal records are not consumed by a later preflight, so they do not block
-a separately approved switch.
+intent is replaced by its outcome). A single symmetric preflight classifies
+every `controller-*.json` record before checkout deploy/rollback or unit
+switch/recovery. `deploy_pending`/`rollback_pending` and pending or
+recovery-required unit switches block both seams. Completed `deploy`/`rollback`
+(including the first producer's outcome-less completed journals),
+`deploy_refused`/`rollback_refused`, completed/rolled-back unit switches, and a
+`recovery_required` record whose retained `prior_state` still matches the
+physical state (HEAD, config bytes, checkout status, installed CRQ user units
+and preserved state) do not block. A `recovery_required` record whose surfaces
+changed, or a legacy record without a verifiable `prior_state`, refuses with the
+record named; `OPERATOR-RESOLUTION.md` prose is not read and is not a
+resolution. `recover_unit` excludes exactly the record it is recovering. Every
+pre-existing record's bytes are unchanged. The guard still only sees the
+supplied `--record-dir`; a second directory and older binaries can bypass it,
+and the lock is checkout-local. Production reconciliation of the actual record
+root and old callers remains parent-owned.
 
 A completed journal is written only after the checks and durable completion
 write succeed. Pending/recovery/unknown outcomes are not rollback inputs;
