@@ -19,7 +19,8 @@ without it cannot be stopped. Source of truth: `src/driver/types.ts`
 - `toolPolicy: ToolPolicy` — `{ allow: readonly string[]; mode?: 'allowlist' | 'unrestricted' | 'none' }`
 - `sandboxPolicy: SandboxPolicy` — `{ level: 'none' | 'workspace-write' | 'read-only' }`
 - `sessionRef?: string` — opaque session handle for multi-turn continuation
-- `budget: Budget` — `{ maxUsd?, maxTokens?, maxSteps?, maxOutputTokens?, maxContextTokens?, wallClockMs?, maxAttempts? }`
+- `budget: Budget` — `{ maxUsd?, maxTokens?, maxSteps?, maxOutputTokens?, maxContextTokens?, wallClockMs?, maxAttempts?, strictTokenBudget? }`
+- `outputSchema?: OutputSchema` — structured-output request (`{ name, schema }`; see the `ai-sdk` section)
 
 `WorkerResult` — the plain-data outcome:
 
