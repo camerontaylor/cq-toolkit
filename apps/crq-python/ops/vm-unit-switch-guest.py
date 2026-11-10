@@ -1262,7 +1262,11 @@ def rollback_fence_phase(args):
             "rollback fence switch unexpectedly returned success")
     created = new_records(before_paths)
     require(len(created) == 1,
-            "rollback fence switch did not leave one journal record")
+            "rollback fence switch did not leave one journal record: rc=%r "
+            "created=%r stdout=%s stderr=%s"
+            % (switched["rc"], [path.name for path in created],
+               (switched.get("stdout") or "")[:800],
+               (switched.get("stderr") or "")[:800]))
     record_path = created[0]
     record = json.loads(record_path.read_text())
     require(record["outcome"] == "pending" and record["phase"] == "drained",
