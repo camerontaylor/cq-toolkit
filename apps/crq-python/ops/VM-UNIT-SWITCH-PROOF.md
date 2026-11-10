@@ -50,12 +50,41 @@ Files:
 
 ## Recorded evidence
 
-Pending the committed guest run. The host harness writes ``report.json`` and
-``raw-guest-evidence.tar.gz`` under
-``~/crq-vm-feasibility/state/runs/<run>/`` outside the worktree, with the
-source commit and SHA-256 of every executed script. ``verify`` recomputes the
-checks and re-hashes the retained artifacts; a stored check or artifact hash
-that disagrees is a failure.
+One run completed on Pluto (KVM, Ubuntu noble guest ``crq-probe``) from source
+commit ``0ad3fc486320caaf793f7a0599b7ec3cd3a4083f``:
+
+- run ``20261110T163616Z-5252017b``
+- ``report.json`` SHA-256
+  ``6b1a6482ade5ce66df09ad29e8d903c6de78847193ff8b19aca4d09dd8cf8356``
+- ``raw-guest-evidence.tar.gz`` SHA-256
+  ``1abd1af5bde17604e8bf7f4ae5cee9a93ce9decbbea4a82f62dd02a3242a3de7``
+- host script ``executed-host-script.py`` SHA-256
+  ``014891375b38b77dd464ceea18152aaabffe24a6e6f135f41df635ab7bfee782``
+- guest script ``executed-guest-probe.py`` SHA-256
+  ``42ac97bb9247bb4e7164136fec9de004a50e5c04942b46d0fad2c9c65e8bf51b``
+
+The report records all 18 checks true and ``problems: []``; a second
+``verify`` recomputed the checks and re-hashed both retained artifacts with
+``problems: []``. Artifacts stay at
+``~/crq-vm-feasibility/state/runs/20261110T163616Z-5252017b/`` on
+Pluto, outside the worktree.
+
+The run produced:
+
+| Step | Observed |
+|---|---|
+| ``switch-node`` | completed; sequences ``1,2`` with distinct invocation IDs; ``node:bbbb…``; queue/heartbeat/history unchanged; ``record_count`` 2 |
+| ``switch-python`` | completed; sequences ``3,4`` with distinct invocation IDs; ``python``; queue/heartbeat/history unchanged; ``record_count`` 3 |
+| ``interrupt`` | CLI rc ``-9``; pending ``drained`` record ``controller-1e3b…``; service left as the durable ``/dev/null`` mask; timer inactive and enabled |
+| ``recover-kill`` | CLI rc ``-9``; record SHA-256 ``6b3e64ef…`` identical before and after; queue/heartbeat/history unchanged |
+| ``recover`` | CLI rc ``0``; ``rolled_back`` at ``restore_activation_pending``; prior Python bytes/mode/uid/gid and timer enablement restored exactly |
+| ``recover-repeat`` | CLI rc ``2``; ``invalid unit recovery record``; no further mutation |
+| ``inspect`` | final Python service SHA-256 ``a8a0e280…``; timer SHA-256 ``3edf2fd6…``; four retained records; seeded queue, heartbeat and historical record bytes unchanged |
+
+The fixture timer uses ``OnUnitInactiveSec=1s`` and ``AccuracySec=1s``. The
+default one-minute timer accuracy outlasted the completion bound in an earlier
+attempt; the fixture now bounds it explicitly. This is fixture configuration,
+not a production template change.
 
 ## Not proven
 
@@ -72,12 +101,15 @@ that disagrees is a failure.
 
 ```sh
 commit=$(git rev-parse HEAD)
+state=$HOME/crq-vm-feasibility/state
 python3 apps/crq-python/ops/vm-unit-switch.py \
-  --state-dir ~/crq-vm-feasibility \
+  --state-dir "$state" \
   --tools ~/crq-vm-feasibility/tools \
   run --source-commit "$commit"
 python3 apps/crq-python/ops/vm-unit-switch.py \
-  verify ~/crq-vm-feasibility/state/runs/<run>/report.json
+  --state-dir "$state" \
+  --tools ~/crq-vm-feasibility/tools \
+  verify "$state/runs/<run>/report.json"
 ```
 
 Run the named tests locally:

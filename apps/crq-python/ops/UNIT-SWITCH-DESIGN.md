@@ -7,10 +7,13 @@ adapter. The recovery snapshot's structure and host operations still need an
 independent design review and disposable-VM proof.
 
 A bounded proof vehicle now exercises the actual ``switch_unit``/``recover_unit``
-seam against one harmless fixture in a disposable guest. It is fixture-only
-evidence, not production enablement: production journal interoperability, a
-real runtime-bound completion provider, and the manager-restart/reboot matrix
-remain open. See [VM-UNIT-SWITCH-PROOF.md](VM-UNIT-SWITCH-PROOF.md).
+seam against one harmless fixture in a disposable KVM guest; run
+``20261110T163616Z-5252017b`` passed both directions, preactivation
+interruption, interrupted recovery and repeat-recovery refusal. It is
+fixture-only evidence, not production enablement: production journal
+interoperability, a real runtime-bound completion provider, and the
+manager-restart/reboot matrix remain open. See
+[VM-UNIT-SWITCH-PROOF.md](VM-UNIT-SWITCH-PROOF.md).
 
 ## Probe evidence and its limits
 
