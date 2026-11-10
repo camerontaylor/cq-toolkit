@@ -8,10 +8,12 @@ import importlib.util
 import io
 import json
 import pathlib
+import subprocess
 import tempfile
 import tarfile
 import unittest
 import hashlib
+from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parent
 OPS = ROOT / "ops"
@@ -429,6 +431,37 @@ class VerifyTests(unittest.TestCase):
         self.assertEqual(status, 1)
         self.assertTrue(any("raw guest evidence size does not match" in item
                             for item in payload["problems"]))
+
+
+class SourceCommitTests(unittest.TestCase):
+    def _run(self, status, match=None):
+        calls = []
+
+        def fake(argv, **kwargs):
+            calls.append(list(argv))
+            dirty = match is not None and any(match in arg for arg in argv)
+            stdout = SOURCE_COMMIT if "rev-parse" in argv else (status if dirty else "")
+            return subprocess.CompletedProcess(argv, 0, stdout, "")
+
+        return calls, mock.patch.object(harness.subprocess, "run", side_effect=fake)
+
+    def test_dirty_host_module_is_rejected(self):
+        calls, patcher = self._run(" M apps/crq-python/ops/vm-feasibility.py\n",
+                                   match="vm-feasibility.py")
+        with patcher:
+            with self.assertRaisesRegex(ValueError, "host proof modules"):
+                harness.source_commit_check(pathlib.Path("/repo"), SOURCE_COMMIT)
+        checked = {word for call in calls for word in call}
+        self.assertIn(str(OPS / "vm-unit-switch.py"), checked)
+        self.assertIn(str(OPS / "vm-feasibility.py"), checked)
+
+    def test_clean_checkout_is_accepted(self):
+        calls, patcher = self._run("")
+        with patcher:
+            self.assertEqual(
+                harness.source_commit_check(pathlib.Path("/repo"), SOURCE_COMMIT),
+                SOURCE_COMMIT)
+        self.assertEqual(len(calls), 3)
 
 
 if __name__ == "__main__":

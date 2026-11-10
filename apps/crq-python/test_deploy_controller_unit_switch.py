@@ -132,6 +132,40 @@ class UnitSwitchTests(ControllerFixture):
             dc.recover_unit(self.effects, adapter, path)
         self.assertFalse(adapter.running)
 
+    def test_rollback_release_follows_restore_activation_journal(self):
+        fixture = self
+
+        class JournalingAdapter(Adapter):
+            def __init__(self):
+                super().__init__("python")
+                self.phases = []
+
+            def _phase(self):
+                records = [json.loads(candidate.read_text())
+                           for candidate in fixture.record_dir.glob("controller-*.json")]
+                return records[0]["phase"]
+
+            def install(self, unit, runtime):
+                raise RuntimeError("install failed")
+
+            def restore(self, unit, snapshot):
+                self.phases.append(("restore", self._phase()))
+                super().restore(unit, snapshot)
+
+            def restore_activation(self, unit, snapshot):
+                self.phases.append(("release", self._phase()))
+                super().restore_activation(unit, snapshot)
+
+        adapter = JournalingAdapter()
+        with self.assertRaises(dc.RecoveryRequired):
+            dc.switch_unit(self.effects, adapter, "crq-tick.service",
+                           "node:" + "a" * 40)
+        self.assertEqual(adapter.phases, [
+            ("restore", "drained"),
+            ("release", "restore_activation_pending"),
+        ])
+        self.assertTrue(adapter.running)
+
     def test_recovery_final_journal_failure_retains_ambiguous_intent(self):
         class Crash(BaseException):
             pass

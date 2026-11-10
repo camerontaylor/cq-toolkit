@@ -39,6 +39,10 @@ UPLOADS = (
     "unit-switch-fixture.mjs",
     "vm-unit-switch-guest.py",
 )
+HOST_MODULES = (
+    "vm-unit-switch.py",
+    "vm-feasibility.py",
+)
 GUEST_PHASES = ("prepare", "switch-node", "switch-python", "interrupt",
                 "recover-kill", "recover", "recover-repeat", "inspect", "fence")
 NODE_RUNTIME = "node:" + "b" * 40
@@ -437,12 +441,14 @@ def source_commit_check(repo, commit):
                           capture_output=True, text=True, check=True).stdout.strip()
     if head != commit:
         raise ValueError("source commit is not the worktree HEAD")
-    status = subprocess.run(
-        ["git", "-C", str(repo), "status", "--porcelain", "--"] +
-        [str(OPS / name) for name in UPLOADS],
-        capture_output=True, text=True, check=True).stdout.strip()
-    if status:
-        raise ValueError("uploaded proof scripts have uncommitted changes")
+    for label, names in (("uploaded proof scripts", UPLOADS),
+                         ("host proof modules", HOST_MODULES)):
+        status = subprocess.run(
+            ["git", "-C", str(repo), "status", "--porcelain", "--"] +
+            [str(OPS / name) for name in names],
+            capture_output=True, text=True, check=True).stdout.strip()
+        if status:
+            raise ValueError(label + " have uncommitted changes")
     return head
 
 

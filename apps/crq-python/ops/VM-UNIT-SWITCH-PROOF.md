@@ -81,7 +81,13 @@ fixture scripts, nonempty matching local and remote digests, verified upload
 status, the recorded source commit and the report directory path. A
 host-validator-only change may re-run this check against the retained report
 when the guest scripts are byte-identical; that is a validator re-run, not a
-new guest run. Artifacts stay at
+new guest run. The host checks also refuse a run when the executed
+``vm-unit-switch.py`` or its imported ``vm-feasibility.py`` has uncommitted
+changes, so evidence cannot be attributed to HEAD when the host implementation
+differs from that commit. Rollback restores the prior service into the staged
+path while the durable ``/dev/null`` mask remains in place; the controller
+journals ``restore_activation_pending`` before ``restore_activation`` releases
+the staged service and restores its prior activation state. Artifacts stay at
 ``~/crq-vm-feasibility/state/runs/20261110T173225Z-de36ec18/`` on Pluto,
 outside the worktree. The earlier retained run
 ``20261110T170322Z-9e8c5133`` remains on Pluto; it predates the fence probe

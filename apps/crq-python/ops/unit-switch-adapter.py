@@ -870,25 +870,32 @@ class GuestFixtureAdapter:
         self.validate_snapshot(unit, snapshot)
         self._maybe_kill("restore")
         paths = self._unit_paths()
-        self._staged_service_path(paths["service"]).unlink(missing_ok=True)
+        staged = self._staged_service_path(paths["service"])
+        staged.unlink(missing_ok=True)
         self._fsync_dir(paths["service"].parent)
         self.systemctl("stop", TIMER)
         self.systemctl("reset-failed", TIMER)
-        for key in ("service", "timer", "wants"):
+        fenced = self._usable_current_service(paths["service"])
+        if fenced["type"] != "symlink" or fenced["target"] != "/dev/null":
+            self.refuse("restore requires the durable /dev/null service fence")
+        for key in ("timer", "wants"):
             path = paths[key]
             self._restore_path(path, snapshot["paths"][str(path)])
+        self._restore_path(staged, snapshot["paths"][str(paths["service"])])
         self._ok(self.systemctl("daemon-reload"), "daemon reload after restore")
-        for key in ("service", "timer", "wants"):
+        for key in ("timer", "wants"):
             path = paths[key]
             self._compare_state(path, snapshot["paths"][str(path)])
-        loaded = self._show(self.unit, ["LoadState", "FragmentPath"])
-        if loaded["LoadState"] != "loaded" \
-                or loaded["FragmentPath"] != str(paths["service"]):
-            self.refuse("restored service did not load from the expected path")
-        runtime = self._runtime_from_unit(paths["service"])
+        self._compare_state(staged, snapshot["paths"][str(paths["service"])])
+        masked = self._show(self.unit, ["LoadState", "FragmentPath"])
+        if masked["LoadState"] != "masked" \
+                or masked["FragmentPath"] != str(paths["service"]):
+            self.refuse("restore must keep the service masked until activation")
+        runtime = self._runtime_from_unit(staged)
         if runtime != snapshot["runtime"]:
-            self.refuse("restored service runtime does not match the snapshot")
-        self.last_restore = {"runtime": runtime, "paths": list(snapshot["paths"])}
+            self.refuse("staged restore runtime does not match the snapshot")
+        self.last_restore = {"runtime": runtime, "paths": list(snapshot["paths"]),
+                             "staged": str(staged), "masked": masked}
         return self.last_restore
 
     def restore_activation(self, unit, snapshot):
@@ -896,6 +903,25 @@ class GuestFixtureAdapter:
             self.refuse("unit is not supported by this proof adapter")
         self.validate_snapshot(unit, snapshot)
         self._maybe_kill("restore_activation")
+        paths = self._unit_paths()
+        staged = self._staged_service_path(paths["service"])
+        service_state = snapshot["paths"][str(paths["service"])]
+        self._compare_state(staged, service_state)
+        if self._runtime_from_unit(staged) != snapshot["runtime"]:
+            self.refuse("staged restore runtime changed before activation")
+        fenced = self._usable_current_service(paths["service"])
+        if fenced["type"] != "symlink" or fenced["target"] != "/dev/null":
+            self.refuse("restore activation requires the durable /dev/null service fence")
+        os.replace(staged, paths["service"])
+        self._fsync_dir(paths["service"].parent)
+        self._ok(self.systemctl("daemon-reload"), "daemon reload after restore release")
+        loaded = self._show(self.unit, ["LoadState", "FragmentPath"])
+        if loaded["LoadState"] != "loaded" \
+                or loaded["FragmentPath"] != str(paths["service"]):
+            self.refuse("restored service did not load from the expected path")
+        self._compare_state(paths["service"], service_state)
+        if self._runtime_from_unit(paths["service"]) != snapshot["runtime"]:
+            self.refuse("restored service runtime does not match the snapshot")
         expected = snapshot["activators"]
         if expected["timer_active"] == "active":
             self._ok(self.systemctl("start", TIMER), "restore timer activation")
