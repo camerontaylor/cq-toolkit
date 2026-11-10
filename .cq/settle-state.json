@@ -1133,19 +1133,6 @@
         }
       ]
     },
-    "1454": {
-      "tuple": {
-        "head": "64b87efb7ad6dc2ee435e6839a77255c616266a6",
-        "base": "a7883396d68a277b6d7595fb5064635a48f06693",
-        "forcePushEpoch": 0
-      },
-      "observations": [
-        {
-          "observedAt": "2026-11-10T02:55:38.692Z",
-          "by": "self-merge-prs:observe"
-        }
-      ]
-    },
     "1455": {
       "tuple": {
         "head": "0f36ea738197fb1743cac4e2b337ed9f2d6e721f",
@@ -1324,6 +1311,58 @@
       "observations": [
         {
           "observedAt": "2026-11-10T02:59:16.685Z",
+          "by": "self-merge-prs:observe"
+        }
+      ]
+    },
+    "1473": {
+      "tuple": {
+        "head": "57c40b29f4f77fc5f741a01092c48ffd833b3803",
+        "base": "880d3d9b9bbc9b1a7e4700d94d07bbef935f3ed2",
+        "forcePushEpoch": 0
+      },
+      "observations": [
+        {
+          "observedAt": "2026-11-10T03:16:22.437Z",
+          "by": "self-merge-prs:observe"
+        }
+      ]
+    },
+    "1474": {
+      "tuple": {
+        "head": "55dd6de4aeed9f98e17ad7c26f751d2ae8bc8318",
+        "base": "880d3d9b9bbc9b1a7e4700d94d07bbef935f3ed2",
+        "forcePushEpoch": 0
+      },
+      "observations": [
+        {
+          "observedAt": "2026-11-10T03:16:22.437Z",
+          "by": "self-merge-prs:observe"
+        }
+      ]
+    },
+    "1475": {
+      "tuple": {
+        "head": "acf64c3f02ad00271b851822e006d828db5778f1",
+        "base": "d8e58b7858f7c5f29debe170b9340fb2d53b9cc2",
+        "forcePushEpoch": 0
+      },
+      "observations": [
+        {
+          "observedAt": "2026-11-10T03:16:22.437Z",
+          "by": "self-merge-prs:observe"
+        }
+      ]
+    },
+    "1476": {
+      "tuple": {
+        "head": "397f0023cca822c7b01a5ba09f72d59609ab90f2",
+        "base": "d8e58b7858f7c5f29debe170b9340fb2d53b9cc2",
+        "forcePushEpoch": 0
+      },
+      "observations": [
+        {
+          "observedAt": "2026-11-10T03:16:22.437Z",
           "by": "self-merge-prs:observe"
         }
       ]
