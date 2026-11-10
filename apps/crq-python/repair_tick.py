@@ -21,6 +21,10 @@ def prepare_current_job(c, q, old_job_id, source_sha, evidence, *, preserve_work
     if old.get('job') != old_job_id:
         raise ValueError('historical job identity mismatch')
     validate_revalidation(c.CONFIG, old, source_sha, evidence)
+    instructions = evidence.get('fix_instructions')
+    if 'fix_instructions' in evidence and (not isinstance(instructions, str) or not instructions.strip()
+                                     or len(instructions) > 2000 or '\x00' in instructions):
+        raise ValueError('fix instructions must contain 1..2000 characters without NUL')
     item = next(i for i in q['items'] if i['id'] == old['item'])
     old_record = item.get('repair_runs', {}).get(old['run'])
     if not old_record or old_job_id not in old_record.get('jobs', []):
@@ -55,6 +59,15 @@ def prepare_current_job(c, q, old_job_id, source_sha, evidence, *, preserve_work
     clean, _ = c.secret_scan_diff(patch, scan_path, base=None, head=source_sha)
     if not clean:
         raise ValueError('current-tip preparation secret scan failed')
+    if instructions is not None:
+        instruction_patch = ('diff --git a/crq-fix-instructions.txt b/crq-fix-instructions.txt\n'
+                             '--- /dev/null\n+++ b/crq-fix-instructions.txt\n'
+                             '@@ -0,0 +1,' + str(len(instructions.splitlines())) + ' @@\n'
+                             + '\n'.join('+' + line for line in instructions.splitlines()) + '\n')
+        clean, _ = c.secret_scan_diff(instruction_patch, scan_path.with_name(run + '-instructions-scan.json'),
+                                      base=None, head=source_sha)
+        if not clean:
+            raise ValueError('fix instructions secret scan failed')
     job = {**old, 'job': job_id, 'run': run, 'cycle': None, 'kind': 'merged',
            'repair_base': source_sha, 'branch': None, 'repair_round': count + 1,
            'origin_job': old_job_id, 'source_sha': source_sha,

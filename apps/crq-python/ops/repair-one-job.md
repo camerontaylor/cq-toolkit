@@ -28,6 +28,13 @@ python3 crq.py repair-prepare <historical-job-id> \
   --revalidation <private-reviewed-evidence-json>
 ```
 
+Add `--instructions-file <utf8-file>` to attach up to 2,000 characters of concrete
+fix guidance. It is retained as `revalidation.fix_instructions`, contributes to
+the retry identity, and is secret-scanned before enrollment. CQ includes it in
+the bounded fixer body; other fixer drivers receive the revalidation payload.
+Guidance does not expand scope, bypass checks, or authorize publishing. Changing
+it creates a new retry subject to the existing per-pin round ceiling.
+
 The existing tick lock covers preparation. Evidence must bind `source_sha`,
 `finding_sha256` (SHA256 of canonical sorted compact finding JSON),
 `source_blob_sha`, `verdict: "still-valid"`, a named `reviewer`, and a concrete
