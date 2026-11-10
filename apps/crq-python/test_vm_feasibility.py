@@ -275,7 +275,8 @@ class LifecycleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             state, run = self._prepared(temporary)
             args = type("Args", (), {"state_dir": str(state), "tools": None,
-                                     "keep": False})()
+                                     "keep": False,
+                                     "source_commit": "a" * 40})()
             image = {"name": "image", "path": "/image", "sha256": DIGEST,
                      "sums_sha256": DIGEST, "sums_verified": True,
                      "signature_verified": False, "downloaded": False}
@@ -296,6 +297,48 @@ class LifecycleTests(unittest.TestCase):
                 stop.assert_called_once_with(
                     {"run_id": "r1", "path": str(run), "port": 2222,
                      "started_at": "now"}, purge=False)
+
+    def test_cmd_run_requires_a_source_commit(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state, _run = self._prepared(temporary)
+            args = type("Args", (), {"state_dir": str(state), "tools": None,
+                                     "keep": False, "source_commit": None})()
+            with mock.patch.object(vm, "fetch_image") as fetch:
+                with self.assertRaises(ValueError):
+                    vm.cmd_run(args)
+            fetch.assert_not_called()
+
+    def test_boot_failure_does_not_stop_an_unverified_scope(self):
+        class ExitedProcess:
+            pid = 4321
+
+            def poll(self):
+                return 1
+
+        with tempfile.TemporaryDirectory() as temporary:
+            run = pathlib.Path(temporary) / "r1"
+            run.mkdir()
+            recorder = vm.Recorder(run)
+            with mock.patch.object(vm, "require_memory"), \
+                 mock.patch.object(vm, "tool", return_value="/bin/true"), \
+                 mock.patch.object(vm.subprocess, "Popen",
+                                   return_value=ExitedProcess()), \
+                 mock.patch.object(vm.subprocess, "run") as subprocess_run:
+                with self.assertRaises(RuntimeError):
+                    vm.boot({"run_id": "r1", "path": str(run), "port": 2222},
+                            recorder, None, {"kvm_writable": True})
+            subprocess_run.assert_not_called()
+
+    def test_timeout_output_is_text_and_json_safe(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            recorder = vm.Recorder(pathlib.Path(temporary))
+            timed_out = vm.subprocess.TimeoutExpired(["probe"], 1,
+                                                     output=b"partial")
+            with mock.patch.object(vm.subprocess, "run", side_effect=timed_out):
+                entry = recorder.run(["probe"], timeout=1)
+            self.assertEqual(entry["stdout"], "partial")
+            self.assertTrue(entry["timeout"])
+            json.dumps(entry)
 
     def test_uptime_is_not_a_pid(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -338,6 +381,16 @@ class EvidenceTests(unittest.TestCase):
                                                     load_state="loaded", link="unit")},
             "activation": {"direct": {"run_delta": ["service"]},
                            "dependency": {"run_delta": ["service", "dependent"]},
+                           "queue_blocker": {"rc": 0},
+                           "queue_start": {"rc": 0},
+                           "jobs_before_mask": [
+                               "77 crq-queued.service start waiting",
+                               "96 crq-queued-fixture.service start waiting"],
+                           "queue2_blocker": {"rc": 0},
+                           "queue2_start": {"rc": 0},
+                           "jobs2_before_stop": [
+                               "116 crq-queued.service start waiting",
+                               "135 crq-queued-fixture.service start waiting"],
                            "queued_run_delta": [],
                            "queued2_run_delta": []},
             "mask": {"native_mask": {"rc": 1},
@@ -401,7 +454,7 @@ class EvidenceTests(unittest.TestCase):
                   "qemu_pid_before": 99, "qemu_pid_after": 99,
                   "qemu_identity_verified": True}
         report = {
-            "schema_version": 1,
+            "schema_version": vm.REPORT_SCHEMA,
             "image": {"sha256": DIGEST, "sums_verified": True,
                       "signature_verified": False},
             "checks": vm.build_checks(phases, manager, reboot),
@@ -436,13 +489,83 @@ class EvidenceTests(unittest.TestCase):
         self.assertFalse(checks["queued_observations_present"])
         self.assertIsNone(checks["queued_job_executed_after_mask"])
         self.assertIsNone(checks["queued_job_executed_after_stop"])
-        report = {"schema_version": 1,
+        report = {"schema_version": vm.REPORT_SCHEMA,
                   "image": {"sha256": DIGEST, "sums_verified": True,
                             "signature_verified": False},
                   "checks": checks, "limitations": ["limited"]}
         problems = vm.report_problems(report)
         self.assertIn("check not proven: run_after_trigger_observed", problems)
         self.assertIn("check not proven: queued_observations_present", problems)
+
+    def test_queued_setup_requires_success_and_a_waiting_fixture(self):
+        phases = self._phases()
+        phases["activation"]["queue_start"] = {"rc": 1}
+        phases["activation"]["jobs_before_mask"] = []
+        manager = {"before": self._snapshot(10, "i1", "boot-1"),
+                   "after": self._snapshot(11, "i2", "boot-1"),
+                   "after_phase": self._refusals()}
+        reboot = {"before": self._snapshot(11, "i2", "boot-1"),
+                  "after": self._snapshot(12, "i3", "boot-2"),
+                  "after_phase": self._refusals(),
+                  "boot_id_before": "boot-1", "boot_id_after": "boot-2",
+                  "qemu_pid_before": 99, "qemu_pid_after": 99,
+                  "qemu_identity_verified": True}
+        checks = vm.build_checks(phases, manager, reboot)
+        self.assertFalse(checks["queued_setup_proven"])
+
+    def _bound_report(self, base):
+        phases = self._phases()
+        manager = {"before": self._snapshot(10, "i1", "boot-1"),
+                   "after": self._snapshot(11, "i2", "boot-1"),
+                   "after_phase": self._refusals()}
+        reboot = {"before": self._snapshot(11, "i2", "boot-1"),
+                  "after": self._snapshot(12, "i3", "boot-2"),
+                  "after_phase": self._refusals(),
+                  "boot_id_before": "boot-1", "boot_id_after": "boot-2",
+                  "qemu_pid_before": 99, "qemu_pid_after": 99,
+                  "qemu_identity_verified": True}
+        host = pathlib.Path(base) / "executed-host-script.py"
+        guest = pathlib.Path(base) / "executed-guest-probe.py"
+        host.write_bytes(b"host bytes")
+        guest.write_bytes(b"guest bytes")
+        return {
+            "schema_version": vm.REPORT_SCHEMA,
+            "image": {"sha256": DIGEST, "sums_verified": True,
+                      "signature_verified": False},
+            "provenance": {
+                "source_commit": "a" * 40,
+                "host_script": {"artifact": host.name,
+                                "sha256": vm.sha256_file(host)},
+                "guest_script": {"artifact": guest.name,
+                                 "sha256": vm.sha256_file(guest),
+                                 "remote_sha256": vm.sha256_file(guest),
+                                 "verified": True}},
+            "phases": phases,
+            "manager_restart": manager,
+            "reboot": reboot,
+            "checks": vm.build_checks(phases, manager, reboot),
+            "limitations": ["not controller acceptance"],
+        }
+
+    def test_verify_recomputes_checks_from_raw_observations(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            report = self._bound_report(temporary)
+            report["manager_restart"]["after_phase"]["direct"]["rc"] = 0
+            report["reboot"]["boot_id_after"] = report["reboot"]["boot_id_before"]
+            problems = vm.verify_report(report, pathlib.Path(temporary))
+            self.assertIn("stored checks do not match recomputed evidence", problems)
+            self.assertIn("check not proven: mask_persisted", problems)
+            self.assertIn("check not proven: boot_id_changed", problems)
+
+    def test_verify_rejects_changed_executed_bytes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            report = self._bound_report(temporary)
+            self.assertEqual(vm.verify_report(report, pathlib.Path(temporary)), [])
+            (pathlib.Path(temporary) / "executed-host-script.py").write_bytes(
+                b"changed")
+            problems = vm.verify_report(report, pathlib.Path(temporary))
+            self.assertIn(
+                "provenance host_script artifact digest does not match", problems)
 
     def test_post_boundary_activation_refusal_is_required(self):
         phases = self._phases()

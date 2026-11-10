@@ -30,6 +30,7 @@ import hashlib
 import json
 import os
 import pathlib
+import re
 import shutil
 import socket
 import subprocess
@@ -50,7 +51,9 @@ OVERLAY_SIZE = "8G"
 MIN_AVAILABLE_KIB = 2 * 1024 * 1024
 SCOPE_MEMORY = "3G"
 SSH_KEY = "id_ed25519"
-REPORT_SCHEMA = 1
+REPORT_SCHEMA = 2
+COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
+DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 
 LIMITATIONS = [
     "Checksum verification proves download integrity against the published "
@@ -251,7 +254,73 @@ def compare_files(before: dict, after: dict, ignore=(), content_keys=True):
     return changes
 
 
-def report_problems(report: dict) -> list[str]:
+def recompute_checks(report: dict) -> tuple[dict | None, str | None]:
+    """Derive checks from raw observations, never from the stored booleans."""
+    phases = report.get("phases")
+    manager = report.get("manager_restart")
+    reboot = report.get("reboot")
+    if not all(isinstance(value, dict) for value in (phases, manager, reboot)):
+        return None, "raw observations are missing; checks cannot be recomputed"
+    try:
+        return build_checks(phases, manager, reboot), None
+    except (AttributeError, KeyError, TypeError, ValueError) as exc:
+        return None, "raw observations are malformed: %s" % exc
+
+
+def provenance_problems(report: dict) -> list[str]:
+    problems = []
+    provenance = report.get("provenance")
+    if not isinstance(provenance, dict):
+        return ["provenance missing"]
+    source_commit = provenance.get("source_commit")
+    if not isinstance(source_commit, str) or not COMMIT_RE.fullmatch(source_commit):
+        problems.append("source_commit must be a full lowercase git commit")
+    for key in ("host_script", "guest_script"):
+        item = provenance.get(key)
+        if not isinstance(item, dict):
+            problems.append("provenance %s missing" % key)
+            continue
+        digest = item.get("sha256")
+        if not isinstance(digest, str) or not DIGEST_RE.fullmatch(digest):
+            problems.append("provenance %s sha256 missing" % key)
+        artifact = item.get("artifact")
+        if (not isinstance(artifact, str) or not artifact
+                or pathlib.PurePath(artifact).name != artifact):
+            problems.append("provenance %s artifact must be a local filename" % key)
+        if key == "guest_script":
+            if item.get("remote_sha256") != digest:
+                problems.append("guest script upload digest does not match")
+            if item.get("verified") is not True:
+                problems.append("guest script upload not verified")
+    return problems
+
+
+def verify_report(report: dict, base_dir: pathlib.Path) -> list[str]:
+    """Verify a saved report against its raw evidence and retained bytes."""
+    problems = report_problems(report, require_evidence=True)
+    provenance = report.get("provenance")
+    if not isinstance(provenance, dict):
+        return problems
+    for key in ("host_script", "guest_script"):
+        item = provenance.get(key)
+        if not isinstance(item, dict):
+            continue
+        artifact = item.get("artifact")
+        if (not isinstance(artifact, str) or not artifact
+                or pathlib.PurePath(artifact).name != artifact):
+            continue
+        path = pathlib.Path(base_dir) / artifact
+        try:
+            digest = sha256_file(path)
+        except OSError:
+            problems.append("provenance %s artifact missing: %s" % (key, artifact))
+            continue
+        if digest != item.get("sha256"):
+            problems.append("provenance %s artifact digest does not match" % key)
+    return problems
+
+
+def report_problems(report: dict, *, require_evidence: bool = False) -> list[str]:
     """Validate the evidence shape and the claims it is allowed to make."""
     problems = []
     if report.get("schema_version") != REPORT_SCHEMA:
@@ -264,6 +333,15 @@ def report_problems(report: dict) -> list[str]:
     if image.get("signature_verified") is not False:
         problems.append("checksum must not be claimed as signed authenticity")
     checks = report.get("checks") or {}
+    if require_evidence:
+        computed, error = recompute_checks(report)
+        if error:
+            problems.append(error)
+        if computed is not None:
+            if report.get("checks") != computed:
+                problems.append("stored checks do not match recomputed evidence")
+            checks = computed
+        problems.extend(provenance_problems(report))
     for name in ("boot_id_changed", "manager_restarted", "mask_persisted",
                  "direct_refused", "dependency_refused", "timer_active",
                  "path_active", "unmask_started", "metadata_equal",
@@ -277,7 +355,7 @@ def report_problems(report: dict) -> list[str]:
                  "run_after_trigger_observed", "no_run_after_trigger",
                  "activator_states_after_reboot", "run_log_observed_after_reboot",
                  "metadata_observed", "queued_observations_present",
-                 "no_new_service_after_reboot"):
+                 "queued_setup_proven", "no_new_service_after_reboot"):
         if checks.get(name) is not True:
             problems.append("check not proven: " + name)
     if checks.get("queued_job_executed_after_mask") is None:
@@ -294,6 +372,15 @@ def report_problems(report: dict) -> list[str]:
 
 def utc_now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def text_output(value) -> str:
+    """Decode captured command output regardless of text/bytes mode."""
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", "replace")
+    return str(value)
 
 
 class Recorder:
@@ -314,15 +401,15 @@ class Recorder:
         try:
             result = subprocess.run(argv, input=stdin, cwd=cwd, capture_output=True,
                                     timeout=timeout)
-            stdout = result.stdout.decode("utf-8", "replace")
-            stderr = result.stderr.decode("utf-8", "replace")
+            stdout = text_output(result.stdout)
+            stderr = text_output(result.stderr)
             entry = {"at": utc_now(), "argv": argv, "rc": result.returncode,
                      "stdout": stdout if max_output is None else stdout[-max_output:],
                      "stderr": stderr if max_output is None else stderr[-max_output:],
                      "seconds": round(time.time() - started, 3)}
         except subprocess.TimeoutExpired as exc:
-            stdout = (exc.stdout or b"").decode("utf-8", "replace")
-            stderr = (exc.stderr or b"").decode("utf-8", "replace")
+            stdout = text_output(exc.stdout)
+            stderr = text_output(exc.stderr)
             entry = {"at": utc_now(), "argv": argv, "rc": None, "timeout": True,
                      "stdout": stdout if max_output is None else stdout[-max_output:],
                      "stderr": stderr if max_output is None else stderr[-max_output:],
@@ -472,8 +559,22 @@ def boot(run: dict, recorder: Recorder, tools: pathlib.Path | None,
             {"pid": pid, "starttime": starttime, "scope_unit": scope_unit},
             indent=2) + "\n")
     except BaseException:
-        subprocess.run(["systemctl", "--user", "stop", scope_unit],
-                       capture_output=True, text=True)
+        identity_ok = False
+        identity_path = run_dir / "process.json"
+        if identity_path.exists():
+            try:
+                identity = json.loads(identity_path.read_text())
+                pid = identity.get("pid")
+                identity_ok = (
+                    isinstance(pid, int)
+                    and identity.get("scope_unit") == scope_unit
+                    and process_matches(pid, identity.get("starttime"),
+                                        str(run_dir / "overlay.qcow2")))
+            except (OSError, ValueError):
+                identity_ok = False
+        if identity_ok:
+            subprocess.run(["systemctl", "--user", "stop", scope_unit],
+                           capture_output=True, text=True)
         if process.poll() is None:
             process.terminate()
             try:
@@ -513,14 +614,26 @@ def wait_ssh(run: dict, recorder: Recorder, timeout: float = 240) -> dict:
     raise RuntimeError("guest SSH/cloud-init did not become ready")
 
 
-def upload_guest_probe(run: dict, recorder: Recorder) -> None:
-    source = pathlib.Path(__file__).with_name("vm-guest-probe.py").read_bytes()
+def upload_guest_probe(run: dict, recorder: Recorder,
+                       source: bytes | None = None) -> dict:
+    if source is None:
+        source = pathlib.Path(__file__).with_name("vm-guest-probe.py").read_bytes()
+    local_sha256 = sha256_bytes(source)
     remote = ("mkdir -p /home/%s/probe-bin && cat > /home/%s/probe-bin/vm-guest-probe.py "
               "&& chmod 700 /home/%s/probe-bin/vm-guest-probe.py"
               % (GUEST_USER, GUEST_USER, GUEST_USER))
     result = guest_ssh(run, remote, recorder, stdin=source)
     if result["rc"] != 0:
         raise RuntimeError("guest probe upload failed: " + result["stderr"])
+    check = guest_ssh(run, "sha256sum /home/%s/probe-bin/vm-guest-probe.py" % GUEST_USER,
+                      recorder, timeout=30)
+    observed = (check.get("stdout") or "").split()
+    remote_sha256 = observed[0] if observed else ""
+    if check["rc"] != 0 or remote_sha256 != local_sha256:
+        raise RuntimeError("guest probe upload digest mismatch: %s != %s"
+                           % (remote_sha256, local_sha256))
+    return {"sha256": local_sha256, "remote_sha256": remote_sha256,
+            "verified": True}
 
 
 def guest_phase(run: dict, phase: str, recorder: Recorder) -> dict:
@@ -654,6 +767,21 @@ def build_checks(phases: dict, manager: dict, reboot: dict) -> dict:
     files_after = (reboot.get("after") or {}).get("files") or {}
     reboot_changes = compare_files(files_before, files_after,
                                    ignore=(TRIGGER_PATH,))
+    def waiting(jobs, unit):
+        return (isinstance(jobs, list)
+                and any(unit in str(line) and "start waiting" in str(line)
+                        for line in jobs))
+
+    def succeeded(result):
+        return isinstance(result, dict) and result.get("rc") == 0
+
+    queued_setup_proven = (
+        succeeded(activation.get("queue_blocker"))
+        and succeeded(activation.get("queue_start"))
+        and succeeded(activation.get("queue2_blocker"))
+        and succeeded(activation.get("queue2_start"))
+        and waiting(activation.get("jobs_before_mask"), "crq-queued-fixture.service")
+        and waiting(activation.get("jobs2_before_stop"), "crq-queued-fixture.service"))
     checks = {
         "direct_start_ran": "service" in (activation.get("direct", {}).get("run_delta") or []),
         "dependency_start_ran": "dependent" in
@@ -695,6 +823,7 @@ def build_checks(phases: dict, manager: dict, reboot: dict) -> dict:
         "queued_observations_present": (
             isinstance(activation.get("queued_run_delta"), list)
             and isinstance(activation.get("queued2_run_delta"), list)),
+        "queued_setup_proven": queued_setup_proven,
         "queued_job_executed_after_mask": None,
         "queued_job_executed_after_stop": None,
         "native_mask_refused": (mask.get("native_mask") or {}).get("rc") not in (0, None),
@@ -754,7 +883,8 @@ def build_checks(phases: dict, manager: dict, reboot: dict) -> dict:
 
 
 def build_report(run: dict, boot: dict, phases: dict, manager: dict,
-                 reboot: dict, stamps: dict, image: dict) -> dict:
+                 reboot: dict, stamps: dict, image: dict,
+                 provenance: dict) -> dict:
     checks = build_checks(phases, manager, reboot)
     return {
         "schema_version": REPORT_SCHEMA,
@@ -763,6 +893,7 @@ def build_report(run: dict, boot: dict, phases: dict, manager: dict,
         "started_at": run["started_at"],
         "finished_at": utc_now(),
         "image": image,
+        "provenance": provenance,
         "guest": {
             "port": run["port"], "pid": boot["pid"], "scope_unit": boot["scope_unit"],
             "boot_id_before_manager_restart": (manager.get("before") or {}).get("boot_id"),
@@ -905,17 +1036,38 @@ def cmd_reboot(args) -> int:
 def cmd_run(args) -> int:
     state = pathlib.Path(args.state_dir).expanduser().resolve()
     state.mkdir(parents=True, exist_ok=True)
+    source_commit = (getattr(args, "source_commit", None)
+                     or os.environ.get("CRQ_VM_SOURCE_COMMIT"))
+    if not isinstance(source_commit, str) or not COMMIT_RE.fullmatch(source_commit):
+        raise ValueError("run requires --source-commit with the full git commit "
+                         "whose tree produced the executed scripts")
     recorder = Recorder(state)
     stamps = {"start": host_stamp()}
     image = fetch_image(state, recorder)
     run = prepare_run(state, image, recorder, args.tools)
     save_json(pathlib.Path(run["path"]) / "run.json", run)
     try:
+        run_dir = pathlib.Path(run["path"])
+        host_source = pathlib.Path(__file__).resolve()
+        guest_source = host_source.with_name("vm-guest-probe.py")
+        guest_bytes = guest_source.read_bytes()
+        host_artifact = run_dir / "executed-host-script.py"
+        guest_artifact = run_dir / "executed-guest-probe.py"
+        shutil.copy2(host_source, host_artifact)
+        guest_artifact.write_bytes(guest_bytes)
+        provenance = {
+            "source_commit": source_commit,
+            "host_script": {"artifact": host_artifact.name,
+                            "sha256": sha256_file(host_artifact)},
+            "guest_script": {"artifact": guest_artifact.name,
+                             "sha256": sha256_file(guest_artifact)},
+        }
         recorder = Recorder(pathlib.Path(run["path"]))
         stamp = host_stamp()
         boot_info = boot(run, recorder, args.tools, stamp)
         boot_info["ssh"] = wait_ssh(run, recorder)
-        upload_guest_probe(run, recorder)
+        upload = upload_guest_probe(run, recorder, source=guest_bytes)
+        provenance["guest_script"].update(upload)
         phases = {"install": guest_phase(run, "install", recorder),
                   "activation": guest_phase(run, "activation", recorder),
                   "mask": guest_phase(run, "mask", recorder)}
@@ -930,9 +1082,10 @@ def cmd_run(args) -> int:
         stamps["after_reboot"] = host_stamp()
         phases["unmask"] = guest_phase(run, "unmask", recorder)
         stamps["finish"] = host_stamp()
-        report = build_report(run, boot_info, phases, manager, reboot, stamps, image)
+        report = build_report(run, boot_info, phases, manager, reboot, stamps, image,
+                              provenance)
         save_json(pathlib.Path(run["path"]) / "report.json", report)
-        problems = report_problems(report)
+        problems = report_problems(report, require_evidence=True)
     except BaseException:
         if not args.keep:
             try:
@@ -1017,8 +1170,9 @@ def cmd_destroy(args) -> int:
 
 
 def cmd_verify(args) -> int:
-    report = json.loads(pathlib.Path(args.report).read_text())
-    problems = report_problems(report)
+    report_path = pathlib.Path(args.report).resolve()
+    report = json.loads(report_path.read_text())
+    problems = verify_report(report, report_path.parent)
     print(json.dumps({"problems": problems}, indent=2, sort_keys=True))
     return 0 if not problems else 1
 
@@ -1028,6 +1182,8 @@ def main(argv=None) -> int:
     parser.add_argument("--state-dir", default=str(DEFAULT_STATE))
     parser.add_argument("--tools", type=pathlib.Path,
                         help="directory holding qemu, qemu-img and cloud-localds")
+    parser.add_argument("--source-commit", default=None,
+                        help="full git commit whose tree produced the executed scripts")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("plan")
     sub.add_parser("fetch")
