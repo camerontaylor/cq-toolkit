@@ -337,7 +337,20 @@ export class ClaudeCodeSdkTransport implements Driver {
     // then the workspace binding.
     const route = resolveRoute(modelSpec, this.routingTable); // unknown provider → the throw
     const keyValue = readKeyEnvOrThrow(route); // missing key env → throw
-    const sdk = await this.loadSdk(); // peer absent / misshaped → throw
+    let sdk;
+    try {
+      sdk = await this.loadSdk(); // peer absent / misshaped → throw
+    } catch (error) {
+      if (signalAborted(signal)) {
+        return {
+          usage: zeroUsage(),
+          usageProvenance: 'unmeasured',
+          denials: [],
+          stopReason: 'aborted',
+        };
+      }
+      throw error;
+    }
     if (
       budget.maxTokens !== undefined &&
       (!Number.isFinite(budget.maxTokens) || budget.maxTokens <= 0)
