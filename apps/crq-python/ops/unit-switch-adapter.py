@@ -81,7 +81,7 @@ class GuestFixtureAdapter:
                  proof_root=None, runner=None, error_type=RuntimeError,
                  guest_only=True, completion_timeout=COMPLETION_TIMEOUT,
                  drain_timeout=DRAIN_TIMEOUT, sleep=time.sleep,
-                 clock=time.monotonic):
+                 clock=time.monotonic, queue_drain=None):
         self.unit = unit
         self.unit_dir = pathlib.Path(unit_dir)
         self.fixture_dir = pathlib.Path(fixture_dir)
@@ -94,6 +94,7 @@ class GuestFixtureAdapter:
         self.drain_timeout = drain_timeout
         self.sleep = sleep
         self.clock = clock
+        self.queue_drain = queue_drain
         self.commands = []
         self._snapshot = None
         self._returned = []
@@ -620,6 +621,28 @@ class GuestFixtureAdapter:
                                           "state": state}, sort_keys=True)[:500])
             self.sleep(0.25)
 
+    def _observe_queue_drain(self):
+        """Observe recorded queue ownership through the injected controller probe.
+
+        The probe is ``deploy-controller.runner_queue_drain`` (the existing
+        fail-closed ``drain_check`` bound to the checkout's actual
+        ``crq.run_liveness``). A missing probe is the production shape and is
+        reported as ``None``; a probe failure is ambiguous ownership, never an
+        absence proof. This adapter never signals or kills a process.
+        """
+        if self.queue_drain is None:
+            return None
+        try:
+            observation = self.queue_drain()
+        except Exception as exc:  # probe failure is ambiguous ownership
+            self.refuse("queue drain observation failed; ownership is "
+                        "unknown: " + (str(exc) or type(exc).__name__)[:200])
+        if (not isinstance(observation, dict)
+                or not isinstance(observation.get("drained"), bool)
+                or not isinstance(observation.get("blocked"), list)):
+            self.refuse("queue drain observation is malformed")
+        return observation
+
     def stop_and_drain(self, unit):
         if unit != self.unit:
             self.refuse("unit is not supported by this proof adapter")
@@ -656,11 +679,20 @@ class GuestFixtureAdapter:
         self.systemctl("stop", self.unit)
         self.systemctl("reset-failed", self.unit)
         drained = self._wait_drain()
+        # Combine the systemd job/cgroup drain with the controller's recorded
+        # queue ownership observation. The unit fence above cannot see a
+        # detached runner child; neither observation alone is sufficient.
+        queue = self._observe_queue_drain()
         self.last_drain = {"before": before, "masked": masked,
                            "direct_start": {"rc": refusal.get("rc"),
                                             "stdout": refusal.get("stdout"),
                                             "stderr": refusal.get("stderr")},
+                           "queue_drain": queue,
                            **drained}
+        if queue is not None and not queue["drained"]:
+            self.refuse("queue-owned work is alive or ambiguous after the "
+                        "systemd fence: "
+                        + json.dumps(queue["blocked"], sort_keys=True)[:400])
         return self.last_drain
 
     # -- seam: completion sequence and install --------------------------

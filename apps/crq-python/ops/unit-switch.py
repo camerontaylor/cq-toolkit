@@ -48,7 +48,15 @@ def _print(value, status=0):
     return status
 
 
-def _adapter(args):
+def _evidence(adapter, exc=None):
+    """Structured drain/command evidence for a success, refusal or error."""
+    drain = getattr(exc, "drain", None) if exc is not None else None
+    return {"drain": drain if drain is not None
+            else getattr(adapter, "last_drain", None),
+            "commands": adapter.commands}
+
+
+def _adapter(args, effects):
     return adapter_mod.GuestFixtureAdapter(
         unit_dir=pathlib.Path.home() / ".config/systemd/user",
         fixture_dir=args.fixture_dir,
@@ -56,6 +64,9 @@ def _adapter(args):
         proof_root=args.proof_root,
         error_type=dc.Refused,
         guest_only=True,
+        # The guest-only proof observes the controller's existing
+        # drain_check/run_liveness after its systemd job/cgroup drain.
+        queue_drain=lambda: dc.runner_queue_drain(effects),
     )
 
 
@@ -83,22 +94,22 @@ def run_switch(args):
                                   + str(exc)[:160]}, 2)
     root = args.root.resolve()
     effects = dc.Effects(root, record_dir.resolve())
-    adapter = _adapter(args)
+    adapter = _adapter(args, effects)
     try:
         record = dc.switch_unit(effects, adapter, args.unit, args.runtime)
     except dc.RecoveryRequired as exc:
         return _print({"command": "switch", "refused": str(exc),
                        "recovery_required": _summary(exc.recovery),
-                       "commands": adapter.commands}, 3)
+                       **_evidence(adapter, exc)}, 3)
     except dc.Refused as exc:
         return _print({"command": "switch", "refused": str(exc),
-                       "commands": adapter.commands}, 2)
+                       **_evidence(adapter, exc)}, 2)
     except Exception as exc:  # noqa: BLE001 - fail closed with the observed error
         return _print({"command": "switch", "error": type(exc).__name__,
                        "detail": str(exc)[:400],
-                       "commands": adapter.commands}, 1)
+                       **_evidence(adapter)}, 1)
     return _print({"command": "switch", "record": _summary(record),
-                   "commands": adapter.commands}, 0)
+                   **_evidence(adapter)}, 0)
 
 
 def run_recover(args):
@@ -117,22 +128,22 @@ def run_recover(args):
                                   + str(exc)[:160]}, 2)
     root = args.root.resolve()
     effects = dc.Effects(root, record_dir.resolve())
-    adapter = _adapter(args)
+    adapter = _adapter(args, effects)
     try:
         record = dc.recover_unit(effects, adapter, args.record)
     except dc.RecoveryRequired as exc:
         return _print({"command": "recover", "refused": str(exc),
                        "recovery_required": _summary(exc.recovery),
-                       "commands": adapter.commands}, 3)
+                       **_evidence(adapter, exc)}, 3)
     except dc.Refused as exc:
         return _print({"command": "recover", "refused": str(exc),
-                       "commands": adapter.commands}, 2)
+                       **_evidence(adapter, exc)}, 2)
     except Exception as exc:  # noqa: BLE001 - fail closed with the observed error
         return _print({"command": "recover", "error": type(exc).__name__,
                        "detail": str(exc)[:400],
-                       "commands": adapter.commands}, 1)
+                       **_evidence(adapter)}, 1)
     return _print({"command": "recover", "record": _summary(record),
-                   "commands": adapter.commands}, 0)
+                   **_evidence(adapter)}, 0)
 
 
 def build_parser():

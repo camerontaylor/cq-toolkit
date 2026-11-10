@@ -39,6 +39,8 @@ BOOT_AFTER = "22222222-2222-2222-2222-222222222222"
 SOURCE_COMMIT = "c" * 40
 GUEST_BYTES = (OPS / "vm-unit-switch-guest.py").read_bytes()
 GUEST_SHA = harness.sha256_bytes(GUEST_BYTES)
+RUNNER_BYTES = b"runner:source:apps/crq-python"
+RUNNER_SHA = harness.sha256_bytes(RUNNER_BYTES)
 RECORDS = {}
 
 
@@ -64,7 +66,10 @@ def phases():
     node_sha = _sha(harness.expected_unit(NODE))
     preserved = {"state": STATE, "history_sha256": HISTORY}
     prepare = {
-        "prepared": {"state": STATE, "history_sha256": HISTORY},
+        "prepared": {"state": STATE, "history_sha256": HISTORY,
+                     "runner_source": {"sha256": RUNNER_SHA,
+                                       "crq_sha256": "e" * 64,
+                                       "bytes": len(RUNNER_BYTES)}},
         "snapshot": {
             "hostname": "crq-probe", "user": 1000,
             "boot_id": "00000000-0000-0000-0000-000000000000",
@@ -84,6 +89,90 @@ def phases():
         "installed_runtime": NODE,
         "after": {"files": {SERVICE: {"type": "file", "sha256": node_sha}}},
         "preserved": preserved,
+    }
+    blocked_alive = [{"item": "drain-alive", "state": "alive",
+                      "run": "e" * 32}]
+    blocked_ambiguous = [{"item": "drain-ambiguous", "state": "ambiguous",
+                          "run": "f" * 32}]
+    quiet = {"metadata": {"service": "unchanged"},
+             "units": {"crq-tick.service": {"LoadState": "loaded"}},
+             "jobs": []}
+    drain_alive = {
+        "kind": "alive", "target_runtime": NODE, "current_runtime": PYTHON,
+        "cli": {"rc": 2, "stdout": "{\"refused\": \"queue-owned work\"}",
+                "stderr": ""},
+        "refused": "queue-owned work is alive or ambiguous; refusing",
+        "drain": {"blocked": blocked_alive},
+        "observation": {"drained": False, "blocked": blocked_alive},
+        "liveness": [{"item": "drain-alive", "run_id": "e" * 32,
+                      "has_exit": False, "state": "alive"}],
+        "seeded": {"run_id": "e" * 32, "item": {"id": "drain-alive"},
+                   "identity": {"exit": False},
+                   "process": {"pid": 4001, "alive": True}},
+        "queue": {"before_sha256": "1" * 64, "after_sha256": "1" * 64,
+                  "baseline_sha256": "0" * 64, "restored_sha256": "0" * 64},
+        "records_before": ["/home/probe/records/controller-history.json"],
+        "records_after": ["/home/probe/records/controller-history.json"],
+        "completions_before": 4, "completions_after": 4,
+        "before": quiet, "after": dict(quiet),
+        "processes": {"owned": {"pid": 4001, "alive": True},
+                      "unrelated": {"before": {"pid": 4002, "alive": True},
+                                    "after": {"pid": 4002, "alive": True}}},
+        "cleanup": [{"terminated": True, "controller_signalled": False},
+                    {"terminated": True, "controller_signalled": False}],
+        "baseline_restored": True,
+    }
+    drain_ambiguous = {
+        **drain_alive,
+        "kind": "ambiguous", "target_runtime": PYTHON,
+        "current_runtime": NODE,
+        "refused": "queue-owned work is alive or ambiguous; refusing",
+        "drain": {"blocked": blocked_ambiguous},
+        "observation": {"drained": False, "blocked": blocked_ambiguous},
+        "liveness": [{"item": "drain-ambiguous", "run_id": "f" * 32,
+                      "has_exit": False, "state": "ambiguous"}],
+        "seeded": {"run_id": "f" * 32, "item": {"id": "drain-ambiguous"},
+                   "identity": {"exit": False}, "process": {"pid": None,
+                                                            "alive": False}},
+        "processes": {"owned": None,
+                      "unrelated": {"before": {"pid": 4003, "alive": True},
+                                    "after": {"pid": 4003, "alive": True}}},
+        "queue": {"before_sha256": "2" * 64, "after_sha256": "2" * 64,
+                  "baseline_sha256": "0" * 64, "restored_sha256": "0" * 64},
+    }
+    harvest_node = _record("harvest-node", {
+        "outcome": "completed", "phase": "activation_pending",
+        "runtime": NODE, "prior_runtime": PYTHON})
+    harvest_python = _record("harvest-python", {
+        "outcome": "completed", "phase": "activation_pending",
+        "runtime": PYTHON, "prior_runtime": NODE})
+    drain_harvest = {
+        "observation": {"drained": True, "blocked": []},
+        "liveness": [{"item": "drain-harvest", "run_id": "1" * 32,
+                      "has_exit": True, "state": "harvest"}],
+        "seeded": {"run_id": "1" * 32, "item": {"id": "drain-harvest"},
+                   "identity": {"exit": True},
+                   "process": {"pid": 3999, "alive": False}},
+        "queue": {"seeded_sha256": "3" * 64,
+                  "after_node_sha256": "3" * 64,
+                  "after_python_sha256": "3" * 64},
+        "node": {"cli": {"rc": 0}, "record_path": harvest_node["path"],
+                 "record": harvest_node,
+                 "completions": {"sequences": [5, 6],
+                                 "invocations": ["e" * 32, "f" * 32]}},
+        "python": {"cli": {"rc": 0}, "record_path": harvest_python["path"],
+                   "record": harvest_python,
+                   "completions": {"sequences": [7, 8],
+                                   "invocations": ["1" * 32, "2" * 32]}},
+        "processes": {"unrelated": {"before": {"pid": 4004, "alive": True},
+                                    "after": {"pid": 4004, "alive": True}},
+                      "completed": {"pid": 3999, "alive": False}},
+        "completions_before": 4, "completions_after": 8,
+        "preserved": {"state": {"queue.json": "3" * 64,
+                                "heartbeat.json": STATE["heartbeat.json"]},
+                      "history_sha256": HISTORY, "record_count": 4},
+        "cleanup": [{"terminated": True, "controller_signalled": False}],
+        "baseline_restored": True,
     }
     python_phase = {
         "cli": {"rc": 0},
@@ -105,6 +194,7 @@ def phases():
     final_record = _record("recover-transaction", rolled_back)
     interrupt = {
         "cli": {"rc": -9},
+        "record_path": pending_record["path"],
         "record": dict(pending_record),
         "after": {"files": {SERVICE: {"type": "symlink", "target": "/dev/null"}},
                   "units": {"crq-tick.timer": {"ActiveState": "inactive"}}},
@@ -114,6 +204,36 @@ def phases():
         "cli": {"rc": -9},
         "record_before": dict(pending_record),
         "record_after": dict(pending_record),
+    }
+    recover_drain = {
+        "record_path": pending_record["path"],
+        "record_before": dict(pending_record),
+        "record_after": dict(pending_record),
+        "cli": {"rc": 2, "stdout": "{\"refused\": \"queue-owned work\"}",
+                "stderr": ""},
+        "refused": "queue-owned work is alive or ambiguous; refusing",
+        "drain": {"blocked": blocked_alive},
+        "observation": {"drained": False, "blocked": blocked_alive},
+        "liveness": [{"item": "drain-alive", "run_id": "e" * 32,
+                      "has_exit": False, "state": "alive"}],
+        "seeded": {"run_id": "e" * 32, "item": {"id": "drain-alive"},
+                   "identity": {"exit": False},
+                   "process": {"pid": 4010, "alive": True}},
+        "queue": {"before_sha256": "4" * 64, "after_sha256": "4" * 64,
+                  "restored_sha256": "0" * 64},
+        "service": {"before": {"LoadState": "masked",
+                                "FragmentPath": SERVICE},
+                    "after": {"LoadState": "masked",
+                              "FragmentPath": SERVICE}},
+        "timer": {"before": {"ActiveState": "inactive"},
+                  "after": {"ActiveState": "inactive"}},
+        "completions_before": 8, "completions_after": 8,
+        "processes": {"owned": {"pid": 4010, "alive": True},
+                      "unrelated": {"before": {"pid": 4011, "alive": True},
+                                    "after": {"pid": 4011, "alive": True}}},
+        "cleanup": [{"terminated": True, "controller_signalled": False},
+                    {"terminated": True, "controller_signalled": False}],
+        "baseline_restored": True,
     }
     recover = {
         "cli": {"rc": 0},
@@ -176,10 +296,13 @@ def phases():
                   WANTS: {"type": "symlink"}},
         "state": STATE,
         "records": [node_phase["record"], python_phase["record"],
-                    final_record, rollback_completed, fence_record],
+                    harvest_node, harvest_python, final_record,
+                    rollback_completed, fence_record],
     }}
-    return {"prepare": prepare, "switch-node": node_phase,
-            "switch-python": python_phase, "interrupt": interrupt,
+    return {"prepare": prepare, "drain-alive": drain_alive,
+            "switch-node": node_phase, "drain-ambiguous": drain_ambiguous,
+            "switch-python": python_phase, "drain-harvest": drain_harvest,
+            "interrupt": interrupt, "recover-drain-alive": recover_drain,
             "recover-kill": recover_kill, "recover": recover,
             "recover-repeat": repeat, "rollback-fence": rollback,
             "inspect": inspect, "fence": fence}
@@ -384,6 +507,70 @@ class HarnessCheckTests(unittest.TestCase):
         value["prepare"]["prepared"].pop("state")
         checks, problems = harness.build_checks(value)
         self.assertFalse(checks["prepared_baseline_present"])
+        self.assertTrue(problems)
+
+    def test_drain_alive_refusal_must_preserve_queue(self):
+        value = phases()
+        value["drain-alive"]["queue"]["after_sha256"] = "9" * 64
+        checks, problems = harness.build_checks(value)
+        self.assertFalse(checks["drain_alive_refused"])
+        self.assertTrue(problems)
+
+    def test_drain_alive_refusal_must_not_run_work(self):
+        value = phases()
+        value["drain-alive"]["completions_after"] = 5
+        checks, problems = harness.build_checks(value)
+        self.assertFalse(checks["drain_alive_refused"])
+        self.assertTrue(problems)
+
+    def test_drain_alive_refusal_must_keep_owned_and_unrelated_processes(self):
+        value = phases()
+        value["drain-alive"]["processes"]["owned"]["alive"] = False
+        value["drain-alive"]["processes"]["unrelated"]["after"]["alive"] = False
+        checks, problems = harness.build_checks(value)
+        self.assertFalse(checks["drain_alive_refused"])
+        self.assertTrue(problems)
+
+    def test_drain_ambiguous_must_be_ownership_ambiguous(self):
+        value = phases()
+        value["drain-ambiguous"]["liveness"][0]["state"] = "alive"
+        checks, problems = harness.build_checks(value)
+        self.assertFalse(checks["drain_ambiguous_refused"])
+        self.assertTrue(problems)
+
+    def test_drain_harvest_must_accept_only_completed_dead_work(self):
+        value = phases()
+        value["drain-harvest"]["liveness"][0]["state"] = "ambiguous"
+        checks, problems = harness.build_checks(value)
+        self.assertFalse(checks["drain_harvest_proceeds"])
+        self.assertTrue(problems)
+
+    def test_drain_harvest_must_complete_both_directions(self):
+        value = phases()
+        value["drain-harvest"]["python"]["record"]["runtime"] = NODE
+        checks, problems = harness.build_checks(value)
+        self.assertFalse(checks["drain_harvest_proceeds"])
+        self.assertTrue(problems)
+
+    def test_recovery_drain_refusal_must_keep_record_bytes(self):
+        value = phases()
+        value["recover-drain-alive"]["record_after"]["sha256"] = "9" * 64
+        checks, problems = harness.build_checks(value)
+        self.assertFalse(checks["recovery_drain_refused"])
+        self.assertTrue(problems)
+
+    def test_recovery_drain_refusal_must_keep_service_fenced(self):
+        value = phases()
+        value["recover-drain-alive"]["service"]["after"]["LoadState"] = "loaded"
+        checks, problems = harness.build_checks(value)
+        self.assertFalse(checks["recovery_drain_refused"])
+        self.assertTrue(problems)
+
+    def test_runner_source_must_be_recorded(self):
+        value = phases()
+        value["prepare"]["prepared"].pop("runner_source")
+        checks, problems = harness.build_checks(value)
+        self.assertFalse(checks["runner_source_recorded"])
         self.assertTrue(problems)
 
     def test_wrong_completion_runtime_fails(self):
@@ -700,6 +887,7 @@ class VerifyTests(unittest.TestCase):
         self.guest.write_bytes(GUEST_BYTES)
         self.upload_data = {name: ("upload:" + name).encode()
                             for name in harness.UPLOADS}
+        self.upload_data[harness.RUNNER_ARCHIVE] = RUNNER_BYTES
         self.report = {
             "schema_version": harness.SCHEMA_VERSION,
             "kind": harness.KIND,
@@ -725,10 +913,20 @@ class VerifyTests(unittest.TestCase):
                                  "sha256": GUEST_SHA},
                 "guest_report": self.guest.name,
                 "uploads": {
-                    name: {"sha256": harness.sha256_bytes(data),
-                           "remote_sha256": harness.sha256_bytes(data),
-                           "bytes": len(data), "verified": True}
-                    for name, data in self.upload_data.items()},
+                    **{name: {"sha256": harness.sha256_bytes(data),
+                              "remote_sha256": harness.sha256_bytes(data),
+                              "bytes": len(data), "verified": True}
+                       for name, data in self.upload_data.items()
+                       if name != harness.RUNNER_ARCHIVE},
+                    "runner_source": {
+                        "name": harness.RUNNER_ARCHIVE,
+                        "sha256": harness.sha256_bytes(
+                            self.upload_data[harness.RUNNER_ARCHIVE]),
+                        "remote_sha256": harness.sha256_bytes(
+                            self.upload_data[harness.RUNNER_ARCHIVE]),
+                        "bytes": len(self.upload_data[harness.RUNNER_ARCHIVE]),
+                        "verified": True,
+                        "source": "git-archive:HEAD:apps/crq-python"}},
             },
             "raw": {"raw_tar": self.raw.name},
         }
@@ -957,6 +1155,7 @@ class MatrixVerifyTests(unittest.TestCase):
         self.guest.write_bytes(GUEST_BYTES)
         self.upload_data = {name: ("upload:" + name).encode()
                             for name in harness.UPLOADS}
+        self.upload_data[harness.RUNNER_ARCHIVE] = RUNNER_BYTES
         self.phases, self.restarts, self.reboots = matrix_evidence()
         self.report = {
             "schema_version": harness.SCHEMA_VERSION,
@@ -986,10 +1185,20 @@ class MatrixVerifyTests(unittest.TestCase):
                                  "sha256": GUEST_SHA},
                 "guest_report": self.guest.name,
                 "uploads": {
-                    name: {"sha256": harness.sha256_bytes(data),
-                           "remote_sha256": harness.sha256_bytes(data),
-                           "bytes": len(data), "verified": True}
-                    for name, data in self.upload_data.items()},
+                    **{name: {"sha256": harness.sha256_bytes(data),
+                              "remote_sha256": harness.sha256_bytes(data),
+                              "bytes": len(data), "verified": True}
+                       for name, data in self.upload_data.items()
+                       if name != harness.RUNNER_ARCHIVE},
+                    "runner_source": {
+                        "name": harness.RUNNER_ARCHIVE,
+                        "sha256": harness.sha256_bytes(
+                            self.upload_data[harness.RUNNER_ARCHIVE]),
+                        "remote_sha256": harness.sha256_bytes(
+                            self.upload_data[harness.RUNNER_ARCHIVE]),
+                        "bytes": len(self.upload_data[harness.RUNNER_ARCHIVE]),
+                        "verified": True,
+                        "source": "git-archive:HEAD:apps/crq-python"}},
             },
             "raw": {"raw_tar": self.raw.name},
         }
@@ -1131,7 +1340,19 @@ class SourceCommitTests(unittest.TestCase):
             self.assertEqual(
                 harness.source_commit_check(pathlib.Path("/repo"), SOURCE_COMMIT),
                 SOURCE_COMMIT)
-        self.assertEqual(len(calls), 3)
+        self.assertEqual(len(calls), 4)
+        self.assertTrue(any("apps/crq-python" in call for call in calls))
+
+    def test_dirty_runner_source_is_rejected(self):
+        def fake(argv, **kwargs):
+            dirty = list(argv[-2:]) == ["--", "apps/crq-python"]
+            stdout = SOURCE_COMMIT if "rev-parse" in argv else (
+                " M apps/crq-python/crq.py\n" if dirty else "")
+            return subprocess.CompletedProcess(argv, 0, stdout, "")
+
+        with mock.patch.object(harness.subprocess, "run", side_effect=fake):
+            with self.assertRaisesRegex(ValueError, "runner source"):
+                harness.source_commit_check(pathlib.Path("/repo"), SOURCE_COMMIT)
 
 
 if __name__ == "__main__":

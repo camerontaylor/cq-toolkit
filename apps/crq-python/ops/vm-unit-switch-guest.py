@@ -24,6 +24,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tarfile
 import time
 
 HOME = pathlib.Path.home()
@@ -31,6 +32,8 @@ UNIT_DIR = HOME / ".config/systemd/user"
 FIXTURE = HOME / "fixture"
 PROOF_BIN = HOME / "proof-bin"
 CHECKOUT = HOME / "checkout"
+RUNNER_ROOT = CHECKOUT / "apps/crq-python"
+RUNNER_ARCHIVE = PROOF_BIN / "crq-runner-source.tar.gz"
 RECORDS = HOME / "records"
 CASE_RECORDS = {
     "manager": RECORDS / "ambiguity-manager-restart",
@@ -51,6 +54,17 @@ INVOCATION = re.compile(r"[0-9a-f]{32}\Z")
 NODE_RUNTIME = "node:" + "b" * 40
 PYTHON_RUNTIME = "python"
 PHASE_DIR = FIXTURE / "phases"
+GROUP_OWNER_MARKER = "foreground-v1"
+DRAIN_RUN_IDS = {
+    "alive": "e" * 32,
+    "ambiguous": "f" * 32,
+    "harvest": "1" * 32,
+}
+DRAIN_ITEM_IDS = {
+    "alive": "drain-alive",
+    "ambiguous": "drain-ambiguous",
+    "harvest": "drain-harvest",
+}
 
 # The restart/reboot matrix deliberately keeps activation-pending ambiguity in
 # a separate private record directory per case. An unresolved intent blocks new
@@ -96,6 +110,237 @@ def sha256_file(path):
 def require(condition, message):
     if not condition:
         raise RuntimeError(message)
+
+
+def _starttime(pid):
+    try:
+        text = (pathlib.Path("/proc") / str(pid) / "stat").read_text()
+    except OSError:
+        return None
+    # The comm field may contain spaces and parentheses; fields after the
+    # final ')' begin at state (field 3), so starttime (field 22) is index 19.
+    tail = text.rsplit(")", 1)[1].split()
+    return tail[19] if len(tail) > 19 else None
+
+
+def process_state(pid):
+    """Observed identity/liveness for one guest PID, by exact /proc identity."""
+    state = {"pid": pid, "alive": False, "cmdline": "", "starttime": None}
+    if not isinstance(pid, int) or pid <= 0:
+        return state
+    try:
+        raw = (pathlib.Path("/proc") / str(pid) / "cmdline").read_bytes()
+    except OSError:
+        return state
+    state["alive"] = True
+    state["cmdline"] = raw.replace(b"\0", b" ").decode("utf-8", "replace").strip()
+    state["starttime"] = _starttime(pid)
+    try:
+        state["pgid"] = os.getpgid(pid)
+        state["sid"] = os.getsid(pid)
+    except OSError:
+        state["pgid"] = None
+        state["sid"] = None
+    return state
+
+
+def spawn_detached(marker, seconds=600):
+    """Spawn a harmless detached session leader whose argv carries the marker.
+
+    ``setsid`` runs in the Popen child (not a process-group leader), so the
+    child becomes its own session and process group: pid == pgid == sid. That
+    is the managed identity shape the runner records for a detached review.
+    """
+    require(shutil.which("setsid") is not None, "setsid is required")
+    proc = subprocess.Popen(["setsid", "sleep", str(seconds), marker],
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL)
+    deadline = time.time() + 5
+    state = process_state(proc.pid)
+    while time.time() < deadline and not (
+            state["alive"] and marker in state["cmdline"]
+            and state["pgid"] == proc.pid and state["sid"] == proc.pid):
+        time.sleep(0.02)
+        state = process_state(proc.pid)
+    require(state["alive"] and marker in state["cmdline"],
+            "detached process did not start with the marker")
+    require(state["pgid"] == proc.pid and state["sid"] == proc.pid,
+            "detached process did not become its own session/group leader")
+    return proc, state
+
+
+def spawn_exited(marker):
+    """Spawn and reap a harmless detached process; return its recorded identity."""
+    proc = subprocess.Popen(["setsid", "sleep", "0.2", marker],
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL)
+    deadline = time.time() + 5
+    state = process_state(proc.pid)
+    while time.time() < deadline and not state["alive"]:
+        time.sleep(0.01)
+        state = process_state(proc.pid)
+    require(state["alive"], "harvest process did not start")
+    starttime = state.get("starttime")
+    proc.wait(timeout=10)
+    state = process_state(proc.pid)
+    require(not state["alive"], "detached harvest process did not exit")
+    try:
+        os.killpg(proc.pid, 0)
+    except ProcessLookupError:
+        pass
+    else:
+        raise RuntimeError("harvest process group survived its process")
+    return {"pid": proc.pid, "starttime": starttime}
+
+
+def stop_process(proc):
+    """Harness cleanup only. The controller never signals any process."""
+    if proc is None:
+        return {"terminated": True, "controller_signalled": False}
+    before = process_state(proc.pid)
+    if before["alive"]:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5)
+    after = process_state(proc.pid)
+    require(not after["alive"], "harness cleanup did not stop a seeded process")
+    return {"before": before, "after": after, "terminated": True,
+            "controller_signalled": False}
+
+
+def load_controller():
+    spec = importlib.util.spec_from_file_location(
+        "crq_deploy_controller", PROOF_BIN / "deploy-controller.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def runner_effects():
+    return load_controller().Effects(CHECKOUT, RECORDS)
+
+
+def write_run_identity(run_id, pid, *, group_owner=GROUP_OWNER_MARKER,
+                       has_exit=False, starttime=None):
+    rdir = STATE / "runs" / run_id
+    rdir.mkdir(parents=True, exist_ok=True)
+    identity = {"run_id": run_id, "pid": pid, "ppid": os.getpid(),
+                "pgid": pid, "sid": pid, "group_owner": group_owner,
+                "starttime": starttime}
+    (rdir / "review.pid").write_text(
+        json.dumps(identity, sort_keys=True) + "\n")
+    if has_exit:
+        (rdir / "exit.json").write_text(
+            json.dumps({"exit": 0, "ended_at": "2026-01-01T00:00:00Z"},
+                       sort_keys=True) + "\n")
+    return {"path": str(rdir), "identity": identity,
+            "exit": has_exit}
+
+
+def item_liveness(item):
+    """The actual controller/runner liveness result for one recorded item."""
+    run = item.get("run")
+    require(isinstance(run, dict) and isinstance(run.get("run_id"), str),
+            "liveness evidence requires a recorded run")
+    effects = runner_effects()
+    rdir = effects.state_dir() / "runs" / run["run_id"]
+    has_exit = (rdir / "exit.json").exists()
+    state = load_controller()._runner_liveness(effects)(
+        rdir, item, run, has_exit)
+    return {"item": item.get("id"), "run_id": run["run_id"],
+            "has_exit": has_exit, "state": state}
+
+
+def queue_bytes():
+    return (STATE / "queue.json").read_bytes()
+
+
+def seed_drain_work(kind):
+    """Create one recorded run with genuinely shaped runner metadata."""
+    require(kind in DRAIN_RUN_IDS, "unknown drain seed kind")
+    run_id = DRAIN_RUN_IDS[kind]
+    marker = "crq-drain-" + run_id
+    proc = None
+    if kind == "alive":
+        proc, state = spawn_detached(marker)
+        identity = write_run_identity(run_id, proc.pid,
+                                      starttime=state.get("starttime"))
+        run = {"run_id": run_id, "pid": proc.pid}
+    elif kind == "ambiguous":
+        # The queue records a run but the ownership evidence is incomplete:
+        # no pidfile, no recorded pid and no terminal artifact. The runner's
+        # fail-closed liveness retains it as ambiguous. A process whose
+        # ownership is not represented by metadata is deliberately NOT claimed
+        # as detected here (see the report limitations).
+        rdir = STATE / "runs" / run_id
+        rdir.mkdir(parents=True, exist_ok=True)
+        state = {"pid": None, "starttime": None}
+        identity = {"path": str(rdir), "identity": None, "exit": False}
+        run = {"run_id": run_id}
+    else:
+        state = spawn_exited(marker)
+        identity = write_run_identity(run_id, state["pid"], has_exit=True,
+                                      starttime=state.get("starttime"))
+        run = {"run_id": run_id}
+    item = {"id": DRAIN_ITEM_IDS[kind], "state": "reviewing", "run": run}
+    return {"kind": kind, "run_id": run_id, "item": item, "process": proc,
+            "process_state": process_state(proc.pid) if proc else state,
+            "identity": identity,
+            "expected_kind": {"alive": "alive", "ambiguous": "ambiguous",
+                              "harvest": "harvest"}[kind]}
+
+
+def seed_queue(items):
+    saved = queue_bytes()
+    queue = json.loads(saved)
+    require(isinstance(queue, dict), "queue root is not an object")
+    queue["items"] = list(queue.get("items", [])) + list(items)
+    _write(STATE / "queue.json", json.dumps(queue, indent=2, sort_keys=True) + "\n")
+    return saved
+
+
+def restore_queue(saved):
+    (STATE / "queue.json").write_bytes(saved)
+
+
+def remove_drain_runs():
+    for run_id in DRAIN_RUN_IDS.values():
+        shutil.rmtree(STATE / "runs" / run_id, ignore_errors=True)
+
+
+def drain_observation():
+    """The actual controller drain_check bound to the actual runner liveness."""
+    dc = load_controller()
+    return dc.runner_queue_drain(dc.Effects(CHECKOUT, RECORDS))
+
+
+def extract_runner_source(archive):
+    """Extract the exact committed runner source into the throwaway checkout."""
+    archive = pathlib.Path(archive)
+    require(archive.is_file() and not archive.is_symlink(),
+            "runner source archive is missing or a symlink")
+    digest = sha256_file(archive)
+    with tarfile.open(archive, "r:gz") as tar:
+        members = tar.getmembers()
+        require(members, "runner source archive is empty")
+        for member in members:
+            parts = pathlib.PurePosixPath(member.name).parts
+            require(parts and parts[0] == "apps" and len(parts) > 1,
+                    "runner archive member escapes apps/: " + member.name)
+            require(".." not in parts and not member.name.startswith("/"),
+                    "runner archive contains an unsafe path")
+            require(member.isfile() or member.isdir(),
+                    "runner archive contains a non-file member: " + member.name)
+        tar.extractall(CHECKOUT, filter="data")
+    require((RUNNER_ROOT / "crq.py").is_file(),
+            "runner archive did not provide crq.py")
+    require((RUNNER_ROOT / "author_quota.py").is_file(),
+            "runner archive did not provide author_quota.py")
+    return {"sha256": digest, "bytes": archive.stat().st_size,
+            "crq_sha256": sha256_file(RUNNER_ROOT / "crq.py")}
 
 
 def env():
@@ -246,6 +491,21 @@ def check_preserved(phase):
             "record_count": len(records())}
 
 
+def check_preserved_expected(expected_state, label):
+    """Preservation against a phase-local seeded queue, not the prepare baseline."""
+    observed = state_hashes()
+    require(observed == expected_state,
+            label + " changed the seeded queue/heartbeat bytes")
+    saved = baseline()
+    require(HISTORY_PATH.exists()
+            and sha256_file(HISTORY_PATH) == saved["history_sha256"],
+            label + " changed the historical completed record")
+    require(set(str(path) for path in records()) >= set(saved["record_paths"]),
+            label + " lost a historical record")
+    return {"state": observed, "history_sha256": sha256_file(HISTORY_PATH),
+            "record_count": len(records())}
+
+
 def completions():
     if not COMPLETIONS.exists():
         return []
@@ -351,10 +611,9 @@ def prepare_fixture(adapter):
 def prepare_checkout():
     if CHECKOUT.exists():
         shutil.rmtree(CHECKOUT)
-    (CHECKOUT / "apps/crq-python/state").mkdir(parents=True)
+    STATE.mkdir(parents=True)
     _write(CHECKOUT / ".gitignore", "apps/crq-python/state/\n")
-    _write(CHECKOUT / "apps/crq-python/config.json",
-           json.dumps({"proof_vehicle": True}, indent=2) + "\n")
+    runner_source = extract_runner_source(RUNNER_ARCHIVE)
     _write(STATE / "queue.json",
            json.dumps({"items": [], "version": "proof-vehicle"}, indent=2) + "\n")
     _write(STATE / "heartbeat.json",
@@ -363,7 +622,7 @@ def prepare_checkout():
                     ("config", "user.name", "Proof Fixture"), ("add", "."),
                     ("commit", "-qm", "isolated proof baseline")):
         git(*command)
-    return git("rev-parse", "HEAD")
+    return git("rev-parse", "HEAD"), runner_source
 
 
 def prepare_history():
@@ -411,7 +670,7 @@ def phase_prepare(args):
                 "a production crq artifact directory is present in the guest")
     required = ["deploy-controller.py", "unit-switch-adapter.py",
                 "unit-switch.py", "unit-switch-fixture.py",
-                "unit-switch-fixture.mjs"]
+                "unit-switch-fixture.mjs", "crq-runner-source.tar.gz"]
     for name in required:
         path = PROOF_BIN / name
         require(path.is_file() and not path.is_symlink(),
@@ -422,7 +681,7 @@ def phase_prepare(args):
             "node is required for the Node fixture")
     require(shutil.which("python3") is not None,
             "python3 is required for the Python fixture")
-    commit = prepare_checkout()
+    commit, runner_source = prepare_checkout()
     history = prepare_history()
     for label, path in CASE_RECORDS.items():
         path.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -435,6 +694,7 @@ def phase_prepare(args):
     initial = snapshot()
     baseline_value = {
         "commit": commit,
+        "runner_source": runner_source,
         "node_runtime": NODE_RUNTIME,
         "python_runtime": PYTHON_RUNTIME,
         "history_path": str(HISTORY_PATH),
@@ -528,6 +788,316 @@ def switch_phase(runtime):
             "preserved": check_preserved("switch"),
             "installed_runtime": installed,
             "completions_seen": records_after}
+
+
+def drain_refuse_phase(args):
+    """Attempt a real switch with live/ambiguous recorded work and require refusal."""
+    kind = args.seed
+    require(kind in ("alive", "ambiguous"),
+            "drain refusal seed must be alive or ambiguous")
+    target = args.runtime
+    saved = baseline()
+    adapter = load_adapter().GuestFixtureAdapter(
+        unit_dir=UNIT_DIR, fixture_dir=FIXTURE, unit=UNIT,
+        proof_root=PROOF_BIN, guest_only=True)
+    current = adapter._runtime_from_unit(SERVICE)
+    require(target in (PYTHON_RUNTIME, NODE_RUNTIME) and target != current,
+            "drain refusal target must differ from the installed runtime")
+    saved_queue = queue_bytes()
+    before_paths = [str(path) for path in records()]
+    seeded = seed_drain_work(kind)
+    unrelated, unrelated_state = spawn_detached("crq-drain-unrelated")
+    cleanup = []
+    try:
+        seed_queue([seeded["item"],
+                    {"id": "drain-terminal", "state": "done"}])
+        seeded_sha = sha256_file(STATE / "queue.json")
+        liveness = item_liveness(seeded["item"])
+        require(liveness["state"] == seeded["expected_kind"],
+                "seeded run has unexpected liveness: " + liveness["state"])
+        observation = drain_observation()
+        require(observation["drained"] is False,
+                "drain erroneously reported the seeded run absent")
+        blocked = {entry.get("run"): entry
+                   for entry in observation["blocked"] if entry.get("run")}
+        require(blocked.get(seeded["run_id"], {}).get("state")
+                == seeded["expected_kind"],
+                "drain did not classify the seeded run as expected")
+        before_cli = snapshot()
+        result = cli("switch", ["--runtime", target])
+        require(result["rc"] == 2,
+                "drain refusal switch did not refuse: "
+                + (result.get("stdout") or result.get("stderr") or "")[:800])
+        try:
+            payload = json.loads(result["stdout"])
+        except ValueError as exc:
+            raise RuntimeError("drain refusal CLI did not emit JSON") from exc
+        require("queue-owned work" in (payload.get("refused") or ""),
+                "drain refusal message is not explicit")
+        require(payload.get("drain", {}).get("blocked") == observation["blocked"],
+                "CLI drain evidence does not match the controller observation")
+        after_cli = snapshot()
+        require(sha256_file(STATE / "queue.json") == seeded_sha,
+                "refused switch changed the seeded queue bytes")
+        require([str(path) for path in records()] == before_paths,
+                "refused switch created a journal record")
+        require(after_cli["completions"] == before_cli["completions"],
+                "refused switch ran work")
+        require(after_cli["metadata"] == before_cli["metadata"],
+                "refused switch changed installed unit metadata")
+        require(after_cli["units"] == before_cli["units"],
+                "refused switch changed unit activation state")
+        owned_after = (process_state(seeded["process"].pid)
+                       if seeded["process"] is not None else None)
+        if owned_after is not None:
+            require(owned_after["alive"],
+                    "controller signalled the alive seeded process")
+            require(owned_after["starttime"]
+                    == seeded["process_state"].get("starttime"),
+                    "alive seeded process identity changed")
+        unrelated_after = process_state(unrelated.pid)
+        require(unrelated_after["alive"],
+                "controller signalled unrelated guest work")
+        require(unrelated_after["starttime"] == unrelated_state.get("starttime"),
+                "unrelated guest process identity changed")
+        result = {
+            "kind": kind, "target_runtime": target,
+            "current_runtime": current,
+            "cli": {"rc": result["rc"],
+                    "stdout": result["stdout"],
+                    "stderr": result["stderr"]},
+            "refused": payload.get("refused"),
+            "drain": payload.get("drain"),
+            "observation": observation,
+            "liveness": [liveness],
+            "seeded": {"run_id": seeded["run_id"],
+                       "item": seeded["item"],
+                       "identity": seeded["identity"],
+                       "process": seeded["process_state"]},
+            "queue": {"before_sha256": seeded_sha,
+                      "after_sha256": sha256_file(STATE / "queue.json"),
+                      "baseline_sha256": sha256_bytes(saved_queue)},
+            "records_before": before_paths,
+            "records_after": [str(path) for path in records()],
+            "completions_before": len(before_cli["completions"]),
+            "completions_after": len(after_cli["completions"]),
+            "before": before_cli, "after": after_cli,
+            "processes": {"owned": owned_after,
+                          "unrelated": {"before": unrelated_state,
+                                        "after": unrelated_after}},
+        }
+    finally:
+        cleanup.append(stop_process(seeded["process"]))
+        cleanup.append(stop_process(unrelated))
+        restore_queue(saved_queue)
+        remove_drain_runs()
+    require(state_hashes() == saved["state"],
+            "drain refusal cleanup did not restore the baseline queue")
+    result["cleanup"] = cleanup
+    result["queue"]["restored_sha256"] = sha256_file(STATE / "queue.json")
+    result["baseline_restored"] = state_hashes() == saved["state"]
+    return result
+
+
+def drain_harvest_phase(args):
+    """Proceed through real switches with only completed/dead and terminal work."""
+    saved = baseline()
+    saved_queue = queue_bytes()
+    before_paths = [str(path) for path in records()]
+    seeded = seed_drain_work("harvest")
+    unrelated, unrelated_state = spawn_detached("crq-drain-unrelated")
+    cleanup = []
+    try:
+        seed_queue([seeded["item"],
+                    {"id": "drain-terminal", "state": "done"}])
+        seeded_sha = sha256_file(STATE / "queue.json")
+        seeded_hashes = state_hashes()
+        liveness = item_liveness(seeded["item"])
+        require(liveness["state"] == "harvest",
+                "completed/dead run is not harvest: " + liveness["state"])
+        observation = drain_observation()
+        require(observation == {"drained": True, "blocked": []},
+                "drain did not accept completed/dead work: "
+                + json.dumps(observation, sort_keys=True)[:400])
+        adapter = load_adapter().GuestFixtureAdapter(
+            unit_dir=UNIT_DIR, fixture_dir=FIXTURE, unit=UNIT,
+            proof_root=PROOF_BIN, guest_only=True)
+        current = adapter._runtime_from_unit(SERVICE)
+        require(current == PYTHON_RUNTIME,
+                "harvest proof must start from the Python fixture runtime")
+        before = snapshot()
+        node_result = cli("switch", ["--runtime", NODE_RUNTIME])
+        require(node_result["rc"] == 0,
+                "harvest switch to Node failed: "
+                + (node_result.get("stderr") or node_result.get("stdout") or "")[:800])
+        node_records = new_records(before_paths)
+        require(len(node_records) == 1,
+                "harvest switch did not create exactly one record")
+        node_record = json.loads(node_records[0].read_text())
+        node_completions = validate_completed(
+            node_record, NODE_RUNTIME, PYTHON_RUNTIME)
+        require(sha256_file(STATE / "queue.json") == seeded_sha,
+                "harvest switch changed the seeded queue bytes")
+        require(process_state(unrelated.pid)["alive"],
+                "harvest switch signalled unrelated guest work")
+        require(not process_state(seeded["process_state"]["pid"])["alive"],
+                "completed/dead run unexpectedly came alive")
+        check_preserved_expected(seeded_hashes, "drain-harvest-node")
+        node_paths = [str(path) for path in records()]
+        python_result = cli("switch", ["--runtime", PYTHON_RUNTIME])
+        require(python_result["rc"] == 0,
+                "harvest switch back to Python failed: "
+                + (python_result.get("stderr") or python_result.get("stdout") or "")[:800])
+        python_records = new_records(node_paths)
+        require(len(python_records) == 1,
+                "harvest return switch did not create exactly one record")
+        python_record = json.loads(python_records[0].read_text())
+        python_completions = validate_completed(
+            python_record, PYTHON_RUNTIME, NODE_RUNTIME)
+        require(sha256_file(STATE / "queue.json") == seeded_sha,
+                "harvest return switch changed the seeded queue bytes")
+        require(process_state(unrelated.pid)["alive"],
+                "harvest return switch signalled unrelated guest work")
+        after = snapshot()
+        require(len(after["completions"]) > len(before["completions"]),
+                "harvest proof did not observe fixture completions")
+        preserved = check_preserved_expected(seeded_hashes, "drain-harvest")
+        result = {
+            "observation": observation,
+            "liveness": [liveness],
+            "seeded": {"run_id": seeded["run_id"],
+                       "item": seeded["item"],
+                       "identity": seeded["identity"],
+                       "process": seeded["process_state"]},
+            "queue": {"seeded_sha256": seeded_sha,
+                      "after_node_sha256": seeded_sha,
+                      "after_python_sha256": sha256_file(STATE / "queue.json")},
+            "node": {"cli": {"rc": node_result["rc"],
+                             "stdout": node_result["stdout"]},
+                     "record_path": str(node_records[0]),
+                     "record": record_summary(node_records[0]),
+                     "completions": node_completions},
+            "python": {"cli": {"rc": python_result["rc"],
+                               "stdout": python_result["stdout"]},
+                       "record_path": str(python_records[0]),
+                       "record": record_summary(python_records[0]),
+                       "completions": python_completions},
+            "processes": {"unrelated": {"before": unrelated_state,
+                                        "after": process_state(unrelated.pid)},
+                          "completed": seeded["process_state"]},
+            "completions_before": len(before["completions"]),
+            "completions_after": len(after["completions"]),
+            "preserved": preserved,
+        }
+    finally:
+        cleanup.append(stop_process(unrelated))
+        restore_queue(saved_queue)
+        remove_drain_runs()
+    require(state_hashes() == saved["state"],
+            "harvest proof cleanup did not restore the baseline queue")
+    result["cleanup"] = cleanup
+    result["baseline_restored"] = state_hashes() == saved["state"]
+    return result
+
+
+def recover_drain_refuse_phase(args):
+    """Recovery independently re-observes ownership before its own fence."""
+    record_path = pathlib.Path(args.record)
+    saved = baseline()
+    saved_queue = queue_bytes()
+    record_before = record_summary(record_path)
+    record = json.loads(record_path.read_text())
+    require(record["outcome"] == "pending" and record["phase"] == "drained",
+            "recovery drain proof requires a retained drained intent")
+    seeded = seed_drain_work("alive")
+    unrelated, unrelated_state = spawn_detached("crq-drain-unrelated")
+    cleanup = []
+    try:
+        seed_queue([seeded["item"],
+                    {"id": "drain-terminal", "state": "done"}])
+        seeded_sha = sha256_file(STATE / "queue.json")
+        liveness = item_liveness(seeded["item"])
+        require(liveness["state"] == "alive",
+                "recovery seeded run is not alive: " + liveness["state"])
+        observation = drain_observation()
+        require(observation["drained"] is False,
+                "recovery drain erroneously reported owned work absent")
+        before = snapshot()
+        service_before = show(UNIT, ["LoadState", "ActiveState", "FragmentPath"])
+        timer_before = show(TIMER, ["ActiveState", "LoadState"])
+        result = cli("recover", ["--record", str(record_path)])
+        require(result["rc"] == 2,
+                "recovery did not refuse live owned work: "
+                + (result.get("stdout") or result.get("stderr") or "")[:800])
+        try:
+            payload = json.loads(result["stdout"])
+        except ValueError as exc:
+            raise RuntimeError("recovery refusal CLI did not emit JSON") from exc
+        require("queue-owned work" in (payload.get("refused") or ""),
+                "recovery refusal message is not explicit")
+        require(payload.get("drain", {}).get("blocked") == observation["blocked"],
+                "recovery drain evidence does not match the observation")
+        after = snapshot()
+        service_after = show(UNIT, ["LoadState", "ActiveState", "FragmentPath"])
+        timer_after = show(TIMER, ["ActiveState", "LoadState"])
+        require(record_summary(record_path)["sha256"] == record_before["sha256"],
+                "refused recovery changed the retained record")
+        require(record_summary(record_path)["outcome"] == "pending"
+                and record_summary(record_path)["phase"] == "drained",
+                "refused recovery advanced the retained intent")
+        require(sha256_file(STATE / "queue.json") == seeded_sha,
+                "refused recovery changed the seeded queue bytes")
+        require(after["completions"] == before["completions"],
+                "refused recovery released activation")
+        require(service_after == service_before,
+                "refused recovery changed the service fence")
+        require(timer_after == timer_before,
+                "refused recovery changed timer activation")
+        require(SERVICE.is_symlink() and os.readlink(SERVICE) == "/dev/null",
+                "refused recovery released the durable service mask")
+        require(not STAGED_SERVICE.exists() and not STAGED_SERVICE.is_symlink(),
+                "refused recovery created an unexpected staging path")
+        owned_after = process_state(seeded["process"].pid)
+        unrelated_after = process_state(unrelated.pid)
+        require(owned_after["alive"],
+                "refused recovery signalled the alive seeded process")
+        require(unrelated_after["alive"],
+                "refused recovery signalled unrelated guest work")
+        result = {
+            "record_path": str(record_path),
+            "record_before": record_before,
+            "record_after": record_summary(record_path),
+            "cli": {"rc": result["rc"], "stdout": result["stdout"],
+                    "stderr": result["stderr"]},
+            "refused": payload.get("refused"),
+            "drain": payload.get("drain"),
+            "observation": observation,
+            "liveness": [liveness],
+            "seeded": {"run_id": seeded["run_id"],
+                       "item": seeded["item"],
+                       "identity": seeded["identity"],
+                       "process": seeded["process_state"]},
+            "queue": {"before_sha256": seeded_sha,
+                      "after_sha256": sha256_file(STATE / "queue.json")},
+            "service": {"before": service_before, "after": service_after},
+            "timer": {"before": timer_before, "after": timer_after},
+            "completions_before": len(before["completions"]),
+            "completions_after": len(after["completions"]),
+            "processes": {"owned": owned_after,
+                          "unrelated": {"before": unrelated_state,
+                                        "after": unrelated_after}},
+        }
+    finally:
+        cleanup.append(stop_process(seeded["process"]))
+        cleanup.append(stop_process(unrelated))
+        restore_queue(saved_queue)
+        remove_drain_runs()
+    require(state_hashes() == saved["state"],
+            "recovery drain proof cleanup did not restore the baseline queue")
+    result["cleanup"] = cleanup
+    result["queue"]["restored_sha256"] = sha256_file(STATE / "queue.json")
+    result["baseline_restored"] = state_hashes() == saved["state"]
+    return result
 
 
 def interrupt_phase(args):
@@ -1061,9 +1631,11 @@ def reset_fixture_phase(args):
 
 
 def main(argv=None):
-    phases = ("prepare", "switch-node", "switch-python", "interrupt",
-              "recover-kill", "recover", "recover-repeat", "rollback-fence",
-              "inspect", "fence", "host-identity", "matrix-switch-node",
+    phases = ("prepare", "drain-alive", "switch-node", "drain-ambiguous",
+              "switch-python", "drain-harvest", "interrupt",
+              "recover-drain-alive", "recover-kill", "recover",
+              "recover-repeat", "rollback-fence", "inspect", "fence",
+              "host-identity", "matrix-switch-node",
               "matrix-reset-python", "matrix-reset-python-final",
               *MATRIX_CASES.keys(),
               *(name + "-observe" for name in MATRIX_CASES))
@@ -1074,17 +1646,24 @@ def main(argv=None):
     parser.add_argument("--kind", choices=("manager", "reboot"))
     parser.add_argument("--after")
     parser.add_argument("--runtime", choices=(PYTHON_RUNTIME, NODE_RUNTIME))
+    parser.add_argument("--seed", choices=("alive", "ambiguous", "harvest"))
     parser.add_argument("--label")
     args = parser.parse_args(argv)
     try:
         if args.phase == "prepare":
             payload = phase_prepare(args)
+        elif args.phase in ("drain-alive", "drain-ambiguous"):
+            payload = drain_refuse_phase(args)
         elif args.phase == "switch-node":
             payload = switch_phase(NODE_RUNTIME)
         elif args.phase == "switch-python":
             payload = switch_phase(PYTHON_RUNTIME)
+        elif args.phase == "drain-harvest":
+            payload = drain_harvest_phase(args)
         elif args.phase == "interrupt":
             payload = interrupt_phase(args)
+        elif args.phase == "recover-drain-alive":
+            payload = recover_drain_refuse_phase(args)
         elif args.phase == "recover-kill":
             payload = recover_kill_phase(args)
         elif args.phase == "recover":

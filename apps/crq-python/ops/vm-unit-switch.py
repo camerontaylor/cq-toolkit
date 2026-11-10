@@ -39,13 +39,15 @@ UPLOADS = (
     "unit-switch-fixture.mjs",
     "vm-unit-switch-guest.py",
 )
+RUNNER_ARCHIVE = "crq-runner-source.tar.gz"
 HOST_MODULES = (
     "vm-unit-switch.py",
     "vm-feasibility.py",
 )
-GUEST_PHASES = ("prepare", "switch-node", "switch-python", "interrupt",
-                "recover-kill", "recover", "recover-repeat", "rollback-fence",
-                "inspect", "fence")
+GUEST_PHASES = ("prepare", "drain-alive", "switch-node", "drain-ambiguous",
+                "switch-python", "drain-harvest", "interrupt",
+                "recover-drain-alive", "recover-kill", "recover",
+                "recover-repeat", "rollback-fence", "inspect", "fence")
 NODE_RUNTIME = "node:" + "b" * 40
 PYTHON_RUNTIME = "python"
 
@@ -106,6 +108,12 @@ LIMITATIONS = [
     "CRQ runtime completion exists and no CQ enablement is implied.",
     "The guest user manager is not restarted and the guest is not rebooted; "
     "that matrix remains later bounded work.",
+    "The drain proof seeds real detached session-leader processes and real "
+    "runner metadata. It covers recorded alive, ownership-ambiguous and "
+    "completed/dead runs only: a process whose ownership is not represented "
+    "by queue run metadata and a runner pidfile is not claimed as detected.",
+    "No production run_liveness provider, queue-runner runtime, adapter, "
+    "journal location or shared lock identity is exercised or enabled.",
     "Production journal interoperability, legacy resolution and the actual "
     "deployed record location remain unresolved and are not tested here.",
     "A guest run is not power-loss, ACL, xattr or privileged-ownership proof.",
@@ -118,6 +126,10 @@ MATRIX_LIMITATIONS = [
     "The matrix restarts the real guest user manager and reboots the real guest "
     "OS at the tested boundaries. It is not power-loss proof, and the guest is "
     "not a production host.",
+    "Drain coverage is limited to recorded runs with genuine runner metadata. "
+    "An ownership-ambiguous record with no live evidence is retained; an "
+    "unrepresented escaped process is an explicit uncovered semantics "
+    "question, not a detection claim.",
     "Activation-pending ambiguity is retained in a separate private record "
     "directory per case so independent cases do not block each other. That is "
     "test isolation, not a resolution mechanism or a fix for the known "
@@ -219,6 +231,34 @@ def upload_files(run, recorder):
                                % (name, remote_sha, local_sha))
         provenance[name] = {"sha256": local_sha, "remote_sha256": remote_sha,
                             "bytes": len(data), "verified": True}
+    archive = pathlib.Path(run["path"]) / RUNNER_ARCHIVE
+    result = subprocess.run(
+        ["git", "-C", str(REPO), "archive", "--format=tar.gz",
+         "--output", str(archive), "HEAD", "apps/crq-python"],
+        capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError("could not build the committed runner source archive: "
+                           + (result.stderr or "").strip()[:400])
+    data = archive.read_bytes()
+    local_sha = sha256_bytes(data)
+    remote = ("cat > /home/%s/proof-bin/%s && chmod 600 /home/%s/proof-bin/%s"
+              % (vm.GUEST_USER, RUNNER_ARCHIVE, vm.GUEST_USER, RUNNER_ARCHIVE))
+    uploaded = vm.guest_ssh(run, remote, recorder, stdin=data, max_output=2000)
+    if uploaded["rc"] != 0:
+        raise RuntimeError("runner source upload failed: "
+                           + (uploaded.get("stderr") or "")[:400])
+    check = vm.guest_ssh(
+        run, "sha256sum /home/%s/proof-bin/%s" % (vm.GUEST_USER, RUNNER_ARCHIVE),
+        recorder, timeout=30)
+    observed = (check.get("stdout") or "").split()
+    remote_sha = observed[0] if observed else ""
+    if check["rc"] != 0 or remote_sha != local_sha:
+        raise RuntimeError("runner source archive digest mismatch: %s != %s"
+                           % (remote_sha, local_sha))
+    provenance["runner_source"] = {
+        "name": RUNNER_ARCHIVE, "sha256": local_sha,
+        "remote_sha256": remote_sha, "bytes": len(data), "verified": True,
+        "source": "git-archive:HEAD:apps/crq-python"}
     return provenance
 
 
@@ -768,6 +808,127 @@ def _matrix_checks(phases, restarts, reboots, prepared, problems):
     return checks
 
 
+def _cleanup_never_signalled(phase):
+    cleanup = phase.get("cleanup")
+    return (isinstance(cleanup, list) and bool(cleanup)
+            and all(isinstance(item, dict)
+                    and item.get("controller_signalled") is False
+                    for item in cleanup))
+
+
+def _drain_refusal_ok(phase, kind):
+    cli = phase.get("cli") or {}
+    queue = phase.get("queue") or {}
+    before = phase.get("before") or {}
+    after = phase.get("after") or {}
+    liveness = phase.get("liveness") or [{}]
+    processes = phase.get("processes") or {}
+    owned = processes.get("owned")
+    unrelated = (processes.get("unrelated") or {}).get("after") or {}
+    observation = phase.get("observation") or {}
+    drain = phase.get("drain") or {}
+    return (
+        cli.get("rc") == 2
+        and "queue-owned work" in (phase.get("refused") or "")
+        and observation.get("drained") is False
+        and drain.get("blocked") == observation.get("blocked")
+        and any(entry.get("state") == kind
+                and entry.get("run") == (phase.get("seeded") or {}).get("run_id")
+                for entry in observation.get("blocked") or [])
+        and liveness[0].get("state") == kind
+        and queue.get("before_sha256") == queue.get("after_sha256")
+        and isinstance(queue.get("restored_sha256"), str)
+        and (phase.get("records_before") or [])
+        == (phase.get("records_after") or [])
+        and phase.get("completions_before") == phase.get("completions_after")
+        and (before.get("metadata") == after.get("metadata"))
+        and (before.get("units") == after.get("units"))
+        and (before.get("jobs") == after.get("jobs"))
+        and (owned is None or owned.get("alive") is True)
+        and unrelated.get("alive") is True
+        and _cleanup_never_signalled(phase)
+        and phase.get("baseline_restored") is True
+    )
+
+
+def _completion_pair(value):
+    evidence = value or {}
+    sequences = evidence.get("sequences") or []
+    invocations = evidence.get("invocations") or []
+    return (len(sequences) == 2 and sequences[0] < sequences[1]
+            and len(set(invocations)) == 2)
+
+
+def _drain_harvest_ok(phase):
+    queue = phase.get("queue") or {}
+    processes = phase.get("processes") or {}
+    observation = phase.get("observation") or {}
+    liveness = phase.get("liveness") or [{}]
+    node = phase.get("node") or {}
+    python = phase.get("python") or {}
+    node_record = node.get("record") or {}
+    python_record = python.get("record") or {}
+    preserved = phase.get("preserved") or {}
+    seeded = preserved.get("state") or {}
+    return (
+        observation == {"drained": True, "blocked": []}
+        and liveness[0].get("state") == "harvest"
+        and queue.get("seeded_sha256") == queue.get("after_node_sha256")
+        and queue.get("seeded_sha256") == queue.get("after_python_sha256")
+        and ((node.get("cli") or {}).get("rc") == 0)
+        and ((python.get("cli") or {}).get("rc") == 0)
+        and _completion_pair(node.get("completions"))
+        and _completion_pair(python.get("completions"))
+        and node_record.get("outcome") == "completed"
+        and node_record.get("runtime") == NODE_RUNTIME
+        and node_record.get("prior_runtime") == PYTHON_RUNTIME
+        and python_record.get("outcome") == "completed"
+        and python_record.get("runtime") == PYTHON_RUNTIME
+        and python_record.get("prior_runtime") == NODE_RUNTIME
+        and (processes.get("unrelated") or {}).get("after", {}).get(
+            "alive") is True
+        and (processes.get("completed") or {}).get("alive") is False
+        and seeded.get("queue.json") == queue.get("seeded_sha256")
+        and _cleanup_never_signalled(phase)
+        and phase.get("baseline_restored") is True
+    )
+
+
+def _recovery_drain_refusal_ok(phase, service_path):
+    cli = phase.get("cli") or {}
+    queue = phase.get("queue") or {}
+    before = phase.get("record_before") or {}
+    after = phase.get("record_after") or {}
+    service = phase.get("service") or {}
+    timer = phase.get("timer") or {}
+    observation = phase.get("observation") or {}
+    drain = phase.get("drain") or {}
+    processes = phase.get("processes") or {}
+    unrelated = (processes.get("unrelated") or {}).get("after") or {}
+    return (
+        cli.get("rc") == 2
+        and "queue-owned work" in (phase.get("refused") or "")
+        and observation.get("drained") is False
+        and drain.get("blocked") == observation.get("blocked")
+        and (phase.get("liveness") or [{}])[0].get("state") == "alive"
+        and before.get("sha256") == after.get("sha256")
+        and after.get("outcome") == "pending"
+        and after.get("phase") == "drained"
+        and queue.get("before_sha256") == queue.get("after_sha256")
+        and isinstance(queue.get("restored_sha256"), str)
+        and phase.get("completions_before") == phase.get("completions_after")
+        and (service.get("before") or {}).get("LoadState") == "masked"
+        and (service.get("after") or {}).get("LoadState") == "masked"
+        and (service.get("before") or {}).get("FragmentPath") == service_path
+        and service.get("before") == service.get("after")
+        and timer.get("before") == timer.get("after")
+        and (processes.get("owned") or {}).get("alive") is True
+        and unrelated.get("alive") is True
+        and _cleanup_never_signalled(phase)
+        and phase.get("baseline_restored") is True
+    )
+
+
 def build_checks(phases, restarts=None, reboots=None, mode="base"):
     checks = {}
     problems = []
@@ -799,6 +960,36 @@ def build_checks(phases, restarts=None, reboots=None, mode="base"):
             "ActiveState") == "inactive")
     checks["historical_record_seeded"] = bool(
         (snapshot.get("history") or {}).get("sha256"))
+    runner_source = prepared.get("runner_source") or {}
+    checks["runner_source_recorded"] = (
+        isinstance(runner_source.get("sha256"), str)
+        and HEX64.fullmatch(runner_source["sha256"]) is not None
+        and isinstance(runner_source.get("crq_sha256"), str)
+        and HEX64.fullmatch(runner_source["crq_sha256"]) is not None
+        and type(runner_source.get("bytes")) is int
+        and runner_source["bytes"] > 0)
+
+    for name, kind in (("drain-alive", "alive"),
+                       ("drain-ambiguous", "ambiguous")):
+        phase = phases.get(name) or {}
+        if not _ok_phase(phase, name, problems):
+            checks[name.replace("-", "_") + "_refused"] = False
+            continue
+        checks[name.replace("-", "_") + "_refused"] = _drain_refusal_ok(
+            phase, kind)
+
+    harvest = phases.get("drain-harvest") or {}
+    if not _ok_phase(harvest, "drain-harvest", problems):
+        checks["drain_harvest_proceeds"] = False
+    else:
+        checks["drain_harvest_proceeds"] = _drain_harvest_ok(harvest)
+
+    recovery_drain = phases.get("recover-drain-alive") or {}
+    if not _ok_phase(recovery_drain, "recover-drain-alive", problems):
+        checks["recovery_drain_refused"] = False
+    else:
+        checks["recovery_drain_refused"] = _recovery_drain_refusal_ok(
+            recovery_drain, service_path)
 
     for name, runtime, prior in (("switch-node", NODE_RUNTIME, PYTHON_RUNTIME),
                                  ("switch-python", PYTHON_RUNTIME, NODE_RUNTIME)):
@@ -1055,6 +1246,12 @@ def source_commit_check(repo, commit):
             capture_output=True, text=True, check=True).stdout.strip()
         if status:
             raise ValueError(label + " have uncommitted changes")
+    status = subprocess.run(
+        ["git", "-C", str(repo), "status", "--porcelain", "--",
+         "apps/crq-python"],
+        capture_output=True, text=True, check=True).stdout.strip()
+    if status:
+        raise ValueError("runner source has uncommitted changes")
     return head
 
 
@@ -1104,7 +1301,12 @@ def cmd_run(args):
         for kind, name, options in run_steps(args.mode):
             if kind == "phase":
                 extra = []
-                if name in ("recover-kill", "recover", "recover-repeat"):
+                if name == "drain-alive":
+                    extra = ["--runtime", NODE_RUNTIME, "--seed", "alive"]
+                elif name == "drain-ambiguous":
+                    extra = ["--runtime", PYTHON_RUNTIME, "--seed", "ambiguous"]
+                elif name in ("recover-kill", "recover", "recover-repeat",
+                              "recover-drain-alive"):
                     extra = ["--record", phases["interrupt"]["record_path"]]
                 if options.get("case"):
                     case = options["case"]
@@ -1274,8 +1476,16 @@ def verify_raw_evidence(report, raw_root, mode="base"):
     if isinstance(snapshot.get("history"), dict):
         _retained_record_problem(snapshot["history"], raw_root, "records",
                                  "inspect.snapshot.history", problems)
+    harvest = phases.get("drain-harvest") or {}
+    for label in ("node", "python"):
+        summary = (harvest.get(label) or {}).get("record")
+        _retained_record_problem(summary, raw_root, "records",
+                                 "drain-harvest." + label, problems)
 
     expected_rc = {
+        "drain-alive": lambda rc: rc == 2,
+        "drain-ambiguous": lambda rc: rc == 2,
+        "recover-drain-alive": lambda rc: rc == 2,
         "switch-node": lambda rc: rc == 0,
         "switch-python": lambda rc: rc == 0,
         "interrupt": lambda rc: rc not in (0, None),
@@ -1293,6 +1503,12 @@ def verify_raw_evidence(report, raw_root, mode="base"):
         cli = _phase_cli(phases.get(name) or {}, name, problems)
         if cli is not None and not predicate(cli.get("rc")):
             problems.append(name + " CLI result contradicts the proof outcome")
+    harvest = phases.get("drain-harvest") or {}
+    for label in ("node", "python"):
+        nested = (harvest.get(label) or {}).get("cli") or {}
+        if nested.get("rc") != 0:
+            problems.append("drain-harvest." + label
+                            + " CLI result contradicts the proof outcome")
     if mode == "matrix":
         for case in MATRIX_ORDER:
             boundary = phases.get(case) or {}
@@ -1342,7 +1558,7 @@ def verify_raw_evidence(report, raw_root, mode="base"):
         retained = ({entry.name for entry in proof_bin.iterdir()
                      if entry.is_file() and not entry.is_symlink()}
                     if proof_bin.is_dir() else set())
-        if retained != set(UPLOADS):
+        if retained != set(UPLOADS) | {RUNNER_ARCHIVE}:
             problems.append("raw upload set does not match the expected "
                             "controller and fixture scripts")
         for name in UPLOADS:
@@ -1360,6 +1576,24 @@ def verify_raw_evidence(report, raw_root, mode="base"):
                     problems.append("raw upload size does not match: " + name)
                 if vm.sha256_file(raw_path) != entry["sha256"]:
                     problems.append("raw upload digest does not match: " + name)
+        runner = uploads.get("runner_source")
+        raw_runner = proof_bin / RUNNER_ARCHIVE
+        if not isinstance(runner, dict) or not _sha256_text(runner.get("sha256")):
+            problems.append("runner source provenance is missing")
+        else:
+            if raw_runner.is_symlink() or not raw_runner.is_file():
+                problems.append("raw runner source archive is missing")
+            elif type(runner.get("bytes")) is not int or runner["bytes"] < 1:
+                problems.append("runner source size is invalid")
+            elif raw_runner.stat().st_size != runner["bytes"]:
+                problems.append("runner source size does not match")
+            elif vm.sha256_file(raw_runner) != runner["sha256"]:
+                problems.append("runner source digest does not match")
+            prepared = ((phases.get("prepare") or {}).get("prepared") or {})
+            guest_runner = prepared.get("runner_source") or {}
+            if guest_runner.get("sha256") != runner.get("sha256"):
+                problems.append("guest runner source digest does not match "
+                                "the uploaded archive")
     return problems
 
 
@@ -1463,7 +1697,7 @@ def validate_provenance(report, run_dir):
     if not isinstance(uploads, dict):
         problems.append("upload provenance is not an object")
     else:
-        if set(uploads) != set(UPLOADS):
+        if set(uploads) != set(UPLOADS) | {"runner_source"}:
             problems.append("upload provenance set does not match the expected "
                             "controller and fixture scripts")
         for name in UPLOADS:
@@ -1483,6 +1717,24 @@ def validate_provenance(report, run_dir):
                 problems.append("upload size is invalid: " + name)
             if entry["verified"] is not True:
                 problems.append("upload is not verified: " + name)
+        runner = uploads.get("runner_source")
+        if not isinstance(runner, dict):
+            problems.append("runner source provenance is missing")
+        elif (set(runner) != {"name", "sha256", "remote_sha256", "bytes",
+                              "verified", "source"}):
+            problems.append("runner source provenance fields are wrong")
+        else:
+            if runner.get("name") != RUNNER_ARCHIVE:
+                problems.append("runner source provenance names the wrong file")
+            if not _sha256_text(runner.get("sha256")) \
+                    or not _sha256_text(runner.get("remote_sha256")):
+                problems.append("runner source digest is invalid")
+            elif runner["sha256"] != runner["remote_sha256"]:
+                problems.append("runner source local and remote digests differ")
+            if type(runner.get("bytes")) is not int or runner["bytes"] < 1:
+                problems.append("runner source size is invalid")
+            if runner.get("verified") is not True:
+                problems.append("runner source upload is not verified")
 
     raw = report.get("raw")
     if not isinstance(raw, dict):

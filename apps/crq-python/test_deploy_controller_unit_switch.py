@@ -85,6 +85,14 @@ def pending_checkout(operation):
 
 
 class UnitSwitchTests(ControllerFixture):
+    def setUp(self):
+        super().setUp()
+        # Unit transactions now refuse before mutation when recorded queue
+        # ownership cannot be observed; the fixture's queue is genuinely empty.
+        self.write_state("queue.json", {"items": [], "starts": []})
+        self.write_state("heartbeat.json",
+                         {"last_tick": "2026-01-01T00:00:00Z"})
+
     def test_preservation_baseline_is_captured_after_drain(self):
         self.write_state("queue.json", {"version": "before"})
         fixture = self
@@ -368,6 +376,85 @@ class UnitSwitchTests(ControllerFixture):
         with self.assertRaisesRegex(dc.Refused, "no runtime-bound"):
             dc.switch_unit(self.effects, None, "crq-tick.service", "node:" + "a" * 40)
         self.assertEqual(list(self.record_dir.iterdir()), [])
+
+    def test_switch_refuses_live_queue_before_adapter_or_journal(self):
+        run_id = "a" * 32
+        item = {"id": "pr1", "state": "reviewing",
+                "run": {"run_id": run_id, "pid": 4242}}
+        self.write_state("queue.json", {"items": [item]})
+        queue_before = (self.runner / "state/queue.json").read_bytes()
+        adapter = Adapter("python")
+        calls = []
+
+        def preflight(*args):
+            calls.append("preflight")
+            return {"runtime": "python"}
+
+        with mock.patch.object(dc, "_runner_liveness",
+                               return_value=lambda *args: "alive"), \
+                mock.patch.object(adapter, "preflight", side_effect=preflight):
+            with self.assertRaises(dc.QueueDrainRefused) as error:
+                dc.switch_unit(self.effects, adapter, "crq-tick.service",
+                               "node:" + "b" * 40)
+        self.assertEqual(error.exception.drain, {
+            "drained": False,
+            "blocked": [{"item": "pr1", "state": "alive", "run": run_id}]})
+        self.assertEqual(calls, [])
+        self.assertTrue(adapter.running)
+        self.assertEqual((self.runner / "state/queue.json").read_bytes(),
+                         queue_before)
+        self.assertEqual(list(self.record_dir.glob("controller-*.json")), [])
+
+    def test_switch_refuses_ambiguous_queue_before_mutation(self):
+        run_id = "b" * 32
+        self.write_state("queue.json", {"items": [
+            {"id": "pr2", "run": {"run_id": run_id}}]})
+        adapter = Adapter("python")
+        with mock.patch.object(dc, "_runner_liveness",
+                               return_value=lambda *args: "ambiguous"):
+            with self.assertRaises(dc.QueueDrainRefused) as error:
+                dc.switch_unit(self.effects, adapter, "crq-tick.service",
+                               "node:" + "b" * 40)
+        self.assertEqual(error.exception.drain["blocked"], [
+            {"item": "pr2", "state": "ambiguous", "run": run_id}])
+        self.assertEqual(list(self.record_dir.glob("controller-*.json")), [])
+
+    def test_unreadable_queue_refuses_before_adapter(self):
+        (self.runner / "state/queue.json").write_text("not json\n")
+        adapter = Adapter("python")
+        with self.assertRaisesRegex(dc.Refused, "queue unreadable"):
+            dc.switch_unit(self.effects, adapter, "crq-tick.service",
+                           "node:" + "b" * 40)
+        self.assertEqual(list(self.record_dir.glob("controller-*.json")), [])
+
+    def test_recovery_independently_refuses_live_owned_work(self):
+        record = {
+            "schema_version": dc.JOURNAL_SCHEMA,
+            "transaction_id": "c" * 32,
+            "operation": "unit_switch",
+            "unit": "crq-tick.service",
+            "runtime": "node:" + "b" * 40,
+            "prior_runtime": "python",
+            "outcome": "pending",
+            "at": "2026-01-01T00:00:00Z",
+            "snapshot": ["python", True],
+            "state": None,
+            "phase": "snapshot",
+        }
+        path = self.effects.journal_append(record)
+        before = path.read_bytes()
+        run_id = "d" * 32
+        self.write_state("queue.json", {"items": [
+            {"id": "pr3", "run": {"run_id": run_id, "pid": 5252}}]})
+        adapter = Adapter("python")
+        with mock.patch.object(dc, "_runner_liveness",
+                               return_value=lambda *args: "alive"):
+            with self.assertRaises(dc.QueueDrainRefused) as error:
+                dc.recover_unit(self.effects, adapter, path)
+        self.assertEqual(error.exception.drain["blocked"], [
+            {"item": "pr3", "state": "alive", "run": run_id}])
+        self.assertEqual(path.read_bytes(), before)
+        self.assertTrue(adapter.running)
 
     def test_recovery_failure_keeps_pending_record_and_reports_recovery(self):
         class Crash(BaseException):

@@ -111,6 +111,19 @@ class Refused(Exception):
     """A controller refusal: nothing was changed; the reason is terminal."""
 
 
+class QueueDrainRefused(Refused):
+    """A fail-closed queue ownership refusal before any unit mutation.
+
+    ``drain`` is the exact observation the controller acted on so the caller
+    can retain the blocked item identities without parsing prose. The
+    controller never signals or kills a process.
+    """
+
+    def __init__(self, message: str, drain: dict):
+        super().__init__(message)
+        self.drain = drain
+
+
 class NoChangeRefused(Refused):
     """A helper refusal with every deployment surface observed unchanged.
 
@@ -466,6 +479,34 @@ def drain_check(effects: Effects, liveness) -> dict:
             blocked.append({"item": item.get("id"), "state": state,
                             "run": run_id})
     return {"blocked": blocked, "drained": not blocked}
+
+
+def runner_queue_drain(effects: Effects) -> dict:
+    """The controller's queue drain bound to the runner's own liveness probe.
+
+    This is the existing ``drain_check`` driven by ``_runner_liveness`` (which
+    executes the checkout's actual ``crq.run_liveness``), never a second
+    ownership model. It only observes; no process or state is signalled.
+    """
+    return drain_check(effects, _runner_liveness(effects))
+
+
+def queue_drain_gate(effects: Effects) -> dict:
+    """Refuse a unit transaction while recorded queue work is live/ambiguous.
+
+    Callers invoke this before any unit mutation or journal write, so a
+    refusal leaves installed units, activation, preserved queue bytes and
+    retained records unchanged. Both the switch and recovery entry points call
+    it independently; the guest adapter observes the same queue again after its
+    systemd fence to close the dispatch race.
+    """
+    drain = runner_queue_drain(effects)
+    if not drain["drained"]:
+        raise QueueDrainRefused(
+            "queue-owned work is alive or ambiguous; refusing unit "
+            "transaction before activation: "
+            + json.dumps(drain["blocked"], sort_keys=True)[:400], drain)
+    return drain
 
 
 # ------------------------------------------------------------- preservation
@@ -1303,6 +1344,10 @@ def recover_unit(effects, adapter, path):
                            and not _hex(_HEX64, record["state"]["preserved/" + rel]))
                        for rel in PRESERVED))):
             raise Refused("invalid unit recovery record")
+        # Recovery re-observes ownership itself; it never assumes the switch's
+        # drain or a prior crash left the queue empty. Refusal happens before
+        # re-fencing, restore or any journal rewrite.
+        queue_drain_gate(effects)
         adapter.validate_snapshot(record["unit"], record["snapshot"])
         try:
             adapter.stop_and_drain(record["unit"])
@@ -1611,6 +1656,9 @@ def switch_unit(effects, adapter, unit, runtime):
     with effects.controller_lock():
         effects.record_preflight()
         refuse_unfinished_transactions(effects)
+        # No journal entry, snapshot or unit mutation precedes this gate: an
+        # alive/ambiguous recorded run refuses the transaction as-is.
+        queue_drain_gate(effects)
         prior = adapter.preflight(unit, runtime)
         if not isinstance(prior, dict) or not _unit_runtime(prior.get("runtime")):
             raise Refused("invalid prior runtime")

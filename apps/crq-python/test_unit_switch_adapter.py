@@ -264,6 +264,45 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(self.fake.runtime(), "python")
         self.assertFalse(self.fake.timer_active)
 
+    def test_stop_drain_combines_systemd_and_queue_observation(self):
+        self._snapshot()
+        self.adapter.queue_drain = lambda: {"drained": True, "blocked": []}
+        drain = self.adapter.stop_and_drain(UNIT)
+        self.assertEqual(drain["queue_drain"],
+                         {"drained": True, "blocked": []})
+        self.assertTrue(self.fake.masked)
+        self.assertEqual(drain["owned"],
+                         {"main_pid": 0, "pids": [], "cgroup": ""})
+
+    def test_stop_drain_refuses_when_queue_work_is_alive(self):
+        self._snapshot()
+        blocked = [{"item": "pr1", "state": "alive", "run": "a" * 32}]
+        self.adapter.queue_drain = lambda: {"drained": False,
+                                            "blocked": blocked}
+        with self.assertRaisesRegex(RuntimeError, "queue-owned work"):
+            self.adapter.stop_and_drain(UNIT)
+        self.assertTrue(self.fake.masked)
+        self.assertEqual(self.adapter.last_drain["queue_drain"],
+                         {"drained": False, "blocked": blocked})
+
+    def test_stop_drain_treats_probe_failure_as_ambiguous(self):
+        self._snapshot()
+
+        def broken():
+            raise RuntimeError("probe subsystem failed")
+
+        self.adapter.queue_drain = broken
+        with self.assertRaisesRegex(RuntimeError, "ownership is unknown"):
+            self.adapter.stop_and_drain(UNIT)
+        self.assertTrue(self.fake.masked)
+
+    def test_stop_drain_refuses_malformed_queue_observation(self):
+        self._snapshot()
+        self.adapter.queue_drain = lambda: {"drained": "yes", "blocked": []}
+        with self.assertRaisesRegex(RuntimeError, "malformed"):
+            self.adapter.stop_and_drain(UNIT)
+        self.assertTrue(self.fake.masked)
+
     def test_install_keeps_direct_start_fenced_until_release(self):
         snapshot = self._snapshot()
         self.adapter.stop_and_drain(UNIT)
