@@ -66,7 +66,7 @@ describe('optional per-task loop', () => {
     ['replacement-character', undefined],
     ['scoped-secret', 'worker upload refused'],
   ] as const)(
-    'rescue feedback preserves provenance and refuses %s evidence',
+    'rescue feedback preserves provenance and omits unreadable %s evidence',
     async (fault, refusal) => {
       const world = await makeWorld([{ failing: true }, { failing: false }]);
       const underlying = world.gitFactory();

@@ -386,6 +386,14 @@ class PhaseTest(FindingTest):
         self.assertEqual(packed['regions'][0]['start_line'], 981)
         self.assertLessEqual(sum(len(r['text']) for r in packed['regions']), 8000)
 
+    def test_citation_past_end_of_file_falls_back_to_prefix(self):
+        from crq_repair.triage import source_excerpt
+        content = 'x\n' * 5000
+        packed = source_excerpt(content, 'src/a.ts', 'See src/a.ts:9999')
+        self.assertEqual(packed['text'], content[:8000])
+        self.assertIs(packed['truncated'], True)
+        self.assertEqual(packed.get('regions', []), [])
+
     def test_unique_exact_quote_recovers_wrong_line_number(self):
         result, queue, _ = self.run_phase({'stop': 'ok', 'verdict': 'valid',
             'reason': 'source confirms', 'current_path': 'a',
