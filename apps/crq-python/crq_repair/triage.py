@@ -237,7 +237,9 @@ def phase(inbox, repo, tip, judge, transport, at, *, maximum=6, seconds=600, dry
             if remaining <= 0:
                 stopped = 'deadline'; break
             report = judge(row, packed, remaining)
-        except (subprocess.TimeoutExpired, OSError):
+        except (subprocess.TimeoutExpired, OSError, RuntimeError):
+            # Includes a judge-side secret scan that could not read its policy; defer
+            # before the model runs so deterministic plans are still persisted.
             stopped = 'deferred'; break
         if report.get('stop') != 'ok':
             if report.get('stop') == 'error' and report.get('errorClass') == 'output-invalid':

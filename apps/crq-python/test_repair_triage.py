@@ -534,6 +534,14 @@ class PhaseTest(FindingTest):
         self.assertEqual(result['stopped'], 'deferred')
         self.assertEqual(result['unjudged'], 1)
 
+    def test_judge_secret_scan_failure_defers_without_losing_row(self):
+        judge = mock.Mock(side_effect=RuntimeError('git show … denylist unreadable'))
+        result = phase(self.inbox, self.f.repo, self.t, judge, None, AT)
+        self.assertEqual(result['stopped'], 'deferred')
+        self.assertEqual(result['unjudged'], 1)
+        path = self.inbox.root / 'triage' / (self.fid + '.json')
+        self.assertEqual(ledger.loads(path.read_bytes())['status'], 'untriaged')
+
     def test_info_confirmed_finding_is_not_delivered(self):
         path = self.inbox.root / 'triage' / (self.fid + '.json')
         row = ledger.loads(path.read_bytes()); row['finding']['severity'] = 'info'
