@@ -164,7 +164,17 @@ test('removed recovery accepts a missing checkout parent while holding the origi
 
 test('missing acknowledgement preserves incomplete metadata', async () => {
   const f = await recoveryFixture();
-  await recoverReviewCheckout(f.env, { ...f.io, acknowledge: async () => '' });
+  await expect(
+    recoverReviewCheckout(f.env, { ...f.io, acknowledge: async () => '' }),
+  ).rejects.toThrow('Acknowledgement absent');
+  for (const path of f.paths) expect((await f.read(path))?.incomplete).toBe(true);
+});
+
+test('failed recovery shell reports non-clearing result', async () => {
+  const f = await recoveryFixture();
+  await expect(recoverReviewCheckout(f.env, { ...f.io, shell: async () => false })).rejects.toThrow(
+    'Recovery shell exited unsuccessfully',
+  );
   for (const path of f.paths) expect((await f.read(path))?.incomplete).toBe(true);
 });
 
@@ -180,7 +190,9 @@ test.each(['existing', 'dangling'] as const)(
         { ...f.env, CQ_RECOVERY_CHECKOUT: join(alias, 'missing', 'checkout') },
         f.io,
       ),
-    ).rejects.toThrow(/alias/i);
+    ).rejects.toThrow(
+      kind === 'existing' ? 'Checkout parent alias refused:' : 'Unresolvable path alias:',
+    );
     for (const path of f.paths) expect((await f.read(path))?.incomplete).toBe(true);
   },
 );

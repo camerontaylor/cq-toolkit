@@ -338,6 +338,8 @@ export class AddressCheckoutOwnership extends AddressRunLifecycle {
           incompleteRefusals.add(error);
           throw error;
         }
+        if (source.startsWith('pr:') && this.registry.legacyHint?.(Number(source.slice(3))))
+          throw new Error('legacy review checkout requires reconciliation');
         await this.assertIdentity();
         await this.disposeTerminalSession();
         await this.context.complete();

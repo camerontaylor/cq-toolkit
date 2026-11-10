@@ -8,6 +8,10 @@ import { expect, test } from 'vitest';
 import { resolvePrWorktree } from '../../../src/adapters/git/prWorktree.js';
 import { NOW, fixture } from './addressManyWorktree.helpers.js';
 
+// The removed child-harness cases used the retired owner's fabricated child
+// API. Real concurrent slots are exercised in addressMany.slotOwnership;
+// leased publication and callback ordering are covered in review-loop.push-target.
+
 test('concurrent PRs sharing a head ref retain distinct exact-head worktrees and both registry entries', async () => {
   const f = await fixture();
   try {

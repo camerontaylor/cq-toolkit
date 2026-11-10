@@ -118,10 +118,13 @@ async function withAdmission<T>(
       } catch (error) {
         // Owner ruling on D5.4: a closed fetch/check is not an unaccounted writer.
         // Add/remove/config/worker failures and incomplete metadata writes remain unsafe.
+        // An unresolved legacy hint also cannot be certified: a later run would
+        // otherwise bypass the hint after the unbound slot became complete.
         if (
           error instanceof Error &&
           !phase.checkoutMutation &&
           !phase.metadataWrite &&
+          !opts.registry.legacyHint?.(opts.pr) &&
           settled()
         ) {
           const refusal = new Error(error.message, { cause: error });
@@ -430,7 +433,7 @@ async function resolveLockedPrWorktree(opts: PrWorktreeOpts, phase: ResolutionPh
     // here: the prune is the successful re-registration at the end (the
     // overwrite) — pruning up-front would destroy the machine-readable
     // pointer precisely when the run is about to wedge on a refused add.
-    const legacy = opts.registry.legacyHint?.(opts.pr);
+    const legacy = metadata?.state === 'bound' ? undefined : opts.registry.legacyHint?.(opts.pr);
     if (
       legacy &&
       (legacy.branch !== reviewBranch || !(await isInsideRoot(legacy.path, worktreeRoot)))

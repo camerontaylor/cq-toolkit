@@ -45,6 +45,8 @@ Inspect mode never clears metadata. Run the same command again with all the
 same locks and checkout and mode `retain` or `removed`; inspect and reconcile
 again inside that invocation's held shell. After closing it, acknowledge
 `quiescent-and-reconciled` only after establishing actual writer quiescence.
+An unsuccessful shell or missing acknowledgement reports an error and leaves
+metadata unchanged.
 The recovery script verifies retained checkout identity and cleanliness before
 writing bound/false, or path absence before writing unbound/false, then closes
 its descriptors. An earlier inspection does not authorize a later clear.

@@ -101,6 +101,8 @@ export function slotWorktreeRegistry(
           }
           await context.begin();
           const result = await action();
+          if ((await slot.readMetadata())?.state === 'bound')
+            admissionHints.get(context)?.delete(key);
           if (!inherited) await context.complete();
           return result;
         } finally {

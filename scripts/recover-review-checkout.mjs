@@ -88,9 +88,11 @@ export async function recoverReviewCheckout(env, io) {
       }
     }
     const success = await io.shell(slots.map((slot) => slot.fd));
-    if (!success || mode === 'inspect') return;
+    if (mode === 'inspect') return;
+    if (!success) throw new Error('Recovery shell exited unsuccessfully; metadata left incomplete');
     if (invalid) throw new Error('Missing or malformed metadata permits inspection only');
-    if ((await io.acknowledge()) !== 'quiescent-and-reconciled') return;
+    if ((await io.acknowledge()) !== 'quiescent-and-reconciled')
+      throw new Error('Acknowledgement absent; metadata left incomplete');
     for (const slot of slots) await slot.assertIdentity();
     let next;
     if (mode === 'removed') {
