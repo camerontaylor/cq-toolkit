@@ -111,12 +111,19 @@ def merged_current(queue, receipt_root=None):
                 category = "unsupported"
             else:
                 raise ValueError("terminal state lacks proof")
-            counts[category] += 1
-            targets.add(capture["target"])
-            for path in capture["paths"]:
-                disposition = path.get("disposition", "unknown")
+            # Read and stage every field the counts depend on before touching
+            # them: a malformed capture must count once, as unverified, never
+            # as both its category and unverified.
+            target = capture["target"]
+            skipped = [path.get("disposition", "unknown") for path in capture["paths"]]
+            pending = {}
+            for disposition in skipped:
                 if disposition not in ("included", "renamed"):
-                    exclusions[disposition] = exclusions.get(disposition, 0) + 1
+                    pending[disposition] = pending.get(disposition, 0) + 1
+            targets.add(target)
+            counts[category] += 1
+            for disposition, total in pending.items():
+                exclusions[disposition] = exclusions.get(disposition, 0) + total
         except (KeyError, TypeError, ValueError, AttributeError, OSError):
             counts["unverified"] += 1
     discovery = queue.get("merged_reconcile") or {}
