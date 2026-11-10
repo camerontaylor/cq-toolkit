@@ -60,16 +60,27 @@ The current CLI has no unit recovery adapter or production switch provider.
 The [unit-switch design](../crq-python/ops/UNIT-SWITCH-DESIGN.md) records the
 VM probe evidence and the unproven manager-restart and reboot boundaries.
 
-Prior evidence (historical, not reusable provenance): on 2026-11-10 an offline
-packaging exercise on pluto (Linux x64, Node
-24.21.0, pnpm 12.8.1) used clean checkout
-`4baffebd42cbe8c37d7bbdb9c143d0416aa93595`. The frozen offline install,
-`fs-ext` rebuild, runner build, and offline production deploy to a separate
-staging directory succeeded. The lockfile SHA-256 was
+Route evidence (2026-11-10, pluto, linux-x64, Node 24.21.0, pnpm 12.8.1):
+`build-runner.py` ran from clean checkout
+`c76666d0745ed619221c1ac81e50d23b2802a893` with the frozen offline route.
+The source lockfile SHA-256 was
 `75a1bc501a6bc22081ec1ca949f7a29d37f9598941f2486df2a792cac380c20e`.
-The resulting local archive SHA-256 was
-`97d6adb51b4020860d23ede0320286a3a861dc2d50682785b1d0c92dc827646a`.
-After extraction, all 3,609 inventoried entries matched and Node loaded
-`fs-ext` 2.1.1 and successfully performed flock and unlock. The extracted
-runner refused the unimplemented tick as expected. This is evidence for that
-specific build, not a reproducible-build guarantee or a cutover approval.
+The recorded provenance names Node v24.21.0, ABI 137, linux-x64, pnpm 12.8.1,
+a project virtual store, and the twelve staged production dependencies,
+including `fs-ext` 2.1.1 with native SHA-256
+`e4e80b814d406c828510c55eca152e2bc688195d6febb025ce8e9be683ac9213`.
+The archive SHA-256 was
+`4f7cd2bc70088c5cfe561f94e2dd7f0458f85b04e9905cb6127aaea0b0df40a1`;
+the canonical content SHA-256 was
+`f9cc74b9976d97a7f771184fb226958e7e996a879fd8a13e8a153602ad9757f2`;
+and the manifest inventoried 4,047 paths. An independent
+`package-runner.py verify` re-extracted the archive, matched every entry,
+loaded `fs-ext` 2.1.1, proved flock contention, and observed the runner's
+indeterminate `tick --dry-run` refusal (exit 1).
+
+Evidence is preserved outside the code worktree at
+`~/crq-artifact-runs/c76666d07/` on pluto: the archive, sidecar,
+provenance file, build report, independent verification report, and staging
+tree. This is reusable route evidence, not a bit-for-bit reproducible-build
+guarantee or a cutover approval. The earlier `4baffebd` one-off is superseded
+and was never reusable provenance.
