@@ -140,7 +140,45 @@ interoperability gap.
 
 ## Recorded evidence
 
-One base-mode run completed on Pluto (KVM, Ubuntu noble guest ``crq-probe``)
+### Current drain/harvest proof runs
+
+Both current runs completed on Pluto (KVM, Ubuntu noble guest ``crq-probe``)
+from source commit ``a5033cb2f6a5cab2c9cd0e45368ef2e9737a869c``. That commit
+is also the source of the uploaded ``crq-runner-source.tar.gz``
+(``905950`` bytes, SHA-256
+``9030c950d6a1009d62a464e0c1f87e1a9833dc5b2868d6c68bc9024256f7c37a``).
+The host script is
+``3f92755e14bc72a3a34fcd66b26c9c4e68ca23fcbfa5877b57f45091fa3ca77d`` and the
+guest script is
+``65a92e001f6cf7f5cbb7b60c0f28c21da42010e103d95041b4a85f9a58b13f0d``.
+
+- Base mode, run ``20261110T220347Z-4db17be7``: 26 of 26 checks true,
+  ``problems: []``. ``report.json`` SHA-256
+  ``f9fa3bd554bc36227267e5d5e8ff3fa69c42053bd586f632d37af457fc9395ec``;
+  ``raw-guest-evidence.tar.gz`` SHA-256
+  ``1169d21b816696e954324479a6493e6821c9e72e53bf35cad900fdc6dc4b838e``
+  (``1066512`` bytes).
+- Matrix mode, run ``20261110T220604Z-c9b62fa0``: 62 of 62 checks true,
+  ``problems: []``. ``report.json`` SHA-256
+  ``766d79964f216b6ef657d50bbe907d12f48fa8aba23913797c0a56c01b8cd5b6``;
+  ``raw-guest-evidence.tar.gz`` SHA-256
+  ``101439e280ede13cc1dfee5367a3bc70c6d2153c0257b0bb095a2183a91be8c6``
+  (``1133509`` bytes).
+
+A second ``verify`` of each retained report returned ``problems: []``,
+``host_matches_run: true``, ``guest_matches_run: true`` and
+``validator_only: false``, and recomputed every phase, the retained raw
+journal state, the uploaded scripts and the runner source archive. The
+drain-specific checks are ``runner_source_recorded``,
+``drain_alive_refused``, ``drain_ambiguous_refused``,
+``drain_harvest_proceeds`` and ``recovery_drain_refused``. Artifacts remain
+at ``~/crq-vm-feasibility/state/runs/20261110T220347Z-4db17be7/`` and
+``~/crq-vm-feasibility/state/runs/20261110T220604Z-c9b62fa0/`` on Pluto,
+outside the worktree.
+
+### Earlier base-mode run (historical)
+
+One earlier base-mode run completed on Pluto (KVM, Ubuntu noble guest ``crq-probe``)
 from source commit ``0f9111d70aa06b8f907e453109bb1b791e19f48c``:
 
 - run ``20261110T180943Z-f3acc725``
@@ -195,7 +233,7 @@ The run produced:
 | ``inspect`` | final Python service SHA-256 ``a8a0e280…``; timer SHA-256 ``3edf2fd6…``; five retained records; seeded queue, heartbeat and historical record bytes unchanged |
 | ``fence`` | CLI rc ``-9``; pending ``activation_pending`` record ``controller-6c698e3c…`` SHA-256 ``6cbcf082…``; service ``LoadState=masked`` through the ``/dev/null`` symlink; direct start rc ``1`` with ``Unit crq-tick.service is masked.``; staged Node target behind the mask; completions ``4`` before and ``4`` after; recovery rc ``3`` with identical record bytes |
 
-### Restart/reboot matrix run
+### Earlier restart/reboot matrix run (historical)
 
 The most recent matrix run completed on Pluto (KVM, Ubuntu noble guest
 ``crq-probe``) from source commit
@@ -256,8 +294,8 @@ not a production template change.
 ### Drain/harvest proof status
 
 The drain-alive, drain-ambiguous, drain-harvest and recover-drain-alive phases
-have offline coverage but no recorded guest run on this branch yet. A run is
-evidence for this slice only when the report's checks include
+are covered by the current base and matrix runs above. A run is evidence for
+this slice only when the report's checks include
 ``runner_source_recorded``, ``drain_alive_refused``,
 ``drain_ambiguous_refused``, ``drain_harvest_proceeds`` and
 ``recovery_drain_refused``, and a second ``verify`` against the retained
@@ -278,6 +316,10 @@ source must be the exact implementation under test.
 - The refusal phases assert that the controller does not signal the seeded
   owned or unrelated processes; they do not prove that no signal could ever
   be sent, and they do not cover every possible detached-process topology.
+- The drain is a point-in-time observation at the controller gate and again
+  after the guest adapter's systemd fence. Work dispatched after an
+  observation and before the journal advances is not excluded; no lock,
+  atomic queue generation or dispatch barrier is claimed.
 - The matrix restarts the real guest user manager and reboots the real guest
   OS at the tested boundaries, but it is not power-loss proof, not a
   production host, and not a privileged-ownership, ACL or xattr proof.
