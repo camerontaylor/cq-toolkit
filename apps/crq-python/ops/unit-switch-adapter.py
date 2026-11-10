@@ -896,6 +896,7 @@ class GuestFixtureAdapter:
             self.refuse("staged restore runtime does not match the snapshot")
         self.last_restore = {"runtime": runtime, "paths": list(snapshot["paths"]),
                              "staged": str(staged), "masked": masked}
+        self._maybe_kill("restore_staged")
         return self.last_restore
 
     def restore_activation(self, unit, snapshot):

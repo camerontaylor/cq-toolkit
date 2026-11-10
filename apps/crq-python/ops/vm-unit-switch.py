@@ -44,7 +44,8 @@ HOST_MODULES = (
     "vm-feasibility.py",
 )
 GUEST_PHASES = ("prepare", "switch-node", "switch-python", "interrupt",
-                "recover-kill", "recover", "recover-repeat", "inspect", "fence")
+                "recover-kill", "recover", "recover-repeat", "rollback-fence",
+                "inspect", "fence")
 NODE_RUNTIME = "node:" + "b" * 40
 PYTHON_RUNTIME = "python"
 HEX40 = re.compile(r"[0-9a-f]{40}\Z")
@@ -360,6 +361,55 @@ def build_checks(phases):
             and (repeat.get("record_before") or {}).get("sha256")
             == (repeat.get("record_after") or {}).get("sha256"))
 
+    rollback = phases.get("rollback-fence") or {}
+    if not _ok_phase(rollback, "rollback-fence", problems):
+        checks["rollback_fence_held"] = False
+        checks["rollback_fence_recovery_completed"] = False
+    else:
+        record = rollback.get("record") or {}
+        after_kill = rollback.get("record_after_kill") or {}
+        service = rollback.get("service") or {}
+        staged = rollback.get("staged") or {}
+        direct = rollback.get("direct_start") or {}
+        direct_text = ((direct.get("stdout") or "")
+                       + (direct.get("stderr") or "")).lower()
+        checks["rollback_fence_held"] = (
+            record.get("outcome") == "pending"
+            and record.get("phase") == "drained"
+            and after_kill.get("sha256") == record.get("sha256")
+            and after_kill.get("outcome") == "pending"
+            and after_kill.get("phase") == "drained"
+            and service.get("LoadState") == "masked"
+            and service.get("FragmentPath") == service_path
+            and staged.get("type") == "file"
+            and staged.get("runtime") == PYTHON_RUNTIME
+            and direct.get("rc") not in (0, None)
+            and "masked" in direct_text
+            and rollback.get("completions_before")
+            == rollback.get("completions_after_kill"))
+        completed = rollback.get("record_completed") or {}
+        after = rollback.get("after") or {}
+        rollback_repeat = rollback.get("repeat") or {}
+        repeated = rollback.get("record_after_repeat") or {}
+        checks["rollback_fence_recovery_completed"] = (
+            completed.get("outcome") == "rolled_back"
+            and completed.get("phase") == "restore_activation_pending"
+            and (after.get("files") or {}).get(service_path, {}).get("sha256")
+            == _sha(expected_unit(PYTHON_RUNTIME))
+            and (rollback.get("staged_after_completion") or {}).get("type")
+            == "missing"
+            and (after.get("units") or {}).get("crq-tick.timer", {}).get(
+                "UnitFileState") == "enabled"
+            and (after.get("units") or {}).get("crq-tick.timer", {}).get(
+                "ActiveState") == "inactive"
+            and rollback_repeat.get("rc") == 2
+            and "refused" in (rollback_repeat.get("stdout") or "")
+            and repeated.get("sha256") == completed.get("sha256")
+            and rollback.get("preserved", {}).get("state")
+            == prepared.get("state")
+            and rollback.get("preserved", {}).get("history_sha256")
+            == prepared.get("history_sha256"))
+
     inspect = phases.get("inspect") or {}
     if not _ok_phase(inspect, "inspect", problems):
         checks["final_state_python_and_queue_preserved"] = False
@@ -469,10 +519,20 @@ def cmd_run(args):
         guest_artifact = run_dir / "executed-guest-probe.py"
         shutil.copy2(host_source, host_artifact)
         guest_artifact.write_bytes(guest_source.read_bytes())
+        host_modules = {}
+        for name in HOST_MODULES:
+            source = host_source if name == "vm-unit-switch.py" else OPS / name
+            artifact = (host_artifact if name == "vm-unit-switch.py"
+                        else run_dir / ("executed-host-" + name))
+            if artifact != host_artifact:
+                shutil.copy2(source, artifact)
+            host_modules[name] = {"artifact": artifact.name,
+                                  "sha256": vm.sha256_file(artifact)}
         provenance = {
             "source_commit": commit,
             "host_script": {"artifact": host_artifact.name,
                             "sha256": vm.sha256_file(host_artifact)},
+            "host_modules": host_modules,
             "guest_script": {"artifact": guest_artifact.name,
                              "sha256": vm.sha256_file(guest_artifact)},
         }
@@ -588,6 +648,7 @@ def verify_raw_evidence(report, raw_root):
         "switch-python": ("record",),
         "recover": ("record",),
         "recover-repeat": ("record_before", "record_after"),
+        "rollback-fence": ("record_completed", "record_after_repeat"),
         "fence": ("record", "record_after_refusal"),
     }
     for name, keys in final_keys.items():
@@ -613,6 +674,7 @@ def verify_raw_evidence(report, raw_root):
         "recover-kill": lambda rc: rc not in (0, None),
         "recover": lambda rc: rc == 0,
         "recover-repeat": lambda rc: rc == 2,
+        "rollback-fence": lambda rc: rc not in (0, None),
         "fence": lambda rc: rc not in (0, None),
     }
     for name, predicate in expected_rc.items():
@@ -623,6 +685,14 @@ def verify_raw_evidence(report, raw_root):
     recovery_cli = fence.get("recovery")
     if not isinstance(recovery_cli, dict) or recovery_cli.get("rc") != 3:
         problems.append("fence recovery refusal is not retained")
+    rollback = phases.get("rollback-fence") or {}
+    for key, predicate in (("recovery", lambda rc: rc == 0),
+                           ("repeat", lambda rc: rc == 2)):
+        cli = _phase_cli({"cli": rollback.get(key)},
+                         "rollback-fence." + key, problems)
+        if cli is not None and not predicate(cli.get("rc")):
+            problems.append("rollback-fence." + key
+                            + " CLI result contradicts the proof outcome")
 
     fence_service = raw_root / ".config/systemd/user/crq-tick.service"
     if not fence_service.is_symlink() or os.readlink(fence_service) != "/dev/null":
@@ -726,6 +796,33 @@ def validate_provenance(report, run_dir):
             guest_artifact = artifact
     if provenance.get("guest_report") != guest_artifact:
         problems.append("guest report provenance does not match the guest script")
+
+    host_modules = provenance.get("host_modules")
+    if not isinstance(host_modules, dict):
+        problems.append("host module provenance is not an object")
+    else:
+        if set(host_modules) != set(HOST_MODULES):
+            problems.append("host module provenance set does not match the "
+                            "executed host modules")
+        for name in HOST_MODULES:
+            entry = host_modules.get(name)
+            if not isinstance(entry, dict):
+                problems.append("host module provenance is missing: " + name)
+                continue
+            if set(entry) != {"artifact", "sha256"}:
+                problems.append("host module provenance fields are wrong: " + name)
+                continue
+            artifact = entry["artifact"]
+            digest = entry["sha256"]
+            if not _sha256_text(digest):
+                problems.append("host module digest is invalid: " + name)
+            path = _artifact_path(run_dir, artifact)
+            if path is None:
+                problems.append("host module artifact is missing: " + name)
+            elif _sha256_text(digest) and vm.sha256_file(path) != digest:
+                problems.append("host module artifact digest does not match: " + name)
+        if host_modules.get("vm-unit-switch.py") != provenance.get("host_script"):
+            problems.append("host script provenance does not match host_modules")
 
     uploads = provenance.get("uploads")
     if not isinstance(uploads, dict):

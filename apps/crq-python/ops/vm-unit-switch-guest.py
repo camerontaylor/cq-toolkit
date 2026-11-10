@@ -551,6 +551,125 @@ def recover_repeat_phase(args):
     return payload
 
 
+def _observe_masked_service(label):
+    require(SERVICE.is_symlink() and os.readlink(SERVICE) == "/dev/null",
+            label + " lost the durable service mask")
+    service = show(UNIT, ["LoadState", "ActiveState", "FragmentPath"])
+    require(service["LoadState"] == "masked"
+            and service["FragmentPath"] == str(SERVICE),
+            label + " did not keep the service masked")
+    direct = systemctl("start", UNIT)
+    require(direct["rc"] not in (0, None),
+            label + " accepted a direct start while masked")
+    direct_text = ((direct.get("stdout") or "")
+                   + (direct.get("stderr") or "")).lower()
+    require("masked" in direct_text,
+            label + " direct start refusal was not an explicit mask refusal: "
+            + direct_text[:300])
+    return service, direct
+
+
+def rollback_fence_phase(args):
+    saved = baseline()
+    before = snapshot()
+    before_paths = [str(path) for path in records()]
+    switched = cli("switch", ["--runtime", NODE_RUNTIME], kill="install")
+    require(switched["rc"] not in (0, None),
+            "rollback fence switch unexpectedly returned success")
+    created = new_records(before_paths)
+    require(len(created) == 1,
+            "rollback fence switch did not leave one journal record")
+    record_path = created[0]
+    record = json.loads(record_path.read_text())
+    require(record["outcome"] == "pending" and record["phase"] == "drained",
+            "rollback fence switch is not a preactivation drained record")
+    require(record["runtime"] == NODE_RUNTIME
+            and record["prior_runtime"] == saved["python_runtime"],
+            "rollback fence switch runtime identity is wrong")
+    record_before = record_summary(record_path)
+
+    killed = cli("recover", ["--record", str(record_path)], kill="restore_staged")
+    require(killed["rc"] not in (0, None),
+            "rollback fence recovery unexpectedly returned success")
+    record_after_kill = record_summary(record_path)
+    require(record_after_kill["sha256"] == record_before["sha256"],
+            "rollback fence kill changed the retained record")
+    require(record_after_kill["outcome"] == "pending"
+            and record_after_kill["phase"] == "drained",
+            "rollback fence kill advanced beyond the drained intent")
+    service, direct = _observe_masked_service("rollback fence")
+    staged_state = file_state(STAGED_SERVICE)
+    require(staged_state["type"] == "file",
+            "rollback fence did not stage the prior service")
+    adapter = load_adapter().GuestFixtureAdapter(
+        unit_dir=UNIT_DIR, fixture_dir=FIXTURE, unit=UNIT,
+        proof_root=PROOF_BIN, guest_only=True)
+    staged_runtime = adapter._runtime_from_unit(STAGED_SERVICE)
+    require(staged_runtime == saved["python_runtime"],
+            "rollback fence staged the wrong prior runtime")
+    after_kill = snapshot()
+    require(len(after_kill["completions"]) == len(before["completions"]),
+            "rollback fence released the staged service before the journal")
+
+    completed = cli("recover", ["--record", str(record_path)])
+    require(completed["rc"] == 0,
+            "rollback fence completion failed: "
+            + (completed.get("stderr") or completed.get("stdout") or "")[:800])
+    record_completed = record_summary(record_path)
+    require(record_completed["outcome"] == "rolled_back"
+            and record_completed["phase"] == "restore_activation_pending",
+            "rollback fence completion did not roll back")
+    completed_record = json.loads(record_path.read_text())
+    expected = completed_record["snapshot"]["paths"][str(SERVICE)]
+    state = file_state(SERVICE)
+    require(state["type"] == "file" and state["sha256"] == expected["sha256"]
+            and state["mode"] == expected["mode"]
+            and state["uid"] == expected["uid"] and state["gid"] == expected["gid"],
+            "rollback fence completion did not restore exact service bytes")
+    require(adapter._runtime_from_unit(SERVICE) == saved["python_runtime"],
+            "rollback fence completion did not restore the prior runtime")
+    staged_after_completion = file_state(STAGED_SERVICE)
+    require(staged_after_completion["type"] == "missing",
+            "rollback fence completion retained the staged service")
+    timer = show(TIMER, ["ActiveState", "UnitFileState", "LoadState"])
+    expected_timer = completed_record["snapshot"]["activators"]
+    require(timer["ActiveState"] == expected_timer["timer_active"]
+            and timer["UnitFileState"] == expected_timer["timer_unit_file_state"],
+            "rollback fence completion did not restore timer state")
+    after = snapshot()
+    require(len(after["completions"]) == len(before["completions"]),
+            "rollback fence completion started unexpected work")
+
+    repeated = cli("recover", ["--record", str(record_path)])
+    require(repeated["rc"] == 2,
+            "rollback fence repeated recovery did not refuse")
+    require("refused" in (repeated.get("stdout") or ""),
+            "rollback fence repeated recovery refusal is not explicit")
+    record_after_repeat = record_summary(record_path)
+    require(record_after_repeat["sha256"] == record_completed["sha256"],
+            "rollback fence repeated recovery changed the completed record")
+    return {"cli": killed,
+            "switch": switched,
+            "record_path": str(record_path),
+            "record": record_before,
+            "record_after_kill": record_after_kill,
+            "service": service,
+            "direct_start": direct,
+            "staged": {"path": str(STAGED_SERVICE),
+                       "type": staged_state["type"],
+                       "sha256": staged_state.get("sha256"),
+                       "runtime": staged_runtime},
+            "staged_after_completion": staged_after_completion,
+            "completions_before": len(before["completions"]),
+            "completions_after_kill": len(after_kill["completions"]),
+            "recovery": completed,
+            "record_completed": record_completed,
+            "after": after,
+            "repeat": repeated,
+            "record_after_repeat": record_after_repeat,
+            "preserved": check_preserved("rollback-fence")}
+
+
 def fence_phase(args):
     saved = baseline()
     before = snapshot()
@@ -618,7 +737,8 @@ def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("phase", choices=("prepare", "switch-node", "switch-python",
                                          "interrupt", "recover-kill", "recover",
-                                         "recover-repeat", "inspect", "fence"))
+                                         "recover-repeat", "rollback-fence",
+                                         "inspect", "fence"))
     parser.add_argument("--record")
     args = parser.parse_args(argv)
     try:
@@ -636,6 +756,8 @@ def main(argv=None):
             payload = recover_complete_phase(args)
         elif args.phase == "recover-repeat":
             payload = recover_repeat_phase(args)
+        elif args.phase == "rollback-fence":
+            payload = rollback_fence_phase(args)
         elif args.phase == "fence":
             payload = fence_phase(args)
         else:

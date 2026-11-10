@@ -46,9 +46,18 @@ Files:
    activation/enablement.
 7. ``recover-repeat``: invoke recovery against the completed rollback again.
    Require an explicit refusal and unchanged record bytes.
-8. ``inspect``: confirm the final Python unit, no mask, preserved queue,
+8. ``rollback-fence``: start one more Python-to-Node switch and SIGKILL it at
+   ``install``. Invoke recovery and SIGKILL it at ``restore_staged``, after the
+   prior Python service has been written to the staged path but before the
+   controller journals ``restore_activation_pending``. Require the retained
+   record to remain ``drained`` with unchanged bytes, the durable
+   ``/dev/null`` mask still in place, a refused direct start, the staged prior
+   Python service, and no new completion. Complete recovery, require
+   ``rolled_back`` with exact Python restoration and no staged path, then
+   require repeated recovery to refuse without changing the record.
+9. ``inspect``: confirm the final Python unit, no mask, preserved queue,
    heartbeat and historical record bytes.
-9. ``fence``: start one more Python-to-Node switch and SIGKILL the controller
+10. ``fence``: start one more Python-to-Node switch and SIGKILL the controller
    at the ``start`` boundary, after ``install`` staged the target and the
    controller durably journaled ``activation_pending`` but before ``start``
    releases the mask. Require the pending ``activation_pending`` record, the
@@ -84,10 +93,12 @@ when the guest scripts are byte-identical; that is a validator re-run, not a
 new guest run. The host checks also refuse a run when the executed
 ``vm-unit-switch.py`` or its imported ``vm-feasibility.py`` has uncommitted
 changes, so evidence cannot be attributed to HEAD when the host implementation
-differs from that commit. Rollback restores the prior service into the staged
-path while the durable ``/dev/null`` mask remains in place; the controller
-journals ``restore_activation_pending`` before ``restore_activation`` releases
-the staged service and restores its prior activation state. Artifacts stay at
+differs from that commit. Each new report retains both executed host modules
+under ``provenance.host_modules`` and verifies their artifact digests. Rollback
+restores the prior service into the staged path while the durable ``/dev/null``
+mask remains in place; the controller journals ``restore_activation_pending``
+before ``restore_activation`` releases the staged service and restores its prior
+activation state. Artifacts stay at
 ``~/crq-vm-feasibility/state/runs/20261110T173225Z-de36ec18/`` on Pluto,
 outside the worktree. The earlier retained run
 ``20261110T170322Z-9e8c5133`` remains on Pluto; it predates the fence probe

@@ -124,6 +124,29 @@ def phases():
         "record_before": dict(final_record),
         "record_after": dict(final_record),
     }
+    rollback_pending = _record("rollback-transaction", pending,
+                               raw_fields=rolled_back)
+    rollback_completed = _record("rollback-transaction", rolled_back)
+    rollback = {
+        "cli": {"rc": -9},
+        "switch": {"rc": -9},
+        "record": dict(rollback_pending),
+        "record_after_kill": dict(rollback_pending),
+        "service": {"LoadState": "masked", "FragmentPath": SERVICE},
+        "direct_start": {"rc": 1,
+                         "stderr": "Unit crq-tick.service is masked."},
+        "staged": {"type": "file", "runtime": PYTHON, "sha256": python_sha},
+        "staged_after_completion": {"type": "missing"},
+        "completions_before": 4, "completions_after_kill": 4,
+        "recovery": {"rc": 0},
+        "record_completed": dict(rollback_completed),
+        "after": {"files": {SERVICE: {"type": "file", "sha256": python_sha}},
+                  "units": {"crq-tick.timer": {"UnitFileState": "enabled",
+                                               "ActiveState": "inactive"}}},
+        "repeat": {"rc": 2, "stdout": "{\"refused\": \"invalid record\"}"},
+        "record_after_repeat": dict(rollback_completed),
+        "preserved": preserved,
+    }
     fence_record = _record("fence", {
         "outcome": "pending", "phase": "activation_pending",
         "runtime": NODE, "prior_runtime": PYTHON})
@@ -148,12 +171,13 @@ def phases():
                   WANTS: {"type": "symlink"}},
         "state": STATE,
         "records": [node_phase["record"], python_phase["record"],
-                    final_record, fence_record],
+                    final_record, rollback_completed, fence_record],
     }}
     return {"prepare": prepare, "switch-node": node_phase,
             "switch-python": python_phase, "interrupt": interrupt,
             "recover-kill": recover_kill, "recover": recover,
-            "recover-repeat": repeat, "inspect": inspect, "fence": fence}
+            "recover-repeat": repeat, "rollback-fence": rollback,
+            "inspect": inspect, "fence": fence}
 
 
 class HarnessCheckTests(unittest.TestCase):
@@ -205,6 +229,28 @@ class HarnessCheckTests(unittest.TestCase):
         self.assertFalse(checks["repeat_recovery_refused"])
         self.assertTrue(problems)
 
+    def test_rollback_fence_must_stage_the_prior_runtime(self):
+        value = phases()
+        value["rollback-fence"]["staged"]["runtime"] = NODE
+        checks, problems = harness.build_checks(value)
+        self.assertFalse(checks["rollback_fence_held"])
+        self.assertTrue(problems)
+
+    def test_rollback_fence_must_not_advance_before_release(self):
+        value = phases()
+        value["rollback-fence"]["record_after_kill"]["sha256"] = "3" * 64
+        checks, problems = harness.build_checks(value)
+        self.assertFalse(checks["rollback_fence_held"])
+        self.assertTrue(problems)
+
+    def test_rollback_fence_must_complete_and_clear_staged_service(self):
+        value = phases()
+        value["rollback-fence"]["staged_after_completion"] = {
+            "type": "file", "runtime": PYTHON}
+        checks, problems = harness.build_checks(value)
+        self.assertFalse(checks["rollback_fence_recovery_completed"])
+        self.assertTrue(problems)
+
     def test_expected_runtimes_are_distinct(self):
         self.assertNotEqual(harness.expected_unit(PYTHON),
                             harness.expected_unit(NODE))
@@ -224,9 +270,11 @@ class VerifyTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.run_dir = pathlib.Path(self.temp.name)
         self.host = self.run_dir / "executed-host-script.py"
+        self.feasibility = self.run_dir / "executed-host-vm-feasibility.py"
         self.guest = self.run_dir / "executed-guest-probe.py"
         self.raw = self.run_dir / "raw-guest-evidence.tar.gz"
         self.host.write_bytes(b"host")
+        self.feasibility.write_bytes(b"feasibility")
         self.guest.write_bytes(b"guest")
         self.upload_data = {name: ("upload:" + name).encode()
                             for name in harness.UPLOADS}
@@ -242,6 +290,14 @@ class VerifyTests(unittest.TestCase):
                 "source_commit": SOURCE_COMMIT,
                 "host_script": {"artifact": self.host.name,
                                 "sha256": harness.sha256_bytes(b"host")},
+                "host_modules": {
+                    "vm-unit-switch.py": {
+                        "artifact": self.host.name,
+                        "sha256": harness.sha256_bytes(b"host")},
+                    "vm-feasibility.py": {
+                        "artifact": self.feasibility.name,
+                        "sha256": harness.sha256_bytes(b"feasibility")},
+                },
                 "guest_script": {"artifact": self.guest.name,
                                  "sha256": harness.sha256_bytes(b"guest")},
                 "guest_report": self.guest.name,
@@ -430,6 +486,21 @@ class VerifyTests(unittest.TestCase):
         status, payload = self._verify()
         self.assertEqual(status, 1)
         self.assertTrue(any("raw guest evidence size does not match" in item
+                            for item in payload["problems"]))
+
+    def test_missing_host_module_provenance_is_rejected(self):
+        del self.report["provenance"]["host_modules"]
+        status, payload = self._verify()
+        self.assertEqual(status, 1)
+        self.assertTrue(any("host module provenance" in item
+                            for item in payload["problems"]))
+
+    def test_host_module_digest_mismatch_is_rejected(self):
+        self.report["provenance"]["host_modules"]["vm-feasibility.py"][
+            "sha256"] = "d" * 64
+        status, payload = self._verify()
+        self.assertEqual(status, 1)
+        self.assertTrue(any("host module artifact digest does not match" in item
                             for item in payload["problems"]))
 
 
