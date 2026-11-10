@@ -587,6 +587,25 @@ export class ClaudeCodeCliTransport implements Driver {
         ),
       );
     }
+    // --- Governed-cancellation LAST recheck, immediately before the spawn:
+    // the record/manifest/MCP-config awaits above are not atomic with the
+    // late check at entry — an abort that fires during ANY of them would
+    // otherwise still spawn the CLI (and write the prompt to its stdin),
+    // leaving the child a full SIGTERM grace window to spend client-side.
+    // The session record exists by now, so the aborted verdict carries it;
+    // the per-run MCP config is removed. The attach-time recheck below stays
+    // as the backstop for aborts that land after this point.
+    if (signalAborted(signal)) {
+      await removeMcpConfig(mcpConfigPath);
+      return {
+        usage: zeroUsage(),
+        usageProvenance: 'unmeasured',
+        sessionId: record.sessionId,
+        denials: [],
+        stopReason: 'aborted',
+      };
+    }
+
     let child: ManagedChild;
     try {
       child = this.spawnImpl({
