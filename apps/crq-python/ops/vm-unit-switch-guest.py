@@ -150,9 +150,13 @@ def spawn_detached(marker, seconds=600):
     ``setsid`` runs in the Popen child (not a process-group leader), so the
     child becomes its own session and process group: pid == pgid == sid. That
     is the managed identity shape the runner records for a detached review.
+    Python, not ``sleep``, carries the marker: ``sleep 600 marker`` would treat
+    the marker as a second interval and exit immediately.
     """
     require(shutil.which("setsid") is not None, "setsid is required")
-    proc = subprocess.Popen(["setsid", "sleep", str(seconds), marker],
+    proc = subprocess.Popen(
+        ["setsid", sys.executable, "-c",
+         "import time; time.sleep(%s)" % seconds, marker],
                             stdout=subprocess.DEVNULL,
                             stderr=subprocess.DEVNULL)
     deadline = time.time() + 5
@@ -171,7 +175,9 @@ def spawn_detached(marker, seconds=600):
 
 def spawn_exited(marker):
     """Spawn and reap a harmless detached process; return its recorded identity."""
-    proc = subprocess.Popen(["setsid", "sleep", "0.2", marker],
+    proc = subprocess.Popen(
+        ["setsid", sys.executable, "-c",
+         "import time; time.sleep(0.2)", marker],
                             stdout=subprocess.DEVNULL,
                             stderr=subprocess.DEVNULL)
     deadline = time.time() + 5
