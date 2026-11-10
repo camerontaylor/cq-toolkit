@@ -76,8 +76,8 @@ repository identities, duplicate numbers and incomplete-results flag. Truncation
 (including GitHub's 1,000-result ceiling), failed pages or changing totals refuse
 the run with `needs-human` before any leg starts. Search is not a transactional
 snapshot; PR facts reads are capped at eight, and a failed read refuses the run.
-Every admitted head and its eligibility are revalidated after isolation and
-enrollment, immediately before dispatch. The fetched PR head is then checked
+Every admitted head and its eligibility are revalidated after isolation,
+before enrollment and dispatch. The fetched PR head is then checked
 against the admitted head inside the address loop before any action or worker.
 
 `--concurrency=3` is the default. Each production leg uses an independent local
