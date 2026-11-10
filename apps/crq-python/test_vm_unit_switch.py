@@ -288,7 +288,8 @@ def matrix_evidence():
             "fence": {"service": {"LoadState": "masked",
                                    "FragmentPath": SERVICE},
                       "direct_start": {"rc": 1,
-                                       "stderr": "Unit is masked."}},
+                                       "stderr": "Unit is masked."},
+                      "timer": {"ActiveState": "inactive"}},
             "staged": staged, "owned": {"main_pid": 0, "pids": []},
             "jobs": [], "completions_before": 4,
             "completions_after": 4, "preserved": preserved,
@@ -640,6 +641,16 @@ class MatrixHarnessCheckTests(unittest.TestCase):
         observe["record_after"] = dict(observe["record_after"])
         observe["record_before"].pop("outcome")
         observe["record_after"].pop("outcome")
+        checks, problems = harness.build_checks(phases_value, restarts,
+                                                reboots, "matrix")
+        self.assertFalse(
+            checks["matrix-restart-drained_journal_metadata_fence"])
+        self.assertTrue(problems)
+
+    def test_observe_timer_must_be_inactive(self):
+        phases_value, restarts, reboots, _ = self._checks()
+        phases_value["matrix-restart-drained-observe"]["fence"]["timer"][
+            "ActiveState"] = "active"
         checks, problems = harness.build_checks(phases_value, restarts,
                                                 reboots, "matrix")
         self.assertFalse(
@@ -1049,6 +1060,13 @@ class MatrixVerifyTests(unittest.TestCase):
         status, payload = self._verify()
         self.assertEqual(status, 1)
         self.assertTrue(any("fresh matrix run" in item
+                            for item in payload["problems"]))
+
+    def test_matrix_reset_record_dir_must_match_case(self):
+        self.report["phases"]["matrix-reset-python"]["record_dir"] = "/etc"
+        status, payload = self._verify()
+        self.assertEqual(status, 1)
+        self.assertTrue(any("record directory does not match" in item
                             for item in payload["problems"]))
 
     def test_matrix_phase_contradicting_raw_is_rejected(self):

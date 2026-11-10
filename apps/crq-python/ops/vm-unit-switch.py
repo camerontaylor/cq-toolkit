@@ -573,6 +573,8 @@ def _matrix_checks(phases, restarts, reboots, prepared, problems):
             and record.get("runtime") == spec["runtime"]
             and record.get("prior_runtime") == spec["prior_runtime"]
             and (fence.get("service") or {}).get("LoadState") == "masked"
+            and (fence.get("timer") or {}).get("ActiveState") in (
+                "inactive", "failed")
             and staged.get("type") == expected_staged["type"]
             and (expected_staged.get("runtime") is None
                  or staged.get("runtime") == expected_staged["runtime"])
@@ -677,6 +679,8 @@ def _matrix_checks(phases, restarts, reboots, prepared, problems):
             and observe.get("metadata_match") is True
             and (observe.get("fence") or {}).get("service", {}).get("LoadState")
             == "masked"
+            and (observe.get("fence") or {}).get("timer", {}).get(
+                "ActiveState") in ("inactive", "failed")
             and (observe.get("fence") or {}).get("service", {}).get("FragmentPath")
             == service_path
             and (observe.get("fence") or {}).get("direct_start", {}).get("rc")
@@ -1219,6 +1223,7 @@ def verify_raw_evidence(report, raw_root, mode="base"):
                                         "record_after_repeat")),
         "fence": ("records", ("record", "record_after_refusal")),
     }
+    reset_expectations = {}
     if mode == "matrix":
         final_keys["matrix-switch-node"] = ("records", ("record",))
         for case in MATRIX_ORDER:
@@ -1228,17 +1233,19 @@ def verify_raw_evidence(report, raw_root, mode="base"):
             else:
                 final_keys[case] = (directory, ())
             final_keys[case + "-observe"] = (directory, ())
-        for reset in ("matrix-reset-python", "matrix-reset-python-final"):
-            final_keys[reset] = (None, ("record_before", "record_after"))
+        for reset, after in (
+                ("matrix-reset-python", "matrix-restart-ambiguity"),
+                ("matrix-reset-python-final", "matrix-reboot-ambiguity")):
+            reset_expectations[reset] = "/home/%s/%s" % (
+                vm.GUEST_USER, MATRIX_CASES[after]["record_dir"])
+            final_keys[reset] = (MATRIX_CASES[after]["record_dir"],
+                                 ("record_before", "record_after"))
     for name, (directory, keys) in final_keys.items():
         phase = phases.get(name) or {}
-        if directory is None:
-            directory = phase.get("record_dir")
-            if not isinstance(directory, str) or not directory:
-                problems.append(name + " has no retained record directory")
-                continue
-            directory = pathlib.PurePosixPath(directory).relative_to(
-                "/home/%s" % vm.GUEST_USER).as_posix()
+        if name in reset_expectations:
+            if phase.get("record_dir") != reset_expectations[name]:
+                problems.append(name + " record directory does not match "
+                                "the expected ambiguity case")
         for key in keys:
             if key in phase:
                 _retained_record_problem(phase[key], raw_root, directory,

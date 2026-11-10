@@ -969,6 +969,9 @@ def matrix_observe_phase(args):
     require(metadata_match,
             args.phase + " changed retained path bytes or metadata")
     service, direct = _observe_masked_service(args.phase)
+    timer = show(TIMER, ["ActiveState", "LoadState"])
+    require(timer["ActiveState"] in ("inactive", "failed"),
+            args.phase + " left the timer activator active after the boundary")
     staged = _assert_staged(spec, args.phase)
     require(staged == boundary["staged"],
             args.phase + " changed the staged service across the boundary")
@@ -992,7 +995,8 @@ def matrix_observe_phase(args):
             "snapshot": after, "before": before_snapshot,
             "identity": identity, "metadata": metadata_after,
             "metadata_match": metadata_match,
-            "fence": {"service": service, "direct_start": direct},
+            "fence": {"service": service, "direct_start": direct,
+                      "timer": timer},
             "staged": staged, "owned": owned["owned"], "jobs": owned["jobs"],
             "completions_before": boundary["completions_after"],
             "completions_after": len(after["completions"]),
