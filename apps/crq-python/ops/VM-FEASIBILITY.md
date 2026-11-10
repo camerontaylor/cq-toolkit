@@ -224,22 +224,22 @@ revision.
 
 ## Recorded evidence
 
-Run `20261110T152535Z-b1704bdd` on `pluto` (Linux 6.12.63, systemd 255
+Run `20261110T154311Z-7691c36f` on `pluto` (Linux 6.12.63, systemd 255
 `255.4-1ubuntu8.18`, Ubuntu 24.04 noble guest) produced
-`state/runs/20261110T152535Z-b1704bdd/report.json`; `verify` returned
+`state/runs/20261110T154311Z-7691c36f/report.json`; `verify` returned
 `{"problems": []}` by recomputing the checks from the raw phase files and
 re-hashing the retained scripts. The report is bound to source commit
-`2dc651baefeec25ad953c31f3a45e6003476ef03`; the executed host script SHA-256 is
-`469b04d20091153f47550971d5b43b01789b37f80bda33b63907da0c9539978a`, the
+`6609f675b96a82ea118c0b7926118873831cfb30`; the executed host script SHA-256 is
+`20f5e311501406477bdd410a2ee70114bd324539fd5cde12d81abfb47c6d7ba5`, the
 executed guest script SHA-256 is
-`84f870c97bb2d80d0638b0c0c3df9b6300b9b564f194f0d54dd2c8f4e33897cc`, and the
+`11041fbc1dcf8807a57b80a490aa102ec6055294d6cc0615a63ea53719fd4ef9`, and the
 guest reported the same guest digest after upload. The report SHA-256 is
-`7bd97de11022e32d6b9de4d00316bfbf83239a6d0a21774516f84c3045a7d67c`. The host
-was busy: load1 5.67 at start and 4.00 at finish, with 14,376,280 KiB and
-13,326,476 KiB `MemAvailable` respectively. The harness window was 15:25:35Z to
-15:27:02Z (87 s); that is an observation under that load, not a performance
+`b46dcf0710a787872ab26f091f325b8d4fda7d170e99f6c52c49abbb61c20a1a`. The host
+was quiet: load1 0.05 at start and 0.62 at finish, with 14,564,640 KiB and
+13,802,748 KiB `MemAvailable` respectively. The harness window was 15:43:09Z to
+15:44:33Z (84 s); that is an observation under that load, not a performance
 claim. The guest had 2 vCPU and 2048 MiB, and the QEMU process stayed at PID
-391789 across the reboot with its start identity verified.
+396121 across the reboot with its start identity verified.
 
 Earlier runs are retained for history. `20261110T142207Z-8c1668ea` predates
 schema 2 and has no executed-script/commit binding; `20261110T144209Z-75683132`
@@ -247,8 +247,10 @@ predates the settled-queue and manager-restart run-log checks.
 `20261110T145335Z-af76415d` predates the explicit-stop proof and refreshed
 manifest; its host script was `c2ac65de...` and source commit `441d7238...`.
 `20261110T150956Z-f4129247` predates the explicit job-query success binding;
-its host script was `d9dad850...` and source commit `b5b7008...`. None is
-evidence for the current revision.
+its host script was `d9dad850...` and source commit `b5b7008...`.
+`20261110T152535Z-b1704bdd` predates the queued-mask proof and complete
+snapshot requirements; its host script was `469b04d2...` and source commit
+`2dc651ba...`. None is evidence for the current revision.
 
 | Check | Result |
 |---|---|
@@ -265,20 +267,21 @@ evidence for the current revision.
 | timer active/enabled while service fenced | active and enabled before the fence; starting it while fenced failed rc 1 |
 | path active/enabled while service fenced | active and enabled before the fence; starting it while fenced failed rc 1; a trigger after fencing produced no service run and left the path `failed` after stop |
 | queued setup proved in both rounds | yes: both blocker and wrapper starts returned 0, and each round recorded `crq-queued-fixture.service` in `start waiting`; both settle checks are true with empty job lists |
+| queued mask reloads and load state proved in both rounds | yes: `reload` and `reload2` returned 0, and both post-reload unit states report `LoadState=masked`; `queued_mask_proven` is true |
 | job queries succeeded before absence was asserted | yes: the post-stop observation and both settlement observations record `ok`/`query_ok` true and rc 0; failed `list-jobs` results are represented as `ok: false` and fail the checks |
 | explicit stop proved in the second round | yes: stop rc 0; the successful post-stop job query contains the blocker and wrapper but no `crq-queued-fixture.service` job, so `queued_stop_proven` is true |
 | queued wrapper ran after mask and after stop | yes: `["queued"]` in both rounds |
 | queued job behavior recorded | the wrapper ran (`["queued"]`); `queued-fixture` did not run |
 | queued job behavior after explicit stop recorded | explicit stop rc 0; the wrapper ran (`["queued"]`); `queued-fixture` did not run |
-| user-manager PID and invocation changed | yes: PID 993 to 1543, invocation `1dd69c5a...` to `c10d7da9...` |
+| user-manager PID and invocation changed | yes: PID 1004 to 1543, invocation `5de6f32f...` to `9fc3dbf4...` |
 | mask persisted over manager restart | yes, `LoadState=masked` after the new manager was ready, and direct/dependency starts were refused |
 | no new fixture service run after manager restart | yes; both snapshots contain five run entries and the delta is empty |
-| guest `boot_id` changed after reboot | yes: `e05f1cba-36aa-4344-85bb-a174726edbce` to `88f5ba12-dc80-4a72-95ca-9071a4b2210b` |
-| QEMU PID/start identity unchanged across the guest reboot | yes: PID 391789, identity verified |
+| guest `boot_id` changed after reboot | yes: `aa77b8cc-7776-4de1-82c1-aec06c2c7607` to `37348d4f-378c-437d-9ea3-734eba6d2ed5` |
+| QEMU PID/start identity unchanged across the guest reboot | yes: PID 396121, identity verified |
 | timer and path state recorded after reboot | both `inactive`/`enabled`, `SubState=dead`; target service still masked |
 | no new fixture service run after reboot | yes; run log delta empty |
-| unit/backing/enablement metadata restored | yes; install and post-unmask file snapshots compared with no changes (the synthetic trigger file is excluded) |
-| unit/backing/enablement metadata unchanged across reboot | yes; no changes in the reboot before/after snapshots (trigger excluded) |
+| unit/backing/enablement metadata restored | yes; every required snapshot path is present with its applicable metadata, and the install and post-unmask snapshots compare with no changes (the synthetic trigger file is excluded) |
+| unit/backing/enablement metadata unchanged across reboot | yes; the same required paths and fields are present in both reboot snapshots and compare with no changes (trigger excluded) |
 | unmask starts the fixture again | yes, unmask delta `["service"]` |
 | executed bytes bound and verified | yes; source commit plus host/guest SHA-256, retained copies and remote guest digest all match |
 
