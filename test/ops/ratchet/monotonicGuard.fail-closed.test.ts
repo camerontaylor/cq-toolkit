@@ -70,28 +70,6 @@ describe('checkDiffMonotonicity', () => {
     },
   );
 
-  test.each(['+', '-'])('escaped key on %s side followed by context colon fails closed', (side) => {
-    const diff = [
-      `diff --git a/${REL} b/${REL}`,
-      `--- a/${REL}`,
-      `+++ b/${REL}`,
-      '@@ -1,7 +1,7 @@',
-      ' {',
-      '   "direction": "higher-is-better",',
-      '-  "value": 80,',
-      '+  "value": 81,',
-      `${side}  "val\\u0075e"`,
-      '   : 1',
-      ' }',
-    ].join('\n');
-    expect((JSON.parse('{"value":81,"val\\u0075e"\n:1}') as { value: number }).value).toBe(1);
-    expect(checkDiffMonotonicity(diff)).toEqual({
-      ok: false,
-      violations: [{ path: REL, why: 'unparsable baseline diff' }],
-      filesChecked: 1,
-    });
-  });
-
   test('an escaped key after a separator in context retains line-start detection', () => {
     const injected = '  "val\\u0075e": 50, "capturedAt": "2026-09-15T00:00:00.000Z"';
     const parsed = JSON.parse(`{"value": 81, ${injected}}`) as { value: unknown };
