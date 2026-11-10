@@ -77,7 +77,7 @@ describe('the fix-run wall-clock ladder (opts.limits → the governor)', () => {
           return completeWorker(fixLine(false, 'No change needed.', []));
         },
       });
-      const settled = expect(running).rejects.toThrow('detached work requires quarantine');
+      const settled = expect(running).rejects.toThrow('checkout actual writer drain unresolved');
       await started;
       await vi.advanceTimersByTimeAsync(20_000);
       expect(calls).toEqual(['fix-1']);
