@@ -1137,9 +1137,13 @@ def stop_owned_process(run: dict, *, purge: bool) -> dict:
                                         capture_output=True, text=True)
                 stop_rc = result.returncode
             deadline = time.time() + 30
-            while time.time() < deadline and pathlib.Path("/proc/%d" % pid).exists():
+            def owned_alive():
+                return (pathlib.Path("/proc/%d" % pid).exists()
+                        and process_matches(pid, identity.get("starttime"), needle))
+
+            while time.time() < deadline and owned_alive():
                 time.sleep(0.5)
-            stopped = not pathlib.Path("/proc/%d" % pid).exists()
+            stopped = not owned_alive()
     trashed = None
     if purge and stopped:
         trash = (run_dir.parent.parent / "trash"

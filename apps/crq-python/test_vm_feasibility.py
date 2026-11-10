@@ -271,6 +271,20 @@ class LifecycleTests(unittest.TestCase):
                 vm.stop_owned_process(
                     {"run_id": "r1", "path": str(run)}, purge=False)
 
+    def test_destroy_treats_a_changed_process_as_stopped(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state, run = self._prepared(temporary)
+            (run / "process.json").write_text(json.dumps(
+                {"pid": os.getpid(), "starttime": "0",
+                 "scope_unit": "crq-vm-test.scope"}))
+            with mock.patch.object(vm, "process_matches",
+                                   side_effect=[True, False, False]), \
+                 mock.patch.object(vm.subprocess, "run",
+                                   return_value=mock.Mock(returncode=0)):
+                payload = vm.stop_owned_process(
+                    {"run_id": "r1", "path": str(run)}, purge=False)
+            self.assertTrue(payload["stopped"])
+
     def test_cmd_run_cleans_up_after_failure(self):
         with tempfile.TemporaryDirectory() as temporary:
             state, run = self._prepared(temporary)
