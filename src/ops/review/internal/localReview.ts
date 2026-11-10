@@ -22,6 +22,7 @@ export const git = async (cwd: string, ...args: string[]) =>
       timeout: 30000,
       maxBuffer: 6 * 1024 * 1024,
       env: {
+        PATH: process.env.PATH ?? '',
         GIT_CONFIG_NOSYSTEM: '1',
         GIT_CONFIG_GLOBAL: '/dev/null',
         GIT_NO_REPLACE_OBJECTS: '1',
