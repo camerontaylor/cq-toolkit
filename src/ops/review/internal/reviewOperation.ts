@@ -312,6 +312,7 @@ export function canonicalReview(value: unknown): string {
     return (
       '{' +
       Object.entries(value)
+        .filter(([, val]) => val !== undefined)
         .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
         .map(([key, val]) => canonicalReview(key) + ':' + canonicalReview(val))
         .join(',') +
