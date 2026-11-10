@@ -19,6 +19,15 @@ from test_deploy_controller_fixtures import DeployPlanFixture, dc, host
 
 
 class DeployPlanTests(DeployPlanFixture):
+    def test_active_runner_refuses_before_drain_or_switch(self):
+        with mock.patch.object(host, "inactive", side_effect=ValueError("active tick")), \
+             mock.patch.object(dc, "drain_check") as drain, \
+             mock.patch.object(host, "switch") as switch:
+            with self.assertRaisesRegex(dc.Refused, "stopped before checking drain"):
+                dc.deploy_plan(self.effects, host, self.target, self.tag, self.overlay_path)
+        drain.assert_not_called()
+        switch.assert_not_called()
+
     def test_missing_record_ancestors_refuse_before_intent_or_helper_without_creation(self):
         self.effects.record_dir = self.base / "not-provisioned" / "private" / "records"
         before = dc.captured_state(self.effects)

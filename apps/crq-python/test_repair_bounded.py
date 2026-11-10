@@ -22,6 +22,29 @@ OLD = 'crq-historical-F1'
 
 
 class BoundedRepairTest(unittest.TestCase):
+    def test_paseo_inspect_accepts_trailing_text_and_maps_malformed_output(self):
+        from crq_repair.drivers import paseo
+        config = {'repair': {'paseo_host': 'local', 'paseo_read_only_mode': 'read-only',
+                  'paseo_budget_launcher': 'guard', 'paseo_budget_launcher_verified': True,
+                  'budget': {'max_tokens': 100, 'wall_clock_min': 1}}}
+        for status in ('prefix {"status":"idle"} trailing', 'no JSON', '{bad JSON}'):
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as directory:
+                replies = [SimpleNamespace(returncode=0, stdout='{"agentId":"test-agent"}'),
+                           SimpleNamespace(returncode=0, stdout=status),
+                           SimpleNamespace(returncode=0, stdout='{"verdict":"valid","reason":"source"}')]
+                def respond(argv, **kwargs):
+                    if argv[-2] in ('stop', 'archive'):
+                        return SimpleNamespace(returncode=0, stdout='')
+                    return replies.pop(0)
+                with mock.patch.object(paseo, 'command', side_effect=respond) as command:
+                    if 'idle' in status:
+                        self.assertEqual(paseo.invoke(config, {'model': 'test'}, {}, directory, directory)['verdict'], 'valid')
+                    else:
+                        with self.assertRaisesRegex(RuntimeError, 'judge status unavailable; outcome unknown'):
+                            paseo.invoke(config, {'model': 'test'}, {}, directory, directory)
+                    self.assertTrue(any(call.args[0][-2:] == ['stop', 'test-agent']
+                                        for call in command.call_args_list))
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)

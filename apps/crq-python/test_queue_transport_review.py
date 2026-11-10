@@ -231,6 +231,16 @@ class ReviewTransportTests(SnapshotTransportFixture, unittest.TestCase):
         item["receipt_id"] = review_receipt.write_receipt(self.state / "receipts", {"report": "clean"})
         self.assertIn("data", self.invoke_main(dict(v=1, op="result", request_id="local-1"), no_lock))
 
+    def test_parent_supervision_failures_return_retryable_json(self):
+        from author_quota import AuthorRefused
+        for failure in (ValueError("review snapshot/install deadline"),
+                        AuthorRefused("request refused; no permission")):
+            with self.subTest(failure=type(failure).__name__):
+                result = self.invoke_main(self.review, mock.Mock(side_effect=failure))
+                self.assertEqual(result["error"]["code"], "unavailable")
+                self.assertTrue(result["error"]["retryable"])
+                self.assertIn("same request id", result["error"]["message"])
+
     def test_snapshot_cap_is_enforced_inside_request_bound(self):
         req = copy.deepcopy(self.review)
         req["snapshot"]["objects"][0]["data"] = "A" * transport.MAX_SNAPSHOT_BYTES

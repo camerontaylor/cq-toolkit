@@ -5,6 +5,7 @@
 // Pinned over the template and its instantiation: they are rendered, but the
 // trust direction is the point of the workflow, so it is asserted directly.
 import { readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
@@ -74,4 +75,22 @@ describe.each(PATHS)('%s scans with a trusted scanner policy', (path) => {
     expect(text).toContain('path: trust');
     expect(text).toContain('sparse-checkout: .gitleaks.toml');
   });
+});
+
+// A failed rev-list must stop the required check, rather than turn the loop
+// into an empty successful scan. Exercise the actual shell fragment.
+it('fails when octopus merge enumeration fails', () => {
+  for (const path of PATHS) {
+    const text = readFileSync(join(ROOT, path), 'utf8');
+    const block = text.match(/ {10}octopus=.*\n          for commit[^]*?          done/);
+    expect(block, path).not.toBeNull();
+    if (block === null) throw new Error(`missing octopus scan in ${path}`);
+    const shell = `set -euo pipefail
+RANGE=HEAD
+git() { return 42; }
+gitleaks() { :; }
+${block[0]}
+exit 0`;
+    expect(spawnSync('bash', ['-c', shell]).status, path).toBe(42);
+  }
 });
