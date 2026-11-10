@@ -1,4 +1,4 @@
-import { chmod, mkdir, mkdtemp, symlink, writeFile } from 'node:fs/promises';
+import { access, chmod, mkdir, mkdtemp, symlink, writeFile } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -41,11 +41,19 @@ test('git resolves the current PATH on each invocation and isolates its environm
 });
 
 test.each([undefined, ''])(
-  'unset or empty PATH does not search the default system path',
+  'unset or empty PATH does not execute git in the review directory',
   async (path) => {
     const root = await mkdtemp(join(tmpdir(), 'cq-review-empty-path-'));
     vi.stubEnv('PATH', path);
-    await expect(git(root, '--version')).rejects.toThrow();
+    const executable = join(root, 'git');
+    const marker = join(root, 'executed');
+    await writeFile(
+      executable,
+      `#!${process.execPath}\nrequire('node:fs').writeFileSync(${JSON.stringify(marker)}, 'executed');\n`,
+    );
+    await chmod(executable, 0o755);
+    expect(await git(root, '--version')).toMatch(/^git version /);
+    await expect(access(marker)).rejects.toMatchObject({ code: 'ENOENT' });
   },
 );
 

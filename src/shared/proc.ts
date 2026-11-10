@@ -48,8 +48,9 @@ import { spawn } from 'node:child_process';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 
 /** A fresh, PATH-only environment for isolated child executable lookup. */
-export function pathOnlyChildEnv(): { PATH: string } {
-  return { PATH: process.env.PATH ?? '' };
+export function pathOnlyChildEnv(): { PATH?: string } {
+  const path = process.env.PATH;
+  return path ? { PATH: path } : {};
 }
 
 /** POSIX gets process-group semantics; Windows has no Job Object in v1 (header). */
