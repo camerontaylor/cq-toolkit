@@ -203,6 +203,26 @@ describe('no-shell run lifecycle', { timeout: 30_000 }, () => {
     });
     expect(outcome).toMatchObject({ kind: 'spawn-error', error: { code: 'ENOENT' } });
   });
+
+  test('a completed exit survives an abort while a descendant holds the pipes', async () => {
+    // The child exits at once but an inherited pipe keeps `close` pending; an
+    // abort inside that window must not relabel the finished command `killed`.
+    const script = [
+      "const { spawn } = require('node:child_process');",
+      "spawn(process.execPath, ['-e', 'setTimeout(() => {}, 5000)'], { stdio: 'inherit' });",
+      'setTimeout(() => process.exit(5), 200);',
+    ].join(' ');
+    const controller = new AbortController();
+    const pending = runArgvCommand(process.execPath, ['-e', script], {
+      cwd: tmpdir(),
+      env: buildChildEnv(process.env),
+      maxBytes: 1_024,
+      timeoutMs: 20_000,
+      signal: controller.signal,
+    });
+    setTimeout(() => controller.abort(), 1_200);
+    expect(await pending).toMatchObject({ kind: 'exit', code: 5 });
+  });
 });
 
 describe('shared run core environment boundary', { timeout: 30_000 }, () => {
