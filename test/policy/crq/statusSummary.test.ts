@@ -39,6 +39,7 @@ import {
   type SummarizeOptions,
 } from '../../../src/policy/crq/statusSummary.js';
 import { currentEquivalence, reusableCurrent } from '../../../src/policy/crq/receiptIdentity.js';
+import { parseCrqState, stateValueWithNumbers } from '../../../src/policy/crq/state.js';
 import { parseUtc } from '../../../src/policy/crq/utc.js';
 import {
   UsageSlotsError,
@@ -72,18 +73,25 @@ type Outcome =
   | { readonly ok: false; readonly pythonError: string; readonly message: string };
 
 function loadFamily(directory: URL, name: string): VectorCase[] {
-  const document = JSON.parse(readFileSync(new URL(`${name}.json`, directory), 'utf8')) as unknown;
-  const root = recordOf(document, name);
+  // Keep the JSON literally: `usage.limit: 3.0` must stay a float so the
+  // oracle fallback is exercised through the same shape a byte reader sees.
+  const lossless = parseJsonValue(readFileSync(new URL(`${name}.json`, directory), 'utf8'));
+  if (!(lossless instanceof JsonObject)) throw new Error(`${name}: root is not an object`);
+  const root = recordOf(toPlainJson(lossless), name);
   const cases = root.cases;
+  const losslessCases = lossless.get('cases');
   if (!Array.isArray(cases)) throw new Error(`${name}: missing cases`);
-  return cases.map((entry) => {
+  if (!Array.isArray(losslessCases)) throw new Error(`${name}: missing lossless cases`);
+  return cases.map((entry, index) => {
     const row = recordOf(entry, name);
     const expectation = recordOf(row.expect, `${name}/${String(row.name)}`);
+    const input = recordOf(row.input, `${name} input`);
+    spliceLosslessUsage(input, losslessCases[index]);
     return {
       family: name,
       name: stringOf(row.name, 'name'),
       source: stringOf(row.source, 'source'),
-      input: recordOf(row.input, `${name} input`),
+      input,
       expect: {
         ok: expectation.ok === true,
         value: expectation.value,
@@ -92,6 +100,21 @@ function loadFamily(directory: URL, name: string): VectorCase[] {
       },
     };
   });
+}
+
+/** Restore the one numeric lexeme `summarize` still distinguishes. */
+function spliceLosslessUsage(input: RecordValue, losslessCase: unknown): void {
+  if (!(losslessCase instanceof JsonObject)) return;
+  const losslessInput = losslessCase.get('input');
+  const queue = input.queue;
+  if (!(losslessInput instanceof JsonObject) || !isRecordObject(queue)) return;
+  const queueDocument = losslessInput.get('queue');
+  const usage = queue.usage;
+  if (!(queueDocument instanceof JsonObject) || !isRecordObject(usage)) return;
+  const usageDocument = queueDocument.get('usage');
+  if (!(usageDocument instanceof JsonObject)) return;
+  const limit = usageDocument.get('limit');
+  if (limit instanceof JsonNumber) usage.limit = limit;
 }
 
 function recordOf(value: unknown, label: string): RecordValue {
@@ -590,6 +613,39 @@ describe('Python int rules survive materialisation and lossless input', () => {
     expect(pythonIntValue('8')).toBeNull();
     expect(pythonIntValue(0)).toBe(0);
     expect(pythonIntValue(-1)).toBe(-1);
+    expect(pythonIntValue(1e20)).toBeNull();
+    expect(pythonIntValue(2 ** 53)).toBeNull();
+  });
+
+  test('the parsed queue boundary keeps exact int and integral-float lexemes', () => {
+    const state = parseCrqState('queue.schema.json', '{"items":[],"usage":{"limit":3.00}}');
+    expect(state.ok).toBe(true);
+    if (!state.ok) return;
+    const queue = stateValueWithNumbers(state, [['usage', 'limit']]) as RecordValue;
+    const usage = queue.usage as RecordValue;
+    expect(usage.limit).toBeInstanceOf(JsonNumber);
+    const limit = usage.limit as JsonNumber;
+    expect(limit.kind).toBe('float');
+    expect(limit.raw).toBe('3.00');
+
+    const capFor = (text: string): number => {
+      const accepted = parseCrqState('queue.schema.json', text);
+      if (!accepted.ok) throw new Error(accepted.issues.join('; '));
+      const parsed = stateValueWithNumbers(accepted, [['usage', 'limit']]) as RecordValue;
+      return summarize(
+        { generated_at: '2026-11-09T11:55:00Z' },
+        parsed,
+        {},
+        { max_starts_per_hour: 10 },
+        [],
+        NOW,
+      ).starts_cap;
+    };
+    expect(capFor('{"items":[],"usage":{"limit":3}}')).toBe(3);
+    for (const literal of ['3.0', '3.00', '3e0', '30e-1', '0.3e1']) {
+      expect(capFor(`{"items":[],"usage":{"limit":${literal}}}`), literal).toBe(10);
+    }
+    expect(capFor('{"items":[]}')).toBe(10);
   });
 
   test('a lossless float limit falls back to the configured cap', () => {

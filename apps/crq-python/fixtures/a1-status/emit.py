@@ -275,6 +275,37 @@ def summarize_family() -> Dict[str, Any]:
                 now="2026-10-31T00:00:00Z",
             )
         )
+    for usage, label in (
+        ({"limit": 3}, "usage-limit-int-three-is-kept"),
+        ({"limit": 3.0}, "usage-limit-integral-float-falls-back"),
+    ):
+        cases.append(
+            summarize(
+                label,
+                queue={"items": [], "usage": usage},
+                config={"max_starts_per_hour": 10},
+                generated_at="2026-10-31T00:00:00Z",
+                now="2026-10-31T00:00:00Z",
+            )
+        )
+    cases.append(
+        summarize(
+            "local-review-generation-bool-is-one",
+            queue={
+                "items": [
+                    {
+                        "id": "generation-bool",
+                        "kind": "local-review",
+                        "generation": True,
+                        "state": "pending",
+                        "order": 1,
+                    }
+                ]
+            },
+            generated_at="1970-01-01T01:00:00Z",
+            now="1970-01-01T01:00:00Z",
+        )
+    )
     cases.append(
         summarize(
             "optional-open-cycles-are-not-review-debt",

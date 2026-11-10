@@ -713,10 +713,10 @@ function comparePythonValues(left: unknown, right: unknown): number {
 function itemAgingDeadline(item: CrqRecord, config: CrqRecord): number | null {
   if (get(item, 'kind') !== 'local-review') return null;
   const generation = get(item, 'generation', 1);
-  if (typeof generation !== 'number') {
+  if (typeof generation !== 'number' && typeof generation !== 'boolean') {
     throw new StatusSummaryError('generation is not a number', 'TypeError');
   }
-  const superseding = generation > 1 || get(item, 'repeat_requested') === true;
+  const superseding = Number(generation) > 1 || get(item, 'repeat_requested') === true;
   if (!superseding) return null;
   const created = get(item, 'created_at');
   if (!pyTruthy(created)) return null;
@@ -839,7 +839,7 @@ export function pythonIntValue(value: unknown): number | null {
     const converted = Number(value.integer);
     return Number.isSafeInteger(converted) ? converted : null;
   }
-  if (typeof value === 'number' && Number.isInteger(value)) return value;
+  if (typeof value === 'number' && Number.isSafeInteger(value)) return value;
   return null;
 }
 

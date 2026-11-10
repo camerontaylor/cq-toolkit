@@ -32,7 +32,7 @@ trailing newline; fixed timestamps only, so the bytes are host-independent.
 
 | file | sources | covers |
 |---|---|---|
-| `summarize.json` | `status_summary.summarize` | local-review aging and the config window, invalid age tolerance, foreign open PR rank, operator-priority ordering, 24 h completion grouping and the 10-row preview, `starts_cap` fallbacks (`0`, `true`, `"8"`, missing, remaining-only), open cycles, re-harvested runs, review_finished timestamp refusals, 60-minute window boundaries, global in-flight, configured repos before their first item |
+| `summarize.json` | `status_summary.summarize` | local-review aging and the config window, invalid age tolerance, foreign open PR rank, operator-priority ordering, 24 h completion grouping and the 10-row preview, `starts_cap` (`3` kept, `3.0`/`3e0` fallback, `0`, `true`, `"8"`, missing, remaining-only), generation `true` equality, open cycles, re-harvested runs, review_finished timestamp refusals, 60-minute window boundaries, global in-flight, configured repos before their first item |
 | `merged-current.json` | `status_summary.merged_current` | verified no-current-code / partial-scope / terminal / unsupported, deleted and excluded-path counts, receipt-less and tampered receipts, missing receipt, retained reuse lineage (verified, missing parent, cycle, capture-target mismatch), empty path list, sorted and bounded captured targets (+34 case), discovery passthrough |
 | `client-health.json` | `client_health.snapshot` | completed age (frozen clock), missing/empty completed_at, invalid and non-string refusals, non-object health and item refusals, pending/blocked counts |
 
@@ -50,11 +50,16 @@ queue/repair text, never from transcripts.
 ## Int/float boundary
 
 `parse_usage` parses its input with the lossless reader, so `1` and `1.0`
-follow Python's `type(value) is int`. `summarize` accepts a materialised queue
-or a lossless `usage` object from `parseJsonValue`; `usage.limit` then keeps
-either a `JsonNumber` or its plain value, and `pythonIntValue` refuses floats,
-booleans and numeric strings. A caller that reads queue bytes must keep
-`usage` lossless (materialising the rest) because `JSON.parse` erases the
-`3`/`3.0` distinction the oracle enforces. Focused TypeScript tests cover both
-shapes: an explicit `JsonNumber.float`, and a lossless JSON integral float
-that falls back to the configured cap.
+follow Python's `type(value) is int`. A byte-reading caller validates the queue
+with `parseCrqState`, then uses
+`stateValueWithNumbers(state, [['usage', 'limit']])`; the helper splices the
+exact `JsonNumber` from the retained document into a selectively cloned plain
+value. `3` stays an int and is kept, while `3.0`, `3.00`, `3e0`, `30e-1` and
+`0.3e1` stay floats and fall back to the configured cap. `pythonIntValue`
+refuses floats, booleans, numeric strings and unsafe integers.
+
+The A1 fixture loader parses `summarize.json` losslessly and does the same
+splice, so the oracle `3.0` case runs through the serialized queue shape; the
+end-to-end test also covers the other float lexemes and the missing-usage
+fallback. A plain `JSON.parse` result cannot preserve the distinction, and
+`toPlainJson` alone erases it.

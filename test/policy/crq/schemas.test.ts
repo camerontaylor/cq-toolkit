@@ -7,12 +7,20 @@ import {
   type CrqStateSchemaName,
 } from '../../../src/policy/crq/schemas.js';
 import {
+  StateValuePathError,
   parseCrqState,
   parseCrqStateLines,
+  stateValueWithNumbers,
   validateCrqState,
+  type CrqStateAcceptance,
   type CrqStateResult,
 } from '../../../src/policy/crq/state.js';
-import { JsonObject, parseJsonValue, toPlainJson } from '../../../src/policy/crq/jsonValue.js';
+import {
+  JsonNumber,
+  JsonObject,
+  parseJsonValue,
+  toPlainJson,
+} from '../../../src/policy/crq/jsonValue.js';
 
 const ROOT = new URL('../../../', import.meta.url);
 const POLICY = new URL('policy/crq/', ROOT);
@@ -177,6 +185,69 @@ describe('source-text integer parity', () => {
     const result = parseCrqState('heartbeat.schema.json', heartbeat);
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.divergence).toContain('zod rejected');
+  });
+});
+
+describe('stateValueWithNumbers', () => {
+  function acceptance(text: string): CrqStateAcceptance {
+    const result = parseCrqState('queue.schema.json', text);
+    if (!result.ok) throw new Error(result.issues.join('; '));
+    return result;
+  }
+
+  test('splices the exact numeric lexeme without mutating the materialised value', () => {
+    const state = acceptance('{"items":[],"usage":{"limit":3.0}}');
+    const before = JSON.parse(JSON.stringify(state.value)) as unknown;
+    const value = stateValueWithNumbers(state, [['usage', 'limit']]) as {
+      usage: { limit: JsonNumber };
+    };
+    expect(value.usage.limit).toBeInstanceOf(JsonNumber);
+    expect(value.usage.limit.kind).toBe('float');
+    expect(value.usage.limit.raw).toBe('3.0');
+    expect(state.value).toEqual(before);
+    expect((state.value as { usage: { limit: number } }).usage.limit).toBe(3);
+    expect(value).not.toBe(state.value);
+  });
+
+  test('missing and null intermediates stay materialised', () => {
+    const missing = acceptance('{"items":[]}');
+    expect(stateValueWithNumbers(missing, [['usage', 'limit']])).toBe(missing.value);
+    const nullUsage = acceptance('{"items":[],"usage":null}');
+    expect(stateValueWithNumbers(nullUsage, [['usage', 'limit']])).toBe(nullUsage.value);
+  });
+
+  test('overlapping and repeated paths keep one exact leaf', () => {
+    const state = acceptance(
+      '{"items":[{"id":"i","kind":"open","state":"pending","usage":{"limit":3.0}}]}',
+    );
+    const value = stateValueWithNumbers(state, [
+      ['items', '0', 'usage', 'limit'],
+      ['items', '0', 'usage', 'limit'],
+    ]) as { items: Array<{ usage: { limit: JsonNumber } }> };
+    expect(value.items[0]?.usage.limit).toBeInstanceOf(JsonNumber);
+    expect(value.items[0]?.usage.limit.raw).toBe('3.0');
+  });
+
+  test('malformed traversal rejects explicitly', () => {
+    const state = acceptance('{"items":[]}');
+    expect(() => stateValueWithNumbers(state, [['items', 'length']])).toThrow(StateValuePathError);
+    expect(() => stateValueWithNumbers(state, [['items', '01']])).toThrow(StateValuePathError);
+    expect(() => stateValueWithNumbers(state, [[]])).toThrow(StateValuePathError);
+    const shape: CrqStateAcceptance = {
+      ok: true,
+      document: new JsonObject([['usage', new JsonObject([['limit', JsonNumber.int(3)]])]]),
+      value: { usage: 'not an object' },
+    };
+    expect(() => stateValueWithNumbers(shape, [['usage', 'limit']])).toThrow(StateValuePathError);
+  });
+
+  test('own-property traversal never reaches the prototype', () => {
+    const state = acceptance('{"items":[]}');
+    expect(stateValueWithNumbers(state, [['__proto__']])).toBe(state.value);
+    expect(stateValueWithNumbers(state, [['constructor', 'prototype', 'polluted']])).toBe(
+      state.value,
+    );
+    expect(({} as { polluted?: unknown }).polluted).toBeUndefined();
   });
 });
 
