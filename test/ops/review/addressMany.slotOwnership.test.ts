@@ -146,6 +146,48 @@ test('same original PR refuses before second clone creation (mutation: install o
   }
 });
 
+test('bulk admission preserves a legacy hint for direct reconciliation before dispatch', async () => {
+  const f = await bulkFixture();
+  try {
+    const path = join(f.worktreeRoot, 'legacy-pr-7');
+    f.repo.git('worktree', 'add', '-b', 'cq-review/pr-7', path, 'HEAD');
+    const source = join(f.common, 'cq-review-address-worktrees.json');
+    const bytes = JSON.stringify({ 7: { path, branch: 'cq-review/pr-7' } });
+    await writeFile(source, bytes);
+    const result = await makeReviewAddressMany({ gh: f.gh, address: (input) => f.child(input) })(
+      f.input,
+    );
+    expect(result.status, JSON.stringify(result)).toBe('needs-human');
+    expect(JSON.stringify(result)).toContain(
+      'legacy review checkout requires direct reconciliation',
+    );
+    expect(f.roots).toEqual([]);
+    expect(await readSlotMetadata(join(f.common, 'cq-review/slots/pr-7.json'))).toBeUndefined();
+    expect(await readFile(source, 'utf8')).toBe(bytes);
+    expect((await lstat(path)).isDirectory()).toBe(true);
+    const { resolvePrWorktree } = await import('../../../src/adapters/git/prWorktree.js');
+    const opts = f.opts();
+    await expect(
+      resolvePrWorktree({
+        repoRoot: opts.repoRoot,
+        pr: 7,
+        headRefName: opts.headRefName,
+        worktreeRoot: f.worktreeRoot,
+        nowMs: 1,
+        run: opts.git,
+        registry: slotWorktreeRegistry(f.common, { legacySources: [source] }),
+      }),
+    ).rejects.toThrow(/identity or head mismatch/);
+    expect((await lstat(path)).isDirectory()).toBe(true);
+    expect(await readSlotMetadata(join(f.common, 'cq-review/slots/pr-7.json'))).toMatchObject({
+      incomplete: true,
+    });
+    expect(await readFile(source, 'utf8')).toBe(bytes);
+  } finally {
+    await f.cleanup();
+  }
+});
+
 test('incomplete no-fix clone is retained (mutation: drop incomplete cleanup guard)', async () => {
   const f = await bulkFixture();
   try {

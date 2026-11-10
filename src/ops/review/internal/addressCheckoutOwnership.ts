@@ -449,7 +449,13 @@ export async function withAddressManyCheckout<T>(
     try {
       if (!(await slot.readMetadata())) {
         const path = resolve(opts.commonDir, 'cq-review-address-worktrees.json');
-        await readLegacyReviewHint([path], opts.pr);
+        if (await readLegacyReviewHint([path], opts.pr)) {
+          // A bulk clone cannot reconcile the original checkout. Refuse before
+          // creating metadata so a direct invocation can still import it.
+          const error = new Error('legacy review checkout requires direct reconciliation');
+          incompleteRefusals.add(error);
+          throw error;
+        }
       }
       await context.begin();
       const result = await bulkContext.run(state, () =>
