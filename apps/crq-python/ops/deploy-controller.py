@@ -131,7 +131,7 @@ class RecoveryRequired(Exception):
     """
 
     def __init__(self, recovery: dict):
-        super().__init__(recovery["reason"])
+        super().__init__(recovery.get("reason", "unit recovery required"))
         self.recovery = recovery
 
 
@@ -1205,8 +1205,9 @@ def deploy_plan(effects: Effects, helper_module, target: str, tag: str,
     deployment was unchanged. Units are started only by the owner.
     """
     with effects.controller_lock():
-        pre = preflight(effects, target, tag)
         effects.record_preflight()
+        refuse_unfinished_unit_switches(effects)
+        pre = preflight(effects, target, tag)
         prior_tag = prior_tag_for(effects, pre["state"]["prior_head"])
         plan = {"preflight": pre, "steps": [], "helper_sha256": helper_sha256}
         drain = drain_check(effects, _runner_liveness(effects))
@@ -1233,6 +1234,166 @@ def deploy_plan(effects: Effects, helper_module, target: str, tag: str,
             tx["phase"] = "journal"
             effects.journal_replace(tx["path"], journal)
         return plan
+
+
+# Per-unit adapters are deliberately unavailable in production until a provider
+# can bind successful completions to both the unit and its exact runtime.
+UNIT_RUNTIMES = frozenset({"crq-tick.service", "crq-slot.service", "crq-repair.service",
+                           "crq-publisher.service", "crq-backfill.service",
+                           "crq-watchdog.service"})
+
+
+def _unit_runtime(value):
+    return value == "python" or (isinstance(value, str) and
+                                  re.fullmatch(r"node:[0-9a-f]{40}", value) is not None)
+
+
+def _completion(adapter, unit, runtime, previous):
+    evidence = adapter.completion(unit, runtime, previous)
+    if (not isinstance(evidence, dict) or evidence.get("unit") != unit
+            or evidence.get("runtime") != runtime or evidence.get("success") is not True
+            or type(evidence.get("sequence")) is not int
+            or evidence["sequence"] <= previous):
+        raise ValueError("invalid or non-advancing unit completion evidence")
+    return evidence
+
+
+def recover_unit(effects, adapter, path):
+    """Restore a pre-activation intent; activation ambiguity requires investigation."""
+    if adapter is None:
+        raise Refused("no unit recovery adapter")
+    path = Path(path)
+    with effects.controller_lock():
+        effects.record_preflight()
+        if path.parent != effects.record_dir or path.is_symlink():
+            raise Refused("invalid controller transaction record path")
+        try:
+            record = json.loads(path.read_text())
+        except (OSError, ValueError) as exc:
+            raise Refused("unreadable unit recovery record") from exc
+        if (not isinstance(record, dict) or record.get("operation") != "unit_switch"
+                or record.get("outcome") not in ("pending", "recovery_required")
+                or type(record.get("schema_version")) is not int
+                or record["schema_version"] != JOURNAL_SCHEMA
+                or not isinstance(record.get("transaction_id"), str)
+                or not re.fullmatch(r"[0-9a-f]{32}", record["transaction_id"])
+                or not isinstance(record.get("unit"), str)
+                or record["unit"] not in UNIT_RUNTIMES
+                or not _unit_runtime(record.get("runtime"))
+                or not _unit_runtime(record.get("prior_runtime"))
+                or record["runtime"] == record["prior_runtime"]
+                or "snapshot" not in record or "state" not in record
+                or record.get("phase") not in ("snapshot", "drained", "activation_pending", "restore_activation_pending")
+                or (record["phase"] == "snapshot" and record.get("state") is not None)
+                or (record["phase"] in ("drained", "activation_pending") and not isinstance(record.get("state"), dict))
+                or (record["phase"] == "restore_activation_pending" and record.get("state") is not None and not isinstance(record["state"], dict))
+                or (isinstance(record.get("state"), dict) and any("preserved/" + rel not in record["state"]
+                       or (record["state"]["preserved/" + rel] is not None
+                           and not _hex(_HEX64, record["state"]["preserved/" + rel]))
+                       for rel in PRESERVED))):
+            raise Refused("invalid unit recovery record")
+        adapter.validate_snapshot(record["unit"], record["snapshot"])
+        try:
+            adapter.stop_and_drain(record["unit"])
+            if record["phase"] in ("activation_pending", "restore_activation_pending"):
+                raise ValueError("activation may have occurred; inspect runtime evidence before recovery")
+            adapter.restore(record["unit"], record["snapshot"])
+            if record["state"] is not None:
+                preservation_check(effects, record["state"])
+            record["phase"] = "restore_activation_pending"
+            effects.journal_replace(path, record)
+            adapter.restore_activation(record["unit"], record["snapshot"])
+            completed = {**record, "outcome": "rolled_back"}
+            effects.journal_replace(path, completed)
+        except (Exception, KeyboardInterrupt) as exc:
+            raise RecoveryRequired({**record, "record_path": str(path),
+                                    "reason": type(exc).__name__ + ": " + str(exc)[:400]}) from exc
+        return completed
+
+
+def refuse_unfinished_unit_switches(effects):
+    """Do not start a new transaction while an interrupted one needs recovery."""
+    for path in effects.record_dir.glob("controller-*.json"):
+        if path.is_symlink() or not path.is_file():
+            raise Refused("invalid controller journal entry: " + path.name)
+        try:
+            record = json.loads(path.read_text())
+        except (OSError, ValueError) as exc:
+            raise Refused("unreadable controller journal entry: " + path.name) from exc
+        if not isinstance(record, dict):
+            raise Refused("invalid controller journal entry: " + path.name)
+        if (record.get("operation") == "unit_switch"
+                and record.get("outcome") not in ("completed", "rolled_back")):
+            raise Refused("unfinished unit switch requires recovery: " + path.name)
+
+
+def switch_unit(effects, adapter, unit, runtime):
+    """Execute one unit transaction using a trusted, injected host adapter.
+
+    Adapter preflight must establish artifact identity, provider availability and
+    the current pointer without mutation. Its stop/drain fence must prevent new
+    work until start. Snapshot/restore retain exact installed unit bytes and
+    activation state. validate_snapshot rejects invalid types and paths before
+    any mutation. Completion sequences are monotonic for each unit.
+    """
+    if unit not in UNIT_RUNTIMES or not _unit_runtime(runtime):
+        raise Refused("invalid unit or runtime")
+    if adapter is None:
+        raise Refused("no runtime-bound completion evidence provider for unit")
+    with effects.controller_lock():
+        effects.record_preflight()
+        refuse_unfinished_unit_switches(effects)
+        prior = adapter.preflight(unit, runtime)
+        if not isinstance(prior, dict) or not _unit_runtime(prior.get("runtime")):
+            raise Refused("invalid prior runtime")
+        if prior["runtime"] == runtime:
+            raise Refused("unit already selects requested runtime")
+        snapshot = adapter.snapshot(unit)
+        adapter.validate_snapshot(unit, snapshot)
+        identity = {"schema_version": JOURNAL_SCHEMA, "transaction_id": uuid.uuid4().hex,
+                    "operation": "unit_switch", "unit": unit, "runtime": runtime,
+                    "prior_runtime": prior["runtime"], "outcome": "pending", "at": now_iso(),
+                    "snapshot": snapshot, "state": None, "phase": "snapshot"}
+        path = effects.journal_append(identity)
+        try:
+            adapter.stop_and_drain(unit)
+            identity = {**identity, "state": captured_state(effects), "phase": "drained"}
+            effects.journal_replace(path, identity)
+            baseline = adapter.sequence(unit)
+            if type(baseline) is not int or baseline < 0:
+                raise ValueError("invalid completion baseline")
+            adapter.install(unit, runtime)
+            preservation_check(effects, identity["state"])
+            identity = {**identity, "phase": "activation_pending"}
+            effects.journal_replace(path, identity)
+            adapter.start(unit)
+            first = _completion(adapter, unit, runtime, baseline)
+            second = _completion(adapter, unit, runtime, first["sequence"])
+            record = {**identity, "outcome": "completed", "completions": [first, second]}
+            effects.journal_replace(path, record)
+            return record
+        except (Exception, KeyboardInterrupt) as exc:
+            try:
+                adapter.stop_and_drain(unit)
+                if identity["phase"] == "activation_pending":
+                    raise ValueError("activation may have occurred; inspect runtime evidence before recovery")
+                adapter.restore(unit, snapshot)
+                if identity["state"] is not None:
+                    preservation_check(effects, identity["state"])
+                identity = {**identity, "phase": "restore_activation_pending"}
+                effects.journal_replace(path, identity)
+                adapter.restore_activation(unit, snapshot)
+                record = {**identity, "outcome": "rolled_back", "reason": str(exc)[:400]}
+                effects.journal_replace(path, record)
+            except (Exception, KeyboardInterrupt) as rollback_exc:
+                recovery = {**identity, "outcome": "recovery_required", "record_path": str(path),
+                            "reason": str(exc)[:200] + "; rollback: " + str(rollback_exc)[:200]}
+                try:
+                    effects.journal_replace(path, recovery)
+                except Exception:
+                    pass  # retained pending intent remains the recovery anchor
+                raise RecoveryRequired(recovery) from rollback_exc
+            raise RecoveryRequired({**record, "record_path": str(path)}) from exc
 
 
 def prior_tag_for(effects: Effects, sha: str) -> str | None:
@@ -1353,6 +1514,8 @@ def rollback_plan(effects: Effects, helper_module, prior: dict,
     Refuses when the compatibility record disables automatic rollback
     (schema-incompatible prior target)."""
     with effects.controller_lock():
+        effects.record_preflight()
+        refuse_unfinished_unit_switches(effects)
         record = rollback_target(prior)
         if effects.git("rev-parse", "HEAD") != record["deployed"]:
             raise Refused("prior record does not describe the current deployment")
@@ -1373,7 +1536,6 @@ def rollback_plan(effects: Effects, helper_module, prior: dict,
         if not drain["drained"]:
             raise Refused("cannot roll back with live/ambiguous reviews: "
                           + json.dumps(drain["blocked"])[:400])
-        effects.record_preflight()
         state = captured_state(effects)
         prior_tag = prior_tag_for(effects, state["prior_head"])
         overlay, raw = helper_module.load_overlay(overlay_path)
@@ -1419,8 +1581,10 @@ def main(argv=None) -> int:
                              "before import, lock and preflight")
     sub = parser.add_subparsers(dest="operation", required=True)
     switch = sub.add_parser("switch", help="preflight, drain, switch, verify, journal")
-    switch.add_argument("--sha", required=True)
-    switch.add_argument("--tag", required=True)
+    switch.add_argument("--unit", choices=sorted(UNIT_RUNTIMES))
+    switch.add_argument("--runtime")
+    switch.add_argument("--sha")
+    switch.add_argument("--tag")
     rollback = sub.add_parser("rollback",
                               help="owner-approved rollback to the recorded prior target")
     rollback.add_argument("--prior-record", required=True, type=Path,
@@ -1445,7 +1609,13 @@ def main(argv=None) -> int:
         # Identity first, then the controller lock, then preflight (#549).
         helper_module, helper_sha256 = _load_helper(helper_path,
                                                     args.expect_helper_sha256)
-        if args.operation == "switch":
+        if args.operation == "switch" and (args.unit or args.runtime):
+            if not args.unit or not args.runtime or args.sha or args.tag:
+                raise Refused("unit switch requires --unit and --runtime only")
+            switch_unit(effects, None, args.unit, args.runtime)
+        elif args.operation == "switch":
+            if not args.sha or not args.tag:
+                raise Refused("checkout switch requires --sha and --tag")
             plan = deploy_plan(effects, helper_module, args.sha, args.tag,
                                args.overlay, helper_sha256)
             print(json.dumps({"operation": "switch", "target": plan["preflight"]["target"],

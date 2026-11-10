@@ -363,7 +363,17 @@ def validate_unit_template(name, text):
         raise ValueError('unit lacks monorepo root placeholder: ' + name)
 
 
-def render_units(root, output, sha='HEAD'):
+UNIT_COMMANDS = {
+    'crq-tick.service': 'tick',
+    'crq-slot.service': 'slot',
+    'crq-repair.service': 'repair',
+    'crq-publisher.service': 'publish',
+    'crq-backfill.service': 'backfill inventory',
+    'crq-watchdog.service': 'watchdog',
+}
+
+
+def render_units(root, output, sha='HEAD', runtimes=None):
     # Read both the inventory and exact bytes from one immutable commit, as
     # verify_target does. Dirty/deleted/extra worktree units are not deploy inputs.
     sha = git(root, 'rev-parse', sha + '^{commit}')
@@ -375,13 +385,36 @@ def render_units(root, output, sha='HEAD'):
         raise ValueError('target lacks CRQ unit templates')
     for source, text in templates:
         validate_unit_template(source.name, text)
-    output.mkdir(parents=True, exist_ok=True)
+    runtimes = runtimes or {}
+    if set(runtimes) - UNIT_COMMANDS.keys():
+        raise ValueError('unknown runtime unit')
+    if set(runtimes) - {source.name for source, _ in templates}:
+        raise ValueError('runtime unit absent from target')
+    commands = {}
+    for unit, runtime in runtimes.items():
+        if runtime == 'python':
+            continue
+        if not isinstance(runtime, str) or not re.fullmatch(r'node:[0-9a-f]{40}', runtime):
+            raise ValueError('runtime must be python or node:<full SHA>')
+        artifact = host_path(str(Path.home() / '.local/opt' / ('crq-' + runtime[5:])))
+        commands[unit] = '/usr/bin/env node ' + str(artifact / 'dist/queue-runner/crq.js') + ' ' + UNIT_COMMANDS[unit]
+    rendered = []
     runner = str(host_path(str(root)) / 'apps/crq-python')
-    paths = []
     for source, text in templates:
         text = text.replace('@CRQ_ROOT@', runner)
         if '@CRQ_ROOT@' in text:
             raise ValueError('unexpanded runner root')
+        if source.name in commands:
+            lines = text.splitlines(keepends=True)
+            matches = [i for i, line in enumerate(lines) if line.startswith('ExecStart=')]
+            if len(matches) != 1:
+                raise ValueError('unit must have exactly one ExecStart: ' + source.name)
+            lines[matches[0]] = 'ExecStart=' + commands[source.name] + '\n'
+            text = ''.join(lines)
+        rendered.append((source, text))
+    output.mkdir(parents=True, exist_ok=True)
+    paths = []
+    for source, text in rendered:
         target = output / source.name
         atomic_bytes(target, text.encode())
         paths.append(str(target))

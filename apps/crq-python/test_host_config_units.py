@@ -104,6 +104,19 @@ class HostConfigTests(HostConfigFixture, unittest.TestCase):
         self.assertIn('AccuracySec=1s', slot_timer)
         self.assertIn(str(self.runner / 'state/repair/inbox'), contents)
 
+    def test_runtime_selection_is_per_unit_and_rejects_invalid_pointers(self):
+        sha = 'a' * 40
+        output = self.base / 'node-units'
+        host.render_units(self.root, output, runtimes={'crq-tick.service': 'node:' + sha})
+        tick = (output / 'crq-tick.service').read_text()
+        self.assertIn(str(Path.home() / ('.local/opt/crq-' + sha) /
+                          'dist/queue-runner/crq.js') + ' tick', tick)
+        self.assertIn(str(self.runner / 'crq_slot.py'), (output / 'crq-slot.service').read_text())
+        for mapping in ({'crq-tick.service': 'node:../bad'}, {'crq-other.service': 'python'}):
+            with self.subTest(mapping=mapping), self.assertRaises(ValueError):
+                host.render_units(self.root, self.base / 'invalid', runtimes=mapping)
+            self.assertFalse((self.base / 'invalid').exists())
+
     @unittest.skipUnless(shutil.which('systemd-analyze'), 'systemd-analyze runs in Linux CI')
     def test_systemd_analyze_verify_detached_render(self):
         paths = host.render_units(self.root, self.base / 'units')
