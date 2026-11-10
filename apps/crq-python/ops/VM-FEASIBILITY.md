@@ -211,14 +211,14 @@ and memory stamps for any timing claim.
 
 ## Recorded evidence
 
-Run `20261110T140526Z-bd5f7acf` on `pluto` (Linux 6.12.63, systemd 255
+Run `20261110T141556Z-3d2aa476` on `pluto` (Linux 6.12.63, systemd 255
 `255.4-1ubuntu8.18`, Ubuntu 24.04 noble guest) produced
-`state/runs/20261110T140526Z-bd5f7acf/report.json`; `verify` returned
-`{"problems": []}`. The host was busy: load1 12.35 at start and 14.32 at
-finish, with 7.3 GiB and 6.5 GiB `MemAvailable` respectively. The harness
-window was 14:05:26Z to 14:07:05Z (about 99 s); that is an observation under
+`state/runs/20261110T141556Z-3d2aa476/report.json`; `verify` returned
+`{"problems": []}`. The host was busy: load1 13.28 at start and 14.02 at
+finish, with 7.3 GiB and 6.6 GiB `MemAvailable` respectively. The harness
+window was 14:15:56Z to 14:17:36Z (about 100 s); that is an observation under
 that load, not a performance claim. The guest had 2 vCPU and 2048 MiB, and the
-QEMU process stayed at PID 373069 across the reboot with its start identity
+QEMU process stayed at PID 375389 across the reboot with its start identity
 verified.
 
 | Check | Result |
@@ -235,12 +235,12 @@ verified.
 | mask link target `/dev/null` | yes |
 | timer active/enabled while service fenced | active and enabled before the fence; starting it while fenced failed rc 1 |
 | path active/enabled while service fenced | active and enabled before the fence; starting it while fenced failed rc 1; a trigger after fencing produced no service run and left the path `failed` after stop |
-| queued job behavior recorded | mask removed the pending queued-fixture job; run delta `[]` |
-| queued job behavior after explicit stop recorded | explicit stop rc 0; the wrapper run delta was `["queued"]`, but `queued-fixture` did not run |
-| user-manager PID and invocation changed | yes: PID 1001 to 1539, invocation `4a99c4c1...` to `655d14db...` |
-| mask persisted over manager restart | yes, `LoadState=masked` after the new manager was ready |
-| guest `boot_id` changed after reboot | yes: `1b2cd15f-eb1a-452d-a72f-624f11250967` to `e83e496f-5322-4675-929a-d1cf377bc695` |
-| QEMU PID/start identity unchanged across the guest reboot | yes: PID 373069, identity verified |
+| queued job behavior recorded | the wrapper ran (`["queued"]`); `queued-fixture` did not run |
+| queued job behavior after explicit stop recorded | explicit stop rc 0; the wrapper ran (`["queued"]`); `queued-fixture` did not run |
+| user-manager PID and invocation changed | yes: PID 993 to 1533, invocation `2d3dfea8...` to `85b9d679...` |
+| mask persisted over manager restart | yes, `LoadState=masked` after the new manager was ready, and direct/dependency starts were refused |
+| guest `boot_id` changed after reboot | yes: `3eef5353-624c-4923-9427-f2c167eef71a` to `e3c5ecfd-4139-4649-a069-9381266e7565` |
+| QEMU PID/start identity unchanged across the guest reboot | yes: PID 375389, identity verified |
 | timer and path state recorded after reboot | both `inactive`/`enabled`, `SubState=dead`; target service still masked |
 | no new fixture service run after reboot | yes; run log delta empty |
 | unit/backing/enablement metadata restored | yes; install and post-unmask file snapshots compared with no changes (the synthetic trigger file is excluded) |
@@ -250,9 +250,10 @@ verified.
 All required checks in the report are true. The two queued checks are recorded
 as `false` because the `queued-fixture` unit did not execute; that is the
 observed behavior, not a pass/fail assertion about queued work in general. In
-this run the wrapper `crq-queued.service` did run after the explicit stop, so
-the adapter cannot assume that stopping the queued unit also stops its
-wrapper. The after-reboot activator checks are recorded strings (`inactive`),
+this run the wrapper `crq-queued.service` ran in both rounds, including after
+the explicit stop of the queued unit, so the adapter cannot assume that
+stopping the queued unit also stops its wrapper. The after-reboot activator
+checks are recorded strings (`inactive`),
 not required to be `active`, because a mask that still blocks the target
 service is the property under test.
 

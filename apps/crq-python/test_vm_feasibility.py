@@ -6,9 +6,11 @@ recorded separately by the harness and is not part of the unit suite.
 """
 import importlib.util
 import json
+import os
 import pathlib
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parent
 OPS = ROOT / "ops"
@@ -172,6 +174,106 @@ class ProcessIdentityTests(unittest.TestCase):
             self.assertFalse(vm.process_matches(999, "4242", "qemu", root))
 
 
+class LifecycleTests(unittest.TestCase):
+    def _prepared(self, temporary):
+        state = pathlib.Path(temporary)
+        run = state / "runs" / "r1"
+        run.mkdir(parents=True)
+        (run / "run.json").write_text(json.dumps(
+            {"run_id": "r1", "path": str(run), "port": 2222}))
+        return state, run
+
+    def test_prepared_run_loads_without_process(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state, run = self._prepared(temporary)
+            loaded = vm.load_run(state, "r1", require_process=False)
+            self.assertEqual(loaded["port"], 2222)
+            self.assertEqual(loaded["path"], str(run))
+            with self.assertRaises(ValueError):
+                vm.load_run(state, "r1")
+
+    def test_destroy_purges_stopped_run(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state, run = self._prepared(temporary)
+            (run / "overlay.qcow2").write_text("evidence")
+            payload = vm.stop_owned_process(
+                {"run_id": "r1", "path": str(run)}, purge=True)
+            self.assertTrue(payload["stopped"])
+            self.assertFalse((run / "overlay.qcow2").exists())
+            self.assertTrue(pathlib.Path(payload["trash"]).is_dir())
+            again = vm.stop_owned_process(
+                {"run_id": "r1", "path": str(run)}, purge=True)
+            self.assertTrue(again["stopped"])
+            self.assertIsNone(again["trash"])
+
+    def test_destroy_purges_a_dead_recorded_process(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state, run = self._prepared(temporary)
+            (run / "overlay.qcow2").write_text("evidence")
+            (run / "process.json").write_text(json.dumps(
+                {"pid": 999999, "starttime": "1",
+                 "scope_unit": "crq-vm-test.scope"}))
+            payload = vm.stop_owned_process(
+                {"run_id": "r1", "path": str(run)}, purge=True)
+            self.assertTrue(payload["stopped"])
+            self.assertFalse((run / "overlay.qcow2").exists())
+
+    def test_cmd_boot_accepts_a_prepared_run(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state, run = self._prepared(temporary)
+            args = type("Args", (), {"state_dir": str(state), "run_id": "r1",
+                                     "tools": None})()
+            with mock.patch.object(vm, "boot", return_value={"pid": 1}) as boot, \
+                 mock.patch.object(vm, "wait_ssh", return_value={}), \
+                 mock.patch.object(vm, "upload_guest_probe"):
+                self.assertEqual(vm.cmd_boot(args), 0)
+                boot.assert_called_once()
+
+    def test_destroy_refuses_mismatched_live_process(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state, run = self._prepared(temporary)
+            (run / "overlay.qcow2").write_text("evidence")
+            (run / "process.json").write_text(json.dumps(
+                {"pid": os.getpid(), "starttime": "0",
+                 "scope_unit": "crq-vm-test.scope"}))
+            with self.assertRaises(RuntimeError):
+                vm.stop_owned_process(
+                    {"run_id": "r1", "path": str(run)}, purge=False)
+
+    def test_cmd_run_cleans_up_after_failure(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state, run = self._prepared(temporary)
+            args = type("Args", (), {"state_dir": str(state), "tools": None,
+                                     "keep": False})()
+            image = {"name": "image", "path": "/image", "sha256": DIGEST,
+                     "sums_sha256": DIGEST, "sums_verified": True,
+                     "signature_verified": False, "downloaded": False}
+            with mock.patch.object(vm, "fetch_image", return_value=image), \
+                 mock.patch.object(vm, "prepare_run", return_value={
+                     "run_id": "r1", "path": str(run), "port": 2222,
+                     "started_at": "now"}), \
+                 mock.patch.object(vm, "host_stamp",
+                                   return_value={"kvm_writable": True}), \
+                 mock.patch.object(vm, "boot", return_value={
+                     "pid": 1, "starttime": "1", "scope_unit": "s.scope"}), \
+                 mock.patch.object(vm, "wait_ssh",
+                                   side_effect=RuntimeError("SSH never ready")), \
+                 mock.patch.object(vm, "stop_owned_process",
+                                   return_value={"stopped": True}) as stop:
+                with self.assertRaises(RuntimeError):
+                    vm.cmd_run(args)
+                stop.assert_called_once_with(
+                    {"run_id": "r1", "path": str(run), "port": 2222,
+                     "started_at": "now"}, purge=False)
+
+    def test_uptime_is_not_a_pid(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = pathlib.Path(temporary) / "uptime"
+            path.write_text("123.45 678.90\n")
+            self.assertEqual(vm.read_uptime(str(path)), 123.45)
+            self.assertIsNone(vm.read_uptime(str(path) + ".missing"))
+
+
 class EvidenceTests(unittest.TestCase):
     def _snapshot(self, pid, invocation, boot, load_state="masked",
                   link="/dev/null", active="active"):
@@ -195,6 +297,9 @@ class EvidenceTests(unittest.TestCase):
                                      "UnitFileState": "enabled"},
             },
         }
+
+    def _refusals(self):
+        return {"direct": {"rc": 1}, "dependency": {"rc": 1}}
 
     def _phases(self):
         return {
@@ -231,9 +336,11 @@ class EvidenceTests(unittest.TestCase):
     def test_all_checks_proven(self):
         phases = self._phases()
         manager = {"before": self._snapshot(10, "i1", "boot-1"),
-                   "after": self._snapshot(11, "i2", "boot-1")}
+                   "after": self._snapshot(11, "i2", "boot-1"),
+                   "after_phase": self._refusals()}
         reboot = {"before": self._snapshot(11, "i2", "boot-1"),
                   "after": self._snapshot(12, "i3", "boot-2"),
+                  "after_phase": self._refusals(),
                   "boot_id_before": "boot-1", "boot_id_after": "boot-2",
                   "qemu_pid_before": 99, "qemu_pid_after": 99,
                   "qemu_identity_verified": True}
@@ -254,9 +361,11 @@ class EvidenceTests(unittest.TestCase):
     def test_report_requires_every_boundary(self):
         phases = self._phases()
         manager = {"before": self._snapshot(10, "i1", "boot-1"),
-                   "after": self._snapshot(11, "i2", "boot-1")}
+                   "after": self._snapshot(11, "i2", "boot-1"),
+                   "after_phase": self._refusals()}
         reboot = {"before": self._snapshot(11, "i2", "boot-1"),
                   "after": self._snapshot(12, "i3", "boot-2"),
+                  "after_phase": self._refusals(),
                   "boot_id_before": "boot-1", "boot_id_after": "boot-2",
                   "qemu_pid_before": 99, "qemu_pid_after": 99,
                   "qemu_identity_verified": True}
@@ -276,12 +385,58 @@ class EvidenceTests(unittest.TestCase):
         self.assertIn("checksum must not be claimed as signed authenticity",
                       vm.report_problems(bad))
 
+    def test_missing_observations_fail_closed(self):
+        phases = self._phases()
+        del phases["mask"]["run_delta"]
+        phases["activation"].pop("queued_run_delta")
+        phases["activation"].pop("queued2_run_delta")
+        manager = {"before": self._snapshot(10, "i1", "boot-1"),
+                   "after": self._snapshot(11, "i2", "boot-1"),
+                   "after_phase": self._refusals()}
+        reboot = {"before": self._snapshot(11, "i2", "boot-1"),
+                  "after": self._snapshot(12, "i3", "boot-2"),
+                  "after_phase": self._refusals(),
+                  "boot_id_before": "boot-1", "boot_id_after": "boot-2",
+                  "qemu_pid_before": 99, "qemu_pid_after": 99,
+                  "qemu_identity_verified": True}
+        checks = vm.build_checks(phases, manager, reboot)
+        self.assertFalse(checks["run_after_trigger_observed"])
+        self.assertFalse(checks["no_run_after_trigger"])
+        self.assertFalse(checks["queued_observations_present"])
+        self.assertIsNone(checks["queued_job_executed_after_mask"])
+        self.assertIsNone(checks["queued_job_executed_after_stop"])
+        report = {"schema_version": 1,
+                  "image": {"sha256": DIGEST, "sums_verified": True,
+                            "signature_verified": False},
+                  "checks": checks, "limitations": ["limited"]}
+        problems = vm.report_problems(report)
+        self.assertIn("check not proven: run_after_trigger_observed", problems)
+        self.assertIn("check not proven: queued_observations_present", problems)
+
+    def test_post_boundary_activation_refusal_is_required(self):
+        phases = self._phases()
+        manager = {"before": self._snapshot(10, "i1", "boot-1"),
+                   "after": self._snapshot(11, "i2", "boot-1"),
+                   "after_phase": {"direct": {"rc": 0},
+                                   "dependency": {"rc": 1}}}
+        reboot = {"before": self._snapshot(11, "i2", "boot-1"),
+                  "after": self._snapshot(12, "i3", "boot-2"),
+                  "after_phase": {"direct": {"rc": 1},
+                                  "dependency": {"rc": 0}},
+                  "boot_id_before": "boot-1", "boot_id_after": "boot-2",
+                  "qemu_pid_before": 99, "qemu_pid_after": 99,
+                  "qemu_identity_verified": True}
+        checks = vm.build_checks(phases, manager, reboot)
+        self.assertFalse(checks["mask_persisted"])
+
     def test_same_boot_or_manager_fails(self):
         phases = self._phases()
         manager = {"before": self._snapshot(10, "i1", "boot-1"),
-                   "after": self._snapshot(10, "i1", "boot-1")}
+                   "after": self._snapshot(10, "i1", "boot-1"),
+                   "after_phase": self._refusals()}
         reboot = {"before": self._snapshot(10, "i1", "boot-1"),
                   "after": self._snapshot(11, "i2", "boot-1"),
+                  "after_phase": self._refusals(),
                   "qemu_pid_before": 99, "qemu_pid_after": 99,
                   "qemu_identity_verified": True}
         checks = vm.build_checks(phases, manager, reboot)
@@ -294,9 +449,11 @@ class EvidenceTests(unittest.TestCase):
             "type": "file", "mode": "0o664", "uid": 1000, "gid": 1000,
             "sha256": "c" * 64}
         manager = {"before": self._snapshot(10, "i1", "boot-1"),
-                   "after": self._snapshot(11, "i2", "boot-1")}
+                   "after": self._snapshot(11, "i2", "boot-1"),
+                   "after_phase": self._refusals()}
         reboot = {"before": self._snapshot(11, "i2", "boot-1"),
                   "after": self._snapshot(12, "i3", "boot-2"),
+                  "after_phase": self._refusals(),
                   "boot_id_before": "boot-1", "boot_id_after": "boot-2",
                   "qemu_pid_before": 99, "qemu_pid_after": 99,
                   "qemu_identity_verified": True}
@@ -308,9 +465,11 @@ class EvidenceTests(unittest.TestCase):
         phases = self._phases()
         phases["unmask"]["snapshot"]["files"]["/home/probe/fixture/record.sh"]["mode"] = "0o700"
         manager = {"before": self._snapshot(10, "i1", "boot-1"),
-                   "after": self._snapshot(11, "i2", "boot-1")}
+                   "after": self._snapshot(11, "i2", "boot-1"),
+                   "after_phase": self._refusals()}
         reboot = {"before": self._snapshot(11, "i2", "boot-1"),
                   "after": self._snapshot(12, "i3", "boot-2"),
+                  "after_phase": self._refusals(),
                   "boot_id_before": "boot-1", "boot_id_after": "boot-2",
                   "qemu_pid_before": 99, "qemu_pid_after": 99,
                   "qemu_identity_verified": True}
@@ -321,10 +480,12 @@ class EvidenceTests(unittest.TestCase):
     def test_reboot_metadata_change_is_reported(self):
         phases = self._phases()
         manager = {"before": self._snapshot(10, "i1", "boot-1"),
-                   "after": self._snapshot(11, "i2", "boot-1")}
+                   "after": self._snapshot(11, "i2", "boot-1"),
+                   "after_phase": self._refusals()}
         after = self._snapshot(12, "i3", "boot-2")
         after["files"]["/home/probe/fixture/record.sh"]["mode"] = "0o700"
         reboot = {"before": self._snapshot(11, "i2", "boot-1"), "after": after,
+                  "after_phase": self._refusals(),
                   "boot_id_before": "boot-1", "boot_id_after": "boot-2",
                   "qemu_pid_before": 99, "qemu_pid_after": 99,
                   "qemu_identity_verified": True}

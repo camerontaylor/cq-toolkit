@@ -274,7 +274,9 @@ def report_problems(report: dict) -> list[str]:
                  "native_mask_refused", "alias_native_mask_refused",
                  "alias_durable_mask_refused", "qemu_pid_unchanged",
                  "timer_refused_while_masked", "path_refused_while_masked",
-                 "no_run_after_trigger", "activator_states_after_reboot",
+                 "run_after_trigger_observed", "no_run_after_trigger",
+                 "activator_states_after_reboot", "run_log_observed_after_reboot",
+                 "metadata_observed", "queued_observations_present",
                  "no_new_service_after_reboot"):
         if checks.get(name) is not True:
             problems.append("check not proven: " + name)
@@ -332,6 +334,13 @@ class Recorder:
         return entry
 
 
+def read_uptime(path: str = "/proc/uptime") -> float | None:
+    try:
+        return float(pathlib.Path(path).read_text().split()[0])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
 def host_stamp() -> dict:
     load = pathlib.Path("/proc/loadavg").read_text().split()
     meminfo = pathlib.Path("/proc/meminfo").read_text()
@@ -339,7 +348,7 @@ def host_stamp() -> dict:
         "at": utc_now(),
         "hostname": socket.gethostname(),
         "kernel": os.uname().release,
-        "uptime_seconds": float(load[4]) if len(load) > 4 else None,
+        "uptime_seconds": read_uptime(),
         "load1": float(load[0]), "load5": float(load[1]), "load15": float(load[2]),
         "mem_available_kib": mem_available_kib(meminfo),
         "kvm_writable": os.access("/dev/kvm", os.W_OK),
@@ -448,18 +457,32 @@ def boot(run: dict, recorder: Recorder, tools: pathlib.Path | None,
                                start_new_session=True)
     recorder.append({"at": utc_now(), "argv": argv, "spawned_pid": process.pid,
                      "scope_unit": scope_unit})
-    deadline = time.time() + 30
-    pid_path = run_dir / "qemu.pid"
-    while time.time() < deadline and not pid_path.exists():
-        if process.poll() is not None:
-            raise RuntimeError("QEMU exited before writing its pid file; see qemu.log")
-        time.sleep(0.25)
-    if not pid_path.exists():
-        raise RuntimeError("QEMU did not write a pid file")
-    pid = int(pid_path.read_text().strip())
-    starttime = process_starttime(pid)
-    (run_dir / "process.json").write_text(json.dumps(
-        {"pid": pid, "starttime": starttime, "scope_unit": scope_unit}, indent=2) + "\n")
+    try:
+        deadline = time.time() + 30
+        pid_path = run_dir / "qemu.pid"
+        while time.time() < deadline and not pid_path.exists():
+            if process.poll() is not None:
+                raise RuntimeError("QEMU exited before writing its pid file; see qemu.log")
+            time.sleep(0.25)
+        if not pid_path.exists():
+            raise RuntimeError("QEMU did not write a pid file")
+        pid = int(pid_path.read_text().strip())
+        starttime = process_starttime(pid)
+        (run_dir / "process.json").write_text(json.dumps(
+            {"pid": pid, "starttime": starttime, "scope_unit": scope_unit},
+            indent=2) + "\n")
+    except BaseException:
+        subprocess.run(["systemctl", "--user", "stop", scope_unit],
+                       capture_output=True, text=True)
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                process.kill()
+        raise
+    finally:
+        log.close()
     return {"pid": pid, "starttime": starttime, "scope_unit": scope_unit,
             "spawned_pid": process.pid, "qemu": argv, "port": run["port"]}
 
@@ -647,7 +670,9 @@ def build_checks(phases: dict, manager: dict, reboot: dict) -> dict:
         not in (0, None),
         "path_refused_while_masked": (mask.get("path_start_while_masked") or {}).get("rc")
         not in (0, None),
-        "no_run_after_trigger": not (mask.get("run_delta") or []),
+        "run_after_trigger_observed": isinstance(mask.get("run_delta"), list),
+        "no_run_after_trigger": (isinstance(mask.get("run_delta"), list)
+                                 and not mask["run_delta"]),
         "timer_state_after_reboot":
         ((reboot.get("after") or {}).get("units", {}).get("crq-fixture.timer") or {})
         .get("ActiveState"),
@@ -659,10 +684,19 @@ def build_checks(phases: dict, manager: dict, reboot: dict) -> dict:
             .get("ActiveState")
             and ((reboot.get("after") or {}).get("units", {}).get("crq-fixture.path") or {})
             .get("ActiveState")),
-        "no_new_service_after_reboot": True,
+        "run_log_observed_after_reboot": (
+            isinstance((reboot.get("before") or {}).get("runs"), list)
+            and isinstance((reboot.get("after") or {}).get("runs"), list)),
+        "metadata_observed": (
+            isinstance((install.get("snapshot") or {}).get("files"), dict)
+            and isinstance((unmask.get("snapshot") or {}).get("files"), dict)
+            and isinstance((reboot.get("before") or {}).get("files"), dict)
+            and isinstance((reboot.get("after") or {}).get("files"), dict)),
+        "queued_observations_present": (
+            isinstance(activation.get("queued_run_delta"), list)
+            and isinstance(activation.get("queued2_run_delta"), list)),
         "queued_job_executed_after_mask": None,
-        "queued_job_executed_after_stop": "queued-fixture" in
-        (activation.get("queued2_run_delta") or []),
+        "queued_job_executed_after_stop": None,
         "native_mask_refused": (mask.get("native_mask") or {}).get("rc") not in (0, None),
         "alias_native_mask_refused": (mask.get("alias_native_mask") or {}).get("rc")
         not in (0, None),
@@ -670,10 +704,19 @@ def build_checks(phases: dict, manager: dict, reboot: dict) -> dict:
         not in (0, None),
         "qemu_pid_unchanged": (reboot.get("qemu_pid_before") == reboot.get("qemu_pid_after")
                                and reboot.get("qemu_identity_verified") is True),
-        "mask_persisted": (after_restart["unit"].get("LoadState") == "masked"
-                           and after_reboot["unit"].get("LoadState") == "masked"
-                           and after_restart["path"].get("link_target") == "/dev/null"
-                           and after_reboot["path"].get("link_target") == "/dev/null"),
+        "mask_persisted": (
+            after_restart["unit"].get("LoadState") == "masked"
+            and after_reboot["unit"].get("LoadState") == "masked"
+            and after_restart["path"].get("link_target") == "/dev/null"
+            and after_reboot["path"].get("link_target") == "/dev/null"
+            and (manager.get("after_phase") or {}).get("direct", {}).get("rc")
+            not in (0, None)
+            and (manager.get("after_phase") or {}).get("dependency", {}).get("rc")
+            not in (0, None)
+            and (reboot.get("after_phase") or {}).get("direct", {}).get("rc")
+            not in (0, None)
+            and (reboot.get("after_phase") or {}).get("dependency", {}).get("rc")
+            not in (0, None)),
         "manager_restarted": (
             (manager.get("before") or {}).get("manager", {}).get("pid")
             != (manager.get("after") or {}).get("manager", {}).get("pid")
@@ -695,13 +738,18 @@ def build_checks(phases: dict, manager: dict, reboot: dict) -> dict:
                                   .get("crq-fixture.path") or {})
                                  .get("UnitFileState") == "enabled"),
     }
-    delta = activation.get("queued_run_delta") or []
-    checks["queued_job_executed_after_mask"] = "queued-fixture" in delta
-    before_runs = (reboot.get("before") or {}).get("runs") or []
-    after_runs = (reboot.get("after") or {}).get("runs") or []
-    new_runs = after_runs[len(before_runs):] if len(after_runs) >= len(before_runs) else after_runs
-    checks["no_new_service_after_reboot"] = not any(
-        entry.get("label") in ("service", "dependent", "alias") for entry in new_runs)
+    delta = activation.get("queued_run_delta")
+    if isinstance(delta, list):
+        checks["queued_job_executed_after_mask"] = "queued-fixture" in delta
+    delta2 = activation.get("queued2_run_delta")
+    if isinstance(delta2, list):
+        checks["queued_job_executed_after_stop"] = "queued-fixture" in delta2
+    before_runs = (reboot.get("before") or {}).get("runs")
+    after_runs = (reboot.get("after") or {}).get("runs")
+    if isinstance(before_runs, list) and isinstance(after_runs, list):
+        new_runs = after_runs[len(before_runs):] if len(after_runs) >= len(before_runs) else after_runs
+        checks["no_new_service_after_reboot"] = not any(
+            entry.get("label") in ("service", "dependent", "alias") for entry in new_runs)
     return checks
 
 
@@ -745,16 +793,21 @@ def save_json(path: pathlib.Path, value) -> None:
 # -------------------------------------------------------------------- cli
 
 
-def load_run(state: pathlib.Path, run_id: str | None) -> dict:
+def load_run(state: pathlib.Path, run_id: str | None, *,
+             require_process: bool = True) -> dict:
     runs = sorted((state / "runs").glob("*")) if (state / "runs").is_dir() else []
     if not runs:
         raise ValueError("no runs under " + str(state / "runs"))
     run = runs[-1] if run_id is None else state / "runs" / run_id
-    if not (run / "process.json").exists():
+    if require_process and not (run / "process.json").exists():
         raise ValueError("run has no retained process identity: " + str(run))
-    return {"run_id": run.name, "path": str(run),
-            "port": json.loads((run / "run.json").read_text())["port"]
-            if (run / "run.json").exists() else None}
+    meta = {}
+    if (run / "run.json").exists():
+        try:
+            meta = json.loads((run / "run.json").read_text())
+        except (OSError, ValueError) as exc:
+            raise ValueError("unreadable run metadata: " + str(run / "run.json")) from exc
+    return {"run_id": run.name, "path": str(run), "port": meta.get("port")}
 
 
 def cmd_plan(args) -> int:
@@ -799,7 +852,7 @@ def cmd_prepare(args) -> int:
 
 def cmd_boot(args) -> int:
     state = pathlib.Path(args.state_dir).expanduser().resolve()
-    run = load_run(state, args.run_id)
+    run = load_run(state, args.run_id, require_process=False)
     if not run["port"]:
         run["port"] = free_port()
         save_json(pathlib.Path(run["path"]) / "run.json", run)
@@ -849,70 +902,111 @@ def cmd_run(args) -> int:
     image = fetch_image(state, recorder)
     run = prepare_run(state, image, recorder, args.tools)
     save_json(pathlib.Path(run["path"]) / "run.json", run)
-    recorder = Recorder(pathlib.Path(run["path"]))
-    stamp = host_stamp()
-    boot_info = boot(run, recorder, args.tools, stamp)
-    boot_info["ssh"] = wait_ssh(run, recorder)
-    upload_guest_probe(run, recorder)
-    phases = {"install": guest_phase(run, "install", recorder),
-              "activation": guest_phase(run, "activation", recorder),
-              "mask": guest_phase(run, "mask", recorder)}
-    stamps["after_mask"] = host_stamp()
-    manager = restart_manager(run, recorder)
-    phases["manager_restart"] = manager
-    save_json(pathlib.Path(run["path"]) / "phases" / "manager-restart.json", manager)
-    stamps["after_manager_restart"] = host_stamp()
-    reboot = reboot_guest(run, recorder)
-    phases["reboot"] = reboot
-    save_json(pathlib.Path(run["path"]) / "phases" / "reboot.json", reboot)
-    stamps["after_reboot"] = host_stamp()
-    phases["unmask"] = guest_phase(run, "unmask", recorder)
-    stamps["finish"] = host_stamp()
-    report = build_report(run, boot_info, phases, manager, reboot, stamps, image)
-    save_json(pathlib.Path(run["path"]) / "report.json", report)
-    problems = report_problems(report)
+    try:
+        recorder = Recorder(pathlib.Path(run["path"]))
+        stamp = host_stamp()
+        boot_info = boot(run, recorder, args.tools, stamp)
+        boot_info["ssh"] = wait_ssh(run, recorder)
+        upload_guest_probe(run, recorder)
+        phases = {"install": guest_phase(run, "install", recorder),
+                  "activation": guest_phase(run, "activation", recorder),
+                  "mask": guest_phase(run, "mask", recorder)}
+        stamps["after_mask"] = host_stamp()
+        manager = restart_manager(run, recorder)
+        phases["manager_restart"] = manager
+        save_json(pathlib.Path(run["path"]) / "phases" / "manager-restart.json", manager)
+        stamps["after_manager_restart"] = host_stamp()
+        reboot = reboot_guest(run, recorder)
+        phases["reboot"] = reboot
+        save_json(pathlib.Path(run["path"]) / "phases" / "reboot.json", reboot)
+        stamps["after_reboot"] = host_stamp()
+        phases["unmask"] = guest_phase(run, "unmask", recorder)
+        stamps["finish"] = host_stamp()
+        report = build_report(run, boot_info, phases, manager, reboot, stamps, image)
+        save_json(pathlib.Path(run["path"]) / "report.json", report)
+        problems = report_problems(report)
+    except BaseException:
+        if not args.keep:
+            try:
+                stop_owned_process(run, purge=False)
+            except Exception as cleanup_error:
+                print("cleanup after failed run did not complete: %s"
+                      % cleanup_error, file=sys.stderr)
+        raise
     print(json.dumps({"run": run["run_id"], "path": run["path"],
                       "problems": problems, "checks": report["checks"]},
                      indent=2, sort_keys=True))
     if args.keep:
         return 0 if not problems else 1
-    stop_owned_process(run, purge=False)
+    cleanup = stop_owned_process(run, purge=False)
+    if not cleanup["stopped"]:
+        print(json.dumps({"cleanup": cleanup, "problems": problems},
+                         indent=2, sort_keys=True))
+        return 1
     return 0 if not problems else 1
 
 
 def stop_owned_process(run: dict, *, purge: bool) -> dict:
     run_dir = pathlib.Path(run["path"])
-    identity = json.loads((run_dir / "process.json").read_text())
-    needle = str(run_dir / "overlay.qcow2")
-    if not process_matches(identity["pid"], identity["starttime"], needle):
-        raise RuntimeError("refusing to stop an unverified process: %s"
-                           % identity["pid"])
-    scope_unit = identity["scope_unit"]
-    if not scope_unit.endswith(".scope"):
+    identity_path = run_dir / "process.json"
+    identity = None
+    if identity_path.exists():
+        try:
+            identity = json.loads(identity_path.read_text())
+        except (OSError, ValueError) as exc:
+            raise RuntimeError("unreadable process identity: " + str(identity_path)) from exc
+    pid = identity.get("pid") if isinstance(identity, dict) else None
+    scope_unit = identity.get("scope_unit") if isinstance(identity, dict) else None
+    if identity is not None and (not isinstance(pid, int)
+                                 or not isinstance(scope_unit, str)
+                                 or not scope_unit):
+        raise RuntimeError("invalid process identity: " + str(identity_path))
+    if scope_unit and not scope_unit.endswith(".scope"):
         scope_unit += ".scope"
-    result = subprocess.run(["systemctl", "--user", "stop", scope_unit],
-                            capture_output=True, text=True)
-    deadline = time.time() + 30
-    while time.time() < deadline and pathlib.Path("/proc/%d" % identity["pid"]).exists():
-        time.sleep(0.5)
-    stopped = not pathlib.Path("/proc/%d" % identity["pid"]).exists()
+    needle = str(run_dir / "overlay.qcow2")
+    stopped = True
+    stop_rc = None
+    if identity is not None:
+        alive = pathlib.Path("/proc/%d" % pid).exists()
+        if alive:
+            if not process_matches(pid, identity.get("starttime"), needle):
+                raise RuntimeError("refusing to stop an unverified process: %s" % pid)
+            if scope_unit:
+                result = subprocess.run(["systemctl", "--user", "stop", scope_unit],
+                                        capture_output=True, text=True)
+                stop_rc = result.returncode
+            deadline = time.time() + 30
+            while time.time() < deadline and pathlib.Path("/proc/%d" % pid).exists():
+                time.sleep(0.5)
+            stopped = not pathlib.Path("/proc/%d" % pid).exists()
+        elif scope_unit:
+            result = subprocess.run(["systemctl", "--user", "stop", scope_unit],
+                                    capture_output=True, text=True)
+            stop_rc = result.returncode
     trashed = None
-    if purge:
-        trash = run_dir.parent.parent / "trash" / (run["run_id"] + "-" + utc_now().replace(":", ""))
+    if purge and stopped:
+        trash = (run_dir.parent.parent / "trash"
+                 / (run["run_id"] + "-" + utc_now().replace(":", "")
+                    + "-" + uuid.uuid4().hex[:8]))
         trash.mkdir(parents=True, exist_ok=False)
+        moved = False
         for name in ("overlay.qcow2", "seed.iso", SSH_KEY, SSH_KEY + ".pub",
                      "known_hosts"):
             source = run_dir / name
             if source.exists() or source.is_symlink():
                 shutil.move(str(source), str(trash / name))
-        trashed = str(trash)
-    return {"scope_unit": scope_unit, "pid": identity["pid"],
-            "stop_rc": result.returncode, "stopped": stopped, "trash": trashed}
+                moved = True
+        if moved:
+            trashed = str(trash)
+        else:
+            trash.rmdir()
+    return {"scope_unit": scope_unit, "pid": pid,
+            "stop_rc": stop_rc, "stopped": stopped, "trash": trashed}
 
 
 def cmd_destroy(args) -> int:
     state = pathlib.Path(args.state_dir).expanduser().resolve()
-    run = load_run(state, args.run_id)
+    run = load_run(state, args.run_id, require_process=False)
     payload = stop_owned_process(run, purge=args.purge)
     print(json.dumps(payload, indent=2, sort_keys=True))
     return 0 if payload["stopped"] else 1
