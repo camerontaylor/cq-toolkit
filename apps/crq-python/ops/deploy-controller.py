@@ -1614,7 +1614,9 @@ def main(argv=None) -> int:
 
     root = args.root.resolve()
     helper_path = args.helper or (root / "apps/crq-python/ops/prepare-host.py")
-    effects = Effects(root, args.record_dir.resolve())
+    # Absolute without resolving: record_preflight() must still see a symlinked
+    # --record-dir and refuse it instead of writing journals to its target.
+    effects = Effects(root, Path(os.path.abspath(args.record_dir)))
 
     try:
         # Identity first, then the controller lock, then preflight (#549).
