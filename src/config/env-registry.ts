@@ -13,7 +13,34 @@ import {
   parseRunTool,
 } from './parsers.js';
 import { isSecretEnvName } from './secret.js';
-import { ACCEPT_STATES, ASSOCIATIONS, BOT_ENTRY_RE, POSTURE_LIST, isPosture } from './values.js';
+import {
+  ACCEPT_STATES,
+  ASSOCIATIONS,
+  BOT_ENTRY_RE,
+  POSTURE_LIST,
+  stripRefsHeads,
+  isPosture,
+} from './values.js';
+
+/**
+ * A git branch name in the conservative refname grammar the merge op schemas
+ * use. A leading `refs/heads/` is stripped so the stored value is always the
+ * bare name and every comparison sees one spelling.
+ */
+const branchName =
+  (key: string) =>
+  (raw: string): string => {
+    const v = stripRefsHeads(raw.trim());
+    if (
+      v === '' ||
+      v.length > 250 ||
+      !/^[A-Za-z0-9._][A-Za-z0-9._/-]*$/.test(v) ||
+      v.includes('..')
+    ) {
+      throw new Error(`${key} must be a branch name, got '${raw.slice(0, 80)}'`);
+    }
+    return v;
+  };
 
 export type CqEnvKind = 'config' | 'identity' | 'test';
 /**
@@ -94,14 +121,8 @@ const epochMs: CqEnvParser = (raw) => {
   return value;
 };
 
-/** Runtime (shared/proc.ts, harness/surface.ts) splits on commas and whitespace. */
-const passthrough: CqEnvParser = (raw) =>
-  parsePassthrough(
-    raw
-      .split(/[,\s]+/)
-      .filter(Boolean)
-      .join(','),
-  );
+/** One grammar and deny set for every path: see `parsePassthrough`. */
+const passthrough: CqEnvParser = (raw) => parsePassthrough(raw);
 
 function entry(
   name: string,
@@ -146,7 +167,7 @@ export const CQ_ENV_ENTRIES: readonly CqEnvEntry[] = [
     text,
     'neutral',
     false,
-    'Snapshot scanner command for the review transport.',
+    'Snapshot scanner command for the review transport and review.submit (an explicit scanner input wins).',
   ),
   entry(
     'CQ_AUTHOR_SSH_ALIAS',
@@ -195,10 +216,18 @@ export const CQ_ENV_ENTRIES: readonly CqEnvEntry[] = [
   entry(
     'CQ_MERGE_BASE_BRANCH',
     'config',
-    text,
+    branchName('CQ_MERGE_BASE_BRANCH'),
     'conservative',
     true,
     'Base branch the self-merge flow targets.',
+  ),
+  entry(
+    'CQ_MERGE_PROTECTED_BRANCH',
+    'config',
+    branchName('CQ_MERGE_PROTECTED_BRANCH'),
+    'conservative',
+    true,
+    'Branch merge pushes may never target; plan data cannot override it (blank: main).',
   ),
   entry(
     'CQ_MERGE_PROTECTED_PATHS',

@@ -29,6 +29,8 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parent
 CRQ = ROOT / 'crq.py'
+CQ_SNAPSHOT = {'source_sha': 'a' * 40, 'source_blob_sha': 'b' * 40, 'finding_sha256': 'c' * 64,
+               'path': 'a', 'line_start': 1, 'line_end': 1, 'source': '1: x', 'incomplete': False}
 
 
 def _load(name, path):
@@ -61,6 +63,33 @@ class WorkRecordTest(unittest.TestCase):
             crq.append_work_record({'type': 'work-started', 'workId': 'w1'})
         ev.assert_called_once()
         self.assertEqual(ev.call_args.args[0], 'work_record_failed')
+
+
+class CodexLogFailureTest(unittest.TestCase):
+    def test_broken_log_and_stderr_do_not_interrupt_either_pipe(self):
+        """Keep every line when both the log and failure diagnostic reject writes."""
+        for log_error in (OSError, ValueError):
+            for report_error in (OSError, ValueError):
+                with self.subTest(log_error=log_error, report_error=report_error):
+                    lines = ['event-one\n', 'event-two\n']
+                    errors = ['error-one\n', 'error-two\n']
+                    process = mock.Mock(stdout=io.StringIO(''.join(lines)),
+                                        stderr=io.StringIO(''.join(errors)), returncode=0)
+                    log = mock.MagicMock()
+                    log.__enter__.return_value = log
+                    log.write.side_effect = [None] + [log_error('broken log')] * 4
+                    stderr = mock.Mock()
+                    stderr.write.side_effect = report_error('broken stderr')
+                    with mock.patch.object(codex, 'open', return_value=log), \
+                         mock.patch.object(codex.subprocess, 'Popen', return_value=process), \
+                         mock.patch.object(codex.os, 'killpg'), \
+                         mock.patch.object(codex.sys, 'stderr', stderr), \
+                         mock.patch.object(threading, 'excepthook') as thread_error:
+                        result = codex._stream_codex([], None, None, 1, 'driver.log')
+                    self.assertEqual(result, (0, lines, ''.join(errors), False))
+                    self.assertEqual(log.write.call_count, 5)
+                    self.assertEqual(stderr.write.call_count, 2)
+                    thread_error.assert_not_called()
 
 
 class CodexStreamTest(unittest.TestCase):
@@ -313,7 +342,7 @@ class CqSessionsDirTest(unittest.TestCase):
         config = {'repo': 'o/r', 'repair': {'cq_bin': 'cq.js',
                                             'budget': {'max_tokens': 1, 'wall_clock_min': 1}}}
         job = {'job': 'j', 'pr': 1, 'finding': {'path': 'a', 'line': 1, 'body': 'b'},
-               'source_snapshot': {}}
+               'source_snapshot': CQ_SNAPSHOT}
         with tempfile.TemporaryDirectory() as tmp:
             job_dir = Path(tmp) / 'job'
             job_dir.mkdir()
@@ -371,6 +400,29 @@ class CqSessionsDirTest(unittest.TestCase):
         session, _ = self._run(True, value_sid='s-value')
         self.assertEqual(session['sessionId'], 's-value')
 
+    def test_retry_attributes_only_the_new_session(self):
+        cqd = _load('crq_cq_retry_driver', ROOT / 'crq_repair' / 'drivers' / 'cq.py')
+        config = {'repo': 'o/r', 'repair': {'cq_bin': 'cq.js',
+                  'budget': {'max_tokens': 1, 'wall_clock_min': 1}}}
+        job = {'job': 'j', 'finding': {'path': 'a', 'line': 1, 'body': 'b'}, 'source_snapshot': CQ_SNAPSHOT}
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            sessions = directory / 'sessions'
+            sessions.mkdir()
+            (sessions / 'old.jsonl').write_text('{}\n')
+            def run(create):
+                def command(*args, **kwargs):
+                    if create:
+                        (sessions / 'new.jsonl').write_text('{}\n')
+                    return mock.Mock(returncode=0, stdout='{"status":"ok","value":{}}', stderr='')
+                with mock.patch.object(cqd, 'command', command):
+                    cqd.invoke(config, {'model': 'p/m'}, job, directory, directory)
+                return json.loads((directory / 'session.json').read_text())
+            self.assertIsNone(run(False)['sessionId'])
+            session = run(True)
+            self.assertEqual(session['sessionId'], 'new')
+            self.assertEqual(session['sessionIds'], ['new', 'old'])
+
 
 class CqTimeoutLogTest(unittest.TestCase):
     """A wall-clock kill keeps its invocation output in driver.log."""
@@ -386,7 +438,7 @@ class CqTimeoutLogTest(unittest.TestCase):
     def test_invoke_logs_the_timed_out_invocation(self):
         cqd = _load('crq_cq_driver_timeout', ROOT / 'crq_repair' / 'drivers' / 'cq.py')
         job = {'job': 'j', 'pr': 1, 'finding': {'path': 'a', 'line': 1, 'body': 'b'},
-               'source_snapshot': {}}
+               'source_snapshot': CQ_SNAPSHOT}
         with tempfile.TemporaryDirectory() as tmp:
             directory = Path(tmp)
             with mock.patch.object(cqd, 'command', side_effect=self._timeout()):

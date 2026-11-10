@@ -115,7 +115,7 @@ def execute(c, args):
         repo.git("fetch", "--no-tags", "origin", DEFAULT_FETCH_REFSPEC)
         tip = repo.git("rev-parse", DEFAULT_REF + "^{commit}").decode().strip()
         return inbox.triage(args.finding, repo, tip, args.action, args.operator, args.reason, c.iso(),
-                            fixing_commit=args.fixing_commit, canonical_id=args.canonical_id)
+                            fixing_commit=args.fixing_commit, canonical_id=args.canonical_id, reviews=publisher.fetch()[1])
     if args.command == "deliver":
         def scan(target, name):
             base, head = runtime.subjects.projection(repo, target, [name])
@@ -193,18 +193,22 @@ def inventory_unlocked(c, args, clock=time.monotonic):
 
 
 def collect_history_unlocked(c, args):
-    """Snapshot the queue under the lock; run the slow GitHub collection outside it."""
-    taken = c.with_lock(lambda: (copy.deepcopy(c.load_queue()), runtime.settings(c.STATE)), lock_wait=30)
-    if taken is None:
-        return None
-    queue, config = taken
-    if not config:
-        raise ledger.IntegrityError("owner-provisioned rollout configuration is absent")
-    _, store, _, _ = runtime.services(c, config)
-    from backfill_history import collect_sources, github_sources
-    value = collect_sources(queue, c.STATE, store, github=(lambda: github_sources(store)) if args.github else None)
-    ledger.atomic(args.output, ledger.canonical(value))
-    return {"catalog": args.output, "sources": len(value["sources"]), "acquisition": value["acquisition"]}
+    """Own the output across collection; hold the queue lock only to snapshot."""
+    output = Path(args.output).resolve()
+    # Keep the sidecar inode: unlinking it would split exclusion. Canonical
+    # output identity coordinates collectors even across CRQ state directories.
+    with ledger.locked(output.with_name("." + output.name + ".collect-history.lock")):
+        taken = c.with_lock(lambda: (copy.deepcopy(c.load_queue()), runtime.settings(c.STATE)), lock_wait=30)
+        if taken is None:
+            return None
+        queue, config = taken
+        if not config:
+            raise ledger.IntegrityError("owner-provisioned rollout configuration is absent")
+        _, store, _, _ = runtime.services(c, config)
+        from backfill_history import collect_sources, github_sources
+        value = collect_sources(queue, c.STATE, store, github=(lambda: github_sources(store)) if args.github else None)
+        ledger.atomic(output, ledger.canonical(value))
+        return {"catalog": args.output, "sources": len(value["sources"]), "acquisition": value["acquisition"]}
 
 
 def main():

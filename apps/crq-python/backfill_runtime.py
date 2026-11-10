@@ -165,6 +165,13 @@ def select(c, queue, log, dry, only):
     # A rollout owns the rank-4 lane; the path-count-only fallback cannot launch
     # outside the ledger accounting once the new mechanism is enabled.
     items = [j for j in queue["items"] if j.get("kind") == jobs.KIND and (not only or only == j["id"])]
+    # Terminal refusals cannot become eligible again merely to retry publication.
+    for item in items:
+        pending_event = item.get("refusal_state_event")
+        if pending_event and not dry:
+            state_event(c, queue, item, pending_event["at"], pending_event["reason"])
+            del item["refusal_state_event"]
+            c.save_queue(queue)
     items.sort(key=lambda j: (j["tier_importance"], j.get("retry", False), j["subject_kind"],
                              j.get("row") or 0 if j["subject_kind"] == "A" else -j["score"], j["subject_id"]))
     pending = [j for j in items if jobs.eligible(queue, j, c.iso())]
@@ -259,6 +266,7 @@ def select(c, queue, log, dry, only):
         plan = {"base": item["base"], "head": item["head"], "target": item["target"], "cycle": None,
                 "branch": None, "notes": [], "label": "pinned scoped backfill", "range_policy": "backfill-current-scoped-v1"}
         run_bound = False
+        terminal_recorded = False
         try:
             run_id = c.launch(queue, item, plan)
             if item.get("state") == "reviewing":
@@ -271,10 +279,14 @@ def select(c, queue, log, dry, only):
             if not item.get("run"):
                 jobs.cancel_before_vendor(queue, item)
             jobs.terminal(queue, item, c.iso(), "secret-scan", vendor_terminal=not bool(item.get("run")), reason=item.get("last_error", "launch refused"))
-            state_event(c, queue, item, c.iso(), "launch refused before vendor binding")
+            terminal_recorded = True
+            item["refusal_state_event"] = {"at": c.iso(), "reason": "launch refused before vendor binding"}
+            c.save_queue(queue)
+            state_event(c, queue, item, item["refusal_state_event"]["at"], item["refusal_state_event"]["reason"])
+            del item["refusal_state_event"]
             c.save_queue(queue)
         except Exception:
-            if not run_bound:
+            if not run_bound and not terminal_recorded:
                 item.update(state="launch-unknown", vendor_state="unknown")
             c.save_queue(queue)
             raise
@@ -318,17 +330,7 @@ def completion_event(repo, store, item, raw, exit_code, meta, ended_at, submissi
             # whose vendor anchor is absent or outside the pinned repository.
             intervals = []
         else:
-            lines = set()
-            try:
-                for start, end in value.get("intervals") or []:
-                    if type(start) is not int or type(end) is not int or not 1 <= start <= end <= 1_000_000:
-                        raise ValueError("invalid vendor interval")
-                    lines.update(range(start, end + 1))
-                    if len(lines) > 1_000_000:
-                        raise ValueError("vendor interval bound")
-                intervals = accounting.ranges(lines)
-            except (TypeError, ValueError):
-                intervals = []
+            intervals = history.finding_intervals(value)
         normalized = {"source_id": str(value["id"]) if value.get("id") is not None else None, "severity": value.get("severity", "info"), "path": name,
                       "blob": entries.get(name, {}).get("blob"), "intervals": intervals,
                       "title": value.get("title") or "Unverified vendor finding anchor",
@@ -586,7 +588,7 @@ def run_inventory(c, queue, *, required_paths=None, members=None, fetch=True, en
     queue["backfill_finding_backlog"] = dict(sorted(statuses.items()))
     baseline_file = c.STATE / "backfill/baseline.json"
     original = ledger.loads(baseline_file.read_bytes()) if baseline_file.exists() else None
-    report = reporting.summary(repo, ranked, queue, original)
+    report = reporting.summary(repo, ranked, queue, original, findings_root=c.STATE / "backfill/findings")
     report["construction_debt"] = debt
     if prepare_only:
         return {"queue": queue, "manifest": manifest, "ranked": ranked, "report": report, "event_items": event_items}

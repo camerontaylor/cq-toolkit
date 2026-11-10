@@ -4,8 +4,8 @@
 import { realpathSync, statSync } from 'node:fs';
 import type { CqEnv } from '../../config/env.js';
 import { buildChildEnv } from '../../shared/proc.js';
-import { buildSandboxLauncherEnv, harnessRunGate } from '../../sandbox/index.js';
-import { createHarnessSurface, HarnessManifestSchema } from '../surface.js';
+import { LauncherEnvError, buildSandboxLauncherEnv, harnessRunGate } from '../../sandbox/index.js';
+import { createHarnessSurface, parseManifest } from '../surface.js';
 import type { HarnessManifest, HarnessSurface } from '../surface.js';
 
 /** The startup-refusal exit status (sysexits EX_CONFIG). */
@@ -31,7 +31,7 @@ export function checkStartup(argv: readonly string[]): StartupResult {
   }
   let manifest: HarnessManifest;
   try {
-    manifest = HarnessManifestSchema.parse(JSON.parse(argv[0] as string));
+    manifest = parseManifest(JSON.parse(argv[0] as string));
   } catch (err) {
     return { ok: false, reason: `invalid manifest: ${oneLine(err)}` };
   }
@@ -52,6 +52,9 @@ export function checkStartup(argv: readonly string[]): StartupResult {
   try {
     return { ok: true, manifest, surface: createHarnessSurface(manifest) };
   } catch (err) {
+    // An env-name refusal is not a surface defect: say what it is.
+    if (err instanceof LauncherEnvError)
+      return { ok: false, reason: `invalid env: ${oneLine(err)}` };
     return { ok: false, reason: `surface mismatch: ${oneLine(err)}` };
   }
 }
@@ -63,7 +66,10 @@ export function scrubEnvironment(envNames: readonly string[], cqEnv?: CqEnv): vo
   // Validate the final run-child names through the sandbox scrub. This rejects
   // CQ_* policy knobs before process.env is replaced; otherwise a manifest
   // could smuggle one through and only fail later when the run tool executes.
-  buildSandboxLauncherEnv(process.env, { envPassthrough: explicitNames });
+  buildSandboxLauncherEnv(process.env, {
+    envPassthrough: gate.envPassthrough,
+    declaredEnvNames: envNames,
+  });
 
   // buildChildEnv also reads CQ_RUN_ENV_PASSTHROUGH implicitly. Remove that
   // knob first so the MCP scrub uses ONLY the names resolved and validated

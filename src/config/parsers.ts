@@ -3,6 +3,9 @@
 // and a later value-import of readCqEnv by sandbox/selfhost cannot form a cycle.
 // The original modules re-export these, so existing callers are unchanged.
 
+import { isSecretEnvName } from './secret.js';
+import { urlValueRefused } from '../shared/urlRedact.js';
+
 export type SandboxMode = 'off' | 'required';
 /**
  * The requested egress posture of a sandboxed run child.
@@ -23,8 +26,6 @@ const BACKENDS = new Set<SandboxBackend>([
   'seatbelt',
   'cc-native',
 ]);
-
-const ENV_NAMES = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 /** Policy controls must never be copied into a model-directed child. */
 export const SANDBOX_POLICY_ENV_NAMES: ReadonlySet<string> = new Set([
@@ -64,20 +65,116 @@ export function parseRunTool(raw: string | undefined): 'on' | 'off' {
   throw new Error(`sandbox: CQ_RUN_TOOL must be 'on' or 'off', got '${raw}'`);
 }
 
+/** The POSIX/Windows-standard environment variable NAME shape. */
+export const ENV_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/**
+ * Names `CQ_RUN_ENV_PASSTHROUGH` may never copy into a run child (Annex B
+ * §B.5): credential-shaped names the subprocess allowlist excludes by design.
+ * `DATABASE_URL` and every other `*_URL` name are passable by NAME (`_URL` is
+ * not a secret suffix); their VALUE must pass the URL acceptance rule
+ * (`urlValueRefused`). Registry data: test/config/passthrough.test.ts checks it
+ * against `DEFAULT_CHILD_ENV_ALLOWLIST` and the vendor names the registry
+ * lists. Secret-suffixed names (`isSecretEnvName`), the `AWS_*` family and every
+ * `CQ_*` name (a nested cq could read trust config from one) are refused on top
+ * of this set.
+ */
+export const PASSTHROUGH_DENIED_NAMES: readonly string[] = Object.freeze([
+  'NPM_TOKEN',
+  'SSH_AUTH_SOCK',
+  'GOOGLE_APPLICATION_CREDENTIALS',
+  'NODE_OPTIONS',
+  'NODE_PATH',
+]);
+
+/**
+ * The names a TRUSTED (in-process, code-level) env allowlist may carry despite
+ * the credential refusal. Every other refusal still applies to that origin
+ * (credential-shaped names, every `CQ_*` name, the policy knobs). Frozen and
+ * explicit: adding a name needs a stated reason in ADR-0009 ("Origin of env
+ * names") and a change to test/harness/env-origin.test.ts, which pins this list.
+ */
+export const TRUSTED_ENV_EXEMPT_NAMES: readonly string[] = Object.freeze(['SSH_AUTH_SOCK']);
+
+/**
+ * The names a harness MANIFEST FILE's `envNames` may carry despite the
+ * credential and `CQ_*` refusals. Empty: no current non-test caller needs one
+ * (CQ_TEST_KEEP was only a test canary). Frozen; pinned by
+ * test/harness/env-origin.test.ts; a name needs a stated reason in ADR-0009.
+ */
+export const DECLARED_ENV_EXEMPT_NAMES: readonly string[] = Object.freeze([]);
+
+/**
+ * Refuse a passthrough VALUE that carries URL credentials. A `*_URL` name is
+ * allowed by name (`_URL` is not a secret suffix), but a value with userinfo
+ * (`user@host`, `user:pass@host`) is refused, failing closed when it does not
+ * parse. Applies to a URL-named variable and to any value with a scheme
+ * separator. The message names the VARIABLE only, never the value. Returns the
+ * reason text, or `undefined` when the value is fine.
+ */
+export function urlValueRefusal(name: string, value: string): string | undefined {
+  return urlValueRefused(name, value)
+    ? `value of '${name}' is not an acceptable URL (credentials, whitespace, backslash or unparseable); refused`
+    : undefined;
+}
+
+/** True when `name` has the env var NAME shape. */
+export function isEnvName(name: string): boolean {
+  return ENV_NAME_PATTERN.test(name);
+}
+
+/**
+ * Why a well-formed `name` is credential-shaped and may never reach a run
+ * child from ANY origin (operator passthrough or harness manifest), or
+ * `undefined`. Secret-suffixed names (which include every `*_URL`), the
+ * `AWS_*` family and the listed names. Names the NAME only.
+ */
+export function credentialRefusal(name: string): string | undefined {
+  const folded = name.toUpperCase();
+  if (
+    isSecretEnvName(name) ||
+    folded.startsWith('AWS_') ||
+    PASSTHROUGH_DENIED_NAMES.includes(folded)
+  ) {
+    return `may not expose credential-shaped name '${name}'`;
+  }
+  return undefined;
+}
+
+/**
+ * Why a well-formed `name` may not be passed through by the OPERATOR key
+ * (`CQ_RUN_ENV_PASSTHROUGH`): the credential refusal plus the sandbox policy
+ * knobs and every `CQ_*` name. A malformed token is the caller's to report
+ * (by position, never by text). Names the NAME only; a value never reaches here.
+ */
+export function passthroughRefusal(name: string): string | undefined {
+  const folded = name.toUpperCase();
+  if (SANDBOX_POLICY_ENV_NAMES.has(folded)) return `may not expose policy env '${name}'`;
+  if (folded.startsWith('CQ_')) return `may not expose CQ_* name '${name}'`;
+  return credentialRefusal(name);
+}
+
+/**
+ * The ONE grammar and deny check for `CQ_RUN_ENV_PASSTHROUGH`: names separated
+ * by commas and/or whitespace; blank means none. Every path (registry
+ * snapshot, sandbox config, child-env builder, launcher) goes through here, so
+ * a value is accepted or refused identically everywhere. Throws a config error
+ * naming the first offending name (or, for a malformed token, its position).
+ */
 export function parsePassthrough(raw: string | undefined): readonly string[] {
   if (raw === undefined || raw.trim() === '') return [];
-  const names = raw
-    .split(',')
-    .map((name) => name.trim())
-    .filter((name) => name !== '');
-  for (const name of names) {
-    if (!ENV_NAMES.test(name)) {
-      throw new Error(`sandbox: CQ_RUN_ENV_PASSTHROUGH contains invalid env name '${name}'`);
+  const names = raw.split(/[,\s]+/).filter((name) => name !== '');
+  names.forEach((name, index) => {
+    // A malformed token may be an operator's `NAME=value` slip: report its
+    // position only, never any part of the raw text.
+    if (!isEnvName(name)) {
+      throw new Error(
+        `sandbox: CQ_RUN_ENV_PASSTHROUGH entry ${index + 1} is not an env var name (names match ${String(ENV_NAME_PATTERN)})`,
+      );
     }
-    if (SANDBOX_POLICY_ENV_NAMES.has(name.toUpperCase())) {
-      throw new Error(`sandbox: CQ_RUN_ENV_PASSTHROUGH may not expose policy env '${name}'`);
-    }
-  }
+    const refusal = passthroughRefusal(name);
+    if (refusal !== undefined) throw new Error(`sandbox: CQ_RUN_ENV_PASSTHROUGH ${refusal}`);
+  });
   return [...new Set(names)];
 }
 

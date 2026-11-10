@@ -1,0 +1,738 @@
+{
+  "event_keys": {
+    "_unknown_key_count": 0,
+    "acknowledged_at": "str",
+    "agent": "str",
+    "at": "str",
+    "audit_at": "str",
+    "base": "str",
+    "batch": "str",
+    "blocking": [
+      "null",
+      "object"
+    ],
+    "body_only": "int",
+    "cycle": "int",
+    "description": "str",
+    "error": "str",
+    "event": "str",
+    "finding_id": "str",
+    "findings": "int",
+    "from": "str",
+    "gap_min": "int",
+    "head": "str",
+    "inline": "int",
+    "issue": "int",
+    "item": [
+      "null",
+      "str"
+    ],
+    "job": "str",
+    "label": "str",
+    "last_tick": "str",
+    "mode": "str",
+    "notes": "list",
+    "notified": "object",
+    "ordinary_gate": "object",
+    "origin_job": "str",
+    "outcome": "str",
+    "posted_state": "str",
+    "pr": "int",
+    "reason": [
+      "null",
+      "str"
+    ],
+    "reasons": "list",
+    "repo": "str",
+    "request": "str",
+    "review": [
+      "int",
+      "null"
+    ],
+    "reviewed_tip": "str",
+    "run": "str",
+    "severity": "object",
+    "sha": "str",
+    "source_sha": "str",
+    "state": "str",
+    "status": [
+      "object",
+      "str"
+    ],
+    "target": "str",
+    "text": "str",
+    "tip": "str",
+    "to": "str",
+    "verdict": "str",
+    "workflow": "str"
+  },
+  "event_type_count_bucket": "10-99",
+  "heartbeat_keys": {
+    "_unknown_key_count": 0,
+    "alert_agent_host": "str",
+    "alert_agent_id": "str",
+    "last_tick": "str",
+    "root": "str",
+    "schedule_id": "null",
+    "stale_alarm_min": "int"
+  },
+  "observed_on": "2026-11-09",
+  "policy": "Only allowlisted schema keys, JSON value types, code-enum item states and bucketed counts are retained. Exact zero is retained for unknown-key diagnostics; nonzero counts are bucketed. No scalar value, identifier, path, host, timestamp, free text, credential or config entry is written.",
+  "projection_sha256": "54b6d585fd95659b53e141dcd73b2af76a7d3859e4cf48787a230c8d1b49eab0",
+  "queue": {
+    "item_count_bucket": "1000+",
+    "item_keys_by_kind": {
+      "author": {
+        "_unknown_key_count": 0,
+        "attempts": "list",
+        "author": "object",
+        "author_cycles": "list",
+        "cycles": "list",
+        "failures": "int",
+        "id": "str",
+        "kind": "str",
+        "last_error": "null",
+        "notes": "list",
+        "order": "int",
+        "pr": "int",
+        "requested_at": "str",
+        "run": "null",
+        "state": "str",
+        "wait_reason": "null"
+      },
+      "backfill": {
+        "_unknown_key_count": 0,
+        "attempt": "int",
+        "attempt_id": "str",
+        "attempts": "list",
+        "base": "str",
+        "construction_policy_digest": "str",
+        "context": "object",
+        "coverage_satisfied_by": "str",
+        "created_at": "str",
+        "cycles": "list",
+        "diff_bytes": "int",
+        "dispatch_tier_importance": "str",
+        "failures": "int",
+        "family": "str",
+        "family_failures": "int",
+        "generation": "int",
+        "head": "str",
+        "head_tree": "str",
+        "id": "str",
+        "inventory_subject_id": "str",
+        "job_id": "str",
+        "kind": "str",
+        "last_error": "str",
+        "not_before": "str",
+        "notes": "list",
+        "partition": "int",
+        "path_lineages": "object",
+        "path_scores": "object",
+        "path_tiers": "object",
+        "paths": "list",
+        "pr": "int",
+        "prs": "list",
+        "publication_event_id": "str",
+        "published_event_id": "str",
+        "refs": "str",
+        "repo": "str",
+        "residual": "bool",
+        "retry": "bool",
+        "row": [
+          "int",
+          "null"
+        ],
+        "run": "null",
+        "scope": "list",
+        "scope_digest": "str",
+        "score": "int",
+        "state": "str",
+        "subject_id": "str",
+        "subject_kind": "str",
+        "target": "str",
+        "target_tree": "str",
+        "tier": "int",
+        "tier_importance": "str",
+        "vendor_state": "str",
+        "wait_reason": [
+          "null",
+          "str"
+        ]
+      },
+      "coverage": {
+        "_unknown_key_count": 0,
+        "attempt": "int",
+        "attempt_id": "str",
+        "attempts": "list",
+        "coverage_paths": "list",
+        "coverage_region": "str",
+        "coverage_sha": "str",
+        "coverage_source": "str",
+        "created_at": "str",
+        "cycles": "list",
+        "failures": "int",
+        "id": "str",
+        "kind": "str",
+        "last_error": [
+          "null",
+          "str"
+        ],
+        "measure": "object",
+        "merge_commit": "str",
+        "not_before": "str",
+        "notes": "list",
+        "order": "int",
+        "pr": "int",
+        "repair_runs": "object",
+        "run": "null",
+        "state": "str",
+        "tier": "int",
+        "vendor_state": "str",
+        "wait_reason": [
+          "null",
+          "str"
+        ]
+      },
+      "delta": {
+        "_unknown_key_count": 0,
+        "attempts": "list",
+        "cycles": "list",
+        "failures": "int",
+        "followup": "str",
+        "id": "str",
+        "kind": "str",
+        "last_error": [
+          "null",
+          "str"
+        ],
+        "merge_commit": "str",
+        "merged_at": "str",
+        "not_before": "str",
+        "notes": "list",
+        "order": "int",
+        "pr": "int",
+        "pr_review": "object",
+        "pr_review_attempt_at": "str",
+        "pr_review_attempts": "int",
+        "pr_review_pending": "bool",
+        "pr_review_request": "object",
+        "repair_runs": "object",
+        "repo": "str",
+        "run": "null",
+        "since": [
+          "null",
+          "str"
+        ],
+        "state": "str",
+        "wait_reason": [
+          "null",
+          "str"
+        ]
+      },
+      "local-review": {
+        "_unknown_key_count": 0,
+        "attempts": "list",
+        "completed_at": "str",
+        "created_at": "str",
+        "cycles": "list",
+        "depends_on": "list",
+        "failures": "int",
+        "generation": "int",
+        "id": "str",
+        "identity": "str",
+        "identity_inputs": "object",
+        "kind": "str",
+        "last_error": [
+          "null",
+          "str"
+        ],
+        "local_run_id": "str",
+        "notify": "list",
+        "observers": "list",
+        "order": "int",
+        "pr": "null",
+        "pr_observers": "list",
+        "profile": "object",
+        "publication_pending": "bool",
+        "publication_reason": "str",
+        "receipt_id": "str",
+        "repeat_requested": "bool",
+        "repo": "str",
+        "run": "null",
+        "scope_adequate": "bool",
+        "state": "str",
+        "wait_reason": "null"
+      },
+      "merged": {
+        "_unknown_key_count": 0,
+        "attempts": "list",
+        "cycles": "list",
+        "failures": "int",
+        "id": "str",
+        "kind": "str",
+        "last_error": [
+          "null",
+          "str"
+        ],
+        "measure": "object",
+        "merge_commit": "str",
+        "merged_at": "str",
+        "not_before": [
+          "null",
+          "str"
+        ],
+        "notes": "list",
+        "order": "int",
+        "owed_per_audit": "int",
+        "pr": "int",
+        "repair_runs": "object",
+        "run": "null",
+        "source": "str",
+        "state": "str",
+        "tier": "int",
+        "wait_reason": [
+          "null",
+          "str"
+        ]
+      },
+      "merged-current": {
+        "_unknown_key_count": 0,
+        "attempts": "list",
+        "capture": "object",
+        "created_at": "str",
+        "cycles": "list",
+        "depends_on": "list",
+        "failures": "int",
+        "id": "str",
+        "kind": "str",
+        "last_error": [
+          "null",
+          "str"
+        ],
+        "merge_commit": "str",
+        "operator_priority": "bool",
+        "order": "int",
+        "pr": "int",
+        "receipt_id": "str",
+        "remediation_state": "str",
+        "request_id": "str",
+        "reused_from": "str",
+        "run": "null",
+        "state": "str",
+        "subject": "object",
+        "wait_reason": [
+          "null",
+          "str"
+        ]
+      },
+      "open": {
+        "_unknown_key_count": 0,
+        "addressing": "null",
+        "attempts": "list",
+        "cycles": "list",
+        "depends_on": [
+          "null",
+          "str"
+        ],
+        "failures": "int",
+        "id": "str",
+        "issue": "object",
+        "issue_attempt_at": "str",
+        "issue_pending": "bool",
+        "issue_request": "object",
+        "kind": "str",
+        "last_error": [
+          "null",
+          "str"
+        ],
+        "last_push": "object",
+        "not_before": [
+          "null",
+          "str"
+        ],
+        "notes": "list",
+        "order": "int",
+        "pinned_base": "str",
+        "pr": "int",
+        "pr_review": "object",
+        "pr_review_attempt_at": "str",
+        "pr_review_attempts": "int",
+        "pr_review_pending": "bool",
+        "pr_review_request": "object",
+        "prior_base": [
+          "null",
+          "str"
+        ],
+        "prior_cycles": "int",
+        "repair_origin": "str",
+        "repair_runs": "object",
+        "repo": "str",
+        "run": "null",
+        "state": "str",
+        "target_ref": "str",
+        "tier": "int",
+        "voided_cycles": "list",
+        "voided_prior_cycles": "int",
+        "wait_reason": [
+          "null",
+          "str"
+        ]
+      },
+      "promotion": {
+        "_unknown_key_count": 0,
+        "attempts": "list",
+        "base_sha": "str",
+        "batch_sha": "str",
+        "blocking": "list",
+        "cycles": "list",
+        "dispatched": "str",
+        "failures": "int",
+        "gate_stalled_at": "str",
+        "id": "str",
+        "kind": "str",
+        "last_error": [
+          "null",
+          "str"
+        ],
+        "merges": "int",
+        "not_before": [
+          "null",
+          "str"
+        ],
+        "notes": "list",
+        "order": "int",
+        "pr": "int",
+        "repair_runs": "object",
+        "request": "object",
+        "reviewed_sha": [
+          "null",
+          "str"
+        ],
+        "run": "null",
+        "signer": "bool",
+        "signer_result": "object",
+        "state": "str",
+        "statuses": "list",
+        "success_at": "str",
+        "wait_reason": [
+          "null",
+          "str"
+        ]
+      },
+      "push-current": {
+        "_unknown_key_count": 0,
+        "attempts": "list",
+        "capture": "object",
+        "created_at": "str",
+        "cycles": "list",
+        "depends_on": "str",
+        "failures": "int",
+        "id": "str",
+        "issue": "object",
+        "issue_attempt_at": "str",
+        "issue_pending": "bool",
+        "issue_request": "object",
+        "kind": "str",
+        "last_error": [
+          "null",
+          "str"
+        ],
+        "notes": "list",
+        "order": "int",
+        "pr": "int",
+        "receipt_id": "str",
+        "repo": "str",
+        "run": "null",
+        "state": "str",
+        "subject": "object",
+        "wait_reason": [
+          "null",
+          "str"
+        ]
+      }
+    },
+    "item_kinds": [
+      "author",
+      "backfill",
+      "coverage",
+      "delta",
+      "local-review",
+      "merged",
+      "merged-current",
+      "open",
+      "promotion",
+      "push-current"
+    ],
+    "item_states": [
+      "blocked",
+      "done",
+      "no-current-code",
+      "pending",
+      "promoting",
+      "quarantined",
+      "rejected",
+      "repair_failed",
+      "retried",
+      "skipped"
+    ],
+    "item_states_by_kind": {
+      "author": [
+        "done"
+      ],
+      "backfill": [
+        "done",
+        "pending",
+        "quarantined"
+      ],
+      "coverage": [
+        "blocked",
+        "done",
+        "pending",
+        "repair_failed",
+        "skipped"
+      ],
+      "delta": [
+        "blocked",
+        "done",
+        "repair_failed",
+        "skipped"
+      ],
+      "local-review": [
+        "blocked",
+        "done"
+      ],
+      "merged": [
+        "done",
+        "repair_failed",
+        "skipped"
+      ],
+      "merged-current": [
+        "blocked",
+        "done",
+        "no-current-code"
+      ],
+      "open": [
+        "blocked",
+        "done",
+        "pending",
+        "repair_failed",
+        "skipped"
+      ],
+      "promotion": [
+        "done",
+        "promoting",
+        "rejected",
+        "retried"
+      ],
+      "push-current": [
+        "blocked",
+        "done",
+        "skipped"
+      ]
+    },
+    "top_level_keys": {
+      "_unknown_key_count": 0,
+      "archived_tick_runs": "list",
+      "author_requests": "object",
+      "backfill_admission_history_version": "int",
+      "backfill_admissions": "list",
+      "backfill_capacity_runs": "list",
+      "backfill_coverage_reconciled": "object",
+      "backfill_daily_capacity": "object",
+      "backfill_families": "object",
+      "backfill_finding_backlog": "object",
+      "backfill_history_import": "object",
+      "backfill_last_manifest": "object",
+      "backfill_operator_events": "list",
+      "backfill_ordinary_exhausted": "bool",
+      "backfill_reservations": "object",
+      "backfill_scope_failures": "object",
+      "backfill_starts_at_observation": "int",
+      "backfill_state_events": "object",
+      "backfill_unsupported_construction": "list",
+      "backfill_usage": "object",
+      "backfill_usage_probe_at": "str",
+      "cleanup_backlog": "int",
+      "client_health": "object",
+      "cooldown_until": "str",
+      "coverage": "object",
+      "created_at": "str",
+      "items": "list",
+      "last_tick": "str",
+      "legacy_repair_backfilled": "str",
+      "legacy_repair_missing": "list",
+      "merged_current_requests": "object",
+      "merged_discovery": "object",
+      "merged_reconcile": "object",
+      "merged_watermark": "str",
+      "merged_wrappers_pruned_at": "str",
+      "pause_reason": "null",
+      "paused": "bool",
+      "promotion": "object",
+      "promotion_audit": "object",
+      "push_discovery": "object",
+      "queue_client_requests": "object",
+      "repair_own_commits": "list",
+      "review_events": "object",
+      "review_ledger_head": "str",
+      "review_notify_outbox": "object",
+      "review_pr_links": "object",
+      "review_pr_outbox": "object",
+      "review_requests": "object",
+      "rl_backoff_min": "int",
+      "starts": "list",
+      "usage": "object"
+    },
+    "unknown_kind_count": 0
+  },
+  "redaction": {
+    "dropped_value_classes": [
+      "repository slugs",
+      "PR numbers",
+      "commit and tree object IDs",
+      "item, request, run and job IDs",
+      "file paths and worktree paths",
+      "finding titles and bodies",
+      "notes and operator messages",
+      "host names and absolute paths",
+      "alert endpoints",
+      "provider credentials and cooldown names",
+      "config overlays"
+    ],
+    "retained_value_classes": [
+      "allowlisted schema key names",
+      "JSON type names",
+      "code-enum item kinds and states",
+      "bucketed counts and exact-zero unknown-key diagnostics"
+    ]
+  },
+  "repair_cooldowns": {
+    "entry_count_bucket": "1-9",
+    "key_type": "str",
+    "value_type": "str"
+  },
+  "run_files": {
+    "classification.json": {
+      "_unknown_key_count": 0,
+      "bad_lines": "int",
+      "counted": "bool",
+      "events": "int",
+      "exit": "int",
+      "failure_provenance": "object",
+      "findings": "int",
+      "outcome": "str",
+      "reviewed_files": "int",
+      "severity_counts": "object"
+    },
+    "exit.json": {
+      "_unknown_key_count": 0,
+      "ended_at": "str",
+      "exit": "int",
+      "timed_out": "bool"
+    },
+    "findings.md": {
+      "type": "text"
+    },
+    "meta.json": {
+      "_unknown_key_count": 0,
+      "base": "str",
+      "cmd": "list",
+      "cycle": "int",
+      "dirty_diff": "str",
+      "head": "str",
+      "item_id": "str",
+      "kind": "str",
+      "label": "str",
+      "pr": "int",
+      "pr_branch": "str",
+      "pr_head": "str",
+      "range_policy": "str",
+      "repo": "str",
+      "review_pin": "str",
+      "run_id": "str",
+      "started_at": "str",
+      "target": "str",
+      "workId": "str",
+      "worktree": "str",
+      "wt_branch": "str"
+    },
+    "review.ndjson": {
+      "type": "text"
+    },
+    "review.pid": {
+      "type": "text"
+    },
+    "runner.log": {
+      "type": "text"
+    },
+    "secret-scan.json": {
+      "_unknown_key_count": 0,
+      "base": "str",
+      "denylist_hits": "list",
+      "denylist_rules": "int",
+      "diff_bytes": "int",
+      "gitleaks": "str",
+      "gitleaks_hits": "list",
+      "head": "str"
+    },
+    "stderr.log": {
+      "type": "text"
+    }
+  },
+  "schema": "cq.crq-state-provenance/v1",
+  "source": "deployed crq state, read-only schema inspection",
+  "status_keys": {
+    "_unknown_key_count": 0,
+    "cooldown_until": "str",
+    "finding_triage": "object",
+    "generated_at": "str",
+    "items": "list",
+    "paused": "bool"
+  },
+  "summary_keys": {
+    "_unknown_key_count": 0,
+    "backfill_reserved_slots": "int",
+    "backlog": "object",
+    "completed_24h_by_work": "object",
+    "cooldown_until": "str",
+    "finding_triage": "object",
+    "generated_at": "str",
+    "in_flight": "int",
+    "last_tick": "str",
+    "merged_current": "object",
+    "other_outcomes_24h": "int",
+    "outcomes_24h": "object",
+    "paused": "bool",
+    "pending_items": "list",
+    "repair": "object",
+    "repos": "object",
+    "schedule": "object",
+    "schema_version": "int",
+    "starts_60m": "int",
+    "starts_cap": "int",
+    "status_as_of": "str",
+    "systemd_services": "object",
+    "systemd_timers": "object",
+    "utilization": "object"
+  },
+  "unknown_run_file_count": 0,
+  "work_keys": {
+    "_unknown_key_count": 0,
+    "at": "str",
+    "harness": "str",
+    "head": "str",
+    "host": "str",
+    "pr": [
+      "int",
+      "null"
+    ],
+    "repo": "str",
+    "role": "str",
+    "runId": "str",
+    "source": "str",
+    "task": "str",
+    "type": "str",
+    "workId": "str"
+  }
+}

@@ -232,7 +232,10 @@ step bound plus `STEP_FETCH_MARGIN_MS`: Node's bundled fetch otherwise gives
 up on a non-streaming request after undici's default 300 s, below the step
 bound (S7 attempt F). These socket timeouts apply to each HTTP request and
 cannot fire before the step bound, even on a retry: the SDK's step timer
-spans the retry. Injected providers keep their own transport. The
+spans the retry. Injected providers keep their own transport. The process-global undici dispatcher is preserved, including Node's startup
+proxy configuration and `setGlobalDispatcher`. `AiSdkDriverOptions.dispatcher`
+(also `lanes.aiSdk.dispatcher`) can override it. Per-request socket timeouts
+are applied without replacing the chosen transport. The
 factory takes the bound from `DriverRequest.stepTimeoutMs` or per
 lane (`lanes.aiSdk.stepTimeoutMs`); the agent reviewer passes cq.json
 `budgets.step.wallMs`, capped at the remaining review wall time.
@@ -505,8 +508,10 @@ inject a plain-object mock) and feature-detected against the driven
 surface (query / tool / createSdkMcpServer) — capability detection, never
 version checks. A peer that is absent (or misshaped) is a PRE-DISPATCH
 throw naming the peer and the install command. The repo builds and the
-whole suite passes with the peer ABSENT; the `install-matrix` workflow
-proves both halves on every PR. Refusal detection is the D-E′ F2
+whole suite passes with the peer ABSENT. The `install-matrix` workflow
+checks SDK driver tests, build and public import in both peer modes on
+relevant PRs; nightly and pre-release manual runs test the full suite in
+both modes. Refusal detection is the D-E′ F2
 alternative to a pin bump: the lane detects `stop_reason: 'refusal'`
 structurally (available in the vendor vocabulary since the 0.3.162-era
 frames) instead of requiring ≥0.3.302 pins — the recorded fixtures pin
@@ -576,8 +581,9 @@ open in `yolo`, which never asks, so the driver pins
 ANY prompt (a failed pin is a pre-prompt error verdict); the permission
 answer table selects by option KIND (optionIds are vendor strings) and
 never answers `cancelled`; the NEVER-ASKS TRIPWIRE records a
-`tool_call` with no preceding permission request as ungated-execution
-evidence and fails the run; `WorkerResult.model` reads the
+`tool_call` or `tool_call_update` reaching `in_progress`, `completed` or
+`failed` before any permission request as ungated-execution evidence and
+fails the run; a `pending` announcement alone is not evidence; `WorkerResult.model` reads the
 POST-MATERIALIZATION `config_option_update` value only (the `session/new`
 entry is the lazy default); usage folds only `PromptResponse.usage`
 (`cachedWriteTokens` folds; `reasoning` is never emitted — thoughtTokens

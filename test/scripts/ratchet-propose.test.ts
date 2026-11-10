@@ -228,7 +228,7 @@ describe('ratchet-propose: happy path against a local main origin', () => {
     const repo = join(dir, 'repo');
     const bin = join(dir, 'bin');
     const ghLog = join(dir, 'gh.log');
-    mkdirSync(join(repo, 'scripts'), { recursive: true });
+    mkdirSync(join(repo, 'scripts/lib'), { recursive: true });
     mkdirSync(join(repo, 'baselines'), { recursive: true });
     mkdirSync(bin);
     git(dir, ['init', '--bare', '-b', 'main', origin]);
@@ -239,6 +239,7 @@ describe('ratchet-propose: happy path against a local main origin', () => {
       join(ROOT, 'scripts', 'ratchet-lib.mjs'),
       join(repo, 'scripts', 'ratchet-lib.mjs'),
     );
+    copyFileSync(join(ROOT, 'scripts/lib/build-env.mjs'), join(repo, 'scripts/lib/build-env.mjs'));
     symlinkSync(join(ROOT, 'dist'), join(repo, 'dist'));
     // This source-free fixture intentionally reuses the shared prebuilt dist.
     // Generate a marker for this fixture's actual input inventory and linked

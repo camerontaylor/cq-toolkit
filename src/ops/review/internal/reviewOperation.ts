@@ -344,6 +344,7 @@ export const SubmitInputSchema = z
     cwd: z.string().default('.'),
     repo: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/),
     target: z.string().min(1),
+    base: z.string().min(1).optional(),
     requestId: z
       .string()
       .regex(/^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$/)

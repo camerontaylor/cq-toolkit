@@ -207,7 +207,7 @@ describe('makeManifest', () => {
     expect(topoOrder(makeManifest(diamondPlan()).jobs)).toEqual([['a'], ['c', 'b'], ['d']]);
   });
 
-  test('rejects a non-finite number before cloning, naming the job', () => {
+  test('rejects a non-finite number while snapshotting, naming the job', () => {
     // JSON.parse('1e400') is Infinity. structuredClone keeps it while the
     // canonical hash renders it as null — a resumed run could then reuse a
     // result for a different input.
@@ -218,12 +218,61 @@ describe('makeManifest', () => {
     expect(() => makeManifest(plan)).toThrow(/job 'n1'.*non-finite number/);
   });
 
-  test('rejects a non-plain object before cloning, naming the job', () => {
+  test('rejects a non-plain object while snapshotting, naming the job', () => {
     const plan: Plan = {
       id: 'plan-bad-object',
       jobs: [{ id: 'd1', op: 'op-d', input: { when: new Date(0) } }],
     };
     expect(() => makeManifest(plan)).toThrow(/job 'd1'.*not plain JSON data/);
+  });
+
+  test('rejects a nested class instance before its prototype is erased', () => {
+    class InputValue {
+      n = 1;
+    }
+    const plan: Plan = {
+      id: 'plan-class-instance',
+      jobs: [{ id: 'c1', op: 'op-c', input: { nested: new InputValue() } }],
+    };
+    expect(() => makeManifest(plan)).toThrow(/job 'c1'.*input.nested.*not plain JSON data/);
+  });
+
+  test('hashes the input snapshot, not the plan-owned object', () => {
+    // An accessor that answers differently on each read must not be able to
+    // make the validated/stored input disagree with the hashed one: one
+    // snapshot is read, then validated, stored, AND hashed.
+    let read = 0;
+    const input = {
+      get n() {
+        read += 1;
+        return read === 1 ? 1 : 2;
+      },
+    };
+    const plan: Plan = { id: 'plan-accessor', jobs: [{ id: 'g1', op: 'op-g', input }] };
+
+    const job = makeManifest(plan).jobs[0];
+    expect(read).toBe(1);
+    expect(job?.input).toEqual({ n: 1 });
+    expect(job?.inputsHash).toBe(hashInputs('op-g', { n: 1 }));
+  });
+
+  test('snapshots a shared input object once and preserves its aliases', () => {
+    let reads = 0;
+    const shared = {
+      get n() {
+        return ++reads;
+      },
+    };
+    const plan: Plan = {
+      id: 'plan-shared-input',
+      jobs: [{ id: 's1', op: 'op-s', input: { left: shared, right: shared } }],
+    };
+    const job = makeManifest(plan).jobs[0];
+    const input = job?.input as { left: unknown; right: unknown };
+    expect(reads).toBe(1);
+    expect(input.left).toBe(input.right);
+    expect(input.left).not.toBe(shared);
+    expect(job?.inputsHash).toBe(hashInputs('op-s', input));
   });
 
   test('still accepts the documented undefined values and sparse arrays', () => {

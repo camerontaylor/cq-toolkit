@@ -250,7 +250,12 @@ class Spool:
 
 
 def live_items(q):
-    """Retain historical promotion records on disk, outside the active queue."""
+    """Retain historical promotion records on disk, outside the active queue.
+
+    The production queue still carries retired promotion items. Keep this
+    filter until those records are removed from state; deleting it would make
+    them live again in discovery, admission, harvesting and reporting.
+    """
     return [item for item in q["items"] if item.get("kind") != "promotion"]
 
 
@@ -333,7 +338,7 @@ def make_worktree(name: str, commit: str, *, clone: Optional[Path] = None) -> Tu
     try:
         git("-c", "filter.lfs.smudge=", "-c", "filter.lfs.process=",
             "worktree", "add", "--quiet", "-B", branch, str(path), commit, cwd=clone, env=env)
-    except RuntimeError:
+    except (RuntimeError, subprocess.TimeoutExpired):
         remove_worktree(path, branch, clone=clone)
         raise
     return path, branch
@@ -1853,9 +1858,9 @@ def notify(destination, text: str) -> Dict[str, Any]:
 
 
 def notify_owner(text: str) -> Dict[str, Any]:
-    promotion = CONFIG.get("promotion", {})
-    return notify(dict(paseo_agent_id=promotion.get("alert_agent_id"),
-                       paseo_host=promotion.get("alert_agent_host")), text)
+    alerts = CONFIG.get("alerts", {})
+    return notify(dict(paseo_agent_id=alerts.get("alert_agent_id"),
+                       paseo_host=alerts.get("alert_agent_host")), text)
 
 
 def inflight(q: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -1878,7 +1883,7 @@ def launch(q: Dict[str, Any], item: Dict[str, Any], plan: Dict[str, Any]) -> str
         # Universal secret shapes plus this repo's configured extra classes;
         # the primary repo's publish classes stay out of foreign scans.
         scan_classes = UNIVERSAL_SCAN_CLASSES | set(cfg["scan_extra_classes"])
-    elif item["kind"] in ("open", "delta", local_review_runtime.KIND) and item_repo(item) != REPO:
+    elif item["kind"] in ("open", "delta", local_review_runtime.KIND) and not repo_registry.same_repo(item_repo(item), REPO):
         # Foreign open/delta review (docs/multi-repo.md discovery pr): scan and
         # worktree run in that repo's clone with the same universal secret-shape
         # set as push items. These reviews scan the raw base..head range — not a
@@ -1915,7 +1920,7 @@ def launch(q: Dict[str, Any], item: Dict[str, Any], plan: Dict[str, Any]) -> str
         return run_id
     try:
         wt, wbranch = make_worktree(f"wt-{run_id}", plan["head"], clone=repo_clone)
-    except RuntimeError as exc:
+    except (RuntimeError, subprocess.TimeoutExpired) as exc:
         if item["kind"] == author_quota.AUTHOR_KIND:
             # An admitted author head the clone cannot check out (e.g. a runner-configured
             # required smudge filter) stays ungranted and waits for its lease deadline, which
@@ -2541,7 +2546,7 @@ def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
         q.get("backfill_reservations", {}).get(item["attempt_id"], {})["terminal_at"] = iso()
     # A foreign open/delta review's worktree branch lives in that repo's clone.
     cleanup_clone = None
-    if item["kind"] in ("open", "delta") and item_repo(item) != REPO:
+    if item["kind"] in ("open", "delta") and not repo_registry.same_repo(item_repo(item), REPO):
         cfg = repo_registry.by_repo(REPOS, item_repo(item))
         cleanup_clone = Path(cfg["clone"]) if cfg else None
     remove_worktree(Path(meta["worktree"]), meta["wt_branch"], clone=cleanup_clone)
@@ -2570,7 +2575,7 @@ def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
         if item["kind"] in ("open", "delta") and item.get("pr") and cls["findings"]:
             # All repos use the same durable, bounded PR-review delivery.
             _request_pr_review(item, r["run_id"], meta, rdir, cls)
-        if item["kind"] in ("open", "delta") and item_repo(item) != REPO:
+        if item["kind"] in ("open", "delta") and not repo_registry.same_repo(item_repo(item), REPO):
             # Foreign cycles are real evidence; coverage and repair stay primary-only.
             item["state"] = "done"
             return f"{item['id']}: completed ({cls['findings']} findings)"
@@ -2758,7 +2763,7 @@ def sort_key(item: Dict[str, Any]) -> Tuple:
 def last_reviewed(q: Dict[str, Any], pr: int) -> Optional[Dict[str, Any]]:
     """Newest completed CLI review of the PR's own head (open cycles and deltas)."""
     recs = [c for i in live_items(q) if i["pr"] == pr and i["kind"] in ("open", "delta")
-            and item_repo(i) == REPO for c in i.get("cycles", [])]
+            and repo_registry.same_repo(item_repo(i), REPO) for c in i.get("cycles", [])]
     return max(recs, key=lambda c: c["completed_at"]) if recs else None
 
 
@@ -2810,7 +2815,7 @@ def enroll(q: Dict[str, Any], dry: bool) -> List[str]:
         if p["isDraft"] or not chains_to_target(p, by_head):
             continue
         mine = [i for i in live_items(q) if i["pr"] == n and i["kind"] in ("open", "delta")
-                and item_repo(i) == REPO]
+                and repo_registry.same_repo(item_repo(i), REPO)]
         pin = None
         try:
             if not ensure_commit(n, head):
@@ -3420,6 +3425,9 @@ def write_status(q: Dict[str, Any]) -> None:
           *repo_status_lines(q, items), *([""] if repo_lines else []),
           "| item | repo | kind | state | cycles | pinned base | last outcome | wait / last error | supersession |",
           "|---|---|---|---|---|---|---|---|---|", *rows, "", "## Recent events", "", "```", *recent, "```", ""]
+    triage_status = status_summary.finding_triage(STATE / "backfill/findings")
+    md.extend(["## Backfill finding triage", "", "```json",
+               json.dumps(triage_status, sort_keys=True), "```", ""])
     md.extend(["## Repair and utilization", "", "```json",
                json.dumps({"repair": repair_tick.digest(ROOT, q),
                    "utilization": coverage.utilization_digest(q, q.get("coverage") or coverage.new_ledger(),
@@ -3427,6 +3435,7 @@ def write_status(q: Dict[str, Any]) -> None:
     (STATE / "status.md").write_text("\n".join(md))
     (STATE / "status.json").write_text(json.dumps({"generated_at": iso(), "paused": q.get("paused"),
                                                    "cooldown_until": q.get("cooldown_until"),
+                                                   "finding_triage": triage_status,
                                                    "items": [{**{k: i.get(k) for k in ("id", "kind", "state",
                                                               "prior_cycles", "cycles", "operator_priority", "optional_cycle", "pinned_base", "last_error",
                                                               "wait_reason", "gate_stalled_at")},
@@ -3526,8 +3535,8 @@ def write_heartbeat(q: Dict[str, Any]) -> None:
         tmp = WATCHDOG_HOME / ".heartbeat.json.tmp"
         tmp.write_text(json.dumps({"last_tick": q["last_tick"], "stale_alarm_min": CONFIG.get("stale_alarm_min", 36),
                                    "schedule_id": CONFIG.get("schedule_id"), "root": str(ROOT),
-                                   "alert_agent_id": CONFIG.get("promotion", {}).get("alert_agent_id"),
-                                   "alert_agent_host": CONFIG.get("promotion", {}).get("alert_agent_host")}) + "\n")
+                                   "alert_agent_id": CONFIG.get("alerts", {}).get("alert_agent_id"),
+                                   "alert_agent_host": CONFIG.get("alerts", {}).get("alert_agent_host")}) + "\n")
         tmp.replace(WATCHDOG_HOME / "heartbeat.json")
     except OSError as exc:
         event("heartbeat_failed", error=str(exc)[:200])

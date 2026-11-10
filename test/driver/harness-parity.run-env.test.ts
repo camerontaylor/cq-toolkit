@@ -30,7 +30,7 @@ const ENV_BLOCKED_FIELDS = [
 const ENV_PROBE_CHECKS = ENV_BLOCKED_FIELDS.map((name) => `Boolean(process.env.${name})`).join(',');
 const ENV_PROBE_COMMAND = [
   "node -p 'JSON.stringify({",
-  'canary:process.env.CQ_PARITY_BENIGN_CANARY??null,',
+  'canary:process.env.PARITY_BENIGN_CANARY??null,',
   `blocked:[${ENV_PROBE_CHECKS}]})'`,
 ].join('');
 const ENV_PROBE_PATTERN = `re:^${ENV_PROBE_COMMAND.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`;
@@ -46,7 +46,7 @@ describe('harness parity — run child environment', () => {
   test.each(['default', 'explicit', 'configured'] as const)(
     '%s allowlist: named env probe matches core, stdio and claude-agent callbacks',
     async (mode) => {
-      const canaryName = 'CQ_PARITY_BENIGN_CANARY';
+      const canaryName = 'PARITY_BENIGN_CANARY';
       const canaryValue = 'parity-benign-value';
       const secretNames = ENV_BLOCKED_FIELDS.slice(0, 6);
       for (const name of secretNames) vi.stubEnv(name, `parity-fake-${name}`);

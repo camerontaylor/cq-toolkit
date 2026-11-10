@@ -22,40 +22,10 @@
   "merged_min_survival": 0.25,
   "merged_min_surviving_lines": 15,
   "merged_min_file_focus": 0.25,
-  "promotion": {
-    "enabled": true,
-    "post_status": true,
-    "status_context": "crq/promotion-review",
-    "checks": [
-      "crq-python",
-      "static",
-      "denylist",
-      "ratchet"
-    ],
-    "merges_trigger": 1,
-    "hours_trigger": 8,
-    "dispatch_after_min": 0,
-    "tip_search_depth": 15,
-    "poster": "camerontaylor",
+  "alerts": {
     "alert_agent_id": "00000000-0000-4000-8000-000000000004",
     "alert_agent_host": null,
-    "_alert_agent_host_note": "Host overlay supplies the alert endpoint; ops/HOST-DEPLOY.md.",
-    "allowed_reviewers": [],
-    "resolver": "conductor (acceptance conductor reviewer-example)",
-    "signer": {
-      "app_login": "cq-promotion-reviewer[bot]",
-      "reviewer_bot_id": 339373542,
-      "_identity_source": "ONLY the owner's registration record: toolkit-research/plans/app-registration-session-20261004.md (never a name lookup)",
-      "spool": {
-        "dir": "/var/lib/crq-spool",
-        "ssh_alias": "@HOST_SPOOL_SSH_ALIAS@",
-        "ssh_key": null,
-        "_ssh_key_note": "Host overlay supplies the dedicated forced-command transport; ssh runs with -F none. No plain-shell fallback."
-      }
-    },
-    "signer_stall_min": 150,
-    "signer_down_min": 30,
-    "record_url_template": null
+    "_alert_agent_host_note": "Host overlay supplies the alert endpoint; ops/HOST-DEPLOY.md."
   },
   "stale_alarm_min": 36,
   "timeout_bin": "timeout",

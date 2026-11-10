@@ -9,6 +9,42 @@ from test_backfill_accounting import Fixture
 
 
 class ReportTest(unittest.TestCase):
+    def test_triage_uses_current_occurrences_and_keeps_human_evidence_link(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            self.assertEqual(reporting.finding_triage(root), {"counts": {}, "needs_human": []})
+            rows = root / "triage"
+            rows.mkdir()
+            def write(fid, status):
+                row = {"status": status, "canonical_id": "canonical", "target": "old",
+                       "target_current": "new", "mapped_path": "moved.py", "previous_event_id": "event",
+                       "finding": {"id": fid, "path": "old.py", "title": "Problem", "severity": "major"}}
+                ledger.atomic(rows / (fid + ".json"), ledger.canonical(row))
+            write("a", "needs-human")
+            write("b", "duplicate")
+            write("c", "needs-retriage")
+            for status in ("untriaged", "confirmed", "delivered", "fixed"):
+                write(status, status)
+            result = reporting.finding_triage(root)
+            self.assertEqual(result["counts"], {"needs-human": 1, "duplicate": 1, "needs-retriage": 1,
+                "untriaged": 1, "confirmed": 1, "delivered": 1, "fixed": 1})
+            self.assertEqual(result["needs_human"], [{"id": "a", "canonical_id": "canonical",
+                "path": "moved.py", "title": "Problem", "severity": "major", "target": "new", "event_id": "event"}])
+            ranked = {"manifest_id": "m", "target": "new", "paths": [], "required": [], "evidence_gaps": []}
+            report = reporting.summary(None, ranked, {"backfill_finding_backlog": {"untriaged": 99}}, findings_root=root)
+            self.assertEqual(report["finding_triage"], result)
+            self.assertEqual(report["finding_delivery_backlog"], result["counts"])
+            write("a", "fixed")
+            self.assertEqual(reporting.finding_triage(root)["needs_human"], [])
+
+    def test_corrupt_triage_is_not_reported_as_zero(self):
+        with tempfile.TemporaryDirectory() as td:
+            rows = Path(td) / "triage"
+            rows.mkdir()
+            (rows / "bad.json").write_text("not json")
+            with self.assertRaises(ValueError):
+                reporting.finding_triage(Path(td))
+
     def test_ambiguous_rename_stays_unresolved_but_pure_deletion_is_removed(self):
         with tempfile.TemporaryDirectory() as td:
             f = Fixture(Path(td) / "repo")
@@ -45,6 +81,31 @@ class ReportTest(unittest.TestCase):
             result = reporting.summary(f.repo, rank(head, [current]), {"items": []}, original)["baseline"]
             self.assertFalse(result["unresolved_baseline_objects"])
             self.assertEqual(result["target_status"], "baseline-zero")
+
+    def test_unmeasurable_current_object_keeps_baseline_debt_unresolved(self):
+        with tempfile.TemporaryDirectory() as td:
+            f = Fixture(Path(td) / "repo")
+            old = f.commit({"a": b"one\ntwo\n"})
+            row = {"path": "a", "blob": f.repo.entries(old)["a"]["blob"], "tier": "T1", "lines": 2,
+                   "uncovered": [[1, 2]], "disposition": "included", "reason": "text"}
+            def rank(target, paths):
+                return {"target": target, "manifest_id": "m", "paths": paths, "candidates": [], "required": [], "evidence_gaps": []}
+            original = reporting.baseline(f.repo, rank(old, [row]), "p", "l", "2026-10-30T00:00:00Z")
+            # Unreadable and oversized current objects both leave coverage unverified.
+            head = f.commit({"a": b"one\ntwo\n", "other": b"x\n"})
+            for lines, uncovered, reason in ((None, [], "unreadable blob"),
+                    (2, [[1, 2]], "current content exceeds per-file limit")):
+                with self.subTest(lines=lines):
+                    current = {**row, "blob": f.repo.entries(head)["a"]["blob"], "lines": lines,
+                               "uncovered": uncovered, "disposition": "unsupported", "reason": reason}
+                    result = reporting.summary(f.repo, rank(head, [current]), {"items": []}, original)["baseline"]
+                    self.assertEqual(result["unresolved_baseline_objects"],
+                                     [{**row, "reason": "unmeasurable current object"}])
+                    self.assertEqual(result["surviving_T1_debt"], 0)
+                    self.assertEqual(result["baseline_T1_reviewed_since"], 0)
+                    self.assertEqual(result["baseline_T1_removed_or_superseded"], 0)
+                    self.assertEqual(result["new_T1_debt"], 0)
+                    self.assertEqual(result["target_status"], "pending")
 
     def test_nonancestor_baseline_lineage_remains_unknown(self):
         with tempfile.TemporaryDirectory() as td:

@@ -1,26 +1,5 @@
-# The agent-SDK install matrix — T1.6 slice 2.
-#
-# `@anthropic-ai/claude-agent-sdk` is an OPTIONAL peer dependency of this
-# package: the claude-agent driver lane (src/driver/claude-agent/) loads it
-# lazily by dynamic import at run() time and feature-detects it — importing
-# or building this package must never require it to exist. This workflow is
-# the mechanical proof of that ADR claim, both halves, on every PR:
-#   - without-peer: a plain `pnpm install --frozen-lockfile` (the optional
-#     peer is NOT installed; pnpm-workspace.yaml sets autoInstallPeers: false)
-#     — the compiler + typed lint, full suite, and build must pass with
-#     the SDK absent.
-#   - with-peer: the same gates after installing the pinned peer
-#     (checkout-local, so the committed lockfile stays peer-free) — the
-#     driver lane must also be correct WITH the real package present. The
-#     suite itself never contacts the network or a real CLI in either half
-#     (every test injects a mock module through the driver's `sdkLoader`
-#     seam).
-#
-# Trigger note (development posture, 2026-10-20): this workflow is not a
-# required check, so invariant I4 does not bind it; it is path-filtered to
-# the files that can change the peer-optional claim — the dependency set,
-# the driver lanes, the scripts, and this file — plus workflow_dispatch.
-# If it is ever made required, the filter goes in the same edit (I4).
+# Optional SDK: focused PR checks; full two-peer-mode suites nightly and before release
+# via workflow_dispatch. Repo-owned non-template (policy/templates/instances.json).
 name: install-matrix
 
 on:
@@ -29,10 +8,20 @@ on:
       - package.json
       - pnpm-lock.yaml
       - pnpm-workspace.yaml
-      - 'src/driver/**'
+      - 'src/**'
+      - 'tsconfig*.json'
+      - 'vitest*.ts'
+      - '.oxlint*'
+      - 'lint/**'
       - 'test/driver/**'
+      - test/suite-classes.json
+      - test/global-setup.ts
+      - 'test/helpers/**'
       - 'scripts/**'
+      - '.github/actions/**'
       - .github/workflows/install-matrix.yml
+  schedule:
+    - cron: '23 18 * * *'
   workflow_dispatch:
 
 permissions:
@@ -68,13 +57,26 @@ jobs:
       # Plain ci: the optional peer is NOT installed (never in the lockfile).
       - name: Install dependencies (optional peer absent)
         run: pnpm install --frozen-lockfile
+      - name: Assert optional peer is absent
+        run: |
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          assert.throws(() => import.meta.resolve('@anthropic-ai/claude-agent-sdk'),
+            { code: 'ERR_MODULE_NOT_FOUND' });
+          NODE
       # The typecheck gate IS this ratchet step (same posture as ci.yml).
       - name: Compiler and typed lint
         run: node scripts/ratchet-typecheck.mjs
-      - name: Test
+      - name: SDK driver tests (PR)
+        if: github.event_name == 'pull_request'
+        run: pnpm run test test/driver/claude-code test/driver/factory
+      - name: Full suite (nightly and release preparation)
+        if: github.event_name != 'pull_request'
         run: pnpm run test
       - name: Build
         run: pnpm run build
+      - name: Import built public entry point
+        run: node --input-type=module -e "await import('./dist/index.js')"
 
   with-peer:
     name: build+test with the optional agent SDK peer
@@ -121,9 +123,17 @@ jobs:
       # would.
       - name: Install the optional agent SDK peer (pinned, checkout-local)
         run: pnpm add --save-optional @anthropic-ai/claude-agent-sdk@0.3.270
+      - name: Assert optional peer imports
+        run: node --input-type=module -e "await import('@anthropic-ai/claude-agent-sdk')"
       - name: Compiler and typed lint
         run: node scripts/ratchet-typecheck.mjs
-      - name: Test
+      - name: SDK driver tests (PR)
+        if: github.event_name == 'pull_request'
+        run: pnpm run test test/driver/claude-code test/driver/factory
+      - name: Full suite (nightly and release preparation)
+        if: github.event_name != 'pull_request'
         run: pnpm run test
       - name: Build
         run: pnpm run build
+      - name: Import built public entry point
+        run: node --input-type=module -e "await import('./dist/index.js')"

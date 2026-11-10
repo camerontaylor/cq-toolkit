@@ -92,6 +92,7 @@ import type { DriverFactory, ResolvedDriver } from '../../driver/factory.js';
 import { deepFreeze } from '../../shared/deepFreeze.js';
 import { defaultHarnessConfig, HarnessConfigSchema } from '../../harness/config.js';
 import type { HarnessConfig } from '../../harness/config.js';
+import { selectHarnessSurface } from '../../harness/surface.js';
 import type {
   Budget,
   ModelSpec,
@@ -468,6 +469,36 @@ const composeUserPrompt = (input: FixReviewItemInput): { text: string; truncated
         : `${singleLine(input.item.path)}:${input.item.line}`;
   lines.push(`Location: ${anchor}`);
   lines.push(`Worktree: ${input.worktree.path} (branch: ${input.worktree.branch})`);
+  // Operating instructions come from the caller's harness, never review data.
+  // Keep this outside the fences. The op knows the capped caller config,
+  // but the resolved driver owns the runtime sandbox gate, which may differ
+  // from the process environment. Do not infer that gate here.
+  const harness = input.harness ?? defaultHarnessConfig;
+  const tools = selectHarnessSurface(
+    harness,
+    toolPolicyFor(harness),
+    { enabled: true, envPassthrough: [] },
+    'workspace-write',
+  );
+  lines.push('');
+  lines.push(`Configured tools (capped caller harness): ${JSON.stringify(tools)}.`);
+  lines.push(
+    'Runtime tool definitions are authoritative; the driver may withhold configured tools. Use only tools actually exposed to you.',
+  );
+  if (tools.includes('bash')) {
+    lines.push(
+      `Bash command patterns (caller harness): ${JSON.stringify(harness.tools.bash.commandPatterns)}.`,
+    );
+    lines.push(
+      'Use only commands matching these patterns and the harness command syntax. Patterns starting with re: are regular expressions, not commands to run. Use read for file contents; do not guess shell alternatives after a command is denied.',
+    );
+    lines.push(
+      'For permitted git inspection, use the closed forms git diff, git diff --cached, git log -n 1, git log --oneline -n 20. Search arguments must match the supplied pattern, including its restrictions on quotes, backslashes and shell characters.',
+      'The worktree cwd is already set. Submit one permitted command per call; do not prefix it with cd or add command chaining or pipes unless the supplied patterns explicitly permit them. If a search needs unsupported quotes or shell syntax, use the exposed read tool instead of trying denied shape variants.',
+    );
+  } else {
+    lines.push('Bash is absent from the capped caller harness; do not attempt shell commands.');
+  }
   lines.push('');
   lines.push('Reviewed item body:');
   // The body and the comments are UNTRUSTED review content (finding: prompt
@@ -755,7 +786,21 @@ export function makeFixReviewItem(deps: {
       input.promptOverride ?? defaultFixPrompt,
       harness.promptBudget.maxSystemPromptChars,
     );
-    const user = composeUserPrompt(input);
+    let user: ReturnType<typeof composeUserPrompt>;
+    try {
+      user = composeUserPrompt(input);
+    } catch (err) {
+      if (currentJobContext()?.signal.aborted === true) {
+        return {
+          status: 'indeterminate',
+          detail: `fixReviewItem: prompt preparation cancelled: ${messageOf(err)}`,
+        };
+      }
+      return {
+        status: 'needs-human',
+        reason: `fixReviewItem: invalid harness for prompt preparation: ${messageOf(err)}`,
+      };
+    }
     const truncated = system.truncated || user.truncated;
     const invocation: OpInvocation = {
       prompt: `${system.text}\n\n${user.text}`,

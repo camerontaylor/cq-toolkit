@@ -55,6 +55,17 @@ class ParseTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             repo_registry.parse({"repo": PRIMARY, "repos": [entry(), entry()]})
 
+    def test_repo_identity_is_case_insensitive(self):
+        # GitHub treats owner/name as case-insensitive: one repository, not two.
+        with self.assertRaisesRegex(ValueError, "duplicated"):
+            repo_registry.parse({"repo": PRIMARY, "repos": [
+                entry(), entry(repo="CameronTaylor/Infra", clone="/srv/crq/infra2")]})
+        with self.assertRaisesRegex(ValueError, "primary repo"):
+            repo_registry.parse({"repo": PRIMARY, "repos": [entry(repo=PRIMARY.upper())]})
+        with self.assertRaisesRegex(ValueError, "name collides"):
+            repo_registry.parse({"repo": PRIMARY, "repos": [
+                entry(), entry(repo="other/Infra", clone="/srv/crq/infra2")]})
+
     def test_duplicate_name_suffix_refused(self):
         with self.assertRaisesRegex(ValueError, "name collides"):
             repo_registry.parse({"repo": PRIMARY, "repos": [
@@ -101,6 +112,15 @@ class RankTests(unittest.TestCase):
     def test_legacy_and_primary_items_keep_kind_rank(self):
         self.assertIsNone(repo_registry.rank_for({"kind": "open"}, PRIMARY, self.repos))
         self.assertIsNone(repo_registry.rank_for({"kind": "open", "repo": PRIMARY}, PRIMARY, self.repos))
+
+    def test_primary_and_configured_lookups_are_case_insensitive(self):
+        # A differently-cased primary item keeps its kind rank (never DEFAULT_RANK).
+        self.assertIsNone(repo_registry.rank_for(
+            {"kind": "open", "repo": PRIMARY.upper()}, PRIMARY, self.repos))
+        configured = repo_registry.by_repo(self.repos, "CameronTaylor/Infra")
+        self.assertEqual(configured["rank_tier"], 2)
+        self.assertEqual(repo_registry.rank_for(
+            {"kind": "push-current", "repo": "CameronTaylor/Infra"}, PRIMARY, self.repos), 2)
 
     def test_foreign_repo_uses_configured_tier(self):
         self.assertEqual(repo_registry.rank_for(

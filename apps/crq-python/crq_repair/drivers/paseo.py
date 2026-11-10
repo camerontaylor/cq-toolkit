@@ -2,9 +2,15 @@
 import json
 import os
 from pathlib import Path
+import subprocess
 import sys
 import time
 from crq_repair import atomic, command
+
+
+def _budget_stop():
+    """The exhausted-budget verdict, for the loop and for a stalled poll."""
+    return {'stop': 'budget', 'verdict': 'unsure', 'reason': 'judge timeout'}
 
 
 def invoke(config, role, job, wt, directory):
@@ -52,13 +58,24 @@ def invoke(config, role, job, wt, directory):
         # the agent the launcher already created.
         atomic(Path(directory) / 'agent.json', {'agentId': agent, 'endpoint': endpoint})
         deadline = time.monotonic() + repair['budget']['wall_clock_min'] * 60
-        while time.monotonic() < deadline:
-            status = command(['paseo', '--host', endpoint, 'inspect', agent, '--json'])
+        while (remaining := deadline - time.monotonic()) > 0:
+            # Bound each poll by the budget left, not by command()'s 20-minute
+            # default: a stalled host command must not outlive the deadline.
+            try:
+                status = command(['paseo', '--host', endpoint, 'inspect', agent, '--json'],
+                                 timeout=remaining)
+            except subprocess.TimeoutExpired:
+                return _budget_stop()
             if status.returncode:
                 raise RuntimeError('judge status unavailable; outcome unknown')
             info = json.loads(status.stdout[status.stdout.index('{'):])
             if info.get('Status', info.get('status')) in ('idle', 'error', 'closed'):
-                logs = command(['paseo', '--host', endpoint, 'logs', agent, '--filter', 'assistant_message', '--tail', '1'])
+                try:
+                    logs = command(['paseo', '--host', endpoint, 'logs', agent, '--filter',
+                                    'assistant_message', '--tail', '1'],
+                                   timeout=max(0.0, deadline - time.monotonic()))
+                except subprocess.TimeoutExpired:
+                    return _budget_stop()
                 text = logs.stdout
                 start = text.find('{')
                 if logs.returncode or start < 0:
@@ -68,8 +85,8 @@ def invoke(config, role, job, wt, directory):
                     raise ValueError('invalid judge output')
                 atomic(Path(directory) / 'judge-result.json', answer)
                 return {**answer, 'stop': 'ok'}
-            time.sleep(5)
-        return {'stop': 'budget', 'verdict': 'unsure', 'reason': 'judge timeout'}
+            time.sleep(min(5, max(0.0, deadline - time.monotonic())))
+        return _budget_stop()
     finally:
         # Stop the exact owned agent before archival; never leave timed-out
         # spend. A failed stop must be visible and must not archive the agent

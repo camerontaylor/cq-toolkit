@@ -97,12 +97,12 @@ describe('CLI env entry', () => {
     expect(parsed.error.message).toContain('CQ_RUN_TOOL');
   });
 
-  test('--json: warnings go to stderr and stdout stays valid JSON', async () => {
+  test('--json: warnings stay off stderr and stdout stays valid JSON', async () => {
     vi.stubEnv('CQ_SANBOX', 'off');
     const run = await capture(['echo', '--msg=hi', '--json'], { opsRoot });
     expect(run.code).toBe(0);
     expect((JSON.parse(run.out) as { status: string }).status).toBe('ok');
-    expect(warningLines(run.err)).toHaveLength(1);
+    expect(run.err).toBe('');
   });
 
   test('identity names never warn', async () => {

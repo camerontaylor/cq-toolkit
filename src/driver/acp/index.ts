@@ -79,14 +79,14 @@
 // THE NEVER-ASKS TRIWIRE (§2.1): the spec makes asking the AGENT's
 // decision, so a protocol-legal vendor that executes tools WITHOUT asking
 // is possible. The driver OBSERVES the tool_call stream: a tool_call (or
-// tool_call_update) whose toolCallId was NEVER preceded by a
+// tool_call_update) reaching in_progress, completed or failed BEFORE a
 // session/request_permission for the same id is recorded as evidence of
 // UNGATED EXECUTION and the verdict is 'error' — fail loud, because a
 // policy that cannot be enforced is not silently soft. (Evaluation happens
-// AT SETTLE, FIRST-WRITE-WINS per id: a tool_call that arrived BEFORE any
-// gate for its id is the bypass evidence — a gate firing only afterward
-// never reclassifies it — while an id whose gate fired FIRST stays gated,
-// whatever arrives later.)
+// AT SETTLE, FIRST-WRITE-WINS per id: a pending announcement leaves the
+// slot free; execution reported BEFORE any gate is bypass evidence — a
+// gate firing only afterward never reclassifies it — while an id whose
+// gate fired FIRST stays gated, whatever arrives later.)
 //
 // USAGE (the step-2-corrected fold): ONLY the PromptResponse.usage folds —
 // `usage_update` frames are context-window telemetry and are dropped
@@ -164,10 +164,11 @@
 //     'tool' message per IN-POLICY tool execution (an allow-answered id
 //     that reached a terminal status — { input, ok, output } plain JSON);
 //     the assistant transcript text (when any); narration + stderr under
-//     toolName 'acp-narration'. Denied-at-the-answer and UNGATED tool
-//     activity is narration-only: the record reflects the governed
-//     surface. Persist errors after dispatch are swallowed: the honest
-//     verdict outranks the record.
+//     toolName 'acp-narration'. Ids denied at the answer and ids without
+//     an allow answer are narration-only. A later allow answer permits terminal-result
+//     persistence even if execution preceded permission; the never-asks
+//     error remains latched. Persist errors after dispatch are swallowed:
+//     the honest verdict outranks the record.
 //
 // I8 SEAM — the driver owns NO wall clock. The run's ONLY cancellation
 // SOURCE is `RunOptions.signal` (seam v2, ADR-0002 §2.1) — the caller
@@ -296,6 +297,7 @@ import {
   SessionUpdateParamsSchema,
   SetConfigOptionResultSchema,
   AcpRpcError,
+  configOptionValueFrom,
   isAuthRequiredError,
   mapWireUsage,
   modelOptionValueFrom,
@@ -1507,25 +1509,41 @@ export class AcpDriver implements Driver {
         });
         const pin = SetConfigOptionResultSchema.safeParse(pinRaw);
         const echoedMode = pin.success ? pin.data.modes?.currentModeId : undefined;
-        // TWO confirmation surfaces (review round 1 / the live record): the
-        // response's modes echo, OR a current_mode_update naming the pinned
-        // mode that arrived AFTER the pin was sent — the live vendor does
-        // the latter, in the same flush BEFORE the response line, so it is
-        // already folded (with a newer seq) when this continuation runs
-        // (wire lines process in order). Neither surface confirming = an
-        // unpinned session: a policy void, refusing to prompt.
+        // The response's `configOptions` are the third confirmation surface:
+        // ACP returns the session's current option values there, so a
+        // compliant agent may report the switch as the `mode` option's
+        // currentValue without echoing `modes` and without sending a
+        // current_mode_update. Rejecting that shape would fail a successful
+        // pin before every prompt.
+        const configOptionMode = pin.success
+          ? configOptionValueFrom(pin.data.configOptions, MODE_CONFIG_ID)
+          : undefined;
+        // THREE confirmation surfaces (review round 1 / the live record /
+        // the config-option response): the response's modes echo, the
+        // response's `mode` configOption value, OR a current_mode_update
+        // naming the pinned mode that arrived AFTER the pin was sent — the
+        // live vendor does the last, in the same flush BEFORE the response
+        // line, so it is already folded (with a newer seq) when this
+        // continuation runs (wire lines process in order). No surface
+        // confirming = an unpinned session: a policy void, refusing to
+        // prompt.
         const notificationConfirms =
           observation.observedMode === GATING_MODE &&
           observation.observedModeSeq !== undefined &&
           observation.observedModeSeq > seqBeforePin;
-        if (echoedMode !== GATING_MODE && !notificationConfirms) {
+        if (
+          echoedMode !== GATING_MODE &&
+          configOptionMode !== GATING_MODE &&
+          !notificationConfirms
+        ) {
           const stale =
             observation.observedMode === GATING_MODE
               ? ' (STALE — folded before the pin was sent; not a confirmation of THIS pin)'
               : '';
           handshakeFailure =
             `the mode pin was not confirmed (session/set_config_option ${MODE_CONFIG_ID}=${GATING_MODE} ` +
-            `echoed ${echoedMode === undefined ? (pin.success ? 'no mode echo' : 'unshapeable pin response') : `mode '${echoedMode}'`}, observed ` +
+            `echoed ${echoedMode === undefined ? (pin.success ? 'no mode echo' : 'unshapeable pin response') : `mode '${echoedMode}'`}, ` +
+            `configOptions carried ${configOptionMode === undefined ? (pin.success ? 'no mode option' : 'an unshapeable pin response') : `mode '${configOptionMode}'`}, observed ` +
             `${observation.observedMode === undefined ? 'no mode update' : `mode '${observation.observedMode}'`}${stale}) — ` +
             'an unpinned session is a policy void, refusing to prompt';
         }
@@ -2163,9 +2181,11 @@ function sessionIdOf(params: unknown): string | undefined {
  * Post-settle persistence (OUR vocabulary, in order): the ACP-session
  * sidecar (when newly observed — the NEXT run's session/load handle), ONE
  * role 'tool' message per IN-POLICY tool execution (an allow-answered id
- * that reached a terminal status; { input, ok, output } plain JSON —
- * denied-at-the-answer and UNGATED activity stays narration-only, per the
- * header's governed-surface rule), the assistant transcript (when any),
+ * that reached a terminal status; { input, ok, output } plain JSON).
+ * Ids denied at the answer and ids without an allow answer stay
+ * narration-only; a later allow answer permits persistence without
+ * clearing never-asks evidence.
+ * Next comes the assistant transcript (when any),
  * and narration + stderr diagnostics (when any). Never fabricates an
  * assistant turn: a run that produced no text records none.
  */

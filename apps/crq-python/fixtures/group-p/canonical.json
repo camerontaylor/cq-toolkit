@@ -1,0 +1,256 @@
+{
+  "schema": "cq.crq-group-p-vector/v1",
+  "family": "canonical",
+  "cases": [
+    {
+      "name": "receipt-sorted-keys-and-scalars",
+      "source": "review_receipt.canonical+digest",
+      "input": {
+        "value": {
+          "b": 1,
+          "a": [
+            true,
+            false,
+            null
+          ],
+          "c": {
+            "z": "x",
+            "y": 2
+          }
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "canonical": "{\"a\":[true,false,null],\"b\":1,\"c\":{\"y\":2,\"z\":\"x\"}}",
+          "sha256": "9f8827db93e70a0bffa3ff231631ba670ad838f7f71cd4e4a5e0d3ceeaf2a363"
+        }
+      }
+    },
+    {
+      "name": "receipt-ascii-escapes-unicode",
+      "source": "review_receipt.canonical+digest",
+      "input": {
+        "value": {
+          "unicode": "\u96ea",
+          "emoji": "\ud83d\ude00"
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "canonical": "{\"emoji\":\"\\ud83d\\ude00\",\"unicode\":\"\\u96ea\"}",
+          "sha256": "6a3914a32e4bd41134e2a143391c7559e2e801edebeaeae51cb76bcf24fb6191"
+        }
+      }
+    },
+    {
+      "name": "receipt-escapes-controls",
+      "source": "review_receipt.canonical+digest",
+      "input": {
+        "value": {
+          "text": "quote\" backslash\\ newline\n tab\t"
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "canonical": "{\"text\":\"quote\\\" backslash\\\\ newline\\n tab\\t\"}",
+          "sha256": "bce363ac31eccd6ffdedb378374afe13eb4526e0d6ce3171b014348f5075d59c"
+        }
+      }
+    },
+    {
+      "name": "receipt-python-float-repr-is-preserved",
+      "source": "review_receipt.canonical+digest",
+      "input": {
+        "value": {
+          "float": 1.0,
+          "small": 0.1,
+          "negative_zero": -0.0,
+          "exponent": 1e+20
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "canonical": "{\"exponent\":1e+20,\"float\":1.0,\"negative_zero\":-0.0,\"small\":0.1}",
+          "sha256": "3fb781c9de5dc6be458d6cf72c4235b8a87c88fcc1249cdfc65bf5f9ae0aca4d"
+        }
+      }
+    },
+    {
+      "name": "receipt-large-integers-are-written-in-full",
+      "source": "review_receipt.canonical+digest",
+      "input": {
+        "value": {
+          "safe": 9007199254740991,
+          "unsafe": 9007199254740993,
+          "wide": 9223372036854775808
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "canonical": "{\"safe\":9007199254740991,\"unsafe\":9007199254740993,\"wide\":9223372036854775808}",
+          "sha256": "cc47c2c17a9a4482e4f1b5db08b23eeb7a10c1e82adfad325c288ec9a061751a"
+        }
+      }
+    },
+    {
+      "name": "receipt-empty-containers",
+      "source": "review_receipt.canonical+digest",
+      "input": {
+        "value": {
+          "object": {},
+          "array": [],
+          "string": ""
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "canonical": "{\"array\":[],\"object\":{},\"string\":\"\"}",
+          "sha256": "160df1cb7c08864a4d113733fe02cfbc06a3e39c4ce0e0273ca7f2bb42e0facc"
+        }
+      }
+    },
+    {
+      "name": "receipt-lone-high-surrogate-round-trips-as-an-escape",
+      "source": "review_receipt.canonical+digest",
+      "input": {
+        "value": {
+          "value": "\ud800"
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "canonical": "{\"value\":\"\\ud800\"}",
+          "sha256": "adfebe803c48e286a13ff4dc084eb4ade9ae1588174e39efc459232f8af380a2"
+        }
+      }
+    },
+    {
+      "name": "ledger-sorted-keys-and-scalars",
+      "source": "review_ledger.canonical+digest",
+      "input": {
+        "value": {
+          "b": 1,
+          "a": [
+            true,
+            false,
+            null
+          ],
+          "c": {
+            "z": "x",
+            "y": 2
+          }
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "canonical": "{\"a\":[true,false,null],\"b\":1,\"c\":{\"y\":2,\"z\":\"x\"}}",
+          "sha256": "9f8827db93e70a0bffa3ff231631ba670ad838f7f71cd4e4a5e0d3ceeaf2a363"
+        }
+      }
+    },
+    {
+      "name": "ledger-utf8-without-escapes",
+      "source": "review_ledger.canonical+digest",
+      "input": {
+        "value": {
+          "unicode": "\u96ea",
+          "emoji": "\ud83d\ude00",
+          "control": "\u0001"
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "canonical": "{\"control\":\"\\u0001\",\"emoji\":\"\ud83d\ude00\",\"unicode\":\"\u96ea\"}",
+          "sha256": "a028ec0202315ebef0a30f54c020a963fb0c89f3733641201ccf6f0d4439cb9c"
+        }
+      }
+    },
+    {
+      "name": "ledger-utf16be-key-order",
+      "source": "review_ledger.canonical+digest",
+      "input": {
+        "value": {
+          "\uffff": 1,
+          "\ud800\udc00": 2,
+          "a": 3,
+          "\u00e9": 4
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "canonical": "{\"a\":3,\"\u00e9\":4,\"\ud800\udc00\":2,\"\uffff\":1}",
+          "sha256": "4ae82ef75e7c365dc7340e8239231c55f90a8a27f1b215c612c3d4b5af2f760d"
+        }
+      }
+    },
+    {
+      "name": "ledger-integer-bounds",
+      "source": "review_ledger.canonical+digest",
+      "input": {
+        "value": {
+          "maximum": 9007199254740991,
+          "minimum": -9007199254740991
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "canonical": "{\"maximum\":9007199254740991,\"minimum\":-9007199254740991}",
+          "sha256": "fbfd7545b6e2e70fe97a1b1de6bb85a3cea527c9e49f787bb6392cd36964b62c"
+        }
+      }
+    },
+    {
+      "name": "ledger-float-is-refused",
+      "source": "review_ledger.canonical+digest",
+      "input": {
+        "value": {
+          "bad": 1.5
+        }
+      },
+      "expect": {
+        "ok": false,
+        "error": "IntegrityError",
+        "message": "unsupported canonical JSON value"
+      }
+    },
+    {
+      "name": "ledger-integer-beyond-json-range-is-refused",
+      "source": "review_ledger.canonical+digest",
+      "input": {
+        "value": {
+          "bad": 9007199254740992
+        }
+      },
+      "expect": {
+        "ok": false,
+        "error": "IntegrityError",
+        "message": "integer outside interoperable JSON range"
+      }
+    },
+    {
+      "name": "ledger-non-scalar-unicode-is-refused",
+      "source": "review_ledger.canonical+digest",
+      "input": {
+        "value": {
+          "bad": "\udfff"
+        }
+      },
+      "expect": {
+        "ok": false,
+        "error": "IntegrityError",
+        "message": "non-scalar Unicode"
+      }
+    }
+  ]
+}

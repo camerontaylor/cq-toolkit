@@ -44,6 +44,7 @@ export const fakeGit = (
     // prWorktree composes every git argv with a leading '-C <path>' — the
     // subcommand starts at index 2 in that form, at 0 without it.
     const rest = args[0] === '-C' ? args.slice(2) : args;
+    if (rest[0] === 'rev-parse' && rest.includes('--git-common-dir')) return ok('/fake/git-dir\n');
     if (rest[0] === 'rev-parse' && rest[1] === '--absolute-git-dir') {
       return ok(`${join(worktreePath, '.git')}\n`);
     }

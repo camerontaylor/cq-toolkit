@@ -15,7 +15,7 @@ import {
   readdir,
   rmdir,
 } from 'node:fs/promises';
-import { delimiter, dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { basename, delimiter, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { GIT_HARDEN, HARDENED_DIFF_FLAGS } from '../../../shared/gitHarden.js';
 import {
@@ -463,13 +463,13 @@ async function terminalGit(
   return output;
 }
 
-async function terminalPath(root: string, file: string) {
+async function terminalPath(root: string, file: string, allowGlob = false) {
   if (
     !file ||
     isAbsolute(file) ||
     file.startsWith('-') ||
     file.split(/[\\/]/).some((part) => part === '..') ||
-    /[*?\[\]{}]/.test(file)
+    (!allowGlob && /[*?\[\]{}]/.test(file))
   )
     throw new Error('terminal literal file refused');
   const canonical = await realpath(root);
@@ -537,6 +537,7 @@ const ordinaryReports = new WeakMap<
 >();
 export async function noteAddressOrdinaryReport(token: object, path: string, bytes: string) {
   await validateAddressTerminalAuthority(token);
+  path = join(await realpath(dirname(path)), basename(path));
   const stat = await lstat(path);
   const digest = digestBytes(Buffer.from(bytes));
   if (
@@ -797,7 +798,9 @@ export async function settleAddressTerminalEvidence(
         cursor = end + 1;
         const file = entry[3]!;
         if (paths.has(`${attempt.root}\0${file}`)) continue;
-        const foreign = await terminalPath(attempt.root, file);
+        // Foreign tracked paths only get read and hashed: never interpreted by
+        // git pathspecs here, so glob characters in real file names are safe.
+        const foreign = await terminalPath(attempt.root, file, true);
         const mode = foreign.stat.mode & 0o111 ? '100755' : '100644';
         if (
           mode !== entry[1] ||

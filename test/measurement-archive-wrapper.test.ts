@@ -9,7 +9,7 @@
 // Local fixtures and a fake subprocess runner, plus real-rclone immutability
 // probes against a hermetic local alias remote: no ambient config, no
 // credentials, no network; the probes skip only where rclone is absent.
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { constants } from 'node:fs';
 import {
   chmod,
@@ -64,6 +64,42 @@ async function rawBundle(base: string, name: string, manifest: unknown): Promise
 afterEach(async () => {
   vi.unstubAllEnvs();
   await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+});
+
+describe('measurement archive CLI entry guard', () => {
+  test.each([false, true])(
+    'runs a symlinked entry with preserve-symlinks-main=%s',
+    async (preserve) => {
+      const base = await workspace();
+      // Keep relative sibling imports valid even when Node preserves the main URL.
+      await symlink(join(process.cwd(), 'scripts'), join(base, 'scripts'), 'dir');
+      const entry = join(base, 'scripts', 'archive-measurement-wrapper.mjs');
+      const result = spawnSync(
+        process.execPath,
+        [...(preserve ? ['--preserve-symlinks-main'] : []), entry],
+        { encoding: 'utf8', timeout: 10_000 },
+      );
+      expect(result.error).toBeUndefined();
+      expect(result.stderr).toBe('');
+      expect(result.status).toBe(1);
+      expect(JSON.parse(result.stdout)).toMatchObject({
+        state: 'failed',
+        reason: 'measurement archive: no valid rclone target',
+      });
+    },
+  );
+
+  test('importing the wrapper does not run the CLI', () => {
+    const result = spawnSync(
+      process.execPath,
+      ['--input-type=module', '-e', "await import('./scripts/archive-measurement-wrapper.mjs')"],
+      { encoding: 'utf8', timeout: 10_000 },
+    );
+    expect(result.error).toBeUndefined();
+    expect(result.status).toBe(0);
+    expect(result.stdout).toBe('');
+    expect(result.stderr).toBe('');
+  });
 });
 
 describe('M8b nominal evidence', () => {

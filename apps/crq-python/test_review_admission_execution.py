@@ -76,6 +76,32 @@ class ExecutionTests(SnapshotGitFixture, unittest.TestCase):
         self.assertEqual(pr["cycles"][0]["profile"], self.profile)
         self.assertNotIn("coverage", self.q)
 
+    def test_primary_case_variant_publication_spools_and_acknowledges_on_retry(self):
+        self.item["identity_inputs"]["repo"] = self.c.REPO.upper()
+        self.finish()
+        store = review_ledger.ArtifactStore(self.state / "artifacts")
+        outbox = review_ledger.Outbox(self.state / "outbox", store)
+        with mock.patch.object(backfill_runtime, "settings", return_value={"enabled": True}), \
+             mock.patch.object(backfill_runtime, "services", return_value=(None, store, outbox, None)), \
+             mock.patch.object(backfill_runtime, "publish") as publish:
+            runtime.republish(self.c, self.q, self.item)
+            self.assertTrue(self.item["publication_pending"])
+            self.assertEqual(self.item["publication_reason"], "publication-spooled")
+            events = outbox.pending()
+            self.assertEqual(len(events), 1)
+            value = events[0]
+            self.assertEqual(value["payload"]["repo"], self.c.REPO)
+            self.assertEqual(value["payload"]["source"]["repo"], self.c.REPO)
+            self.assertEqual(value["source_key"], self.c.REPO + ":author-queue:run-1")
+            runtime.republish(self.c, self.q, self.item)
+            self.assertEqual(outbox.pending(), [value])
+            outbox.acknowledge(value, [value["id"]])
+            runtime.republish(self.c, self.q, self.item)
+            self.assertFalse(self.item["publication_pending"])
+            self.assertIsNone(self.item["publication_reason"])
+            self.assertEqual(publish.call_count, 2)
+            self.assertEqual(self.item["identity_inputs"]["repo"], self.c.REPO.upper())
+
     def full_tick(self, opened, *, remaining=0, clone=None):
         """Real tick, enrollment and repair backfill; replace external I/O."""
         config = copy.deepcopy(crq.CONFIG)

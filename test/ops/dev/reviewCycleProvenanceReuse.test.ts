@@ -1,4 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
+import { unlink, writeFile } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
+import { makeSubprocessDevEffects } from '../../../src/ops/dev/effects.js';
 import { cycleRecord, stubScanner } from './fakes.js';
 import { cycleReview, ran, reviewer, reviewerCalls } from './reviewTestKit.js';
 import { makeTestRepo, repoEffects, seed, type TestRepo } from './repo.js';
@@ -154,8 +157,8 @@ describe('dev.review cycle', () => {
     ).toBe(false);
   });
 
-  test.each(['missing', 'altered'])(
-    'retained %s log refuses without vendor dispatch',
+  test.each(['missing', 'unreadable', 'unavailable', 'altered'])(
+    'retained %s log does not reuse',
     async (fault) => {
       await seed(repo);
       let vendorCalls = 0;
@@ -163,10 +166,25 @@ describe('dev.review cycle', () => {
         if (command === 'coderabbit') vendorCalls += 1;
         return reviewer(ran(0))(command, []);
       });
-      if (fault === 'missing')
+      if (fault === 'missing') {
+        const path = join(dirname(repo.root), 'retained-review.log');
+        await writeFile(path, 'retained review');
+        await effects.openLedger('feature/x').mutate((ledger) => ({
+          ledger: {
+            ...ledger,
+            records: ledger.records.map((record) =>
+              record.kind === 'cycle' ? { ...record, logPath: path } : record,
+            ),
+          },
+          value: undefined,
+        }));
+        await unlink(path);
+        effects.reviewLogSha256 = makeSubprocessDevEffects(repo.root).reviewLogSha256!;
+      } else if (fault === 'unreadable')
         effects.reviewLogSha256 = async () => {
-          throw new Error('missing log');
+          throw new Error('unreadable log');
         };
+      else if (fault === 'unavailable') delete effects.reviewLogSha256;
       else {
         await effects.openLedger('feature/x').mutate((ledger) => ({
           ledger: {
@@ -179,8 +197,8 @@ describe('dev.review cycle', () => {
         }));
       }
       const result = await cycleReview(effects, stubScanner())({ repoRoot: repo.root });
-      expect(result.status).toBe('needs-human');
-      expect(vendorCalls).toBe(0);
+      expect(result.status).toBe(fault === 'altered' ? 'needs-human' : 'ok');
+      expect(vendorCalls).toBe(fault === 'altered' ? 0 : 1);
       expect(
         effects
           .openLedger('feature/x')

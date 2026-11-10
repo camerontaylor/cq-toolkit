@@ -33,12 +33,14 @@ suite; they do not revisit this contract.
 - **Zero local full gates per PR.** Run focused checks locally; CI owns the
   full gates. CodeRabbit is advisory and adds no mandatory CLI cycle or
   fixed review checkpoints. See [review guidance](coderabbit-review.md).
-- **The full suite is CI's job, and CI alone is the authority.** CI runs the
-  whole suite on every push and pull request: the trigger surface is unfiltered
-  (doctrine I4 — no path, branch or tag filter; the sole sanctioned skip is the
-  job-level `cq-state` settle-ledger exclusion in `.github/workflows/ci.yml`),
-  and the `static` job runs `test:unit` + `test:e2e`. The `ratchet` job re-runs
-  the suite with coverage as an advisory measurement. Required merge checks
+- **The full suite is CI's job, and CI alone is the authority.** Required
+  workflow triggers remain unfiltered (doctrine I4); jobs select every PR and
+  main push, avoiding duplicate feature-push suites. Recognized prose/Python-only
+  PRs run formatting without TS gates; Python runs for Python/shared changes.
+  Generated docs, operational `.cq`, unknown paths and detection failures fall
+  back to full checks. Main, nightly and manual dispatch run full checks.
+  This is the owner-approved 2026-11-08 coarse policy: unexpected cross-area
+  coupling can merge and be caught on main/nightly. Required merge checks
   are `static` and `denylist` on the exact PR head. PRs target `main` and
   merge with a merge commit after one independent head-bound PASS comment.
   There is no separate queue candidate, throwaway merge branch or promotion

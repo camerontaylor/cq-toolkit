@@ -63,7 +63,7 @@ export async function runPlanEntryCommand(
   // applies to a plan FILE (PlanSchema.parse in runPlanCommand): a malformed
   // floor is an input-class defect (exit 2, no artifact), not an opaque
   // kernel throw. An importer that THROWS stays a runtime throw → exit 1.
-  const imported = await entry.importer();
+  const imported = await entry.importer(opts?.cqEnv !== undefined ? { cqEnv: opts.cqEnv } : {});
   const checked = PlanSchema.safeParse(imported);
   if (!checked.success) {
     return inputDefect(

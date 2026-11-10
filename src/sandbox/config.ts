@@ -18,6 +18,8 @@ import {
 import { assertCqEnvName } from '../config/entry.js';
 import type { CqEnv } from '../config/env.js';
 import { processEnv } from '../config/process-env.js';
+import type { CqEnvRegistry } from '../config/env-registry.js';
+import { assertOptInAuthority } from '../config/optin.js';
 
 export {
   SANDBOX_POLICY_ENV_NAMES,
@@ -38,6 +40,14 @@ export interface SandboxOptIn {
   run?: string;
   'run.envPassthrough'?: string;
 }
+
+const SANDBOX_OPT_IN_ENV: Readonly<Record<string, string>> = {
+  sandbox: 'CQ_SANDBOX',
+  'sandbox.backend': 'CQ_SANDBOX_BACKEND',
+  'sandbox.network': 'CQ_SANDBOX_NETWORK',
+  run: 'CQ_RUN_TOOL',
+  'run.envPassthrough': 'CQ_RUN_ENV_PASSTHROUGH',
+};
 
 export interface SandboxConfig {
   mode: SandboxMode;
@@ -61,6 +71,8 @@ export interface ResolveSandboxOptions {
   cqEnv?: CqEnv;
   env?: Readonly<Record<string, string | undefined>>;
   optIn?: SandboxOptIn;
+  /** Registry consulted for the `trust` flag; default the shipped registry (a test seam). */
+  registry?: CqEnvRegistry;
   platform?: NodeJS.Platform;
   /** Backends whose launcher passed the RS-13 live boundary probe. */
   certifiedBackends?: readonly SandboxBackend[];
@@ -88,6 +100,7 @@ export function resolveSandboxConfig(options: ResolveSandboxOptions = {}): Sandb
   const env = options.env ?? processEnv();
   const typed = options.cqEnv?.values;
   const optIn = options.optIn ?? {};
+  assertOptInAuthority('sandbox', optIn, SANDBOX_OPT_IN_ENV, options.registry);
   // optIn beats the env layer; the env layer is the snapshot's parsed value
   // when one was passed, else the raw process/explicit env parsed here.
   const layered = <T>(

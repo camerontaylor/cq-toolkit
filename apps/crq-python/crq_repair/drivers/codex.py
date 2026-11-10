@@ -12,6 +12,7 @@ a second copy of the same session.
 import json
 import os
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -43,11 +44,30 @@ def _stream_codex(argv, cwd, env, timeout, log_path):
                                    start_new_session=True)
 
         def pump(stream, sink):
+            """Drain a pipe even when logging or its failure report is unwritable."""
+            # A failed log write must never stop the drain: a pump that exits
+            # while the child still writes blocks the child on a full pipe until
+            # the wall clock. Report it once and keep reading.
+            log_failed = [False]
+
+            def report_failure(exc):
+                """Attempt one diagnostic per pipe without interrupting its drain."""
+                if log_failed[0]:
+                    return
+                log_failed[0] = True
+                try:
+                    print('codex driver.log write failed: ' + str(exc)[:200], file=sys.stderr, flush=True)
+                except (OSError, ValueError):
+                    pass  # Reporting is best effort; draining must continue.
+
             for raw in stream:
-                with lock:
-                    if log_open[0]:  # a straggler after the bounded join
-                        log.write(raw)
-                        log.flush()
+                try:
+                    with lock:
+                        if log_open[0]:  # a straggler after the bounded join
+                            log.write(raw)
+                            log.flush()
+                except (OSError, ValueError) as exc:  # closed or unwritable log
+                    report_failure(exc)
                 sink.append(raw)
 
         threads = [threading.Thread(target=pump, args=(process.stdout, lines), daemon=True),

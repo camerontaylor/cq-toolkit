@@ -81,6 +81,8 @@
 // (`SelfhostDefaults.maxTokens`) exists to be tuned from this evidence.
 import { enterWithCqEnv } from '../config/entry.js';
 import type { CqEnv } from '../config/env.js';
+import { stripRefsHeads } from '../config/values.js';
+import { checkedProtectedBranch } from '../ops/merge/trustMirrors.js';
 import { appendFileSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -418,10 +420,11 @@ const EXCLUDE_DRAFT = 'draft';
  * The protected-branch exclusion reason (shared verbatim by both run modes):
  * the loop's fix workers push review commits to the PR's HEAD branch, so a
  * PR whose head IS the protected branch must never be looped — the push
- * would land worker commits on it (SelfhostDefaults.protectedBranch, the
- * resolveConflict protectedBranch passthrough's same rule).
+ * would land worker commits on it (the resolved CQ_MERGE_PROTECTED_BRANCH, default main — the
+ * resolveConflict protectedBranch rule).
  */
-const EXCLUDE_PROTECTED_HEAD = `protected-branch head (a review fix would push worker commits to ${SelfhostDefaults.protectedBranch})`;
+const excludeProtectedHead = (protectedBranch: string): string =>
+  `protected-branch head (a review fix would push worker commits to ${protectedBranch})`;
 
 /** The sweep-budget exclusion reason — real-run only (a dry run spends nothing). */
 const EXCLUDE_SWEEP_BUDGET = 'sweep budget exhausted (I9)';
@@ -457,12 +460,15 @@ const preLoopExclusion = (
   row: { pr: number; headRepoFullName: string; draft: boolean; headRefName: string },
   owner: string,
   repo: string,
+  protectedBranch: string,
 ): string | null => {
   if (row.pr === 0) return EXCLUDE_NO_NUMBER;
   if (row.headRefName === '') return EXCLUDE_NO_HEAD_REF;
   if (row.headRepoFullName !== `${owner}/${repo}`) return excludeForked(row.headRepoFullName);
   if (row.draft) return EXCLUDE_DRAFT;
-  if (row.headRefName === SelfhostDefaults.protectedBranch) return EXCLUDE_PROTECTED_HEAD;
+  // Either spelling of the resolved protected branch counts.
+  if (stripRefsHeads(row.headRefName) === protectedBranch)
+    return excludeProtectedHead(protectedBranch);
   return null;
 };
 
@@ -495,12 +501,13 @@ export async function runSelfReviewLoop(
   // pruneAuditDirs' bounded cleanup of the audit dirs prior runs left behind.
   const worktreeRoot = join(cfg.repoRoot, '.selfhost', 'worktrees');
 
+  const protectedBranch = checkedProtectedBranch('selfhost.reviewLoop', cfg.cqEnv);
   const rows = await listOpenPrs({ gh: deps.gh, owner: cfg.owner, repo: cfg.repo });
 
   if (cfg.dryRun === true) {
     const wouldRun: string[] = [];
     for (const row of rows) {
-      const exclusion = preLoopExclusion(row, cfg.owner, cfg.repo);
+      const exclusion = preLoopExclusion(row, cfg.owner, cfg.repo, protectedBranch);
       if (exclusion !== null) {
         wouldRun.push(`#${String(row.pr)} excluded ${exclusion}`);
         continue;
@@ -594,7 +601,7 @@ export async function runSelfReviewLoop(
     // with the same reason strings the dry run surfaces — a silent skip
     // would orphan the PR from the summary (an absent row is a lie, not a
     // shrug).
-    const exclusion = preLoopExclusion(row, cfg.owner, cfg.repo);
+    const exclusion = preLoopExclusion(row, cfg.owner, cfg.repo, protectedBranch);
     if (exclusion !== null) {
       excluded.push({ pr: row.pr, reason: exclusion });
       continue;

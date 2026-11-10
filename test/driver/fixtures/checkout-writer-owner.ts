@@ -41,6 +41,7 @@ if (boundary === 'bulk') {
               state: 'open',
               merged: false,
               draft: false,
+              base: { ref: 'main' },
               user: { login: 'octo', type: 'User' },
               head: { sha: head, ref: 'feature/x', repo: { full_name: 'octo/widget' } },
             },

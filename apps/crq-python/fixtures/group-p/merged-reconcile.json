@@ -1,0 +1,1650 @@
+{
+  "schema": "cq.crq-group-p-vector/v1",
+  "family": "merged-reconcile",
+  "cases": [
+    {
+      "name": "valid-window",
+      "source": "merged_reconcile.normalize_interval",
+      "input": {
+        "after": "2026-10-01T00:00:00Z",
+        "before": "2026-10-02T00:00:00Z"
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "after": "2026-10-01T00:00:00Z",
+          "before": "2026-10-02T00:00:00Z"
+        }
+      }
+    },
+    {
+      "name": "equal-endpoints-refused",
+      "source": "merged_reconcile.normalize_interval",
+      "input": {
+        "after": "2026-10-01T00:00:00Z",
+        "before": "2026-10-01T00:00:00Z"
+      },
+      "expect": {
+        "ok": false,
+        "error": "ReconcileRefused",
+        "message": "after must be strictly earlier than before"
+      }
+    },
+    {
+      "name": "reversed-endpoints-refused",
+      "source": "merged_reconcile.normalize_interval",
+      "input": {
+        "after": "2026-10-02T00:00:00Z",
+        "before": "2026-10-01T00:00:00Z"
+      },
+      "expect": {
+        "ok": false,
+        "error": "ReconcileRefused",
+        "message": "after must be strictly earlier than before"
+      }
+    },
+    {
+      "name": "fractional-seconds-refused",
+      "source": "merged_reconcile.normalize_interval",
+      "input": {
+        "after": "2026-10-01T00:00:00.5Z",
+        "before": "2026-10-02T00:00:00Z"
+      },
+      "expect": {
+        "ok": false,
+        "error": "ReconcileRefused",
+        "message": "after must be an exact UTC timestamp YYYY-MM-DDTHH:MM:SSZ"
+      }
+    },
+    {
+      "name": "unicode-digits-refused",
+      "source": "merged_reconcile.normalize_interval",
+      "input": {
+        "after": "\uff12\uff10\uff12\uff16-10-01T00:00:00Z",
+        "before": "2026-10-02T00:00:00Z"
+      },
+      "expect": {
+        "ok": false,
+        "error": "ReconcileRefused",
+        "message": "after must be an exact UTC timestamp YYYY-MM-DDTHH:MM:SSZ"
+      }
+    },
+    {
+      "name": "impossible-date-refused",
+      "source": "merged_reconcile.normalize_interval",
+      "input": {
+        "after": "2026-02-30T00:00:00Z",
+        "before": "2026-03-01T00:00:00Z"
+      },
+      "expect": {
+        "ok": false,
+        "error": "ReconcileRefused",
+        "message": "after is not a valid UTC timestamp"
+      }
+    },
+    {
+      "name": "non-string-refused",
+      "source": "merged_reconcile.normalize_interval",
+      "input": {
+        "after": 1,
+        "before": "2026-10-02T00:00:00Z"
+      },
+      "expect": {
+        "ok": false,
+        "error": "ReconcileRefused",
+        "message": "after must be an exact UTC timestamp YYYY-MM-DDTHH:MM:SSZ"
+      }
+    },
+    {
+      "name": "minimum",
+      "source": "merged_reconcile.normalize_page_budget",
+      "input": {
+        "budget": 1
+      },
+      "expect": {
+        "ok": true,
+        "value": 1
+      }
+    },
+    {
+      "name": "maximum",
+      "source": "merged_reconcile.normalize_page_budget",
+      "input": {
+        "budget": 200
+      },
+      "expect": {
+        "ok": true,
+        "value": 200
+      }
+    },
+    {
+      "name": "zero-refused",
+      "source": "merged_reconcile.normalize_page_budget",
+      "input": {
+        "budget": 0
+      },
+      "expect": {
+        "ok": false,
+        "error": "ReconcileRefused",
+        "message": "page budget must be a positive integer capped at 200"
+      }
+    },
+    {
+      "name": "over-maximum-refused",
+      "source": "merged_reconcile.normalize_page_budget",
+      "input": {
+        "budget": 201
+      },
+      "expect": {
+        "ok": false,
+        "error": "ReconcileRefused",
+        "message": "page budget must be a positive integer capped at 200"
+      }
+    },
+    {
+      "name": "boolean-refused",
+      "source": "merged_reconcile.normalize_page_budget",
+      "input": {
+        "budget": true
+      },
+      "expect": {
+        "ok": false,
+        "error": "ReconcileRefused",
+        "message": "page budget must be a positive integer capped at 200"
+      }
+    },
+    {
+      "name": "float-refused",
+      "source": "merged_reconcile.normalize_page_budget",
+      "input": {
+        "budget": 1.0
+      },
+      "expect": {
+        "ok": false,
+        "error": "ReconcileRefused",
+        "message": "page budget must be a positive integer capped at 200"
+      }
+    },
+    {
+      "name": "valid-record-is-an-intent",
+      "source": "merged_reconcile.record_identity",
+      "input": {
+        "record": {
+          "number": 7,
+          "mergedAt": "2026-10-01T12:00:00Z",
+          "mergeCommit": {
+            "oid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "headRefOid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "disposition": "intent",
+          "pr": 7,
+          "merged_at": "2026-10-01T12:00:00Z",
+          "merge_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "subject": {
+            "repo": null,
+            "pr": 7,
+            "merge_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "target_selector": "promoted-main",
+            "policy": "affected-current-additions-v1"
+          }
+        }
+      }
+    },
+    {
+      "name": "non-object-is-unsupported",
+      "source": "merged_reconcile.record_identity",
+      "input": {
+        "record": []
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "disposition": "unsupported",
+          "reason": "page record is not an object"
+        }
+      }
+    },
+    {
+      "name": "boolean-pr-is-unsupported",
+      "source": "merged_reconcile.record_identity",
+      "input": {
+        "record": {
+          "number": true,
+          "mergedAt": "2026-10-01T12:00:00Z",
+          "mergeCommit": {
+            "oid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "headRefOid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "disposition": "unsupported",
+          "reason": "malformed PR number"
+        }
+      }
+    },
+    {
+      "name": "zero-pr-is-unsupported",
+      "source": "merged_reconcile.record_identity",
+      "input": {
+        "record": {
+          "number": 0,
+          "mergedAt": "2026-10-01T12:00:00Z",
+          "mergeCommit": {
+            "oid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "headRefOid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "disposition": "unsupported",
+          "reason": "malformed PR number"
+        }
+      }
+    },
+    {
+      "name": "missing-merged-at-is-unsupported",
+      "source": "merged_reconcile.record_identity",
+      "input": {
+        "record": {
+          "number": 7,
+          "mergeCommit": {
+            "oid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "headRefOid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "disposition": "unsupported",
+          "pr": 7,
+          "reason": "missing or malformed mergedAt"
+        }
+      }
+    },
+    {
+      "name": "malformed-merge-commit-is-unsupported",
+      "source": "merged_reconcile.record_identity",
+      "input": {
+        "record": {
+          "number": 7,
+          "mergedAt": "2026-10-01T12:00:00Z",
+          "mergeCommit": {},
+          "headRefOid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "disposition": "unsupported",
+          "pr": 7,
+          "merged_at": "2026-10-01T12:00:00Z",
+          "reason": "missing or malformed merge commit identity"
+        }
+      }
+    },
+    {
+      "name": "malformed-head-is-unsupported",
+      "source": "merged_reconcile.record_identity",
+      "input": {
+        "record": {
+          "number": 7,
+          "mergedAt": "2026-10-01T12:00:00Z",
+          "mergeCommit": {
+            "oid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "headRefOid": "not-a-sha"
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "disposition": "unsupported",
+          "pr": 7,
+          "merged_at": "2026-10-01T12:00:00Z",
+          "reason": "source head gone or malformed"
+        }
+      }
+    },
+    {
+      "name": "incidental-fields-are-ignored",
+      "source": "merged_reconcile.record_identity",
+      "input": {
+        "record": {
+          "number": 7,
+          "mergedAt": "2026-10-01T12:00:00Z",
+          "mergeCommit": {
+            "oid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "headRefOid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "title": "ignored",
+          "author": {
+            "login": "x"
+          }
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "disposition": "intent",
+          "pr": 7,
+          "merged_at": "2026-10-01T12:00:00Z",
+          "merge_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "subject": {
+            "repo": null,
+            "pr": 7,
+            "merge_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "target_selector": "promoted-main",
+            "policy": "affected-current-additions-v1"
+          }
+        }
+      }
+    },
+    {
+      "name": "digest-excludes-own-field",
+      "source": "merged_reconcile.checkpoint_digest",
+      "input": {
+        "checkpoint": {
+          "schema_version": 2,
+          "after": "2026-10-01T00:00:00Z",
+          "before": "2026-10-02T00:00:00Z",
+          "cursor": null,
+          "nested": {
+            "b": 1,
+            "a": [
+              2,
+              3
+            ]
+          },
+          "digest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": "4a8e376a8996864db391537227a89d237f60126d8b36647055fbd575b17a887b"
+      }
+    },
+    {
+      "name": "new-checkpoint",
+      "source": "merged_reconcile.new_checkpoint",
+      "input": {
+        "interval": {
+          "after": "2026-10-01T00:00:00Z",
+          "before": "2026-10-02T00:00:00Z"
+        },
+        "page_budget": 10,
+        "repo": "camerontaylor/cq-toolkit",
+        "base": "origin/main"
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "schema_version": 2,
+          "after": "2026-10-01T00:00:00Z",
+          "before": "2026-10-02T00:00:00Z",
+          "page_budget": 10,
+          "repo": "camerontaylor/cq-toolkit",
+          "base": "origin/main",
+          "cursor": null,
+          "pages_read": 0,
+          "seen": {},
+          "inventory": [],
+          "record_keys": [],
+          "cursor_history": [],
+          "duplicates_seen": 0,
+          "outside_window": 0,
+          "records_read": 0,
+          "transient_failures": 0,
+          "complete": false,
+          "steps": [],
+          "dry_run": false
+        }
+      }
+    },
+    {
+      "name": "page-fold-sorts-filters-and-dedupes",
+      "source": "merged_reconcile.reconcile_page",
+      "input": {
+        "checkpoint": {
+          "schema_version": 2,
+          "after": "2026-10-01T00:00:00Z",
+          "before": "2026-10-02T00:00:00Z",
+          "page_budget": 10,
+          "repo": "camerontaylor/cq-toolkit",
+          "base": "origin/main",
+          "cursor": null,
+          "pages_read": 0,
+          "seen": {},
+          "inventory": [],
+          "record_keys": [],
+          "cursor_history": [],
+          "duplicates_seen": 0,
+          "outside_window": 0,
+          "records_read": 0,
+          "transient_failures": 0,
+          "complete": false,
+          "steps": [],
+          "dry_run": false
+        },
+        "pages": [
+          [
+            {
+              "number": 9,
+              "mergedAt": "2026-10-01T13:00:00Z",
+              "mergeCommit": {
+                "oid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+              },
+              "headRefOid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            },
+            {
+              "number": 9,
+              "mergedAt": "2026-10-01T13:00:00Z",
+              "mergeCommit": {
+                "oid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+              },
+              "headRefOid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            },
+            {
+              "number": 3,
+              "mergedAt": "2026-09-01T00:00:00Z",
+              "mergeCommit": {
+                "oid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+              },
+              "headRefOid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            },
+            {
+              "number": 4,
+              "mergedAt": "2026-10-01T14:00:00Z"
+            },
+            {
+              "number": 5,
+              "mergedAt": "2026-10-01T15:00:00Z",
+              "mergeCommit": {
+                "oid": "cccccccccccccccccccccccccccccccccccccccc"
+              },
+              "headRefOid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            },
+            {
+              "number": 6,
+              "mergedAt": "2026-10-01T16:00:00Z",
+              "mergeCommit": {
+                "oid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+              },
+              "headRefOid": "dddddddddddddddddddddddddddddddddddddddd"
+            },
+            {
+              "number": 8,
+              "mergedAt": "2026-10-01T17:00:00Z",
+              "mergeCommit": {
+                "oid": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+              },
+              "headRefOid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            }
+          ],
+          [
+            {
+              "number": 9,
+              "mergedAt": "2026-10-01T13:00:00Z",
+              "mergeCommit": {
+                "oid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+              },
+              "headRefOid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            }
+          ]
+        ]
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "schema_version": 2,
+          "after": "2026-10-01T00:00:00Z",
+          "before": "2026-10-02T00:00:00Z",
+          "page_budget": 10,
+          "repo": "camerontaylor/cq-toolkit",
+          "base": "origin/main",
+          "cursor": null,
+          "pages_read": 2,
+          "seen": {
+            "9": {
+              "merge_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "merged_at": "2026-10-01T13:00:00Z"
+            },
+            "5": {
+              "merge_sha": "cccccccccccccccccccccccccccccccccccccccc",
+              "merged_at": "2026-10-01T15:00:00Z"
+            },
+            "6": {
+              "merge_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "merged_at": "2026-10-01T16:00:00Z"
+            },
+            "8": {
+              "merge_sha": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+              "merged_at": "2026-10-01T17:00:00Z"
+            }
+          },
+          "inventory": [
+            {
+              "disposition": "intent",
+              "pr": 9,
+              "merged_at": "2026-10-01T13:00:00Z",
+              "merge_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "subject": {
+                "repo": null,
+                "pr": 9,
+                "merge_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "target_selector": "promoted-main",
+                "policy": "affected-current-additions-v1"
+              }
+            },
+            {
+              "disposition": "unsupported",
+              "pr": 4,
+              "merged_at": "2026-10-01T14:00:00Z",
+              "reason": "missing or malformed merge commit identity"
+            },
+            {
+              "disposition": "intent",
+              "pr": 5,
+              "merged_at": "2026-10-01T15:00:00Z",
+              "merge_sha": "cccccccccccccccccccccccccccccccccccccccc",
+              "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "subject": {
+                "repo": null,
+                "pr": 5,
+                "merge_sha": "cccccccccccccccccccccccccccccccccccccccc",
+                "target_selector": "promoted-main",
+                "policy": "affected-current-additions-v1"
+              }
+            },
+            {
+              "disposition": "intent",
+              "pr": 6,
+              "merged_at": "2026-10-01T16:00:00Z",
+              "merge_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "head": "dddddddddddddddddddddddddddddddddddddddd",
+              "subject": {
+                "repo": null,
+                "pr": 6,
+                "merge_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "target_selector": "promoted-main",
+                "policy": "affected-current-additions-v1"
+              }
+            },
+            {
+              "disposition": "intent",
+              "pr": 8,
+              "merged_at": "2026-10-01T17:00:00Z",
+              "merge_sha": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+              "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "subject": {
+                "repo": null,
+                "pr": 8,
+                "merge_sha": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                "target_selector": "promoted-main",
+                "policy": "affected-current-additions-v1"
+              }
+            }
+          ],
+          "record_keys": [
+            "6d40e6edbbc383233e368346a5429eb35f0ad0f900abcc67ad0dc8ba4cc21932",
+            "3446aa7b19e8d0b2b7ffb7a280d0aefd77012de61e2b7b7f65b40a3246d4c2bf",
+            "95a15d534723c8b6e95626e054107a7ef5e701b8a11be77d6a0d35362f499d4f",
+            "b2d864414e2f0724005382fd84194d310424598e331cdcf75adf22717e784f5b",
+            "8f16600d0ca74b2e81ae6fa4443d370cf9f1db8d5899ae48e53e930b72da2fce"
+          ],
+          "cursor_history": [],
+          "duplicates_seen": 2,
+          "outside_window": 1,
+          "records_read": 8,
+          "transient_failures": 0,
+          "complete": false,
+          "steps": [],
+          "dry_run": false
+        }
+      }
+    },
+    {
+      "name": "valid-open-checkpoint",
+      "source": "merged_reconcile.load_checkpoint",
+      "input": {
+        "checkpoint": {
+          "schema_version": 2,
+          "after": "2026-10-01T00:00:00Z",
+          "before": "2026-10-02T00:00:00Z",
+          "page_budget": 1,
+          "repo": "camerontaylor/cq-toolkit",
+          "base": "origin/main",
+          "cursor": "cursor-1",
+          "pages_read": 1,
+          "seen": {
+            "9": {
+              "merge_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "merged_at": "2026-10-01T13:00:00Z"
+            },
+            "5": {
+              "merge_sha": "cccccccccccccccccccccccccccccccccccccccc",
+              "merged_at": "2026-10-01T15:00:00Z"
+            },
+            "6": {
+              "merge_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "merged_at": "2026-10-01T16:00:00Z"
+            },
+            "8": {
+              "merge_sha": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+              "merged_at": "2026-10-01T17:00:00Z"
+            }
+          },
+          "inventory": [
+            {
+              "disposition": "intent",
+              "pr": 9,
+              "merged_at": "2026-10-01T13:00:00Z",
+              "merge_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "subject": {
+                "repo": null,
+                "pr": 9,
+                "merge_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "target_selector": "promoted-main",
+                "policy": "affected-current-additions-v1"
+              }
+            },
+            {
+              "disposition": "unsupported",
+              "pr": 4,
+              "merged_at": "2026-10-01T14:00:00Z",
+              "reason": "missing or malformed merge commit identity"
+            },
+            {
+              "disposition": "intent",
+              "pr": 5,
+              "merged_at": "2026-10-01T15:00:00Z",
+              "merge_sha": "cccccccccccccccccccccccccccccccccccccccc",
+              "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "subject": {
+                "repo": null,
+                "pr": 5,
+                "merge_sha": "cccccccccccccccccccccccccccccccccccccccc",
+                "target_selector": "promoted-main",
+                "policy": "affected-current-additions-v1"
+              }
+            },
+            {
+              "disposition": "intent",
+              "pr": 6,
+              "merged_at": "2026-10-01T16:00:00Z",
+              "merge_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "head": "dddddddddddddddddddddddddddddddddddddddd",
+              "subject": {
+                "repo": null,
+                "pr": 6,
+                "merge_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "target_selector": "promoted-main",
+                "policy": "affected-current-additions-v1"
+              }
+            },
+            {
+              "disposition": "intent",
+              "pr": 8,
+              "merged_at": "2026-10-01T17:00:00Z",
+              "merge_sha": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+              "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "subject": {
+                "repo": null,
+                "pr": 8,
+                "merge_sha": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                "target_selector": "promoted-main",
+                "policy": "affected-current-additions-v1"
+              }
+            }
+          ],
+          "record_keys": [
+            "6d40e6edbbc383233e368346a5429eb35f0ad0f900abcc67ad0dc8ba4cc21932",
+            "3446aa7b19e8d0b2b7ffb7a280d0aefd77012de61e2b7b7f65b40a3246d4c2bf",
+            "95a15d534723c8b6e95626e054107a7ef5e701b8a11be77d6a0d35362f499d4f",
+            "b2d864414e2f0724005382fd84194d310424598e331cdcf75adf22717e784f5b",
+            "8f16600d0ca74b2e81ae6fa4443d370cf9f1db8d5899ae48e53e930b72da2fce"
+          ],
+          "cursor_history": [
+            "cursor-1"
+          ],
+          "duplicates_seen": 1,
+          "outside_window": 1,
+          "records_read": 7,
+          "transient_failures": 0,
+          "complete": false,
+          "steps": [
+            {
+              "page": 1,
+              "records": 7,
+              "outcome": "read",
+              "watermark_advanced": false
+            }
+          ],
+          "dry_run": false,
+          "summary": {
+            "version": 1,
+            "after": "2026-10-01T00:00:00Z",
+            "before": "2026-10-02T00:00:00Z",
+            "pages_read": 1,
+            "transient_failures": 0,
+            "complete": false,
+            "next_cursor": "cursor-1",
+            "complete_through": null,
+            "represented": 5,
+            "intents": 4,
+            "unsupported": 1,
+            "duplicates_seen": 1,
+            "outside_window": 1,
+            "records_read": 7,
+            "reviewed": 0,
+            "pending_review": 4
+          },
+          "digest": "c38340d29d2d6d87e902d85c7934c9a2b64f6e1ffab5a09b8100c26b6e3162bd"
+        },
+        "interval": {
+          "after": "2026-10-01T00:00:00Z",
+          "before": "2026-10-02T00:00:00Z"
+        },
+        "page_budget": 1,
+        "repo": "camerontaylor/cq-toolkit",
+        "base": "origin/main",
+        "allow_complete": false
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "schema_version": 2,
+          "after": "2026-10-01T00:00:00Z",
+          "before": "2026-10-02T00:00:00Z",
+          "page_budget": 1,
+          "repo": "camerontaylor/cq-toolkit",
+          "base": "origin/main",
+          "cursor": "cursor-1",
+          "pages_read": 1,
+          "seen": {
+            "9": {
+              "merge_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "merged_at": "2026-10-01T13:00:00Z"
+            },
+            "5": {
+              "merge_sha": "cccccccccccccccccccccccccccccccccccccccc",
+              "merged_at": "2026-10-01T15:00:00Z"
+            },
+            "6": {
+              "merge_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "merged_at": "2026-10-01T16:00:00Z"
+            },
+            "8": {
+              "merge_sha": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+              "merged_at": "2026-10-01T17:00:00Z"
+            }
+          },
+          "inventory": [
+            {
+              "disposition": "intent",
+              "pr": 9,
+              "merged_at": "2026-10-01T13:00:00Z",
+              "merge_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "subject": {
+                "repo": null,
+                "pr": 9,
+                "merge_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "target_selector": "promoted-main",
+                "policy": "affected-current-additions-v1"
+              }
+            },
+            {
+              "disposition": "unsupported",
+              "pr": 4,
+              "merged_at": "2026-10-01T14:00:00Z",
+              "reason": "missing or malformed merge commit identity"
+            },
+            {
+              "disposition": "intent",
+              "pr": 5,
+              "merged_at": "2026-10-01T15:00:00Z",
+              "merge_sha": "cccccccccccccccccccccccccccccccccccccccc",
+              "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "subject": {
+                "repo": null,
+                "pr": 5,
+                "merge_sha": "cccccccccccccccccccccccccccccccccccccccc",
+                "target_selector": "promoted-main",
+                "policy": "affected-current-additions-v1"
+              }
+            },
+            {
+              "disposition": "intent",
+              "pr": 6,
+              "merged_at": "2026-10-01T16:00:00Z",
+              "merge_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "head": "dddddddddddddddddddddddddddddddddddddddd",
+              "subject": {
+                "repo": null,
+                "pr": 6,
+                "merge_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "target_selector": "promoted-main",
+                "policy": "affected-current-additions-v1"
+              }
+            },
+            {
+              "disposition": "intent",
+              "pr": 8,
+              "merged_at": "2026-10-01T17:00:00Z",
+              "merge_sha": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+              "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "subject": {
+                "repo": null,
+                "pr": 8,
+                "merge_sha": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                "target_selector": "promoted-main",
+                "policy": "affected-current-additions-v1"
+              }
+            }
+          ],
+          "record_keys": [
+            "6d40e6edbbc383233e368346a5429eb35f0ad0f900abcc67ad0dc8ba4cc21932",
+            "3446aa7b19e8d0b2b7ffb7a280d0aefd77012de61e2b7b7f65b40a3246d4c2bf",
+            "95a15d534723c8b6e95626e054107a7ef5e701b8a11be77d6a0d35362f499d4f",
+            "b2d864414e2f0724005382fd84194d310424598e331cdcf75adf22717e784f5b",
+            "8f16600d0ca74b2e81ae6fa4443d370cf9f1db8d5899ae48e53e930b72da2fce"
+          ],
+          "cursor_history": [
+            "cursor-1"
+          ],
+          "duplicates_seen": 1,
+          "outside_window": 1,
+          "records_read": 7,
+          "transient_failures": 0,
+          "complete": false,
+          "steps": [
+            {
+              "page": 1,
+              "records": 7,
+              "outcome": "read",
+              "watermark_advanced": false
+            }
+          ],
+          "dry_run": false,
+          "summary": {
+            "version": 1,
+            "after": "2026-10-01T00:00:00Z",
+            "before": "2026-10-02T00:00:00Z",
+            "pages_read": 1,
+            "transient_failures": 0,
+            "complete": false,
+            "next_cursor": "cursor-1",
+            "complete_through": null,
+            "represented": 5,
+            "intents": 4,
+            "unsupported": 1,
+            "duplicates_seen": 1,
+            "outside_window": 1,
+            "records_read": 7,
+            "reviewed": 0,
+            "pending_review": 4
+          },
+          "digest": "c38340d29d2d6d87e902d85c7934c9a2b64f6e1ffab5a09b8100c26b6e3162bd"
+        }
+      }
+    },
+    {
+      "name": "complete-checkpoint-refused-without-flag",
+      "source": "merged_reconcile.load_checkpoint",
+      "input": {
+        "checkpoint": {
+          "schema_version": 2,
+          "after": "2026-10-01T00:00:00Z",
+          "before": "2026-10-02T00:00:00Z",
+          "page_budget": 1,
+          "repo": "camerontaylor/cq-toolkit",
+          "base": "origin/main",
+          "cursor": null,
+          "pages_read": 1,
+          "seen": {
+            "9": {
+              "merge_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "merged_at": "2026-10-01T13:00:00Z"
+            },
+            "5": {
+              "merge_sha": "cccccccccccccccccccccccccccccccccccccccc",
+              "merged_at": "2026-10-01T15:00:00Z"
+            },
+            "6": {
+              "merge_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "merged_at": "2026-10-01T16:00:00Z"
+            },
+            "8": {
+              "merge_sha": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+              "merged_at": "2026-10-01T17:00:00Z"
+            }
+          },
+          "inventory": [
+            {
+              "disposition": "intent",
+              "pr": 9,
+              "merged_at": "2026-10-01T13:00:00Z",
+              "merge_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "subject": {
+                "repo": null,
+                "pr": 9,
+                "merge_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "target_selector": "promoted-main",
+                "policy": "affected-current-additions-v1"
+              }
+            },
+            {
+              "disposition": "unsupported",
+              "pr": 4,
+              "merged_at": "2026-10-01T14:00:00Z",
+              "reason": "missing or malformed merge commit identity"
+            },
+            {
+              "disposition": "intent",
+              "pr": 5,
+              "merged_at": "2026-10-01T15:00:00Z",
+              "merge_sha": "cccccccccccccccccccccccccccccccccccccccc",
+              "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "subject": {
+                "repo": null,
+                "pr": 5,
+                "merge_sha": "cccccccccccccccccccccccccccccccccccccccc",
+                "target_selector": "promoted-main",
+                "policy": "affected-current-additions-v1"
+              }
+            },
+            {
+              "disposition": "intent",
+              "pr": 6,
+              "merged_at": "2026-10-01T16:00:00Z",
+              "merge_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "head": "dddddddddddddddddddddddddddddddddddddddd",
+              "subject": {
+                "repo": null,
+                "pr": 6,
+                "merge_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "target_selector": "promoted-main",
+                "policy": "affected-current-additions-v1"
+              }
+            },
+            {
+              "disposition": "intent",
+              "pr": 8,
+              "merged_at": "2026-10-01T17:00:00Z",
+              "merge_sha": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+              "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "subject": {
+                "repo": null,
+                "pr": 8,
+                "merge_sha": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                "target_selector": "promoted-main",
+                "policy": "affected-current-additions-v1"
+              }
+            }
+          ],
+          "record_keys": [
+            "6d40e6edbbc383233e368346a5429eb35f0ad0f900abcc67ad0dc8ba4cc21932",
+            "3446aa7b19e8d0b2b7ffb7a280d0aefd77012de61e2b7b7f65b40a3246d4c2bf",
+            "95a15d534723c8b6e95626e054107a7ef5e701b8a11be77d6a0d35362f499d4f",
+            "b2d864414e2f0724005382fd84194d310424598e331cdcf75adf22717e784f5b",
+            "8f16600d0ca74b2e81ae6fa4443d370cf9f1db8d5899ae48e53e930b72da2fce"
+          ],
+          "cursor_history": [],
+          "duplicates_seen": 1,
+          "outside_window": 1,
+          "records_read": 7,
+          "transient_failures": 0,
+          "complete": true,
+          "steps": [
+            {
+              "page": 1,
+              "records": 7,
+              "outcome": "read",
+              "watermark_advanced": false
+            }
+          ],
+          "dry_run": false,
+          "summary": {
+            "version": 1,
+            "after": "2026-10-01T00:00:00Z",
+            "before": "2026-10-02T00:00:00Z",
+            "pages_read": 1,
+            "transient_failures": 0,
+            "complete": true,
+            "next_cursor": null,
+            "complete_through": "2026-10-02T00:00:00Z",
+            "represented": 5,
+            "intents": 4,
+            "unsupported": 1,
+            "duplicates_seen": 1,
+            "outside_window": 1,
+            "records_read": 7,
+            "reviewed": 0,
+            "pending_review": 4
+          },
+          "digest": "d14ec07988e4e00eaae369359e1328a406fd445b140b906379ca2b6a38661335"
+        },
+        "interval": {
+          "after": "2026-10-01T00:00:00Z",
+          "before": "2026-10-02T00:00:00Z"
+        },
+        "page_budget": 1,
+        "repo": "camerontaylor/cq-toolkit",
+        "base": "origin/main",
+        "allow_complete": false
+      },
+      "expect": {
+        "ok": false,
+        "error": "ReconcileRefused",
+        "message": "checkpoint is already complete; nothing to resume"
+      }
+    },
+    {
+      "name": "complete-checkpoint-allowed-with-flag",
+      "source": "merged_reconcile.load_checkpoint",
+      "input": {
+        "checkpoint": {
+          "schema_version": 2,
+          "after": "2026-10-01T00:00:00Z",
+          "before": "2026-10-02T00:00:00Z",
+          "page_budget": 1,
+          "repo": "camerontaylor/cq-toolkit",
+          "base": "origin/main",
+          "cursor": null,
+          "pages_read": 1,
+          "seen": {
+            "9": {
+              "merge_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "merged_at": "2026-10-01T13:00:00Z"
+            },
+            "5": {
+              "merge_sha": "cccccccccccccccccccccccccccccccccccccccc",
+              "merged_at": "2026-10-01T15:00:00Z"
+            },
+            "6": {
+              "merge_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "merged_at": "2026-10-01T16:00:00Z"
+            },
+            "8": {
+              "merge_sha": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+              "merged_at": "2026-10-01T17:00:00Z"
+            }
+          },
+          "inventory": [
+            {
+              "disposition": "intent",
+              "pr": 9,
+              "merged_at": "2026-10-01T13:00:00Z",
+              "merge_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "subject": {
+                "repo": null,
+                "pr": 9,
+                "merge_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "target_selector": "promoted-main",
+                "policy": "affected-current-additions-v1"
+              }
+            },
+            {
+              "disposition": "unsupported",
+              "pr": 4,
+              "merged_at": "2026-10-01T14:00:00Z",
+              "reason": "missing or malformed merge commit identity"
+            },
+            {
+              "disposition": "intent",
+              "pr": 5,
+              "merged_at": "2026-10-01T15:00:00Z",
+              "merge_sha": "cccccccccccccccccccccccccccccccccccccccc",
+              "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "subject": {
+                "repo": null,
+                "pr": 5,
+                "merge_sha": "cccccccccccccccccccccccccccccccccccccccc",
+                "target_selector": "promoted-main",
+                "policy": "affected-current-additions-v1"
+              }
+            },
+            {
+              "disposition": "intent",
+              "pr": 6,
+              "merged_at": "2026-10-01T16:00:00Z",
+              "merge_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "head": "dddddddddddddddddddddddddddddddddddddddd",
+              "subject": {
+                "repo": null,
+                "pr": 6,
+                "merge_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "target_selector": "promoted-main",
+                "policy": "affected-current-additions-v1"
+              }
+            },
+            {
+              "disposition": "intent",
+              "pr": 8,
+              "merged_at": "2026-10-01T17:00:00Z",
+              "merge_sha": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+              "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "subject": {
+                "repo": null,
+                "pr": 8,
+                "merge_sha": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                "target_selector": "promoted-main",
+                "policy": "affected-current-additions-v1"
+              }
+            }
+          ],
+          "record_keys": [
+            "6d40e6edbbc383233e368346a5429eb35f0ad0f900abcc67ad0dc8ba4cc21932",
+            "3446aa7b19e8d0b2b7ffb7a280d0aefd77012de61e2b7b7f65b40a3246d4c2bf",
+            "95a15d534723c8b6e95626e054107a7ef5e701b8a11be77d6a0d35362f499d4f",
+            "b2d864414e2f0724005382fd84194d310424598e331cdcf75adf22717e784f5b",
+            "8f16600d0ca74b2e81ae6fa4443d370cf9f1db8d5899ae48e53e930b72da2fce"
+          ],
+          "cursor_history": [],
+          "duplicates_seen": 1,
+          "outside_window": 1,
+          "records_read": 7,
+          "transient_failures": 0,
+          "complete": true,
+          "steps": [
+            {
+              "page": 1,
+              "records": 7,
+              "outcome": "read",
+              "watermark_advanced": false
+            }
+          ],
+          "dry_run": false,
+          "summary": {
+            "version": 1,
+            "after": "2026-10-01T00:00:00Z",
+            "before": "2026-10-02T00:00:00Z",
+            "pages_read": 1,
+            "transient_failures": 0,
+            "complete": true,
+            "next_cursor": null,
+            "complete_through": "2026-10-02T00:00:00Z",
+            "represented": 5,
+            "intents": 4,
+            "unsupported": 1,
+            "duplicates_seen": 1,
+            "outside_window": 1,
+            "records_read": 7,
+            "reviewed": 0,
+            "pending_review": 4
+          },
+          "digest": "d14ec07988e4e00eaae369359e1328a406fd445b140b906379ca2b6a38661335"
+        },
+        "interval": {
+          "after": "2026-10-01T00:00:00Z",
+          "before": "2026-10-02T00:00:00Z"
+        },
+        "page_budget": 1,
+        "repo": "camerontaylor/cq-toolkit",
+        "base": "origin/main",
+        "allow_complete": true
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "schema_version": 2,
+          "after": "2026-10-01T00:00:00Z",
+          "before": "2026-10-02T00:00:00Z",
+          "page_budget": 1,
+          "repo": "camerontaylor/cq-toolkit",
+          "base": "origin/main",
+          "cursor": null,
+          "pages_read": 1,
+          "seen": {
+            "9": {
+              "merge_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "merged_at": "2026-10-01T13:00:00Z"
+            },
+            "5": {
+              "merge_sha": "cccccccccccccccccccccccccccccccccccccccc",
+              "merged_at": "2026-10-01T15:00:00Z"
+            },
+            "6": {
+              "merge_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "merged_at": "2026-10-01T16:00:00Z"
+            },
+            "8": {
+              "merge_sha": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+              "merged_at": "2026-10-01T17:00:00Z"
+            }
+          },
+          "inventory": [
+            {
+              "disposition": "intent",
+              "pr": 9,
+              "merged_at": "2026-10-01T13:00:00Z",
+              "merge_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "subject": {
+                "repo": null,
+                "pr": 9,
+                "merge_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "target_selector": "promoted-main",
+                "policy": "affected-current-additions-v1"
+              }
+            },
+            {
+              "disposition": "unsupported",
+              "pr": 4,
+              "merged_at": "2026-10-01T14:00:00Z",
+              "reason": "missing or malformed merge commit identity"
+            },
+            {
+              "disposition": "intent",
+              "pr": 5,
+              "merged_at": "2026-10-01T15:00:00Z",
+              "merge_sha": "cccccccccccccccccccccccccccccccccccccccc",
+              "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "subject": {
+                "repo": null,
+                "pr": 5,
+                "merge_sha": "cccccccccccccccccccccccccccccccccccccccc",
+                "target_selector": "promoted-main",
+                "policy": "affected-current-additions-v1"
+              }
+            },
+            {
+              "disposition": "intent",
+              "pr": 6,
+              "merged_at": "2026-10-01T16:00:00Z",
+              "merge_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "head": "dddddddddddddddddddddddddddddddddddddddd",
+              "subject": {
+                "repo": null,
+                "pr": 6,
+                "merge_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "target_selector": "promoted-main",
+                "policy": "affected-current-additions-v1"
+              }
+            },
+            {
+              "disposition": "intent",
+              "pr": 8,
+              "merged_at": "2026-10-01T17:00:00Z",
+              "merge_sha": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+              "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "subject": {
+                "repo": null,
+                "pr": 8,
+                "merge_sha": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                "target_selector": "promoted-main",
+                "policy": "affected-current-additions-v1"
+              }
+            }
+          ],
+          "record_keys": [
+            "6d40e6edbbc383233e368346a5429eb35f0ad0f900abcc67ad0dc8ba4cc21932",
+            "3446aa7b19e8d0b2b7ffb7a280d0aefd77012de61e2b7b7f65b40a3246d4c2bf",
+            "95a15d534723c8b6e95626e054107a7ef5e701b8a11be77d6a0d35362f499d4f",
+            "b2d864414e2f0724005382fd84194d310424598e331cdcf75adf22717e784f5b",
+            "8f16600d0ca74b2e81ae6fa4443d370cf9f1db8d5899ae48e53e930b72da2fce"
+          ],
+          "cursor_history": [],
+          "duplicates_seen": 1,
+          "outside_window": 1,
+          "records_read": 7,
+          "transient_failures": 0,
+          "complete": true,
+          "steps": [
+            {
+              "page": 1,
+              "records": 7,
+              "outcome": "read",
+              "watermark_advanced": false
+            }
+          ],
+          "dry_run": false,
+          "summary": {
+            "version": 1,
+            "after": "2026-10-01T00:00:00Z",
+            "before": "2026-10-02T00:00:00Z",
+            "pages_read": 1,
+            "transient_failures": 0,
+            "complete": true,
+            "next_cursor": null,
+            "complete_through": "2026-10-02T00:00:00Z",
+            "represented": 5,
+            "intents": 4,
+            "unsupported": 1,
+            "duplicates_seen": 1,
+            "outside_window": 1,
+            "records_read": 7,
+            "reviewed": 0,
+            "pending_review": 4
+          },
+          "digest": "d14ec07988e4e00eaae369359e1328a406fd445b140b906379ca2b6a38661335"
+        }
+      }
+    },
+    {
+      "name": "digest-mismatch-refused",
+      "source": "merged_reconcile.load_checkpoint",
+      "input": {
+        "checkpoint": {
+          "schema_version": 2,
+          "after": "2026-10-01T00:00:00Z",
+          "before": "2026-10-02T00:00:00Z",
+          "page_budget": 1,
+          "repo": "camerontaylor/cq-toolkit",
+          "base": "origin/main",
+          "cursor": "cursor-1",
+          "pages_read": 1,
+          "seen": {
+            "9": {
+              "merge_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "merged_at": "2026-10-01T13:00:00Z"
+            },
+            "5": {
+              "merge_sha": "cccccccccccccccccccccccccccccccccccccccc",
+              "merged_at": "2026-10-01T15:00:00Z"
+            },
+            "6": {
+              "merge_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "merged_at": "2026-10-01T16:00:00Z"
+            },
+            "8": {
+              "merge_sha": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+              "merged_at": "2026-10-01T17:00:00Z"
+            }
+          },
+          "inventory": [
+            {
+              "disposition": "intent",
+              "pr": 9,
+              "merged_at": "2026-10-01T13:00:00Z",
+              "merge_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "subject": {
+                "repo": null,
+                "pr": 9,
+                "merge_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "target_selector": "promoted-main",
+                "policy": "affected-current-additions-v1"
+              }
+            },
+            {
+              "disposition": "unsupported",
+              "pr": 4,
+              "merged_at": "2026-10-01T14:00:00Z",
+              "reason": "missing or malformed merge commit identity"
+            },
+            {
+              "disposition": "intent",
+              "pr": 5,
+              "merged_at": "2026-10-01T15:00:00Z",
+              "merge_sha": "cccccccccccccccccccccccccccccccccccccccc",
+              "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "subject": {
+                "repo": null,
+                "pr": 5,
+                "merge_sha": "cccccccccccccccccccccccccccccccccccccccc",
+                "target_selector": "promoted-main",
+                "policy": "affected-current-additions-v1"
+              }
+            },
+            {
+              "disposition": "intent",
+              "pr": 6,
+              "merged_at": "2026-10-01T16:00:00Z",
+              "merge_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "head": "dddddddddddddddddddddddddddddddddddddddd",
+              "subject": {
+                "repo": null,
+                "pr": 6,
+                "merge_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "target_selector": "promoted-main",
+                "policy": "affected-current-additions-v1"
+              }
+            },
+            {
+              "disposition": "intent",
+              "pr": 8,
+              "merged_at": "2026-10-01T17:00:00Z",
+              "merge_sha": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+              "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "subject": {
+                "repo": null,
+                "pr": 8,
+                "merge_sha": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                "target_selector": "promoted-main",
+                "policy": "affected-current-additions-v1"
+              }
+            }
+          ],
+          "record_keys": [
+            "6d40e6edbbc383233e368346a5429eb35f0ad0f900abcc67ad0dc8ba4cc21932",
+            "3446aa7b19e8d0b2b7ffb7a280d0aefd77012de61e2b7b7f65b40a3246d4c2bf",
+            "95a15d534723c8b6e95626e054107a7ef5e701b8a11be77d6a0d35362f499d4f",
+            "b2d864414e2f0724005382fd84194d310424598e331cdcf75adf22717e784f5b",
+            "8f16600d0ca74b2e81ae6fa4443d370cf9f1db8d5899ae48e53e930b72da2fce"
+          ],
+          "cursor_history": [
+            "cursor-1"
+          ],
+          "duplicates_seen": 1,
+          "outside_window": 1,
+          "records_read": 7,
+          "transient_failures": 0,
+          "complete": false,
+          "steps": [
+            {
+              "page": 1,
+              "records": 7,
+              "outcome": "read",
+              "watermark_advanced": false
+            }
+          ],
+          "dry_run": false,
+          "summary": {
+            "version": 1,
+            "after": "2026-10-01T00:00:00Z",
+            "before": "2026-10-02T00:00:00Z",
+            "pages_read": 1,
+            "transient_failures": 0,
+            "complete": false,
+            "next_cursor": "cursor-1",
+            "complete_through": null,
+            "represented": 5,
+            "intents": 4,
+            "unsupported": 1,
+            "duplicates_seen": 1,
+            "outside_window": 1,
+            "records_read": 7,
+            "reviewed": 0,
+            "pending_review": 4
+          },
+          "digest": "0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        "interval": {
+          "after": "2026-10-01T00:00:00Z",
+          "before": "2026-10-02T00:00:00Z"
+        },
+        "page_budget": 1,
+        "repo": "camerontaylor/cq-toolkit",
+        "base": "origin/main",
+        "allow_complete": false
+      },
+      "expect": {
+        "ok": false,
+        "error": "ReconcileRefused",
+        "message": "checkpoint digest mismatch"
+      }
+    },
+    {
+      "name": "different-interval-refused",
+      "source": "merged_reconcile.load_checkpoint",
+      "input": {
+        "checkpoint": {
+          "schema_version": 2,
+          "after": "2026-10-01T00:00:00Z",
+          "before": "2026-10-02T00:00:00Z",
+          "page_budget": 1,
+          "repo": "camerontaylor/cq-toolkit",
+          "base": "origin/main",
+          "cursor": "cursor-1",
+          "pages_read": 1,
+          "seen": {
+            "9": {
+              "merge_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "merged_at": "2026-10-01T13:00:00Z"
+            },
+            "5": {
+              "merge_sha": "cccccccccccccccccccccccccccccccccccccccc",
+              "merged_at": "2026-10-01T15:00:00Z"
+            },
+            "6": {
+              "merge_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "merged_at": "2026-10-01T16:00:00Z"
+            },
+            "8": {
+              "merge_sha": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+              "merged_at": "2026-10-01T17:00:00Z"
+            }
+          },
+          "inventory": [
+            {
+              "disposition": "intent",
+              "pr": 9,
+              "merged_at": "2026-10-01T13:00:00Z",
+              "merge_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "subject": {
+                "repo": null,
+                "pr": 9,
+                "merge_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "target_selector": "promoted-main",
+                "policy": "affected-current-additions-v1"
+              }
+            },
+            {
+              "disposition": "unsupported",
+              "pr": 4,
+              "merged_at": "2026-10-01T14:00:00Z",
+              "reason": "missing or malformed merge commit identity"
+            },
+            {
+              "disposition": "intent",
+              "pr": 5,
+              "merged_at": "2026-10-01T15:00:00Z",
+              "merge_sha": "cccccccccccccccccccccccccccccccccccccccc",
+              "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "subject": {
+                "repo": null,
+                "pr": 5,
+                "merge_sha": "cccccccccccccccccccccccccccccccccccccccc",
+                "target_selector": "promoted-main",
+                "policy": "affected-current-additions-v1"
+              }
+            },
+            {
+              "disposition": "intent",
+              "pr": 6,
+              "merged_at": "2026-10-01T16:00:00Z",
+              "merge_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "head": "dddddddddddddddddddddddddddddddddddddddd",
+              "subject": {
+                "repo": null,
+                "pr": 6,
+                "merge_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "target_selector": "promoted-main",
+                "policy": "affected-current-additions-v1"
+              }
+            },
+            {
+              "disposition": "intent",
+              "pr": 8,
+              "merged_at": "2026-10-01T17:00:00Z",
+              "merge_sha": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+              "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "subject": {
+                "repo": null,
+                "pr": 8,
+                "merge_sha": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                "target_selector": "promoted-main",
+                "policy": "affected-current-additions-v1"
+              }
+            }
+          ],
+          "record_keys": [
+            "6d40e6edbbc383233e368346a5429eb35f0ad0f900abcc67ad0dc8ba4cc21932",
+            "3446aa7b19e8d0b2b7ffb7a280d0aefd77012de61e2b7b7f65b40a3246d4c2bf",
+            "95a15d534723c8b6e95626e054107a7ef5e701b8a11be77d6a0d35362f499d4f",
+            "b2d864414e2f0724005382fd84194d310424598e331cdcf75adf22717e784f5b",
+            "8f16600d0ca74b2e81ae6fa4443d370cf9f1db8d5899ae48e53e930b72da2fce"
+          ],
+          "cursor_history": [
+            "cursor-1"
+          ],
+          "duplicates_seen": 1,
+          "outside_window": 1,
+          "records_read": 7,
+          "transient_failures": 0,
+          "complete": false,
+          "steps": [
+            {
+              "page": 1,
+              "records": 7,
+              "outcome": "read",
+              "watermark_advanced": false
+            }
+          ],
+          "dry_run": false,
+          "summary": {
+            "version": 1,
+            "after": "2026-10-01T00:00:00Z",
+            "before": "2026-10-02T00:00:00Z",
+            "pages_read": 1,
+            "transient_failures": 0,
+            "complete": false,
+            "next_cursor": "cursor-1",
+            "complete_through": null,
+            "represented": 5,
+            "intents": 4,
+            "unsupported": 1,
+            "duplicates_seen": 1,
+            "outside_window": 1,
+            "records_read": 7,
+            "reviewed": 0,
+            "pending_review": 4
+          },
+          "digest": "c38340d29d2d6d87e902d85c7934c9a2b64f6e1ffab5a09b8100c26b6e3162bd"
+        },
+        "interval": {
+          "after": "2026-09-01T00:00:00Z",
+          "before": "2026-10-02T00:00:00Z"
+        },
+        "page_budget": 1,
+        "repo": "camerontaylor/cq-toolkit",
+        "base": "origin/main",
+        "allow_complete": false
+      },
+      "expect": {
+        "ok": false,
+        "error": "ReconcileRefused",
+        "message": "checkpoint belongs to a different frozen interval"
+      }
+    }
+  ]
+}

@@ -124,6 +124,8 @@ export function serveStdio(
   /** In-flight tool calls by request id → their abort handle. */
   const inflight = new Map<JsonRpcId, AbortController>();
   let ended = false;
+  /** Writes to `output` whose write callback has not settled yet. */
+  let pendingWrites = 0;
   let finish!: (end: ServeEnd) => void;
   const done = new Promise<ServeEnd>((resolve) => {
     finish = resolve;
@@ -131,7 +133,14 @@ export function serveStdio(
 
   const send = (message: Record<string, unknown>): void => {
     if (ended) return;
-    output.write(`${JSON.stringify({ jsonrpc: '2.0', ...message })}\n`);
+    pendingWrites += 1;
+    const line = `${JSON.stringify({ jsonrpc: '2.0', ...message })}\n`;
+    output.write(line, (error?: Error | null) => {
+      pendingWrites -= 1;
+      // A failed write still reports through an 'error' event, so it does not
+      // rule out a later error: only a clean write releases the handler.
+      if (error === undefined || error === null) releaseOnOutputSettled();
+    });
   };
   const reply = (id: JsonRpcId, result: unknown): void => send({ id, result });
   const fail = (id: JsonRpcId | null, code: number, message: string): void =>
@@ -145,9 +154,18 @@ export function serveStdio(
     input.off('data', onData);
     input.off('end', onEnd);
     input.off('error', onEnd);
-    output.off('error', onEnd);
+    // Keep the output 'error' handler attached until every outstanding write
+    // has settled: a write still in flight can emit 'error' after `end`, and
+    // an unhandled 'error' would terminate an embedding process.
+    releaseOnOutputSettled();
     finish(why);
   };
+
+  /** Detach `onEnd` from output once no write can still emit 'error'. */
+  function releaseOnOutputSettled(): void {
+    if (!ended || pendingWrites > 0) return;
+    output.off('error', onEnd);
+  }
 
   const handleToolsCall = (id: JsonRpcId, params: Record<string, unknown> | undefined): void => {
     const name = params?.['name'];

@@ -82,14 +82,14 @@ describe('scrubEnvironment', () => {
     const saved = { ...process.env };
     try {
       process.env['ANTHROPIC_API_KEY'] = 'secret';
-      process.env['CQ_TEST_EXTRA'] = 'kept';
+      process.env['TEST_EXTRA_CANARY'] = 'kept';
       process.env['CQ_TEST_OTHER'] = 'dropped';
       process.env['PATH'] ??= '/usr/bin:/bin';
       const path = process.env['PATH'];
-      scrubEnvironment(['CQ_TEST_EXTRA']);
+      scrubEnvironment(['TEST_EXTRA_CANARY']);
       expect(process.env['ANTHROPIC_API_KEY']).toBeUndefined();
       expect(process.env['CQ_TEST_OTHER']).toBeUndefined();
-      expect(process.env['CQ_TEST_EXTRA']).toBe('kept');
+      expect(process.env['TEST_EXTRA_CANARY']).toBe('kept');
       expect(process.env['PATH']).toBe(path);
     } finally {
       for (const name of Object.keys(process.env)) delete process.env[name];

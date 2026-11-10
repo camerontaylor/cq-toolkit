@@ -256,8 +256,9 @@ settings." The frozen `ToolPolicy` is DECLARATIVE
 (an allowlist match, or any request under mode `unrestricted`) selects
 the `allow_once` option when one is offered, else the `allow_always`
 option (`{ outcome: 'selected', optionId }` of the chosen option;
-`allow_always` is harmless per-run — the session dies with the process,
-so there is no cross-run memory to honor). A DENY decision (an allowlist
+`allow_always` can be remembered by the agent beyond this run; its
+scope and duration are agent-defined. Prefer `allow_once` to avoid granting
+a broader remembered permission). A DENY decision (an allowlist
 miss, or any request under mode `none`) selects the `reject_once` option
 when one is offered, else the `reject_always` option; a deny with NO
 reject option offered FAILS THE RUN with an error naming the vendor's
@@ -299,13 +300,19 @@ enforcement on `session/request_permission` ARRIVING — but the spec
 makes asking the AGENT's decision, not a client-enforceable MUST, so a
 protocol-legal vendor that executes tools WITHOUT asking is possible.
 The driver does not assume it away: it OBSERVES the `tool_call` stream
-inside the session/update filter (§1.1 item 4), and a `tool_call`
-arriving with NO preceding permission request for that tool call is
-recorded as evidence of UNGATED EXECUTION and the run verdict is
-`error` — fail loud, because a policy that cannot be enforced is not
-silently soft. That is what keeps the "only gate we own" claim above
-honest: if the gate never fires, the run record says so instead of
-passing a policy-void run as green.
+inside the session/update filter (§1.1 item 4) and tracks each call
+through its permission and EXECUTION states — the announcement alone is
+not a verdict. A `tool_call` reported `pending` is NOT evidence: the
+spec permits a pending call while input is still streaming or approval
+is still pending, and an agent may report the call BEFORE it sends its
+permission request, so treating that report as ungated would fail a run
+the driver actually governs. Only a call that reaches an EXECUTING or
+terminal status (`in_progress`, `completed`, `failed`) with NO preceding
+permission request for its id is recorded as evidence of UNGATED
+EXECUTION and the run verdict is `error` — fail loud, because a policy
+that cannot be enforced is not silently soft. That is what keeps the
+"only gate we own" claim above honest: if the gate never fires, the run
+record says so instead of passing a policy-void run as green.
 
 ### 2.2 `sandboxPolicy` → nothing, and that is the answer, stated plainly
 
@@ -749,9 +756,11 @@ the RD-F PR): the set_config_option ANSWER carries no `modes` member —
 notification naming `build`, written in the same stdout flush BEFORE the
 response line. A driver that verifies the pin from the response echo alone
 would fail every live run pre-prompt; the driver therefore confirms from
-either surface (echo, or a folded current_mode_update naming `build` —
-the wire's line ordering guarantees the notification is already folded
-when the pin await resolves).
+any of three surfaces: the echo, the response's `configOptions` entry for
+`mode` with currentValue `build`, or a fresh folded `current_mode_update`
+naming `build`. The wire's line ordering guarantees the notification is
+already folded when the pin await resolves. See the mode-pin rule in
+[the driver guide](acp-driver.md).
 
 **OQ-6 (cancel-spend) — ANSWERED (client-observable scope per §2.3).**
 Mid-turn `session/cancel` on a generation prompt: `session/prompt` resolves

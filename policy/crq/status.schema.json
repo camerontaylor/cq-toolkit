@@ -1,0 +1,158 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["generated_at", "paused", "cooldown_until", "finding_triage", "items"],
+  "properties": {
+    "generated_at": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$"
+    },
+    "paused": {
+      "type": ["boolean", "null"]
+    },
+    "cooldown_until": {
+      "type": ["string", "null"]
+    },
+    "finding_triage": {
+      "type": "object",
+      "required": ["counts", "needs_human"],
+      "properties": {
+        "counts": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "needs_human": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id", "canonical_id", "path", "title", "severity", "target", "event_id"],
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "canonical_id": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "path": {
+                "type": ["string", "null"]
+              },
+              "title": {
+                "type": "string",
+                "minLength": 1
+              },
+              "severity": {
+                "type": "string",
+                "minLength": 1
+              },
+              "target": {
+                "type": "string",
+                "minLength": 1
+              },
+              "event_id": {
+                "type": ["string", "null"]
+              }
+            },
+            "additionalProperties": true
+          }
+        },
+        "counts_complete": {
+          "type": "boolean"
+        },
+        "error_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "errors": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["file", "error"],
+            "properties": {
+              "file": {
+                "type": "string",
+                "minLength": 1
+              },
+              "error": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "additionalProperties": true
+          }
+        },
+        "errors_omitted": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "needs_human_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "needs_human_omitted": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": true
+    },
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "kind", "state", "repo"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "kind": {
+            "type": "string",
+            "minLength": 1
+          },
+          "state": {
+            "type": "string",
+            "minLength": 1
+          },
+          "repo": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+          },
+          "prior_cycles": {
+            "type": ["integer", "null"]
+          },
+          "cycles": {
+            "type": ["array", "null"],
+            "items": {
+              "type": "object"
+            }
+          },
+          "operator_priority": {
+            "type": ["boolean", "null"]
+          },
+          "optional_cycle": {
+            "type": ["boolean", "null"]
+          },
+          "pinned_base": {
+            "type": ["string", "null"]
+          },
+          "last_error": {
+            "type": ["string", "null"]
+          },
+          "wait_reason": {
+            "type": ["string", "null"]
+          },
+          "gate_stalled_at": {
+            "type": ["string", "null"]
+          }
+        },
+        "additionalProperties": true
+      }
+    }
+  },
+  "additionalProperties": true
+}

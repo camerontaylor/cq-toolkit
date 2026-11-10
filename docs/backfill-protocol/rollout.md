@@ -146,13 +146,39 @@ churn rather than run count. Deleting the index frees no store bytes.
 Collection or relocation is tracked in #1064.
 The six-hour timer and 45-minute service timeout are unchanged.
 
-All findings enter triage, including threadless/unanchored occurrences. Use
-`backfill.py triage` with an actor/reason against a newly fetched promoted tip;
-only confirmed mapped anchors may be delivered with `backfill.py deliver`.
-Delivery uses the existing repair inbox, never invents GitHub threads and never
-dispatches a fixer. A receipt means delivered; `fixed` requires fixing commit
-and verification evidence. Duplicate linking is explicit and preserves each
-occurrence. These operations do not authorize the old draft posting workflow.
+All findings enter triage, including threadless/unanchored occurrences. The
+repair drain's automatic triage phase checks the freshly fetched promoted tip
+before repair selection. It handles deleted paths and exact duplicates first,
+then judges up to `repair.triage.max_per_pass` findings (default 6), majors
+first, using the configured triage role and provider fallbacks. Both
+`untriaged` and `needs-retriage` findings are eligible. Provider limits leave
+pending work for a later pass. `--triage-dry-run` runs triage only, without
+recording events or delivering findings; use it for rollout evidence before
+live enablement. This documentation change does not enable or deploy triage.
+
+Only confirmed, verified current anchors of critical, major or minor severity
+enter the repair inbox automatically. Canonical minor findings use the same
+current delivered-receipt checks in normal drain and prepared selection;
+legacy minor jobs remain excluded. Triage
+never invents GitHub threads. Ambiguous judgements remain `needs-human`.
+The inventory report's `finding_triage` and `crq status` show current counts by
+status and the needs-human list (finding ID, canonical ID, path, title,
+severity, target and event ID). Status previews retain at most 32 needs-human
+entries and report `needs_human_count` and `needs_human_omitted`; durable rows
+and inventory reports retain the full list. Malformed rows do not stop status
+publication: `error_count`, a bounded `errors` list and `errors_omitted` expose
+them, and `counts_complete: false` marks counts as partial (valid rows only).
+The needs-human count is also partial in that case. Inventory remains strict
+on malformed rows. The event ID links to the retained decision
+evidence. Counts describe occurrences, including duplicates, rather than
+unique repair jobs. `backfill.py triage` with an actor/reason remains the
+operator override, and `backfill.py deliver` remains available for confirmed
+findings. A receipt means delivered; `fixed` requires fixing commit and
+verification evidence. Repair outcomes write back into the same finding-event
+chain: merged fixes become `fixed`, stale jobs need retriage, invalid findings
+are dismissed, and failures remain visible as `needs-human`. Duplicate linking
+preserves each occurrence. These operations do not authorize the old draft
+posting workflow.
 
 For Stage 2, after separately reviewed live evidence, set `inventory_mode` to
 `integrated` and retire the separate timer through the owner runbook. Full ticks

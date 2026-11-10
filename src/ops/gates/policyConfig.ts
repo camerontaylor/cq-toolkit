@@ -29,6 +29,8 @@ import {
 } from '../../config/values.js';
 import { assertCqEnvName } from '../../config/entry.js';
 import { processEnv } from '../../config/process-env.js';
+import type { CqEnvRegistry } from '../../config/env-registry.js';
+import { assertOptInAuthority } from '../../config/optin.js';
 
 /**
  * `human`: every finding needs a human. `diff-check`: plain protected-path
@@ -73,6 +75,8 @@ export function resolveProtectedPathsConfig(
     /** The entry point's resolved snapshot; wins over `env` so nothing re-reads the process env. */
     cqEnv?: CqEnv;
     optIn?: ProtectedPathsOptIn;
+    /** Registry consulted for the `trust` flag; default the shipped registry (a test seam). */
+    registry?: CqEnvRegistry;
   } = {},
 ): ProtectedPathsConfig {
   const env =
@@ -80,6 +84,12 @@ export function resolveProtectedPathsConfig(
       ? { [PROTECTED_PATHS_ENV]: options.cqEnv.values[PROTECTED_PATHS_ENV] as string | undefined }
       : (options.env ?? processEnv());
   const optIn = options.optIn ?? {};
+  assertOptInAuthority(
+    'policy',
+    optIn,
+    { [PROTECTED_PATHS_OPT_IN]: PROTECTED_PATHS_ENV },
+    options.registry,
+  );
 
   const call = optIn[PROTECTED_PATHS_OPT_IN];
   if (call !== undefined) {

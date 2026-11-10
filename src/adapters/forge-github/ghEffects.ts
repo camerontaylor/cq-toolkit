@@ -31,7 +31,7 @@
 // captured gh JSON shapes.
 import { execFile } from 'node:child_process';
 import type { CqEnv } from '../../config/env.js';
-import { resolveGhBin } from './ghBin.js';
+import { ghSpawnEnv, resolveGhBin, resolveWindowsCommand } from './ghBin.js';
 import type {
   PrChecks,
   PrEffects,
@@ -115,15 +115,21 @@ function runGhWith(
   cqEnv?: CqEnv,
 ): Promise<string> {
   return new Promise((resolve, reject) => {
+    const env = ghSpawnEnv({ ...process.env, GH_PROMPT_DISABLED: '1' });
+    const bin = resolveWindowsCommand(resolveGhBin(cqEnv), env, process.platform, process.env);
+    if (bin === undefined) {
+      reject(new Error('gh executable not found'));
+      return;
+    }
     const child = execFile(
-      resolveGhBin(cqEnv),
+      bin,
       args,
       {
         cwd,
         maxBuffer: GH_OUTPUT_MAX_BUFFER_BYTES,
         timeout: timeoutMs,
         killSignal: 'SIGKILL',
-        env: { ...process.env, GH_PROMPT_DISABLED: '1' },
+        env,
       },
       (error, stdout, stderr) => {
         if (error !== null) {

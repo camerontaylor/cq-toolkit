@@ -12,7 +12,9 @@ It supersedes the old 3× full-gate rule everywhere that rule was stated.
 
 pnpm is the package manager (`packageManager` in package.json); install
 with `pnpm install`. `pnpm-workspace.yaml` enables the global virtual store,
-so a warm install in a fresh worktree is a symlink pass.
+so a warm install in a fresh worktree is a symlink pass. Paseo runs
+`scripts/init-worktree.mjs` (via `paseo.json`) in every worktree it creates;
+in a plain `git worktree add` worktree, run `node scripts/init-worktree.mjs`.
 
 Your local duty, on a coherent change:
 
@@ -28,8 +30,11 @@ Your local duty, on a coherent change:
   otherwise (canonical condition: the contract's §1)
 
 **Zero local full gates per PR.** Run focused checks locally; CI owns the full gates.
-The full suite — plus the build, the from-source smoke plan, the coverage
-ratchet and the denylist scan + self-test — runs in CI on every push/PR, and
+CI runs full TS checks on code/shared/unknown PR changes, and skips TS work
+only for recognized prose/Python-only changes; formatting stays unconditional.
+Python runs for Python/shared changes. Main pushes and nightly run full checks.
+Required workflows keep unfiltered triggers; job selection avoids feature-push
+duplicates. The merge bar remains
 **green `static` and `denylist` on the exact PR head**, plus one independent
 exact-head review comment, is the merge bar for PRs directly to `main`.
 CRQ reviews after merge. See [merge policy](docs/promotion-policy.md).

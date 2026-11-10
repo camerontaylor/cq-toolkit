@@ -33,6 +33,40 @@ describe('acp driver specifics (fake ACP server)', () => {
     });
   });
 
+  test.each([
+    ['pending', 'complete', false],
+    ['in_progress', 'error', true],
+  ] as const)(
+    'a %s report before permission produces %s and ungated evidence=%s',
+    async (status, stopReason, ungated) => {
+      await withScratch(async (scratchDir, store) => {
+        const driver = new AcpDriver(
+          driverOptions(
+            scratchDir,
+            {
+              FAKE_ACP_MODE: 'tool-then-reply',
+              FAKE_ACP_TOOL: 'run',
+              FAKE_ACP_INPUT: JSON.stringify({ command: 'echo pre-permission-ok' }),
+              FAKE_ACP_BEFORE_ASK_STATUS: status,
+            },
+            [],
+          ),
+        );
+        const result = await driver.run(invocation({ prompt: 'pre-permission status' }));
+        expect(result.stopReason).toBe(stopReason);
+        expect(result.denials).toEqual([]);
+        const narration = await narrationOf(store, result.sessionId as string);
+        expect(narration.some((line) => line.includes('"never-asks"'))).toBe(ungated);
+        const record = await store.load(result.sessionId as string);
+        expect(
+          record?.messages.some(
+            (message) => message.role === 'tool' && message.content.includes('pre-permission-ok'),
+          ),
+        ).toBe(true);
+      });
+    },
+  );
+
   test('THE DENIED-EXECUTION TRIPWIRE (#45): a denied toolCallId reporting completed is ungated-execution evidence — error, never green', async () => {
     await withScratch(async (scratchDir, store) => {
       // FAKE_ACP_DENY_BUT_COMPLETE: the ask fires, the driver answers

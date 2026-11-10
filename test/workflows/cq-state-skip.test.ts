@@ -1,24 +1,14 @@
-// The `cq-state` settle-ledger skip guards (review-debt #226).
-//
-// Pushes to the machine-written `cq-state` branch used to fire the
-// unfiltered push workflows (ci, denylist) — wasted runner time on
-// a branch that carries no reviewable change. The I4-sanctioned fix is a
-// JOB-LEVEL `if:` (never a trigger filter: the `on:` block of a required
-// workflow stays unfiltered, or the required check never reports — unchanged
-// here), pinned per file in this test so a regeneration cannot drop it.
 import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { runInNewContext } from 'node:vm';
+import { parse } from 'yaml';
 import { describe, expect, it } from 'vitest';
-import { STATE_BRANCH } from '../../src/selfhost/state-branch.js';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 
-// Built from the owned constant (PR #234 r1), not a 'cq-state' literal:
-// the YAML files spell the branch out, so a STATE_BRANCH rename must fail
-// HERE — a hardcoded literal would let a rename silently disable every
-// guard with no failing test.
-const SKIP = `if: \${{ github.ref != 'refs/heads/${STATE_BRANCH}' }}`;
+// Required workflows select PR events and main pushes at job level.
+const SKIP = `if: \${{ github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}`;
 
 const read = (rel: string): string => readFileSync(join(ROOT, rel), 'utf8');
 
@@ -54,16 +44,34 @@ function expectEveryJobGuarded(text: string, file: string): void {
     const idLine = lines.findIndex((line, i) => i >= start && line === `  ${id}:`);
     const next = lines.findIndex((line, i) => i > idLine && /^ {2}[A-Za-z0-9_-]+:\s*$/.test(line));
     const blockLines = lines.slice(idLine, next === -1 ? lines.length : next);
-    expect(
-      blockLines,
-      `${file} job ${id} carries the cq-state skip at JOB-KEY indentation`,
-    ).toContain(jobLevelGuard);
+    const guard = blockLines.find((line) => line.startsWith('    if:'));
+    expect(guard, `${file} job ${id} has event selection`).toBeDefined();
+    if (file.includes('denylist')) expect(blockLines).toContain(jobLevelGuard);
+    else {
+      expect(guard).toContain("github.event_name == 'pull_request'");
+      expect(guard).toContain(
+        "github.ref == format('refs/heads/{0}', github.event.repository.default_branch)",
+      );
+      expect(guard).toContain("github.event_name == 'schedule'");
+    }
   }
 }
 
-describe('the cq-state skip guards (review-debt #226)', () => {
+describe('required workflow event selection', () => {
+  it('instantiates the required-check example without drift', () => {
+    const doc = read('policy/templates/required-check.md');
+    const yaml = doc.split('```yaml\n')[1]?.split('\n```')[0];
+    expect(yaml).toBeDefined();
+    const rendered = yaml!
+      .replaceAll('{{RUNNER}}', 'ubuntu-latest')
+      .replaceAll('{{NODE_VERSION}}', '24')
+      .replaceAll('{{INSTALL_CMD}}', 'pnpm install --frozen-lockfile');
+    expect(read('.github/workflows/ci.yml')).toBe(
+      `# instantiated from policy/templates/required-check.md — edit the template, not this file\n${rendered}\n`,
+    );
+  });
   it.each(['.github/workflows/ci.yml', '.github/workflows/denylist.yml'])(
-    'every job in %s skips the cq-state ledger branch at the JOB level',
+    'every job in %s selects PRs and main pushes at the JOB level',
     (file) => {
       expectEveryJobGuarded(read(file), file);
     },
@@ -80,5 +88,57 @@ describe('the cq-state skip guards (review-debt #226)', () => {
     // The template teaches the rule the guard obeys: the `on:` block of the
     // worked example stays filter-free.
     expect(yaml).toMatch(/on:\n {2}push:\n {2}pull_request:\n/);
+  });
+});
+
+describe('required workflow cancellation isolation', () => {
+  it.each(['.github/workflows/ci.yml', '.github/workflows/denylist.yml'])(
+    '%s isolates each event and PR/ref',
+    (file) => {
+      const text = read(file);
+      expect(text).toContain(
+        'group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}',
+      );
+      expect(text).toContain('cancel-in-progress: true');
+      expect(text).toMatch(/on:\n {2}push:\n {2}pull_request:\n/);
+    },
+  );
+});
+
+// Evaluate actual keys with no string comparisons: property lookup and || only.
+// JavaScript string equality would not model GitHub's case-insensitive equality.
+describe('concurrency collisions', () => {
+  it.each(['ci.yml', 'denylist.yml'])('%s isolates cancellation axes', (file) => {
+    const workflow = parse(read(`.github/workflows/${file}`)) as { concurrency: { group: string } };
+    expect(workflow.concurrency.group).not.toMatch(/==|!=|format\(/);
+    const key = (event: string, ref: string, run: number, pr = 0): string =>
+      workflow.concurrency.group
+        .replace(/\$\{\{([\s\S]*?)\}\}/g, (_whole: string, expression: string) =>
+          String(
+            runInNewContext(expression, {
+              github: {
+                workflow: file,
+                event_name: event,
+                ref,
+                run_id: run,
+                sha: 'same-sha',
+                event: { repository: { default_branch: 'main' }, pull_request: { number: pr } },
+              },
+              format: (pattern: string, value: string) => pattern.replace('{0}', value),
+            }),
+          ),
+        )
+        .toLowerCase();
+    const main = key('push', 'refs/heads/main', 1);
+    // Every push finishes independently, including incremental main scans.
+    expect(key('push', 'refs/heads/main', 2)).not.toBe(main);
+    for (const ref of ['refs/heads/feature', 'refs/heads/Main', 'refs/tags/v1']) {
+      expect(key('push', ref, 3)).not.toBe(main);
+    }
+    const pr = key('pull_request', 'refs/pull/7/merge', 4, 7);
+    expect(key('pull_request', 'refs/pull/7/merge', 5, 7)).toBe(pr);
+    expect(key('pull_request', 'refs/pull/8/merge', 6, 8)).not.toBe(pr);
+    expect(key('push', 'refs/heads/feature', 7)).not.toBe(pr);
+    expect(main).not.toBe(pr);
   });
 });

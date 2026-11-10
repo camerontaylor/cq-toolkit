@@ -79,7 +79,11 @@
 // DETERMINISM: classify and plan are pure and clock-free; Date.now() is
 // read ONCE, here (the composition is the one place the ambient clock is
 // allowed — tests inject `nowMs`). Same input + same nowMs → deep-equal
-// outcome, always.
+// outcome, always. With NO `nowMs` supplied the composition reads Date.now()
+// once, so its verdicts depend on the real clock. A plan-supplied `nowMs`
+// later than the real clock is REJECTED by the dispatched op (`config`; a
+// later clock would shorten the settle wait), so for an input that supplies
+// `nowMs` the dispatch route is deterministic.
 import pLimit from 'p-limit';
 import { createDriverFactory } from '../../driver/factory.js';
 import type { DriverFactory } from '../../driver/factory.js';
@@ -94,6 +98,14 @@ import { executeMerges } from './executeMerges.js';
 import type { ExecutionReport } from './executeMerges.js';
 import { realMergeEffects } from '../../adapters/forge-github/mergeEffects.js';
 import type { MergeEffects } from '../../adapters/forge-github/mergeEffects.js';
+import type { CqEnv } from '../../config/env.js';
+import { assertPlanClock } from '../../shared/planClock.js';
+import {
+  assertBaseBranchMirror,
+  assertProtectedBranchMirror,
+  mergeClassifyConfig,
+  resolveClassifyTrust,
+} from './trustMirrors.js';
 import { diagnoseMergeFailure } from './diagnoseMergeFailure.js';
 import type { MergeFailureDiagnosis } from './diagnoseMergeFailure.js';
 import { planMergeOrder } from './planMergeOrder.js';
@@ -311,10 +323,17 @@ export async function runMergePrs(
   // Stages 1–3: classify → plan → execute (pass 1). The planner's seven
   // fail-closed rules stand untouched; conflicting prs are withheld
   // 'not_eligible' by the planner — carried, never re-graded.
+  // `config` (the JSON twin, incl. the env-resolved trust fields) merges INTO the
+  // caller's classifyConfig: it overrides only the fields it names, so a
+  // caller's excludedLogins/automationLogin survive.
   const classifyConfig =
     input.config === undefined
       ? input.classifyConfig
-      : ({ ...defaultClassifyPrConfig, ...input.config } as ClassifyPrConfig);
+      : (mergeClassifyConfig(
+          'merge.runPrs',
+          input.classifyConfig ?? defaultClassifyPrConfig,
+          input.config,
+        ) as ClassifyPrConfig);
   const planned1 = classifyStage(input.prs, nowMs, classifyConfig);
   const plan1 = planMergeOrder({ baseBranch: input.baseBranch, prs: planned1 });
   const firstPass = await execute(plan1);
@@ -602,6 +621,8 @@ export async function runMergePrs(
 /** Construction-time seams for the DEFAULT op — everything optional; a
  * test injects fakes here, production builds real ones per call. */
 export interface MakeRunMergePrsOpDeps {
+  /** The resolved config snapshot the baseBranch mirror is checked against. Default: readCqEnv(). */
+  cqEnv?: CqEnv;
   /** Default: realMergeEffects built lazily per call from
    * input.repoRoot (+ input.protectedBranch). */
   effects?: MergeEffects;
@@ -662,15 +683,31 @@ export function makeRunMergePrsOp(
   deps?: MakeRunMergePrsOpDeps,
 ): Op<RunMergePrsInput, MergePrsOutcome> {
   return async (input): Promise<OpResult<MergePrsOutcome>> => {
+    const protectedBranch = assertProtectedBranchMirror(
+      'merge.runPrs',
+      input.protectedBranch,
+      deps?.cqEnv,
+    );
+    const baseBranch = assertBaseBranchMirror('merge.runPrs', input.baseBranch, deps?.cqEnv);
+    // A plan-supplied clock later than the real one is a `config` error (before any effect).
+    const nowMs =
+      input.nowMs !== undefined ? assertPlanClock('merge.runPrs', input.nowMs) : undefined;
+    // Who counts as a reviewer is a trust input: resolved from config only.
+    const trust = resolveClassifyTrust('merge.runPrs', input.config, deps?.cqEnv);
+    const config =
+      input.config === undefined && Object.keys(trust).length === 0
+        ? undefined
+        : { ...input.config, ...trust };
     const effects =
       deps?.effects ??
       realMergeEffects({
         repoRoot: input.repoRoot,
-        ...(input.protectedBranch !== undefined ? { protectedBranch: input.protectedBranch } : {}),
+        protectedBranch,
       });
     const sessionsDir = deps?.sessionsDir ?? input.sessionsDir;
     const resolve = makeResolveConflictOp({
       effects,
+      ...(deps?.cqEnv !== undefined ? { cqEnv: deps.cqEnv } : {}),
       ...(deps?.drivers !== undefined
         ? { drivers: deps.drivers }
         : {
@@ -686,11 +723,21 @@ export function makeRunMergePrsOp(
           }),
       ...(deps?.harnessConfig !== undefined ? { harnessConfig: deps.harnessConfig } : {}),
     });
-    const outcome = await runMergePrs(input, {
-      effects,
-      resolve,
-      ...(input.maxRetries !== undefined ? { maxRetries: input.maxRetries } : {}),
-    });
+    // The nested resolve calls see the RESOLVED protected branch, never the raw input.
+    const outcome = await runMergePrs(
+      {
+        ...input,
+        baseBranch,
+        protectedBranch,
+        ...(nowMs !== undefined ? { nowMs } : {}),
+        ...(config !== undefined ? { config } : {}),
+      },
+      {
+        effects,
+        resolve,
+        ...(input.maxRetries !== undefined ? { maxRetries: input.maxRetries } : {}),
+      },
+    );
     // The pipeline is total — every not-done pr is DATA in the outcome —
     // so a completed composition is exactly an 'ok' result.
     return { status: 'ok', value: outcome };

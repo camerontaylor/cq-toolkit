@@ -1,15 +1,21 @@
 """Tick-owned inbox, result harvesting and publication. No model dispatch."""
 from runtime_target import DEFAULT_BRANCH, DEFAULT_REF
+import repo_registry
 import review_receipt
 import copy
 import json
 from pathlib import Path
 import re
 from crq_repair import atomic, findings, git as wt_git, hack_detector, verify
-from crq_repair.bounded import JOB_ID, identity, job_path, source_path, validate_revalidation
+from crq_repair.bounded import JOB_ID, identity, job_path, require_canonical_delivery, source_path, validate_revalidation
 
 
-def prepare_current_job(c, q, old_job_id, source_sha, evidence):
+# The fixer ladder crq_repair.process runs is exactly A0-A2; digest keys its
+# fixed counts on these rungs, so nothing else may be recorded as a fix.
+FIXED_RUNGS = ('A0', 'A1', 'A2')
+
+
+def prepare_current_job(c, q, old_job_id, source_sha, evidence, *, preserve_worktree=False):
     """Locked operator preparation, not dispatch or a historical-job disposition."""
     old = json.loads(job_path(c.ROOT, old_job_id).read_text())
     if old.get('job') != old_job_id:
@@ -19,12 +25,17 @@ def prepare_current_job(c, q, old_job_id, source_sha, evidence):
     old_record = item.get('repair_runs', {}).get(old['run'])
     if not old_record or old_job_id not in old_record.get('jobs', []):
         raise ValueError('historical finding lacks tick-owned repair evidence')
-    token = identity({'origin_job': old_job_id, 'source_sha': source_sha,
-                      'evidence': evidence})[:24]
+    binding = {'origin_job': old_job_id, 'source_sha': source_sha, 'evidence': evidence}
+    if preserve_worktree:
+        binding['preserve_worktree'] = True
+    token = identity(binding)[:24]
     run = 'revalidated-' + token
     job_id = 'crq-' + run + '-F1'
     existing = item.get('repair_runs', {}).get(run)
     if existing:
+        if old.get('canonical_finding_id'):
+            job = json.loads(job_path(c.ROOT, job_id).read_text())
+            finding_inbox(c).handoff(old['canonical_finding_id'], old_job_id, job, c.iso())
         return job_id
     history = [r for i in q['items'] if (i.get('id') == item.get('id') if old.get('canonical_finding_id')
                                         else i.get('pr') == item.get('pr'))
@@ -48,8 +59,18 @@ def prepare_current_job(c, q, old_job_id, source_sha, evidence):
            'repair_base': source_sha, 'branch': None, 'repair_round': count + 1,
            'origin_job': old_job_id, 'source_sha': source_sha,
            'finding_sha256': identity(old['finding']), 'revalidation': evidence,
-           'prior': None, 'recurrence': False}
+           'prior': None, 'recurrence': False,
+           'source': {**old.get('source', {}), 'run': old.get('source', {}).get('run', old['run'])}}
+    if preserve_worktree:
+        job['recovery_worktree'] = True
     atomic(job_path(c.ROOT, job_id), job)
+    if old.get('canonical_finding_id'):
+        finding_inbox(c).handoff(old['canonical_finding_id'], old_job_id, job, c.iso())
+    if ((old.get('canonical_finding_id') or preserve_worktree)
+            and old_record.get('jobs') == [old_job_id]
+            and old_record.get('state') in ('queued', 'ready', 'publish_failed')
+            and not old_record.get('fix_pr')):
+        old_record.update(state='stale', error='superseded by prepared retry ' + job_id)
     item.setdefault('repair_runs', {})[run] = {
         'jobs': [job_id], 'pin': source_sha, 'base': source_sha, 'branch': None,
         'open_pr': False, 'round': count + 1, 'state': 'queued',
@@ -73,7 +94,7 @@ def enqueue(c, q, item, meta, rdir):
             or any(cycle.get('source') == 'local-review' and cycle.get('run_id') == meta.get('run_id')
                    for cycle in item.get('cycles', []))):
         return False
-    if c.item_repo(item) != c.REPO:
+    if not repo_registry.same_repo(c.item_repo(item), c.REPO):
         # The repair drain never runs for non-primary repositories.
         return False
     if item['kind'] == review_receipt.KIND:
@@ -85,9 +106,22 @@ def enqueue(c, q, item, meta, rdir):
                 or any(f.get('severity') not in ('critical', 'major') for f in doc['findings'])):
             return False
     existing = item.setdefault('repair_runs', {}).get(meta['run_id'])
+    sourced = findings(rdir / 'review.ndjson', provenance=True)
+    sources = [f.pop('_source', {}) for f in sourced]
+    actionable = sourced
+    for source in sources:
+        source['run'] = meta['run_id']
     if existing:
+        for job_id in existing.get('jobs', []):
+            path = c.STATE / 'repair/inbox' / (job_id + '.json')
+            if not path.exists():
+                continue
+            job = json.loads(path.read_text())
+            matches = [source for finding, source in zip(actionable, sources) if finding == job.get('finding')]
+            if len(matches) == 1 and not job.get('source'):
+                job['source'] = matches[0]
+                atomic(path, job)
         return existing['state'] in ('queued', 'ready', 'publish_failed')
-    actionable = findings(rdir / 'review.ndjson')
     if not actionable:
         return False
     if own_range(c, q, meta['base'], meta.get('pr_head', meta['head'])):
@@ -129,12 +163,15 @@ def enqueue(c, q, item, meta, rdir):
                'run': meta['run_id'], 'cycle': meta.get('cycle'), 'repair_base': base,
                'branch': record['branch'], 'finding': finding, 'repair_round': count + 1,
                'prior': prior[-1] if prior else None, 'recurrence': bool(prior),
-               'review_diff': reviewed_diff}
+               'review_diff': reviewed_diff, 'source': sources[n - 1]}
         path = c.STATE / 'repair/inbox' / (job_id + '.json')
         if not path.exists():
             atomic(path, job)
         else:
             prev = json.loads(path.read_text())
+            if not prev.get('source') and prev.get('finding') == finding:
+                prev['source'] = sources[n - 1]
+                atomic(path, prev)
             if ((prev.get('repair_base') != base or prev.get('finding') != finding)
                     and not (c.STATE / 'repair' / job_id / 'result.json').exists()):
                 # Stale orphan that never ran: rebind to this record.
@@ -151,16 +188,96 @@ def enqueue(c, q, item, meta, rdir):
     return True
 
 
+def finding_inbox(c):
+    import backfill_runtime
+    import finding_delivery
+    import review_ledger as ledger
+    config = backfill_runtime.settings(c.STATE)
+    if not config:
+        raise ValueError('backfill repair write-back requires existing ledger configuration')
+    store = ledger.ArtifactStore(config['durable_artifact_root'])
+    return finding_delivery.Inbox(c.STATE / 'backfill/findings',
+                                  ledger.Outbox(c.STATE / 'backfill/publication', store))
+
+
+def mark_finding_outcome(c, job, result, merge=None, fix_pr=None):
+    """The source finding ledger remains authoritative for threadless repairs."""
+    fid = job.get('canonical_finding_id')
+    if not fid:
+        return
+    verdict = result['verdict']
+    action = 'fixed' if merge and verdict == 'FIXED' else {
+        'STALE': 'needs-retriage', 'FAILED': 'needs-human'}.get(verdict)
+    if verdict == 'NOT-FIXED':
+        action = 'dismissed' if result.get('unchanged_evidence') or (result.get('judge') or {}).get('verdict') == 'invalid' else 'needs-human'
+    if not action:
+        return
+    inbox = finding_inbox(c)
+    inbox.repair_outcome(fid, job['job'], action, result.get('reason') or verdict,
+                         c.iso(), fixing_commit=merge, fix_pr=fix_pr,
+                         **({'source_evidence': result['unchanged_evidence']} if result.get('unchanged_evidence') else {}))
+
+
+def repair_provenance(c, record, run):
+    import review_ledger as ledger
+    reviews = None
+    lines = ['', 'Source run: `' + run + '`', '', '| finding ID | source ledger/review | source |',
+             '|---|---|---|']
+    for job_id in record['jobs']:
+        job = json.loads((c.STATE / 'repair/inbox' / (job_id + '.json')).read_text())
+        finding = job.get('finding', {})
+        fid = job.get('canonical_finding_id') or finding.get('id') or finding.get('source_id') or job.get('source', {}).get('id') or job.get('source', {}).get('source_id') or job_id
+        source = job.get('review_id') or job.get('source', {}).get('review_id') or job.get('source', {}).get('run') or job.get('run') or run
+        job_file = c.STATE / 'repair/inbox' / (job_id + '.json')
+        source_run = job.get('source', {}).get('run') or job.get('run') or run
+        raw = c.STATE / 'runs' / source_run / 'review.ndjson'
+        local = raw if raw.exists() else job_file
+        link = ('https://github.com/' + c.REPO + '/pull/' + str(job['pr'])) if job.get('pr') else 'threadless; local source `' + str(local.relative_to(c.STATE.parent)) + '`'
+        if job.get('canonical_finding_id'):
+            row = c.STATE / 'backfill/findings/triage' / (fid + '.json')
+            local = row if row.exists() else job_file
+            link = 'threadless; local source `' + str(local.relative_to(c.STATE.parent)) + '`'
+            if reviews is None:
+                try:
+                    reviews = {v['id']: v for v in finding_inbox(c).publication.retained()
+                               if isinstance(v, dict) and v.get('event_type') == 'review'}
+                except (OSError, ValueError, KeyError):
+                    reviews = {}
+            value = reviews.get(job.get('review_id') or job.get('source', {}).get('review_id'))
+            if value:
+                try:
+                    ledger.validate(value)
+                    if value['payload']['repo'] == c.REPO and any(f['id'] == fid for f in value['payload']['findings']):
+                        link = '[ledger review](https://github.com/' + c.REPO + '/blob/cq/review-ledger/' + ledger.record_path(value) + ')'
+                except (ValueError, KeyError, TypeError):
+                    pass  # Keep an accurate local locator; never invent a ledger URL.
+        lines.append('| `' + str(fid) + '` | `' + str(source) + '` | ' + link + ' |')
+    return lines
+
+
 def harvest(c, q, item, dry=False):
     messages = []
     for run, record in item.get('repair_runs', {}).items():
         if record['state'] in ('published', 'done', 'failed', 'stale'):
+            if not dry and record.get('verdicts') and hasattr(c, 'WT_ROOT') and hasattr(c, 'CLONE'):
+                from crq_repair.retain import cleanup_harvested
+                for result in record['verdicts']:
+                    if not isinstance(result, dict):
+                        continue
+                    job_id = result.get('job', '')
+                    if isinstance(job_id, str) and JOB_ID.fullmatch(job_id):
+                        try:
+                            for alternate in (False, True):
+                                cleanup_harvested(c.CLONE, c.WT_ROOT, c.STATE / 'repair' / job_id,
+                                                  item['id'], job_id, result, alternate=alternate)
+                        except (OSError, ValueError, KeyError, TypeError, RuntimeError) as exc:
+                            messages.append('repair cleanup ' + job_id + ': ' + str(exc)[:300])
             # Reconcile atomically persisted publication after a caller crash.
             if item['kind'] == review_receipt.KIND:
                 item['state'] = 'done'
                 item['repair_outcome'] = record['state']
                 item['last_error'] = None
-            elif item['kind'] != 'promotion' and item.get('state') == 'repairing':
+            elif item.get('state') == 'repairing':
                 item['state'] = 'repair_failed' if record['state'] == 'failed' else 'done'
             continue
         if record['state'] not in ('queued', 'ready', 'publish_failed'):
@@ -171,37 +288,75 @@ def harvest(c, q, item, dry=False):
             path = c.STATE / 'repair' / job_id / 'result.json'
             if not path.exists():
                 break
-            result = json.loads(path.read_text())
-            if result.get('retry_after'):
-                break
             expected = json.loads((c.STATE / 'repair/inbox' / (job_id + '.json')).read_text())
-            if result.get('job') != job_id or result.get('item') != item['id']:
-                raise ValueError('repair result identity mismatch')
-            if expected.get('source_sha') and any(result.get(k) != expected.get(k)
-                    for k in ('source_sha', 'finding_sha256', 'origin_job')):
-                raise ValueError('prepared repair result source/evidence binding mismatch')
+            try:
+                require_canonical_delivery(c.STATE.parent, expected)
+            except ValueError as exc:
+                if not dry:
+                    record.update(state='stale', error=str(exc))
+                    item['state'] = 'done'
+                break  # Retain the result artifact without publishing an obsolete fix.
+            try:
+                result = json.loads(path.read_text())
+                if not isinstance(result, dict):
+                    raise ValueError('repair result must be an object')
+                if result.get('retry_after'):
+                    break
+                if result.get('job') != job_id or result.get('item') != item['id']:
+                    raise ValueError('repair result identity mismatch')
+                if expected.get('source_sha') and any(result.get(k) != expected.get(k)
+                        for k in ('source_sha', 'finding_sha256', 'origin_job')):
+                    raise ValueError('prepared repair result source/evidence binding mismatch')
+                if result.get('verdict') == 'FIXED':
+                    commits = result.get('commits')
+                    if (not isinstance(commits, list) or not commits
+                            or not all(isinstance(sha, str) and re.fullmatch(r'[0-9a-fA-F]{40}', sha)
+                                       for sha in commits)):
+                        raise ValueError('repair result claims FIXED without valid commits')
+                    attempts = result.get('attempts')
+                    final = attempts[-1] if isinstance(attempts, list) and attempts else None
+                    if not isinstance(final, dict) or final.get('rung') not in FIXED_RUNGS:
+                        raise ValueError('repair fixed result lacks a valid final attempt rung')
+                    wt = Path(result['worktree']).resolve()
+                    root = c.WT_ROOT.resolve()
+                    legacy_name = 'crq-repair-' + item['id']
+                    scoped_name = legacy_name + '-' + job_id
+                    if wt.parent != root or wt.name not in (legacy_name, scoped_name, scoped_name + '-A2'):
+                        raise ValueError('repair result worktree outside owned path')
+                    if result.get('repair_base') != predecessor:
+                        raise ValueError('repair predecessor mismatch')
+                elif result.get('verdict') not in ('NOT-FIXED', 'FAILED', 'STALE'):
+                    raise ValueError('unknown repair verdict')
+            except (ValueError, IndexError, KeyError, TypeError) as exc:
+                # A deterministic artifact defect can never pass on a later tick,
+                # so record it as a terminal failure instead of blocking the item.
+                if not dry:
+                    mark_finding_outcome(c, expected, {'verdict': 'FAILED', 'reason': 'invalid repair result: ' + str(exc)[:300]})
+                    record.update(state='failed', error=str(exc)[:300])
+                    if item['kind'] == review_receipt.KIND:
+                        item['state'] = 'done'
+                        item['repair_outcome'] = record['state']
+                        item['last_error'] = None
+                    else:
+                        item['state'] = 'repair_failed'
+                        item['last_error'] = 'repair_failed; needs human'
+                break
             if result.get('verdict') == 'FIXED':
-                wt = Path(result['worktree']).resolve()
-                root = c.WT_ROOT.resolve()
-                if wt.parent != root or wt.name != 'crq-repair-' + item['id']:
-                    raise ValueError('repair result worktree outside owned path')
-                if result.get('repair_base') != predecessor:
-                    raise ValueError('repair predecessor mismatch')
                 # Later findings move the shared HEAD; validate each immutable
                 # claimed range through a separate detached verification worktree.
-                check_wt, branch = c.make_worktree('verify-' + job_id, result['commits'][-1])
+                check_wt, branch = c.make_worktree('verify-' + job_id, commits[-1])
                 try:
-                    verify(check_wt, predecessor, result['commits'], job_id)
+                    verify(check_wt, predecessor, commits, job_id)
                     from importlib import util
                     spec = util.spec_from_file_location('crq_repair_service', c.ROOT / 'crq_repair.py')
                     module = util.module_from_spec(spec)
                     spec.loader.exec_module(module)
-                    module.mechanical(c.CONFIG, check_wt, predecessor, result['commits'], job_id, path.parent)
+                    module.mechanical(c.CONFIG, check_wt, predecessor, commits, job_id, path.parent)
                 finally:
                     c.remove_worktree(check_wt, branch)
-                predecessor = result['commits'][-1]
-            elif result.get('verdict') not in ('NOT-FIXED', 'FAILED', 'STALE'):
-                raise ValueError('unknown repair verdict')
+                predecessor = commits[-1]
+            if not dry:
+                mark_finding_outcome(c, expected, result)
             verdicts.append({**result, 'finding': expected['finding']})
         if len(verdicts) != len(record['jobs']):
             continue
@@ -210,11 +365,6 @@ def harvest(c, q, item, dry=False):
             continue
         record['verdicts'] = verdicts
         record['state'] = 'ready'
-        if item['kind'] == 'promotion':
-            for blocker in item.get('blocking', []):
-                related = [v for v in verdicts if v['job'] == blocker.get('repair_job')]
-                if related:
-                    blocker['repair_advice'] = related[-1]['reason']
         fixed = [v for v in verdicts if v['verdict'] == 'FIXED']
         if not fixed:
             record['state'] = 'failed' if any(v['verdict'] == 'FAILED' for v in verdicts) else 'done'
@@ -230,7 +380,7 @@ def harvest(c, q, item, dry=False):
             item['state'] = 'done'
             item['repair_outcome'] = record['state']
             item['last_error'] = None
-        elif item['kind'] != 'promotion':
+        else:
             item['state'] = 'repair_failed' if record['state'] in ('failed', 'publish_failed') else 'done'
         messages.append(item['id'] + ': repair ' + record['state'])
     return messages
@@ -257,8 +407,24 @@ def publish(c, q, item, run, record, fixed):
         translated = []
         for v in fixed:
             before = wt_git(wt, 'rev-parse', 'HEAD')
-            for sha in v['commits']:
-                wt_git(wt, 'cherry-pick', sha)
+            try:
+                for sha in v['commits']:
+                    wt_git(wt, 'cherry-pick', sha)
+            except RuntimeError as exc:
+                # Only a recorded cherry-pick with conflicts or an empty index
+                # proves a deterministic replay failure. Spawn, timeout, hook,
+                # and other git failures must remain retryable.
+                try:
+                    wt_git(wt, 'rev-parse', '--verify', 'CHERRY_PICK_HEAD')
+                except RuntimeError:
+                    raise exc
+                conflicts = wt_git(wt, 'diff', '--name-only', '--diff-filter=U')
+                staged = wt_git(wt, 'diff', '--cached', '--name-only')
+                if conflicts or not staged:
+                    record.update(state='stale',
+                                  error='repair does not apply to current target: ' + str(exc)[:200])
+                    return
+                raise
             claims = wt_git(wt, 'rev-list', '--reverse', before + '..HEAD').splitlines()
             verify(wt, before, claims, v['job'])
             translated.extend(claims)
@@ -337,6 +503,7 @@ def finalize_publication(c, q, item, run, record, publication):
     record['published_commits'] = translated
     if publication['open_pr']:
         item['last_push'] = {'sha': head, 'shas': translated, 'at': c.iso()}
+        record['fix_pr'] = {'number': item['pr'], 'url': 'https://github.com/' + c.REPO + '/pull/' + str(item['pr'])}
     else:
         prs = c.gh_json(['pr', 'list', '--repo', c.REPO, '--head', branch, '--state', 'all', '--json', 'number,url,state'])
         if not prs:
@@ -345,6 +512,7 @@ def finalize_publication(c, q, item, run, record, publication):
             body = ['Verified CodeRabbit repairs from ' + run, '', '| finding | verdict | reason |', '|---|---|---|']
             for v in record['verdicts']:
                 body.append('| ' + v['job'] + ' | ' + v['verdict'] + ' | ' + v['reason'].replace('|', r'\|').replace('\n', ' ') + ' |')
+            body.extend(repair_provenance(c, record, run))
             path = c.STATE / 'repair' / record['jobs'][0] / 'fix-pr.md'
             path.write_text('\n'.join(body) + '\n')
             publication['pr_create_pending'] = True
@@ -362,8 +530,7 @@ def finalize_publication(c, q, item, run, record, publication):
                        prior_cycles=2 - c.CONFIG['repair'].get('fix_pr_cycles', 1), repair_origin=run,
                        why='verified repair fix PR')
     record['state'] = 'published'
-    if item['kind'] != 'promotion':
-        item['state'] = 'done'
+    item['state'] = 'done'
     c.save_queue(q)
 
 
@@ -372,7 +539,7 @@ def backfill(c, q):
         return
     missing = []
     for item in q['items']:
-        if c.item_repo(item) != c.REPO:
+        if not repo_registry.same_repo(c.item_repo(item), c.REPO):
             # Foreign cycles are review evidence, never legacy repair debt.
             continue
         for cycle in item.get('cycles', []):
@@ -479,6 +646,149 @@ def reconcile_current_fix(c, item):
         item.pop('remediation', None)
 
 
+def source_thread(c, job):
+    source = job.get('source', {})
+    explicit = (job.get('source_thread_id') or job.get('thread_id') or
+                source.get('source_thread_id') or source.get('thread_id') or
+                job.get('finding', {}).get('thread_id'))
+    if explicit:
+        return explicit
+    number = source.get('finding_number')
+    if not number or not job.get('pr'):
+        return None
+    owner, repo = c.REPO.split('/')
+    query = ('query($owner:String!,$repo:String!,$pr:Int!,$endCursor:String){'
+             'repository(owner:$owner,name:$repo){pullRequest(number:$pr){'
+             'reviewThreads(first:100,after:$endCursor){pageInfo{hasNextPage endCursor}'
+             'nodes{id comments(first:1){nodes{body path}}}}}}}')
+    pages = c.gh_json(['api', 'graphql', '--paginate', '--slurp', '-f', 'query=' + query,
+                       '-f', 'owner=' + owner, '-f', 'repo=' + repo, '-F', 'pr=' + str(job['pr'])])
+    matches = set()
+    for page in pages:
+        if page.get('errors'):
+            raise ValueError('source thread lookup failed')
+        for thread in page['data']['repository']['pullRequest']['reviewThreads']['nodes']:
+            for comment in thread['comments']['nodes']:
+                if (comment.get('path') == job['finding'].get('path') and
+                        comment.get('body', '').startswith('**crq finding F' + str(number) + ' [') and
+                        '<sub>crq run `' + source.get('run', job['run']) + '`' in comment.get('body', '')):
+                    matches.add(thread['id'])
+    if len(matches) > 1:
+        raise ValueError('ambiguous source thread; retain publication for retry')
+    return next(iter(matches), None)
+
+
+def publish_source_resolution(c, record, merge):
+    """Resume source comments/resolves in the existing publication journal."""
+    publication = record.get('publication')
+    if not publication:
+        return
+    journal = c.STATE / 'repair' / record['jobs'][0] / 'publication.json'
+    completed = publication.setdefault('source_resolutions', [])
+    for result in record.get('verdicts', []):
+        if result['verdict'] != 'FIXED' or result['job'] in completed:
+            continue
+        job = json.loads((c.STATE / 'repair/inbox' / (result['job'] + '.json')).read_text())
+        if not job.get('pr'):
+            continue  # Threadless source truth is the finding ledger.
+        marker = '<!-- crq-repair-source:' + job['job'] + ' -->'
+        pages = c.gh_json(['api', 'repos/' + c.REPO + '/issues/' + str(job['pr']) + '/comments',
+                           '--paginate', '--slurp'])
+        comments = [comment for page in pages for comment in page]
+        if not any(marker in comment.get('body', '') for comment in comments):
+            body = journal.parent / ('source-' + job['job'] + '.md')
+            body.write_text(marker + '\nFixed in [' + merge + '](https://github.com/' + c.REPO + '/commit/' + merge + ').\n')
+            c.run(['env', '-u', 'GITHUB_TOKEN', 'gh', 'pr', 'comment', str(job['pr']), '--repo', c.REPO, '--body-file', str(body)])
+        thread = source_thread(c, job)
+        if thread:
+            request = journal.parent / ('resolve-' + job['job'] + '.json')
+            atomic(request, {'query': 'mutation($threadId:ID!){resolveReviewThread(input:{threadId:$threadId}){thread{isResolved}}}',
+                             'variables': {'threadId': thread}})
+            response = c.gh_json(['api', 'graphql', '--input', str(request)])
+            if response.get('errors') or not response.get('data', {}).get('resolveReviewThread', {}).get('thread', {}).get('isResolved'):
+                raise ValueError('source thread resolution unconfirmed')
+        completed.append(job['job'])
+        atomic(journal, publication)
+
+
+def repair_test_path(path):
+    # Exact classifier from scripts/lib/affected-tests.mjs:isTest; no Python exemption.
+    return re.fullmatch(r'(?:test/.*\.test\.(?:ts|mjs)|lint/.*\.test\.ts)', path) is not None
+
+
+def repair_source_entry(c, head, path):
+    raw = c.git('ls-tree', '-z', head, '--', path)
+    if not raw:
+        return None  # Preserve a published deletion, not just existing blobs.
+    header, name = raw.rstrip('\0').split('\t', 1)
+    mode, kind, blob = header.split()
+    if name != path or kind != 'blob':
+        raise ValueError('repair source is not an exact blob path: ' + path)
+    return mode, blob
+
+
+def merge_head_evidence(c, record, actual_head):
+    published = record.get('publication', {}).get('head')
+    if not published:
+        return None  # Preserve legacy reconciliation without a publication journal.
+    evidence = {'published_head': published, 'actual_head': actual_head, 'source_blobs': {}}
+    if actual_head == published:
+        return evidence
+    fixed = [v['job'] for v in record.get('verdicts', []) if v['verdict'] == 'FIXED']
+    if not actual_head or not fixed or not c.is_ancestor(published, actual_head):
+        raise ValueError('merged repair head is not a descendant of the published fix')
+    commits = record.get('publication', {}).get('commits')
+    if not isinstance(commits, list) or not commits:
+        raise ValueError('published repair commits unavailable; needs revalidation')
+    anchors = {source_path(json.loads((c.STATE / 'repair/inbox' / (j + '.json')).read_text())['finding']) for j in fixed}
+    changed = set()
+    for sha in commits:
+        if not isinstance(sha, str) or not re.fullmatch(r'[0-9a-f]{40}', sha) or not c.is_ancestor(sha, published):
+            raise ValueError('published repair commit lineage unavailable; needs revalidation')
+        changed.update(p for p in c.git('diff-tree', '--root', '--no-commit-id', '--name-only',
+                                        '--no-renames', '-r', '-z', sha).split('\0') if p)
+    paths = anchors | {p for p in changed if not repair_test_path(p)}
+    evidence.update(compared_paths=sorted(paths), excluded_test_paths=sorted(changed - paths), source_modes={})
+    for path in sorted(paths):
+        source_path({'path': path})
+        before = repair_source_entry(c, published, path)
+        after = repair_source_entry(c, actual_head, path)
+        if before != after:
+            raise ValueError('merged repair source changed; needs revalidation: ' + path)
+        evidence['source_blobs'][path] = before[1] if before else None
+        evidence['source_modes'][path] = before[0] if before else None
+    return evidence
+
+
+def canonical_fixed_events(c, record, info):
+    """Project existing terminal ledger truth; never create a disposition."""
+    fixed = [v['job'] for v in record.get('verdicts', []) if v['verdict'] == 'FIXED']
+    if not fixed:
+        return None
+    jobs = [json.loads((c.STATE / 'repair/inbox' / (j + '.json')).read_text()) for j in fixed]
+    if not all(isinstance(j.get('canonical_finding_id'), str)
+               and re.fullmatch(r'[0-9a-f]{64}', j['canonical_finding_id'])
+               and (c.STATE / 'backfill/findings/triage' / (j['canonical_finding_id'] + '.json')).exists()
+               for j in jobs):
+        return None
+    merge = (info.get('mergeCommit') or {}).get('oid')
+    inbox = finding_inbox(c)
+    events = {}
+    for job_id, job in zip(fixed, jobs):
+        if job.get('job') != job_id or job_id not in record['jobs']:
+            raise ValueError('canonical fixed repair job identity mismatch')
+        event_id = inbox.current_fixed_event(job, merge)
+        if not event_id:
+            return None
+        events[job_id] = event_id
+    published = record.get('publication', {}).get('head')
+    actual = info.get('headRefOid')
+    if (info.get('number') != record['fix_pr']['number'] or not published or not actual
+            or not c.is_ancestor(published, actual)):
+        raise ValueError('canonical fixed repair PR lineage mismatch')
+    return {'published_head': published, 'actual_head': actual, 'canonical_fixed_events': events}
+
+
 def reconcile_fix_prs(c, q):
     for item in q['items']:
         if item['kind'] == review_receipt.KIND:
@@ -489,8 +799,6 @@ def reconcile_fix_prs(c, q):
                 if item.get('remediation_state') == 'fixed':
                     item['remediation_state'] = 'pending-merged-evidence'
                 item['repair_error'] = str(exc)[:300]
-            continue
-        if item['kind'] != 'promotion':
             continue
         for record in item.get('repair_runs', {}).values():
             pr = record.get('fix_pr')
@@ -506,12 +814,36 @@ def reconcile_fix_prs(c, q):
                 merge = (info.get('mergeCommit') or {}).get('oid')
                 if not merge or not c.is_ancestor(merge, c.git('rev-parse', DEFAULT_REF)):
                     continue
+                try:
+                    proof = canonical_fixed_events(c, record, info)
+                    projected = proof is not None
+                    if not projected:
+                        proof = merge_head_evidence(c, record, info.get('headRefOid'))
+                    elif canonical_fixed_events(c, record, info) != proof:
+                        raise ValueError('canonical fixed finding changed before source feedback')
+                except Exception as exc:
+                    record['source_publication_error'] = str(exc)[:300]
+                    continue
+                if proof is not None:
+                    record['validated_merge_head'] = {**proof, 'merge_commit': merge}
                 fixed = {v['job'] for v in record.get('verdicts', []) if v['verdict'] == 'FIXED'}
                 for index, job in enumerate(record['jobs'], 1):
                     if job in fixed:
+                        expected = json.loads((c.STATE / 'repair/inbox' / (job + '.json')).read_text())
+                        result = next(v for v in record['verdicts'] if v['job'] == job)
+                        if not projected:
+                            mark_finding_outcome(c, expected, result, merge, pr.get('url'))
                         for blocker in item.get('blocking', []):
                             if blocker.get('repair_job') == job:
                                 blocker['resolution'] = {'fix_pr': pr['number'], 'merge': merge, 'at': c.iso()}
+                try:
+                    if projected and canonical_fixed_events(c, record, info) != proof:
+                        raise ValueError('canonical fixed finding changed before source feedback')
+                    publish_source_resolution(c, record, merge)
+                except Exception as exc:
+                    record['source_publication_error'] = str(exc)[:300]
+                    continue  # Optional feedback must not abort the scheduler tick.
+                record.pop('source_publication_error', None)
                 record['fix_merged'] = c.iso()
 
 
@@ -520,9 +852,12 @@ def digest(root, queue):
     import datetime as dt
     counts = {k: 0 for k in ('fixed@A0', 'fixed@A1', 'fixed@A2', 'not-fixed', 'stale', 'judged-valid', 'judged-invalid', 'failed')}
     fix_prs = []
+    source_publication_errors = []
     consumed = set()
     for item in queue['items']:
-        for record in item.get('repair_runs', {}).values():
+        for run, record in item.get('repair_runs', {}).items():
+            if record.get('source_publication_error'):
+                source_publication_errors.append({'item': item['id'], 'run': run, 'error': record['source_publication_error']})
             if record.get('fix_pr'):
                 fix_prs.append(record['fix_pr'])
             for value in record.get('verdicts', []):
@@ -567,4 +902,4 @@ def digest(root, queue):
     return {'verdicts': counts, 'inbox': len(pending), 'oldest_age_minutes':
             max(0, (dt.datetime.now(dt.timezone.utc).timestamp() - min(pending)) / 60) if pending else 0,
             'jobs_in_flight': running, 'rate_limit_deferred': deferred, 'orphaned': orphaned,
-            'fix_prs': fix_prs}
+            'fix_prs': fix_prs, 'source_publication_errors': source_publication_errors}

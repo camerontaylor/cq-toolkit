@@ -39,6 +39,7 @@ const PullMetadata = z.object({
   state: z.enum(['open', 'closed']),
   draft: z.boolean(),
   user: z.object({ login: z.string(), type: z.enum(['User', 'Organization', 'Bot']) }).nullable(),
+  base: z.object({ ref: z.string().min(1) }),
   head: z.object({
     sha: z.string(),
     ref: z.string(),
@@ -234,7 +235,7 @@ function makeReviewAddressManyCore(
     if (!valid.success) return { status: 'failed', error: valid.error.message };
     const gh =
       deps.gh ?? makeGhRunner({ cwd: input.repoRoot, unsetEnv: ['GH_REPO'], timeoutMs: 30_000 });
-    const facts = async (number: number): Promise<AddressManyPrFacts> => {
+    const facts = async (number: number): Promise<AddressManyPrFacts & { baseRefName: string }> => {
       const response = await gh(['api', `repos/${input.repo}/pulls/${number}`]);
       if (response.code !== 0) throw new Error(`cannot read PR #${number}: ${response.stderr}`);
       const pr = PullMetadata.parse(JSON.parse(response.stdout) as unknown);
@@ -247,6 +248,7 @@ function makeReviewAddressManyCore(
         headRepository: pr.head.repo?.full_name ?? '',
         headRefName: pr.head.ref,
         headOid: pr.head.sha,
+        baseRefName: pr.base.ref,
       };
     };
     try {
@@ -319,7 +321,7 @@ function makeReviewAddressManyCore(
         Object.keys(input.dependencyRoots ?? {}).some((number) => !numbers.includes(Number(number)))
       )
         return { status: 'needs-human', reason: 'Prepared dependency root outside PR selection' };
-      const listed: AddressManyPrFacts[] = [];
+      const listed: Array<AddressManyPrFacts & { baseRefName: string }> = [];
       let cursor = 0;
       const reads = await Promise.allSettled(
         Array.from({ length: Math.min(8, numbers.length) }, async () => {
@@ -383,6 +385,7 @@ function makeReviewAddressManyCore(
       const worker = async () => {
         while (pending.length) {
           const candidate = pending.shift()!;
+          const baseRefName = listed.find((item) => item.number === candidate.number)!.baseRefName;
           const identity = {
             id: String(candidate.number),
             repo: input.repo,
@@ -440,9 +443,13 @@ function makeReviewAddressManyCore(
                     }
                   }
                   const root = deps.isolate
-                    ? await deps.isolate(input.repoRoot, candidate.number, { cloneRoot })
+                    ? await deps.isolate(input.repoRoot, candidate.number, {
+                        cloneRoot,
+                        target: baseRefName,
+                      })
                     : await isolateAddressMany(input.repoRoot, candidate.number, {
                         cloneRoot,
+                        target: baseRefName,
                         onPartial: (path) => {
                           isolatedRoot = path;
                           preservedClones.push({ number: candidate.number, path });
@@ -475,17 +482,19 @@ function makeReviewAddressManyCore(
                     !revalidated.candidates.length ||
                     current.headOid !== candidate.headOid ||
                     current.headRepository !== candidate.headRepository ||
-                    current.headRefName !== candidate.headRefName
+                    current.headRefName !== candidate.headRefName ||
+                    current.baseRefName !== baseRefName
                   ) {
                     result = {
                       status: 'needs-human',
-                      reason: 'PR eligibility or head changed before dispatch',
+                      reason: 'PR eligibility, head or base changed before dispatch',
                     };
                   } else {
                     dispatched = true;
                     result = await address({
                       repoRoot: root,
                       source: `pr:${candidate.number}`,
+                      target: baseRefName,
                       ...(input.dependencyRoots?.[String(candidate.number)] === undefined
                         ? {}
                         : {

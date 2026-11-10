@@ -7,7 +7,39 @@ import { coordinationRoot } from './addressMany.helpers.js';
 // addressMany.isolation.test.ts and addressMany.usage.test.ts.
 import { expect, test, vi } from 'vitest';
 import { makeReviewAddressMany } from '../../../src/ops/review/addressMany.js';
-import { gh, input, report } from './addressMany.helpers.js';
+import { gh, input, metadata, report } from './addressMany.helpers.js';
+
+test('uses each PR base for isolation and address', async () => {
+  const read = async (args: string[]) => {
+    if (args[0] === 'repo') return gh(args);
+    const number = Number(args[1]!.split('/').at(-1));
+    return {
+      code: 0,
+      stderr: '',
+      stdout: JSON.stringify({ ...metadata(number), base: { ref: `release-${number}` } }),
+    };
+  };
+  const isolate = vi.fn(
+    async (root: string, _number: number, _options: { cloneRoot: string; target?: string }) => root,
+  );
+  const address = vi.fn(
+    async (_input: import('../../../src/ops/review/address.js').ReviewAddressInput) => ({
+      status: 'ok' as const,
+      value: report(),
+    }),
+  );
+  await makeReviewAddressMany({
+    coordinationRoot: coordinationRoot(),
+    gh: read,
+    isolate,
+    address,
+  })(input);
+  expect(isolate.mock.calls.map((call) => call[2])).toEqual([
+    expect.objectContaining({ target: 'release-1' }),
+    expect.objectContaining({ target: 'release-2' }),
+  ]);
+  expect(address.mock.calls.map(([arg]) => arg.target)).toEqual(['release-1', 'release-2']);
+});
 
 test('addresses two independently attributed heads and preserves reports', async () => {
   const address = vi.fn(async () => ({ status: 'ok' as const, value: report() }));

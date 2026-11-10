@@ -38,16 +38,40 @@
 
 **Precedence.** built-in → `cq.json` (committed, schema-strict) → env (`CQ_*`) → per call (CLI flag or op
 input). Trust-boundary keys (sandbox, merge trust set, protected branch and paths, approval) skip the `cq.json`
-and per-call layers: they never come from `cq.json`, plan JSON or op input. The list is examples: the `trust`
+and per-call layers: they never come from `cq.json`, plan JSON, op input or workspace files: an op-input field that restates one must equal the resolved value and supplies nothing. The list is examples: the `trust`
 flag in the registry (`src/config/env-registry.ts`) is authoritative for which keys are trust-boundary keys.
+
+**The one per-call route for a trust key** is an explicit in-process SDK `optIn` (ADR-0003 named authorization),
+built with `trustedOptIn()` (`src/config/optin.ts`). It must never be fed from plan JSON, op input or the CLI: the
+brand is a module-private `WeakSet` entry, so a JSON-derived object cannot carry it. The resolvers
+(`resolveSandboxConfig`, `resolveProtectedPathsConfig`) call `assertOptInAuthority`, which consults the `trust`
+flag: a per-call value for a `trust: true` key from anything but a `trustedOptIn()` object is refused with a
+`config` error. Keys with `trust: false` are unaffected.
 
 `CQ_PROFILE` profile seeding (Annex B §B.4.1) is retired. Nothing in `src` reads `CQ_PROFILE`.
 
 **Secrets** come from env only. A key is secret by name suffix. The list is `SECRET_ENV_SUFFIXES` in
 `src/config/secret.ts`, matched case-insensitively by `isSecretEnvName`, and the registry derives each entry's
-`secret` flag from it. Today the list includes `_URL`, which Annex B's own list omits, so vendor `*_BASE_URL` names
-(for example `ANTHROPIC_BASE_URL`) are classified secret and recorded as present or absent only. Whether `_URL`
-should stay a secret suffix is pending an owner decision and is not decided here.
+`secret` flag from it. `_URL` is NOT a secret suffix (owner ruling 2026-10-11, re-confirmed 2026-11-09; post-acceptance
+note N21). Vendor `*_BASE_URL` names (for example `ANTHROPIC_BASE_URL`) are non-secret: their values are shown and
+recorded in provenance, always through the shared URL module (`showUrl` and `redactUrlUserinfo`, `src/shared/urlRedact.ts`),
+which strips userinfo, query and fragment. There are three display forms, all produced by `src/shared/urlRedact.ts`:
+
+- **Structured value** (a config value: `cq config` text and `--json`, v3 provenance, the env snapshot): if the value
+  parses with WHATWG `new URL()` it is shown as `protocol//host` + pathname (`showUrl`); the host is `URL.host`, never a
+  last-`@` cut, and userinfo, query and fragment are gone. `https://user:TOKEN@host?x=1` is shown as `https://host/`.
+  A value that does not parse (or has no host) is shown as `[redacted-url]`, never as raw text.
+- **Free text** (persisted error text, config diagnostics, attempt records; `redactUrlUserinfo`): every URL authority
+  the scanner finds has its userinfo replaced by `[redacted]@` and its query and fragment dropped and marked
+  (`https://u:p@host/x?t=1` becomes `https://[redacted]@host/x?[redacted]`). The path, other text, bare `name@host`
+  prose and package specs are untouched. The scanner is linear. Attempt observations and parser error details additionally apply the strict
+  `stripCredentialText` pass: it strips bare credential-like prefixes and deliberately over-matches path at-signs
+  (`https://host/path@seg` becomes `https://seg`) to fail closed on credential-shaped evidence.
+- **A known env value inside free text:** when the exact value of a `*_URL` environment variable appears in text, it is
+  replaced by its structured form (`showUrl`), then the free-text pass runs over the result.
+
+A credential-bearing URL is refused in passthrough (below), not redacted into a pass. The non-URL detectors in
+`scripts/*.mjs` (offline evidence scanner, build-env check) are standalone JavaScript and are not part of this contract.
 
 **`CQ_APPROVAL_KEY*` is denied.** Approval is the attended preview-digest authority, not an env key.
 
@@ -62,14 +86,56 @@ have no built-in default and the correlation record carries them. Secrets are re
 by value. Defaults and other layers are not recorded. A snapshot that carries an error is refused, never recorded.
 This extends ADR-0008 provenance (`cqJsonHash`).
 
-**Op-input mirrors of trust keys** (for example `protectedBranch`, `baseBranch`) are removed where the caller can
-use the resolved value. Any that remain are compared with the resolved value, and a difference fails with `config`.
-Neutral keys such as `sessionsDir` may be set per call; a per-call value is not recorded in the run-start
-config (call-layer recording is out of scope for C5 and would need a schema and ADR change).
+**Op-input mirrors of trust keys** (`protectedBranch`, `baseBranch`, and the classification trust fields
+`config.trustedBots`, `config.trustedAssociations` and `config.acceptReviewStates`) are removed where the caller can
+use the resolved value. Any that remain are compared with the resolved value (`src/ops/merge/trustMirrors.ts`), and
+a difference fails with `config` before any effect; the error names the field and never echoes a plan-supplied trust
+list. A mirror that equals the resolved value is accepted, because it supplies nothing: the effective value always
+comes from the registry key (`CQ_MERGE_PROTECTED_BRANCH`, `CQ_MERGE_BASE_BRANCH`, `CQ_MERGE_TRUSTED_BOTS`,
+`CQ_MERGE_TRUSTED_ASSOCIATIONS`, `CQ_MERGE_ACCEPT_REVIEW_STATES`), and an invalid snapshot value fails rather than
+defaulting. Branch values are normalised exactly once, by stripping a single leading `refs/heads/`.
+When any reviewer-trust key is set, each unset one independently takes its documented default (bots: none;
+associations: OWNER, MEMBER, COLLABORATOR; states: APPROVED). Neutral keys such as `sessionsDir` may be set per call;
+a per-call value is not recorded in the run-start config (call-layer recording is out of scope for C5 and would need
+a schema and ADR change).
 
 **Key list.** The key list is generated from the code registry `src/config/env-registry.ts` into
 [`docs/config.md`](../config.md); the static gate fails when that table is stale. Annex B's hand-written key
 tables are retired; where they differ from the registry, the registry is current.
+
+**`CQ_RUN_ENV_PASSTHROUGH` grammar and deny set.** One parser (`parsePassthrough`, `src/config/parsers.ts`) owns both,
+and the registry, `resolveSandboxConfig`, `buildChildEnv` and the launcher env all use it. Names are separated by
+commas and/or whitespace. Annex B §B.5 stays in force: secret-suffixed names, the `AWS_*` family, `NPM_TOKEN`,
+`SSH_AUTH_SOCK`, `GOOGLE_APPLICATION_CREDENTIALS`, `NODE_OPTIONS` and `NODE_PATH` are refused, and
+so is every `CQ_*` name (a nested cq could read trust config from one). A `*_URL` name (including `DATABASE_URL`) is
+passable by name, but its VALUE must pass a fail-closed acceptance rule on every origin and every path that copies a
+value (the operator key, the launcher env, `buildChildEnv`, a manifest's declared names, trusted code and a driver's
+`envAllowlist`): it contains no `@` anywhere (raw or `%40`, either case), no whitespace and no backslash, and the whole
+value parses with WHATWG `new URL()` with an empty username and password. Anything else is refused. An `@` in a path is
+rare enough in env URLs to refuse. Hostless values such as `file:///tmp`, `mailto:foo` and `data:...` may satisfy
+this acceptance rule, but their structured display is intentionally `[redacted-url]` because there is no host to show. A non-`*_URL` variable is screened only when its value has a `://` separator, and is
+then refused on any raw `@` or encoded `%40` (case-insensitive). The refusal names the variable, never the value. Not screened, by design, because they are
+trusted code-owned inputs: the proxy variables of the default child allowlist (for example `HTTPS_PROXY`, which may
+legitimately carry proxy credentials) and `SpawnOptions.env` overrides (per-route endpoint and auth values composed by
+the driver).
+The refusal for the other names above is a
+config error that names the offending name, or the position of a malformed entry (never any part of the raw value).
+
+**Origin of env names.** Trusted code that sets a value in-process (the SDK `optIn` ruling above, a driver's
+`envAllowlist`) is a trusted origin; names from a manifest file, a plan, op input or the env/CLI are untrusted data.
+Every origin refuses credential-shaped names, every `CQ_*` name and the sandbox policy knobs. Each origin has at most
+one explicit, frozen exemption list. The operator key has none. A harness manifest file's list, `DECLARED_ENV_EXEMPT_NAMES`,
+is empty (the only `CQ_*` name a test ever declared, `CQ_TEST_KEEP`, was a test canary and moved to a non-`CQ_` name).
+The trusted origin is NOT a blanket exemption; its list, `TRUSTED_ENV_EXEMPT_NAMES` in `src/config/parsers.ts`, which holds only
+`SSH_AUTH_SOCK` (a deployment's git-over-ssh agent socket, which a run child needs and which is not a bearer secret
+the toolkit mints). A name is added only with a reason stated here and a change to the test that pins the list.
+The origin is not a manifest field: it is remembered against the object `buildManifest` returned (module-private,
+keyed by identity), so JSON, a clone, a prototype or proxy wrapper, a plan or any other input cannot claim it, and the
+strict manifest schema rejects an extra key. Only in-process code paths can carry it (`HarnessRunGate.trustedEnvNames`
+is a code-level field). A manifest serialized to the MCP stdio bin loses it, so over that transport even
+`SSH_AUTH_SOCK` is refused (fail closed, exit 78, prefix `invalid env:`): the message names the variable, says it is a
+credential, says a declared or manifest name can never pass it and only the in-process code-level origin may pass
+`SSH_AUTH_SOCK`, and never echoes a value.
 
 **Inspection.** `cq config` prints each resolved key, its source layer, the warnings and the errors. It exits 2
 when the environment has errors (after printing the report), like every other subcommand. `cq config --strict`

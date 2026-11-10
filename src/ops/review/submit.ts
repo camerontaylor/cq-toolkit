@@ -10,6 +10,69 @@ import { captureSnapshot, SnapshotConfigError } from '../dev/internal/snapshot.j
 import { observeReview } from './wait.js';
 import { QueueUnsupported, ReviewInputError } from './internal/queueClient.js';
 import type { QueueTransport } from './internal/queueProtocol.js';
+import { currentCqEnv } from '../../config/run-env.js';
+
+/**
+ * An explicit `scanner` input always wins (even an invalid one, which then fails
+ * closed). Only when it is absent does the operator's documented
+ * CQ_AUTHOR_SNAPSHOT_SCANNER apply. Validation stays in captureSnapshot: a
+ * missing, relative or unexecutable value is a configuration error, never a skip.
+ */
+function snapshotScanner(explicit: string | undefined): string | undefined {
+  if (explicit !== undefined) return explicit;
+  const configured = currentCqEnv().values['CQ_AUTHOR_SNAPSHOT_SCANNER'];
+  return typeof configured === 'string' ? configured : undefined;
+}
+
+// Resolve shorthand deterministically instead of accepting Git's ambiguous-ref warning.
+async function resolveTarget(cwd: string, target: string) {
+  const refs = (await git(cwd, 'for-each-ref', '--format=%(refname)')).split('\n');
+  if (target.startsWith('refs/')) return resolveCommit(cwd, target);
+  const direct = refs.filter((ref) =>
+    [`refs/heads/${target}`, `refs/tags/${target}`, `refs/remotes/${target}`].includes(ref),
+  );
+  if (direct.length > 1)
+    throw new ReviewInputError('ambiguous target; use an explicit refs/ reference');
+  if (direct[0]) return resolveCommit(cwd, direct[0]);
+  const remote = refs.filter(
+    (ref) =>
+      ref.startsWith('refs/remotes/') &&
+      ref.slice('refs/remotes/'.length).split('/').slice(1).join('/') === target,
+  );
+  if (remote.length > 1)
+    throw new ReviewInputError('ambiguous remote target; use an explicit refs/remotes/ reference');
+  if (remote[0] === `refs/remotes/origin/${target}`) return resolveCommit(cwd, remote[0]);
+  if (remote.length)
+    throw new ReviewInputError('remote target requires an explicit refs/remotes/ reference');
+  return resolveCommit(cwd, target);
+}
+async function resolveCommit(cwd: string, ref: string) {
+  return git(cwd, 'rev-parse', '--verify', '--end-of-options', ref + '^{commit}');
+}
+type TargetFreshness = { local: string; upstream: string; ahead: number; behind: number };
+async function targetFreshness(cwd: string, target: string): Promise<TargetFreshness | undefined> {
+  const localRef = target.startsWith('refs/') ? target : 'refs/heads/' + target;
+  if (!localRef.startsWith('refs/heads/')) return undefined;
+  try {
+    const upstreamRef = (
+      await git(cwd, 'for-each-ref', '--format=%(refname) %(upstream)', localRef)
+    )
+      .split('\n')
+      .find((line) => line.startsWith(localRef + ' '))
+      ?.slice(localRef.length + 1);
+    if (!upstreamRef) return undefined;
+    const local = await resolveCommit(cwd, localRef);
+    const upstream = await resolveCommit(cwd, upstreamRef);
+    if (local === upstream) return undefined;
+    const counts = (await git(cwd, 'rev-list', '--left-right', '--count', local + '...' + upstream))
+      .split(/\s+/)
+      .map(Number);
+    return { local, upstream, ahead: counts[0]!, behind: counts[1]! };
+  } catch {
+    // A missing upstream or unavailable divergence must never block submission.
+    return undefined;
+  }
+}
 
 export const makeSubmit = (transport?: QueueTransport) =>
   reviewOp(
@@ -27,6 +90,7 @@ export const makeSubmit = (transport?: QueueTransport) =>
             submitted_at: string;
             wire: unknown;
             snapshotPolicy?: string;
+            targetFreshness?: TargetFreshness;
           }
         | undefined;
       try {
@@ -41,8 +105,10 @@ export const makeSubmit = (transport?: QueueTransport) =>
       };
       let wire;
       let snapshotPolicy = i.reachable ? 'reachable' : 'snapshot';
+      let freshness: TargetFreshness | undefined;
       if (saved) {
         wire = WireSchema.parse(saved.wire);
+        freshness = saved.targetFreshness;
         snapshotPolicy =
           saved.snapshotPolicy ?? ('snapshot' in wire && wire.snapshot ? 'snapshot' : 'reachable');
         // Required selectors must still match. Omitted optional admission fields
@@ -52,20 +118,22 @@ export const makeSubmit = (transport?: QueueTransport) =>
           wire.request_id !== requestId ||
           wire.inputs.repo !== i.repo ||
           wire.inputs.target !== i.target ||
+          (i.base !== undefined &&
+            (await resolveCommit(i.cwd, i.base)) !== wire.inputs.base_commit) ||
           (i.repeat !== undefined && (wire.repeat ?? false) !== i.repeat) ||
           (i.supersedes !== undefined && wire.supersedes !== i.supersedes)
         )
           throw new Error('requestId is already bound to different inputs');
       } else {
         const head = await git(i.cwd, 'rev-parse', '--verify', 'HEAD^{commit}');
-        const target = await git(
-          i.cwd,
-          'rev-parse',
-          '--verify',
-          '--end-of-options',
-          i.target + '^{commit}',
-        );
-        const base = await git(i.cwd, 'merge-base', target, head);
+        const target = await resolveTarget(i.cwd, i.target);
+        const base =
+          i.base === undefined
+            ? await git(i.cwd, 'merge-base', target, head)
+            : await resolveCommit(i.cwd, i.base);
+        if (i.base !== undefined && (await git(i.cwd, 'merge-base', base, head)) !== base)
+          throw new ReviewInputError('explicit base must be an ancestor of HEAD');
+        freshness = await targetFreshness(i.cwd, i.target);
         const inputs = {
           repo: i.repo,
           target: i.target,
@@ -76,7 +144,14 @@ export const makeSubmit = (transport?: QueueTransport) =>
           projection: 'full-diff',
         };
         if (inputs.base_tree === inputs.head_tree)
-          return { v: 1, action: 'no-changes', state: 'completed', exclusions, reviewedHead: head };
+          return {
+            v: 1,
+            action: 'no-changes',
+            state: 'completed',
+            exclusions,
+            reviewedHead: head,
+            ...(freshness ? { targetFreshness: freshness } : {}),
+          };
         const notify = i.notify ?? reviewNotifyDestination();
         wire = WireSchema.parse({
           v: 1,
@@ -93,6 +168,7 @@ export const makeSubmit = (transport?: QueueTransport) =>
           submitted_at: new Date().toISOString(),
           wire,
           snapshotPolicy,
+          ...(freshness ? { targetFreshness: freshness } : {}),
         };
         try {
           await writeFile(path, JSON.stringify(record), { flag: 'wx', mode: 0o600 });
@@ -115,7 +191,7 @@ export const makeSubmit = (transport?: QueueTransport) =>
             root,
             wire.inputs.base_commit,
             wire.inputs.head_tree,
-            i.scanner,
+            snapshotScanner(i.scanner),
             30000,
             wire.inputs.head_commit,
           ).catch((error: unknown) => {
@@ -168,6 +244,7 @@ export const makeSubmit = (transport?: QueueTransport) =>
           request_id: requestId,
           exclusions,
           reviewedHead: wire.inputs.head_commit,
+          ...(freshness ? { targetFreshness: freshness } : {}),
           message: await headMessage(i.cwd, wire.inputs.head_commit),
         };
       } catch (error) {

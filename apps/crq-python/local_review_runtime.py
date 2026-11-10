@@ -10,6 +10,7 @@ import json
 import subprocess
 from pathlib import Path
 
+import repo_registry
 import review_admission as admission
 import review_operation as operation
 import review_receipt as receipts
@@ -23,7 +24,7 @@ KIND = operation.KIND
 
 def facts(c, base, head, profile, repo=None):
     repo = repo or c.REPO
-    kwargs = {} if repo == c.REPO else dict(cwd=transport.clone_for(c, repo))
+    kwargs = {} if repo_registry.same_repo(repo, c.REPO) else dict(cwd=transport.clone_for(c, repo))
     inputs = dict(repo=repo, target="main", base_commit=base, head_commit=head,
                   base_tree=c.git("rev-parse", base + "^{tree}", **kwargs),
                   head_tree=c.git("rev-parse", head + "^{tree}", **kwargs), projection="full-diff")
@@ -79,7 +80,7 @@ def reconcile_pr(c, q, item, plan, dry):
 
 def prepare(c, q, item, dry, *, completed_only=False):
     wanted = item["identity_inputs"]
-    if wanted["repo"] != c.REPO:
+    if not repo_registry.same_repo(wanted["repo"], c.REPO):
         clone = transport.clone_for(c, wanted["repo"])
         if not all(c.object_present(wanted[end + "_commit"], clone=clone) for end in ("base", "head")):
             c.fetch(clone=clone)
@@ -189,7 +190,7 @@ def complete(c, q, item, rdir, run_id, cls, ended_at, exit_code):
 
 def republish(c, q, item):
     """Remote publication is independent of local completion and exact reuse."""
-    if item["identity_inputs"]["repo"] != c.REPO:
+    if not repo_registry.same_repo(item["identity_inputs"]["repo"], c.REPO):
         item.update(publication_pending=False, publication_reason="multi-repo publication unsupported")
         c.save_queue(q)
         return
@@ -205,9 +206,9 @@ def republish(c, q, item):
         reference = store.put(receipts.canonical(document))
         reference["kind"] = operation.RECEIPT_KIND
         facts = item["identity_inputs"]
-        payload = dict(repo=facts["repo"], subject_id=item["identity"], job_id=item["local_run_id"],
+        payload = dict(repo=c.REPO, subject_id=item["identity"], job_id=item["local_run_id"],
             attempt_id=item["local_run_id"],
-            source=dict(repo=facts["repo"], producer="author-queue", type="author-queue",
+            source=dict(repo=c.REPO, producer="author-queue", type="author-queue",
                         id=item["local_run_id"], authenticated=True),
             base=facts["base_commit"], head=facts["head_commit"], head_tree=facts["head_tree"],
             target=facts["head_commit"], target_tree=facts["head_tree"],
@@ -217,7 +218,7 @@ def republish(c, q, item):
                             exit_code=document["observed"]["exit_code"],
                             errors=["per-line scope unverified: full-diff adapter supplies no line-scope proof"]),
             outcome="unverified", artifacts=[reference], findings=[])
-        value = ledger.event("review", f"{facts['repo']}:author-queue:{item['local_run_id']}",
+        value = ledger.event("review", f"{c.REPO}:author-queue:{item['local_run_id']}",
                              item["completed_at"], payload)
         outbox.spool(value)
         pending = (outbox.root / "ack" / (value["id"] + ".json")).exists() is False

@@ -1,0 +1,634 @@
+{
+  "created_at": "2026-11-09T00:00:00Z",
+  "items": [
+    {
+      "id": "author-fixture",
+      "kind": "author",
+      "state": "done",
+      "repo": "example/primary",
+      "pr": 101,
+      "attempts": [],
+      "author": {},
+      "author_cycles": [],
+      "cycles": [],
+      "failures": 0,
+      "last_error": null,
+      "notes": [],
+      "order": 0,
+      "requested_at": "2026-11-09T00:00:00Z",
+      "run": null,
+      "wait_reason": null
+    },
+    {
+      "id": "backfill-job-1-g0",
+      "job_id": "job-1:0",
+      "subject_id": "6666666666666666666666666666666666666666666666666666666666666666",
+      "kind": "backfill",
+      "repo": "example/primary",
+      "pr": 101,
+      "family": "7777777777777777777777777777777777777777777777777777777777777777",
+      "generation": 0,
+      "partition": 0,
+      "subject_kind": "merged",
+      "tier": 4,
+      "tier_importance": "T3",
+      "dispatch_tier_importance": "T3",
+      "state": "pending",
+      "vendor_state": "none",
+      "attempt": 0,
+      "failures": 0,
+      "family_failures": 0,
+      "created_at": "2026-11-09T00:20:00Z",
+      "cycles": [],
+      "attempts": [],
+      "notes": [],
+      "target": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "base": "1111111111111111111111111111111111111111",
+      "head": "2222222222222222222222222222222222222222",
+      "head_tree": "dddddddddddddddddddddddddddddddddddddddd",
+      "target_tree": "cccccccccccccccccccccccccccccccccccccccc",
+      "refs": "refs/heads/main",
+      "diff_bytes": 1234,
+      "residual": false,
+      "scope": [
+        {
+          "path": "src/a.py",
+          "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "intervals": [
+            [
+              1,
+              10
+            ]
+          ]
+        }
+      ],
+      "scope_digest": "8888888888888888888888888888888888888888888888888888888888888888",
+      "paths": [],
+      "path_scores": {},
+      "path_tiers": {},
+      "path_lineages": {},
+      "prs": [
+        101
+      ],
+      "construction_policy_digest": "9999999999999999999999999999999999999999999999999999999999999999",
+      "score": 10,
+      "retry": false,
+      "row": 1,
+      "context": {
+        "trust": "committed",
+        "prs": [
+          101
+        ],
+        "sources": []
+      },
+      "run": null,
+      "wait_reason": null,
+      "last_error": "",
+      "attempt_id": "fixture-attempt_id",
+      "coverage_satisfied_by": "",
+      "inventory_subject_id": "fixture-inventory_subject_id",
+      "not_before": "2026-11-09T00:00:00Z",
+      "publication_event_id": "fixture-publication_event_id",
+      "published_event_id": "fixture-published_event_id"
+    },
+    {
+      "id": "coverage-dddddddddddddddd",
+      "repo": "example/primary",
+      "pr": 102,
+      "kind": "coverage",
+      "tier": 4,
+      "order": 4,
+      "state": "pending",
+      "cycles": [],
+      "attempts": [],
+      "notes": [],
+      "merge_commit": "3333333333333333333333333333333333333333",
+      "coverage_source": "merged-102",
+      "coverage_sha": "4444444444444444444444444444444444444444",
+      "coverage_paths": [
+        "src/a.py"
+      ],
+      "coverage_region": "src",
+      "created_at": "2026-11-09T00:15:00Z",
+      "measure": {
+        "merge_queue": "4444444444444444444444444444444444444444",
+        "synthetic_paths": [
+          "src/a.py"
+        ]
+      },
+      "run": null,
+      "wait_reason": null,
+      "failures": 0,
+      "last_error": null,
+      "repair_runs": {},
+      "attempt": 0,
+      "attempt_id": "fixture-attempt_id",
+      "not_before": "2026-11-09T00:00:00Z",
+      "vendor_state": "normal"
+    },
+    {
+      "id": "delta-fixture",
+      "kind": "delta",
+      "state": "done",
+      "repo": "example/primary",
+      "pr": 101,
+      "attempts": [],
+      "cycles": [],
+      "failures": 0,
+      "followup": "",
+      "last_error": null,
+      "merge_commit": "ffffffffffffffffffffffffffffffffffffffff",
+      "merged_at": "2026-11-09T00:00:00Z",
+      "not_before": "2026-11-09T00:00:00Z",
+      "notes": [],
+      "order": 0,
+      "pr_review": {},
+      "pr_review_attempt_at": "2026-11-09T00:00:00Z",
+      "pr_review_attempts": 0,
+      "pr_review_pending": false,
+      "pr_review_request": {},
+      "repair_runs": {},
+      "run": null,
+      "since": null,
+      "wait_reason": null
+    },
+    {
+      "id": "local-review-1",
+      "repo": "example/other",
+      "kind": "local-review",
+      "identity": "e453dce014a1e90390d87b185dbd34fc49a006058a14a3660eb5079752eaaeae",
+      "identity_inputs": {
+        "v": 1,
+        "repo": "example/other",
+        "base_commit": "1111111111111111111111111111111111111111",
+        "base_tree": "cccccccccccccccccccccccccccccccccccccccc",
+        "head_commit": "2222222222222222222222222222222222222222",
+        "head_tree": "dddddddddddddddddddddddddddddddddddddddd",
+        "scope": "full-diff",
+        "projection": "full-diff",
+        "config_digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "profile": {
+          "adapter": "coderabbit-cli",
+          "revision": "committed-full-diff-v1"
+        }
+      },
+      "profile": {
+        "adapter": "coderabbit-cli",
+        "revision": "committed-full-diff-v1",
+        "flags": []
+      },
+      "generation": 1,
+      "repeat_requested": false,
+      "observers": [
+        "fixture"
+      ],
+      "notify": [],
+      "state": "done",
+      "pr": null,
+      "created_at": "2026-11-09T09:00:00Z",
+      "order": 5,
+      "cycles": [],
+      "attempts": [],
+      "failures": 0,
+      "depends_on": [],
+      "run": null,
+      "wait_reason": null,
+      "scope_adequate": false,
+      "receipt_id": "receipt-fixture",
+      "publication_pending": false,
+      "local_run_id": "local-run-fixture",
+      "completed_at": "2026-11-09T09:30:00Z",
+      "last_error": null,
+      "publication_reason": "",
+      "pr_observers": []
+    },
+    {
+      "id": "merged-102",
+      "repo": "example/primary",
+      "pr": 102,
+      "kind": "merged",
+      "tier": 2,
+      "order": 2,
+      "owed_per_audit": 1,
+      "merge_commit": "3333333333333333333333333333333333333333",
+      "merged_at": "2026-11-08T20:00:00Z",
+      "source": "manual",
+      "state": "done",
+      "cycles": [],
+      "attempts": [],
+      "notes": [],
+      "measure": {
+        "measured_at": "2026-11-09T00:10:00Z",
+        "merge_queue": "4444444444444444444444444444444444444444",
+        "pr_commits": 2,
+        "added": 40,
+        "surviving": 35,
+        "surviving_nondoc": 35,
+        "survival": 0.875,
+        "synthetic_paths": [
+          "src/a.py"
+        ],
+        "excluded_paths": [],
+        "synthetic_added": 12,
+        "covered_surviving": 0,
+        "focus": 0.0,
+        "file_level_focus": 0.0,
+        "docs_only": false,
+        "files": [
+          {
+            "path": "src/a.py",
+            "now": "src/a.py",
+            "added": 12,
+            "surviving": 12,
+            "synthetic_added": 12
+          }
+        ]
+      },
+      "last_error": null,
+      "run": null,
+      "wait_reason": null,
+      "failures": 0,
+      "repair_runs": {},
+      "not_before": null
+    },
+    {
+      "id": "current-103",
+      "repo": "example/primary",
+      "kind": "merged-current",
+      "pr": 103,
+      "merge_commit": "5555555555555555555555555555555555555555",
+      "subject": {
+        "repo": "example/primary",
+        "pr": 103,
+        "merge_sha": "5555555555555555555555555555555555555555",
+        "target_selector": "promoted-main",
+        "policy": "affected-current-additions-v1"
+      },
+      "request_id": "fixture-103",
+      "state": "done",
+      "created_at": "2026-11-09T08:00:00Z",
+      "order": 3,
+      "cycles": [],
+      "attempts": [],
+      "failures": 0,
+      "depends_on": [],
+      "operator_priority": false,
+      "capture": {
+        "target": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "tree": "cccccccccccccccccccccccccccccccccccccccc",
+        "paths": [
+          {
+            "source_path": "src/a.py",
+            "path": "src/a.py",
+            "resolution": "same",
+            "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "mode": "100644",
+            "bytes": 120,
+            "disposition": "included"
+          }
+        ],
+        "scope_digest": "872802cb0aabf019f52aaa85f0acd2c5736f97b8ba1645640b23aa79b61ad99c",
+        "policy": "affected-current-additions-v1",
+        "projection": "current-affected-files/full-file-addition-projection",
+        "reviewer": "coderabbit-review-agent-committed-v1",
+        "reviewer_version": "1.0.0",
+        "captured_at": "2026-11-09T08:00:00Z",
+        "equivalence": "79184a96b5d5163715185ca856a858433b34e85b66f067a46796bbb2c0a1feef",
+        "base": "1111111111111111111111111111111111111111",
+        "head": "5555555555555555555555555555555555555555"
+      },
+      "run": null,
+      "wait_reason": null,
+      "receipt_id": "receipt-fixture",
+      "last_error": null,
+      "remediation_state": "",
+      "reused_from": "fixture-reused_from"
+    },
+    {
+      "id": "open-101",
+      "repo": "example/primary",
+      "pr": 101,
+      "kind": "open",
+      "tier": 0,
+      "order": 1,
+      "prior_cycles": 0,
+      "prior_base": null,
+      "depends_on": null,
+      "notes": [],
+      "state": "pending",
+      "cycles": [
+        {
+          "run_id": "open-101-20261108T235500Z",
+          "cycle": 1,
+          "base": "1111111111111111111111111111111111111111",
+          "head": "2222222222222222222222222222222222222222",
+          "dirty_diff": "",
+          "ndjson": "runs/open-101-20261108T235500Z/review.ndjson",
+          "findings": 1,
+          "severity_counts": {
+            "critical": 0,
+            "major": 0,
+            "minor": 1,
+            "trivial": 0,
+            "info": 0,
+            "none": 0
+          },
+          "completed_at": "2026-11-08T23:55:00Z",
+          "addressing": ""
+        }
+      ],
+      "attempts": [
+        {
+          "run_id": "open-101-20261108T235500Z",
+          "outcome": "completed",
+          "counted": true,
+          "at": "2026-11-08T23:55:00Z",
+          "head": "2222222222222222222222222222222222222222",
+          "base": "1111111111111111111111111111111111111111",
+          "message": null
+        }
+      ],
+      "wait_reason": null,
+      "pinned_base": "1111111111111111111111111111111111111111",
+      "target_ref": "origin/main",
+      "run": null,
+      "failures": 0,
+      "last_error": null,
+      "repair_runs": {},
+      "addressing": null,
+      "issue": {},
+      "issue_attempt_at": "2026-11-09T00:00:00Z",
+      "issue_pending": false,
+      "issue_request": {},
+      "last_push": {},
+      "not_before": null,
+      "pr_review": {},
+      "pr_review_attempt_at": "2026-11-09T00:00:00Z",
+      "pr_review_attempts": 0,
+      "pr_review_pending": false,
+      "pr_review_request": {},
+      "repair_origin": "",
+      "voided_cycles": [],
+      "voided_prior_cycles": 0
+    },
+    {
+      "id": "promotion-promoting-002",
+      "pr": 202,
+      "kind": "promotion",
+      "order": 0,
+      "state": "promoting",
+      "cycles": [],
+      "attempts": [],
+      "base_sha": "1111111111111111111111111111111111111111",
+      "batch_sha": "3333333333333333333333333333333333333333",
+      "reviewed_sha": null,
+      "blocking": [],
+      "merges": 1,
+      "notes": [
+        "historical promotion record retained on disk"
+      ],
+      "run": null,
+      "wait_reason": null,
+      "statuses": [
+        {
+          "at": "2026-10-02T00:00:00Z",
+          "sha": "3333333333333333333333333333333333333333",
+          "state": "pending",
+          "description": "historical promotion record",
+          "id": 1
+        }
+      ],
+      "failures": 0,
+      "last_error": null,
+      "success_at": null,
+      "repair_runs": {},
+      "dispatched": "2026-11-09T00:00:00Z",
+      "gate_stalled_at": "2026-11-09T00:00:00Z",
+      "not_before": null,
+      "request": {},
+      "signer": false,
+      "signer_result": {}
+    },
+    {
+      "id": "promotion-done-001",
+      "pr": 201,
+      "kind": "promotion",
+      "order": 90,
+      "state": "done",
+      "cycles": [],
+      "attempts": [],
+      "base_sha": "1111111111111111111111111111111111111111",
+      "batch_sha": "4444444444444444444444444444444444444444",
+      "reviewed_sha": "4444444444444444444444444444444444444444",
+      "blocking": [],
+      "merges": 1,
+      "notes": [
+        "historical promotion record retained on disk"
+      ],
+      "run": null,
+      "wait_reason": null,
+      "statuses": [
+        {
+          "at": "2026-10-01T00:00:00Z",
+          "sha": "4444444444444444444444444444444444444444",
+          "state": "success",
+          "description": "historical promotion record",
+          "id": 2
+        }
+      ],
+      "failures": 0,
+      "last_error": null,
+      "success_at": "2026-10-01T00:00:00Z",
+      "repair_runs": {},
+      "dispatched": "2026-11-09T00:00:00Z",
+      "gate_stalled_at": "2026-11-09T00:00:00Z",
+      "not_before": null,
+      "request": {},
+      "signer": false,
+      "signer_result": {}
+    },
+    {
+      "id": "push-current-fixture",
+      "kind": "push-current",
+      "state": "done",
+      "repo": "example/primary",
+      "pr": 101,
+      "attempts": [],
+      "capture": {},
+      "created_at": "2026-11-09T00:00:00Z",
+      "cycles": [],
+      "depends_on": "",
+      "failures": 0,
+      "issue": {},
+      "issue_attempt_at": "2026-11-09T00:00:00Z",
+      "issue_pending": false,
+      "issue_request": {},
+      "last_error": null,
+      "notes": [],
+      "order": 0,
+      "receipt_id": "fixture-receipt_id",
+      "run": null,
+      "subject": {},
+      "wait_reason": null
+    }
+  ],
+  "starts": [
+    "2026-11-09T11:30:00Z",
+    "2026-11-09T11:40:00Z"
+  ],
+  "paused": false,
+  "last_tick": "2026-11-09T11:50:00Z",
+  "pause_reason": null,
+  "cooldown_until": "2026-11-09T12:15:00Z",
+  "rl_backoff_min": 15,
+  "archived_tick_runs": [],
+  "cleanup_backlog": 0,
+  "coverage": {
+    "schema_version": 1,
+    "paths": {
+      "src/a.py": {
+        "review_count": 1,
+        "last_reviewed_at": "2026-11-08T23:55:00Z",
+        "last_run": "open-101-20261108T235500Z",
+        "reviewed_sha": "2222222222222222222222222222222222222222"
+      }
+    },
+    "runs": {
+      "open-101-20261108T235500Z": {
+        "completed_at": "2026-11-08T23:55:00Z",
+        "paths": [
+          "src/a.py"
+        ]
+      }
+    },
+    "observations": {
+      "2026-11-09T11:48:00Z": {
+        "started": true,
+        "pending": true,
+        "candidate_exists": true,
+        "blocked_reason": null
+      }
+    }
+  },
+  "author_requests": {},
+  "merged_current_requests": {
+    "fixture-103": {
+      "binding": {
+        "repo": "example/primary",
+        "pr": 103,
+        "merge_sha": "5555555555555555555555555555555555555555",
+        "target_selector": "promoted-main",
+        "policy": "affected-current-additions-v1"
+      },
+      "item": "current-103"
+    }
+  },
+  "usage": {
+    "remaining": 8,
+    "limit": 10,
+    "rollingWindowMs": 3600000,
+    "fullCapacityInMs": 1200000
+  },
+  "queue_client_requests": {},
+  "backfill_usage": {
+    "observed_at": "2026-11-09T11:48:00Z",
+    "reflected_reservations": [],
+    "remaining": 8,
+    "successful": true
+  },
+  "backfill_starts_at_observation": 2,
+  "backfill_ordinary_exhausted": false,
+  "backfill_halted": "",
+  "backfill_halt_operation": "",
+  "backfill_publication_error": "",
+  "backfill_reservations": {},
+  "backfill_admissions": [],
+  "backfill_admission_history_version": 1,
+  "backfill_daily_capacity": {
+    "2026-11-09": {
+      "spare_admissions": 8,
+      "completed_partitions": 0
+    }
+  },
+  "backfill_families": {},
+  "backfill_scope_failures": {},
+  "backfill_finding_backlog": {
+    "already-fixed": 0,
+    "delivered": 0,
+    "dismissed": 0,
+    "fixed": 0,
+    "needs-human": 0,
+    "superseded": 0,
+    "untriaged": 0
+  },
+  "backfill_operator_events": [],
+  "backfill_usage_probe_at": "2026-11-09T11:48:00Z",
+  "merged_reconcile": {
+    "after": "2026-11-02T00:00:00Z",
+    "before": "2026-11-09T00:00:00Z",
+    "checkpoint_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "complete": true,
+    "complete_through": "2026-11-09T00:00:00Z",
+    "duplicates_seen": 0,
+    "intents": 1,
+    "inventory_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "next_cursor": null,
+    "outside_window": 0,
+    "pages_read": 1,
+    "pending_review": 1,
+    "records_read": 1,
+    "represented": 1,
+    "reviewed": 0,
+    "source": {
+      "version": 1,
+      "method": "closed-updated-v1",
+      "repo": "example/primary",
+      "base": "main-or-merge-queue",
+      "repository_id": "example/primary",
+      "ceiling": 0,
+      "window": 50
+    },
+    "transient_failures": 0,
+    "unsupported": 0,
+    "version": 1
+  },
+  "merged_discovery": {
+    "after": "2026-11-09T11:40:00Z",
+    "before": "2026-11-09T11:50:00Z",
+    "complete": true
+  },
+  "merged_watermark": "2026-11-09T00:00:00Z",
+  "merged_wrappers_pruned_at": "2026-11-09T00:00:00Z",
+  "push_discovery": {
+    "example/other": {
+      "reviewed_tip": "2222222222222222222222222222222222222222"
+    }
+  },
+  "review_requests": {},
+  "review_events": {},
+  "review_pr_links": {},
+  "review_notify_outbox": {},
+  "review_pr_outbox": {},
+  "repair_own_commits": [],
+  "legacy_repair_missing": [],
+  "legacy_repair_backfilled": "2026-10-10T12:00:07Z",
+  "client_health": {
+    "completed_at": "2026-11-09T11:48:00Z",
+    "complete": true,
+    "incomplete_ticks": 0,
+    "sha": "f79ef46dfc2d4b24a7c3241ca198df0bd75e26e1"
+  },
+  "promotion_audit": {
+    "alerts": [],
+    "last_main": null,
+    "records": []
+  },
+  "review_ledger_head": "9999999999999999999999999999999999999999",
+  "backfill_capacity_runs": [],
+  "backfill_coverage_reconciled": {},
+  "backfill_history_import": {},
+  "backfill_last_manifest": {},
+  "backfill_state_events": {},
+  "backfill_unsupported_construction": [],
+  "promotion": {}
+}

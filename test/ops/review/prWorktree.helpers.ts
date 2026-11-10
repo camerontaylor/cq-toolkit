@@ -36,7 +36,7 @@ import { realTmpDirSync } from '../../helpers/tmp-dir.js';
 //      holding the branch refuses the create (git's double-checkout
 //      refusal) and the throw names it — freeing it is the human's call.
 //   5. The create path: `pr-<pr>-<sanitized-branch>` under worktreeRoot
-//      (default `<repoRoot>/.git/cq-review-worktrees`), added with
+//      (default `<git-common-dir>/cq-review-worktrees`), added with
 //      `-B <branch> <path> <expectedSha>` so the new tree sits AT the
 //      fetched sha, registered with the injected clock, reused=false; an
 //      add FAILURE throws with git's stderr and leaves the registry (and
@@ -131,18 +131,27 @@ export const mkModel = (
 });
 
 /** Build the injected run (GhFn shape, bin 'git' by convention). */
-export const fakeGit = (model: FakeGit, calls?: string[][]): GhFn => {
+export const fakeGit = (
+  model: FakeGit,
+  calls?: string[][],
+  options: { commonDir?: string } = {},
+): GhFn => {
+  let commonDir = options.commonDir;
+  let firstCall = true;
   // Materialize only this harness's temporary checkouts before the resolver
   // verifies their identity. Foreign model paths remain virtual and untouched.
   for (const path of Object.keys(model.headOf))
     if (path.startsWith(dirname(REPO) + sep)) mkdirSync(path, { recursive: true });
   return async (args: string[]): Promise<GhResult> => {
     calls?.push(args);
+    const initial = firstCall;
+    firstCall = false;
     const sub = args[2];
     if (sub === 'diff' || sub === 'ls-files') return { code: 0, stdout: '', stderr: '' };
     if (sub === 'rev-parse' && args.includes('--git-common-dir')) {
-      await mkdir(join(REPO, '.git'), { recursive: true });
-      return { code: 0, stdout: join(REPO, '.git'), stderr: '' };
+      commonDir ??= initial ? join(args[1]!, '.git') : join(REPO, '.git');
+      await mkdir(commonDir, { recursive: true });
+      return { code: 0, stdout: commonDir, stderr: '' };
     }
     if (sub === 'symbolic-ref')
       return { code: 0, stdout: `refs/heads/${model.headOf[args[1]!]!.branch}`, stderr: '' };

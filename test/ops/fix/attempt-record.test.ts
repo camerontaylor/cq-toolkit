@@ -33,6 +33,10 @@ const ADR_STOP_TABLE: ReadonlyArray<readonly [string, string]> = [
 ];
 
 describe('sanitizeObservation', () => {
+  it('pins the strict observation over-match for an at-sign in a URL path', () => {
+    expect(sanitizeObservation('https://host/path@seg')).toBe('https://seg');
+  });
+
   it('T12 round-trip', () => {
     process.env.FAKE_TEST_API_KEY = 'sup3rs3cretvalue';
     try {
@@ -187,10 +191,12 @@ describe('sanitizeObservation', () => {
     expect(sanitizeObservation(input)).toEqual(expected);
   });
 
-  it('requires post-strip redaction for a newly exposed URL secret', () => {
+  it('a *_URL value is not a secret: the credential-stripped URL stays visible', () => {
     process.env.ZZ_HOOK_URL = 'https://hooks.example/svc/p';
     try {
-      expect(sanitizeObservation('https://u:p@hooks.example/svc/p')).toEqual('[redacted]');
+      expect(sanitizeObservation('https://u:p@hooks.example/svc/p')).toEqual(
+        'https://hooks.example/svc/p',
+      );
     } finally {
       delete process.env.ZZ_HOOK_URL;
     }
@@ -214,12 +220,12 @@ describe('sanitizeObservation', () => {
     });
   });
 
-  it('redact-before-strip kills a *_URL secret whose stripped host survives', () => {
+  it('a *_URL value with userinfo is shown through the shared redactor (userinfo gone)', () => {
     process.env.FAKE_HOOK_URL = 'https://tolk3n@hooks.example.test/wb';
     try {
       const out = sanitizeObservation('webhook https://tolk3n@hooks.example.test/wb fired');
       expect(out).not.toContain('tolk3n');
-      expect(out).toContain('[redacted]');
+      expect(out).toContain('https://hooks.example.test/wb');
     } finally {
       delete process.env.FAKE_HOOK_URL;
     }
@@ -535,5 +541,46 @@ describe('finishAttempt', () => {
     expect(record.requestedModel).toEqual('claude-3-5-sonnet-v2@20241022');
     expect(record.servedModel).toEqual('claude-3-5-sonnet-v2@20241023');
     expect(record.priceTableRevision).toEqual('rev@7');
+  });
+
+  it.each([
+    ['https://user:password-http:tail@host.test/path', 'https://[redacted]@host.test/path'],
+    ['https://user:password-https:tail@host.test/path', 'https://[redacted]@host.test/path'],
+    ['https://user:password-wss:tail@host.test/path', 'https://[redacted]@host.test/path'],
+    ['https://user:password-ftp:tail@host.test/path', 'https://[redacted]@host.test/path'],
+    [
+      'https://host.test/?next=https://private:password@private.test/sensitive',
+      'https://host.test/?[redacted]',
+    ],
+    ['https://host.test/#https://private.test/sensitive', 'https://host.test/#[redacted]'],
+    ['https://host.test/?next=https://private.test/sensitive', 'https://host.test/?[redacted]'],
+  ])('keeps embedded schemes redacted in persisted identifiers: %s', (value, expected) => {
+    const record = finishAttempt({
+      ...base,
+      completed: true,
+      invocation: value,
+      requestedModel: value,
+      servedModel: value,
+    });
+    for (const shown of [record.invocation, record.requestedModel, record.servedModel]) {
+      expect(shown).toBe(expected);
+      expect(shown).not.toContain('password');
+      expect(shown).not.toContain('private.test');
+    }
+  });
+
+  it('redacts URL-shaped attempt identifiers without relying on env values', () => {
+    const value = 'https://u:IdentifierCanary@host/x?token=IdentifierCanary';
+    const record = finishAttempt({
+      ...base,
+      completed: true,
+      invocation: value,
+      requestedModel: value,
+      servedModel: value,
+    });
+    for (const shown of [record.invocation, record.requestedModel, record.servedModel]) {
+      expect(shown).toBe('https://[redacted]@host/x?[redacted]');
+      expect(shown).not.toContain('IdentifierCanary');
+    }
   });
 });

@@ -1,0 +1,30 @@
+{
+  "canonical_id": "1414141414141414141414141414141414141414141414141414141414141414",
+  "finding_id": "1414141414141414141414141414141414141414141414141414141414141414",
+  "review_id": "3131313131313131313131313131313131313131313131313131313131313131",
+  "target": "origin/main",
+  "path": "src/ops/crq/tick.ts",
+  "intervals": [
+    [
+      1,
+      4
+    ]
+  ],
+  "finding": {
+    "id": "1414141414141414141414141414141414141414141414141414141414141414",
+    "severity": "minor",
+    "path": "src/ops/crq/tick.ts",
+    "blob": "2020202020202020202020202020202020202020",
+    "intervals": [
+      [
+        1,
+        4
+      ]
+    ],
+    "title": "Guard the admission path",
+    "body": "The scheduler can launch twice.",
+    "source_id": null,
+    "status": "untriaged",
+    "anchor_status": "verified"
+  }
+}

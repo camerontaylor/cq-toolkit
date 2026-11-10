@@ -1,0 +1,293 @@
+{
+  "schema": "cq.crq-group-p-vector/v1",
+  "family": "status-helpers",
+  "cases": [
+    {
+      "name": "exact-utc",
+      "source": "status_summary.timestamp",
+      "input": {
+        "value": "2026-11-09T00:00:00Z"
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "epoch": 1794182400.0
+        }
+      }
+    },
+    {
+      "name": "fraction-accepted",
+      "source": "status_summary.timestamp",
+      "input": {
+        "value": "2026-11-09T00:00:00.5Z"
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "epoch": 1794182400.5
+        }
+      }
+    },
+    {
+      "name": "offset-accepted",
+      "source": "status_summary.timestamp",
+      "input": {
+        "value": "2026-11-09T10:00:00+10:00"
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "epoch": 1794182400.0
+        }
+      }
+    },
+    {
+      "name": "none-invalid",
+      "source": "status_summary.timestamp",
+      "input": {
+        "value": null
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "epoch": null
+        }
+      }
+    },
+    {
+      "name": "number-invalid",
+      "source": "status_summary.timestamp",
+      "input": {
+        "value": 1
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "epoch": null
+        }
+      }
+    },
+    {
+      "name": "merged-pending-reviewing-blocked",
+      "source": "status_summary.merged_current",
+      "input": {
+        "queue": {
+          "items": [
+            {
+              "kind": "merged-current",
+              "state": "pending"
+            },
+            {
+              "kind": "merged-current",
+              "state": "reviewing"
+            },
+            {
+              "kind": "merged-current",
+              "state": "blocked"
+            },
+            {
+              "kind": "open",
+              "state": "pending"
+            }
+          ],
+          "merged_discovery": {
+            "after": "2026-11-08T00:00:00Z",
+            "before": "2026-11-09T00:00:00Z",
+            "complete": true
+          },
+          "merged_reconcile": {
+            "after": "2026-11-08T00:00:00Z",
+            "before": "2026-11-09T00:00:00Z",
+            "complete": true,
+            "pages_read": 2,
+            "inventory_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "merged_watermark": "2026-11-09T00:00:00Z"
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "natural_discovery": {
+            "after": "2026-11-08T00:00:00Z",
+            "before": "2026-11-09T00:00:00Z",
+            "complete": true
+          },
+          "discovery": {
+            "after": "2026-11-08T00:00:00Z",
+            "before": "2026-11-09T00:00:00Z",
+            "complete": true,
+            "inventory_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "pages_read": 2
+          },
+          "watermark": "2026-11-09T00:00:00Z",
+          "receipts": {
+            "pending": 1,
+            "reviewing": 1,
+            "blocked": 1,
+            "unverified": 0,
+            "proven_terminal": 0,
+            "no_current_code": 0,
+            "partial_scope": 0,
+            "unsupported": 0
+          },
+          "path_exclusions": {},
+          "captured_targets": [],
+          "additional_captured_targets": 0,
+          "coverage_at_today_target": "unverified",
+          "legacy_done_is_review_proof": false
+        }
+      }
+    },
+    {
+      "name": "merged-terminal-without-retained-receipts",
+      "source": "status_summary.merged_current",
+      "input": {
+        "queue": {
+          "items": [
+            {
+              "kind": "merged-current",
+              "state": "done",
+              "receipt_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            },
+            {
+              "kind": "merged-current",
+              "state": "no-current-code",
+              "receipt_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            },
+            {
+              "kind": "merged-current",
+              "state": "unsupported",
+              "receipt_id": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+            }
+          ],
+          "merged_discovery": {
+            "complete": false,
+            "reason": "budget"
+          }
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "natural_discovery": {
+            "complete": false,
+            "reason": "budget"
+          },
+          "discovery": {},
+          "watermark": null,
+          "receipts": {
+            "pending": 0,
+            "reviewing": 0,
+            "blocked": 0,
+            "unverified": 3,
+            "proven_terminal": 0,
+            "no_current_code": 0,
+            "partial_scope": 0,
+            "unsupported": 0
+          },
+          "path_exclusions": {},
+          "captured_targets": [],
+          "additional_captured_targets": 0,
+          "coverage_at_today_target": "unverified",
+          "legacy_done_is_review_proof": false
+        }
+      }
+    },
+    {
+      "name": "repos-counts-configured-push-and-other-states",
+      "source": "status_summary.repos_summary",
+      "input": {
+        "queue": {
+          "items": [
+            {
+              "id": "a",
+              "repo": "example/primary",
+              "state": "pending"
+            },
+            {
+              "id": "b",
+              "repo": "example/other",
+              "state": "pending"
+            },
+            {
+              "id": "c",
+              "repo": "example/other",
+              "state": "reviewing"
+            },
+            {
+              "id": "d",
+              "repo": "example/other",
+              "state": "blocked"
+            },
+            {
+              "id": "e",
+              "repo": "example/other",
+              "state": "done"
+            },
+            {
+              "id": "f",
+              "repo": "example/other",
+              "state": "mystery"
+            },
+            {
+              "id": "g",
+              "repo": "example/third",
+              "state": "pending"
+            }
+          ],
+          "push_discovery": {
+            "example/pushonly": {
+              "reviewed_tip": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            "example/primary": {
+              "reviewed_tip": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            }
+          }
+        },
+        "primary": "example/primary",
+        "configured": [
+          {
+            "repo": "example/other"
+          },
+          {
+            "repo": "example/primary"
+          },
+          {
+            "repo": "example/configured"
+          }
+        ]
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "example/other": {
+            "pending": 1,
+            "reviewing": 1,
+            "blocked": 1,
+            "other": 2
+          },
+          "example/configured": {
+            "pending": 0,
+            "reviewing": 0,
+            "blocked": 0,
+            "other": 0
+          },
+          "example/pushonly": {
+            "pending": 0,
+            "reviewing": 0,
+            "blocked": 0,
+            "other": 0,
+            "reviewed_tip": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "example/third": {
+            "pending": 1,
+            "reviewing": 0,
+            "blocked": 0,
+            "other": 0
+          }
+        }
+      }
+    }
+  ]
+}

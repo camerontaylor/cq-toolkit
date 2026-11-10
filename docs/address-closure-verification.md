@@ -85,12 +85,15 @@ the canonical order with at most one non-pass entry, last:
    newline markers/transitions and malformed hunks are unavailable; there is
    no fuzzy application or fallback to line membership. An unchanged final
    newline is preserved. Incoherent packets are `unavailable`.
-4. `trigger-removed`: quoted spans from the finding text must not survive in
-   the after content or in any cited dependency's content; symbols declared
-   on removed lines must not be re-declared in the after content or in any
-   cited dependency. Survival is concrete counter-evidence: verdict
-   `unresolved`. Removed declarations supply counter-evidence only: their
-   removal alone cannot establish a relationship to the finding. Without a
+4. `trigger-removed`: a surviving quoted expression or literal from the finding,
+   or a removed declaration re-declared in the after content or a cited
+   dependency, is counter-evidence: verdict `unresolved`. A surviving bare
+   identifier quoted by the finding but never quoted as a literal in before
+   may name the affected code rather than its trigger. Its survival is
+   `uncertain` (`unavailable-evidence`), unless another cited trigger or
+   declaration supplies counter-evidence. Removed declarations supply
+   counter-evidence only: their removal alone cannot establish a relationship
+   to the finding. Without a
    supported quoted finding trigger, a packet with no survival counter-evidence is
    uncertain (`no-citable-trigger`), even when an unrelated declaration was
    removed. The helper refuses to guess what the finding was about, and
@@ -116,7 +119,8 @@ finding.
 
 - `resolved` via `closure-evidence-complete`: the finding may close.
 - `unresolved` via `deleted-trigger-survives`: the finding stays open with
-  concrete counter-evidence.
+  concrete trigger or declaration counter-evidence. A surviving ambiguous
+  quoted name instead produces `uncertain` via `unavailable-evidence`.
 - `uncertain`: the finding stays open and no edit is demanded. Reasons:
   `unavailable-evidence`, `unpinned-revision`, `no-citable-trigger`,
   `deleted-line-alone`, `omitted-consumer-or-dependency`, or the gate's own

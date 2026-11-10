@@ -75,6 +75,144 @@ class ModuleTest(unittest.TestCase):
         self.td = tempfile.TemporaryDirectory()
         self.addCleanup(self.td.cleanup)
 
+    def test_independent_summary_explicit_login_and_base(self):
+        meta = {**META, "base": "c" * 40, "label": "Independent reviewer", "summary": f"**Independent review (Sol): PASS for `{HEAD}`**"}
+        gh = FakeGh()
+        result = prf.deliver(REPO, 7, meta, write_ndjson(self.td.name,
+            [{**ANCHORED, "severity": "nonblocking"}, OUTSIDE]), gh=gh, login="cq-review[bot]")
+        self.assertEqual(result["inline"], 1)
+        payload = gh.posts()[0]
+        self.assertTrue(payload["body"].startswith(prf.marker(META["run_id"]) + "\n" + meta["summary"]))
+        self.assertIn("Independent reviewer", payload["body"])
+        self.assertIn("nonblocking", payload["comments"][0]["body"])
+        self.assertIn("lines 20-22", payload["body"])
+        self.assertFalse(any(argv[2:3] == ["user"] for argv, _ in gh.calls))
+        self.assertTrue(any("repos/" + REPO + "/compare/" + "c" * 40 + "..." + HEAD in argv for argv, _ in gh.calls))
+
+    def test_summary_survives_422_and_empty_findings(self):
+        meta = {**META, "summary": f"**Independent review (Sol): PASS for `{HEAD}`**"}
+        gh = FakeGh(post=[(1, "", "HTTP 422"), (0, '{"id":77}', "")])
+        result = prf.deliver(REPO, 7, meta, write_ndjson(self.td.name, [ANCHORED]), gh=gh)
+        self.assertEqual(result["body_only"], 1)
+        self.assertIn(meta["summary"], gh.posts()[-1]["body"])
+        gh = FakeGh()
+        self.assertEqual(prf.deliver(REPO, 7, meta, write_ndjson(self.td.name, []), gh=gh)["state"], "created")
+
+    def test_independent_summary_survives_matching_crq_findings(self):
+        class MatchingCrqGh(FakeGh):
+            def __call__(self, argv, *, input_text=None):
+                if "--paginate" in argv and "crq-local-findings head=" in argv[-1]:
+                    return SimpleNamespace(returncode=0, stdout='{"id":66,"url":"https://x/r/66"}', stderr="")
+                return super().__call__(argv, input_text=input_text)
+        meta = {**META, "summary": f"**Independent review (Sol): PASS for `{HEAD}`**"}
+        gh = MatchingCrqGh()
+        result = prf.deliver(REPO, 7, meta, write_ndjson(self.td.name, [ANCHORED]), gh=gh)
+        self.assertEqual(result["state"], "created")
+        self.assertIn(meta["summary"], gh.posts()[0]["body"])
+
+    def test_cli_json(self):
+        import contextlib
+        import io
+        body = Path(self.td.name) / "summary.md"
+        body.write_text(f"**Independent review (Sol): PASS for `{HEAD}`**")
+        findings = write_ndjson(self.td.name, [ANCHORED])
+        argv = ["--repo", REPO, "--pr", "7", "--head", HEAD, "--base", BASE,
+                "--run-id", "review-cli", "--findings", str(findings), "--body-file", str(body)]
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(prf.main(argv, gh=FakeGh()), 0)
+        self.assertEqual(json.loads(output.getvalue())["inline"], 1)
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(prf.main(argv + ["--base", "bad"], gh=FakeGh()), 1)
+
+    def test_cli_rejects_malformed_findings_before_network(self):
+        import contextlib
+        import io
+        body = Path(self.td.name) / "summary.md"
+        body.write_text(f"**Independent review (Sol): ITERATE for `{HEAD}`**")
+        for event in ({"type": "finding"}, {**ANCHORED, "startLine": "2"},
+                      {**ANCHORED, "endLine": True}, {**ANCHORED, "fileName": ""}):
+            findings = write_ndjson(self.td.name, [event])
+            gh = FakeGh()
+            with contextlib.redirect_stderr(io.StringIO()):
+                result = prf.main(["--repo", REPO, "--pr", "7", "--head", HEAD, "--base", BASE,
+                    "--run-id", "invalid-finding", "--findings", str(findings), "--body-file", str(body)], gh=gh)
+            self.assertEqual(result, 1)
+            self.assertEqual(gh.calls, [])
+
+    def test_script_entrypoint_publishes_and_reports_errors(self):
+        import sys
+        root = Path(self.td.name)
+        body = root / "summary.md"
+        summary = f"**Independent review (Sol): ITERATE for `{HEAD}`**"
+        body.write_text(summary, encoding="utf-8")
+        findings = write_ndjson(root, [ANCHORED])
+        calls = root / "calls.ndjson"
+        payload = root / "payload.json"
+        # Exercise the real script and subprocess boundary, with no real gh or
+        # credentials. Each fake gh process records the endpoint it received.
+        fake = root / "gh"
+        fake.write_text(f"#!{sys.executable}\n" + """
+import json
+import sys
+from pathlib import Path
+root = Path(__file__).parent
+args = sys.argv[1:]
+with (root / 'calls.ndjson').open('a') as log:
+    log.write(json.dumps(args) + '\\n')
+if (root / 'fail').exists():
+    print('mock publication failure', file=sys.stderr)
+    sys.exit(1)
+if '--method' in args:
+    (root / 'payload.json').write_text(sys.stdin.read())
+    print(json.dumps({'id': 77, 'html_url': 'https://example.test/review/77'}))
+elif args[1] == 'user':
+    print('mock-reviewer')
+elif '/compare/' in args[1]:
+    print(json.dumps([{'filename': 'src/a.py', 'status': 'modified',
+                       'patch': '@@ -1,3 +1,3 @@\\n a\\n+b\\n c'}]))
+elif '--paginate' not in args:
+    print(json.dumps({'state': 'open', 'merged': False}))
+""", encoding="utf-8")
+        fake.chmod(0o700)
+        env = {"PATH": str(root), "PYTHONIOENCODING": "utf-8"}
+        argv = [sys.executable, str(Path(prf.__file__).resolve()),
+                "--repo", REPO, "--pr", "7", "--head", HEAD, "--base", BASE,
+                "--run-id", "script-review", "--reviewer", "Sol",
+                "--findings", str(findings), "--body-file", str(body)]
+
+        def run(extra=()):
+            return subprocess.run(argv + list(extra), env=env, cwd=root,
+                                  capture_output=True, text=True, timeout=20)
+
+        result = run()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(json.loads(result.stdout), {
+            "state": "created", "review_id": 77,
+            "review_url": "https://example.test/review/77", "inline": 1, "body_only": 0})
+        review = json.loads(payload.read_text())
+        self.assertEqual(review["commit_id"], HEAD)
+        self.assertIn(summary, review["body"])
+        self.assertEqual(review["comments"][0]["path"], "src/a.py")
+        self.assertEqual(review["comments"][0]["line"], 3)
+        self.assertTrue(any(json.loads(line)[1] == "user"
+                            for line in calls.read_text().splitlines()))
+
+        before = calls.read_text()
+        for extra in (["--base", "bad"], ["--body-file", str(root / "missing")]):
+            with self.subTest(extra=extra):
+                result = run(extra)
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual(result.stdout, "")
+                self.assertIn("pr_review_findings:", result.stderr)
+                self.assertEqual(calls.read_text(), before)
+        (root / "fail").touch()
+        result = run()
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("mock publication failure", result.stderr)
+
     def test_right_ranges_cover_each_hunk_including_context(self):
         self.assertEqual(prf.right_ranges(PATCH), [(1, 4), (41, 46)])
         self.assertEqual(prf.right_ranges("@@ -3 +3 @@\n-x\n+y\n@@ -9,2 +8,0 @@\n-a\n-b\n"), [(3, 3)])

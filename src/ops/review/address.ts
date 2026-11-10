@@ -3161,16 +3161,6 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                   }
                   return await finish('needs-human', closureRefused);
                 }
-                // A failed after-snapshot leaves the loop's replies/resolves
-                // published but the round unverified. Stop BEFORE the
-                // re-review: that pass would replace the retained settled
-                // run's record with the re-reviewed population and lose the
-                // history of what the fixes did.
-                if (loop.verifyFailure !== undefined)
-                  return await finish(
-                    'needs-human',
-                    `verify snapshot failed: ${loop.verifyFailure}`,
-                  );
                 const fetched = await fetchReviewState(
                   { owner: meta.owner, repo: meta.repo, pr: meta.pr },
                   undefined,
@@ -3226,6 +3216,16 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                     await rename(`${pendingRerequestPath}.tmp`, pendingRerequestPath);
                   }
                 }
+                // A failed after-snapshot leaves the loop's replies/resolves
+                // published but the round unverified. Stop BEFORE the
+                // re-review, after preserving pending reviewer requests. That pass
+                // would replace the settled record with the re-reviewed
+                // population and lose the history of what the fixes did.
+                if (loop.verifyFailure !== undefined)
+                  return await finish(
+                    'needs-human',
+                    `verify snapshot failed: ${loop.verifyFailure}`,
+                  );
                 if ((await branchName(root)) !== loop.worktree.branch)
                   return await finish('needs-human', 'PR worker branch changed');
                 const currentHead = await gitText(root, ['rev-parse', 'HEAD']);

@@ -32,9 +32,10 @@ import { slotWorktreeRegistry } from '../../../src/adapters/git/slotWorktreeRegi
 // skipResponderAuthoredThreads: false for this drill (a classifyConfig
 // flip — data, not a code change).
 //
-// LEAVE-BEHIND: the scratch repo is deliberately NOT deleted (the drill
-// token holds no delete_repo scope); its URL is printed as the LAST line of
-// the test output for the drill doc. The tmp clone/worktrees ARE cleaned.
+// LEAVE-BEHIND: the drill makes no repository delete call. Its scratch repo
+// URL is printed as the LAST line of the test output for the drill doc.
+// Token permissions are described in .github/workflows/live-review.yml;
+// the tmp clone/worktrees ARE cleaned.
 import { readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, test, vi } from 'vitest';

@@ -39,7 +39,10 @@ const namespace = createHash('sha256')
   .update(JSON.stringify(['octo', 'widget', 7, 'main', null, 'octo/widget', 'feature/x', 'author']))
   .digest('hex');
 
-async function runPersistedCase(mode: 'rerequest' | 'resolve-valid' | 'resolve-forged') {
+async function runPersistedCase(
+  mode: 'rerequest' | 'snapshot' | 'resolve-valid' | 'resolve-forged',
+) {
+  const failure = mode === 'snapshot' ? 'snapshot' : 'request';
   const repo = await makeTestRepo();
   const journal = await realTmpDir('cq-address-rerequest-');
   const role = { provider: 'scripted', model: 'worker' };
@@ -79,7 +82,9 @@ async function runPersistedCase(mode: 'rerequest' | 'resolve-valid' | 'resolve-f
     const reRequested = new Set<string>();
     // Run 1's re-review works; only the reviewer-request API fails.
     let failReRequest = mode === 'rerequest';
-    let failResolution = mode !== 'rerequest';
+    let failSnapshot = mode === 'snapshot';
+    let snapshotReads = 0;
+    let failResolution = mode.startsWith('resolve-');
     let replyLogin = 'author';
     let workerInvocations = 0;
     const threads = () => [
@@ -161,7 +166,12 @@ async function runPersistedCase(mode: 'rerequest' | 'resolve-valid' | 'resolve-f
           },
         });
       const endpoint = args.find((arg) => arg.startsWith('repos/')) ?? '';
-      if (endpoint === 'repos/octo/widget/pulls/7') return ok({ head: { sha: remoteHead() } });
+      if (endpoint === 'repos/octo/widget/pulls/7') {
+        snapshotReads++;
+        if (failSnapshot && snapshotReads === 2)
+          return { code: 1, stdout: '', stderr: 'snapshot unavailable' };
+        return ok({ head: { sha: remoteHead() } });
+      }
       if (endpoint.includes('/pulls/7/comments'))
         return ok([
           ...threads().map((thread) => ({
@@ -250,7 +260,7 @@ async function runPersistedCase(mode: 'rerequest' | 'resolve-valid' | 'resolve-f
       'pending-rerequests.json',
     );
 
-    if (mode !== 'rerequest') {
+    if (mode.startsWith('resolve-')) {
       const first = await invoke();
       expect(first.status).toBe('needs-human');
       expect(actions).toContain('resolve-failed');
@@ -285,7 +295,11 @@ async function runPersistedCase(mode: 'rerequest' | 'resolve-valid' | 'resolve-f
     // Run 1: the fix lands, the re-review is fine, the re-request API fails.
     const first = await invoke();
     expect(first.status).toBe('needs-human');
-    expect(actions).toEqual(['reply', 'resolve', 'rerequest-failed']);
+    const firstActions =
+      failure === 'request' ? ['reply', 'resolve', 'rerequest-failed'] : ['reply', 'resolve'];
+    expect(actions).toEqual(firstActions);
+    if (failure === 'snapshot')
+      expect(first.report?.reasons.join(' ')).toContain('verify snapshot failed');
     // The pending re-request is durably recorded beside the publication receipts.
     const pending = JSON.parse(await readFile(pendingPath, 'utf8')) as string[];
     expect(pending).toContain('octocat');
@@ -294,10 +308,11 @@ async function runPersistedCase(mode: 'rerequest' | 'resolve-valid' | 'resolve-f
     // lose the human reviewer, and a successful re-request clears the store.
     resolvedThreads.add('T1');
     failReRequest = false;
+    failSnapshot = false;
     advancePrHead();
     const second = await invoke();
     expect(second.status, JSON.stringify(second.report?.reasons)).toBe('ok');
-    expect(actions).toEqual(['reply', 'resolve', 'rerequest-failed', 'rerequest']);
+    expect(actions).toEqual([...firstActions, 'rerequest']);
     expect(reRequested.size).toBeGreaterThanOrEqual(1);
     await expect(readFile(pendingPath)).rejects.toMatchObject({ code: 'ENOENT' });
   } finally {
@@ -306,8 +321,9 @@ async function runPersistedCase(mode: 'rerequest' | 'resolve-valid' | 'resolve-f
   }
 }
 
-test('a failed re-request is recovered on the next invocation', () =>
-  runPersistedCase('rerequest'));
+test.each(['rerequest', 'snapshot'] as const)('recovers failed %s', (mode) =>
+  runPersistedCase(mode),
+);
 test.each(['resolve-valid', 'resolve-forged'] as const)(
   'SDK pending resolution checks authenticated receipt: %s (mutation: omit carry or accept forged author)',
   (mode) => runPersistedCase(mode),

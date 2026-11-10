@@ -6,6 +6,7 @@
     "src/registry/types.ts",
     "src/ops/*/registry.ts",
     "scripts/*.mjs",
+    "scripts/ci-select-checks.d.mts",
     "scripts/lib/affected-tests.d.mts",
     "scripts/lib/build-env.d.mts",
     "scripts/lib/eval-axes-select.d.mts",
@@ -24,7 +25,8 @@
     "test/fixtures/ratchet-lib-selfhost.mjs",
     "test/fixtures/cli-ops/fixture/*.js",
     "test/fixtures/cli-smoke-ops/smoke/*.js",
-    "test/fixtures/cli-verdict-ops/verdict/*.js"
+    "test/fixtures/cli-verdict-ops/verdict/*.js",
+    "src/queue-runner/crq.ts"
   ],
   "project": [
     "src/**/*.ts",

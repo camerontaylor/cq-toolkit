@@ -18,6 +18,7 @@
 //   5. MIRROR FIDELITY spot-checks: the strict mirrors REJECT an unknown
 //      key, a verdict outside the frozen union, and an action outside
 //      'merge'|'retarget-self'.
+import { readCqEnv } from '../../src/config/env.js';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -63,7 +64,7 @@ describe('the shipped merge-prs plan entry', () => {
   test("name 'merge-prs'; importer resolves the schema-valid EMPTY run", async () => {
     expect(plan.name).toBe('merge-prs');
 
-    const resolved = await plan.importer();
+    const resolved = await plan.importer({ cqEnv: readCqEnv({}) });
     expect(resolved.id).toBe(MERGE_PRS_PLAN_ID);
     const job = resolved.jobs[0];
     expect(job?.op).toBe('merge.runPrs');
@@ -123,7 +124,7 @@ describe('the merge family op registry', () => {
   test('one dispatch smoke through the lazy importer chain: empty run → ok, empty totals', async () => {
     const entry = await get('merge.runPrs');
     if (entry === undefined) throw new Error('no registry entry named merge.runPrs');
-    const op = await entry.importer();
+    const op = await entry.importer({ cqEnv: readCqEnv({}) });
 
     // An empty temp dir as repoRoot: the empty plan never spawns a process
     // (no effect call can reach git), and with no prs there is nothing to

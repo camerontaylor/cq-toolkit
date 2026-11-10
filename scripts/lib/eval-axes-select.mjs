@@ -18,9 +18,15 @@ export function selectCells(cells, argv) {
   if (onlyIndex === -1) return cells;
   const only = argv[onlyIndex + 1];
   const valid = cells.map((c) => `${c.lane}/${c.model}`);
-  if (only === undefined || !cells.some((c) => `${c.lane}/${c.model}`.includes(only))) {
+  // An empty value matches every cell (`includes('')` is always true), which
+  // would silently turn a targeted rerun into a full run — reject it here.
+  if (
+    only === undefined ||
+    only === '' ||
+    !cells.some((c) => `${c.lane}/${c.model}`.includes(only))
+  ) {
     throw new Error(
-      `demo-eval-axes: ${only === undefined ? '--only requires a value' : `no cell matches '${only}'`} — valid cells: ${valid.join(', ')}`,
+      `demo-eval-axes: ${only === undefined || only === '' ? '--only requires a value' : `no cell matches '${only}'`} — valid cells: ${valid.join(', ')}`,
     );
   }
   return cells.filter((c) => `${c.lane}/${c.model}`.includes(only));

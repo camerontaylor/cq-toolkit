@@ -212,6 +212,12 @@ class PublisherTest(unittest.TestCase):
         self.assertIn("OnUnitInactiveSec=1min", (root / "crq-publisher.timer").read_text())
         path = (root / "crq-publisher.path").read_text()
         self.assertIn("PathChanged=@CRQ_ROOT@/state/backfill/publication/pending", path)
+        # Activation drains existing work once; acknowledged pending records persist.
+        from configparser import ConfigParser
+        unit = ConfigParser(interpolation=None)
+        unit.read_string(path)
+        self.assertEqual(unit["Unit"]["Wants"], "crq-publisher.service")
+        self.assertNotIn("DirectoryNotEmpty", unit["Path"])
         self.assertIn("Unit=crq-publisher.service", path)
 
     def test_live_owner_is_never_completed_by_reconciliation(self):

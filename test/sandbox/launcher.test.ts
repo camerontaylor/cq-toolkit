@@ -100,7 +100,7 @@ describe('the launcher env scrub reaches the actual run child', () => {
     const scratch = await mkdtemp(join(tmpdir(), 'cq-sandbox-env-'));
     const names = {
       secret: 'CQ_TEST_SECRET',
-      keep: 'CQ_TEST_KEEP',
+      keep: 'TEST_PASSTHROUGH_KEEP',
       knob: 'CQ_SANDBOX',
     } as const;
     const prior = Object.fromEntries(Object.values(names).map((name) => [name, process.env[name]]));
@@ -167,7 +167,7 @@ describe('the launcher env scrub reaches the actual run child', () => {
   });
 
   test('a policy knob is refused on the passthrough and on a declared manifest name', () => {
-    const parent = { PATH: '/bin', CQ_SANDBOX: 'required', CQ_TEST_KEEP: 'kept' };
+    const parent = { PATH: '/bin', CQ_SANDBOX: 'required', TEST_KEEP_CANARY: 'kept' };
     expect(() => buildSandboxLauncherEnv(parent, { envPassthrough: ['CQ_RUN_TOOL'] })).toThrow(
       /not permitted/,
     );
@@ -177,8 +177,11 @@ describe('the launcher env scrub reaches the actual run child', () => {
     // A declared non-knob name rides the same seam (the manifest envNames
     // contract the MCP surface already relies on).
     expect(
-      buildSandboxLauncherEnv(parent, { envPassthrough: [], declaredEnvNames: ['CQ_TEST_KEEP'] }),
-    ).toEqual({ PATH: '/bin', CQ_TEST_KEEP: 'kept' });
+      buildSandboxLauncherEnv(parent, {
+        envPassthrough: [],
+        declaredEnvNames: ['TEST_KEEP_CANARY'],
+      }),
+    ).toEqual({ PATH: '/bin', TEST_KEEP_CANARY: 'kept' });
   });
 
   test('an invalid policy passthrough fails before run is exposed', () => {

@@ -88,6 +88,12 @@ describe('eval-axes-select module: --only selection and the credential gate (pur
     expect(() => selectCells(CELLS, ['node', 'x', '--only', 'bogus'])).toThrow('valid cells:');
   });
 
+  it('selectCells rejects an empty --only value instead of matching every cell', () => {
+    expect(() => selectCells(CELLS, ['node', 'x', '--only', ''])).toThrow(
+      '--only requires a value',
+    );
+  });
+
   it('requiredKeys: a zai-only selection with ZAI_API_KEY set needs nothing', () => {
     const selected = selectCells(CELLS, ['node', 'x', '--only', 'ai-sdk/glm-5.3-flash']);
     expect(requiredKeys(selected, EVAL_AXES_PROVIDER_KEYS, { ZAI_API_KEY: 'x' })).toEqual({

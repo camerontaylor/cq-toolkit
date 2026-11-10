@@ -46,6 +46,28 @@ describe.each(PATHS)('%s scans with a trusted scanner policy', (path) => {
     }
   });
 
+  it('keeps the trusted policy available when both scans run', () => {
+    // Check executable step order, excluding comments that describe old order.
+    const steps = text.split(/^ {6}- name: /m).slice(1);
+    const names = steps.map((step) => step.split('\n')[0]);
+    const root = names.indexOf('Check out the repo');
+    const policy = names.indexOf('Check out the trusted scanner policy (default branch)');
+    const commits = names.indexOf('Scan added commits');
+    const messages = names.indexOf('Scan commit messages');
+    expect(root).toBeGreaterThanOrEqual(0);
+    expect(policy).toBeGreaterThan(root);
+    expect(commits).toBeGreaterThan(policy);
+    expect(messages).toBeGreaterThan(policy);
+    // A later checkout could clean away trust/; it must be the final checkout.
+    const checkouts = steps.flatMap((step, index) =>
+      /uses: actions\/checkout@/.test(step) ? [index] : [],
+    );
+    expect(checkouts).toEqual([root, policy]);
+    expect(steps[root]).toContain('ref: ${{ github.event.pull_request.head.sha || github.sha }}');
+    expect(steps[policy]).toContain('path: trust');
+    expect(steps[policy]).toContain('ref: ${{ github.event.repository.default_branch }}');
+  });
+
   it('points $GITLEAKS_CONFIG at the default-branch checkout', () => {
     expect(jobEnv(text, 'GITLEAKS_CONFIG')).toBe('${{ github.workspace }}/trust/.gitleaks.toml');
     expect(text).toContain('ref: ${{ github.event.repository.default_branch }}');

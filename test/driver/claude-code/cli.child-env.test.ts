@@ -31,10 +31,10 @@ describe('claude-code driver, CLI transport specifics (fake agent CLI)', () => {
     expect(child['MISSING']).toBeUndefined();
     expect(child['GH_TOKEN']).toBeUndefined();
     expect(() => buildChildEnv({ ...parent, CQ_RUN_ENV_PASSTHROUGH: 'A=1' })).toThrow(
-      /CQ_RUN_ENV_PASSTHROUGH entries must be env var names matching/,
+      /CQ_RUN_ENV_PASSTHROUGH entry 1 is not an env var name/,
     );
     expect(() => buildChildEnv({ ...parent, CQ_RUN_ENV_PASSTHROUGH: 'BAD.NAME' })).toThrow(
-      /CQ_RUN_ENV_PASSTHROUGH entries must be env var names matching/,
+      /CQ_RUN_ENV_PASSTHROUGH entry 1 is not an env var name/,
     );
   });
 

@@ -142,6 +142,15 @@ function quotedSpans(text: string, before: string): string[] | undefined {
   return spans;
 }
 
+// A bare name used as code may identify the affected function rather than
+// describe its defect. A quoted literal or expression is stronger evidence.
+function isAmbiguousName(span: string, before: string): boolean {
+  return (
+    /^[A-Za-z_$][\w$]*$/.test(span) &&
+    !['"', "'", '`'].some((quote) => before.includes(quote + span + quote))
+  );
+}
+
 /** Symbols declared on removed patch lines: candidates for surviving triggers. */
 function removedDeclarations(removedLines: readonly string[]): string[] | undefined {
   const symbols: string[] = [];
@@ -481,7 +490,13 @@ export function verifyClosureEvidence(
         detail: `trigger evidence exceeds scan limits (${MAX_SPANS} quoted spans, ${MAX_DECLARATIONS} declarations)`,
         reason: 'unavailable-evidence',
       };
+    let ambiguousSurvivor: string | undefined;
     for (const span of spans) {
+      if (isAmbiguousName(span, packet.before)) {
+        if (packet.after.includes(span) || dependencies.some((entry) => entry.text.includes(span)))
+          ambiguousSurvivor ??= span;
+        continue;
+      }
       if (packet.after.includes(span))
         return {
           check: 'trigger-removed',
@@ -530,6 +545,13 @@ export function verifyClosureEvidence(
           };
       }
     }
+    if (ambiguousSurvivor !== undefined)
+      return {
+        check: 'trigger-removed',
+        outcome: 'unavailable',
+        detail: `surviving quoted name may identify code rather than its trigger: ${oneLine(ambiguousSurvivor)}`,
+        reason: 'unavailable-evidence',
+      };
     // Removed declarations can supply counter-evidence, but their removal
     // alone does not link the patch to the finding's actual trigger.
     const supportedTrigger = spans.some(

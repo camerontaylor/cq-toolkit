@@ -60,7 +60,13 @@ describe('fetch-first — origin branch is truth', () => {
     ).rejects.toThrow(/fetch origin refs\/pull\/7\/head failed.*couldn't find remote ref/s);
     // The fetch was the only thing attempted — registry untouched.
     expect(calls).toHaveLength(2);
-    expect(calls[0]).toEqual(['-C', `${REPO}`, 'rev-parse', '--absolute-git-dir']);
+    expect(calls[0]).toEqual([
+      '-C',
+      REPO,
+      'rev-parse',
+      '--path-format=absolute',
+      '--git-common-dir',
+    ]);
     expect(calls[1]).toEqual([
       '-C',
       `${REPO}`,
@@ -89,7 +95,13 @@ describe('fetch-first — origin branch is truth', () => {
     try {
       const model = mkModel();
       await resolvePrWorktree(baseOpts(model, registry, { repoRoot, run: fakeGit(model, calls) }));
-      expect(calls[0]).toEqual(['-C', repoRoot, 'rev-parse', '--absolute-git-dir']);
+      expect(calls[0]).toEqual([
+        '-C',
+        repoRoot,
+        'rev-parse',
+        '--path-format=absolute',
+        '--git-common-dir',
+      ]);
       expect(calls[1]).toEqual([
         '-C',
         repoRoot,

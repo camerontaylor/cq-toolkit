@@ -1,0 +1,25 @@
+{
+  "job": "crq-pr1304-20261109T082400Z-F1",
+  "item": "pr1304",
+  "kind": "open",
+  "pr": 1304,
+  "run": "pr1304-20261109T082400Z",
+  "cycle": 1,
+  "repair_base": "89abcdef0123456789abcdef0123456789abcdef",
+  "branch": "camerontaylor/crq-ts-plan",
+  "finding": {
+    "severity": "major",
+    "path": "src/ops/crq/tick.ts",
+    "line": 88,
+    "body": "The scheduler must not launch a second CodeRabbit run while the group is still alive."
+  },
+  "repair_round": 1,
+  "prior": null,
+  "recurrence": false,
+  "review_diff": "diff --git a/src/ops/crq/tick.ts b/src/ops/crq/tick.ts\n--- a/src/ops/crq/tick.ts\n+++ b/src/ops/crq/tick.ts\n@@ -1,1 +1,2 @@\n+export const admission = true;\n",
+  "source": {
+    "run": "pr1304-20261109T082400Z",
+    "thread_id": "PRRT_kwDOExample",
+    "finding_number": 1
+  }
+}

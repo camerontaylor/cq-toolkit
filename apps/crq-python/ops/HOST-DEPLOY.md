@@ -74,16 +74,9 @@ Example only; replace every host value privately:
     "timeout_bin": "/usr/bin/timeout",
     "paseo_hosts": ["worker.example.invalid:6767", "127.0.0.1:6767"],
     "notify": {"hosts": ["worker.example.invalid:6767"]},
-    "promotion": {
-      "record_url_template": "http://queue.example.invalid:6778/promotion/{item}",
+    "alerts": {
       "alert_agent_host": "worker.example.invalid:6767",
-      "alert_agent_id": "00000000-0000-4000-8000-000000000004",
-      "signer": {
-        "spool": {
-          "ssh_alias": "operator@127.0.0.1",
-          "ssh_key": "/srv/private/crq-spool-key"
-        }
-      }
+      "alert_agent_id": "00000000-0000-4000-8000-000000000004"
     },
     "repair": {
       "enabled": false,
@@ -94,11 +87,18 @@ Example only; replace every host value privately:
 }
 ```
 
-`promotion.signer.spool.dir` is an optional host path, and
-`promotion.alert_agent_id` optionally overrides the committed alert recipient with
-a lowercase Paseo agent UUID; all other config leaves above are required. The spool key may retain its accepted `~/` spelling; other
-paths are absolute. The runtime clone and worktree root must be separate from the
-deployment clone.
+`alerts.alert_agent_id` optionally overrides the committed alert recipient with
+a lowercase Paseo agent UUID; `alerts.alert_agent_host` supplies the host
+endpoint, and all other config leaves above are required. The runtime clone and
+worktree root must be separate from the deployment clone. The renderer maps the
+alert leaves back onto a pre-Phase-0.1 target's `promotion` block so a rollback
+still delivers alerts.
+An overlay written for a pre-Phase-0.1 deployment may keep its
+`promotion.record_url_template`, `promotion.alert_agent_*` and
+`promotion.signer.spool.*` leaves. They let `switch` reproduce the live source
+config byte-for-byte for its drift check; the new config keeps the alert
+recipient and ignores the retired template and spool values. Remove them after
+the source has switched.
 The overlay also supplies the fleet-reader's source host and absolute source path;
 `fleet-reader.py --overlay /private/host.json` reads only that summary via SSH.
 Render launchd templates with `preview`; install from a retained detached toolkit
@@ -274,20 +274,38 @@ Ordering and guarantees:
    malformed or other-checkout heartbeat refuses assessment. Each
    observation also carries two independent receipt verdicts that never
    change `healthy` or the exit code (a bad sample is not a tick failure):
-   - `receipts_readable` — the ten most recently modified
-     `state/runs/*/meta.json` parse as JSON (counts under `receipts`);
+   - `receipts_readable` — the ten most recently modified run directories
+     under `state/runs` have a `meta.json` that parses as JSON. A directory
+     holding only `secret-scan.json` (and `context-secret-scan.json`) is a
+     review stopped before launch (blocked secret scan or refused checkout,
+     which `crq.py` records before `meta.json`); it is counted as
+     `prelaunch`, not as unreadable. Any other missing or corrupt entry is
+     listed by run name and reason under `receipts.unreadable`.
+     Non-directory entries (for example AppleDouble `._*` copies) are not
+     runs: they are counted as `ignored_entries` and never sampled;
    - `receipts_valid` — the ten most recently modified retained
-     `state/receipts/<sha256>.json` receipts validate against the stable v1 receipt schema
-     (`review_receipt.py`, TS `QueueReceiptSchema`): content identity,
-     run identity (`item_id`, well-formed `run_id`), captured target (v1
-     source binding, 40-hex `capture.target`/`tree`, matching scope
-     digest) and terminal outcome (a counted receipt needs a completed,
-     classified run). Policy, version and target selectors come from this
-     deployment's own `review_receipt.py`/`runtime_target.py`, parsed
+     `state/receipts/<sha256>.json` receipts validate against their own
+     family. All families first prove content identity. Merged-current and
+     push-range receipts (`crq.current_document`) check the stable v1
+     receipt schema (`review_receipt.py`, TS `QueueReceiptSchema`): run
+     identity (`item_id`, well-formed `run_id`), captured target (source
+     binding, 40-hex `capture.target`/`tree`, matching scope digest) and
+     terminal outcome (a counted receipt needs a completed, classified run).
+     A merged-current source names a PR, merge SHA and target selector; a
+     push-range source names 40-hex `base`/`head` and may carry a split
+     part's `paths_filter`/`pin`, and only push captures may contain
+     `deferred-split` rows. Policy, version and target selectors come from
+     this deployment's own `review_receipt.py`/`runtime_target.py`, parsed
      read-only (never executed); if they are unusable the builtin copy is
-     used. `receipt_validation.schema_source` records which, and why.
-     Details, with a reason per invalid receipt, are under
-     `receipt_validation`.
+     used. `local-review-full-diff` receipts are checked against the
+     `receipt` variant of this deployment's
+     `policy/review-operation.schema.json` (read as data), plus their
+     identity digest and outcome/scope consistency; without that file they
+     are reported as unverified, never accepted. Any other `kind` is an
+     unsupported family. `receipt_validation.schema_source` and
+     `local_review_schema_source` record which sources were used, and why;
+     `families` counts the sample by family, and each invalid receipt
+     carries its family and reason.
    Each verdict is `true`, `false`, or `null` when nothing was sampled; the
    top-level artifact repeats both, aggregated across observations. Tick
    advancement, receipt readability and receipt validity are distinct

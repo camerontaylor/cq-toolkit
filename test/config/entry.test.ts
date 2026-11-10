@@ -1,4 +1,5 @@
 // C3a: entry helpers and the readers that now take a CqEnv snapshot.
+import { trustedOptIn } from '../../src/config/optin.js';
 import { describe, expect, test } from 'vitest';
 import { assertCqEnv, checkEntryEnv, CqEnvError, enterWithCqEnv } from '../../src/config/entry.js';
 import { readCqEnv } from '../../src/config/env.js';
@@ -80,7 +81,9 @@ describe('readers take the snapshot', () => {
     const cqEnv = readCqEnv({ CQ_SANDBOX: 'off', CQ_SANDBOX_NETWORK: 'allow' });
     expect(resolveSandboxConfig({ cqEnv }).mode).toBe('off');
     expect(resolveSandboxConfig({ cqEnv }).network).toBe('allow');
-    expect(resolveSandboxConfig({ cqEnv, optIn: { sandbox: 'required' } }).mode).toBe('required');
+    expect(resolveSandboxConfig({ cqEnv, optIn: trustedOptIn({ sandbox: 'required' }) }).mode).toBe(
+      'required',
+    );
   });
 
   test('harnessRunGate reads policy from the snapshot', () => {

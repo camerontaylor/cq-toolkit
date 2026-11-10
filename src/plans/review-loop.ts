@@ -86,7 +86,7 @@ import {
 import type { Budget, ModelSpec, Usage } from '../driver/types.js';
 import { deepFreeze } from '../shared/deepFreeze.js';
 import type { HarnessConfig } from '../harness/config.js';
-import { createGovernor, governorConfig } from '../kernel/governor.js';
+import { createGovernor, currentJobContext, governorConfig } from '../kernel/governor.js';
 import { runPlan, type OpRegistryView } from '../kernel/runner.js';
 import type {
   GovernanceOptIn,
@@ -393,8 +393,8 @@ export interface ReviewLoopOpts {
    * Same-repo callers omit it: the push targets 'origin' as before.
    */
   headRepo?: string;
-  /** Fires per confirmed push, including re-assertion; independent of final outcome. Must not throw. */
-  onPublished?: (sha: string) => void;
+  /** Fires per confirmed push, including re-assertion; independent of final outcome. */
+  onPublished?: (sha: string) => void | Promise<void>;
   /** The checked-out repository root resolvePrWorktree anchors to. */
   repoRoot: string;
   /** The gh transport — review reads, replies, and resolves ride it. */
@@ -784,14 +784,16 @@ type CommitVerificationFailure =
 
 /**
  * Why an unchanged answer's EVIDENCE does not verify, or null when it does:
- * every cited `{path, line}` must name a FILE (a blob, never a directory) in
- * the tree at `tip`, read through the git seam (`git cat-file -t` and `-s`,
- * then `git show <tip>:<path>`), at most MAX_EVIDENCE_BLOB_BYTES long, with
- * at least `line` lines.
+ * at least one citation must be present, and every cited `{path, line}` must
+ * name a FILE (a blob, never a directory) in the tree at `tip`, read through
+ * the git seam (`git cat-file -t` and `-s`, then `git show <tip>:<path>`), at
+ * most MAX_EVIDENCE_BLOB_BYTES long, with at least `line` lines — `line` being
+ * a 1-based integer. This is the LAST gate before a settling reply posts, so
+ * it enforces the citation rule itself rather than trusting the parser's.
  */
 const MAX_EVIDENCE_BLOB_BYTES = 2_000_000;
 
-const evidenceFailure = async (
+export const evidenceFailure = async (
   git: GhFn,
   worktreePath: string,
   tip: string,
@@ -800,7 +802,17 @@ const evidenceFailure = async (
   if (!COMMIT_SHA_RE.test(tip)) {
     return 'the worktree tip is unreadable';
   }
+  // An unchanged answer must cite something: an empty list skips the loop
+  // below and would post a settling reply with nothing behind it.
+  if (evidence.length === 0) {
+    return 'no evidence cited';
+  }
   for (const { path, line } of evidence) {
+    // 1-based integer only: a fractional, zero, or negative line passes the
+    // `line > lines.length` bound below without proving any line exists.
+    if (!Number.isSafeInteger(line) || line < 1) {
+      return `${path}:${String(line)} is not a valid line (lines are 1-based integers)`;
+    }
     // A FILE, not a tree: `git show <tip>:<dir>` succeeds on a directory too.
     const kind = await git(['-C', worktreePath, 'cat-file', '-t', `${tip}:${path}`]);
     if (kind.code !== 0 || kind.stdout.trim() !== 'blob') {
@@ -1198,6 +1210,7 @@ async function runOwnedReviewLoop(
   opts.onItemsPlanned?.(fixInputs.map((input) => input.item.id));
   const pending = new Set<Promise<void>>();
   const priorByFile = new Map<string, Promise<void>>();
+  const scheduled = new Map<string, { started: boolean; release: () => void }>();
   let barrier = Promise.resolve();
   const underlyingView = opts.driverRegistryView ?? (await centralRegistryView());
   const executionHeads = new Map<string, string | null>();
@@ -1209,25 +1222,12 @@ async function runOwnedReviewLoop(
         ...entry,
         importer: async (...args) => {
           const op = await entry.importer(...args);
-          return (raw) =>
-            lease.track(async () => {
-              const input = raw as FixReviewItemInput;
-              let release = () => {};
-              let settled: Promise<void> | undefined;
-              let file: string | undefined;
-              let waits: Promise<void>[] = [];
-              if (opts.engineOwnedConcurrency !== undefined) {
-                file = input.item.path ? posix.normalize(input.item.path) : undefined;
-                waits = file ? [barrier, priorByFile.get(file) ?? Promise.resolve()] : [...pending];
-                settled = new Promise<void>((resolve) => {
-                  release = resolve;
-                });
-                pending.add(settled);
-                if (file) priorByFile.set(file, settled);
-                else barrier = settled;
-              }
-              try {
-                await Promise.all(waits);
+          return (raw) => {
+            const job = scheduled.get(currentJobContext()?.info.jobKey ?? '');
+            if (job) job.started = true;
+            return lease
+              .track(async () => {
+                const input = raw as FixReviewItemInput;
                 const observed = await opts.git([
                   '-C',
                   worktree.path,
@@ -1247,7 +1247,10 @@ async function runOwnedReviewLoop(
                   if (actual !== undefined) {
                     const early = executionHeads.get(input.item.id);
                     if (!COMMIT_SHA_RE.test(actual) || !early)
-                      return { status: 'needs-human', reason: 'engine execution head unavailable' };
+                      return {
+                        status: 'needs-human' as const,
+                        reason: 'engine execution head unavailable',
+                      };
                     // An admission wait may cross verified sibling commits. The
                     // actual identity must remain inside the observed ancestry;
                     // it cannot borrow an unrelated tree for a rejection citation.
@@ -1265,7 +1268,7 @@ async function runOwnedReviewLoop(
                       ]);
                       if (proof.code !== 0)
                         return {
-                          status: 'needs-human',
+                          status: 'needs-human' as const,
                           reason: 'engine execution head ancestry changed',
                         };
                     }
@@ -1273,12 +1276,9 @@ async function runOwnedReviewLoop(
                   }
                 }
                 return result;
-              } finally {
-                release();
-                if (settled) pending.delete(settled);
-                if (file && priorByFile.get(file) === settled) priorByFile.delete(file);
-              }
-            });
+              })
+              .finally(() => job?.release());
+          };
         },
       };
     },
@@ -1298,6 +1298,48 @@ async function runOwnedReviewLoop(
   // arms through the governor config: runPlan's governed dispatch reads
   // governor.ladderSpec.
   const governor = createGovernor(governorConfig(runOptions, opts.limits ?? {}));
+  const scheduleJob = async (jobId: string, run: () => Promise<void>) => {
+    const index = Number(jobId.slice('fix-'.length)) - 1;
+    const item = fixInputs[index]?.item;
+    if (!jobId.startsWith('fix-') || !item) throw new Error('unknown review job');
+    const file = item.path ? posix.normalize(item.path) : undefined;
+    const waits = file ? [barrier, priorByFile.get(file) ?? Promise.resolve()] : [...pending];
+    let resolve!: () => void;
+    const settled = new Promise<void>((done) => {
+      resolve = done;
+    });
+    const state = {
+      started: false,
+      release: () => {
+        resolve();
+        pending.delete(settled);
+        if (file && priorByFile.get(file) === settled) priorByFile.delete(file);
+        scheduled.delete(jobId);
+      },
+    };
+    scheduled.set(jobId, state);
+    pending.add(settled);
+    if (file) priorByFile.set(file, settled);
+    else barrier = settled;
+    const signal = governor.tripAbortSignal;
+    let wake!: () => void;
+    const cancelled = new Promise<void>((done) => {
+      wake = done;
+    });
+    signal.addEventListener('abort', wake, { once: true });
+    try {
+      if (!signal.aborted) await Promise.race([Promise.all(waits), cancelled]);
+      await run();
+      // A ladder can detach a non-cooperative body. Do not let its ordering
+      // lease hold this run forever, or dispatch another writer over it.
+      if (state.started && scheduled.has(jobId)) {
+        governor.tripSignal('review fixer detached before its body settled');
+      }
+    } finally {
+      signal.removeEventListener('abort', wake);
+      if (!state.started) state.release();
+    }
+  };
   const fixReport = await (async (): Promise<RunReport> => {
     // Propagated accounted spend (review-debt #186): report the governor's
     // observed USD rollup OUT of the loop even when the fix run throws, so a
@@ -1315,6 +1357,7 @@ async function runOwnedReviewLoop(
       // through the evidence folds and (W2.3) reservation capacity.
       return await runPlan(plan, runOptions, view, {
         governor,
+        ...(opts.engineOwnedConcurrency === undefined ? {} : { scheduleJob }),
         ...(opts.signal ? { signal: opts.signal } : {}),
         allowAdvisory: opts.allowAdvisoryBudget === true,
         ...(opts.allowAdvisoryBudget === true
@@ -1603,7 +1646,7 @@ async function runOwnedReviewLoop(
     );
     if (result.code === 0) {
       expectedPublishedHead = worktreeTip;
-      opts.onPublished?.(worktreeTip);
+      await opts.onPublished?.(worktreeTip);
     } else publicationFailed = true;
     return result;
   };

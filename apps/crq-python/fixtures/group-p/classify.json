@@ -1,0 +1,876 @@
+{
+  "schema": "cq.crq-group-p-vector/v1",
+  "family": "classify",
+  "cases": [
+    {
+      "name": "completed-with-reviewed-file-list",
+      "source": "crq.classify",
+      "input": {
+        "ndjson": "{\"type\":\"status\",\"status\":\"reviewing\"}\n{\"type\":\"complete\",\"status\":\"review_completed\",\"reviewedFiles\":[\"a.py\",\"b.py\"]}\n",
+        "exit_code": 0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "exit": 0,
+          "events": 2,
+          "bad_lines": 0,
+          "findings": 0,
+          "severity_counts": {
+            "critical": 0,
+            "major": 0,
+            "minor": 0,
+            "trivial": 0,
+            "info": 0,
+            "none": 0
+          },
+          "outcome": "completed",
+          "reviewed_files": 2,
+          "failure_provenance": {
+            "version": 1,
+            "complete": true,
+            "causes": []
+          },
+          "counted": true
+        }
+      }
+    },
+    {
+      "name": "completed-with-reviewed-file-count",
+      "source": "crq.classify",
+      "input": {
+        "ndjson": "{\"type\":\"complete\",\"status\":\"review_completed\",\"reviewedFiles\":3}\n",
+        "exit_code": 0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "exit": 0,
+          "events": 1,
+          "bad_lines": 0,
+          "findings": 0,
+          "severity_counts": {
+            "critical": 0,
+            "major": 0,
+            "minor": 0,
+            "trivial": 0,
+            "info": 0,
+            "none": 0
+          },
+          "outcome": "completed",
+          "reviewed_files": 3,
+          "failure_provenance": {
+            "version": 1,
+            "complete": true,
+            "causes": []
+          },
+          "counted": true
+        }
+      }
+    },
+    {
+      "name": "blocking-finding-is-recorded-with-completion",
+      "source": "crq.classify",
+      "input": {
+        "ndjson": "{\"type\":\"finding\",\"severity\":\"major\",\"comment\":\"fix\"}\n{\"type\":\"complete\",\"status\":\"review_completed\",\"reviewedFiles\":1}\n",
+        "exit_code": 0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "exit": 0,
+          "events": 2,
+          "bad_lines": 0,
+          "findings": 1,
+          "severity_counts": {
+            "critical": 0,
+            "major": 1,
+            "minor": 0,
+            "trivial": 0,
+            "info": 0,
+            "none": 0
+          },
+          "outcome": "completed",
+          "reviewed_files": 1,
+          "failure_provenance": {
+            "version": 1,
+            "complete": true,
+            "causes": [
+              {
+                "source": "queue",
+                "category": "unknown",
+                "code": "blocking-finding"
+              }
+            ]
+          },
+          "counted": true
+        }
+      }
+    },
+    {
+      "name": "affirmative-no-fresh-completion-is-skipped",
+      "source": "crq.classify",
+      "input": {
+        "ndjson": "{\"type\":\"complete\",\"status\":\"review_completed\",\"message\":\"no fresh detailed review was performed\"}\n",
+        "exit_code": 0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "exit": 0,
+          "events": 1,
+          "bad_lines": 0,
+          "findings": 0,
+          "severity_counts": {
+            "critical": 0,
+            "major": 0,
+            "minor": 0,
+            "trivial": 0,
+            "info": 0,
+            "none": 0
+          },
+          "outcome": "skipped",
+          "message": "affirmative no-fresh/skipped completion",
+          "failure_provenance": {
+            "version": 1,
+            "complete": true,
+            "causes": [
+              {
+                "source": "queue",
+                "category": "unknown",
+                "code": "nonterminal-review"
+              }
+            ]
+          },
+          "counted": false
+        }
+      },
+      "note": "D2: the TypeScript port records blocked/retriable skipped:no-fresh instead of Python's terminal skipped"
+    },
+    {
+      "name": "complete-status-other-than-review-completed-is-skipped",
+      "source": "crq.classify",
+      "input": {
+        "ndjson": "{\"type\":\"complete\",\"status\":\"review_skipped\"}\n",
+        "exit_code": 0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "exit": 0,
+          "events": 1,
+          "bad_lines": 0,
+          "findings": 0,
+          "severity_counts": {
+            "critical": 0,
+            "major": 0,
+            "minor": 0,
+            "trivial": 0,
+            "info": 0,
+            "none": 0
+          },
+          "outcome": "skipped",
+          "message": "complete.status=review_skipped",
+          "failure_provenance": {
+            "version": 1,
+            "complete": true,
+            "causes": [
+              {
+                "source": "queue",
+                "category": "unknown",
+                "code": "nonterminal-review"
+              }
+            ]
+          },
+          "counted": false
+        }
+      }
+    },
+    {
+      "name": "recoverable-rate-limit-reports-wait-seconds",
+      "source": "crq.classify",
+      "input": {
+        "ndjson": "{\"type\":\"error\",\"errorType\":\"rate_limit\",\"recoverable\":true,\"metadata\":{\"waitTime\":\"2 minutes\"}}\n",
+        "exit_code": 1
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "exit": 1,
+          "events": 1,
+          "bad_lines": 0,
+          "findings": 0,
+          "severity_counts": {
+            "critical": 0,
+            "major": 0,
+            "minor": 0,
+            "trivial": 0,
+            "info": 0,
+            "none": 0
+          },
+          "outcome": "rate_limited",
+          "wait_seconds": 120,
+          "failure_provenance": {
+            "version": 1,
+            "complete": true,
+            "causes": [
+              {
+                "source": "vendor",
+                "category": "vendor-rate-limited",
+                "code": "rate_limit"
+              }
+            ]
+          },
+          "counted": false,
+          "retry_transient": {
+            "version": 1,
+            "category": "vendor-rate-limited"
+          }
+        }
+      }
+    },
+    {
+      "name": "recoverable-rate-limit-without-a-complete-event",
+      "source": "crq.classify",
+      "input": {
+        "ndjson": "{\"type\":\"error\",\"errorType\":\"rate_limit\",\"recoverable\":true}\n",
+        "exit_code": 0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "exit": 0,
+          "events": 1,
+          "bad_lines": 0,
+          "findings": 0,
+          "severity_counts": {
+            "critical": 0,
+            "major": 0,
+            "minor": 0,
+            "trivial": 0,
+            "info": 0,
+            "none": 0
+          },
+          "outcome": "rate_limited",
+          "wait_seconds": null,
+          "failure_provenance": {
+            "version": 1,
+            "complete": true,
+            "causes": [
+              {
+                "source": "vendor",
+                "category": "vendor-rate-limited",
+                "code": "rate_limit"
+              }
+            ]
+          },
+          "counted": false,
+          "retry_transient": {
+            "version": 1,
+            "category": "vendor-rate-limited"
+          }
+        }
+      }
+    },
+    {
+      "name": "recoverable-transport-error-is-transient",
+      "source": "crq.classify",
+      "input": {
+        "ndjson": "{\"type\":\"error\",\"errorType\":\"network_error\",\"recoverable\":true}\n",
+        "exit_code": 1
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "exit": 1,
+          "events": 1,
+          "bad_lines": 0,
+          "findings": 0,
+          "severity_counts": {
+            "critical": 0,
+            "major": 0,
+            "minor": 0,
+            "trivial": 0,
+            "info": 0,
+            "none": 0
+          },
+          "outcome": "error",
+          "message": "structured failure; see failure provenance",
+          "failure_provenance": {
+            "version": 1,
+            "complete": true,
+            "causes": [
+              {
+                "source": "queue",
+                "category": "unknown",
+                "code": "network_error"
+              },
+              {
+                "source": "queue",
+                "category": "unknown",
+                "code": "unexpected-exit"
+              }
+            ]
+          },
+          "counted": false,
+          "retry_transient": {
+            "version": 1,
+            "category": "transport"
+          }
+        }
+      }
+    },
+    {
+      "name": "auth-error-is-an-owner-stop",
+      "source": "crq.classify",
+      "input": {
+        "ndjson": "{\"type\":\"error\",\"errorType\":\"auth\"}\n",
+        "exit_code": 1
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "exit": 1,
+          "events": 1,
+          "bad_lines": 0,
+          "findings": 0,
+          "severity_counts": {
+            "critical": 0,
+            "major": 0,
+            "minor": 0,
+            "trivial": 0,
+            "info": 0,
+            "none": 0
+          },
+          "outcome": "auth",
+          "message": "structured authentication failure; owner action needed",
+          "failure_provenance": {
+            "version": 1,
+            "complete": true,
+            "causes": [
+              {
+                "source": "queue",
+                "category": "unknown",
+                "code": "auth"
+              },
+              {
+                "source": "queue",
+                "category": "unknown",
+                "code": "unexpected-exit"
+              }
+            ]
+          },
+          "counted": false
+        }
+      }
+    },
+    {
+      "name": "structured-action-required",
+      "source": "crq.classify",
+      "input": {
+        "ndjson": "{\"type\":\"action_required\",\"status\":\"awaiting_confirmation\"}\n",
+        "exit_code": 0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "exit": 0,
+          "events": 1,
+          "bad_lines": 0,
+          "findings": 0,
+          "severity_counts": {
+            "critical": 0,
+            "major": 0,
+            "minor": 0,
+            "trivial": 0,
+            "info": 0,
+            "none": 0
+          },
+          "outcome": "action_required",
+          "message": "structured action required",
+          "failure_provenance": {
+            "version": 1,
+            "complete": false,
+            "causes": [
+              {
+                "source": "queue",
+                "category": "unknown",
+                "code": "action-required"
+              },
+              {
+                "source": "queue",
+                "category": "unknown",
+                "code": "awaiting_confirmation"
+              }
+            ]
+          },
+          "counted": false
+        }
+      }
+    },
+    {
+      "name": "malformed-line-is-not-proof",
+      "source": "crq.classify",
+      "input": {
+        "ndjson": "{\"type\":\"finding\"}\n{\"type\":\"complete\",\"status\":\"review_completed\"}\n",
+        "exit_code": 0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "exit": 0,
+          "events": 2,
+          "bad_lines": 1,
+          "findings": 1,
+          "severity_counts": {
+            "critical": 0,
+            "major": 0,
+            "minor": 0,
+            "trivial": 0,
+            "info": 0,
+            "none": 1
+          },
+          "outcome": "malformed",
+          "message": "stream contains malformed or unrecognized events",
+          "failure_provenance": {
+            "version": 1,
+            "complete": false,
+            "causes": [
+              {
+                "source": "queue",
+                "category": "unknown",
+                "code": "malformed-stream"
+              },
+              {
+                "source": "queue",
+                "category": "unknown",
+                "code": "nonterminal-review"
+              }
+            ]
+          },
+          "counted": false
+        }
+      }
+    },
+    {
+      "name": "unparseable-json-is-a-bad-line",
+      "source": "crq.classify",
+      "input": {
+        "ndjson": "{\"type\":\"complete\"\n",
+        "exit_code": 0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "exit": 0,
+          "events": 0,
+          "bad_lines": 1,
+          "findings": 0,
+          "severity_counts": {
+            "critical": 0,
+            "major": 0,
+            "minor": 0,
+            "trivial": 0,
+            "info": 0,
+            "none": 0
+          },
+          "outcome": "malformed",
+          "message": "stream contains malformed or unrecognized events",
+          "failure_provenance": {
+            "version": 1,
+            "complete": false,
+            "causes": [
+              {
+                "source": "queue",
+                "category": "unknown",
+                "code": "malformed-stream"
+              },
+              {
+                "source": "queue",
+                "category": "unknown",
+                "code": "nonterminal-review"
+              }
+            ]
+          },
+          "counted": false
+        }
+      }
+    },
+    {
+      "name": "missing-exit-is-interrupted",
+      "source": "crq.classify",
+      "input": {
+        "ndjson": "{\"type\":\"complete\",\"status\":\"review_completed\",\"reviewedFiles\":1}\n",
+        "exit_code": null
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "exit": null,
+          "events": 1,
+          "bad_lines": 0,
+          "findings": 0,
+          "severity_counts": {
+            "critical": 0,
+            "major": 0,
+            "minor": 0,
+            "trivial": 0,
+            "info": 0,
+            "none": 0
+          },
+          "outcome": "interrupted",
+          "message": "no exit status recorded",
+          "failure_provenance": {
+            "version": 1,
+            "complete": false,
+            "causes": [
+              {
+                "source": "queue",
+                "category": "unknown",
+                "code": "missing-exit"
+              },
+              {
+                "source": "queue",
+                "category": "unknown",
+                "code": "nonterminal-review"
+              }
+            ]
+          },
+          "counted": false
+        }
+      }
+    },
+    {
+      "name": "nonterminal-last-event-is-interrupted",
+      "source": "crq.classify",
+      "input": {
+        "ndjson": "{\"type\":\"complete\",\"status\":\"review_completed\",\"reviewedFiles\":1}\n{\"type\":\"status\",\"status\":\"reviewing\"}\n",
+        "exit_code": 0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "exit": 0,
+          "events": 2,
+          "bad_lines": 0,
+          "findings": 0,
+          "severity_counts": {
+            "critical": 0,
+            "major": 0,
+            "minor": 0,
+            "trivial": 0,
+            "info": 0,
+            "none": 0
+          },
+          "outcome": "interrupted",
+          "message": "stream did not end with a terminal complete event",
+          "failure_provenance": {
+            "version": 1,
+            "complete": true,
+            "causes": [
+              {
+                "source": "queue",
+                "category": "unknown",
+                "code": "nonterminal-review"
+              }
+            ]
+          },
+          "counted": false
+        }
+      }
+    },
+    {
+      "name": "unknown-status-invalidates-completion",
+      "source": "crq.classify",
+      "input": {
+        "ndjson": "{\"type\":\"status\",\"status\":\"mystery\"}\n{\"type\":\"complete\",\"status\":\"review_completed\",\"reviewedFiles\":1}\n",
+        "exit_code": 0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "exit": 0,
+          "events": 2,
+          "bad_lines": 0,
+          "findings": 0,
+          "severity_counts": {
+            "critical": 0,
+            "major": 0,
+            "minor": 0,
+            "trivial": 0,
+            "info": 0,
+            "none": 0
+          },
+          "outcome": "malformed",
+          "reviewed_files": 1,
+          "message": "stream contains an unrecognized status",
+          "failure_provenance": {
+            "version": 1,
+            "complete": false,
+            "causes": [
+              {
+                "source": "queue",
+                "category": "unknown",
+                "code": "mystery"
+              }
+            ]
+          },
+          "counted": false
+        }
+      }
+    },
+    {
+      "name": "error-plus-complete-conflicts",
+      "source": "crq.classify",
+      "input": {
+        "ndjson": "{\"type\":\"error\",\"errorType\":\"network_error\",\"recoverable\":true}\n{\"type\":\"complete\",\"status\":\"review_completed\"}\n",
+        "exit_code": 1
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "exit": 1,
+          "events": 2,
+          "bad_lines": 0,
+          "findings": 0,
+          "severity_counts": {
+            "critical": 0,
+            "major": 0,
+            "minor": 0,
+            "trivial": 0,
+            "info": 0,
+            "none": 0
+          },
+          "outcome": "error",
+          "message": "structured failure; see failure provenance",
+          "failure_provenance": {
+            "version": 1,
+            "complete": true,
+            "causes": [
+              {
+                "source": "queue",
+                "category": "unknown",
+                "code": "network_error"
+              },
+              {
+                "source": "queue",
+                "category": "unknown",
+                "code": "conflicting-terminal"
+              },
+              {
+                "source": "queue",
+                "category": "unknown",
+                "code": "unexpected-exit"
+              }
+            ]
+          },
+          "counted": false
+        }
+      }
+    },
+    {
+      "name": "timeout-exit-is-transient",
+      "source": "crq.classify",
+      "input": {
+        "ndjson": "",
+        "exit_code": 124
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "exit": 124,
+          "events": 0,
+          "bad_lines": 0,
+          "findings": 0,
+          "severity_counts": {
+            "critical": 0,
+            "major": 0,
+            "minor": 0,
+            "trivial": 0,
+            "info": 0,
+            "none": 0
+          },
+          "outcome": "error",
+          "message": "CLI exit 124",
+          "failure_provenance": {
+            "version": 1,
+            "complete": true,
+            "causes": [
+              {
+                "source": "queue",
+                "category": "unknown",
+                "code": "unexpected-exit"
+              },
+              {
+                "source": "queue",
+                "category": "unknown",
+                "code": "nonterminal-review"
+              }
+            ]
+          },
+          "counted": false,
+          "retry_transient": {
+            "version": 1,
+            "category": "timeout"
+          }
+        }
+      }
+    },
+    {
+      "name": "sighup-exit-is-transient",
+      "source": "crq.classify",
+      "input": {
+        "ndjson": "",
+        "exit_code": 129
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "exit": 129,
+          "events": 0,
+          "bad_lines": 0,
+          "findings": 0,
+          "severity_counts": {
+            "critical": 0,
+            "major": 0,
+            "minor": 0,
+            "trivial": 0,
+            "info": 0,
+            "none": 0
+          },
+          "outcome": "error",
+          "message": "CLI exit 129",
+          "failure_provenance": {
+            "version": 1,
+            "complete": true,
+            "causes": [
+              {
+                "source": "queue",
+                "category": "unknown",
+                "code": "unexpected-exit"
+              },
+              {
+                "source": "queue",
+                "category": "unknown",
+                "code": "nonterminal-review"
+              }
+            ]
+          },
+          "counted": false
+        }
+      }
+    },
+    {
+      "name": "empty-existing-stream-is-interrupted",
+      "source": "crq.classify",
+      "input": {
+        "ndjson": "",
+        "exit_code": 0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "exit": 0,
+          "events": 0,
+          "bad_lines": 0,
+          "findings": 0,
+          "severity_counts": {
+            "critical": 0,
+            "major": 0,
+            "minor": 0,
+            "trivial": 0,
+            "info": 0,
+            "none": 0
+          },
+          "outcome": "interrupted",
+          "message": "stream did not end with a terminal complete event",
+          "failure_provenance": {
+            "version": 1,
+            "complete": true,
+            "causes": [
+              {
+                "source": "queue",
+                "category": "unknown",
+                "code": "nonterminal-review"
+              }
+            ]
+          },
+          "counted": false
+        }
+      }
+    },
+    {
+      "name": "absent-stream-is-interrupted",
+      "source": "crq.classify",
+      "input": {
+        "ndjson": null,
+        "exit_code": 0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "exit": 0,
+          "events": 0,
+          "bad_lines": 0,
+          "findings": 0,
+          "severity_counts": {
+            "critical": 0,
+            "major": 0,
+            "minor": 0,
+            "trivial": 0,
+            "info": 0,
+            "none": 0
+          },
+          "outcome": "interrupted",
+          "message": "stream did not end with a terminal complete event",
+          "failure_provenance": {
+            "version": 1,
+            "complete": false,
+            "causes": [
+              {
+                "source": "queue",
+                "category": "unknown",
+                "code": "nonterminal-review"
+              }
+            ]
+          },
+          "counted": false
+        }
+      }
+    },
+    {
+      "name": "unknown-severity-is-counted-under-its-name",
+      "source": "crq.classify",
+      "input": {
+        "ndjson": "{\"type\":\"finding\",\"severity\":\"nit\",\"comment\":\"x\"}\n{\"type\":\"complete\",\"status\":\"review_completed\",\"reviewedFiles\":1}\n",
+        "exit_code": 0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "exit": 0,
+          "events": 2,
+          "bad_lines": 0,
+          "findings": 1,
+          "severity_counts": {
+            "critical": 0,
+            "major": 0,
+            "minor": 0,
+            "trivial": 0,
+            "info": 0,
+            "none": 0,
+            "nit": 1
+          },
+          "outcome": "completed",
+          "reviewed_files": 1,
+          "failure_provenance": {
+            "version": 1,
+            "complete": true,
+            "causes": []
+          },
+          "counted": true
+        }
+      }
+    }
+  ]
+}

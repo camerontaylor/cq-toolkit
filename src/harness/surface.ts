@@ -40,6 +40,7 @@
 import { realpath, stat } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { z } from 'zod';
+import { ENV_NAME_PATTERN, parsePassthrough } from '../config/parsers.js';
 import type { SandboxLevel, ToolPolicy } from '../driver/types.js';
 import { TOOL_FAILURE_KINDS } from './failures.js';
 import { HarnessConfigSchema } from './config.js';
@@ -128,7 +129,7 @@ export function selectHarnessSurface(
 // ---------------------------------------------------------------------------
 
 /** The env-var NAME shape (POSIX/Windows standard) — names only, never values. */
-const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const ENV_NAME = ENV_NAME_PATTERN;
 
 /**
  * The whole binding of one harness surface, as strict plain data (Annex
@@ -155,6 +156,21 @@ export const HarnessManifestSchema = z
   .strict();
 
 export type HarnessManifest = z.infer<typeof HarnessManifestSchema>;
+
+/**
+ * Strictly parse a manifest, reporting a defect as ONE line that names the
+ * position and the reason, never any part of the offending value (the schema's
+ * raw multi-line ZodError is what this replaces).
+ */
+export function parseManifest(raw: unknown): HarnessManifest {
+  const result = HarnessManifestSchema.safeParse(raw);
+  if (result.success) return result.data;
+  const [first] = result.error.issues;
+  const where = first === undefined || first.path.length === 0 ? 'manifest' : first.path.join('.');
+  const reason = (first?.message ?? 'invalid').split('\n')[0]?.slice(0, 120) ?? 'invalid';
+  const more = result.error.issues.length > 1 ? ` (+${result.error.issues.length - 1} more)` : '';
+  throw new Error(`harness manifest: invalid ${where}: ${reason}${more}`);
+}
 
 /** Inputs to `buildManifest` — everything the driver resolved, plain data. */
 export interface ManifestInputs {
@@ -187,11 +203,15 @@ export async function buildManifest(inputs: ManifestInputs): Promise<HarnessMani
     inputs.sandbox,
   );
   if (tools.length === 0) return undefined;
+  const rawEnvNames: unknown = inputs.envNames;
+  if (rawEnvNames !== undefined && !Array.isArray(rawEnvNames)) {
+    throw new Error('harness manifest: invalid envNames: expected an array of env var names');
+  }
   const workspace = await realpath(inputs.workspace);
   if (!(await stat(workspace)).isDirectory()) {
     throw new Error(`harness manifest: workspace '${workspace}' is not a directory`);
   }
-  return HarnessManifestSchema.parse({
+  const manifest = parseManifest({
     v: 1,
     workspace,
     sandbox: inputs.sandbox,
@@ -204,11 +224,29 @@ export async function buildManifest(inputs: ManifestInputs): Promise<HarnessMani
     envNames: [
       ...new Set([
         ...(inputs.envNames ?? []),
-        ...(processEnv()['CQ_RUN_ENV_PASSTHROUGH'] ?? '').split(/[,\s]+/).filter(Boolean),
+        ...parsePassthrough(processEnv()['CQ_RUN_ENV_PASSTHROUGH']),
       ]),
     ],
   });
+  // The caller's own code-level names are a TRUSTED origin (see below).
+  TRUSTED_ENV_NAMES.set(manifest, Object.freeze([...(inputs.envNames ?? [])]));
+  return manifest;
 }
+
+/**
+ * ORIGIN of manifest env names. `envNames` in the manifest is plain data: it
+ * is JSON on the MCP bin's argv and anyone can author it, so every name in it
+ * gets the full credential refusal when it arrives from a file. The names
+ * trusted CODE passed to `buildManifest` (a driver's `envAllowlist`, which may
+ * carry e.g. SSH_AUTH_SOCK) are remembered here against the manifest OBJECT
+ * identity. The map is module-private and keyed by identity, so there is no
+ * field a JSON manifest, a plan or op input could set: a parsed or cloned
+ * manifest is a new object and has no entry, and the strict schema rejects any
+ * extra key. Only `createHarnessSurface` on the very object `buildManifest`
+ * returned honours it (in-process transports); a manifest serialized to the
+ * MCP bin loses it and is fully checked there.
+ */
+const TRUSTED_ENV_NAMES = new WeakMap<object, readonly string[]>();
 
 // ---------------------------------------------------------------------------
 // Execution — the surface
@@ -263,11 +301,17 @@ export function toCallToolResult(outcome: ToolkitToolResult): McpCallToolResult 
  * silently smaller surface).
  */
 export function createHarnessSurface(input: HarnessManifest): HarnessSurface {
-  const manifest = HarnessManifestSchema.parse(input);
+  const trusted = TRUSTED_ENV_NAMES.get(input) ?? [];
+  const manifest = parseManifest(input);
   // The manifest's declared envNames ride the SHARED run gate (src/sandbox):
   // they are still a default-deny allowlist, merged after the launcher scrub,
-  // and a policy knob name among them is refused there.
-  const gate: HarnessRunGate = { ...harnessRunGate(), declaredEnvNames: manifest.envNames };
+  // and a policy knob or credential-shaped name among them is refused there,
+  // except names trusted code supplied in-process (TRUSTED_ENV_NAMES).
+  const gate: HarnessRunGate = {
+    ...harnessRunGate(),
+    declaredEnvNames: manifest.envNames.filter((name) => !trusted.includes(name)),
+    trustedEnvNames: trusted,
+  };
   const built = buildTools(manifest.harness, manifest.workspace, manifest.sandbox, gate);
   const byName = new Map(built.map((tool) => [tool.name, tool] as const));
   // Normalise one-release aliases (`run` → `bash`) and de-duplicate: a

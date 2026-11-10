@@ -1,0 +1,495 @@
+{
+  "created_at": "2026-10-01T00:00:00Z",
+  "last_tick": "2026-11-09T09:48:00Z",
+  "paused": false,
+  "pause_reason": null,
+  "cooldown_until": null,
+  "rl_backoff_min": 30,
+  "starts": [
+    "2026-11-09T08:24:00Z",
+    "2026-11-09T09:36:00Z"
+  ],
+  "usage": {
+    "remaining": 7,
+    "limit": 10,
+    "rollingWindowMs": 3600000
+  },
+  "deferred_refresh_cursor": "author-cycle-2",
+  "items": [
+    {
+      "id": "pr1304",
+      "pr": 1304,
+      "kind": "open",
+      "repo": "camerontaylor/cq-toolkit",
+      "tier": 1,
+      "order": 0,
+      "prior_cycles": 1,
+      "prior_base": null,
+      "depends_on": null,
+      "notes": [
+        "2026-11-09T08:24:00Z auto-enrolled: open PR not yet enrolled"
+      ],
+      "state": "pending",
+      "cycles": [
+        {
+          "run_id": "pr1304-20261109T082400Z",
+          "band": "foreground",
+          "started_at": "2026-11-09T08:24:00Z",
+          "completed_at": "2026-11-09T08:41:00Z",
+          "base": "0123456789abcdef0123456789abcdef01234567",
+          "head": "89abcdef0123456789abcdef0123456789abcdef",
+          "range_policy": "full-range-once-v1",
+          "outcome": "completed",
+          "counted": true
+        }
+      ],
+      "attempts": [
+        {
+          "run_id": "pr1304-20261109T082400Z",
+          "band": "foreground",
+          "started_at": "2026-11-09T08:24:00Z",
+          "outcome": "completed",
+          "counted": true
+        }
+      ],
+      "failures": 0,
+      "not_before": null,
+      "wait_reason": null,
+      "last_error": null,
+      "run": null,
+      "receipt_id": null,
+      "created_at": "2026-11-09T08:20:00Z",
+      "measure": {
+        "docs_only": false,
+        "surviving": 120,
+        "synthetic_paths": [
+          "src/policy/crq/queue.ts"
+        ],
+        "files": [
+          {
+            "path": "apps/crq-python/crq.py",
+            "now": "src/ops/crq/tick.ts",
+            "synthetic_added": 40,
+            "surviving": 80
+          }
+        ]
+      }
+    },
+    {
+      "id": "pr1304-range-0123456789-89abcdef01",
+      "pr": 1304,
+      "kind": "delta",
+      "repo": "camerontaylor/cq-toolkit",
+      "order": 1,
+      "followup": "open",
+      "since": "89abcdef0123456789abcdef0123456789abcdef",
+      "notes": [
+        "2026-11-09T08:45:00Z auto-enrolled: current full range lacks equivalent captured evidence"
+      ],
+      "state": "pending",
+      "cycles": [],
+      "attempts": [],
+      "failures": 0,
+      "not_before": null,
+      "wait_reason": null,
+      "last_error": null,
+      "run": null
+    },
+    {
+      "id": "pr1200-merged",
+      "pr": 1200,
+      "kind": "merged",
+      "tier": 3,
+      "order": 2,
+      "owed_per_audit": 1,
+      "merge_commit": "fedcba9876543210fedcba9876543210fedcba98",
+      "merged_at": "2026-10-30T12:00:00Z",
+      "state": "pending",
+      "cycles": [],
+      "attempts": [],
+      "notes": [],
+      "measure": {
+        "merge_queue": "fedcba9876543210fedcba9876543210fedcba98",
+        "docs_only": false,
+        "surviving": 42,
+        "surviving_nondoc": 42,
+        "file_level_focus": 1.0,
+        "synthetic_paths": [
+          "src/shared/proc.ts"
+        ],
+        "files": [
+          {
+            "path": "apps/crq-python/crq.py",
+            "now": "src/shared/proc.ts",
+            "synthetic_added": 42,
+            "surviving": 42
+          }
+        ]
+      }
+    },
+    {
+      "id": "coverage-0123456789abcdef",
+      "pr": 1200,
+      "kind": "coverage",
+      "tier": 4,
+      "order": 3,
+      "state": "pending",
+      "cycles": [],
+      "attempts": [],
+      "notes": [],
+      "merge_commit": "fedcba9876543210fedcba9876543210fedcba98",
+      "coverage_source": "pr1200-merged",
+      "coverage_sha": "fedcba9876543210fedcba9876543210fedcba98",
+      "coverage_paths": [
+        "src/shared/proc.ts"
+      ],
+      "coverage_region": "src/shared",
+      "created_at": "2026-11-09T09:00:00Z",
+      "measure": {
+        "merge_queue": "fedcba9876543210fedcba9876543210fedcba98",
+        "synthetic_paths": [
+          "src/shared/proc.ts"
+        ]
+      }
+    },
+    {
+      "id": "backfill-0123456789abcdef-g0",
+      "kind": "backfill",
+      "tier": 4,
+      "order": 4,
+      "subject_kind": "B",
+      "tier_importance": "T2",
+      "repo": "camerontaylor/cq-toolkit",
+      "prs": [
+        0
+      ],
+      "paths": [
+        "src/ops/crq/tick.ts"
+      ],
+      "target": "origin/main",
+      "scope_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+      "construction_policy_digest": "2222222222222222222222222222222222222222222222222222222222222222",
+      "partition": 0,
+      "subject_id": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "family": "3333333333333333333333333333333333333333333333333333333333333333",
+      "generation": 0,
+      "retry": false,
+      "row": null,
+      "score": 84,
+      "scope": [
+        {
+          "path": "src/ops/crq/tick.ts",
+          "blob": "abcdef0123456789abcdef0123456789abcdef01",
+          "intervals": [
+            [
+              1,
+              84
+            ]
+          ]
+        }
+      ],
+      "job_id": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef:0",
+      "path_lineages": {
+        "src/ops/crq/tick.ts": "src/ops/crq/tick.ts"
+      },
+      "path_tiers": {
+        "src/ops/crq/tick.ts": "T2"
+      },
+      "path_scores": {
+        "src/ops/crq/tick.ts": 84
+      },
+      "state": "pending",
+      "vendor_state": "none",
+      "attempt": 0,
+      "failures": 0,
+      "family_failures": 0,
+      "created_at": "2026-11-09T06:00:00Z",
+      "cycles": [],
+      "attempts": [],
+      "notes": [],
+      "pr": 0
+    },
+    {
+      "id": "current-44444444444444444444444444444444",
+      "kind": "merged-current",
+      "pr": 1188,
+      "merge_commit": "5555555555555555555555555555555555555555",
+      "subject": {
+        "repo": "camerontaylor/cq-toolkit",
+        "pr": 1188,
+        "merge_sha": "5555555555555555555555555555555555555555",
+        "target_selector": "promoted-main",
+        "policy": "affected-current-additions-v1"
+      },
+      "request_id": "merged-current-1188",
+      "state": "pending",
+      "created_at": "2026-11-09T07:00:00Z",
+      "order": 5,
+      "cycles": [],
+      "attempts": [],
+      "failures": 0,
+      "depends_on": []
+    },
+    {
+      "id": "push-infra-6666666-7777777",
+      "repo": "camerontaylor/infra",
+      "kind": "push-current",
+      "pr": 0,
+      "subject": {
+        "type": "push-range",
+        "repo": "camerontaylor/infra",
+        "base": "6666666666666666666666666666666666666666",
+        "head": "7777777777777777777777777777777777777777",
+        "policy": "first-parent-push-range-v1"
+      },
+      "state": "pending",
+      "created_at": "2026-11-09T07:30:00Z",
+      "order": 6,
+      "cycles": [],
+      "attempts": [],
+      "failures": 0,
+      "notes": [
+        "2026-11-09T07:30:00Z auto-enrolled: push range 6666666666..7777777777"
+      ]
+    },
+    {
+      "id": "lr-888888888888-g1",
+      "kind": "local-review",
+      "repo": "camerontaylor/cq-toolkit",
+      "identity": "9999999999999999999999999999999999999999999999999999999999999999",
+      "identity_inputs": {
+        "repo": "camerontaylor/cq-toolkit",
+        "base_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "head_commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "scope": "full-diff",
+        "projection": "full-file-addition-projection",
+        "config_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "profile": {
+          "adapter": "coderabbit-cli",
+          "revision": "0.9.2"
+        }
+      },
+      "profile": {
+        "adapter": "coderabbit-cli",
+        "revision": "0.9.2",
+        "flags": [
+          "--agent",
+          "--deep"
+        ]
+      },
+      "generation": 1,
+      "repeat_requested": false,
+      "observers": [
+        "review-request-1"
+      ],
+      "notify": [],
+      "state": "pending",
+      "pr": null,
+      "created_at": "2026-11-09T09:10:00Z",
+      "order": 7,
+      "cycles": [],
+      "attempts": [],
+      "failures": 0,
+      "depends_on": []
+    },
+    {
+      "id": "author-author-cycle-1",
+      "pr": 0,
+      "kind": "author",
+      "order": 8,
+      "state": "pending",
+      "cycles": [],
+      "author_cycles": [],
+      "attempts": [],
+      "requested_at": "2026-11-09T09:20:00Z",
+      "author": {
+        "request_id": "author-cycle-1",
+        "base": "dddddddddddddddddddddddddddddddddddddddd",
+        "head": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "target": "ffffffffffffffffffffffffffffffffffffffff",
+        "cycle": 1
+      },
+      "notes": [
+        "2026-11-09T09:20:00Z author-enrolled (request author-cycle-1): cycle 1, dddddddddd..eeeeeeeeee -> ffffffffff"
+      ]
+    },
+    {
+      "id": "pr100-promotion",
+      "pr": 100,
+      "kind": "promotion",
+      "tier": 1,
+      "order": 9,
+      "state": "done",
+      "cycles": [],
+      "attempts": [],
+      "notes": [],
+      "promotion": {
+        "event_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "status": "success"
+      }
+    }
+  ],
+  "coverage": {
+    "schema_version": 1,
+    "paths": {
+      "src/shared/proc.ts": {
+        "review_count": 1,
+        "last_reviewed_at": "2026-11-09T09:36:00Z",
+        "last_run": "coverage-0123456789abcdef-20261109T093600Z",
+        "reviewed_sha": "fedcba9876543210fedcba9876543210fedcba98"
+      },
+      "src/ops/crq/tick.ts": {
+        "review_count": 0,
+        "last_reviewed_at": null
+      }
+    },
+    "runs": {
+      "coverage-0123456789abcdef-20261109T093600Z": {
+        "completed_at": "2026-11-09T09:47:00Z",
+        "paths": [
+          "src/shared/proc.ts"
+        ]
+      }
+    },
+    "observations": {
+      "2026-11-09T09:48:00Z": {
+        "started": false,
+        "pending": true,
+        "candidate_exists": true,
+        "blocked_reason": "inflight"
+      }
+    }
+  },
+  "author_requests": {
+    "author-cycle-1": {
+      "request_id": "author-cycle-1",
+      "base": "dddddddddddddddddddddddddddddddddddddddd",
+      "head": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "target": "ffffffffffffffffffffffffffffffffffffffff",
+      "cycle": 1,
+      "item": "author-author-cycle-1",
+      "created_at": "2026-11-09T09:20:00Z",
+      "state": "enrolled"
+    }
+  },
+  "author_observations": [],
+  "merged_current_requests": {
+    "merged-current-1188": {
+      "binding": {
+        "repo": "camerontaylor/cq-toolkit",
+        "pr": 1188,
+        "merge_sha": "5555555555555555555555555555555555555555",
+        "target_selector": "promoted-main",
+        "policy": "affected-current-additions-v1"
+      },
+      "item": "current-44444444444444444444444444444444"
+    }
+  },
+  "merged_discovery": {
+    "after": "2026-11-01T00:00:00Z",
+    "before": "2026-11-09T00:00:00Z",
+    "complete": true
+  },
+  "review_requests": {
+    "review-request-1": {
+      "v": 1,
+      "key_digest": "1212121212121212121212121212121212121212121212121212121212121212",
+      "identity": "9999999999999999999999999999999999999999999999999999999999999999",
+      "created_at": "2026-11-09T09:10:00Z",
+      "item": "lr-888888888888-g1"
+    }
+  },
+  "review_events": {
+    "1313131313131313131313131313131313131313131313131313131313131313": {
+      "item": "lr-888888888888-g1",
+      "run_id": "lr-888888888888-g1-20261109T091200Z",
+      "receipt_id": "14141414141414141414141414141414",
+      "occurred_at": "2026-11-09T09:30:00Z",
+      "state": "completed"
+    }
+  },
+  "push_discovery": {
+    "camerontaylor/infra": {
+      "reviewed_tip": "6666666666666666666666666666666666666666"
+    }
+  },
+  "backfill_families": {
+    "3333333333333333333333333333333333333333333333333333333333333333": {
+      "failures": 0,
+      "quarantined": false,
+      "next_eligible_at": null
+    }
+  },
+  "backfill_scope_failures": {
+    "src/ops/crq/tick.ts": {
+      "failures": 1,
+      "quarantined": false,
+      "next_eligible_at": "2026-11-09T12:00:00Z"
+    }
+  },
+  "backfill_path_lineages": {
+    "src/ops/crq/tick.ts": "src/ops/crq/tick.ts"
+  },
+  "backfill_reservations": {
+    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef:0:1": {
+      "item": "backfill-0123456789abcdef-g0",
+      "at": "2026-11-09T09:48:00Z",
+      "quota_state": "reserved",
+      "vendor_run_id": null
+    }
+  },
+  "backfill_admissions": [
+    {
+      "at": "2026-11-09T09:48:00Z",
+      "item": "backfill-0123456789abcdef-g0",
+      "ordinary_eligible": false,
+      "effective_remaining": 0,
+      "decision": "reserve",
+      "observation": null,
+      "reservation_counts": {
+        "reserved": 1
+      }
+    }
+  ],
+  "backfill_admission_history_version": 1,
+  "backfill_daily_capacity": {
+    "2026-11-08": {
+      "completed_partitions": 2,
+      "started_partitions": 2
+    }
+  },
+  "backfill_state_events": {},
+  "backfill_operator_events": [],
+  "backfill_last_manifest": {
+    "version": "cq.backfill-inventory/v1",
+    "repo": "camerontaylor/cq-toolkit",
+    "target": "origin/main",
+    "evaluated_at": "2026-11-09T06:00:00Z",
+    "id": "1515151515151515151515151515151515151515151515151515151515151515"
+  },
+  "backfill_mapped_ownership": [],
+  "backfill_idle_with_candidate": 0,
+  "backfill_capacity_runs": [
+    "backfill-0123456789abcdef-g0-20261108T120000Z"
+  ],
+  "backfill_usage": {
+    "remaining": 7,
+    "observed_at": "2026-11-09T09:48:00Z"
+  },
+  "repair_own_commits": [
+    "1616161616161616161616161616161616161616"
+  ],
+  "legacy_coverage_releases": [],
+  "legacy_coverage_quota_releases": [],
+  "legacy_coverage_failure_runs": {
+    "legacy-coverage-run-1": {
+      "item": "coverage-0123456789abcdef",
+      "outcome": "error",
+      "origins": [
+        "legacy-coverage:1200:src/shared/proc.ts"
+      ],
+      "at": "2026-11-08T22:00:00Z"
+    }
+  },
+  "review_ledger_head": "1717171717171717171717171717171717171717"
+}

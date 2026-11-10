@@ -68,6 +68,7 @@ interface FixtureSnapshot {
     merge_commit_sha: string;
   };
   comments: unknown[];
+  reviews?: unknown;
   bases: Record<string, string | null>;
   pagination: { comments: number };
   complete: boolean;
@@ -77,7 +78,13 @@ interface FixtureSnapshot {
 /** A synthetic recorded snapshot (docs/measurement/import-acceptance.md). */
 const snapshot = (
   comments: unknown[],
-  init: { bases?: Record<string, string | null>; complete?: boolean; failed_step?: string } = {},
+  init: {
+    bases?: Record<string, string | null>;
+    complete?: boolean;
+    failed_step?: string;
+    reviews?: unknown;
+    noReviews?: boolean;
+  } = {},
 ): FixtureSnapshot => ({
   repo: 'synthetic-org/synthetic-repo',
   pr_number: 7,
@@ -91,6 +98,7 @@ const snapshot = (
     merge_commit_sha: 'f'.repeat(40),
   },
   comments,
+  ...(init.noReviews ? {} : { reviews: init.reviews ?? [] }),
   bases: init.bases ?? { [HEAD_A]: BASE_A, [HEAD_B]: BASE_A, [HEAD_C]: BASE_A },
   pagination: { comments: 1 },
   complete: init.complete ?? true,
@@ -153,6 +161,41 @@ describe('M4b1 nominal evidence', () => {
       snapshot([comment(carry(HEAD_A), { login: 'cq-review[bot]' })]),
     );
     expect(carried.acceptances[0]?.reviewerId).toBe('self-declared:coordinator');
+  });
+
+  test('a findings-mode PR review (run marker, then header) is read from reviews', () => {
+    const review = {
+      id: 4200,
+      html_url: 'https://github.com/synthetic-org/synthetic-repo/pull/7#pullrequestreview-4200',
+      submitted_at: AT_A,
+      user: { login: 'cq-review[bot]' },
+      body: `<!-- crq-findings run=7-bbbbbbbbbb-DeepSeek -->\n${pass(HEAD_A)}\n\n- P3 one minor thread`,
+    };
+    const result = importAcceptance(snapshot([], { reviews: [review] }));
+
+    expect(result.unknown).toEqual([]);
+    expect(result.acceptances).toHaveLength(1);
+    const row = result.acceptances[0]!;
+    expect(AcceptancePayloadSchema.safeParse(row).success).toBe(true);
+    expect(row).toMatchObject({
+      headSha: HEAD_A,
+      reviewerId: 'app:cq-review:DeepSeek',
+      verdict: 'PASS',
+      evidence: [review.html_url],
+    });
+    expect(result.meta).toEqual([{ at: AT_A_MS }]);
+  });
+
+  test('marker skipping is for whole-line HTML comments before the header only', () => {
+    const late = comment(`<!-- marker -->\nnot a header\n${pass(HEAD_A)}`);
+    const markerOnly = comment('<!-- crq-findings run=x -->');
+    const inline = comment(`<!-- marker --> ${pass(HEAD_A)}`);
+    const result = importAcceptance(snapshot([late, markerOnly, inline]));
+    expect(result.acceptances).toEqual([]);
+    expect(result.unknown).toEqual([]);
+    // Two leading markers are both skipped.
+    const two = importAcceptance(snapshot([comment(`<!-- a -->\r\n<!-- b -->\n${pass(HEAD_A)}`)]));
+    expect(two.acceptances).toHaveLength(1);
   });
 
   test('ITERATE maps to HOLD', () => {
@@ -232,6 +275,41 @@ describe('M4b1 missing evidence', () => {
         { source: c.html_url, kind: 'unavailable', reason: 'reviewed base not recorded' },
       ]);
     }
+  });
+
+  test('a snapshot without reviews says so; malformed reviews are corrupt', () => {
+    const absent = importAcceptance(snapshot([comment(pass(HEAD_A))], { noReviews: true }));
+    expect(absent.acceptances).toHaveLength(1);
+    expect(absent.unknown).toEqual([
+      { source: 'snapshot', kind: 'unavailable', reason: 'PR reviews not recorded' },
+    ]);
+    const notArray = importAcceptance(snapshot([], { reviews: 'no' }));
+    expect(notArray.unknown).toEqual([
+      { source: 'snapshot reviews', kind: 'corrupt', reason: 'reviews is not an array' },
+    ]);
+    const badTime = importAcceptance(
+      snapshot([], {
+        reviews: [
+          {
+            id: 1,
+            html_url: 'https://github.com/o/r/pull/7#pullrequestreview-1',
+            submitted_at: null,
+            user: { login: 'cq-review[bot]' },
+            body: pass(HEAD_A),
+          },
+          7,
+        ],
+      }),
+    );
+    expect(badTime.acceptances).toEqual([]);
+    expect(badTime.unknown).toEqual([
+      {
+        source: 'https://github.com/o/r/pull/7#pullrequestreview-1',
+        kind: 'corrupt',
+        reason: 'review submitted_at is not a UTC instant',
+      },
+      { source: 'snapshot reviews', kind: 'corrupt', reason: 'review entry is not an object' },
+    ]);
   });
 
   test('an incomplete snapshot yields its rows plus one partial unknown', () => {

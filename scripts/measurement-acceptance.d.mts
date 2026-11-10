@@ -1,5 +1,5 @@
 // Types for scripts/measurement-acceptance.mjs (measurement slice M4b1).
-// The input is one recorded PR-comment snapshot read as raw JSON; every
+// The input is one recorded PR comment-and-review snapshot read as raw JSON; every
 // field is validated at runtime, so no snapshot type is asserted here.
 import type { AcceptancePayload } from '../src/kernel/types.js';
 
@@ -10,9 +10,9 @@ export interface UnknownEntry {
   reason: string;
 }
 
-/** Parallel to `acceptances` (same index): the comment's capture instant. */
+/** Parallel to `acceptances` (same index): the comment's or review's capture instant. */
 export interface ImportedAcceptanceMeta {
-  /** Comment `created_at`, strict UTC, normalised to milliseconds. */
+  /** Comment `created_at` or review `submitted_at`, strict UTC, normalised to milliseconds. */
   at: string;
 }
 
@@ -23,7 +23,7 @@ export interface ImportAcceptanceResult {
   /** Beside the rows: the payload schema is strict, so an inline `at`
    * field would fail parsing (the parallel-array choice). */
   meta: ImportedAcceptanceMeta[];
-  /** Near-miss, base-less, conflicting or corrupt comments, with a reason. */
+  /** Near-miss, base-less, conflicting or corrupt comments and reviews, with a reason. */
   unknown: UnknownEntry[];
 }
 

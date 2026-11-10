@@ -200,6 +200,68 @@ describe('config error at startup', () => {
   }, 20_000);
 });
 
+describe('manifest-declared credential names', () => {
+  test.each(['ANTHROPIC_API_KEY', 'GH_TOKEN', 'MY_SERVICE_SECRET'])(
+    'envNames [%s] refuses to start: exit 78, no stdout',
+    async (name) => {
+      const dummy = ['dummy', 'credential', String(Date.now())].join('-');
+      const server = startBin(
+        [JSON.stringify(manifestFor(scratch(), ['env'], { envNames: [name] }))],
+        baseEnv({ [name]: dummy }),
+      );
+      const { code } = await server.exited;
+      expect(code).toBe(78);
+      expect(server.stdout()).toBe('');
+      expect(server.stderr()).toContain(`'${name}' is a credential`);
+      expect(server.stderr()).toContain('a declared or manifest name can never pass it');
+      expect(server.stderr()).toContain('invalid env:');
+      expect(server.stderr()).not.toContain('surface mismatch');
+      expect(server.stderr()).not.toContain(dummy);
+    },
+    20_000,
+  );
+});
+
+describe('manifest startup diagnostics', () => {
+  test('a declared SSH_AUTH_SOCK says declared names can never pass it', async () => {
+    const dummy = ['dummy', 'sock', String(Date.now())].join('-');
+    const server = startBin(
+      [JSON.stringify(manifestFor(scratch(), ['env'], { envNames: ['SSH_AUTH_SOCK'] }))],
+      baseEnv({ SSH_AUTH_SOCK: dummy }),
+    );
+    expect((await server.exited).code).toBe(78);
+    expect(server.stderr()).toContain(
+      'a declared or manifest name can never pass it (not even SSH_AUTH_SOCK)',
+    );
+    expect(server.stderr()).not.toContain('declare it');
+    expect(server.stderr()).not.toContain(dummy);
+  }, 20_000);
+
+  test.each([
+    ['an assignment', ['FOO=sk-live-secret-value']],
+    ['a non-string', [42]],
+    ['an empty string', ['']],
+  ])(
+    'a malformed envNames (%s) is a one-line manifest error without the value',
+    async (_l, bad) => {
+      const server = startBin(
+        [JSON.stringify({ ...manifestFor(scratch(), ['env']), envNames: bad })],
+        baseEnv(),
+      );
+      expect((await server.exited).code).toBe(78);
+      const lines = server
+        .stderr()
+        .split('\n')
+        .filter((line) => line !== '');
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toMatch(/invalid manifest: harness manifest: invalid envNames\.0/);
+      expect(server.stderr()).not.toContain('sk-live-secret-value');
+      expect(server.stderr()).not.toContain('invalid manifest: [');
+    },
+    20_000,
+  );
+});
+
 describe('lifetime', () => {
   test('stdin EOF exits 0 after flushing the last response', async () => {
     const server = startBin([JSON.stringify(manifestFor(scratch()))]);
@@ -293,8 +355,12 @@ describe('env scrub', () => {
   test('a provider credential never reaches a run child; PATH and envNames do', async () => {
     const workspace = scratch();
     const server = startBin(
-      [JSON.stringify(manifestFor(workspace, ['env'], { envNames: ['CQ_TEST_KEEP'] }))],
-      baseEnv({ ANTHROPIC_API_KEY: 'secret', CQ_TEST_KEEP: 'kept', CQ_TEST_DROP: 'dropped' }),
+      [JSON.stringify(manifestFor(workspace, ['env'], { envNames: ['TEST_KEEP_CANARY'] }))],
+      baseEnv({
+        ANTHROPIC_API_KEY: 'secret',
+        TEST_KEEP_CANARY: 'kept',
+        TEST_DROP_CANARY: 'dropped',
+      }),
     );
     server.send({
       jsonrpc: '2.0',
@@ -306,8 +372,8 @@ describe('env scrub', () => {
     expect(text.startsWith('exit 0')).toBe(true);
     expect(text).not.toContain('ANTHROPIC_API_KEY');
     expect(text).not.toContain('secret');
-    expect(text).not.toContain('CQ_TEST_DROP');
-    expect(text).toContain('CQ_TEST_KEEP=kept');
+    expect(text).not.toContain('TEST_DROP_CANARY');
+    expect(text).toContain('TEST_KEEP_CANARY=kept');
     expect(text).toMatch(/^PATH=/m);
     server.child.stdin.end();
     expect((await server.exited).code).toBe(0);

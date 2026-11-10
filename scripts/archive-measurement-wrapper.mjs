@@ -323,7 +323,15 @@ export async function runMeasurementArchive(input = {}) {
   };
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+// Node normally resolves the main module's symlinks, but preserves its raw
+// URL under --preserve-symlinks-main. Accept either form of the entry path.
+const entry = process.argv[1] ? resolve(process.argv[1]) : null;
+const realEntry = entry ? await realpath(entry).catch(() => null) : null;
+if (
+  entry &&
+  (import.meta.url === pathToFileURL(entry).href ||
+    (realEntry && import.meta.url === pathToFileURL(realEntry).href))
+) {
   const args = process.argv.slice(2);
   const option = (name) => {
     const value = args[args.indexOf(name) + 1];

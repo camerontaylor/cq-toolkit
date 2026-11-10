@@ -90,11 +90,14 @@ session/set_config_option { configId: 'mode', value: 'build' }
 
 A failed pin is a pre-prompt **error verdict** — an unpinned session is a
 policy void, not a degraded run. The pin is **verified, not just sent**,
-against EITHER of the two surfaces the wire actually offers: the
-response's echoed `modes.currentModeId`, or a `current_mode_update`
-notification naming `build` (the live vendor's shape — probe 2026-09-14:
-its set_config_option answer carries no modes member; the switch rides a
-notification in the same flush, before the response line). Neither surface
+against ANY of the three surfaces the wire actually offers: the
+response's echoed `modes.currentModeId`, the response's `configOptions`
+entry for `id: 'mode'` (ACP returns current values there, so a compliant
+agent can report the switch with no `modes` echo and no
+`current_mode_update`), or a `current_mode_update` notification naming
+`build` (the live vendor's shape — probe 2026-09-14: its
+set_config_option answer carries no modes member; the switch rides a
+notification in the same flush, before the response line). No surface
 naming `build` is a failed pin (review-debt #39). The never-asks tripwire
 (below) is the backstop for a harness that accepts the pin and still does
 not ask.
@@ -126,11 +129,12 @@ deduped per toolCallId.
 
 **The never-asks tripwire:** the spec makes asking the AGENT's decision,
 so a vendor that executes tools without asking is protocol-legal. The
-driver watches the `tool_call` stream: a tool call whose id was never
-preceded by a `session/request_permission` is recorded as evidence of
-UNGATED EXECUTION (session narration, `cq: 'never-asks'`) and the run
-verdict is **`error`** — a policy that cannot be enforced is never
-silently soft.
+driver watches the `tool_call` stream: a call reaching `in_progress`,
+`completed` or `failed` before a `session/request_permission` for its id
+is recorded as evidence of UNGATED EXECUTION (session narration,
+`cq: 'never-asks'`) and the run verdict is **`error`** — a policy that
+cannot be enforced is never silently soft. A `pending` announcement alone
+is not evidence.
 
 The mirror failure through the answer channel — a DENIED tool that
 nevertheless reports a completed execution (the harness asked, was told

@@ -2993,6 +2993,7 @@ export function buildTools(
           env = buildChildEnv(buildSandboxLauncherEnv(process.env, gate), undefined, [
             ...gate.envPassthrough,
             ...(gate.declaredEnvNames ?? []),
+            ...(gate.trustedEnvNames ?? []),
           ]);
         } catch (error) {
           return deny('bash', `EXECUTION_ERROR: bash failed: ${messageOf(error)}`);

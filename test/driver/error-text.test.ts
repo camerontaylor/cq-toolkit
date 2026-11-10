@@ -54,18 +54,16 @@ describe('driver error text — plain, bounded, secret-redacted', () => {
     }
   });
 
-  // Issue #291 row 6b (owner ruling 2026-10-11, ADR N21): the suffix lists
-  // DIVERGE deliberately. Config resolution, journaling and passthrough treat a
-  // `_URL` name as non-secret only for a clean absolute http(s) URL, but
-  // diagnostics redaction KEEPS `_URL` (case-insensitively) so a URL value can
-  // never reach persisted error text. This pins the divergence on the exact
-  // value config now accepts.
-  test('boundedErrorText still redacts a _URL-suffixed value by name (deliberate divergence)', () => {
+  // Owner ruling (2026-10-11, re-confirmed 2026-11-09, ADR N21): `_URL` is NOT a
+  // secret suffix. A URL value is shown through the one shared redactor
+  // (src/shared/urlRedact.ts): userinfo, query and fragment are stripped; a clean
+  // URL is left as is.
+  test('boundedErrorText leaves a clean _URL value visible (not a secret)', () => {
     const prior = process.env.CQ_TEST_URL;
     process.env.CQ_TEST_URL = 'https://example.test/metrics';
     try {
       expect(boundedErrorText('endpoint https://example.test/metrics failed')).toBe(
-        'endpoint [redacted] failed',
+        'endpoint https://example.test/metrics failed',
       );
     } finally {
       if (prior === undefined) delete process.env.CQ_TEST_URL;
@@ -73,14 +71,14 @@ describe('driver error text — plain, bounded, secret-redacted', () => {
     }
   });
 
-  test('boundedErrorText still redacts a credential-suffixed var even when a _URL var is set', () => {
+  test('boundedErrorText redacts a credential-suffixed var next to a visible _URL var', () => {
     const priorKey = process.env.CQ_TEST_TOKEN;
     const priorUrl = process.env.CQ_TEST_URL;
     process.env.CQ_TEST_TOKEN = 'token-value-1234';
     process.env.CQ_TEST_URL = 'https://example.test/metrics';
     try {
       expect(boundedErrorText('token-value-1234 at https://example.test/metrics')).toBe(
-        '[redacted] at [redacted]',
+        '[redacted] at https://example.test/metrics',
       );
     } finally {
       if (priorKey === undefined) delete process.env.CQ_TEST_TOKEN;
@@ -90,14 +88,14 @@ describe('driver error text — plain, bounded, secret-redacted', () => {
     }
   });
 
-  // Round 3 (Codex P1 L0_a): classification is case-folded, so a lowercase or
-  // win32-spelled `metrics_url` cannot dodge the redaction.
-  test('boundedErrorText redacts a lowercase _URL-suffixed env name', () => {
+  // Case-folded classification: a lowercase or win32-spelled `metrics_url` is a
+  // URL name too, so its userinfo is stripped the same way.
+  test('boundedErrorText strips userinfo from a lowercase _URL env value', () => {
     const prior = process.env.metrics_url;
     process.env.metrics_url = 'https://user:pass@example.test/x';
     try {
       expect(boundedErrorText('failed at https://user:pass@example.test/x')).toBe(
-        'failed at [redacted]',
+        'failed at https://example.test/x',
       );
     } finally {
       if (prior === undefined) delete process.env.metrics_url;

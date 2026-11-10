@@ -96,6 +96,8 @@ export function createGovernor(config: GovernorConfig, clock?: Clock): BudgetGov
  */
 export interface Governance {
   governor: Governor;
+  /** Arrange governed jobs before they enter the runner pool and dispatch ladder. */
+  scheduleJob?: (jobId: string, run: () => Promise<void>) => Promise<void>;
   /** Run-level cancel signal; an abort trips the governor (trip kind `signal`). */
   signal?: AbortSignal;
   /** Operator-declared attendance (journalled on run-started; P8 default false). */

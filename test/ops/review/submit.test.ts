@@ -3,7 +3,7 @@ import { promisify } from 'node:util';
 import { mkdtemp, readFile, writeFile, readdir, mkdir, access } from 'node:fs/promises';
 import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, expect, test, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { makeSubmit } from '../../../src/ops/review/submit.js';
 import { SnapshotSchema } from '../../../src/ops/review/internal/reviewOperation.js';
 vi.mock('node:os', async (importOriginal) => {
@@ -202,11 +202,13 @@ for (const refusal of ['oversize', 'scanner'])
     );
     await git('add', 'file');
     await git('commit', '-qm', 'head');
+    const scanner = join(cwd, 'refusing-scanner');
+    await writeFile(scanner, '#!/bin/sh\nexit 1\n', { mode: 0o755 });
     const calls: string[] = [];
     const result = await makeSubmit(async (raw) => {
       calls.push((JSON.parse(raw) as { op: string }).op);
       return JSON.stringify(caps);
-    })({ cwd, repo: 'owner/repo', target: 'target', scanner: '/bin/false' });
+    })({ cwd, repo: 'owner/repo', target: 'target', scanner });
     expect(result.status).toBe('failed');
     if (result.status === 'failed') {
       expect(result.error).toContain(
@@ -218,6 +220,109 @@ for (const refusal of ['oversize', 'scanner'])
     }
     expect(calls).toEqual(['capabilities']);
   });
+describe('snapshot scanner selection (explicit input, then CQ_AUTHOR_SNAPSHOT_SCANNER)', () => {
+  // Each scanner records its argv to its own marker so the test proves which one ran.
+  const recordingScanner = async (name: string, exit: number) => {
+    const path = join(cwd, name);
+    const marker = join(cwd, name + '.argv');
+    await writeFile(path, `#!/bin/sh\nprintf '%s\\n' "$@" > '${marker}'\nexit ${exit}\n`, {
+      mode: 0o700,
+    });
+    return { path, marker };
+  };
+  const ran = (marker: string) =>
+    access(marker).then(
+      () => true,
+      () => false,
+    );
+  const commitChange = async () => {
+    await writeFile(join(cwd, 'file'), 'changed');
+    await git('add', 'file');
+    await git('commit', '-qm', 'head');
+  };
+  const submitWith = async (input: Record<string, unknown>) => {
+    const calls: string[] = [];
+    const result = await makeSubmit(async (raw) => {
+      const wire = JSON.parse(raw) as { op: string };
+      calls.push(wire.op);
+      if (wire.op === 'capabilities') return JSON.stringify(caps);
+      return JSON.stringify({ v: 1, action: 'created', state: 'queued' });
+    })({ cwd, repo: 'owner/repo', target: 'target', ...input });
+    return { result, calls };
+  };
+
+  test('environment scanner is used when no explicit scanner is given', async () => {
+    await commitChange();
+    const env = await recordingScanner('env-scan', 0);
+    vi.stubEnv('CQ_AUTHOR_SNAPSHOT_SCANNER', env.path);
+    const { result, calls } = await submitWith({});
+    expect(result.status).toBe('ok');
+    expect(calls).toEqual(['capabilities', 'submit']);
+    const argv = (await readFile(env.marker, 'utf8')).trim().split('\n');
+    // argv is exactly repo, base, original head: no shell, no extra arguments.
+    expect(argv).toEqual([
+      await git('rev-parse', '--show-toplevel'),
+      await git('rev-parse', 'target'),
+      await git('rev-parse', 'HEAD'),
+    ]);
+  });
+
+  test('explicit scanner wins over the environment scanner', async () => {
+    await commitChange();
+    const env = await recordingScanner('env-refusing-scan', 1);
+    const explicit = await recordingScanner('explicit-scan', 0);
+    vi.stubEnv('CQ_AUTHOR_SNAPSHOT_SCANNER', env.path);
+    const { result, calls } = await submitWith({ scanner: explicit.path });
+    expect(result.status).toBe('ok');
+    expect(calls).toEqual(['capabilities', 'submit']);
+    expect(await ran(explicit.marker)).toBe(true);
+    expect(await ran(env.marker)).toBe(false);
+  });
+
+  test('an explicit invalid scanner is not replaced by the environment scanner', async () => {
+    await commitChange();
+    const env = await recordingScanner('env-scan', 0);
+    vi.stubEnv('CQ_AUTHOR_SNAPSHOT_SCANNER', env.path);
+    const { result, calls } = await submitWith({ scanner: 'relative-scan' });
+    expect(result.status).toBe('needs-human');
+    expect(calls).toEqual(['capabilities']);
+    expect(await ran(env.marker)).toBe(false);
+  });
+
+  test('no explicit and no environment scanner fails closed as configuration, sending nothing', async () => {
+    await commitChange();
+    vi.stubEnv('CQ_AUTHOR_SNAPSHOT_SCANNER', undefined);
+    const { result, calls } = await submitWith({});
+    expect(result.status).toBe('needs-human');
+    if (result.status === 'needs-human')
+      expect(result.reason).toContain('absolute snapshot scanner');
+    expect(calls).toEqual(['capabilities']);
+  });
+
+  for (const [label, value] of [
+    ['relative', 'scan'],
+    ['missing', '/nonexistent/cq-snapshot-scan'],
+  ] as const)
+    test(`a ${label} environment scanner fails closed as configuration`, async () => {
+      await commitChange();
+      vi.stubEnv('CQ_AUTHOR_SNAPSHOT_SCANNER', value);
+      const { result, calls } = await submitWith({});
+      expect(result.status).toBe('needs-human');
+      expect(calls).toEqual(['capabilities']);
+    });
+
+  test('a refusing environment scanner refuses the submission, sending nothing', async () => {
+    await commitChange();
+    const env = await recordingScanner('env-refusing-scan', 1);
+    vi.stubEnv('CQ_AUTHOR_SNAPSHOT_SCANNER', env.path);
+    const { result, calls } = await submitWith({});
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed')
+      expect(result.error).toContain('snapshot pre-upload scan refused');
+    expect(calls).toEqual(['capabilities']);
+    expect(await ran(env.marker)).toBe(true);
+  });
+});
 for (const action of ['created', 'joined'])
   test(`submit wait preserves ${action} admission action and returns observed state`, async () => {
     await writeFile(join(cwd, 'file'), 'head');
@@ -376,4 +481,120 @@ test('cached snapshots exceeding the decoded limit are refused before submit dis
     error: 'snapshot content exceeds bound',
   });
   expect(calls).toEqual(['capabilities']);
+});
+
+async function commitContent(content: string) {
+  await writeFile(join(cwd, 'file'), content);
+  await git('add', 'file');
+  await git('commit', '-qm', content);
+  return git('rev-parse', 'HEAD');
+}
+function reachableSubmit() {
+  const wires: { inputs: { base_commit: string } }[] = [];
+  const op = makeSubmit(async (raw) => {
+    const wire = JSON.parse(raw) as { op: string; inputs: { base_commit: string } };
+    if (wire.op === 'capabilities') return JSON.stringify(caps);
+    wires.push(wire);
+    return JSON.stringify({ v: 1, action: 'created', state: 'queued' });
+  });
+  return { op, wires };
+}
+test('stale local target reports upstream divergence without moving the base', async () => {
+  const local = await git('rev-parse', 'target');
+  const upstream = await commitContent('upstream');
+  await git('update-ref', 'refs/remotes/origin/target', upstream);
+  await git('config', 'remote.origin.url', '.');
+  await git('config', 'remote.origin.fetch', '+refs/heads/*:refs/remotes/origin/*');
+  await git('config', 'branch.target.remote', 'origin');
+  await git('config', 'branch.target.merge', 'refs/heads/target');
+  await commitContent('feature');
+  const { op, wires } = reachableSubmit();
+  const input = { cwd, repo: 'owner/repo', target: 'target', reachable: true, requestId: 'stale' };
+  expect(await op(input)).toMatchObject({
+    status: 'ok',
+    value: { targetFreshness: { local, upstream, ahead: 0, behind: 1 } },
+  });
+  expect(wires[0]?.inputs.base_commit).toBe(local);
+  const newer = await commitContent('newer');
+  await git('update-ref', 'refs/remotes/origin/target', newer);
+  await git('update-ref', 'refs/heads/target', newer);
+  expect(await op(input)).toMatchObject({
+    status: 'ok',
+    value: { targetFreshness: { local, upstream, ahead: 0, behind: 1 } },
+  });
+  expect(wires[1]).toEqual(wires[0]);
+  expect(wires[0]).not.toHaveProperty('targetFreshness');
+});
+test('explicit base selects an ancestor and refuses a different base on retry', async () => {
+  const base = await commitContent('middle');
+  await commitContent('feature');
+  const { op, wires } = reachableSubmit();
+  const input = {
+    cwd,
+    repo: 'owner/repo',
+    target: 'target',
+    reachable: true,
+    requestId: 'explicit-base',
+    base,
+  };
+  expect(await op(input)).toMatchObject({ status: 'ok' });
+  expect(wires[0]?.inputs.base_commit).toBe(base);
+  expect(await op({ ...input, base: 'target' })).toMatchObject({ status: 'failed' });
+  expect(wires).toHaveLength(1);
+});
+test('explicit base must be an ancestor of HEAD before any network call', async () => {
+  await git('checkout', '-qb', 'other');
+  const base = await commitContent('other');
+  await git('checkout', '-q', 'target');
+  await commitContent('feature');
+  const { op, wires } = reachableSubmit();
+  expect(
+    await op({ cwd, repo: 'owner/repo', target: 'target', base, reachable: true }),
+  ).toMatchObject({ status: 'failed', error: expect.stringContaining('ancestor') as unknown });
+  expect(wires).toHaveLength(0);
+});
+test('remote-only target resolves a unique origin tracking ref', async () => {
+  const base = await git('rev-parse', 'target');
+  await git('update-ref', 'refs/remotes/origin/remote-target', base);
+  await git('update-ref', 'refs/remotes/origin/topic/remote-target', base);
+  await commitContent('feature');
+  const { op, wires } = reachableSubmit();
+  expect(
+    await op({ cwd, repo: 'owner/repo', target: 'remote-target', reachable: true }),
+  ).toMatchObject({
+    status: 'ok',
+  });
+  expect(wires[0]?.inputs.base_commit).toBe(base);
+});
+test('remote-only target refuses multiple remotes, but explicit remote ref works', async () => {
+  const base = await git('rev-parse', 'target');
+  await git('update-ref', 'refs/remotes/origin/remote-target', base);
+  await git('update-ref', 'refs/remotes/other/remote-target', base);
+  await commitContent('feature');
+  const { op, wires } = reachableSubmit();
+  expect(
+    await op({ cwd, repo: 'owner/repo', target: 'remote-target', reachable: true }),
+  ).toMatchObject({
+    status: 'failed',
+    error: expect.stringContaining('ambiguous') as unknown,
+  });
+  expect(wires).toHaveLength(0);
+  expect(
+    await op({
+      cwd,
+      repo: 'owner/repo',
+      target: 'refs/remotes/origin/remote-target',
+      reachable: true,
+    }),
+  ).toMatchObject({ status: 'ok' });
+});
+test('target branch and tag collision is refused even when commits coincide', async () => {
+  await git('tag', 'target');
+  await commitContent('feature');
+  const { op, wires } = reachableSubmit();
+  expect(await op({ cwd, repo: 'owner/repo', target: 'target', reachable: true })).toMatchObject({
+    status: 'failed',
+    error: expect.stringContaining('ambiguous') as unknown,
+  });
+  expect(wires).toHaveLength(0);
 });

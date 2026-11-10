@@ -42,6 +42,7 @@ import { checkoutWriterStdio, trackCheckoutWriter } from './checkoutWriterContex
 // SPAWN FAILURES ARE DATA, NOT THROWS: a missing binary (ENOENT) surfaces
 // on `close` as `spawnError` — the driver maps it to a stopReason 'error'
 // WorkerResult and NEVER throws past the frozen seam once spawned.
+import { ENV_NAME_PATTERN, parsePassthrough, urlValueRefusal } from '../config/parsers.js';
 import { processSignalCleanupStarted, registerProcessSignalCleanup } from './process-signals.js';
 import { spawn } from 'node:child_process';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
@@ -211,7 +212,7 @@ export function paseoParentLinkFromAgentId(agentId: string | undefined): string 
 }
 
 /** The POSIX/Windows-standard environment variable NAME shape (r2). */
-const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const ENV_NAME = ENV_NAME_PATTERN;
 const ENV_PASSTHROUGH = 'CQ_RUN_ENV_PASSTHROUGH';
 
 /**
@@ -235,24 +236,24 @@ export function buildChildEnv(
   for (const name of extraAllowlist) {
     if (!ENV_NAME.test(name)) {
       throw new Error(
-        `envAllowlist entries must be env var names matching ${String(ENV_NAME)}, got ${JSON.stringify(name)}`,
+        `envAllowlist entries must be env var names matching ${String(ENV_NAME)} (a malformed entry is not echoed)`,
       );
     }
   }
   const child = Object.create(null) as Record<string, string>;
-  const configuredAllowlist = (parentEnv[ENV_PASSTHROUGH] ?? '')
-    .split(/[,\s]+/)
-    .filter((name) => name.length > 0);
-  for (const name of configuredAllowlist) {
-    if (!ENV_NAME.test(name)) {
-      throw new Error(
-        `${ENV_PASSTHROUGH} entries must be env var names matching ${String(ENV_NAME)}, got ${JSON.stringify(name)}`,
-      );
-    }
-  }
+  // The ONE passthrough grammar and deny set (src/config/parsers.ts).
+  const configuredAllowlist = parsePassthrough(parentEnv[ENV_PASSTHROUGH]);
+  const operatorNames = new Set([...extraAllowlist, ...configuredAllowlist]);
   for (const name of [...DEFAULT_CHILD_ENV_ALLOWLIST, ...extraAllowlist, ...configuredAllowlist]) {
     const value = parentEnv[name];
-    if (value !== undefined) child[name] = value;
+    if (value === undefined) continue;
+    // A passthrough value that carries URL credentials is refused, naming the
+    // variable (never the value).
+    if (operatorNames.has(name)) {
+      const refusal = urlValueRefusal(name, value);
+      if (refusal !== undefined) throw new Error(`child env: ${refusal}`);
+    }
+    child[name] = value;
   }
   if (overrides !== undefined) {
     for (const [name, value] of Object.entries(overrides)) child[name] = value;

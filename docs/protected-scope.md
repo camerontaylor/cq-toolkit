@@ -119,40 +119,13 @@ Protecting it at merge time would add a second one for code that cannot judge.
 
 ## Accepted residuals (named, with their fixes)
 
-These are open owner decisions. R1 is not new: none of its files was
-protected before this change. R2 is mostly not new, with one exception.
-Before this change, `src/ops/merge/classify*` and `src/selfhost/candidates.ts`
-were protected as admission logic, and this change drops them because the gate
-re-judges every PR they admit. That is a deliberate narrowing, and **owner
-acceptance is needed**. It also widens R2 by those three files: they run in
-the `self-merge-prs` and `self-review-loop` jobs. Those protections never
-covered those jobs' credentials, though. The other ~60 files in the same
-closures, including the drivers and harness, were already unprotected.
+R1 is closed; R2 remains a historical residual of the earlier posture.
 
-**R1: the CLI dispatch shell in the trusted verifier jobs.** Two trusted
-calls still dispatch through `dist/cli.js`: `cq-policy`'s `gates.policyDiff`,
-and `cq-verify`'s compute job, which runs `ratchet.recomputeTypecheck` to
-produce the typecheck count. On every dispatch, `src/registry/index.ts`
-imports every `src/ops/*/registry.ts`. So the CLI shell (`src/cli/**`,
-`src/kernel/**`, `src/registry/**`) and the static imports of each op
-registry run in those jobs. That is about 85 files, mostly in-development
-code, and they are not protected. A malicious change there needs I2
-acceptance, then promotion. Once deployed, it could forge the PR-level
-`cq/policy` check, or the typecheck count that feeds `cq/ratchet`, so a
-**typecheck regression could promote**. It cannot get a protected-path or
-definition change past the gate: the gate is authoritative (D-G.5) and
-recomputes `policyDiff` in-process, without the CLI, including the monotonic
-baseline guard.
-
-**Narrowed in this PR:** the `cq/ratchet` verdict itself (`judge`) now runs
-in-process (`dist/selfhost/verify-ratchet.js`, readiness T2), so coverage and
-baseline judgement no longer load the registry.
-
-**Fix (the next protected batch):** give `recomputeTypecheck` and the PR-level
-`policyDiff` their own `dist/selfhost/` entry points too. The alternative is
-to protect `src/cli/**`, `src/kernel/**` and `src/registry/**` now. That only
-narrows R1, because the registry closures still load, and it protects the
-kernel exactly while Phase 1 is revising it.
+**R1 (closed 2026-10-17): the CLI dispatch shell in trusted verifier jobs.**
+`cq-policy` and `cq-verify` now invoke dedicated `policy-diff` and
+`recompute-typecheck` selfhost entries. Their trusted jobs no longer dispatch
+through the CLI or load its registry. The trusted-job and closure tests assert
+that boundary.
 
 **R2: privileged jobs that run unprotected code.**
 
@@ -172,20 +145,18 @@ launcher already strips runner credentials from run children
 (`test/adversarial/boundary-rows.test.ts` A11/A17); the remaining gap is the
 in-process code.
 
-`test/ops/gates/protectedPaths.trustedJobs.test.ts` pins this table. Every script or
-selfhost entry that a privileged job runs must be protected or appear in its
-residual list, and every listed entry must still be in use. Adding a
-privileged executor therefore fails CI until someone classifies it.
+`test/ops/gates/protectedPaths.trustedJobs.test.ts` classifies jobs that
+build or run the trust checkout and pins their selfhost entry points. It does
+not enforce the R2 table or classify every privileged executor.
 
 ## How the scope stays honest
 
-`test/ops/gates/protectedPaths.closure.test.ts` follows the value-import closure of
-the judging entry points and fails when a file is unprotected. The entry
-points include the ratchet engine that `loadEngine` imports, parsed from the
-script. It also pins which `trust/dist/...` calls the workflows contain.
-`test/ops/gates/policyDiff.own-policy-list.test.ts` fails if a protected entry matches no
-tracked file. A pending entry, one whose tree has not landed yet, must be
-named in that test, and none is pending today.
+`test/ops/gates/protectedPaths.closure.test.ts` walks the value-import closure
+of the judging entry points, fails on unclassified edges, and asserts that the
+judges are reached without the CLI shell. Under the advisory posture it does
+not require every closure file to match the privileged list.
+`test/ops/gates/policyDiff.own-policy-list.test.ts` fails if a protected entry
+matches no tracked file. A pending entry must be named in that test.
 
 ## The D-P revision window
 

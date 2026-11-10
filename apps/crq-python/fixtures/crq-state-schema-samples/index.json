@@ -1,0 +1,235 @@
+{
+  "note": "Representative crq on-disk state derived from the Python writers at 4fb74ca3b. No secrets and no host config overlay. map_checks validate arbitrary-key map values the checked-in schema vocabulary cannot traverse.",
+  "documents": [
+    {
+      "path": "queue.json",
+      "schema": "queue.schema.json",
+      "map_checks": [
+        {
+          "at": [
+            "coverage",
+            "paths"
+          ],
+          "rule": ["properties", "coverage", "properties", "paths", "additionalProperties"]
+        },
+        {
+          "at": [
+            "coverage",
+            "runs"
+          ],
+          "rule": ["properties", "coverage", "properties", "runs", "additionalProperties"]
+        },
+        {
+          "at": [
+            "coverage",
+            "observations"
+          ],
+          "rule": ["properties", "coverage", "properties", "observations", "additionalProperties"]
+        },
+        {
+          "at": [
+            "author_requests"
+          ],
+          "rule": ["properties", "author_requests", "additionalProperties"]
+        },
+        {
+          "at": [
+            "backfill_families"
+          ],
+          "rule": ["properties", "backfill_families", "additionalProperties"]
+        },
+        {
+          "at": [
+            "backfill_scope_failures"
+          ],
+          "rule": ["properties", "backfill_scope_failures", "additionalProperties"]
+        },
+        {
+          "at": [
+            "merged_current_requests"
+          ],
+          "rule": ["properties", "merged_current_requests", "additionalProperties"]
+        },
+        {
+          "at": [
+            "backfill_path_lineages"
+          ],
+          "rule": ["properties", "backfill_path_lineages", "additionalProperties"]
+        },
+        {
+          "at": [
+            "legacy_coverage_failure_runs"
+          ],
+          "rule": ["properties", "legacy_coverage_failure_runs", "additionalProperties"]
+        }
+      ]
+    },
+    {
+      "path": "queue-usage-unavailable.json",
+      "schema": "queue.schema.json"
+    },
+    {
+      "path": "queue-backfill-halted.json",
+      "schema": "queue.schema.json"
+    },
+    {
+      "path": "coverage.json",
+      "schema": "coverage.schema.json",
+      "map_checks": [
+        {
+          "at": [
+            "paths"
+          ],
+          "rule": ["properties", "paths", "additionalProperties"]
+        },
+        {
+          "at": [
+            "runs"
+          ],
+          "rule": ["properties", "runs", "additionalProperties"]
+        },
+        {
+          "at": [
+            "observations"
+          ],
+          "rule": ["properties", "observations", "additionalProperties"]
+        }
+      ]
+    },
+    {
+      "path": "events.jsonl",
+      "schema": "events.schema.json",
+      "lines": true
+    },
+    {
+      "path": "work.jsonl",
+      "schema": "work-record.schema.json",
+      "lines": true
+    },
+    {
+      "path": "status.json",
+      "schema": "status.schema.json"
+    },
+    {
+      "path": "runs/pr1304-20261109T082400Z/meta.json",
+      "schema": "run-meta.schema.json"
+    },
+    {
+      "path": "runs/pr1304-20261109T082400Z/exit.json",
+      "schema": "run-exit.schema.json"
+    },
+    {
+      "path": "runs/pr1304-20261109T082400Z/classification.json",
+      "schema": "run-classification.schema.json",
+      "map_checks": [
+        {
+          "at": [
+            "severity_counts"
+          ],
+          "rule": ["properties", "severity_counts", "additionalProperties"]
+        }
+      ]
+    },
+    {
+      "path": "runs/pr1304-20261109T082400Z/review.pid",
+      "schema": "run-pidfile.schema.json"
+    },
+    {
+      "path": "runs/pr1304-20261109T082400Z/secret-scan.json",
+      "schema": "run-secret-scan.schema.json"
+    },
+    {
+      "path": "runs/backfill-0123456789abcdef-g0-20261109T091200Z/meta.json",
+      "schema": "run-meta.schema.json"
+    },
+    {
+      "path": "runs/backfill-0123456789abcdef-g0-20261109T091200Z/submission.json",
+      "schema": "run-submission.schema.json"
+    },
+    {
+      "path": "repair/inbox/crq-pr1304-20261109T082400Z-F1.json",
+      "schema": "repair-job.schema.json"
+    },
+    {
+      "path": "repair/inbox/crq-legacy-run-F1.json",
+      "schema": "repair-job.schema.json"
+    },
+    {
+      "path": "repair/crq-pr1304-20261109T082400Z-F1/result.json",
+      "schema": "repair-result.schema.json"
+    },
+    {
+      "path": "repair/crq-pr1304-20261109T082400Z-F1/publication.json",
+      "schema": "repair-publication.schema.json"
+    },
+    {
+      "path": "repair/provider-cooldowns.json",
+      "schema": "provider-cooldowns.schema.json",
+      "map_checks": [
+        {
+          "at": [],
+          "rule": ["additionalProperties"]
+        }
+      ]
+    },
+    {
+      "path": "heartbeat.json",
+      "schema": "heartbeat.schema.json"
+    },
+    {
+      "path": "next-review-at",
+      "schema": "next-review-at.schema.json",
+      "text": true
+    },
+    {
+      "path": "repair/rate-limited-until",
+      "schema": "repair-pause.schema.json"
+    },
+    {
+      "path": "backfill/latest-ranked.json",
+      "schema": "backfill-inventory.schema.json"
+    },
+    {
+      "path": "backfill/latest-report.json",
+      "schema": "backfill-report.schema.json",
+      "map_checks": [
+        {
+          "at": [
+            "tiers"
+          ],
+          "rule": ["properties", "tiers", "additionalProperties"]
+        },
+        {
+          "at": [
+            "states"
+          ],
+          "rule": ["properties", "states", "additionalProperties"]
+        }
+      ]
+    },
+    {
+      "path": "backfill/baseline.json",
+      "schema": "backfill-baseline.schema.json"
+    },
+    {
+      "path": "backfill/publish-request.json",
+      "schema": "backfill-publish-request.schema.json"
+    },
+    {
+      "path": "backfill/publication-failure.json",
+      "schema": "backfill-publication-failure.schema.json"
+    },
+    {
+      "path": "backfill/findings/triage/1414141414141414141414141414141414141414141414141414141414141414.json",
+      "schema": "backfill-triage.schema.json"
+    },
+    {
+      "path": "backfill/findings/delivery/1414141414141414141414141414141414141414141414141414141414141414.json",
+      "schema": "backfill-delivery-request.schema.json"
+    },
+    {
+      "path": "backfill/findings/receipts/1414141414141414141414141414141414141414141414141414141414141414.json",
+      "schema": "backfill-delivery-receipt.schema.json"
+    }
+  ]
+}

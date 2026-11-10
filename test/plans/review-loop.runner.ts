@@ -68,6 +68,7 @@ export const runLoop = async (
     /** The loop's own identity (the settle gate's resolve-carry authorization). */
     responderLogin?: string;
     engineObservedHead?: string;
+    engineConcurrency?: number;
     /** Explicit publication opt-in (the composition passes `input.push === true`). */
     publish?: boolean;
   } = {},
@@ -147,7 +148,9 @@ export const runLoop = async (
     registry: memoryRegistry(),
     driver: { model: 'test-model', provider: 'test-provider' },
     driverRegistryView: view,
-    ...(o.engineObservedHead !== undefined ? { engineOwnedConcurrency: 1 } : {}),
+    ...(o.engineConcurrency !== undefined || o.engineObservedHead !== undefined
+      ? { engineOwnedConcurrency: o.engineConcurrency ?? 1 }
+      : {}),
     // The A12c escape is EXPLICIT and defaults OFF (r1 M4): these tests
     // exercise dispatched fix runs, so they opt in — the shipped sweep does
     // the same (unattended by design), and the journal records

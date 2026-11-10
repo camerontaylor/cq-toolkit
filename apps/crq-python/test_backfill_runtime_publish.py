@@ -111,6 +111,41 @@ class RuntimeTest(RuntimeTestBase):
         runtime.harvest(self.c, self.q, self.item, rdir, {"run_id": "vendor-1", "head": self.item["head"]}, {"counted": True, "outcome": "completed"}, 0)
         self.assertEqual(self.item["state"], "publication-pending")
 
+    def test_refusal_event_failure_preserves_quarantine_and_replays_after_reload(self):
+        runtime.usage_context(self.c, self.q, {"remaining": 2}, [])
+        self.q["backfill_starts_at_observation"] = 0
+        self.c.launch = mock.Mock(return_value=None)
+        self.refresh_snapshots()
+        original_event = runtime.state_event
+        reason = "launch refused before vendor binding"
+        def failing_event(c, queue, item, at, event_reason):
+            if event_reason == reason:
+                raise OSError("publication unavailable")
+            return original_event(c, queue, item, at, event_reason)
+        with mock.patch.object(runtime, "state_event", side_effect=failing_event):
+            with self.assertRaisesRegex(OSError, "publication unavailable"):
+                runtime.select(self.c, self.q, [], False, None)
+        self.q = ledger.loads(self.saved[-1])
+        self.item = self.q["items"][0]
+        self.assertEqual(self.item["state"], "quarantined")
+        self.assertEqual(self.item["vendor_state"], "terminal")
+        self.assertFalse(jobs.is_execution_owner(self.item))
+        self.assertEqual(self.item["failures"], 1)
+        self.assertEqual(self.item["refusal_state_event"]["reason"], reason)
+        self.assertTrue(all(h["quota_state"] == "released"
+                            for h in self.q["backfill_reservations"].values()))
+        runtime.select(self.c, self.q, [], True, None)
+        self.assertIn("refusal_state_event", self.item)
+        runtime.select(self.c, self.q, [], False, None)
+        self.assertNotIn("refusal_state_event", self.item)
+        self.assertEqual(self.item["state"], "quarantined")
+        self.assertEqual(self.item["failures"], 1)
+        self.c.launch.assert_called_once()
+        _, _, outbox, _ = runtime.services(self.c, self.config)
+        events = [e for e in outbox.retained() if e["payload"].get("reason") == reason]
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["payload"]["state"], "quarantined")
+
     def test_exception_before_run_binding_still_holds_unknown_launch(self):
         runtime.usage_context(self.c, self.q, {"remaining": 2}, [])
         self.q["backfill_starts_at_observation"] = 0
