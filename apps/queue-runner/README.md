@@ -86,8 +86,11 @@ same preserved archive: the archive and content digests and all 4,047 paths
 matched, `fs-ext` 2.1.1 flock contention held, and the runner returned exit 1,
 status `indeterminate`, and the incomplete-plan detail. A negative run with a
 fake Node that emitted valid `fs-ext` JSON but exited 0 with status `success`
-failed at the smoke check with `runner smoke expected exit 1, got 0`, so a
-failed or regressed runner cannot pass verification.
+failed at the smoke check with `runner smoke expected exit 1, got 0`. The
+smoke rejects the tested exit-0 success output, exits other than 1, statuses
+other than `indeterminate`, and missing or empty detail. It does not prove
+that every runner regression is detected: an artifact that still exits 1 with
+`indeterminate` and a non-empty detail can pass.
 
 Evidence is preserved outside the code worktree at
 `~/crq-artifact-runs/c76666d07/` on pluto: the archive, sidecar,
