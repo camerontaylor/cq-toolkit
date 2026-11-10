@@ -31,6 +31,14 @@ export function createAreaReviewPlan(input: CreateReviewPlanInput): ReviewPlan {
     return plan;
   });
   const sessions = plans.flatMap((plan) => plan.sessions);
+  // Each area plan states its own honesty statements; dropping them would let the
+  // merged plan report verification an unverified area session never had.
+  for (const plan of plans) {
+    for (const limitation of plan.limitations)
+      if (!original.limitations.includes(limitation)) original.limitations.push(limitation);
+    for (const advisory of plan.advisories)
+      if (!original.advisories.includes(advisory)) original.advisories.push(advisory);
+  }
   if (areas.crossAreaPass.required) {
     const prompt = [
       'Review cross-area contracts and their consumers for this change. Use read-only tools to verify interactions.',
