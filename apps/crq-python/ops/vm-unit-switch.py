@@ -401,8 +401,130 @@ def _direct_text(value):
     return ((direct.get("stdout") or "") + (direct.get("stderr") or "")).lower()
 
 
+def _boot_id(value):
+    if not isinstance(value, str):
+        return None
+    if not re.fullmatch(
+            r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+            value):
+        return None
+    return value
+
+
+def _manager_identity(value):
+    if not isinstance(value, dict):
+        return None
+    pid = value.get("pid")
+    invocation = value.get("invocation_id")
+    if not isinstance(pid, str) or not pid.isdigit() or int(pid) <= 0:
+        return None
+    if not isinstance(invocation, str) \
+            or re.fullmatch(r"[0-9a-f]{32}", invocation) is None:
+        return None
+    return {"pid": pid, "invocation_id": invocation}
+
+
+def _completions(value):
+    if not isinstance(value, dict):
+        return None
+    completions = value.get("completions")
+    return completions if isinstance(completions, list) else None
+
+
+def _count(value, key):
+    count = value.get(key)
+    return count if type(count) is int and count >= 0 else None
+
+
+def _empty_jobs(value):
+    jobs = value.get("jobs")
+    return isinstance(jobs, list) and not jobs
+
+
+def _no_owned(value):
+    owned = value.get("owned")
+    if not isinstance(owned, dict):
+        return False
+    pids = owned.get("pids")
+    return (owned.get("main_pid") == 0
+            and isinstance(pids, list)
+            and not pids)
+
+
+def _sha_present(value):
+    sha = value.get("sha256") if isinstance(value, dict) else None
+    return isinstance(sha, str) and HEX64.fullmatch(sha) is not None
+
+
+def _host_identity_ok(host, kind):
+    before = host.get("before") or {}
+    after = host.get("after") or {}
+    before_boot = _boot_id(before.get("boot_id"))
+    after_boot = _boot_id(after.get("boot_id"))
+    before_manager = _manager_identity(before.get("manager"))
+    after_manager = _manager_identity(after.get("manager"))
+    if (before_boot is None or after_boot is None
+            or before_manager is None or after_manager is None):
+        return False
+    boot_changed = before_boot != after_boot
+    manager_changed = (before_manager["invocation_id"]
+                       != after_manager["invocation_id"])
+    if host.get("boot_id_changed") is not boot_changed:
+        return False
+    if host.get("manager_invocation_changed") is not manager_changed:
+        return False
+    if kind == "manager":
+        if boot_changed or not manager_changed:
+            return False
+    else:
+        if not boot_changed or not manager_changed:
+            return False
+        if _boot_id(host.get("boot_id_before")) != before_boot:
+            return False
+        if _boot_id(host.get("boot_id_after")) != after_boot:
+            return False
+    return True
+
+
+def _ambiguity_retained(phase):
+    if not isinstance(phase, dict):
+        return False
+    recovery = phase.get("recovery") or {}
+    repeat = phase.get("repeat") or {}
+    before = recovery.get("record_before") or {}
+    after = recovery.get("record_after") or {}
+    repeat_after = repeat.get("record_after") or {}
+    return (
+        (recovery.get("cli") or {}).get("rc") == 3
+        and (repeat.get("cli") or {}).get("rc") == 3
+        and _sha_present(before)
+        and _sha_present(after)
+        and _sha_present(repeat_after)
+        and after["sha256"] == before["sha256"]
+        and repeat_after["sha256"] == before["sha256"]
+        and after.get("outcome") == "pending"
+        and after.get("phase") == "activation_pending")
+
+
+def _reset_preserved(phase):
+    if not isinstance(phase, dict):
+        return False
+    before = phase.get("record_before") or {}
+    after = phase.get("record_after") or {}
+    return (
+        _sha_present(before)
+        and _sha_present(after)
+        and after["sha256"] == before["sha256"]
+        and phase.get("runtime") == PYTHON_RUNTIME
+        and (phase.get("service") or {}).get("LoadState") == "loaded"
+        and (phase.get("service") or {}).get("ActiveState") == "inactive"
+        and (phase.get("timer") or {}).get("ActiveState") == "inactive"
+        and (phase.get("timer") or {}).get("UnitFileState") == "enabled")
+
+
 def _matrix_checks(phases, restarts, reboots, prepared, problems):
     checks = {}
+    case_no_work = {}
     restarts = restarts or {}
     reboots = reboots or {}
     service_path = "/home/%s/.config/systemd/user/crq-tick.service" % vm.GUEST_USER
@@ -415,6 +537,7 @@ def _matrix_checks(phases, restarts, reboots, prepared, problems):
             for suffix in ("_boundary", "_identity", "_journal_metadata_fence",
                            "_recovery_outcome", "_preserved_state"):
                 checks[case + suffix] = False
+            case_no_work[case] = False
             continue
         record = boundary.get("record") or {}
         expected_phase = ("activation_pending"
@@ -423,6 +546,23 @@ def _matrix_checks(phases, restarts, reboots, prepared, problems):
         expected_staged = _expected_staged(spec)
         staged = boundary.get("staged") or {}
         fence = boundary.get("fence") or {}
+        boundary_before = boundary.get("before") or {}
+        boundary_after = boundary.get("snapshot") or {}
+        boundary_before_completions = _completions(boundary_before)
+        boundary_after_completions = _completions(boundary_after)
+        boundary_before_count = _count(boundary, "completions_before")
+        boundary_after_count = _count(boundary, "completions_after")
+        boundary_counts_ok = (
+            boundary_before_completions is not None
+            and boundary_after_completions is not None
+            and boundary_before_count is not None
+            and boundary_after_count is not None
+            and len(boundary_before_completions) == boundary_before_count
+            and len(boundary_after_completions) == boundary_after_count
+            and boundary_before_count == boundary_after_count
+            and boundary_before_completions == boundary_after_completions)
+        boundary_jobs_ok = _empty_jobs(boundary)
+        boundary_owned_ok = _no_owned(boundary)
         checks[case + "_boundary"] = (
             (boundary.get("cli") or {}).get("rc") not in (0, None)
             and (spec["boundary"] != "restore_staged"
@@ -436,18 +576,75 @@ def _matrix_checks(phases, restarts, reboots, prepared, problems):
             and staged.get("type") == expected_staged["type"]
             and (expected_staged.get("runtime") is None
                  or staged.get("runtime") == expected_staged["runtime"])
-            and boundary.get("completions_before")
-            == boundary.get("completions_after")
-            and (boundary.get("owned") or {}).get("main_pid") == 0
-            and not (boundary.get("owned") or {}).get("pids"))
+            and boundary_counts_ok
+            and boundary_jobs_ok
+            and boundary_owned_ok)
+
+        observe_snapshot = observe.get("snapshot") or {}
+        observe_completions = _completions(observe_snapshot)
+        observe_before_count = _count(observe, "completions_before")
+        observe_after_count = _count(observe, "completions_after")
+        observe_counts_ok = (
+            observe_completions is not None
+            and observe_before_count is not None
+            and observe_after_count is not None
+            and boundary_after_count is not None
+            and boundary_after_completions is not None
+            and observe.get("before") == boundary_after
+            and observe_before_count == boundary_after_count
+            and observe_after_count == len(observe_completions)
+            and observe_before_count == observe_after_count
+            and observe_completions == boundary_after_completions)
+        observe_jobs_ok = _empty_jobs(observe)
+        observe_owned_ok = _no_owned(observe)
+        case_no_work[case] = (
+            boundary_counts_ok and observe_counts_ok
+            and boundary_jobs_ok and observe_jobs_ok
+            and boundary_owned_ok and observe_owned_ok)
 
         identity = observe.get("identity") or {}
+        boundary_boot = _boot_id(boundary_after.get("boot_id"))
+        observe_boot = _boot_id(observe_snapshot.get("boot_id"))
+        before_boot = _boot_id(boundary_before.get("boot_id"))
+        boundary_manager = _manager_identity(boundary_after.get("manager"))
+        observe_manager = _manager_identity(observe_snapshot.get("manager"))
+        before_manager = _manager_identity(boundary_before.get("manager"))
+        identity_before_boot = _boot_id(identity.get("boot_id_before"))
+        identity_after_boot = _boot_id(identity.get("boot_id_after"))
+        identity_before_manager = _manager_identity(
+            identity.get("manager_before"))
+        identity_after_manager = _manager_identity(
+            identity.get("manager_after"))
+        identity_consistent = (
+            boundary_boot is not None and observe_boot is not None
+            and before_boot is not None
+            and boundary_manager is not None and observe_manager is not None
+            and before_manager is not None
+            and identity_before_boot is not None
+            and identity_after_boot is not None
+            and identity_before_manager is not None
+            and identity_after_manager is not None
+            and boundary_boot == before_boot
+            and boundary_manager == before_manager
+            and boundary_boot == identity_before_boot
+            and observe_boot == identity_after_boot
+            and boundary_manager == identity_before_manager
+            and observe_manager == identity_after_manager)
+        derived_boot_changed = (
+            boundary_boot is not None and observe_boot is not None
+            and boundary_boot != observe_boot)
+        derived_manager_changed = (
+            boundary_manager is not None and observe_manager is not None
+            and boundary_manager["invocation_id"]
+            != observe_manager["invocation_id"])
+        flags_consistent = (
+            identity.get("boot_id_changed") is derived_boot_changed
+            and identity.get("manager_changed") is derived_manager_changed)
         host = (restarts if spec["kind"] == "manager" else reboots).get(case) or {}
         if spec["kind"] == "manager":
             command = " ".join((host.get("command") or {}).get("argv") or [])
             host_ok = (host.get("kind") == "user_manager_restart"
-                       and host.get("boot_id_changed") is False
-                       and host.get("manager_invocation_changed") is True
+                       and _host_identity_ok(host, "manager")
                        and host.get("qemu_identity_verified") is True
                        and "restart" in command
                        and "user@" in command
@@ -455,24 +652,28 @@ def _matrix_checks(phases, restarts, reboots, prepared, problems):
         else:
             issued = " ".join((host.get("issued") or {}).get("argv") or [])
             host_ok = (host.get("kind") == "guest_reboot"
-                       and host.get("boot_id_changed") is True
-                       and host.get("manager_invocation_changed") is True
+                       and _host_identity_ok(host, "reboot")
                        and host.get("qemu_identity_verified") is True
                        and "reboot" in issued
                        and isinstance(host.get("ssh_ready"), dict)
                        and isinstance(host.get("manager_ready"), dict))
         checks[case + "_identity"] = (
-            identity.get("boot_id_changed") == (spec["kind"] == "reboot")
-            and identity.get("manager_changed") is True
+            identity_consistent
+            and flags_consistent
+            and derived_manager_changed
+            and derived_boot_changed == (spec["kind"] == "reboot")
             and host_ok)
 
+        record_before = observe.get("record_before") or {}
+        record_after = observe.get("record_after") or {}
         checks[case + "_journal_metadata_fence"] = (
-            (observe.get("record_after") or {}).get("sha256")
-            == (observe.get("record_before") or {}).get("sha256")
-            and (observe.get("record_after") or {}).get("outcome")
-            == (observe.get("record_before") or {}).get("outcome")
-            and (observe.get("record_after") or {}).get("phase")
-            == (observe.get("record_before") or {}).get("phase")
+            _sha_present(record_before)
+            and _sha_present(record_after)
+            and record_after["sha256"] == record_before["sha256"]
+            and record_before.get("outcome") == "pending"
+            and record_before.get("phase") == expected_phase
+            and record_after.get("outcome") == "pending"
+            and record_after.get("phase") == expected_phase
             and observe.get("metadata_match") is True
             and (observe.get("fence") or {}).get("service", {}).get("LoadState")
             == "masked"
@@ -486,35 +687,42 @@ def _matrix_checks(phases, restarts, reboots, prepared, problems):
             and (expected_staged.get("runtime") is None
                  or (observe.get("staged") or {}).get("runtime")
                  == expected_staged["runtime"])
-            and observe.get("completions_before")
-            == observe.get("completions_after")
-            and (observe.get("owned") or {}).get("main_pid") == 0
-            and not (observe.get("owned") or {}).get("pids"))
+            and observe_counts_ok
+            and observe_jobs_ok
+            and observe_owned_ok)
 
         recovery = observe.get("recovery") or {}
         repeat = observe.get("repeat") or {}
+        recovery_before = recovery.get("record_before") or {}
+        recovery_after = recovery.get("record_after") or {}
+        recovery_record = recovery.get("record") or {}
+        repeat_after = repeat.get("record_after") or {}
         if spec["boundary"] in ("drained", "restore_staged"):
             checks[case + "_recovery_outcome"] = (
                 (recovery.get("cli") or {}).get("rc") == 0
-                and (recovery.get("record") or {}).get("outcome")
-                == "rolled_back"
-                and (recovery.get("record") or {}).get("phase")
+                and _sha_present(recovery_before)
+                and recovery_record.get("outcome") == "rolled_back"
+                and recovery_record.get("phase")
                 == "restore_activation_pending"
+                and _sha_present(recovery_record)
                 and (recovery.get("restored") or {}).get("runtime")
                 == spec["prior_runtime"]
                 and (recovery.get("restored") or {}).get("staged", {}).get("type")
                 == "missing"
                 and (repeat.get("cli") or {}).get("rc") == 2
-                and (repeat.get("record_after") or {}).get("sha256")
-                == (recovery.get("record") or {}).get("sha256"))
+                and _sha_present(repeat_after)
+                and repeat_after["sha256"] == recovery_record["sha256"])
         else:
             checks[case + "_recovery_outcome"] = (
                 (recovery.get("cli") or {}).get("rc") == 3
-                and (recovery.get("record_after") or {}).get("sha256")
-                == (recovery.get("record_before") or {}).get("sha256")
+                and _sha_present(recovery_before)
+                and _sha_present(recovery_after)
+                and recovery_after["sha256"] == recovery_before["sha256"]
+                and recovery_after.get("outcome") == "pending"
+                and recovery_after.get("phase") == "activation_pending"
                 and (repeat.get("cli") or {}).get("rc") == 3
-                and (repeat.get("record_after") or {}).get("sha256")
-                == (recovery.get("record_before") or {}).get("sha256"))
+                and _sha_present(repeat_after)
+                and repeat_after["sha256"] == recovery_before["sha256"])
         checks[case + "_preserved_state"] = (
             (observe.get("preserved") or {}).get("state")
             == (prepared.get("state") or {})
@@ -530,8 +738,7 @@ def _matrix_checks(phases, restarts, reboots, prepared, problems):
                 for spec in MATRIX_CASES.values()))
     checks["matrix_manager_restart_is_not_reload"] = all(
         (restarts.get(case) or {}).get("kind") == "user_manager_restart"
-        and (restarts.get(case) or {}).get("boot_id_changed") is False
-        and (restarts.get(case) or {}).get("manager_invocation_changed") is True
+        and _host_identity_ok(restarts.get(case) or {}, "manager")
         and (restarts.get(case) or {}).get("qemu_identity_verified") is True
         and "restart" in " ".join(
             ((restarts.get(case) or {}).get("command") or {}).get("argv") or [])
@@ -542,28 +749,17 @@ def _matrix_checks(phases, restarts, reboots, prepared, problems):
         for case in MATRIX_ORDER if MATRIX_CASES[case]["kind"] == "manager")
     checks["matrix_guest_reboot_changes_boot_id"] = all(
         (reboots.get(case) or {}).get("kind") == "guest_reboot"
-        and (reboots.get(case) or {}).get("boot_id_changed") is True
-        and (reboots.get(case) or {}).get("manager_invocation_changed") is True
+        and _host_identity_ok(reboots.get(case) or {}, "reboot")
         and (reboots.get(case) or {}).get("qemu_identity_verified") is True
         for case in MATRIX_ORDER if MATRIX_CASES[case]["kind"] == "reboot")
     checks["matrix_no_unrecorded_work"] = all(
-        (phases.get(case) or {}).get("completions_before")
-        == (phases.get(case) or {}).get("completions_after")
-        and (phases.get(case + "-observe") or {}).get("completions_before")
-        == (phases.get(case + "-observe") or {}).get("completions_after")
-        for case in MATRIX_ORDER)
+        case_no_work.get(case, False) for case in MATRIX_ORDER)
     checks["matrix_ambiguity_retained"] = all(
-        ((phases.get(case + "-observe") or {}).get("recovery") or {})
-        .get("cli", {}).get("rc") == 3
-        and ((phases.get(case + "-observe") or {}).get("record_after") or {})
-        .get("sha256")
-        == ((phases.get(case + "-observe") or {}).get("record_before") or {})
-        .get("sha256")
+        _ambiguity_retained(phases.get(case + "-observe"))
         for case in MATRIX_ORDER
         if MATRIX_CASES[case]["boundary"] == "activation_pending")
     checks["matrix_ambiguity_reset_preserved"] = all(
-        (phases.get(reset) or {}).get("record_after", {}).get("sha256")
-        == (phases.get(reset) or {}).get("record_before", {}).get("sha256")
+        _reset_preserved(phases.get(reset))
         for reset in ("matrix-reset-python", "matrix-reset-python-final"))
     return checks
 
@@ -1331,6 +1527,11 @@ def cmd_verify(args):
     for problem in recomputed:
         if problem not in problems:
             problems.append(problem)
+    if not isinstance(report.get("run"), str) or not report["run"]:
+        problems.append("report has no run binding")
+    if not isinstance(report.get("source_commit"), str) \
+            or not re.fullmatch(r"[0-9a-f]{40}", report["source_commit"]):
+        problems.append("report has no source commit binding")
     run_dir = pathlib.Path(args.report).resolve().parent
     provenance_problems, raw_path = validate_provenance(report, run_dir)
     problems.extend(provenance_problems)
@@ -1342,7 +1543,33 @@ def cmd_verify(args):
                 problems.extend(verify_raw_evidence(report, raw_root, mode))
         except (OSError, tarfile.TarError, RuntimeError) as exc:
             problems.append("raw guest evidence is unreadable: " + str(exc)[:200])
-    print(json.dumps({"report": str(args.report), "problems": problems},
+    current_host = sha256_bytes(pathlib.Path(__file__).resolve().read_bytes())
+    current_guest = sha256_bytes(
+        (OPS / "vm-unit-switch-guest.py").read_bytes())
+    provenance = report.get("provenance") or {}
+    retained_host = (provenance.get("host_script") or {}).get("sha256")
+    retained_guest = (provenance.get("guest_script") or {}).get("sha256")
+    host_matches = isinstance(retained_host, str) and current_host == retained_host
+    guest_matches = (isinstance(retained_guest, str)
+                     and current_guest == retained_guest)
+    if mode == "matrix" and not guest_matches:
+        problems.append("guest proof script differs from the retained matrix run; "
+                        "a fresh matrix run is required")
+    validator = {
+        "host_script_sha256": current_host,
+        "guest_script_sha256": current_guest,
+        "retained_host_script_sha256": retained_host,
+        "retained_guest_script_sha256": retained_guest,
+        "host_matches_run": host_matches,
+        "guest_matches_run": guest_matches,
+        "validator_only": mode == "matrix" and guest_matches and not host_matches,
+        "run": report.get("run"),
+        "run_source_commit": report.get("source_commit"),
+        "report_sha256": sha256_bytes(pathlib.Path(args.report).read_bytes()),
+        "raw_tar_sha256": (report.get("raw") or {}).get("tar_sha256"),
+    }
+    print(json.dumps({"report": str(args.report), "problems": problems,
+                      "validator": validator},
                      indent=2, sort_keys=True))
     return 0 if not problems else 1
 
