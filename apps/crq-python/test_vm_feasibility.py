@@ -525,8 +525,12 @@ class EvidenceTests(unittest.TestCase):
         for path in SNAPSHOT_PATHS:
             key = str(path)
             if key == str(GUEST_UNIT_DIR / "crq-fixture.service"):
-                files[key] = {"type": "symlink", "mode": "0o777", "uid": 1000,
-                              "gid": 1000, "link_target": link}
+                if link is None:
+                    files[key] = {"type": "file", "mode": "0o640", "uid": 1000,
+                                  "gid": 1000, "sha256": "b" * 64}
+                else:
+                    files[key] = {"type": "symlink", "mode": "0o777", "uid": 1000,
+                                  "gid": 1000, "link_target": link}
             elif key.endswith(("crq-alias.service", ".wants/crq-fixture.timer",
                                ".wants/crq-fixture.path")):
                 files[key] = {"type": "symlink", "mode": "0o777", "uid": 1000,
@@ -574,7 +578,7 @@ class EvidenceTests(unittest.TestCase):
     def _phases(self):
         return {
             "install": {"snapshot": self._snapshot(10, "i1", "boot-1",
-                                                    load_state="loaded", link="unit")},
+                                                    load_state="loaded", link=None)},
             "activation": {"direct": {"run_delta": ["service"]},
                            "dependency": {"run_delta": ["service", "dependent"]},
                            "queue_blocker": {"rc": 0},
@@ -622,7 +626,7 @@ class EvidenceTests(unittest.TestCase):
                              "link_target": "/dev/null"}}}},
             "unmask": {"run_delta": ["service"],
                        "snapshot": self._snapshot(12, "i3", "boot-2",
-                                                    load_state="loaded", link="unit")},
+                                                    load_state="loaded", link=None)},
         }
 
     def test_all_checks_proven(self):
@@ -855,6 +859,40 @@ class EvidenceTests(unittest.TestCase):
         checks = vm.build_checks(phases, manager, reboot)
         self.assertFalse(checks["metadata_observed"])
         self.assertTrue(checks["mask_metadata_equal"])
+
+    def test_metadata_preservation_rejects_all_absent_required_paths(self):
+        phases = self._phases()
+        manager, reboot = self._boundaries()
+        self.assertTrue(vm.build_checks(phases, manager, reboot)
+                        ["metadata_observed"])
+        for snapshot in (phases["install"]["snapshot"],
+                         phases["unmask"]["snapshot"]):
+            for path in list(snapshot["files"]):
+                snapshot["files"][path] = None
+        checks = vm.build_checks(phases, manager, reboot)
+        self.assertFalse(checks["metadata_observed"])
+        self.assertTrue(checks["metadata_equal"])
+        report = {"schema_version": vm.REPORT_SCHEMA,
+                  "image": {"sha256": DIGEST, "sums_verified": True,
+                            "signature_verified": False},
+                  "checks": checks, "limitations": ["limited"]}
+        self.assertIn("check not proven: metadata_observed",
+                      vm.report_problems(report))
+
+    def test_metadata_preservation_requires_expected_path_types(self):
+        phases = self._phases()
+        manager, reboot = self._boundaries()
+        self.assertTrue(vm.build_checks(phases, manager, reboot)
+                        ["metadata_observed"])
+        service = str(GUEST_UNIT_DIR / "crq-fixture.service")
+        for snapshot in (phases["install"]["snapshot"],
+                         phases["unmask"]["snapshot"]):
+            snapshot["files"][service] = {
+                "type": "symlink", "mode": "0o777", "uid": 1000,
+                "gid": 1000, "link_target": "target"}
+        checks = vm.build_checks(phases, manager, reboot)
+        self.assertFalse(checks["metadata_observed"])
+        self.assertTrue(checks["metadata_equal"])
 
     def test_metadata_preservation_requires_applicable_fields(self):
         phases = self._phases()

@@ -48,21 +48,23 @@ GUEST_HOME = pathlib.Path("/home/%s" % GUEST_USER)
 UNIT_DIR = GUEST_HOME / ".config/systemd/user"
 FIXTURE_DIR = GUEST_HOME / "fixture"
 TRIGGER_PATH = str(FIXTURE_DIR / "trigger")
-SNAPSHOT_PATHS = (
-    UNIT_DIR / "crq-fixture.service",
-    UNIT_DIR / "crq-fixture.timer",
-    UNIT_DIR / "crq-fixture.path",
-    UNIT_DIR / "crq-dependent.service",
-    UNIT_DIR / "crq-alias.service",
-    UNIT_DIR / "crq-blocker.service",
-    UNIT_DIR / "crq-queued.service",
-    UNIT_DIR / "crq-queued-fixture.service",
-    UNIT_DIR / "timers.target.wants/crq-fixture.timer",
-    UNIT_DIR / "default.target.wants/crq-fixture.path",
-    FIXTURE_DIR / "crq-alias.service.unit",
+SNAPSHOT_TYPES = {
+    UNIT_DIR / "crq-fixture.service": "file",
+    UNIT_DIR / "crq-fixture.timer": "file",
+    UNIT_DIR / "crq-fixture.path": "file",
+    UNIT_DIR / "crq-dependent.service": "file",
+    UNIT_DIR / "crq-alias.service": "symlink",
+    UNIT_DIR / "crq-blocker.service": "file",
+    UNIT_DIR / "crq-queued.service": "file",
+    UNIT_DIR / "crq-queued-fixture.service": "file",
+    UNIT_DIR / "timers.target.wants/crq-fixture.timer": "symlink",
+    UNIT_DIR / "default.target.wants/crq-fixture.path": "symlink",
+    FIXTURE_DIR / "crq-alias.service.unit": "file",
+    FIXTURE_DIR / "record.sh": "file",
+}
+OPTIONAL_SNAPSHOT_PATHS = (
     FIXTURE_DIR / "original-crq-fixture.service",
     FIXTURE_DIR / "original-crq-alias.service.link",
-    FIXTURE_DIR / "record.sh",
 )
 GUEST_RAM_MB = 2048
 GUEST_VCPUS = 2
@@ -789,13 +791,11 @@ def masked_state(snapshot: dict) -> dict:
     return {"unit": unit, "path": path}
 
 
-def snapshot_entry_observed(entry) -> bool:
-    """A snapshot entry must carry the metadata its own type promises."""
-    if entry is None:
-        return True
+def snapshot_entry_observed(entry, expected_type: str) -> bool:
+    """A required path must exist with the metadata its own type promises."""
     if not isinstance(entry, dict):
         return False
-    if entry.get("type") not in ("file", "symlink"):
+    if entry.get("type") != expected_type:
         return False
     if not isinstance(entry.get("mode"), str):
         return False
@@ -808,13 +808,27 @@ def snapshot_entry_observed(entry) -> bool:
     return isinstance(target, str) and bool(target)
 
 
-def snapshot_files_observed(snapshot: dict) -> bool:
-    """A snapshot that omits an expected path cannot prove preservation."""
+def optional_snapshot_entry_observed(entry, expected_type: str) -> bool:
+    """Only the backup paths may be absent; when present they must be files."""
+    return entry is None or snapshot_entry_observed(entry, expected_type)
+
+
+def snapshot_files_observed(snapshot: dict, *, masked: bool = False) -> bool:
+    """A snapshot must contain every required path, not just path keys."""
     files = snapshot.get("files")
     if not isinstance(files, dict):
         return False
-    return all(str(path) in files and snapshot_entry_observed(files[str(path)])
-               for path in SNAPSHOT_PATHS)
+    types = dict(SNAPSHOT_TYPES)
+    if masked:
+        types[UNIT_DIR / "crq-fixture.service"] = "symlink"
+    required = all(
+        str(path) in files and snapshot_entry_observed(files[str(path)], expected)
+        for path, expected in types.items())
+    optional = all(
+        str(path) in files
+        and optional_snapshot_entry_observed(files[str(path)], "file")
+        for path in OPTIONAL_SNAPSHOT_PATHS)
+    return required and optional
 
 
 def build_checks(phases: dict, manager: dict, reboot: dict) -> dict:
@@ -909,8 +923,8 @@ def build_checks(phases: dict, manager: dict, reboot: dict) -> dict:
         "metadata_observed": bool(
             snapshot_files_observed(install.get("snapshot") or {})
             and snapshot_files_observed(unmask.get("snapshot") or {})
-            and snapshot_files_observed(reboot.get("before") or {})
-            and snapshot_files_observed(reboot.get("after") or {})),
+            and snapshot_files_observed(reboot.get("before") or {}, masked=True)
+            and snapshot_files_observed(reboot.get("after") or {}, masked=True)),
         "queued_observations_present": (
             isinstance(activation.get("queued_run_delta"), list)
             and isinstance(activation.get("queued2_run_delta"), list)),
