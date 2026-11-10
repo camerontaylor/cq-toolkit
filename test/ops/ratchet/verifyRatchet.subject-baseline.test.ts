@@ -25,6 +25,46 @@ afterAll(teardownFixtures);
 describe('verifyRatchet: the subject baseline is required and enforced (F3, F4)', SLOW, () => {
   const coveragePath = baselineRelPath('coverage', 'coverage');
 
+  test('full canonical blobs reject off-hunk escaped keys on both sides', async () => {
+    const original = git(['rev-parse', 'merge-queue']);
+    const clean = git(['show', `${original}:${coveragePath}`]);
+    const before = clean
+      .replace('"value": 90,', '"value": 80,')
+      .replace('\n}', ',\n\n\n\n\n  "val\\u0075e"\n\n\n\n\n  : 90\n}');
+    const after = before.replace('"value": 80,', '"value": 81,').replace(': 90\n}', ': 50\n}');
+    expect((JSON.parse(before) as { value: number }).value).toBe(90);
+    expect((JSON.parse(after) as { value: number }).value).toBe(50);
+    try {
+      const base = prBranch('escaped-base', 'merge-queue', () => write(coveragePath, before));
+      git(['branch', '-f', 'merge-queue', base]);
+      const head = prBranch('escaped-subject', 'merge-queue', () => write(coveragePath, after));
+      const diff = git(['diff', base, head, '--', coveragePath]);
+      expect(diff).not.toContain('val\\u0075e');
+      const measurementPath = artifact('escaped.json', {
+        schemaVersion: 1,
+        metrics: { coverage: 100 },
+      });
+      const subject = await verify(head, { measurementPath });
+      expect(subject.guard.ok).toBe(true);
+      expect(subject.reasons.join('\n')).toMatch(/subject.*escaped property key/);
+      expect(subject.verdict).toBe('fail');
+      const trust = await verify(head, { trustRef: base, measurementPath });
+      expect(trust.reasons.join('\n')).toMatch(/trust ref.*escaped property key/);
+      expect(trust.verdict).toBe('fail');
+    } finally {
+      git(['branch', '-f', 'merge-queue', original]);
+    }
+  });
+
+  test('escaped string values in canonical blobs remain valid', async () => {
+    const head = prBranch('escaped-value', 'merge-queue', () => {
+      const text = readFileSync(join(repo, coveragePath), 'utf8');
+      write(coveragePath, text.replace('"coverage"', '"cover\\u0061ge"'));
+    });
+    const result = await verify(head);
+    expect(result.results.find((r) => r.metric === 'coverage')?.verdict).toBe('pass');
+  });
+
   test('a tightening that has landed in the subject is enforced before promotion (F3)', async () => {
     // The queue already holds 95; the trust ref still says 90. A reading of
     // 92 satisfies the trust ref alone and must still FAIL, or the window

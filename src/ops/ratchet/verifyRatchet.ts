@@ -234,6 +234,26 @@ function evidenceValue(
   return value;
 }
 
+/** Inspect JSON string tokens after parsing; only strings followed by a colon are keys. */
+function hasEscapedPropertyKey(text: string): boolean {
+  for (let i = 0; i < text.length; i += 1) {
+    if (text[i] !== '"') continue;
+    let escaped = false;
+    i += 1;
+    while (i < text.length && text[i] !== '"') {
+      if (text[i] === '\\') {
+        escaped = true;
+        i += 1;
+      }
+      i += 1;
+    }
+    let next = i + 1;
+    while (next < text.length && /\s/.test(text[next] ?? '')) next += 1;
+    if (escaped && text[next] === ':') return true;
+  }
+  return false;
+}
+
 /**
  * The canonical baseline for `def` at `rev`, with its identity checked against
  * the definition. A value, or a reason — every fault (absent, unparsable, or
@@ -261,6 +281,9 @@ async function readCanonicalBaseline(
     baseline = parseBaseline(text);
   } catch (err) {
     return { reason: `${path} at ${label}: ${messageOf(err)}` };
+  }
+  if (hasEscapedPropertyKey(text)) {
+    return { reason: `${path} at ${label}: escaped property key in baseline` };
   }
   if (baseline.target !== def.target || baseline.metric !== def.metric) {
     return { reason: `${path} at ${label} names another ratchet` };
