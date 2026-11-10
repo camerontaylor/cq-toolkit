@@ -32,7 +32,7 @@ trailing newline; fixed timestamps only, so the bytes are host-independent.
 
 | file | sources | covers |
 |---|---|---|
-| `summarize.json` | `status_summary.summarize` | local-review aging and the config window, invalid age tolerance, foreign open PR rank, 24 h completion grouping and the 10-row preview, `starts_cap` fallbacks (`0`, `true`, `"8"`, missing, remaining-only), open cycles, re-harvested runs, review_finished timestamp refusals, 60-minute window boundaries, global in-flight, configured repos before their first item |
+| `summarize.json` | `status_summary.summarize` | local-review aging and the config window, invalid age tolerance, foreign open PR rank, operator-priority ordering, 24 h completion grouping and the 10-row preview, `starts_cap` fallbacks (`0`, `true`, `"8"`, missing, remaining-only), open cycles, re-harvested runs, review_finished timestamp refusals, 60-minute window boundaries, global in-flight, configured repos before their first item |
 | `merged-current.json` | `status_summary.merged_current` | verified no-current-code / partial-scope / terminal / unsupported, deleted and excluded-path counts, receipt-less and tampered receipts, missing receipt, retained reuse lineage (verified, missing parent, cycle, capture-target mismatch), empty path list, sorted and bounded captured targets (+34 case), discovery passthrough |
 | `client-health.json` | `client_health.snapshot` | completed age (frozen clock), missing/empty completed_at, invalid and non-string refusals, non-object health and item refusals, pending/blocked counts |
 
@@ -50,9 +50,11 @@ queue/repair text, never from transcripts.
 ## Int/float boundary
 
 `parse_usage` parses its input with the lossless reader, so `1` and `1.0`
-follow Python's `type(value) is int`. `summarize` receives an already-parsed
-queue; `usage.limit` accepts a `JsonNumber` when a caller preserves the
-lexeme, and `pythonIntValue` refuses floats, booleans and numeric strings.
-The `8.0` case is covered as a focused TypeScript test with an explicit
-`JsonNumber.float` rather than a JSON fixture, because `JSON.parse` erases the
-distinction the oracle enforces.
+follow Python's `type(value) is int`. `summarize` accepts a materialised queue
+or a lossless `usage` object from `parseJsonValue`; `usage.limit` then keeps
+either a `JsonNumber` or its plain value, and `pythonIntValue` refuses floats,
+booleans and numeric strings. A caller that reads queue bytes must keep
+`usage` lossless (materialising the rest) because `JSON.parse` erases the
+`3`/`3.0` distinction the oracle enforces. Focused TypeScript tests cover both
+shapes: an explicit `JsonNumber.float`, and a lossless JSON integral float
+that falls back to the configured cap.

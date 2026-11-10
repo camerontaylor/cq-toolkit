@@ -13,7 +13,7 @@
  * carry `repair_origin` and a bounded one-line `label`. The summary schema
  * stays 2 and readers ignore unknown keys; Python is NOT patched.
  */
-import { JsonNumber, parseJsonValue, toPlainJson } from './jsonValue.js';
+import { JsonNumber, JsonObject, parseJsonValue, toPlainJson } from './jsonValue.js';
 import { compareCodePoints, sha256Hex } from './pythonJson.js';
 import {
   MERGED_CURRENT_KIND,
@@ -249,7 +249,7 @@ export function summarize(
   }
 
   const usage = firstTruthy([get(queue, 'usage'), {}]);
-  const limit = isRecord(usage) ? pythonIntValue(get(usage, 'limit')) : null;
+  const limit = pythonIntValue(usageLimit(usage));
   // The configured cap is a conservative scheduler fallback, not an account quota.
   const startsCap =
     limit !== null && limit > 0
@@ -277,7 +277,7 @@ export function summarize(
     if (kind === 'local-review') {
       const deadline = agingDeadline(item);
       rank =
-        (itemGeneration(item) === 1 && get(item, 'repeat_requested') !== true) ||
+        (pythonEqual(itemGeneration(item), 1) && get(item, 'repeat_requested') !== true) ||
         (deadline !== null && now >= deadline)
           ? 0
           : 1;
@@ -691,7 +691,8 @@ function comparePendingKeys(keyOf: (item: CrqRecord) => PendingKey) {
   return (left: CrqRecord, right: CrqRecord): number => {
     const a = keyOf(left);
     const b = keyOf(right);
-    if (a.priority !== b.priority) return a.priority ? 1 : -1;
+    // Python sorts on `not operator_priority`, so priority items come first.
+    if (a.priority !== b.priority) return a.priority ? -1 : 1;
     if (a.rank !== b.rank) return a.rank - b.rank;
     return comparePythonValues(a.order, b.order);
   };
@@ -840,6 +841,20 @@ export function pythonIntValue(value: unknown): number | null {
   }
   if (typeof value === 'number' && Number.isInteger(value)) return value;
   return null;
+}
+
+/**
+ * The `usage.limit` field, accepting either a materialised object or the
+ * lossless {@link JsonObject} a caller gets from `parseJsonValue`.
+ *
+ * `JSON.parse` erases the difference between `3` and `3.0`, and Python's
+ * `type(limit) is int` depends on it. Callers that read queue bytes must keep
+ * `usage` lossless (and materialise the rest) rather than pass a plain
+ * `JSON.parse` result, whose `3.0` is already indistinguishable from `3`.
+ */
+function usageLimit(usage: unknown): unknown {
+  if (usage instanceof JsonObject) return usage.get('limit');
+  return isRecord(usage) ? get(usage, 'limit') : undefined;
 }
 
 function nonEmptyString(value: unknown): string | null {

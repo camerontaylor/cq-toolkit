@@ -235,6 +235,28 @@ def summarize_family() -> Dict[str, Any]:
             now="1970-01-01T00:00:02Z",
         )
     )
+    priority_items = [
+        {"id": f"n{n}", "kind": "open", "state": "pending", "pr": n + 1, "order": n}
+        for n in range(11)
+    ]
+    priority_items.append(
+        {
+            "id": "priority",
+            "kind": "open",
+            "state": "pending",
+            "pr": 99,
+            "operator_priority": True,
+            "order": 99,
+        }
+    )
+    cases.append(
+        summarize(
+            "operator-priority-precedes-ordinary-items",
+            queue={"items": priority_items},
+            generated_at="2026-11-09T11:55:00Z",
+            now="2026-11-09T12:00:00Z",
+        )
+    )
     for usage, label in (
         ({"limit": 8}, "account-limit-overrides-fallback-cap"),
         ({"limit": 0}, "usage-limit-zero-falls-back"),

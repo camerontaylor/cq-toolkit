@@ -17,8 +17,13 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, test } from 'vitest';
 import { ClientHealthError, clientHealthSnapshot } from '../../../src/policy/crq/clientHealth.js';
-import { JsonNumber } from '../../../src/policy/crq/jsonValue.js';
-import { receiptJsonBytes } from '../../../src/policy/crq/pythonJson.js';
+import {
+  JsonNumber,
+  JsonObject,
+  parseJsonValue,
+  toPlainJson,
+} from '../../../src/policy/crq/jsonValue.js';
+import { receiptJsonBytes, receiptJsonDigest } from '../../../src/policy/crq/pythonJson.js';
 import {
   LABEL_MAX_UNITS,
   StatusSummaryError,
@@ -33,6 +38,7 @@ import {
   type StatusSummaryView,
   type SummarizeOptions,
 } from '../../../src/policy/crq/statusSummary.js';
+import { currentEquivalence, reusableCurrent } from '../../../src/policy/crq/receiptIdentity.js';
 import { parseUtc } from '../../../src/policy/crq/utc.js';
 import {
   UsageSlotsError,
@@ -597,7 +603,74 @@ describe('Python int rules survive materialisation and lossless input', () => {
     );
     expect(fallback.starts_cap).toBe(5);
   });
+
+  test('a lossless integral limit is reused from the queue bytes', () => {
+    expect(losslessSummary('{"items":[],"usage":{"limit":8}}').starts_cap).toBe(8);
+  });
+
+  test('a lossless integral float limit falls back to the configured cap', () => {
+    expect(losslessSummary('{"items":[],"usage":{"limit":3.0}}').starts_cap).toBe(5);
+  });
 });
+
+/**
+ * Build the queue the way a byte-reading caller must: materialise the document
+ * for the projection, but keep `usage` lossless so `3` and `3.0` stay distinct.
+ * A plain `JSON.parse` result cannot preserve that distinction.
+ */
+function losslessQueue(text: string): RecordValue {
+  const document = parseJsonValue(text);
+  if (!(document instanceof JsonObject)) throw new Error('queue must be an object');
+  const queue = toPlainJson(document) as RecordValue;
+  queue.usage = document.get('usage');
+  return queue;
+}
+
+function losslessSummary(text: string): StatusSummaryView {
+  return summarize(
+    { generated_at: '2026-11-09T11:55:00Z' },
+    losslessQueue(text),
+    {},
+    { max_starts_per_hour: 5 },
+    [],
+    NOW,
+  );
+}
+
+describe('receipt identity parity', () => {
+  test('a boolean version equals 1 like Python', () => {
+    expect(reusableCurrent(...retainedReceipt(true))).toBe(true);
+    expect(reusableCurrent(...retainedReceipt(1))).toBe(true);
+    expect(reusableCurrent(...retainedReceipt(2))).toBe(false);
+  });
+});
+
+/**
+ * A countable retained receipt whose capture is internally consistent. The
+ * version is the variable under test (`True == 1` in Python).
+ */
+function retainedReceipt(version: unknown): [RecordValue, RecordValue] {
+  const paths = [{ path: 'src/a.ts', disposition: 'included' }];
+  const capture: RecordValue = {
+    target: 'a'.repeat(40),
+    tree: 'b'.repeat(40),
+    paths,
+    scope_digest: receiptJsonDigest(paths),
+    policy: 'affected-current-additions-v1',
+    projection: 'current-affected-files/full-file-addition-projection',
+    reviewer: 'coderabbit-review-agent-committed-v1',
+    reviewer_version: 'fixture',
+  };
+  capture.equivalence = currentEquivalence(capture);
+  const document: RecordValue = {
+    version,
+    capture,
+    classification: { counted: true, outcome: 'completed' },
+    counted: true,
+    outcome: 'terminal-clean',
+  };
+  return [document, capture];
+}
 
 function hasLoneSurrogate(text: string): boolean {
   for (let index = 0; index < text.length; index += 1) {

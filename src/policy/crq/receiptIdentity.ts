@@ -136,7 +136,7 @@ export function reusableCurrent(document: unknown, capture: unknown): boolean {
     const classification = document.classification;
     const retainedCapture = document.capture;
     return (
-      document.version === RECEIPT_VERSION &&
+      pythonEqual(document.version, RECEIPT_VERSION) &&
       wanted === retained &&
       isRecord(retainedCapture) &&
       retainedCapture.equivalence === retained &&
