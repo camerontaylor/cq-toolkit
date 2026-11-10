@@ -587,7 +587,9 @@ test('missing own registration preserves unpushed commits', async () => {
     const unpublished = f.repo.git('-C', first.path, 'rev-parse', 'HEAD').trim();
     await rename(first.path, first.path + '-saved');
     await expect(resolvePrWorktree(f.opts)).rejects.toThrow(/unpushed/);
-    expect(f.repo.git('rev-parse', 'cq-review/pr-7').trim()).toBe(unpublished);
+    expect(f.repo.git('rev-parse', '--verify', 'refs/heads/cq-review/pr-7').trim()).toBe(
+      unpublished,
+    );
     expect(f.repo.git('worktree', 'list', '--porcelain')).toContain(`worktree ${first.path}\n`);
   } finally {
     await f.repo.cleanup();
