@@ -42,6 +42,103 @@
       }
     },
     {
+      "name": "escapes-keys-and-del",
+      "source": "crq_repair.atomic",
+      "input": {
+        "value": {
+          "\u007f": 1,
+          "\u2028": 2,
+          "quote\"": 3
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "text": "{\n  \"\\u007f\": 1,\n  \"\\u2028\": 2,\n  \"quote\\\"\": 3\n}\n",
+          "sha256": "fc34dd5dc6d552cc7acb311131de90367af0a461b154b688cc4601b26a601301"
+        }
+      }
+    },
+    {
+      "name": "nested-indent-layout",
+      "source": "crq_repair.atomic",
+      "input": {
+        "value": {
+          "a": [],
+          "b": {},
+          "c": [
+            [],
+            {}
+          ],
+          "d": [
+            {
+              "e": []
+            },
+            [
+              1,
+              [
+                2,
+                {
+                  "f": 3
+                }
+              ]
+            ]
+          ]
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "text": "{\n  \"a\": [],\n  \"b\": {},\n  \"c\": [\n    [],\n    {}\n  ],\n  \"d\": [\n    {\n      \"e\": []\n    },\n    [\n      1,\n      [\n        2,\n        {\n          \"f\": 3\n        }\n      ]\n    ]\n  ]\n}\n",
+          "sha256": "0595d5b4f4592fb9f7720455202c5d6335ccd39175a173663c64aa68eb7d7eab"
+        }
+      }
+    },
+    {
+      "name": "deep-indent-layout",
+      "source": "crq_repair.atomic",
+      "input": {
+        "value": {
+          "x": {
+            "y": {
+              "z": [
+                1,
+                2,
+                {
+                  "w": "\u96ea"
+                }
+              ]
+            }
+          }
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "text": "{\n  \"x\": {\n    \"y\": {\n      \"z\": [\n        1,\n        2,\n        {\n          \"w\": \"\\u96ea\"\n        }\n      ]\n    }\n  }\n}\n",
+          "sha256": "084563d072495066758ae4df989ef38b794dbb523c45c989d2172103081885f7"
+        }
+      }
+    },
+    {
+      "name": "unicode-keys-and-values",
+      "source": "crq_repair.atomic",
+      "input": {
+        "value": {
+          "\u96ea": 1,
+          "\ud83d\ude00": 2,
+          "del": "\u007f"
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "text": "{\n  \"\\u96ea\": 1,\n  \"\\ud83d\\ude00\": 2,\n  \"del\": \"\\u007f\"\n}\n",
+          "sha256": "8716e3ee7e4e0b337a2b9489106bfa9cd49f9bbcb60d53197b2885159cec417d"
+        }
+      }
+    },
+    {
       "name": "python-float-repr-is-preserved",
       "source": "crq_repair.atomic",
       "input": {
@@ -57,6 +154,29 @@
         "value": {
           "text": "{\n  \"one\": 1.0,\n  \"tenth\": 0.1,\n  \"negative_zero\": -0.0,\n  \"exponent\": 1e+20\n}\n",
           "sha256": "94064e4ea287edd7a9cfdd9f96a704218ed84292f51f0f9da7217e80fbf6306a"
+        }
+      }
+    },
+    {
+      "name": "float-repr-boundaries",
+      "source": "crq_repair.atomic",
+      "input": {
+        "value": {
+          "fixed_high": 1000000000000000.0,
+          "scientific_high": 1e+16,
+          "fixed_low": 0.0001,
+          "scientific_low": 1e-05,
+          "subnormal": 5e-324,
+          "maximum": 1.7976931348623157e+308,
+          "integer_valued": 1234567890123456.0,
+          "shortest_round_trip": 0.30000000000000004
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "text": "{\n  \"fixed_high\": 1000000000000000.0,\n  \"scientific_high\": 1e+16,\n  \"fixed_low\": 0.0001,\n  \"scientific_low\": 1e-05,\n  \"subnormal\": 5e-324,\n  \"maximum\": 1.7976931348623157e+308,\n  \"integer_valued\": 1234567890123456.0,\n  \"shortest_round_trip\": 0.30000000000000004\n}\n",
+          "sha256": "f56d6f86665a90a91c832ae24c3df74512f55988c272eea909461c60874d0cef"
         }
       }
     },
