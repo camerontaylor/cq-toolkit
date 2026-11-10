@@ -16,9 +16,12 @@
  * {@link toPlainJson} materialises ordinary JavaScript values for zod.
  *
  * This is deliberately a JSON parser, not a JSON5/YAML reader: only the
- * RFC 8259 grammar is accepted; Python's non-finite constants are deliberately refused. Duplicate keys
- * are the caller's choice because Python's default `json.loads` keeps the last
- * value (and the first key position), while `review_ledger.loads` refuses them.
+ * RFC 8259 grammar is accepted. Python's non-finite constants are refused by
+ * default and exposed through the `parseConstant` hook, which lets
+ * `review_ledger.loads` reproduce Python's in-document refusal order.
+ * Duplicate keys are the caller's choice because Python's default
+ * `json.loads` keeps the last value (and the first key position), while
+ * `review_ledger.loads` refuses them.
  */
 
 /** A Python `int` or `float`, keeping the exact source lexeme. */
@@ -107,11 +110,27 @@ export interface ParseJsonOptions {
    * value. `error` (review_ledger.loads): reject a duplicate key.
    */
   duplicates?: 'last' | 'error';
+  /**
+   * Python `parse_float`: called as soon as a float literal is scanned, so a
+   * refusing callback wins over any later syntax error.
+   */
+  parseFloat?: (raw: string) => JsonValue;
+  /**
+   * Python `parse_constant`: called for `NaN`, `Infinity` and `-Infinity` as
+   * soon as the token is scanned.
+   */
+  parseConstant?: (raw: string) => JsonValue;
+  /**
+   * Python `object_pairs_hook`: called with the source-ordered pairs when an
+   * object closes. Supplying it disables the `duplicates` policy because the
+   * hook owns the key policy.
+   */
+  objectPairs?: (pairs: ReadonlyArray<readonly [string, JsonValue]>) => JsonValue;
 }
 
 /** Parse RFC 8259 JSON without losing int-vs-float or object key order. */
 export function parseJsonValue(text: string, options: ParseJsonOptions = {}): JsonValue {
-  return new Parser(text, options.duplicates ?? 'last').parse();
+  return new Parser(text, options).parse();
 }
 
 /** The Python `repr(float)` text, used by `JsonNumber.float` and the serialiser. */
@@ -127,7 +146,7 @@ class Parser {
 
   constructor(
     private readonly text: string,
-    private readonly duplicates: 'last' | 'error',
+    private readonly options: ParseJsonOptions,
   ) {}
 
   parse(): JsonValue {
@@ -153,9 +172,16 @@ class Parser {
         return this.parseKeyword('false', false);
       case 'n':
         return this.parseKeyword('null', null);
+      case 'N':
+        return this.parseNonFinite('NaN');
+      case 'I':
+        return this.parseNonFinite('Infinity');
       case undefined:
         return this.fail('expected a JSON value');
       default:
+        if (this.text.startsWith('-Infinity', this.index)) {
+          return this.parseNonFinite('-Infinity');
+        }
         if (
           character === '-' ||
           (character !== undefined && character >= '0' && character <= '9')
@@ -166,14 +192,13 @@ class Parser {
     }
   }
 
-  private parseObject(): JsonObject {
+  private parseObject(): JsonValue {
     this.index += 1; // {
     const entries: Array<[string, JsonValue]> = [];
-    const positions = new Map<string, number>();
     this.skipWhitespace();
     if (this.text[this.index] === '}') {
       this.index += 1;
-      return new JsonObject(entries);
+      return this.finishObject(entries);
     }
     for (;;) {
       this.skipWhitespace();
@@ -184,24 +209,42 @@ class Parser {
       this.index += 1;
       this.skipWhitespace();
       const value = this.parseValue();
-      const existing = positions.get(key);
-      if (existing === undefined) {
-        positions.set(key, entries.length);
-        entries.push([key, value]);
-      } else if (this.duplicates === 'error') {
-        this.fail(`duplicate key ${JSON.stringify(key)}`);
-      } else {
-        entries[existing] = [key, value];
-      }
+      entries.push([key, value]);
       this.skipWhitespace();
       const separator = this.text[this.index];
       if (separator === '}') {
         this.index += 1;
-        return new JsonObject(entries);
+        return this.finishObject(entries);
       }
       if (separator !== ',') this.fail("expected ',' or '}'");
       this.index += 1;
     }
+  }
+
+  private finishObject(entries: Array<[string, JsonValue]>): JsonValue {
+    if (this.options.objectPairs !== undefined) return this.options.objectPairs(entries);
+    if ((this.options.duplicates ?? 'last') === 'last') {
+      const merged: Array<[string, JsonValue]> = [];
+      const positions = new Map<string, number>();
+      for (const [key, value] of entries) {
+        const existing = positions.get(key);
+        if (existing === undefined) {
+          positions.set(key, merged.length);
+          merged.push([key, value]);
+        } else {
+          merged[existing] = [key, value];
+        }
+      }
+      return new JsonObject(merged);
+    }
+    // Python's object_pairs_hook runs when the object closes, so a syntax
+    // error after the repeated key but before `}` wins over the duplicate.
+    const seen = new Set<string>();
+    for (const [key] of entries) {
+      if (seen.has(key)) this.fail(`duplicate key ${JSON.stringify(key)}`);
+      seen.add(key);
+    }
+    return new JsonObject(entries);
   }
 
   private parseArray(): JsonValue[] {
@@ -284,7 +327,7 @@ class Parser {
     }
   }
 
-  private parseNumber(): JsonNumber {
+  private parseNumber(): JsonValue {
     const start = this.index;
     if (this.text[this.index] === '-') this.index += 1;
     if (this.text[this.index] === '0') {
@@ -311,7 +354,21 @@ class Parser {
       while (isDigit(this.text[this.index])) this.index += 1;
     }
     const raw = this.text.slice(start, this.index);
-    return fractional || exponent ? JsonNumber.float(Number(raw), raw) : JsonNumber.int(raw);
+    if (fractional || exponent) {
+      return this.options.parseFloat === undefined
+        ? JsonNumber.float(Number(raw), raw)
+        : this.options.parseFloat(raw);
+    }
+    return JsonNumber.int(raw);
+  }
+
+  private parseNonFinite(token: string): JsonValue {
+    if (this.text.slice(this.index, this.index + token.length) !== token) {
+      return this.fail('expected a JSON value');
+    }
+    if (this.options.parseConstant === undefined) return this.fail('expected a JSON value');
+    this.index += token.length;
+    return this.options.parseConstant(token);
   }
 
   private parseKeyword<T extends boolean | null>(word: string, value: T): T {

@@ -181,12 +181,46 @@ def loads_vectors() -> Dict[str, Any]:
         ("trailing-data", "[] extra"),
         ("malformed", "{"),
         ("empty", ""),
+        # Python's parse_float/parse_constant refusals happen while scanning,
+        # so they outrank a later syntax error; its object_pairs_hook runs at
+        # object close, so an earlier duplicate does not.
+        ("float-before-trailing-comma", "[1.0,]"),
+        ("syntax-before-nan", "{broken NaN}"),
+        ("duplicate-before-trailing-comma", '{"a":1,"a":2,}'),
+        ("duplicate-at-close", '{"a":1,"a":2}'),
+        ("duplicate-before-syntax", '{"a":1,"a":2,"b":}'),
+        ("duplicate-before-nan", '{"a":1,"a":2,"b":NaN}'),
+        ("nan-before-trailing-comma", "[NaN,]"),
+        ("float-before-syntax", "[1.0, broken]"),
     )
-    return _family("loads", [
+    cases = [
         _capture(name, "review_ledger.loads", {"raw": raw},
                  lambda raw=raw: ledger.loads(raw))
         for name, raw in raws
-    ])
+    ]
+
+    payload = '{"雪":"😀","n":1}'
+    byte_cases = (
+        ("bytes-utf8-bom", b"\xef\xbb\xbf" + payload.encode("utf-8")),
+        ("bytes-utf16le-bom", b"\xff\xfe" + payload.encode("utf-16-le")),
+        ("bytes-utf16be-bom", b"\xfe\xff" + payload.encode("utf-16-be")),
+        ("bytes-utf32le-bom", b"\xff\xfe\x00\x00" + payload.encode("utf-32-le")),
+        ("bytes-utf32be-bom", b"\x00\x00\xfe\xff" + payload.encode("utf-32-be")),
+        ("bytes-utf16le-heuristic", payload.encode("utf-16-le")),
+        ("bytes-utf16be-heuristic", payload.encode("utf-16-be")),
+        ("bytes-utf32le-heuristic", payload.encode("utf-32-le")),
+        ("bytes-utf32be-heuristic", payload.encode("utf-32-be")),
+        # surrogatepass decodes the surrogate, then canonical() refuses it.
+        ("bytes-raw-surrogate-utf8", b'"\xed\xa0\x80"'),
+        ("bytes-invalid-utf8", b"\x80"),
+        ("bytes-truncated-utf32", b"{\x00\x00\x00}\x00\x00"),
+    )
+    cases.extend(
+        _capture(name, "review_ledger.loads", {"bytes": list(raw)},
+                 lambda raw=raw: ledger.loads(raw))
+        for name, raw in byte_cases
+    )
+    return _family("loads", cases)
 
 
 def timestamp_vectors() -> Dict[str, Any]:
@@ -205,6 +239,16 @@ def timestamp_vectors() -> Dict[str, Any]:
         ("invalid-day", "2026-02-30T00:00:00Z"),
         ("year-zero", "0000-01-01T00:00:00Z"),
         ("unicode-digits", "٢٠٢٦-١١-٠٩T٠٠:٠٠:٠٠Z"),
+        # strptime's %Y accepts any Unicode decimal digits.
+        ("unicode-year", "٢٠٢٦-11-09T00:00:00Z"),
+        # %d, %H, %M and %S accept a Unicode digit after an ASCII digit.
+        ("unicode-second-day", "2026-11-1٢T00:00:00Z"),
+        ("unicode-second-hour", "2026-11-09T0٢:00:00Z"),
+        ("unicode-second-minute", "2026-11-09T00:5٩:00Z"),
+        ("unicode-second-second", "2026-11-09T00:00:5٩Z"),
+        # %m is ASCII-only, and a leading non-ASCII digit is refused.
+        ("unicode-month-refused", "2026-١١-09T00:00:00Z"),
+        ("unicode-leading-day-refused", "2026-11-٢٢T00:00:00Z"),
         ("non-string", 1),
     )
     return _family("timestamp", [

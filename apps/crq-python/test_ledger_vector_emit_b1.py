@@ -48,10 +48,44 @@ class LedgerVectorTest(unittest.TestCase):
                     self.assertIn("value", case["expect"])
                 else:
                     self.assertIn(case["expect"]["error"],
-                                  ("IntegrityError", "ValueError", "JSONDecodeError"))
+                                  ("IntegrityError", "ValueError", "JSONDecodeError",
+                                   "UnicodeDecodeError"))
         self.assertNotIn("/home/", emitter.render())
         self.assertNotIn("/tmp/", emitter.render())
         self.assertNotIn(os.environ.get("HOME", "\0"), emitter.render())
+
+    def test_byte_vectors_cover_python_encoding_detection(self):
+        cases = {case["name"]: case for case in _family("loads")["cases"]}
+        for name in (
+            "bytes-utf8-bom",
+            "bytes-utf16le-bom",
+            "bytes-utf16be-bom",
+            "bytes-utf32le-bom",
+            "bytes-utf32be-bom",
+            "bytes-utf16le-heuristic",
+            "bytes-utf16be-heuristic",
+            "bytes-utf32le-heuristic",
+            "bytes-utf32be-heuristic",
+        ):
+            self.assertTrue(cases[name]["expect"]["ok"], name)
+            self.assertEqual(cases[name]["expect"]["value"], {"雪": "😀", "n": 1}, name)
+        self.assertEqual(cases["bytes-invalid-utf8"]["expect"]["error"], "UnicodeDecodeError")
+        self.assertEqual(cases["bytes-raw-surrogate-utf8"]["expect"]["error"], "IntegrityError")
+
+    def test_loads_refusal_order_matches_the_scanner(self):
+        cases = {case["name"]: case for case in _family("loads")["cases"]}
+        expected = {
+            "float-before-trailing-comma": "IntegrityError",
+            "syntax-before-nan": "JSONDecodeError",
+            "duplicate-before-trailing-comma": "JSONDecodeError",
+            "duplicate-at-close": "IntegrityError",
+            "duplicate-before-syntax": "JSONDecodeError",
+            "duplicate-before-nan": "IntegrityError",
+            "nan-before-trailing-comma": "IntegrityError",
+            "float-before-syntax": "IntegrityError",
+        }
+        for name, error in expected.items():
+            self.assertEqual(cases[name]["expect"].get("error"), error, name)
 
     def test_tampered_id_case_keeps_the_hash_defect(self):
         family = _family("validate")

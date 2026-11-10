@@ -51,9 +51,9 @@ export class LedgerIntegrityError extends Error {
 }
 
 /**
- * `datetime.strptime`'s failure mode for an exact-shaped timestamp with an
- * impossible calendar value (or non-ASCII decimal digits). `review_ledger`
- * lets this `ValueError` escape, so the port keeps the same class.
+ * `datetime.strptime`'s failure mode for an exact-shaped timestamp whose
+ * fields do not match its format or calendar. `review_ledger` lets this
+ * `ValueError` escape, so the port keeps the same class.
  */
 export class LedgerTimestampError extends Error {
   override readonly name = 'LedgerTimestampError';
@@ -68,6 +68,16 @@ export class LedgerTimestampError extends Error {
 export class LedgerJsonDecodeError extends Error {
   override readonly name = 'LedgerJsonDecodeError';
   readonly pythonError = 'JSONDecodeError';
+
+  constructor(message: string) {
+    super(message);
+  }
+}
+
+/** `UnicodeDecodeError`: the byte input is invalid in its detected encoding. */
+export class LedgerUnicodeDecodeError extends Error {
+  override readonly name = 'LedgerUnicodeDecodeError';
+  readonly pythonError = 'UnicodeDecodeError';
 
   constructor(message: string) {
     super(message);
@@ -172,33 +182,30 @@ export function ledgerDigestOf(value: JsonValue): string {
  * not decode errors.
  */
 export function ledgerLoads(raw: string | Uint8Array): JsonValue {
-  let text: string;
-  if (typeof raw === 'string') {
-    text = raw;
-  } else {
-    try {
-      text = new TextDecoder('utf-8', { fatal: true }).decode(raw);
-    } catch {
-      throw new LedgerJsonDecodeError('invalid UTF-8');
-    }
-    // Python's byte decoder strips a UTF-8 BOM before parsing.
-    if (text.startsWith('\uFEFF')) text = text.slice(1);
-  }
+  const text = typeof raw === 'string' ? raw : decodeLedgerBytes(raw);
 
   let value: JsonValue;
   try {
-    value = parseJsonValue(text, { duplicates: 'error' });
+    value = parseJsonValue(text, {
+      // Python refuses these while scanning, in document order: `[1.0,]` is
+      // an integrity refusal even though the document is also malformed.
+      parseFloat: () => fail('unsupported numeric JSON value'),
+      parseConstant: () => fail('unsupported numeric JSON value'),
+      // Python's object_pairs_hook runs at object close, so a later syntax
+      // error outranks a duplicate key that has already been scanned.
+      objectPairs: (pairs) => {
+        const seen = new Set<string>();
+        for (const [key] of pairs) {
+          if (seen.has(key)) fail('duplicate JSON key');
+          seen.add(key);
+        }
+        return new JsonObject(pairs);
+      },
+    });
   } catch (error) {
-    if (!(error instanceof JsonParseError)) throw error;
-    try {
-      parseJsonValue(text, { duplicates: 'last' });
-    } catch {
-      if (containsNonFiniteConstant(text)) fail('unsupported numeric JSON value');
-      throw new LedgerJsonDecodeError(error.message);
-    }
-    fail('duplicate JSON key');
+    if (error instanceof JsonParseError) throw new LedgerJsonDecodeError(error.message);
+    throw error;
   }
-  rejectFloats(value);
   try {
     ledgerJsonBytes(value);
   } catch (error) {
@@ -208,81 +215,171 @@ export function ledgerLoads(raw: string | Uint8Array): JsonValue {
   return value;
 }
 
-function rejectFloats(value: JsonValue): void {
-  if (value instanceof JsonNumber) {
-    if (value.kind === 'float') fail('unsupported numeric JSON value');
-    return;
-  }
-  if (Array.isArray(value)) {
-    for (const entry of value) rejectFloats(entry);
-    return;
-  }
-  if (value instanceof JsonObject) {
-    for (const [, entry] of value.entries) rejectFloats(entry);
-  }
-}
+const UTF8_BOM = [0xef, 0xbb, 0xbf] as const;
+const UTF16_BE_BOM = [0xfe, 0xff] as const;
+const UTF16_LE_BOM = [0xff, 0xfe] as const;
+const UTF32_BE_BOM = [0x00, 0x00, 0xfe, 0xff] as const;
+const UTF32_LE_BOM = [0xff, 0xfe, 0x00, 0x00] as const;
 
 /**
- * Python's `json` module recognises `NaN`, `Infinity` and `-Infinity` outside
- * strings; the RFC 8259 parser in `jsonValue` does not, so a refused parse is
- * classified rather than misreported as a decode error.
+ * `json.detect_encoding` for `bytes` input, including its exact precedence:
+ * UTF-32/UTF-16/UTF-8 BOMs, then the four-byte heuristics, then the two-byte
+ * heuristics. The decoded text is what Python hands to the JSON scanner
+ * (`surrogatepass`, so lone surrogates survive to the canonical-domain check).
  */
-function containsNonFiniteConstant(text: string): boolean {
-  let inString = false;
-  let escaped = false;
-  for (let index = 0; index < text.length; index += 1) {
-    const character = text[index];
-    if (inString) {
-      if (escaped) escaped = false;
-      else if (character === '\\') escaped = true;
-      else if (character === '"') inString = false;
-      continue;
+function decodeLedgerBytes(raw: Uint8Array): string {
+  if (startsWithBytes(raw, UTF32_BE_BOM)) return decodeUtf32(raw.subarray(4), true);
+  if (startsWithBytes(raw, UTF32_LE_BOM)) return decodeUtf32(raw.subarray(4), false);
+  if (startsWithBytes(raw, UTF16_BE_BOM)) return decodeUtf16(raw.subarray(2), true);
+  if (startsWithBytes(raw, UTF16_LE_BOM)) return decodeUtf16(raw.subarray(2), false);
+  if (startsWithBytes(raw, UTF8_BOM)) return decodeUtf8(raw.subarray(3));
+
+  if (raw.length >= 4) {
+    if (raw[0] === 0) {
+      return raw[1] === 0 ? decodeUtf32(raw, true) : decodeUtf16(raw, true);
     }
-    if (character === '"') {
-      inString = true;
-      continue;
+    if (raw[1] === 0) {
+      return raw[2] === 0 && raw[3] === 0 ? decodeUtf32(raw, false) : decodeUtf16(raw, false);
     }
-    for (const token of ['-Infinity', 'Infinity', 'NaN']) {
-      if (!text.startsWith(token, index)) continue;
-      if (!boundaryBefore(text, index) || !boundaryAfter(text, index + token.length)) continue;
-      return true;
-    }
+  } else if (raw.length === 2) {
+    if (raw[0] === 0) return decodeUtf16(raw, true);
+    if (raw[1] === 0) return decodeUtf16(raw, false);
   }
-  return false;
+  return decodeUtf8(raw);
 }
 
-function boundaryBefore(text: string, index: number): boolean {
-  if (index === 0) return true;
-  const character = text[index - 1];
-  return character !== undefined && /[\s[{,:]/.test(character);
+function startsWithBytes(bytes: Uint8Array, prefix: readonly number[]): boolean {
+  if (bytes.length < prefix.length) return false;
+  return prefix.every((byte, index) => bytes[index] === byte);
 }
 
-function boundaryAfter(text: string, index: number): boolean {
-  if (index >= text.length) return true;
-  const character = text[index];
-  return character !== undefined && /[\s\]},:]/.test(character);
+function decodeUtf8(bytes: Uint8Array): string {
+  let result = '';
+  for (let index = 0; index < bytes.length;) {
+    const first = bytes[index] ?? 0;
+    if (first < 0x80) {
+      result += String.fromCharCode(first);
+      index += 1;
+      continue;
+    }
+    let length: number;
+    let codePoint: number;
+    let minimum: number;
+    if (first >= 0xc2 && first <= 0xdf) {
+      length = 2;
+      codePoint = first & 0x1f;
+      minimum = 0x80;
+    } else if (first >= 0xe0 && first <= 0xef) {
+      length = 3;
+      codePoint = first & 0x0f;
+      minimum = 0x800;
+    } else if (first >= 0xf0 && first <= 0xf4) {
+      length = 4;
+      codePoint = first & 0x07;
+      minimum = 0x10000;
+    } else {
+      throw new LedgerUnicodeDecodeError('invalid UTF-8 start byte');
+    }
+    if (index + length > bytes.length) {
+      throw new LedgerUnicodeDecodeError('truncated UTF-8 sequence');
+    }
+    for (let offset = 1; offset < length; offset += 1) {
+      const continuation = bytes[index + offset] ?? 0;
+      if ((continuation & 0xc0) !== 0x80) {
+        throw new LedgerUnicodeDecodeError('invalid UTF-8 continuation byte');
+      }
+      codePoint = (codePoint << 6) | (continuation & 0x3f);
+    }
+    if (codePoint < minimum || codePoint > 0x10ffff) {
+      throw new LedgerUnicodeDecodeError('invalid UTF-8 code point');
+    }
+    result += String.fromCodePoint(codePoint);
+    index += length;
+  }
+  return result;
 }
+
+function decodeUtf16(bytes: Uint8Array, bigEndian: boolean): string {
+  if (bytes.length % 2 !== 0) throw new LedgerUnicodeDecodeError('truncated UTF-16');
+  let result = '';
+  for (let index = 0; index < bytes.length; index += 2) {
+    const unit = readUint16(bytes, index, bigEndian);
+    if (unit >= 0xd800 && unit <= 0xdbff && index + 3 < bytes.length) {
+      const low = readUint16(bytes, index + 2, bigEndian);
+      if (low >= 0xdc00 && low <= 0xdfff) {
+        result += String.fromCharCode(unit, low);
+        index += 2;
+        continue;
+      }
+    }
+    // surrogatepass: an unpaired surrogate is preserved, then refused by the
+    // canonical-domain check if it reaches a string value.
+    result += String.fromCharCode(unit);
+  }
+  return result;
+}
+
+function decodeUtf32(bytes: Uint8Array, bigEndian: boolean): string {
+  if (bytes.length % 4 !== 0) throw new LedgerUnicodeDecodeError('truncated UTF-32');
+  let result = '';
+  for (let index = 0; index < bytes.length; index += 4) {
+    const codePoint = bigEndian
+      ? readUint16(bytes, index, true) * 0x10000 + readUint16(bytes, index + 2, true)
+      : readUint16(bytes, index + 2, false) * 0x10000 + readUint16(bytes, index, false);
+    if (codePoint > 0x10ffff) throw new LedgerUnicodeDecodeError('invalid UTF-32 code point');
+    result += String.fromCodePoint(codePoint);
+  }
+  return result;
+}
+
+function readUint16(bytes: Uint8Array, index: number, bigEndian: boolean): number {
+  const first = bytes[index] ?? 0;
+  const second = bytes[index + 1] ?? 0;
+  return bigEndian ? (first << 8) | second : (second << 8) | first;
+}
+
+const TIMESTAMP_SHAPE =
+  /^(\p{Nd}{4})-(\p{Nd}{2})-(\p{Nd}{2})T(\p{Nd}{2}):(\p{Nd}{2}):(\p{Nd}{2})Z$/u;
+const TIMESTAMP_MONTH = /^(?:1[0-2]|0[1-9])$/;
+const TIMESTAMP_DAY = /^(?:3[01]|0[1-9]|[12]\p{Nd})$/u;
+const TIMESTAMP_HOUR = /^(?:2[0-3]|[01]\p{Nd})$/u;
+const TIMESTAMP_MINUTE = /^(?:[0-5]\p{Nd})$/u;
+const TIMESTAMP_SECOND = /^(?:6[01]|[0-5]\p{Nd})$/u;
+const DECIMAL_DIGIT = /\p{Nd}/u;
 
 /**
  * `review_ledger.timestamp`: exactly `YYYY-MM-DDTHH:MM:SSZ`, with Python's
- * Unicode `\d` shape check followed by `strptime`'s calendar validation.
- * Non-ASCII decimal digits pass the shape but fail `strptime`, hence
- * {@link LedgerTimestampError}.
+ * Unicode `\d` shape check followed by `strptime`'s field grammar. CPython's
+ * `%Y` accepts any Unicode decimal digits, and `%d`/`%H`/`%M`/`%S` accept a
+ * Unicode digit after an ASCII `0`/`1`/`2`/`5`; `%m` is ASCII-only.
  */
 export function ledgerTimestamp(value: JsonValue | undefined): LedgerTimestamp {
   if (typeof value !== 'string') fail('expected exact UTC timestamp');
-  const shape = /^\p{Nd}{4}-\p{Nd}{2}-\p{Nd}{2}T\p{Nd}{2}:\p{Nd}{2}:\p{Nd}{2}Z$/u.exec(value);
+  const shape = TIMESTAMP_SHAPE.exec(value);
   if (shape === null || shape[0].length !== value.length) fail('expected exact UTC timestamp');
 
-  const fields = /^([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})Z$/.exec(value);
-  if (fields === null) throw new LedgerTimestampError(`time data '${value}' does not match format`);
-  const values = fields.slice(1).map((part) => Number(part));
-  const year = values[0] ?? 0;
-  const month = values[1] ?? 0;
-  const day = values[2] ?? 0;
-  const hour = values[3] ?? 0;
-  const minute = values[4] ?? 0;
-  const second = values[5] ?? 0;
+  const yearField = shape[1] ?? '';
+  const monthField = shape[2] ?? '';
+  const dayField = shape[3] ?? '';
+  const hourField = shape[4] ?? '';
+  const minuteField = shape[5] ?? '';
+  const secondField = shape[6] ?? '';
+  if (
+    !TIMESTAMP_MONTH.test(monthField) ||
+    !TIMESTAMP_DAY.test(dayField) ||
+    !TIMESTAMP_HOUR.test(hourField) ||
+    !TIMESTAMP_MINUTE.test(minuteField) ||
+    !TIMESTAMP_SECOND.test(secondField)
+  ) {
+    throw new LedgerTimestampError(`time data '${value}' does not match format`);
+  }
+
+  const year = pythonDigits(yearField);
+  const month = Number(monthField);
+  const day = pythonDigits(dayField);
+  const hour = pythonDigits(hourField);
+  const minute = pythonDigits(minuteField);
+  const second = pythonDigits(secondField);
   if (
     year < 1 ||
     month < 1 ||
@@ -296,6 +393,26 @@ export function ledgerTimestamp(value: JsonValue | undefined): LedgerTimestamp {
     throw new LedgerTimestampError(`time data '${value}' does not match format`);
   }
   return { year, month, day, hour, minute, second };
+}
+
+/** Python `int()` for a string of Unicode decimal digits. */
+function pythonDigits(text: string): number {
+  let value = 0;
+  for (const character of text) value = value * 10 + decimalDigitValue(character);
+  return value;
+}
+
+/**
+ * Unicode `Nd` code points occur in aligned runs of ten, so the digit value is
+ * the offset from the start of the character's run.
+ */
+function decimalDigitValue(character: string): number {
+  const codePoint = character.codePointAt(0);
+  if (codePoint === undefined) throw new LedgerTimestampError('empty timestamp field');
+  if (codePoint >= 0x30 && codePoint <= 0x39) return codePoint - 0x30;
+  let start = codePoint;
+  while (start > 0 && DECIMAL_DIGIT.test(String.fromCodePoint(start - 1))) start -= 1;
+  return (codePoint - start) % 10;
 }
 
 function daysInMonth(year: number, month: number): number {

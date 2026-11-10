@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, test } from 'vitest';
 import {
+  JsonNumber,
   JsonObject,
   parseJsonValue,
   toPlainJson,
@@ -10,6 +11,7 @@ import {
   LedgerIntegrityError,
   LedgerJsonDecodeError,
   LedgerTimestampError,
+  LedgerUnicodeDecodeError,
   independentBatch,
   independentImport,
   initialInventoryEnrollment,
@@ -81,6 +83,21 @@ function arrayAt(object: JsonObject, key: string): JsonValue[] {
   return value;
 }
 
+function bytesAt(object: JsonObject, key: string): Uint8Array {
+  return Uint8Array.from(
+    arrayAt(object, key).map((entry) => {
+      if (!(entry instanceof JsonNumber) || entry.kind !== 'int') {
+        throw new Error(`non-integer byte in ${key}`);
+      }
+      const byte = Number(entry.integer);
+      if (!Number.isInteger(byte) || byte < 0 || byte > 255) {
+        throw new Error(`byte out of range in ${key}`);
+      }
+      return byte;
+    }),
+  );
+}
+
 function loadVectors(): VectorCase[] {
   const document = requireObject(parseJsonValue(readFileSync(VECTORS, 'utf8')), 'vector document');
   if (document.get('schema') !== 'cq.crq-ledger-b1-vector/v1') {
@@ -112,7 +129,8 @@ function capture(action: () => unknown): Outcome {
       error instanceof PythonJsonError ||
       error instanceof LedgerIntegrityError ||
       error instanceof LedgerTimestampError ||
-      error instanceof LedgerJsonDecodeError
+      error instanceof LedgerJsonDecodeError ||
+      error instanceof LedgerUnicodeDecodeError
     ) {
       return { ok: false, pythonError: error.pythonError, message: error.message };
     }
@@ -146,7 +164,11 @@ function run(vector: VectorCase): unknown {
       return { canonical: ledgerCanonicalText(value), sha256: ledgerDigestOf(value) };
     }
     case 'review_ledger.loads':
-      return toPlainJson(ledgerLoads(stringAt(input, 'raw')));
+      return toPlainJson(
+        input.get('bytes') === undefined
+          ? ledgerLoads(stringAt(input, 'raw'))
+          : ledgerLoads(bytesAt(input, 'bytes')),
+      );
     case 'review_ledger.timestamp':
       return ledgerTimestamp(valueAt(input, 'value'));
     case 'review_ledger.path':
@@ -264,9 +286,52 @@ describe('ledger records are pure and self-describing', () => {
     expect(toPlainJson(ledgerLoads(bytes))).toEqual({});
   });
 
+  test('loads detects UTF-16 and UTF-32 byte encodings like Python', () => {
+    // `{"雪":1}` in UTF-16LE, selected by the `xx 00` heuristic.
+    const utf16 = new Uint8Array(Buffer.from('{"雪":1}', 'utf16le'));
+    expect(toPlainJson(ledgerLoads(utf16))).toEqual({ 雪: 1 });
+
+    // `{}` in UTF-32BE, selected by the `00 00` heuristic.
+    const utf32 = new Uint8Array([0, 0, 0, 0x7b, 0, 0, 0, 0x7d]);
+    expect(toPlainJson(ledgerLoads(utf32))).toEqual({});
+
+    // A UTF-16BE BOM outranks the byte heuristics.
+    const bom = new Uint8Array([0xfe, 0xff, 0, 0x7b, 0, 0x7d]);
+    expect(toPlainJson(ledgerLoads(bom))).toEqual({});
+  });
+
+  test('an invalid byte encoding keeps the Python UnicodeDecodeError class', () => {
+    expect(() => ledgerLoads(new Uint8Array([0x80]))).toThrow(LedgerUnicodeDecodeError);
+    expect(() => ledgerLoads(new Uint8Array([0x7b, 0, 0, 0, 0x7d, 0, 0]))).toThrow(
+      LedgerUnicodeDecodeError,
+    );
+  });
+
+  test('loads refuses floats and constants while scanning, in document order', () => {
+    // Python's parse_float/parse_constant refusals happen before a later
+    // syntax error, while object_pairs_hook waits for the object to close.
+    expect(() => ledgerLoads('[1.0,]')).toThrow(LedgerIntegrityError);
+    expect(() => ledgerLoads('{broken NaN}')).toThrow(LedgerJsonDecodeError);
+    expect(() => ledgerLoads('{"a":1,"a":2,}')).toThrow(LedgerJsonDecodeError);
+    expect(() => ledgerLoads('{"a":1,"a":2}')).toThrow(LedgerIntegrityError);
+    expect(() => ledgerLoads('{"a":1,"a":2,"b":}')).toThrow(LedgerJsonDecodeError);
+  });
+
   test('an invalid calendar timestamp keeps the Python ValueError class', () => {
     expect(() => ledgerTimestamp('2026-02-30T00:00:00Z')).toThrow(LedgerTimestampError);
     expect(() => ledgerTimestamp('٢٠٢٦-١١-٠٩T٠٠:٠٠:٠٠Z')).toThrow(LedgerTimestampError);
+  });
+
+  test("timestamp reproduces strptime's Unicode digit grammar", () => {
+    expect(ledgerTimestamp('٢٠٢٦-11-09T00:00:00Z').year).toBe(2026);
+    expect(ledgerTimestamp('२०२६-11-09T00:00:00Z').year).toBe(2026);
+    expect(ledgerTimestamp('2026-11-1٢T00:00:00Z').day).toBe(12);
+    expect(ledgerTimestamp('2026-11-09T0٢:00:00Z').hour).toBe(2);
+    expect(ledgerTimestamp('2026-11-09T00:5٩:00Z').minute).toBe(59);
+    expect(ledgerTimestamp('2026-11-09T00:00:5٩Z').second).toBe(59);
+    // %m is ASCII-only and a leading non-ASCII digit is refused.
+    expect(() => ledgerTimestamp('2026-١١-09T00:00:00Z')).toThrow(LedgerTimestampError);
+    expect(() => ledgerTimestamp('2026-11-٢٢T00:00:00Z')).toThrow(LedgerTimestampError);
   });
 
   test('a record whose id does not match its digest is refused', () => {
