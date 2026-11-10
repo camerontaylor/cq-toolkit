@@ -126,6 +126,13 @@ export interface ParseJsonOptions {
    * hook owns the key policy.
    */
   objectPairs?: (pairs: ReadonlyArray<readonly [string, JsonValue]>) => JsonValue;
+  /**
+   * Called when the source contains a raw surrogate code unit that is not an
+   * escaped high/low pair. Python keeps such code units as separate
+   * characters; JavaScript would otherwise merge an adjacent high/low pair
+   * into a scalar.
+   */
+  onRawSurrogate?: () => void;
 }
 
 /** Parse RFC 8259 JSON without losing int-vs-float or object key order. */
@@ -277,12 +284,16 @@ class Parser {
       const character = this.text[this.index];
       if (character === undefined) this.fail('unterminated string');
       if (character === '"') {
-        result += this.text.slice(chunkStart, this.index);
+        const chunk = this.text.slice(chunkStart, this.index);
+        this.checkRawSurrogates(chunk);
+        result += chunk;
         this.index += 1;
         return result;
       }
       if (character === '\\') {
-        result += this.text.slice(chunkStart, this.index);
+        const chunk = this.text.slice(chunkStart, this.index);
+        this.checkRawSurrogates(chunk);
+        result += chunk;
         this.index += 1;
         result += this.parseEscape();
         chunkStart = this.index;
@@ -291,6 +302,26 @@ class Parser {
       const code = character.charCodeAt(0);
       if (code < 0x20) this.fail('unescaped control character in string');
       this.index += 1;
+    }
+  }
+
+  private checkRawSurrogates(chunk: string): void {
+    if (this.options.onRawSurrogate === undefined) return;
+    for (let index = 0; index < chunk.length; index += 1) {
+      const unit = chunk.charCodeAt(index);
+      if (unit >= 0xd800 && unit <= 0xdbff) {
+        const next = chunk.charCodeAt(index + 1);
+        if (next >= 0xdc00 && next <= 0xdfff) {
+          index += 1;
+          continue;
+        }
+        this.options.onRawSurrogate();
+        return;
+      }
+      if (unit >= 0xdc00 && unit <= 0xdfff) {
+        this.options.onRawSurrogate();
+        return;
+      }
     }
   }
 
@@ -318,13 +349,34 @@ class Parser {
         const digits = this.text.slice(this.index, this.index + 4);
         if (!/^[0-9a-fA-F]{4}$/.test(digits)) this.fail('invalid \\u escape');
         this.index += 4;
-        return String.fromCharCode(Number.parseInt(digits, 16));
+        const code = Number.parseInt(digits, 16);
+        if (code >= 0xd800 && code <= 0xdbff) {
+          const low = this.parseEscapedLowSurrogate();
+          if (low !== null) {
+            return String.fromCodePoint(0x10000 + ((code - 0xd800) << 10) + (low - 0xdc00));
+          }
+          this.options.onRawSurrogate?.();
+          return String.fromCharCode(code);
+        }
+        if (code >= 0xdc00 && code <= 0xdfff) this.options.onRawSurrogate?.();
+        return String.fromCharCode(code);
       }
       case undefined:
         return this.fail('invalid escape');
       default:
         return this.fail('invalid escape');
     }
+  }
+
+  /** Python's json scanner joins an escaped high surrogate with an escaped low. */
+  private parseEscapedLowSurrogate(): number | null {
+    if (this.text[this.index] !== '\\' || this.text[this.index + 1] !== 'u') return null;
+    const digits = this.text.slice(this.index + 2, this.index + 6);
+    if (!/^[0-9a-fA-F]{4}$/.test(digits)) return null;
+    const code = Number.parseInt(digits, 16);
+    if (code < 0xdc00 || code > 0xdfff) return null;
+    this.index += 6;
+    return code;
   }
 
   private parseNumber(): JsonValue {
@@ -347,11 +399,17 @@ class Parser {
     }
     let exponent = false;
     if (this.text[this.index] === 'e' || this.text[this.index] === 'E') {
-      exponent = true;
+      // Python leaves an exponent marker without digits unconsumed, so the
+      // preceding literal is still scanned and `parseFloat` still runs.
+      const exponentStart = this.index;
       this.index += 1;
       if (this.text[this.index] === '+' || this.text[this.index] === '-') this.index += 1;
-      if (!isDigit(this.text[this.index])) this.fail('expected an exponent digit');
-      while (isDigit(this.text[this.index])) this.index += 1;
+      if (isDigit(this.text[this.index])) {
+        exponent = true;
+        while (isDigit(this.text[this.index])) this.index += 1;
+      } else {
+        this.index = exponentStart;
+      }
     }
     const raw = this.text.slice(start, this.index);
     if (fractional || exponent) {

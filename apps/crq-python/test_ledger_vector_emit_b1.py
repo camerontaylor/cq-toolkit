@@ -92,9 +92,24 @@ class LedgerVectorTest(unittest.TestCase):
             "duplicate-before-nan": "IntegrityError",
             "nan-before-trailing-comma": "IntegrityError",
             "float-before-syntax": "IntegrityError",
+            "float-before-bare-exponent": "IntegrityError",
+            "float-before-bare-exponent-sign": "IntegrityError",
+            "integer-before-bare-exponent": "JSONDecodeError",
         }
         for name, error in expected.items():
             self.assertEqual(cases[name]["expect"].get("error"), error, name)
+
+    def test_surrogate_string_vectors_preserve_escape_boundaries(self):
+        cases = {case["name"]: case for case in _family("loads")["cases"]}
+        for name in (
+            "escape-high-literal-low",
+            "literal-high-escape-low",
+            "literal-high-alone",
+            "literal-low-alone",
+        ):
+            self.assertEqual(cases[name]["expect"].get("error"), "IntegrityError", name)
+        self.assertEqual(cases["raw-astral"]["expect"]["value"], "😀")
+        self.assertEqual(cases["escaped-surrogate-pair"]["expect"]["value"], "😀")
 
     def test_tampered_id_case_keeps_the_hash_defect(self):
         family = _family("validate")

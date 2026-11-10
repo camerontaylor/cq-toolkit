@@ -61,6 +61,12 @@ def _family(name: str, cases: List[Dict[str, Any]]) -> Dict[str, Any]:
     return {"family": name, "cases": cases}
 
 
+def _utf16_units(text: str) -> List[int]:
+    data = text.encode("utf-16-le", "surrogatepass")
+    return [int.from_bytes(data[index:index + 2], "little")
+            for index in range(0, len(data), 2)]
+
+
 def _canonical(value: Any) -> Dict[str, str]:
     raw = ledger.canonical(value)
     return {"canonical": raw.decode("utf-8"), "sha256": hashlib.sha256(raw).hexdigest()}
@@ -192,6 +198,9 @@ def loads_vectors() -> Dict[str, Any]:
         ("duplicate-before-nan", '{"a":1,"a":2,"b":NaN}'),
         ("nan-before-trailing-comma", "[NaN,]"),
         ("float-before-syntax", "[1.0, broken]"),
+        ("float-before-bare-exponent", "[1.5e]"),
+        ("float-before-bare-exponent-sign", "[1.5E+]"),
+        ("integer-before-bare-exponent", "[1e]"),
         # Python combines escaped surrogate pairs into one scalar.
         ("escaped-surrogate-pair", '"\\ud83d\\ude00"'),
     )
@@ -236,6 +245,21 @@ def loads_vectors() -> Dict[str, Any]:
         _capture(name, "review_ledger.loads", {"bytes": list(raw)},
                  lambda raw=raw: ledger.loads(raw))
         for name, raw in byte_cases
+    )
+
+    # A raw surrogate cannot survive json.dumps(ensure_ascii=True) as a
+    # distinct code unit, so record the exact UTF-16 units instead.
+    surrogate_inputs = (
+        ("escape-high-literal-low", '"' + "\\ud83d" + "\ude00" + '"'),
+        ("literal-high-escape-low", '"' + "\ud83d" + "\\ude00" + '"'),
+        ("literal-high-alone", '"' + "\ud83d" + '"'),
+        ("literal-low-alone", '"' + "\ude00" + '"'),
+        ("raw-astral", '"😀"'),
+    )
+    cases.extend(
+        _capture(name, "review_ledger.loads", {"utf16": _utf16_units(raw)},
+                 lambda raw=raw: ledger.loads(raw))
+        for name, raw in surrogate_inputs
     )
     return _family("loads", cases)
 

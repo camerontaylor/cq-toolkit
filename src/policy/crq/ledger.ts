@@ -184,6 +184,7 @@ export function ledgerDigestOf(value: JsonValue): string {
 export function ledgerLoads(raw: string | Uint8Array): JsonValue {
   const decoded =
     typeof raw === 'string' ? { text: raw, rawSurrogate: false } : decodeLedgerBytes(raw);
+  let rawSurrogate = decoded.rawSurrogate;
 
   let value: JsonValue;
   try {
@@ -202,15 +203,20 @@ export function ledgerLoads(raw: string | Uint8Array): JsonValue {
         }
         return new JsonObject(pairs);
       },
+      // A literal surrogate, or an escape not paired with an escaped low,
+      // stays a separate Python character even when JS would merge the two.
+      onRawSurrogate: () => {
+        rawSurrogate = true;
+      },
     });
   } catch (error) {
     if (error instanceof JsonParseError) throw new LedgerJsonDecodeError(error.message);
     throw error;
   }
-  // Python keeps raw surrogate code points from byte input as separate
-  // characters; JavaScript would merge an adjacent high/low pair into a
-  // scalar. Refuse the record the oracle refuses.
-  if (decoded.rawSurrogate) fail('non-scalar Unicode');
+  // Python keeps raw surrogate code points as separate characters; JavaScript
+  // would otherwise merge an adjacent high/low pair into a scalar. Refuse the
+  // record the oracle refuses.
+  if (rawSurrogate) fail('non-scalar Unicode');
   try {
     ledgerJsonBytes(value);
   } catch (error) {

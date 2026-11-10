@@ -98,6 +98,20 @@ function bytesAt(object: JsonObject, key: string): Uint8Array {
   );
 }
 
+function utf16At(object: JsonObject, key: string): string {
+  const units = arrayAt(object, key).map((entry) => {
+    if (!(entry instanceof JsonNumber) || entry.kind !== 'int') {
+      throw new Error(`non-integer UTF-16 unit in ${key}`);
+    }
+    const unit = Number(entry.integer);
+    if (!Number.isInteger(unit) || unit < 0 || unit > 0xffff) {
+      throw new Error(`UTF-16 unit out of range in ${key}`);
+    }
+    return unit;
+  });
+  return String.fromCharCode(...units);
+}
+
 function loadVectors(): VectorCase[] {
   const document = requireObject(parseJsonValue(readFileSync(VECTORS, 'utf8')), 'vector document');
   if (document.get('schema') !== 'cq.crq-ledger-b1-vector/v1') {
@@ -164,6 +178,9 @@ function run(vector: VectorCase): unknown {
       return { canonical: ledgerCanonicalText(value), sha256: ledgerDigestOf(value) };
     }
     case 'review_ledger.loads':
+      if (input.get('utf16') !== undefined) {
+        return toPlainJson(ledgerLoads(utf16At(input, 'utf16')));
+      }
       return toPlainJson(
         input.get('bytes') === undefined
           ? ledgerLoads(stringAt(input, 'raw'))
@@ -335,6 +352,20 @@ describe('ledger records are pure and self-describing', () => {
     expect(() => ledgerLoads('{"a":1,"a":2,}')).toThrow(LedgerJsonDecodeError);
     expect(() => ledgerLoads('{"a":1,"a":2}')).toThrow(LedgerIntegrityError);
     expect(() => ledgerLoads('{"a":1,"a":2,"b":}')).toThrow(LedgerJsonDecodeError);
+    expect(() => ledgerLoads('[1.5e]')).toThrow(LedgerIntegrityError);
+    expect(() => ledgerLoads('[1.5E+]')).toThrow(LedgerIntegrityError);
+    expect(() => ledgerLoads('[1e]')).toThrow(LedgerJsonDecodeError);
+  });
+
+  test('a literal surrogate across an escape boundary keeps the Python refusal', () => {
+    const escapeHighLiteralLow = `"\\ud83d${String.fromCharCode(0xde00)}"`;
+    expect(() => ledgerLoads(escapeHighLiteralLow)).toThrow(LedgerIntegrityError);
+    const literalHighEscapeLow = `"${String.fromCharCode(0xd83d)}\\ude00"`;
+    expect(() => ledgerLoads(literalHighEscapeLow)).toThrow(LedgerIntegrityError);
+
+    // Escaped high + escaped low, and a raw astral character, are scalars.
+    expect(toPlainJson(ledgerLoads('"\\ud83d\\ude00"'))).toBe('😀');
+    expect(toPlainJson(ledgerLoads('"😀"'))).toBe('😀');
   });
 
   test('an invalid calendar timestamp keeps the Python ValueError class', () => {

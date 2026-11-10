@@ -385,6 +385,42 @@
           }
         },
         {
+          "name": "float-before-bare-exponent",
+          "source": "review_ledger.loads",
+          "input": {
+            "raw": "[1.5e]"
+          },
+          "expect": {
+            "ok": false,
+            "error": "IntegrityError",
+            "message": "unsupported numeric JSON value"
+          }
+        },
+        {
+          "name": "float-before-bare-exponent-sign",
+          "source": "review_ledger.loads",
+          "input": {
+            "raw": "[1.5E+]"
+          },
+          "expect": {
+            "ok": false,
+            "error": "IntegrityError",
+            "message": "unsupported numeric JSON value"
+          }
+        },
+        {
+          "name": "integer-before-bare-exponent",
+          "source": "review_ledger.loads",
+          "input": {
+            "raw": "[1e]"
+          },
+          "expect": {
+            "ok": false,
+            "error": "JSONDecodeError",
+            "message": "Expecting ',' delimiter: line 1 column 3 (char 2)"
+          }
+        },
+        {
           "name": "escaped-surrogate-pair",
           "source": "review_ledger.loads",
           "input": {
@@ -1110,6 +1146,98 @@
             "ok": false,
             "error": "UnicodeDecodeError",
             "message": "'utf-32-le' codec can't decode bytes in position 4-6: truncated data"
+          }
+        },
+        {
+          "name": "escape-high-literal-low",
+          "source": "review_ledger.loads",
+          "input": {
+            "utf16": [
+              34,
+              92,
+              117,
+              100,
+              56,
+              51,
+              100,
+              56832,
+              34
+            ]
+          },
+          "expect": {
+            "ok": false,
+            "error": "IntegrityError",
+            "message": "non-scalar Unicode"
+          }
+        },
+        {
+          "name": "literal-high-escape-low",
+          "source": "review_ledger.loads",
+          "input": {
+            "utf16": [
+              34,
+              55357,
+              92,
+              117,
+              100,
+              101,
+              48,
+              48,
+              34
+            ]
+          },
+          "expect": {
+            "ok": false,
+            "error": "IntegrityError",
+            "message": "non-scalar Unicode"
+          }
+        },
+        {
+          "name": "literal-high-alone",
+          "source": "review_ledger.loads",
+          "input": {
+            "utf16": [
+              34,
+              55357,
+              34
+            ]
+          },
+          "expect": {
+            "ok": false,
+            "error": "IntegrityError",
+            "message": "non-scalar Unicode"
+          }
+        },
+        {
+          "name": "literal-low-alone",
+          "source": "review_ledger.loads",
+          "input": {
+            "utf16": [
+              34,
+              56832,
+              34
+            ]
+          },
+          "expect": {
+            "ok": false,
+            "error": "IntegrityError",
+            "message": "non-scalar Unicode"
+          }
+        },
+        {
+          "name": "raw-astral",
+          "source": "review_ledger.loads",
+          "input": {
+            "utf16": [
+              34,
+              55357,
+              56832,
+              34
+            ]
+          },
+          "expect": {
+            "ok": true,
+            "value": "\ud83d\ude00"
           }
         }
       ]
