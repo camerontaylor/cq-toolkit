@@ -171,47 +171,56 @@ The run produced:
 
 ### Restart/reboot matrix run
 
-One matrix run completed on Pluto (KVM, Ubuntu noble guest ``crq-probe``)
-from source commit ``b2748889a164d10677b6aa317d467152ccc7969d``:
+The current matrix run completed on Pluto (KVM, Ubuntu noble guest
+``crq-probe``) from source commit
+``c1aa549fc6fb52829cfb2e075c53dfffcd343292``:
 
-- run ``20261110T185429Z-a5212c16``
+- run ``20261110T192818Z-f879a12d``
 - ``report.json`` SHA-256
-  ``bf59192aa838865ad9b101b73ca75d33234847d65c5c79c6fb4b5bfae4225012``
+  ``2ca6fd047fbf27e8aa61cbb64ee953e05d6f66faf6597ef5dac5448243e257be``
 - ``raw-guest-evidence.tar.gz`` SHA-256
-  ``cd2885d1b80c0a8cb89e554ed3bbbf403f183a214e91a73dc0ea0cca26e5b5cc``
-  (``177539`` bytes)
+  ``163aae8b82627250c466c7d151188f56a74599b1b55af62ea84473f999b59f53``
+  (``177986`` bytes)
 - host script ``executed-host-script.py`` SHA-256
-  ``8a5782bc807ecffc5ac202a76cf0103cb43151e02e2e4ea794850aab3ef058be``
+  ``5f2fa8ea7d52a21871e1a1d6e79d8375aad52d07b20571d9e3c5f0960f996589``
 - host feasibility module ``executed-host-vm-feasibility.py`` SHA-256
   ``04757807a7af3de2824054e9dd79ba3b706c109e62498f8ec5dd56a44362b996``
 - guest script ``executed-guest-probe.py`` SHA-256
-  ``4c226d84d192b554b6c553ee1170766318c221d60404766342b646dab3acdea1``
+  ``f850e0a92e489be82e95e52318f74464541573eb9adf84ba155fd8f12063b980``
 
 The report records all 57 checks true and ``problems: []``. A second
 ``verify`` recomputed the checks and re-hashed the retained artifacts with
 ``problems: []``, including every phase against the retained raw guest phase
 JSON, the final retained journal state in each record directory (the main
 directory plus both private ambiguity directories), the uploaded script
-bytes and the final service mask and staged target. The guest observe phase
-independently records the boot ID and user-manager invocation before and
-after each boundary; the host restart/reboot command records are report
+bytes and the final service mask, staged target and inactive timer. The
+verifier binds the run to ``c1aa549fc…`` and reports
+``host_matches_run: true``, ``guest_matches_run: true`` and
+``validator_only: false``. Every observe phase records ``jobs: []``, no owned
+PIDs, matching completion counts and an inactive timer. The guest observe
+phase independently records the boot ID and user-manager invocation before
+and after each boundary; the host restart/reboot command records are report
 provenance, while the guest observation is the raw-verifiable identity
 evidence.
 
 | Case | Boundary | Identity | Retained state | Recovery |
 |---|---|---|---|---|
-| ``matrix-restart-drained`` | switch killed at ``install`` | boot ID unchanged; manager invocation ``af321eb4…`` to ``fad3d79c…`` | ``drained`` record ``972ed2f2…``; mask; staged missing; completions ``4``/``4`` | rc ``0``, then repeated rc ``2`` |
-| ``matrix-restart-restore-staged`` | switch killed at ``install``; recovery killed at ``restore_staged`` | boot ID unchanged; manager invocation ``fad3d79c…`` to ``cf3bce73…`` | ``drained`` record ``bfb0a431…``; mask; staged prior Python; completions ``4``/``4`` | rc ``0``, then repeated rc ``2`` |
-| ``matrix-restart-ambiguity`` | switch killed at ``start`` | boot ID unchanged; manager invocation ``cf3bce73…`` to ``fe012cf3…`` | ``activation_pending`` record ``11a1e463…``; mask; staged Node; completions ``4``/``4`` | rc ``3`` twice; record bytes unchanged |
-| ``matrix-reboot-drained`` | switch killed at ``install`` | boot ID ``349fe42a…`` to ``45d0c867…``; manager invocation ``fe012cf3…`` to ``47b0d9b8…`` | ``drained`` record ``1742f8c5…``; mask; staged missing; completions ``6``/``6`` | rc ``0``, then repeated rc ``2`` |
-| ``matrix-reboot-restore-staged`` | switch killed at ``install``; recovery killed at ``restore_staged`` | boot ID ``45d0c867…`` to ``9a6b6bbb…``; manager invocation ``47b0d9b8…`` to ``c610f0db…`` | ``drained`` record ``b13d6b30…``; mask; staged prior Node; completions ``6``/``6`` | rc ``0``, then repeated rc ``2`` |
-| ``matrix-reboot-ambiguity`` | switch killed at ``start`` | boot ID ``9a6b6bbb…`` to ``f10ae3c6…``; manager invocation ``c610f0db…`` to ``23320893…`` | ``activation_pending`` record ``e1c681a6…``; mask; staged Python; completions ``6``/``6`` | rc ``3`` twice; record bytes unchanged |
+| ``matrix-restart-drained`` | switch killed at ``install`` | boot ID unchanged; manager invocation ``b354cf5f…`` to ``cb098183…`` | ``drained`` record ``e7faf8fa…``; mask; staged missing; completions ``4``/``4`` | rc ``0``, then repeated rc ``2`` |
+| ``matrix-restart-restore-staged`` | switch killed at ``install``; recovery killed at ``restore_staged`` | boot ID unchanged; manager invocation ``cb098183…`` to ``2b7b3526…`` | ``drained`` record ``9f77a76a…``; mask; staged prior Python; completions ``4``/``4`` | rc ``0``, then repeated rc ``2`` |
+| ``matrix-restart-ambiguity`` | switch killed at ``start`` | boot ID unchanged; manager invocation ``2b7b3526…`` to ``b68c67d5…`` | ``activation_pending`` record ``e2428f32…``; mask; staged Node; completions ``4``/``4`` | rc ``3`` twice; record bytes unchanged |
+| ``matrix-reboot-drained`` | switch killed at ``install`` | boot ID ``0cfbfbc7…`` to ``fea076b7…``; manager invocation ``b68c67d5…`` to ``e6e5e2ce…`` | ``drained`` record ``fc1f60f1…``; mask; staged missing; completions ``6``/``6`` | rc ``0``, then repeated rc ``2`` |
+| ``matrix-reboot-restore-staged`` | switch killed at ``install``; recovery killed at ``restore_staged`` | boot ID ``fea076b7…`` to ``b5bfc10a…``; manager invocation ``e6e5e2ce…`` to ``bf23d358…`` | ``drained`` record ``8b6b23bf…``; mask; staged prior Node; completions ``6``/``6`` | rc ``0``, then repeated rc ``2`` |
+| ``matrix-reboot-ambiguity`` | switch killed at ``start`` | boot ID ``b5bfc10a…`` to ``ba737382…``; manager invocation ``bf23d358…`` to ``6e7a00d0…`` | ``activation_pending`` record ``c70aa41b…``; mask; staged Python; completions ``6``/``6`` | rc ``3`` twice; record bytes unchanged |
 
 Both resets restored a loaded inactive Python service and an enabled inactive
 timer without changing the retained ambiguity record. The aggregate checks
 also require both runtime directions, no ``daemon-reload`` in any restart
 command, a changed boot ID for every reboot, no unrecorded completion, and
-retained ambiguity after both restart and reboot. The base proof run
+retained ambiguity after both restart and reboot. The previous matrix run
+``20261110T185429Z-a5212c16`` from source commit
+``b2748889a164d10677b6aa317d467152ccc7969d`` is preserved as historical
+evidence; its guest script predates the post-boundary timer check, so it is
+not the current bound proof. The base proof run
 ``20261110T180943Z-f3acc725``, the earlier historical run
 ``20261110T173225Z-de36ec18`` and the earlier retained run
 ``20261110T170322Z-9e8c5133`` remain on Pluto and are not rewritten.
