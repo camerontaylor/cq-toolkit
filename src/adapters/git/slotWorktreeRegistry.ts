@@ -1,5 +1,6 @@
-import { lstat, realpath, readdir } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { realpath, readdir } from 'node:fs/promises';
+import { join } from 'node:path';
+import { readLegacyReviewHint, type LegacyReviewHint } from './legacyReviewRegistry.js';
 import { acquireSlot, readSlotMetadata, type SlotMetadata } from '../lock/slotLock.js';
 import {
   CheckoutWriterContext,
@@ -10,6 +11,7 @@ export interface SlotWorktreeRegistry {
   read(pr: number): Promise<SlotMetadata | undefined>;
   update(pr: number, metadata: SlotMetadata): Promise<void>;
   withPrLock<T>(pr: number, action: () => Promise<T>): Promise<T>;
+  legacyHint?(pr: number): LegacyReviewHint | undefined;
 }
 
 /** Discovery is only a hint. Admission always reads again under the kernel lock. */
@@ -47,6 +49,7 @@ export function slotWorktreeRegistry(
     CheckoutWriterContext,
     Map<number, Awaited<ReturnType<CheckoutWriterContext['acquire']>>>
   >();
+  const hints = new WeakMap<CheckoutWriterContext, Map<number, LegacyReviewHint>>();
   const current = (pr: number) => {
     const context = checkoutWriterContext();
     const slot = context && held.get(context)?.get(pr);
@@ -56,6 +59,10 @@ export function slotWorktreeRegistry(
   return {
     read: (pr) => current(pr).readMetadata(),
     update: (pr, metadata) => current(pr).writeMetadata(metadata),
+    legacyHint: (pr) => {
+      const context = checkoutWriterContext();
+      return context ? hints.get(context)?.get(pr) : undefined;
+    },
     async withPrLock(pr, action) {
       const inherited = checkoutWriterContext();
       const context = inherited ?? new CheckoutWriterContext(acquireSlot);
@@ -70,14 +77,14 @@ export function slotWorktreeRegistry(
         entries.set(pr, slot);
         try {
           if (!(await slot.readMetadata())) {
-            for (const source of new Set((opts.legacySources ?? []).map((path) => resolve(path)))) {
-              try {
-                await lstat(source);
-              } catch (error) {
-                if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
-                throw error;
+            const hint = await readLegacyReviewHint(opts.legacySources ?? [], pr);
+            if (hint) {
+              let entries = hints.get(context);
+              if (!entries) {
+                entries = new Map();
+                hints.set(context, entries);
               }
-              throw new Error(`legacy review registry requires migration: ${source}`);
+              entries.set(pr, hint);
             }
           }
           await context.begin();

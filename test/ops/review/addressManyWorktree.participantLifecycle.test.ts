@@ -2,23 +2,11 @@ import { constants } from 'node:fs';
 import { lstat, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { expect, test, vi } from 'vitest';
-import * as addressModule from '../../../src/ops/review/address.js';
-import {
-  makeAddressOwnership,
-  withAddressOwnership,
-} from '../../../src/ops/review/internal/addressOwnership.js';
+import { withAddressOwnership } from '../../../src/ops/review/internal/addressCheckoutOwnership.js';
 
-import type { ReviewAddressReport } from '../../../src/ops/review/address.js';
-import * as ownershipModule from '../../../src/ops/review/internal/addressOwnership.js';
+import * as ownershipModule from '../../../src/ops/review/internal/addressCheckoutOwnership.js';
 
-import {
-  authorityState,
-  damageGuard,
-  deferred,
-  fixture,
-  terminalInput,
-  terminalReport,
-} from './addressManyWorktree.helpers.js';
+import { fixture, terminalInput, terminalReport } from './addressManyWorktree.helpers.js';
 
 // Filesystem fault gates are test-only. Every unaffected operation is real.
 const fsFaults = vi.hoisted(() => ({
@@ -64,150 +52,7 @@ vi.mock('node:fs/promises', async (importOriginal) => {
   };
 });
 
-test.each([false, true])(
-  'closed participant stays immutable; late receipt cannot be reclaimed: %s',
-  async (late) => {
-    const f = await fixture();
-    const parent = new AbortController();
-    const closed = deferred(),
-      entered = deferred(),
-      arrive = deferred(),
-      release = deferred(),
-      secondReady = deferred();
-    const reports = [
-      terminalReport(join(f.root, 'closed-terminal.json')),
-      terminalReport(join(f.root, 'open-terminal.json')),
-    ];
-    reports[0]!.reasons.push('already returned before cancellation');
-    let actual: Promise<unknown> | undefined;
-    const factory = vi
-      .spyOn(addressModule, 'makeReviewAddress')
-      .mockImplementation(() => async (input) => {
-        const index = input.source === 'pr:7' ? 0 : 1;
-        const result = await withAddressOwnership(
-          { repoRoot: f.repo.root, git: f.run, source: input.source, production: true },
-          async (lease) => {
-            await ownershipModule.bindAddressTerminalReport(lease, reports[index]!);
-            if (index === 0) {
-              if (late) {
-                const binding = ownershipModule.addressTerminalWorkerBinding(lease);
-                const attempt = await ownershipModule.recordAddressTerminalAttempt(
-                  binding,
-                  terminalInput(f.repo),
-                );
-                actual = lease.track(async () => {
-                  entered.resolve();
-                  await release.promise;
-                  ownershipModule.deferAddressTerminalAttempt(binding, attempt);
-                });
-                void actual.catch(() => undefined);
-                await entered.promise;
-              }
-              await writeFile(reports[0]!.reportPath, 'immutable closed participant report');
-              return {
-                status: 'needs-human' as const,
-                reason: 'already closed',
-                report: reports[0]!,
-              };
-            }
-            secondReady.resolve();
-            await arrive.promise;
-            return ownershipModule.addressCancelledResult(lease);
-          },
-        );
-        if (index === 0) closed.resolve();
-        return result;
-      });
-    let pending: Promise<unknown> | undefined;
-    try {
-      const owner = await makeAddressOwnership({
-        repoRoot: f.repo.root,
-        git: f.run,
-        signal: parent.signal,
-      });
-      pending = owner.withLock(async () => {
-        const first = owner.address(
-          {
-            pr: 7,
-            head: f.prs[0].headRefOid,
-            headRepo: 'fixture/base',
-            headRefName: 'closed-seven',
-          },
-          { repoRoot: f.repo.root, source: 'pr:7' },
-        );
-        void first.catch(() => undefined);
-        await closed.promise;
-        if (late) {
-          await expect(first).rejects.toThrow('detached child work requires quarantine');
-          await expect(
-            owner.address(
-              {
-                pr: 9,
-                head: f.prs[1].headRefOid,
-                headRepo: 'fixture/base',
-                headRefName: 'open-nine',
-              },
-              { repoRoot: f.repo.root, source: 'pr:9' },
-            ),
-          ).rejects.toThrow();
-          throw new Error('detached child refused');
-        }
-        const second = owner.address(
-          { pr: 9, head: f.prs[1].headRefOid, headRepo: 'fixture/base', headRefName: 'open-nine' },
-          { repoRoot: f.repo.root, source: 'pr:9' },
-        );
-        const outcomes = Promise.allSettled([first, second]);
-        await secondReady.promise;
-        parent.abort();
-        arrive.resolve();
-        release.resolve();
-        const rows = await outcomes;
-        const rejected = rows.find((row) => row.status === 'rejected');
-        if (rejected?.status === 'rejected') throw rejected.reason;
-        return rows;
-      });
-      const outcome = await pending.then(
-        (value) => ({ value }),
-        (error: unknown) => ({ error }),
-      );
-      if (late) {
-        release.resolve();
-        await actual;
-      }
-      expect(await readFile(reports[0]!.reportPath, 'utf8')).toBe(
-        'immutable closed participant report',
-      );
-      expect(reports[0]!.reasons).toEqual(['already returned before cancellation']);
-      if (late) {
-        expect(outcome).toHaveProperty('error');
-        await expect(lstat(reports[1]!.reportPath)).rejects.toMatchObject({ code: 'ENOENT' });
-        expect((await authorityState(owner.guardPath)).state).not.toBe('quiescent');
-      } else {
-        expect(outcome).toHaveProperty('value');
-        expect(
-          (JSON.parse(await readFile(reports[1]!.reportPath, 'utf8')) as ReviewAddressReport)
-            .reasons,
-        ).toEqual(['parent cancelled']);
-      }
-    } finally {
-      arrive.resolve();
-      release.resolve();
-      await Promise.allSettled([...(actual ? [actual] : []), ...(pending ? [pending] : [])]);
-      factory.mockRestore();
-      await f.repo.cleanup();
-    }
-  },
-);
-test.each([
-  'head',
-  'index',
-  'foreign-file',
-  'path',
-  'mode',
-  'cancel-again',
-  'restore-io',
-  'cleanup-owner-loss',
-] as const)(
+test.each(['head', 'index', 'foreign-file', 'path', 'mode', 'cancel-again', 'restore-io'] as const)(
   'terminal evidence guards preserve changed caller state or honest prior ref effects: %s',
   async (mode) => {
     const f = await fixture();
@@ -254,18 +99,6 @@ test.each([
               )
                 throw new Error('terminal restore IO fault');
             };
-          if (mode === 'cleanup-owner-loss')
-            fsFaults.open = async (path, flags) => {
-              if (
-                path === join(f.repo.root, 'src/a.ts') &&
-                typeof flags === 'number' &&
-                flags & constants.O_WRONLY
-              )
-                await damageGuard(
-                  join(f.repo.root, '.git', 'cq-review-address-ownership.owner.json'),
-                  'replace',
-                );
-            };
           if (mode === 'cancel-again')
             fsFaults.open = async (path, flags) => {
               if (
@@ -291,7 +124,7 @@ test.each([
         expect(await readFile(join(f.repo.root, 'src/a.ts'), 'utf8')).toBe(
           mode === 'path' ? 'replacement bytes retained' : 'RAW CANCELLED PARTIAL\n',
         );
-        if (mode === 'restore-io' || mode === 'cleanup-owner-loss') {
+        if (mode === 'restore-io') {
           expect(report.failed).toHaveLength(1);
           expect(f.repo.git('show', `${report.failed[0]!.sha}:src/a.ts`)).toBe(
             'RAW CANCELLED PARTIAL\n',

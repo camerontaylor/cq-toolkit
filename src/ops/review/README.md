@@ -171,8 +171,8 @@ with `-`, contains a `..` component, resolves through an alias or symlink, or ha
 a link count above one, or whose index mode is not `100644`/`100755` or disagrees
 with the file. Glob characters (`*?[]{}`) remain refused in the cancelled file's
 name, but are accepted in foreign tracked names such as `pages/[id].tsx`, which
-are only read and hashed. Any settlement failure quarantines
-the ownership guard for attended recovery and persists no report.
+are only read and hashed. Settlement failure leaves the checkout incomplete for
+attended recovery and persists no report.
 
 PR replies and thread resolution use the current authenticated identity,
 fresh head/round proof and verified publication. Successful dispatch receipts
@@ -195,16 +195,20 @@ cancellation, including while waiting for its dispatch-log lock. In-flight
 successful responses still receive durable receipts for safe replay; callers
 without a signal retain existing behavior.
 
-Addressing owns a canonical Git common-directory lock from admission through
-worker edits, cleanup and publication. A second invocation refuses immediately
-and writes its own needs-human report without entering the worker tree. Linked
-worktrees share this conservative exclusion domain; disjoint workers within one
-invocation retain configured parallelism. Index mutations use a separate stable
-canonical checkout lock and the existing in-process FIFO. Execution-head
-admission joins that FIFO, so a sibling commit cannot be observed before its
-parent/tree verification and registration complete. The optional Git mutex
-`failFast` setting changes ownership admission only; default waiter, stale-lock
-recovery, heartbeat, cancellation and release behavior remain intact.
+Addressing holds persistent per-PR and actual checkout slots from admission
+through worker edits, cleanup and publication. Busy slots refuse immediately;
+different checkouts and PRs may proceed concurrently. Slot locks use the native
+`fs-ext` dependency on local Linux or macOS storage; network and host-shared
+mounts are unsupported. Do not delete lock files. Incomplete slots require the
+[checkout recovery procedure](../../../docs/review-address-checkout-recovery.md).
+Historical clean-completion certificates no longer authorize admission. Legacy
+registry files are preserved and read only as checkout hints.
+
+Controlled child processes inherit held descriptors until actual close. An
+awaited SDK session closes its direct child; unobservable descendants remain a
+residual risk. A `deps.review` override always leaves the slot incomplete.
+Generic fix and the entirety of `dev.cycle` are outside this checkout contract.
+PR publication retains its fast-forward-only explicit remote lease.
 
 Adopted repositories need no `.cq/` ignore rule for verified publication.
 Addressing registers exact ledger and findings-record paths only after validated
