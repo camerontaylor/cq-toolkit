@@ -11,6 +11,7 @@ import {
 import { CheckoutWriterContext } from '../../../shared/checkoutWriterContext.js';
 import { slotWorktreeRegistry } from '../../../adapters/git/slotWorktreeRegistry.js';
 import { readLegacyReviewHint } from '../../../adapters/git/legacyReviewRegistry.js';
+import { isPrWorktreeIncompleteRefusal } from '../../../adapters/git/prWorktree.js';
 import type { GhFn } from '../../../adapters/forge-github/gh.js';
 import type { ReviewLoopOpts, ReviewLoopOutcome } from '../../../plans/review-loop.js';
 export * from './addressRunLifecycle.js';
@@ -36,7 +37,10 @@ const bulkContext = new AsyncLocalStorage<{
   retained: CheckoutWriterContext[];
 }>();
 export function isAddressCheckoutIncomplete(value: unknown): boolean {
-  return typeof value === 'object' && value !== null && incompleteRefusals.has(value);
+  return (
+    (typeof value === 'object' && value !== null && incompleteRefusals.has(value)) ||
+    isPrWorktreeIncompleteRefusal(value)
+  );
 }
 export function isAddressOwnershipAdmissionRefusal(value: unknown): boolean {
   return typeof value === 'object' && value !== null && refusals.has(value);
@@ -338,8 +342,11 @@ export class AddressCheckoutOwnership extends AddressRunLifecycle {
           incompleteRefusals.add(error);
           throw error;
         }
-        if (source.startsWith('pr:') && this.registry.legacyHint?.(Number(source.slice(3))))
-          throw new Error('legacy review checkout requires reconciliation');
+        if (source.startsWith('pr:') && this.registry.legacyHint?.(Number(source.slice(3)))) {
+          const error = new Error('legacy review checkout requires reconciliation');
+          incompleteRefusals.add(error);
+          throw error;
+        }
         await this.assertIdentity();
         await this.disposeTerminalSession();
         await this.context.complete();

@@ -101,9 +101,14 @@ export const reviewBranchFor = (pr: number): string => `cq-review/pr-${pr}`;
 
 type ResolutionPhase = { checkoutMutation: boolean; metadataWrite: boolean };
 const admissionRefusals = new WeakSet<Error>();
+const incompleteRefusals = new WeakSet<Error>();
 /** A resolver-proven, settled refusal; message text alone cannot forge this proof. */
 export function isPrWorktreeAdmissionRefusal(error: unknown): error is Error {
   return error instanceof Error && admissionRefusals.has(error);
+}
+/** A settled refusal that must retain an unresolved legacy slot. */
+export function isPrWorktreeIncompleteRefusal(error: unknown): error is Error {
+  return error instanceof Error && incompleteRefusals.has(error);
 }
 async function withAdmission<T>(
   opts: PrWorktreeOpts,
@@ -124,16 +129,17 @@ async function withAdmission<T>(
           error instanceof Error &&
           !phase.checkoutMutation &&
           !phase.metadataWrite &&
-          !opts.registry.legacyHint?.(opts.pr) &&
           settled()
         ) {
           const refusal = new Error(error.message, { cause: error });
-          admissionRefusals.add(refusal);
+          if (opts.registry.legacyHint?.(opts.pr)) incompleteRefusals.add(refusal);
+          else admissionRefusals.add(refusal);
           throw refusal;
         }
         // A refusal proof is for this attempt; replaying an older error after
         // a mutator must not turn that new failure into a settled admission.
-        if (isPrWorktreeAdmissionRefusal(error)) throw new Error(error.message, { cause: error });
+        if (isPrWorktreeAdmissionRefusal(error) || isPrWorktreeIncompleteRefusal(error))
+          throw new Error(error.message, { cause: error });
         throw error;
       }
     }),
