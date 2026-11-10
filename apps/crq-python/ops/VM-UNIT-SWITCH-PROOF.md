@@ -235,7 +235,7 @@ The run produced:
 
 ### Earlier restart/reboot matrix run (historical)
 
-The most recent matrix run completed on Pluto (KVM, Ubuntu noble guest
+One earlier matrix run completed on Pluto (KVM, Ubuntu noble guest
 ``crq-probe``) from source commit
 ``c1aa549fc6fb52829cfb2e075c53dfffcd343292``. It predates the drain phases
 and the runner-source upload, so the current verifier does not re-validate
