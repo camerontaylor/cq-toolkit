@@ -70,6 +70,7 @@ import { messageOf } from '../../shared/messageOf.js';
 import type { ClassifyConfig } from './classify.config.js';
 import type { ClassifiedItem, Classification } from './classifyThreads.js';
 import type { FixableReviewItem, ReviewFixInput } from './fixReviewItem.js';
+import type { FixFindingBinding, FixFindingInput } from './fixFinding.js';
 import type { FetchedReviewState } from '../../adapters/forge-github/fetchReviewState.js';
 import type { PlanBatchConfig } from './planReviewBatch.js';
 import type { ReviewAction } from './replyAndResolve.js';
@@ -493,6 +494,60 @@ const FixableReviewItemSchema: z.ZodType<FixableReviewItem> = z
   .strict();
 
 /**
+ * The SHARED review-fix request vocabulary: review.fixItem and
+ * review.fixFinding carry the same repo/pr/item/worktree/driver/harness/
+ * promptOverride/budget fields. Declared once so a new field cannot drift
+ * between the two JSON boundaries.
+ */
+const reviewFixCommonFields = {
+  repo: z.string().min(1).exactOptional(),
+  pr: z.number().int().positive().exactOptional(),
+  item: z.union([
+    FixableReviewItemSchema,
+    z.object({ kind: z.literal('finding'), finding: FindingSchema }).strict(),
+  ]),
+  worktree: z.object({ path: z.string().min(1), branch: z.string().min(1) }).strict(),
+  driver: z.object({ model: z.string().min(1), provider: z.string().min(1) }).strict(),
+  harness: HarnessConfigSchema.exactOptional(),
+  promptOverride: z.string().min(1).exactOptional(),
+  budget: z
+    .object({
+      maxUsd: z.number().positive().exactOptional(),
+      maxTokens: z.number().int().positive().exactOptional(),
+      wallClockMs: z.number().int().positive().exactOptional(),
+      maxAttempts: z.number().int().positive().exactOptional(),
+      // Output-only cap and per-request context ceiling (ai-sdk lane).
+      maxOutputTokens: z.number().int().safe().positive().exactOptional(),
+      maxContextTokens: z.number().int().safe().positive().exactOptional(),
+      // The strict pre-request ceiling (opt-in). The review.fixItem lane is
+      // the in-process ai-sdk driver for the default providers, so it can
+      // carry the capability; both binds are required and positive — an
+      // absent capability keeps the legacy soft maxTokens semantics.
+      //
+      // JUDGE / CLASSIFIER PATH: the capability is injected on the ai-sdk
+      // LANE (DriverFactoryConfig.lanes.aiSdk.strictTokenCapability), so it
+      // reaches every role that resolves to that lane — fixer, classifier
+      // and judge alike. The durable reservation hook
+      // (lanes.aiSdk.strictTokenReservationHook) rides the same lane. Strict
+      // enforcement is still PER-INVOCATION: an op must carry
+      // `budget.strictTokenBudget` to opt in, and today only review.fixItem
+      // mirrors that field. A classify/judge op opts in by gaining the same
+      // mirror and the operator injecting a capability for its model; with
+      // no injection the lane refuses pre-dispatch rather than guessing.
+      // This slice wires the fixer only.
+      strictTokenBudget: z
+        .object({
+          maxInputTokens: z.number().int().safe().positive(),
+          reserveOutputTokens: z.number().int().safe().positive(),
+        })
+        .strict()
+        .exactOptional(),
+    })
+    .strict()
+    .exactOptional(),
+};
+
+/**
  * Registry-time mirror of {@link FixReviewItemInput}: the full input, and
  * only it. `pr` is a positive integer (PR numbers start at 1); worktree
  * path/branch and the driver's model/provider handles are non-empty. The
@@ -503,52 +558,38 @@ const FixableReviewItemSchema: z.ZodType<FixableReviewItem> = z
  * typo'd field) must fail loudly, never be silently stripped.
  */
 export const FixReviewItemInputSchema: z.ZodType<ReviewFixInput> = z
+  .object(reviewFixCommonFields)
+  .strict();
+
+/**
+ * Registry-time mirror of {@link FixFindingBinding}: identity data crq
+ * carries and echoes. The op NEVER verifies these values (it spawns no
+ * git); crq revalidates before enqueue and harvest.
+ */
+export const FixFindingBindingSchema: z.ZodType<FixFindingBinding> = z
   .object({
-    repo: z.string().min(1).exactOptional(),
-    pr: z.number().int().positive().exactOptional(),
-    item: z.union([
-      FixableReviewItemSchema,
-      z.object({ kind: z.literal('finding'), finding: FindingSchema }).strict(),
-    ]),
-    worktree: z.object({ path: z.string().min(1), branch: z.string().min(1) }).strict(),
-    driver: z.object({ model: z.string().min(1), provider: z.string().min(1) }).strict(),
-    harness: HarnessConfigSchema.exactOptional(),
-    promptOverride: z.string().min(1).exactOptional(),
-    budget: z
-      .object({
-        maxUsd: z.number().positive().exactOptional(),
-        maxTokens: z.number().int().positive().exactOptional(),
-        wallClockMs: z.number().int().positive().exactOptional(),
-        maxAttempts: z.number().int().positive().exactOptional(),
-        // Output-only cap and per-request context ceiling (ai-sdk lane).
-        maxOutputTokens: z.number().int().safe().positive().exactOptional(),
-        maxContextTokens: z.number().int().safe().positive().exactOptional(),
-        // The strict pre-request ceiling (opt-in). The review.fixItem lane is
-        // the in-process ai-sdk driver for the default providers, so it can
-        // carry the capability; both binds are required and positive — an
-        // absent capability keeps the legacy soft maxTokens semantics.
-        //
-        // JUDGE / CLASSIFIER PATH: the capability is injected on the ai-sdk
-        // LANE (DriverFactoryConfig.lanes.aiSdk.strictTokenCapability), so it
-        // reaches every role that resolves to that lane — fixer, classifier
-        // and judge alike. The durable reservation hook
-        // (lanes.aiSdk.strictTokenReservationHook) rides the same lane. Strict
-        // enforcement is still PER-INVOCATION: an op must carry
-        // `budget.strictTokenBudget` to opt in, and today only review.fixItem
-        // mirrors that field. A classify/judge op opts in by gaining the same
-        // mirror and the operator injecting a capability for its model; with
-        // no injection the lane refuses pre-dispatch rather than guessing.
-        // This slice wires the fixer only.
-        strictTokenBudget: z
-          .object({
-            maxInputTokens: z.number().int().safe().positive(),
-            reserveOutputTokens: z.number().int().safe().positive(),
-          })
-          .strict()
-          .exactOptional(),
-      })
-      .strict()
-      .exactOptional(),
+    job: z.string().min(1),
+    sourceSha: z.string().regex(/^[0-9a-f]{40}$/),
+    sourceBlobSha: z.string().regex(/^[0-9a-f]{40}$/),
+    findingSha256: z.string().regex(/^[0-9a-f]{64}$/),
+    repairBase: z.string().regex(/^[0-9a-f]{40}$/),
+  })
+  .strict();
+
+/**
+ * Registry-time mirror of {@link FixFindingInput}: the shared fix request
+ * plus the carried binding and optional instructions. The op-only UTF-16
+ * bounds (body 8000; instructions 1..2000 and no NUL; whole request 32768)
+ * are deliberately NOT mirrored here: the op measures them and returns the
+ * typed `failed` + `report: { failureClass: 'evidence' }` refusal, so the
+ * JSON boundary must not preempt that contract with an input-validation
+ * error. The binding's hex shapes ARE structural and live here.
+ */
+export const FixFindingInputSchema: z.ZodType<FixFindingInput> = z
+  .object({
+    ...reviewFixCommonFields,
+    binding: FixFindingBindingSchema,
+    instructions: z.string().exactOptional(),
   })
   .strict();
 
@@ -750,6 +791,23 @@ export const registry: OpRegistryEntry[] = [
           // Dispatch wiring (PR #238 review P2): the host's alias-notice
           // sink rides the factory config; absent (every library caller),
           // the library default — one stderr line — is unchanged.
+          wiring?.onDeprecatedAlias !== undefined
+            ? { onDeprecatedAlias: wiring.onDeprecatedAlias }
+            : {},
+        ),
+      }) as Op<unknown, unknown>,
+  },
+  {
+    name: 'review.fixFinding',
+    inputSchema: FixFindingInputSchema,
+    // The C1 finding-fix entry: the same DriverFactory wiring as
+    // review.fixItem (ADR-0002 §2.5 — the factory owns lane construction and
+    // the served-model assertion; no eager lane is built here). The op adds
+    // the carried binding/instructions and the fixed whole-request bound;
+    // it never spawns git (crq verifies the binding around the call).
+    importer: async (wiring) =>
+      (await import('./fixFinding.js')).makeFixFinding({
+        drivers: createDriverFactory(
           wiring?.onDeprecatedAlias !== undefined
             ? { onDeprecatedAlias: wiring.onDeprecatedAlias }
             : {},
