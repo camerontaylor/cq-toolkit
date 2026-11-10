@@ -220,8 +220,9 @@ export function sweepPlannerInput(config: SweepPlanConfig): PlanSweepInput {
  * A package whose manifest path is '.' owns the repo root and gets NO path
  * pattern (only its declared files constrain it). Wire order in
  * buildSweepPlan: the `unitJobOverlay`'s explicit stagePathAllowlist WINS —
- * a caller who genuinely wants fleet-wide scope overrides the default (the
- * test-fix plan does exactly that with the test-file patterns). Non-target
+ * a caller who wants a different scope overrides the default (the test-fix
+ * plan does NOT: its overlay is propose-only, so its units keep THIS default
+ * scope and `proposeOnly` is what stops anything from committing). Non-target
  * changed paths (`selectionEvidence`) are included so a deletion-only root
  * package keeps a scope pin instead of an empty, fail-open allowlist.
  */
@@ -378,9 +379,11 @@ export function buildSweepPlan(
   const unitJobs = report.jobs.map((job, index) => {
     const unit = job.input as WorkUnit;
     // jZ59w: the default per-unit scope applies unless the overlay
-    // explicitly carries one (the test-fix plan overrides with the
-    // fleet-wide test-file patterns). ABSENT (never undefined-valued —
-    // the registry schema's exactOptional keys reject undefined).
+    // explicitly carries one. The test-fix plan carries NONE (its overlay is
+    // propose-only), so its units keep this default package scope and
+    // `proposeOnly` is what stops a staged path from committing. ABSENT
+    // (never undefined-valued — the registry schema's exactOptional keys
+    // reject undefined).
     // Object.hasOwn (r2 major): a package named 'toString'/'constructor'/
     // '__proto__' would otherwise read an inherited Object.prototype member,
     // and the `?? []` fallback would not fire — `for...of` on a function
