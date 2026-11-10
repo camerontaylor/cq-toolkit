@@ -6,6 +6,12 @@ you cannot establish quiescence, leave the slot incomplete and investigate.
 Preserve candidate directories, reports, outstanding work and failed-attempt
 refs; do not invent authenticated receipts for that work.
 
+If bulk `review.addressMany` reports `legacy review checkout requires direct
+reconciliation`, run `cq review.address --repoRoot=<source> --source=pr:<number>`
+for that PR before retrying the bulk run. Direct address checks the legacy
+checkout against the current PR head; if it refuses a stale or unsafe checkout,
+preserve the checkout and reconcile it using the steps below.
+
 Use the matching deployed toolkit build. List every participating persistent
 slot from the report and saved metadata, in original PR, resolver PR, then
 checkout order. For a local-only run, list its checkout slot alone. Do not
