@@ -6,7 +6,7 @@ controller acceptance.
 
 The separately reviewed phase-1.5 slice now exists as the bounded fixture proof
 vehicle in [VM-UNIT-SWITCH-PROOF.md](VM-UNIT-SWITCH-PROOF.md). It ran once on a
-KVM Pluto guest (`20261110T163616Z-5252017b`, all checks true, no problems). It
+KVM Pluto guest (`20261110T170322Z-9e8c5133`, all checks true, no problems). It
 does not change this feasibility evidence or enable a host adapter.
 
 The harness is `ops/vm-feasibility.py`; its guest fixture is
