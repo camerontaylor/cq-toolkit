@@ -683,7 +683,10 @@ function makeDevCycleCore(
       // findings came back open. The DRAFT with the gaps verbatim is the
       // honest publication — never a bypass. The gates are already green
       // (the final check above); publication goes straight out.
-      return await finishNotReady(readiness.reason, addressResult.report);
+      return await finishNotReady(
+        readiness.reason,
+        addressResult.report ?? addressReportOf(addressResult),
+      );
     }
 
     // -------------- 6. push + pr.open (the READY PR) ---------------------
