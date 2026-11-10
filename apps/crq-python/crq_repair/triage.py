@@ -31,6 +31,8 @@ def source_excerpt(content, path, body, primary=False):
         text = ''.join(lines[start:start + 41])[:min(2000, remaining)]
         regions.append({'start_line': start + 1, 'text': text})
         remaining -= len(text)
+    if not regions:
+        return {'text': content[:8000], 'truncated': True}
     return {'text': '', 'regions': regions, 'truncated': True}
 
 
