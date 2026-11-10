@@ -1057,7 +1057,19 @@ function makeDevCycleCore(
                     verdict: 'fault',
                     detail: 'its dependency inputs differ and the reserve cannot cover a reinstall',
                   };
-                await installDeps(tmp, AbortSignal.timeout(reinstallMs));
+                // A reinstall can abort through its own timeout signal; that
+                // is an expected per-candidate path, so it faults THIS
+                // candidate instead of throwing out of the scan (which would
+                // drop the probe history already gathered).
+                try {
+                  await installDeps(tmp, AbortSignal.timeout(reinstallMs));
+                } catch (err) {
+                  return {
+                    commit,
+                    verdict: 'fault',
+                    detail: `dependency reinstall failed: ${(err instanceof Error ? err.message : String(err)).slice(0, 300)}`,
+                  };
+                }
                 installedAt = commit;
               }
             }
