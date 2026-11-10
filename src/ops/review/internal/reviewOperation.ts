@@ -312,12 +312,18 @@ export function canonicalReview(value: unknown): string {
     return (
       '{' +
       Object.entries(value)
+        .filter(([, val]) => val !== undefined)
         .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
         .map(([key, val]) => canonicalReview(key) + ':' + canonicalReview(val))
         .join(',') +
       '}'
     );
-  return JSON.stringify(value).replace(
+  // JSON.stringify omits undefined entries (handled above) but returns
+  // undefined for an unserializable value; fail explicitly instead of
+  // throwing an opaque TypeError from .replace.
+  const json: string | undefined = JSON.stringify(value);
+  if (json === undefined) throw new TypeError('canonicalReview: unserializable value');
+  return json.replace(
     /[\u007f-\uffff]/g,
     (c) => '\\u' + c.charCodeAt(0).toString(16).padStart(4, '0'),
   );
