@@ -322,12 +322,6 @@ def validate_manifest(manifest):
         paths.add(entry['path'])
     if manifest.get('content_sha256') != content_digest(files):
         raise ArtifactError('manifest content_sha256 does not match its file inventory')
-    by_path = {entry['path']: entry for entry in files}
-    for required in REQUIRED_ENTRIES:
-        if required not in by_path:
-            raise ArtifactError('manifest lacks required entry: ' + required)
-    if by_path['node_modules/fs-ext/build/Release/fs_ext.node']['type'] != 'file':
-        raise ArtifactError('manifest fs-ext native entry must be a file')
     return manifest
 
 
@@ -622,6 +616,9 @@ def verify_archive(archive, expected_sha256=None, lockfile=None, smoke=True,
         validate_manifest(manifest)
         if root.name != 'crq-' + manifest['source_sha']:
             raise ArtifactError('archive prefix does not match the recorded source')
+        for required in REQUIRED_ENTRIES:
+            if not (root / required).is_file():
+                raise ArtifactError('archive lacks required entry: ' + required)
         actual = inventory(root, exclude=(MANIFEST_NAME,))
         difference = _first_difference(manifest['files'], actual)
         if difference is not None:

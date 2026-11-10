@@ -137,6 +137,19 @@ class PackageRunnerTests(unittest.TestCase):
             package_runner.package(self.stage, self.base / 'runner.tar.gz', self.sha,
                                    provenance, lockfile=self.lockfile)
 
+    def test_package_accepts_pnpm_symlinked_fs_ext(self):
+        pnpm = self.stage / 'node_modules/.pnpm/fs-ext@2.1.1/node_modules/fs-ext'
+        pnpm.parent.mkdir(parents=True)
+        (self.stage / 'node_modules/fs-ext').rename(pnpm)
+        (self.stage / 'node_modules/fs-ext').symlink_to(
+            '.pnpm/fs-ext@2.1.1/node_modules/fs-ext')
+        manifest, output = self.make_archive()
+        self.assertIn('node_modules/fs-ext',
+                      [entry['path'] for entry in manifest['files']])
+        report = package_runner.verify_archive(output, lockfile=self.lockfile,
+                                               smoke=False)
+        self.assertEqual(report['source_sha'], self.sha)
+
     def test_verify_archive_without_smoke(self):
         _, output = self.make_archive()
         report = package_runner.verify_archive(output, lockfile=self.lockfile, smoke=False)
