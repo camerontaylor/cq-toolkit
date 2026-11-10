@@ -460,6 +460,22 @@ class VerifyTests(unittest.TestCase):
         self.assertTrue(any("local and remote digests differ" in item
                             for item in payload["problems"]))
 
+    def test_upload_size_mismatch_is_rejected(self):
+        entry = self.report["provenance"]["uploads"][harness.UPLOADS[0]]
+        entry["bytes"] = 1
+        status, payload = self._verify()
+        self.assertEqual(status, 1)
+        self.assertTrue(any("raw upload size does not match" in item
+                            for item in payload["problems"]))
+
+    def test_upload_size_must_be_nonnegative(self):
+        entry = self.report["provenance"]["uploads"][harness.UPLOADS[0]]
+        entry["bytes"] = -1
+        status, payload = self._verify()
+        self.assertEqual(status, 1)
+        self.assertTrue(any("upload size is invalid" in item
+                            for item in payload["problems"]))
+
     def test_missing_provenance_is_rejected(self):
         del self.report["provenance"]
         status, payload = self._verify()

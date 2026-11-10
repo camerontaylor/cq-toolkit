@@ -723,8 +723,13 @@ def verify_raw_evidence(report, raw_root):
             elif not isinstance(entry, dict) \
                     or not _sha256_text(entry.get("sha256")):
                 continue
-            elif vm.sha256_file(raw_path) != entry["sha256"]:
-                problems.append("raw upload digest does not match: " + name)
+            else:
+                if type(entry.get("bytes")) is not int or entry["bytes"] < 0:
+                    problems.append("raw upload size is invalid: " + name)
+                elif raw_path.stat().st_size != entry["bytes"]:
+                    problems.append("raw upload size does not match: " + name)
+                if vm.sha256_file(raw_path) != entry["sha256"]:
+                    problems.append("raw upload digest does not match: " + name)
     return problems
 
 
@@ -844,7 +849,7 @@ def validate_provenance(report, run_dir):
                 problems.append("upload digest is invalid: " + name)
             elif local != remote:
                 problems.append("upload local and remote digests differ: " + name)
-            if type(entry["bytes"]) is not int or entry["bytes"] <= 0:
+            if type(entry["bytes"]) is not int or entry["bytes"] < 0:
                 problems.append("upload size is invalid: " + name)
             if entry["verified"] is not True:
                 problems.append("upload is not verified: " + name)
