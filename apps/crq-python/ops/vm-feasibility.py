@@ -355,7 +355,8 @@ def report_problems(report: dict, *, require_evidence: bool = False) -> list[str
                  "run_after_trigger_observed", "no_run_after_trigger",
                  "activator_states_after_reboot", "run_log_observed_after_reboot",
                  "metadata_observed", "queued_observations_present",
-                 "queued_setup_proven", "queued_jobs_settled_after_mask",
+                 "queued_setup_proven", "queued_stop_proven",
+                 "queued_jobs_settled_after_mask",
                  "queued_jobs_settled_after_stop",
                  "queued_wrapper_ran_after_mask",
                  "queued_wrapper_ran_after_stop",
@@ -480,26 +481,39 @@ def download(url: str, destination: pathlib.Path, timeout: float = 120) -> str:
     return str(part)
 
 
+def fetch_sums(sums_path: pathlib.Path, recorder: Recorder) -> None:
+    started = time.time()
+    part = download(IMAGE_URL + SUMS_NAME, sums_path)
+    recorder.append({"at": utc_now(), "argv": ["download", IMAGE_URL + SUMS_NAME],
+                     "rc": 0, "bytes": pathlib.Path(part).stat().st_size,
+                     "seconds": round(time.time() - started, 3)})
+    pathlib.Path(part).replace(sums_path)
+
+
 def fetch_image(state: pathlib.Path, recorder: Recorder) -> dict:
     images = state / "images"
     images.mkdir(parents=True, exist_ok=True)
     sums_path = images / SUMS_NAME
     image_path = images / IMAGE_NAME
-    if not sums_path.exists():
-        started = time.time()
-        part = download(IMAGE_URL + SUMS_NAME, sums_path)
-        recorder.append({"at": utc_now(), "argv": ["download", IMAGE_URL + SUMS_NAME],
-                         "rc": 0, "bytes": pathlib.Path(part).stat().st_size,
-                         "seconds": round(time.time() - started, 3)})
-        pathlib.Path(part).replace(sums_path)
-    text = sums_path.read_text()
-    expected = sums_digest(text, IMAGE_NAME)
     if image_path.exists():
+        if not sums_path.exists():
+            fetch_sums(sums_path, recorder)
+        text = sums_path.read_text()
+        expected = sums_digest(text, IMAGE_NAME)
         actual = verify_image(image_path, expected)
         return {"name": IMAGE_NAME, "path": str(image_path), "sha256": actual,
                 "sums_sha256": sha256_file(sums_path),
                 "sums_verified": True, "signature_verified": False,
                 "downloaded": False}
+    # There is no verified image to pair with a cached manifest. Refreshing it
+    # on every retry prevents an interrupted image download from pinning a
+    # stale checksum while ``current/`` moves on. The manifest and image are
+    # each installed atomically, and the image is still verified before it is
+    # promoted, so a failed or incoherent fetch cannot overwrite a base image
+    # that existing overlays reference.
+    fetch_sums(sums_path, recorder)
+    text = sums_path.read_text()
+    expected = sums_digest(text, IMAGE_NAME)
     started = time.time()
     part = download(IMAGE_URL + IMAGE_NAME, image_path, timeout=1800)
     actual = verify_image(pathlib.Path(part), expected)
@@ -791,6 +805,11 @@ def build_checks(phases: dict, manager: dict, reboot: dict) -> dict:
         and succeeded(activation.get("queue2_start"))
         and waiting(activation.get("jobs_before_mask"), "crq-queued-fixture.service")
         and waiting(activation.get("jobs2_before_stop"), "crq-queued-fixture.service"))
+    queued_stop_proven = (
+        succeeded(activation.get("stop_queued_fixture"))
+        and isinstance(activation.get("jobs2_after_stop"), list)
+        and not any("crq-queued-fixture.service" in str(line)
+                    for line in activation["jobs2_after_stop"]))
     checks = {
         "direct_start_ran": "service" in (activation.get("direct", {}).get("run_delta") or []),
         "dependency_start_ran": "dependent" in
@@ -833,6 +852,7 @@ def build_checks(phases: dict, manager: dict, reboot: dict) -> dict:
             isinstance(activation.get("queued_run_delta"), list)
             and isinstance(activation.get("queued2_run_delta"), list)),
         "queued_setup_proven": queued_setup_proven,
+        "queued_stop_proven": queued_stop_proven,
         "queued_jobs_settled_after_mask": settled(
             activation.get("queued_jobs_after_release")),
         "queued_jobs_settled_after_stop": settled(

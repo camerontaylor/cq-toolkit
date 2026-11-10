@@ -62,6 +62,101 @@ class SumsTests(unittest.TestCase):
                              vm.sha256_file(path))
 
 
+class FetchImageTests(unittest.TestCase):
+    def _download(self, digest, data, calls, *, fail_image=False):
+        def fake(url, destination, timeout=120):
+            calls.append(url)
+            part = pathlib.Path(str(destination) + ".part")
+            if url.endswith(vm.SUMS_NAME):
+                part.write_text("%s  %s\n" % (digest, vm.IMAGE_NAME))
+            elif fail_image:
+                raise RuntimeError("interrupted image download")
+            else:
+                part.write_bytes(data)
+            return str(part)
+        return fake
+
+    def test_orphaned_manifest_is_refreshed_before_retrying_an_image(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state = pathlib.Path(temporary)
+            images = state / "images"
+            images.mkdir()
+            sums_path = images / vm.SUMS_NAME
+            sums_path.write_text("%s  %s\n" % ("0" * 64, vm.IMAGE_NAME))
+            data = b"fresh image bytes"
+            digest = vm.sha256_bytes(data)
+            calls = []
+            with mock.patch.object(
+                    vm, "download",
+                    side_effect=self._download(digest, data, calls)):
+                image = vm.fetch_image(state, vm.Recorder(state))
+            self.assertEqual(calls, [vm.IMAGE_URL + vm.SUMS_NAME,
+                                     vm.IMAGE_URL + vm.IMAGE_NAME])
+            self.assertEqual(image["sha256"], digest)
+            self.assertTrue(image["downloaded"])
+            self.assertEqual((images / vm.IMAGE_NAME).read_bytes(), data)
+            self.assertIn(digest, sums_path.read_text())
+
+    def test_interrupted_fetch_retries_with_a_new_manifest(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state = pathlib.Path(temporary)
+            images = state / "images"
+            images.mkdir()
+            stale = images / vm.SUMS_NAME
+            stale.write_text("%s  %s\n" % ("0" * 64, vm.IMAGE_NAME))
+            first = []
+            with mock.patch.object(
+                    vm, "download",
+                    side_effect=self._download(
+                        "1" * 64, b"first image", first, fail_image=True)):
+                with self.assertRaises(RuntimeError):
+                    vm.fetch_image(state, vm.Recorder(state))
+            self.assertFalse((images / vm.IMAGE_NAME).exists())
+            self.assertIn("1" * 64, stale.read_text())
+            data = b"second image bytes"
+            digest = vm.sha256_bytes(data)
+            second = []
+            with mock.patch.object(
+                    vm, "download",
+                    side_effect=self._download(digest, data, second)):
+                image = vm.fetch_image(state, vm.Recorder(state))
+            self.assertEqual(second, [vm.IMAGE_URL + vm.SUMS_NAME,
+                                      vm.IMAGE_URL + vm.IMAGE_NAME])
+            self.assertEqual(image["sha256"], digest)
+            self.assertEqual((images / vm.IMAGE_NAME).read_bytes(), data)
+
+    def test_cached_image_is_verified_without_redownloading(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state = pathlib.Path(temporary)
+            images = state / "images"
+            images.mkdir()
+            data = b"cached image"
+            digest = vm.sha256_bytes(data)
+            (images / vm.IMAGE_NAME).write_bytes(data)
+            (images / vm.SUMS_NAME).write_text(
+                "%s  %s\n" % (digest, vm.IMAGE_NAME))
+            with mock.patch.object(vm, "download") as download:
+                image = vm.fetch_image(state, vm.Recorder(state))
+            download.assert_not_called()
+            self.assertFalse(image["downloaded"])
+            self.assertEqual(image["sha256"], digest)
+
+    def test_new_image_must_match_the_refreshed_manifest(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state = pathlib.Path(temporary)
+            images = state / "images"
+            images.mkdir()
+            (images / vm.SUMS_NAME).write_text(
+                "%s  %s\n" % ("2" * 64, vm.IMAGE_NAME))
+            calls = []
+            with mock.patch.object(
+                    vm, "download",
+                    side_effect=self._download("3" * 64, b"unexpected", calls)):
+                with self.assertRaises(ValueError):
+                    vm.fetch_image(state, vm.Recorder(state))
+            self.assertFalse((images / vm.IMAGE_NAME).exists())
+
+
 class CloudInitTests(unittest.TestCase):
     def test_user_data_isolated_account_and_linger(self):
         text = vm.render_user_data("ssh-ed25519 AAAA probe@host")
@@ -419,6 +514,8 @@ class EvidenceTests(unittest.TestCase):
                            "jobs2_before_stop": [
                                "116 crq-queued.service start waiting",
                                "135 crq-queued-fixture.service start waiting"],
+                           "stop_queued_fixture": {"rc": 0},
+                           "jobs2_after_stop": [],
                            "queued_jobs_after_release": {
                                "settled": True, "jobs": []},
                            "queued_jobs2_after_release": {
@@ -544,6 +641,34 @@ class EvidenceTests(unittest.TestCase):
                   "qemu_identity_verified": True}
         checks = vm.build_checks(phases, manager, reboot)
         self.assertFalse(checks["queued_setup_proven"])
+
+    def test_stop_round_requires_a_successful_stop_and_cancelled_job(self):
+        phases = self._phases()
+        manager = {"before": self._snapshot(10, "i1", "boot-1"),
+                   "after": self._snapshot(11, "i2", "boot-1"),
+                   "after_phase": self._refusals()}
+        reboot = {"before": self._snapshot(11, "i2", "boot-1"),
+                  "after": self._snapshot(12, "i3", "boot-2"),
+                  "after_phase": self._refusals(),
+                  "boot_id_before": "boot-1", "boot_id_after": "boot-2",
+                  "qemu_pid_before": 99, "qemu_pid_after": 99,
+                  "qemu_identity_verified": True}
+        self.assertTrue(vm.build_checks(phases, manager, reboot)
+                        ["queued_stop_proven"])
+        phases["activation"]["stop_queued_fixture"] = {"rc": 1}
+        phases["activation"]["jobs2_after_stop"] = [
+            "135 crq-queued-fixture.service start waiting"]
+        checks = vm.build_checks(phases, manager, reboot)
+        self.assertFalse(checks["queued_stop_proven"])
+        report = {"schema_version": vm.REPORT_SCHEMA,
+                  "image": {"sha256": DIGEST, "sums_verified": True,
+                            "signature_verified": False},
+                  "checks": checks, "limitations": ["limited"]}
+        self.assertIn("check not proven: queued_stop_proven",
+                      vm.report_problems(report))
+        phases["activation"]["stop_queued_fixture"] = {"rc": 0}
+        checks = vm.build_checks(phases, manager, reboot)
+        self.assertFalse(checks["queued_stop_proven"])
 
     def test_queued_jobs_must_settle_before_sampling_runs(self):
         phases = self._phases()
