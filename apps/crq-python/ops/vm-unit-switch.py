@@ -39,13 +39,15 @@ UPLOADS = (
     "unit-switch-fixture.mjs",
     "vm-unit-switch-guest.py",
 )
+RUNNER_ARCHIVE = "crq-runner-source.tar.gz"
 HOST_MODULES = (
     "vm-unit-switch.py",
     "vm-feasibility.py",
 )
-GUEST_PHASES = ("prepare", "switch-node", "switch-python", "interrupt",
-                "recover-kill", "recover", "recover-repeat", "rollback-fence",
-                "inspect", "fence")
+GUEST_PHASES = ("prepare", "drain-alive", "switch-node", "drain-ambiguous",
+                "switch-python", "drain-harvest", "interrupt",
+                "recover-drain-alive", "recover-kill", "recover",
+                "recover-repeat", "rollback-fence", "inspect", "fence")
 NODE_RUNTIME = "node:" + "b" * 40
 PYTHON_RUNTIME = "python"
 
@@ -99,6 +101,7 @@ def phase_names(mode="base"):
 
 HEX40 = re.compile(r"[0-9a-f]{40}\Z")
 HEX64 = re.compile(r"[0-9a-f]{64}\Z")
+HEX32 = re.compile(r"[0-9a-f]{32}\Z")
 LIMITATIONS = [
     "One representative harmless fixture is installed under the allowlisted "
     "unit name crq-tick.service; no production template is rendered.",
@@ -106,6 +109,12 @@ LIMITATIONS = [
     "CRQ runtime completion exists and no CQ enablement is implied.",
     "The guest user manager is not restarted and the guest is not rebooted; "
     "that matrix remains later bounded work.",
+    "The drain proof seeds real detached session-leader processes and real "
+    "runner metadata. It covers recorded alive, ownership-ambiguous and "
+    "completed/dead runs only: a process whose ownership is not represented "
+    "by queue run metadata and a runner pidfile is not claimed as detected.",
+    "No production run_liveness provider, queue-runner runtime, adapter, "
+    "journal location or shared lock identity is exercised or enabled.",
     "Production journal interoperability, legacy resolution and the actual "
     "deployed record location remain unresolved and are not tested here.",
     "A guest run is not power-loss, ACL, xattr or privileged-ownership proof.",
@@ -118,6 +127,10 @@ MATRIX_LIMITATIONS = [
     "The matrix restarts the real guest user manager and reboots the real guest "
     "OS at the tested boundaries. It is not power-loss proof, and the guest is "
     "not a production host.",
+    "Drain coverage is limited to recorded runs with genuine runner metadata. "
+    "An ownership-ambiguous record with no live evidence is retained; an "
+    "unrepresented escaped process is an explicit uncovered semantics "
+    "question, not a detection claim.",
     "Activation-pending ambiguity is retained in a separate private record "
     "directory per case so independent cases do not block each other. That is "
     "test isolation, not a resolution mechanism or a fix for the known "
@@ -136,6 +149,18 @@ def _load(name, path):
 
 
 vm = _load("crq_vm_feasibility", OPS / "vm-feasibility.py")
+RECORDS_DIR = "/home/%s/records" % vm.GUEST_USER
+FIXTURE_DIR = "/home/%s/fixture" % vm.GUEST_USER
+UNIT_DIR = "/home/%s/.config/systemd/user" % vm.GUEST_USER
+SERVICE_PATH = UNIT_DIR + "/crq-tick.service"
+TIMER_PATH = UNIT_DIR + "/crq-tick.timer"
+WANTS_PATH = UNIT_DIR + "/timers.target.wants/crq-tick.timer"
+STAGED_PATH = UNIT_DIR + "/.crq-tick.service.staged"
+COMPLETIONS_PATH = FIXTURE_DIR + "/completions.jsonl"
+HISTORY_PATH = RECORDS_DIR + "/controller-" + "a" * 32 + ".json"
+CASE_RECORD_DIRS = (RECORDS_DIR + "/ambiguity-manager-restart",
+                    RECORDS_DIR + "/ambiguity-guest-reboot")
+RECORD_ROOTS = (RECORDS_DIR,) + CASE_RECORD_DIRS
 adapter_mod = _load("crq_unit_switch_adapter", OPS / "unit-switch-adapter.py")
 
 
@@ -219,6 +244,34 @@ def upload_files(run, recorder):
                                % (name, remote_sha, local_sha))
         provenance[name] = {"sha256": local_sha, "remote_sha256": remote_sha,
                             "bytes": len(data), "verified": True}
+    archive = pathlib.Path(run["path"]) / RUNNER_ARCHIVE
+    result = subprocess.run(
+        ["git", "-C", str(REPO), "archive", "--format=tar.gz",
+         "--output", str(archive), "HEAD", "apps/crq-python"],
+        capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError("could not build the committed runner source archive: "
+                           + (result.stderr or "").strip()[:400])
+    data = archive.read_bytes()
+    local_sha = sha256_bytes(data)
+    remote = ("cat > /home/%s/proof-bin/%s && chmod 600 /home/%s/proof-bin/%s"
+              % (vm.GUEST_USER, RUNNER_ARCHIVE, vm.GUEST_USER, RUNNER_ARCHIVE))
+    uploaded = vm.guest_ssh(run, remote, recorder, stdin=data, max_output=2000)
+    if uploaded["rc"] != 0:
+        raise RuntimeError("runner source upload failed: "
+                           + (uploaded.get("stderr") or "")[:400])
+    check = vm.guest_ssh(
+        run, "sha256sum /home/%s/proof-bin/%s" % (vm.GUEST_USER, RUNNER_ARCHIVE),
+        recorder, timeout=30)
+    observed = (check.get("stdout") or "").split()
+    remote_sha = observed[0] if observed else ""
+    if check["rc"] != 0 or remote_sha != local_sha:
+        raise RuntimeError("runner source archive digest mismatch: %s != %s"
+                           % (remote_sha, local_sha))
+    provenance["runner_source"] = {
+        "name": RUNNER_ARCHIVE, "sha256": local_sha,
+        "remote_sha256": remote_sha, "bytes": len(data), "verified": True,
+        "source": "git-archive:HEAD:apps/crq-python"}
     return provenance
 
 
@@ -768,6 +821,462 @@ def _matrix_checks(phases, restarts, reboots, prepared, problems):
     return checks
 
 
+def _cleanup_never_signalled(phase):
+    cleanup = phase.get("cleanup")
+    return (isinstance(cleanup, list) and bool(cleanup)
+            and all(isinstance(item, dict)
+                    and item.get("controller_signalled") is False
+                    for item in cleanup))
+
+
+def _record_path_ok(value):
+    if not isinstance(value, str) or not value.endswith(".json"):
+        return False
+    for root in RECORD_ROOTS:
+        prefix = root + "/"
+        if value.startswith(prefix):
+            name = value[len(prefix):]
+            if "/" not in name and name.startswith("controller-"):
+                return True
+    return False
+
+
+def _path_list_ok(value):
+    return (isinstance(value, list) and bool(value)
+            and all(_record_path_ok(item) for item in value))
+
+
+def _record_list_ok(value, allow_empty=False):
+    return (isinstance(value, list) and (allow_empty or bool(value))
+            and all(isinstance(item, dict) and _sha_present(item)
+                    and _record_path_ok(item.get("path"))
+                    and type(item.get("bytes")) is int and item["bytes"] > 0
+                    for item in value))
+
+
+def _all_records_ok(value):
+    if not isinstance(value, dict) or set(value) != set(RECORD_ROOTS):
+        return False
+    return (_record_list_ok(value.get(RECORDS_DIR))
+            and all(_record_list_ok(value.get(root), allow_empty=True)
+                    for root in CASE_RECORD_DIRS))
+
+
+def _path_entry_ok(entry, path, allowed, expected_sha=None, *,
+                   with_bytes=False, require_path=False,
+                   require_xattrs=False):
+    if not isinstance(entry, dict) or entry.get("type") not in allowed:
+        return False
+    if require_path and entry.get("path") != path:
+        return False
+    state = entry["type"]
+    if state == "missing":
+        keys = {"type", "path"} if require_path else {"type"}
+        return set(entry) == keys
+    if not (type(entry.get("mode")) is int and entry["mode"] >= 0
+            and type(entry.get("uid")) is int and entry["uid"] >= 0
+            and type(entry.get("gid")) is int and entry["gid"] >= 0):
+        return False
+    if require_xattrs and not (
+            isinstance(entry.get("xattrs"), list)
+            and all(isinstance(item, str) for item in entry["xattrs"])):
+        return False
+    if state == "file":
+        size = entry.get("size")
+        digest = entry.get("sha256")
+        if not _sha256_text(digest) or type(size) is not int or size <= 0:
+            return False
+        if with_bytes:
+            encoded = entry.get("bytes_b64")
+            if not isinstance(encoded, str) or not encoded:
+                return False
+            try:
+                raw = base64.b64decode(encoded, validate=True)
+            except (ValueError, TypeError):
+                return False
+            if len(raw) != size or sha256_bytes(raw) != digest:
+                return False
+        return expected_sha is None or digest == expected_sha
+    if state == "symlink":
+        target = entry.get("target")
+        if not isinstance(target, str) or not target:
+            return False
+        return target == "../crq-tick.timer" if path == WANTS_PATH else True
+    return False
+
+
+METADATA_TYPES = {
+    SERVICE_PATH: ("file",),
+    TIMER_PATH: ("file",),
+    WANTS_PATH: ("symlink",),
+    STAGED_PATH: ("missing", "file"),
+}
+FILE_TYPES = {
+    SERVICE_PATH: ("file",),
+    TIMER_PATH: ("file",),
+    WANTS_PATH: ("symlink",),
+    STAGED_PATH: ("missing", "file"),
+    COMPLETIONS_PATH: ("missing", "file"),
+    HISTORY_PATH: ("file",),
+}
+
+
+def _metadata_ok(metadata, service_sha=None):
+    if not isinstance(metadata, dict) or set(metadata) != set(METADATA_TYPES):
+        return False
+    return all(
+        _path_entry_ok(metadata[path], path, allowed,
+                       service_sha if path == SERVICE_PATH else None,
+                       with_bytes=True, require_xattrs=True)
+        for path, allowed in METADATA_TYPES.items())
+
+
+def _files_ok(files, service_sha=None):
+    if not isinstance(files, dict) or set(files) != set(FILE_TYPES):
+        return False
+    return all(
+        _path_entry_ok(files[path], path, allowed,
+                       service_sha if path == SERVICE_PATH else None,
+                       require_path=True)
+        for path, allowed in FILE_TYPES.items())
+
+
+def _views_agree(metadata, files):
+    for path in (SERVICE_PATH, TIMER_PATH, WANTS_PATH, STAGED_PATH):
+        meta = metadata[path]
+        file = files[path]
+        if meta["type"] != file["type"]:
+            return False
+        if meta["type"] == "missing":
+            continue
+        for field in ("mode", "uid", "gid"):
+            if (type(meta[field]) is not int
+                    or type(file[field]) is not int
+                    or meta[field] != file[field]):
+                return False
+        if meta["type"] == "file":
+            if (meta["size"] != file["size"]
+                    or meta["sha256"] != file["sha256"]):
+                return False
+        elif meta["type"] == "symlink":
+            if meta["target"] != file["target"]:
+                return False
+    return True
+
+
+def _process_ok(value, alive):
+    return (isinstance(value, dict)
+            and type(value.get("pid")) is int and value["pid"] > 0
+            and value.get("alive") is alive
+            and isinstance(value.get("starttime"), str)
+            and bool(value["starttime"]))
+
+
+def _same_live_process(before, after):
+    return (_process_ok(before, True) and _process_ok(after, True)
+            and before["pid"] == after["pid"]
+            and before["starttime"] == after["starttime"])
+
+
+def _owned_alive_ok(phase):
+    seeded = ((phase.get("seeded") or {}).get("process") or {})
+    owned = (phase.get("processes") or {}).get("owned")
+    return (_process_ok(owned, True)
+            and owned["pid"] == seeded.get("pid")
+            and owned["starttime"] == seeded.get("starttime"))
+
+
+def _unrelated_alive_ok(phase):
+    unrelated = (phase.get("processes") or {}).get("unrelated") or {}
+    return _same_live_process(unrelated.get("before"), unrelated.get("after"))
+
+
+def _blocked_observation_ok(value):
+    return (isinstance(value, dict)
+            and value.get("drained") is False
+            and isinstance(value.get("blocked"), list)
+            and bool(value["blocked"])
+            and all(isinstance(entry, dict)
+                    and entry.get("state") in ("alive", "ambiguous")
+                    and isinstance(entry.get("run"), str) and bool(entry["run"])
+                    and isinstance(entry.get("item"), str) and bool(entry["item"])
+                    for entry in value["blocked"]))
+
+
+def _liveness_ok(phase, state):
+    seeded = phase.get("seeded") or {}
+    liveness = phase.get("liveness")
+    run_id = seeded.get("run_id")
+    item = (seeded.get("item") or {}).get("id")
+    return (isinstance(liveness, list) and len(liveness) == 1
+            and isinstance(liveness[0], dict)
+            and liveness[0].get("state") == state
+            and isinstance(run_id, str) and bool(run_id)
+            and isinstance(item, str) and bool(item)
+            and liveness[0].get("run_id") == run_id
+            and liveness[0].get("item") == item)
+
+
+def _snapshot_preservation_ok(snapshot, service_sha=None):
+    if not isinstance(snapshot, dict):
+        return False
+    state = snapshot.get("state")
+    units = snapshot.get("units")
+    metadata = snapshot.get("metadata")
+    jobs = snapshot.get("jobs")
+    records = snapshot.get("records")
+    all_records = snapshot.get("all_records")
+    history = snapshot.get("history")
+    completions = snapshot.get("completions")
+    files = snapshot.get("files")
+    if not (isinstance(state, dict)
+            and set(state) == {"queue.json", "heartbeat.json"}
+            and _sha256_text(state.get("queue.json"))
+            and _sha256_text(state.get("heartbeat.json"))):
+        return False
+    if not (isinstance(units, dict)
+            and set(units) == {"crq-tick.service", "crq-tick.timer"}):
+        return False
+    for name, path, file_state in (
+            ("crq-tick.service", SERVICE_PATH, "static"),
+            ("crq-tick.timer", TIMER_PATH, "enabled")):
+        unit = units[name]
+        if not isinstance(unit, dict):
+            return False
+        for key in ("LoadState", "ActiveState", "SubState", "UnitFileState",
+                    "FragmentPath", "Result"):
+            if not isinstance(unit.get(key), str) or not unit[key]:
+                return False
+        if not isinstance(unit.get("InvocationID"), str):
+            return False
+        if (unit["FragmentPath"] != path
+                or unit["UnitFileState"] != file_state):
+            return False
+    if not _metadata_ok(metadata, service_sha):
+        return False
+    if not _files_ok(files, service_sha):
+        return False
+    if not _views_agree(metadata, files):
+        return False
+    if not isinstance(jobs, list) or not _record_list_ok(records):
+        return False
+    if not _all_records_ok(all_records):
+        return False
+    if all_records[RECORDS_DIR] != records:
+        return False
+    if not (_sha_present(history)
+            and _record_path_ok(history.get("path"))
+            and any(item["path"] == history["path"]
+                    and item["sha256"] == history["sha256"]
+                    for item in records)):
+        return False
+    if files[HISTORY_PATH].get("sha256") != history["sha256"]:
+        return False
+    if not isinstance(completions, list):
+        return False
+    if not all(isinstance(entry, dict)
+               and type(entry.get("sequence")) is int
+               for entry in completions):
+        return False
+    return True
+
+
+def _snapshot_preserved(before, after, service_sha=None):
+    if not (_snapshot_preservation_ok(before, service_sha)
+            and _snapshot_preservation_ok(after, service_sha)):
+        return False
+    return all(before.get(key) == after.get(key)
+               for key in ("state", "units", "metadata", "jobs", "records",
+                           "all_records", "history", "completions", "files"))
+
+
+def _queue_restored_ok(queue, before_key, after_key=None):
+    after_key = after_key or before_key
+    return (_sha256_text(queue.get(before_key))
+            and _sha256_text(queue.get(after_key))
+            and _sha256_text(queue.get("baseline_sha256"))
+            and _sha256_text(queue.get("restored_sha256"))
+            and queue[before_key] == queue[after_key]
+            and queue["baseline_sha256"] == queue["restored_sha256"]
+            and queue[before_key] != queue["restored_sha256"])
+
+
+def _count_ok(value, *, positive=False):
+    return (type(value) is int and value >= 0
+            and (value > 0 if positive else True))
+
+
+def _record_summary_ok(value):
+    return (_sha_present(value)
+            and type(value.get("bytes")) is int and value["bytes"] > 0
+            and isinstance(value.get("path"), str) and bool(value["path"])
+            and value.get("outcome") == "pending"
+            and value.get("phase") == "drained")
+
+
+def _drain_refusal_ok(phase, kind):
+    cli = phase.get("cli") or {}
+    queue = phase.get("queue") or {}
+    before = phase.get("before") or {}
+    after = phase.get("after") or {}
+    observation = phase.get("observation") or {}
+    drain = phase.get("drain") or {}
+    seeded_run = (phase.get("seeded") or {}).get("run_id")
+    owned = (phase.get("processes") or {}).get("owned")
+    runtime = phase.get("current_runtime")
+    service_sha = (_sha(expected_unit(runtime))
+                   if runtime in (NODE_RUNTIME, PYTHON_RUNTIME) else None)
+    return (
+        cli.get("rc") == 2
+        and service_sha is not None
+        and "queue-owned work" in (phase.get("refused") or "")
+        and _blocked_observation_ok(observation)
+        and _blocked_observation_ok(drain)
+        and drain == observation
+        and any(entry.get("state") == kind
+                and entry.get("run") == seeded_run
+                for entry in observation["blocked"])
+        and _liveness_ok(phase, kind)
+        and _queue_restored_ok(queue, "before_sha256", "after_sha256")
+        and _path_list_ok(phase.get("records_before"))
+        and phase.get("records_before") == phase.get("records_after")
+        and _count_ok(phase.get("completions_before"))
+        and phase.get("completions_before") == phase.get("completions_after")
+        and _snapshot_preserved(before, after, service_sha)
+        and (("owned" in (phase.get("processes") or {})
+              and owned is None) if kind == "ambiguous"
+             else _owned_alive_ok(phase))
+        and _unrelated_alive_ok(phase)
+        and _cleanup_never_signalled(phase)
+        and phase.get("baseline_restored") is True
+    )
+
+
+def _completion_pair(value):
+    evidence = value or {}
+    sequences = evidence.get("sequences")
+    invocations = evidence.get("invocations")
+    return (isinstance(sequences, list) and len(sequences) == 2
+            and all(type(item) is int for item in sequences)
+            and sequences[0] < sequences[1]
+            and isinstance(invocations, list) and len(invocations) == 2
+            and all(isinstance(item, str) and HEX32.fullmatch(item)
+                    for item in invocations)
+            and len(set(invocations)) == 2)
+
+
+def _drain_harvest_ok(phase):
+    queue = phase.get("queue") or {}
+    processes = phase.get("processes") or {}
+    observation = phase.get("observation") or {}
+    node = phase.get("node") or {}
+    python = phase.get("python") or {}
+    node_record = node.get("record") or {}
+    python_record = python.get("record") or {}
+    preserved = phase.get("preserved") or {}
+    seeded = preserved.get("state") or {}
+    after = phase.get("after") or {}
+    seeded_process = (phase.get("seeded") or {}).get("process") or {}
+    unrelated = processes.get("unrelated") or {}
+    completed = processes.get("completed")
+    return (
+        observation == {"drained": True, "blocked": []}
+        and _liveness_ok(phase, "harvest")
+        and all(_sha256_text(queue.get(key)) for key in (
+            "seeded_sha256", "after_node_sha256", "after_python_sha256"))
+        and queue["seeded_sha256"] == queue["after_node_sha256"]
+        and queue["seeded_sha256"] == queue["after_python_sha256"]
+        and ((node.get("cli") or {}).get("rc") == 0)
+        and ((python.get("cli") or {}).get("rc") == 0)
+        and _completion_pair(node.get("completions"))
+        and _completion_pair(python.get("completions"))
+        and node_record.get("outcome") == "completed"
+        and node_record.get("runtime") == NODE_RUNTIME
+        and node_record.get("prior_runtime") == PYTHON_RUNTIME
+        and python_record.get("outcome") == "completed"
+        and python_record.get("runtime") == PYTHON_RUNTIME
+        and python_record.get("prior_runtime") == NODE_RUNTIME
+        and _same_live_process(unrelated.get("before"), unrelated.get("after"))
+        and _process_ok(completed, False)
+        and completed["pid"] == seeded_process.get("pid")
+        and completed["starttime"] == seeded_process.get("starttime")
+        and _snapshot_preservation_ok(
+            after, _sha(expected_unit(PYTHON_RUNTIME)))
+        and (after.get("units") or {}).get(
+            "crq-tick.timer", {}).get("ActiveState") == "inactive"
+        and _sha256_text(seeded.get("queue.json"))
+        and _sha256_text(seeded.get("heartbeat.json"))
+        and seeded["queue.json"] == queue["seeded_sha256"]
+        and seeded["queue.json"] == (after.get("state") or {}).get(
+            "queue.json")
+        and seeded["heartbeat.json"] == (after.get("state") or {}).get(
+            "heartbeat.json")
+        and _sha256_text(preserved.get("history_sha256"))
+        and preserved["history_sha256"] == (after.get("history") or {}).get(
+            "sha256")
+        and type(preserved.get("record_count")) is int
+        and preserved["record_count"] > 0
+        and preserved["record_count"] == len(after.get("records") or [])
+        and _cleanup_never_signalled(phase)
+        and phase.get("baseline_restored") is True
+    )
+
+
+def _recovery_drain_refusal_ok(phase, service_path, baseline_queue):
+    cli = phase.get("cli") or {}
+    queue = phase.get("queue") or {}
+    before = phase.get("record_before") or {}
+    after = phase.get("record_after") or {}
+    service = phase.get("service") or {}
+    timer = phase.get("timer") or {}
+    observation = phase.get("observation") or {}
+    drain = phase.get("drain") or {}
+    service_before = service.get("before") or {}
+    service_after = service.get("after") or {}
+    timer_before = timer.get("before") or {}
+    timer_after = timer.get("after") or {}
+    return (
+        cli.get("rc") == 2
+        and "queue-owned work" in (phase.get("refused") or "")
+        and _blocked_observation_ok(observation)
+        and _blocked_observation_ok(drain)
+        and drain == observation
+        and _liveness_ok(phase, "alive")
+        and isinstance(phase.get("record_path"), str)
+        and _record_path_ok(phase["record_path"])
+        and _record_summary_ok(before)
+        and _record_summary_ok(after)
+        and before["path"] == phase["record_path"]
+        and after["path"] == phase["record_path"]
+        and before.get("sha256") == after.get("sha256")
+        and before["bytes"] == after["bytes"]
+        and _sha256_text(queue.get("before_sha256"))
+        and _sha256_text(queue.get("after_sha256"))
+        and _sha256_text(queue.get("restored_sha256"))
+        and _sha256_text(baseline_queue)
+        and queue["before_sha256"] == queue["after_sha256"]
+        and queue["restored_sha256"] == baseline_queue
+        and queue["restored_sha256"] != queue["before_sha256"]
+        and _count_ok(phase.get("completions_before"), positive=True)
+        and phase.get("completions_before") == phase.get("completions_after")
+        and service_before.get("LoadState") == "masked"
+        and service_after.get("LoadState") == "masked"
+        and service_before.get("FragmentPath") == service_path
+        and service_after.get("FragmentPath") == service_path
+        and isinstance(service_before.get("ActiveState"), str)
+        and service_before == service_after
+        and timer_before.get("ActiveState") in ("inactive", "failed")
+        and timer_after.get("ActiveState") in ("inactive", "failed")
+        and isinstance(timer_before.get("LoadState"), str)
+        and isinstance(timer_after.get("LoadState"), str)
+        and timer_before == timer_after
+        and _owned_alive_ok(phase)
+        and _unrelated_alive_ok(phase)
+        and _cleanup_never_signalled(phase)
+        and phase.get("baseline_restored") is True
+    )
+
+
 def build_checks(phases, restarts=None, reboots=None, mode="base"):
     checks = {}
     problems = []
@@ -799,6 +1308,37 @@ def build_checks(phases, restarts=None, reboots=None, mode="base"):
             "ActiveState") == "inactive")
     checks["historical_record_seeded"] = bool(
         (snapshot.get("history") or {}).get("sha256"))
+    runner_source = prepared.get("runner_source") or {}
+    checks["runner_source_recorded"] = (
+        isinstance(runner_source.get("sha256"), str)
+        and HEX64.fullmatch(runner_source["sha256"]) is not None
+        and isinstance(runner_source.get("crq_sha256"), str)
+        and HEX64.fullmatch(runner_source["crq_sha256"]) is not None
+        and type(runner_source.get("bytes")) is int
+        and runner_source["bytes"] > 0)
+
+    for name, kind in (("drain-alive", "alive"),
+                       ("drain-ambiguous", "ambiguous")):
+        phase = phases.get(name) or {}
+        if not _ok_phase(phase, name, problems):
+            checks[name.replace("-", "_") + "_refused"] = False
+            continue
+        checks[name.replace("-", "_") + "_refused"] = _drain_refusal_ok(
+            phase, kind)
+
+    harvest = phases.get("drain-harvest") or {}
+    if not _ok_phase(harvest, "drain-harvest", problems):
+        checks["drain_harvest_proceeds"] = False
+    else:
+        checks["drain_harvest_proceeds"] = _drain_harvest_ok(harvest)
+
+    recovery_drain = phases.get("recover-drain-alive") or {}
+    if not _ok_phase(recovery_drain, "recover-drain-alive", problems):
+        checks["recovery_drain_refused"] = False
+    else:
+        checks["recovery_drain_refused"] = _recovery_drain_refusal_ok(
+            recovery_drain, service_path,
+            (prepared.get("state") or {}).get("queue.json"))
 
     for name, runtime, prior in (("switch-node", NODE_RUNTIME, PYTHON_RUNTIME),
                                  ("switch-python", PYTHON_RUNTIME, NODE_RUNTIME)):
@@ -849,7 +1389,9 @@ def build_checks(phases, restarts=None, reboots=None, mode="base"):
         before = recover_kill.get("record_before") or {}
         after = recover_kill.get("record_after") or {}
         checks["recovery_interruption_preserved_record"] = (
-            before.get("sha256") == after.get("sha256")
+            _sha_present(before)
+            and _sha_present(after)
+            and before["sha256"] == after["sha256"]
             and after.get("outcome") == "pending"
             and after.get("phase") == "drained")
 
@@ -1055,6 +1597,12 @@ def source_commit_check(repo, commit):
             capture_output=True, text=True, check=True).stdout.strip()
         if status:
             raise ValueError(label + " have uncommitted changes")
+    status = subprocess.run(
+        ["git", "-C", str(repo), "status", "--porcelain", "--",
+         "apps/crq-python"],
+        capture_output=True, text=True, check=True).stdout.strip()
+    if status:
+        raise ValueError("runner source has uncommitted changes")
     return head
 
 
@@ -1104,7 +1652,12 @@ def cmd_run(args):
         for kind, name, options in run_steps(args.mode):
             if kind == "phase":
                 extra = []
-                if name in ("recover-kill", "recover", "recover-repeat"):
+                if name == "drain-alive":
+                    extra = ["--runtime", NODE_RUNTIME, "--seed", "alive"]
+                elif name == "drain-ambiguous":
+                    extra = ["--runtime", PYTHON_RUNTIME, "--seed", "ambiguous"]
+                elif name in ("recover-kill", "recover", "recover-repeat",
+                              "recover-drain-alive"):
                     extra = ["--record", phases["interrupt"]["record_path"]]
                 if options.get("case"):
                     case = options["case"]
@@ -1274,8 +1827,16 @@ def verify_raw_evidence(report, raw_root, mode="base"):
     if isinstance(snapshot.get("history"), dict):
         _retained_record_problem(snapshot["history"], raw_root, "records",
                                  "inspect.snapshot.history", problems)
+    harvest = phases.get("drain-harvest") or {}
+    for label in ("node", "python"):
+        summary = (harvest.get(label) or {}).get("record")
+        _retained_record_problem(summary, raw_root, "records",
+                                 "drain-harvest." + label, problems)
 
     expected_rc = {
+        "drain-alive": lambda rc: rc == 2,
+        "drain-ambiguous": lambda rc: rc == 2,
+        "recover-drain-alive": lambda rc: rc == 2,
         "switch-node": lambda rc: rc == 0,
         "switch-python": lambda rc: rc == 0,
         "interrupt": lambda rc: rc not in (0, None),
@@ -1293,6 +1854,12 @@ def verify_raw_evidence(report, raw_root, mode="base"):
         cli = _phase_cli(phases.get(name) or {}, name, problems)
         if cli is not None and not predicate(cli.get("rc")):
             problems.append(name + " CLI result contradicts the proof outcome")
+    harvest = phases.get("drain-harvest") or {}
+    for label in ("node", "python"):
+        nested = (harvest.get(label) or {}).get("cli") or {}
+        if nested.get("rc") != 0:
+            problems.append("drain-harvest." + label
+                            + " CLI result contradicts the proof outcome")
     if mode == "matrix":
         for case in MATRIX_ORDER:
             boundary = phases.get(case) or {}
@@ -1342,7 +1909,7 @@ def verify_raw_evidence(report, raw_root, mode="base"):
         retained = ({entry.name for entry in proof_bin.iterdir()
                      if entry.is_file() and not entry.is_symlink()}
                     if proof_bin.is_dir() else set())
-        if retained != set(UPLOADS):
+        if retained != set(UPLOADS) | {RUNNER_ARCHIVE}:
             problems.append("raw upload set does not match the expected "
                             "controller and fixture scripts")
         for name in UPLOADS:
@@ -1360,6 +1927,24 @@ def verify_raw_evidence(report, raw_root, mode="base"):
                     problems.append("raw upload size does not match: " + name)
                 if vm.sha256_file(raw_path) != entry["sha256"]:
                     problems.append("raw upload digest does not match: " + name)
+        runner = uploads.get("runner_source")
+        raw_runner = proof_bin / RUNNER_ARCHIVE
+        if not isinstance(runner, dict) or not _sha256_text(runner.get("sha256")):
+            problems.append("runner source provenance is missing")
+        else:
+            if raw_runner.is_symlink() or not raw_runner.is_file():
+                problems.append("raw runner source archive is missing")
+            elif type(runner.get("bytes")) is not int or runner["bytes"] < 1:
+                problems.append("runner source size is invalid")
+            elif raw_runner.stat().st_size != runner["bytes"]:
+                problems.append("runner source size does not match")
+            elif vm.sha256_file(raw_runner) != runner["sha256"]:
+                problems.append("runner source digest does not match")
+            prepared = ((phases.get("prepare") or {}).get("prepared") or {})
+            guest_runner = prepared.get("runner_source") or {}
+            if guest_runner.get("sha256") != runner.get("sha256"):
+                problems.append("guest runner source digest does not match "
+                                "the uploaded archive")
     return problems
 
 
@@ -1463,7 +2048,7 @@ def validate_provenance(report, run_dir):
     if not isinstance(uploads, dict):
         problems.append("upload provenance is not an object")
     else:
-        if set(uploads) != set(UPLOADS):
+        if set(uploads) != set(UPLOADS) | {"runner_source"}:
             problems.append("upload provenance set does not match the expected "
                             "controller and fixture scripts")
         for name in UPLOADS:
@@ -1483,6 +2068,24 @@ def validate_provenance(report, run_dir):
                 problems.append("upload size is invalid: " + name)
             if entry["verified"] is not True:
                 problems.append("upload is not verified: " + name)
+        runner = uploads.get("runner_source")
+        if not isinstance(runner, dict):
+            problems.append("runner source provenance is missing")
+        elif (set(runner) != {"name", "sha256", "remote_sha256", "bytes",
+                              "verified", "source"}):
+            problems.append("runner source provenance fields are wrong")
+        else:
+            if runner.get("name") != RUNNER_ARCHIVE:
+                problems.append("runner source provenance names the wrong file")
+            if not _sha256_text(runner.get("sha256")) \
+                    or not _sha256_text(runner.get("remote_sha256")):
+                problems.append("runner source digest is invalid")
+            elif runner["sha256"] != runner["remote_sha256"]:
+                problems.append("runner source local and remote digests differ")
+            if type(runner.get("bytes")) is not int or runner["bytes"] < 1:
+                problems.append("runner source size is invalid")
+            if runner.get("verified") is not True:
+                problems.append("runner source upload is not verified")
 
     raw = report.get("raw")
     if not isinstance(raw, dict):
@@ -1569,7 +2172,7 @@ def cmd_verify(args):
         "retained_guest_script_sha256": retained_guest,
         "host_matches_run": host_matches,
         "guest_matches_run": guest_matches,
-        "validator_only": mode == "matrix" and guest_matches and not host_matches,
+        "validator_only": guest_matches and not host_matches,
         "run": report.get("run"),
         "run_source_commit": report.get("source_commit"),
         "report_sha256": sha256_bytes(pathlib.Path(args.report).read_bytes()),
