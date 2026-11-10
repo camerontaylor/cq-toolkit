@@ -37,7 +37,7 @@
 // MAX_COMMENT_CHARS — and the worktree path/branch) plus the OUTPUT
 // CONTRACT: the worker must make the fix in the worktree, COMMIT it, and
 // answer with a single line of JSON {"disposition", "summary", "commits",
-// "evidence"} (THE FIX OUTCOME CONTRACT in ./fixContract.ts): commits are
+// "evidence"} (THE FIX OUTCOME CONTRACT in ./internal/fixContract.ts): commits are
 // the full shas it created, evidence the code an unchanged answer cites. The
 // single prompt string is system + blank line + user (OpInvocation carries
 // one prompt). `truncated: true` rides the ok result when ANY truncation
@@ -113,10 +113,10 @@ import {
   NO_OUTCOME_REASON,
   headCapped,
   parseFixContract,
-} from './fixContract.js';
-import type { FixEvidence } from './fixContract.js';
+} from './internal/fixContract.js';
+import type { FixEvidence } from './internal/fixContract.js';
 
-// The fix-contract vocabulary is SHARED (./fixContract.ts) so a second op can
+// The fix-contract vocabulary is SHARED (./internal/fixContract.ts) so a second op can
 // read the worker's typed disposition instead of the needs-human reason
 // prose. Re-exported here because this module remains the review.fixItem
 // surface its callers and tests import.
@@ -130,14 +130,14 @@ export {
   MAX_SUMMARY_CHARS,
   NO_OUTCOME_REASON,
   parseFixContract,
-} from './fixContract.js';
+} from './internal/fixContract.js';
 export type {
   FixContractParse,
   FixDisposition,
   FixEvidence,
   FixNoOutcome,
   FixOutcome,
-} from './fixContract.js';
+} from './internal/fixContract.js';
 
 /**
  * The one review item a fixer worker fixes. Plain JSON, built from the
@@ -282,7 +282,7 @@ export const MAX_ITEM_BODY_CHARS = 8_000;
 
 /**
  * THE FIX OUTCOME CONTRACT and its structural parse live in
- * ./fixContract.ts (the vocabulary is shared; this module re-exports it).
+ * ./internal/fixContract.ts (the vocabulary is shared; this module re-exports it).
  * The no-outcome mapping below is unchanged: every well-formed non-outcome
  * is `needs-human` with a reason opening NO_OUTCOME_REASON.
  */

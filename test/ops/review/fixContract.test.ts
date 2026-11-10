@@ -1,4 +1,5 @@
-// Focused tests for the shared fix-contract parse (src/ops/review/fixContract.ts).
+// Focused tests for the shared fix-contract parse
+// (src/ops/review/internal/fixContract.ts).
 //
 // Pinned here:
 //   1. The two outcome dispositions, with their required commits/evidence.
@@ -19,7 +20,7 @@ import {
   MAX_SUMMARY_CHARS,
   NO_OUTCOME_REASON,
   parseFixContract,
-} from '../../../src/ops/review/fixContract.js';
+} from '../../../src/ops/review/internal/fixContract.js';
 
 const SHA = 'a'.repeat(40);
 const OTHER_SHA = 'b'.repeat(40);
