@@ -6,6 +6,16 @@ a private fsynced journal, but its CLI provides no unit-switch or unit-recovery
 adapter. The recovery snapshot's structure and host operations still need an
 independent design review and disposable-VM proof.
 
+A bounded proof vehicle now exercises the actual ``switch_unit``/``recover_unit``
+seam against one harmless fixture in a disposable KVM guest; run
+``20261110T173225Z-de36ec18`` passed both directions, preactivation
+interruption, interrupted recovery, repeat-recovery refusal and the
+activation-fence probe. It is
+fixture-only evidence, not production enablement: production journal
+interoperability, a real runtime-bound completion provider, and the
+manager-restart/reboot matrix remain open. See
+[VM-UNIT-SWITCH-PROOF.md](VM-UNIT-SWITCH-PROOF.md).
+
 ## Probe evidence and its limits
 
 On an Ubuntu 24.04 disposable CI VM with systemd 255, a synthetic installed
