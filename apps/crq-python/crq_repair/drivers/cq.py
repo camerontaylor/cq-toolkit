@@ -48,6 +48,13 @@ MAX_OUTPUT_TOKENS = 500_000
 MAX_CONTEXT_TOKENS = 200_000
 MAX_ITEM_BODY_CHARS = 8_000  # review.fixItem uses JavaScript string length (UTF-16 units).
 
+# The cq process spends time before its own wall clock starts (node startup,
+# argv parsing), so a Python kill timer set to exactly the cq budget expires
+# first and the caller sees TimeoutExpired instead of cq's `budget-exhausted`
+# result with its `budget-stop` detail. Keep the subprocess timeout strictly
+# longer than the budget sent as `wallClockMs`.
+WALL_CLOCK_GRACE_S = 60
+
 
 def fixer_body(job):
     """Fit complete finding and provenance plus whole, anchor-containing source lines."""
@@ -184,7 +191,8 @@ def invoke(config, role, job, wt, directory):
     argv += ['--' + k + '=' + json.dumps(v) for k, v in payload.items()]
     before = session_files(sessions_dir)
     try:
-        p = command(argv, cwd=wt, env=env, timeout=config['repair']['budget']['wall_clock_min'] * 60)
+        p = command(argv, cwd=wt, env=env,
+                    timeout=config['repair']['budget']['wall_clock_min'] * 60 + WALL_CLOCK_GRACE_S)
     except subprocess.TimeoutExpired as exc:
         _log_invocation(directory, str(exc.stdout or ''), str(exc.stderr or ''))
         raise
@@ -287,7 +295,7 @@ def judge(config, role, job, wt, directory):
     bridge = Path(__file__).parents[1] / 'judge-cq.mjs'
     try:
         p = command(['node', str(bridge), str(path)], cwd=wt,
-                    timeout=config['repair']['budget']['wall_clock_min'] * 60)
+                    timeout=config['repair']['budget']['wall_clock_min'] * 60 + WALL_CLOCK_GRACE_S)
     except subprocess.TimeoutExpired as exc:
         _log_invocation(directory, str(exc.stdout or ''), str(exc.stderr or ''))
         raise
