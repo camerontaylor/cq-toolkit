@@ -39,9 +39,11 @@ def _sha(text):
     return hashlib.sha256(text.encode()).hexdigest()
 
 
-def _record(name, fields):
+def _record(name, fields, raw_fields=None):
+    raw = json.dumps(raw_fields if raw_fields is not None else fields,
+                     sort_keys=True).encode()
+    RECORDS[name] = raw
     data = json.dumps(fields, sort_keys=True).encode()
-    RECORDS[name] = data
     return {**fields,
             "path": "/home/probe/records/controller-"
                     + hashlib.md5(name.encode()).hexdigest() + ".json",
@@ -85,37 +87,39 @@ def phases():
         "after": {"files": {SERVICE: {"type": "file", "sha256": python_sha}}},
         "preserved": preserved,
     }
+    pending = {"outcome": "pending", "phase": "drained", "runtime": NODE,
+               "prior_runtime": PYTHON}
+    rolled_back = {"outcome": "rolled_back",
+                   "phase": "restore_activation_pending",
+                   "runtime": NODE, "prior_runtime": PYTHON}
+    pending_record = _record("recover-transaction", pending,
+                             raw_fields=rolled_back)
+    final_record = _record("recover-transaction", rolled_back)
     interrupt = {
         "cli": {"rc": -9},
-        "record": _record("interrupt", {
-            "outcome": "pending", "phase": "drained", "runtime": NODE,
-            "prior_runtime": PYTHON}),
+        "record": dict(pending_record),
         "after": {"files": {SERVICE: {"type": "symlink", "target": "/dev/null"}},
                   "units": {"crq-tick.timer": {"ActiveState": "inactive"}}},
         "preserved": preserved,
     }
-    recover_kill_record = _record("recover-kill", {
-        "outcome": "pending", "phase": "drained"})
     recover_kill = {
         "cli": {"rc": -9},
-        "record_before": dict(recover_kill_record),
-        "record_after": dict(recover_kill_record),
+        "record_before": dict(pending_record),
+        "record_after": dict(pending_record),
     }
     recover = {
         "cli": {"rc": 0},
-        "record": _record("recover", {
-            "outcome": "rolled_back", "phase": "restore_activation_pending"}),
+        "record": dict(final_record),
+        "record_before": dict(pending_record),
         "after": {"files": {SERVICE: {"type": "file", "sha256": python_sha}},
                   "units": {"crq-tick.timer": {"UnitFileState": "enabled",
                                                "ActiveState": "inactive"}}},
         "preserved": preserved,
     }
-    repeat_record = _record("recover-repeat", {
-        "outcome": "rolled_back", "phase": "restore_activation_pending"})
     repeat = {
         "cli": {"rc": 2, "stdout": "{\"refused\": \"invalid record\"}"},
-        "record_before": dict(repeat_record),
-        "record_after": dict(repeat_record),
+        "record_before": dict(final_record),
+        "record_after": dict(final_record),
     }
     fence_record = _record("fence", {
         "outcome": "pending", "phase": "activation_pending",
@@ -141,7 +145,7 @@ def phases():
                   WANTS: {"type": "symlink"}},
         "state": STATE,
         "records": [node_phase["record"], python_phase["record"],
-                    interrupt["record"], recover["record"], fence_record],
+                    final_record, fence_record],
     }}
     return {"prepare": prepare, "switch-node": node_phase,
             "switch-python": python_phase, "interrupt": interrupt,
