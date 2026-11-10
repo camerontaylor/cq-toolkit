@@ -714,6 +714,7 @@
   "test/policy/crq/ids.test.ts": "pure",
   "test/policy/crq/pythonJson.test.ts": "pure",
   "test/policy/crq/schemas.test.ts": "pure",
+  "test/policy/crq/statusSummary.test.ts": "pure",
   "test/policy/crq/utc.test.ts": "pure",
   "test/policy/crq/vectors.test.ts": "pure",
   "test/policy/queue/settle-state.test.ts": "pure",
