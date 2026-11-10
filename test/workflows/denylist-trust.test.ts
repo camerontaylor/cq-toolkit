@@ -82,7 +82,7 @@ describe.each(PATHS)('%s scans with a trusted scanner policy', (path) => {
 it('fails when octopus merge enumeration fails', () => {
   for (const path of PATHS) {
     const text = readFileSync(join(ROOT, path), 'utf8');
-    const block = text.match(/ {10}octopus=.*\n          for commit[^]*?          done/);
+    const block = text.match(/ {10}octopus=.*\n {10}for commit[^]*? {10}done/);
     expect(block, path).not.toBeNull();
     if (block === null) throw new Error(`missing octopus scan in ${path}`);
     const shell = `set -euo pipefail
