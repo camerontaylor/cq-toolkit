@@ -548,6 +548,15 @@ class MatrixHarnessCheckTests(unittest.TestCase):
             checks["matrix-restart-restore-staged_journal_metadata_fence"])
         self.assertTrue(problems)
 
+    def test_staged_evidence_must_name_the_runtime(self):
+        phases_value, restarts, reboots, _ = self._checks()
+        phases_value["matrix-restart-restore-staged"]["staged"].pop("runtime")
+        checks, problems = harness.build_checks(phases_value, restarts,
+                                                reboots, "matrix")
+        self.assertFalse(
+            checks["matrix-restart-restore-staged_boundary"])
+        self.assertTrue(problems)
+
 
 class VerifyTests(unittest.TestCase):
     def setUp(self):

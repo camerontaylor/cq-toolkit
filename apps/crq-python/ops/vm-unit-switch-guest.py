@@ -857,6 +857,7 @@ def _assert_staged(spec, label):
         runtime = _matrix_adapter()._runtime_from_unit(STAGED_SERVICE)
         require(runtime == expected["runtime"],
                 label + " staged the wrong runtime: " + runtime)
+        return {**staged, "runtime": runtime}
     return staged
 
 
