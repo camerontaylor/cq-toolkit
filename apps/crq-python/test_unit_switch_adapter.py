@@ -184,6 +184,13 @@ class AdapterTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.adapter.preflight("crq-other.service", NODE)
 
+    def test_timer_accuracy_is_bounded(self):
+        # The default 1min accuracy can outlast the completion bound; the
+        # proof timer must fire promptly after the oneshot becomes inactive.
+        text = self.adapter.render_timer()
+        self.assertIn("OnUnitInactiveSec=1s", text)
+        self.assertIn("AccuracySec=1s", text)
+
     def test_snapshot_rejects_mask_as_prior_state(self):
         snapshot = self._snapshot()
         tampered = copy.deepcopy(snapshot)

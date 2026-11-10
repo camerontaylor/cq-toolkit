@@ -496,6 +496,7 @@ class GuestFixtureAdapter:
                 "\n"
                 "[Timer]\n"
                 "OnUnitInactiveSec=1s\n"
+                "AccuracySec=1s\n"
                 "Unit=" + self.unit + "\n"
                 "\n"
                 "[Install]\n"
