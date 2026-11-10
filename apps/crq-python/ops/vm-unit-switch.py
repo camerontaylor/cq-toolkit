@@ -888,6 +888,8 @@ def _drain_harvest_ok(phase):
         and (processes.get("unrelated") or {}).get("after", {}).get(
             "alive") is True
         and (processes.get("completed") or {}).get("alive") is False
+        and ((phase.get("after") or {}).get("units") or {}).get(
+            "crq-tick.timer", {}).get("ActiveState") == "inactive"
         and seeded.get("queue.json") == queue.get("seeded_sha256")
         and _cleanup_never_signalled(phase)
         and phase.get("baseline_restored") is True

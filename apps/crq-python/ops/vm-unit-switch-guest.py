@@ -944,6 +944,12 @@ def drain_harvest_phase(args):
         node_record = json.loads(node_records[0].read_text())
         node_completions = validate_completed(
             node_record, NODE_RUNTIME, PYTHON_RUNTIME)
+        # Match switch_phase's post-switch baseline: the proof adapter starts
+        # the fixture timer on release, and the timer must not keep triggering
+        # a oneshot service into the next phase's snapshot.
+        systemctl("stop", TIMER)
+        systemctl("reset-failed", TIMER)
+        time.sleep(0.5)
         require(sha256_file(STATE / "queue.json") == seeded_sha,
                 "harvest switch changed the seeded queue bytes")
         require(process_state(unrelated.pid)["alive"],
@@ -962,6 +968,9 @@ def drain_harvest_phase(args):
         python_record = json.loads(python_records[0].read_text())
         python_completions = validate_completed(
             python_record, PYTHON_RUNTIME, NODE_RUNTIME)
+        systemctl("stop", TIMER)
+        systemctl("reset-failed", TIMER)
+        time.sleep(0.5)
         require(sha256_file(STATE / "queue.json") == seeded_sha,
                 "harvest return switch changed the seeded queue bytes")
         require(process_state(unrelated.pid)["alive"],
@@ -993,6 +1002,7 @@ def drain_harvest_phase(args):
             "processes": {"unrelated": {"before": unrelated_state,
                                         "after": process_state(unrelated.pid)},
                           "completed": seeded["process_state"]},
+            "after": after,
             "completions_before": len(before["completions"]),
             "completions_after": len(after["completions"]),
             "preserved": preserved,

@@ -168,6 +168,8 @@ def phases():
         "processes": {"unrelated": {"before": {"pid": 4004, "alive": True},
                                     "after": {"pid": 4004, "alive": True}},
                       "completed": {"pid": 3999, "alive": False}},
+        "after": {"units": {"crq-tick.timer": {
+            "ActiveState": "inactive"}}},
         "completions_before": 4, "completions_after": 8,
         "preserved": {"state": {"queue.json": "3" * 64,
                                 "heartbeat.json": STATE["heartbeat.json"]},
@@ -549,6 +551,14 @@ class HarnessCheckTests(unittest.TestCase):
     def test_drain_harvest_must_complete_both_directions(self):
         value = phases()
         value["drain-harvest"]["python"]["record"]["runtime"] = NODE
+        checks, problems = harness.build_checks(value)
+        self.assertFalse(checks["drain_harvest_proceeds"])
+        self.assertTrue(problems)
+
+    def test_drain_harvest_must_stop_the_fixture_timer(self):
+        value = phases()
+        value["drain-harvest"]["after"]["units"]["crq-tick.timer"][
+            "ActiveState"] = "active"
         checks, problems = harness.build_checks(value)
         self.assertFalse(checks["drain_harvest_proceeds"])
         self.assertTrue(problems)
