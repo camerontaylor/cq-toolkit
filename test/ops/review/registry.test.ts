@@ -63,6 +63,7 @@ const ENTRY_NAMES = [
   'review.address',
   'review.run',
   'review.fixItem',
+  'review.fixFinding',
   'review.fetchReviewState',
   'review.classifyThreads',
   'review.planReviewBatch',
@@ -156,6 +157,20 @@ const minimalInputs: Record<string, () => Record<string, unknown>> = {
     item: { id: 'T1', path: null, line: null, body: 'fix me', comments: [] },
     worktree: { path: '/tmp/cq-fix-review/pr-1', branch: 'cq-review/pr-1' },
     driver: { model: 'm', provider: 'p' },
+  }),
+  'review.fixFinding': () => ({
+    pr: 1,
+    item: { id: 'T1', path: null, line: null, body: 'fix me', comments: [] },
+    worktree: { path: '/tmp/cq-fix-review/pr-1', branch: 'cq-review/pr-1' },
+    driver: { model: 'm', provider: 'p' },
+    binding: {
+      job: 'repair-job-1',
+      sourceSha: 'a'.repeat(40),
+      sourceBlobSha: 'b'.repeat(40),
+      findingSha256: 'c'.repeat(64),
+      repairBase: 'd'.repeat(40),
+    },
+    instructions: 'Prefer the smallest guard.',
   }),
   'review.fetchReviewState': () => ({ owner: 'octocat', repo: 'hello-world', pr: 1 }),
   'review.classifyThreads': () => ({ state: fetchedState(), nowMs: 0 }),
@@ -338,6 +353,37 @@ describe('review family registry entries', () => {
     (input as { item: { comments: unknown[] } }).item.comments = [
       { authorLogin: 'review-bot', authorType: 'Bot', body: 'done', createdAt: null },
     ];
+    expect(entry.inputSchema.safeParse(input).success).toBe(true);
+  });
+
+  test('review.fixFinding: the binding hex shapes are strict', () => {
+    const entry = entryByName('review.fixFinding');
+    const input = minimalInput('review.fixFinding');
+    expect(entry.inputSchema.safeParse(input).success).toBe(true);
+    for (const field of ['sourceSha', 'sourceBlobSha', 'repairBase'] as const) {
+      const bad = {
+        ...input,
+        binding: { ...(input['binding'] as Record<string, unknown>), [field]: 'xyz' },
+      };
+      expect(entry.inputSchema.safeParse(bad).success).toBe(false);
+    }
+    const badDigest = {
+      ...input,
+      binding: {
+        ...(input['binding'] as Record<string, unknown>),
+        findingSha256: 'c'.repeat(63),
+      },
+    };
+    expect(entry.inputSchema.safeParse(badDigest).success).toBe(false);
+  });
+
+  test('review.fixFinding: a {kind: finding} item is accepted (the shared union)', () => {
+    const entry = entryByName('review.fixFinding');
+    const input = minimalInput('review.fixFinding');
+    input['item'] = {
+      kind: 'finding',
+      finding: { id: 'F1', source: 'agent', severity: 'minor', text: 't', status: 'open' },
+    };
     expect(entry.inputSchema.safeParse(input).success).toBe(true);
   });
 
