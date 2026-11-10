@@ -228,7 +228,14 @@ def apply(config, overlay):
             # reads them from promotion, so render that shape for the source.
             parts = ['promotion', parts[1]]
         dest = config
+        parent = ''
         for part in parts[:-1]:
+            parent = parent + '.' + part if parent else part
+            # The committed config owns the shape. A baseline without the
+            # block (e.g. no repair.blackout) is refused, never given one: the
+            # legacy drift comparison must stay exact.
+            if not isinstance(dest, dict) or not isinstance(dest.get(part), dict):
+                raise ValueError('overlay parent missing from committed config: ' + parent)
             dest = dest[part]
         dest[parts[-1]] = value
     # Spend authorization is policy, not an overlay escape hatch: the overlay
