@@ -23,6 +23,11 @@ class InterruptedAdapter(Adapter):
         raise Crash()
 
 
+class EmptyReasonInterrupt(Adapter):
+    def install(self, unit, runtime):
+        raise KeyboardInterrupt()
+
+
 class TrackingAdapter(Adapter):
     def __init__(self, runtime):
         super().__init__(runtime)
@@ -321,6 +326,23 @@ class InteropTests(DeployPlanFixture):
         original = path.read_bytes()
         # The successful recovery record must itself be accepted as history,
         # or completing recovery would block every later controller operation.
+        dc.refuse_unfinished_transactions(self.effects)
+        result = dc.switch_unit(self.effects, Adapter("python"),
+                                "crq-slot.service", NODE)
+        self.assertEqual(result["outcome"], "completed")
+        self.assertEqual(path.read_bytes(), original)
+
+    def test_empty_reason_rolled_back_record_is_history_for_later_scans(self):
+        with self.assertRaises(dc.RecoveryRequired):
+            dc.switch_unit(self.effects, EmptyReasonInterrupt("python"),
+                           "crq-tick.service", NODE)
+        path = next(self.record_dir.glob("controller-*.json"))
+        record = json.loads(path.read_text())
+        self.assertEqual(record["outcome"], "rolled_back")
+        self.assertEqual(record["reason"], "")
+        original = path.read_bytes()
+        # A bare KeyboardInterrupt produces an empty reason; the successful
+        # rollback is still history and must not block later operations.
         dc.refuse_unfinished_transactions(self.effects)
         result = dc.switch_unit(self.effects, Adapter("python"),
                                 "crq-slot.service", NODE)

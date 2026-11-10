@@ -1480,9 +1480,10 @@ def _unit_switch_shape(record, outcome):
             and completions[0]["sequence"] < completions[1]["sequence"]
         )
     if outcome == "rolled_back":
-        # switch_unit's rollback path records a reason; recover_unit's
-        # successful recovery path writes the same identity without one.
-        return "reason" not in record or _text(record.get("reason"))
+        # switch_unit's rollback path records a reason (possibly empty for a
+        # bare KeyboardInterrupt); recover_unit's successful recovery path
+        # writes the same identity without one.
+        return "reason" not in record or isinstance(record.get("reason"), str)
     if outcome == "recovery_required":
         return (_text(record.get("reason"))
                 and isinstance(record.get("record_path"), str))
