@@ -579,6 +579,7 @@
   "test/ops/review/fetchReviewState.pagination.test.ts": "process",
   "test/ops/review/fetchReviewState.slurpShapes.test.ts": "process",
   "test/ops/review/fetchReviewState.wireMapping.test.ts": "process",
+  "test/ops/review/fixContract.test.ts": "pure",
   "test/ops/review/fixReviewItem.contract.test.ts": "process",
   "test/ops/review/fixReviewItem.harness.test.ts": "process",
   "test/ops/review/fixReviewItem.invocation.test.ts": "process",

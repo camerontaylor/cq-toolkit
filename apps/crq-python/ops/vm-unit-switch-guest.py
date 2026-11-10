@@ -378,10 +378,22 @@ def prepare_history():
         "prior_runtime": PYTHON_RUNTIME,
         "outcome": "completed",
         "at": "2026-01-01T00:00:00Z",
-        "snapshot": {},
-        "state": None,
+        "snapshot": {"proof": "historical"},
+        "state": {
+            "prior_head": "0" * 40,
+            "prior_config_sha256": None,
+            "checkout_status": "clean",
+            "units": {UNIT: PYTHON_RUNTIME},
+            "preserved/queue.json": "0" * 64,
+            "preserved/heartbeat.json": "0" * 64,
+        },
         "phase": "activation_pending",
-        "completions": [],
+        "completions": [
+            {"unit": UNIT, "runtime": NODE_RUNTIME,
+             "success": True, "sequence": 1},
+            {"unit": UNIT, "runtime": NODE_RUNTIME,
+             "success": True, "sequence": 2},
+        ],
     }
     _write(HISTORY_PATH, json.dumps(record, indent=2, sort_keys=True) + "\n",
            0o600)
