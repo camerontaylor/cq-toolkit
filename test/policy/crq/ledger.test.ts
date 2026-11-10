@@ -298,6 +298,10 @@ describe('ledger records are pure and self-describing', () => {
     // A UTF-16BE BOM outranks the byte heuristics.
     const bom = new Uint8Array([0xfe, 0xff, 0, 0x7b, 0, 0x7d]);
     expect(toPlainJson(ledgerLoads(bom))).toEqual({});
+
+    // A valid UTF-16 surrogate pair is one scalar, not two raw surrogates.
+    const pair = new Uint8Array([0xff, 0xfe, 0x22, 0, 0x3d, 0xd8, 0x00, 0xde, 0x22, 0]);
+    expect(toPlainJson(ledgerLoads(pair))).toBe('😀');
   });
 
   test('an invalid byte encoding keeps the Python UnicodeDecodeError class', () => {
@@ -305,6 +309,22 @@ describe('ledger records are pure and self-describing', () => {
     expect(() => ledgerLoads(new Uint8Array([0x7b, 0, 0, 0, 0x7d, 0, 0]))).toThrow(
       LedgerUnicodeDecodeError,
     );
+  });
+
+  test('raw surrogate code points from bytes keep the Python non-scalar refusal', () => {
+    // Adjacent UTF-8 surrogate encodings would otherwise merge into 😀 in JS.
+    const utf8 = new Uint8Array([0x22, 0xed, 0xa0, 0xbd, 0xed, 0xb8, 0x80, 0x22]);
+    expect(() => ledgerLoads(utf8)).toThrow(LedgerIntegrityError);
+
+    const utf32 = new Uint8Array([
+      0xff, 0xfe, 0, 0, 0x22, 0, 0, 0, 0x3d, 0xd8, 0, 0, 0x00, 0xde, 0, 0, 0x22, 0, 0, 0,
+    ]);
+    expect(() => ledgerLoads(utf32)).toThrow(LedgerIntegrityError);
+
+    const scalar = new Uint8Array([
+      0xff, 0xfe, 0, 0, 0x22, 0, 0, 0, 0x00, 0xf6, 0x01, 0, 0x22, 0, 0, 0,
+    ]);
+    expect(toPlainJson(ledgerLoads(scalar))).toBe('😀');
   });
 
   test('loads refuses floats and constants while scanning, in document order', () => {

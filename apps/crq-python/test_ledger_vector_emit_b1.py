@@ -71,6 +71,15 @@ class LedgerVectorTest(unittest.TestCase):
             self.assertEqual(cases[name]["expect"]["value"], {"雪": "😀", "n": 1}, name)
         self.assertEqual(cases["bytes-invalid-utf8"]["expect"]["error"], "UnicodeDecodeError")
         self.assertEqual(cases["bytes-raw-surrogate-utf8"]["expect"]["error"], "IntegrityError")
+        self.assertEqual(cases["bytes-adjacent-surrogates-utf8"]["expect"]["error"],
+                         "IntegrityError")
+        self.assertEqual(cases["bytes-adjacent-surrogates-utf32"]["expect"]["error"],
+                         "IntegrityError")
+        self.assertEqual(cases["bytes-utf16-unpaired-surrogate"]["expect"]["error"],
+                         "IntegrityError")
+        self.assertEqual(cases["bytes-utf16-surrogate-pair"]["expect"]["value"], "😀")
+        self.assertEqual(cases["bytes-utf32-scalar"]["expect"]["value"], "😀")
+        self.assertEqual(cases["escaped-surrogate-pair"]["expect"]["value"], "😀")
 
     def test_loads_refusal_order_matches_the_scanner(self):
         cases = {case["name"]: case for case in _family("loads")["cases"]}

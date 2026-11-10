@@ -192,6 +192,8 @@ def loads_vectors() -> Dict[str, Any]:
         ("duplicate-before-nan", '{"a":1,"a":2,"b":NaN}'),
         ("nan-before-trailing-comma", "[NaN,]"),
         ("float-before-syntax", "[1.0, broken]"),
+        # Python combines escaped surrogate pairs into one scalar.
+        ("escaped-surrogate-pair", '"\\ud83d\\ude00"'),
     )
     cases = [
         _capture(name, "review_ledger.loads", {"raw": raw},
@@ -212,6 +214,21 @@ def loads_vectors() -> Dict[str, Any]:
         ("bytes-utf32be-heuristic", payload.encode("utf-32-be")),
         # surrogatepass decodes the surrogate, then canonical() refuses it.
         ("bytes-raw-surrogate-utf8", b'"\xed\xa0\x80"'),
+        # Adjacent raw surrogate code points stay separate in Python, while JS
+        # would merge them into an astral scalar.
+        ("bytes-adjacent-surrogates-utf8", b'"\xed\xa0\xbd\xed\xb8\x80"'),
+        ("bytes-adjacent-surrogates-utf32",
+         b"\xff\xfe\x00\x00"
+         + b"".join(code.to_bytes(4, "little") for code in (0x22, 0xD83D, 0xDE00, 0x22))),
+        ("bytes-utf16-surrogate-pair",
+         b"\xff\xfe" + b"".join(unit.to_bytes(2, "little")
+                                for unit in (0x22, 0xD83D, 0xDE00, 0x22))),
+        ("bytes-utf16-unpaired-surrogate",
+         b"\xff\xfe" + b"".join(unit.to_bytes(2, "little")
+                                for unit in (0x22, 0xD83D, 0x61, 0x22))),
+        ("bytes-utf32-scalar",
+         b"\xff\xfe\x00\x00"
+         + b"".join(code.to_bytes(4, "little") for code in (0x22, 0x1F600, 0x22))),
         ("bytes-invalid-utf8", b"\x80"),
         ("bytes-truncated-utf32", b"{\x00\x00\x00}\x00\x00"),
     )

@@ -182,11 +182,12 @@ export function ledgerDigestOf(value: JsonValue): string {
  * not decode errors.
  */
 export function ledgerLoads(raw: string | Uint8Array): JsonValue {
-  const text = typeof raw === 'string' ? raw : decodeLedgerBytes(raw);
+  const decoded =
+    typeof raw === 'string' ? { text: raw, rawSurrogate: false } : decodeLedgerBytes(raw);
 
   let value: JsonValue;
   try {
-    value = parseJsonValue(text, {
+    value = parseJsonValue(decoded.text, {
       // Python refuses these while scanning, in document order: `[1.0,]` is
       // an integrity refusal even though the document is also malformed.
       parseFloat: () => fail('unsupported numeric JSON value'),
@@ -206,6 +207,10 @@ export function ledgerLoads(raw: string | Uint8Array): JsonValue {
     if (error instanceof JsonParseError) throw new LedgerJsonDecodeError(error.message);
     throw error;
   }
+  // Python keeps raw surrogate code points from byte input as separate
+  // characters; JavaScript would merge an adjacent high/low pair into a
+  // scalar. Refuse the record the oracle refuses.
+  if (decoded.rawSurrogate) fail('non-scalar Unicode');
   try {
     ledgerJsonBytes(value);
   } catch (error) {
@@ -221,13 +226,19 @@ const UTF16_LE_BOM = [0xff, 0xfe] as const;
 const UTF32_BE_BOM = [0x00, 0x00, 0xfe, 0xff] as const;
 const UTF32_LE_BOM = [0xff, 0xfe, 0x00, 0x00] as const;
 
+interface DecodedLedgerText {
+  readonly text: string;
+  /** The bytes contained a surrogate code point, not a scalar character. */
+  readonly rawSurrogate: boolean;
+}
+
 /**
  * `json.detect_encoding` for `bytes` input, including its exact precedence:
  * UTF-32/UTF-16/UTF-8 BOMs, then the four-byte heuristics, then the two-byte
  * heuristics. The decoded text is what Python hands to the JSON scanner
  * (`surrogatepass`, so lone surrogates survive to the canonical-domain check).
  */
-function decodeLedgerBytes(raw: Uint8Array): string {
+function decodeLedgerBytes(raw: Uint8Array): DecodedLedgerText {
   if (startsWithBytes(raw, UTF32_BE_BOM)) return decodeUtf32(raw.subarray(4), true);
   if (startsWithBytes(raw, UTF32_LE_BOM)) return decodeUtf32(raw.subarray(4), false);
   if (startsWithBytes(raw, UTF16_BE_BOM)) return decodeUtf16(raw.subarray(2), true);
@@ -253,8 +264,9 @@ function startsWithBytes(bytes: Uint8Array, prefix: readonly number[]): boolean 
   return prefix.every((byte, index) => bytes[index] === byte);
 }
 
-function decodeUtf8(bytes: Uint8Array): string {
+function decodeUtf8(bytes: Uint8Array): DecodedLedgerText {
   let result = '';
+  let rawSurrogate = false;
   for (let index = 0; index < bytes.length;) {
     const first = bytes[index] ?? 0;
     if (first < 0x80) {
@@ -293,15 +305,17 @@ function decodeUtf8(bytes: Uint8Array): string {
     if (codePoint < minimum || codePoint > 0x10ffff) {
       throw new LedgerUnicodeDecodeError('invalid UTF-8 code point');
     }
+    if (codePoint >= 0xd800 && codePoint <= 0xdfff) rawSurrogate = true;
     result += String.fromCodePoint(codePoint);
     index += length;
   }
-  return result;
+  return { text: result, rawSurrogate };
 }
 
-function decodeUtf16(bytes: Uint8Array, bigEndian: boolean): string {
+function decodeUtf16(bytes: Uint8Array, bigEndian: boolean): DecodedLedgerText {
   if (bytes.length % 2 !== 0) throw new LedgerUnicodeDecodeError('truncated UTF-16');
   let result = '';
+  let rawSurrogate = false;
   for (let index = 0; index < bytes.length; index += 2) {
     const unit = readUint16(bytes, index, bigEndian);
     if (unit >= 0xd800 && unit <= 0xdbff && index + 3 < bytes.length) {
@@ -314,22 +328,25 @@ function decodeUtf16(bytes: Uint8Array, bigEndian: boolean): string {
     }
     // surrogatepass: an unpaired surrogate is preserved, then refused by the
     // canonical-domain check if it reaches a string value.
+    if (unit >= 0xd800 && unit <= 0xdfff) rawSurrogate = true;
     result += String.fromCharCode(unit);
   }
-  return result;
+  return { text: result, rawSurrogate };
 }
 
-function decodeUtf32(bytes: Uint8Array, bigEndian: boolean): string {
+function decodeUtf32(bytes: Uint8Array, bigEndian: boolean): DecodedLedgerText {
   if (bytes.length % 4 !== 0) throw new LedgerUnicodeDecodeError('truncated UTF-32');
   let result = '';
+  let rawSurrogate = false;
   for (let index = 0; index < bytes.length; index += 4) {
     const codePoint = bigEndian
       ? readUint16(bytes, index, true) * 0x10000 + readUint16(bytes, index + 2, true)
       : readUint16(bytes, index + 2, false) * 0x10000 + readUint16(bytes, index, false);
     if (codePoint > 0x10ffff) throw new LedgerUnicodeDecodeError('invalid UTF-32 code point');
+    if (codePoint >= 0xd800 && codePoint <= 0xdfff) rawSurrogate = true;
     result += String.fromCodePoint(codePoint);
   }
-  return result;
+  return { text: result, rawSurrogate };
 }
 
 function readUint16(bytes: Uint8Array, index: number, bigEndian: boolean): number {
