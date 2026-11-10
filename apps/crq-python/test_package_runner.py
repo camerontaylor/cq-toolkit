@@ -7,6 +7,7 @@ import shutil
 import tarfile
 import tempfile
 import unittest
+from unittest import mock
 
 spec = importlib.util.spec_from_file_location(
     'package_runner', Path(__file__).parent / 'ops/package-runner.py')
@@ -55,6 +56,12 @@ class PackageRunnerTests(unittest.TestCase):
         manifest = package_runner.package(self.stage, output, self.sha,
                                           self.provenance(), lockfile=self.lockfile)
         return manifest, output
+
+    def write_fake_node(self, body):
+        fake = self.base / 'node'
+        fake.write_text('#!/bin/sh\n' + body)
+        fake.chmod(0o755)
+        return str(fake)
 
     def repack(self, source, target, mutate):
         with tempfile.TemporaryDirectory() as temp:
@@ -262,12 +269,59 @@ class PackageRunnerTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'beneath a non-directory'):
             package_runner._safe_extract(nested, self.base)
 
+    def test_package_does_not_delete_a_concurrent_output(self):
+        output = self.base / 'runner.tar.gz'
+        real_inventory = package_runner.inventory
+
+        def inventory_with_winner(root, exclude=()):
+            output.write_bytes(b'winner')
+            return real_inventory(root, exclude=exclude)
+
+        with mock.patch.object(package_runner, 'inventory',
+                               side_effect=inventory_with_winner):
+            with self.assertRaises(FileExistsError):
+                package_runner.package(self.stage, output, self.sha,
+                                       self.provenance(), lockfile=self.lockfile)
+        self.assertEqual(output.read_bytes(), b'winner')
+        self.assertFalse(Path(str(output) + '.sha256').exists())
+
+    def test_smoke_runner_accepts_expected_refusal(self):
+        node = self.write_fake_node(
+            'printf \'%s\\n\' \'{"status":"indeterminate","detail":"incomplete"}\'\n'
+            'exit 1\n')
+        observed = package_runner.smoke_runner(self.stage, node=node)
+        self.assertEqual(observed['exit_code'], 1)
+        self.assertEqual(observed['status'], 'indeterminate')
+        self.assertEqual(observed['detail'], 'incomplete')
+
+    def test_smoke_runner_rejects_exit_zero(self):
+        node = self.write_fake_node(
+            'printf \'%s\\n\' \'{"status":"success","detail":"ok"}\'\n'
+            'exit 0\n')
+        with self.assertRaisesRegex(ValueError, 'exit 1'):
+            package_runner.smoke_runner(self.stage, node=node)
+
+    def test_smoke_runner_rejects_wrong_status(self):
+        node = self.write_fake_node(
+            'printf \'%s\\n\' \'{"status":"failed","detail":"boom"}\'\n'
+            'exit 1\n')
+        with self.assertRaisesRegex(ValueError, 'indeterminate'):
+            package_runner.smoke_runner(self.stage, node=node)
+
+    def test_smoke_runner_rejects_missing_detail(self):
+        node = self.write_fake_node(
+            'printf \'%s\\n\' \'{"status":"indeterminate"}\'\n'
+            'exit 1\n')
+        with self.assertRaisesRegex(ValueError, 'detail'):
+            package_runner.smoke_runner(self.stage, node=node)
+
     def test_smoke_plumbing(self):
         fake = self.base / 'node'
         fake.write_text(
             '#!/bin/sh\n'
             'case "$*" in\n'
-            '  *crq.js*) printf \'%s\\n\' \'{"status":"indeterminate"}\'; exit 1;;\n'
+            '  *crq.js*) printf \'%s\\n\' \'{"status":"indeterminate",'
+            '"detail":"incomplete"}\'; exit 1;;\n'
             '  *) printf \'%s\\n\' \'{"node":"v24.21.0","platform":"linux",'
             '"arch":"x64","modules":"137","fsExt":"2.1.1",'
             '"flock":"blocked-second-descriptor"}\';;\n'

@@ -325,41 +325,40 @@ def validate_manifest(manifest):
     return manifest
 
 
-def _write_archive(root, output, sha, entries, manifest):
+def _write_archive(raw, root, sha, entries, manifest):
     prefix = 'crq-' + sha
-    with output.open('xb') as raw:
-        with gzip.GzipFile(fileobj=raw, mode='wb', mtime=0) as compressed:
-            with tarfile.open(fileobj=compressed, mode='w',
-                              format=tarfile.PAX_FORMAT) as archive:
-                for entry in entries:
-                    path = root / entry['path']
-                    info = tarfile.TarInfo(prefix + '/' + entry['path'])
-                    info.mtime = 0
-                    info.uid = info.gid = 0
-                    info.uname = info.gname = ''
-                    if entry['type'] == 'directory':
-                        info.type = tarfile.DIRTYPE
-                        info.mode = entry['mode']
-                        archive.addfile(info)
-                    elif entry['type'] == 'symlink':
-                        info.type = tarfile.SYMTYPE
-                        info.mode = 0o777
-                        info.linkname = entry['target']
-                        archive.addfile(info)
-                    else:
-                        info.type = tarfile.REGTYPE
-                        info.mode = entry['mode']
-                        info.size = path.stat().st_size
-                        with path.open('rb') as stream:
-                            archive.addfile(info, stream)
-                data = (json.dumps(manifest, sort_keys=True, indent=2) + '\n').encode()
-                info = tarfile.TarInfo(prefix + '/' + MANIFEST_NAME)
-                info.size = len(data)
-                info.mode = 0o644
+    with gzip.GzipFile(fileobj=raw, mode='wb', mtime=0) as compressed:
+        with tarfile.open(fileobj=compressed, mode='w',
+                          format=tarfile.PAX_FORMAT) as archive:
+            for entry in entries:
+                path = root / entry['path']
+                info = tarfile.TarInfo(prefix + '/' + entry['path'])
                 info.mtime = 0
                 info.uid = info.gid = 0
                 info.uname = info.gname = ''
-                archive.addfile(info, io.BytesIO(data))
+                if entry['type'] == 'directory':
+                    info.type = tarfile.DIRTYPE
+                    info.mode = entry['mode']
+                    archive.addfile(info)
+                elif entry['type'] == 'symlink':
+                    info.type = tarfile.SYMTYPE
+                    info.mode = 0o777
+                    info.linkname = entry['target']
+                    archive.addfile(info)
+                else:
+                    info.type = tarfile.REGTYPE
+                    info.mode = entry['mode']
+                    info.size = path.stat().st_size
+                    with path.open('rb') as stream:
+                        archive.addfile(info, stream)
+            data = (json.dumps(manifest, sort_keys=True, indent=2) + '\n').encode()
+            info = tarfile.TarInfo(prefix + '/' + MANIFEST_NAME)
+            info.size = len(data)
+            info.mode = 0o644
+            info.mtime = 0
+            info.uid = info.gid = 0
+            info.uname = info.gname = ''
+            archive.addfile(info, io.BytesIO(data))
 
 
 def package(root, output, sha, provenance, lockfile=None):
@@ -384,14 +383,24 @@ def package(root, output, sha, provenance, lockfile=None):
                 'content_sha256': content_digest(entries),
                 'provenance': provenance,
                 'files': entries}
+    # Cleanup must only remove files this invocation created: losing the
+    # exclusive open means another packager owns the surviving artifact.
+    created_output = False
+    created_sidecar = False
     try:
-        _write_archive(root, output, sha, entries, manifest)
+        raw = output.open('xb')
+        created_output = True
+        with raw:
+            _write_archive(raw, root, sha, entries, manifest)
         digest = sha256_file(output)
         with sidecar.open('x') as stream:
+            created_sidecar = True
             stream.write(f'{digest}  {output.name}\n')
     except BaseException:
-        output.unlink(missing_ok=True)
-        sidecar.unlink(missing_ok=True)
+        if created_sidecar:
+            sidecar.unlink(missing_ok=True)
+        if created_output:
+            output.unlink(missing_ok=True)
         raise
     return manifest
 
@@ -574,15 +583,24 @@ def smoke_runner(root, node=None):
         result = subprocess.run([node, str(runner), 'tick', '--dry-run'],
                                 cwd=temp, check=False, capture_output=True,
                                 text=True, timeout=60)
-    if result.returncode not in (0, 1):
-        raise ArtifactError('runner smoke failed: ' + (result.stderr or result.stdout).strip())
+    if result.returncode != 1:
+        raise ArtifactError('runner smoke expected exit 1, got '
+                            + str(result.returncode) + ': '
+                            + (result.stderr or result.stdout).strip())
     try:
         artifact = json.loads(result.stdout.strip().splitlines()[-1])
     except (IndexError, ValueError) as exc:
         raise ArtifactError('runner smoke emitted no JSON artifact') from exc
-    if not isinstance(artifact, dict) or not isinstance(artifact.get('status'), str):
+    if not isinstance(artifact, dict):
         raise ArtifactError('runner smoke emitted an invalid artifact')
-    return {'exit_code': result.returncode, 'status': artifact['status']}
+    if artifact.get('status') != 'indeterminate':
+        raise ArtifactError('runner smoke expected indeterminate refusal, got '
+                            + repr(artifact.get('status')))
+    detail = artifact.get('detail')
+    if not isinstance(detail, str) or not detail:
+        raise ArtifactError('runner smoke expected a non-empty detail')
+    return {'exit_code': result.returncode, 'status': artifact['status'],
+            'detail': detail}
 
 
 def verify_archive(archive, expected_sha256=None, lockfile=None, smoke=True,
@@ -698,7 +716,8 @@ def main():
                           + report['observed']['modules'] + ' flock ok')
                 if report['runner'] is not None:
                     print('runner exit ' + str(report['runner']['exit_code']) + ' status '
-                          + report['runner']['status'])
+                          + report['runner']['status'] + ' detail '
+                          + report['runner']['detail'])
                 if args.keep:
                     print('extracted tree ' + report['root'])
     except (ArtifactError, OSError, ValueError) as exc:

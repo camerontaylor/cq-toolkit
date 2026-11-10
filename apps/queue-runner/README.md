@@ -33,6 +33,8 @@ digest, and every staged path (file digests and modes, symlink targets,
 directories including empty ones). It writes `<archive>.sha256` beside the
 archive. Packaging cross-checks the supplied provenance against the staging
 tree and the lockfile, and it refuses to overwrite an archive or sidecar.
+A packager that loses the exclusive output open does not remove the winning
+packager's archive or sidecar.
 
 `package-runner.py verify --output <archive> [--lockfile <path>]` extracts the
 archive safely into a temporary directory, rejects duplicate members, hard
@@ -40,8 +42,9 @@ links, special files, symlink escapes and entries beneath non-directories, then
 re-hashes every entry against the manifest. By default it loads the extracted
 `fs-ext` addon in Node, proves that a second descriptor cannot take the held
 flock, and runs the extracted runner entry with `tick --dry-run` (expecting its
-JSON artifact and indeterminate refusal). The verifier compares the observed
-Node ABI, platform, arch and `fs-ext` version with the recorded provenance.
+JSON artifact, exit 1, status `indeterminate`, and a non-empty detail). The
+verifier compares the observed Node ABI, platform, arch and `fs-ext` version
+with the recorded provenance.
 
 Trust boundary: these are integrity records, not authenticity records. The
 manifest, content digest and sidecar can be rewritten together with the
