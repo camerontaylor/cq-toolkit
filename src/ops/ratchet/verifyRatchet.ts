@@ -424,12 +424,14 @@ export const createVerifyRatchet =
 
     // Match the promotion gate's privileged-path decision using only the trust ref.
     let ordinaryAdvisory = false;
+    let requiresDefinitionAuthorization = (_path: string): boolean => true;
     if (config.posture === 'advisory') {
       try {
         const text = await gitReadBlob(input.repo, trust, POLICY_LIST_PATH);
         if (text === null) throw new Error(`missing trusted ${POLICY_LIST_PATH}`);
         const policy = parsePolicyList(text);
-        ordinaryAdvisory = !changed.some(privilegedPathPredicate(policy));
+        requiresDefinitionAuthorization = privilegedPathPredicate(policy);
+        ordinaryAdvisory = !changed.some(requiresDefinitionAuthorization);
       } catch (err) {
         return { status: 'failed', error: `ratchet verify: ${messageOf(err)}` };
       }
@@ -449,14 +451,17 @@ export const createVerifyRatchet =
     }
 
     const reasons: string[] = [];
+    const authorizationPaths = definitionChanges.filter(requiresDefinitionAuthorization);
+    const advisoryPaths = definitionChanges.filter(
+      (path) => !requiresDefinitionAuthorization(path),
+    );
     const d11 =
-      definitionChanges.length > 0 && input.authorization !== undefined
-        ? authorizePaths(input.authorization, definitionChanges)
+      authorizationPaths.length > 0 && input.authorization !== undefined
+        ? authorizePaths(input.authorization, authorizationPaths)
         : undefined;
-    const unauthorized =
-      !ordinaryAdvisory && definitionChanges.length > 0 && d11?.authorized !== true;
-    if (ordinaryAdvisory && definitionChanges.length > 0) {
-      reasons.push(`advisory (D11): definition changes — ${definitionChanges.join(', ')}`);
+    const unauthorized = authorizationPaths.length > 0 && d11?.authorized !== true;
+    if (advisoryPaths.length > 0) {
+      reasons.push(`advisory (D11): definition changes — ${advisoryPaths.join(', ')}`);
     }
     // A trusted old dependency tree cannot judge a candidate's new imports.
     // The promotion gate still requires successful static CI on the exact candidate.
@@ -470,7 +475,7 @@ export const createVerifyRatchet =
       r.value !== null;
     if (unauthorized) {
       reasons.push(
-        `needs-human (D11): the subject changes ratchet definitions — ${definitionChanges.join(', ')}`,
+        `needs-human (D11): the subject changes ratchet definitions — ${authorizationPaths.join(', ')}`,
       );
     }
     if (d11 !== undefined) reasons.push(...d11.lines);

@@ -440,7 +440,9 @@ export const AnalyzeRunInputSchema: z.ZodType<AnalyzeRunInput> = z
  * cluster id (`--clusterId=12345678`) arrives as a NUMBER. Ids never start
  * with a zero that JSON would drop (JSON rejects leading zeros, so such ids
  * stay strings), which makes the integer form recoverable exactly — but only
- * when the number ALREADY has all eight digits. A shorter number is left as
+ * when the number ALREADY has all eight digits. Exponent-looking hex ids
+ * cannot be recovered after another caller parses them as numbers; callers
+ * must preserve their string form (as the CLI now does). A shorter number is left as
  * a number and fails the regex rather than being zero-padded into some other
  * cluster's id.
  */
@@ -452,7 +454,12 @@ const ClusterIdInput = z.preprocess(
     value <= 99_999_999
       ? String(value)
       : value,
-  z.string().regex(/^[0-9a-f]{8}$/, 'expected the 8-hex-digit cluster id from analyze.run'),
+  z
+    .string({
+      error:
+        'expected the 8-hex-digit cluster id from analyze.run; preserve its string form, for example --clusterId=\'"12e45678"\'',
+    })
+    .regex(/^[0-9a-f]{8}$/, 'expected the 8-hex-digit cluster id from analyze.run'),
 );
 
 /**
