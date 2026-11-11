@@ -34,4 +34,57 @@ describe('focused-checks policy guidance (#243)', () => {
     expect(template).not.toMatch(/selection remains a proposal|advisory developer optimization/);
     expect(template).not.toContain('Reduced selection is a per-PR convenience');
   });
+
+  // Review r1 P3 (pr1536, 4bf05d8e): the merge-bar assertion above did not
+  // guard the event/skip claims — a falsified event list stayed green
+  // (mutation B). This test derives the expectation from the canonical CI
+  // semantics (the static job's own selection in ci.yml, read live) and
+  // pins the template's exact wording to it, so either side drifting
+  // fails. Block extraction follows cq-state-skip.test.ts: a job's block
+  // runs from its id line to the next two-space job id.
+  it('binds the template CI-scope sentence to ci.yml static-job semantics', () => {
+    // Raw read: the file-level `read` helper collapses whitespace, which
+    // would destroy the line structure the job-block extraction needs.
+    const lines = readFileSync(
+      new URL('../../.github/workflows/ci.yml', import.meta.url),
+      'utf8',
+    ).split('\n');
+    const staticLine = lines.findIndex((line) => line === '  static:');
+    expect(staticLine, 'ci.yml declares a static job').toBeGreaterThan(-1);
+    const nextJob = lines.findIndex(
+      (line, i) => i > staticLine && /^ {2}[A-Za-z0-9_-]+:\s*$/.test(line),
+    );
+    const block = lines.slice(staticLine, nextJob === -1 ? lines.length : nextJob);
+    const jobIf = block.find((line) => line.startsWith('    if:'));
+    // The static job must select exactly the four event classes the
+    // template sentence paraphrases below.
+    expect(jobIf).toContain("github.event_name == 'pull_request'");
+    expect(jobIf).toContain("github.event_name == 'schedule'");
+    expect(jobIf).toContain("github.event_name == 'workflow_dispatch'");
+    expect(jobIf).toContain(
+      "github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)",
+    );
+    // The prose/Python-only skip is enforced by the two complementary step
+    // guards inside the job, not by the job selection itself.
+    expect(
+      block.find((line) => line.includes("needs.changes.outputs.typescript == 'false'")),
+      'format-only step guard',
+    ).toBeDefined();
+    expect(
+      block.find((line) => line.includes("needs.changes.outputs.typescript != 'false'")),
+      'full static-gate step guard',
+    ).toBeDefined();
+    // The template introduction must state this exact selection and skip.
+    // The file-level `read` helper collapses whitespace (prose-oriented),
+    // so the phrases below are written single-spaced; ci.yml above is read
+    // raw to preserve line structure for block extraction.
+    const template = read('policy/templates/affected-tests.md');
+    const introduction = template.split('## The idea')[0];
+    expect(introduction).toContain(
+      'on every PR head, nightly and manual dispatches, and default-branch pushes',
+    );
+    expect(introduction).toContain(
+      'recognized prose/Python-only PRs run formatting without the TS gates',
+    );
+  });
 });
