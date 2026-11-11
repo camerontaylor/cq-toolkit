@@ -265,7 +265,8 @@ the prior runtime, and the actual first fence baseline includes them. Any
 entry after that settled baseline, any wrong-runtime entry and any malformed
 entry fails the check. New entries captured between the pre-fence snapshot and
 the settled fence must use the case runtime: Node for activation cases and
-Python for restore cases.
+Python for restore cases. They must also bind the boot ID observed after the
+restart or reboot; a completion naming an earlier boot fails closed.
 
 Cross-boot completion identity is checked on unit, runtime, success, sequence,
 invocation and boot ID. A completion's first observation must not precede the
@@ -284,16 +285,16 @@ effect point only; timer/path restore effect points are not claimed.
 
 One fresh partial run completed on Pluto (KVM, Ubuntu noble guest
 ``crq-probe``) from source commit
-``5955a526b3a16d535fd10a9cb63117e126762237``:
+``cd8448fccd0b5ca77f7aadfa61513ce10408f8f4``:
 
-- report ``~/crq-vm-feasibility/state/runs/20261111T073715Z-48e32c64/report.json``
+- report ``~/crq-vm-feasibility/state/runs/20261111T075455Z-d577cd6d/report.json``
 - all 38 checks true; ``problems: []``
-- ``raw-guest-evidence.tar.gz`` 1,357,975 bytes, SHA-256
-  ``95ab25662d8d033965cde28c2d97d5ef8108a4b01af9a14ae9e03a4d6a7b0214``
+- ``raw-guest-evidence.tar.gz`` 1,358,177 bytes, SHA-256
+  ``69629dee9bf757ab4f39c406a3ac68fc36233262bec3c68f39866f16b24fdaea``
 - report SHA-256
-  ``24355e6f5f01e5bba328f4eb90ad4b436aa8e023cff4f1158e46c28a5f24b9ea``
+  ``6eb82fd72a247debf4edc560f9e539d2b945469422cb582538679715b45a5d1b``
 - host script SHA-256
-  ``c6ccfc9f73e092ba2124accf858a3c0830bde7faf53b1e36013c47f641f34db9``
+  ``ebeac44f84cd027eb94df77ece5cf5faf2a671532484f362e464fb452b46aeee``
 - partial guest script SHA-256
   ``b1c9b9d1d4af062546b4ea445c63cb04dbb17a099fda450b763cdb9f2ce3da40``
 
@@ -308,14 +309,14 @@ the service is activated:
 
 | Case | Hook | Pending record (prefix) | Released delta |
 |---|---|---|---|
-| ``activation-service-restart`` | ``start-after-service`` | ``a9634020a1564`` | one Node |
-| ``activation-timer-restart`` | ``start-after-timer`` | ``9b47a169d1234`` | one Node |
-| ``activation-path-restart`` | ``start-after-path`` | ``0f693324b8ac4`` | one Node |
-| ``restore-service-restart`` | ``restore-activation-after-service`` | ``97f786a40f364`` | none |
-| ``activation-service-reboot`` | ``start-after-service`` | ``87745aa1bc1f4`` | one Node |
-| ``activation-timer-reboot`` | ``start-after-timer`` | ``b43832f2c3e34`` | one Node |
-| ``activation-path-reboot`` | ``start-after-path`` | ``8c23238d22434`` | one Node |
-| ``restore-service-reboot`` | ``restore-activation-after-service`` | ``5644c5321feb4`` | none |
+| ``activation-service-restart`` | ``start-after-service`` | ``654578544b5a4`` | one Node |
+| ``activation-timer-restart`` | ``start-after-timer`` | ``74b51c1eed074`` | one Node |
+| ``activation-path-restart`` | ``start-after-path`` | ``f344864c94304`` | one Node |
+| ``restore-service-restart`` | ``restore-activation-after-service`` | ``b40191618ee14`` | none |
+| ``activation-service-reboot`` | ``start-after-service`` | ``810112e3939f4`` | one Node |
+| ``activation-timer-reboot`` | ``start-after-timer`` | ``14a79d03828a4`` | one Node |
+| ``activation-path-reboot`` | ``start-after-path`` | ``3a2ad72343e74`` | one Node |
+| ``restore-service-reboot`` | ``restore-activation-after-service`` | ``5dfcb56a84e34`` | none |
 
 Every observe phase retained the same record bytes and returned the actual
 rc-3 ``activation may have occurred`` refusal twice, with the fence-settled
@@ -329,7 +330,7 @@ parsed entries through the completion baseline instead.
 
 ### Earlier reviewed partial proof runs (preserved)
 
-All earlier runs remain preserved unchanged. The three earlier runs that used
+All earlier runs remain preserved unchanged. The four earlier runs that used
 the current partial guest script re-verify under the final host with
 ``problems: []``, ``host_matches_run: false``, ``guest_matches_run: true``
 and ``validator_only: true``:
@@ -360,6 +361,15 @@ and ``validator_only: true``:
   ``631585348bd7097197cd4ce483b19195325f2d9f2e90d6bf1b324208c75142fc``,
   retained host script
   ``210c85b82c9120928687d9cb1709e8dc8c31aedd1e55cce1b36d2f2854eb8c6d``
+  and guest script
+  ``b1c9b9d1d4af062546b4ea445c63cb04dbb17a099fda450b763cdb9f2ce3da40``.
+- ``20261111T073715Z-48e32c64`` from source ``5955a526``: the recovery
+  runtime and raw rogue-unit checks. 38/38, report SHA-256
+  ``24355e6f5f01e5bba328f4eb90ad4b436aa8e023cff4f1158e46c28a5f24b9ea``,
+  raw tar SHA-256
+  ``95ab25662d8d033965cde28c2d97d5ef8108a4b01af9a14ae9e03a4d6a7b0214``,
+  retained host script
+  ``c6ccfc9f73e092ba2124accf858a3c0830bde7faf53b1e36013c47f641f34db9``
   and guest script
   ``b1c9b9d1d4af062546b4ea445c63cb04dbb17a099fda450b763cdb9f2ce3da40``.
 
