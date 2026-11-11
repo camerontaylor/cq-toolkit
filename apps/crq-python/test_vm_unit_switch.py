@@ -30,6 +30,8 @@ def _load(name, path):
 
 harness = _load("crq_vm_unit_switch", OPS / "vm-unit-switch.py")
 guest = _load("crq_vm_unit_switch_guest", OPS / "vm-unit-switch-guest.py")
+guest_partial = _load("crq_vm_unit_switch_guest_partial",
+                      OPS / "vm-unit-switch-guest-partial.py")
 
 NODE = harness.NODE_RUNTIME
 PYTHON = harness.PYTHON_RUNTIME
@@ -2174,3 +2176,899 @@ class ActivatorEvidenceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PartialHarnessCheckTests(unittest.TestCase):
+    """Synthetic partial-release evidence through the real host validator."""
+
+    def setUp(self):
+        self.expected = harness._repair_expected(PYTHON)
+        self.expected_node = harness._repair_expected(NODE)
+        self.python_sha = _sha(self.expected["service"])
+        self.node_sha = _sha(self.expected_node["service"])
+        self.tick_sha = _sha(harness.expected_unit(PYTHON))
+        self.history_path = ("/home/probe/records/"
+                             "controller-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json")
+        self.record_paths = [self.history_path]
+        self.state = {"queue.json": "c" * 64, "heartbeat.json": "d" * 64}
+        self.history = HISTORY
+        self.history_summary = {"path": self.history_path,
+                                "sha256": self.history, "bytes": 123}
+        self.tick = {
+            "state": self.state, "history": self.history_summary,
+            "records": [self.history_summary],
+            "boot_id": "11111111-1111-1111-1111-111111111111",
+            "files": {SERVICE: {"sha256": self.tick_sha},
+                      self.history_path: {"type": "file",
+                                          "sha256": self.history,
+                                          "size": 123}},
+        }
+        self.preserved = {"state": self.state,
+                          "history_sha256": self.history, "record_count": 1}
+        self.source = {
+            "adapter": harness.vm.sha256_file(
+                OPS / "unit-switch-adapter.py"),
+            "controller": harness.vm.sha256_file(
+                OPS / "deploy-controller.py"),
+            "cli": harness.vm.sha256_file(OPS / "unit-switch.py"),
+            "guest": harness.vm.sha256_file(OPS / harness.PARTIAL_GUEST),
+            "runner_source": RUNNER_SHA,
+        }
+        self.completions = [self._completion(1, PYTHON)]
+
+    @staticmethod
+    def _completion(sequence, runtime,
+                    boot_id="11111111-1111-1111-1111-111111111111"):
+        return {"unit": harness.REPAIR_UNIT, "runtime": runtime,
+                "success": True, "sequence": sequence,
+                "invocation": "%032x" % sequence,
+                "boot_id": boot_id}
+
+    @staticmethod
+    def _file(key, text, mode=0o644):
+        return {"path": harness.PARTIAL_FILE_PATHS[key], "type": "file",
+                "mode": mode, "uid": 1000, "gid": 1000,
+                "sha256": _sha(text), "size": len(text.encode())}
+
+    @staticmethod
+    def _inventory_file(text):
+        return {"type": "file", "mode": 0o644, "uid": 1000, "gid": 1000,
+                "sha256": _sha(text), "size": len(text.encode()),
+                "xattrs": [],
+                "bytes_b64": base64.b64encode(text.encode()).decode()}
+
+    @staticmethod
+    def _link(key, target):
+        return {"path": harness.PARTIAL_FILE_PATHS[key], "type": "symlink",
+                "mode": 0o777, "uid": 1000, "gid": 1000, "target": target}
+
+    @staticmethod
+    def _inventory_link(target):
+        return {"type": "symlink", "mode": 0o777, "uid": 1000, "gid": 1000,
+                "target": target, "xattrs": []}
+
+    @staticmethod
+    def _missing(key):
+        return {"path": harness.PARTIAL_FILE_PATHS[key], "type": "missing"}
+
+    @staticmethod
+    def _completions_text(entries):
+        return "".join(json.dumps(entry, sort_keys=True) + "\n"
+                       for entry in entries)
+
+    def _files(self, service, entries):
+        service_text = (self.expected_node if service == "node"
+                        else self.expected)["service"]
+        if service == "masked":
+            files = {"service": self._link("service", "/dev/null")}
+        else:
+            files = {"service": self._file("service", service_text)}
+        files.update({
+            "timer": self._file("timer", self.expected["timer"]),
+            "timer_wants": self._link("timer_wants", "../crq-repair.timer"),
+            "path": self._file("path", self.expected["path"]),
+            "path_wants": self._link("path_wants", "../crq-repair.path"),
+            "dropin": self._file("dropin", self.expected["dropin"]),
+            "staged": self._missing("staged"),
+            "trigger": self._missing("trigger"),
+            "completions": self._file(
+                "completions", self._completions_text(entries), mode=0o664),
+            "caller": self._file("caller", harness.PARTIAL_CALLER_TEXT),
+            "blocker": self._file("blocker", harness.PARTIAL_BLOCKER_TEXT),
+        })
+        return files
+
+    def _metadata(self, service, entries):
+        service_meta = (self._inventory_link("/dev/null")
+                        if service == "masked" else self._inventory_file(
+                            (self.expected_node if service == "node"
+                             else self.expected)["service"]))
+        return {
+            "service": service_meta,
+            "timer": self._inventory_file(self.expected["timer"]),
+            "timer_wants": self._inventory_link("../crq-repair.timer"),
+            "path": self._inventory_file(self.expected["path"]),
+            "path_wants": self._inventory_link("../crq-repair.path"),
+            "dropin": self._inventory_file(self.expected["dropin"]),
+            "staged": {"type": "missing"},
+            "trigger": {"type": "missing"},
+        }
+
+    @staticmethod
+    def _manager(invocation, pid="100"):
+        return {"pid": pid, "invocation_id": invocation}
+
+    def _record(self, case, family, suffix="record"):
+        directory = harness.PARTIAL_CASES[case]["record_dir"]
+        phase = ("activation_pending" if family == "activation"
+                 else "restore_activation_pending")
+        fields = {"outcome": "pending", "phase": phase,
+                  "runtime": NODE, "prior_runtime": PYTHON}
+        raw = json.dumps(fields, sort_keys=True).encode()
+        return {**fields,
+                "path": "/home/probe/%s/%s.json" % (directory, suffix),
+                "sha256": hashlib.sha256(raw).hexdigest(),
+                "bytes": len(raw)}
+
+    def _drained_record(self, case):
+        directory = harness.PARTIAL_CASES[case]["record_dir"]
+        fields = {"outcome": "pending", "phase": "drained",
+                  "runtime": NODE, "prior_runtime": PYTHON}
+        raw = json.dumps(fields, sort_keys=True).encode()
+        return {**fields,
+                "path": "/home/probe/%s/drained.json" % directory,
+                "sha256": hashlib.sha256(raw).hexdigest(),
+                "bytes": len(raw)}
+
+    def _units(self, service_load="loaded", service_active="inactive",
+               timer_active="active", path_active="inactive"):
+        return {
+            harness.REPAIR_UNIT: {
+                "LoadState": service_load, "ActiveState": service_active,
+                "SubState": "dead", "UnitFileState": "static",
+                "FragmentPath": harness.REPAIR_PATHS["service"],
+                "MainPID": "0"},
+            harness.REPAIR_TIMER: {
+                "LoadState": "loaded", "ActiveState": timer_active,
+                "SubState": "dead", "UnitFileState": "enabled",
+                "FragmentPath": harness.REPAIR_PATHS["timer"]},
+            harness.REPAIR_PATH: {
+                "LoadState": "loaded", "ActiveState": path_active,
+                "SubState": "dead", "UnitFileState": "enabled",
+                "FragmentPath": harness.REPAIR_PATHS["path"]},
+        }
+
+    def _snapshot(self, boot, manager, files, units, completions, metadata):
+        return {"boot_id": boot, "manager": manager,
+                "repair_files": files, "repair_units": units,
+                "repair_completions": list(completions), "jobs": [],
+                "partial_metadata": metadata, "tick": copy.deepcopy(self.tick)}
+
+    def _fence(self, count, completions):
+        return {"rc": 3, "timeout": False,
+                "json": {
+                    "recovery_required": {
+                        "reason": "activation may have occurred while the "
+                                  "fence was installed"},
+                    "drain": {
+                        "queue_drain": {"drained": True, "blocked": []},
+                        "jobs": [],
+                        "jobs_observation": {
+                            "command": {"argv": harness.LIST_JOBS_ARGV,
+                                        "rc": 0, "timeout": False,
+                                        "stdout": "", "stderr": ""},
+                            "lines": []},
+                        "service_stop": {
+                            "argv": ["systemctl", "--user", "stop",
+                                     harness.REPAIR_UNIT],
+                            "rc": 0, "timeout": False,
+                            "stdout": "", "stderr": ""},
+                        "masked": {"LoadState": "masked"},
+                        "direct_start": {"argv": ["systemctl", "--user",
+                                                  "start", harness.REPAIR_UNIT],
+                                         "rc": 1, "timeout": False,
+                                         "stdout": "",
+                                         "stderr": "Unit is masked."},
+                        "owned": {"pids": [], "main_pid": 0},
+                        "state": {"ActiveState": "inactive"},
+                        "activators": {
+                            harness.REPAIR_TIMER: {"ActiveState": "inactive"},
+                            harness.REPAIR_PATH: {"ActiveState": "inactive"}},
+                        "completion_baseline": {
+                            "count": count,
+                            "sequences": [item["sequence"]
+                                          for item in completions],
+                            "invocations": [item["invocation"]
+                                            for item in completions],
+                            "max_sequence": max(
+                                (item["sequence"] for item in completions),
+                                default=0)}}}}
+
+    def evidence(self):
+        boot_a = "11111111-1111-1111-1111-111111111111"
+        boot_b = "22222222-2222-2222-2222-222222222222"
+        manager_a = self._manager("a" * 32, "100")
+        manager_b = self._manager("b" * 32, "101")
+        files = self._files("python", self.completions)
+        prepare = {
+            "prepared": {"state": self.state, "history_sha256": HISTORY,
+                         "record_paths": self.record_paths,
+                         "history_path": self.history_path,
+                         "initial_snapshot": {
+                             "history": self.history_summary,
+                             "records": [self.history_summary]},
+                         "runner_source": {"sha256": RUNNER_SHA,
+                                           "crq_sha256": "e" * 64,
+                                           "bytes": len(RUNNER_BYTES)}},
+            "snapshot": {"hostname": "crq-probe", "user": 1000,
+                         "boot_id": boot_a,
+                         "files": {SERVICE: {"sha256": self.tick_sha}},
+                         "units": {"crq-tick.timer": {
+                             "UnitFileState": "enabled",
+                             "ActiveState": "inactive"}},
+                         "history": {"sha256": HISTORY}},
+            "source": self.source,
+        }
+        paths = {
+            "service": self._inventory_file(self.expected["service"]),
+            "timer": self._inventory_file(self.expected["timer"]),
+            "path": self._inventory_file(self.expected["path"]),
+            "dropin": self._inventory_file(self.expected["dropin"]),
+            "timer_wants": self._inventory_link("../crq-repair.timer"),
+            "path_wants": self._inventory_link("../crq-repair.path"),
+        }
+        install = {
+            "inventory": {
+                "unit": harness.REPAIR_UNIT, "topology": "repair",
+                "paths": paths,
+                "activators": {"timer_active": "active",
+                               "timer_unit_file_state": "enabled",
+                               "service_active": "inactive",
+                               "path_active": "inactive",
+                               "path_unit_file_state": "enabled"},
+                "units": {"service": self._units()[harness.REPAIR_UNIT],
+                          "timer": self._units()[harness.REPAIR_TIMER],
+                          "path": self._units()[harness.REPAIR_PATH]}},
+            "files": files, "units": self._units(),
+            "case_dirs": ["/home/probe/"
+                          + harness.PARTIAL_CASES[case]["record_dir"]
+                          for case in harness.PARTIAL_ORDER],
+            "repair_completions": list(self.completions),
+            "tick": copy.deepcopy(self.tick), "preserved": self.preserved,
+            "source": self.source,
+        }
+        phases = {"prepare": prepare, "partial-install": install}
+        restarts = {}
+        reboots = {}
+        for case in harness.PARTIAL_ORDER:
+            family = harness.PARTIAL_CASES[case]["family"]
+            kind = harness.PARTIAL_CASES[case]["kind"]
+            hook = harness.PARTIAL_CASES[case]["hook"]
+            record = self._record(case, family)
+            before_service = "masked" if family == "restore" else "python"
+            before_files = self._files(before_service, self.completions)
+            before_metadata = self._metadata(before_service, self.completions)
+            before_units = self._units()
+            if family == "restore":
+                before_units = self._units(
+                    service_load="masked", timer_active="inactive")
+            before = self._snapshot(boot_a, manager_a, before_files,
+                                    before_units, self.completions,
+                                    before_metadata)
+            new = self._completion(len(self.completions) + 1,
+                                   NODE if family == "activation" else PYTHON)
+            after_service = "node" if family == "activation" else "python"
+            after_units = self._units()
+            if family == "activation" and hook == "start-after-service":
+                after_units = self._units(timer_active="inactive")
+            if family == "restore":
+                after_units = self._units(timer_active="inactive")
+            after_completions = (list(self.completions) + [new]
+                                 if family == "activation"
+                                 else list(self.completions))
+            after_files = self._files(after_service, after_completions)
+            after_metadata = self._metadata(after_service, after_completions)
+            after = self._snapshot(boot_a, manager_a, after_files,
+                                   after_units, after_completions,
+                                   after_metadata)
+            boundary = {
+                "case": case, "hook": hook, "before": before, "after": after,
+                "cli": {"rc": -9, "timeout": False}, "record": record,
+                "hook_marker": {"phase": hook, "pid": 4242,
+                                "at": 1.0},
+                "completion_delta": ([new] if family == "activation" else []),
+                "preserved": self.preserved,
+                "source": self.source,
+            }
+            if family == "restore":
+                boundary["drained_record"] = self._drained_record(case)
+            phases["partial-" + case] = boundary
+            if family == "activation":
+                self.completions = after_completions
+            post_boot = boot_a if kind == "manager" else boot_b
+            post_manager = manager_b if kind == "manager" else manager_b
+            observe_before = copy.deepcopy(after)
+            observe_before["boot_id"] = post_boot
+            observe_before["manager"] = post_manager
+            observe_before["repair_completions"] = list(self.completions)
+            observe = {
+                "before": observe_before, "record": record,
+                "record_after": dict(record),
+                "record_after_repeat": dict(record),
+                "recovery": self._fence(len(self.completions),
+                                        self.completions),
+                "repeat": self._fence(len(self.completions),
+                                      self.completions),
+                "new_completions": ([new] if family == "activation" else []),
+                "preserved": self.preserved,
+                "source": self.source,
+            }
+            fenced = copy.deepcopy(observe_before)
+            fenced["repair_files"] = self._files(
+                "masked", self.completions)
+            fenced["partial_metadata"] = self._metadata(
+                "masked", self.completions)
+            fenced["repair_units"] = self._units(
+                service_load="masked", timer_active="inactive")
+            fenced["repair_completions"] = list(self.completions)
+            observe["after_recovery"] = fenced
+            observe["after_repeat"] = copy.deepcopy(fenced)
+            phases["partial-" + case + "-observe"] = observe
+            host_before = {"boot_id": boot_a, "manager": manager_a}
+            host_after = {"boot_id": post_boot, "manager": post_manager}
+            if kind == "manager":
+                restarts[case] = {
+                    "kind": "user_manager_restart",
+                    "command": {"argv": ["systemctl", "restart",
+                                         "user@1000.service"]},
+                    "before": host_before, "after": host_after,
+                    "boot_id_changed": False,
+                    "manager_invocation_changed": True,
+                    "qemu_identity_verified": True,
+                }
+            else:
+                reboots[case] = {
+                    "kind": "guest_reboot",
+                    "issued": {"argv": ["systemctl", "reboot"]},
+                    "before": host_before, "after": host_after,
+                    "boot_id_changed": True,
+                    "manager_invocation_changed": True,
+                    "boot_id_before": boot_a, "boot_id_after": boot_b,
+                    "ssh_ready": {}, "manager_ready": {},
+                    "qemu_identity_verified": True,
+                }
+        final_files = self._files("python", self.completions)
+        inspect = {
+            "files": final_files, "units": self._units(),
+            "case_records": {case: phases["partial-" + case + "-observe"]
+                             ["record"]
+                             for case in harness.PARTIAL_ORDER},
+            "completions": list(self.completions),
+            "tick": copy.deepcopy(self.tick), "preserved": self.preserved,
+            "source": self.source,
+        }
+        phases["partial-inspect"] = inspect
+        return phases, restarts, reboots
+
+    def test_partial_evidence_passes(self):
+        phases_value, restarts, reboots = self.evidence()
+        checks, problems = harness._partial_checks(phases_value, restarts,
+                                                   reboots)
+        self.assertEqual(problems, [])
+        self.assertTrue(all(value is True for value in checks.values()))
+
+    def test_partial_checks_reject_wrong_case_order_and_sources(self):
+        phases_value, restarts, reboots = self.evidence()
+        broken = copy.deepcopy(phases_value)
+        broken["partial-activation-service-restart"]["record"]["phase"] = "drained"
+        _, problems = harness._partial_checks(broken, restarts, reboots)
+        self.assertTrue(any("activation_pending" in item for item in problems))
+        broken = copy.deepcopy(phases_value)
+        broken["partial-inspect"]["source"]["guest"] = "f" * 64
+        _, problems = harness._partial_checks(broken, restarts, reboots)
+        self.assertTrue(any("source manifest" in item for item in problems))
+
+    def test_partial_checks_reject_excess_released_work(self):
+        phases_value, restarts, reboots = self.evidence()
+        broken = copy.deepcopy(phases_value)
+        case = "activation-service-restart"
+        after = broken["partial-" + case]["after"]
+        after["repair_completions"].append(
+            PartialHarnessCheckTests._completion(99, NODE))
+        after["repair_files"] = self._files(
+            "node", after["repair_completions"])
+        broken["partial-" + case]["completion_delta"].append(
+            PartialHarnessCheckTests._completion(99, NODE))
+        _, problems = harness._partial_checks(broken, restarts, reboots)
+        self.assertTrue(any("exactly 1" in item for item in problems))
+
+    def test_partial_checks_ignore_pre_boundary_prior_runtime_work(self):
+        phases_value, restarts, reboots = self.evidence()
+        case = "activation-service-restart"
+        phase = phases_value["partial-" + case]
+        prior = PartialHarnessCheckTests._completion(98, PYTHON)
+        phase["after"]["repair_completions"].append(prior)
+        phase["after"]["repair_files"] = self._files(
+            "node", phase["after"]["repair_completions"])
+        observe = phases_value["partial-" + case + "-observe"]
+        observe["before"]["repair_completions"].append(prior)
+        observe["before"]["repair_files"] = self._files(
+            "node", observe["before"]["repair_completions"])
+        observe["after_recovery"]["repair_completions"].append(prior)
+        observe["after_recovery"]["repair_files"] = self._files(
+            "masked", observe["after_recovery"]["repair_completions"])
+        observe["after_repeat"]["repair_completions"].append(prior)
+        observe["after_repeat"]["repair_files"] = self._files(
+            "masked", observe["after_repeat"]["repair_completions"])
+        entries = observe["before"]["repair_completions"]
+        observe["recovery"] = self._fence(len(entries), entries)
+        observe["repeat"] = self._fence(len(entries), entries)
+        checks, problems = harness._partial_checks(phases_value, restarts,
+                                                   reboots)
+        # The synthetic mutation stops at this case: a real append-only log
+        # would carry the prior work into every later snapshot and the final
+        # inventory. This test pins the boundary predicate only.
+        self.assertIs(checks["partial_" + case + "_boundary"], True)
+
+    def test_partial_mode_constants_and_plan(self):
+        self.assertEqual(len(harness.PARTIAL_GUEST_PHASES), 19)
+        self.assertEqual(len(harness.PARTIAL_ORDER), 8)
+        self.assertEqual(harness.guest_script_for("partial"),
+                         "vm-unit-switch-guest-partial.py")
+        self.assertIn("vm-unit-switch-guest-partial.py",
+                      harness.uploads_for("partial"))
+        steps = harness.run_steps("partial")
+        names = [item[1] for item in steps if item[0] == "phase"]
+        self.assertEqual(names[0], "prepare")
+        self.assertEqual(names[-1], "partial-inspect")
+        self.assertIn(("restart_manager", "activation-service-restart", {}),
+                      steps)
+        self.assertIn(("reboot", "restore-service-reboot", {}), steps)
+
+    def test_partial_raw_rejects_stray_case_records(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            case = "activation-service-restart"
+            directory = root / harness.PARTIAL_CASES[case]["record_dir"]
+            directory.mkdir(parents=True)
+            (directory / "one.json").write_text("{}")
+            (directory / "two.json").write_text("{}")
+            phases_value, _, _ = self.evidence()
+            problems = []
+            harness._verify_partial_raw({}, root, problems, phases_value)
+            self.assertTrue(any("record set is not one" in item
+                                for item in problems))
+
+    def test_partial_rejects_contradictory_recovery_commands(self):
+        cases = (
+            ("jobs stdout", lambda drain: drain["jobs_observation"][
+                "command"].__setitem__(
+                    "stdout", "211 crq-repair.service start waiting\n"),
+             "list-jobs"),
+            ("jobs argv", lambda drain: drain["jobs_observation"][
+                "command"].__setitem__("argv", ["true"]),
+             "list-jobs"),
+            ("jobs rc", lambda drain: drain["jobs_observation"][
+                "command"].__setitem__("rc", False),
+             "list-jobs"),
+            ("stop argv", lambda drain: drain["service_stop"].__setitem__(
+                "argv", ["true"]),
+             "service stop"),
+            ("direct argv", lambda drain: drain["direct_start"].__setitem__(
+                "argv", ["true"]),
+             "direct start"),
+            ("direct rc", lambda drain: drain["direct_start"].__setitem__(
+                "rc", 2),
+             "direct start"),
+        )
+        for label, mutate, expected in cases:
+            phases_value, restarts, reboots = self.evidence()
+            drain = phases_value["partial-activation-service-restart-observe"][
+                "recovery"]["json"]["drain"]
+            mutate(drain)
+            checks, problems = harness._partial_checks(
+                phases_value, restarts, reboots)
+            self.assertTrue(any(expected in item for item in problems), label)
+            self.assertFalse(
+                checks["partial_activation-service-restart_observe"], label)
+            self.assertFalse(checks["partial_quiescence"], label)
+
+    def test_partial_rejects_paired_file_and_metadata_omissions(self):
+        keys = ("timer", "timer_wants", "path", "path_wants", "dropin",
+                "trigger")
+        phases_value, restarts, reboots = self.evidence()
+        case = "activation-service-restart"
+        boundary = phases_value["partial-" + case]
+        observe = phases_value["partial-" + case + "-observe"]
+        for key in keys:
+            boundary["before"]["repair_files"].pop(key)
+            boundary["after"]["repair_files"].pop(key)
+            observe["before"]["repair_files"].pop(key)
+        _, problems = harness._partial_checks(phases_value, restarts, reboots)
+        self.assertTrue(any("file map is not the exact owned set" in item
+                            for item in problems))
+
+        phases_value, restarts, reboots = self.evidence()
+        boundary = phases_value["partial-" + case]
+        observe = phases_value["partial-" + case + "-observe"]
+        for key in ("timer", "timer_wants", "path", "path_wants", "dropin",
+                    "trigger"):
+            boundary["before"]["partial_metadata"].pop(key)
+            boundary["after"]["partial_metadata"].pop(key)
+            observe["before"]["partial_metadata"].pop(key)
+        _, problems = harness._partial_checks(phases_value, restarts, reboots)
+        self.assertTrue(any("metadata map is not the exact owned set" in item
+                            for item in problems))
+
+        phases_value, restarts, reboots = self.evidence()
+        boundary = phases_value["partial-" + case]
+        boundary["after"]["repair_files"]["timer"]["uid"] = 0
+        _, problems = harness._partial_checks(phases_value, restarts, reboots)
+        self.assertTrue(any("timer file state is not the exact" in item
+                            for item in problems))
+
+    def test_partial_rejects_unbound_completion_baseline(self):
+        for mutation, expected in (
+                (lambda baseline: baseline.__setitem__("sequences", []),
+                 "sequences"),
+                (lambda baseline: baseline.__setitem__("max_sequence", 999999),
+                 "maximum")):
+            phases_value, restarts, reboots = self.evidence()
+            recovery = phases_value[
+                "partial-activation-service-restart-observe"]["recovery"]
+            mutation(recovery["json"]["drain"]["completion_baseline"])
+            _, problems = harness._partial_checks(
+                phases_value, restarts, reboots)
+            self.assertTrue(any(expected in item for item in problems))
+
+    def test_partial_observe_ignores_completion_log_growth(self):
+        phases_value, restarts, reboots = self.evidence()
+        case = "activation-service-restart"
+        observe = phases_value["partial-" + case + "-observe"]
+        log = observe["before"]["repair_files"]["completions"]
+        log["sha256"] = "f" * 64
+        log["size"] += 1
+        checks, problems = harness._partial_checks(
+            phases_value, restarts, reboots)
+        self.assertFalse(any("file states changed across the event" in item
+                             for item in problems))
+        self.assertIs(checks["partial_" + case + "_observe"], True)
+
+    def test_partial_observe_rejects_wrong_runtime_recovery_suffix(self):
+        phases_value, restarts, reboots = self.evidence()
+        case = "restore-service-restart"
+        observe = phases_value["partial-" + case + "-observe"]
+        entries = observe["after_recovery"]["repair_completions"]
+        extra = self._completion(entries[-1]["sequence"] + 1, NODE)
+        for key in ("after_recovery", "after_repeat"):
+            observe[key]["repair_completions"].append(extra)
+        for key in ("recovery", "repeat"):
+            baseline = observe[key]["json"]["drain"]["completion_baseline"]
+            baseline["count"] += 1
+            baseline["sequences"].append(extra["sequence"])
+            baseline["invocations"].append(extra["invocation"])
+            baseline["max_sequence"] = extra["sequence"]
+        checks, problems = harness._partial_checks(
+            phases_value, restarts, reboots)
+        self.assertTrue(any("case runtime" in item for item in problems),
+                        problems)
+        self.assertIs(checks["partial_" + case + "_observe"], False)
+
+    def test_partial_observe_rejects_recovery_suffix_from_prior_boot(self):
+        phases_value, restarts, reboots = self.evidence()
+        case = "activation-service-reboot"
+        observe = phases_value["partial-" + case + "-observe"]
+        entries = observe["after_recovery"]["repair_completions"]
+        extra = self._completion(
+            entries[-1]["sequence"] + 1, NODE,
+            boot_id="11111111-1111-1111-1111-111111111111")
+        for key in ("after_recovery", "after_repeat"):
+            observe[key]["repair_completions"].append(extra)
+        for key in ("recovery", "repeat"):
+            baseline = observe[key]["json"]["drain"]["completion_baseline"]
+            baseline["count"] += 1
+            baseline["sequences"].append(extra["sequence"])
+            baseline["invocations"].append(extra["invocation"])
+            baseline["max_sequence"] = extra["sequence"]
+        checks, problems = harness._partial_checks(
+            phases_value, restarts, reboots)
+        self.assertTrue(any("observed boot" in item for item in problems),
+                        problems)
+        self.assertIs(checks["partial_" + case + "_observe"], False)
+
+    def test_partial_observe_allows_pre_reboot_completion_with_old_boot(self):
+        phases_value, _, _ = self.evidence()
+        case = "activation-timer-reboot"
+        observe = phases_value["partial-" + case + "-observe"]
+        entries = observe["before"]["repair_completions"] + [
+            self._completion(
+                observe["before"]["repair_completions"][-1]["sequence"] + 1,
+                NODE,
+                boot_id="11111111-1111-1111-1111-111111111111")]
+        observe["before"]["repair_completions"] = entries
+        observe["before"]["repair_files"] = self._files("node", entries)
+        observe["before"]["partial_metadata"] = self._metadata("node", entries)
+        for key in ("after_recovery", "after_repeat"):
+            observe[key]["repair_completions"] = entries
+            observe[key]["repair_files"] = self._files("masked", entries)
+            observe[key]["partial_metadata"] = self._metadata("masked", entries)
+        observe["recovery"] = self._fence(len(entries), entries)
+        observe["repeat"] = self._fence(len(entries), entries)
+        problems = []
+        self.assertTrue(harness._partial_observe_ok(
+            case, observe, phases_value["partial-" + case],
+            phases_value["prepare"]["prepared"], problems), problems)
+        self.assertEqual(problems, [])
+
+    def test_partial_final_requires_observed_completion_prefix(self):
+        phases_value, restarts, reboots = self.evidence()
+        inspect = phases_value["partial-inspect"]
+        inspect["completions"] = inspect["completions"][1:]
+        checks, problems = harness._partial_checks(
+            phases_value, restarts, reboots)
+        self.assertTrue(any("unchanged prefix" in item
+                            for item in problems))
+        self.assertIs(checks["partial_final_python"], False)
+
+    def test_partial_final_binds_unobserved_completion_suffix(self):
+        phases_value, restarts, reboots = self.evidence()
+        inspect = phases_value["partial-inspect"]
+        for mutation, expected in (
+                (lambda entry: entry.__setitem__("runtime", NODE),
+                 "does not use the final runtime"),
+                (lambda entry: entry.pop("boot_id"),
+                 "does not bind the final boot"),
+                (lambda entry: entry.__setitem__("boot_id", "2" * 64),
+                 "does not bind the final boot")):
+            mutated = copy.deepcopy(phases_value)
+            final = mutated["partial-inspect"]
+            extra = self._completion(
+                final["completions"][-1]["sequence"] + 1, PYTHON)
+            mutation(extra)
+            final["completions"].append(extra)
+            checks, problems = harness._partial_checks(
+                mutated, restarts, reboots)
+            self.assertTrue(any(expected in item for item in problems),
+                            problems)
+            self.assertIs(checks["partial_final_python"], False)
+
+    def test_partial_raw_accepts_completion_append_after_inspect(self):
+        phases_value, _, _ = self.evidence()
+        inspect = phases_value["partial-inspect"]["completions"]
+        extra = self._completion(inspect[-1]["sequence"] + 1, PYTHON)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            path = root / harness.PARTIAL_COMPLETIONS.replace(
+                "/home/probe/", "")
+            path.parent.mkdir(parents=True)
+            path.write_text("".join(
+                json.dumps(entry) + "\n" for entry in inspect + [extra]))
+            problems = []
+            harness._verify_partial_raw({}, root, problems, phases_value)
+            self.assertFalse(any("archived partial completion" in item
+                                 for item in problems), problems)
+
+    def test_partial_raw_binds_completion_append_to_final_runtime_and_boot(self):
+        phases_value, _, _ = self.evidence()
+        inspect = phases_value["partial-inspect"]["completions"]
+        for mutation, expected in (
+                (lambda entry: entry.__setitem__("runtime", NODE),
+                 "does not use the final runtime"),
+                (lambda entry: entry.pop("boot_id"),
+                 "does not bind the final boot"),
+                (lambda entry: entry.__setitem__("boot_id", "2" * 64),
+                 "does not bind the final boot")):
+            extra = self._completion(inspect[-1]["sequence"] + 1, PYTHON)
+            mutation(extra)
+            with tempfile.TemporaryDirectory() as tmp:
+                root = pathlib.Path(tmp)
+                path = root / harness.PARTIAL_COMPLETIONS.replace(
+                    "/home/probe/", "")
+                path.parent.mkdir(parents=True)
+                path.write_text("".join(
+                    json.dumps(entry) + "\n"
+                    for entry in inspect + [extra]))
+                problems = []
+                harness._verify_partial_raw({}, root, problems, phases_value)
+                self.assertTrue(any(expected in item for item in problems),
+                                problems)
+
+    def test_partial_raw_rejects_completion_truncation(self):
+        phases_value, _, _ = self.evidence()
+        inspect = phases_value["partial-inspect"]["completions"]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            path = root / harness.PARTIAL_COMPLETIONS.replace(
+                "/home/probe/", "")
+            path.parent.mkdir(parents=True)
+            path.write_text("".join(
+                json.dumps(entry) + "\n" for entry in inspect[:-1]))
+            problems = []
+            harness._verify_partial_raw({}, root, problems, phases_value)
+            self.assertTrue(any("unchanged prefix" in item
+                                for item in problems), problems)
+
+    def test_partial_raw_rejects_rogue_unit_entries(self):
+        phases_value, _, _ = self.evidence()
+        raw_unit = pathlib.Path(harness.UNIT_DIR.replace(
+            "/home/%s/" % harness.vm.GUEST_USER, ""))
+        for relative, expected in (
+                ("crq-repair.socket", "rogue repair socket"),
+                ("crq-repair.service.d/20-rogue.conf",
+                 "rogue repair drop-in"),
+                ("default.target.wants/crq-repair.timer",
+                 "rogue timer enablement")):
+            with tempfile.TemporaryDirectory() as tmp:
+                root = pathlib.Path(tmp)
+                target = root / raw_unit / relative
+                target.parent.mkdir(parents=True)
+                target.write_text("rogue\n")
+                problems = []
+                harness._verify_partial_raw({}, root, problems, phases_value)
+                self.assertTrue(any(expected in item for item in problems),
+                                problems)
+
+    def _guest_restore_observe(self, new_entries, after_entries,
+                               baseline_entries=None):
+        case = "restore-service-reboot"
+        spec = guest_partial.PARTIAL_CASES[case]
+        record = {
+            "path": "/home/probe/records/controller-restore.json",
+            "sha256": "a" * 64, "outcome": "pending",
+            "phase": "restore_activation_pending",
+            "runtime": spec["runtime"],
+            "prior_runtime": spec["prior_runtime"],
+        }
+        base_entries = [self._completion(1, PYTHON)]
+        before_entries = base_entries + list(new_entries)
+        after_entries = list(after_entries)
+        if baseline_entries is None:
+            baseline_entries = after_entries
+
+        def baseline(entries):
+            return {
+                "count": len(entries),
+                "sequences": [item["sequence"] for item in entries],
+                "invocations": [item["invocation"] for item in entries],
+            }
+
+        prior = {"type": "file", "path": "/home/probe/service",
+                 "sha256": "b" * 64}
+        masked = {"type": "symlink", "path": "/home/probe/service",
+                  "target": "/dev/null"}
+
+        def snapshot(entries, service):
+            return {
+                "records": [record],
+                "repair_files": {"service": service},
+                "partial_metadata": {},
+                "repair_completions": entries,
+            }
+
+        snapshots = [
+            snapshot(before_entries, prior),
+            snapshot(after_entries, masked),
+            snapshot(after_entries, masked),
+        ]
+        boundary = {
+            "record": record,
+            "after": {
+                "repair_files": {"service": prior},
+                "partial_metadata": {},
+                "repair_completions": base_entries,
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            boundary_path = pathlib.Path(tmp) / "boundary.json"
+            boundary_path.write_text(json.dumps(boundary))
+            with mock.patch.multiple(
+                    guest_partial,
+                    _boundary_phase=lambda name: boundary_path,
+                    case_dir=lambda name: pathlib.Path(tmp) / "case",
+                    partial_snapshot=lambda directory: snapshots.pop(0),
+                    partial_cli=lambda *args, **kwargs: {"rc": 3, "json": {}},
+                    require_fence=lambda cli, label, expected_count=None: (
+                        baseline(baseline_entries)),
+                    require_fenced_state=lambda *args: None,
+                    check_preserved=lambda *args: {},
+                    source_manifest=lambda: {}):
+                return guest_partial.partial_restore_observe(
+                    mock.Mock(case=case))
+
+    def test_guest_restore_observe_accepts_pre_fence_prior_work(self):
+        pre_fence = self._completion(2, PYTHON)
+        result = self._guest_restore_observe(
+            [pre_fence], [self._completion(1, PYTHON), pre_fence])
+        self.assertEqual(result["new_completions"], [pre_fence])
+        self.assertEqual(result["record"]["sha256"], "a" * 64)
+
+    def test_guest_restore_observe_rejects_post_fence_work(self):
+        pre_fence = self._completion(2, PYTHON)
+        post_fence = self._completion(3, PYTHON)
+        with self.assertRaisesRegex(
+                RuntimeError,
+                "produced a completion after the settled fence"):
+            self._guest_restore_observe(
+                [pre_fence],
+                [self._completion(1, PYTHON), pre_fence, post_fence],
+                baseline_entries=[self._completion(1, PYTHON), pre_fence])
+
+    def test_guest_restore_observe_rejects_wrong_runtime_prior_work(self):
+        with self.assertRaisesRegex(
+                RuntimeError,
+                "saw a non-prior runtime completion"):
+            self._guest_restore_observe(
+                [self._completion(2, NODE)],
+                [self._completion(1, PYTHON), self._completion(2, NODE)])
+
+    def test_guest_restore_observe_rejects_malformed_prior_work(self):
+        with self.assertRaisesRegex(
+                RuntimeError,
+                "is not an object"):
+            self._guest_restore_observe(
+                ["not-a-completion"],
+                [self._completion(1, PYTHON), "not-a-completion"])
+
+    def test_partial_observe_allows_pre_fence_prior_runtime_work(self):
+        phases_value, _, _ = self.evidence()
+        case = "restore-service-reboot"
+        observe = phases_value["partial-" + case + "-observe"]
+        entries = observe["before"]["repair_completions"] + [
+            self._completion(
+                observe["before"]["repair_completions"][-1]["sequence"] + 1,
+                PYTHON, boot_id=observe["before"]["boot_id"])]
+        observe["before"]["repair_completions"] = entries
+        observe["before"]["repair_files"] = self._files("python", entries)
+        for key in ("after_recovery", "after_repeat"):
+            observe[key]["repair_completions"] = entries
+            observe[key]["repair_files"] = self._files("masked", entries)
+            observe[key]["partial_metadata"] = self._metadata("masked", entries)
+        observe["recovery"] = self._fence(len(entries), entries)
+        observe["repeat"] = self._fence(len(entries), entries)
+        problems = []
+        self.assertTrue(harness._partial_observe_ok(
+            case, observe, phases_value["partial-" + case],
+            phases_value["prepare"]["prepared"], problems), problems)
+        self.assertEqual(problems, [])
+
+    def test_partial_observe_rejects_post_fence_work(self):
+        phases_value, _, _ = self.evidence()
+        case = "restore-service-reboot"
+        observe = phases_value["partial-" + case + "-observe"]
+        entries = observe["after_recovery"]["repair_completions"] + [
+            self._completion(
+                observe["after_recovery"]["repair_completions"][-1][
+                    "sequence"] + 1, PYTHON)]
+        observe["after_recovery"]["repair_completions"] = entries
+        observe["after_recovery"]["repair_files"] = self._files("masked", entries)
+        problems = []
+        self.assertFalse(harness._partial_observe_ok(
+            case, observe, phases_value["partial-" + case],
+            phases_value["prepare"]["prepared"], problems))
+        self.assertTrue(any("baseline count" in item
+                            for item in problems), problems)
+
+    def test_partial_observe_rejects_malformed_pre_fence_work(self):
+        phases_value, _, _ = self.evidence()
+        case = "restore-service-reboot"
+        observe = phases_value["partial-" + case + "-observe"]
+        observe["before"]["repair_completions"].append("not-a-completion")
+        problems = []
+        self.assertFalse(harness._partial_observe_ok(
+            case, observe, phases_value["partial-" + case],
+            phases_value["prepare"]["prepared"], problems))
+        self.assertTrue(any("typed unit/runtime completion" in item
+                            for item in problems), problems)
+
+    def test_partial_raw_rejects_retained_tick_history_mutation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            records = root / "records"
+            records.mkdir()
+            raw = records / pathlib.PurePosixPath(self.history_path).name
+            raw.write_text("{}")
+            phases_value, _, _ = self.evidence()
+            problems = []
+            harness._verify_partial_raw({}, root, problems, phases_value)
+            self.assertTrue(any("record digest does not match" in item
+                                for item in problems), problems)

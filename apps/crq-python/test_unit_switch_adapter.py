@@ -784,5 +784,174 @@ class RepairSwitchControllerTests(ControllerFixture):
         self.assertEqual(len(self._records()), 1)
 
 
+class PartialReleaseHookTests(unittest.TestCase):
+    """Offline coverage for the approved partial release/restore hook points."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="crq-partial-hooks-")
+        self.addCleanup(self.temp.cleanup)
+        base = pathlib.Path(self.temp.name)
+        self.repair, self.fake, self.paths = build_repair_adapter(
+            base / "user", base / "fixture", base / "proof-bin")
+
+    def _snapshot(self):
+        snapshot = self.repair.snapshot(adapter_mod.REPAIR_UNIT)
+        self.repair.validate_snapshot(adapter_mod.REPAIR_UNIT, snapshot)
+        return snapshot
+
+    def test_release_hooks_fire_after_exact_effects_in_order(self):
+        self.fake.active[adapter_mod.REPAIR_TIMER] = True
+        phases = []
+        self.repair._maybe_kill = phases.append
+        self._snapshot()
+        self.repair.stop_and_drain(adapter_mod.REPAIR_UNIT)
+        self.repair.install(adapter_mod.REPAIR_UNIT, NODE)
+        result = self.repair.start(adapter_mod.REPAIR_UNIT)
+        self.assertEqual(result["release_order"],
+                         ["service", "timer", "path"])
+        self.assertEqual(self.repair.last_release_order,
+                         ["service", "timer", "path"])
+        self.assertEqual(
+            [name for name in phases if name.startswith("start-after-")],
+            ["start-after-service", "start-after-timer", "start-after-path"])
+        self.assertEqual(
+            self.paths["service"].read_text(),
+            self.repair.render_unit(NODE))
+        self.assertTrue(self.fake.active[adapter_mod.REPAIR_TIMER])
+        self.assertFalse(self.fake.active[adapter_mod.REPAIR_PATH])
+
+    def test_restore_hooks_fire_after_exact_effects_in_order(self):
+        self.fake.active[adapter_mod.REPAIR_TIMER] = True
+        phases = []
+        observed = {}
+
+        def maybe_kill(phase):
+            phases.append(phase)
+            if phase == "restore-activation-after-service":
+                observed["timer"] = self.fake.active[
+                    adapter_mod.REPAIR_TIMER]
+                observed["path"] = self.fake.active[adapter_mod.REPAIR_PATH]
+                observed["service"] = self.fake.active[
+                    adapter_mod.REPAIR_UNIT]
+                observed["bytes"] = self.paths["service"].read_text()
+
+        self.repair._maybe_kill = maybe_kill
+        snapshot = self._snapshot()
+        self.repair.stop_and_drain(adapter_mod.REPAIR_UNIT)
+        self.repair.install(adapter_mod.REPAIR_UNIT, NODE)
+        self.repair.start(adapter_mod.REPAIR_UNIT)
+        self.repair.stop_and_drain(adapter_mod.REPAIR_UNIT)
+        self.repair.restore(adapter_mod.REPAIR_UNIT, snapshot)
+        result = self.repair.restore_activation(
+            adapter_mod.REPAIR_UNIT, snapshot)
+        self.assertEqual(result["restore_order"],
+                         ["timer", "path", "service"])
+        self.assertEqual(self.repair.last_restore_order,
+                         ["timer", "path", "service"])
+        self.assertEqual(
+            [name for name in phases
+             if name.startswith("restore-activation-after-")],
+            ["restore-activation-after-service",
+             "restore-activation-after-timer",
+             "restore-activation-after-path",
+             ])
+        self.assertEqual(observed["timer"], False)
+        self.assertEqual(observed["path"], False)
+        self.assertEqual(observed["service"], False)
+        self.assertEqual(observed["bytes"],
+                         self.repair.render_unit("python"))
+        self.assertEqual(
+            self.paths["service"].read_text(),
+            self.repair.render_unit("python"))
+        self.assertTrue(self.fake.active[adapter_mod.REPAIR_TIMER])
+        self.assertFalse(self.fake.active[adapter_mod.REPAIR_PATH])
+
+    def test_hooks_are_inert_for_a_non_guest_caller(self):
+        self.repair.guest_only = False
+        with mock.patch.dict(os.environ,
+                             {"CRQ_PROOF_KILL_ON": "start-after-service"}):
+            with mock.patch.object(adapter_mod.os, "kill") as killed:
+                self.repair._maybe_kill("start-after-service")
+        killed.assert_not_called()
+        self.repair.guest_only = True
+        with mock.patch.dict(os.environ,
+                             {"CRQ_PROOF_KILL_ON": "start-after-service"}):
+            with mock.patch.object(adapter_mod.os, "kill") as killed:
+                self.repair._maybe_kill("start-after-service")
+        killed.assert_called_once_with(os.getpid(), adapter_mod.signal.SIGKILL)
+
+    def test_hook_marker_names_the_actual_restore_phase(self):
+        marker = pathlib.Path(self.temp.name) / "hook.json"
+        self.repair.guest_only = True
+        with mock.patch.dict(os.environ, {
+                "CRQ_PROOF_KILL_ON": "restore-activation-after-service",
+                "CRQ_PROOF_HOOK_MARKER": str(marker)}):
+            with mock.patch.object(adapter_mod.os, "kill"):
+                self.repair._maybe_kill(
+                    "restore-activation-after-service")
+        self.assertEqual(json.loads(marker.read_text())["phase"],
+                         "restore-activation-after-service")
+
+    def test_fence_settled_completion_baseline_is_recorded(self):
+        self.fake.active[adapter_mod.REPAIR_TIMER] = True
+        self._snapshot()
+        self.repair.stop_and_drain(adapter_mod.REPAIR_UNIT)
+        baseline = self.repair.last_drain["completion_baseline"]
+        path = self.fixture_path()
+        entries = ([json.loads(line) for line in path.read_text().splitlines()
+                    if line.strip()] if path.exists() else [])
+        self.assertEqual(baseline["count"], len(entries))
+        self.assertEqual(baseline["sequences"],
+                         [entry["sequence"] for entry in entries])
+        self.assertEqual(baseline["invocations"],
+                         [entry["invocation"] for entry in entries])
+        self.assertEqual(baseline["max_sequence"],
+                         max((entry["sequence"] for entry in entries),
+                             default=0))
+
+    def fixture_path(self):
+        return (pathlib.Path(self.temp.name) / "fixture"
+                / adapter_mod.REPAIR_COMPLETIONS_NAME)
+
+
+class TickReleaseHookTests(unittest.TestCase):
+    def test_tick_release_retains_order_and_does_not_add_a_path(self):
+        temp = tempfile.TemporaryDirectory(prefix="crq-tick-hooks-")
+        self.addCleanup(temp.cleanup)
+        base = pathlib.Path(temp.name)
+        unit_dir = base / "user"
+        fixture_dir = base / "fixture"
+        proof_root = base / "proof-bin"
+        unit_dir.mkdir()
+        (unit_dir / "timers.target.wants").mkdir()
+        fixture_dir.mkdir()
+        proof_root.mkdir()
+        for name in ("unit-switch-fixture.py", "unit-switch-fixture.mjs"):
+            (proof_root / name).write_text("#!/bin/sh\n")
+        service = unit_dir / UNIT
+        timer = unit_dir / TIMER
+        wants = unit_dir / WANTS_REL
+        adapter = adapter_mod.GuestFixtureAdapter(
+            unit_dir, fixture_dir, proof_root=proof_root, guest_only=False,
+            completion_timeout=0.5, drain_timeout=0.5,
+            sleep=lambda _seconds: None)
+        fake = FakeSystemd(service, timer, wants,
+                           fixture_dir / "completions.jsonl")
+        adapter.runner = fake.run
+        service.write_text(adapter.render_unit("python"))
+        service.chmod(0o644)
+        timer.write_text(adapter.render_timer())
+        timer.chmod(0o644)
+        wants.symlink_to("../" + TIMER)
+        snapshot = adapter.snapshot(UNIT)
+        adapter.validate_snapshot(UNIT, snapshot)
+        adapter.stop_and_drain(UNIT)
+        adapter.install(UNIT, NODE)
+        result = adapter.start(UNIT)
+        self.assertEqual(result["release_order"], ["service", "timer"])
+        self.assertNotIn("released", result)
+        self.assertTrue(fake.timer_active)
+
+
 if __name__ == "__main__":
     unittest.main()

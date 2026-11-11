@@ -51,9 +51,16 @@ def _print(value, status=0):
 def _evidence(adapter, exc=None):
     """Structured drain/command evidence for a success, refusal or error."""
     drain = getattr(exc, "drain", None) if exc is not None else None
-    return {"drain": drain if drain is not None
-            else getattr(adapter, "last_drain", None),
-            "commands": adapter.commands}
+    evidence = {"drain": drain if drain is not None
+                else getattr(adapter, "last_drain", None),
+                "commands": adapter.commands}
+    release_order = getattr(adapter, "last_release_order", None)
+    if release_order is not None:
+        evidence["release_order"] = release_order
+    restore_order = getattr(adapter, "last_restore_order", None)
+    if restore_order is not None:
+        evidence["restore_order"] = restore_order
+    return evidence
 
 
 def _adapter(args, effects):

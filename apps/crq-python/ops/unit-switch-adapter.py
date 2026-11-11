@@ -138,6 +138,8 @@ class GuestFixtureAdapter:
         self.last_drain = None
         self.last_install = None
         self.last_restore = None
+        self.last_release_order = None
+        self.last_restore_order = None
         self.last_jobs_observation = None
 
     # -- refusal and process helpers ------------------------------------
@@ -925,16 +927,30 @@ class GuestFixtureAdapter:
         # queue ownership observation. The unit fence above cannot see a
         # detached runner child; neither observation alone is sufficient.
         queue = self._observe_queue_drain()
+        # Capture the completion log at the settled fence. Any work already
+        # recorded before this point is bounded and reported truthfully; no
+        # completion after this baseline can be credited to the fence.
+        completion_records = self._read_completions()
+        completion_baseline = {
+            "count": len(completion_records),
+            "sequences": [record["sequence"] for record in completion_records],
+            "invocations": [record["invocation"]
+                            for record in completion_records],
+            "max_sequence": max((record["sequence"]
+                                 for record in completion_records), default=0),
+        }
         self.last_drain = {"before": before, "masked": masked,
                            "stopped": stopped,
                            "service_stop": service_stop,
                            "jobs_observation": self.last_jobs_observation,
                            "direct_start": {"rc": refusal.get("rc"),
+                                            "argv": refusal.get("argv"),
                                             "stdout": refusal.get("stdout"),
                                             "stderr": refusal.get("stderr"),
                                             "timeout": refusal.get("timeout",
                                                                    False)},
                            "queue_drain": queue,
+                           "completion_baseline": completion_baseline,
                            **drained}
         if queue is not None and not queue["drained"]:
             self.refuse("queue-owned work is alive or ambiguous after the "
@@ -1067,6 +1083,9 @@ class GuestFixtureAdapter:
         self._ok(self.systemctl("start", self.unit, timeout=60),
                  "fixture service release")
         snapshot = self._snapshot_required()
+        release_order = ["service"]
+        self.last_release_order = release_order
+        self._maybe_kill("start-after-service")
         if self._topology()["kind"] == "tick":
             # Existing tick proof behavior, unchanged: release the timer.
             self._ok(self.systemctl("start", TIMER, timeout=60),
@@ -1074,7 +1093,10 @@ class GuestFixtureAdapter:
             timer = self._show(TIMER, ["ActiveState", "LoadState"])
             if timer["ActiveState"] != "active" or timer["LoadState"] != "loaded":
                 self.refuse("timer activator did not become active")
-            return {"service_start": True, "timer": timer}
+            release_order.append("timer")
+            self._maybe_kill("start-after-timer")
+            return {"service_start": True, "timer": timer,
+                    "release_order": release_order}
         # Repair topology: the release policy is explicit and independent of
         # enablement. An activator active before the switch is released. An
         # inactive activator stays inactive even when enabled.
@@ -1097,7 +1119,10 @@ class GuestFixtureAdapter:
                 self.refuse(name + " activator release state does not match "
                             "the snapshot policy")
             released[name] = observed
-        return {"service_start": True, "released": released}
+            release_order.append(name)
+            self._maybe_kill("start-after-" + name)
+        return {"service_start": True, "released": released,
+                "release_order": release_order}
 
     def completion(self, unit, runtime, previous):
         if unit != self.unit or not valid_runtime(runtime) \
@@ -1216,6 +1241,8 @@ class GuestFixtureAdapter:
         paths = self._unit_paths()
         staged = self._staged_service_path(paths["service"])
         service_state = snapshot["paths"][str(paths["service"])]
+        restore_order = []
+        self.last_restore_order = restore_order
         self._compare_state(staged, service_state)
         if self._runtime_from_unit(staged) != snapshot["runtime"]:
             self.refuse("staged restore runtime changed before activation")
@@ -1232,6 +1259,10 @@ class GuestFixtureAdapter:
         self._compare_state(paths["service"], service_state)
         if self._runtime_from_unit(paths["service"]) != snapshot["runtime"]:
             self.refuse("restored service runtime does not match the snapshot")
+        # Approved partial restore boundary: the prior service file has been
+        # released and loaded, but neither activator has been restored and the
+        # service has not been activated yet.
+        self._maybe_kill("restore-activation-after-service")
         expected = snapshot["activators"]
         observed_activators = {}
         for name in self._activator_names():
@@ -1255,6 +1286,8 @@ class GuestFixtureAdapter:
                 self.refuse("restored " + name
                             + " enablement does not match the snapshot")
             observed_activators[name] = observed
+            restore_order.append(name)
+            self._maybe_kill("restore-activation-after-" + name)
         if expected["service_active"] == "active":
             self._ok(self.systemctl("start", self.unit), "restore service activation")
         elif expected["service_active"] == "inactive":
@@ -1265,14 +1298,28 @@ class GuestFixtureAdapter:
         service = self._show(self.unit, ["ActiveState", "LoadState"])
         if service["ActiveState"] != expected["service_active"]:
             self.refuse("restored service active state does not match the snapshot")
-        return {**observed_activators, "service": service}
+        restore_order.append("service")
+        return {**observed_activators, "service": service,
+                "restore_order": restore_order}
 
     def _maybe_kill(self, phase):
         """Proof-only interruption hook; never reachable for a production caller."""
         if not self.guest_only:
             return
-        if os.environ.get("CRQ_PROOF_KILL_ON") == phase:
-            os.kill(os.getpid(), signal.SIGKILL)
+        if os.environ.get("CRQ_PROOF_KILL_ON") != phase:
+            return
+        marker = os.environ.get("CRQ_PROOF_HOOK_MARKER")
+        if marker:
+            marker_path = pathlib.Path(marker)
+            if not marker_path.is_absolute():
+                self.refuse("hook marker must be an absolute path")
+            try:
+                marker_path.write_text(json.dumps(
+                    {"phase": phase, "pid": os.getpid(), "at": time.time()},
+                    sort_keys=True) + "\n")
+            except OSError as exc:
+                self.refuse("hook marker is not writable: " + str(exc)[:160])
+        os.kill(os.getpid(), signal.SIGKILL)
 
     def _maybe_pause(self, phase):
         """Bounded guest-only pause after the durable mask reload."""

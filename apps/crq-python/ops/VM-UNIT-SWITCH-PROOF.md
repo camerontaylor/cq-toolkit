@@ -13,10 +13,10 @@ The vehicle exercises the *actual* controller seam
 (``deploy-controller.switch_unit`` and ``recover_unit``) against two declared
 harmless guest topologies in a disposable guest: ``crq-tick.service`` with a
 timer (the base and matrix modes), and ``crq-repair.service`` with a timer, a
-path activator and one declared blocker drop-in (the activators mode). It does
-not modify the controller's unit allowlist, add a journal, lock, pointer
-store, ledger, approval mechanism or resolution file, and it does not touch a
-production host, checkout, credential or provider.
+path activator and one declared blocker drop-in (the activators and partial
+modes). It does not modify the controller's unit allowlist, add a journal,
+lock, pointer store, ledger, approval mechanism or resolution file, and it
+does not touch a production host, checkout, credential or provider.
 
 Files:
 
@@ -26,6 +26,7 @@ Files:
 | ``ops/unit-switch.py`` | Explicit ``switch``/``recover`` CLI; calls the real controller and requires ``--proof-fixture``. No default or production adapter. |
 | ``ops/unit-switch-fixture.py`` / ``.mjs`` | Harmless Python and Node fixtures emitting distinguishable runtime-bound completion records with real systemd invocation IDs. |
 | ``ops/vm-unit-switch-guest.py`` | In-guest driver: exact runner-source extraction, isolated git checkout, seeded queue/heartbeat and runner metadata, completed historical record, drain refusals and harvest, both directions, interruption, repeated recovery, the activation-fence probe, the restart/reboot matrix at the ``drained``, ``restore_staged`` and ``activation_pending`` boundaries, and the second topology with an allowlisted timer/path/drop-in inventory, positive controls and refusal matrix. |
+| ``ops/vm-unit-switch-guest-partial.py`` | Separate in-guest driver for the partial-release mode. Imports the base driver without modifying it, installs the repair topology once, interrupts the actual controller at the three ``start`` effect points and the ``restore_activation`` service effect point, each under a real user-manager restart and a real guest OS reboot, then observes the retained pending record, exact file metadata, actual activation states and the actual rc-3 ambiguity branch before two recovery repetitions. |
 | ``ops/vm-unit-switch.py`` | Host harness reusing ``vm-feasibility.py`` lifecycle, uploading exact script bytes and ``git archive HEAD apps/crq-python`` as the runner source, restarting the real guest user manager or rebooting the guest OS between a boundary and its observation, retaining raw guest evidence and a report outside the worktree, and recomputing the exact repair topology bytes, paths, metadata, unit states and record snapshots. |
 
 ## Sequence
@@ -195,7 +196,245 @@ inventory gap. Path-topology manager restart and guest reboot are deferred to
 a later slice; the existing restart/reboot matrix covers the tick topology
 only.
 
+## Partial release/restore mode
+
+``run --mode partial`` returns to the repair topology and interrupts the actual
+controller at partial effect points, then performs the real persistence event
+before observing. It uses the separate partial guest driver, so the base,
+matrix and activators guest script stays byte-identical.
+
+The eight cases share the same install baseline but each keeps a private
+record directory: six activation cases (``start-after-service``,
+``start-after-timer`` and ``start-after-path``, each followed by a real user
+manager restart or a real guest OS reboot) and two restore cases
+(``restore-activation-after-service``, followed by the same two events).
+
+For each case the boundary phase runs the actual CLI with
+``CRQ_PROOF_KILL_ON`` set to the exact effect point and requires exact SIGKILL
+(``rc == -9``), and the adapter writes an independent hook marker naming the
+actual phase before it dies. The retained record is pending at
+``activation_pending`` or ``restore_activation_pending``. The host requires
+the exact eleven-entry owned file map and the exact eight-entry metadata map,
+with non-null type/mode/uid/gid/size/digest/target where applicable and
+file-to-metadata agreement, before comparing preserved bytes. The dynamic
+completion log is the one append-only member: Python and Node fixtures write
+equivalent records with different JSON whitespace, so the host checks its
+shape and binds its parsed entries rather than comparing its bytes.
+
+The activation release cases require the released service file and at least
+one released-runtime completion; ``start-after-service`` requires exactly one,
+a verified inactive timer and no queued job. The restore case interrupts after
+the prior service file has been replaced, reloaded and compared, but before
+either activator is restored or the service is activated. It therefore
+requires the prior service file loaded and inactive, both activators inactive,
+no job and no completion.
+
+After the real event the observe phase requires the same record bytes, the same
+owned file bytes and metadata, and only source-bound activation transitions:
+both activators remain enabled, and an active service must be explained by an
+enabled active timer or path. The actual recovery CLI is then invoked twice.
+Each invocation must return rc ``3`` with the controller's own
+``activation may have occurred`` ambiguity branch, a drained queue, an empty
+job observation, no owned process, inactive activators, the durable mask, a
+bounded completion baseline and an unchanged pending record. The list-jobs
+observation must bind its exact argv, typed rc, stdout and lines; the service
+stop and direct-start evidence must bind their exact argv and typed results.
+The completion baseline count, ordered sequences, unique invocations and
+maximum must equal the actual settled-fence completion inventory, and the
+settled inventory must be append-only from the pre-fence snapshot. No
+completion after that fence is credited. The final phase restores the Python
+baseline and requires exactly one pending record per case, valid advancing
+completions, unchanged tick evidence and no staged or rogue unit entry. Raw
+verification also re-hashes the preserved historical tick journal, binds its
+path, size and digest to the prepared baseline, and requires the archived
+record to remain present. The final completion inventory must retain every
+earlier observed inventory as an unchanged prefix, and the archived log may
+append further valid entries after the final inspection while the reset timer
+remains active. Any appended entry must use the final Python runtime and bind
+the boot ID of the final inspection; an entry naming another runtime or
+omitting or changing that boot ID fails closed. The same binding applies to
+final-inventory entries that were not present in the last observed snapshot.
+Raw verification also rejects a retained repair socket, a rogue
+``crq-repair.service.d/20-rogue.conf`` drop-in and rogue timer enablement under
+``default.target.wants``, matching the guest's final absence checks.
+
+After the real restart or reboot, an enabled timer or path may legitimately
+produce prior-runtime work before recovery establishes its settled fence. The
+restore observe accepts those new entries only as an append-only prefix with
+the prior runtime, and the actual first fence baseline includes them. Any
+entry after that settled baseline, any wrong-runtime entry and any malformed
+entry fails the check. New entries captured between the pre-fence snapshot and
+the settled fence must use the case runtime: Node for activation cases and
+Python for restore cases. Boot binding applies to entries added after the
+``observe.before`` inventory: they must bind the boot ID observed after the
+restart or reboot. Pre-reboot work appended between the boundary snapshot and
+the reboot may retain the previous boot, matching the still-active timer;
+historical prefix entries may always carry earlier boots.
+
+Cross-boot completion identity is checked on unit, runtime, success, sequence,
+invocation and boot ID. A completion's first observation must not precede the
+first observation of its boot ID; an unsupported boot identity fails closed.
+The host validator derives checks from the retained phases and raw evidence; it
+does not trust cached booleans.
+
+This remains fixture-only. It is not real runtime completion, C2/full Phase 1.5
+acceptance, power-loss proof, exhaustive production activator discovery, or
+evidence that production release is safe. The restore proof covers the service
+effect point only; timer/path restore effect points are not claimed.
+
 ## Recorded evidence
+
+### Partial proof run (current)
+
+One fresh partial run completed on Pluto (KVM, Ubuntu noble guest
+``crq-probe``) from source commit
+``6475077c711a4fdf9c1ed8c460c0e13b386e16c4``:
+
+- report ``~/crq-vm-feasibility/state/runs/20261111T081031Z-5b500378/report.json``
+- all 38 checks true; ``problems: []``
+- ``raw-guest-evidence.tar.gz`` 1,358,433 bytes, SHA-256
+  ``7f3a54ec7333f0b12949bbdfa318acab914f831be58f0d67032d2f2cd1209642``
+- report SHA-256
+  ``9b9bb56c529a51cd4c0ae0bc80d496032db6f170fcaef6bc558b0739ee95d25c``
+- host script SHA-256
+  ``0aeb8b8a43f0fd1d29889620c7a7dd855fc97e5b2ccf5c5ccaa7feecde701c69``
+- partial guest script SHA-256
+  ``b1c9b9d1d4af062546b4ea445c63cb04dbb17a099fda450b763cdb9f2ce3da40``
+
+Two consecutive ``verify`` runs on that report returned ``problems: []`` with
+``host_matches_run: true``, ``guest_matches_run: true`` and
+``validator_only: false``. Each activation case boundary retained exact
+SIGKILL (``rc == -9``), a pending record, an independent hook marker naming the
+actual phase, and exactly one released-runtime completion. Each restore case
+boundary retained the same evidence with no completion, because the hook now
+fires after the prior service file is restored but before either activator or
+the service is activated:
+
+| Case | Hook | Pending record (prefix) | Released delta |
+|---|---|---|---|
+| ``activation-service-restart`` | ``start-after-service`` | ``9d8a61fd83124`` | one Node |
+| ``activation-timer-restart`` | ``start-after-timer`` | ``eea3a15256a34`` | one Node |
+| ``activation-path-restart`` | ``start-after-path`` | ``94f33de287224`` | one Node |
+| ``restore-service-restart`` | ``restore-activation-after-service`` | ``21c2d52003e04`` | none |
+| ``activation-service-reboot`` | ``start-after-service`` | ``ee40ebbfcce54`` | one Node |
+| ``activation-timer-reboot`` | ``start-after-timer`` | ``a6e3feadd8374`` | one Node |
+| ``activation-path-reboot`` | ``start-after-path`` | ``811971cc7b6d4`` | one Node |
+| ``restore-service-reboot`` | ``restore-activation-after-service`` | ``dd31c48082d64`` | none |
+
+Every observe phase retained the same record bytes and returned the actual
+rc-3 ``activation may have occurred`` refusal twice, with the fence-settled
+completion baseline unchanged. The final phase restored the Python repair
+baseline and retained one pending record per case. An intermediate attempt
+``20261111T055642Z-21aa1bb1`` on source ``d37e3d169`` is preserved but is not
+evidence: it failed closed because the dynamic completion log mixes Python's
+spaced JSON with Node's compact JSON, so reconstructing its bytes from parsed
+entries was not sound. The current host checks that log by shape and binds its
+parsed entries through the completion baseline instead.
+
+### Earlier reviewed partial proof runs (preserved)
+
+All earlier runs remain preserved unchanged. The five earlier runs that used
+the current partial guest script re-verify under the final host with
+``problems: []``, ``host_matches_run: false``, ``guest_matches_run: true``
+and ``validator_only: true``:
+
+- ``20261111T064055Z-1c97122d`` from source ``47d15ef4``: the guest pre-fence
+  completion fix before the host fence-problem propagation. 38/38, report
+  SHA-256
+  ``35599e1d3a1d5261a0ab58d427f9d18988225c09785b20a35bce7d17202f895c``,
+  raw tar SHA-256
+  ``39f892c9af05b244eba99f2b862efa9b18064e5fcafce1e1a31543c34219d1a6``,
+  retained host script
+  ``728631bfffbab2efc1dc70c9796fe8d41f6e72006c9fa82a2fd92ea9b4bc75ed``
+  and guest script
+  ``b1c9b9d1d4af062546b4ea445c63cb04dbb17a099fda450b763cdb9f2ce3da40``.
+- ``20261111T065012Z-92f9f65d`` from source ``208e2279``: the pre-fence
+  restore fix and fence-problem propagation. 38/38, report SHA-256
+  ``3f21970c66f9bdfdb4f685dcd6df47f66578b742e785414fe3145dad7e7a56ee``,
+  raw tar SHA-256
+  ``eb606a7d75e093c83163ec2c067e3f4bf9d0580a3287ea54ce828ddb901fc5d1``,
+  retained host script
+  ``6999cf72fb4867ab8632aff28b0e073ffa66c9ff8828aad4c88498efc0cc89ec``
+  and guest script
+  ``b1c9b9d1d4af062546b4ea445c63cb04dbb17a099fda450b763cdb9f2ce3da40``.
+- ``20261111T071355Z-7f10d753`` from source ``10486896``: the post-inspection
+  completion suffix binding. 38/38, report SHA-256
+  ``6db8ca0c68b159ff89f41a68fb2c83c24bf06fe9561744e142d87cc6fb11a4b6``,
+  raw tar SHA-256
+  ``631585348bd7097197cd4ce483b19195325f2d9f2e90d6bf1b324208c75142fc``,
+  retained host script
+  ``210c85b82c9120928687d9cb1709e8dc8c31aedd1e55cce1b36d2f2854eb8c6d``
+  and guest script
+  ``b1c9b9d1d4af062546b4ea445c63cb04dbb17a099fda450b763cdb9f2ce3da40``.
+- ``20261111T073715Z-48e32c64`` from source ``5955a526``: the recovery
+  runtime and raw rogue-unit checks. 38/38, report SHA-256
+  ``24355e6f5f01e5bba328f4eb90ad4b436aa8e023cff4f1158e46c28a5f24b9ea``,
+  raw tar SHA-256
+  ``95ab25662d8d033965cde28c2d97d5ef8108a4b01af9a14ae9e03a4d6a7b0214``,
+  retained host script
+  ``c6ccfc9f73e092ba2124accf858a3c0830bde7faf53b1e36013c47f641f34db9``
+  and guest script
+  ``b1c9b9d1d4af062546b4ea445c63cb04dbb17a099fda450b763cdb9f2ce3da40``.
+- ``20261111T075455Z-d577cd6d`` from source ``cd8448fcc``: the observed-boot
+  recovery binding. 38/38, report SHA-256
+  ``6eb82fd72a247debf4edc560f9e539d2b945469422cb582538679715b45a5d1b``,
+  raw tar SHA-256
+  ``69629dee9bf757ab4f39c406a3ac68fc36233262bec3c68f39866f16b24fdaea``,
+  retained host script
+  ``ebeac44f84cd027eb94df77ece5cf5faf2a671532484f362e464fb452b46aeee``
+  and guest script
+  ``b1c9b9d1d4af062546b4ea445c63cb04dbb17a099fda450b763cdb9f2ce3da40``.
+
+The older runs below retain guest script
+``116e1e7dee4e45490c018c97af067e7a46cbd35bd2eafd5457043854c72306fc``.
+The final host correctly refuses to bind them to the current guest script, so
+they are not current-guest validator-only evidence. Re-verifying each against
+its own source commit returns ``problems: []`` with ``host_matches_run: true``,
+``guest_matches_run: true`` and ``validator_only: false``, confirming the
+retained artifacts are unchanged:
+
+- ``20261111T062013Z-f29ae3ef`` from source ``83a2395c4``: 38/38, report
+  SHA-256
+  ``5860ece165af4fe3baf5980d8332a1a56b1185681b11b035ee8876ebf91ce4b5``,
+  raw tar SHA-256
+  ``077fee4bc4906d0fdd79b862891e60016b8d9a1c3605b96672c94f73fe6b21d7``,
+  retained host script
+  ``99e86d88619ff92da493d32c59d33829cd30764e8b54bba7c2dc31382ee3e400``
+  and guest script
+  ``116e1e7dee4e45490c018c97af067e7a46cbd35bd2eafd5457043854c72306fc``.
+- ``20261111T060527Z-44eaf59b`` from source ``783bf4ff6``: 38/38, report
+  SHA-256
+  ``d432be48716e24383eedbde682454e5ae73d317ecb460a897e783a6698412113``,
+  raw tar SHA-256
+  ``7c076c49706ba7265080887f4c8beae6c7a5c55536557f9502b32fda362bbfe8``,
+  retained host script
+  ``44916fa4a8b8fe799aaa0bf1a7b46172377330d42dc51213425d298218b3c62d``
+  and guest script
+  ``116e1e7dee4e45490c018c97af067e7a46cbd35bd2eafd5457043854c72306fc``.
+
+### Superseded partial proof run (preserved)
+
+The earlier run ``20261111T051806Z-5cb0e706`` from source commit
+``13c1ee720e76880674d612ef2de993ef27620af8`` remains preserved unchanged:
+38/38 checks true, ``problems: []``, report SHA-256
+``93e82f9e137587d89f21ed55a9b6f52931369187d3128b50e2e86725daf7a5ed``,
+raw tar 1,350,273 bytes with SHA-256
+``298cd043191f89983e6a96f207be78b676864a77af187b62ac26eabcbb6e952a``,
+host script
+``c4895e389ec8686187d4636464340e37a2ef0b853d05dc7efae07a3f6fb937a7``
+and partial guest script
+``ca58ea871678d6fc1dfc209efac918f7213de98f7efddd4de6db0a994c382037``.
+It predates the hook-marker, strict job/command binding, exact file/metadata
+map, completion baseline and tick-journal rehash corrections; it is not
+current evidence.
+
+The earlier activators reports ``20261111T032335Z-7d2896be`` and
+``20261111T033408Z-be40a3a5`` also recomputed with ``problems: []`` and
+``guest_matches_run: true`` under the new host; both are validator-only because
+the host script changed. Older base/matrix reports were generated from an
+earlier guest script; the matrix verifier correctly refuses them as not
+reproducible from the current guest rather than treating them as current
+evidence.
 
 ### Activators proof run (current)
 
@@ -562,6 +801,10 @@ python3 apps/crq-python/ops/vm-unit-switch.py \
   --state-dir "$state" \
   --tools ~/crq-vm-feasibility/tools \
   run --source-commit "$commit" --mode activators
+python3 apps/crq-python/ops/vm-unit-switch.py \
+  --state-dir "$state" \
+  --tools ~/crq-vm-feasibility/tools \
+  run --source-commit "$commit" --mode partial
 python3 apps/crq-python/ops/vm-unit-switch.py \
   --state-dir "$state" \
   --tools ~/crq-vm-feasibility/tools \
