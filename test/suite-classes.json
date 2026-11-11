@@ -1,4 +1,5 @@
 {
+  "test/adapters/crq/repairScan.test.ts": "pure",
   "test/adapters/forge-github/forge.test.ts": "pure",
   "test/adapters/lock/slotMetadata.test.ts": "process",
   "test/adversarial/a14-privileged-workflow.benign-edits.test.ts": "process",
@@ -318,6 +319,7 @@
   "test/ops/crq/outbox.test.ts": "pure",
   "test/ops/crq/publisher.test.ts": "pure",
   "test/ops/crq/repairPrepare.test.ts": "pure",
+  "test/ops/crq/repairPrepareGates.test.ts": "pure",
   "test/ops/dev/cycle-checkoutBoundary.test.ts": "process",
   "test/ops/fix/runFix.atomic-report.test.ts": "process",
   "test/ops/fix/runFix.compare-links.test.ts": "process",
@@ -724,6 +726,7 @@
   "test/policy/crq/publication.test.ts": "pure",
   "test/policy/crq/pythonJson.test.ts": "pure",
   "test/policy/crq/repairBinding.test.ts": "pure",
+  "test/policy/crq/repairGates.test.ts": "pure",
   "test/policy/crq/schemas.test.ts": "pure",
   "test/policy/crq/statusSummary.test.ts": "pure",
   "test/policy/crq/utc.test.ts": "pure",

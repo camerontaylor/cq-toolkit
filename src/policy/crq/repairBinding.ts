@@ -49,7 +49,18 @@ export type RepairRefusal =
   | 'fixfinding-result-envelope-invalid'
   | 'fixfinding-result-binding-missing'
   | 'fixfinding-result-binding-mismatch'
-  | 'canonical-finding-id-invalid';
+  | 'canonical-finding-id-invalid'
+  | 'source-read-unavailable'
+  | 'secret-scan-unavailable'
+  | 'source-secret-scan-failed'
+  | 'instructions-secret-scan-failed'
+  | 'round-history-unreadable'
+  | 'prepared-job-unreadable'
+  | 'canonical-handoff-unavailable'
+  | 'canonical-handoff-mismatch'
+  | 'canonical-delivery-invalid'
+  | 'canonical-delivery-unavailable'
+  | 'canonical-delivery-mismatch';
 
 /**
  * The caller's existing round count for the current pin, injected as typed
