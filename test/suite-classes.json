@@ -731,6 +731,7 @@
   "test/policy/crq/pythonJson.test.ts": "pure",
   "test/policy/crq/repairBinding.test.ts": "pure",
   "test/policy/crq/repairGates.test.ts": "pure",
+  "test/policy/crq/repairRequest.test.ts": "pure",
   "test/policy/crq/schemas.test.ts": "pure",
   "test/policy/crq/statusSummary.test.ts": "pure",
   "test/policy/crq/summarySections.test.ts": "pure",
