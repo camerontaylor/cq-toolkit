@@ -436,13 +436,15 @@ def partial_activation_boundary(args):
     require(path_state == "inactive",
             "after-path boundary path is not inactive")
     new = after["repair_completions"][len(before["repair_completions"]):]
-    require(all(item.get("runtime") == spec["runtime"] for item in new),
-            "activation boundary produced a non-requested runtime completion")
+    released = [item for item in new if item.get("runtime") == spec["runtime"]]
+    require(all(item.get("runtime") in (PYTHON_RUNTIME, NODE_RUNTIME)
+                for item in new),
+            "activation boundary produced an unknown-runtime completion")
     if expected_delta is not None:
-        require(len(new) == expected_delta,
+        require(len(released) == expected_delta,
                 "after-service boundary completion delta is not exactly one")
     else:
-        require(len(new) >= 1,
+        require(len(released) >= 1,
                 "activation boundary produced no completion")
     return require_source({
         "phase": "partial-" + case,
@@ -455,7 +457,7 @@ def partial_activation_boundary(args):
         "after": after,
         "cli": cli,
         "record": record,
-        "completion_delta": new,
+        "completion_delta": released,
         "preserved": check_preserved({"phase": "partial-" + case}),
     })
 
@@ -503,9 +505,12 @@ def partial_restore_boundary(args):
     require((after["repair_units"].get(REPAIR_PATH_UNIT) or {}).get("ActiveState")
             == "inactive", "restore boundary path is not inactive")
     new = after["repair_completions"][len(drained["repair_completions"]):]
-    require(all(item.get("runtime") == spec["prior_runtime"] for item in new),
-            "restore boundary produced a non-prior runtime completion")
-    require(len(new) >= 1, "restore boundary produced no completion")
+    released = [item for item in new
+                if item.get("runtime") == spec["prior_runtime"]]
+    require(all(item.get("runtime") in (PYTHON_RUNTIME, NODE_RUNTIME)
+                for item in new),
+            "restore boundary produced an unknown-runtime completion")
+    require(len(released) >= 1, "restore boundary produced no completion")
     return require_source({
         "phase": "partial-" + case,
         "case": case,
@@ -520,7 +525,7 @@ def partial_restore_boundary(args):
         "switch_cli": kill_cli,
         "recovery_cli": recovery_cli,
         "record": record,
-        "completion_delta": new,
+        "completion_delta": released,
         "preserved": check_preserved({"phase": "partial-" + case}),
     })
 

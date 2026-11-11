@@ -2503,6 +2503,24 @@ class PartialHarnessCheckTests(unittest.TestCase):
         _, problems = harness._partial_checks(broken, restarts, reboots)
         self.assertTrue(any("exactly 1" in item for item in problems))
 
+    def test_partial_checks_ignore_pre_boundary_prior_runtime_work(self):
+        phases_value, restarts, reboots = self.evidence()
+        case = "activation-service-restart"
+        phase = phases_value["partial-" + case]
+        prior = PartialHarnessCheckTests._completion(98, PYTHON)
+        phase["after"]["repair_completions"].append(prior)
+        observe = phases_value["partial-" + case + "-observe"]
+        observe["before"]["repair_completions"].append(prior)
+        observe["after_recovery"]["repair_completions"].append(prior)
+        observe["after_repeat"]["repair_completions"].append(prior)
+        entries = observe["before"]["repair_completions"]
+        observe["recovery"]["cli"] = self._fence(len(entries), entries)
+        observe["repeat"]["cli"] = self._fence(len(entries), entries)
+        checks, problems = harness._partial_checks(phases_value, restarts,
+                                                   reboots)
+        self.assertEqual(problems, [])
+        self.assertIs(checks["partial_" + case + "_boundary"], True)
+
     def test_partial_mode_constants_and_plan(self):
         self.assertEqual(len(harness.PARTIAL_GUEST_PHASES), 19)
         self.assertEqual(len(harness.PARTIAL_ORDER), 8)

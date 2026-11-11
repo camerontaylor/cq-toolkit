@@ -2777,14 +2777,17 @@ def _partial_completion_prefix_ok(before, after, runtime, label, problems,
         problems.append(label + " completion log is not append-only")
         ok = False
     new = after_entries[len(before_entries):]
-    if not all(isinstance(item, dict) and item.get("runtime") == runtime
+    if not all(isinstance(item, dict)
+               and item.get("runtime") in (NODE_RUNTIME, PYTHON_RUNTIME)
                for item in new):
-        problems.append(label + " produced a non-case-runtime completion")
+        problems.append(label + " produced an unknown-runtime completion")
         ok = False
-    if exact is not None and len(new) != exact:
-        problems.append(label + " completion delta is not exactly " + str(exact))
+    released = [item for item in new if item.get("runtime") == runtime]
+    if exact is not None and len(released) != exact:
+        problems.append(label + " released completion delta is not exactly "
+                        + str(exact))
         ok = False
-    if exact is None and not new:
+    if exact is None and not released:
         problems.append(label + " produced no released-runtime completion")
         ok = False
     return ok
