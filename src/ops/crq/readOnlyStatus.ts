@@ -6,11 +6,11 @@
  * `status_summary.publish` writes before its effect sections, and
  * `client_health.snapshot` for the durable health view. This module owns only
  * the wiring Python keeps beside those pure functions: reading the state
- * documents, validating the queue with the phase 0.2 schema, splicing the
- * lossless `usage.limit` lexeme, pre-loading receipt bytes, preserving Python's
- * JSONL line semantics, ordering the publish-core keys, and serialising with
- * `pythonJson` (never `JSON.stringify`; `starts_cap` may be a lossless
- * `JsonNumber` and `aging_deadline` is a Python float).
+ * documents, validating the queue with the phase 0.2 schema, retaining exact
+ * numbers in the summary-relevant queue subtrees, pre-loading receipt bytes,
+ * preserving Python's JSONL line semantics, ordering the publish-core keys, and
+ * serialising with `pythonJson` (never `JSON.stringify`; `starts_cap` may be a
+ * lossless `JsonNumber` and `aging_deadline` is a Python float).
  *
  * Effects are injected: this module never reads the environment, spawns a
  * process, touches the network or writes any file. The adapter in
@@ -30,7 +30,11 @@ import {
 } from '../../policy/crq/jsonValue.js';
 import { pythonJsonText, type PythonJsonOptions } from '../../policy/crq/pythonJson.js';
 import { MERGED_CURRENT_KIND, isRecord, type CrqRecord } from '../../policy/crq/receiptIdentity.js';
-import { parseCrqState, stateValueWithNumbers } from '../../policy/crq/state.js';
+import {
+  parseCrqState,
+  stateValueWithNumbers,
+  type StateValuePath,
+} from '../../policy/crq/state.js';
 import {
   StatusSummaryError,
   mergedCurrent,
@@ -126,14 +130,14 @@ export async function readSummaryCore(effects: ReadOnlyStatusEffects): Promise<S
   const queue = await loadQueue(effects);
   const config = await loadConfig(effects);
   const events = await loadEvents(effects);
-  const receipts = await loadReceipts(queue, effects);
+  const receipts = await loadReceipts(queue.exact, effects);
 
   let view: StatusSummaryView;
   try {
     view = summarize(
       { generated_at: generatedAt },
-      queue,
-      { last_tick: queue.last_tick },
+      queue.exact,
+      { last_tick: queue.exact.last_tick },
       config.value,
       events,
       now,
@@ -147,13 +151,13 @@ export async function readSummaryCore(effects: ReadOnlyStatusEffects): Promise<S
     // Python publishes the receipt-aware view: `summarize` alone cannot read
     // receipt bytes, so its `merged_current` counts every terminal item as
     // unverified and `publish` overwrites it with this call.
-    merged = mergedCurrent(queue, (receiptId) => receipts.get(receiptId) ?? null);
+    merged = mergedCurrent(queue.exact, (receiptId) => receipts.get(receiptId) ?? null);
   } catch (error) {
     throw asRouteError('summary-failed', error);
   }
 
   return {
-    value: coreDocument(view, merged, generatedAt, queue, config.lossless),
+    value: coreDocument(view, merged, generatedAt, queue.exact, config.lossless),
     generatedAt,
   };
 }
@@ -167,7 +171,7 @@ export async function readClientHealth(
   const now = effects.now();
   let snapshot: ClientHealthSnapshot;
   try {
-    snapshot = clientHealthSnapshot(queue, now);
+    snapshot = clientHealthSnapshot(queue.materialized, now);
   } catch (error) {
     throw asRouteError('health-failed', error);
   }
@@ -224,7 +228,30 @@ export async function runReadOnlyStatus(
   }
 }
 
-async function loadQueue(effects: ReadOnlyStatusEffects): Promise<CrqRecord> {
+interface LoadedQueue {
+  /** Existing contract: every number materialised as a JavaScript number. */
+  readonly materialized: CrqRecord;
+  /** Numbers in summary-relevant subtrees kept as exact {@link JsonNumber} values. */
+  readonly exact: CrqRecord;
+}
+
+/**
+ * Queue subtrees whose Python numeric type and value must survive the reader.
+ *
+ * `items` carries `pr`, `generation`, `order`, `title`, `subject.pr`,
+ * `capture` and the receipt-lineage fields; the discovery blocks carry
+ * `represented`, `reviewed_tip`, counters and transient failures. Client health
+ * consumes `materialized`, so its existing contract is unchanged.
+ */
+const EXACT_QUEUE_SUBTREES: readonly StateValuePath[] = [
+  ['items'],
+  ['usage'],
+  ['merged_reconcile'],
+  ['merged_discovery'],
+  ['push_discovery'],
+];
+
+async function loadQueue(effects: ReadOnlyStatusEffects): Promise<LoadedQueue> {
   let text: string;
   try {
     text = await effects.readQueue();
@@ -238,18 +265,22 @@ async function loadQueue(effects: ReadOnlyStatusEffects): Promise<CrqRecord> {
       `queue.json rejected by policy/crq/queue.schema.json: ${accepted.issues.join('; ') || 'no detail'}`,
     );
   }
-  let value: unknown;
+  let exact: unknown;
   try {
-    // `toPlainJson` loses the `3` vs `3.0` lexeme; splice the exact
-    // `JsonNumber` so `type(usage.limit) is int` keeps its Python meaning.
-    value = stateValueWithNumbers(accepted, [['usage', 'limit']]);
+    // Retain every number in the summary-relevant subtrees: `toPlainJson`
+    // loses the `3` vs `3.0` lexeme and rounds integers above 2^53, both of
+    // which `status_summary` reads through Python's numeric rules.
+    exact = stateValueWithNumbers(accepted, [], { subtrees: EXACT_QUEUE_SUBTREES });
   } catch (error) {
     throw new StatusRouteError('queue-invalid', messageOf(error));
   }
-  if (!isRecord(value)) {
+  if (!isRecord(exact)) {
     throw new StatusRouteError('queue-invalid', 'queue.json is not an object');
   }
-  return value;
+  if (!isRecord(accepted.value)) {
+    throw new StatusRouteError('queue-invalid', 'queue.json materialised to a non-object');
+  }
+  return { materialized: accepted.value, exact };
 }
 
 interface LoadedConfig {
@@ -397,7 +428,12 @@ function coreDocument(
     // Python's `timestamp()` is a float, so an aging deadline is always a
     // Python float (or null). A plain `number` would serialise `3600` instead
     // of Python's `3600.0`.
-    aging_deadline: item.aging_deadline === null ? null : JsonNumber.float(item.aging_deadline),
+    aging_deadline:
+      item.aging_deadline === null
+        ? null
+        : item.aging_deadline instanceof JsonNumber
+          ? item.aging_deadline
+          : JsonNumber.float(item.aging_deadline),
   }));
   // Key order matters for the byte diff: the core keeps `summarize`'s order,
   // `merged_current` keeps its existing position, and `schema_version` then

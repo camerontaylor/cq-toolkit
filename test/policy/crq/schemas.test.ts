@@ -249,6 +249,42 @@ describe('stateValueWithNumbers', () => {
     );
     expect(({} as { polluted?: unknown }).polluted).toBeUndefined();
   });
+
+  test('subtrees retain every number while untouched branches keep structural sharing', () => {
+    const state = acceptance(
+      '{"items":[{"id":"i","kind":"open","state":"pending","pr":1,"generation":2,"subject":{"pr":9007199254740993}},{"id":"j","kind":"open","state":"pending"}],"usage":{"limit":3.0},"other":{"n":3.0}}',
+    );
+    const before = state.value as {
+      items: Array<{ subject?: { pr?: number }; generation?: number }>;
+      other: { n: number };
+    };
+    const value = stateValueWithNumbers(state, [], {
+      subtrees: [['items'], ['usage']],
+    }) as {
+      items: Array<{ subject?: { pr?: JsonNumber }; generation?: JsonNumber }>;
+      usage: { limit: JsonNumber };
+      other: { n: number };
+    };
+    expect(value.items[0]?.subject?.pr?.integer).toBe(9007199254740993n);
+    expect(value.items[0]?.generation?.integer).toBe(2n);
+    expect(value.usage.limit.raw).toBe('3.0');
+    expect(value.other).toBe(before.other);
+    expect(value.items[1]).toBe(before.items[1]);
+    expect(before.items[0]?.subject?.pr).toBe(9007199254740992);
+    expect(stateValueWithNumbers(state, [])).toBe(state.value);
+  });
+
+  test('subtree traversal refuses an empty path and does not pollute the prototype', () => {
+    const state = acceptance('{"items":[]}');
+    expect(() => stateValueWithNumbers(state, [], { subtrees: [[]] })).toThrow(StateValuePathError);
+    const proto = acceptance('{"items":[],"__proto__":{"polluted":true}}');
+    const value = stateValueWithNumbers(proto, [], { subtrees: [['__proto__']] }) as Record<
+      string,
+      unknown
+    >;
+    expect(({} as { polluted?: unknown }).polluted).toBeUndefined();
+    expect(Object.getPrototypeOf(value)).toBe(Object.prototype);
+  });
 });
 
 describe('negatives', () => {

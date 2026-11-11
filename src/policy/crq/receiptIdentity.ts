@@ -13,6 +13,7 @@
  * the environment or a process: receipt bytes are supplied by the caller.
  */
 import { MERGED_CURRENT_POLICY } from './ids.js';
+import { JsonNumber, pythonNumbersEqual } from './jsonValue.js';
 import { receiptJsonDigest } from './pythonJson.js';
 
 /** `review_receipt.VERSION`; only version 1 is countable evidence. */
@@ -54,19 +55,18 @@ export function isRecord(value: unknown): value is CrqRecord {
 /**
  * Python `==` for JSON-shaped values.
  *
- * Numbers compare by value (so `1` equals `1.0`, as in Python), booleans also
- * compare equal to their integer value (`True == 1`), mappings ignore key
- * order and sequences keep it. Values that only Python would consider equal
- * through custom `__eq__` never appear in capture documents.
+ * Numbers compare by Python value (so `1` equals `1.0`, as in Python) without
+ * rounding an exact {@link JsonNumber}; booleans also compare equal to their
+ * integer value (`True == 1`), mappings ignore key order and sequences keep
+ * it. Values that only Python would consider equal through custom `__eq__`
+ * never appear in capture documents.
  */
 export function pythonEqual(left: unknown, right: unknown): boolean {
-  if (typeof left === 'boolean') return pythonEqual(Number(left), right);
-  if (typeof right === 'boolean') return pythonEqual(left, Number(right));
-  if (typeof left === 'number' || typeof right === 'number') {
-    if (typeof left !== 'number' || typeof right !== 'number') return false;
-    if (Number.isNaN(left) || Number.isNaN(right)) return false;
-    return left === right;
-  }
+  const numbers = pythonNumbersEqual(left, right);
+  if (numbers !== null) return numbers;
+  // A JsonNumber is a class instance, not a mapping: without this guard a
+  // non-numeric peer could fall through to the own-key comparison below.
+  if (left instanceof JsonNumber || right instanceof JsonNumber) return false;
   if (Array.isArray(left) || Array.isArray(right)) {
     if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) {
       return false;

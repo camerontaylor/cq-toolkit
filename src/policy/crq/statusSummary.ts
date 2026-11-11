@@ -13,7 +13,13 @@
  * carry `repair_origin` and a bounded one-line `label`. The summary schema
  * stays 2 and readers ignore unknown keys; Python is NOT patched.
  */
-import { JsonNumber, JsonObject, parseJsonValue, toPlainJson } from './jsonValue.js';
+import {
+  JsonNumber,
+  JsonObject,
+  comparePythonNumbers,
+  parseJsonValue,
+  toPlainJsonRetainingNumbers,
+} from './jsonValue.js';
 import { compareCodePoints, sha256Hex } from './pythonJson.js';
 import {
   MERGED_CURRENT_KIND,
@@ -95,7 +101,7 @@ export interface PendingItemView {
   readonly kind: unknown;
   readonly band: 'interactive' | 'background';
   readonly generation: unknown;
-  readonly aging_deadline: number | null;
+  readonly aging_deadline: number | JsonNumber | null;
   readonly reason: unknown;
   readonly approximate_position: number;
   /** Additive (#1420): the repair run this fix PR was published for. */
@@ -314,6 +320,7 @@ export function summarize(
     const key = pendingKey(item);
     const repairOrigin = nonEmptyString(get(item, 'repair_origin'));
     const label = labelForItem(item, repairIndex, commitSubjects);
+    const deadline = agingDeadline(item);
     return {
       repo: nullish(repoValue(item, primary)),
       pr: nullish(prValue(item)),
@@ -321,7 +328,9 @@ export function summarize(
       kind: nullish(get(item, 'kind')),
       band: key.rank < 2 ? ('interactive' as const) : ('background' as const),
       generation: nullish(get(item, 'generation')),
-      aging_deadline: agingDeadline(item),
+      // Python's `timestamp()` is a float, so a present deadline keeps the
+      // float lexeme through the exact writer (`3600.0`, not `3600`).
+      aging_deadline: deadline === null ? null : JsonNumber.float(deadline),
       reason: nullish(firstTruthy([get(item, 'wait_reason'), get(item, 'last_error')])),
       approximate_position: index + 1,
       ...(repairOrigin === null ? {} : { repair_origin: repairOrigin }),
@@ -396,7 +405,7 @@ export function mergedCurrent(queue: CrqRecord, readReceipt?: ReceiptReader): Me
       const bytes = readReceipt(receiptId);
       if (bytes === null) throw new StatusSummaryError('receipt bytes unavailable');
       if (sha256Hex(bytes) !== receiptId) throw new StatusSummaryError('receipt digest mismatch');
-      const document = toPlainJson(
+      const document = toPlainJsonRetainingNumbers(
         parseJsonValue(new TextDecoder('utf-8', { fatal: true }).decode(bytes), {
           duplicates: 'last',
         }),
@@ -708,10 +717,8 @@ function comparePendingKeys(keyOf: (item: CrqRecord) => PendingKey) {
 }
 
 function comparePythonValues(left: unknown, right: unknown): number {
-  if (typeof left === 'number' && typeof right === 'number') {
-    if (left < right) return -1;
-    return left > right ? 1 : 0;
-  }
+  const numbers = comparePythonNumbers(left, right);
+  if (numbers !== null) return numbers;
   if (typeof left === 'string' && typeof right === 'string') return compareCodePoints(left, right);
   throw new StatusSummaryError(
     `'<' not supported between instances of '${typeName(left)}' and '${typeName(right)}'`,
@@ -722,10 +729,19 @@ function comparePythonValues(left: unknown, right: unknown): number {
 function itemAgingDeadline(item: CrqRecord, config: CrqRecord): number | null {
   if (get(item, 'kind') !== 'local-review') return null;
   const generation = get(item, 'generation', 1);
-  if (typeof generation !== 'number' && typeof generation !== 'boolean') {
+  if (
+    !(generation instanceof JsonNumber) &&
+    typeof generation !== 'number' &&
+    typeof generation !== 'boolean'
+  ) {
     throw new StatusSummaryError('generation is not a number', 'TypeError');
   }
-  const superseding = Number(generation) > 1 || get(item, 'repeat_requested') === true;
+  const superseding =
+    (generation instanceof JsonNumber
+      ? generation.kind === 'int'
+        ? (generation.integer as bigint) > 1n
+        : (generation.float as number) > 1
+      : Number(generation) > 1) || get(item, 'repeat_requested') === true;
   if (!superseding) return null;
   const created = get(item, 'created_at');
   if (!pyTruthy(created)) return null;
@@ -793,9 +809,12 @@ function firstTruthy(values: readonly unknown[]): unknown {
 }
 
 function pyTruthy(value: unknown): boolean {
+  if (value instanceof JsonNumber) {
+    return value.kind === 'int' ? (value.integer as bigint) !== 0n : (value.float as number) !== 0;
+  }
   if (value === null || value === undefined) return false;
   if (typeof value === 'boolean') return value;
-  if (typeof value === 'number') return value !== 0 && !Number.isNaN(value);
+  if (typeof value === 'number') return value !== 0;
   if (typeof value === 'string') return value.length > 0;
   if (Array.isArray(value)) return value.length > 0;
   if (typeof value === 'object') return Object.keys(value).length > 0;
@@ -900,6 +919,16 @@ function nullish(value: unknown): unknown {
  * objects are unhashable in Python and raise instead of becoming a key.
  */
 function runKey(value: unknown): string {
+  if (value instanceof JsonNumber) {
+    if (value.kind === 'int') return integerRunKey(value.integer as bigint);
+    const float = value.float as number;
+    if (Number.isNaN(float)) {
+      throw new StatusSummaryError('NaN run id is outside the JSON parser domain');
+    }
+    if (!Number.isFinite(float)) return `float:${float === Infinity ? 'inf' : '-inf'}`;
+    if (Number.isInteger(float)) return integerRunKey(BigInt(float));
+    return `float:${String(float)}`;
+  }
   if (typeof value === 'boolean') return integerRunKey(value ? 1n : 0n);
   if (typeof value === 'bigint') return integerRunKey(value);
   if (typeof value === 'number') {
@@ -921,6 +950,11 @@ function integerRunKey(value: bigint): string {
 function typeName(value: unknown): string {
   if (value === null) return 'NoneType';
   if (Array.isArray(value)) return 'list';
+  if (value instanceof JsonNumber) return value.kind;
+  if (typeof value === 'bigint') return 'int';
+  if (typeof value === 'number') return Number.isInteger(value) ? 'int' : 'float';
+  if (typeof value === 'boolean') return 'bool';
+  if (typeof value === 'string') return 'str';
   return typeof value;
 }
 

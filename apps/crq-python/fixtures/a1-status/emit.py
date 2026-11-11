@@ -17,6 +17,7 @@ recorded, so the bytes are identical on every Python 3.14 host.
 from __future__ import annotations
 
 import argparse
+import base64
 import datetime as dt
 import json
 import shutil
@@ -42,16 +43,32 @@ TREE = "b" * 40
 SUBJECT = {"repo": "owner/repo", "pr": 1}
 PROJECTION = "current-affected-files/full-file-addition-projection"
 REVIEWER = "coderabbit-review-agent-committed-v1"
+BIG = 9007199254740993
+NEIGHBOR = 9007199254740992
 
 
-def _capture(name: str, source: str, inputs: Dict[str, Any], call) -> Dict[str, Any]:
+def _capture(
+    name: str, source: str, inputs: Dict[str, Any], call, *, reserialize: bool = False
+) -> Dict[str, Any]:
     try:
         value = call()
     except Exception as exc:  # the oracle refusal is part of the contract
         expect = {"ok": False, "error": type(exc).__name__, "message": str(exc)}
     else:
         expect = {"ok": True, "value": value}
+        if reserialize:
+            expect["bytes"] = _compact(value)
     return {"name": name, "source": source, "input": inputs, "expect": expect}
+
+
+def _compact(value: Any) -> str:
+    """The exact `status_summary.publish` reserialisation (compact, ASCII)."""
+    return json.dumps(value, separators=(",", ":"), ensure_ascii=True)
+
+
+def _utc_iso(epoch: float) -> str:
+    """`datetime.fromtimestamp(epoch, utc).strftime("%Y-%m-%dT%H:%M:%SZ")`."""
+    return dt.datetime.fromtimestamp(epoch, dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _epoch(value: str) -> float:
@@ -1446,6 +1463,432 @@ def utilization_family() -> Dict[str, Any]:
     return _family("utilization", cases, "coverage utilization digest edges")
 
 
+# ------------------------------------------------------- passthrough summary
+
+
+def passthrough_summarize_family() -> Dict[str, Any]:
+    """Numbers that the lossless reader must pass through unchanged."""
+    cases = []
+
+    def case(
+        name: str,
+        queue: Dict[str, Any],
+        *,
+        config: Dict[str, Any] | None = None,
+        events: List[Dict[str, Any]] | None = None,
+        generated_at: str = "2026-11-09T11:55:00Z",
+        now: str = "2026-11-09T12:00:00Z",
+        core_only: bool = False,
+    ) -> Dict[str, Any]:
+        inputs = {
+            "status": {"generated_at": generated_at},
+            "queue": queue,
+            "heartbeat": {},
+            "config": config or {"repo": "owner/repo", "max_starts_per_hour": 8},
+            "events": events or [],
+            "now": _epoch(now),
+        }
+        captured = _capture(
+            name,
+            "status_summary.summarize",
+            inputs,
+            lambda: status_summary.summarize(
+                inputs["status"],
+                inputs["queue"],
+                inputs["heartbeat"],
+                inputs["config"],
+                inputs["events"],
+                inputs["now"],
+            ),
+            reserialize=True,
+        )
+        if captured["expect"].get("ok"):
+            generated = _utc_iso(inputs["now"])
+            core = dict(captured["expect"]["value"])
+            core["status_as_of"] = generated
+            core["schema_version"] = 2
+            core["generated_at"] = generated
+            captured["expect"]["core_bytes"] = _compact(core)
+        if core_only:
+            captured["expect"]["core_only"] = True
+        return captured
+
+    cases.append(
+        case(
+            "item-pr-and-generation-bigints",
+            {
+                "items": [
+                    {
+                        "id": "big",
+                        "kind": "merged",
+                        "state": "pending",
+                        "pr": BIG,
+                        "generation": BIG,
+                        "order": 1,
+                        "title": "BIG",
+                    }
+                ]
+            },
+            generated_at="2026-11-09T11:55:00Z",
+        )
+    )
+    cases.append(
+        case(
+            "subject-pr-bigint-with-zero-item-pr",
+            {
+                "items": [
+                    {
+                        "id": "subject-big",
+                        "kind": "merged",
+                        "state": "pending",
+                        "pr": 0,
+                        "subject": {"repo": "owner/repo", "pr": BIG},
+                        "order": 1,
+                        "title": "SUBJECT",
+                    }
+                ]
+            }
+        )
+    )
+    cases.append(
+        case(
+            "zero-item-pr-falls-back-to-float-subject",
+            {
+                "items": [
+                    {
+                        "id": "float-subject",
+                        "kind": "merged",
+                        "state": "pending",
+                        "pr": 0,
+                        "subject": {"repo": "owner/repo", "pr": 5.0},
+                        "order": 1,
+                    }
+                ]
+            }
+        )
+    )
+    cases.append(
+        case(
+            "zero-item-pr-without-subject-is-null",
+            {
+                "items": [
+                    {
+                        "id": "zero-pr",
+                        "kind": "merged",
+                        "state": "pending",
+                        "pr": 0,
+                        "order": 1,
+                    }
+                ]
+            }
+        )
+    )
+    cases.append(
+        case(
+            "zero-subject-pr-stays-zero",
+            {
+                "items": [
+                    {
+                        "id": "zero-subject",
+                        "kind": "merged",
+                        "state": "pending",
+                        "subject": {"repo": "owner/repo", "pr": 0},
+                        "order": 1,
+                    }
+                ]
+            }
+        )
+    )
+    cases.append(
+        case(
+            "adjacent-bigint-order-sorts-exactly",
+            {
+                "items": [
+                    {
+                        "id": "high",
+                        "kind": "merged",
+                        "state": "pending",
+                        "order": BIG,
+                        "title": "HIGH",
+                    },
+                    {
+                        "id": "low",
+                        "kind": "merged",
+                        "state": "pending",
+                        "order": NEIGHBOR,
+                        "title": "LOW",
+                    },
+                ]
+            }
+        )
+    )
+    cases.append(
+        case(
+            "local-review-float-generation",
+            {
+                "items": [
+                    {
+                        "id": "local",
+                        "kind": "local-review",
+                        "state": "pending",
+                        "generation": 2.0,
+                        "created_at": "1970-01-01T00:00:00Z",
+                        "order": 1,
+                    }
+                ]
+            },
+            generated_at="1970-01-01T01:00:00Z",
+            now="1970-01-01T01:00:00Z",
+        )
+    )
+    cases.append(
+        case(
+            "mixed-order-types-raise-type-error",
+            {
+                "items": [
+                    {"id": "int", "kind": "merged", "state": "pending", "order": 1},
+                    {"id": "str", "kind": "merged", "state": "pending", "order": "1"},
+                ]
+            }
+        )
+    )
+    cases.append(
+        case(
+            "numeric-title-passthrough",
+            {
+                "items": [
+                    {
+                        "id": "title",
+                        "kind": "merged",
+                        "state": "pending",
+                        "title": BIG,
+                        "order": 1,
+                    }
+                ]
+            }
+        )
+    )
+    cases.append(
+        case(
+            "discovery-and-repo-numbers-passthrough",
+            {
+                "items": [],
+                "merged_reconcile": {
+                    "represented": BIG,
+                    "transient_failures": 2.0,
+                    "pages_read": 1,
+                },
+                "merged_discovery": {"complete": True, "after": "2026-11-08T00:00:00Z"},
+                "push_discovery": {
+                    "owner/foreign": {"reviewed_tip": BIG},
+                },
+            },
+            config={
+                "repo": "owner/repo",
+                "max_starts_per_hour": 5,
+                "repos": [{"repo": "owner/foreign"}],
+            },
+        )
+    )
+    cases.append(
+        case(
+            "usage-limit-bigint-passthrough",
+            {"items": [], "usage": {"limit": BIG}},
+            config={"repo": "owner/repo", "max_starts_per_hour": 10},
+            generated_at="2026-10-31T00:00:00Z",
+            now="2026-10-31T00:00:00Z",
+        )
+    )
+    cases.append(
+        case(
+            "usage-limit-float-falls-back-to-float-config-cap",
+            {"items": [], "usage": {"limit": 5.0}},
+            config={"repo": "owner/repo", "max_starts_per_hour": 5.0},
+            generated_at="2026-10-31T00:00:00Z",
+            now="2026-10-31T00:00:00Z",
+            core_only=True,
+        )
+    )
+    return _family("passthrough-summarize", cases, "lossless numeric passthrough cases")
+
+
+# ------------------------------------------------------- passthrough receipt
+
+
+def passthrough_receipt_family() -> Dict[str, Any]:
+    """Receipt bytes and digests produced by the real Python writer."""
+    cases = []
+
+    def terminal(capture: Dict[str, Any], **overrides: Any) -> Dict[str, Any]:
+        document = {
+            "version": 1,
+            "source": SUBJECT,
+            "capture": capture,
+            "outcome": "terminal-with-findings",
+            "counted": True,
+            "classification": {"counted": True, "outcome": "completed"},
+        }
+        document.update(overrides)
+        return document
+
+    def case(
+        name: str,
+        queue_capture: Dict[str, Any],
+        receipt_document: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rid = _receipt(root, receipt_document)
+            raw = (root / f"{rid}.json").read_bytes()
+            queue = {
+                "items": [
+                    {
+                        "kind": "merged-current",
+                        "state": "done",
+                        "subject": SUBJECT,
+                        "capture": queue_capture,
+                        "receipt_id": rid,
+                    }
+                ]
+            }
+            inputs = {
+                "queue": queue,
+                "receipt_bytes": {rid: base64.b64encode(raw).decode("ascii")},
+            }
+            return _capture(
+                name,
+                "status_summary.merged_current",
+                inputs,
+                lambda: status_summary.merged_current(queue, root),
+                reserialize=True,
+            )
+
+    float_paths = [{"path": "x.py", "disposition": "included", "bytes": 5.0}]
+    float_capture = _capture_document(float_paths)
+    cases.append(
+        case("float-path-bytes-verified", float_capture, terminal(float_capture))
+    )
+    int_paths = [{"path": "x.py", "disposition": "included", "bytes": BIG}]
+    int_capture = _capture_document(int_paths)
+    cases.append(case("bigint-path-bytes-verified", int_capture, terminal(int_capture)))
+    equal_capture = _capture_document(float_paths, extra=1.0)
+    cases.append(
+        case("extra-float-equal-verified", equal_capture, terminal(equal_capture))
+    )
+    queue_extra = _capture_document(float_paths, extra=BIG)
+    receipt_extra = _capture_document(float_paths, extra=NEIGHBOR)
+    cases.append(
+        case(
+            "extra-adjacent-bigints-unverified",
+            queue_extra,
+            terminal(receipt_extra),
+        )
+    )
+    queue_lexeme = _capture_document(
+        [{"path": "x.py", "disposition": "included", "bytes": 5}]
+    )
+    receipt_lexeme = _capture_document(float_paths)
+    cases.append(
+        case(
+            "queue-path-lexeme-differs-unverified",
+            queue_lexeme,
+            terminal(receipt_lexeme),
+        )
+    )
+    cases.append(
+        case(
+            "version-float-is-equal-verified",
+            float_capture,
+            terminal(float_capture, version=1.0),
+        )
+    )
+    cases.append(
+        case(
+            "version-bool-is-equal-verified",
+            float_capture,
+            terminal(float_capture, version=True),
+        )
+    )
+    cases.append(
+        case(
+            "version-string-is-unverified",
+            float_capture,
+            terminal(float_capture, version="1"),
+        )
+    )
+    cases.append(
+        _capture(
+            "current-equivalence-float-digest",
+            "review_receipt.current_equivalence",
+            {"capture": float_capture},
+            lambda: {"digest": review_receipt.current_equivalence(float_capture)},
+        )
+    )
+    cases.append(
+        _capture(
+            "current-equivalence-bigint-digest",
+            "review_receipt.current_equivalence",
+            {"capture": int_capture},
+            lambda: {"digest": review_receipt.current_equivalence(int_capture)},
+        )
+    )
+    cases.append(
+        _capture(
+            "path-digests-distinguish-int-and-float",
+            "review_receipt.digest",
+            {"float_paths": float_paths, "bigint_paths": int_paths},
+            lambda: {
+                "float": review_receipt.digest(float_paths),
+                "bigint": review_receipt.digest(int_paths),
+            },
+        )
+    )
+    return _family("passthrough-receipt", cases, "real receipt bytes and numeric identity")
+
+
+# --------------------------------------------------------------------- numeric
+
+
+def numeric_family() -> Dict[str, Any]:
+    """Python `==`, `<` and `>` over JSON numeric texts, including specials."""
+    cases = []
+
+    def case(name: str, a_text: str, b_text: str) -> Dict[str, Any]:
+        a = json.loads(a_text)
+        b = json.loads(b_text)
+        try:
+            compare = int(a > b) - int(a < b)
+            expect = {"equal": a == b, "compare": compare}
+        except TypeError:
+            expect = {"equal": a == b, "compare": None, "error": "TypeError"}
+        return _capture(
+            name,
+            "python.numeric_compare",
+            {"a": a_text, "b": b_text},
+            lambda: expect,
+        )
+
+    cases.append(case("int-float-equal", "1", "1.0"))
+    cases.append(case("bigint-float-exact", str(NEIGHBOR), f"{NEIGHBOR}.0"))
+    cases.append(case("adjacent-bigint-float-greater", str(BIG), f"{NEIGHBOR}.0"))
+    cases.append(case("adjacent-bigint-sort-reverse", str(NEIGHBOR), str(BIG)))
+    cases.append(case("bool-int-equal", "true", "1"))
+    cases.append(case("bool-float-equal", "false", "0.0"))
+    cases.append(case("negative-zero-equal", "-0.0", "0"))
+    cases.append(case("float-equal", "0.1", "0.1"))
+    cases.append(case("float-less", "0.1", "0.2"))
+    cases.append(case("infinity-pair", "1e400", "1e400"))
+    cases.append(case("infinity-greater-than-bigint", "1e400", str(BIG)))
+    cases.append(case("negative-infinity-less-than-bigint", "-1e400", f"-{BIG}"))
+    cases.append(case("negative-infinity-less-than-infinity", "-1e400", "1e400"))
+    cases.append(case("nan-never-equal", "NaN", "NaN"))
+    cases.append(case("nan-vs-int", "NaN", "1"))
+    cases.append(case("string-vs-int-type-error", '"x"', "1"))
+    cases.append(case("bool-vs-string-type-error", "true", '"1"'))
+    cases.append(case("none-vs-int-type-error", "null", "0"))
+    return _family("numeric", cases, "Python numeric comparison edges")
+
+
 def _family(family: str, cases: List[Dict[str, Any]], note: str) -> Dict[str, Any]:
     return {"schema": SCHEMA, "family": family, "note": note, "cases": cases}
 
@@ -1456,6 +1899,9 @@ def documents() -> Dict[str, Dict[str, Any]]:
         "merged-current": merged_current_family(),
         "client-health": client_health_family(),
         "utilization": utilization_family(),
+        "passthrough-summarize": passthrough_summarize_family(),
+        "passthrough-receipt": passthrough_receipt_family(),
+        "numeric": numeric_family(),
     }
 
 
