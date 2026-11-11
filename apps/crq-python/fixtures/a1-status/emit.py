@@ -20,6 +20,7 @@ import argparse
 import base64
 import datetime as dt
 import json
+import os
 import shutil
 import sys
 import tempfile
@@ -1463,6 +1464,260 @@ def utilization_family() -> Dict[str, Any]:
     return _family("utilization", cases, "coverage utilization digest edges")
 
 
+# ------------------------------------------------------------ publish sections
+
+
+def publish_sections_family() -> Dict[str, Any]:
+    """`status_summary.publish` utilization/schedule assembly and its refusals.
+
+    The real publisher runs with its effect seams patched: the systemd probe,
+    the repair digest, finding triage, the previous-summary read and the `gh`
+    title lookup. The `utilization` and `schedule` values therefore come from
+    the unmodified module, and a refusal is the publisher's own exception.
+
+    `input.core` is the publisher's prelude after the receipt-aware
+    `merged_current` replacement: the same document the TypeScript
+    `readSummaryCore` returns. `expect.bytes` is the exact compact
+    reserialisation of the two sections in publish order, and
+    `expect.full_bytes` appends them to that core.
+    """
+    cases: List[Dict[str, Any]] = []
+    fixed_now = _epoch("2026-11-09T12:00:00Z")
+
+    def prelude(queue, config, events, at):
+        generated = _utc_iso(at)
+        base = status_summary.summarize(
+            {"generated_at": generated},
+            queue,
+            {"last_tick": queue.get("last_tick")},
+            config,
+            events,
+            at,
+        )
+        core = dict(base)
+        core["schema_version"] = 2
+        core["generated_at"] = generated
+        return core
+
+    def observation(**overrides: Any) -> Dict[str, Any]:
+        value = {
+            "started": False,
+            "pending": True,
+            "candidate_exists": True,
+            "blocked_reason": None,
+        }
+        value.update(overrides)
+        return value
+
+    def case(
+        name: str,
+        *,
+        queue: Dict[str, Any],
+        config: Dict[str, Any] | None = None,
+        schedule: Dict[str, Any] | None = None,
+        events: List[Dict[str, Any]] | None = None,
+        now: float = fixed_now,
+    ) -> Dict[str, Any]:
+        config = (
+            {"repo": "owner/repo", "max_starts_per_hour": 8} if config is None else config
+        )
+        schedule = {"status": "systemd"} if schedule is None else schedule
+        events = list(events or [])
+        inputs = {
+            "core": prelude(queue, config, events, now),
+            "queue": queue,
+            "config": config,
+            "schedule": schedule,
+            "now": now,
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "state").mkdir()
+            with (root / "state/events.jsonl").open("w") as fh:
+                for event in events:
+                    fh.write(json.dumps(event) + "\n")
+            try:
+                with unittest.mock.patch.object(
+                    status_summary, "systemd_activity", return_value=({}, {})
+                ), unittest.mock.patch.object(
+                    status_summary.repair_tick, "digest", return_value={}
+                ), unittest.mock.patch.object(
+                    status_summary, "finding_triage", return_value={}
+                ), unittest.mock.patch.object(
+                    status_summary, "read", side_effect=OSError("no previous summary")
+                ), unittest.mock.patch.object(
+                    status_summary, "command", side_effect=OSError("no gh")
+                ), unittest.mock.patch.dict(
+                    os.environ, {"XDG_STATE_HOME": str(root)}
+                ):
+                    data = status_summary.publish(
+                        root, queue, config, schedule, home=root, now=now
+                    )
+            except Exception as exc:  # the oracle refusal is part of the contract
+                expect = {"ok": False, "error": type(exc).__name__, "message": str(exc)}
+            else:
+                # Keep the publisher's own core in its own key order; on success
+                # `data` carries the receipt-aware `merged_current` replacement.
+                core = {key: data[key] for key in inputs["core"]}
+                inputs["core"] = core
+                sections = {
+                    "utilization": data["utilization"],
+                    "schedule": data["schedule"],
+                }
+                full = {key: core[key] for key in core}
+                full["utilization"] = sections["utilization"]
+                full["schedule"] = sections["schedule"]
+                expect = {
+                    "ok": True,
+                    "value": sections,
+                    "bytes": _compact(sections),
+                    "full_bytes": _compact(full),
+                }
+        return {
+            "name": name,
+            "source": "status_summary.publish",
+            "input": inputs,
+            "expect": expect,
+        }
+
+    ledger = {
+        "schema_version": 1,
+        "paths": {
+            "src/a.py": {"review_count": 1, "last_reviewed_at": None},
+            "src/b.py": {"review_count": 2, "last_reviewed_at": None},
+        },
+        "runs": {},
+        "observations": {
+            "2026-11-09T11:00:00Z": observation(blocked_reason="paused"),
+            "2026-11-09T11:12:00Z": observation(),
+            "2026-11-09T11:24:00Z": observation(
+                started=True, pending=False, candidate_exists=True
+            ),
+            "2026-11-08T11:00:00Z": observation(),
+        },
+    }
+    queue = {
+        "items": [],
+        "last_tick": "2026-11-09T11:55:00Z",
+        "starts": [
+            "2026-11-09T11:00:00Z",
+            "2026-11-09T11:10:00Z",
+            "2026-11-08T11:00:00Z",
+        ],
+        "cooldown_until": "2026-11-09T12:30:00Z",
+        "usage": {"limit": 5},
+        "coverage": ledger,
+    }
+    cases.append(case("utilization-and-schedule", queue=queue))
+    cases.append(
+        case(
+            "pending-item-title-lookup-stays-unresolved",
+            queue={
+                **queue,
+                "items": [
+                    {
+                        "id": "open",
+                        "kind": "open",
+                        "state": "pending",
+                        "pr": 7,
+                        "order": 1,
+                    }
+                ],
+            },
+        )
+    )
+    cases.append(
+        case(
+            "usage-limit-is-the-utilization-cap",
+            queue={**queue, "usage": {"limit": 3}},
+        )
+    )
+    cases.append(
+        case(
+            "float-config-cap-keeps-float-tag",
+            queue={**queue, "usage": {}},
+            config={"repo": "owner/repo", "max_starts_per_hour": 5.0},
+        )
+    )
+    cases.append(
+        case(
+            "default-ledger-when-coverage-missing",
+            queue={key: value for key, value in queue.items() if key != "coverage"},
+        )
+    )
+    cases.append(case("default-ledger-when-coverage-empty", queue={**queue, "coverage": {}}))
+    cases.append(case("default-ledger-when-coverage-null", queue={**queue, "coverage": None}))
+    cases.append(case("default-ledger-when-coverage-empty-list", queue={**queue, "coverage": []}))
+    cases.append(
+        case(
+            "schedule-unknown-adds-error",
+            queue=queue,
+            schedule={"status": "unknown", "nextRunAt": "2026-11-09T12:12:00Z"},
+        )
+    )
+    cases.append(case("schedule-empty-status-falls-back", queue=queue, schedule={"status": ""}))
+    cases.append(case("schedule-null-status-falls-back", queue=queue, schedule={"status": None}))
+    cases.append(case("schedule-false-status-falls-back", queue=queue, schedule={"status": False}))
+    cases.append(
+        case(
+            "schedule-missing-status-falls-back",
+            queue=queue,
+            schedule={"nextRunAt": "2026-11-09T12:12:00Z"},
+        )
+    )
+    cases.append(
+        case(
+            "custom-schedule-id",
+            queue=queue,
+            config={
+                "repo": "owner/repo",
+                "max_starts_per_hour": 8,
+                "schedule_id": "other-tick.timer",
+            },
+        )
+    )
+    cases.append(
+        case(
+            "null-schedule-id-is-kept",
+            queue=queue,
+            config={"repo": "owner/repo", "max_starts_per_hour": 8, "schedule_id": None},
+        )
+    )
+    cases.append(
+        case(
+            "truthy-string-coverage-is-refused",
+            queue={**queue, "coverage": "x"},
+        )
+    )
+    cases.append(
+        case(
+            "truthy-list-coverage-is-refused",
+            queue={**queue, "coverage": [1]},
+        )
+    )
+    cases.append(
+        case(
+            "no-completed-tick-is-refused",
+            queue={key: value for key, value in queue.items() if key != "last_tick"},
+        )
+    )
+    cases.append(
+        case(
+            "no-completed-tick-precedes-ledger-errors",
+            queue={
+                key: value
+                for key, value in {**queue, "coverage": [1]}.items()
+                if key != "last_tick"
+            },
+        )
+    )
+    return _family(
+        "publish-sections",
+        cases,
+        "status_summary.publish utilization/schedule sections and refusals",
+    )
+
+
 # ------------------------------------------------------- passthrough summary
 
 
@@ -1991,6 +2246,7 @@ def documents() -> Dict[str, Dict[str, Any]]:
         "merged-current": merged_current_family(),
         "client-health": client_health_family(),
         "utilization": utilization_family(),
+        "publish-sections": publish_sections_family(),
         "passthrough-summarize": passthrough_summarize_family(),
         "passthrough-receipt": passthrough_receipt_family(),
         "numeric-lineage": numeric_lineage_family(),
