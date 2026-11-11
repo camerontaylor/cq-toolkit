@@ -2217,11 +2217,12 @@ class PartialHarnessCheckTests(unittest.TestCase):
         self.completions = [self._completion(1, PYTHON)]
 
     @staticmethod
-    def _completion(sequence, runtime):
+    def _completion(sequence, runtime,
+                    boot_id="11111111-1111-1111-1111-111111111111"):
         return {"unit": harness.REPAIR_UNIT, "runtime": runtime,
                 "success": True, "sequence": sequence,
                 "invocation": "%032x" % sequence,
-                "boot_id": "11111111-1111-1111-1111-111111111111"}
+                "boot_id": boot_id}
 
     @staticmethod
     def _file(key, text, mode=0o644):
@@ -2753,6 +2754,28 @@ class PartialHarnessCheckTests(unittest.TestCase):
                         problems)
         self.assertIs(checks["partial_" + case + "_observe"], False)
 
+    def test_partial_observe_rejects_recovery_suffix_from_prior_boot(self):
+        phases_value, restarts, reboots = self.evidence()
+        case = "activation-service-reboot"
+        observe = phases_value["partial-" + case + "-observe"]
+        entries = observe["after_recovery"]["repair_completions"]
+        extra = self._completion(
+            entries[-1]["sequence"] + 1, NODE,
+            boot_id="11111111-1111-1111-1111-111111111111")
+        for key in ("after_recovery", "after_repeat"):
+            observe[key]["repair_completions"].append(extra)
+        for key in ("recovery", "repeat"):
+            baseline = observe[key]["json"]["drain"]["completion_baseline"]
+            baseline["count"] += 1
+            baseline["sequences"].append(extra["sequence"])
+            baseline["invocations"].append(extra["invocation"])
+            baseline["max_sequence"] = extra["sequence"]
+        checks, problems = harness._partial_checks(
+            phases_value, restarts, reboots)
+        self.assertTrue(any("observed boot" in item for item in problems),
+                        problems)
+        self.assertIs(checks["partial_" + case + "_observe"], False)
+
     def test_partial_final_requires_observed_completion_prefix(self):
         phases_value, restarts, reboots = self.evidence()
         inspect = phases_value["partial-inspect"]
@@ -2969,7 +2992,7 @@ class PartialHarnessCheckTests(unittest.TestCase):
         entries = observe["before"]["repair_completions"] + [
             self._completion(
                 observe["before"]["repair_completions"][-1]["sequence"] + 1,
-                PYTHON)]
+                PYTHON, boot_id=observe["before"]["boot_id"])]
         observe["before"]["repair_completions"] = entries
         observe["before"]["repair_files"] = self._files("python", entries)
         for key in ("after_recovery", "after_repeat"):

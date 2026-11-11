@@ -2967,7 +2967,7 @@ def _partial_fenced_state_ok(snapshot_value, label, problems):
 
 
 def _partial_completion_baseline_ok(baseline, entries, before_entries, runtime,
-                                    label, problems):
+                                    boot, label, problems):
     if not isinstance(baseline, dict):
         problems.append(label + " completion baseline is absent")
         return False
@@ -2975,17 +2975,25 @@ def _partial_completion_baseline_ok(baseline, entries, before_entries, runtime,
         problems.append(label + " settled completion inventory is not a list")
         return False
     ok = True
+    suffix = entries[len(before_entries):]
+    if suffix and _boot_id(boot) is None:
+        problems.append(label + " has no observed boot identity")
+        ok = False
     for index, entry in enumerate(entries):
         if not _completion_shape_ok(entry, label + ".entries[" + str(index)
                                     + "]", problems):
             ok = False
             continue
-        if index >= len(before_entries) and entry.get("runtime") != runtime:
-            problems.append(label + ".entries[" + str(index)
-                            + "] is not the case runtime")
-            ok = False
-        boot = entry.get("boot_id")
-        if not isinstance(boot, str) or not boot:
+        if index >= len(before_entries):
+            entry_label = label + ".entries[" + str(index) + "]"
+            if entry.get("runtime") != runtime:
+                problems.append(entry_label + " is not the case runtime")
+                ok = False
+            if entry.get("boot_id") != boot:
+                problems.append(entry_label + " does not bind the observed boot")
+                ok = False
+        entry_boot = entry.get("boot_id")
+        if not isinstance(entry_boot, str) or not entry_boot:
             problems.append(label + " completion has no boot identity")
             ok = False
     if before_entries and entries[:len(before_entries)] != before_entries:
@@ -3276,6 +3284,7 @@ def _partial_observe_ok(case, phase, boundary, prepared, problems):
         ok = False
     ok = _partial_activation_policy(before, label, problems) and ok
     runtime = NODE_RUNTIME if spec["family"] == "activation" else PYTHON_RUNTIME
+    observed_boot = before.get("boot_id")
     before_entries = boundary_after.get("repair_completions") or []
     after_entries = before.get("repair_completions") or []
     if after_entries[:len(before_entries)] != before_entries:
@@ -3307,12 +3316,13 @@ def _partial_observe_ok(case, phase, boundary, prepared, problems):
         after_repeat = phase.get("after_repeat") or {}
         entries = after_recovery.get("repair_completions") or []
         if not _partial_completion_baseline_ok(
-                baseline, entries, before_entries, runtime,
+                baseline, entries, before_entries, runtime, observed_boot,
                 label + ".recovery", problems):
             ok = False
         repeat_entries = after_repeat.get("repair_completions") or []
         if not _partial_completion_baseline_ok(
                 repeat_baseline, repeat_entries, before_entries, runtime,
+                observed_boot,
                 label + ".repeat", problems):
             ok = False
         if repeat_baseline != baseline:
