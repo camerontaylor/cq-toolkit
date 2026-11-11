@@ -254,13 +254,18 @@ remains active. Any appended entry must use the final Python runtime and bind
 the boot ID of the final inspection; an entry naming another runtime or
 omitting or changing that boot ID fails closed. The same binding applies to
 final-inventory entries that were not present in the last observed snapshot.
+Raw verification also rejects a retained repair socket, a rogue
+``crq-repair.service.d/20-rogue.conf`` drop-in and rogue timer enablement under
+``default.target.wants``, matching the guest's final absence checks.
 
 After the real restart or reboot, an enabled timer or path may legitimately
 produce prior-runtime work before recovery establishes its settled fence. The
 restore observe accepts those new entries only as an append-only prefix with
 the prior runtime, and the actual first fence baseline includes them. Any
 entry after that settled baseline, any wrong-runtime entry and any malformed
-entry fails the check.
+entry fails the check. New entries captured between the pre-fence snapshot and
+the settled fence must use the case runtime: Node for activation cases and
+Python for restore cases.
 
 Cross-boot completion identity is checked on unit, runtime, success, sequence,
 invocation and boot ID. A completion's first observation must not precede the
@@ -279,16 +284,16 @@ effect point only; timer/path restore effect points are not claimed.
 
 One fresh partial run completed on Pluto (KVM, Ubuntu noble guest
 ``crq-probe``) from source commit
-``10486896de5b13da3a9336bd83912f881b51d294``:
+``5955a526b3a16d535fd10a9cb63117e126762237``:
 
-- report ``~/crq-vm-feasibility/state/runs/20261111T071355Z-7f10d753/report.json``
+- report ``~/crq-vm-feasibility/state/runs/20261111T073715Z-48e32c64/report.json``
 - all 38 checks true; ``problems: []``
-- ``raw-guest-evidence.tar.gz`` 1,356,691 bytes, SHA-256
-  ``631585348bd7097197cd4ce483b19195325f2d9f2e90d6bf1b324208c75142fc``
+- ``raw-guest-evidence.tar.gz`` 1,357,975 bytes, SHA-256
+  ``95ab25662d8d033965cde28c2d97d5ef8108a4b01af9a14ae9e03a4d6a7b0214``
 - report SHA-256
-  ``6db8ca0c68b159ff89f41a68fb2c83c24bf06fe9561744e142d87cc6fb11a4b6``
+  ``24355e6f5f01e5bba328f4eb90ad4b436aa8e023cff4f1158e46c28a5f24b9ea``
 - host script SHA-256
-  ``210c85b82c9120928687d9cb1709e8dc8c31aedd1e55cce1b36d2f2854eb8c6d``
+  ``c6ccfc9f73e092ba2124accf858a3c0830bde7faf53b1e36013c47f641f34db9``
 - partial guest script SHA-256
   ``b1c9b9d1d4af062546b4ea445c63cb04dbb17a099fda450b763cdb9f2ce3da40``
 
@@ -303,14 +308,14 @@ the service is activated:
 
 | Case | Hook | Pending record (prefix) | Released delta |
 |---|---|---|---|
-| ``activation-service-restart`` | ``start-after-service`` | ``2e05b2ab0f5b4`` | one Node |
-| ``activation-timer-restart`` | ``start-after-timer`` | ``42c7e9df8feb4`` | one Node |
-| ``activation-path-restart`` | ``start-after-path`` | ``50290525f14b4`` | one Node |
-| ``restore-service-restart`` | ``restore-activation-after-service`` | ``6f270e2326734`` | none |
-| ``activation-service-reboot`` | ``start-after-service`` | ``41f6c090e2774`` | one Node |
-| ``activation-timer-reboot`` | ``start-after-timer`` | ``190e1eb514664`` | one Node |
-| ``activation-path-reboot`` | ``start-after-path`` | ``e709e958e5154`` | one Node |
-| ``restore-service-reboot`` | ``restore-activation-after-service`` | ``ca84c34cef9b4`` | none |
+| ``activation-service-restart`` | ``start-after-service`` | ``a9634020a1564`` | one Node |
+| ``activation-timer-restart`` | ``start-after-timer`` | ``9b47a169d1234`` | one Node |
+| ``activation-path-restart`` | ``start-after-path`` | ``0f693324b8ac4`` | one Node |
+| ``restore-service-restart`` | ``restore-activation-after-service`` | ``97f786a40f364`` | none |
+| ``activation-service-reboot`` | ``start-after-service`` | ``87745aa1bc1f4`` | one Node |
+| ``activation-timer-reboot`` | ``start-after-timer`` | ``b43832f2c3e34`` | one Node |
+| ``activation-path-reboot`` | ``start-after-path`` | ``8c23238d22434`` | one Node |
+| ``restore-service-reboot`` | ``restore-activation-after-service`` | ``5644c5321feb4`` | none |
 
 Every observe phase retained the same record bytes and returned the actual
 rc-3 ``activation may have occurred`` refusal twice, with the fence-settled
@@ -324,7 +329,7 @@ parsed entries through the completion baseline instead.
 
 ### Earlier reviewed partial proof runs (preserved)
 
-All earlier runs remain preserved unchanged. The two earlier runs that used
+All earlier runs remain preserved unchanged. The three earlier runs that used
 the current partial guest script re-verify under the final host with
 ``problems: []``, ``host_matches_run: false``, ``guest_matches_run: true``
 and ``validator_only: true``:
@@ -346,6 +351,15 @@ and ``validator_only: true``:
   ``eb606a7d75e093c83163ec2c067e3f4bf9d0580a3287ea54ce828ddb901fc5d1``,
   retained host script
   ``6999cf72fb4867ab8632aff28b0e073ffa66c9ff8828aad4c88498efc0cc89ec``
+  and guest script
+  ``b1c9b9d1d4af062546b4ea445c63cb04dbb17a099fda450b763cdb9f2ce3da40``.
+- ``20261111T071355Z-7f10d753`` from source ``10486896``: the post-inspection
+  completion suffix binding. 38/38, report SHA-256
+  ``6db8ca0c68b159ff89f41a68fb2c83c24bf06fe9561744e142d87cc6fb11a4b6``,
+  raw tar SHA-256
+  ``631585348bd7097197cd4ce483b19195325f2d9f2e90d6bf1b324208c75142fc``,
+  retained host script
+  ``210c85b82c9120928687d9cb1709e8dc8c31aedd1e55cce1b36d2f2854eb8c6d``
   and guest script
   ``b1c9b9d1d4af062546b4ea445c63cb04dbb17a099fda450b763cdb9f2ce3da40``.
 
