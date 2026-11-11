@@ -902,6 +902,14 @@ class HarnessCheckTests(unittest.TestCase):
         self.assertFalse(checks["drain_alive_refused"])
         self.assertTrue(problems)
 
+    def test_drain_snapshot_rejects_malformed_job_rows(self):
+        value = phases()
+        for side in ("before", "after"):
+            value["drain-alive"][side]["jobs"] = ["JOB UNIT TYPE STATE"]
+        checks, problems = harness.build_checks(value)
+        self.assertFalse(checks["drain_alive_refused"])
+        self.assertTrue(problems)
+
     def test_drain_snapshot_allows_consistent_optional_paths(self):
         value = phases()
         for side in ("before", "after"):
