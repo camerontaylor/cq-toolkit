@@ -442,11 +442,12 @@ def _package_runner():
 def artifact_identity(artifact_root, runtime):
     """Read-only whole-artifact identity check for a packaged node runner.
 
-    Reuses package-runner's schema, inventory and canonical digest semantics.
-    It compares the observed tree to the manifest inventory; it does not
-    execute the runner, load dependencies, or establish authenticity. The
-    returned identity is integrity-of-observed-bytes against the manifest, and
-    the manifest is still self-declared provenance.
+    Reuses package-runner's schema, inventory, required-entry, canonical
+    digest and staged-provenance semantics. It compares the observed tree to
+    the manifest inventory; it does not execute the runner, load dependencies,
+    or establish authenticity. The returned identity is integrity of the
+    observed bytes against the manifest, and the manifest is still
+    self-declared provenance.
     """
     if runtime == 'python':
         return None
@@ -467,6 +468,9 @@ def artifact_identity(artifact_root, runtime):
         raise ValueError('artifact manifest is invalid') from exc
     if manifest.get('source_sha') != runtime[5:]:
         raise ValueError('artifact source SHA does not match the node pointer')
+    for required in package.REQUIRED_ENTRIES:
+        if not (root / required).is_file():
+            raise ValueError('artifact lacks required package entry: ' + required)
     try:
         observed = package.inventory(root, exclude=(package.MANIFEST_NAME,))
     except (OSError, ValueError) as exc:
@@ -476,6 +480,11 @@ def artifact_identity(artifact_root, runtime):
     observed_digest = package.content_digest(observed)
     if observed_digest != manifest['content_sha256']:
         raise ValueError('artifact content digest does not match the manifest')
+    try:
+        package.validate_provenance(manifest['provenance'],
+                                    sha=manifest['source_sha'], staging=root)
+    except (OSError, ValueError) as exc:
+        raise ValueError('artifact provenance does not match the observed tree') from exc
     entry = next((item for item in observed
                   if item['path'] == 'dist/queue-runner/crq.js'), None)
     if entry is None or entry['type'] != 'file':

@@ -118,13 +118,35 @@ class HostConfigTests(HostConfigFixture, unittest.TestCase):
                 host.render_units(self.root, self.base / 'invalid', runtimes=mapping)
             self.assertFalse((self.base / 'invalid').exists())
 
+    @staticmethod
+    def _elf_header():
+        header = bytearray(20)
+        header[:5] = b'\x7fELF\x02'
+        header[5] = 1
+        header[18:20] = b'\x3e\x00'
+        return bytes(header)
+
     def _node_artifact(self, sha):
-        """Build a minimal whole-artifact tree accepted by package-runner."""
+        """Build a minimally packageable whole-artifact tree.
+
+        This is an extracted artifact, so it contains the manifest as well as
+        every package.REQUIRED_ENTRIES path. The provenance is derived from
+        package.staging_facts and validated with staging=root, matching the
+        package-runner accept rules without executing the runner.
+        """
         package = host._package_runner()
         root = self.base / '.local/opt' / ('crq-' + sha)
         (root / 'dist/queue-runner').mkdir(parents=True)
         (root / 'dist/queue-runner/crq.js').write_bytes(b'runner')
+        (root / 'package.json').write_text(
+            json.dumps({'name': 'crq-runner', 'version': '0.0.0'}))
+        fs_ext = root / 'node_modules/fs-ext'
+        (fs_ext / 'build/Release').mkdir(parents=True)
+        (fs_ext / 'package.json').write_text(
+            json.dumps({'name': 'fs-ext', 'version': package.FS_EXT_VERSION}))
+        (fs_ext / 'build/Release/fs_ext.node').write_bytes(self._elf_header())
         files = package.inventory(root)
+        facts = package.staging_facts(root)
         provenance = {
             'schema_version': package.PROVENANCE_VERSION,
             'source_sha': sha,
@@ -142,12 +164,8 @@ class HostConfigTests(HostConfigFixture, unittest.TestCase):
                 'build_command': 'pnpm build',
                 'deploy_command': 'pnpm deploy',
             },
-            'dependencies': {'fs-ext': package.FS_EXT_VERSION},
-            'fs_ext': {
-                'version': package.FS_EXT_VERSION,
-                'native_sha256': '2' * 64,
-                'elf': dict(package.ELF),
-            },
+            'dependencies': facts['dependencies'],
+            'fs_ext': facts['fs_ext'],
         }
         manifest = {
             'schema_version': package.SCHEMA_VERSION,
@@ -157,8 +175,49 @@ class HostConfigTests(HostConfigFixture, unittest.TestCase):
             'files': files,
         }
         package.validate_manifest(manifest)
+        package.validate_provenance(provenance, sha=sha, staging=root)
+        for required in package.REQUIRED_ENTRIES:
+            self.assertTrue((root / required).is_file(), required)
         (root / package.MANIFEST_NAME).write_text(json.dumps(manifest))
         return root
+
+    def test_node_artifact_fixture_matches_package_contract(self):
+        sha = 'f' * 40
+        artifact = self._node_artifact(sha)
+        package = host._package_runner()
+        manifest = json.loads((artifact / package.MANIFEST_NAME).read_text())
+        for required in package.REQUIRED_ENTRIES:
+            self.assertTrue((artifact / required).is_file(), required)
+        package.validate_provenance(manifest['provenance'], sha=sha,
+                                    staging=artifact)
+
+    def test_artifact_identity_requires_package_required_entries(self):
+        """A self-consistent manifest cannot waive a required package entry."""
+        sha = 'd' * 40
+        artifact = self._node_artifact(sha)
+        package = host._package_runner()
+        (artifact / 'package.json').unlink()
+        files = package.inventory(artifact, exclude=(package.MANIFEST_NAME,))
+        manifest_path = artifact / package.MANIFEST_NAME
+        manifest = json.loads(manifest_path.read_text())
+        manifest['files'] = files
+        manifest['content_sha256'] = package.content_digest(files)
+        package.validate_manifest(manifest)
+        manifest_path.write_text(json.dumps(manifest))
+        with self.assertRaisesRegex(ValueError, 'required package entry'):
+            host.artifact_identity(artifact, 'node:' + sha)
+
+    def test_artifact_identity_rejects_provenance_that_disagrees_with_tree(self):
+        sha = 'e' * 40
+        artifact = self._node_artifact(sha)
+        package = host._package_runner()
+        manifest_path = artifact / package.MANIFEST_NAME
+        manifest = json.loads(manifest_path.read_text())
+        manifest['provenance']['fs_ext']['native_sha256'] = '0' * 64
+        package.validate_manifest(manifest)
+        manifest_path.write_text(json.dumps(manifest))
+        with self.assertRaisesRegex(ValueError, 'provenance does not match'):
+            host.artifact_identity(artifact, 'node:' + sha)
 
     def test_single_unit_render_matches_render_units_for_all_services(self):
         sha = 'a' * 40

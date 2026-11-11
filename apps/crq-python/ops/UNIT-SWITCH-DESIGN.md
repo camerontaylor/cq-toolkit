@@ -72,10 +72,10 @@ No VM reboot or power-loss test has been performed.
 commit, verifies the Git blob object identity, and returns the rendered bytes
 plus the source commit, template path, blob object id and byte digests. For
 `node:<sha>` it also checks the packaged artifact against its schema-2
-`artifact-manifest.json` using the existing package-runner inventory and
-canonical content-digest semantics. That check is integrity of the observed
-artifact against its manifest, not authenticity; it does not execute the
-runner or load dependencies.
+`artifact-manifest.json` using the existing package-runner inventory,
+canonical content-digest, required-entry and staged-provenance semantics. That
+check is integrity of the observed artifact against its manifest, not
+authenticity; it does not execute the runner or load dependencies.
 
 `render_units` keeps its existing behavior and byte output, including the
 ability to render a `node:` unit before its artifact is installed. The new
