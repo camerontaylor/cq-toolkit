@@ -12,7 +12,10 @@ receipt ids are produced by the real writer.
 
 Determinism: fixed timestamps only, sorted receipt maps, `indent=2` with
 `ensure_ascii=True` and one trailing newline. No host, path or clock is
-recorded, so the bytes are identical on every Python 3.14 host.
+recorded. `--check` byte-identity holds on every host running CPython >=
+3.14.7 (or 3.15+): the `fractional-zero-offset-is-applied` case below pins
+gh-152079 behavior, so pre-3.14.7 interpreters (e.g. 3.14.4) disagree on that
+one synthetic case and `--check` fails there by design.
 """
 from __future__ import annotations
 
