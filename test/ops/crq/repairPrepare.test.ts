@@ -27,7 +27,7 @@ import {
 } from '../../../src/policy/crq/jsonValue.js';
 import type { RepairRefusal } from '../../../src/policy/crq/repairBinding.js';
 import { atomicJsonText } from '../../../src/policy/crq/pythonJson.js';
-import type { FixFindingBinding } from '../../../src/ops/review/fixFinding.js';
+import { makeFixFinding, type FixFindingBinding } from '../../../src/ops/review/fixFinding.js';
 import { completeWorker, UNCHANGED } from '../review/fixReviewItem.helpers.js';
 import { findingInput, scriptedFindingOp } from '../review/fixFinding.helpers.js';
 
@@ -637,28 +637,119 @@ describe('typed fixFinding harvest', () => {
     ]);
   });
 
-  test('non-ok and malformed envelopes are typed, not missing-binding', async () => {
+  test('accepts actual makeFixFinding non-ok artifacts', async () => {
+    const produced = [
+      await scriptedFindingOp([completeWorker({ nonsense: true })]).op(
+        findingInput({ binding: prepared }),
+      ),
+      await scriptedFindingOp([completeWorker(undefined, { stopReason: 'budget' })]).op(
+        findingInput({ binding: prepared }),
+      ),
+      await scriptedFindingOp([completeWorker(undefined, { stopReason: 'aborted' })]).op(
+        findingInput({ binding: prepared }),
+      ),
+      await makeFixFinding({
+        drivers: {
+          resolve: () => {
+            throw new Error('synthetic resolve failure');
+          },
+        },
+      })(findingInput({ binding: prepared })),
+    ];
+    expect(produced.map((result) => result.status)).toEqual([
+      'failed',
+      'budget-exhausted',
+      'indeterminate',
+      'needs-human',
+    ]);
+    for (const result of produced) {
+      const git = fakeGit({ tip: SOURCE, blob: BLOB });
+      expect(
+        await verifyPreparedHarvest({ ...input, artifactJson: JSON.stringify(result) }, git),
+      ).toEqual({ ok: false, refusal: 'fixfinding-result-not-ok' });
+      expect(git.calls).toEqual([]);
+    }
+  });
+
+  test('valid synthetic non-ok envelopes stay not-ok', async () => {
+    const artifacts = [
+      { status: 'failed', error: 'stop', report: { failureClass: 'evidence' } },
+      { status: 'needs-human', reason: 'gap', report: { failureClass: 'transient' } },
+      { status: 'budget-exhausted', report: { failureClass: 'exhausted' } },
+      { status: 'indeterminate', detail: 'lost', report: { failureClass: 'transient' } },
+    ] as const;
+    for (const artifact of artifacts) {
+      const git = fakeGit({ tip: SOURCE, blob: BLOB });
+      expect(
+        await verifyPreparedHarvest({ ...input, artifactJson: JSON.stringify(artifact) }, git),
+      ).toEqual({ ok: false, refusal: 'fixfinding-result-not-ok' });
+      expect(git.calls).toEqual([]);
+    }
+  });
+
+  const malformedEnvelopes: ReadonlyArray<readonly [string, unknown]> = [
+    ['failed missing error', { status: 'failed', report: { failureClass: 'evidence' } }],
+    [
+      'failed wrong error type',
+      { status: 'failed', error: 1, report: { failureClass: 'evidence' } },
+    ],
+    [
+      'failed extra field',
+      { status: 'failed', error: 'x', extra: 1, report: { failureClass: 'evidence' } },
+    ],
+    [
+      'needs-human missing reason',
+      { status: 'needs-human', report: { failureClass: 'transient' } },
+    ],
+    [
+      'needs-human wrong reason type',
+      { status: 'needs-human', reason: null, report: { failureClass: 'transient' } },
+    ],
+    [
+      'budget-exhausted extra field',
+      { status: 'budget-exhausted', cost: 1, report: { failureClass: 'exhausted' } },
+    ],
+    [
+      'indeterminate missing detail',
+      { status: 'indeterminate', report: { failureClass: 'transient' } },
+    ],
+    ['unknown status', { status: 'cancelled', report: { failureClass: 'transient' } }],
+    ['non-string status', { status: 1 }],
+    ['null artifact', null],
+    ['array artifact', []],
+    ['ok missing value', { status: 'ok' }],
+    ['non-ok missing report', { status: 'failed', error: 'x' }],
+    ['non-ok report wrong type', { status: 'failed', error: 'x', report: 'evidence' }],
+    [
+      'non-ok report bad failure class',
+      { status: 'failed', error: 'x', report: { failureClass: 'bogus' } },
+    ],
+  ];
+  test.each(malformedEnvelopes)('%s is an invalid envelope', async (_label, artifact) => {
     const git = fakeGit({ tip: SOURCE, blob: BLOB });
-    for (const status of ['failed', 'needs-human', 'budget-exhausted', 'indeterminate']) {
-      const artifactJson = atomicJsonText(new JsonObject([['status', status]]));
-      expect(await verifyPreparedHarvest({ ...input, artifactJson }, git)).toEqual({
-        ok: false,
-        refusal: 'fixfinding-result-not-ok',
-      });
-    }
-    for (const artifactJson of [
-      '[]',
-      '{}',
-      '{"status":"ok"}',
-      '{"status":"ok","value":[]}',
-      '{"status":"unknown"}',
-    ]) {
-      expect(await verifyPreparedHarvest({ ...input, artifactJson }, git)).toEqual({
-        ok: false,
-        refusal: artifactJson === '[]' ? 'result-not-object' : 'fixfinding-result-envelope-invalid',
-      });
-    }
+    expect(
+      await verifyPreparedHarvest({ ...input, artifactJson: JSON.stringify(artifact) }, git),
+    ).toEqual({ ok: false, refusal: 'fixfinding-result-envelope-invalid' });
     expect(git.calls).toEqual([]);
+  });
+
+  test('ok envelopes with non-object values are binding failures', async () => {
+    for (const value of [[], null, {}, { binding: 'x' }, 1]) {
+      const git = fakeGit({ tip: SOURCE, blob: BLOB });
+      expect(
+        await verifyPreparedHarvest(
+          { ...input, artifactJson: JSON.stringify({ status: 'ok', value }) },
+          git,
+        ),
+      ).toEqual({ ok: false, refusal: 'fixfinding-result-binding-missing' });
+      expect(git.calls).toEqual([]);
+    }
+    expect(
+      await verifyPreparedHarvest(
+        { ...input, artifactJson: 'not-json' },
+        fakeGit({ tip: SOURCE, blob: BLOB }),
+      ),
+    ).toEqual({ ok: false, refusal: 'result-not-object' });
   });
 
   test('missing or mismatched echoes refuse before reobservation', async () => {

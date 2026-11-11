@@ -14,7 +14,7 @@
  * extras survive into `identity()`. The only ops dependency is a TYPE-only
  * import of the merged op binding; no runtime module from `src/ops` loads.
  */
-import type { FixFindingBinding } from '../../ops/review/fixFinding.js';
+import type { FixFindingBinding, FixFindingReport } from '../../ops/review/fixFinding.js';
 import { JsonNumber, JsonObject, type JsonValue } from './jsonValue.js';
 import { receiptJsonDigest } from './pythonJson.js';
 
@@ -410,31 +410,42 @@ const BINDING_FIELDS = [
   'repairBase',
 ] as const satisfies ReadonlyArray<keyof FixFindingBinding>;
 
-/** The frozen non-ok `OpResult` statuses: a well-formed artifact with no value. */
-const NON_OK_STATUSES = new Set(['failed', 'needs-human', 'budget-exhausted', 'indeterminate']);
+/**
+ * A `review.fixFinding` artifact whose frozen `OpResult` envelope and
+ * op-specific report were already validated at the ops boundary with the
+ * canonical `OpResultArtifactSchema`. The pure check never re-parses an
+ * unvalidated envelope.
+ */
+export type ValidatedFixFindingArtifact =
+  | { readonly status: 'ok'; readonly value: JsonValue }
+  | { readonly status: 'failed'; readonly error: string; readonly report: FixFindingReport }
+  | {
+      readonly status: 'needs-human';
+      readonly reason: string;
+      readonly report: FixFindingReport;
+    }
+  | { readonly status: 'budget-exhausted'; readonly report: FixFindingReport }
+  | {
+      readonly status: 'indeterminate';
+      readonly detail: string;
+      readonly report: FixFindingReport;
+    };
 
 /**
  * The new typed `review.fixFinding` artifact is an `OpResult` envelope. An
  * `ok` envelope's `value` MUST echo a COMPLETE binding equal to all five
- * prepared fields. Missing, non-object, non-ok and mismatch refuse; there is
- * no optional-echo bypass for new artifacts (unlike legacy Python results,
- * which predate the binding). A non-ok status is reported truthfully as
+ * prepared fields. Missing, non-object and mismatch refuse; there is no
+ * optional-echo bypass for new artifacts (unlike legacy Python results, which
+ * predate the binding). A validated non-ok status is reported truthfully as
  * non-harvestable rather than flattened into a missing-binding failure.
  */
 export function typedFixFindingResultRefusal(input: {
   readonly prepared: FixFindingBinding;
-  readonly artifact: JsonValue;
+  readonly artifact: ValidatedFixFindingArtifact;
 }): RepairRefusal | undefined {
-  if (!(input.artifact instanceof JsonObject)) return 'result-not-object';
-  const status = input.artifact.get('status');
-  if (status !== 'ok') {
-    return typeof status === 'string' && NON_OK_STATUSES.has(status)
-      ? 'fixfinding-result-not-ok'
-      : 'fixfinding-result-envelope-invalid';
-  }
-  const value = input.artifact.get('value');
-  if (!(value instanceof JsonObject)) return 'fixfinding-result-envelope-invalid';
-  const echo = value.get('binding');
+  if (input.artifact.status !== 'ok') return 'fixfinding-result-not-ok';
+  const echo =
+    input.artifact.value instanceof JsonObject ? input.artifact.value.get('binding') : undefined;
   if (!(echo instanceof JsonObject)) return 'fixfinding-result-binding-missing';
   for (const field of BINDING_FIELDS) {
     if (!echo.has(field)) return 'fixfinding-result-binding-missing';

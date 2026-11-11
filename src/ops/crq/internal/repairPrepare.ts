@@ -28,9 +28,17 @@ import {
   validateInstructions,
   type RepairRefusal,
   type RepairRoundCount,
+  type ValidatedFixFindingArtifact,
 } from '../../../policy/crq/repairBinding.js';
-import { JsonObject, parseJsonValue, type JsonValue } from '../../../policy/crq/jsonValue.js';
-import type { FixFindingBinding } from '../../review/fixFinding.js';
+import {
+  JsonObject,
+  parseJsonValue,
+  toPlainJson,
+  type JsonValue,
+} from '../../../policy/crq/jsonValue.js';
+import { OpResultArtifactSchema } from '../../../kernel/schema.js';
+import type { OpResultArtifact } from '../../../kernel/types.js';
+import type { FixFindingBinding, FixFindingReport } from '../../review/fixFinding.js';
 
 /** The two immutable git facts, injected so this module performs no spawn. */
 export interface RepairGit {
@@ -144,6 +152,59 @@ function parseValue(text: string): JsonValue | undefined {
 
 function refusal(value: RepairRefusal): { readonly ok: false; readonly refusal: RepairRefusal } {
   return { ok: false, refusal: value };
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+const FIX_FINDING_FAILURE_CLASSES = new Set<string>(['evidence', 'exhausted', 'transient']);
+
+/**
+ * The op-specific non-ok report. The kernel artifact schema proves the report
+ * is lossless JSON; this guard adds the fixFinding contract's typed failure
+ * class. Optional worker evidence is preserved but not interpreted.
+ */
+function isFixFindingReport(value: unknown): value is FixFindingReport {
+  if (!isPlainRecord(value)) return false;
+  const failureClass = value['failureClass'];
+  return typeof failureClass === 'string' && FIX_FINDING_FAILURE_CLASSES.has(failureClass);
+}
+
+/**
+ * Turn a canonically validated plain artifact into the pure checker's typed
+ * input. The lossless model supplies `ok.value` so binding fields never pass
+ * through a permissive cast; a missing value or an op-invalid report is an
+ * envelope failure.
+ */
+function validatedFixFindingArtifact(
+  parsed: OpResultArtifact<unknown>,
+  lossless: JsonValue,
+): ValidatedFixFindingArtifact | undefined {
+  if (!(lossless instanceof JsonObject)) return undefined;
+  switch (parsed.status) {
+    case 'ok': {
+      const value = lossless.get('value');
+      if (value === undefined) return undefined;
+      return { status: 'ok', value };
+    }
+    case 'failed': {
+      if (!isFixFindingReport(parsed.report)) return undefined;
+      return { status: 'failed', error: parsed.error, report: parsed.report };
+    }
+    case 'needs-human': {
+      if (!isFixFindingReport(parsed.report)) return undefined;
+      return { status: 'needs-human', reason: parsed.reason, report: parsed.report };
+    }
+    case 'budget-exhausted': {
+      if (!isFixFindingReport(parsed.report)) return undefined;
+      return { status: 'budget-exhausted', report: parsed.report };
+    }
+    case 'indeterminate': {
+      if (!isFixFindingReport(parsed.report)) return undefined;
+      return { status: 'indeterminate', detail: parsed.detail, report: parsed.report };
+    }
+  }
 }
 
 /**
@@ -508,9 +569,13 @@ export async function verifyPreparedHarvest(
 
   const artifact = parseValue(input.artifactJson);
   if (artifact === undefined) return refusal('result-not-object');
+  const parsed = OpResultArtifactSchema.safeParse(toPlainJson(artifact));
+  if (!parsed.success) return refusal('fixfinding-result-envelope-invalid');
+  const validated = validatedFixFindingArtifact(parsed.data, artifact);
+  if (validated === undefined) return refusal('fixfinding-result-envelope-invalid');
   const bindingRefusal = typedFixFindingResultRefusal({
     prepared: input.prepared,
-    artifact,
+    artifact: validated,
   });
   if (bindingRefusal !== undefined) return refusal(bindingRefusal);
   const source = await reobservePreparedSourceStrict(
