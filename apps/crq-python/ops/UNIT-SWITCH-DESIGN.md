@@ -109,10 +109,11 @@ topology and its independent active/enabled release, but it is not exhaustive
 production discovery: other-name dependency units, default-target links and
 socket units outside the declared paths remain untested. The separate
 ``partial`` proof mode crash-tests the three ``start`` effect points and the
-``restore_activation`` service effect point across a real user-manager restart
-and a real guest OS reboot, requiring pending-record ambiguity, actual
-source-bound activation states, a fence-settled completion baseline and
-unchanged record bytes. It is fixture-only and does not cover restore timer or
+``restore_activation`` service-file effect point before either activator is
+restored across a real user-manager restart and a real guest OS reboot,
+requiring pending-record ambiguity, actual source-bound activation states, a
+fence-settled completion baseline and unchanged record bytes. It is
+fixture-only and does not cover restore timer or
 path effect points. Release of each activator and the service must be
 controlled and crash-tested; the seam's single `start` call is not evidence
 that production release is safe.

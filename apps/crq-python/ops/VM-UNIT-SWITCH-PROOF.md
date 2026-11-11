@@ -211,13 +211,20 @@ manager restart or a real guest OS reboot) and two restore cases
 
 For each case the boundary phase runs the actual CLI with
 ``CRQ_PROOF_KILL_ON`` set to the exact effect point and requires exact SIGKILL
-(``rc == -9``). The retained record is pending at ``activation_pending`` or
-``restore_activation_pending``; the service is the released or restored
-runtime; the timer, path, wants links, drop-in, staged target and trigger have
-their expected bytes and metadata; and the completion delta is the released
-runtime only. ``start-after-service`` requires exactly one completion, a
-verified inactive timer and no queued job. Timer and path release require at
-least one completion; the observed delta is recorded rather than assumed.
+(``rc == -9``), and the adapter writes an independent hook marker naming the
+actual phase before it dies. The retained record is pending at
+``activation_pending`` or ``restore_activation_pending``. The host requires
+the exact eleven-entry owned file map and the exact eight-entry metadata map,
+with non-null type/mode/uid/gid/size/digest/target where applicable and
+file-to-metadata agreement, before comparing preserved bytes.
+
+The activation release cases require the released service file and at least
+one released-runtime completion; ``start-after-service`` requires exactly one,
+a verified inactive timer and no queued job. The restore case interrupts after
+the prior service file has been replaced, reloaded and compared, but before
+either activator is restored or the service is activated. It therefore
+requires the prior service file loaded and inactive, both activators inactive,
+no job and no completion.
 
 After the real event the observe phase requires the same record bytes, the same
 owned file bytes and metadata, and only source-bound activation transitions:
@@ -226,10 +233,18 @@ enabled active timer or path. The actual recovery CLI is then invoked twice.
 Each invocation must return rc ``3`` with the controller's own
 ``activation may have occurred`` ambiguity branch, a drained queue, an empty
 job observation, no owned process, inactive activators, the durable mask, a
-bounded completion baseline and an unchanged pending record. No completion
-after that fence is credited. The final phase restores the Python baseline and
-requires exactly one pending record per case, valid advancing completions,
-unchanged tick evidence and no staged or rogue unit entry.
+bounded completion baseline and an unchanged pending record. The list-jobs
+observation must bind its exact argv, typed rc, stdout and lines; the service
+stop and direct-start evidence must bind their exact argv and typed results.
+The completion baseline count, ordered sequences, unique invocations and
+maximum must equal the actual settled-fence completion inventory, and the
+settled inventory must be append-only from the pre-fence snapshot. No
+completion after that fence is credited. The final phase restores the Python
+baseline and requires exactly one pending record per case, valid advancing
+completions, unchanged tick evidence and no staged or rogue unit entry. Raw
+verification also re-hashes the preserved historical tick journal, binds its
+path, size and digest to the prepared baseline, and requires the archived
+record to remain present.
 
 Cross-boot completion identity is checked on unit, runtime, success, sequence,
 invocation and boot ID. A completion's first observation must not precede the
