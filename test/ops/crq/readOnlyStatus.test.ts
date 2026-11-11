@@ -47,6 +47,8 @@ interface VectorCase {
   readonly expectOk: boolean;
   readonly expectValue?: JsonValue;
   readonly expectError?: string;
+  readonly expectBytes?: string;
+  readonly expectCoreBytes?: string;
 }
 
 interface CliOutcome {
@@ -80,6 +82,8 @@ function loadFamily(name: string): VectorCase[] {
     }
     const value = expectation.get('value');
     const error = expectation.get('error');
+    const bytes = expectation.get('bytes');
+    const coreBytes = expectation.get('core_bytes');
     return {
       name: caseName,
       source,
@@ -87,6 +91,8 @@ function loadFamily(name: string): VectorCase[] {
       expectOk: expectation.get('ok') === true,
       ...(value === undefined ? {} : { expectValue: value }),
       ...(typeof error === 'string' ? { expectError: error } : {}),
+      ...(typeof bytes === 'string' ? { expectBytes: bytes } : {}),
+      ...(typeof coreBytes === 'string' ? { expectCoreBytes: coreBytes } : {}),
     };
   });
 }
@@ -298,6 +304,78 @@ describe('receipt-aware merged_current through the file boundary', () => {
     expect(compact(output.get('merged_current')), vector.name).toBe(
       compact(requireObject(vector.expectValue, `${vector.name} value`)),
     );
+  });
+});
+
+describe('lossless passthrough summary core through the file boundary', () => {
+  const cases = loadFamily('passthrough-summarize');
+  test.each(cases)('$name', async (vector) => {
+    const roots = await makeRoots();
+    const queue = withItemIds(requireObject(vector.input.get('queue'), `${vector.name} queue`));
+    const config = requireObject(vector.input.get('config'), `${vector.name} config`);
+    const events = vector.input.get('events');
+    if (!Array.isArray(events)) throw new Error(`${vector.name}: events is not an array`);
+    const now = requireNumber(vector.input.get('now'), `${vector.name} now`);
+    await writeState(roots, { queue, config, events });
+
+    const result = await runCli(['summary-core'], roots, now);
+    const accepted = parseCrqState('queue.schema.json', compact(queue));
+    if (!accepted.ok) {
+      // The phase 0.2 schema has a narrowing domain: `pr`/`order`/`generation`
+      // reject integers above 2^53 and `generation` rejects floats. Those cases
+      // stay pure-oracle tests; the route documents the refusal.
+      expect(result.exitCode, vector.name).toBe(1);
+      expect(result.stdout).toBe('');
+      expect(result.stderr).toContain('queue-invalid:');
+      return;
+    }
+    if (!vector.expectOk) {
+      expect(result.exitCode, vector.name).toBe(1);
+      expect(result.stderr).toContain('summary-failed:');
+      if (vector.expectError !== undefined) {
+        expect(result.stderr).toContain(`${vector.expectError}:`);
+      }
+      return;
+    }
+    expect(result.stderr, vector.name).toBe('');
+    expect(result.exitCode, vector.name).toBe(0);
+    if (vector.expectCoreBytes === undefined) {
+      throw new Error(`${vector.name}: missing expect.core_bytes`);
+    }
+    expect(compact(stripAdditive(parseOutput(result.stdout))), vector.name).toBe(
+      vector.expectCoreBytes,
+    );
+  });
+});
+
+describe('lossless receipt bytes through the file boundary', () => {
+  const cases = loadFamily('passthrough-receipt').filter(
+    (vector) => vector.source === 'status_summary.merged_current',
+  );
+  test.each(cases)('$name', async (vector) => {
+    const roots = await makeRoots();
+    const queue = withItemIds(requireObject(vector.input.get('queue'), `${vector.name} queue`));
+    const encoded = vector.input.get('receipt_bytes');
+    const receipts = new Map<string, Uint8Array>();
+    if (encoded instanceof JsonObject) {
+      for (const [id, value] of encoded.entries) {
+        if (typeof value !== 'string') throw new Error(`${vector.name}: receipt bytes not text`);
+        // These are the exact bytes `review_receipt.write_receipt` wrote. Do
+        // not reconstruct them through the TypeScript canonical encoder: that
+        // would couple the expected oracle to the implementation under test.
+        receipts.set(id, Buffer.from(value, 'base64'));
+      }
+    }
+    await writeState(roots, { queue, config: DEFAULT_CONFIG, events: [], receipts });
+
+    const result = await runCli(['summary-core'], roots, FIXED_NOW);
+    expect(result.stderr, vector.name).toBe('');
+    expect(result.exitCode, vector.name).toBe(0);
+    if (vector.expectBytes === undefined) {
+      throw new Error(`${vector.name}: missing expect.bytes`);
+    }
+    const output = parseOutput(result.stdout);
+    expect(compact(output.get('merged_current')), vector.name).toBe(vector.expectBytes);
   });
 });
 

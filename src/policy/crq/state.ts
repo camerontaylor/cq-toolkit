@@ -70,19 +70,39 @@ export class StateValuePathError extends Error {
  * wrong kind throws {@link StateValuePathError}. Array segments are canonical
  * non-negative indices only (`0`, `1`, ...); no other spelling is guessed.
  *
+ * `options.subtrees` is the bulk form: every number inside a named subtree is
+ * retained. The same structural-sharing and own-property rules apply, and a
+ * subtree is cloned only where a number actually replaces a materialised value.
+ *
  * `acceptance.value` is never mutated. Object clones use own-property reads
  * and writes, so `__proto__` and similar keys cannot reach the prototype.
  */
 export function stateValueWithNumbers(
   acceptance: CrqStateAcceptance,
   paths: readonly StateValuePath[],
+  options: StateValueOptions = {},
 ): unknown {
   let value = acceptance.value;
   for (const path of paths) {
     if (path.length === 0) throw new StateValuePathError('path must name a leaf', path);
     value = spliceNumber(value, acceptance.document, path, path, 0);
   }
+  for (const path of options.subtrees ?? []) {
+    if (path.length === 0) throw new StateValuePathError('path must name a subtree', path);
+    value = retainAtPath(value, acceptance.document, path, path, 0);
+  }
   return value;
+}
+
+export interface StateValueOptions {
+  /**
+   * Subtrees whose numbers all stay lossless. Unlike `paths`, which replaces
+   * only a leaf and leaves its siblings materialised, every {@link JsonNumber}
+   * inside a subtree becomes the exact value. The subtree is cloned only where
+   * a number actually changes, so untouched siblings and branches keep
+   * structural sharing.
+   */
+  readonly subtrees?: readonly StateValuePath[];
 }
 
 const ARRAY_INDEX = /^(?:0|[1-9][0-9]*)$/;
@@ -128,6 +148,87 @@ function spliceNumber(
   }
   if (value === null || value === undefined) return value;
   throw new StateValuePathError('path traverses a non-container', fullPath);
+}
+
+function retainAtPath(
+  value: unknown,
+  document: JsonValue,
+  path: StateValuePath,
+  fullPath: StateValuePath,
+  offset: number,
+): unknown {
+  if (offset === path.length) return retainSubtree(value, document, fullPath);
+  const key = path[offset] as string;
+  if (Array.isArray(value)) {
+    if (!Array.isArray(document)) {
+      throw new StateValuePathError('materialised and lossless containers differ', fullPath);
+    }
+    if (!ARRAY_INDEX.test(key)) {
+      throw new StateValuePathError('array segment must be a canonical index', fullPath);
+    }
+    const index = Number(key);
+    if (index >= value.length || index >= document.length) return value;
+    const child: unknown = value[index];
+    const replaced = retainAtPath(child, document[index] as JsonValue, path, fullPath, offset + 1);
+    if (replaced === child) return value;
+    const clone = value.slice();
+    defineOwn(clone, index, replaced);
+    return clone;
+  }
+  if (isPlainRecord(value)) {
+    if (!(document instanceof JsonObject)) {
+      throw new StateValuePathError('materialised and lossless containers differ', fullPath);
+    }
+    if (!Object.prototype.hasOwnProperty.call(value, key)) return value;
+    const childDocument = document.get(key);
+    if (childDocument === undefined) return value;
+    const child = value[key];
+    const replaced = retainAtPath(child, childDocument, path, fullPath, offset + 1);
+    if (replaced === child) return value;
+    const clone = clonePlainRecord(value);
+    defineOwn(clone, key, replaced);
+    return clone;
+  }
+  if (value === null || value === undefined) return value;
+  throw new StateValuePathError('path traverses a non-container', fullPath);
+}
+
+function retainSubtree(value: unknown, document: JsonValue, path: StateValuePath): unknown {
+  if (document instanceof JsonNumber) return document;
+  if (Array.isArray(value)) {
+    if (!Array.isArray(document)) {
+      throw new StateValuePathError('materialised and lossless containers differ', path);
+    }
+    let clone: unknown[] | null = null;
+    document.forEach((entry, index) => {
+      if (index >= value.length) return;
+      const child: unknown = value[index];
+      const replaced = retainSubtree(child, entry, path);
+      if (replaced === child) return;
+      clone ??= value.slice();
+      defineOwn(clone, index, replaced);
+    });
+    return clone ?? value;
+  }
+  if (isPlainRecord(value)) {
+    if (!(document instanceof JsonObject)) {
+      throw new StateValuePathError('materialised and lossless containers differ', path);
+    }
+    let clone: Record<string, unknown> | null = null;
+    for (const [key, entry] of document.entries) {
+      if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
+      const child = value[key];
+      const replaced = retainSubtree(child, entry, path);
+      if (replaced === child) continue;
+      clone ??= clonePlainRecord(value);
+      defineOwn(clone, key, replaced);
+    }
+    return clone ?? value;
+  }
+  if (document instanceof JsonObject || Array.isArray(document)) {
+    throw new StateValuePathError('materialised and lossless containers differ', path);
+  }
+  return value;
 }
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {

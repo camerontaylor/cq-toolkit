@@ -20,14 +20,19 @@ import { ClientHealthError, clientHealthSnapshot } from '../../../src/policy/crq
 import {
   JsonNumber,
   JsonObject,
+  comparePythonNumbers,
   parseJsonValue,
+  pythonNumbersEqual,
   toPlainJson,
+  toPlainJsonRetainingNumbers,
   type JsonValue,
 } from '../../../src/policy/crq/jsonValue.js';
 import {
+  pythonJsonText,
   receiptJsonBytes,
   receiptJsonDigest,
   receiptJsonText,
+  sha256Hex,
 } from '../../../src/policy/crq/pythonJson.js';
 import {
   LABEL_MAX_UNITS,
@@ -55,6 +60,12 @@ import {
 
 const GROUP_P = new URL('../../../apps/crq-python/fixtures/group-p/', import.meta.url);
 const A1 = new URL('../../../apps/crq-python/fixtures/a1-status/', import.meta.url);
+const COMPACT = {
+  asciiOnly: true,
+  sortKeys: false,
+  keyOrder: 'insertion' as const,
+  indent: null,
+};
 
 type RecordValue = Record<string, unknown>;
 
@@ -71,6 +82,11 @@ interface VectorCase {
   readonly source: string;
   readonly input: RecordValue;
   readonly expect: Expectation;
+}
+
+interface LosslessVectorCase extends VectorCase {
+  readonly expectBytes?: string;
+  readonly expectCoreOnly?: boolean;
 }
 
 type Outcome =
@@ -103,6 +119,57 @@ function loadFamily(directory: URL, name: string): VectorCase[] {
         ...(typeof expectation.error === 'string' ? { error: expectation.error } : {}),
         ...(typeof expectation.message === 'string' ? { message: expectation.message } : {}),
       },
+    };
+  });
+}
+
+/**
+ * Load a family without materialising numbers inside `input.queue`, and keep
+ * the Python reserialisation of `expect.value` as `expect.bytes`.
+ *
+ * Config/status/events keep their materialised shape because the projection
+ * consumes them as ordinary values; the queue is the boundary under test.
+ */
+function loadLosslessFamily(directory: URL, name: string): LosslessVectorCase[] {
+  const lossless = parseJsonValue(readFileSync(new URL(`${name}.json`, directory), 'utf8'));
+  if (!(lossless instanceof JsonObject)) throw new Error(`${name}: root is not an object`);
+  const cases = lossless.get('cases');
+  if (!Array.isArray(cases)) throw new Error(`${name}: missing cases`);
+  return cases.map((entry, index) => {
+    if (!(entry instanceof JsonObject)) throw new Error(`${name}: case ${index} is not an object`);
+    const expectation = entry.get('expect');
+    const inputDocument = entry.get('input');
+    const caseName = entry.get('name');
+    const source = entry.get('source');
+    if (!(expectation instanceof JsonObject) || !(inputDocument instanceof JsonObject)) {
+      throw new Error(`${name}: case ${index} has no input/expect object`);
+    }
+    if (typeof caseName !== 'string' || typeof source !== 'string') {
+      throw new Error(`${name}: case ${index} has no name/source`);
+    }
+    const materialised = new Set(['status', 'heartbeat', 'config', 'events', 'now']);
+    const input: RecordValue = {};
+    for (const [key, value] of inputDocument.entries) {
+      input[key] = materialised.has(key) ? toPlainJson(value) : toPlainJsonRetainingNumbers(value);
+    }
+    const value = expectation.get('value');
+    const error = expectation.get('error');
+    const bytes = expectation.get('bytes');
+    return {
+      family: name,
+      name: caseName,
+      source,
+      input,
+      expect: {
+        ok: expectation.get('ok') === true,
+        ...(value === undefined ? {} : { value: toPlainJson(value) }),
+        ...(typeof error === 'string' ? { error } : {}),
+        ...(typeof expectation.get('message') === 'string'
+          ? { message: expectation.get('message') as string }
+          : {}),
+      },
+      ...(typeof bytes === 'string' ? { expectBytes: bytes } : {}),
+      ...(expectation.get('core_only') === true ? { expectCoreOnly: true } : {}),
     };
   });
 }
@@ -297,6 +364,81 @@ function runA1Vector(vector: VectorCase): unknown {
   }
 }
 
+function runLosslessSummarize(input: RecordValue): unknown {
+  return summarize(
+    recordOf(input.status, 'status'),
+    recordOf(input.queue, 'queue'),
+    recordOf(input.heartbeat, 'heartbeat'),
+    recordOf(input.config, 'config'),
+    arrayOf(input.events, 'events'),
+    numberOf(input.now, 'now'),
+  );
+}
+
+function runLosslessMergedCurrent(input: RecordValue): unknown {
+  const raw = isRecordObject(input.receipt_bytes) ? input.receipt_bytes : {};
+  return mergedCurrent(recordOf(input.queue, 'queue'), (receiptId) => {
+    const encoded = raw[receiptId];
+    return typeof encoded === 'string' ? Buffer.from(encoded, 'base64') : null;
+  });
+}
+
+function parseNumericText(text: string): JsonValue {
+  return parseJsonValue(text, {
+    parseConstant: (raw) =>
+      JsonNumber.float(
+        raw === 'NaN'
+          ? Number.NaN
+          : raw === 'Infinity'
+            ? Number.POSITIVE_INFINITY
+            : Number.NEGATIVE_INFINITY,
+      ),
+  });
+}
+
+function runNumericVector(input: RecordValue): unknown {
+  const left = parseNumericText(stringOf(input.a, 'a'));
+  const right = parseNumericText(stringOf(input.b, 'b'));
+  const equal = pythonNumbersEqual(left, right);
+  const compare = comparePythonNumbers(left, right);
+  return {
+    equal: equal === true,
+    compare,
+    ...(compare === null ? { error: 'TypeError' } : {}),
+  };
+}
+
+function runLosslessA1Vector(vector: LosslessVectorCase): unknown {
+  switch (vector.source) {
+    case 'status_summary.summarize':
+      return runLosslessSummarize(vector.input);
+    case 'status_summary.merged_current':
+      return runLosslessMergedCurrent(vector.input);
+    case 'review_receipt.current_equivalence':
+      return { digest: currentEquivalence(vector.input.capture) };
+    case 'review_receipt.digest':
+      return {
+        float: receiptJsonDigest(vector.input.float_paths as JsonValue),
+        bigint: receiptJsonDigest(vector.input.bigint_paths as JsonValue),
+      };
+    case 'python.numeric_compare':
+      return runNumericVector(vector.input);
+    default:
+      throw new Error(`unhandled lossless A1 source ${vector.source}`);
+  }
+}
+
+/** Remove only the two additive #1420 keys without materialising JsonNumber. */
+function withoutAdditiveLossless(view: StatusSummaryView): unknown {
+  const pending = view.pending_items.map((item) => {
+    const copy: RecordValue = { ...item };
+    delete copy.label;
+    delete copy.repair_origin;
+    return copy;
+  });
+  return { ...(view as unknown as RecordValue), pending_items: pending };
+}
+
 describe.each(loadFamily(GROUP_P, 'summary'))('group-p summary/$name', (vector) => {
   test('every non-additive field matches the Python oracle', () => {
     const outcome = capture(() => runSummarize(vector.input));
@@ -353,6 +495,74 @@ describe.each(loadFamily(A1, 'client-health'))('a1 client-health/$name', (vector
       capture(() => runA1Vector(vector)),
     );
   });
+});
+
+describe.each(
+  loadLosslessFamily(A1, 'passthrough-summarize').filter((vector) => !vector.expectCoreOnly),
+)('a1 passthrough summarize/$name', (vector) => {
+  test('summary bytes match Python reserialisation exactly', () => {
+    const outcome = capture(() => runLosslessA1Vector(vector));
+    if (!vector.expect.ok || !outcome.ok) {
+      assertOutcome(vector, outcome);
+      return;
+    }
+    if (vector.expectBytes === undefined) throw new Error(`${vector.name}: missing expect.bytes`);
+    expect(
+      pythonJsonText(withoutAdditiveLossless(outcome.value as StatusSummaryView), COMPACT),
+    ).toBe(vector.expectBytes);
+  });
+});
+
+describe.each(loadLosslessFamily(A1, 'passthrough-receipt'))(
+  'a1 passthrough receipt/$name',
+  (vector) => {
+    test('raw receipt bytes and numeric identity match Python', () => {
+      const outcome = capture(() => runLosslessA1Vector(vector));
+      if (!vector.expect.ok || !outcome.ok) {
+        assertOutcome(vector, outcome);
+        return;
+      }
+      if (vector.expectBytes === undefined) {
+        expect(plain(outcome.value)).toEqual(vector.expect.value);
+        return;
+      }
+      expect(pythonJsonText(outcome.value, COMPACT)).toBe(vector.expectBytes);
+    });
+  },
+);
+
+describe.each(loadLosslessFamily(A1, 'numeric-lineage'))('a1 numeric lineage/$name', (vector) => {
+  test('Python numeric dict-key lineage matches', () => {
+    const outcome = capture(() => runLosslessA1Vector(vector));
+    if (!vector.expect.ok || !outcome.ok) {
+      assertOutcome(vector, outcome);
+      return;
+    }
+    if (vector.expectBytes === undefined) {
+      throw new Error(`${vector.name}: missing expect.bytes`);
+    }
+    expect(pythonJsonText(outcome.value, COMPACT)).toBe(vector.expectBytes);
+  });
+});
+
+describe.each(loadLosslessFamily(A1, 'numeric'))('a1 numeric/$name', (vector) => {
+  test('Python equality and ordering match the oracle', () => {
+    assertOutcome(
+      vector,
+      capture(() => runLosslessA1Vector(vector)),
+    );
+  });
+});
+
+test('passthrough receipt fixtures retain the exact Python writer bytes', () => {
+  for (const vector of loadLosslessFamily(A1, 'passthrough-receipt')) {
+    const bytes = vector.input.receipt_bytes;
+    if (!isRecordObject(bytes)) continue;
+    for (const [id, encoded] of Object.entries(bytes)) {
+      if (typeof encoded !== 'string') throw new Error(`${vector.name}: receipt bytes not text`);
+      expect(sha256Hex(Buffer.from(encoded, 'base64'))).toBe(id);
+    }
+  }
 });
 
 describe('existing group-P families stay the foundation', () => {

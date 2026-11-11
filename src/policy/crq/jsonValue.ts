@@ -489,3 +489,157 @@ export function toPlainJson(value: JsonValue, options: { bigints?: boolean } = {
   if (Array.isArray(value)) return value.map((entry) => toPlainJson(entry, options));
   return value;
 }
+
+/**
+ * Materialise ordinary JavaScript containers while keeping every number as a
+ * {@link JsonNumber}.
+ *
+ * This is the bridge for readers that need plain arrays/objects and Python's
+ * int-vs-float distinction at the same time: `new Map`, structural sharing and
+ * `Object.entries` work on the result, and a later `toPlainJson` (or
+ * `pythonJsonText`) still sees the exact Python value. Unlike
+ * {@link toPlainJson}, no integer is converted to a JavaScript number, so an
+ * integer above `Number.MAX_SAFE_INTEGER` cannot round.
+ */
+export function toPlainJsonRetainingNumbers(value: JsonValue): unknown {
+  if (value instanceof JsonNumber) return value;
+  if (value instanceof JsonObject) {
+    const object: Record<string, unknown> = {};
+    for (const [key, entry] of value.entries) {
+      Object.defineProperty(object, key, {
+        value: toPlainJsonRetainingNumbers(entry),
+        enumerable: true,
+        writable: true,
+        configurable: true,
+      });
+    }
+    return object;
+  }
+  if (Array.isArray(value)) return value.map(toPlainJsonRetainingNumbers);
+  return value;
+}
+
+interface PythonNumber {
+  readonly kind: 'int' | 'float';
+  readonly integer: bigint | null;
+  readonly float: number | null;
+}
+
+/**
+ * Python's `int`/`float` view of a JSON-shaped value.
+ *
+ * Python `bool` is an `int` subclass, so `True` compares as `1` and `False` as
+ * `0`. A plain JavaScript number is treated as a float when it is non-integral
+ * and as an integer when it is integral; callers that need the original Python
+ * type must pass a {@link JsonNumber}, which is why the status reader keeps
+ * exact numbers at the boundary.
+ */
+function pythonNumber(value: unknown): PythonNumber | null {
+  if (value instanceof JsonNumber) {
+    return value.kind === 'int'
+      ? { kind: 'int', integer: value.integer, float: null }
+      : { kind: 'float', integer: null, float: value.float };
+  }
+  if (typeof value === 'boolean') {
+    return { kind: 'int', integer: value ? 1n : 0n, float: null };
+  }
+  if (typeof value === 'bigint') return { kind: 'int', integer: value, float: null };
+  if (typeof value === 'number') {
+    return Number.isInteger(value)
+      ? { kind: 'int', integer: BigInt(value), float: null }
+      : { kind: 'float', integer: null, float: value };
+  }
+  return null;
+}
+
+/**
+ * Python `==` for two numeric values, or `null` when either side is not a
+ * number.
+ *
+ * `1 == 1.0` is true, booleans compare as their integer value, and adjacent
+ * integers above `Number.MAX_SAFE_INTEGER` stay distinct. A float never rounds
+ * an integer before comparing. `NaN != NaN` and every comparison involving
+ * NaN is false, matching Python.
+ */
+export function pythonNumbersEqual(left: unknown, right: unknown): boolean | null {
+  const a = pythonNumber(left);
+  const b = pythonNumber(right);
+  if (a === null || b === null) return null;
+  if (isNan(a) || isNan(b)) return false;
+  return compareNumbers(a, b) === 0;
+}
+
+/**
+ * Python ordering for two numeric values, or `null` when either side is not a
+ * number.
+ *
+ * Returns `-1`, `0` or `1`. A compare involving NaN returns `0` because both
+ * Python `<` and `>` are false; equality is still false and must be tested
+ * with {@link pythonNumbersEqual}. The comparison is exact for integers above
+ * `Number.MAX_SAFE_INTEGER`: it never converts an integer to a double.
+ */
+export function comparePythonNumbers(left: unknown, right: unknown): number | null {
+  const a = pythonNumber(left);
+  const b = pythonNumber(right);
+  if (a === null || b === null) return null;
+  if (isNan(a) || isNan(b)) return 0;
+  return compareNumbers(a, b);
+}
+
+function isNan(value: PythonNumber): boolean {
+  return value.kind === 'float' && Number.isNaN(value.float as number);
+}
+
+function compareNumbers(a: PythonNumber, b: PythonNumber): number {
+  if (a.kind === 'int' && b.kind === 'int') {
+    const left = a.integer as bigint;
+    const right = b.integer as bigint;
+    return left < right ? -1 : left > right ? 1 : 0;
+  }
+  if (a.kind === 'float' && b.kind === 'float') {
+    const left = a.float as number;
+    const right = b.float as number;
+    return left < right ? -1 : left > right ? 1 : 0;
+  }
+  return a.kind === 'int'
+    ? compareIntToFloat(a.integer as bigint, b.float as number)
+    : -compareIntToFloat(b.integer as bigint, a.float as number);
+}
+
+/** Exact `int` vs `float` ordering without converting the integer to a double. */
+function compareIntToFloat(integer: bigint, float: number): number {
+  if (Number.isNaN(float)) return 0;
+  if (float === Infinity) return -1;
+  if (float === -Infinity) return 1;
+  if (float === 0) return integer < 0n ? -1 : integer > 0n ? 1 : 0;
+  if (integer === 0n) return float < 0 ? 1 : -1;
+  if (integer < 0n !== float < 0) return integer < 0n ? -1 : 1;
+  const negative = integer < 0n;
+  const magnitude = negative ? -integer : integer;
+  const [numerator, denominator] = floatRatio(Math.abs(float));
+  const left = magnitude * denominator;
+  const right = numerator;
+  const comparison = left < right ? -1 : left > right ? 1 : 0;
+  return negative ? -comparison : comparison;
+}
+
+/**
+ * Exact finite float as `numerator / denominator`, read from its IEEE-754
+ * bits. The decimal `toString` form is shortest-round-trip, not the exact
+ * binary value, so it can misorder an adjacent integer above 2^53.
+ */
+function floatRatio(value: number): [bigint, bigint] {
+  const view = new DataView(new ArrayBuffer(8));
+  view.setFloat64(0, value, false);
+  const high = BigInt(view.getUint32(0, false));
+  const low = BigInt(view.getUint32(4, false));
+  const bits = (high << 32n) | low;
+  const exponentBits = Number((bits >> 52n) & 0x7ffn);
+  const fraction = bits & ((1n << 52n) - 1n);
+  const mantissa = exponentBits === 0 ? fraction : (1n << 52n) | fraction;
+  const exponent = exponentBits === 0 ? -1074 : exponentBits - 1023 - 52;
+  const sign = bits >> 63n === 1n ? -1n : 1n;
+  return exponent >= 0
+    ? [sign * (mantissa << BigInt(exponent)), 1n]
+    : [sign * mantissa, 1n << BigInt(-exponent)];
+}
