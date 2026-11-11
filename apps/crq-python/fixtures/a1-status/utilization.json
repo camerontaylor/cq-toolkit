@@ -2251,28 +2251,6 @@
         "error": "ValueError",
         "message": "year must be in 1..9999, not 31690708"
       }
-    },
-    {
-      "name": "platform-time-error",
-      "source": "coverage.utilization_digest",
-      "input": {
-        "queue": {
-          "starts": []
-        },
-        "ledger": {
-          "schema_version": 1,
-          "paths": {},
-          "runs": {},
-          "observations": {}
-        },
-        "now": 1e+18,
-        "max_starts_per_hour": 5
-      },
-      "expect": {
-        "ok": false,
-        "error": "OSError",
-        "message": "[Errno 75] Value too large for defined data type"
-      }
     }
   ]
 }

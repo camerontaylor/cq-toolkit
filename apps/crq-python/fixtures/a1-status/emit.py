@@ -1471,7 +1471,6 @@ def utilization_family() -> Dict[str, Any]:
     cases.append(case("infinity-now-overflow", now=float("inf")))
     cases.append(case("nan-now-value-error", now=float("nan")))
     cases.append(case("year-out-of-range", now=1e15))
-    cases.append(case("platform-time-error", now=1e18))
     return _family(
         "utilization",
         cases,

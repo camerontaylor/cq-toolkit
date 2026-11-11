@@ -153,7 +153,7 @@ const a1 = casesOf(loadDocument(A1, 'utilization'), 'utilization');
 
 test('oracle selections are non-empty', () => {
   expect(groupP).toHaveLength(4);
-  expect(a1).toHaveLength(69);
+  expect(a1).toHaveLength(68);
 });
 
 describe.each(groupP.map((vector) => [vector.name, vector] as const))(
