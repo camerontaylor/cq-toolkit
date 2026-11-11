@@ -406,11 +406,20 @@ describe('dev.cycle', () => {
       expect(result.reason).toContain('NOT READY');
       expect(result.reason).toContain('untracked non-ignored files');
       expect(result.reason).toContain(followUpCommand(44, repo.root));
+      // The clean leg's report rides its VALUE (addressReportOf), so the
+      // findings section IS composed and the reason's attempt-log claim is
+      // true on this path.
+      expect(result.reason).toContain('and the attempt log');
     }
     expect(opens).toEqual([
       { repoRoot: repo.root, target: 'main', draft: true, draftWhenNotReady: true },
     ]);
-    // A clean address report carries NO findings section: nothing is open.
-    expect(bodies).toEqual([]);
+    // The findings section is composed with the CLEAN-RUN framing: no
+    // round-cap "stopped" text on a run that finished clean.
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0]).toContain(DEV_FINDINGS_SECTION_MARKER);
+    expect(bodies[0]).toContain('## Open findings after a clean address run (readiness gaps)');
+    expect(bodies[0]).toContain('review.address finished clean');
+    expect(bodies[0]).not.toContain('round cap');
   });
 });

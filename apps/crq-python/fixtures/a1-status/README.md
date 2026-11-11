@@ -35,6 +35,7 @@ trailing newline; fixed timestamps only, so the bytes are host-independent.
 | `summarize.json` | `status_summary.summarize` | local-review aging and the config window, invalid age tolerance, foreign open PR rank, operator-priority ordering, 24 h completion grouping and the 10-row preview, `starts_cap` (`3` kept, `3.0`/`3e0` fallback, 2^53 and 2^53+1 kept exactly, large negative and float fallbacks, `0`, `true`, `"8"`, missing, remaining-only), generation `true` equality, open cycles, re-harvested runs, review_finished timestamp refusals, 60-minute window boundaries, global in-flight, configured repos before their first item |
 | `merged-current.json` | `status_summary.merged_current` | verified no-current-code / partial-scope / terminal / unsupported, deleted and excluded-path counts, receipt-less and tampered receipts, missing receipt, retained reuse lineage (verified, missing parent, cycle, capture-target mismatch), empty path list, sorted and bounded captured targets (+34 case), discovery passthrough |
 | `client-health.json` | `client_health.snapshot` | completed age (frozen clock), missing/empty completed_at, invalid and non-string refusals, non-object health and item refusals, pending/blocked counts |
+| `publish-sections.json` | `status_summary.publish` | `utilization` + `schedule` section values and exact compact bytes, default ledger for a missing/empty/null/falsy `coverage`, cap from `usage.limit` vs config (int and float lexeme), schedule `unknown`/empty/null/false/missing status and custom/null `schedule_id`, truthy non-dict coverage refusals, and the `no completed tick to publish` refusal (which precedes ledger errors) |
 | `passthrough-summarize.json` | `status_summary.summarize` + publish core | lossless `pr`/`generation`/`order`/`title`/`subject.pr`, exact adjacent-bigint ordering, local-review float generation and aging deadline, discovery and usage numbers, plus the Python `bytes`/`core_bytes` reserialisation; `core_only` cases exercise the route's lossless config cap without claiming the pure projection sees the config float |
 | `passthrough-receipt.json` | `status_summary.merged_current`, `review_receipt` | real `write_receipt` bytes, float/bigint path counts, adjacent-bigint inequality, int-vs-float version equality, current-equivalence and path digests |
 | `numeric-lineage.json` | `status_summary.merged_current` | numeric `reused_from` dict-key parity: int, int/float, bool, adjacent bigints, and a truthy list remaining unverified |
@@ -50,6 +51,19 @@ additive behaviour in TypeScript-only cases (verdict path + reason, `+N`,
 title/body fallback, commit-subject hook, cycle label, `<= 120` UTF-16 units,
 no split surrogate, one line). Labels are sourced only from existing
 queue/repair text, never from transcripts.
+
+## Publish-section assembly
+
+`publish-sections.json` drives the real `status_summary.publish` with its
+effect seams patched (systemd probe, repair digest, finding triage, previous
+summary read, `gh` title lookup) and records the sections the publisher itself
+produced. `input.core` is the publisher's prelude after the receipt-aware
+`merged_current` replacement, matching `readSummaryCore().value`;
+`expect.bytes` is the exact compact `{"utilization":…,"schedule":…}`
+reserialisation and `expect.full_bytes` appends those sections to the core.
+The TypeScript helper `src/policy/crq/summarySections.ts` is the port. A
+no-tick refusal is the publisher's `ValueError("no completed tick to
+publish")`; like Python, it is checked before the ledger and cap are read.
 
 ## Int/float boundary
 

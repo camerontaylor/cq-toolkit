@@ -535,6 +535,15 @@ def triage_context_safe(c, context, output):
     return c.secret_scan_diff(diff, output)[0]
 
 
+def triage_context_scan(c, context, output):
+    """A scan policy read or parse failure must defer with its cause intact."""
+    from crq_repair.triage import ContextScanError
+    try:
+        return triage_context_safe(c, context, output)
+    except (OSError, RuntimeError) as exc:
+        raise ContextScanError(exc) from exc
+
+
 def triage_phase(config, dry_run=False):
     import crq as c
     import backfill_runtime as runtime
@@ -559,7 +568,7 @@ def triage_phase(config, dry_run=False):
                'triage_context': context}
         directory = state / 'repair/triage' / row['finding']['id']
         directory.mkdir(parents=True, exist_ok=True)
-        if not triage_context_safe(c, context, directory / 'context-scan.json'):
+        if not triage_context_scan(c, context, directory / 'context-scan.json'):
             return {'stop': 'ok', 'verdict': 'unsure', 'context_scan_refused': True, 'reason': 'triage context secret scan rejected'}
         bounded_config = copy.deepcopy(config)
         bounded_config['repair']['budget']['wall_clock_min'] = remaining / 60
