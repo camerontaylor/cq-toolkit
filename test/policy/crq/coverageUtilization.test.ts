@@ -217,6 +217,36 @@ describe('numeric boundary contract', () => {
   });
 });
 
+describe('timestamp and cooldown rounding contract', () => {
+  test('fromtimestamp rounds the binary64 microsecond product half-even', () => {
+    const queue = new JsonObject([
+      ['starts', [JsonNumber.float(0.0000025)]],
+      ['cooldown_until', null],
+    ]);
+    const value = utilizationDigest(queue, emptyLedger(), {
+      now: '1970-01-01T00:00:00.000002Z',
+      maxStartsPerHour: 5,
+    });
+    // Exact-rational rounding would produce 3 microseconds and exclude the
+    // start; CPython multiplies in binary64 first and rounds 2.5 to 2.
+    expect(compact(value)).toContain('"starts_24h":1,');
+  });
+
+  test('cooldown uses timedelta.total_seconds exact int ratio', () => {
+    const queue = new JsonObject([
+      ['starts', []],
+      ['cooldown_until', '2400-01-01T00:00:00.000001Z'],
+    ]);
+    const value = utilizationDigest(queue, emptyLedger(), {
+      now: '2026-11-09T12:00:00Z',
+      maxStartsPerHour: 5,
+    });
+    // Converting the whole microsecond delta to binary64 first loses the low
+    // bit and yields 196254000.0.
+    expect(compact(value)).toContain('"cooldown_minutes":196254000.00000003,');
+  });
+});
+
 function observationLedger(pending: readonly unknown[]): Record<string, unknown> {
   const observations: Record<string, unknown> = {};
   pending.forEach((value, index) => {

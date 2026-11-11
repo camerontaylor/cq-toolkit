@@ -299,7 +299,9 @@ function cooldownMinutes(queue: unknown, now: bigint): number | JsonNumber {
   const cooldown = coverageTime(raw);
   const delta = cooldown - now;
   if (delta <= 0n) return 0;
-  const minutes = Number(delta) / Number(MICROS_PER_SECOND) / 60;
+  // Python 3.14 `timedelta.total_seconds()` true-divides the exact total
+  // microsecond int by 1_000_000, then the port divides by 60 in binary64.
+  const minutes = intRatioToDouble(delta, MICROS_PER_SECOND) / 60;
   return JsonNumber.float(minutes);
 }
 
@@ -381,35 +383,47 @@ function floatSeconds(seconds: number): bigint {
       'OverflowError',
     );
   }
-  return checkDatetimeRange(roundHalfEvenMicros(seconds));
+  const split = splitFloatSeconds(seconds);
+  if (split.seconds >= limit || split.seconds < -limit) {
+    throw new CoverageUtilizationError(
+      'timestamp out of range for platform time_t',
+      'OverflowError',
+    );
+  }
+  return checkDatetimeRange(split.seconds * MICROS_PER_SECOND + split.microseconds);
 }
 
-/** Exact IEEE-754 value -> UTC microseconds, round half to even. */
-function roundHalfEvenMicros(value: number): bigint {
-  if (value === 0) return 0n;
-  const view = new DataView(new ArrayBuffer(8));
-  view.setFloat64(0, value, false);
-  const high = view.getUint32(0, false);
-  const low = view.getUint32(4, false);
-  const sign = (high & 0x8000_0000) !== 0 ? -1n : 1n;
-  const exponent = (high >>> 20) & 0x7ff;
-  const fraction = (BigInt(high & 0x000f_ffff) << 32n) | BigInt(low);
-  const numerator = exponent === 0 ? fraction : (1n << 52n) | fraction;
-  const normalized =
-    exponent === 0
-      ? { significand: numerator, power: -1074 }
-      : exponent > 1075
-        ? { significand: numerator << BigInt(exponent - 1075), power: 0 }
-        : { significand: numerator, power: exponent - 1075 };
-  const scaled = normalized.significand * MICROS_PER_SECOND;
-  const denominator = 1n << BigInt(-normalized.power);
-  let quotient = scaled / denominator;
-  const remainder = scaled % denominator;
-  const twice = remainder * 2n;
-  if (twice > denominator || (twice === denominator && (quotient & 1n) !== 0n)) {
-    quotient += 1n;
+interface FloatSecondsSplit {
+  readonly seconds: bigint;
+  readonly microseconds: bigint;
+}
+
+/**
+ * CPython `_PyTime_ObjectToTimeval` for a float: `modf` splits the seconds,
+ * the fraction is multiplied by 1e6 in binary64, and only then rounded
+ * half-even. Rounding the exact rational instead changes ties such as
+ * `0.0000025` from 2 microseconds to 3.
+ */
+function splitFloatSeconds(value: number): FloatSecondsSplit {
+  const integer = Math.trunc(value);
+  let fraction = roundHalfEven((value - integer) * 1e6);
+  let seconds = integer;
+  if (fraction >= 1e6) {
+    fraction -= 1e6;
+    seconds += 1;
+  } else if (fraction < 0) {
+    fraction += 1e6;
+    seconds -= 1;
   }
-  return sign * quotient;
+  return { seconds: BigInt(seconds), microseconds: BigInt(fraction) };
+}
+
+function roundHalfEven(value: number): number {
+  const floor = Math.floor(value);
+  const difference = value - floor;
+  if (difference < 0.5) return floor;
+  if (difference > 0.5) return floor + 1;
+  return floor % 2 === 0 ? floor : floor + 1;
 }
 
 function checkDatetimeRange(micros: bigint): bigint {

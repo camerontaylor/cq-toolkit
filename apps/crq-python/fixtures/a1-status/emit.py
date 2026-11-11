@@ -1003,6 +1003,13 @@ def utilization_family() -> Dict[str, Any]:
     )
     cases.append(
         case(
+            "float-start-half-even-tie",
+            now="1970-01-01T00:00:00.000002Z",
+            queue={"starts": [0.0000025]},
+        )
+    )
+    cases.append(
+        case(
             "bool-now-is-epoch-second",
             now=True,
             queue={
@@ -1044,6 +1051,15 @@ def utilization_family() -> Dict[str, Any]:
             queue={
                 "starts": [],
                 "cooldown_until": "2026-11-10T13:00:00Z",
+            },
+        )
+    )
+    cases.append(
+        case(
+            "large-cooldown-total-seconds",
+            queue={
+                "starts": [],
+                "cooldown_until": "2400-01-01T00:00:00.000001Z",
             },
         )
     )
