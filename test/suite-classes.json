@@ -320,6 +320,7 @@
   "test/ops/crq/outbox.test.ts": "pure",
   "test/ops/crq/publisher.test.ts": "pure",
   "test/ops/crq/repairPrepare.test.ts": "pure",
+  "test/ops/crq/repairPrepareExecution.test.ts": "pure",
   "test/ops/crq/repairPrepareGates.test.ts": "pure",
   "test/ops/dev/cycle-checkoutBoundary.test.ts": "process",
   "test/ops/fix/runFix.atomic-report.test.ts": "process",
