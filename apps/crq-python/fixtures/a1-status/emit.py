@@ -1035,6 +1035,14 @@ def utilization_family() -> Dict[str, Any]:
     )
     cases.append(
         case(
+            # Interpreter requirement: this case pins CPython gh-152079
+            # (commit 6f9c76d8d869, first released in 3.14.7; present in
+            # 3.15+). Before 3.14.7, fromisoformat dropped the fraction of a
+            # zero-whole-second offset ("+00:00:00.5" collapsed to UTC), so
+            # 3.14.4 computes starts_24h=0 here instead of 1. CI's floating
+            # '3.14' pin observed 3.14.10; the fixture was generated on
+            # 3.15.0. Not a reachable production input: the queue writes only
+            # second-granularity strftime("%Y-%m-%dT%H:%M:%SZ") timestamps.
             "fractional-zero-offset-is-applied",
             now="2026-11-09T12:00:00+00:00:00.5",
             queue={"starts": ["2026-11-08T12:00:00Z"]},
@@ -1461,7 +1469,21 @@ def utilization_family() -> Dict[str, Any]:
     cases.append(case("nan-now-value-error", now=float("nan")))
     cases.append(case("year-out-of-range", now=1e15))
     cases.append(case("platform-time-error", now=1e18))
-    return _family("utilization", cases, "coverage utilization digest edges")
+    return _family(
+        "utilization",
+        cases,
+        # Interpreter requirement for fractional-zero-offset-is-applied:
+        # CPython gh-152079 (commit 6f9c76d8d869, first released in
+        # 3.14.7; present in 3.15+). Pre-3.14.7 fromisoformat drops the
+        # fraction of a zero-whole-second offset, so 3.14.4 computes
+        # starts_24h=0 for that case instead of 1. CI's floating '3.14'
+        # pin observed 3.14.10; generated on 3.15.0.
+        "coverage utilization digest edges; the "
+        "fractional-zero-offset-is-applied case requires CPython >= 3.14.7 "
+        "(gh-152079, commit 6f9c76d8d869) or >= 3.15; pre-3.14.7 fromisoformat "
+        "drops the fraction of a zero-whole-second offset. "
+        "CI observed 3.14.10; generated on 3.15.0",
+    )
 
 
 # ------------------------------------------------------------ publish sections

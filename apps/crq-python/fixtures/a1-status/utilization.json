@@ -1,7 +1,7 @@
 {
   "schema": "cq.crq-a1-status-vector/v1",
   "family": "utilization",
-  "note": "coverage utilization digest edges",
+  "note": "coverage utilization digest edges; the fractional-zero-offset-is-applied case requires CPython >= 3.14.7 (gh-152079, commit 6f9c76d8d869) or >= 3.15; pre-3.14.7 fromisoformat drops the fraction of a zero-whole-second offset. CI observed 3.14.10; generated on 3.15.0",
   "cases": [
     {
       "name": "float-cap-keeps-float-tag",
