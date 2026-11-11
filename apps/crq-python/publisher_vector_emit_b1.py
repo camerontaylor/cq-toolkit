@@ -393,9 +393,11 @@ def outbox_vectors() -> Dict[str, Any]:
                          (cases[3], ack_requires_remote)):
         try:
             action()
-        except Exception as exc:  # the vector records the oracle's refusal
+        except ledger.IntegrityError as exc:  # the vector records the oracle's refusal
             case["expect"]["error"] = type(exc).__name__
             case["expect"]["message"] = str(exc)
+        else:
+            raise AssertionError(case["name"] + ": oracle did not refuse")
     return _family("outbox", cases)
 
 
@@ -426,7 +428,7 @@ def _publish_case(name: str, *, ledger_values: Sequence[Dict[str, Any]] = (),
         try:
             outcome: Dict[str, Any] = {"ok": True}
             remote.publish(outbox)
-        except Exception as exc:  # the vector records the oracle's refusal
+        except ledger.IntegrityError as exc:  # the vector records the oracle's refusal
             outcome = {"ok": False, "error": type(exc).__name__, "message": str(exc)}
         value = {
             "fetch_calls": remote.fetch_calls,
