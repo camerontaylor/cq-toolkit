@@ -25,7 +25,7 @@ import {
   parseJsonValue,
   type JsonValue,
 } from '../../../src/policy/crq/jsonValue.js';
-import type { RepairRefusal } from '../../../src/policy/crq/repairBinding.js';
+import type { RepairRefusal, RepairRoundCount } from '../../../src/policy/crq/repairBinding.js';
 import { atomicJsonText } from '../../../src/policy/crq/pythonJson.js';
 import { makeFixFinding, type FixFindingBinding } from '../../../src/ops/review/fixFinding.js';
 import { completeWorker, UNCHANGED } from '../review/fixReviewItem.helpers.js';
@@ -112,7 +112,9 @@ function fakeGit(input: {
   };
 }
 
-function verifyInput(row: JsonObject): Parameters<typeof verifyPreparedRepair>[0] {
+function verifyInput(
+  row: JsonObject,
+): Parameters<typeof verifyPreparedRepair>[0] & { readonly roundCount: RepairRoundCount } {
   const input = asObject(row.get('input'));
   const round = asObject(input.get('round_count'));
   const basis = asString(round.get('basis'));

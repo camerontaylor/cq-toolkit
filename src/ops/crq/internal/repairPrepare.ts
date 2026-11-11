@@ -39,6 +39,7 @@ import {
 import { OpResultArtifactSchema } from '../../../kernel/schema.js';
 import type { OpResultArtifact } from '../../../kernel/types.js';
 import type { FixFindingBinding, FixFindingReport } from '../../review/fixFinding.js';
+import { staleMarkingFor } from '../../../policy/crq/repairGates.js';
 
 /** The two immutable git facts, injected so this module performs no spawn. */
 export interface RepairGit {
@@ -86,11 +87,24 @@ export interface VerifyPreparedRepairInput {
   readonly sourceSha: string;
   /** Exact text of the revalidation evidence JSON. */
   readonly evidenceJson: string;
-  /** The caller's existing round count for this pin (typed evidence). */
-  readonly roundCount: RepairRoundCount;
+  /**
+   * The caller's existing round count for this pin (typed evidence), or a
+   * lazy provider resolved at Python's position: after the prepared-id
+   * idempotence check and before the round ceiling. The object form keeps
+   * every existing caller unchanged.
+   */
+  readonly roundCount: RepairRoundCountSource;
   readonly maxRoundsPerPin: number;
   readonly preserveWorktree?: boolean;
 }
+
+/** The lazy provider result; a refusal stops preparation without a git read. */
+export type RepairRoundCountSource =
+  | RepairRoundCount
+  | (() => Promise<
+      | { readonly ok: true; readonly value: RepairRoundCount }
+      | { readonly ok: false; readonly refusal: RepairRefusal }
+    >);
 
 export type VerifyPreparedRepairResult =
   | { readonly ok: true; readonly value: ProposedRepairPreparation }
@@ -219,6 +233,8 @@ function pendingGates(input: {
   readonly oldJob: JsonObject;
   readonly oldRecord: JsonObject;
   readonly oldJobId: string;
+  readonly oldRun: string;
+  readonly preparedJobId: string;
   readonly instructions: boolean;
   readonly preserveWorktree: boolean;
 }): PendingPreparationGate[] {
@@ -228,15 +244,15 @@ function pendingGates(input: {
   }
   const canonical = input.oldJob.has('canonical_finding_id');
   if (canonical) gates.push('canonical-delivery-handoff');
-  const records = input.oldRecord.get('jobs');
-  const singleJob = Array.isArray(records) && records.length === 1 && records[0] === input.oldJobId;
-  const state = input.oldRecord.get('state');
-  const stateEligible = state === 'queued' || state === 'ready' || state === 'publish_failed';
   if (
-    (canonical || input.preserveWorktree) &&
-    singleJob &&
-    stateEligible &&
-    !pythonTruthy(input.oldRecord.get('fix_pr'))
+    staleMarkingFor({
+      oldJob: input.oldJob,
+      oldRecord: input.oldRecord,
+      oldJobId: input.oldJobId,
+      oldRun: input.oldRun,
+      preparedJobId: input.preparedJobId,
+      preserveWorktree: input.preserveWorktree,
+    }) !== undefined
   ) {
     gates.push('old-record-stale-marking');
   }
@@ -361,6 +377,8 @@ export async function verifyPreparedRepair(
     oldJob,
     oldRecord,
     oldJobId: input.oldJobId,
+    oldRun,
+    preparedJobId: identity.jobId,
     instructions: instructionsResult.instructions !== undefined,
     preserveWorktree: input.preserveWorktree === true,
   });
@@ -386,21 +404,27 @@ export async function verifyPreparedRepair(
     };
   }
 
-  if (input.roundCount.basis !== 'canonical-finding' && input.roundCount.basis !== 'pr-pin') {
+  const resolvedRoundCount =
+    typeof input.roundCount === 'function'
+      ? await input.roundCount()
+      : { ok: true as const, value: input.roundCount };
+  if (!resolvedRoundCount.ok) return refusal(resolvedRoundCount.refusal);
+  const roundCount = resolvedRoundCount.value;
+  if (roundCount.basis !== 'canonical-finding' && roundCount.basis !== 'pr-pin') {
     return refusal('round-count-invalid');
   }
-  if (!Number.isSafeInteger(input.roundCount.count) || input.roundCount.count < 0) {
+  if (!Number.isSafeInteger(roundCount.count) || roundCount.count < 0) {
     return refusal('round-count-invalid');
   }
-  if (canonical !== (input.roundCount.basis === 'canonical-finding')) {
+  if (canonical !== (roundCount.basis === 'canonical-finding')) {
     return refusal('round-count-invalid');
   }
   if (!Number.isFinite(input.maxRoundsPerPin) || input.maxRoundsPerPin < 0) {
     return refusal('round-count-invalid');
   }
-  if (input.roundCount.count >= input.maxRoundsPerPin) return refusal('round-ceiling');
+  if (roundCount.count >= input.maxRoundsPerPin) return refusal('round-ceiling');
 
-  const round = input.roundCount.count + 1;
+  const round = roundCount.count + 1;
   const job = proposedPreparedJob({
     oldJob,
     oldJobId: input.oldJobId,

@@ -32,10 +32,21 @@ class RepairPrepareVectorsTest(unittest.TestCase):
         self.assertTrue(document["prepare_cases"])
         self.assertTrue(document["harvest_cases"])
         self.assertTrue(document["path_cases"])
+        self.assertTrue(document["gate_cases"])
+        self.assertTrue(document["round_cases"])
+        self.assertTrue(document["delivery_cases"])
+        self.assertTrue(document["handoff_cases"])
+        self.assertTrue(document["allowlist_cases"])
+        self.assertTrue(document["patch_cases"]["source"])
+        self.assertTrue(document["patch_cases"]["instructions"])
         names = [case["name"] for case in document["prepare_cases"]]
         self.assertEqual(len(names), len(set(names)))
         self.assertIn("major-no-instructions", names)
         self.assertIn("refuse-round-ceiling", names)
+        gate_names = [case["name"] for case in document["gate_cases"]]
+        self.assertEqual(len(gate_names), len(set(gate_names)))
+        self.assertIn("scan-clean-source-only", gate_names)
+        self.assertIn("canonical-round-backfill-missing", gate_names)
 
     def test_no_temp_paths_leak(self) -> None:
         text = emitter.render(emitter.build())
