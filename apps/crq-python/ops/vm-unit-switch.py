@@ -1103,7 +1103,9 @@ def _snapshot_preservation_ok(snapshot, service_sha=None):
         return False
     if not _views_agree(metadata, files):
         return False
-    if not isinstance(jobs, list) or not _record_list_ok(records):
+    if (not isinstance(jobs, list)
+            or _job_rows(jobs, "snapshot jobs", []) is None
+            or not _record_list_ok(records)):
         return False
     if not _all_records_ok(all_records):
         return False
@@ -1442,25 +1444,77 @@ def _count_ok(value, label, problems):
     return ok
 
 
+JOB_TYPES = frozenset({
+    "start", "verify", "stop", "reload", "restart", "try-restart",
+    "reload-or-restart", "try-reload-or-restart", "isolate", "kill", "clean",
+    "freeze", "thaw", "nop"})
+JOB_STATES = frozenset({"waiting", "running"})
+JOB_UNIT_RE = re.compile(
+    r"[A-Za-z0-9][A-Za-z0-9:_.@\\-]*\."
+    r"(?:service|socket|target|timer|path|mount|automount|swap|slice|"
+    r"scope|device)\Z")
+JOB_LINE_RE = re.compile(
+    r"[ \t]*(\d+)[ \t]+(\S+)[ \t]+(\S+)[ \t]+(\S+)[ \t]*\Z")
+
+
 def _job_identity(line):
+    """Parse one canonical ``list-jobs`` row, or return ``None``.
+
+    The proof fixture is deliberately strict: four columns, a positive
+    canonical job ID, a systemd unit name and known job type/state. A header,
+    trailing field, non-string, unknown token or malformed ID is not ignored.
+    """
     if not isinstance(line, str):
         return None
-    match = re.fullmatch(r"\s*(\d+)\s+(\S+)\s+(\S+)\s+(\S+)\s*", line)
+    match = JOB_LINE_RE.fullmatch(line)
     if match is None:
         return None
-    return {"job_id": int(match.group(1)), "unit": match.group(2),
-            "type": match.group(3), "state": match.group(4)}
+    job_id_text = match.group(1)
+    job_id = int(job_id_text)
+    if job_id <= 0 or job_id > 0xFFFFFFFF or str(job_id) != job_id_text:
+        return None
+    unit, job_type, state = match.group(2), match.group(3), match.group(4)
+    if (JOB_UNIT_RE.fullmatch(unit) is None
+            or job_type not in JOB_TYPES or state not in JOB_STATES):
+        return None
+    return {"job_id": job_id, "unit": unit,
+            "type": job_type, "state": state}
+
+
+def _job_rows(lines, label, problems):
+    """Return parsed rows only when the complete observation is unambiguous."""
+    if not isinstance(lines, list):
+        problems.append(label + " job lines are absent or not a list: "
+                        + json.dumps(lines)[:300])
+        return None
+    rows = []
+    job_ids = set()
+    units = set()
+    ok = True
+    for index, line in enumerate(lines):
+        identity = _job_identity(line)
+        if identity is None:
+            problems.append(label + "[" + str(index) + "] is not a canonical "
+                            "list-jobs row: " + json.dumps(line)[:160])
+            ok = False
+            continue
+        if identity["job_id"] in job_ids:
+            problems.append(label + " repeats job ID "
+                            + str(identity["job_id"])
+                            + " with a second row; job identity is ambiguous")
+            ok = False
+        if identity["unit"] in units:
+            problems.append(label + " repeats unit " + identity["unit"]
+                            + " with a second job; job identity is ambiguous")
+            ok = False
+        job_ids.add(identity["job_id"])
+        units.add(identity["unit"])
+        rows.append(identity)
+    return rows if ok else None
 
 
 def _job_lines_ok(lines, label, problems):
-    ok = (isinstance(lines, list)
-          and all(isinstance(line, str) and line.strip()
-                  and _job_identity(line) is not None
-                  for line in lines))
-    if not ok:
-        problems.append(label + " job lines are not typed list-jobs output: "
-                        + json.dumps(lines)[:300])
-    return ok
+    return _job_rows(lines, label, problems) is not None
 
 
 LIST_JOBS_ARGV = ["systemctl", "--user", "list-jobs", "--no-legend",
@@ -1477,7 +1531,7 @@ def _job_observation_lines(observation):
     stdout = command.get("stdout")
     if not isinstance(stdout, str):
         return None
-    return [line for line in stdout.splitlines() if line.strip()]
+    return stdout.splitlines()
 
 
 def _job_observation_ok(observation, label, problems, lines=None):
@@ -1594,6 +1648,8 @@ def _positive_queue_ok(queue, problems):
     before_count = queue.get("before_count")
     after_count = queue.get("after_count")
     identity = _job_identity(job)
+    queue_rows = _job_rows(jobs, "queue job lines", problems)
+    after_rows = _job_rows(jobs_after, "queue post-stop job lines", problems)
     ok = (
         _command_ok(queue.get("blocker_command"), "queue blocker start",
                     problems)
@@ -1602,19 +1658,20 @@ def _positive_queue_ok(queue, problems):
         and _command_ok(queue.get("stop"), "queue target stop", problems)
         and _command_ok(queue.get("blocker_stop"), "queue blocker stop",
                         problems)
-        and _job_lines_ok(jobs, "queue job lines", problems)
-        and _job_lines_ok(jobs_after, "queue post-stop job lines", problems)
         and _job_observation_ok(queue.get("job_observation"),
                                 "queue job observation", problems, jobs)
         and _job_observation_ok(queue.get("jobs_after_observation"),
                                 "queue post-stop observation", problems,
                                 jobs_after)
+        and queue_rows is not None
+        and after_rows is not None
         and identity is not None
         and identity["unit"] == REPAIR_UNIT
         and identity["type"] == "start"
         and identity["state"] == "waiting"
         and isinstance(job, str) and job in jobs
-        and not any(REPAIR_UNIT in line for line in jobs_after)
+        and identity in queue_rows
+        and not any(row["unit"] == REPAIR_UNIT for row in after_rows)
         and _count_ok(before_count, "queue before", problems)
         and _count_ok(after_count, "queue after", problems)
         and before_count == after_count
@@ -1634,25 +1691,28 @@ def _fence_job_ok(queue_seed, during, problems):
     during_jobs = during.get("jobs")
     queue_blocker = queue_seed.get("blocker") or {}
     during_blocker = during.get("blocker") or {}
+    queue_rows = _job_rows(queue_jobs, "fence queue job lines", problems)
+    during_rows = _job_rows(during_jobs, "fence during job lines", problems)
     ok = (
         _command_ok(queue_seed.get("blocker_command"),
                     "fence queue blocker start", problems)
         and _command_ok(queue_seed.get("target_command"),
                         "fence queue target start", problems)
-        and _job_lines_ok(queue_jobs, "fence queue job lines", problems)
-        and _job_lines_ok(during_jobs, "fence during job lines", problems)
         and _job_observation_ok(queue_seed.get("job_observation"),
                                 "fence queue job observation", problems,
                                 queue_jobs)
         and _job_observation_ok(during.get("jobs_observation"),
                                 "fence during job observation", problems,
                                 during_jobs)
+        and queue_rows is not None
+        and during_rows is not None
         and queue_job is not None
         and queue_job["unit"] == REPAIR_UNIT
         and queue_job["type"] == "start"
         and queue_job["state"] == "waiting"
         and queue_seed.get("job") in queue_jobs
-        and any(_job_identity(line) == queue_job for line in during_jobs)
+        and queue_job in queue_rows
+        and during_rows.count(queue_job) == 1
         and queue_blocker.get("ActiveState") in ("activating", "active")
         and during_blocker.get("ActiveState") in ("activating", "active")
         and queue_blocker.get("MainPID") not in (None, "", "0")

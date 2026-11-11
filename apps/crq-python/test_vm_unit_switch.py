@@ -1899,16 +1899,20 @@ class ActivatorEvidenceTests(unittest.TestCase):
 
     def _queue(self):
         job = "52 crq-repair.service        start waiting"
-        observation = {"command": self._job_command([job]), "lines": [job]}
+        blocker_job = "32 crq-blocker.service        start running"
+        observation = {"command": self._job_command([job, blocker_job]),
+                       "lines": [job, blocker_job]}
         return {
             "blocker_command": self._command(),
             "target_command": self._command(),
             "stop": self._command(),
             "blocker_stop": self._command(),
-            "job": job, "job_observation": observation, "jobs": [job],
-            "jobs_after": [],
-            "jobs_after_observation": {"command": self._job_command(),
-                                       "lines": []},
+            "job": job, "job_observation": observation,
+            "jobs": [job, blocker_job],
+            "jobs_after": [blocker_job],
+            "jobs_after_observation": {
+                "command": self._job_command([blocker_job]),
+                "lines": [blocker_job]},
             "blocker": {"ActiveState": "activating", "MainPID": "2063",
                         "InvocationID": "d" * 32},
             "before_count": 0, "after_count": 0}
@@ -1948,6 +1952,120 @@ class ActivatorEvidenceTests(unittest.TestCase):
             changed = copy.deepcopy(queue)
             mutate(changed)
             self.assertFalse(harness._positive_queue_ok(changed, []))
+
+    def test_job_rows_are_canonical_and_unique(self):
+        valid = ["52 crq-repair.service        start waiting",
+                 "32 crq-blocker.service        start running"]
+        self.assertTrue(harness._job_lines_ok(valid, "test", []))
+        self.assertEqual(harness._job_identity(valid[0]),
+                         {"job_id": 52, "unit": "crq-repair.service",
+                          "type": "start", "state": "waiting"})
+        invalid = [
+            ["52 crq-repair.service start waiting",
+             "52 crq-repair.service start running"],
+            ["52 crq-repair.service start running",
+             "52 crq-repair.service start waiting"],
+            ["52 crq-repair.service start waiting",
+             "52 crq-repair.service start waiting"],
+            ["52 crq-repair.service start waiting",
+             "52 crq-blocker.service start running"],
+            ["52 crq-repair.service start waiting",
+             "53 crq-repair.service start running"],
+            ["JOB UNIT TYPE STATE"],
+            ["52 crq-repair.service start waiting extra"],
+            ["0 crq-repair.service start waiting"],
+            ["052 crq-repair.service start waiting"],
+            ["52 not-a-unit start waiting"],
+            ["52 crq-repair.service bogus waiting"],
+            ["52 crq-repair.service start bogus"],
+            ["52 crq-repair.service start waiting\n"],
+            [True], [None], [123], [""],
+            "52 crq-repair.service start waiting",
+            None,
+        ]
+        for lines in invalid:
+            with self.subTest(lines=lines):
+                self.assertFalse(harness._job_lines_ok(lines, "test", []))
+
+    def test_queue_rejects_ambiguous_job_rows(self):
+        queue = self._queue()
+        target = queue["job"]
+        blocker = queue["jobs"][1]
+
+        def with_jobs(lines):
+            changed = copy.deepcopy(queue)
+            changed["jobs"] = list(lines)
+            changed["job_observation"] = {
+                "command": self._job_command(lines),
+                "lines": list(lines)}
+            return changed
+
+        self.assertTrue(harness._positive_queue_ok(
+            with_jobs([target, blocker]), []))
+        contradictory = target.replace("waiting", "running")
+        cases = [
+            [target, contradictory],
+            [contradictory, target],
+            [target, target],
+            [target, "52 crq-blocker.service start running"],
+            [target, "53 crq-repair.service start running"],
+            [target, "JOB UNIT TYPE STATE"],
+            [target, target + " extra"],
+        ]
+        for lines in cases:
+            with self.subTest(lines=lines):
+                self.assertFalse(harness._positive_queue_ok(
+                    with_jobs(lines), []))
+        changed = with_jobs([target, blocker])
+        changed["jobs_after"] = [blocker, blocker]
+        changed["jobs_after_observation"] = {
+            "command": self._job_command([blocker, blocker]),
+            "lines": [blocker, blocker]}
+        self.assertFalse(harness._positive_queue_ok(changed, []))
+
+    def test_fence_rejects_ambiguous_job_rows(self):
+        queue = self._queue()
+        target = queue["job"]
+        blocker = queue["jobs"][1]
+        seed = {
+            "blocker": queue["blocker"],
+            "blocker_command": queue["blocker_command"],
+            "target_command": queue["target_command"],
+            "job": target, "job_observation": queue["job_observation"],
+            "jobs": queue["jobs"]}
+
+        def during_with(lines):
+            return {
+                "jobs": list(lines),
+                "jobs_observation": {
+                    "command": self._job_command(lines),
+                    "lines": list(lines)},
+                "blocker": copy.deepcopy(queue["blocker"])}
+
+        self.assertTrue(harness._fence_job_ok(
+            seed, during_with([target, blocker]), []))
+        contradictory = target.replace("waiting", "running")
+        cases = [
+            [target, contradictory],
+            [contradictory, target],
+            [target, target],
+            [target, "52 crq-blocker.service start running"],
+            [target, "53 crq-repair.service start running"],
+            [target, "JOB UNIT TYPE STATE"],
+            [target, target + " extra"],
+            [blocker, "999 crq-repair.service start waiting"],
+        ]
+        for lines in cases:
+            with self.subTest(lines=lines):
+                self.assertFalse(harness._fence_job_ok(
+                    seed, during_with(lines), []))
+        changed = copy.deepcopy(seed)
+        changed["jobs"] = [target, target]
+        changed["job_observation"] = {
+            "command": self._job_command([target, target]),
+            "lines": [target, target]}
+        self.assertFalse(harness._fence_job_ok(
+            changed, during_with([target, blocker]), []))
 
     def test_fence_requires_same_waiting_job_and_blocker(self):
         queue = self._queue()
