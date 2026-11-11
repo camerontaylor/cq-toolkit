@@ -3259,8 +3259,11 @@ def _partial_observe_ok(case, phase, boundary, prepared, problems):
         ok = False
     recovery = phase.get("recovery") or {}
     repeat = phase.get("repeat") or {}
+    fence_problems = len(problems)
     baseline = _partial_fence_ok(recovery, label + ".recovery", problems)
     repeat_baseline = _partial_fence_ok(repeat, label + ".repeat", problems)
+    if len(problems) != fence_problems:
+        ok = False
     if baseline is None or repeat_baseline is None:
         ok = False
     else:
@@ -3584,8 +3587,9 @@ def _partial_checks(phases, restarts=None, reboots=None):
         baseline_ok = True
         for key in ("recovery", "repeat"):
             cli = observe.get(key)
-            if _partial_fence_ok(cli, "partial-" + case + "." + key,
-                                 problems) is None:
+            before_count = len(problems)
+            _partial_fence_ok(cli, "partial-" + case + "." + key, problems)
+            if len(problems) != before_count:
                 baseline_ok = False
         quiescence_ok = quiescence_ok and baseline_ok
         released = NODE_RUNTIME if PARTIAL_CASES[case]["family"] == "activation" \

@@ -2391,6 +2391,7 @@ class PartialHarnessCheckTests(unittest.TestCase):
         prepare = {
             "prepared": {"state": self.state, "history_sha256": HISTORY,
                          "record_paths": self.record_paths,
+                         "history_path": self.history_path,
                          "initial_snapshot": {
                              "history": self.history_summary,
                              "records": [self.history_summary]},
@@ -2660,9 +2661,12 @@ class PartialHarnessCheckTests(unittest.TestCase):
             drain = phases_value["partial-activation-service-restart-observe"][
                 "recovery"]["json"]["drain"]
             mutate(drain)
-            _, problems = harness._partial_checks(
+            checks, problems = harness._partial_checks(
                 phases_value, restarts, reboots)
             self.assertTrue(any(expected in item for item in problems), label)
+            self.assertFalse(
+                checks["partial_activation-service-restart_observe"], label)
+            self.assertFalse(checks["partial_quiescence"], label)
 
     def test_partial_rejects_paired_file_and_metadata_omissions(self):
         keys = ("timer", "timer_wants", "path", "path_wants", "dropin",
@@ -2928,6 +2932,5 @@ class PartialHarnessCheckTests(unittest.TestCase):
             phases_value, _, _ = self.evidence()
             problems = []
             harness._verify_partial_raw({}, root, problems, phases_value)
-            self.assertTrue(any("partial tick" in item
-                                or "record digest" in item
-                                for item in problems))
+            self.assertTrue(any("record digest does not match" in item
+                                for item in problems), problems)
