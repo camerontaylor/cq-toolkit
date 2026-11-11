@@ -2776,6 +2776,30 @@ class PartialHarnessCheckTests(unittest.TestCase):
                         problems)
         self.assertIs(checks["partial_" + case + "_observe"], False)
 
+    def test_partial_observe_allows_pre_reboot_completion_with_old_boot(self):
+        phases_value, _, _ = self.evidence()
+        case = "activation-timer-reboot"
+        observe = phases_value["partial-" + case + "-observe"]
+        entries = observe["before"]["repair_completions"] + [
+            self._completion(
+                observe["before"]["repair_completions"][-1]["sequence"] + 1,
+                NODE,
+                boot_id="11111111-1111-1111-1111-111111111111")]
+        observe["before"]["repair_completions"] = entries
+        observe["before"]["repair_files"] = self._files("node", entries)
+        observe["before"]["partial_metadata"] = self._metadata("node", entries)
+        for key in ("after_recovery", "after_repeat"):
+            observe[key]["repair_completions"] = entries
+            observe[key]["repair_files"] = self._files("masked", entries)
+            observe[key]["partial_metadata"] = self._metadata("masked", entries)
+        observe["recovery"] = self._fence(len(entries), entries)
+        observe["repeat"] = self._fence(len(entries), entries)
+        problems = []
+        self.assertTrue(harness._partial_observe_ok(
+            case, observe, phases_value["partial-" + case],
+            phases_value["prepare"]["prepared"], problems), problems)
+        self.assertEqual(problems, [])
+
     def test_partial_final_requires_observed_completion_prefix(self):
         phases_value, restarts, reboots = self.evidence()
         inspect = phases_value["partial-inspect"]

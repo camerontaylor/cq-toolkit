@@ -2966,16 +2966,22 @@ def _partial_fenced_state_ok(snapshot_value, label, problems):
     return ok
 
 
-def _partial_completion_baseline_ok(baseline, entries, before_entries, runtime,
-                                    boot, label, problems):
+def _partial_completion_baseline_ok(baseline, entries, before_entries,
+                                    observed_entries, runtime, boot, label,
+                                    problems):
     if not isinstance(baseline, dict):
         problems.append(label + " completion baseline is absent")
         return False
-    if not isinstance(entries, list) or not isinstance(before_entries, list):
+    if not isinstance(entries, list) or not isinstance(before_entries, list) \
+            or not isinstance(observed_entries, list):
         problems.append(label + " settled completion inventory is not a list")
         return False
     ok = True
-    suffix = entries[len(before_entries):]
+    if entries[:len(observed_entries)] != observed_entries:
+        problems.append(label + " settled completion log is not append-only "
+                        "from the observed inventory")
+        ok = False
+    suffix = entries[len(observed_entries):]
     if suffix and _boot_id(boot) is None:
         problems.append(label + " has no observed boot identity")
         ok = False
@@ -2989,6 +2995,8 @@ def _partial_completion_baseline_ok(baseline, entries, before_entries, runtime,
             if entry.get("runtime") != runtime:
                 problems.append(entry_label + " is not the case runtime")
                 ok = False
+        if index >= len(observed_entries):
+            entry_label = label + ".entries[" + str(index) + "]"
             if entry.get("boot_id") != boot:
                 problems.append(entry_label + " does not bind the observed boot")
                 ok = False
@@ -3316,13 +3324,13 @@ def _partial_observe_ok(case, phase, boundary, prepared, problems):
         after_repeat = phase.get("after_repeat") or {}
         entries = after_recovery.get("repair_completions") or []
         if not _partial_completion_baseline_ok(
-                baseline, entries, before_entries, runtime, observed_boot,
-                label + ".recovery", problems):
+                baseline, entries, before_entries, after_entries, runtime,
+                observed_boot, label + ".recovery", problems):
             ok = False
         repeat_entries = after_repeat.get("repair_completions") or []
         if not _partial_completion_baseline_ok(
-                repeat_baseline, repeat_entries, before_entries, runtime,
-                observed_boot,
+                repeat_baseline, repeat_entries, before_entries, after_entries,
+                runtime, observed_boot,
                 label + ".repeat", problems):
             ok = False
         if repeat_baseline != baseline:
