@@ -512,7 +512,9 @@ async function runPreparation(
  * construction, which is why there is no plan-only entry point.
  *
  * Only a lock that rejects before entering the scope is reported as
- * `lock-unavailable`. A throw from inside the scope is an internal defect and
+ * `lock-unavailable`. A lock that rejects after the callback returned keeps the
+ * callback's result and marks it `lockExit: 'unconfirmed'`. A callback throw,
+ * or an entered scope with no recorded result, is an internal defect and
  * propagates: it is never disguised as a lock, plan or effect result.
  */
 export async function executeRepairPreparation(
