@@ -20,7 +20,14 @@
 //      cq-verify measure and judge the manifest ratchets); it keeps only the
 //      baseline monotonicity guard, in ref mode, on pull requests.
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -570,6 +577,65 @@ describe('trusted recompute lockfile guard', () => {
         },
       });
       expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout.includes('recompute')).toBe(true);
+      expect(readFileSync(output, 'utf8')).toBe('');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('treats a diff error as a recompute crash, never as a lockfile skip', () => {
+    // The guard runs `git diff --quiet <comparison> <subject> -- pnpm-lock.yaml`
+    // negated historically: exit 1 means changed (skip), but exit >= 2 means
+    // git itself failed. The guard must not read that as "the PR changes the
+    // lockfile"; it produces no count and no skip reason, so the judge's
+    // verifier fails the verdict closed. The fixture removes the base lockfile
+    // blob (inside its own temp dir) so the DIFF fails while the merge-base
+    // above it succeeds.
+    const root = mkdtempSync(join(tmpdir(), 'recompute-lockfile-diff-error-'));
+    const git = (...args: string[]) => {
+      const result = spawnSync('git', ['-C', join(root, 'trust'), ...args], { encoding: 'utf8' });
+      expect(result.status, result.stderr).toBe(0);
+      return result.stdout.trim();
+    };
+    try {
+      spawnSync('git', ['init', join(root, 'trust')]);
+      git('config', 'user.email', 'test@example.invalid');
+      git('config', 'user.name', 'Test');
+      writeFileSync(join(root, 'trust/pnpm-lock.yaml'), 'base');
+      git('add', '.');
+      git('commit', '-m', 'base');
+      git('update-ref', 'refs/cq-transfer/base', 'HEAD');
+      const baseBlob = git('rev-parse', 'HEAD:pnpm-lock.yaml');
+      writeFileSync(join(root, 'trust/pnpm-lock.yaml'), 'head');
+      git('add', '.');
+      git('commit', '-m', 'head');
+      // Remove the base blob from the fixture's own object store: the diff
+      // cannot read it and exits 128; the merge-base (commit objects) is intact.
+      unlinkSync(
+        join(root, 'trust', '.git', 'objects', baseBlob.slice(0, 2), baseBlob.slice(2)),
+      );
+      const workflow = template('cq-verify.yml');
+      const guard = workflow
+        .slice(
+          workflow.indexOf('          # Lockfile guard:'),
+          workflow.indexOf('          # End lockfile guard.'),
+        )
+        .replace(/^ {10}/gm, '');
+      const output = join(root, 'output');
+      writeFileSync(output, '');
+      const result = spawnSync('bash', ['-eu', '-c', guard + '\necho recompute'], {
+        cwd: root,
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          KIND: 'pr',
+          SUBJECT: git('rev-parse', 'HEAD'),
+          GITHUB_OUTPUT: output,
+        },
+      });
+      expect(result.status, result.stderr).toBe(0);
+      // The recompute still ran and no skip reason was claimed.
       expect(result.stdout.includes('recompute')).toBe(true);
       expect(readFileSync(output, 'utf8')).toBe('');
     } finally {

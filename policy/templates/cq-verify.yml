@@ -265,22 +265,30 @@ jobs:
         run: |
           set -euo pipefail
           # Lockfile guard: trusted dependencies cannot typecheck a different graph.
-          # Only a PR subject can share the base's history; computing the merge-base
-          # unconditionally would abort this step for an unrelated history (merge-base
-          # exits 1 under `set -e`, and `git diff --quiet` with an empty revision is
-          # a usage error that `!` would invert into a false "lockfile changed" skip).
-          if [ "$KIND" != pr ]; then
-            comparison=''
-          elif comparison="$(git -C trust merge-base refs/cq-transfer/base "$SUBJECT" 2>/dev/null)" && [ -n "$comparison" ]; then
-            :
-          else
-            comparison=''
+          # The merge-base call runs only for a PR subject (resolve refuses every
+          # other event today; the non-PR branch is future-proofing). A PR whose
+          # history is unrelated to the base has no merge-base: fall through and
+          # let the judge's own merge-base (verifyRatchet) fail the verdict closed.
+          # The diff is negated, so only exit 1 means the lockfile changed; an
+          # exit >= 2 is a git error, handled as "no evidence" rather than read
+          # through the negation as a change (the judge would fail an unjustified
+          # skip anyway, verifyRatchet's dependencyChange check).
+          comparison=''
+          if [ "$KIND" = pr ]; then
+            if mb="$(git -C trust merge-base refs/cq-transfer/base "$SUBJECT" 2>/dev/null)" && [ -n "$mb" ]; then
+              comparison="$mb"
+            fi
           fi
-          if [ "$KIND" = pr ] && [ -n "$comparison" ] \
-            && ! git -C trust diff --quiet "$comparison" "$SUBJECT" -- pnpm-lock.yaml; then
+          diff_rc=0
+          if [ -n "$comparison" ]; then
+            git -C trust diff --quiet "$comparison" "$SUBJECT" -- pnpm-lock.yaml || diff_rc=$?
+          fi
+          if [ "$diff_rc" -eq 1 ]; then
             echo 'typecheck_skip_reason=PR changes pnpm-lock.yaml; trusted typecheck recompute skipped because installed dependencies belong to the trust ref' >> "$GITHUB_OUTPUT"
             echo 'typecheck_count=' >> "$GITHUB_OUTPUT"
             exit 0
+          elif [ "$diff_rc" -ge 2 ]; then
+            echo "lockfile-guard diff failed with exit $diff_rc; proceeding without a skip reason" >&2
           fi
           # End lockfile guard.
           out="$(node trust/dist/selfhost/recompute-typecheck.js \
