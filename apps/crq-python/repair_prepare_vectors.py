@@ -123,7 +123,7 @@ def _evidence(finding, **overrides):
 
 def _round_count(queue, item, canonical):
     """The production round count for this pin, with its existing basis."""
-    if canonical is not None:
+    if canonical:
         from finding_delivery import canonical_rounds
         return {
             "basis": "canonical-finding",
@@ -268,6 +268,18 @@ def _prepare_case(spec):
             }
             if canonical is not None:
                 expected["handoff_calls"] = inbox.handoff.call_count
+            if spec.get("select_on_prepared"):
+                try:
+                    bounded.select_job(
+                        root, service.CONFIG, job_id, SOURCE, job["finding_sha256"]
+                    )
+                    expected["python_select"] = {"ok": True}
+                except Exception as exc:  # the production select gate refused
+                    expected["python_select"] = {
+                        "ok": False,
+                        "error": type(exc).__name__,
+                        "message": str(exc),
+                    }
         except Exception as exc:  # the vector records the oracle's refusal
             expected = {
                 "ok": False,
@@ -379,6 +391,13 @@ def build():
         {"name": "refuse-round-ceiling", "previous_round": True, "max_rounds": 1},
         {"name": "refuse-lineage-missing",
          "queue_item_overrides": {"repair_runs": {}}},
+        # A PRESENT invalid canonical identity: Python preparation writes the
+        # job (truthiness skips the handoff), then Python selection refuses it
+        # via require_canonical_delivery. This slice fails closed instead of
+        # proposing a job Python cannot select.
+        {"name": "refuse-canonical-id-invalid", "canonical": "",
+         "select_on_prepared": True,
+         "ts_refusal": "canonical-finding-id-invalid"},
     ]
 
     # Case-specific source sha override for the grammar refusal.
@@ -396,6 +415,8 @@ def build():
             expected = _prepare_case(spec)
         expected["name"] = spec["name"]
         expected["input"] = _prepare_input(spec)
+        if "ts_refusal" in spec:
+            expected["ts_refusal"] = spec["ts_refusal"]
         prepare_cases.append(expected)
 
     # Harvest cases use one accepted prepared job and vary the artifact.

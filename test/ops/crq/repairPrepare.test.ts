@@ -17,6 +17,7 @@ import {
   verifyPreparedRepair,
   type PendingPreparationGate,
   type RepairGit,
+  type VerifyPreparedHarvestInput,
 } from '../../../src/ops/crq/internal/repairPrepare.js';
 import {
   JsonNumber,
@@ -27,6 +28,8 @@ import {
 import type { RepairRefusal } from '../../../src/policy/crq/repairBinding.js';
 import { atomicJsonText } from '../../../src/policy/crq/pythonJson.js';
 import type { FixFindingBinding } from '../../../src/ops/review/fixFinding.js';
+import { completeWorker, UNCHANGED } from '../review/fixReviewItem.helpers.js';
+import { findingInput, scriptedFindingOp } from '../review/fixFinding.helpers.js';
 
 const SOURCE = 'a'.repeat(40);
 const OTHER = 'd'.repeat(40);
@@ -157,6 +160,7 @@ const EXPECTED_REFUSAL: Record<string, RepairRefusal> = {
   'refuse-instructions-nul': 'instructions-invalid',
   'refuse-round-ceiling': 'round-ceiling',
   'refuse-lineage-missing': 'old-job-not-tick-owned',
+  'refuse-canonical-id-invalid': 'canonical-finding-id-invalid',
 };
 
 const EXPECTED_GATES: Record<string, readonly PendingPreparationGate[]> = {
@@ -195,6 +199,20 @@ describe('verifyPreparedRepair against the Python oracle', () => {
       const git = fixtureGit(row, name === 'refuse-blob-unreadable' ? 'blob' : undefined);
       const result = await verifyPreparedRepair(input, git);
       const expectedCalls = callList(row.get('git_calls'));
+
+      const tsRefusal = row.get('ts_refusal');
+      if (tsRefusal !== undefined) {
+        // Python preparation writes this job, then Python selection refuses
+        // it. This slice fails closed at preparation with a typed refusal.
+        expect(result.ok).toBe(false);
+        if (result.ok) return;
+        expect(result.refusal).toBe(asString(tsRefusal));
+        expect(git.calls).toEqual(expectedCalls);
+        const pythonSelect = asObject(row.get('python_select'));
+        expect(asBoolean(pythonSelect.get('ok'))).toBe(false);
+        expect(asString(pythonSelect.get('message'))).toBe('invalid canonical finding identity');
+        return;
+      }
 
       if (!asBoolean(row.get('ok'))) {
         expect(result.ok).toBe(false);
@@ -492,13 +510,44 @@ describe('typed fixFinding harvest', () => {
     ['findingSha256', prepared.findingSha256],
     ['repairBase', prepared.repairBase],
   ]);
-  const artifact = atomicJsonText(new JsonObject([['binding', echo]]));
+  const okArtifact = (binding: JsonValue = echo): string =>
+    atomicJsonText(
+      new JsonObject([
+        ['status', 'ok'],
+        ['value', new JsonObject([['binding', binding]])],
+      ]),
+    );
   const input = {
     format: 'fixFinding' as const,
     prepared,
-    artifactJson: artifact,
+    artifactJson: okArtifact(),
     path: 'src/lock.ts',
   };
+
+  test('accepts the actual makeFixFinding ok artifact envelope', async () => {
+    const { op } = scriptedFindingOp([completeWorker(UNCHANGED)]);
+    const produced = await op(findingInput({ binding: prepared }));
+    expect(produced.status).toBe('ok');
+    const git = fakeGit({ tip: SOURCE, blob: BLOB });
+    const result = await verifyPreparedHarvest(
+      { ...input, artifactJson: JSON.stringify(produced) },
+      git,
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.binding).toBe('verified');
+    expect(result.value.source).toEqual({
+      observed: true,
+      currentTip: SOURCE,
+      blobOid: BLOB,
+      atTip: true,
+      blobMatches: true,
+    });
+    expect(git.calls).toEqual([
+      ['rev-parse', 'origin/main'],
+      ['rev-parse', `${SOURCE}:src/lock.ts`],
+    ]);
+  });
 
   test('verifies a complete echo and reobserves current state', async () => {
     const git = fakeGit({ tip: SOURCE, blob: BLOB });
@@ -531,45 +580,90 @@ describe('typed fixFinding harvest', () => {
     expect(changed.value.source).toMatchObject({ atTip: true, blobMatches: false });
   });
 
-  test('a failed observation is reported, not fabricated', async () => {
-    const failed = await verifyPreparedHarvest(
-      input,
-      fakeGit({ tip: SOURCE, blob: BLOB, fail: 'tip' }),
-    );
-    expect(failed.ok).toBe(true);
-    if (!failed.ok) return;
-    expect(failed.value.source).toEqual({ observed: false });
+  test('a failed read refuses instead of claiming a verified binding', async () => {
+    const tipFailure = fakeGit({ tip: SOURCE, blob: BLOB, fail: 'tip' });
+    expect(await verifyPreparedHarvest(input, tipFailure)).toEqual({
+      ok: false,
+      refusal: 'source-not-current-tip',
+    });
+    expect(tipFailure.calls).toEqual([['rev-parse', 'origin/main']]);
+
+    const blobFailure = fakeGit({ tip: SOURCE, blob: BLOB, fail: 'blob' });
+    expect(await verifyPreparedHarvest(input, blobFailure)).toEqual({
+      ok: false,
+      refusal: 'source-blob-unreadable',
+    });
+    expect(blobFailure.calls).toEqual([
+      ['rev-parse', 'origin/main'],
+      ['rev-parse', `${SOURCE}:src/lock.ts`],
+    ]);
   });
 
-  test('without a path only the tip is observed', async () => {
+  test('a missing or invalid path refuses before any git read', async () => {
     const withoutPath = {
       format: input.format,
       prepared: input.prepared,
       artifactJson: input.artifactJson,
     };
-    const result = await verifyPreparedHarvest(withoutPath, fakeGit({ tip: SOURCE, blob: BLOB }));
-    expect(result.ok).toBe(true);
-    if (!result.ok) return;
-    expect(result.value.source).toEqual({
-      observed: true,
-      currentTip: SOURCE,
-      blobOid: null,
-      atTip: true,
-      blobMatches: false,
+    const missingGit = fakeGit({ tip: SOURCE, blob: BLOB });
+    expect(
+      await verifyPreparedHarvest(withoutPath as unknown as VerifyPreparedHarvestInput, missingGit),
+    ).toEqual({ ok: false, refusal: 'finding-path-invalid' });
+    expect(missingGit.calls).toEqual([]);
+
+    const invalidGit = fakeGit({ tip: SOURCE, blob: BLOB });
+    expect(await verifyPreparedHarvest({ ...input, path: '../escape' }, invalidGit)).toEqual({
+      ok: false,
+      refusal: 'finding-path-invalid',
     });
+    expect(invalidGit.calls).toEqual([]);
+  });
+
+  test('normalizes a valid path before the mandatory blob read', async () => {
+    const git = fakeGit({ tip: SOURCE, blob: BLOB });
+    const result = await verifyPreparedHarvest({ ...input, path: 'src/./lock.ts' }, git);
+    expect(result.ok).toBe(true);
+    expect(git.calls).toEqual([
+      ['rev-parse', 'origin/main'],
+      ['rev-parse', `${SOURCE}:src/lock.ts`],
+    ]);
+  });
+
+  test('non-ok and malformed envelopes are typed, not missing-binding', async () => {
+    const git = fakeGit({ tip: SOURCE, blob: BLOB });
+    for (const status of ['failed', 'needs-human', 'budget-exhausted', 'indeterminate']) {
+      const artifactJson = atomicJsonText(new JsonObject([['status', status]]));
+      expect(await verifyPreparedHarvest({ ...input, artifactJson }, git)).toEqual({
+        ok: false,
+        refusal: 'fixfinding-result-not-ok',
+      });
+    }
+    for (const artifactJson of [
+      '[]',
+      '{}',
+      '{"status":"ok"}',
+      '{"status":"ok","value":[]}',
+      '{"status":"unknown"}',
+    ]) {
+      expect(await verifyPreparedHarvest({ ...input, artifactJson }, git)).toEqual({
+        ok: false,
+        refusal: artifactJson === '[]' ? 'result-not-object' : 'fixfinding-result-envelope-invalid',
+      });
+    }
+    expect(git.calls).toEqual([]);
   });
 
   test('missing or mismatched echoes refuse before reobservation', async () => {
     const git = fakeGit({ tip: SOURCE, blob: BLOB });
-    expect(await verifyPreparedHarvest({ ...input, artifactJson: '{"status":"ok"}' }, git)).toEqual(
-      { ok: false, refusal: 'fixfinding-result-binding-missing' },
-    );
+    expect(
+      await verifyPreparedHarvest({ ...input, artifactJson: okArtifact('not-an-object') }, git),
+    ).toEqual({ ok: false, refusal: 'fixfinding-result-binding-missing' });
     const missingField = new JsonObject(echo.entries.filter(([key]) => key !== 'repairBase'));
     expect(
       await verifyPreparedHarvest(
         {
           ...input,
-          artifactJson: atomicJsonText(new JsonObject([['binding', missingField]])),
+          artifactJson: okArtifact(missingField),
         },
         git,
       ),
@@ -581,12 +675,71 @@ describe('typed fixFinding harvest', () => {
       await verifyPreparedHarvest(
         {
           ...input,
-          artifactJson: atomicJsonText(new JsonObject([['binding', wrong]])),
+          artifactJson: okArtifact(wrong),
         },
         git,
       ),
     ).toEqual({ ok: false, refusal: 'fixfinding-result-binding-mismatch' });
     expect(git.calls).toEqual([]);
+  });
+});
+
+describe('canonical identity presence', () => {
+  const row = prepareCase('major-no-instructions');
+  const base = verifyInput(row);
+  const oldJob = asObject(parseJsonValue(base.oldJobJson));
+
+  function withCanonical(value: JsonValue | undefined): string {
+    const entries = oldJob.entries.filter(([key]) => key !== 'canonical_finding_id');
+    if (value !== undefined) entries.push(['canonical_finding_id', value]);
+    return atomicJsonText(new JsonObject(entries));
+  }
+
+  const invalidValues: ReadonlyArray<readonly [string, JsonValue]> = [
+    ['null', null],
+    ['empty', ''],
+    ['uppercase', 'F'.repeat(64)],
+    ['short', '0'.repeat(63)],
+    ['long', '0'.repeat(65)],
+    ['false', false],
+    ['zero', JsonNumber.int(0)],
+    ['array', []],
+  ];
+  for (const [label, value] of invalidValues) {
+    test(`a present invalid id (${label}) fails closed`, async () => {
+      const result = await verifyPreparedRepair(
+        {
+          ...base,
+          oldJobJson: withCanonical(value),
+          roundCount: { basis: 'pr-pin', count: 0 },
+        },
+        fixtureGit(row),
+      );
+      expect(result).toEqual({ ok: false, refusal: 'canonical-finding-id-invalid' });
+    });
+  }
+
+  test('a valid canonical id keeps the mandatory handoff gate', async () => {
+    const result = await verifyPreparedRepair(
+      {
+        ...base,
+        oldJobJson: withCanonical('f'.repeat(64)),
+        roundCount: { basis: 'canonical-finding', count: 0 },
+      },
+      fixtureGit(row),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.pendingGates).toContain('canonical-delivery-handoff');
+    expect(result.value.record?.get('canonical_finding_id')).toBe('f'.repeat(64));
+  });
+
+  test('absence keeps the handoff gate off and the record key absent', async () => {
+    const result = await verifyPreparedRepair(base, fixtureGit(row));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.pendingGates).not.toContain('canonical-delivery-handoff');
+    expect(result.value.record?.has('canonical_finding_id')).toBe(false);
   });
 });
 

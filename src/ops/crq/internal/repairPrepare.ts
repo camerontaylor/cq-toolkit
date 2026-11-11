@@ -13,6 +13,7 @@
  * throwing read becomes a typed refusal without git prose.
  */
 import {
+  checkCanonicalFindingId,
   checkSha,
   findingDigest,
   legacyPythonResultRefusal,
@@ -110,8 +111,8 @@ export type VerifyPreparedHarvestInput =
       readonly format: 'fixFinding';
       readonly prepared: FixFindingBinding;
       readonly artifactJson: string;
-      /** The prepared finding's repository-relative path, when available. */
-      readonly path?: string;
+      /** The prepared finding's repository-relative path; both reads use it. */
+      readonly path: string;
     };
 
 export type VerifyPreparedHarvestResult =
@@ -146,8 +147,10 @@ function refusal(value: RepairRefusal): { readonly ok: false; readonly refusal: 
 }
 
 /**
- * Every effect this proposal does not perform. The stale-marking condition is
- * Python's exact predicate:
+ * Every effect this proposal does not perform. A carried canonical identity
+ * always names the handoff gate (preparation refuses a present invalid id,
+ * so key presence and Python truthiness coincide on every proposal). The
+ * stale-marking condition is Python's exact predicate:
  * `(canonical_finding_id or preserve_worktree)`, a single-job record, a
  * queued/ready/publish_failed state and no `fix_pr`.
  */
@@ -162,7 +165,7 @@ function pendingGates(input: {
   if (input.instructions) {
     gates.push('fix-instructions-secret-scan', 'instruction-utf16-dispatch-check');
   }
-  const canonical = pythonTruthy(input.oldJob.get('canonical_finding_id'));
+  const canonical = input.oldJob.has('canonical_finding_id');
   if (canonical) gates.push('canonical-delivery-handoff');
   const records = input.oldRecord.get('jobs');
   const singleJob = Array.isArray(records) && records.length === 1 && records[0] === input.oldJobId;
@@ -260,9 +263,16 @@ export async function verifyPreparedRepair(
     return refusal('old-job-not-tick-owned');
   }
 
-  const canonicalValue = oldJob.get('canonical_finding_id');
-  const canonical = pythonTruthy(canonicalValue);
-  if (canonical && typeof canonicalValue !== 'string') return refusal('old-job-unreadable');
+  // Python preparation writes a job with a PRESENT invalid canonical id and
+  // its selection gate refuses it. Fail closed here so no proposal is
+  // produced that Python cannot select.
+  let canonicalId: string | undefined;
+  if (oldJob.has('canonical_finding_id')) {
+    const value = oldJob.get('canonical_finding_id');
+    if (!checkCanonicalFindingId(value)) return refusal('canonical-finding-id-invalid');
+    canonicalId = value;
+  }
+  const canonical = canonicalId !== undefined;
   const oldSource = oldJob.get('source');
   if (oldSource !== undefined && !(oldSource instanceof JsonObject)) {
     return refusal('old-job-unreadable');
@@ -347,7 +357,7 @@ export async function verifyPreparedRepair(
     round,
     originJobId: input.oldJobId,
     revalidationSha256: identity.revalidationSha256,
-    ...(canonical ? { canonicalFindingId: canonicalValue as string } : {}),
+    ...(canonicalId === undefined ? {} : { canonicalFindingId: canonicalId }),
   });
   return {
     ok: true,
@@ -412,6 +422,45 @@ async function observeTipOnly(
 }
 
 /**
+ * Typed-harvest reobservation: the path is validated, then BOTH reads are
+ * mandatory. A failed read refuses; it never reports a verified binding with
+ * an unobserved blob.
+ */
+async function reobservePreparedSourceStrict(
+  input: { readonly sourceSha: string; readonly sourceBlobSha: string; readonly path: string },
+  git: RepairGit,
+): Promise<
+  | { readonly ok: true; readonly source: Extract<RepairSourceReobservation, { observed: true }> }
+  | { readonly ok: false; readonly refusal: RepairRefusal }
+> {
+  const normalized = sourcePath(new JsonObject([['path', input.path]]));
+  if (!normalized.ok) return { ok: false, refusal: normalized.refusal };
+  if (!checkSha(input.sourceSha)) return { ok: false, refusal: 'source-sha-invalid' };
+  let currentTip: string;
+  try {
+    currentTip = await git.currentTip();
+  } catch {
+    return { ok: false, refusal: 'source-not-current-tip' };
+  }
+  let blobOid: string;
+  try {
+    blobOid = await git.blobOid(input.sourceSha, normalized.path);
+  } catch {
+    return { ok: false, refusal: 'source-blob-unreadable' };
+  }
+  return {
+    ok: true,
+    source: {
+      observed: true,
+      currentTip,
+      blobOid,
+      atTip: currentTip === input.sourceSha,
+      blobMatches: blobOid === input.sourceBlobSha,
+    },
+  };
+}
+
+/**
  * The prospective harvest check. Artifact binding is verified against the
  * prepared data, then the current tip/blob is re-observed. The observation is
  * reported, never used to rewrite history or to claim a preparation-time fact
@@ -461,32 +510,23 @@ export async function verifyPreparedHarvest(
   if (artifact === undefined) return refusal('result-not-object');
   const bindingRefusal = typedFixFindingResultRefusal({
     prepared: input.prepared,
-    value: artifact,
+    artifact,
   });
   if (bindingRefusal !== undefined) return refusal(bindingRefusal);
-  if (input.path === undefined) {
-    return {
-      ok: true,
-      value: {
-        binding: 'verified',
-        source: await observeTipOnly(input.prepared.sourceSha, git),
-      },
-    };
-  }
-  const path = sourcePath(new JsonObject([['path', input.path]]));
-  if (!path.ok) return refusal(path.refusal);
+  const source = await reobservePreparedSourceStrict(
+    {
+      sourceSha: input.prepared.sourceSha,
+      sourceBlobSha: input.prepared.sourceBlobSha,
+      path: input.path,
+    },
+    git,
+  );
+  if (!source.ok) return refusal(source.refusal);
   return {
     ok: true,
     value: {
       binding: 'verified',
-      source: await reobservePreparedSource(
-        {
-          sourceSha: input.prepared.sourceSha,
-          sourceBlobSha: input.prepared.sourceBlobSha,
-          path: path.path,
-        },
-        git,
-      ),
+      source: source.source,
     },
   };
 }

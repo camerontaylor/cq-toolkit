@@ -400,7 +400,7 @@ describe('harvest checks', () => {
     ).toBe('result-not-object');
   });
 
-  test('typed fixFinding artifact requires a complete echoed binding', () => {
+  test('typed fixFinding artifact unwraps the real OpResult envelope', () => {
     const binding: FixFindingBinding = {
       job: 'crq-revalidated-x-F1',
       sourceSha: 'a'.repeat(40),
@@ -408,7 +408,11 @@ describe('harvest checks', () => {
       findingSha256: 'f'.repeat(64),
       repairBase: 'a'.repeat(40),
     };
-    const artifact = (echo: JsonValue): JsonValue => new JsonObject([['binding', echo]]);
+    const artifact = (echo: JsonValue): JsonValue =>
+      new JsonObject([
+        ['status', 'ok'],
+        ['value', new JsonObject([['binding', echo]])],
+      ]);
     const echo = new JsonObject([
       ['job', binding.job],
       ['sourceSha', binding.sourceSha],
@@ -416,30 +420,57 @@ describe('harvest checks', () => {
       ['findingSha256', binding.findingSha256],
       ['repairBase', binding.repairBase],
     ]);
-    expect(
-      typedFixFindingResultRefusal({ prepared: binding, value: artifact(echo) }),
-    ).toBeUndefined();
-    expect(
-      typedFixFindingResultRefusal({
-        prepared: binding,
-        value: new JsonObject([['status', 'ok']]),
-      }),
-    ).toBe('fixfinding-result-binding-missing');
+    expect(typedFixFindingResultRefusal({ prepared: binding, artifact: artifact(echo) })).toBe(
+      undefined,
+    );
     expect(
       typedFixFindingResultRefusal({
         prepared: binding,
-        value: artifact('not-an-object'),
+        artifact: new JsonObject([['status', 'ok']]),
+      }),
+    ).toBe('fixfinding-result-envelope-invalid');
+    expect(
+      typedFixFindingResultRefusal({
+        prepared: binding,
+        artifact: new JsonObject([
+          ['status', 'ok'],
+          ['value', new JsonObject([['binding', 'not-an-object']])],
+        ]),
       }),
     ).toBe('fixfinding-result-binding-missing');
+    for (const status of ['failed', 'needs-human', 'budget-exhausted', 'indeterminate']) {
+      expect(
+        typedFixFindingResultRefusal({
+          prepared: binding,
+          artifact: new JsonObject([['status', status]]),
+        }),
+      ).toBe('fixfinding-result-not-ok');
+    }
+    for (const artifactValue of [
+      new JsonObject([]),
+      new JsonObject([['status', JsonNumber.int(1)]]),
+      new JsonObject([['status', 'unknown']]),
+      new JsonObject([
+        ['status', 'ok'],
+        ['value', []],
+      ]),
+    ]) {
+      expect(typedFixFindingResultRefusal({ prepared: binding, artifact: artifactValue })).toBe(
+        'fixfinding-result-envelope-invalid',
+      );
+    }
+    expect(typedFixFindingResultRefusal({ prepared: binding, artifact: [] })).toBe(
+      'result-not-object',
+    );
     for (const key of ['job', 'sourceSha', 'sourceBlobSha', 'findingSha256', 'repairBase']) {
       const missing = new JsonObject(echo.entries.filter(([name]) => name !== key));
-      expect(typedFixFindingResultRefusal({ prepared: binding, value: artifact(missing) })).toBe(
+      expect(typedFixFindingResultRefusal({ prepared: binding, artifact: artifact(missing) })).toBe(
         'fixfinding-result-binding-missing',
       );
       const wrong = new JsonObject(
         echo.entries.map(([name, value]) => [name, name === key ? 'wrong' : value]),
       );
-      expect(typedFixFindingResultRefusal({ prepared: binding, value: artifact(wrong) })).toBe(
+      expect(typedFixFindingResultRefusal({ prepared: binding, artifact: artifact(wrong) })).toBe(
         'fixfinding-result-binding-mismatch',
       );
     }

@@ -44,8 +44,11 @@ export type RepairRefusal =
   | 'result-identity-mismatch'
   | 'result-binding-mismatch'
   | 'legacy-source-sha-missing'
+  | 'fixfinding-result-not-ok'
+  | 'fixfinding-result-envelope-invalid'
   | 'fixfinding-result-binding-missing'
-  | 'fixfinding-result-binding-mismatch';
+  | 'fixfinding-result-binding-mismatch'
+  | 'canonical-finding-id-invalid';
 
 /**
  * The caller's existing round count for the current pin, injected as typed
@@ -136,6 +139,11 @@ export function checkSha(value: unknown): boolean {
   return typeof value === 'string' && CHECK_SHA.test(value);
 }
 
+/** `bounded.require_canonical_delivery`'s identity grammar. */
+export function checkCanonicalFindingId(value: unknown): value is string {
+  return typeof value === 'string' && CANONICAL_FINDING.test(value);
+}
+
 /** `bounded.identity`: the Python canonical JSON digest. */
 export function findingDigest(finding: JsonValue): string {
   return receiptJsonDigest(finding);
@@ -176,8 +184,7 @@ export function severityRepairable(job: JsonObject): boolean {
   const severity = finding instanceof JsonObject ? finding.get('severity') : undefined;
   if (severity === 'critical' || severity === 'major') return true;
   if (severity !== 'minor') return false;
-  const canonical = job.get('canonical_finding_id');
-  return typeof canonical === 'string' && CANONICAL_FINDING.test(canonical);
+  return checkCanonicalFindingId(job.get('canonical_finding_id'));
 }
 
 function validEvidenceText(value: JsonValue | undefined): boolean {
@@ -402,17 +409,31 @@ const BINDING_FIELDS = [
   'repairBase',
 ] as const satisfies ReadonlyArray<keyof FixFindingBinding>;
 
+/** The frozen non-ok `OpResult` statuses: a well-formed artifact with no value. */
+const NON_OK_STATUSES = new Set(['failed', 'needs-human', 'budget-exhausted', 'indeterminate']);
+
 /**
- * The new typed `review.fixFinding` artifact MUST echo a COMPLETE binding
- * equal to all five prepared fields. Missing, non-object and mismatch refuse;
- * there is no optional-echo bypass for new artifacts (unlike legacy Python
- * results, which predate the binding).
+ * The new typed `review.fixFinding` artifact is an `OpResult` envelope. An
+ * `ok` envelope's `value` MUST echo a COMPLETE binding equal to all five
+ * prepared fields. Missing, non-object, non-ok and mismatch refuse; there is
+ * no optional-echo bypass for new artifacts (unlike legacy Python results,
+ * which predate the binding). A non-ok status is reported truthfully as
+ * non-harvestable rather than flattened into a missing-binding failure.
  */
 export function typedFixFindingResultRefusal(input: {
   readonly prepared: FixFindingBinding;
-  readonly value: JsonValue;
+  readonly artifact: JsonValue;
 }): RepairRefusal | undefined {
-  const echo = input.value instanceof JsonObject ? input.value.get('binding') : undefined;
+  if (!(input.artifact instanceof JsonObject)) return 'result-not-object';
+  const status = input.artifact.get('status');
+  if (status !== 'ok') {
+    return typeof status === 'string' && NON_OK_STATUSES.has(status)
+      ? 'fixfinding-result-not-ok'
+      : 'fixfinding-result-envelope-invalid';
+  }
+  const value = input.artifact.get('value');
+  if (!(value instanceof JsonObject)) return 'fixfinding-result-envelope-invalid';
+  const echo = value.get('binding');
   if (!(echo instanceof JsonObject)) return 'fixfinding-result-binding-missing';
   for (const field of BINDING_FIELDS) {
     if (!echo.has(field)) return 'fixfinding-result-binding-missing';
