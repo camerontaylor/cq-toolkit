@@ -779,12 +779,12 @@ for a in "$@"; do
 done
 echo "$url" >> "${urlsPath}"
 ${
-      emit
-        ? `printf '${emit.first}\\n'
+  emit
+    ? `printf '${emit.first}\\n'
 sleep 0.${String(emit.delayMs).padStart(3, '0')}
 ${emit.rest.map((n) => `printf '${n}\\n'`).join('\n')}
 exit 0`
-        : `pages_json=$(cat <<'PAGES'
+    : `pages_json=$(cat <<'PAGES'
 ${JSON.stringify(fixture.pages ?? [])}
 PAGES
 )
@@ -796,7 +796,7 @@ if [ "${fixture.failOnPage ?? 0}" -ge 1 ]; then
 fi
 printf '%s' "$pages_json" | jq -c '.[][] | select(.pull_request == null and .title == "ratchet") | .number'
 exit 0`
-    }
+}
 `,
   );
   chmodSync(gh, 0o755);
