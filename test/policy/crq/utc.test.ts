@@ -149,13 +149,10 @@ describe('parseUtcUnchecked — parse-only companion', () => {
 });
 
 describe('parseUtcDetailed — component-validation messages', () => {
-  test('treats a zero-second fractional offset as UTC', () => {
-    expect(parseUtcDetailed('2026-11-08T00:00:00+00:00:00.5')).toBe(
-      parseUtc('2026-11-08T00:00:00Z')?.epochMicros,
-    );
-    expect(parseUtcDetailed('2026-11-08T00:00:00-00:00:00.5')).toBe(
-      parseUtc('2026-11-08T00:00:00Z')?.epochMicros,
-    );
+  test('applies a zero-second fractional offset', () => {
+    const base = parseUtc('2026-11-08T00:00:00Z')?.epochMicros;
+    expect(parseUtcDetailed('2026-11-08T00:00:00+00:00:00.5')).toBe((base as bigint) - 500_000n);
+    expect(parseUtcDetailed('2026-11-08T00:00:00-00:00:00.5')).toBe((base as bigint) + 500_000n);
   });
 
   test('keeps Python calendar and clock messages', () => {

@@ -333,12 +333,12 @@ describe('generic sum after int fast-path overflow', () => {
 });
 
 describe('UTC component validation', () => {
-  test('a zero-second fractional offset is UTC', () => {
+  test('a zero-second fractional offset is applied', () => {
     const value = utilizationDigest({ starts: ['2026-11-08T12:00:00Z'] }, emptyLedger(), {
       now: '2026-11-09T12:00:00+00:00:00.5',
       maxStartsPerHour: 5,
     });
-    expect(compact(value)).toContain('"starts_24h":0,');
+    expect(compact(value)).toContain('"starts_24h":1,');
   });
 
   test('calendar and clock errors keep Python messages', () => {

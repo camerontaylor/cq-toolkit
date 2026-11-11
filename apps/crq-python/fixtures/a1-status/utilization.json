@@ -457,7 +457,7 @@
       }
     },
     {
-      "name": "fractional-zero-offset-is-utc",
+      "name": "fractional-zero-offset-is-applied",
       "source": "coverage.utilization_digest",
       "input": {
         "queue": {
@@ -477,9 +477,9 @@
       "expect": {
         "ok": true,
         "value": {
-          "starts_24h": 0,
+          "starts_24h": 1,
           "nominal_cap_24h": 120,
-          "nominal_utilization": 0.0,
+          "nominal_utilization": 0.008333333333333333,
           "cooldown_minutes": 0,
           "observed_ticks_24h": 0,
           "available_start_opportunities_24h": 0,

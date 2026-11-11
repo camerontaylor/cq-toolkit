@@ -3,7 +3,6 @@ import copy
 import datetime as dt
 import importlib.util
 from pathlib import Path
-import shutil
 import subprocess
 import sys
 import unittest
@@ -244,16 +243,8 @@ class CoverageRepairDebtTest(unittest.TestCase):
 class CoverageUtilizationFixtureTest(unittest.TestCase):
     def test_a1_status_fixtures_are_current(self):
         emit = Path(__file__).with_name("fixtures") / "a1-status" / "emit.py"
-        # The fixture is emitted by the production minor (3.14). Python 3.15
-        # changed fractional zero-second offsets, so use 3.14 when this test
-        # itself runs on a newer local interpreter.
-        python = (
-            sys.executable
-            if sys.version_info[:2] == (3, 14)
-            else shutil.which("python3.14") or sys.executable
-        )
         result = subprocess.run(
-            [python, str(emit), "--check"],
+            [sys.executable, str(emit), "--check"],
             capture_output=True,
             text=True,
             check=False,

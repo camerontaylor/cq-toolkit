@@ -1017,7 +1017,7 @@ def utilization_family() -> Dict[str, Any]:
     )
     cases.append(
         case(
-            "fractional-zero-offset-is-utc",
+            "fractional-zero-offset-is-applied",
             now="2026-11-09T12:00:00+00:00:00.5",
             queue={"starts": ["2026-11-08T12:00:00Z"]},
         )
