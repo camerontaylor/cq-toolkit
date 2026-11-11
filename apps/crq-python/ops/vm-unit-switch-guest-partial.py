@@ -741,7 +741,7 @@ def partial_inspect(args):
             "final partial tick state changed the original record set")
     require((tick.get("files") or {}).get(
         str(base.SERVICE), {}).get("sha256")
-        == sha256_bytes(expected_unit_bytes(PYTHON_RUNTIME).encode()),
+        == sha256_bytes(expected_tick_unit_bytes(PYTHON_RUNTIME).encode()),
         "final partial tick service bytes changed")
     require(not (UNIT_DIR / ".crq-tick.service.staged").exists(),
             "final partial state retains the staged tick target")
@@ -760,6 +760,12 @@ def partial_inspect(args):
 
 def expected_unit_bytes(runtime):
     return repair_adapter().render_unit(runtime)
+
+
+def expected_tick_unit_bytes(runtime):
+    return base.load_adapter().GuestFixtureAdapter(
+        unit_dir=UNIT_DIR, fixture_dir=FIXTURE, unit=base.UNIT,
+        proof_root=PROOF_BIN, guest_only=True).render_unit(runtime)
 
 
 def main(argv=None):
