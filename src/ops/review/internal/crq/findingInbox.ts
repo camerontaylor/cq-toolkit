@@ -1,11 +1,13 @@
 /**
- * Finding inbox ingestion and crash-recovery replay, behind an injected seam.
+ * Finding inbox ingestion, crash-recovery replay and canonical handoff,
+ * behind an injected seam.
  *
- * Ports `finding_delivery.Inbox.ingest` and `Inbox.recover`. This is effect
- * orchestration for a future filesystem adapter: it holds the same
- * `findings.lock`, reads `triage/<id>.json`, applies the pure transition and
- * writes canonical row bytes. No real root is bound here, no lock file is
- * created and no outbox record is spooled.
+ * Ports `finding_delivery.Inbox.ingest`, `Inbox.recover` and `Inbox.handoff`.
+ * This is effect orchestration for a future filesystem adapter: it holds the
+ * same `findings.lock`, reads `triage/<id>.json`, applies the pure transition
+ * or handoff construction and writes canonical row bytes. No real root is
+ * bound here, no lock file is created and no outbox record is spooled outside
+ * the injected publication seam.
  */
 import { JsonObject, type JsonValue } from '../../../../policy/crq/jsonValue.js';
 import {
@@ -23,6 +25,9 @@ import {
   pythonIterable,
   removeFirstEqual,
 } from '../../../../policy/crq/findingDelivery.js';
+import { planFindingHandoff } from '../../../../policy/crq/findingHandoff.js';
+import { canonicalHandoffRefusal } from '../../../../policy/crq/repairGates.js';
+import type { RepairRefusal } from '../../../../policy/crq/repairBinding.js';
 
 /** The single triage-files seam. The real adapter is a later slice. */
 export interface FindingInboxFiles {
@@ -32,6 +37,16 @@ export interface FindingInboxFiles {
   readTriage(findingId: string): Promise<Uint8Array | null>;
   /** Atomically write `triage/<id>.json` with the supplied canonical bytes. */
   writeTriage(findingId: string, bytes: Uint8Array): Promise<void>;
+}
+
+/**
+ * The publication seam used by handoff. The publication adapter satisfies it
+ * structurally: `retained` is recovery authority and `spool` writes one
+ * durable event.
+ */
+export interface FindingPublication {
+  retained(): Promise<JsonValue[]>;
+  spool(value: JsonValue): Promise<string>;
 }
 
 export interface IngestEvidence {
@@ -50,6 +65,21 @@ export interface RecoverEvidence {
   readonly pending: readonly JsonValue[];
 }
 
+/**
+ * Ordinary operation evidence, never persisted. Python's `Inbox.handoff`
+ * returns `None` on both the write and idempotent paths; the port keeps the
+ * distinction for observability without adding a state file.
+ */
+export type FindingHandoffResult =
+  | {
+      readonly kind: 'written';
+      readonly eventId: JsonValue;
+      readonly receipt: JsonObject;
+      readonly recovery: RecoverEvidence;
+    }
+  | { readonly kind: 'already-handed-off'; readonly recovery: RecoverEvidence }
+  | { readonly kind: 'refused'; readonly refusal: RepairRefusal };
+
 type ApplyOutcome =
   | { readonly kind: 'written'; readonly eventId: JsonValue }
   | { readonly kind: 'already-applied'; readonly eventId: JsonValue }
@@ -62,6 +92,30 @@ function pythonPathComponent(value: JsonValue): string {
     );
   }
   return value;
+}
+
+/** Canonical rows are UTF-8; undecodable bytes are a typed unavailability. */
+const FATAL_UTF8 = new TextDecoder('utf-8', { fatal: true });
+
+function decodeRowText(bytes: Uint8Array): string | undefined {
+  try {
+    return FATAL_UTF8.decode(bytes);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Python's retained-then-recover order (`finding_delivery.py:115-116,181`).
+ * Module-private: a future triage consumer must reuse it rather than repeat
+ * the two calls. Reading retained records takes no lock; `recover` takes its
+ * own.
+ */
+async function recoverRetained(
+  inbox: FindingInbox,
+  publication: FindingPublication,
+): Promise<RecoverEvidence> {
+  return inbox.recover(await publication.retained());
 }
 
 export class FindingInbox {
@@ -138,6 +192,83 @@ export class FindingInbox {
       }
 
       return { written, alreadyApplied, pending: [...remaining] };
+    });
+  }
+
+  /**
+   * `Inbox.handoff`: recover retained events, revalidate the locked row
+   * through the single shared gate, then spool before the atomic row write.
+   *
+   * The gate is called twice with the same arguments: first with a withheld
+   * row, so an identity mismatch refuses before recovery, then with the row
+   * read under `findings.lock`. The first call's unavailability is
+   * provisional, not authoritative. `sourceSha` is deliberately omitted: the
+   * C1 read gate owns the pin binding and Python handoff never rechecks it.
+   */
+  async handoff(
+    publication: FindingPublication,
+    input: {
+      readonly findingId: string;
+      readonly previousTask: string;
+      readonly preparedJobId: string;
+      readonly job: JsonObject;
+      readonly at: string;
+    },
+  ): Promise<FindingHandoffResult> {
+    const identity = canonicalHandoffRefusal({
+      rowText: undefined,
+      job: input.job,
+      findingId: input.findingId,
+      previousTask: input.previousTask,
+      preparedJobId: input.preparedJobId,
+    });
+    if (!identity.ok && identity.refusal !== 'canonical-handoff-unavailable') {
+      return { kind: 'refused', refusal: identity.refusal };
+    }
+
+    const recovery = await recoverRetained(this, publication);
+
+    return this.files.withLock<FindingHandoffResult>(async () => {
+      const bytes = await this.files.readTriage(input.findingId);
+      if (bytes === null) return { kind: 'refused', refusal: 'canonical-handoff-unavailable' };
+      const rowText = decodeRowText(bytes);
+      if (rowText === undefined) {
+        return { kind: 'refused', refusal: 'canonical-handoff-unavailable' };
+      }
+      const decision = canonicalHandoffRefusal({
+        rowText,
+        job: input.job,
+        findingId: input.findingId,
+        previousTask: input.previousTask,
+        preparedJobId: input.preparedJobId,
+      });
+      if (!decision.ok) return { kind: 'refused', refusal: decision.refusal };
+      if (decision.alreadyHandedOff) return { kind: 'already-handed-off', recovery };
+
+      const row = ledgerLoads(bytes);
+      if (!(row instanceof JsonObject)) {
+        return { kind: 'refused', refusal: 'canonical-handoff-unavailable' };
+      }
+      const plan = planFindingHandoff({
+        row,
+        findingId: input.findingId,
+        job: input.job,
+        at: input.at,
+        alreadyHandedOff: false,
+      });
+      if (plan.kind !== 'write') {
+        throw new Error('handoff plan was empty after an authoritative ownership decision');
+      }
+      // Durable event before the local transition, with Python's exact lock
+      // order: `outbox.lock` nested inside the still-held `findings.lock`.
+      await publication.spool(plan.event);
+      await this.files.writeTriage(input.findingId, ledgerCanonicalBytes(plan.row));
+      return {
+        kind: 'written',
+        eventId: ledgerSubscript(plan.event, 'id'),
+        receipt: plan.receipt,
+        recovery,
+      };
     });
   }
 

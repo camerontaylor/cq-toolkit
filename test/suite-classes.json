@@ -315,6 +315,7 @@
   "test/ops/analyze/renderAnalysisReport.sidecarSchema.test.ts": "pure",
   "test/ops/analyze/run.test.ts": "pure",
   "test/ops/analyze/standaloneSlice.test.ts": "process",
+  "test/ops/crq/findingHandoff.test.ts": "pure",
   "test/ops/crq/findingInbox.test.ts": "pure",
   "test/ops/crq/outbox.test.ts": "pure",
   "test/ops/crq/publisher.test.ts": "pure",
