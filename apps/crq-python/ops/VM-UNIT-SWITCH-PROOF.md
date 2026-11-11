@@ -10,12 +10,13 @@ fixture-only and is not power-loss proof.
 ## Scope
 
 The vehicle exercises the *actual* controller seam
-(``deploy-controller.switch_unit`` and ``recover_unit``) against one
-representative harmless fixture installed under the allowlisted unit name
-``crq-tick.service`` in a disposable guest. It does not modify the controller's
-unit allowlist, add a journal, lock, pointer store, ledger, approval mechanism
-or resolution file, and it does not touch a production host, checkout,
-credential or provider.
+(``deploy-controller.switch_unit`` and ``recover_unit``) against two declared
+harmless guest topologies in a disposable guest: ``crq-tick.service`` with a
+timer (the base and matrix modes), and ``crq-repair.service`` with a timer, a
+path activator and one declared blocker drop-in (the activators mode). It does
+not modify the controller's unit allowlist, add a journal, lock, pointer
+store, ledger, approval mechanism or resolution file, and it does not touch a
+production host, checkout, credential or provider.
 
 Files:
 
@@ -24,8 +25,8 @@ Files:
 | ``ops/unit-switch-adapter.py`` | Guest-only adapter: durable ``/dev/null`` service replacement, target staged behind the mask until ``start`` releases it, exact path/type/bytes/mode/uid/gid snapshot and restoration, bounded job/cgroup drain, fake unit/runtime-bound completion provider. |
 | ``ops/unit-switch.py`` | Explicit ``switch``/``recover`` CLI; calls the real controller and requires ``--proof-fixture``. No default or production adapter. |
 | ``ops/unit-switch-fixture.py`` / ``.mjs`` | Harmless Python and Node fixtures emitting distinguishable runtime-bound completion records with real systemd invocation IDs. |
-| ``ops/vm-unit-switch-guest.py`` | In-guest driver: exact runner-source extraction, isolated git checkout, seeded queue/heartbeat and runner metadata, completed historical record, drain refusals and harvest, both directions, interruption, repeated recovery, the activation-fence probe, and the restart/reboot matrix at the ``drained``, ``restore_staged`` and ``activation_pending`` boundaries. |
-| ``ops/vm-unit-switch.py`` | Host harness reusing ``vm-feasibility.py`` lifecycle, uploading exact script bytes and ``git archive HEAD apps/crq-python`` as the runner source, restarting the real guest user manager or rebooting the guest OS between a boundary and its observation, retaining raw guest evidence and a report outside the worktree. |
+| ``ops/vm-unit-switch-guest.py`` | In-guest driver: exact runner-source extraction, isolated git checkout, seeded queue/heartbeat and runner metadata, completed historical record, drain refusals and harvest, both directions, interruption, repeated recovery, the activation-fence probe, the restart/reboot matrix at the ``drained``, ``restore_staged`` and ``activation_pending`` boundaries, and the second topology with an allowlisted timer/path/drop-in inventory, positive controls and refusal matrix. |
+| ``ops/vm-unit-switch.py`` | Host harness reusing ``vm-feasibility.py`` lifecycle, uploading exact script bytes and ``git archive HEAD apps/crq-python`` as the runner source, restarting the real guest user manager or rebooting the guest OS between a boundary and its observation, retaining raw guest evidence and a report outside the worktree, and recomputing the exact repair topology bytes, paths, metadata, unit states and record snapshots. |
 
 ## Sequence
 
@@ -138,7 +139,105 @@ so independent cases do not block each other. That is test isolation, not a
 resolution mechanism and not a fix for the known cross-directory journal
 interoperability gap.
 
+## Activation-inventory mode
+
+``run --mode activators`` keeps ``prepare`` as the original tick baseline and
+then exercises the second topology. It does not re-run the drain, fake
+completion, interrupt or restart/reboot proofs; those keep the base and matrix
+modes as their evidence. The mode is fixture-only and does not change the
+journal schema or action enum.
+
+1. ``activators-install``: install ``crq-repair.service``, its timer, a
+   ``PathExists=`` path unit, the exact ``timers.target.wants`` and
+   ``default.target.wants`` links, and one declared blocker drop-in. Reload and
+   take the adapter inventory. Require the exact six owned paths, the exact
+   activator names and states, no other ``crq-repair*`` entry, and an
+   unchanged original tick state.
+2. ``activators-positive``: prove a real timer firing, a real path trigger, a
+   direct start, a dependency caller start and a genuinely queued start behind
+   a running blocker. Every negative or queued observation retains the command
+   result, unit, job line, load state, completion baseline and bounded wait.
+   The queued job is cancelled by a real ``stop``; mask and reload alone are
+   not treated as cancellation.
+3. ``activators-unknown``: refuse a rogue ``crq-repair.socket``, an unexpected
+   enablement link, an unexpected drop-in and group/world-writable drop-in
+   metadata before any journal write or unit mutation. The original tick
+   state, record set and completion log must be unchanged and the rogue entry
+   removed after each case.
+4. ``activators-fence``: run a Python-to-Node switch with a real queued target
+   behind a verified blocker. A bounded guest-only pause after the durable
+   mask reload issues an external direct start, an external dependency start
+   and a path trigger, and observes the queue, blocker identity, unit states
+   and completion log. Require the queued job and all external attempts to be
+   refused or cancelled, the drain to settle with no service or activator job,
+   and exactly two post-release completions that are absent from the
+   pre-release and pause baselines. The released timer is active and the
+   enabled path stays inactive.
+5. ``activators-switch-back``: complete the reverse switch to Python and
+   require two advancing completions and the same independent activation
+   policy.
+6. ``activators-interrupt``: SIGKILL at ``install``; require a pending
+   ``drained`` record, the durable ``/dev/null`` mask, no staged target, both
+   activators stopped and no completion.
+7. ``activators-recover`` / ``activators-repeat``: recover to the exact Python
+   service and the prior independent active/enabled states, then refuse a
+   repeated recovery without changing the record bytes.
+8. ``activators-inspect``: require the final Python service, active timer,
+   enabled but inactive path, exact drop-in and wants links, absent staged and
+   trigger paths, three retained activator records, the unchanged tick
+   baseline, and an unrelated detached process that survives the switch and is
+   cleaned up only by the harness.
+
+The adapter inventory is an allowlisted guest topology, not exhaustive
+production activator discovery. Other-name dependency units, default-target
+links and socket units outside the exact declared paths remain a production
+inventory gap. Path-topology manager restart and guest reboot are deferred to
+a later slice; the existing restart/reboot matrix covers the tick topology
+only.
+
 ## Recorded evidence
+
+### Activators proof run
+
+One fresh activators run completed on Pluto (KVM, Ubuntu noble guest
+``crq-probe``) from source commit
+``f7853e5f51cf168151f7cb8ee97b0ac99b03b2f2``:
+
+- report ``~/crq-vm-feasibility/state/runs/20261111T020349Z-85d22f20/report.json``
+- all 19 checks true; ``problems: []``
+- ``raw-guest-evidence.tar.gz`` 1,164,189 bytes, SHA-256
+  ``d31d6118594026f95d4f9b87271569fedb2148e05214632ec4059bee7a50de3d``
+- report SHA-256
+  ``8316929b312633209d149a12e9169bccd4105a9c56b8a9f5e49cda850cb8b7c0``
+- host script SHA-256
+  ``46ffd8cc948419e6aea83ed28be41316d20d11a862f614873f600de0fb6d5fec``
+- guest script SHA-256
+  ``500038395e90cb87a6a9e2043d3e9748311a1fb8468b52aac03fc3b5e4e311b4``
+
+Two independent ``verify`` invocations against the retained report both
+returned ``problems: []`` with ``host_matches_run: true``,
+``guest_matches_run: true`` and ``validator_only: false``.
+
+The fence record is ``completed`` at ``activation_pending`` for
+``node:bbbb…`` with distinct completion sequences ``5`` and ``6``; the drain
+had no jobs, both activators inactive, and the queued target was recorded as
+``211 crq-repair.service start waiting`` through mask and reload. The released
+timer was active, the enabled path inactive and the settled service inactive.
+The switch-back completed to ``python`` with sequences ``7`` and ``8``; the
+interrupt retained a pending ``drained`` record; recovery rolled it back at
+``restore_activation_pending``; repeated recovery refused with rc ``2``; and
+inspection retained three activator records, an active timer, an enabled but
+inactive path, the exact service bytes, and an unrelated process that survived
+until harness cleanup. The positive controls ran direct start, timer, path and
+dependency-caller in that order so the timer control had a real inactive
+transition to count from; the queue control ran first and produced no
+completion.
+
+The tick runs below predate ``--mode activators``. They remain valid for the
+tick topology and are preserved unchanged. The activators run above is the
+fresh committed-source-bound evidence for the second topology. The later
+documentation commit does not change the proof scripts; their recorded hashes
+remain the binding.
 
 ### Current drain/harvest proof runs
 
@@ -298,10 +397,14 @@ not the current bound proof. The base proof run
 ``20261110T173225Z-de36ec18`` and the earlier retained run
 ``20261110T170322Z-9e8c5133`` remain on Pluto and are not rewritten.
 
-The fixture timer uses ``OnUnitInactiveSec=1s`` and ``AccuracySec=1s``. The
-default one-minute timer accuracy outlasted the completion bound in an earlier
-attempt; the fixture now bounds it explicitly. This is fixture configuration,
-not a production template change.
+The tick fixture timer keeps ``OnUnitInactiveSec=1s``; the repair fixture timer
+uses ``OnUnitInactiveSec=5s``. Both use ``AccuracySec=1s``. The default
+one-minute timer accuracy outlasted the completion bound in an earlier attempt,
+so the fixtures bound it explicitly. Five seconds leaves a stable window in
+which the repair timer is active while the oneshot service is still inactive,
+so a switch snapshot can capture the active-timer release policy. The tick
+fixture timer and its recorded evidence are unchanged. This is fixture
+configuration, not a production template change.
 
 ### Drain/harvest proof status
 

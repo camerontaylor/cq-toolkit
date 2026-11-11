@@ -1696,6 +1696,78 @@ class MatrixVerifyTests(unittest.TestCase):
                             for item in payload["problems"]))
 
 
+class ActivatorHarnessTests(unittest.TestCase):
+    def test_activators_mode_declares_phases(self):
+        self.assertEqual(harness.phase_names("activators"),
+                         harness.ACTIVATOR_GUEST_PHASES)
+        self.assertEqual([step[1] for step in
+                          harness.run_steps("activators")],
+                         list(harness.ACTIVATOR_GUEST_PHASES))
+        self.assertEqual(len(harness.ACTIVATOR_LIMITATIONS), 9)
+        self.assertTrue(any("allowlisted guest topology"
+                            in item for item in
+                            harness.ACTIVATOR_LIMITATIONS))
+
+    def test_empty_activators_evidence_fails_closed(self):
+        checks, problems = harness.build_checks({}, mode="activators")
+        self.assertIs(checks["activator_prepared_baseline"], False)
+        self.assertTrue(problems)
+
+    def test_repair_snapshot_requires_exact_bytes_and_activation(self):
+        expected = harness._repair_expected(PYTHON)
+
+        def file_state(text):
+            data = text.encode()
+            return {"type": "file", "mode": 0o644, "uid": 1000, "gid": 1000,
+                    "bytes_b64": base64.b64encode(data).decode("ascii"),
+                    "sha256": hashlib.sha256(data).hexdigest(),
+                    "size": len(data), "xattrs": []}
+
+        def link_state(target):
+            return {"type": "symlink", "mode": 0o777, "uid": 1000,
+                    "gid": 1000, "target": target, "xattrs": []}
+
+        snapshot = {
+            "schema_version": 1, "unit": harness.REPAIR_UNIT,
+            "runtime": PYTHON,
+            "paths": {
+                harness.REPAIR_PATHS["service"]: file_state(
+                    expected["service"]),
+                harness.REPAIR_PATHS["timer"]: file_state(expected["timer"]),
+                harness.REPAIR_PATHS["path"]: file_state(expected["path"]),
+                harness.REPAIR_PATHS["dropin"]: file_state(expected["dropin"]),
+                harness.REPAIR_PATHS["timer_wants"]: link_state(
+                    "../" + harness.REPAIR_TIMER),
+                harness.REPAIR_PATHS["path_wants"]: link_state(
+                    "../" + harness.REPAIR_PATH),
+            },
+            "activators": {
+                "timer_active": "active",
+                "timer_unit_file_state": "enabled",
+                "service_active": "inactive",
+                "path_active": "inactive",
+                "path_unit_file_state": "enabled",
+            },
+        }
+        problems = []
+        harness._record_snapshot_problems(
+            {"snapshot": snapshot}, PYTHON, "test snapshot", problems)
+        self.assertEqual(problems, [])
+        snapshot["paths"][harness.REPAIR_PATHS["service"]]["bytes_b64"] = (
+            base64.b64encode(b"tampered").decode("ascii"))
+        problems = []
+        harness._record_snapshot_problems(
+            {"snapshot": snapshot}, PYTHON, "test snapshot", problems)
+        self.assertTrue(problems)
+        snapshot["paths"][harness.REPAIR_PATHS["service"]] = file_state(
+            expected["service"])
+        snapshot["activators"]["path_active"] = "active"
+        problems = []
+        harness._record_snapshot_problems(
+            {"snapshot": snapshot}, PYTHON, "test snapshot", problems)
+        self.assertTrue(problems)
+
+
 class SourceCommitTests(unittest.TestCase):
     def _run(self, status, match=None):
         calls = []
