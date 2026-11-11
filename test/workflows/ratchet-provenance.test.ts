@@ -20,14 +20,7 @@
 //      cq-verify measure and judge the manifest ratchets); it keeps only the
 //      baseline monotonicity guard, in ref mode, on pull requests.
 import { spawnSync } from 'node:child_process';
-import {
-  existsSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  unlinkSync,
-  writeFileSync,
-} from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -612,9 +605,7 @@ describe('trusted recompute lockfile guard', () => {
       git('commit', '-m', 'head');
       // Remove the base blob from the fixture's own object store: the diff
       // cannot read it and exits 128; the merge-base (commit objects) is intact.
-      unlinkSync(
-        join(root, 'trust', '.git', 'objects', baseBlob.slice(0, 2), baseBlob.slice(2)),
-      );
+      unlinkSync(join(root, 'trust', '.git', 'objects', baseBlob.slice(0, 2), baseBlob.slice(2)));
       const workflow = template('cq-verify.yml');
       const guard = workflow
         .slice(
