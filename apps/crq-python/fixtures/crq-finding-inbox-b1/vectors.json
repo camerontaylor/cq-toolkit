@@ -4966,6 +4966,66 @@
           }
         },
         {
+          "name": "handoff-construct-written",
+          "source": "finding_delivery.Inbox.handoff.construct",
+          "input": {
+            "mode": "construct",
+            "finding_id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a",
+            "previous_task": "old-task",
+            "job": {
+              "job": "prepared-task",
+              "canonical_finding_id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a",
+              "origin_job": "old-task",
+              "source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "repair_base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "revalidation": {
+                "fix_instructions": "Keep both sources."
+              }
+            },
+            "at": "2026-10-30T00:00:00Z",
+            "row": {
+              "review_id": "63b4041c83691f6a15ac5a2c49e2f54b74de313be387211ef37c575b9ed41877",
+              "finding": {
+                "severity": "major",
+                "path": "src/a.ts",
+                "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "intervals": [
+                  [
+                    1,
+                    1
+                  ]
+                ],
+                "title": "\u6807\u9898 \ud83d\ude00",
+                "body": "details \u0001 with control",
+                "source_id": null,
+                "status": "untriaged",
+                "anchor_status": "verified",
+                "id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a"
+              },
+              "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "canonical_id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a",
+              "previous_event_id": null,
+              "status": "delivered",
+              "receipt": {
+                "acknowledgement": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "repair_task": "old-task"
+              },
+              "failure_class": "evidence"
+            },
+            "row_canonical": "{\"canonical_id\":\"7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a\",\"failure_class\":\"evidence\",\"finding\":{\"anchor_status\":\"verified\",\"blob\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"body\":\"details \\u0001 with control\",\"id\":\"7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a\",\"intervals\":[[1,1]],\"path\":\"src/a.ts\",\"severity\":\"major\",\"source_id\":null,\"status\":\"untriaged\",\"title\":\"\u6807\u9898 \ud83d\ude00\"},\"previous_event_id\":null,\"receipt\":{\"acknowledgement\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"repair_task\":\"old-task\"},\"review_id\":\"63b4041c83691f6a15ac5a2c49e2f54b74de313be387211ef37c575b9ed41877\",\"status\":\"delivered\",\"target\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}",
+            "already_handed_off": false
+          },
+          "expect": {
+            "ok": true,
+            "value": {
+              "kind": "write",
+              "receipt_canonical": "{\"acknowledgement\":\"b5fce31c5e3422883bfbe6328369631240d08587bcbef7c8476b1adb4e7ff20d\",\"repair_task\":\"prepared-task\"}",
+              "event_canonical": "{\"event_type\":\"finding-event\",\"id\":\"f34b69a04dd491a8eafc8fb6f0eff0c53a024f443b1e7e1d649bcf374066ed0c\",\"occurred_at\":\"2026-10-30T00:00:00Z\",\"payload\":{\"action\":\"delivered\",\"actor\":\"crq-repair-preparation\",\"evidence\":{\"acknowledgement\":\"b5fce31c5e3422883bfbe6328369631240d08587bcbef7c8476b1adb4e7ff20d\",\"repair_task\":\"prepared-task\"},\"finding_id\":\"7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a\",\"previous_event_id\":null,\"review_id\":\"63b4041c83691f6a15ac5a2c49e2f54b74de313be387211ef37c575b9ed41877\"},\"schema\":\"cq.review-ledger/v1\",\"source_key\":\"prepared-delivery:7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a:prepared-task\"}",
+              "row_canonical": "{\"canonical_id\":\"7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a\",\"failure_class\":\"evidence\",\"finding\":{\"anchor_status\":\"verified\",\"blob\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"body\":\"details \\u0001 with control\",\"id\":\"7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a\",\"intervals\":[[1,1]],\"path\":\"src/a.ts\",\"severity\":\"major\",\"source_id\":null,\"status\":\"untriaged\",\"title\":\"\u6807\u9898 \ud83d\ude00\"},\"previous_event_id\":\"f34b69a04dd491a8eafc8fb6f0eff0c53a024f443b1e7e1d649bcf374066ed0c\",\"receipt\":{\"acknowledgement\":\"b5fce31c5e3422883bfbe6328369631240d08587bcbef7c8476b1adb4e7ff20d\",\"repair_task\":\"prepared-task\"},\"review_id\":\"63b4041c83691f6a15ac5a2c49e2f54b74de313be387211ef37c575b9ed41877\",\"status\":\"delivered\",\"target\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}"
+            }
+          }
+        },
+        {
           "name": "handoff-construct-idempotent-no-construction",
           "source": "finding_delivery.Inbox.handoff.construct",
           "input": {

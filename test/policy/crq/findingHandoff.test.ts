@@ -88,7 +88,7 @@ function assertExpectation(entry: FindingDeliveryCase, result: PlanOutcome): voi
   if (entry.expect.get('ok') !== true) {
     const expectedError = stringField(entry.expect, 'error');
     expect(result.ok, `${entry.name}: expected ${expectedError}`).toBe(false);
-    if (result.ok) return;
+    if (result.ok) throw new Error(`${entry.name}: expected ${expectedError}`);
     expect(result.error, entry.name).toBe(expectedError);
     const expectedMessage = entry.expect.get('message');
     if (typeof expectedMessage === 'string') {
@@ -97,10 +97,30 @@ function assertExpectation(entry: FindingDeliveryCase, result: PlanOutcome): voi
     return;
   }
   expect(result.ok, `${entry.name}: unexpected refusal`).toBe(true);
+  if (!result.ok) throw new Error(`${entry.name}: unexpected refusal`);
 }
 
 function expectCanonical(value: JsonValue, expected: string, what: string): void {
   expect(Buffer.from(ledgerCanonicalBytes(value)), what).toEqual(Buffer.from(expected, 'utf8'));
+}
+
+type WritePlan = Extract<FindingHandoffPlan, { readonly kind: 'write' }>;
+
+function requirePlan(result: PlanOutcome, name: string): FindingHandoffPlan {
+  expect(result.ok, `${name}: expected a plan`).toBe(true);
+  if (!result.ok) throw new Error(`${name}: expected a plan`);
+  return result.value;
+}
+
+function requireWrite(plan: FindingHandoffPlan, name: string): WritePlan {
+  expect(plan.kind, `${name}: expected write`).toBe('write');
+  if (plan.kind !== 'write') throw new Error(`${name}: expected write plan`);
+  return plan;
+}
+
+function requireNone(plan: FindingHandoffPlan, name: string): void {
+  expect(plan.kind, `${name}: expected none`).toBe('none');
+  if (plan.kind !== 'none') throw new Error(`${name}: expected none plan`);
 }
 
 describe('canonical handoff construction vectors', () => {
@@ -112,46 +132,47 @@ describe('canonical handoff construction vectors', () => {
   test('construct cases match exact receipt, event and row canonical bytes', () => {
     const construct = cases.filter((entry) => stringField(entry.input, 'mode') === 'construct');
     expect(construct.length).toBeGreaterThan(0);
+    const constructWrites = construct.filter(
+      (entry) =>
+        entry.expect.get('ok') === true &&
+        objectField(entry.expect, 'value').get('kind') === 'write',
+    );
+    expect(constructWrites.length, 'construct write coverage').toBeGreaterThan(0);
     for (const entry of construct) {
       const already = entry.input.get('already_handed_off') === true;
       const result = planFor(entry, 'row_canonical', already);
       assertExpectation(entry, result);
-      if (!result.ok) continue;
+      if (entry.expect.get('ok') !== true) continue;
+      const plan = requirePlan(result, entry.name);
       const expected = objectField(entry.expect, 'value');
       if (expected.get('kind') === 'none') {
-        expect(result.value.kind, entry.name).toBe('none');
+        requireNone(plan, entry.name);
         continue;
       }
-      expect(result.value.kind, entry.name).toBe('write');
-      if (result.value.kind !== 'write') continue;
+      const write = requireWrite(plan, entry.name);
       expectCanonical(
-        result.value.receipt,
+        write.receipt,
         stringField(expected, 'receipt_canonical'),
         `${entry.name} receipt`,
       );
-      expectCanonical(
-        result.value.event,
-        stringField(expected, 'event_canonical'),
-        `${entry.name} event`,
-      );
-      expectCanonical(
-        result.value.row,
-        stringField(expected, 'row_canonical'),
-        `${entry.name} row`,
-      );
+      expectCanonical(write.event, stringField(expected, 'event_canonical'), `${entry.name} event`);
+      expectCanonical(write.row, stringField(expected, 'row_canonical'), `${entry.name} row`);
     }
   });
 
   test('the write case preserves failure_class and matches the outbox event bytes', () => {
     const entry = caseOrThrow('handoff-written');
     const result = planFor(entry, 'row_canonical', false);
-    expect(result.ok).toBe(true);
-    if (!result.ok || result.value.kind !== 'write') return;
-    const event = result.value.event;
-    const row = result.value.row;
+    const plan = requireWrite(requirePlan(result, 'handoff-written'), 'handoff-written');
+    const event = plan.event;
+    const row = plan.row;
     const after = rowsFrom(entry.expect.get('after'));
     expect(after).toHaveLength(1);
-    expectCanonical(row, after[0]?.canonical ?? '', 'handoff-written row');
+    const afterCanonical = after[0]?.canonical;
+    if (typeof afterCanonical !== 'string') {
+      throw new Error('handoff-written: oracle row missing');
+    }
+    expectCanonical(row, afterCanonical, 'handoff-written row');
     expect(row.get('failure_class')).toBe('evidence');
     const payload = objectField(event, 'payload');
     expect(objectField(payload, 'evidence').has('failure_class')).toBe(false);
@@ -161,26 +182,27 @@ describe('canonical handoff construction vectors', () => {
       (effect) => effect.get('kind') === 'write' && effect.get('target') === eventId,
     );
     expect(write).toBeDefined();
-    if (write !== undefined) {
-      expectCanonical(event, stringField(write, 'canonical'), 'handoff-written event');
+    if (write === undefined) {
+      throw new Error('handoff-written: pending write effect missing');
     }
+    expectCanonical(event, stringField(write, 'canonical'), 'handoff-written event');
     expect(arrayField(entry.expect, 'outbox')).toEqual([eventId]);
   });
 
   test('idempotent cases avoid construction, including a malformed job', () => {
     const already = caseOrThrow('handoff-already-handed-off');
     const alreadyResult = planFor(already, 'row_canonical', true);
-    expect(alreadyResult.ok).toBe(true);
-    if (alreadyResult.ok) {
-      expect(alreadyResult.value.kind).toBe('none');
-    }
+    requireNone(
+      requirePlan(alreadyResult, 'handoff-already-handed-off'),
+      'handoff-already-handed-off',
+    );
 
     const malformed = caseOrThrow('handoff-construct-idempotent-no-construction');
     const malformedResult = planFor(malformed, 'row_canonical', true);
-    expect(malformedResult.ok).toBe(true);
-    if (malformedResult.ok) {
-      expect(malformedResult.value.kind).toBe('none');
-    }
+    requireNone(
+      requirePlan(malformedResult, 'handoff-construct-idempotent-no-construction'),
+      'handoff-construct-idempotent-no-construction',
+    );
   });
 
   test('the recovered-after-crash case plans from the actual row after recover', () => {
@@ -194,10 +216,10 @@ describe('canonical handoff construction vectors', () => {
     expect(after.get('failure_class')).toBeNull();
 
     const result = planFor(entry, 'row_after_canonical', true);
-    expect(result.ok).toBe(true);
-    if (result.ok) {
-      expect(result.value.kind).toBe('none');
-    }
+    requireNone(
+      requirePlan(result, 'handoff-recovered-after-crash'),
+      'handoff-recovered-after-crash',
+    );
   });
 
   test('every effect refusal is marked as gate-owned', () => {

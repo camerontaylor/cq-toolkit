@@ -272,6 +272,7 @@ def _construct_handoff(
     updated = copy.deepcopy(row)
     updated.update(status="delivered", previous_event_id=value["id"], receipt=receipt)
     return {
+        "kind": "write",
         "receipt_canonical": ledger.canonical(receipt).decode("utf-8"),
         "event_canonical": ledger.canonical(value).decode("utf-8"),
         "row_canonical": ledger.canonical(updated).decode("utf-8"),
@@ -1367,6 +1368,7 @@ def handoff_vectors() -> Dict[str, Any]:
         key: value for key, value in construct_row.items() if key != "review_id"
     }
 
+    cases.append(construct_case("handoff-construct-written", job))
     cases.append(
         construct_case(
             "handoff-construct-idempotent-no-construction",

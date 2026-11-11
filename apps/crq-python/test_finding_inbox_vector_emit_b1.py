@@ -93,6 +93,7 @@ REQUIRED = {
         "handoff-missing-row",
         "handoff-receipt-not-object",
         "handoff-receipt-missing",
+        "handoff-construct-written",
         "handoff-construct-idempotent-no-construction",
         "handoff-construct-missing-job-float",
         "handoff-construct-non-string-job-float",
