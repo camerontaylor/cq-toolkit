@@ -729,7 +729,7 @@ function lookupLine(text: string): string {
     .map((l) => l.trim())
     .find((l) => l.startsWith('issue="'));
   expect(line, 'lookup assignment present').toBeDefined();
-  // The line is  issue="$(gh api ... | head -n1)"  — strip the wrapper so
+  // The line is  issue="$(gh api ... | sed -n '1p')"  — strip the wrapper so
   // the test runs exactly the command substitution's contents.
   const m = /^issue="\$\((.*)\)"$/.exec(line as string);
   expect(m, 'command substitution shape').not.toBeNull();
@@ -739,34 +739,52 @@ function lookupLine(text: string): string {
 interface LookupFixture {
   pages?: Array<Array<{ number: number; title: string; pull_request?: unknown }>>;
   failOnPage?: number;
+  /**
+   * Model a live `gh` that emits its first exact-title match, then — after
+   * the consumer has already seen it — writes the later pages' duplicates.
+   * A terminating consumer (head -n1) kills the emitter on EPIPE (SIGPIPE,
+   * rc 141); a draining consumer (sed -n '1p') lets it finish cleanly
+   * (r3 review F2).
+   */
+  emit?: { first: string; rest: string[]; delayMs: number };
 }
 
 function runLookup(
   command: string,
   fixture: LookupFixture,
-): { status: number | null; stdout: string; urls: string[] } {
+): { status: number | null; stdout: string; urls: string[]; epipeRc: number | null } {
   const dir = mkdtempSync(join(tmpdir(), 'ratchet-lookup-'));
   const bin = join(dir, 'bin');
   const gh = join(bin, 'gh');
   mkdirSync(bin, { recursive: true });
   const urlsPath = join(dir, 'urls.txt');
+  const epipePath = join(dir, 'epipe.txt');
   // No single quotes in tmp paths (this runner's tmpdir has none); assert
   // rather than silently break the heredoc below.
   expect(urlsPath, 'tmp path must be single-quote safe').not.toContain("'");
+  expect(epipePath, 'tmp path must be single-quote safe').not.toContain("'");
+  const emit = fixture.emit;
   writeFileSync(
     gh,
     `#!/usr/bin/env bash
 # stub gh: a single 'gh api <URL> --paginate --jq <prog>' invocation walks
 # every page internally (HTTP Link headers) and emits the CONCATENATED
 # per-page selections as one stream. The stub models exactly that stream:
-# it emits each page's exact-title numbers in order, so the command's own
-# 'head -n1' must collapse duplicates across pages to the first match.
+# it emits each page's exact-title numbers in order. In emit mode it paces
+# the writes (first match, delay, later duplicates) so a terminating
+# consumer observable dies on EPIPE and a draining consumer does not.
 url=""
 for a in "$@"; do
   if [ -z "$url" ] && [ "$a" != "api" ]; then url="$a"; fi
 done
 echo "$url" >> "${urlsPath}"
-pages_json=$(cat <<'PAGES'
+${
+      emit
+        ? `printf '${emit.first}\\n'
+sleep 0.${String(emit.delayMs).padStart(3, '0')}
+${emit.rest.map((n) => `printf '${n}\\n'`).join('\n')}
+exit 0`
+        : `pages_json=$(cat <<'PAGES'
 ${JSON.stringify(fixture.pages ?? [])}
 PAGES
 )
@@ -777,11 +795,19 @@ if [ "${fixture.failOnPage ?? 0}" -ge 1 ]; then
   exit 1
 fi
 printf '%s' "$pages_json" | jq -c '.[][] | select(.pull_request == null and .title == "ratchet") | .number'
-exit 0
+exit 0`
+    }
 `,
   );
   chmodSync(gh, 0o755);
-  const result = spawnSync('bash', ['-euo', 'pipefail', '-c', command], {
+  // In emit mode, run the lookup inside a capture assignment so the harness
+  // can also observe whether the stub (the model of gh) itself died on a
+  // broken pipe: a terminating consumer leaves EPIPE evidence, a draining
+  // one records 0.
+  const commandToRun = emit
+    ? `out="$( { ${command}; } 2>/dev/null )" || epipe_rc=$?\nprintf '%s' "$out"\necho "${'$'}{epipe_rc:-0}" > '${epipePath}'`
+    : command;
+  const result = spawnSync('bash', ['-euo', 'pipefail', '-c', commandToRun], {
     encoding: 'utf8',
     env: {
       ...process.env,
@@ -791,7 +817,8 @@ exit 0
     },
   });
   const urls = existsSync(urlsPath) ? readFileSync(urlsPath, 'utf8').trim().split('\n') : [];
-  return { status: result.status, stdout: result.stdout, urls };
+  const epipeRc = existsSync(epipePath) ? Number(readFileSync(epipePath, 'utf8').trim()) : null;
+  return { status: result.status, stdout: result.stdout, urls, epipeRc };
 }
 
 describe('ratchet.yml issue lookup executes correctly (r2 review F1/F2)', () => {
@@ -810,9 +837,14 @@ describe('ratchet.yml issue lookup executes correctly (r2 review F1/F2)', () => 
   );
 
   it.each(bothCopies('ratchet.yml'))(
-    '%s: picks the first exact-title issue across multiple pages',
+    '%s: draining consumer keeps the first match when later pages duplicate the title (r3 F1)',
     (_label, text) => {
-      const { status, stdout } = runLookup(lookupLine(text), {
+      // gh writes the page-3 match, pauses mid-walk (later pages still
+      // downloading), then emits the page-3 duplicate and the page-4 one.
+      // head -n1 closes the pipe on the first line: the emitter takes
+      // SIGPIPE (141) and pipefail aborts the assignment before the issue
+      // is reported. The draining consumer must return 0 with '762'.
+      const { status, stdout, epipeRc } = runLookup(lookupLine(text), {
         pages: [
           [
             { number: 1, title: 'unrelated' },
@@ -828,7 +860,9 @@ describe('ratchet.yml issue lookup executes correctly (r2 review F1/F2)', () => 
           ],
           [{ number: 1000, title: 'ratchet' }], // duplicate title, page 4
         ],
+        emit: { first: '762', rest: ['900', '1000'], delayMs: 150 },
       });
+      expect(epipeRc, 'the emitter must not die on a broken pipe').toBe(0);
       expect(status, 'lookup succeeds').toBe(0);
       expect(stdout.trim()).toBe('762');
     },
