@@ -1010,6 +1010,13 @@ def utilization_family() -> Dict[str, Any]:
     )
     cases.append(
         case(
+            "float-start-half-even-cutoff-tie",
+            now="1970-01-02T00:00:00.000002Z",
+            queue={"starts": [0.0000025]},
+        )
+    )
+    cases.append(
+        case(
             "bool-now-is-epoch-second",
             now=True,
             queue={

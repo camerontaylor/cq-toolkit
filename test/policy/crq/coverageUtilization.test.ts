@@ -230,6 +230,14 @@ describe('timestamp and cooldown rounding contract', () => {
     // Exact-rational rounding would produce 3 microseconds and exclude the
     // start; CPython multiplies in binary64 first and rounds 2.5 to 2.
     expect(compact(value)).toContain('"starts_24h":1,');
+
+    const cutoffValue = utilizationDigest(queue, emptyLedger(), {
+      now: '1970-01-02T00:00:00.000002Z',
+      maxStartsPerHour: 5,
+    });
+    // At exactly 24 hours later, the 2-microsecond start is the cutoff and is
+    // excluded; the exact-rational 3 microseconds would still be inside.
+    expect(compact(cutoffValue)).toContain('"starts_24h":0,');
   });
 
   test('cooldown uses timedelta.total_seconds exact int ratio', () => {

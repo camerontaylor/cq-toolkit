@@ -424,6 +424,39 @@
       }
     },
     {
+      "name": "float-start-half-even-cutoff-tie",
+      "source": "coverage.utilization_digest",
+      "input": {
+        "queue": {
+          "starts": [
+            2.5e-06
+          ]
+        },
+        "ledger": {
+          "schema_version": 1,
+          "paths": {},
+          "runs": {},
+          "observations": {}
+        },
+        "now": "1970-01-02T00:00:00.000002Z",
+        "max_starts_per_hour": 5
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "starts_24h": 0,
+          "nominal_cap_24h": 120,
+          "nominal_utilization": 0.0,
+          "cooldown_minutes": 0,
+          "observed_ticks_24h": 0,
+          "available_start_opportunities_24h": 0,
+          "idle_while_pending_24h": null,
+          "idle_with_coverage_candidate_24h": null,
+          "coverage_reviewed_paths": 0
+        }
+      }
+    },
+    {
       "name": "bool-now-is-epoch-second",
       "source": "coverage.utilization_digest",
       "input": {
