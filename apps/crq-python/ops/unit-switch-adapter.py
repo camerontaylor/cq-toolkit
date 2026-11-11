@@ -197,17 +197,17 @@ class GuestFixtureAdapter:
         return values
 
     def _jobs(self):
+        self.last_jobs_observation = None
         result = self.run_command(["systemctl", "--user", "list-jobs",
                                    "--no-legend", "--no-pager"], timeout=30)
-        self.last_jobs_observation = {
-            "command": result,
-            "lines": [line for line in (result.get("stdout") or "").splitlines()
-                      if line.strip()]}
         if result.get("timeout") or result.get("rc") != 0:
             self.refuse("systemctl list-jobs failed; job absence is unknown")
         stdout = result.get("stdout")
         if not isinstance(stdout, str):
             self.refuse("systemctl list-jobs returned no text")
+        self.last_jobs_observation = {
+            "command": result,
+            "lines": [line for line in stdout.splitlines() if line.strip()]}
         return self.last_jobs_observation["lines"]
 
     def _jobs_for(self, names):
@@ -614,6 +614,7 @@ class GuestFixtureAdapter:
         if self._topology()["kind"] == "repair" \
                 and activators["path_active"] not in ("active", "inactive"):
             self.refuse("snapshot path activator state is not restorable")
+        self._require_repair_activation_supported(activators, "snapshot")
         self._snapshot = snapshot
 
     def _snapshot_required(self):
@@ -729,6 +730,29 @@ class GuestFixtureAdapter:
     def _render_path_wants_target(self):
         return "../" + self._topology()["path"]
 
+    def _require_repair_activation_supported(self, activators, label):
+        """Reject an activation shape that cannot yield two completions.
+
+        The repair fixture release starts the service once and releases each
+        activator whose snapshot state is active. If neither timer nor path is
+        active, the controller's second completion can never advance. Refuse
+        that shape before the controller journals or mutates anything; an
+        enabled-but-inactive activator is not silently started.
+        """
+        if self._topology()["kind"] != "repair":
+            return
+        states = {name: activators.get(name + "_active")
+                  for name in ("timer", "path")}
+        if any(state not in ("active", "inactive")
+               for state in states.values()):
+            self.refuse(label + " repair activator state is not restorable: "
+                        + json.dumps(states, sort_keys=True))
+        if not any(state == "active" for state in states.values()):
+            self.refuse(label + " repair switch requires at least one active "
+                        "timer or path activator; both are inactive, so the "
+                        "release cannot produce the controller's second "
+                        "completion")
+
     # -- seam: preflight -------------------------------------------------
     def preflight(self, unit, runtime):
         if unit != self.unit:
@@ -739,6 +763,8 @@ class GuestFixtureAdapter:
             self.refuse("invalid requested runtime")
         paths = self._unit_paths()
         inventory = self.inventory()
+        self._require_repair_activation_supported(inventory["activators"],
+                                                  "preflight")
         fixture = self.proof_root / ("unit-switch-fixture.py"
                                      if runtime == "python"
                                      else "unit-switch-fixture.mjs")
@@ -762,6 +788,8 @@ class GuestFixtureAdapter:
         self._check_guest()
         paths = self._unit_paths()
         inventory = self.inventory()
+        self._require_repair_activation_supported(inventory["activators"],
+                                                  "snapshot")
         snapshot = {
             "schema_version": SCHEMA_VERSION,
             "unit": unit,

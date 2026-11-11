@@ -1454,21 +1454,48 @@ def _job_identity(line):
 
 def _job_lines_ok(lines, label, problems):
     ok = (isinstance(lines, list)
-          and all(isinstance(line, str) and line.strip() for line in lines))
+          and all(isinstance(line, str) and line.strip()
+                  and _job_identity(line) is not None
+                  for line in lines))
     if not ok:
-        problems.append(label + " job lines are not a typed string list: "
+        problems.append(label + " job lines are not typed list-jobs output: "
                         + json.dumps(lines)[:300])
     return ok
 
 
+LIST_JOBS_ARGV = ["systemctl", "--user", "list-jobs", "--no-legend",
+                  "--no-pager"]
+
+
+def _job_observation_lines(observation):
+    """Derive job lines from the retained raw command stdout, never a copy."""
+    if not isinstance(observation, dict):
+        return None
+    command = observation.get("command")
+    if not isinstance(command, dict):
+        return None
+    stdout = command.get("stdout")
+    if not isinstance(stdout, str):
+        return None
+    return [line for line in stdout.splitlines() if line.strip()]
+
+
 def _job_observation_ok(observation, label, problems, lines=None):
+    command = observation.get("command") if isinstance(observation, dict) else None
+    argv = command.get("argv") if isinstance(command, dict) else None
+    derived = _job_observation_lines(observation)
+    retained = observation.get("lines") if isinstance(observation, dict) else None
     ok = (isinstance(observation, dict)
-          and _command_ok(observation.get("command"), label, problems)
-          and _job_lines_ok(observation.get("lines"), label, problems)
-          and (lines is None or observation.get("lines") == lines))
+          and _command_ok(command, label, problems)
+          and argv == LIST_JOBS_ARGV
+          and derived is not None
+          and _job_lines_ok(derived, label, problems)
+          and retained == derived
+          and (lines is None or lines == derived))
     if not ok:
         problems.append(label + " list-jobs observation is incomplete or "
-                        "does not match the retained job lines")
+                        "does not bind its retained lines to the exact "
+                        "list-jobs command output")
     return ok
 
 
@@ -2174,12 +2201,8 @@ def _activator_checks(phases):
                          "fence after service", problems)
             and _fence_job_ok(queue_seed, during, problems)
             and drain.get("jobs") == []
-            and _command_ok(drain_jobs_observation.get("command"),
-                            "fence drain list-jobs", problems)
-            and _job_lines_ok(drain_jobs_observation.get("lines"),
-                              "fence drain job lines", problems)
-            and all(line in (drain_jobs_observation.get("lines") or [])
-                    for line in (drain.get("jobs") or []))
+            and _job_observation_ok(drain_jobs_observation,
+                                    "fence drain job observation", problems, [])
             and _command_ok(drain.get("service_stop"),
                             "fence service stop", problems, allowed=(0, 5))
             and _command_ok(blocker_stop, "fence blocker stop", problems)

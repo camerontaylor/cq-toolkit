@@ -1878,6 +1878,12 @@ class ActivatorEvidenceTests(unittest.TestCase):
         return {"argv": ["systemctl", "--user", "show"], "rc": rc,
                 "stdout": "", "stderr": "", "timeout": False}
 
+    def _job_command(self, lines=()):
+        text = "\n".join(lines)
+        return {"argv": harness.LIST_JOBS_ARGV, "rc": 0,
+                "stdout": (text + "\n") if text else "",
+                "stderr": "", "timeout": False}
+
     def _completion(self, sequence, invocation, runtime=PYTHON):
         return {"unit": harness.REPAIR_UNIT, "runtime": runtime,
                 "success": True, "sequence": sequence,
@@ -1893,7 +1899,7 @@ class ActivatorEvidenceTests(unittest.TestCase):
 
     def _queue(self):
         job = "52 crq-repair.service        start waiting"
-        observation = {"command": self._command(), "lines": [job]}
+        observation = {"command": self._job_command([job]), "lines": [job]}
         return {
             "blocker_command": self._command(),
             "target_command": self._command(),
@@ -1901,7 +1907,7 @@ class ActivatorEvidenceTests(unittest.TestCase):
             "blocker_stop": self._command(),
             "job": job, "job_observation": observation, "jobs": [job],
             "jobs_after": [],
-            "jobs_after_observation": {"command": self._command(),
+            "jobs_after_observation": {"command": self._job_command(),
                                        "lines": []},
             "blocker": {"ActiveState": "activating", "MainPID": "2063",
                         "InvocationID": "d" * 32},
@@ -1923,6 +1929,26 @@ class ActivatorEvidenceTests(unittest.TestCase):
         queue["after_count"] = False
         self.assertFalse(harness._positive_queue_ok(queue, []))
 
+    def test_job_observation_requires_exact_raw_stdout_binding(self):
+        queue = self._queue()
+        self.assertTrue(harness._positive_queue_ok(queue, []))
+        mutations = [
+            lambda item: item["job_observation"]["command"].update(stdout=""),
+            lambda item: item["job_observation"]["command"].update(
+                stdout="999 crq-repair.service        start waiting\n"),
+            lambda item: item["job_observation"]["command"].update(
+                argv=["systemctl", "--user", "list-jobs"]),
+            lambda item: item["job_observation"].update(lines=[]),
+            lambda item: item["jobs_after_observation"]["command"].update(
+                stdout="999 crq-repair.service        start waiting\n"),
+            lambda item: item["jobs_after_observation"]["command"].update(
+                argv=["systemctl", "--user", "list-jobs"]),
+        ]
+        for mutate in mutations:
+            changed = copy.deepcopy(queue)
+            mutate(changed)
+            self.assertFalse(harness._positive_queue_ok(changed, []))
+
     def test_fence_requires_same_waiting_job_and_blocker(self):
         queue = self._queue()
         queue_seed = {
@@ -1942,6 +1968,9 @@ class ActivatorEvidenceTests(unittest.TestCase):
         self.assertFalse(harness._fence_job_ok(queue_seed, changed, []))
         changed = json.loads(json.dumps(during))
         changed["blocker"]["InvocationID"] = "e" * 32
+        self.assertFalse(harness._fence_job_ok(queue_seed, changed, []))
+        changed = json.loads(json.dumps(during))
+        changed["jobs_observation"]["command"]["stdout"] = ""
         self.assertFalse(harness._fence_job_ok(queue_seed, changed, []))
         changed = json.loads(json.dumps(queue_seed))
         changed.pop("job_observation")

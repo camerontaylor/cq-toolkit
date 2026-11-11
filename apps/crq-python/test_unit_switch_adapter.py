@@ -16,6 +16,9 @@ import unittest
 import uuid
 from unittest import mock
 
+from test_deploy_controller_fixtures import ControllerFixture
+from test_deploy_controller_fixtures import dc as controller
+
 ROOT = pathlib.Path(__file__).resolve().parent
 OPS = ROOT / "ops"
 
@@ -143,6 +146,161 @@ class FakeSystemd:
                 "timeout": False}
 
 
+class RepairSystemd:
+    """Fake repair-topology host state with role-specific activator state."""
+
+    def __init__(self, service, timer, path, completions):
+        self.paths = {
+            adapter_mod.REPAIR_UNIT: service,
+            adapter_mod.REPAIR_TIMER: timer,
+            adapter_mod.REPAIR_PATH: path,
+        }
+        self.active = {unit: False for unit in self.paths}
+        self.completions = completions
+        self.masked = False
+        self.invocation = ""
+        self.calls = []
+
+    def runtime(self):
+        try:
+            text = self.paths[adapter_mod.REPAIR_UNIT].read_text()
+        except OSError:
+            return None
+        for line in text.splitlines():
+            if line.startswith("ExecStart=") and "--runtime" in line:
+                parts = line.split()
+                return parts[parts.index("--runtime") + 1]
+        return None
+
+    def _write_completion(self):
+        runtime = self.runtime()
+        if runtime is None:
+            return
+        records = []
+        if self.completions.exists():
+            for line in self.completions.read_text().splitlines():
+                if line.strip():
+                    records.append(json.loads(line))
+        sequence = max((item["sequence"] for item in records), default=0) + 1
+        self.invocation = uuid.uuid4().hex
+        record = {"unit": adapter_mod.REPAIR_UNIT, "runtime": runtime,
+                  "success": True, "sequence": sequence,
+                  "invocation": self.invocation,
+                  "at": "2026-01-01T00:00:00Z",
+                  "boot_id": "00000000-0000-0000-0000-000000000000"}
+        with self.completions.open("a") as out:
+            out.write(json.dumps(record, sort_keys=True) + "\n")
+
+    def show(self, unit, props):
+        path = self.paths.get(unit)
+        if path is None:
+            return ""
+        service = unit == adapter_mod.REPAIR_UNIT
+        values = {
+            "LoadState": "masked" if service and self.masked else "loaded",
+            "ActiveState": "active" if self.active[unit] else "inactive",
+            "SubState": "dead",
+            "UnitFileState": "static" if service else "enabled",
+            "FragmentPath": str(path),
+            "MainPID": "0",
+            "ControlGroup": "",
+            "InvocationID": self.invocation,
+            "Result": "success",
+        }
+        return "\n".join("%s=%s" % (prop, values[prop]) for prop in props) + "\n"
+
+    def run(self, argv, timeout):
+        self.calls.append(list(argv))
+        if argv[:2] == ["systemctl", "--user"]:
+            rest = argv[2:]
+            if rest[0] == "show":
+                return {"argv": argv, "rc": 0,
+                        "stdout": self.show(rest[1], rest[3].split(",")),
+                        "stderr": "", "timeout": False}
+            if rest[0] == "list-jobs":
+                return {"argv": argv, "rc": 0, "stdout": "", "stderr": "",
+                        "timeout": False}
+            if rest[0] == "daemon-reload":
+                self.masked = self.paths[adapter_mod.REPAIR_UNIT].is_symlink()
+                return {"argv": argv, "rc": 0, "stdout": "", "stderr": "",
+                        "timeout": False}
+            if rest[0] == "stop":
+                self.active[rest[1]] = False
+                return {"argv": argv, "rc": 0, "stdout": "", "stderr": "",
+                        "timeout": False}
+            if rest[0] == "reset-failed":
+                return {"argv": argv, "rc": 0, "stdout": "", "stderr": "",
+                        "timeout": False}
+            if rest[0] == "start":
+                unit = rest[1]
+                if unit == adapter_mod.REPAIR_UNIT and self.masked:
+                    return {"argv": argv, "rc": 1, "stdout": "",
+                            "stderr": "Unit %s is masked." % unit,
+                            "timeout": False}
+                if unit not in self.active:
+                    return {"argv": argv, "rc": 1, "stdout": "",
+                            "stderr": "unknown unit", "timeout": False}
+                if unit == adapter_mod.REPAIR_UNIT:
+                    self._write_completion()
+                    self.active[unit] = False
+                else:
+                    self.active[unit] = True
+                    self._write_completion()
+                return {"argv": argv, "rc": 0, "stdout": "", "stderr": "",
+                        "timeout": False}
+        if argv[0].endswith("python3") and argv[1:] == ["--version"]:
+            return {"argv": argv, "rc": 0, "stdout": "Python 3.12.0\n",
+                    "stderr": "", "timeout": False}
+        if argv[0].endswith("node") and argv[1:] == ["--version"]:
+            return {"argv": argv, "rc": 0, "stdout": "v18.19.1\n",
+                    "stderr": "", "timeout": False}
+        return {"argv": argv, "rc": 1, "stdout": "", "stderr": "unexpected",
+                "timeout": False}
+
+
+def build_repair_adapter(unit_dir, fixture_dir, proof_root,
+                         error_type=RuntimeError):
+    """Create the real proof adapter over a temporary repair topology."""
+    unit_dir = pathlib.Path(unit_dir)
+    fixture_dir = pathlib.Path(fixture_dir)
+    proof_root = pathlib.Path(proof_root)
+    unit_dir.mkdir(parents=True, exist_ok=True)
+    fixture_dir.mkdir(parents=True, exist_ok=True)
+    proof_root.mkdir(parents=True, exist_ok=True)
+    for name in ("unit-switch-fixture.py", "unit-switch-fixture.mjs"):
+        (proof_root / name).write_text("#!/bin/sh\n")
+    repair = adapter_mod.GuestFixtureAdapter(
+        unit_dir, fixture_dir, unit=adapter_mod.REPAIR_UNIT,
+        proof_root=proof_root, guest_only=False,
+        error_type=error_type,
+        completion_timeout=0.5, drain_timeout=0.5,
+        sleep=lambda _seconds: None)
+    paths = {
+        "service": unit_dir / adapter_mod.REPAIR_UNIT,
+        "timer": unit_dir / adapter_mod.REPAIR_TIMER,
+        "path": unit_dir / adapter_mod.REPAIR_PATH,
+        "timer_wants": unit_dir / adapter_mod.REPAIR_TIMER_WANTS,
+        "path_wants": unit_dir / adapter_mod.REPAIR_PATH_WANTS,
+        "dropin": unit_dir / adapter_mod.REPAIR_DROPIN,
+    }
+    paths["timer_wants"].parent.mkdir(parents=True, exist_ok=True)
+    paths["path_wants"].parent.mkdir(parents=True, exist_ok=True)
+    paths["dropin"].parent.mkdir(parents=True, exist_ok=True)
+    paths["service"].write_text(repair.render_unit("python"))
+    paths["timer"].write_text(repair.render_timer())
+    paths["path"].write_text(repair.render_path())
+    paths["dropin"].write_text(repair.render_dropin())
+    for key in ("service", "timer", "path", "dropin"):
+        paths[key].chmod(0o644)
+    paths["timer_wants"].symlink_to("../" + adapter_mod.REPAIR_TIMER)
+    paths["path_wants"].symlink_to("../" + adapter_mod.REPAIR_PATH)
+    fake = RepairSystemd(
+        paths["service"], paths["timer"], paths["path"],
+        fixture_dir / adapter_mod.REPAIR_COMPLETIONS_NAME)
+    repair.runner = fake.run
+    return repair, fake, paths
+
+
 class AdapterTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="crq-unit-switch-")
@@ -180,31 +338,8 @@ class AdapterTests(unittest.TestCase):
         return snapshot
 
     def _repair_adapter(self):
-        repair = adapter_mod.GuestFixtureAdapter(
-            self.unit_dir, self.fixture_dir, unit=adapter_mod.REPAIR_UNIT,
-            proof_root=self.proof_root, guest_only=False,
-            completion_timeout=0.5, drain_timeout=0.5,
-            sleep=lambda _seconds: None)
-        repair.runner = self.fake.run
-        paths = {
-            "service": self.unit_dir / adapter_mod.REPAIR_UNIT,
-            "timer": self.unit_dir / adapter_mod.REPAIR_TIMER,
-            "path": self.unit_dir / adapter_mod.REPAIR_PATH,
-            "timer_wants": self.unit_dir / adapter_mod.REPAIR_TIMER_WANTS,
-            "path_wants": self.unit_dir / adapter_mod.REPAIR_PATH_WANTS,
-            "dropin": self.unit_dir / adapter_mod.REPAIR_DROPIN,
-        }
-        paths["timer_wants"].parent.mkdir(parents=True, exist_ok=True)
-        paths["path_wants"].parent.mkdir(parents=True, exist_ok=True)
-        paths["dropin"].parent.mkdir(parents=True, exist_ok=True)
-        paths["service"].write_text(repair.render_unit("python"))
-        paths["timer"].write_text(repair.render_timer())
-        paths["path"].write_text(repair.render_path())
-        paths["dropin"].write_text(repair.render_dropin())
-        for key in ("service", "timer", "path", "dropin"):
-            paths[key].chmod(0o644)
-        paths["timer_wants"].symlink_to("../" + adapter_mod.REPAIR_TIMER)
-        paths["path_wants"].symlink_to("../" + adapter_mod.REPAIR_PATH)
+        repair, self.repair_fake, paths = build_repair_adapter(
+            self.unit_dir, self.fixture_dir, self.proof_root)
         return repair, paths
 
     def test_preflight_reads_installed_runtime(self):
@@ -239,22 +374,55 @@ class AdapterTests(unittest.TestCase):
         self.assertIn("OnUnitInactiveSec=5s", repair.render_timer())
         self.assertIn("Requires=crq-probe-blocker.service",
                       repair.render_dropin())
+        self.repair_fake.active[adapter_mod.REPAIR_TIMER] = True
         snapshot = repair.snapshot(adapter_mod.REPAIR_UNIT)
         repair.validate_snapshot(adapter_mod.REPAIR_UNIT, snapshot)
+        self.assertEqual(snapshot["activators"]["timer_active"], "active")
+        self.assertEqual(snapshot["activators"]["path_active"], "inactive")
         tampered = copy.deepcopy(snapshot)
         tampered["activators"]["path_active"] = "activating"
         with self.assertRaises(RuntimeError):
             repair.validate_snapshot(adapter_mod.REPAIR_UNIT, tampered)
 
-    def test_repair_inventory_allows_the_exact_topology(self):
+    def test_repair_preflight_allows_one_active_activator(self):
         repair, paths = self._repair_adapter()
+        self.repair_fake.active[adapter_mod.REPAIR_TIMER] = True
         inventory = repair.preflight(adapter_mod.REPAIR_UNIT, "python")["inventory"]
         self.assertEqual(inventory["topology"], "repair")
         self.assertEqual(set(inventory["paths"]),
                          {"service", "timer", "timer_wants", "path",
                           "path_wants", "dropin"})
+        self.assertEqual(inventory["activators"]["timer_active"], "active")
+        self.assertEqual(inventory["activators"]["path_active"], "inactive")
         self.assertIsNotNone(repair.last_inventory)
         self.assertTrue(paths["dropin"].is_file())
+
+    def test_repair_preflight_refuses_both_inactive_activators_before_mutation(self):
+        repair, paths = self._repair_adapter()
+        service = paths["service"]
+        before = service.read_bytes()
+        with self.assertRaisesRegex(RuntimeError, "at least one active"):
+            repair.preflight(adapter_mod.REPAIR_UNIT, "python")
+        self.assertEqual(repair.last_inventory["activators"]["timer_active"],
+                         "inactive")
+        self.assertEqual(repair.last_inventory["activators"]["path_active"],
+                         "inactive")
+        self.assertEqual(
+            repair.last_inventory["activators"]["timer_unit_file_state"],
+            "enabled")
+        self.assertEqual(
+            repair.last_inventory["activators"]["path_unit_file_state"],
+            "enabled")
+        self.assertEqual(service.read_bytes(), before)
+        self.assertFalse(service.is_symlink())
+        self.assertFalse((self.unit_dir / ".crq-repair.service.staged").exists())
+        self.assertFalse((self.fixture_dir
+                          / adapter_mod.REPAIR_COMPLETIONS_NAME).exists())
+
+    def test_repair_snapshot_refuses_both_inactive_activators(self):
+        repair, _paths = self._repair_adapter()
+        with self.assertRaisesRegex(RuntimeError, "at least one active"):
+            repair.snapshot(adapter_mod.REPAIR_UNIT)
 
     def test_repair_inventory_refuses_rogue_unit_before_mutation(self):
         repair, paths = self._repair_adapter()
@@ -427,6 +595,21 @@ class AdapterTests(unittest.TestCase):
             self.adapter.stop_and_drain(UNIT)
         self.assertTrue(self.fake.masked)
 
+    def test_failed_list_jobs_clears_stale_empty_observation(self):
+        self.adapter.last_jobs_observation = {
+            "command": {"argv": [], "rc": 0, "stdout": "", "stderr": "",
+                        "timeout": False},
+            "lines": []}
+
+        def failed(argv, timeout):
+            return {"argv": argv, "rc": 1, "stdout": "", "stderr": "failed",
+                    "timeout": False}
+
+        self.adapter.runner = failed
+        with self.assertRaisesRegex(RuntimeError, "job absence is unknown"):
+            self.adapter._jobs()
+        self.assertIsNone(self.adapter.last_jobs_observation)
+
     def test_install_keeps_direct_start_fenced_until_release(self):
         snapshot = self._snapshot()
         self.adapter.stop_and_drain(UNIT)
@@ -526,6 +709,50 @@ class AdapterTests(unittest.TestCase):
         self.completions.write_text("{not json}\n")
         with self.assertRaises(RuntimeError):
             self.adapter.sequence(UNIT)
+
+
+class RepairSwitchControllerTests(ControllerFixture):
+    """Actual controller plus actual proof adapter over a repair topology."""
+
+    def setUp(self):
+        super().setUp()
+        self.write_state("queue.json", {"items": [], "starts": []})
+        self.write_state("heartbeat.json",
+                         {"last_tick": "2026-01-01T00:00:00Z"})
+        self.repair, self.repair_fake, self.paths = build_repair_adapter(
+            self.base / "repair-units", self.base / "repair-fixture",
+            self.base / "repair-proof", error_type=controller.Refused)
+
+    def _records(self):
+        return sorted(self.record_dir.glob("controller-*.json"))
+
+    def test_both_inactive_activators_refuse_before_journal_or_mutation(self):
+        service = self.paths["service"]
+        before = service.read_bytes()
+        with self.assertRaisesRegex(controller.Refused, "at least one active"):
+            controller.switch_unit(self.effects, self.repair,
+                                   adapter_mod.REPAIR_UNIT, NODE)
+        self.assertEqual(self._records(), [])
+        self.assertEqual(service.read_bytes(), before)
+        self.assertFalse(service.is_symlink())
+        self.assertFalse((self.paths["service"].with_name(
+            ".crq-repair.service.staged")).exists())
+        self.assertFalse((self.base / "repair-fixture"
+                          / adapter_mod.REPAIR_COMPLETIONS_NAME).exists())
+
+    def test_one_active_activator_completes_and_preserves_inactive_path(self):
+        self.repair_fake.active[adapter_mod.REPAIR_TIMER] = True
+        record = controller.switch_unit(self.effects, self.repair,
+                                        adapter_mod.REPAIR_UNIT, NODE)
+        self.assertEqual(record["outcome"], "completed")
+        self.assertEqual(len(record["completions"]), 2)
+        self.assertLess(record["completions"][0]["sequence"],
+                        record["completions"][1]["sequence"])
+        self.assertTrue(self.repair_fake.active[adapter_mod.REPAIR_TIMER])
+        self.assertFalse(self.repair_fake.active[adapter_mod.REPAIR_PATH])
+        self.assertEqual(self.paths["path"].read_text(),
+                         self.repair.render_path())
+        self.assertEqual(len(self._records()), 1)
 
 
 if __name__ == "__main__":
