@@ -2655,6 +2655,9 @@ class PartialHarnessCheckTests(unittest.TestCase):
             ("direct argv", lambda drain: drain["direct_start"].__setitem__(
                 "argv", ["true"]),
              "direct start"),
+            ("direct rc", lambda drain: drain["direct_start"].__setitem__(
+                "rc", 2),
+             "direct start"),
         )
         for label, mutate, expected in cases:
             phases_value, restarts, reboots = self.evidence()
