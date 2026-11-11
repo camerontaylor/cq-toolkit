@@ -201,16 +201,16 @@ only.
 
 One fresh activators run completed on Pluto (KVM, Ubuntu noble guest
 ``crq-probe``) from source commit
-``2f5e8fd23e7eb893f67af7fd06fe23a11d020b6f``:
+``779ef5c494494acb689951cd77d66ae216a63674``:
 
-- report ``~/crq-vm-feasibility/state/runs/20261111T025413Z-dc3fff72/report.json``
+- report ``~/crq-vm-feasibility/state/runs/20261111T032335Z-7d2896be/report.json``
 - all 19 checks true; ``problems: []``
-- ``raw-guest-evidence.tar.gz`` 1,171,689 bytes, SHA-256
-  ``65c1354c11b80c1eda71f7162c56e296d38f4ce1fe60e1dca2a4ee87e98a7c48``
+- ``raw-guest-evidence.tar.gz`` 1,175,424 bytes, SHA-256
+  ``c404cb18c0a01aa7cf218ed73a16c87bf2fbe74b0eed948b685a0cd4f7ab194b``
 - report SHA-256
-  ``eeb54fd9ca4ae784b1a520596d361a6a0f20ae979bc52faa4a352d435e11e5ac``
+  ``a1be30f096300ea1b1f12026ca19cfcbe64f82e5d16d647966bbad63cd0cb090``
 - host script SHA-256
-  ``8db220ec25a4f35620cc289ba38b002c1ee07e0f54090d26e1fa6e842b42a83c``
+  ``030895b048ad239f88e3fbd3d2a55d5202f22fb7c529e9b4852942faecb58b3f``
 - guest script SHA-256
   ``5c9b68542a90fce42e994d3092f6106c1dfc6e1a92ba975fdb9c84649c53a9dc``
 
@@ -219,26 +219,53 @@ returned ``problems: []`` with ``host_matches_run: true``,
 ``guest_matches_run: true`` and ``validator_only: false``.
 
 The queue positive control recorded the exact waiting job
-``52 crq-repair.service start waiting``, a successful target stop (rc ``0``),
-and a post-stop list-jobs observation whose only remaining job was the
-blocker; both completion counts were the typed integer ``0``. The fence seeded
-``211 crq-repair.service start waiting`` and the pause observed the same job
-ID, unit, type and state, with the same blocker ``MainPID`` and
-``InvocationID``. Its list-jobs observations carry the command rc, and the
-drain retained an empty job list, a successful service stop, and both
-activators inactive. The pre-release and during completion inventories are
-identical, so the zero external delta is derived rather than trusted; the
-fence record is ``completed`` at ``activation_pending`` for ``node:bbbb…``
-with distinct completion sequences ``5`` and ``6``. The released timer was
-active, the enabled path inactive and the settled service inactive. The
-switch-back completed to ``python`` with sequences ``8`` and ``9`` after a
-real inactive transition; the interrupt retained a pending ``drained``
-record; recovery rolled it back at ``restore_activation_pending``; repeated
-recovery refused with rc ``2``; and inspection retained three activator
-records, an active timer, an enabled but inactive path, the exact service
-bytes, and an unrelated process that survived until harness cleanup. All four
-refusal cases retained present, paired, empty journal inventories and
-unchanged completion counts.
+``52 crq-repair.service start waiting``; its raw list-jobs command is the exact
+``systemctl --user list-jobs --no-legend --no-pager`` argv with rc ``0`` and
+stdout containing the blocker job ``32`` and the target job ``52``. The
+retained lines equal the normalized stdout, and the post-stop command stdout
+contains only the blocker job. The fence seed recorded the same exact argv
+with blocker job ``191`` and target job ``211``, and the pause retained the
+same job ID, unit, type and state with the same blocker ``MainPID`` and
+``InvocationID``. The drain list-jobs command has empty stdout and an empty
+line list, a successful service stop, and both activators inactive. The
+pre-release and during completion inventories are identical, so the zero
+external delta is derived rather than trusted; the fence record
+``controller-6daefc0cec4746f4ae53aaf29c387d15`` (SHA-256
+``540d3002b83f27225cc814a0848fb2ec416a9e2d6dc5597ba0183c72edb1333f``)
+is ``completed`` at ``activation_pending`` for ``node:bbbb…`` with distinct
+completion sequences ``5`` and ``6``. The released timer was active, the
+enabled path inactive and the settled service inactive. The switch-back
+completed to ``python`` with sequences ``8`` and ``9`` after a real inactive
+transition; the interrupt retained a pending ``drained`` record; recovery
+rolled it back at ``restore_activation_pending``; repeated recovery refused
+with rc ``2``; and inspection retained three activator records, an active
+timer, an enabled but inactive path, the exact service bytes, and an unrelated
+process that survived until harness cleanup. All four refusal cases retained
+present, paired, empty journal inventories and unchanged completion counts.
+
+The adapter now refuses a repair preflight or snapshot with both timer and
+path inactive, before the controller can journal or mutate a unit; an
+enabled-but-inactive activator does not count as active. Actual controller
+and adapter tests cover one active activator (the inactive path is preserved)
+and both inactive (``Refused`` with no controller record, unchanged service
+and no completion). Removing the precondition makes those three tests fail;
+removing the raw stdout binding makes the queued and fence contradiction
+tests fail.
+
+### Earlier review-fix activators run (preserved)
+
+The run ``20261111T025413Z-dc3fff72`` from source commit
+``2f5e8fd23e7eb893f67af7fd06fe23a11d020b6f`` remains preserved: all 19 checks
+true, report SHA-256
+``eeb54fd9ca4ae784b1a520596d361a6a0f20ae979bc52faa4a352d435e11e5ac``,
+raw tar 1,171,689 bytes with SHA-256
+``65c1354c11b80c1eda71f7162c56e296d38f4ce1fe60e1dca2a4ee87e98a7c48``,
+host script
+``8db220ec25a4f35620cc289ba38b002c1ee07e0f54090d26e1fa6e842b42a83c`` and
+guest script
+``5c9b68542a90fce42e994d3092f6106c1dfc6e1a92ba975fdb9c84649c53a9dc``.
+It predates the raw stdout binding and the repair activation precondition;
+the current run above is the fresh committed-source-bound evidence.
 
 ### Earlier activators proof run (preserved)
 
