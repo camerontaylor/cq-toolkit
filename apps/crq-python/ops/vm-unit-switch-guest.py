@@ -428,12 +428,20 @@ def show(unit, props):
     return values
 
 
-def jobs():
+def jobs_observation():
     result = run(["systemctl", "--user", "list-jobs", "--no-legend",
                   "--no-pager"], timeout=30)
+    lines = [line for line in (result.get("stdout") or "").splitlines()
+             if line.strip()]
+    return {"command": result, "lines": lines}
+
+
+def jobs():
+    observation = jobs_observation()
+    result = observation["command"]
     require(not result["timeout"] and result["rc"] == 0,
             "list-jobs failed; job absence is unknown")
-    return [line for line in result["stdout"].splitlines() if line.strip()]
+    return observation["lines"]
 
 
 def file_state(path):
@@ -1769,21 +1777,24 @@ def settle_service():
 
     ``OnUnitInactiveSec`` counts from the service's last inactive entry, so a
     timer started while the service has been inactive for longer than the
-    interval fires immediately. The short no-block start/stop below forces a
-    fresh inactive transition without running the fixture to completion.
+    interval fires immediately. A real start followed by a stop forces the
+    fresh inactive transition; the completed fixture run is part of the
+    baseline the switch-back takes afterwards.
     """
     systemctl("stop", REPAIR_TIMER)
     systemctl("stop", REPAIR_UNIT)
     systemctl("stop", BLOCKER_UNIT)
     systemctl("reset-failed", REPAIR_UNIT)
-    systemctl("start", "--no-block", REPAIR_UNIT)
+    started = systemctl("start", REPAIR_UNIT, timeout=60)
+    require(not started["timeout"] and started["rc"] == 0,
+            "failed to create a fresh inactive transition")
     systemctl("stop", REPAIR_UNIT)
     systemctl("reset-failed", REPAIR_UNIT)
     systemctl("stop", BLOCKER_UNIT)
     systemctl("reset-failed", BLOCKER_UNIT)
     started = systemctl("start", REPAIR_TIMER)
     require(started["rc"] == 0, "failed to start timer after settling")
-    require(show(REPAIR_SERVICE, ["ActiveState"])["ActiveState"] == "inactive",
+    require(show(REPAIR_UNIT, ["ActiveState"])["ActiveState"] == "inactive",
             "service did not settle to inactive")
 
 
@@ -1799,12 +1810,16 @@ def wait_until(predicate, timeout, label):
 
 def wait_job(unit_name, timeout=15):
     deadline = time.time() + timeout
-    last = []
+    last = None
     while time.time() < deadline:
-        last = jobs()
+        observation = jobs_observation()
+        result = observation["command"]
+        require(not result["timeout"] and result["rc"] == 0,
+                "list-jobs failed; job identity is unknown")
+        last = observation["lines"]
         for line in last:
             if unit_name in line:
-                return line, last
+                return line, observation
         time.sleep(0.1)
     raise RuntimeError("no job for " + unit_name + " within the bound: "
                        + json.dumps(last)[:300])
@@ -1812,11 +1827,15 @@ def wait_job(unit_name, timeout=15):
 
 def wait_job_absent(unit_name, timeout=15):
     deadline = time.time() + timeout
-    last = []
+    last = None
     while time.time() < deadline:
-        last = jobs()
+        observation = jobs_observation()
+        result = observation["command"]
+        require(not result["timeout"] and result["rc"] == 0,
+                "list-jobs failed; job absence is unknown")
+        last = observation["lines"]
         if not any(unit_name in line for line in last):
-            return last
+            return observation
         time.sleep(0.1)
     raise RuntimeError("job for " + unit_name + " survived the bound: "
                        + json.dumps(last)[:300])
@@ -2002,7 +2021,7 @@ def activators_install(args):
 
 def activators_positive(args):
     repair_clean()
-    require(show(REPAIR_SERVICE, ["ActiveState"])["ActiveState"] == "inactive",
+    require(show(REPAIR_UNIT, ["ActiveState"])["ActiveState"] == "inactive",
             "direct control requires an inactive service")
     require(show(REPAIR_TIMER, ["UnitFileState"])["UnitFileState"] == "enabled",
             "timer control requires an enabled timer")
@@ -2016,23 +2035,30 @@ def activators_positive(args):
     blocker_state = wait_until(blocker_running, 15, "queue blocker")
     target = systemctl("start", "--no-block", REPAIR_UNIT)
     require(target["rc"] == 0, "queued target failed to queue")
-    job_line, job_lines = wait_job(REPAIR_UNIT, timeout=15)
+    job_line, job_observation = wait_job(REPAIR_UNIT, timeout=15)
     require("start" in job_line, "queued target job is not a start job")
     require(REPAIR_UNIT in job_line, "queued target job names another unit")
     queued_entries = read_completions(REPAIR_COMPLETIONS)
     require(len(queued_entries) == len(before),
             "queued target completed before cancellation")
     stopped = systemctl("stop", REPAIR_UNIT)
-    jobs_after = wait_job_absent(REPAIR_UNIT, timeout=15)
+    require(not stopped["timeout"] and stopped["rc"] == 0,
+            "queued target stop did not complete")
+    jobs_after_observation = wait_job_absent(REPAIR_UNIT, timeout=15)
     after_entries = read_completions(REPAIR_COMPLETIONS)
     require(len(after_entries) == len(before),
             "queued target completed after cancellation")
     blocker_stop = systemctl("stop", BLOCKER_UNIT)
+    require(not blocker_stop["timeout"] and blocker_stop["rc"] == 0,
+            "queue blocker stop did not complete")
     systemctl("reset-failed", BLOCKER_UNIT)
     controls["queue"] = {
         "blocker_command": blocker, "blocker": blocker_state,
-        "target_command": target, "job": job_line, "jobs": job_lines,
-        "stop": stopped, "jobs_after": jobs_after,
+        "target_command": target, "job": job_line,
+        "job_observation": job_observation,
+        "jobs": job_observation["lines"],
+        "stop": stopped, "jobs_after": jobs_after_observation["lines"],
+        "jobs_after_observation": jobs_after_observation,
         "blocker_stop": blocker_stop, "before_count": len(before),
         "after_count": len(after_entries), "bounded_wait_seconds": 15}
 
@@ -2124,6 +2150,8 @@ def activators_unknown(args):
     repair_clean()
     baseline_files = repair_files()
     baseline_tick = stable_snapshot(snapshot())
+    baseline_records = [record_summary(path)
+                        for path in records_in(REPAIR_RECORDS)]
     baseline_completions = read_completions(REPAIR_COMPLETIONS)
     cases = {}
 
@@ -2182,13 +2210,19 @@ def activators_unknown(args):
 
     after_files = repair_files()
     after_tick = stable_snapshot(snapshot())
+    after_records = [record_summary(path)
+                     for path in records_in(REPAIR_RECORDS)]
     require(after_files == baseline_files,
             "refusal cases changed a fixture path")
+    require(after_records == baseline_records,
+            "refusal cases changed the controller journal inventory")
     require(after_tick == baseline_tick,
             "refusal cases changed the original tick topology")
     return {"phase": "activators-unknown", "cases": cases,
-            "baseline": {"files": baseline_files, "tick": baseline_tick},
-            "after": {"files": after_files, "tick": after_tick},
+            "baseline": {"files": baseline_files, "tick": baseline_tick,
+                         "records": baseline_records},
+            "after": {"files": after_files, "tick": after_tick,
+                      "records": after_records},
             "completions": len(baseline_completions)}
 
 
@@ -2203,7 +2237,7 @@ def activators_fence(args):
     blocker_state = wait_until(blocker_running, 15, "queue blocker")
     target = systemctl("start", "--no-block", REPAIR_UNIT)
     require(target["rc"] == 0, "failed to queue the target before the fence")
-    job_line, job_lines = wait_job(REPAIR_UNIT, timeout=15)
+    job_line, job_observation = wait_job(REPAIR_UNIT, timeout=15)
     require("start" in job_line and REPAIR_UNIT in job_line,
             "queued target job is not the expected start job")
     started = systemctl("start", REPAIR_TIMER)
@@ -2214,6 +2248,11 @@ def activators_fence(args):
     completions_before = read_completions(REPAIR_COMPLETIONS)
     records_before = [record_summary(path)
                       for path in records_in(REPAIR_RECORDS)]
+    queue_seed = {
+        "blocker": blocker_state, "blocker_command": blocker,
+        "target_command": target, "job": job_line,
+        "job_observation": job_observation,
+        "jobs": job_observation["lines"]}
 
     def during():
         completions_before_external = read_completions(REPAIR_COMPLETIONS)
@@ -2223,13 +2262,13 @@ def activators_fence(args):
         path_state = show(REPAIR_PATH_UNIT, ["ActiveState", "UnitFileState"])
         blocker_now = show(BLOCKER_UNIT, ["ActiveState", "SubState", "MainPID",
                                           "InvocationID"])
-        jobs_now = jobs()
+        jobs_now = jobs_observation()
         completions_now = read_completions(REPAIR_COMPLETIONS)
         marker = json.loads(REPAIR_PAUSE_MARKER.read_text())
         trigger_state = file_state(REPAIR_TRIGGER)
         return {"direct": direct, "dependency": dependency,
                 "path_state": path_state, "blocker": blocker_now,
-                "jobs": jobs_now,
+                "jobs": jobs_now["lines"], "jobs_observation": jobs_now,
                 "completions_before_external": completions_before_external,
                 "completions": completions_now,
                 "completion_count": len(completions_now),
@@ -2241,6 +2280,8 @@ def activators_fence(args):
     REPAIR_TRIGGER.unlink(missing_ok=True)
     REPAIR_PAUSE_MARKER.unlink(missing_ok=True)
     blocker_stop = systemctl("stop", BLOCKER_UNIT)
+    require(not blocker_stop["timeout"] and blocker_stop["rc"] == 0,
+            "fence blocker stop did not complete")
     systemctl("reset-failed", BLOCKER_UNIT)
     systemctl("stop", REPAIR_UNIT)
     systemctl("reset-failed", REPAIR_UNIT)
@@ -2360,9 +2401,7 @@ def activators_fence(args):
             "pre-switch timer was not active")
     require(before["repair_units"][REPAIR_PATH_UNIT]["ActiveState"]
             == "inactive", "pre-switch path was not inactive")
-    return {"phase": "activators-fence", "queue_seed": {
-                "blocker": blocker_state, "job": job_line,
-                "jobs": job_lines},
+    return {"phase": "activators-fence", "queue_seed": queue_seed,
             "before": before, "after": after,
             "completions_before": completions_before,
             "completions_after": completions_after,

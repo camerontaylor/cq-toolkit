@@ -179,6 +179,34 @@ class AdapterTests(unittest.TestCase):
         self.adapter.validate_snapshot(UNIT, snapshot)
         return snapshot
 
+    def _repair_adapter(self):
+        repair = adapter_mod.GuestFixtureAdapter(
+            self.unit_dir, self.fixture_dir, unit=adapter_mod.REPAIR_UNIT,
+            proof_root=self.proof_root, guest_only=False,
+            completion_timeout=0.5, drain_timeout=0.5,
+            sleep=lambda _seconds: None)
+        repair.runner = self.fake.run
+        paths = {
+            "service": self.unit_dir / adapter_mod.REPAIR_UNIT,
+            "timer": self.unit_dir / adapter_mod.REPAIR_TIMER,
+            "path": self.unit_dir / adapter_mod.REPAIR_PATH,
+            "timer_wants": self.unit_dir / adapter_mod.REPAIR_TIMER_WANTS,
+            "path_wants": self.unit_dir / adapter_mod.REPAIR_PATH_WANTS,
+            "dropin": self.unit_dir / adapter_mod.REPAIR_DROPIN,
+        }
+        paths["timer_wants"].parent.mkdir(parents=True, exist_ok=True)
+        paths["path_wants"].parent.mkdir(parents=True, exist_ok=True)
+        paths["dropin"].parent.mkdir(parents=True, exist_ok=True)
+        paths["service"].write_text(repair.render_unit("python"))
+        paths["timer"].write_text(repair.render_timer())
+        paths["path"].write_text(repair.render_path())
+        paths["dropin"].write_text(repair.render_dropin())
+        for key in ("service", "timer", "path", "dropin"):
+            paths[key].chmod(0o644)
+        paths["timer_wants"].symlink_to("../" + adapter_mod.REPAIR_TIMER)
+        paths["path_wants"].symlink_to("../" + adapter_mod.REPAIR_PATH)
+        return repair, paths
+
     def test_preflight_reads_installed_runtime(self):
         result = self.adapter.preflight(UNIT, NODE)
         self.assertEqual(result["runtime"], "python")
@@ -192,31 +220,13 @@ class AdapterTests(unittest.TestCase):
                          "enabled")
 
     def test_repair_topology_inventory_and_rendering(self):
-        repair = adapter_mod.GuestFixtureAdapter(
-            self.unit_dir, self.fixture_dir, unit=adapter_mod.REPAIR_UNIT,
-            proof_root=self.proof_root, guest_only=False,
-            completion_timeout=0.5, drain_timeout=0.5,
-            sleep=lambda _seconds: None)
-        repair.runner = self.fake.run
-        service = self.unit_dir / adapter_mod.REPAIR_UNIT
-        timer = self.unit_dir / adapter_mod.REPAIR_TIMER
-        path = self.unit_dir / adapter_mod.REPAIR_PATH
-        timer_wants = self.unit_dir / adapter_mod.REPAIR_TIMER_WANTS
-        path_wants = self.unit_dir / adapter_mod.REPAIR_PATH_WANTS
-        dropin = self.unit_dir / adapter_mod.REPAIR_DROPIN
-        timer_wants.parent.mkdir(parents=True, exist_ok=True)
-        path_wants.parent.mkdir(parents=True, exist_ok=True)
-        dropin.parent.mkdir(parents=True, exist_ok=True)
-        service.write_text(repair.render_unit("python"))
-        service.chmod(0o644)
-        timer.write_text(repair.render_timer())
-        timer.chmod(0o644)
-        path.write_text(repair.render_path())
-        path.chmod(0o644)
-        dropin.write_text(repair.render_dropin())
-        dropin.chmod(0o644)
-        timer_wants.symlink_to("../" + adapter_mod.REPAIR_TIMER)
-        path_wants.symlink_to("../" + adapter_mod.REPAIR_PATH)
+        repair, paths = self._repair_adapter()
+        service = paths["service"]
+        timer = paths["timer"]
+        path = paths["path"]
+        timer_wants = paths["timer_wants"]
+        path_wants = paths["path_wants"]
+        dropin = paths["dropin"]
         inventory = repair.inventory()
         self.assertEqual(inventory["topology"], "repair")
         self.assertEqual(set(inventory["paths"]),
@@ -235,6 +245,56 @@ class AdapterTests(unittest.TestCase):
         tampered["activators"]["path_active"] = "activating"
         with self.assertRaises(RuntimeError):
             repair.validate_snapshot(adapter_mod.REPAIR_UNIT, tampered)
+
+    def test_repair_inventory_allows_the_exact_topology(self):
+        repair, paths = self._repair_adapter()
+        inventory = repair.preflight(adapter_mod.REPAIR_UNIT, "python")["inventory"]
+        self.assertEqual(inventory["topology"], "repair")
+        self.assertEqual(set(inventory["paths"]),
+                         {"service", "timer", "timer_wants", "path",
+                          "path_wants", "dropin"})
+        self.assertIsNotNone(repair.last_inventory)
+        self.assertTrue(paths["dropin"].is_file())
+
+    def test_repair_inventory_refuses_rogue_unit_before_mutation(self):
+        repair, paths = self._repair_adapter()
+        rogue = self.unit_dir / "crq-repair.socket"
+        rogue.write_text("[Socket]\nListenStream=%t/crq-repair-proof.sock\n")
+        with self.assertRaisesRegex(RuntimeError, "outside the allowlisted"):
+            repair.preflight(adapter_mod.REPAIR_UNIT, "python")
+        self.assertTrue(rogue.is_file())
+        self.assertIsNone(repair.last_inventory)
+        self.assertTrue(paths["service"].is_file())
+
+    def test_repair_inventory_refuses_unknown_wants_link_before_mutation(self):
+        repair, paths = self._repair_adapter()
+        rogue = self.unit_dir / "default.target.wants" / adapter_mod.REPAIR_TIMER
+        rogue.parent.mkdir(parents=True, exist_ok=True)
+        rogue.symlink_to("../" + adapter_mod.REPAIR_TIMER)
+        with self.assertRaisesRegex(RuntimeError, "outside the allowlisted"):
+            repair.preflight(adapter_mod.REPAIR_UNIT, "python")
+        self.assertTrue(rogue.is_symlink())
+        self.assertIsNone(repair.last_inventory)
+        self.assertTrue(paths["service"].is_file())
+
+    def test_repair_inventory_refuses_unknown_dropin_before_mutation(self):
+        repair, paths = self._repair_adapter()
+        rogue = paths["dropin"].parent / "20-rogue.conf"
+        rogue.write_text("[Unit]\nDescription=rogue\n")
+        with self.assertRaisesRegex(RuntimeError, "outside the allowlisted"):
+            repair.preflight(adapter_mod.REPAIR_UNIT, "python")
+        self.assertTrue(rogue.is_file())
+        self.assertIsNone(repair.last_inventory)
+        self.assertTrue(paths["dropin"].is_file())
+
+    def test_repair_inventory_refuses_unsafe_metadata_before_mutation(self):
+        repair, paths = self._repair_adapter()
+        paths["dropin"].chmod(0o666)
+        with self.assertRaisesRegex(RuntimeError, "group- or world-writable"):
+            repair.preflight(adapter_mod.REPAIR_UNIT, "python")
+        self.assertEqual(paths["dropin"].stat().st_mode & 0o777, 0o666)
+        self.assertIsNone(repair.last_inventory)
+        self.assertTrue(paths["service"].is_file())
 
     def test_tick_topology_refuses_path_rendering(self):
         with self.assertRaises(RuntimeError):
@@ -332,6 +392,10 @@ class AdapterTests(unittest.TestCase):
         self.assertTrue(self.fake.masked)
         self.assertEqual(drain["owned"],
                          {"main_pid": 0, "pids": [], "cgroup": ""})
+        self.assertEqual(drain["service_stop"]["rc"], 0)
+        self.assertFalse(drain["service_stop"]["timeout"])
+        self.assertEqual(drain["jobs_observation"]["command"]["rc"], 0)
+        self.assertEqual(drain["jobs_observation"]["lines"], [])
 
     def test_stop_drain_refuses_when_queue_work_is_alive(self):
         self._snapshot()

@@ -6,6 +6,7 @@ The real guest run is recorded separately and is not part of the unit suite.
 """
 import importlib.util
 import base64
+import copy
 import io
 import json
 import pathlib
@@ -1870,6 +1871,144 @@ class RunnerSourceArchiveTests(unittest.TestCase):
                                   "file")])
         with self.assertRaisesRegex(RuntimeError, "author_quota.py"):
             guest.extract_runner_source(archive)
+
+
+class ActivatorEvidenceTests(unittest.TestCase):
+    def _command(self, rc=0):
+        return {"argv": ["systemctl", "--user", "show"], "rc": rc,
+                "stdout": "", "stderr": "", "timeout": False}
+
+    def _completion(self, sequence, invocation, runtime=PYTHON):
+        return {"unit": harness.REPAIR_UNIT, "runtime": runtime,
+                "success": True, "sequence": sequence,
+                "invocation": invocation}
+
+    def _record(self):
+        return {
+            "path": harness.REPAIR_RECORDS_DIR
+                    + "/controller-" + "a" * 32 + ".json",
+            "sha256": "b" * 64, "bytes": 120,
+            "transaction_id": "c" * 32, "schema_version": 1,
+            "unit": harness.REPAIR_UNIT, "outcome": "pending"}
+
+    def _queue(self):
+        job = "52 crq-repair.service        start waiting"
+        observation = {"command": self._command(), "lines": [job]}
+        return {
+            "blocker_command": self._command(),
+            "target_command": self._command(),
+            "stop": self._command(),
+            "blocker_stop": self._command(),
+            "job": job, "job_observation": observation, "jobs": [job],
+            "jobs_after": [],
+            "jobs_after_observation": {"command": self._command(),
+                                       "lines": []},
+            "blocker": {"ActiveState": "activating", "MainPID": "2063",
+                        "InvocationID": "d" * 32},
+            "before_count": 0, "after_count": 0}
+
+    def test_positive_queue_requires_settlement_and_exact_job(self):
+        problems = []
+        self.assertTrue(harness._positive_queue_ok(self._queue(), problems))
+        self.assertEqual(problems, [])
+        for key in ("jobs_after", "jobs_after_observation"):
+            queue = self._queue()
+            queue.pop(key)
+            self.assertFalse(harness._positive_queue_ok(queue, []))
+        queue = self._queue()
+        queue["stop"]["rc"] = 1
+        self.assertFalse(harness._positive_queue_ok(queue, []))
+        queue = self._queue()
+        queue["before_count"] = False
+        queue["after_count"] = False
+        self.assertFalse(harness._positive_queue_ok(queue, []))
+
+    def test_fence_requires_same_waiting_job_and_blocker(self):
+        queue = self._queue()
+        queue_seed = {
+            "blocker": queue["blocker"],
+            "blocker_command": queue["blocker_command"],
+            "target_command": queue["target_command"],
+            "job": queue["job"], "job_observation": queue["job_observation"],
+            "jobs": queue["jobs"]}
+        during = {
+            "jobs": queue["jobs"],
+            "jobs_observation": queue["job_observation"],
+            "blocker": queue["blocker"]}
+        self.assertTrue(harness._fence_job_ok(queue_seed, during, []))
+        changed = json.loads(json.dumps(during))
+        changed["jobs"] = ["999 crq-repair.service        start waiting"]
+        changed["jobs_observation"]["lines"] = changed["jobs"]
+        self.assertFalse(harness._fence_job_ok(queue_seed, changed, []))
+        changed = json.loads(json.dumps(during))
+        changed["blocker"]["InvocationID"] = "e" * 32
+        self.assertFalse(harness._fence_job_ok(queue_seed, changed, []))
+        changed = json.loads(json.dumps(queue_seed))
+        changed.pop("job_observation")
+        self.assertFalse(harness._fence_job_ok(changed, during, []))
+
+    def _fence(self):
+        before = [self._completion(1, "a" * 32),
+                  self._completion(2, "b" * 32)]
+        after = before + [self._completion(3, "c" * 32, NODE),
+                          self._completion(4, "d" * 32, NODE)]
+        during = {"completions_before_external": copy.deepcopy(before),
+                  "completions": copy.deepcopy(before),
+                  "completion_count": 2, "external_completion_delta": 0}
+        fence = {"completions_before": before, "completions_after": after}
+        record = {"completions": after[2:]}
+        return fence, during, record
+
+    def test_fence_completion_delta_is_derived_not_cached(self):
+        fence, during, record = self._fence()
+        self.assertTrue(harness._fence_completion_ok(fence, during, record, []))
+        during["completions"] = during["completions"] + [
+            self._completion(5, "e" * 32)]
+        self.assertFalse(harness._fence_completion_ok(fence, during, record, []))
+        fence, during, record = self._fence()
+        during.pop("completions_before_external")
+        self.assertFalse(harness._fence_completion_ok(fence, during, record, []))
+        fence, during, record = self._fence()
+        during["external_completion_delta"] = True
+        self.assertFalse(harness._fence_completion_ok(fence, during, record, []))
+
+    def test_refusal_requires_present_paired_record_inventories(self):
+        record = self._record()
+        files = {"service": {"type": "file"}}
+        units = {
+            harness.REPAIR_UNIT: {
+                "LoadState": "loaded", "ActiveState": "inactive",
+                "UnitFileState": "static",
+                "FragmentPath": harness.REPAIR_PATHS["service"]},
+            harness.REPAIR_TIMER: {
+                "LoadState": "loaded", "ActiveState": "inactive",
+                "UnitFileState": "enabled",
+                "FragmentPath": harness.REPAIR_PATHS["timer"]},
+            harness.REPAIR_PATH: {
+                "LoadState": "loaded", "ActiveState": "inactive",
+                "UnitFileState": "enabled",
+                "FragmentPath": harness.REPAIR_PATHS["path"]},
+        }
+        baseline = {"files": files, "records": [record]}
+        unknown = {"after": {"records": [record]}, "completions": 0}
+        case = {"command": {"rc": 2, "timeout": False,
+                            "stdout": "outside the allowlisted socket",
+                            "stderr": ""},
+                "records_before": [record], "records_after": [record],
+                "completions_after": 0, "units_after": units,
+                "mutated_files": files}
+        self.assertTrue(harness._refusal_case_ok(
+            "rogue-unit", case, baseline, unknown, []))
+        missing = copy.deepcopy(case)
+        missing.pop("records_before")
+        self.assertFalse(harness._refusal_case_ok(
+            "rogue-unit", missing, baseline, unknown, []))
+        malformed = copy.deepcopy(case)
+        malformed["records_before"] = [{"path": record["path"],
+                                        "sha256": "not-a-digest",
+                                        "bytes": 1}]
+        self.assertFalse(harness._refusal_case_ok(
+            "rogue-unit", malformed, baseline, unknown, []))
 
 
 if __name__ == "__main__":

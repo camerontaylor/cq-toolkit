@@ -138,6 +138,7 @@ class GuestFixtureAdapter:
         self.last_drain = None
         self.last_install = None
         self.last_restore = None
+        self.last_jobs_observation = None
 
     # -- refusal and process helpers ------------------------------------
     def refuse(self, message):
@@ -198,12 +199,16 @@ class GuestFixtureAdapter:
     def _jobs(self):
         result = self.run_command(["systemctl", "--user", "list-jobs",
                                    "--no-legend", "--no-pager"], timeout=30)
+        self.last_jobs_observation = {
+            "command": result,
+            "lines": [line for line in (result.get("stdout") or "").splitlines()
+                      if line.strip()]}
         if result.get("timeout") or result.get("rc") != 0:
             self.refuse("systemctl list-jobs failed; job absence is unknown")
         stdout = result.get("stdout")
         if not isinstance(stdout, str):
             self.refuse("systemctl list-jobs returned no text")
-        return [line for line in stdout.splitlines() if line.strip()]
+        return self.last_jobs_observation["lines"]
 
     def _jobs_for(self, names):
         return [line for line in self._jobs()
@@ -876,7 +881,12 @@ class GuestFixtureAdapter:
         text = ((refusal.get("stdout") or "") + (refusal.get("stderr") or "")).lower()
         if "masked" not in text:
             self.refuse("direct start failed for an unknown reason while fenced")
-        self.systemctl("stop", self.unit)
+        service_stop = self.systemctl("stop", self.unit, timeout=60)
+        if service_stop.get("timeout") or service_stop.get("rc") not in (0, 5):
+            self.refuse("service stop did not complete during fence: "
+                        + ((service_stop.get("stderr")
+                            or service_stop.get("stdout") or "").strip()[:200]
+                           or "rc " + str(service_stop.get("rc"))))
         self.systemctl("reset-failed", self.unit)
         drained = self._wait_drain()
         # Combine the systemd job/cgroup drain with the controller's recorded
@@ -885,6 +895,8 @@ class GuestFixtureAdapter:
         queue = self._observe_queue_drain()
         self.last_drain = {"before": before, "masked": masked,
                            "stopped": stopped,
+                           "service_stop": service_stop,
+                           "jobs_observation": self.last_jobs_observation,
                            "direct_start": {"rc": refusal.get("rc"),
                                             "stdout": refusal.get("stdout"),
                                             "stderr": refusal.get("stderr")},
