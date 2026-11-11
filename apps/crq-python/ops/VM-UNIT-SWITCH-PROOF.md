@@ -197,47 +197,68 @@ only.
 
 ## Recorded evidence
 
-### Activators proof run
+### Activators proof run (current)
 
 One fresh activators run completed on Pluto (KVM, Ubuntu noble guest
 ``crq-probe``) from source commit
-``8e4b302d958f02387d0d2be96f4d65d6bf399598``:
+``2f5e8fd23e7eb893f67af7fd06fe23a11d020b6f``:
 
-- report ``~/crq-vm-feasibility/state/runs/20261111T021704Z-110a85ab/report.json``
+- report ``~/crq-vm-feasibility/state/runs/20261111T025413Z-dc3fff72/report.json``
 - all 19 checks true; ``problems: []``
-- ``raw-guest-evidence.tar.gz`` 1,165,031 bytes, SHA-256
-  ``76475f1641bfd061d6a52737e2ec42c74dceede8f854c59c45bc88749c896e15``
+- ``raw-guest-evidence.tar.gz`` 1,171,689 bytes, SHA-256
+  ``65c1354c11b80c1eda71f7162c56e296d38f4ce1fe60e1dca2a4ee87e98a7c48``
 - report SHA-256
-  ``e7aec082cd1d5997d805bf793479c6bb47ccb8b8e3a35ec3bebed1ed0b2efbea``
+  ``eeb54fd9ca4ae784b1a520596d361a6a0f20ae979bc52faa4a352d435e11e5ac``
 - host script SHA-256
-  ``46ffd8cc948419e6aea83ed28be41316d20d11a862f614873f600de0fb6d5fec``
+  ``8db220ec25a4f35620cc289ba38b002c1ee07e0f54090d26e1fa6e842b42a83c``
 - guest script SHA-256
-  ``500038395e90cb87a6a9e2043d3e9748311a1fb8468b52aac03fc3b5e4e311b4``
+  ``5c9b68542a90fce42e994d3092f6106c1dfc6e1a92ba975fdb9c84649c53a9dc``
 
 Two independent ``verify`` invocations against the retained report both
 returned ``problems: []`` with ``host_matches_run: true``,
 ``guest_matches_run: true`` and ``validator_only: false``.
 
-The fence record is ``completed`` at ``activation_pending`` for
-``node:bbbb…`` with distinct completion sequences ``5`` and ``6``; the drain
-had no jobs, both activators inactive, and the queued target was recorded as
-``211 crq-repair.service start waiting`` through mask and reload. The released
-timer was active, the enabled path inactive and the settled service inactive.
-The switch-back completed to ``python`` with sequences ``7`` and ``8``; the
-interrupt retained a pending ``drained`` record; recovery rolled it back at
-``restore_activation_pending``; repeated recovery refused with rc ``2``; and
-inspection retained three activator records, an active timer, an enabled but
-inactive path, the exact service bytes, and an unrelated process that survived
-until harness cleanup. The positive controls ran direct start, timer, path and
-dependency-caller in that order so the timer control had a real inactive
-transition to count from; the queue control ran first and produced no
-completion.
+The queue positive control recorded the exact waiting job
+``52 crq-repair.service start waiting``, a successful target stop (rc ``0``),
+and a post-stop list-jobs observation whose only remaining job was the
+blocker; both completion counts were the typed integer ``0``. The fence seeded
+``211 crq-repair.service start waiting`` and the pause observed the same job
+ID, unit, type and state, with the same blocker ``MainPID`` and
+``InvocationID``. Its list-jobs observations carry the command rc, and the
+drain retained an empty job list, a successful service stop, and both
+activators inactive. The pre-release and during completion inventories are
+identical, so the zero external delta is derived rather than trusted; the
+fence record is ``completed`` at ``activation_pending`` for ``node:bbbb…``
+with distinct completion sequences ``5`` and ``6``. The released timer was
+active, the enabled path inactive and the settled service inactive. The
+switch-back completed to ``python`` with sequences ``8`` and ``9`` after a
+real inactive transition; the interrupt retained a pending ``drained``
+record; recovery rolled it back at ``restore_activation_pending``; repeated
+recovery refused with rc ``2``; and inspection retained three activator
+records, an active timer, an enabled but inactive path, the exact service
+bytes, and an unrelated process that survived until harness cleanup. All four
+refusal cases retained present, paired, empty journal inventories and
+unchanged completion counts.
+
+### Earlier activators proof run (preserved)
+
+The earlier fresh activators run from source commit
+``8e4b302d958f02387d0d2be96f4d65d6bf399598`` is preserved as genuine
+provenance: run ``20261111T021704Z-110a85ab``, report SHA-256
+``e7aec082cd1d5997d805bf793479c6bb47ccb8b8e3a35ec3bebed1ed0b2efbea``,
+raw tar 1,165,031 bytes with SHA-256
+``76475f1641bfd061d6a52737e2ec42c74dceede8f854c59c45bc88749c896e15``,
+host script ``46ffd8cc948419e6aea83ed28be41316d20d11a862f614873f600de0fb6d5fec``
+and guest script
+``500038395e90cb87a6a9e2043d3e9748311a1fb8468b52aac03fc3b5e4e311b4``.
+It remains valid evidence for the state it observed, but it predates the
+typed settlement, job-identity, derived-delta and refusal-inventory checks;
+the current run above is the fresh committed-source-bound evidence for the
+second topology. The later test and documentation commits do not change the
+proof scripts; their recorded hashes remain the binding.
 
 The tick runs below predate ``--mode activators``. They remain valid for the
-tick topology and are preserved unchanged. The activators run above is the
-fresh committed-source-bound evidence for the second topology. The later
-documentation commit does not change the proof scripts; their recorded hashes
-remain the binding.
+tick topology and are preserved unchanged.
 
 ### Current drain/harvest proof runs
 
@@ -454,6 +475,10 @@ python3 apps/crq-python/ops/vm-unit-switch.py \
   --state-dir "$state" \
   --tools ~/crq-vm-feasibility/tools \
   run --source-commit "$commit" --mode matrix
+python3 apps/crq-python/ops/vm-unit-switch.py \
+  --state-dir "$state" \
+  --tools ~/crq-vm-feasibility/tools \
+  run --source-commit "$commit" --mode activators
 python3 apps/crq-python/ops/vm-unit-switch.py \
   --state-dir "$state" \
   --tools ~/crq-vm-feasibility/tools \

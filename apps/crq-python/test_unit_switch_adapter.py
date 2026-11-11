@@ -396,6 +396,7 @@ class AdapterTests(unittest.TestCase):
         self.assertFalse(drain["service_stop"]["timeout"])
         self.assertEqual(drain["jobs_observation"]["command"]["rc"], 0)
         self.assertEqual(drain["jobs_observation"]["lines"], [])
+        self.assertFalse(drain["direct_start"]["timeout"])
 
     def test_stop_drain_refuses_when_queue_work_is_alive(self):
         self._snapshot()
