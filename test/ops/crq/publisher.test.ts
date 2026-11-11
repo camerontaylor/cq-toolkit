@@ -354,6 +354,39 @@ test('a malformed retained job writes only the acknowledgements before it', asyn
   expect(remote.batches).toEqual([]);
 });
 
+test('a list-valued import result is classified before batch validation refuses', async () => {
+  const caseEntry = publishCases.find(
+    (entry) => entry.name === 'malformed-import-result-list-middle',
+  );
+  if (caseEntry === undefined) throw new Error('missing malformed import-result vector');
+  const input = inputOf(caseEntry);
+  const files = new MemoryFiles();
+  const artifacts = new MemoryArtifacts();
+  const outbox = new Outbox(files, artifacts);
+  for (const value of input.direct) {
+    files.pending.set(recordId(value), ledgerCanonicalBytes(value));
+  }
+  const remote = new MemoryRemote(input.ledger, input);
+  const effects = new Effects(artifacts);
+
+  let error: unknown;
+  try {
+    await publish(remote, outbox, effects);
+  } catch (caught) {
+    error = caught;
+  }
+  expect(error).toBeInstanceOf(LedgerIntegrityError);
+  const ledgerError = error as LedgerIntegrityError;
+  expect(ledgerError.pythonError).toBe('IntegrityError');
+  expect(ledgerError.message).toBe('event does not match one schema variant');
+  const expected = expectedValue(caseEntry);
+  expect(files.ackOrder).toEqual(idsAt(expected, 'acks'));
+  expect(files.ack.size).toBe(idsAt(expected, 'acks').length);
+  expect((await outbox.pending()).map(recordId)).toEqual(idsAt(expected, 'pending'));
+  expect(remote.pushCalls).toBe(0);
+  expect(remote.batches).toEqual([]);
+});
+
 function expectedLockCount(caseEntry: PublisherVectorCase): number {
   // One lock per successful spool; direct seeds and acks take no outbox lock.
   return arrayAt(caseEntry.input, 'pending').length;

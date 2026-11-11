@@ -520,6 +520,33 @@ def publish_vectors() -> Dict[str, Any]:
     malformed_middle, middle_records = malformed_jobs("middle")
     malformed_last, last_records = malformed_jobs("last")
 
+    def malformed_import(position: str) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """Three retained records with a list-valued import result at position.
+
+        Python's tuple membership compares rather than hashes, so the import is
+        classified as a non-import, both remote-held job records are
+        acknowledged, and only batch validation refuses the malformed record.
+        """
+        jobs = [_job_event(job_id="fixture:import-list-" + suffix) for suffix in "ab"]
+        index = {"first": 0, "middle": 1, "last": 2}[position]
+        for attempt in range(1000):
+            malformed = _import(ident="malformed-import-" + position + "-" + str(attempt))
+            records = sorted(jobs + [malformed], key=lambda value: value["id"])
+            if records.index(malformed) == index:
+                break
+        else:
+            raise AssertionError("could not place malformed import at " + position)
+        malformed["payload"]["result"] = []
+        remote = [value for offset, value in enumerate(records) if offset != index]
+        return remote, records
+
+    import_first, import_first_records = malformed_import("first")
+    import_middle, import_middle_records = malformed_import("middle")
+    import_last, import_last_records = malformed_import("last")
+    unhashable_dependency = _import(ident="unhashable-dependency")
+    unhashable_dependency["payload"]["review_id"] = []
+    unhashable_dependency["payload"]["duplicate_id"] = None
+
     return _family("publish", [
         _publish_case("idle-outbox", ledger_values=[idle]),
         _publish_case("initial-remote-acks", ledger_values=[already], pending=[already]),
@@ -557,6 +584,14 @@ def publish_vectors() -> Dict[str, Any]:
                       direct=middle_records, refusals=(KeyError,)),
         _publish_case("malformed-last-retained-job", ledger_values=malformed_last,
                       direct=last_records, refusals=(KeyError,)),
+        _publish_case("malformed-import-result-list-first", ledger_values=import_first,
+                      direct=import_first_records),
+        _publish_case("malformed-import-result-list-middle", ledger_values=import_middle,
+                      direct=import_middle_records),
+        _publish_case("malformed-import-result-list-last", ledger_values=import_last,
+                      direct=import_last_records),
+        _publish_case("unhashable-import-dependency", ledger_values=[already],
+                      direct=[unhashable_dependency], refusals=(TypeError,)),
         _publish_case("three-push-failures", pending=[failing], failures=3),
     ])
 

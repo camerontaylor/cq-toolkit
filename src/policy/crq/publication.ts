@@ -26,10 +26,11 @@
 import { JsonObject, type JsonValue } from './jsonValue.js';
 import {
   LedgerIntegrityError,
-  LedgerKeyError,
+  LedgerTypeError,
   independentImport,
   initialInventoryEnrollment,
   ledgerCanonicalBytes,
+  ledgerSubscript,
   ledgerValidateSequence,
 } from './ledger.js';
 import { PythonJsonError } from './pythonJson.js';
@@ -85,33 +86,23 @@ export interface PublicationPlanInput {
   readonly pending: readonly JsonValue[];
 }
 
-function record(value: JsonValue): JsonObject {
-  if (!(value instanceof JsonObject)) throw new LedgerIntegrityError('record is not an object');
-  return value;
-}
-
-function required(value: JsonObject, key: string): JsonValue {
-  const field = value.get(key);
-  if (field === undefined) throw new LedgerKeyError(key);
-  return field;
-}
-
-function payloadOf(value: JsonValue): JsonObject {
-  const payload = required(record(value), 'payload');
-  if (!(payload instanceof JsonObject))
-    throw new LedgerIntegrityError('record payload is not an object');
-  return payload;
+function payloadOf(value: JsonValue): JsonValue {
+  return ledgerSubscript(value, 'payload');
 }
 
 function idOf(value: JsonValue): string {
-  const id = required(record(value), 'id');
+  const id = ledgerSubscript(value, 'id');
   if (typeof id !== 'string') throw new LedgerIntegrityError('record id is not a string');
   return id;
 }
 
+const NON_STRING_EVENT_TYPE = '\u0000non-string-event-type';
+
 function eventType(value: JsonValue): string {
-  const kind = required(record(value), 'event_type');
-  if (typeof kind !== 'string') throw new LedgerIntegrityError('record event_type is not a string');
+  const kind = ledgerSubscript(value, 'event_type');
+  // Python compares the value and treats any non-string as a non-match; the
+  // batch sequence validation owns the eventual refusal.
+  if (typeof kind !== 'string') return NON_STRING_EVENT_TYPE;
   return kind;
 }
 
@@ -123,14 +114,17 @@ function eventType(value: JsonValue): string {
 function dependencies(value: JsonValue): readonly (string | null)[] {
   const payload = payloadOf(value);
   const field = (name: string): string | null => {
-    const raw = required(payload, name);
+    const raw = ledgerSubscript(payload, name);
     if (raw === null) return null;
     if (typeof raw === 'string') return raw;
     // Python tests `dependency in available`, a set of string ids. A hashable
     // non-string never matches; an unhashable list/object raises before any
     // acknowledgement. The sentinel cannot collide with a record id.
-    if (raw instanceof JsonObject || Array.isArray(raw)) {
-      throw new LedgerIntegrityError('causal dependency is not hashable');
+    if (Array.isArray(raw)) {
+      throw new LedgerTypeError("cannot use 'list' as a set element (unhashable type: 'list')");
+    }
+    if (raw instanceof JsonObject) {
+      throw new LedgerTypeError("cannot use 'dict' as a set element (unhashable type: 'dict')");
     }
     return NO_DEPENDENCY;
   };
@@ -145,6 +139,24 @@ function dependencies(value: JsonValue): readonly (string | null)[] {
 }
 
 const NO_DEPENDENCY = '\u0000no-matching-dependency';
+
+/**
+ * Python's `seen_jobs` is a set of every job-state id: strings participate in
+ * later membership tests, hashable non-strings cannot equal a string id, and
+ * an unhashable id raises before any acknowledgement.
+ */
+function addSeenJob(seenJobs: Set<string>, jobId: JsonValue): void {
+  if (typeof jobId === 'string') {
+    seenJobs.add(jobId);
+    return;
+  }
+  if (Array.isArray(jobId)) {
+    throw new LedgerTypeError("cannot use 'list' as a set element (unhashable type: 'list')");
+  }
+  if (jobId instanceof JsonObject) {
+    throw new LedgerTypeError("cannot use 'dict' as a set element (unhashable type: 'dict')");
+  }
+}
 
 /**
  * Causal order for pending records. Python repeatedly appends every record
@@ -191,8 +203,7 @@ export function planPublication(input: PublicationPlanInput): PublicationPlan {
   const seenJobs = new Set<string>();
   for (const value of input.ledgerValues) {
     if (eventType(value) === 'job-state') {
-      const jobId = required(payloadOf(value), 'job_id');
-      if (typeof jobId === 'string') seenJobs.add(jobId);
+      addSeenJob(seenJobs, ledgerSubscript(payloadOf(value), 'job_id'));
     }
   }
 
@@ -218,12 +229,11 @@ export function planPublication(input: PublicationPlanInput): PublicationPlan {
       }
       let kind: string | null = independentImport(value) ? 'import' : null;
       if (initialInventoryEnrollment(value)) {
-        const jobId = required(payloadOf(value), 'job_id');
+        const jobId = ledgerSubscript(payloadOf(value), 'job_id');
         if (typeof jobId === 'string' && !seenJobs.has(jobId)) kind = 'enrollment';
       }
       if (eventType(value) === 'job-state') {
-        const jobId = required(payloadOf(value), 'job_id');
-        if (typeof jobId === 'string') seenJobs.add(jobId);
+        addSeenJob(seenJobs, ledgerSubscript(payloadOf(value), 'job_id'));
       }
       const last = batches.at(-1);
       if (

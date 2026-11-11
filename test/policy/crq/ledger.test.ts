@@ -240,6 +240,9 @@ function assertExpected(vector: VectorCase): void {
   expect(outcome.ok, label).toBe(false);
   if (outcome.ok) return;
   expect(outcome.pythonError, label).toBe(stringAt(vector.expect, 'error'));
+  if (vector.family === 'independence' && vector.expect.has('message')) {
+    expect(outcome.message, label).toBe(stringAt(vector.expect, 'message'));
+  }
 }
 
 const vectors = loadVectors();

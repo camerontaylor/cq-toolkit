@@ -4708,6 +4708,481 @@
           }
         },
         {
+          "name": "malformed-import-result-list-first",
+          "source": "review_ledger.GitLedger.publish",
+          "input": {
+            "ledger": [
+              {
+                "schema": "cq.review-ledger/v1",
+                "event_type": "job-state",
+                "source_key": "job:fixture:import-list-a:7d40ba169a00012dccdd6c5dba52083f63115a9821a7033aa0b910853c9f5c87",
+                "occurred_at": "2026-10-30T00:00:00Z",
+                "payload": {
+                  "family": "fixture",
+                  "subject_id": "subject",
+                  "job_id": "fixture:import-list-a",
+                  "generation": 0,
+                  "attempt": 0,
+                  "state": "pending",
+                  "failures": 0,
+                  "next_eligible_at": null,
+                  "reason": "fixture transition"
+                },
+                "id": "c1b06546f4dc0299843b0226ef54aafce0f73be4f19abc06ada6f36bd6530a14"
+              },
+              {
+                "schema": "cq.review-ledger/v1",
+                "event_type": "job-state",
+                "source_key": "job:fixture:import-list-b:1818a04e69925859f9d218f525de40cc7471c8b44e869ae7320fbb6172b5883c",
+                "occurred_at": "2026-10-30T00:00:00Z",
+                "payload": {
+                  "family": "fixture",
+                  "subject_id": "subject",
+                  "job_id": "fixture:import-list-b",
+                  "generation": 0,
+                  "attempt": 0,
+                  "state": "pending",
+                  "failures": 0,
+                  "next_eligible_at": null,
+                  "reason": "fixture transition"
+                },
+                "id": "c978e9dc00a3cb1062ff23d2bd04af4528a11f4a5556e3b7f8c83eb43a814c0f"
+              }
+            ],
+            "pending": [],
+            "direct": [
+              {
+                "schema": "cq.review-ledger/v1",
+                "event_type": "import-result",
+                "source_key": "import:malformed-import-first-0",
+                "occurred_at": "2026-10-30T00:00:00Z",
+                "payload": {
+                  "source": {
+                    "repo": "camerontaylor/cq-toolkit",
+                    "producer": "fixture",
+                    "type": "author-cli",
+                    "id": "malformed-import-first-0",
+                    "authenticated": false
+                  },
+                  "source_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                  "result": [],
+                  "reason": "fixture",
+                  "review_id": null,
+                  "duplicate_id": null,
+                  "artifacts": [
+                    {
+                      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                      "location": "/fixtures/artifacts/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                    }
+                  ]
+                },
+                "id": "b0cd4aa0b3973733f76b90f46b29c548ba0d8f2a86694c11b3e389318f63606b"
+              },
+              {
+                "schema": "cq.review-ledger/v1",
+                "event_type": "job-state",
+                "source_key": "job:fixture:import-list-a:7d40ba169a00012dccdd6c5dba52083f63115a9821a7033aa0b910853c9f5c87",
+                "occurred_at": "2026-10-30T00:00:00Z",
+                "payload": {
+                  "family": "fixture",
+                  "subject_id": "subject",
+                  "job_id": "fixture:import-list-a",
+                  "generation": 0,
+                  "attempt": 0,
+                  "state": "pending",
+                  "failures": 0,
+                  "next_eligible_at": null,
+                  "reason": "fixture transition"
+                },
+                "id": "c1b06546f4dc0299843b0226ef54aafce0f73be4f19abc06ada6f36bd6530a14"
+              },
+              {
+                "schema": "cq.review-ledger/v1",
+                "event_type": "job-state",
+                "source_key": "job:fixture:import-list-b:1818a04e69925859f9d218f525de40cc7471c8b44e869ae7320fbb6172b5883c",
+                "occurred_at": "2026-10-30T00:00:00Z",
+                "payload": {
+                  "family": "fixture",
+                  "subject_id": "subject",
+                  "job_id": "fixture:import-list-b",
+                  "generation": 0,
+                  "attempt": 0,
+                  "state": "pending",
+                  "failures": 0,
+                  "next_eligible_at": null,
+                  "reason": "fixture transition"
+                },
+                "id": "c978e9dc00a3cb1062ff23d2bd04af4528a11f4a5556e3b7f8c83eb43a814c0f"
+              }
+            ],
+            "acked": [],
+            "failures": 0,
+            "accept_then_fail": false,
+            "concurrent": [],
+            "drop_on_fetch": [],
+            "refused_artifacts": []
+          },
+          "expect": {
+            "ok": false,
+            "error": "IntegrityError",
+            "message": "event does not match one schema variant",
+            "value": {
+              "fetch_calls": 1,
+              "push_calls": 0,
+              "batches": [],
+              "acks": [
+                "c1b06546f4dc0299843b0226ef54aafce0f73be4f19abc06ada6f36bd6530a14",
+                "c978e9dc00a3cb1062ff23d2bd04af4528a11f4a5556e3b7f8c83eb43a814c0f"
+              ],
+              "pending": [
+                "b0cd4aa0b3973733f76b90f46b29c548ba0d8f2a86694c11b3e389318f63606b"
+              ]
+            }
+          }
+        },
+        {
+          "name": "malformed-import-result-list-middle",
+          "source": "review_ledger.GitLedger.publish",
+          "input": {
+            "ledger": [
+              {
+                "schema": "cq.review-ledger/v1",
+                "event_type": "job-state",
+                "source_key": "job:fixture:import-list-a:7d40ba169a00012dccdd6c5dba52083f63115a9821a7033aa0b910853c9f5c87",
+                "occurred_at": "2026-10-30T00:00:00Z",
+                "payload": {
+                  "family": "fixture",
+                  "subject_id": "subject",
+                  "job_id": "fixture:import-list-a",
+                  "generation": 0,
+                  "attempt": 0,
+                  "state": "pending",
+                  "failures": 0,
+                  "next_eligible_at": null,
+                  "reason": "fixture transition"
+                },
+                "id": "c1b06546f4dc0299843b0226ef54aafce0f73be4f19abc06ada6f36bd6530a14"
+              },
+              {
+                "schema": "cq.review-ledger/v1",
+                "event_type": "job-state",
+                "source_key": "job:fixture:import-list-b:1818a04e69925859f9d218f525de40cc7471c8b44e869ae7320fbb6172b5883c",
+                "occurred_at": "2026-10-30T00:00:00Z",
+                "payload": {
+                  "family": "fixture",
+                  "subject_id": "subject",
+                  "job_id": "fixture:import-list-b",
+                  "generation": 0,
+                  "attempt": 0,
+                  "state": "pending",
+                  "failures": 0,
+                  "next_eligible_at": null,
+                  "reason": "fixture transition"
+                },
+                "id": "c978e9dc00a3cb1062ff23d2bd04af4528a11f4a5556e3b7f8c83eb43a814c0f"
+              }
+            ],
+            "pending": [],
+            "direct": [
+              {
+                "schema": "cq.review-ledger/v1",
+                "event_type": "job-state",
+                "source_key": "job:fixture:import-list-a:7d40ba169a00012dccdd6c5dba52083f63115a9821a7033aa0b910853c9f5c87",
+                "occurred_at": "2026-10-30T00:00:00Z",
+                "payload": {
+                  "family": "fixture",
+                  "subject_id": "subject",
+                  "job_id": "fixture:import-list-a",
+                  "generation": 0,
+                  "attempt": 0,
+                  "state": "pending",
+                  "failures": 0,
+                  "next_eligible_at": null,
+                  "reason": "fixture transition"
+                },
+                "id": "c1b06546f4dc0299843b0226ef54aafce0f73be4f19abc06ada6f36bd6530a14"
+              },
+              {
+                "schema": "cq.review-ledger/v1",
+                "event_type": "import-result",
+                "source_key": "import:malformed-import-middle-5",
+                "occurred_at": "2026-10-30T00:00:00Z",
+                "payload": {
+                  "source": {
+                    "repo": "camerontaylor/cq-toolkit",
+                    "producer": "fixture",
+                    "type": "author-cli",
+                    "id": "malformed-import-middle-5",
+                    "authenticated": false
+                  },
+                  "source_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                  "result": [],
+                  "reason": "fixture",
+                  "review_id": null,
+                  "duplicate_id": null,
+                  "artifacts": [
+                    {
+                      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                      "location": "/fixtures/artifacts/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                    }
+                  ]
+                },
+                "id": "c4efab1d26473a2950c9b375126d8f901290a91654f469e6d4a17d996043cbae"
+              },
+              {
+                "schema": "cq.review-ledger/v1",
+                "event_type": "job-state",
+                "source_key": "job:fixture:import-list-b:1818a04e69925859f9d218f525de40cc7471c8b44e869ae7320fbb6172b5883c",
+                "occurred_at": "2026-10-30T00:00:00Z",
+                "payload": {
+                  "family": "fixture",
+                  "subject_id": "subject",
+                  "job_id": "fixture:import-list-b",
+                  "generation": 0,
+                  "attempt": 0,
+                  "state": "pending",
+                  "failures": 0,
+                  "next_eligible_at": null,
+                  "reason": "fixture transition"
+                },
+                "id": "c978e9dc00a3cb1062ff23d2bd04af4528a11f4a5556e3b7f8c83eb43a814c0f"
+              }
+            ],
+            "acked": [],
+            "failures": 0,
+            "accept_then_fail": false,
+            "concurrent": [],
+            "drop_on_fetch": [],
+            "refused_artifacts": []
+          },
+          "expect": {
+            "ok": false,
+            "error": "IntegrityError",
+            "message": "event does not match one schema variant",
+            "value": {
+              "fetch_calls": 1,
+              "push_calls": 0,
+              "batches": [],
+              "acks": [
+                "c1b06546f4dc0299843b0226ef54aafce0f73be4f19abc06ada6f36bd6530a14",
+                "c978e9dc00a3cb1062ff23d2bd04af4528a11f4a5556e3b7f8c83eb43a814c0f"
+              ],
+              "pending": [
+                "c4efab1d26473a2950c9b375126d8f901290a91654f469e6d4a17d996043cbae"
+              ]
+            }
+          }
+        },
+        {
+          "name": "malformed-import-result-list-last",
+          "source": "review_ledger.GitLedger.publish",
+          "input": {
+            "ledger": [
+              {
+                "schema": "cq.review-ledger/v1",
+                "event_type": "job-state",
+                "source_key": "job:fixture:import-list-a:7d40ba169a00012dccdd6c5dba52083f63115a9821a7033aa0b910853c9f5c87",
+                "occurred_at": "2026-10-30T00:00:00Z",
+                "payload": {
+                  "family": "fixture",
+                  "subject_id": "subject",
+                  "job_id": "fixture:import-list-a",
+                  "generation": 0,
+                  "attempt": 0,
+                  "state": "pending",
+                  "failures": 0,
+                  "next_eligible_at": null,
+                  "reason": "fixture transition"
+                },
+                "id": "c1b06546f4dc0299843b0226ef54aafce0f73be4f19abc06ada6f36bd6530a14"
+              },
+              {
+                "schema": "cq.review-ledger/v1",
+                "event_type": "job-state",
+                "source_key": "job:fixture:import-list-b:1818a04e69925859f9d218f525de40cc7471c8b44e869ae7320fbb6172b5883c",
+                "occurred_at": "2026-10-30T00:00:00Z",
+                "payload": {
+                  "family": "fixture",
+                  "subject_id": "subject",
+                  "job_id": "fixture:import-list-b",
+                  "generation": 0,
+                  "attempt": 0,
+                  "state": "pending",
+                  "failures": 0,
+                  "next_eligible_at": null,
+                  "reason": "fixture transition"
+                },
+                "id": "c978e9dc00a3cb1062ff23d2bd04af4528a11f4a5556e3b7f8c83eb43a814c0f"
+              }
+            ],
+            "pending": [],
+            "direct": [
+              {
+                "schema": "cq.review-ledger/v1",
+                "event_type": "job-state",
+                "source_key": "job:fixture:import-list-a:7d40ba169a00012dccdd6c5dba52083f63115a9821a7033aa0b910853c9f5c87",
+                "occurred_at": "2026-10-30T00:00:00Z",
+                "payload": {
+                  "family": "fixture",
+                  "subject_id": "subject",
+                  "job_id": "fixture:import-list-a",
+                  "generation": 0,
+                  "attempt": 0,
+                  "state": "pending",
+                  "failures": 0,
+                  "next_eligible_at": null,
+                  "reason": "fixture transition"
+                },
+                "id": "c1b06546f4dc0299843b0226ef54aafce0f73be4f19abc06ada6f36bd6530a14"
+              },
+              {
+                "schema": "cq.review-ledger/v1",
+                "event_type": "job-state",
+                "source_key": "job:fixture:import-list-b:1818a04e69925859f9d218f525de40cc7471c8b44e869ae7320fbb6172b5883c",
+                "occurred_at": "2026-10-30T00:00:00Z",
+                "payload": {
+                  "family": "fixture",
+                  "subject_id": "subject",
+                  "job_id": "fixture:import-list-b",
+                  "generation": 0,
+                  "attempt": 0,
+                  "state": "pending",
+                  "failures": 0,
+                  "next_eligible_at": null,
+                  "reason": "fixture transition"
+                },
+                "id": "c978e9dc00a3cb1062ff23d2bd04af4528a11f4a5556e3b7f8c83eb43a814c0f"
+              },
+              {
+                "schema": "cq.review-ledger/v1",
+                "event_type": "import-result",
+                "source_key": "import:malformed-import-last-1",
+                "occurred_at": "2026-10-30T00:00:00Z",
+                "payload": {
+                  "source": {
+                    "repo": "camerontaylor/cq-toolkit",
+                    "producer": "fixture",
+                    "type": "author-cli",
+                    "id": "malformed-import-last-1",
+                    "authenticated": false
+                  },
+                  "source_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                  "result": [],
+                  "reason": "fixture",
+                  "review_id": null,
+                  "duplicate_id": null,
+                  "artifacts": [
+                    {
+                      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                      "location": "/fixtures/artifacts/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                    }
+                  ]
+                },
+                "id": "d0257a34ff2b85d8c572c7e92dcece22560a2a604a861ea4541aa62954a284d5"
+              }
+            ],
+            "acked": [],
+            "failures": 0,
+            "accept_then_fail": false,
+            "concurrent": [],
+            "drop_on_fetch": [],
+            "refused_artifacts": []
+          },
+          "expect": {
+            "ok": false,
+            "error": "IntegrityError",
+            "message": "event does not match one schema variant",
+            "value": {
+              "fetch_calls": 1,
+              "push_calls": 0,
+              "batches": [],
+              "acks": [
+                "c1b06546f4dc0299843b0226ef54aafce0f73be4f19abc06ada6f36bd6530a14",
+                "c978e9dc00a3cb1062ff23d2bd04af4528a11f4a5556e3b7f8c83eb43a814c0f"
+              ],
+              "pending": [
+                "d0257a34ff2b85d8c572c7e92dcece22560a2a604a861ea4541aa62954a284d5"
+              ]
+            }
+          }
+        },
+        {
+          "name": "unhashable-import-dependency",
+          "source": "review_ledger.GitLedger.publish",
+          "input": {
+            "ledger": [
+              {
+                "schema": "cq.review-ledger/v1",
+                "event_type": "job-state",
+                "source_key": "job:fixture:already:55964e88de7871b0b2ea35f43baed8253edc4f543a2a83e1b0afede9a4703f40",
+                "occurred_at": "2026-10-30T00:00:00Z",
+                "payload": {
+                  "family": "fixture",
+                  "subject_id": "subject",
+                  "job_id": "fixture:already",
+                  "generation": 0,
+                  "attempt": 0,
+                  "state": "pending",
+                  "failures": 0,
+                  "next_eligible_at": null,
+                  "reason": "fixture transition"
+                },
+                "id": "95c7eda14405d3cddae5ae6d75c051098adc0b582bd74244d1211b005ea01a86"
+              }
+            ],
+            "pending": [],
+            "direct": [
+              {
+                "schema": "cq.review-ledger/v1",
+                "event_type": "import-result",
+                "source_key": "import:unhashable-dependency",
+                "occurred_at": "2026-10-30T00:00:00Z",
+                "payload": {
+                  "source": {
+                    "repo": "camerontaylor/cq-toolkit",
+                    "producer": "fixture",
+                    "type": "author-cli",
+                    "id": "unhashable-dependency",
+                    "authenticated": false
+                  },
+                  "source_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                  "result": "unverified",
+                  "reason": "fixture",
+                  "review_id": [],
+                  "duplicate_id": null,
+                  "artifacts": [
+                    {
+                      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                      "location": "/fixtures/artifacts/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                    }
+                  ]
+                },
+                "id": "2e64e55c50bbb3113af51848fdfb97ec21c6a271e5cd2c0fb8d55699bf44fc8f"
+              }
+            ],
+            "acked": [],
+            "failures": 0,
+            "accept_then_fail": false,
+            "concurrent": [],
+            "drop_on_fetch": [],
+            "refused_artifacts": []
+          },
+          "expect": {
+            "ok": false,
+            "error": "TypeError",
+            "message": "cannot use 'list' as a set element (unhashable type: 'list')",
+            "value": {
+              "fetch_calls": 1,
+              "push_calls": 0,
+              "batches": [],
+              "acks": [],
+              "pending": [
+                "2e64e55c50bbb3113af51848fdfb97ec21c6a271e5cd2c0fb8d55699bf44fc8f"
+              ]
+            }
+          }
+        },
+        {
           "name": "three-push-failures",
           "source": "review_ledger.GitLedger.publish",
           "input": {

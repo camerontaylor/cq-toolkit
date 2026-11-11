@@ -65,6 +65,47 @@ export class LedgerKeyError extends LedgerIntegrityError {
   }
 }
 
+/** A Python `TypeError` from applying dict operations to another JSON type. */
+export class LedgerTypeError extends LedgerIntegrityError {
+  override readonly name = 'LedgerTypeError';
+  override readonly pythonError = 'TypeError';
+
+  constructor(message: string) {
+    super(message);
+  }
+}
+
+/** Python's runtime type name for a JSON value. */
+export function ledgerPythonTypeName(value: JsonValue): string {
+  if (value === null) return 'NoneType';
+  if (typeof value === 'boolean') return 'bool';
+  if (typeof value === 'string') return 'str';
+  if (value instanceof JsonNumber) return value.kind;
+  if (Array.isArray(value)) return 'list';
+  return 'dict';
+}
+
+/**
+ * Python `value[key]` for the classifier walk: a missing dict key raises
+ * `KeyError`, while a list/string/number/null raises the same `TypeError`
+ * Python's subscript operator does. Deliberately no shape validation beyond
+ * what the Python helper performs at this point.
+ */
+export function ledgerSubscript(value: JsonValue, key: string): JsonValue {
+  if (value instanceof JsonObject) {
+    const found = value.get(key);
+    if (found === undefined) throw new LedgerKeyError(key);
+    return found;
+  }
+  if (Array.isArray(value)) {
+    throw new LedgerTypeError('list indices must be integers or slices, not str');
+  }
+  if (typeof value === 'string') {
+    throw new LedgerTypeError("string indices must be integers, not 'str'");
+  }
+  throw new LedgerTypeError(`'${ledgerPythonTypeName(value)}' object is not subscriptable`);
+}
+
 /**
  * `datetime.strptime`'s failure mode for an exact-shaped timestamp whose
  * fields do not match its format or calendar. `review_ledger` lets this
@@ -881,50 +922,41 @@ export function ledgerValidateSequence(values: readonly JsonValue[]): Map<string
 
 /** `review_ledger.independent_import`: a non-crediting import outcome. */
 export function independentImport(value: JsonValue): boolean {
-  if (!(value instanceof JsonObject)) return false;
-  const payload = value.get('payload');
-  if (!(payload instanceof JsonObject)) return false;
-  if (requiredKey(value, 'event_type') !== 'import-result') return false;
-  const result = requiredKey(payload, 'result');
-  if (result instanceof JsonObject || Array.isArray(result)) {
-    throw new LedgerIntegrityError('import result is not hashable');
-  }
+  const payload = ledgerSubscript(value, 'payload');
+  if (ledgerSubscript(value, 'event_type') !== 'import-result') return false;
+  const result = ledgerSubscript(payload, 'result');
+  // Python's tuple membership compares each candidate; it never hashes the
+  // value, so a list or object result is simply a non-match.
   if (result !== 'unverified' && result !== 'rejected') return false;
-  if (requiredKey(payload, 'review_id') !== null) return false;
-  return requiredKey(payload, 'duplicate_id') === null;
+  if (ledgerSubscript(payload, 'review_id') !== null) return false;
+  return ledgerSubscript(payload, 'duplicate_id') === null;
 }
 
 /** `review_ledger.initial_inventory_enrollment`: a first, distinct enrollment. */
 export function initialInventoryEnrollment(value: JsonValue): boolean {
-  if (!(value instanceof JsonObject)) return false;
-  const payload = value.get('payload');
-  if (!(payload instanceof JsonObject)) return false;
-  if (requiredKey(value, 'event_type') !== 'job-state') return false;
+  const payload = ledgerSubscript(value, 'payload');
+  if (ledgerSubscript(value, 'event_type') !== 'job-state') return false;
   // Python's `and` chain short-circuits, so each key is read only after the
   // previous field matched. A malformed later field must refuse at this
   // record, before the planner can acknowledge a record that follows it.
-  if (requiredKey(payload, 'reason') !== 'inventory enqueue') return false;
-  if (requiredKey(payload, 'state') !== 'pending') return false;
-  if (!ledgerValueEqual(requiredKey(payload, 'attempt'), ZERO)) return false;
-  if (!ledgerValueEqual(requiredKey(payload, 'failures'), ZERO)) return false;
-  if (!ledgerValueEqual(requiredKey(payload, 'generation'), ZERO)) return false;
-  if (requiredKey(payload, 'next_eligible_at') !== null) return false;
-  if (payload.has('operator')) return false;
-  const sourceKey = requiredKey(value, 'source_key');
-  const jobId = requiredKey(payload, 'job_id');
+  if (ledgerSubscript(payload, 'reason') !== 'inventory enqueue') return false;
+  if (ledgerSubscript(payload, 'state') !== 'pending') return false;
+  if (!ledgerValueEqual(ledgerSubscript(payload, 'attempt'), ZERO)) return false;
+  if (!ledgerValueEqual(ledgerSubscript(payload, 'failures'), ZERO)) return false;
+  if (!ledgerValueEqual(ledgerSubscript(payload, 'generation'), ZERO)) return false;
+  if (ledgerSubscript(payload, 'next_eligible_at') !== null) return false;
+  if (payload instanceof JsonObject && payload.has('operator')) return false;
+  const sourceKey = ledgerSubscript(value, 'source_key');
+  const jobId = ledgerSubscript(payload, 'job_id');
   if (typeof jobId !== 'string') {
-    throw new LedgerIntegrityError('record payload.job_id is not a string');
+    throw new LedgerTypeError(
+      `can only concatenate str (not "${ledgerPythonTypeName(jobId)}") to str`,
+    );
   }
   return sourceKey === `job:${jobId}:${digestOf(payload)}`;
 }
 
 const ZERO = JsonNumber.int(0);
-
-function requiredKey(object: JsonObject, key: string): JsonValue {
-  const value = object.get(key);
-  if (value === undefined) throw new LedgerKeyError(key);
-  return value;
-}
 
 /**
  * `review_ledger.independent_batch`: only homogeneous imports or first-ever,

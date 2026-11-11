@@ -40,6 +40,10 @@ REQUIRED_PUBLISH_CASES = {
     "malformed-first-retained-job",
     "malformed-middle-retained-job",
     "malformed-last-retained-job",
+    "malformed-import-result-list-first",
+    "malformed-import-result-list-middle",
+    "malformed-import-result-list-last",
+    "unhashable-import-dependency",
     "three-push-failures",
 }
 
@@ -87,7 +91,8 @@ class PublisherVectorTest(unittest.TestCase):
             for case in family["cases"]:
                 self.assertTrue(case["source"].startswith("review_ledger."), case["source"])
                 if not case["expect"]["ok"]:
-                    self.assertIn(case["expect"]["error"], {"IntegrityError", "KeyError"})
+                    self.assertIn(case["expect"]["error"],
+                                  {"IntegrityError", "KeyError", "TypeError"})
                     self.assertTrue(case["expect"]["message"])
                     if family["family"] == "publish":
                         self.assertIn("value", case["expect"])
@@ -189,6 +194,29 @@ class PublisherVectorTest(unittest.TestCase):
             self.assertEqual(result["batches"], [])
             self.assertEqual(result["push_calls"], 0)
             self.assertIn(malformed["id"], result["pending"])
+
+    def test_malformed_import_result_list_acks_both_remote_jobs_then_refuses(self):
+        value = document()
+        cases = {case["name"]: case for case in _family(value, "publish")["cases"]}
+        for name in (
+            "malformed-import-result-list-first",
+            "malformed-import-result-list-middle",
+            "malformed-import-result-list-last",
+        ):
+            case = cases[name]
+            records = sorted(case["input"]["direct"], key=lambda record: record["id"])
+            malformed = next(record for record in records
+                             if record["payload"].get("result") == [])
+            remote_ids = sorted(record["id"] for record in records
+                                if record is not malformed)
+            result = case["expect"]["value"]
+            self.assertEqual(case["expect"]["error"], "IntegrityError")
+            self.assertEqual(case["expect"]["message"],
+                             "event does not match one schema variant")
+            self.assertEqual(result["acks"], remote_ids)
+            self.assertEqual(result["batches"], [])
+            self.assertEqual(result["push_calls"], 0)
+            self.assertEqual(result["pending"], [malformed["id"]])
 
     def test_semantic_replay_is_python_equal_but_not_canonical(self):
         value = document()
