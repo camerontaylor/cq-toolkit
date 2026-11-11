@@ -1,0 +1,1129 @@
+{
+  "schema": "cq.crq-a1-status-vector/v1",
+  "family": "utilization",
+  "note": "coverage utilization digest edges",
+  "cases": [
+    {
+      "name": "float-cap-keeps-float-tag",
+      "source": "coverage.utilization_digest",
+      "input": {
+        "queue": {
+          "starts": [],
+          "cooldown_until": "2026-11-09T12:15:00Z"
+        },
+        "ledger": {
+          "schema_version": 1,
+          "paths": {},
+          "runs": {},
+          "observations": {}
+        },
+        "now": "2026-11-09T12:00:00Z",
+        "max_starts_per_hour": 5.0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "starts_24h": 0,
+          "nominal_cap_24h": 120.0,
+          "nominal_utilization": 0.0,
+          "cooldown_minutes": 15.0,
+          "observed_ticks_24h": 0,
+          "available_start_opportunities_24h": 0,
+          "idle_while_pending_24h": null,
+          "idle_with_coverage_candidate_24h": null,
+          "coverage_reviewed_paths": 0
+        }
+      }
+    },
+    {
+      "name": "bool-cap-is-python-int",
+      "source": "coverage.utilization_digest",
+      "input": {
+        "queue": {
+          "starts": []
+        },
+        "ledger": {
+          "schema_version": 1,
+          "paths": {},
+          "runs": {},
+          "observations": {}
+        },
+        "now": "2026-11-09T12:00:00Z",
+        "max_starts_per_hour": true
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "starts_24h": 0,
+          "nominal_cap_24h": 24,
+          "nominal_utilization": 0.0,
+          "cooldown_minutes": 0,
+          "observed_ticks_24h": 0,
+          "available_start_opportunities_24h": 0,
+          "idle_while_pending_24h": null,
+          "idle_with_coverage_candidate_24h": null,
+          "coverage_reviewed_paths": 0
+        }
+      }
+    },
+    {
+      "name": "huge-int-cap-stays-exact",
+      "source": "coverage.utilization_digest",
+      "input": {
+        "queue": {
+          "starts": [
+            "2026-11-09T11:00:00Z"
+          ]
+        },
+        "ledger": {
+          "schema_version": 1,
+          "paths": {},
+          "runs": {},
+          "observations": {}
+        },
+        "now": "2026-11-09T12:00:00Z",
+        "max_starts_per_hour": 10000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "starts_24h": 1,
+          "nominal_cap_24h": 240000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000,
+          "nominal_utilization": 0.0,
+          "cooldown_minutes": 0,
+          "observed_ticks_24h": 0,
+          "available_start_opportunities_24h": 0,
+          "idle_while_pending_24h": null,
+          "idle_with_coverage_candidate_24h": null,
+          "coverage_reviewed_paths": 0
+        }
+      }
+    },
+    {
+      "name": "max-double-int-cap-stays-exact",
+      "source": "coverage.utilization_digest",
+      "input": {
+        "queue": {
+          "starts": [
+            "2026-11-09T11:00:00Z"
+          ]
+        },
+        "ledger": {
+          "schema_version": 1,
+          "paths": {},
+          "runs": {},
+          "observations": {}
+        },
+        "now": "2026-11-09T12:00:00Z",
+        "max_starts_per_hour": 179769313486231570814527423731704356798070567525844996598917476803157260780028538760589558632766878171540458953514382464234321326889464182768467546703537516986049910576551282076245490090389328944075868508455133942304583236903222948165808559332123348274797826204144723168738177180919299881250404026184124858368
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "starts_24h": 1,
+          "nominal_cap_24h": 4314463523669557699548658169560904563153693620620279918374019443275774258720684930254149407186405076116971014884345179141623711845347140386443221120884900407665197853837230769829891762169343894657820844202923214615309997685677350755979405423970960358595147828899473356049716252342063197150009696628418996600832,
+          "nominal_utilization": 2.31778526927835e-310,
+          "cooldown_minutes": 0,
+          "observed_ticks_24h": 0,
+          "available_start_opportunities_24h": 0,
+          "idle_while_pending_24h": null,
+          "idle_with_coverage_candidate_24h": null,
+          "coverage_reviewed_paths": 0
+        }
+      }
+    },
+    {
+      "name": "huge-float-cap-overflows-to-infinity",
+      "source": "coverage.utilization_digest",
+      "input": {
+        "queue": {
+          "starts": [
+            "2026-11-09T11:00:00Z"
+          ]
+        },
+        "ledger": {
+          "schema_version": 1,
+          "paths": {},
+          "runs": {},
+          "observations": {}
+        },
+        "now": "2026-11-09T12:00:00Z",
+        "max_starts_per_hour": 1e+308
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "starts_24h": 1,
+          "nominal_cap_24h": Infinity,
+          "nominal_utilization": 0.0,
+          "cooldown_minutes": 0,
+          "observed_ticks_24h": 0,
+          "available_start_opportunities_24h": 0,
+          "idle_while_pending_24h": null,
+          "idle_with_coverage_candidate_24h": null,
+          "coverage_reviewed_paths": 0
+        }
+      }
+    },
+    {
+      "name": "tiny-float-cap-overflows-utilization",
+      "source": "coverage.utilization_digest",
+      "input": {
+        "queue": {
+          "starts": [
+            "2026-11-09T11:00:00Z"
+          ]
+        },
+        "ledger": {
+          "schema_version": 1,
+          "paths": {},
+          "runs": {},
+          "observations": {}
+        },
+        "now": "2026-11-09T12:00:00Z",
+        "max_starts_per_hour": 1e-323
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "starts_24h": 1,
+          "nominal_cap_24h": 2.37e-322,
+          "nominal_utilization": Infinity,
+          "cooldown_minutes": 0,
+          "observed_ticks_24h": 0,
+          "available_start_opportunities_24h": 0,
+          "idle_while_pending_24h": null,
+          "idle_with_coverage_candidate_24h": null,
+          "coverage_reviewed_paths": 0
+        }
+      }
+    },
+    {
+      "name": "nan-cap-propagates",
+      "source": "coverage.utilization_digest",
+      "input": {
+        "queue": {
+          "starts": []
+        },
+        "ledger": {
+          "schema_version": 1,
+          "paths": {},
+          "runs": {},
+          "observations": {}
+        },
+        "now": "2026-11-09T12:00:00Z",
+        "max_starts_per_hour": NaN
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "starts_24h": 0,
+          "nominal_cap_24h": NaN,
+          "nominal_utilization": NaN,
+          "cooldown_minutes": 0,
+          "observed_ticks_24h": 0,
+          "available_start_opportunities_24h": 0,
+          "idle_while_pending_24h": null,
+          "idle_with_coverage_candidate_24h": null,
+          "coverage_reviewed_paths": 0
+        }
+      }
+    },
+    {
+      "name": "false-cap-refused",
+      "source": "coverage.utilization_digest",
+      "input": {
+        "queue": {
+          "starts": []
+        },
+        "ledger": {
+          "schema_version": 1,
+          "paths": {},
+          "runs": {},
+          "observations": {}
+        },
+        "now": "2026-11-09T12:00:00Z",
+        "max_starts_per_hour": false
+      },
+      "expect": {
+        "ok": false,
+        "error": "ValueError",
+        "message": "max_starts_per_hour must be positive"
+      }
+    },
+    {
+      "name": "string-cap-type-error",
+      "source": "coverage.utilization_digest",
+      "input": {
+        "queue": {
+          "starts": []
+        },
+        "ledger": {
+          "schema_version": 1,
+          "paths": {},
+          "runs": {},
+          "observations": {}
+        },
+        "now": "2026-11-09T12:00:00Z",
+        "max_starts_per_hour": "5"
+      },
+      "expect": {
+        "ok": false,
+        "error": "TypeError",
+        "message": "'<=' not supported between instances of 'str' and 'int'"
+      }
+    },
+    {
+      "name": "none-cap-type-error",
+      "source": "coverage.utilization_digest",
+      "input": {
+        "queue": {
+          "starts": []
+        },
+        "ledger": {
+          "schema_version": 1,
+          "paths": {},
+          "runs": {},
+          "observations": {}
+        },
+        "now": "2026-11-09T12:00:00Z",
+        "max_starts_per_hour": null
+      },
+      "expect": {
+        "ok": false,
+        "error": "TypeError",
+        "message": "'<=' not supported between instances of 'NoneType' and 'int'"
+      }
+    },
+    {
+      "name": "cutoff-and-now-boundaries",
+      "source": "coverage.utilization_digest",
+      "input": {
+        "queue": {
+          "starts": [
+            "2026-11-08T12:00:00Z",
+            "2026-11-09T12:00:00Z"
+          ]
+        },
+        "ledger": {
+          "schema_version": 1,
+          "paths": {},
+          "runs": {},
+          "observations": {
+            "2026-11-08T12:00:00Z": {
+              "started": false,
+              "pending": true,
+              "candidate_exists": true,
+              "blocked_reason": null
+            },
+            "2026-11-09T12:00:00Z": {
+              "started": false,
+              "pending": true,
+              "candidate_exists": false,
+              "blocked_reason": null
+            }
+          }
+        },
+        "now": "2026-11-09T12:00:00Z",
+        "max_starts_per_hour": 5
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "starts_24h": 1,
+          "nominal_cap_24h": 120,
+          "nominal_utilization": 0.008333333333333333,
+          "cooldown_minutes": 0,
+          "observed_ticks_24h": 1,
+          "available_start_opportunities_24h": 1,
+          "idle_while_pending_24h": 1,
+          "idle_with_coverage_candidate_24h": 0,
+          "coverage_reviewed_paths": 0
+        }
+      }
+    },
+    {
+      "name": "numeric-now-rounds-half-even",
+      "source": "coverage.utilization_digest",
+      "input": {
+        "queue": {
+          "starts": [
+            "1970-01-01T00:00:01Z",
+            "1970-01-01T00:00:01.000001Z",
+            "1970-01-01T00:00:01.000002Z"
+          ]
+        },
+        "ledger": {
+          "schema_version": 1,
+          "paths": {},
+          "runs": {},
+          "observations": {
+            "1970-01-01T00:00:01.000001Z": {
+              "started": false,
+              "pending": true,
+              "candidate_exists": true,
+              "blocked_reason": null
+            },
+            "1970-01-01T00:00:01.000002Z": {
+              "started": false,
+              "pending": true,
+              "candidate_exists": true,
+              "blocked_reason": null
+            }
+          }
+        },
+        "now": 1.0000005,
+        "max_starts_per_hour": 5
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "starts_24h": 2,
+          "nominal_cap_24h": 120,
+          "nominal_utilization": 0.016666666666666666,
+          "cooldown_minutes": 0,
+          "observed_ticks_24h": 1,
+          "available_start_opportunities_24h": 1,
+          "idle_while_pending_24h": 1,
+          "idle_with_coverage_candidate_24h": 1,
+          "coverage_reviewed_paths": 0
+        }
+      }
+    },
+    {
+      "name": "bool-now-is-epoch-second",
+      "source": "coverage.utilization_digest",
+      "input": {
+        "queue": {
+          "starts": [
+            "1970-01-01T00:00:00Z",
+            "1970-01-01T00:00:01Z",
+            "1970-01-01T00:00:01.000001Z"
+          ]
+        },
+        "ledger": {
+          "schema_version": 1,
+          "paths": {},
+          "runs": {},
+          "observations": {}
+        },
+        "now": true,
+        "max_starts_per_hour": 5
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "starts_24h": 2,
+          "nominal_cap_24h": 120,
+          "nominal_utilization": 0.016666666666666666,
+          "cooldown_minutes": 0,
+          "observed_ticks_24h": 0,
+          "available_start_opportunities_24h": 0,
+          "idle_while_pending_24h": null,
+          "idle_with_coverage_candidate_24h": null,
+          "coverage_reviewed_paths": 0
+        }
+      }
+    },
+    {
+      "name": "cooldown-exactly-now-is-int-zero",
+      "source": "coverage.utilization_digest",
+      "input": {
+        "queue": {
+          "starts": [],
+          "cooldown_until": "2026-11-09T12:00:00Z"
+        },
+        "ledger": {
+          "schema_version": 1,
+          "paths": {},
+          "runs": {},
+          "observations": {}
+        },
+        "now": "2026-11-09T12:00:00Z",
+        "max_starts_per_hour": 5
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "starts_24h": 0,
+          "nominal_cap_24h": 120,
+          "nominal_utilization": 0.0,
+          "cooldown_minutes": 0,
+          "observed_ticks_24h": 0,
+          "available_start_opportunities_24h": 0,
+          "idle_while_pending_24h": null,
+          "idle_with_coverage_candidate_24h": null,
+          "coverage_reviewed_paths": 0
+        }
+      }
+    },
+    {
+      "name": "cooldown-subsecond-is-positive-float",
+      "source": "coverage.utilization_digest",
+      "input": {
+        "queue": {
+          "starts": [],
+          "cooldown_until": "2026-11-09T12:00:00.000001Z"
+        },
+        "ledger": {
+          "schema_version": 1,
+          "paths": {},
+          "runs": {},
+          "observations": {}
+        },
+        "now": "2026-11-09T12:00:00Z",
+        "max_starts_per_hour": 5
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "starts_24h": 0,
+          "nominal_cap_24h": 120,
+          "nominal_utilization": 0.0,
+          "cooldown_minutes": 1.6666666666666667e-08,
+          "observed_ticks_24h": 0,
+          "available_start_opportunities_24h": 0,
+          "idle_while_pending_24h": null,
+          "idle_with_coverage_candidate_24h": null,
+          "coverage_reviewed_paths": 0
+        }
+      }
+    },
+    {
+      "name": "cooldown-microseconds-use-timedelta-rounding",
+      "source": "coverage.utilization_digest",
+      "input": {
+        "queue": {
+          "starts": [],
+          "cooldown_until": "2026-11-09T12:00:14.380204Z"
+        },
+        "ledger": {
+          "schema_version": 1,
+          "paths": {},
+          "runs": {},
+          "observations": {}
+        },
+        "now": "2026-11-09T12:00:00Z",
+        "max_starts_per_hour": 5
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "starts_24h": 0,
+          "nominal_cap_24h": 120,
+          "nominal_utilization": 0.0,
+          "cooldown_minutes": 0.23967006666666668,
+          "observed_ticks_24h": 0,
+          "available_start_opportunities_24h": 0,
+          "idle_while_pending_24h": null,
+          "idle_with_coverage_candidate_24h": null,
+          "coverage_reviewed_paths": 0
+        }
+      }
+    },
+    {
+      "name": "cooldown-over-one-day",
+      "source": "coverage.utilization_digest",
+      "input": {
+        "queue": {
+          "starts": [],
+          "cooldown_until": "2026-11-10T13:00:00Z"
+        },
+        "ledger": {
+          "schema_version": 1,
+          "paths": {},
+          "runs": {},
+          "observations": {}
+        },
+        "now": "2026-11-09T12:00:00Z",
+        "max_starts_per_hour": 5
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "starts_24h": 0,
+          "nominal_cap_24h": 120,
+          "nominal_utilization": 0.0,
+          "cooldown_minutes": 1500.0,
+          "observed_ticks_24h": 0,
+          "available_start_opportunities_24h": 0,
+          "idle_while_pending_24h": null,
+          "idle_with_coverage_candidate_24h": null,
+          "coverage_reviewed_paths": 0
+        }
+      }
+    },
+    {
+      "name": "empty-cooldown-string-is-falsy",
+      "source": "coverage.utilization_digest",
+      "input": {
+        "queue": {
+          "starts": [],
+          "cooldown_until": ""
+        },
+        "ledger": {
+          "schema_version": 1,
+          "paths": {},
+          "runs": {},
+          "observations": {}
+        },
+        "now": "2026-11-09T12:00:00Z",
+        "max_starts_per_hour": 5
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "starts_24h": 0,
+          "nominal_cap_24h": 120,
+          "nominal_utilization": 0.0,
+          "cooldown_minutes": 0,
+          "observed_ticks_24h": 0,
+          "available_start_opportunities_24h": 0,
+          "idle_while_pending_24h": null,
+          "idle_with_coverage_candidate_24h": null,
+          "coverage_reviewed_paths": 0
+        }
+      }
+    },
+    {
+      "name": "nonempty-list-cooldown-invalid",
+      "source": "coverage.utilization_digest",
+      "input": {
+        "queue": {
+          "starts": [],
+          "cooldown_until": [
+            "x"
+          ]
+        },
+        "ledger": {
+          "schema_version": 1,
+          "paths": {},
+          "runs": {},
+          "observations": {}
+        },
+        "now": "2026-11-09T12:00:00Z",
+        "max_starts_per_hour": 5
+      },
+      "expect": {
+        "ok": false,
+        "error": "ValueError",
+        "message": "invalid timestamp"
+      }
+    },
+    {
+      "name": "non-bmp-inputs",
+      "source": "coverage.utilization_digest",
+      "input": {
+        "queue": {
+          "starts": []
+        },
+        "ledger": {
+          "schema_version": 1,
+          "paths": {
+            "src/\ud83d\ude00.py": {
+              "review_count": 1,
+              "last_reviewed_at": null
+            }
+          },
+          "runs": {},
+          "observations": {
+            "2026-11-09T11:00:00Z": {
+              "started": false,
+              "pending": true,
+              "candidate_exists": true,
+              "blocked_reason": "paused \ud83d\ude00"
+            },
+            "2026-11-09T11:10:00Z": {
+              "started": false,
+              "pending": true,
+              "candidate_exists": true,
+              "blocked_reason": ""
+            }
+          }
+        },
+        "now": "2026-11-09T12:00:00Z",
+        "max_starts_per_hour": 5
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "starts_24h": 0,
+          "nominal_cap_24h": 120,
+          "nominal_utilization": 0.0,
+          "cooldown_minutes": 0,
+          "observed_ticks_24h": 2,
+          "available_start_opportunities_24h": 1,
+          "idle_while_pending_24h": 1,
+          "idle_with_coverage_candidate_24h": 1,
+          "coverage_reviewed_paths": 1
+        }
+      }
+    },
+    {
+      "name": "missing-observations-key",
+      "source": "coverage.utilization_digest",
+      "input": {
+        "queue": {
+          "starts": []
+        },
+        "ledger": {
+          "paths": {}
+        },
+        "now": "2026-11-09T12:00:00Z",
+        "max_starts_per_hour": 5
+      },
+      "expect": {
+        "ok": false,
+        "error": "KeyError",
+        "message": "'observations'"
+      }
+    },
+    {
+      "name": "missing-paths-key",
+      "source": "coverage.utilization_digest",
+      "input": {
+        "queue": {
+          "starts": []
+        },
+        "ledger": {
+          "observations": {}
+        },
+        "now": "2026-11-09T12:00:00Z",
+        "max_starts_per_hour": 5
+      },
+      "expect": {
+        "ok": false,
+        "error": "KeyError",
+        "message": "'paths'"
+      }
+    },
+    {
+      "name": "missing-blocked-reason",
+      "source": "coverage.utilization_digest",
+      "input": {
+        "queue": {
+          "starts": []
+        },
+        "ledger": {
+          "schema_version": 1,
+          "paths": {},
+          "runs": {},
+          "observations": {
+            "2026-11-09T11:00:00Z": {
+              "started": false,
+              "pending": true,
+              "candidate_exists": true
+            }
+          }
+        },
+        "now": "2026-11-09T12:00:00Z",
+        "max_starts_per_hour": 5
+      },
+      "expect": {
+        "ok": false,
+        "error": "KeyError",
+        "message": "'blocked_reason'"
+      }
+    },
+    {
+      "name": "pending-string-sum-type-error",
+      "source": "coverage.utilization_digest",
+      "input": {
+        "queue": {
+          "starts": []
+        },
+        "ledger": {
+          "schema_version": 1,
+          "paths": {},
+          "runs": {},
+          "observations": {
+            "2026-11-09T11:00:00Z": {
+              "started": false,
+              "pending": "x",
+              "candidate_exists": true,
+              "blocked_reason": null
+            }
+          }
+        },
+        "now": "2026-11-09T12:00:00Z",
+        "max_starts_per_hour": 5
+      },
+      "expect": {
+        "ok": false,
+        "error": "TypeError",
+        "message": "unsupported operand type(s) for +: 'int' and 'str'"
+      }
+    },
+    {
+      "name": "float-idle-sums-keep-float-tag",
+      "source": "coverage.utilization_digest",
+      "input": {
+        "queue": {
+          "starts": []
+        },
+        "ledger": {
+          "schema_version": 1,
+          "paths": {},
+          "runs": {},
+          "observations": {
+            "2026-11-09T11:00:00Z": {
+              "started": false,
+              "pending": 1.0,
+              "candidate_exists": 2.0,
+              "blocked_reason": null
+            }
+          }
+        },
+        "now": "2026-11-09T12:00:00Z",
+        "max_starts_per_hour": 5
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "starts_24h": 0,
+          "nominal_cap_24h": 120,
+          "nominal_utilization": 0.0,
+          "cooldown_minutes": 0,
+          "observed_ticks_24h": 1,
+          "available_start_opportunities_24h": 1,
+          "idle_while_pending_24h": 1.0,
+          "idle_with_coverage_candidate_24h": 2.0,
+          "coverage_reviewed_paths": 0
+        }
+      }
+    },
+    {
+      "name": "mixed-bool-and-float-idle-sum",
+      "source": "coverage.utilization_digest",
+      "input": {
+        "queue": {
+          "starts": []
+        },
+        "ledger": {
+          "schema_version": 1,
+          "paths": {},
+          "runs": {},
+          "observations": {
+            "2026-11-09T11:00:00Z": {
+              "started": false,
+              "pending": true,
+              "candidate_exists": true,
+              "blocked_reason": null
+            },
+            "2026-11-09T11:10:00Z": {
+              "started": false,
+              "pending": 2.0,
+              "candidate_exists": false,
+              "blocked_reason": null
+            }
+          }
+        },
+        "now": "2026-11-09T12:00:00Z",
+        "max_starts_per_hour": 5
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "starts_24h": 0,
+          "nominal_cap_24h": 120,
+          "nominal_utilization": 0.0,
+          "cooldown_minutes": 0,
+          "observed_ticks_24h": 2,
+          "available_start_opportunities_24h": 2,
+          "idle_while_pending_24h": 3.0,
+          "idle_with_coverage_candidate_24h": 1,
+          "coverage_reviewed_paths": 0
+        }
+      }
+    },
+    {
+      "name": "huge-int-idle-sum-stays-exact",
+      "source": "coverage.utilization_digest",
+      "input": {
+        "queue": {
+          "starts": []
+        },
+        "ledger": {
+          "schema_version": 1,
+          "paths": {},
+          "runs": {},
+          "observations": {
+            "2026-11-09T11:00:00Z": {
+              "started": false,
+              "pending": 1000000000000000000000000000000,
+              "candidate_exists": true,
+              "blocked_reason": null
+            }
+          }
+        },
+        "now": "2026-11-09T12:00:00Z",
+        "max_starts_per_hour": 5
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "starts_24h": 0,
+          "nominal_cap_24h": 120,
+          "nominal_utilization": 0.0,
+          "cooldown_minutes": 0,
+          "observed_ticks_24h": 1,
+          "available_start_opportunities_24h": 1,
+          "idle_while_pending_24h": 1000000000000000000000000000000,
+          "idle_with_coverage_candidate_24h": 1,
+          "coverage_reviewed_paths": 0
+        }
+      }
+    },
+    {
+      "name": "naive-now-refused",
+      "source": "coverage.utilization_digest",
+      "input": {
+        "queue": {
+          "starts": []
+        },
+        "ledger": {
+          "schema_version": 1,
+          "paths": {},
+          "runs": {},
+          "observations": {}
+        },
+        "now": "2026-11-09T12:00:00",
+        "max_starts_per_hour": 5
+      },
+      "expect": {
+        "ok": false,
+        "error": "ValueError",
+        "message": "timestamps must have a timezone"
+      }
+    },
+    {
+      "name": "arbitrary-separator-is-zoned",
+      "source": "coverage.utilization_digest",
+      "input": {
+        "queue": {
+          "starts": []
+        },
+        "ledger": {
+          "schema_version": 1,
+          "paths": {},
+          "runs": {},
+          "observations": {}
+        },
+        "now": "2026-11-09X12:00:00Z",
+        "max_starts_per_hour": 5
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "starts_24h": 0,
+          "nominal_cap_24h": 120,
+          "nominal_utilization": 0.0,
+          "cooldown_minutes": 0,
+          "observed_ticks_24h": 0,
+          "available_start_opportunities_24h": 0,
+          "idle_while_pending_24h": null,
+          "idle_with_coverage_candidate_24h": null,
+          "coverage_reviewed_paths": 0
+        }
+      }
+    },
+    {
+      "name": "naive-arbitrary-separator-refused",
+      "source": "coverage.utilization_digest",
+      "input": {
+        "queue": {
+          "starts": []
+        },
+        "ledger": {
+          "schema_version": 1,
+          "paths": {},
+          "runs": {},
+          "observations": {}
+        },
+        "now": "2026-11-09X12:00:00",
+        "max_starts_per_hour": 5
+      },
+      "expect": {
+        "ok": false,
+        "error": "ValueError",
+        "message": "timestamps must have a timezone"
+      }
+    },
+    {
+      "name": "date-only-with-offset-is-naive",
+      "source": "coverage.utilization_digest",
+      "input": {
+        "queue": {
+          "starts": []
+        },
+        "ledger": {
+          "schema_version": 1,
+          "paths": {},
+          "runs": {},
+          "observations": {}
+        },
+        "now": "2026-11-09+00:00",
+        "max_starts_per_hour": 5
+      },
+      "expect": {
+        "ok": false,
+        "error": "ValueError",
+        "message": "timestamps must have a timezone"
+      }
+    },
+    {
+      "name": "week-date-with-zone-is-naive",
+      "source": "coverage.utilization_digest",
+      "input": {
+        "queue": {
+          "starts": []
+        },
+        "ledger": {
+          "schema_version": 1,
+          "paths": {},
+          "runs": {},
+          "observations": {}
+        },
+        "now": "2026-W45-1Z",
+        "max_starts_per_hour": 5
+      },
+      "expect": {
+        "ok": false,
+        "error": "ValueError",
+        "message": "timestamps must have a timezone"
+      }
+    },
+    {
+      "name": "malformed-now-refused",
+      "source": "coverage.utilization_digest",
+      "input": {
+        "queue": {
+          "starts": []
+        },
+        "ledger": {
+          "schema_version": 1,
+          "paths": {},
+          "runs": {},
+          "observations": {}
+        },
+        "now": "junk",
+        "max_starts_per_hour": 5
+      },
+      "expect": {
+        "ok": false,
+        "error": "ValueError",
+        "message": "Invalid isoformat string: 'junk'"
+      }
+    },
+    {
+      "name": "date-only-with-zone-is-naive",
+      "source": "coverage.utilization_digest",
+      "input": {
+        "queue": {
+          "starts": []
+        },
+        "ledger": {
+          "schema_version": 1,
+          "paths": {},
+          "runs": {},
+          "observations": {}
+        },
+        "now": "2026-11-09Z",
+        "max_starts_per_hour": 5
+      },
+      "expect": {
+        "ok": false,
+        "error": "ValueError",
+        "message": "timestamps must have a timezone"
+      }
+    },
+    {
+      "name": "infinity-now-overflow",
+      "source": "coverage.utilization_digest",
+      "input": {
+        "queue": {
+          "starts": []
+        },
+        "ledger": {
+          "schema_version": 1,
+          "paths": {},
+          "runs": {},
+          "observations": {}
+        },
+        "now": Infinity,
+        "max_starts_per_hour": 5
+      },
+      "expect": {
+        "ok": false,
+        "error": "OverflowError",
+        "message": "timestamp out of range for platform time_t"
+      }
+    },
+    {
+      "name": "nan-now-value-error",
+      "source": "coverage.utilization_digest",
+      "input": {
+        "queue": {
+          "starts": []
+        },
+        "ledger": {
+          "schema_version": 1,
+          "paths": {},
+          "runs": {},
+          "observations": {}
+        },
+        "now": NaN,
+        "max_starts_per_hour": 5
+      },
+      "expect": {
+        "ok": false,
+        "error": "ValueError",
+        "message": "Invalid value NaN (not a number)"
+      }
+    },
+    {
+      "name": "year-out-of-range",
+      "source": "coverage.utilization_digest",
+      "input": {
+        "queue": {
+          "starts": []
+        },
+        "ledger": {
+          "schema_version": 1,
+          "paths": {},
+          "runs": {},
+          "observations": {}
+        },
+        "now": 1000000000000000.0,
+        "max_starts_per_hour": 5
+      },
+      "expect": {
+        "ok": false,
+        "error": "ValueError",
+        "message": "year must be in 1..9999, not 31690708"
+      }
+    },
+    {
+      "name": "platform-time-error",
+      "source": "coverage.utilization_digest",
+      "input": {
+        "queue": {
+          "starts": []
+        },
+        "ledger": {
+          "schema_version": 1,
+          "paths": {},
+          "runs": {},
+          "observations": {}
+        },
+        "now": 1e+18,
+        "max_starts_per_hour": 5
+      },
+      "expect": {
+        "ok": false,
+        "error": "OSError",
+        "message": "[Errno 75] Value too large for defined data type"
+      }
+    }
+  ]
+}
