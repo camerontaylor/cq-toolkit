@@ -205,6 +205,8 @@ def _prepare_case(spec):
         def fake_git(clone, *args):
             calls.append(list(args))
             if args == ("rev-parse", "origin/main"):
+                if spec.get("tip_error"):
+                    raise RuntimeError("git rev-parse failed: synthetic")
                 return tip
             if args == ("rev-parse", SOURCE + ":" + path):
                 if spec.get("blob_error"):
@@ -370,6 +372,7 @@ def build():
          "old_overrides": {"job": "crq-other-F1"}},
         {"name": "refuse-source-sha-invalid", "source_sha": "not-a-sha"},
         {"name": "refuse-source-not-tip", "tip": OTHER},
+        {"name": "refuse-tip-unreadable", "tip_error": True},
         {"name": "refuse-legacy-minor", "old_overrides": {"finding": {
             "path": "src/lock.ts", "line": 2, "severity": "minor",
             "body": "Finding data", "id": "thread-1"}}},

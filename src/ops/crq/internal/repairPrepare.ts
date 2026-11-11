@@ -217,7 +217,7 @@ export async function verifyPreparedRepair(
   try {
     currentTip = await git.currentTip();
   } catch {
-    return refusal('source-not-current-tip');
+    return refusal('source-tip-unreadable');
   }
   if (currentTip !== input.sourceSha) return refusal('source-not-current-tip');
   if (!severityRepairable(oldJob)) return refusal('severity-not-repairable');
@@ -440,7 +440,7 @@ async function reobservePreparedSourceStrict(
   try {
     currentTip = await git.currentTip();
   } catch {
-    return { ok: false, refusal: 'source-not-current-tip' };
+    return { ok: false, refusal: 'source-tip-unreadable' };
   }
   let blobOid: string;
   try {

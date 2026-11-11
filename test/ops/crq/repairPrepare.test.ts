@@ -147,6 +147,7 @@ const EXPECTED_REFUSAL: Record<string, RepairRefusal> = {
   'refuse-old-job-identity': 'old-job-identity-mismatch',
   'refuse-source-sha-invalid': 'source-sha-invalid',
   'refuse-source-not-tip': 'source-not-current-tip',
+  'refuse-tip-unreadable': 'source-tip-unreadable',
   'refuse-legacy-minor': 'severity-not-repairable',
   'refuse-path-absolute': 'finding-path-invalid',
   'refuse-blob-mismatch': 'source-blob-mismatch',
@@ -196,7 +197,14 @@ describe('verifyPreparedRepair against the Python oracle', () => {
     const name = asString(row.get('name'));
     test(name, async () => {
       const input = verifyInput(row);
-      const git = fixtureGit(row, name === 'refuse-blob-unreadable' ? 'blob' : undefined);
+      const git = fixtureGit(
+        row,
+        name === 'refuse-blob-unreadable'
+          ? 'blob'
+          : name === 'refuse-tip-unreadable'
+            ? 'tip'
+            : undefined,
+      );
       const result = await verifyPreparedRepair(input, git);
       const expectedCalls = callList(row.get('git_calls'));
 
@@ -584,7 +592,7 @@ describe('typed fixFinding harvest', () => {
     const tipFailure = fakeGit({ tip: SOURCE, blob: BLOB, fail: 'tip' });
     expect(await verifyPreparedHarvest(input, tipFailure)).toEqual({
       ok: false,
-      refusal: 'source-not-current-tip',
+      refusal: 'source-tip-unreadable',
     });
     expect(tipFailure.calls).toEqual([['rev-parse', 'origin/main']]);
 

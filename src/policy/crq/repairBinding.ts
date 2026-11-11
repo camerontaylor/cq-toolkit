@@ -28,6 +28,7 @@ export type RepairRefusal =
   | 'evidence-unreadable'
   | 'source-sha-invalid'
   | 'source-not-current-tip'
+  | 'source-tip-unreadable'
   | 'evidence-source-sha-mismatch'
   | 'finding-path-invalid'
   | 'severity-not-repairable'
