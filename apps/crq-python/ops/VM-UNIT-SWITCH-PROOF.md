@@ -252,10 +252,11 @@ does not count as active, and an active path still needs a trigger event so it
 is not an autonomous second completion source. Actual controller and adapter
 tests cover one active timer (the inactive path is preserved), both inactive
 and path-only (``Refused`` with no controller record, unchanged service and no
-completion). Removing the timer precondition makes the both-inactive and
-path-only tests fail; removing the raw stdout binding makes the queued and
-fence contradiction tests fail; removing the exact completion comparison
-makes the contradictory after-entry test fail.
+completion). Removing the whole precondition makes the both-inactive and
+path-only tests fail; narrowing it back to any-active fails the path-only
+tests; removing the raw stdout binding makes the queued and fence
+contradiction tests fail; removing the exact completion comparison makes the
+contradictory after-entry test fail.
 
 ### Earlier R2 activators run (preserved)
 
