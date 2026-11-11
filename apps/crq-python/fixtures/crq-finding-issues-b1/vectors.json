@@ -1,0 +1,3553 @@
+{
+  "schema": "cq.crq-finding-issues-b1-vector/v1",
+  "source": "apps/crq-python/finding_issues_vector_emit_b1.py",
+  "families": [
+    {
+      "family": "enabled",
+      "cases": [
+        {
+          "name": "explicit-issue",
+          "source": "finding_issues.enabled",
+          "input": {
+            "repo_cfg": {
+              "findings": "issue"
+            }
+          },
+          "expect": {
+            "ok": true,
+            "value": true
+          }
+        },
+        {
+          "name": "explicit-none",
+          "source": "finding_issues.enabled",
+          "input": {
+            "repo_cfg": {
+              "findings": "none"
+            }
+          },
+          "expect": {
+            "ok": true,
+            "value": false
+          }
+        },
+        {
+          "name": "absent-key",
+          "source": "finding_issues.enabled",
+          "input": {
+            "repo_cfg": {
+              "repo": "camerontaylor/infra"
+            }
+          },
+          "expect": {
+            "ok": true,
+            "value": true
+          }
+        },
+        {
+          "name": "empty-object",
+          "source": "finding_issues.enabled",
+          "input": {
+            "repo_cfg": {}
+          },
+          "expect": {
+            "ok": true,
+            "value": true
+          }
+        },
+        {
+          "name": "null-value",
+          "source": "finding_issues.enabled",
+          "input": {
+            "repo_cfg": {
+              "findings": null
+            }
+          },
+          "expect": {
+            "ok": true,
+            "value": false
+          }
+        },
+        {
+          "name": "empty-string",
+          "source": "finding_issues.enabled",
+          "input": {
+            "repo_cfg": {
+              "findings": ""
+            }
+          },
+          "expect": {
+            "ok": true,
+            "value": false
+          }
+        },
+        {
+          "name": "non-string-number",
+          "source": "finding_issues.enabled",
+          "input": {
+            "repo_cfg": {
+              "findings": 5
+            }
+          },
+          "expect": {
+            "ok": true,
+            "value": false
+          }
+        },
+        {
+          "name": "non-dict-string",
+          "source": "finding_issues.enabled",
+          "input": {
+            "repo_cfg": "x"
+          },
+          "expect": {
+            "ok": false,
+            "error": "AttributeError",
+            "message": "'str' object has no attribute 'get'"
+          }
+        },
+        {
+          "name": "non-dict-null",
+          "source": "finding_issues.enabled",
+          "input": {
+            "repo_cfg": null
+          },
+          "expect": {
+            "ok": false,
+            "error": "AttributeError",
+            "message": "'NoneType' object has no attribute 'get'"
+          }
+        },
+        {
+          "name": "non-dict-list",
+          "source": "finding_issues.enabled",
+          "input": {
+            "repo_cfg": []
+          },
+          "expect": {
+            "ok": false,
+            "error": "AttributeError",
+            "message": "'list' object has no attribute 'get'"
+          }
+        }
+      ]
+    },
+    {
+      "family": "title",
+      "cases": [
+        {
+          "name": "exact-with-blocking",
+          "source": "finding_issues.title",
+          "input": {
+            "base": "aaaaaaaaaa1111",
+            "head": "bbbbbbbbbb2222",
+            "severity_counts": {
+              "critical": 1,
+              "major": 1,
+              "minor": 1
+            },
+            "item_id": "push-infra-aaaaaaaaaa-bbbbbbbbbb"
+          },
+          "expect": {
+            "ok": true,
+            "value": "crq: aaaaaaaaaa..bbbbbbbbbb \u2014 3 findings (2 blocking) [push-infra-aaaaaaaaaa-bbbbbbbbbb]"
+          }
+        },
+        {
+          "name": "zero-blocking",
+          "source": "finding_issues.title",
+          "input": {
+            "base": "aaaaaaaaaa1111",
+            "head": "bbbbbbbbbb2222",
+            "severity_counts": {
+              "minor": 2
+            }
+          },
+          "expect": {
+            "ok": true,
+            "value": "crq: aaaaaaaaaa..bbbbbbbbbb \u2014 2 findings (0 blocking)"
+          }
+        },
+        {
+          "name": "empty-counts",
+          "source": "finding_issues.title",
+          "input": {
+            "base": "aaaaaaaaaa1111",
+            "head": "bbbbbbbbbb2222",
+            "severity_counts": {}
+          },
+          "expect": {
+            "ok": true,
+            "value": "crq: aaaaaaaaaa..bbbbbbbbbb \u2014 0 findings (0 blocking)"
+          }
+        },
+        {
+          "name": "missing-severity-keys",
+          "source": "finding_issues.title",
+          "input": {
+            "base": "aaaaaaaaaa1111",
+            "head": "bbbbbbbbbb2222",
+            "severity_counts": {
+              "major": 1
+            }
+          },
+          "expect": {
+            "ok": true,
+            "value": "crq: aaaaaaaaaa..bbbbbbbbbb \u2014 1 findings (1 blocking)"
+          }
+        },
+        {
+          "name": "short-refs",
+          "source": "finding_issues.title",
+          "input": {
+            "base": "abc",
+            "head": "def",
+            "severity_counts": {}
+          },
+          "expect": {
+            "ok": true,
+            "value": "crq: abc..def \u2014 0 findings (0 blocking)"
+          }
+        },
+        {
+          "name": "item-id-empty",
+          "source": "finding_issues.title",
+          "input": {
+            "base": "aaaaaaaaaa1111",
+            "head": "bbbbbbbbbb2222",
+            "severity_counts": {
+              "critical": 1,
+              "major": 1,
+              "minor": 1
+            },
+            "item_id": ""
+          },
+          "expect": {
+            "ok": true,
+            "value": "crq: aaaaaaaaaa..bbbbbbbbbb \u2014 3 findings (2 blocking)"
+          }
+        },
+        {
+          "name": "item-id-null",
+          "source": "finding_issues.title",
+          "input": {
+            "base": "aaaaaaaaaa1111",
+            "head": "bbbbbbbbbb2222",
+            "severity_counts": {
+              "critical": 1,
+              "major": 1,
+              "minor": 1
+            },
+            "item_id": null
+          },
+          "expect": {
+            "ok": true,
+            "value": "crq: aaaaaaaaaa..bbbbbbbbbb \u2014 3 findings (2 blocking)"
+          }
+        },
+        {
+          "name": "item-id-number",
+          "source": "finding_issues.title",
+          "input": {
+            "base": "aaaaaaaaaa1111",
+            "head": "bbbbbbbbbb2222",
+            "severity_counts": {
+              "critical": 1,
+              "major": 1,
+              "minor": 1
+            },
+            "item_id": 7
+          },
+          "expect": {
+            "ok": true,
+            "value": "crq: aaaaaaaaaa..bbbbbbbbbb \u2014 3 findings (2 blocking) [7]"
+          }
+        },
+        {
+          "name": "item-id-list",
+          "source": "finding_issues.title",
+          "input": {
+            "base": "aaaaaaaaaa1111",
+            "head": "bbbbbbbbbb2222",
+            "severity_counts": {
+              "critical": 1,
+              "major": 1,
+              "minor": 1
+            },
+            "item_id": [
+              1,
+              "x"
+            ]
+          },
+          "expect": {
+            "ok": true,
+            "value": "crq: aaaaaaaaaa..bbbbbbbbbb \u2014 3 findings (2 blocking) [[1, 'x']]"
+          }
+        },
+        {
+          "name": "unicode-refs",
+          "source": "finding_issues.title",
+          "input": {
+            "base": "\u6807\u9898\ud83d\ude00abcdefghijk",
+            "head": "\ud835\udd4fbcdefghijklmnop",
+            "severity_counts": {}
+          },
+          "expect": {
+            "ok": true,
+            "value": "crq: \u6807\u9898\ud83d\ude00abcdefg..\ud835\udd4fbcdefghij \u2014 0 findings (0 blocking)"
+          }
+        },
+        {
+          "name": "emoji-refs",
+          "source": "finding_issues.title",
+          "input": {
+            "base": "\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00",
+            "head": "\ud83d\udee0\ud83d\udee0\ud83d\udee0\ud83d\udee0\ud83d\udee0\ud83d\udee0\ud83d\udee0\ud83d\udee0\ud83d\udee0\ud83d\udee0\ud83d\udee0\ud83d\udee0\ud83d\udee0\ud83d\udee0\ud83d\udee0\ud83d\udee0\ud83d\udee0\ud83d\udee0\ud83d\udee0\ud83d\udee0",
+            "severity_counts": {}
+          },
+          "expect": {
+            "ok": true,
+            "value": "crq: \ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00..\ud83d\udee0\ud83d\udee0\ud83d\udee0\ud83d\udee0\ud83d\udee0\ud83d\udee0\ud83d\udee0\ud83d\udee0\ud83d\udee0\ud83d\udee0 \u2014 0 findings (0 blocking)"
+          }
+        },
+        {
+          "name": "float-counts",
+          "source": "finding_issues.title",
+          "input": {
+            "base": "aaaaaaaaaa1111",
+            "head": "bbbbbbbbbb2222",
+            "severity_counts": {
+              "major": 1.5,
+              "minor": 2.0
+            }
+          },
+          "expect": {
+            "ok": true,
+            "value": "crq: aaaaaaaaaa..bbbbbbbbbb \u2014 3.5 findings (1.5 blocking)"
+          }
+        },
+        {
+          "name": "bool-counts",
+          "source": "finding_issues.title",
+          "input": {
+            "base": "aaaaaaaaaa1111",
+            "head": "bbbbbbbbbb2222",
+            "severity_counts": {
+              "critical": true,
+              "major": false
+            }
+          },
+          "expect": {
+            "ok": true,
+            "value": "crq: aaaaaaaaaa..bbbbbbbbbb \u2014 1 findings (1 blocking)"
+          }
+        },
+        {
+          "name": "negative-counts",
+          "source": "finding_issues.title",
+          "input": {
+            "base": "aaaaaaaaaa1111",
+            "head": "bbbbbbbbbb2222",
+            "severity_counts": {
+              "critical": -2,
+              "major": 1,
+              "minor": -3
+            }
+          },
+          "expect": {
+            "ok": true,
+            "value": "crq: aaaaaaaaaa..bbbbbbbbbb \u2014 -4 findings (-1 blocking)"
+          }
+        },
+        {
+          "name": "huge-int-counts",
+          "source": "finding_issues.title",
+          "input": {
+            "base": "aaaaaaaaaa1111",
+            "head": "bbbbbbbbbb2222",
+            "severity_counts": {
+              "major": 1180591620717411303424
+            }
+          },
+          "expect": {
+            "ok": true,
+            "value": "crq: aaaaaaaaaa..bbbbbbbbbb \u2014 1180591620717411303424 findings (1180591620717411303424 blocking)"
+          }
+        },
+        {
+          "name": "float-int-overflow",
+          "source": "finding_issues.title",
+          "input": {
+            "base": "aaaaaaaaaa1111",
+            "head": "bbbbbbbbbb2222",
+            "severity_counts": {
+              "major": 179769313486231590772930519078902473361797697894230657273430081157732675805500963132708477322407536021120113879871393357658789768814416622492847430639474124377767893424865485276302219601246094119453082952085005768838150682342462881473913110540827237163350510684586298239947245938479716304835356329624224137216,
+              "minor": 1.5
+            }
+          },
+          "expect": {
+            "ok": false,
+            "error": "OverflowError",
+            "message": "int too large to convert to float"
+          }
+        },
+        {
+          "name": "string-count",
+          "source": "finding_issues.title",
+          "input": {
+            "base": "aaaaaaaaaa1111",
+            "head": "bbbbbbbbbb2222",
+            "severity_counts": {
+              "major": "x"
+            }
+          },
+          "expect": {
+            "ok": false,
+            "error": "TypeError",
+            "message": "unsupported operand type(s) for +: 'int' and 'str'"
+          }
+        },
+        {
+          "name": "none-count",
+          "source": "finding_issues.title",
+          "input": {
+            "base": "aaaaaaaaaa1111",
+            "head": "bbbbbbbbbb2222",
+            "severity_counts": {
+              "major": null
+            }
+          },
+          "expect": {
+            "ok": false,
+            "error": "TypeError",
+            "message": "unsupported operand type(s) for +: 'int' and 'NoneType'"
+          }
+        },
+        {
+          "name": "critical-string-major-string",
+          "source": "finding_issues.title",
+          "input": {
+            "base": "aaaaaaaaaa1111",
+            "head": "bbbbbbbbbb2222",
+            "severity_counts": {
+              "critical": "a",
+              "major": "b"
+            }
+          },
+          "expect": {
+            "ok": false,
+            "error": "TypeError",
+            "message": "unsupported operand type(s) for +: 'int' and 'str'"
+          }
+        },
+        {
+          "name": "critical-string-major-int",
+          "source": "finding_issues.title",
+          "input": {
+            "base": "aaaaaaaaaa1111",
+            "head": "bbbbbbbbbb2222",
+            "severity_counts": {
+              "critical": "a",
+              "major": 1
+            }
+          },
+          "expect": {
+            "ok": false,
+            "error": "TypeError",
+            "message": "can only concatenate str (not \"int\") to str"
+          }
+        },
+        {
+          "name": "critical-list-major-list",
+          "source": "finding_issues.title",
+          "input": {
+            "base": "aaaaaaaaaa1111",
+            "head": "bbbbbbbbbb2222",
+            "severity_counts": {
+              "critical": [
+                1
+              ],
+              "major": [
+                2
+              ]
+            }
+          },
+          "expect": {
+            "ok": false,
+            "error": "TypeError",
+            "message": "unsupported operand type(s) for +: 'int' and 'list'"
+          }
+        },
+        {
+          "name": "critical-list-major-int",
+          "source": "finding_issues.title",
+          "input": {
+            "base": "aaaaaaaaaa1111",
+            "head": "bbbbbbbbbb2222",
+            "severity_counts": {
+              "critical": [],
+              "major": 1
+            }
+          },
+          "expect": {
+            "ok": false,
+            "error": "TypeError",
+            "message": "can only concatenate list (not \"int\") to list"
+          }
+        },
+        {
+          "name": "critical-list-major-bool",
+          "source": "finding_issues.title",
+          "input": {
+            "base": "aaaaaaaaaa1111",
+            "head": "bbbbbbbbbb2222",
+            "severity_counts": {
+              "critical": [],
+              "major": true
+            }
+          },
+          "expect": {
+            "ok": false,
+            "error": "TypeError",
+            "message": "can only concatenate list (not \"bool\") to list"
+          }
+        },
+        {
+          "name": "critical-bool-major-list",
+          "source": "finding_issues.title",
+          "input": {
+            "base": "aaaaaaaaaa1111",
+            "head": "bbbbbbbbbb2222",
+            "severity_counts": {
+              "critical": true,
+              "major": []
+            }
+          },
+          "expect": {
+            "ok": false,
+            "error": "TypeError",
+            "message": "unsupported operand type(s) for +: 'bool' and 'list'"
+          }
+        },
+        {
+          "name": "critical-float-major-list",
+          "source": "finding_issues.title",
+          "input": {
+            "base": "aaaaaaaaaa1111",
+            "head": "bbbbbbbbbb2222",
+            "severity_counts": {
+              "critical": 1.5,
+              "major": []
+            }
+          },
+          "expect": {
+            "ok": false,
+            "error": "TypeError",
+            "message": "unsupported operand type(s) for +: 'float' and 'list'"
+          }
+        },
+        {
+          "name": "critical-none-major-string",
+          "source": "finding_issues.title",
+          "input": {
+            "base": "aaaaaaaaaa1111",
+            "head": "bbbbbbbbbb2222",
+            "severity_counts": {
+              "critical": null,
+              "major": "b"
+            }
+          },
+          "expect": {
+            "ok": false,
+            "error": "TypeError",
+            "message": "unsupported operand type(s) for +: 'NoneType' and 'str'"
+          }
+        },
+        {
+          "name": "critical-dict-major-list",
+          "source": "finding_issues.title",
+          "input": {
+            "base": "aaaaaaaaaa1111",
+            "head": "bbbbbbbbbb2222",
+            "severity_counts": {
+              "critical": {
+                "a": 1
+              },
+              "major": []
+            }
+          },
+          "expect": {
+            "ok": false,
+            "error": "TypeError",
+            "message": "unsupported operand type(s) for +: 'dict' and 'list'"
+          }
+        },
+        {
+          "name": "counts-non-dict",
+          "source": "finding_issues.title",
+          "input": {
+            "base": "aaaaaaaaaa1111",
+            "head": "bbbbbbbbbb2222",
+            "severity_counts": []
+          },
+          "expect": {
+            "ok": false,
+            "error": "AttributeError",
+            "message": "'list' object has no attribute 'get'"
+          }
+        },
+        {
+          "name": "base-non-string",
+          "source": "finding_issues.title",
+          "input": {
+            "base": 5,
+            "head": "bbbbbbbbbb2222",
+            "severity_counts": {}
+          },
+          "expect": {
+            "ok": false,
+            "error": "TypeError",
+            "message": "'int' object is not subscriptable"
+          }
+        },
+        {
+          "name": "base-none",
+          "source": "finding_issues.title",
+          "input": {
+            "base": null,
+            "head": "bbbbbbbbbb2222",
+            "severity_counts": {}
+          },
+          "expect": {
+            "ok": false,
+            "error": "TypeError",
+            "message": "'NoneType' object is not subscriptable"
+          }
+        },
+        {
+          "name": "base-dict",
+          "source": "finding_issues.title",
+          "input": {
+            "base": {
+              "a": 1
+            },
+            "head": "bbbbbbbbbb2222",
+            "severity_counts": {}
+          },
+          "expect": {
+            "ok": false,
+            "error": "KeyError",
+            "message": "slice(None, 10, None)"
+          }
+        },
+        {
+          "name": "base-list",
+          "source": "finding_issues.title",
+          "input": {
+            "base": [
+              "a",
+              "b",
+              3
+            ],
+            "head": [
+              "c"
+            ],
+            "severity_counts": {}
+          },
+          "expect": {
+            "ok": true,
+            "value": "crq: ['a', 'b', 3]..['c'] \u2014 0 findings (0 blocking)"
+          }
+        },
+        {
+          "name": "error-order-base-before-total",
+          "source": "finding_issues.title",
+          "input": {
+            "base": 5,
+            "head": "bbbbbbbbbb2222",
+            "severity_counts": {
+              "minor": "x"
+            }
+          },
+          "expect": {
+            "ok": false,
+            "error": "TypeError",
+            "message": "'int' object is not subscriptable"
+          }
+        }
+      ]
+    },
+    {
+      "family": "body",
+      "cases": [
+        {
+          "name": "identity-fields-present",
+          "source": "finding_issues.body",
+          "input": {
+            "meta": {
+              "repo": "camerontaylor/infra",
+              "item_id": "push-infra-aaaaaaaaaa-bbbbbbbbbb",
+              "run_id": "r-20261103T120000Z-abcd",
+              "base": "aaaaaaaaaa1111",
+              "head": "bbbbbbbbbb2222",
+              "receipt_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            },
+            "findings_md": "### Findings\n\n- something\n"
+          },
+          "expect": {
+            "ok": true,
+            "value": "## Review identity\n- Repo: `camerontaylor/infra`\n- Item: `push-infra-aaaaaaaaaa-bbbbbbbbbb`\n- Run: `r-20261103T120000Z-abcd`\n- Range: `aaaaaaaaaa1111..bbbbbbbbbb2222`\n- Receipt: `cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc`\n\n---\n\n### Findings\n\n- something\n\nAuto-filed by crq (CodeRabbit review queue). No auto-fix runs for this repository; triage manually.\n"
+          }
+        },
+        {
+          "name": "absent-fields-degrade",
+          "source": "finding_issues.body",
+          "input": {
+            "meta": {},
+            "findings_md": "### Findings\n\n- something\n"
+          },
+          "expect": {
+            "ok": true,
+            "value": "## Review identity\n- Repo: ``\n- Item: ``\n- Run: ``\n- Range: `..`\n\n---\n\n### Findings\n\n- something\n\nAuto-filed by crq (CodeRabbit review queue). No auto-fix runs for this repository; triage manually.\n"
+          }
+        },
+        {
+          "name": "receipt-empty-string-omitted",
+          "source": "finding_issues.body",
+          "input": {
+            "meta": {
+              "repo": "camerontaylor/infra",
+              "item_id": "push-infra-aaaaaaaaaa-bbbbbbbbbb",
+              "run_id": "r-20261103T120000Z-abcd",
+              "base": "aaaaaaaaaa1111",
+              "head": "bbbbbbbbbb2222",
+              "receipt_id": ""
+            },
+            "findings_md": "### Findings\n\n- something\n"
+          },
+          "expect": {
+            "ok": true,
+            "value": "## Review identity\n- Repo: `camerontaylor/infra`\n- Item: `push-infra-aaaaaaaaaa-bbbbbbbbbb`\n- Run: `r-20261103T120000Z-abcd`\n- Range: `aaaaaaaaaa1111..bbbbbbbbbb2222`\n\n---\n\n### Findings\n\n- something\n\nAuto-filed by crq (CodeRabbit review queue). No auto-fix runs for this repository; triage manually.\n"
+          }
+        },
+        {
+          "name": "receipt-null-omitted",
+          "source": "finding_issues.body",
+          "input": {
+            "meta": {
+              "repo": "camerontaylor/infra",
+              "item_id": "push-infra-aaaaaaaaaa-bbbbbbbbbb",
+              "run_id": "r-20261103T120000Z-abcd",
+              "base": "aaaaaaaaaa1111",
+              "head": "bbbbbbbbbb2222",
+              "receipt_id": null
+            },
+            "findings_md": "### Findings\n\n- something\n"
+          },
+          "expect": {
+            "ok": true,
+            "value": "## Review identity\n- Repo: `camerontaylor/infra`\n- Item: `push-infra-aaaaaaaaaa-bbbbbbbbbb`\n- Run: `r-20261103T120000Z-abcd`\n- Range: `aaaaaaaaaa1111..bbbbbbbbbb2222`\n\n---\n\n### Findings\n\n- something\n\nAuto-filed by crq (CodeRabbit review queue). No auto-fix runs for this repository; triage manually.\n"
+          }
+        },
+        {
+          "name": "receipt-zero-omitted",
+          "source": "finding_issues.body",
+          "input": {
+            "meta": {
+              "repo": "camerontaylor/infra",
+              "item_id": "push-infra-aaaaaaaaaa-bbbbbbbbbb",
+              "run_id": "r-20261103T120000Z-abcd",
+              "base": "aaaaaaaaaa1111",
+              "head": "bbbbbbbbbb2222",
+              "receipt_id": 0
+            },
+            "findings_md": "### Findings\n\n- something\n"
+          },
+          "expect": {
+            "ok": true,
+            "value": "## Review identity\n- Repo: `camerontaylor/infra`\n- Item: `push-infra-aaaaaaaaaa-bbbbbbbbbb`\n- Run: `r-20261103T120000Z-abcd`\n- Range: `aaaaaaaaaa1111..bbbbbbbbbb2222`\n\n---\n\n### Findings\n\n- something\n\nAuto-filed by crq (CodeRabbit review queue). No auto-fix runs for this repository; triage manually.\n"
+          }
+        },
+        {
+          "name": "receipt-false-omitted",
+          "source": "finding_issues.body",
+          "input": {
+            "meta": {
+              "repo": "camerontaylor/infra",
+              "item_id": "push-infra-aaaaaaaaaa-bbbbbbbbbb",
+              "run_id": "r-20261103T120000Z-abcd",
+              "base": "aaaaaaaaaa1111",
+              "head": "bbbbbbbbbb2222",
+              "receipt_id": false
+            },
+            "findings_md": "### Findings\n\n- something\n"
+          },
+          "expect": {
+            "ok": true,
+            "value": "## Review identity\n- Repo: `camerontaylor/infra`\n- Item: `push-infra-aaaaaaaaaa-bbbbbbbbbb`\n- Run: `r-20261103T120000Z-abcd`\n- Range: `aaaaaaaaaa1111..bbbbbbbbbb2222`\n\n---\n\n### Findings\n\n- something\n\nAuto-filed by crq (CodeRabbit review queue). No auto-fix runs for this repository; triage manually.\n"
+          }
+        },
+        {
+          "name": "receipt-empty-list-omitted",
+          "source": "finding_issues.body",
+          "input": {
+            "meta": {
+              "repo": "camerontaylor/infra",
+              "item_id": "push-infra-aaaaaaaaaa-bbbbbbbbbb",
+              "run_id": "r-20261103T120000Z-abcd",
+              "base": "aaaaaaaaaa1111",
+              "head": "bbbbbbbbbb2222",
+              "receipt_id": []
+            },
+            "findings_md": "### Findings\n\n- something\n"
+          },
+          "expect": {
+            "ok": true,
+            "value": "## Review identity\n- Repo: `camerontaylor/infra`\n- Item: `push-infra-aaaaaaaaaa-bbbbbbbbbb`\n- Run: `r-20261103T120000Z-abcd`\n- Range: `aaaaaaaaaa1111..bbbbbbbbbb2222`\n\n---\n\n### Findings\n\n- something\n\nAuto-filed by crq (CodeRabbit review queue). No auto-fix runs for this repository; triage manually.\n"
+          }
+        },
+        {
+          "name": "scalar-meta-values",
+          "source": "finding_issues.body",
+          "input": {
+            "meta": {
+              "repo": 5,
+              "item_id": true,
+              "run_id": null,
+              "base": 1.5,
+              "head": -0.0
+            },
+            "findings_md": "### Findings\n\n- something\n"
+          },
+          "expect": {
+            "ok": true,
+            "value": "## Review identity\n- Repo: `5`\n- Item: `True`\n- Run: `None`\n- Range: `1.5..-0.0`\n\n---\n\n### Findings\n\n- something\n\nAuto-filed by crq (CodeRabbit review queue). No auto-fix runs for this repository; triage manually.\n"
+          }
+        },
+        {
+          "name": "float-meta-values",
+          "source": "finding_issues.body",
+          "input": {
+            "meta": {
+              "repo": 1e+16,
+              "item_id": 1e-05,
+              "run_id": 0.0001,
+              "base": 1.2345678901234567,
+              "head": 1e+21
+            },
+            "findings_md": "### Findings\n\n- something\n"
+          },
+          "expect": {
+            "ok": true,
+            "value": "## Review identity\n- Repo: `1e+16`\n- Item: `1e-05`\n- Run: `0.0001`\n- Range: `1.2345678901234567..1e+21`\n\n---\n\n### Findings\n\n- something\n\nAuto-filed by crq (CodeRabbit review queue). No auto-fix runs for this repository; triage manually.\n"
+          }
+        },
+        {
+          "name": "container-meta",
+          "source": "finding_issues.body",
+          "input": {
+            "meta": {
+              "repo": [
+                "a",
+                1
+              ],
+              "item_id": {
+                "k": "v'w"
+              },
+              "run_id": [
+                "x"
+              ],
+              "base": {
+                "z": null
+              },
+              "head": []
+            },
+            "findings_md": "### Findings\n\n- something\n"
+          },
+          "expect": {
+            "ok": true,
+            "value": "## Review identity\n- Repo: `['a', 1]`\n- Item: `{'k': \"v'w\"}`\n- Run: `['x']`\n- Range: `{'z': None}..[]`\n\n---\n\n### Findings\n\n- something\n\nAuto-filed by crq (CodeRabbit review queue). No auto-fix runs for this repository; triage manually.\n"
+          }
+        },
+        {
+          "name": "unicode-control-meta",
+          "source": "finding_issues.body",
+          "input": {
+            "meta": {
+              "repo": "a\nb\tc\u0001d\u2028e",
+              "item_id": "q'w\"e",
+              "run_id": "\\path",
+              "base": "\u00a0",
+              "head": "\u200b"
+            },
+            "findings_md": "### Findings\n\n- something\n"
+          },
+          "expect": {
+            "ok": true,
+            "value": "## Review identity\n- Repo: `a\nb\tc\u0001d\u2028e`\n- Item: `q'w\"e`\n- Run: `\\path`\n- Range: `\u00a0..\u200b`\n\n---\n\n### Findings\n\n- something\n\nAuto-filed by crq (CodeRabbit review queue). No auto-fix runs for this repository; triage manually.\n"
+          }
+        },
+        {
+          "name": "nonprintable-repr",
+          "source": "finding_issues.body",
+          "input": {
+            "meta": {
+              "repo": "\u0000\u007f\u0080\u00a0\ud800",
+              "item_id": "\ud83d\ude00",
+              "run_id": "\u0085"
+            },
+            "findings_md": "### Findings\n\n- something\n"
+          },
+          "expect": {
+            "ok": true,
+            "value": "## Review identity\n- Repo: `\u0000\u007f\u0080\u00a0\ud800`\n- Item: `\ud83d\ude00`\n- Run: `\u0085`\n- Range: `..`\n\n---\n\n### Findings\n\n- something\n\nAuto-filed by crq (CodeRabbit review queue). No auto-fix runs for this repository; triage manually.\n"
+          }
+        },
+        {
+          "name": "findings-trailing-newlines",
+          "source": "finding_issues.body",
+          "input": {
+            "meta": {
+              "repo": "camerontaylor/infra",
+              "item_id": "push-infra-aaaaaaaaaa-bbbbbbbbbb",
+              "run_id": "r-20261103T120000Z-abcd",
+              "base": "aaaaaaaaaa1111",
+              "head": "bbbbbbbbbb2222",
+              "receipt_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            },
+            "findings_md": "x\n\n\n"
+          },
+          "expect": {
+            "ok": true,
+            "value": "## Review identity\n- Repo: `camerontaylor/infra`\n- Item: `push-infra-aaaaaaaaaa-bbbbbbbbbb`\n- Run: `r-20261103T120000Z-abcd`\n- Range: `aaaaaaaaaa1111..bbbbbbbbbb2222`\n- Receipt: `cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc`\n\n---\n\nx\n\nAuto-filed by crq (CodeRabbit review queue). No auto-fix runs for this repository; triage manually.\n"
+          }
+        },
+        {
+          "name": "findings-trailing-carriage-return",
+          "source": "finding_issues.body",
+          "input": {
+            "meta": {
+              "repo": "camerontaylor/infra",
+              "item_id": "push-infra-aaaaaaaaaa-bbbbbbbbbb",
+              "run_id": "r-20261103T120000Z-abcd",
+              "base": "aaaaaaaaaa1111",
+              "head": "bbbbbbbbbb2222",
+              "receipt_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            },
+            "findings_md": "x\r\n\n"
+          },
+          "expect": {
+            "ok": true,
+            "value": "## Review identity\n- Repo: `camerontaylor/infra`\n- Item: `push-infra-aaaaaaaaaa-bbbbbbbbbb`\n- Run: `r-20261103T120000Z-abcd`\n- Range: `aaaaaaaaaa1111..bbbbbbbbbb2222`\n- Receipt: `cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc`\n\n---\n\nx\r\n\nAuto-filed by crq (CodeRabbit review queue). No auto-fix runs for this repository; triage manually.\n"
+          }
+        },
+        {
+          "name": "findings-empty",
+          "source": "finding_issues.body",
+          "input": {
+            "meta": {
+              "repo": "camerontaylor/infra",
+              "item_id": "push-infra-aaaaaaaaaa-bbbbbbbbbb",
+              "run_id": "r-20261103T120000Z-abcd",
+              "base": "aaaaaaaaaa1111",
+              "head": "bbbbbbbbbb2222",
+              "receipt_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            },
+            "findings_md": ""
+          },
+          "expect": {
+            "ok": true,
+            "value": "## Review identity\n- Repo: `camerontaylor/infra`\n- Item: `push-infra-aaaaaaaaaa-bbbbbbbbbb`\n- Run: `r-20261103T120000Z-abcd`\n- Range: `aaaaaaaaaa1111..bbbbbbbbbb2222`\n- Receipt: `cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc`\n\n---\n\n\n\nAuto-filed by crq (CodeRabbit review queue). No auto-fix runs for this repository; triage manually.\n"
+          }
+        },
+        {
+          "name": "exact-limit-not-truncated",
+          "source": "finding_issues.body",
+          "input": {
+            "meta": {
+              "repo": "camerontaylor/infra",
+              "item_id": "push-infra-aaaaaaaaaa-bbbbbbbbbb",
+              "run_id": "r-20261103T120000Z-abcd",
+              "base": "aaaaaaaaaa1111",
+              "head": "bbbbbbbbbb2222",
+              "receipt_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            },
+            "findings_md": {
+              "repeat": {
+                "text": "x",
+                "count": 65183
+              }
+            }
+          },
+          "expect": {
+            "ok": true,
+            "value_sha256": "29e1b5d925ff236ccb8b36c514b37fb38137c9704f5f25a632df12177bad0902",
+            "value_length": 65536
+          }
+        },
+        {
+          "name": "oversized-ascii-truncated",
+          "source": "finding_issues.body",
+          "input": {
+            "meta": {
+              "repo": "camerontaylor/infra",
+              "item_id": "push-infra-aaaaaaaaaa-bbbbbbbbbb",
+              "run_id": "r-20261103T120000Z-abcd",
+              "base": "aaaaaaaaaa1111",
+              "head": "bbbbbbbbbb2222",
+              "receipt_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            },
+            "findings_md": {
+              "repeat": {
+                "text": "x",
+                "count": 70536
+              }
+            }
+          },
+          "expect": {
+            "ok": true,
+            "value_sha256": "828fd0698ce1f24a5c8e4b84f48dc42fa0b98672cc2dc212dacd9870c7fee051",
+            "value_length": 65536
+          }
+        },
+        {
+          "name": "oversized-unicode-truncated",
+          "source": "finding_issues.body",
+          "input": {
+            "meta": {
+              "repo": "camerontaylor/infra",
+              "item_id": "push-infra-aaaaaaaaaa-bbbbbbbbbb",
+              "run_id": "r-20261103T120000Z-abcd",
+              "base": "aaaaaaaaaa1111",
+              "head": "bbbbbbbbbb2222",
+              "receipt_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            },
+            "findings_md": {
+              "repeat": {
+                "text": "\ud83d\ude00",
+                "count": 70000
+              }
+            }
+          },
+          "expect": {
+            "ok": true,
+            "value_sha256": "8a999e5cd5d5ca7d30e43520d64f30fda51033ab113e0d079ef1f63e0e22721b",
+            "value_length": 65536
+          }
+        },
+        {
+          "name": "budget-negative",
+          "source": "finding_issues.body",
+          "input": {
+            "meta": {
+              "repo": {
+                "repeat": {
+                  "text": "x",
+                  "count": 70000
+                }
+              }
+            },
+            "findings_md": "abc"
+          },
+          "expect": {
+            "ok": true,
+            "value_sha256": "38fdd377e280d503bc0a6088322b5a51681c5b5d97fda4fcd22fa04de8fa5944",
+            "value_length": 70266
+          }
+        },
+        {
+          "name": "meta-non-dict",
+          "source": "finding_issues.body",
+          "input": {
+            "meta": [],
+            "findings_md": "### Findings\n\n- something\n"
+          },
+          "expect": {
+            "ok": false,
+            "error": "AttributeError",
+            "message": "'list' object has no attribute 'get'"
+          }
+        },
+        {
+          "name": "findings-non-string",
+          "source": "finding_issues.body",
+          "input": {
+            "meta": {
+              "repo": "camerontaylor/infra",
+              "item_id": "push-infra-aaaaaaaaaa-bbbbbbbbbb",
+              "run_id": "r-20261103T120000Z-abcd",
+              "base": "aaaaaaaaaa1111",
+              "head": "bbbbbbbbbb2222",
+              "receipt_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            },
+            "findings_md": 5
+          },
+          "expect": {
+            "ok": false,
+            "error": "AttributeError",
+            "message": "'int' object has no attribute 'rstrip'"
+          }
+        }
+      ]
+    },
+    {
+      "family": "file_issue",
+      "cases": [
+        {
+          "name": "disabled-no-calls",
+          "source": "finding_issues.file_issue",
+          "input": {
+            "repo_cfg": {
+              "repo": "camerontaylor/infra",
+              "findings": "none"
+            },
+            "base": "aaaaaaaaaa1111",
+            "head": "bbbbbbbbbb2222",
+            "meta": {
+              "repo": "camerontaylor/infra",
+              "item_id": "push-infra-aaaaaaaaaa-bbbbbbbbbb",
+              "run_id": "r-20261103T120000Z-abcd",
+              "base": "aaaaaaaaaa1111",
+              "head": "bbbbbbbbbb2222",
+              "receipt_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            },
+            "severity_counts": {
+              "critical": 1,
+              "major": 1,
+              "minor": 1
+            },
+            "findings_md": "### Findings\n\n- something\n",
+            "gh_script": []
+          },
+          "expect": {
+            "ok": true,
+            "value": {
+              "issue_url": null,
+              "issue_number": null,
+              "created": false
+            },
+            "calls": []
+          }
+        },
+        {
+          "name": "existing-exact-title",
+          "source": "finding_issues.file_issue",
+          "input": {
+            "repo_cfg": {
+              "repo": "camerontaylor/infra",
+              "findings": "issue"
+            },
+            "base": "aaaaaaaaaa1111",
+            "head": "bbbbbbbbbb2222",
+            "meta": {
+              "repo": "camerontaylor/infra",
+              "item_id": "push-infra-aaaaaaaaaa-bbbbbbbbbb",
+              "run_id": "r-20261103T120000Z-abcd",
+              "base": "aaaaaaaaaa1111",
+              "head": "bbbbbbbbbb2222",
+              "receipt_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            },
+            "severity_counts": {
+              "critical": 1,
+              "major": 1,
+              "minor": 1
+            },
+            "findings_md": "### Findings\n\n- something\n",
+            "gh_script": [
+              {
+                "returncode": 0,
+                "stdout": "[{\"number\": 7, \"title\": \"crq: aaaaaaaaaa..bbbbbbbbbb \\u2014 3 findings (2 blocking) [push-infra-aaaaaaaaaa-bbbbbbbbbb]\", \"url\": \"https://github.com/camerontaylor/infra/issues/7\"}]",
+                "stderr": ""
+              }
+            ]
+          },
+          "expect": {
+            "ok": true,
+            "value": {
+              "issue_url": "https://github.com/camerontaylor/infra/issues/7",
+              "issue_number": 7,
+              "created": false
+            },
+            "calls": [
+              {
+                "argv": [
+                  "gh",
+                  "issue",
+                  "list",
+                  "--repo",
+                  "camerontaylor/infra",
+                  "--state",
+                  "all",
+                  "--limit",
+                  "20",
+                  "--json",
+                  "number,title,url",
+                  "--search",
+                  "in:title \"crq: aaaaaaaaaa..bbbbbbbbbb \u2014 3 findings (2 blocking) [push-infra-aaaaaaaaaa-bbbbbbbbbb]\""
+                ],
+                "input_text": null
+              }
+            ]
+          }
+        },
+        {
+          "name": "existing-case-sensitive-mismatch",
+          "source": "finding_issues.file_issue",
+          "input": {
+            "repo_cfg": {
+              "repo": "camerontaylor/infra"
+            },
+            "base": "aaaaaaaaaa1111",
+            "head": "bbbbbbbbbb2222",
+            "meta": {
+              "repo": "camerontaylor/infra",
+              "item_id": "push-infra-aaaaaaaaaa-bbbbbbbbbb",
+              "run_id": "r-20261103T120000Z-abcd",
+              "base": "aaaaaaaaaa1111",
+              "head": "bbbbbbbbbb2222",
+              "receipt_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            },
+            "severity_counts": {
+              "critical": 1,
+              "major": 1,
+              "minor": 1
+            },
+            "findings_md": "### Findings\n\n- something\n",
+            "gh_script": [
+              {
+                "returncode": 0,
+                "stdout": "[{\"number\": 7, \"title\": \"CRQ: AAAAAAAAAA..BBBBBBBBBB \\u2014 3 FINDINGS (2 BLOCKING) [PUSH-INFRA-AAAAAAAAAA-BBBBBBBBBB]\", \"url\": \"https://github.com/camerontaylor/infra/issues/7\"}]",
+                "stderr": ""
+              },
+              {
+                "returncode": 0,
+                "stdout": "https://github.com/camerontaylor/infra/issues/9\n",
+                "stderr": ""
+              }
+            ]
+          },
+          "expect": {
+            "ok": true,
+            "value": {
+              "issue_url": "https://github.com/camerontaylor/infra/issues/9",
+              "issue_number": 9,
+              "created": true
+            },
+            "calls": [
+              {
+                "argv": [
+                  "gh",
+                  "issue",
+                  "list",
+                  "--repo",
+                  "camerontaylor/infra",
+                  "--state",
+                  "all",
+                  "--limit",
+                  "20",
+                  "--json",
+                  "number,title,url",
+                  "--search",
+                  "in:title \"crq: aaaaaaaaaa..bbbbbbbbbb \u2014 3 findings (2 blocking) [push-infra-aaaaaaaaaa-bbbbbbbbbb]\""
+                ],
+                "input_text": null
+              },
+              {
+                "argv": [
+                  "gh",
+                  "issue",
+                  "create",
+                  "--repo",
+                  "camerontaylor/infra",
+                  "--title",
+                  "crq: aaaaaaaaaa..bbbbbbbbbb \u2014 3 findings (2 blocking) [push-infra-aaaaaaaaaa-bbbbbbbbbb]",
+                  "--body-file",
+                  "-"
+                ],
+                "input_text": "## Review identity\n- Repo: `camerontaylor/infra`\n- Item: `push-infra-aaaaaaaaaa-bbbbbbbbbb`\n- Run: `r-20261103T120000Z-abcd`\n- Range: `aaaaaaaaaa1111..bbbbbbbbbb2222`\n- Receipt: `cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc`\n\n---\n\n### Findings\n\n- something\n\nAuto-filed by crq (CodeRabbit review queue). No auto-fix runs for this repository; triage manually.\n"
+              }
+            ]
+          }
+        },
+        {
+          "name": "existing-row-not-object",
+          "source": "finding_issues.file_issue",
+          "input": {
+            "repo_cfg": {
+              "repo": "camerontaylor/infra"
+            },
+            "base": "aaaaaaaaaa1111",
+            "head": "bbbbbbbbbb2222",
+            "meta": {
+              "repo": "camerontaylor/infra",
+              "item_id": "push-infra-aaaaaaaaaa-bbbbbbbbbb",
+              "run_id": "r-20261103T120000Z-abcd",
+              "base": "aaaaaaaaaa1111",
+              "head": "bbbbbbbbbb2222",
+              "receipt_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            },
+            "severity_counts": {
+              "critical": 1,
+              "major": 1,
+              "minor": 1
+            },
+            "findings_md": "### Findings\n\n- something\n",
+            "gh_script": [
+              {
+                "returncode": 0,
+                "stdout": "[1, \"x\", null]",
+                "stderr": ""
+              },
+              {
+                "returncode": 0,
+                "stdout": "https://github.com/camerontaylor/infra/issues/9\n",
+                "stderr": ""
+              }
+            ]
+          },
+          "expect": {
+            "ok": true,
+            "value": {
+              "issue_url": "https://github.com/camerontaylor/infra/issues/9",
+              "issue_number": 9,
+              "created": true
+            },
+            "calls": [
+              {
+                "argv": [
+                  "gh",
+                  "issue",
+                  "list",
+                  "--repo",
+                  "camerontaylor/infra",
+                  "--state",
+                  "all",
+                  "--limit",
+                  "20",
+                  "--json",
+                  "number,title,url",
+                  "--search",
+                  "in:title \"crq: aaaaaaaaaa..bbbbbbbbbb \u2014 3 findings (2 blocking) [push-infra-aaaaaaaaaa-bbbbbbbbbb]\""
+                ],
+                "input_text": null
+              },
+              {
+                "argv": [
+                  "gh",
+                  "issue",
+                  "create",
+                  "--repo",
+                  "camerontaylor/infra",
+                  "--title",
+                  "crq: aaaaaaaaaa..bbbbbbbbbb \u2014 3 findings (2 blocking) [push-infra-aaaaaaaaaa-bbbbbbbbbb]",
+                  "--body-file",
+                  "-"
+                ],
+                "input_text": "## Review identity\n- Repo: `camerontaylor/infra`\n- Item: `push-infra-aaaaaaaaaa-bbbbbbbbbb`\n- Run: `r-20261103T120000Z-abcd`\n- Range: `aaaaaaaaaa1111..bbbbbbbbbb2222`\n- Receipt: `cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc`\n\n---\n\n### Findings\n\n- something\n\nAuto-filed by crq (CodeRabbit review queue). No auto-fix runs for this repository; triage manually.\n"
+              }
+            ]
+          }
+        },
+        {
+          "name": "existing-row-number-float",
+          "source": "finding_issues.file_issue",
+          "input": {
+            "repo_cfg": {
+              "repo": "camerontaylor/infra"
+            },
+            "base": "aaaaaaaaaa1111",
+            "head": "bbbbbbbbbb2222",
+            "meta": {
+              "repo": "camerontaylor/infra",
+              "item_id": "push-infra-aaaaaaaaaa-bbbbbbbbbb",
+              "run_id": "r-20261103T120000Z-abcd",
+              "base": "aaaaaaaaaa1111",
+              "head": "bbbbbbbbbb2222",
+              "receipt_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            },
+            "severity_counts": {
+              "critical": 1,
+              "major": 1,
+              "minor": 1
+            },
+            "findings_md": "### Findings\n\n- something\n",
+            "gh_script": [
+              {
+                "returncode": 0,
+                "stdout": "[{\"number\": 1.0, \"title\": \"crq: aaaaaaaaaa..bbbbbbbbbb \\u2014 3 findings (2 blocking) [push-infra-aaaaaaaaaa-bbbbbbbbbb]\", \"url\": \"https://github.com/camerontaylor/infra/issues/7\"}]",
+                "stderr": ""
+              },
+              {
+                "returncode": 0,
+                "stdout": "https://github.com/camerontaylor/infra/issues/9\n",
+                "stderr": ""
+              }
+            ]
+          },
+          "expect": {
+            "ok": true,
+            "value": {
+              "issue_url": "https://github.com/camerontaylor/infra/issues/9",
+              "issue_number": 9,
+              "created": true
+            },
+            "calls": [
+              {
+                "argv": [
+                  "gh",
+                  "issue",
+                  "list",
+                  "--repo",
+                  "camerontaylor/infra",
+                  "--state",
+                  "all",
+                  "--limit",
+                  "20",
+                  "--json",
+                  "number,title,url",
+                  "--search",
+                  "in:title \"crq: aaaaaaaaaa..bbbbbbbbbb \u2014 3 findings (2 blocking) [push-infra-aaaaaaaaaa-bbbbbbbbbb]\""
+                ],
+                "input_text": null
+              },
+              {
+                "argv": [
+                  "gh",
+                  "issue",
+                  "create",
+                  "--repo",
+                  "camerontaylor/infra",
+                  "--title",
+                  "crq: aaaaaaaaaa..bbbbbbbbbb \u2014 3 findings (2 blocking) [push-infra-aaaaaaaaaa-bbbbbbbbbb]",
+                  "--body-file",
+                  "-"
+                ],
+                "input_text": "## Review identity\n- Repo: `camerontaylor/infra`\n- Item: `push-infra-aaaaaaaaaa-bbbbbbbbbb`\n- Run: `r-20261103T120000Z-abcd`\n- Range: `aaaaaaaaaa1111..bbbbbbbbbb2222`\n- Receipt: `cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc`\n\n---\n\n### Findings\n\n- something\n\nAuto-filed by crq (CodeRabbit review queue). No auto-fix runs for this repository; triage manually.\n"
+              }
+            ]
+          }
+        },
+        {
+          "name": "existing-row-number-bool",
+          "source": "finding_issues.file_issue",
+          "input": {
+            "repo_cfg": {
+              "repo": "camerontaylor/infra"
+            },
+            "base": "aaaaaaaaaa1111",
+            "head": "bbbbbbbbbb2222",
+            "meta": {
+              "repo": "camerontaylor/infra",
+              "item_id": "push-infra-aaaaaaaaaa-bbbbbbbbbb",
+              "run_id": "r-20261103T120000Z-abcd",
+              "base": "aaaaaaaaaa1111",
+              "head": "bbbbbbbbbb2222",
+              "receipt_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            },
+            "severity_counts": {
+              "critical": 1,
+              "major": 1,
+              "minor": 1
+            },
+            "findings_md": "### Findings\n\n- something\n",
+            "gh_script": [
+              {
+                "returncode": 0,
+                "stdout": "[{\"number\": true, \"title\": \"crq: aaaaaaaaaa..bbbbbbbbbb \\u2014 3 findings (2 blocking) [push-infra-aaaaaaaaaa-bbbbbbbbbb]\", \"url\": \"https://github.com/camerontaylor/infra/issues/7\"}]",
+                "stderr": ""
+              }
+            ]
+          },
+          "expect": {
+            "ok": true,
+            "value": {
+              "issue_url": "https://github.com/camerontaylor/infra/issues/7",
+              "issue_number": true,
+              "created": false
+            },
+            "calls": [
+              {
+                "argv": [
+                  "gh",
+                  "issue",
+                  "list",
+                  "--repo",
+                  "camerontaylor/infra",
+                  "--state",
+                  "all",
+                  "--limit",
+                  "20",
+                  "--json",
+                  "number,title,url",
+                  "--search",
+                  "in:title \"crq: aaaaaaaaaa..bbbbbbbbbb \u2014 3 findings (2 blocking) [push-infra-aaaaaaaaaa-bbbbbbbbbb]\""
+                ],
+                "input_text": null
+              }
+            ]
+          }
+        },
+        {
+          "name": "existing-row-url-empty",
+          "source": "finding_issues.file_issue",
+          "input": {
+            "repo_cfg": {
+              "repo": "camerontaylor/infra"
+            },
+            "base": "aaaaaaaaaa1111",
+            "head": "bbbbbbbbbb2222",
+            "meta": {
+              "repo": "camerontaylor/infra",
+              "item_id": "push-infra-aaaaaaaaaa-bbbbbbbbbb",
+              "run_id": "r-20261103T120000Z-abcd",
+              "base": "aaaaaaaaaa1111",
+              "head": "bbbbbbbbbb2222",
+              "receipt_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            },
+            "severity_counts": {
+              "critical": 1,
+              "major": 1,
+              "minor": 1
+            },
+            "findings_md": "### Findings\n\n- something\n",
+            "gh_script": [
+              {
+                "returncode": 0,
+                "stdout": "[{\"number\": 1, \"title\": \"crq: aaaaaaaaaa..bbbbbbbbbb \\u2014 3 findings (2 blocking) [push-infra-aaaaaaaaaa-bbbbbbbbbb]\", \"url\": \"\"}]",
+                "stderr": ""
+              },
+              {
+                "returncode": 0,
+                "stdout": "https://github.com/camerontaylor/infra/issues/9\n",
+                "stderr": ""
+              }
+            ]
+          },
+          "expect": {
+            "ok": true,
+            "value": {
+              "issue_url": "https://github.com/camerontaylor/infra/issues/9",
+              "issue_number": 9,
+              "created": true
+            },
+            "calls": [
+              {
+                "argv": [
+                  "gh",
+                  "issue",
+                  "list",
+                  "--repo",
+                  "camerontaylor/infra",
+                  "--state",
+                  "all",
+                  "--limit",
+                  "20",
+                  "--json",
+                  "number,title,url",
+                  "--search",
+                  "in:title \"crq: aaaaaaaaaa..bbbbbbbbbb \u2014 3 findings (2 blocking) [push-infra-aaaaaaaaaa-bbbbbbbbbb]\""
+                ],
+                "input_text": null
+              },
+              {
+                "argv": [
+                  "gh",
+                  "issue",
+                  "create",
+                  "--repo",
+                  "camerontaylor/infra",
+                  "--title",
+                  "crq: aaaaaaaaaa..bbbbbbbbbb \u2014 3 findings (2 blocking) [push-infra-aaaaaaaaaa-bbbbbbbbbb]",
+                  "--body-file",
+                  "-"
+                ],
+                "input_text": "## Review identity\n- Repo: `camerontaylor/infra`\n- Item: `push-infra-aaaaaaaaaa-bbbbbbbbbb`\n- Run: `r-20261103T120000Z-abcd`\n- Range: `aaaaaaaaaa1111..bbbbbbbbbb2222`\n- Receipt: `cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc`\n\n---\n\n### Findings\n\n- something\n\nAuto-filed by crq (CodeRabbit review queue). No auto-fix runs for this repository; triage manually.\n"
+              }
+            ]
+          }
+        },
+        {
+          "name": "existing-row-url-number",
+          "source": "finding_issues.file_issue",
+          "input": {
+            "repo_cfg": {
+              "repo": "camerontaylor/infra"
+            },
+            "base": "aaaaaaaaaa1111",
+            "head": "bbbbbbbbbb2222",
+            "meta": {
+              "repo": "camerontaylor/infra",
+              "item_id": "push-infra-aaaaaaaaaa-bbbbbbbbbb",
+              "run_id": "r-20261103T120000Z-abcd",
+              "base": "aaaaaaaaaa1111",
+              "head": "bbbbbbbbbb2222",
+              "receipt_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            },
+            "severity_counts": {
+              "critical": 1,
+              "major": 1,
+              "minor": 1
+            },
+            "findings_md": "### Findings\n\n- something\n",
+            "gh_script": [
+              {
+                "returncode": 0,
+                "stdout": "[{\"number\": 1, \"title\": \"crq: aaaaaaaaaa..bbbbbbbbbb \\u2014 3 findings (2 blocking) [push-infra-aaaaaaaaaa-bbbbbbbbbb]\", \"url\": 5}]",
+                "stderr": ""
+              }
+            ]
+          },
+          "expect": {
+            "ok": true,
+            "value": {
+              "issue_url": 5,
+              "issue_number": 1,
+              "created": false
+            },
+            "calls": [
+              {
+                "argv": [
+                  "gh",
+                  "issue",
+                  "list",
+                  "--repo",
+                  "camerontaylor/infra",
+                  "--state",
+                  "all",
+                  "--limit",
+                  "20",
+                  "--json",
+                  "number,title,url",
+                  "--search",
+                  "in:title \"crq: aaaaaaaaaa..bbbbbbbbbb \u2014 3 findings (2 blocking) [push-infra-aaaaaaaaaa-bbbbbbbbbb]\""
+                ],
+                "input_text": null
+              }
+            ]
+          }
+        },
+        {
+          "name": "existing-row-url-list",
+          "source": "finding_issues.file_issue",
+          "input": {
+            "repo_cfg": {
+              "repo": "camerontaylor/infra"
+            },
+            "base": "aaaaaaaaaa1111",
+            "head": "bbbbbbbbbb2222",
+            "meta": {
+              "repo": "camerontaylor/infra",
+              "item_id": "push-infra-aaaaaaaaaa-bbbbbbbbbb",
+              "run_id": "r-20261103T120000Z-abcd",
+              "base": "aaaaaaaaaa1111",
+              "head": "bbbbbbbbbb2222",
+              "receipt_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            },
+            "severity_counts": {
+              "critical": 1,
+              "major": 1,
+              "minor": 1
+            },
+            "findings_md": "### Findings\n\n- something\n",
+            "gh_script": [
+              {
+                "returncode": 0,
+                "stdout": "[{\"number\": 1, \"title\": \"crq: aaaaaaaaaa..bbbbbbbbbb \\u2014 3 findings (2 blocking) [push-infra-aaaaaaaaaa-bbbbbbbbbb]\", \"url\": [1, 2]}]",
+                "stderr": ""
+              }
+            ]
+          },
+          "expect": {
+            "ok": true,
+            "value": {
+              "issue_url": [
+                1,
+                2
+              ],
+              "issue_number": 1,
+              "created": false
+            },
+            "calls": [
+              {
+                "argv": [
+                  "gh",
+                  "issue",
+                  "list",
+                  "--repo",
+                  "camerontaylor/infra",
+                  "--state",
+                  "all",
+                  "--limit",
+                  "20",
+                  "--json",
+                  "number,title,url",
+                  "--search",
+                  "in:title \"crq: aaaaaaaaaa..bbbbbbbbbb \u2014 3 findings (2 blocking) [push-infra-aaaaaaaaaa-bbbbbbbbbb]\""
+                ],
+                "input_text": null
+              }
+            ]
+          }
+        },
+        {
+          "name": "list-empty-stdout",
+          "source": "finding_issues.file_issue",
+          "input": {
+            "repo_cfg": {
+              "repo": "camerontaylor/infra"
+            },
+            "base": "aaaaaaaaaa1111",
+            "head": "bbbbbbbbbb2222",
+            "meta": {
+              "repo": "camerontaylor/infra",
+              "item_id": "push-infra-aaaaaaaaaa-bbbbbbbbbb",
+              "run_id": "r-20261103T120000Z-abcd",
+              "base": "aaaaaaaaaa1111",
+              "head": "bbbbbbbbbb2222",
+              "receipt_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            },
+            "severity_counts": {
+              "critical": 1,
+              "major": 1,
+              "minor": 1
+            },
+            "findings_md": "### Findings\n\n- something\n",
+            "gh_script": [
+              {
+                "returncode": 0,
+                "stdout": "",
+                "stderr": ""
+              },
+              {
+                "returncode": 0,
+                "stdout": "https://github.com/camerontaylor/infra/issues/9\n",
+                "stderr": ""
+              }
+            ]
+          },
+          "expect": {
+            "ok": true,
+            "value": {
+              "issue_url": "https://github.com/camerontaylor/infra/issues/9",
+              "issue_number": 9,
+              "created": true
+            },
+            "calls": [
+              {
+                "argv": [
+                  "gh",
+                  "issue",
+                  "list",
+                  "--repo",
+                  "camerontaylor/infra",
+                  "--state",
+                  "all",
+                  "--limit",
+                  "20",
+                  "--json",
+                  "number,title,url",
+                  "--search",
+                  "in:title \"crq: aaaaaaaaaa..bbbbbbbbbb \u2014 3 findings (2 blocking) [push-infra-aaaaaaaaaa-bbbbbbbbbb]\""
+                ],
+                "input_text": null
+              },
+              {
+                "argv": [
+                  "gh",
+                  "issue",
+                  "create",
+                  "--repo",
+                  "camerontaylor/infra",
+                  "--title",
+                  "crq: aaaaaaaaaa..bbbbbbbbbb \u2014 3 findings (2 blocking) [push-infra-aaaaaaaaaa-bbbbbbbbbb]",
+                  "--body-file",
+                  "-"
+                ],
+                "input_text": "## Review identity\n- Repo: `camerontaylor/infra`\n- Item: `push-infra-aaaaaaaaaa-bbbbbbbbbb`\n- Run: `r-20261103T120000Z-abcd`\n- Range: `aaaaaaaaaa1111..bbbbbbbbbb2222`\n- Receipt: `cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc`\n\n---\n\n### Findings\n\n- something\n\nAuto-filed by crq (CodeRabbit review queue). No auto-fix runs for this repository; triage manually.\n"
+              }
+            ]
+          }
+        },
+        {
+          "name": "list-whitespace-stdout",
+          "source": "finding_issues.file_issue",
+          "input": {
+            "repo_cfg": {
+              "repo": "camerontaylor/infra"
+            },
+            "base": "aaaaaaaaaa1111",
+            "head": "bbbbbbbbbb2222",
+            "meta": {
+              "repo": "camerontaylor/infra",
+              "item_id": "push-infra-aaaaaaaaaa-bbbbbbbbbb",
+              "run_id": "r-20261103T120000Z-abcd",
+              "base": "aaaaaaaaaa1111",
+              "head": "bbbbbbbbbb2222",
+              "receipt_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            },
+            "severity_counts": {
+              "critical": 1,
+              "major": 1,
+              "minor": 1
+            },
+            "findings_md": "### Findings\n\n- something\n",
+            "gh_script": [
+              {
+                "returncode": 0,
+                "stdout": "  \n",
+                "stderr": ""
+              }
+            ]
+          },
+          "expect": {
+            "ok": false,
+            "error": "RuntimeError",
+            "message": "gh issue list returned unparsable output: ",
+            "calls": [
+              {
+                "argv": [
+                  "gh",
+                  "issue",
+                  "list",
+                  "--repo",
+                  "camerontaylor/infra",
+                  "--state",
+                  "all",
+                  "--limit",
+                  "20",
+                  "--json",
+                  "number,title,url",
+                  "--search",
+                  "in:title \"crq: aaaaaaaaaa..bbbbbbbbbb \u2014 3 findings (2 blocking) [push-infra-aaaaaaaaaa-bbbbbbbbbb]\""
+                ],
+                "input_text": null
+              }
+            ]
+          }
+        },
+        {
+          "name": "list-unparsable",
+          "source": "finding_issues.file_issue",
+          "input": {
+            "repo_cfg": {
+              "repo": "camerontaylor/infra"
+            },
+            "base": "aaaaaaaaaa1111",
+            "head": "bbbbbbbbbb2222",
+            "meta": {
+              "repo": "camerontaylor/infra",
+              "item_id": "push-infra-aaaaaaaaaa-bbbbbbbbbb",
+              "run_id": "r-20261103T120000Z-abcd",
+              "base": "aaaaaaaaaa1111",
+              "head": "bbbbbbbbbb2222",
+              "receipt_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            },
+            "severity_counts": {
+              "critical": 1,
+              "major": 1,
+              "minor": 1
+            },
+            "findings_md": "### Findings\n\n- something\n",
+            "gh_script": [
+              {
+                "returncode": 0,
+                "stdout": "not json",
+                "stderr": ""
+              }
+            ]
+          },
+          "expect": {
+            "ok": false,
+            "error": "RuntimeError",
+            "message": "gh issue list returned unparsable output: not json",
+            "calls": [
+              {
+                "argv": [
+                  "gh",
+                  "issue",
+                  "list",
+                  "--repo",
+                  "camerontaylor/infra",
+                  "--state",
+                  "all",
+                  "--limit",
+                  "20",
+                  "--json",
+                  "number,title,url",
+                  "--search",
+                  "in:title \"crq: aaaaaaaaaa..bbbbbbbbbb \u2014 3 findings (2 blocking) [push-infra-aaaaaaaaaa-bbbbbbbbbb]\""
+                ],
+                "input_text": null
+              }
+            ]
+          }
+        },
+        {
+          "name": "list-non-list",
+          "source": "finding_issues.file_issue",
+          "input": {
+            "repo_cfg": {
+              "repo": "camerontaylor/infra"
+            },
+            "base": "aaaaaaaaaa1111",
+            "head": "bbbbbbbbbb2222",
+            "meta": {
+              "repo": "camerontaylor/infra",
+              "item_id": "push-infra-aaaaaaaaaa-bbbbbbbbbb",
+              "run_id": "r-20261103T120000Z-abcd",
+              "base": "aaaaaaaaaa1111",
+              "head": "bbbbbbbbbb2222",
+              "receipt_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            },
+            "severity_counts": {
+              "critical": 1,
+              "major": 1,
+              "minor": 1
+            },
+            "findings_md": "### Findings\n\n- something\n",
+            "gh_script": [
+              {
+                "returncode": 0,
+                "stdout": "{\"a\": 1}",
+                "stderr": ""
+              }
+            ]
+          },
+          "expect": {
+            "ok": false,
+            "error": "RuntimeError",
+            "message": "gh issue list returned unexpected output: {\"a\": 1}",
+            "calls": [
+              {
+                "argv": [
+                  "gh",
+                  "issue",
+                  "list",
+                  "--repo",
+                  "camerontaylor/infra",
+                  "--state",
+                  "all",
+                  "--limit",
+                  "20",
+                  "--json",
+                  "number,title,url",
+                  "--search",
+                  "in:title \"crq: aaaaaaaaaa..bbbbbbbbbb \u2014 3 findings (2 blocking) [push-infra-aaaaaaaaaa-bbbbbbbbbb]\""
+                ],
+                "input_text": null
+              }
+            ]
+          }
+        },
+        {
+          "name": "list-duplicate-key-last",
+          "source": "finding_issues.file_issue",
+          "input": {
+            "repo_cfg": {
+              "repo": "camerontaylor/infra"
+            },
+            "base": "aaaaaaaaaa1111",
+            "head": "bbbbbbbbbb2222",
+            "meta": {
+              "repo": "camerontaylor/infra",
+              "item_id": "push-infra-aaaaaaaaaa-bbbbbbbbbb",
+              "run_id": "r-20261103T120000Z-abcd",
+              "base": "aaaaaaaaaa1111",
+              "head": "bbbbbbbbbb2222",
+              "receipt_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            },
+            "severity_counts": {
+              "critical": 1,
+              "major": 1,
+              "minor": 1
+            },
+            "findings_md": "### Findings\n\n- something\n",
+            "gh_script": [
+              {
+                "returncode": 0,
+                "stdout": "[{\"title\": \"wrong\", \"title\": \"crq: aaaaaaaaaa..bbbbbbbbbb \u2014 3 findings (2 blocking) [push-infra-aaaaaaaaaa-bbbbbbbbbb]\", \"number\": 1, \"url\": \"https://github.com/camerontaylor/infra/issues/7\"}]",
+                "stderr": ""
+              }
+            ]
+          },
+          "expect": {
+            "ok": true,
+            "value": {
+              "issue_url": "https://github.com/camerontaylor/infra/issues/7",
+              "issue_number": 1,
+              "created": false
+            },
+            "calls": [
+              {
+                "argv": [
+                  "gh",
+                  "issue",
+                  "list",
+                  "--repo",
+                  "camerontaylor/infra",
+                  "--state",
+                  "all",
+                  "--limit",
+                  "20",
+                  "--json",
+                  "number,title,url",
+                  "--search",
+                  "in:title \"crq: aaaaaaaaaa..bbbbbbbbbb \u2014 3 findings (2 blocking) [push-infra-aaaaaaaaaa-bbbbbbbbbb]\""
+                ],
+                "input_text": null
+              }
+            ]
+          }
+        },
+        {
+          "name": "list-nonfinite-number",
+          "source": "finding_issues.file_issue",
+          "input": {
+            "repo_cfg": {
+              "repo": "camerontaylor/infra"
+            },
+            "base": "aaaaaaaaaa1111",
+            "head": "bbbbbbbbbb2222",
+            "meta": {
+              "repo": "camerontaylor/infra",
+              "item_id": "push-infra-aaaaaaaaaa-bbbbbbbbbb",
+              "run_id": "r-20261103T120000Z-abcd",
+              "base": "aaaaaaaaaa1111",
+              "head": "bbbbbbbbbb2222",
+              "receipt_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            },
+            "severity_counts": {
+              "critical": 1,
+              "major": 1,
+              "minor": 1
+            },
+            "findings_md": "### Findings\n\n- something\n",
+            "gh_script": [
+              {
+                "returncode": 0,
+                "stdout": "[{\"number\": NaN, \"title\": \"x\", \"url\": \"u\"}]",
+                "stderr": ""
+              },
+              {
+                "returncode": 0,
+                "stdout": "https://github.com/camerontaylor/infra/issues/9\n",
+                "stderr": ""
+              }
+            ]
+          },
+          "expect": {
+            "ok": true,
+            "value": {
+              "issue_url": "https://github.com/camerontaylor/infra/issues/9",
+              "issue_number": 9,
+              "created": true
+            },
+            "calls": [
+              {
+                "argv": [
+                  "gh",
+                  "issue",
+                  "list",
+                  "--repo",
+                  "camerontaylor/infra",
+                  "--state",
+                  "all",
+                  "--limit",
+                  "20",
+                  "--json",
+                  "number,title,url",
+                  "--search",
+                  "in:title \"crq: aaaaaaaaaa..bbbbbbbbbb \u2014 3 findings (2 blocking) [push-infra-aaaaaaaaaa-bbbbbbbbbb]\""
+                ],
+                "input_text": null
+              },
+              {
+                "argv": [
+                  "gh",
+                  "issue",
+                  "create",
+                  "--repo",
+                  "camerontaylor/infra",
+                  "--title",
+                  "crq: aaaaaaaaaa..bbbbbbbbbb \u2014 3 findings (2 blocking) [push-infra-aaaaaaaaaa-bbbbbbbbbb]",
+                  "--body-file",
+                  "-"
+                ],
+                "input_text": "## Review identity\n- Repo: `camerontaylor/infra`\n- Item: `push-infra-aaaaaaaaaa-bbbbbbbbbb`\n- Run: `r-20261103T120000Z-abcd`\n- Range: `aaaaaaaaaa1111..bbbbbbbbbb2222`\n- Receipt: `cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc`\n\n---\n\n### Findings\n\n- something\n\nAuto-filed by crq (CodeRabbit review queue). No auto-fix runs for this repository; triage manually.\n"
+              }
+            ]
+          }
+        },
+        {
+          "name": "list-exit-error",
+          "source": "finding_issues.file_issue",
+          "input": {
+            "repo_cfg": {
+              "repo": "camerontaylor/infra"
+            },
+            "base": "aaaaaaaaaa1111",
+            "head": "bbbbbbbbbb2222",
+            "meta": {
+              "repo": "camerontaylor/infra",
+              "item_id": "push-infra-aaaaaaaaaa-bbbbbbbbbb",
+              "run_id": "r-20261103T120000Z-abcd",
+              "base": "aaaaaaaaaa1111",
+              "head": "bbbbbbbbbb2222",
+              "receipt_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            },
+            "severity_counts": {
+              "critical": 1,
+              "major": 1,
+              "minor": 1
+            },
+            "findings_md": "### Findings\n\n- something\n",
+            "gh_script": [
+              {
+                "returncode": 1,
+                "stdout": "",
+                "stderr": "  GraphQL: Could not resolve to an Issue  \n"
+              }
+            ]
+          },
+          "expect": {
+            "ok": false,
+            "error": "RuntimeError",
+            "message": "gh issue list --repo \u2026 exit 1: GraphQL: Could not resolve to an Issue",
+            "calls": [
+              {
+                "argv": [
+                  "gh",
+                  "issue",
+                  "list",
+                  "--repo",
+                  "camerontaylor/infra",
+                  "--state",
+                  "all",
+                  "--limit",
+                  "20",
+                  "--json",
+                  "number,title,url",
+                  "--search",
+                  "in:title \"crq: aaaaaaaaaa..bbbbbbbbbb \u2014 3 findings (2 blocking) [push-infra-aaaaaaaaaa-bbbbbbbbbb]\""
+                ],
+                "input_text": null
+              }
+            ]
+          }
+        },
+        {
+          "name": "list-exit-error-empty-stderr",
+          "source": "finding_issues.file_issue",
+          "input": {
+            "repo_cfg": {
+              "repo": "camerontaylor/infra"
+            },
+            "base": "aaaaaaaaaa1111",
+            "head": "bbbbbbbbbb2222",
+            "meta": {
+              "repo": "camerontaylor/infra",
+              "item_id": "push-infra-aaaaaaaaaa-bbbbbbbbbb",
+              "run_id": "r-20261103T120000Z-abcd",
+              "base": "aaaaaaaaaa1111",
+              "head": "bbbbbbbbbb2222",
+              "receipt_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            },
+            "severity_counts": {
+              "critical": 1,
+              "major": 1,
+              "minor": 1
+            },
+            "findings_md": "### Findings\n\n- something\n",
+            "gh_script": [
+              {
+                "returncode": 1,
+                "stdout": "",
+                "stderr": ""
+              }
+            ]
+          },
+          "expect": {
+            "ok": false,
+            "error": "RuntimeError",
+            "message": "gh issue list --repo \u2026 exit 1: ",
+            "calls": [
+              {
+                "argv": [
+                  "gh",
+                  "issue",
+                  "list",
+                  "--repo",
+                  "camerontaylor/infra",
+                  "--state",
+                  "all",
+                  "--limit",
+                  "20",
+                  "--json",
+                  "number,title,url",
+                  "--search",
+                  "in:title \"crq: aaaaaaaaaa..bbbbbbbbbb \u2014 3 findings (2 blocking) [push-infra-aaaaaaaaaa-bbbbbbbbbb]\""
+                ],
+                "input_text": null
+              }
+            ]
+          }
+        },
+        {
+          "name": "list-exit-error-astral-stderr",
+          "source": "finding_issues.file_issue",
+          "input": {
+            "repo_cfg": {
+              "repo": "camerontaylor/infra"
+            },
+            "base": "aaaaaaaaaa1111",
+            "head": "bbbbbbbbbb2222",
+            "meta": {
+              "repo": "camerontaylor/infra",
+              "item_id": "push-infra-aaaaaaaaaa-bbbbbbbbbb",
+              "run_id": "r-20261103T120000Z-abcd",
+              "base": "aaaaaaaaaa1111",
+              "head": "bbbbbbbbbb2222",
+              "receipt_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            },
+            "severity_counts": {
+              "critical": 1,
+              "major": 1,
+              "minor": 1
+            },
+            "findings_md": "### Findings\n\n- something\n",
+            "gh_script": [
+              {
+                "returncode": 1,
+                "stdout": "",
+                "stderr": "\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00"
+              }
+            ]
+          },
+          "expect": {
+            "ok": false,
+            "error": "RuntimeError",
+            "message": "gh issue list --repo \u2026 exit 1: \ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00",
+            "calls": [
+              {
+                "argv": [
+                  "gh",
+                  "issue",
+                  "list",
+                  "--repo",
+                  "camerontaylor/infra",
+                  "--state",
+                  "all",
+                  "--limit",
+                  "20",
+                  "--json",
+                  "number,title,url",
+                  "--search",
+                  "in:title \"crq: aaaaaaaaaa..bbbbbbbbbb \u2014 3 findings (2 blocking) [push-infra-aaaaaaaaaa-bbbbbbbbbb]\""
+                ],
+                "input_text": null
+              }
+            ]
+          }
+        },
+        {
+          "name": "list-timeout",
+          "source": "finding_issues.file_issue",
+          "input": {
+            "repo_cfg": {
+              "repo": "camerontaylor/infra"
+            },
+            "base": "aaaaaaaaaa1111",
+            "head": "bbbbbbbbbb2222",
+            "meta": {
+              "repo": "camerontaylor/infra",
+              "item_id": "push-infra-aaaaaaaaaa-bbbbbbbbbb",
+              "run_id": "r-20261103T120000Z-abcd",
+              "base": "aaaaaaaaaa1111",
+              "head": "bbbbbbbbbb2222",
+              "receipt_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            },
+            "severity_counts": {
+              "critical": 1,
+              "major": 1,
+              "minor": 1
+            },
+            "findings_md": "### Findings\n\n- something\n",
+            "gh_script": [
+              {
+                "raise": "timeout",
+                "detail": "Command '['gh', 'issue', 'list', '--repo', 'camerontaylor/infra', '--state', 'all', '--limit', '20', '--json', 'number,title,url', '--search', 'in:title \"crq: aaaaaaaaaa..bbbbbbbbbb \u2014 3 findings (2 blocking) [push-infra-aaaaaaaaaa-bbbbbbbbbb]\"']' timed out after 10 seconds"
+              }
+            ]
+          },
+          "expect": {
+            "ok": false,
+            "error": "RuntimeError",
+            "message": "gh issue list --repo \u2026 timed out after 10s: Command '['gh', 'issue', 'list', '--repo', 'camerontaylor/infra', '--state', 'all', '--limit', '20', '--json', 'number,title,url', '--search', 'in:title \"crq: aaaaaaaaaa..bbbbbbbbbb \u2014 3 findings (2 blocking) [push-infra-aaaaaaaaaa-bbbbbbbbbb]\"']' timed out after 10 seconds",
+            "calls": [
+              {
+                "argv": [
+                  "gh",
+                  "issue",
+                  "list",
+                  "--repo",
+                  "camerontaylor/infra",
+                  "--state",
+                  "all",
+                  "--limit",
+                  "20",
+                  "--json",
+                  "number,title,url",
+                  "--search",
+                  "in:title \"crq: aaaaaaaaaa..bbbbbbbbbb \u2014 3 findings (2 blocking) [push-infra-aaaaaaaaaa-bbbbbbbbbb]\""
+                ],
+                "input_text": null
+              }
+            ]
+          }
+        },
+        {
+          "name": "list-spawn-error",
+          "source": "finding_issues.file_issue",
+          "input": {
+            "repo_cfg": {
+              "repo": "camerontaylor/infra"
+            },
+            "base": "aaaaaaaaaa1111",
+            "head": "bbbbbbbbbb2222",
+            "meta": {
+              "repo": "camerontaylor/infra",
+              "item_id": "push-infra-aaaaaaaaaa-bbbbbbbbbb",
+              "run_id": "r-20261103T120000Z-abcd",
+              "base": "aaaaaaaaaa1111",
+              "head": "bbbbbbbbbb2222",
+              "receipt_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            },
+            "severity_counts": {
+              "critical": 1,
+              "major": 1,
+              "minor": 1
+            },
+            "findings_md": "### Findings\n\n- something\n",
+            "gh_script": [
+              {
+                "raise": "oserror",
+                "detail": "no gh binary"
+              }
+            ]
+          },
+          "expect": {
+            "ok": false,
+            "error": "RuntimeError",
+            "message": "gh issue list --repo \u2026 could not start: no gh binary",
+            "calls": [
+              {
+                "argv": [
+                  "gh",
+                  "issue",
+                  "list",
+                  "--repo",
+                  "camerontaylor/infra",
+                  "--state",
+                  "all",
+                  "--limit",
+                  "20",
+                  "--json",
+                  "number,title,url",
+                  "--search",
+                  "in:title \"crq: aaaaaaaaaa..bbbbbbbbbb \u2014 3 findings (2 blocking) [push-infra-aaaaaaaaaa-bbbbbbbbbb]\""
+                ],
+                "input_text": null
+              }
+            ]
+          }
+        },
+        {
+          "name": "create-passes-body-stdin",
+          "source": "finding_issues.file_issue",
+          "input": {
+            "repo_cfg": {
+              "repo": "camerontaylor/infra"
+            },
+            "base": "aaaaaaaaaa1111",
+            "head": "bbbbbbbbbb2222",
+            "meta": {
+              "repo": "camerontaylor/infra",
+              "item_id": "push-infra-aaaaaaaaaa-bbbbbbbbbb",
+              "run_id": "r-20261103T120000Z-abcd",
+              "base": "aaaaaaaaaa1111",
+              "head": "bbbbbbbbbb2222",
+              "receipt_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            },
+            "severity_counts": {
+              "critical": 1,
+              "major": 1,
+              "minor": 1
+            },
+            "findings_md": "### Findings\n\n- something\n",
+            "gh_script": [
+              {
+                "returncode": 0,
+                "stdout": "[]\n",
+                "stderr": ""
+              },
+              {
+                "returncode": 0,
+                "stdout": "\nhttps://github.com/camerontaylor/infra/issues/12\n",
+                "stderr": ""
+              }
+            ]
+          },
+          "expect": {
+            "ok": true,
+            "value": {
+              "issue_url": "https://github.com/camerontaylor/infra/issues/12",
+              "issue_number": 12,
+              "created": true
+            },
+            "calls": [
+              {
+                "argv": [
+                  "gh",
+                  "issue",
+                  "list",
+                  "--repo",
+                  "camerontaylor/infra",
+                  "--state",
+                  "all",
+                  "--limit",
+                  "20",
+                  "--json",
+                  "number,title,url",
+                  "--search",
+                  "in:title \"crq: aaaaaaaaaa..bbbbbbbbbb \u2014 3 findings (2 blocking) [push-infra-aaaaaaaaaa-bbbbbbbbbb]\""
+                ],
+                "input_text": null
+              },
+              {
+                "argv": [
+                  "gh",
+                  "issue",
+                  "create",
+                  "--repo",
+                  "camerontaylor/infra",
+                  "--title",
+                  "crq: aaaaaaaaaa..bbbbbbbbbb \u2014 3 findings (2 blocking) [push-infra-aaaaaaaaaa-bbbbbbbbbb]",
+                  "--body-file",
+                  "-"
+                ],
+                "input_text": "## Review identity\n- Repo: `camerontaylor/infra`\n- Item: `push-infra-aaaaaaaaaa-bbbbbbbbbb`\n- Run: `r-20261103T120000Z-abcd`\n- Range: `aaaaaaaaaa1111..bbbbbbbbbb2222`\n- Receipt: `cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc`\n\n---\n\n### Findings\n\n- something\n\nAuto-filed by crq (CodeRabbit review queue). No auto-fix runs for this repository; triage manually.\n"
+              }
+            ]
+          }
+        },
+        {
+          "name": "create-url-surrounded",
+          "source": "finding_issues.file_issue",
+          "input": {
+            "repo_cfg": {
+              "repo": "camerontaylor/infra"
+            },
+            "base": "aaaaaaaaaa1111",
+            "head": "bbbbbbbbbb2222",
+            "meta": {
+              "repo": "camerontaylor/infra",
+              "item_id": "push-infra-aaaaaaaaaa-bbbbbbbbbb",
+              "run_id": "r-20261103T120000Z-abcd",
+              "base": "aaaaaaaaaa1111",
+              "head": "bbbbbbbbbb2222",
+              "receipt_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            },
+            "severity_counts": {
+              "critical": 1,
+              "major": 1,
+              "minor": 1
+            },
+            "findings_md": "### Findings\n\n- something\n",
+            "gh_script": [
+              {
+                "returncode": 0,
+                "stdout": "[]",
+                "stderr": ""
+              },
+              {
+                "returncode": 0,
+                "stdout": "prefix https://github.com/camerontaylor/infra/issues/12 suffix\n",
+                "stderr": ""
+              }
+            ]
+          },
+          "expect": {
+            "ok": true,
+            "value": {
+              "issue_url": "https://github.com/camerontaylor/infra/issues/12",
+              "issue_number": 12,
+              "created": true
+            },
+            "calls": [
+              {
+                "argv": [
+                  "gh",
+                  "issue",
+                  "list",
+                  "--repo",
+                  "camerontaylor/infra",
+                  "--state",
+                  "all",
+                  "--limit",
+                  "20",
+                  "--json",
+                  "number,title,url",
+                  "--search",
+                  "in:title \"crq: aaaaaaaaaa..bbbbbbbbbb \u2014 3 findings (2 blocking) [push-infra-aaaaaaaaaa-bbbbbbbbbb]\""
+                ],
+                "input_text": null
+              },
+              {
+                "argv": [
+                  "gh",
+                  "issue",
+                  "create",
+                  "--repo",
+                  "camerontaylor/infra",
+                  "--title",
+                  "crq: aaaaaaaaaa..bbbbbbbbbb \u2014 3 findings (2 blocking) [push-infra-aaaaaaaaaa-bbbbbbbbbb]",
+                  "--body-file",
+                  "-"
+                ],
+                "input_text": "## Review identity\n- Repo: `camerontaylor/infra`\n- Item: `push-infra-aaaaaaaaaa-bbbbbbbbbb`\n- Run: `r-20261103T120000Z-abcd`\n- Range: `aaaaaaaaaa1111..bbbbbbbbbb2222`\n- Receipt: `cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc`\n\n---\n\n### Findings\n\n- something\n\nAuto-filed by crq (CodeRabbit review queue). No auto-fix runs for this repository; triage manually.\n"
+              }
+            ]
+          }
+        },
+        {
+          "name": "create-no-url",
+          "source": "finding_issues.file_issue",
+          "input": {
+            "repo_cfg": {
+              "repo": "camerontaylor/infra"
+            },
+            "base": "aaaaaaaaaa1111",
+            "head": "bbbbbbbbbb2222",
+            "meta": {
+              "repo": "camerontaylor/infra",
+              "item_id": "push-infra-aaaaaaaaaa-bbbbbbbbbb",
+              "run_id": "r-20261103T120000Z-abcd",
+              "base": "aaaaaaaaaa1111",
+              "head": "bbbbbbbbbb2222",
+              "receipt_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            },
+            "severity_counts": {
+              "critical": 1,
+              "major": 1,
+              "minor": 1
+            },
+            "findings_md": "### Findings\n\n- something\n",
+            "gh_script": [
+              {
+                "returncode": 0,
+                "stdout": "[]",
+                "stderr": ""
+              },
+              {
+                "returncode": 0,
+                "stdout": "nothing here\n",
+                "stderr": ""
+              }
+            ]
+          },
+          "expect": {
+            "ok": false,
+            "error": "RuntimeError",
+            "message": "gh issue create returned no issue URL: nothing here",
+            "calls": [
+              {
+                "argv": [
+                  "gh",
+                  "issue",
+                  "list",
+                  "--repo",
+                  "camerontaylor/infra",
+                  "--state",
+                  "all",
+                  "--limit",
+                  "20",
+                  "--json",
+                  "number,title,url",
+                  "--search",
+                  "in:title \"crq: aaaaaaaaaa..bbbbbbbbbb \u2014 3 findings (2 blocking) [push-infra-aaaaaaaaaa-bbbbbbbbbb]\""
+                ],
+                "input_text": null
+              },
+              {
+                "argv": [
+                  "gh",
+                  "issue",
+                  "create",
+                  "--repo",
+                  "camerontaylor/infra",
+                  "--title",
+                  "crq: aaaaaaaaaa..bbbbbbbbbb \u2014 3 findings (2 blocking) [push-infra-aaaaaaaaaa-bbbbbbbbbb]",
+                  "--body-file",
+                  "-"
+                ],
+                "input_text": "## Review identity\n- Repo: `camerontaylor/infra`\n- Item: `push-infra-aaaaaaaaaa-bbbbbbbbbb`\n- Run: `r-20261103T120000Z-abcd`\n- Range: `aaaaaaaaaa1111..bbbbbbbbbb2222`\n- Receipt: `cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc`\n\n---\n\n### Findings\n\n- something\n\nAuto-filed by crq (CodeRabbit review queue). No auto-fix runs for this repository; triage manually.\n"
+              }
+            ]
+          }
+        },
+        {
+          "name": "create-no-url-astral",
+          "source": "finding_issues.file_issue",
+          "input": {
+            "repo_cfg": {
+              "repo": "camerontaylor/infra"
+            },
+            "base": "aaaaaaaaaa1111",
+            "head": "bbbbbbbbbb2222",
+            "meta": {
+              "repo": "camerontaylor/infra",
+              "item_id": "push-infra-aaaaaaaaaa-bbbbbbbbbb",
+              "run_id": "r-20261103T120000Z-abcd",
+              "base": "aaaaaaaaaa1111",
+              "head": "bbbbbbbbbb2222",
+              "receipt_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            },
+            "severity_counts": {
+              "critical": 1,
+              "major": 1,
+              "minor": 1
+            },
+            "findings_md": "### Findings\n\n- something\n",
+            "gh_script": [
+              {
+                "returncode": 0,
+                "stdout": "[]",
+                "stderr": ""
+              },
+              {
+                "returncode": 0,
+                "stdout": "\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00",
+                "stderr": ""
+              }
+            ]
+          },
+          "expect": {
+            "ok": false,
+            "error": "RuntimeError",
+            "message": "gh issue create returned no issue URL: \ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00",
+            "calls": [
+              {
+                "argv": [
+                  "gh",
+                  "issue",
+                  "list",
+                  "--repo",
+                  "camerontaylor/infra",
+                  "--state",
+                  "all",
+                  "--limit",
+                  "20",
+                  "--json",
+                  "number,title,url",
+                  "--search",
+                  "in:title \"crq: aaaaaaaaaa..bbbbbbbbbb \u2014 3 findings (2 blocking) [push-infra-aaaaaaaaaa-bbbbbbbbbb]\""
+                ],
+                "input_text": null
+              },
+              {
+                "argv": [
+                  "gh",
+                  "issue",
+                  "create",
+                  "--repo",
+                  "camerontaylor/infra",
+                  "--title",
+                  "crq: aaaaaaaaaa..bbbbbbbbbb \u2014 3 findings (2 blocking) [push-infra-aaaaaaaaaa-bbbbbbbbbb]",
+                  "--body-file",
+                  "-"
+                ],
+                "input_text": "## Review identity\n- Repo: `camerontaylor/infra`\n- Item: `push-infra-aaaaaaaaaa-bbbbbbbbbb`\n- Run: `r-20261103T120000Z-abcd`\n- Range: `aaaaaaaaaa1111..bbbbbbbbbb2222`\n- Receipt: `cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc`\n\n---\n\n### Findings\n\n- something\n\nAuto-filed by crq (CodeRabbit review queue). No auto-fix runs for this repository; triage manually.\n"
+              }
+            ]
+          }
+        },
+        {
+          "name": "create-unicode-digits",
+          "source": "finding_issues.file_issue",
+          "input": {
+            "repo_cfg": {
+              "repo": "camerontaylor/infra"
+            },
+            "base": "aaaaaaaaaa1111",
+            "head": "bbbbbbbbbb2222",
+            "meta": {
+              "repo": "camerontaylor/infra",
+              "item_id": "push-infra-aaaaaaaaaa-bbbbbbbbbb",
+              "run_id": "r-20261103T120000Z-abcd",
+              "base": "aaaaaaaaaa1111",
+              "head": "bbbbbbbbbb2222",
+              "receipt_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            },
+            "severity_counts": {
+              "critical": 1,
+              "major": 1,
+              "minor": 1
+            },
+            "findings_md": "### Findings\n\n- something\n",
+            "gh_script": [
+              {
+                "returncode": 0,
+                "stdout": "[]",
+                "stderr": ""
+              },
+              {
+                "returncode": 0,
+                "stdout": "https://github.com/o/r/issues/\u0661\u0662\n",
+                "stderr": ""
+              }
+            ]
+          },
+          "expect": {
+            "ok": true,
+            "value": {
+              "issue_url": "https://github.com/o/r/issues/\u0661\u0662",
+              "issue_number": 12,
+              "created": true
+            },
+            "calls": [
+              {
+                "argv": [
+                  "gh",
+                  "issue",
+                  "list",
+                  "--repo",
+                  "camerontaylor/infra",
+                  "--state",
+                  "all",
+                  "--limit",
+                  "20",
+                  "--json",
+                  "number,title,url",
+                  "--search",
+                  "in:title \"crq: aaaaaaaaaa..bbbbbbbbbb \u2014 3 findings (2 blocking) [push-infra-aaaaaaaaaa-bbbbbbbbbb]\""
+                ],
+                "input_text": null
+              },
+              {
+                "argv": [
+                  "gh",
+                  "issue",
+                  "create",
+                  "--repo",
+                  "camerontaylor/infra",
+                  "--title",
+                  "crq: aaaaaaaaaa..bbbbbbbbbb \u2014 3 findings (2 blocking) [push-infra-aaaaaaaaaa-bbbbbbbbbb]",
+                  "--body-file",
+                  "-"
+                ],
+                "input_text": "## Review identity\n- Repo: `camerontaylor/infra`\n- Item: `push-infra-aaaaaaaaaa-bbbbbbbbbb`\n- Run: `r-20261103T120000Z-abcd`\n- Range: `aaaaaaaaaa1111..bbbbbbbbbb2222`\n- Receipt: `cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc`\n\n---\n\n### Findings\n\n- something\n\nAuto-filed by crq (CodeRabbit review queue). No auto-fix runs for this repository; triage manually.\n"
+              }
+            ]
+          }
+        },
+        {
+          "name": "create-huge-number",
+          "source": "finding_issues.file_issue",
+          "input": {
+            "repo_cfg": {
+              "repo": "camerontaylor/infra"
+            },
+            "base": "aaaaaaaaaa1111",
+            "head": "bbbbbbbbbb2222",
+            "meta": {
+              "repo": "camerontaylor/infra",
+              "item_id": "push-infra-aaaaaaaaaa-bbbbbbbbbb",
+              "run_id": "r-20261103T120000Z-abcd",
+              "base": "aaaaaaaaaa1111",
+              "head": "bbbbbbbbbb2222",
+              "receipt_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            },
+            "severity_counts": {
+              "critical": 1,
+              "major": 1,
+              "minor": 1
+            },
+            "findings_md": "### Findings\n\n- something\n",
+            "gh_script": [
+              {
+                "returncode": 0,
+                "stdout": "[]",
+                "stderr": ""
+              },
+              {
+                "returncode": 0,
+                "stdout": "https://github.com/o/r/issues/999999999999999999999\n",
+                "stderr": ""
+              }
+            ]
+          },
+          "expect": {
+            "ok": true,
+            "value": {
+              "issue_url": "https://github.com/o/r/issues/999999999999999999999",
+              "issue_number": 999999999999999999999,
+              "created": true
+            },
+            "calls": [
+              {
+                "argv": [
+                  "gh",
+                  "issue",
+                  "list",
+                  "--repo",
+                  "camerontaylor/infra",
+                  "--state",
+                  "all",
+                  "--limit",
+                  "20",
+                  "--json",
+                  "number,title,url",
+                  "--search",
+                  "in:title \"crq: aaaaaaaaaa..bbbbbbbbbb \u2014 3 findings (2 blocking) [push-infra-aaaaaaaaaa-bbbbbbbbbb]\""
+                ],
+                "input_text": null
+              },
+              {
+                "argv": [
+                  "gh",
+                  "issue",
+                  "create",
+                  "--repo",
+                  "camerontaylor/infra",
+                  "--title",
+                  "crq: aaaaaaaaaa..bbbbbbbbbb \u2014 3 findings (2 blocking) [push-infra-aaaaaaaaaa-bbbbbbbbbb]",
+                  "--body-file",
+                  "-"
+                ],
+                "input_text": "## Review identity\n- Repo: `camerontaylor/infra`\n- Item: `push-infra-aaaaaaaaaa-bbbbbbbbbb`\n- Run: `r-20261103T120000Z-abcd`\n- Range: `aaaaaaaaaa1111..bbbbbbbbbb2222`\n- Receipt: `cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc`\n\n---\n\n### Findings\n\n- something\n\nAuto-filed by crq (CodeRabbit review queue). No auto-fix runs for this repository; triage manually.\n"
+              }
+            ]
+          }
+        },
+        {
+          "name": "create-digit-limit-boundary",
+          "source": "finding_issues.file_issue",
+          "input": {
+            "repo_cfg": {
+              "repo": "camerontaylor/infra"
+            },
+            "base": "aaaaaaaaaa1111",
+            "head": "bbbbbbbbbb2222",
+            "meta": {
+              "repo": "camerontaylor/infra",
+              "item_id": "push-infra-aaaaaaaaaa-bbbbbbbbbb",
+              "run_id": "r-20261103T120000Z-abcd",
+              "base": "aaaaaaaaaa1111",
+              "head": "bbbbbbbbbb2222",
+              "receipt_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            },
+            "severity_counts": {
+              "critical": 1,
+              "major": 1,
+              "minor": 1
+            },
+            "findings_md": "### Findings\n\n- something\n",
+            "gh_script": [
+              {
+                "returncode": 0,
+                "stdout": "[]",
+                "stderr": ""
+              },
+              {
+                "returncode": 0,
+                "stdout": "https://github.com/o/r/issues/9999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999\n",
+                "stderr": ""
+              }
+            ]
+          },
+          "expect": {
+            "ok": true,
+            "value": {
+              "issue_url": "https://github.com/o/r/issues/9999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999",
+              "issue_number": 9999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999,
+              "created": true
+            },
+            "calls": [
+              {
+                "argv": [
+                  "gh",
+                  "issue",
+                  "list",
+                  "--repo",
+                  "camerontaylor/infra",
+                  "--state",
+                  "all",
+                  "--limit",
+                  "20",
+                  "--json",
+                  "number,title,url",
+                  "--search",
+                  "in:title \"crq: aaaaaaaaaa..bbbbbbbbbb \u2014 3 findings (2 blocking) [push-infra-aaaaaaaaaa-bbbbbbbbbb]\""
+                ],
+                "input_text": null
+              },
+              {
+                "argv": [
+                  "gh",
+                  "issue",
+                  "create",
+                  "--repo",
+                  "camerontaylor/infra",
+                  "--title",
+                  "crq: aaaaaaaaaa..bbbbbbbbbb \u2014 3 findings (2 blocking) [push-infra-aaaaaaaaaa-bbbbbbbbbb]",
+                  "--body-file",
+                  "-"
+                ],
+                "input_text": "## Review identity\n- Repo: `camerontaylor/infra`\n- Item: `push-infra-aaaaaaaaaa-bbbbbbbbbb`\n- Run: `r-20261103T120000Z-abcd`\n- Range: `aaaaaaaaaa1111..bbbbbbbbbb2222`\n- Receipt: `cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc`\n\n---\n\n### Findings\n\n- something\n\nAuto-filed by crq (CodeRabbit review queue). No auto-fix runs for this repository; triage manually.\n"
+              }
+            ]
+          }
+        },
+        {
+          "name": "create-digit-limit-exceeded",
+          "source": "finding_issues.file_issue",
+          "input": {
+            "repo_cfg": {
+              "repo": "camerontaylor/infra"
+            },
+            "base": "aaaaaaaaaa1111",
+            "head": "bbbbbbbbbb2222",
+            "meta": {
+              "repo": "camerontaylor/infra",
+              "item_id": "push-infra-aaaaaaaaaa-bbbbbbbbbb",
+              "run_id": "r-20261103T120000Z-abcd",
+              "base": "aaaaaaaaaa1111",
+              "head": "bbbbbbbbbb2222",
+              "receipt_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            },
+            "severity_counts": {
+              "critical": 1,
+              "major": 1,
+              "minor": 1
+            },
+            "findings_md": "### Findings\n\n- something\n",
+            "gh_script": [
+              {
+                "returncode": 0,
+                "stdout": "[]",
+                "stderr": ""
+              },
+              {
+                "returncode": 0,
+                "stdout": "https://github.com/o/r/issues/99999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999\n",
+                "stderr": ""
+              }
+            ]
+          },
+          "expect": {
+            "ok": false,
+            "error": "ValueError",
+            "message": "Exceeds the limit (4300 digits) for integer string conversion: value has 4301 digits; use sys.set_int_max_str_digits() to increase the limit",
+            "calls": [
+              {
+                "argv": [
+                  "gh",
+                  "issue",
+                  "list",
+                  "--repo",
+                  "camerontaylor/infra",
+                  "--state",
+                  "all",
+                  "--limit",
+                  "20",
+                  "--json",
+                  "number,title,url",
+                  "--search",
+                  "in:title \"crq: aaaaaaaaaa..bbbbbbbbbb \u2014 3 findings (2 blocking) [push-infra-aaaaaaaaaa-bbbbbbbbbb]\""
+                ],
+                "input_text": null
+              },
+              {
+                "argv": [
+                  "gh",
+                  "issue",
+                  "create",
+                  "--repo",
+                  "camerontaylor/infra",
+                  "--title",
+                  "crq: aaaaaaaaaa..bbbbbbbbbb \u2014 3 findings (2 blocking) [push-infra-aaaaaaaaaa-bbbbbbbbbb]",
+                  "--body-file",
+                  "-"
+                ],
+                "input_text": "## Review identity\n- Repo: `camerontaylor/infra`\n- Item: `push-infra-aaaaaaaaaa-bbbbbbbbbb`\n- Run: `r-20261103T120000Z-abcd`\n- Range: `aaaaaaaaaa1111..bbbbbbbbbb2222`\n- Receipt: `cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc`\n\n---\n\n### Findings\n\n- something\n\nAuto-filed by crq (CodeRabbit review queue). No auto-fix runs for this repository; triage manually.\n"
+              }
+            ]
+          }
+        },
+        {
+          "name": "create-zero-number",
+          "source": "finding_issues.file_issue",
+          "input": {
+            "repo_cfg": {
+              "repo": "camerontaylor/infra"
+            },
+            "base": "aaaaaaaaaa1111",
+            "head": "bbbbbbbbbb2222",
+            "meta": {
+              "repo": "camerontaylor/infra",
+              "item_id": "push-infra-aaaaaaaaaa-bbbbbbbbbb",
+              "run_id": "r-20261103T120000Z-abcd",
+              "base": "aaaaaaaaaa1111",
+              "head": "bbbbbbbbbb2222",
+              "receipt_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            },
+            "severity_counts": {
+              "critical": 1,
+              "major": 1,
+              "minor": 1
+            },
+            "findings_md": "### Findings\n\n- something\n",
+            "gh_script": [
+              {
+                "returncode": 0,
+                "stdout": "[]",
+                "stderr": ""
+              },
+              {
+                "returncode": 0,
+                "stdout": "https://github.com/o/r/issues/0\n",
+                "stderr": ""
+              }
+            ]
+          },
+          "expect": {
+            "ok": true,
+            "value": {
+              "issue_url": "https://github.com/o/r/issues/0",
+              "issue_number": 0,
+              "created": true
+            },
+            "calls": [
+              {
+                "argv": [
+                  "gh",
+                  "issue",
+                  "list",
+                  "--repo",
+                  "camerontaylor/infra",
+                  "--state",
+                  "all",
+                  "--limit",
+                  "20",
+                  "--json",
+                  "number,title,url",
+                  "--search",
+                  "in:title \"crq: aaaaaaaaaa..bbbbbbbbbb \u2014 3 findings (2 blocking) [push-infra-aaaaaaaaaa-bbbbbbbbbb]\""
+                ],
+                "input_text": null
+              },
+              {
+                "argv": [
+                  "gh",
+                  "issue",
+                  "create",
+                  "--repo",
+                  "camerontaylor/infra",
+                  "--title",
+                  "crq: aaaaaaaaaa..bbbbbbbbbb \u2014 3 findings (2 blocking) [push-infra-aaaaaaaaaa-bbbbbbbbbb]",
+                  "--body-file",
+                  "-"
+                ],
+                "input_text": "## Review identity\n- Repo: `camerontaylor/infra`\n- Item: `push-infra-aaaaaaaaaa-bbbbbbbbbb`\n- Run: `r-20261103T120000Z-abcd`\n- Range: `aaaaaaaaaa1111..bbbbbbbbbb2222`\n- Receipt: `cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc`\n\n---\n\n### Findings\n\n- something\n\nAuto-filed by crq (CodeRabbit review queue). No auto-fix runs for this repository; triage manually.\n"
+              }
+            ]
+          }
+        },
+        {
+          "name": "create-url-whitespace",
+          "source": "finding_issues.file_issue",
+          "input": {
+            "repo_cfg": {
+              "repo": "camerontaylor/infra"
+            },
+            "base": "aaaaaaaaaa1111",
+            "head": "bbbbbbbbbb2222",
+            "meta": {
+              "repo": "camerontaylor/infra",
+              "item_id": "push-infra-aaaaaaaaaa-bbbbbbbbbb",
+              "run_id": "r-20261103T120000Z-abcd",
+              "base": "aaaaaaaaaa1111",
+              "head": "bbbbbbbbbb2222",
+              "receipt_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            },
+            "severity_counts": {
+              "critical": 1,
+              "major": 1,
+              "minor": 1
+            },
+            "findings_md": "### Findings\n\n- something\n",
+            "gh_script": [
+              {
+                "returncode": 0,
+                "stdout": "[]",
+                "stderr": ""
+              },
+              {
+                "returncode": 0,
+                "stdout": "https://github.com/a b/c/issues/1\n",
+                "stderr": ""
+              }
+            ]
+          },
+          "expect": {
+            "ok": false,
+            "error": "RuntimeError",
+            "message": "gh issue create returned no issue URL: https://github.com/a b/c/issues/1",
+            "calls": [
+              {
+                "argv": [
+                  "gh",
+                  "issue",
+                  "list",
+                  "--repo",
+                  "camerontaylor/infra",
+                  "--state",
+                  "all",
+                  "--limit",
+                  "20",
+                  "--json",
+                  "number,title,url",
+                  "--search",
+                  "in:title \"crq: aaaaaaaaaa..bbbbbbbbbb \u2014 3 findings (2 blocking) [push-infra-aaaaaaaaaa-bbbbbbbbbb]\""
+                ],
+                "input_text": null
+              },
+              {
+                "argv": [
+                  "gh",
+                  "issue",
+                  "create",
+                  "--repo",
+                  "camerontaylor/infra",
+                  "--title",
+                  "crq: aaaaaaaaaa..bbbbbbbbbb \u2014 3 findings (2 blocking) [push-infra-aaaaaaaaaa-bbbbbbbbbb]",
+                  "--body-file",
+                  "-"
+                ],
+                "input_text": "## Review identity\n- Repo: `camerontaylor/infra`\n- Item: `push-infra-aaaaaaaaaa-bbbbbbbbbb`\n- Run: `r-20261103T120000Z-abcd`\n- Range: `aaaaaaaaaa1111..bbbbbbbbbb2222`\n- Receipt: `cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc`\n\n---\n\n### Findings\n\n- something\n\nAuto-filed by crq (CodeRabbit review queue). No auto-fix runs for this repository; triage manually.\n"
+              }
+            ]
+          }
+        },
+        {
+          "name": "create-url-feff-owner",
+          "source": "finding_issues.file_issue",
+          "input": {
+            "repo_cfg": {
+              "repo": "camerontaylor/infra"
+            },
+            "base": "aaaaaaaaaa1111",
+            "head": "bbbbbbbbbb2222",
+            "meta": {
+              "repo": "camerontaylor/infra",
+              "item_id": "push-infra-aaaaaaaaaa-bbbbbbbbbb",
+              "run_id": "r-20261103T120000Z-abcd",
+              "base": "aaaaaaaaaa1111",
+              "head": "bbbbbbbbbb2222",
+              "receipt_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            },
+            "severity_counts": {
+              "critical": 1,
+              "major": 1,
+              "minor": 1
+            },
+            "findings_md": "### Findings\n\n- something\n",
+            "gh_script": [
+              {
+                "returncode": 0,
+                "stdout": "[]",
+                "stderr": ""
+              },
+              {
+                "returncode": 0,
+                "stdout": "https://github.com/\ufeff/r/issues/1\n",
+                "stderr": ""
+              }
+            ]
+          },
+          "expect": {
+            "ok": true,
+            "value": {
+              "issue_url": "https://github.com/\ufeff/r/issues/1",
+              "issue_number": 1,
+              "created": true
+            },
+            "calls": [
+              {
+                "argv": [
+                  "gh",
+                  "issue",
+                  "list",
+                  "--repo",
+                  "camerontaylor/infra",
+                  "--state",
+                  "all",
+                  "--limit",
+                  "20",
+                  "--json",
+                  "number,title,url",
+                  "--search",
+                  "in:title \"crq: aaaaaaaaaa..bbbbbbbbbb \u2014 3 findings (2 blocking) [push-infra-aaaaaaaaaa-bbbbbbbbbb]\""
+                ],
+                "input_text": null
+              },
+              {
+                "argv": [
+                  "gh",
+                  "issue",
+                  "create",
+                  "--repo",
+                  "camerontaylor/infra",
+                  "--title",
+                  "crq: aaaaaaaaaa..bbbbbbbbbb \u2014 3 findings (2 blocking) [push-infra-aaaaaaaaaa-bbbbbbbbbb]",
+                  "--body-file",
+                  "-"
+                ],
+                "input_text": "## Review identity\n- Repo: `camerontaylor/infra`\n- Item: `push-infra-aaaaaaaaaa-bbbbbbbbbb`\n- Run: `r-20261103T120000Z-abcd`\n- Range: `aaaaaaaaaa1111..bbbbbbbbbb2222`\n- Receipt: `cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc`\n\n---\n\n### Findings\n\n- something\n\nAuto-filed by crq (CodeRabbit review queue). No auto-fix runs for this repository; triage manually.\n"
+              }
+            ]
+          }
+        },
+        {
+          "name": "create-url-information-separator",
+          "source": "finding_issues.file_issue",
+          "input": {
+            "repo_cfg": {
+              "repo": "camerontaylor/infra"
+            },
+            "base": "aaaaaaaaaa1111",
+            "head": "bbbbbbbbbb2222",
+            "meta": {
+              "repo": "camerontaylor/infra",
+              "item_id": "push-infra-aaaaaaaaaa-bbbbbbbbbb",
+              "run_id": "r-20261103T120000Z-abcd",
+              "base": "aaaaaaaaaa1111",
+              "head": "bbbbbbbbbb2222",
+              "receipt_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            },
+            "severity_counts": {
+              "critical": 1,
+              "major": 1,
+              "minor": 1
+            },
+            "findings_md": "### Findings\n\n- something\n",
+            "gh_script": [
+              {
+                "returncode": 0,
+                "stdout": "[]",
+                "stderr": ""
+              },
+              {
+                "returncode": 0,
+                "stdout": "https://github.com/a\u001cb/c/issues/1\n",
+                "stderr": ""
+              }
+            ]
+          },
+          "expect": {
+            "ok": false,
+            "error": "RuntimeError",
+            "message": "gh issue create returned no issue URL: https://github.com/a\u001cb/c/issues/1",
+            "calls": [
+              {
+                "argv": [
+                  "gh",
+                  "issue",
+                  "list",
+                  "--repo",
+                  "camerontaylor/infra",
+                  "--state",
+                  "all",
+                  "--limit",
+                  "20",
+                  "--json",
+                  "number,title,url",
+                  "--search",
+                  "in:title \"crq: aaaaaaaaaa..bbbbbbbbbb \u2014 3 findings (2 blocking) [push-infra-aaaaaaaaaa-bbbbbbbbbb]\""
+                ],
+                "input_text": null
+              },
+              {
+                "argv": [
+                  "gh",
+                  "issue",
+                  "create",
+                  "--repo",
+                  "camerontaylor/infra",
+                  "--title",
+                  "crq: aaaaaaaaaa..bbbbbbbbbb \u2014 3 findings (2 blocking) [push-infra-aaaaaaaaaa-bbbbbbbbbb]",
+                  "--body-file",
+                  "-"
+                ],
+                "input_text": "## Review identity\n- Repo: `camerontaylor/infra`\n- Item: `push-infra-aaaaaaaaaa-bbbbbbbbbb`\n- Run: `r-20261103T120000Z-abcd`\n- Range: `aaaaaaaaaa1111..bbbbbbbbbb2222`\n- Receipt: `cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc`\n\n---\n\n### Findings\n\n- something\n\nAuto-filed by crq (CodeRabbit review queue). No auto-fix runs for this repository; triage manually.\n"
+              }
+            ]
+          }
+        },
+        {
+          "name": "create-url-astral-owner",
+          "source": "finding_issues.file_issue",
+          "input": {
+            "repo_cfg": {
+              "repo": "camerontaylor/infra"
+            },
+            "base": "aaaaaaaaaa1111",
+            "head": "bbbbbbbbbb2222",
+            "meta": {
+              "repo": "camerontaylor/infra",
+              "item_id": "push-infra-aaaaaaaaaa-bbbbbbbbbb",
+              "run_id": "r-20261103T120000Z-abcd",
+              "base": "aaaaaaaaaa1111",
+              "head": "bbbbbbbbbb2222",
+              "receipt_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            },
+            "severity_counts": {
+              "critical": 1,
+              "major": 1,
+              "minor": 1
+            },
+            "findings_md": "### Findings\n\n- something\n",
+            "gh_script": [
+              {
+                "returncode": 0,
+                "stdout": "[]",
+                "stderr": ""
+              },
+              {
+                "returncode": 0,
+                "stdout": "https://github.com/\ud83d\ude00/r/issues/1\n",
+                "stderr": ""
+              }
+            ]
+          },
+          "expect": {
+            "ok": true,
+            "value": {
+              "issue_url": "https://github.com/\ud83d\ude00/r/issues/1",
+              "issue_number": 1,
+              "created": true
+            },
+            "calls": [
+              {
+                "argv": [
+                  "gh",
+                  "issue",
+                  "list",
+                  "--repo",
+                  "camerontaylor/infra",
+                  "--state",
+                  "all",
+                  "--limit",
+                  "20",
+                  "--json",
+                  "number,title,url",
+                  "--search",
+                  "in:title \"crq: aaaaaaaaaa..bbbbbbbbbb \u2014 3 findings (2 blocking) [push-infra-aaaaaaaaaa-bbbbbbbbbb]\""
+                ],
+                "input_text": null
+              },
+              {
+                "argv": [
+                  "gh",
+                  "issue",
+                  "create",
+                  "--repo",
+                  "camerontaylor/infra",
+                  "--title",
+                  "crq: aaaaaaaaaa..bbbbbbbbbb \u2014 3 findings (2 blocking) [push-infra-aaaaaaaaaa-bbbbbbbbbb]",
+                  "--body-file",
+                  "-"
+                ],
+                "input_text": "## Review identity\n- Repo: `camerontaylor/infra`\n- Item: `push-infra-aaaaaaaaaa-bbbbbbbbbb`\n- Run: `r-20261103T120000Z-abcd`\n- Range: `aaaaaaaaaa1111..bbbbbbbbbb2222`\n- Receipt: `cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc`\n\n---\n\n### Findings\n\n- something\n\nAuto-filed by crq (CodeRabbit review queue). No auto-fix runs for this repository; triage manually.\n"
+              }
+            ]
+          }
+        },
+        {
+          "name": "repo-missing",
+          "source": "finding_issues.file_issue",
+          "input": {
+            "repo_cfg": {
+              "findings": "issue"
+            },
+            "base": "aaaaaaaaaa1111",
+            "head": "bbbbbbbbbb2222",
+            "meta": {
+              "repo": "camerontaylor/infra",
+              "item_id": "push-infra-aaaaaaaaaa-bbbbbbbbbb",
+              "run_id": "r-20261103T120000Z-abcd",
+              "base": "aaaaaaaaaa1111",
+              "head": "bbbbbbbbbb2222",
+              "receipt_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            },
+            "severity_counts": {
+              "critical": 1,
+              "major": 1,
+              "minor": 1
+            },
+            "findings_md": "### Findings\n\n- something\n",
+            "gh_script": []
+          },
+          "expect": {
+            "ok": false,
+            "error": "KeyError",
+            "message": "'repo'",
+            "calls": []
+          }
+        },
+        {
+          "name": "meta-non-dict",
+          "source": "finding_issues.file_issue",
+          "input": {
+            "repo_cfg": {
+              "repo": "camerontaylor/infra"
+            },
+            "base": "aaaaaaaaaa1111",
+            "head": "bbbbbbbbbb2222",
+            "meta": [],
+            "severity_counts": {
+              "critical": 1,
+              "major": 1,
+              "minor": 1
+            },
+            "findings_md": "### Findings\n\n- something\n",
+            "gh_script": []
+          },
+          "expect": {
+            "ok": false,
+            "error": "AttributeError",
+            "message": "'list' object has no attribute 'get'",
+            "calls": []
+          }
+        },
+        {
+          "name": "findings-non-string-after-search",
+          "source": "finding_issues.file_issue",
+          "input": {
+            "repo_cfg": {
+              "repo": "camerontaylor/infra"
+            },
+            "base": "aaaaaaaaaa1111",
+            "head": "bbbbbbbbbb2222",
+            "meta": {
+              "repo": "camerontaylor/infra",
+              "item_id": "push-infra-aaaaaaaaaa-bbbbbbbbbb",
+              "run_id": "r-20261103T120000Z-abcd",
+              "base": "aaaaaaaaaa1111",
+              "head": "bbbbbbbbbb2222",
+              "receipt_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            },
+            "severity_counts": {
+              "critical": 1,
+              "major": 1,
+              "minor": 1
+            },
+            "findings_md": 5,
+            "gh_script": [
+              {
+                "returncode": 0,
+                "stdout": "[]",
+                "stderr": ""
+              }
+            ]
+          },
+          "expect": {
+            "ok": false,
+            "error": "AttributeError",
+            "message": "'int' object has no attribute 'rstrip'",
+            "calls": [
+              {
+                "argv": [
+                  "gh",
+                  "issue",
+                  "list",
+                  "--repo",
+                  "camerontaylor/infra",
+                  "--state",
+                  "all",
+                  "--limit",
+                  "20",
+                  "--json",
+                  "number,title,url",
+                  "--search",
+                  "in:title \"crq: aaaaaaaaaa..bbbbbbbbbb \u2014 3 findings (2 blocking) [push-infra-aaaaaaaaaa-bbbbbbbbbb]\""
+                ],
+                "input_text": null
+              }
+            ]
+          }
+        },
+        {
+          "name": "existing-with-nonstring-findings",
+          "source": "finding_issues.file_issue",
+          "input": {
+            "repo_cfg": {
+              "repo": "camerontaylor/infra"
+            },
+            "base": "aaaaaaaaaa1111",
+            "head": "bbbbbbbbbb2222",
+            "meta": {
+              "repo": "camerontaylor/infra",
+              "item_id": "push-infra-aaaaaaaaaa-bbbbbbbbbb",
+              "run_id": "r-20261103T120000Z-abcd",
+              "base": "aaaaaaaaaa1111",
+              "head": "bbbbbbbbbb2222",
+              "receipt_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            },
+            "severity_counts": {
+              "critical": 1,
+              "major": 1,
+              "minor": 1
+            },
+            "findings_md": 5,
+            "gh_script": [
+              {
+                "returncode": 0,
+                "stdout": "[{\"number\": 7, \"title\": \"crq: aaaaaaaaaa..bbbbbbbbbb \\u2014 3 findings (2 blocking) [push-infra-aaaaaaaaaa-bbbbbbbbbb]\", \"url\": \"https://github.com/camerontaylor/infra/issues/7\"}]",
+                "stderr": ""
+              }
+            ]
+          },
+          "expect": {
+            "ok": true,
+            "value": {
+              "issue_url": "https://github.com/camerontaylor/infra/issues/7",
+              "issue_number": 7,
+              "created": false
+            },
+            "calls": [
+              {
+                "argv": [
+                  "gh",
+                  "issue",
+                  "list",
+                  "--repo",
+                  "camerontaylor/infra",
+                  "--state",
+                  "all",
+                  "--limit",
+                  "20",
+                  "--json",
+                  "number,title,url",
+                  "--search",
+                  "in:title \"crq: aaaaaaaaaa..bbbbbbbbbb \u2014 3 findings (2 blocking) [push-infra-aaaaaaaaaa-bbbbbbbbbb]\""
+                ],
+                "input_text": null
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

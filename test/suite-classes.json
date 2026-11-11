@@ -724,6 +724,7 @@
   "test/policy/crq/coverageUtilization.test.ts": "pure",
   "test/policy/crq/findingDelivery.test.ts": "pure",
   "test/policy/crq/findingHandoff.test.ts": "pure",
+  "test/policy/crq/findingIssues.test.ts": "pure",
   "test/policy/crq/ids.test.ts": "pure",
   "test/policy/crq/publication.test.ts": "pure",
   "test/policy/crq/pythonJson.test.ts": "pure",
