@@ -263,39 +263,64 @@ effect point only; timer/path restore effect points are not claimed.
 
 One fresh partial run completed on Pluto (KVM, Ubuntu noble guest
 ``crq-probe``) from source commit
-``13c1ee720e76880674d612ef2de993ef27620af8``:
+``783bf4ff6869232d7d93e6a5fb5d76abb975be76``:
 
-- report ``~/crq-vm-feasibility/state/runs/20261111T051806Z-5cb0e706/report.json``
+- report ``~/crq-vm-feasibility/state/runs/20261111T060527Z-44eaf59b/report.json``
 - all 38 checks true; ``problems: []``
-- ``raw-guest-evidence.tar.gz`` 1,350,273 bytes, SHA-256
-  ``298cd043191f89983e6a96f207be78b676864a77af187b62ac26eabcbb6e952a``
+- ``raw-guest-evidence.tar.gz`` 1,352,520 bytes, SHA-256
+  ``7c076c49706ba7265080887f4c8beae6c7a5c55536557f9502b32fda362bbfe8``
 - report SHA-256
-  ``93e82f9e137587d89f21ed55a9b6f52931369187d3128b50e2e86725daf7a5ed``
+  ``d432be48716e24383eedbde682454e5ae73d317ecb460a897e783a6698412113``
 - host script SHA-256
-  ``c4895e389ec8686187d4636464340e37a2ef0b853d05dc7efae07a3f6fb937a7``
+  ``44916fa4a8b8fe799aaa0bf1a7b46172377330d42dc51213425d298218b3c62d``
 - partial guest script SHA-256
-  ``ca58ea871678d6fc1dfc209efac918f7213de98f7efddd4de6db0a994c382037``
+  ``116e1e7dee4e45490c018c97af067e7a46cbd35bd2eafd5457043854c72306fc``
 
 Two consecutive ``verify`` runs on that report returned ``problems: []`` with
 ``host_matches_run: true``, ``guest_matches_run: true`` and
-``validator_only: false``. Each case boundary retained exact SIGKILL
-(``rc == -9``), a pending record, and exactly one released-runtime completion:
+``validator_only: false``. Each activation case boundary retained exact
+SIGKILL (``rc == -9``), a pending record, an independent hook marker naming the
+actual phase, and exactly one released-runtime completion. Each restore case
+boundary retained the same evidence with no completion, because the hook now
+fires after the prior service file is restored but before either activator or
+the service is activated:
 
 | Case | Hook | Pending record (prefix) | Released delta |
 |---|---|---|---|
-| ``activation-service-restart`` | ``start-after-service`` | ``736086e90d6d`` | one Node |
-| ``activation-timer-restart`` | ``start-after-timer`` | ``5efd62c33b69`` | one Node |
-| ``activation-path-restart`` | ``start-after-path`` | ``ab82819a1ed6`` | one Node |
-| ``restore-service-restart`` | ``restore-activation-after-service`` | ``21f27348bb3b`` | one Python |
-| ``activation-service-reboot`` | ``start-after-service`` | ``8e8e31226acc`` | one Node |
-| ``activation-timer-reboot`` | ``start-after-timer`` | ``b9cc9376875f`` | one Node |
-| ``activation-path-reboot`` | ``start-after-path`` | ``24729ac81278`` | one Node |
-| ``restore-service-reboot`` | ``restore-activation-after-service`` | ``bfd3d7da02b8`` | one Python |
+| ``activation-service-restart`` | ``start-after-service`` | ``b3e8cc4c204c`` | one Node |
+| ``activation-timer-restart`` | ``start-after-timer`` | ``30dcc7edbdbf`` | one Node |
+| ``activation-path-restart`` | ``start-after-path`` | ``e0fe833c3e37`` | one Node |
+| ``restore-service-restart`` | ``restore-activation-after-service`` | ``3b7eb52c648d`` | none |
+| ``activation-service-reboot`` | ``start-after-service`` | ``a059ecd7bfbd`` | one Node |
+| ``activation-timer-reboot`` | ``start-after-timer`` | ``9677a2bad2d5`` | one Node |
+| ``activation-path-reboot`` | ``start-after-path`` | ``3ed05260c8fe`` | one Node |
+| ``restore-service-reboot`` | ``restore-activation-after-service`` | ``f841ae55ca0c`` | none |
 
 Every observe phase retained the same record bytes and returned the actual
 rc-3 ``activation may have occurred`` refusal twice, with the fence-settled
 completion baseline unchanged. The final phase restored the Python repair
-baseline and retained one pending record per case.
+baseline and retained one pending record per case. An intermediate attempt
+``20261111T055642Z-21aa1bb1`` on source ``d37e3d169`` is preserved but is not
+evidence: it failed closed because the dynamic completion log mixes Python's
+spaced JSON with Node's compact JSON, so reconstructing its bytes from parsed
+entries was not sound. The current host checks that log by shape and binds its
+parsed entries through the completion baseline instead.
+
+### Superseded partial proof run (preserved)
+
+The earlier run ``20261111T051806Z-5cb0e706`` from source commit
+``13c1ee720e76880674d612ef2de993ef27620af8`` remains preserved unchanged:
+38/38 checks true, ``problems: []``, report SHA-256
+``93e82f9e137587d89f21ed55a9b6f52931369187d3128b50e2e86725daf7a5ed``,
+raw tar 1,350,273 bytes with SHA-256
+``298cd043191f89983e6a96f207be78b676864a77af187b62ac26eabcbb6e952a``,
+host script
+``c4895e389ec8686187d4636464340e37a2ef0b853d05dc7efae07a3f6fb937a7``
+and partial guest script
+``ca58ea871678d6fc1dfc209efac918f7213de98f7efddd4de6db0a994c382037``.
+It predates the hook-marker, strict job/command binding, exact file/metadata
+map, completion baseline and tick-journal rehash corrections; it is not
+current evidence.
 
 The earlier activators reports ``20261111T032335Z-7d2896be`` and
 ``20261111T033408Z-be40a3a5`` also recomputed with ``problems: []`` and
