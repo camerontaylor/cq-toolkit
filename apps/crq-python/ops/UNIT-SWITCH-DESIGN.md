@@ -63,6 +63,32 @@ was not established and the initial environment comparison was not fully
 hermetic. [Restart diagnosis](https://github.com/camerontaylor/cq-toolkit/actions/runs/42720216729/job/129511976423).
 No VM reboot or power-loss test has been performed.
 
+## Offline rendering separation and identity binding
+
+`prepare-host.render_units` now shares a pure byte-render core
+(`render_service_text`) with a separate read-only, adapter-facing wrapper
+(`render_service`). The wrapper reads the exact
+`apps/crq-python/ops/systemd/<unit>` template from a resolved immutable
+commit, verifies the Git blob object identity, and returns the rendered bytes
+plus the source commit, template path, blob object id and byte digests. For
+`node:<sha>` it also checks the packaged artifact against its schema-2
+`artifact-manifest.json` using the existing package-runner inventory,
+canonical content-digest, required-entry and staged-provenance semantics. That
+check is integrity of the observed artifact against its manifest, not
+authenticity; it does not execute the runner or load dependencies.
+
+`render_units` keeps its existing behavior and byte output, including the
+ability to render a `node:` unit before its artifact is installed. The new
+wrapper's stricter artifact checks do not become a prerequisite for the old
+renderer.
+
+This does not implement a production adapter, host CLI, unit capability check
+or enablement path. Rendering a `node:` unit for a runner command that has not
+been implemented does not make that command available. Production adapter
+class/CLI/capability wiring, real per-unit runtime-bound completion,
+exhaustive activation discovery, shared root/lock coverage, drain races, and
+restart/reboot/power-loss behavior remain separate acceptance work.
+
 ## Proposed stable-manager sequence
 
 1. Under the existing controller lock, validate the unit and target, artifact

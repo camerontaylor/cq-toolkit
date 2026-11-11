@@ -10,6 +10,7 @@ import copy
 import datetime as dt
 import fcntl
 import hashlib
+import importlib.util
 import json
 import os
 import plistlib
@@ -50,6 +51,10 @@ PATH_KEYS = {'clone', 'worktree_root', 'timeout_bin', 'repair.cq_bin',
 
 def run(argv):
     return subprocess.run(argv, check=True, capture_output=True, text=True).stdout
+
+
+def run_bytes(argv):
+    return subprocess.run(argv, check=True, capture_output=True).stdout
 
 
 def git(root, *args):
@@ -380,6 +385,185 @@ UNIT_COMMANDS = {
 }
 
 
+def unit_command(unit, runtime, home=None):
+    """The existing renderer's ExecStart command for one per-unit pointer.
+
+    ``None`` means keep the committed Python ExecStart. This helper performs
+    no filesystem writes and does not require the artifact to exist.
+    """
+    if unit not in UNIT_COMMANDS:
+        raise ValueError('unknown runtime unit')
+    if runtime == 'python':
+        return None
+    if not isinstance(runtime, str) or not re.fullmatch(r'node:[0-9a-f]{40}', runtime):
+        raise ValueError('runtime must be python or node:<full SHA>')
+    base = Path(home) if home is not None else Path.home()
+    artifact = host_path(str(base / '.local/opt' / ('crq-' + runtime[5:])))
+    return ('/usr/bin/env node ' + str(artifact / 'dist/queue-runner/crq.js')
+            + ' ' + UNIT_COMMANDS[unit])
+
+
+def render_service_text(template_name, template_text, runner_root, command=None):
+    """Pure byte render shared by the old renderer and the new wrapper.
+
+    This function establishes no source binding: the caller supplies the
+    template bytes. ``render_service`` is the read-only wrapper that reads the
+    exact template from a resolved Git commit and verifies the Git blob.
+    """
+    if not isinstance(template_text, str):
+        raise ValueError('template text must be a string')
+    text = template_text.replace('@CRQ_ROOT@', runner_root)
+    if '@CRQ_ROOT@' in text:
+        raise ValueError('unexpanded runner root')
+    if command is not None:
+        lines = text.splitlines(keepends=True)
+        matches = [i for i, line in enumerate(lines) if line.startswith('ExecStart=')]
+        if len(matches) != 1:
+            raise ValueError('unit must have exactly one ExecStart: ' + template_name)
+        lines[matches[0]] = 'ExecStart=' + command + '\n'
+        text = ''.join(lines)
+    return text
+
+
+_PACKAGE_RUNNER = None
+
+
+def _package_runner():
+    global _PACKAGE_RUNNER
+    if _PACKAGE_RUNNER is None:
+        spec = importlib.util.spec_from_file_location(
+            'crq_package_runner', Path(__file__).with_name('package-runner.py'))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _PACKAGE_RUNNER = module
+    return _PACKAGE_RUNNER
+
+
+def artifact_identity(artifact_root, runtime):
+    """Read-only whole-artifact identity check for a packaged node runner.
+
+    Reuses package-runner's schema, inventory, required-entry, canonical
+    digest and staged-provenance semantics. It compares the observed tree to
+    the manifest inventory; it does not execute the runner, load dependencies,
+    or establish authenticity. The returned identity is integrity of the
+    observed bytes against the manifest, and the manifest is still
+    self-declared provenance.
+    """
+    if runtime == 'python':
+        return None
+    if not isinstance(runtime, str) or not re.fullmatch(r'node:[0-9a-f]{40}', runtime):
+        raise ValueError('runtime must be python or node:<full SHA>')
+    root = Path(artifact_root)
+    if root.is_symlink() or not root.is_dir():
+        raise ValueError('artifact root is not a regular directory')
+    package = _package_runner()
+    manifest_path = root / package.MANIFEST_NAME
+    if manifest_path.is_symlink() or not manifest_path.is_file():
+        raise ValueError('artifact manifest is unavailable')
+    manifest_raw = manifest_path.read_bytes()
+    try:
+        manifest = json.loads(manifest_raw)
+        package.validate_manifest(manifest)
+    except (OSError, ValueError) as exc:
+        raise ValueError('artifact manifest is invalid') from exc
+    if manifest.get('source_sha') != runtime[5:]:
+        raise ValueError('artifact source SHA does not match the node pointer')
+    for required in package.REQUIRED_ENTRIES:
+        if not (root / required).is_file():
+            raise ValueError('artifact lacks required package entry: ' + required)
+    try:
+        observed = package.inventory(root, exclude=(package.MANIFEST_NAME,))
+    except (OSError, ValueError) as exc:
+        raise ValueError('artifact inventory is invalid') from exc
+    if observed != manifest['files']:
+        raise ValueError('artifact inventory does not match the manifest')
+    observed_digest = package.content_digest(observed)
+    if observed_digest != manifest['content_sha256']:
+        raise ValueError('artifact content digest does not match the manifest')
+    try:
+        package.validate_provenance(manifest['provenance'],
+                                    sha=manifest['source_sha'], staging=root)
+    except (OSError, ValueError) as exc:
+        raise ValueError('artifact provenance does not match the observed tree') from exc
+    entry = next((item for item in observed
+                  if item['path'] == 'dist/queue-runner/crq.js'), None)
+    if entry is None or entry['type'] != 'file':
+        raise ValueError('artifact lacks the runner entry point')
+    facts = manifest['provenance']['runtime']
+    return {
+        'kind': 'node',
+        'runtime': runtime,
+        'source_sha': manifest['source_sha'],
+        'declared_content_sha256': manifest['content_sha256'],
+        'observed_content_sha256': observed_digest,
+        'manifest_sha256': digest(manifest_raw),
+        'node_version': facts['node_version'],
+        'node_major': facts['node_major'],
+        'node_abi': facts['node_abi'],
+        'platform': facts['platform'],
+        'arch': facts['arch'],
+        'crq_js_sha256': entry['sha256'],
+        'verification': 'whole-artifact-inventory-matched',
+        'authenticity': 'not-established',
+    }
+
+
+def render_service(root, unit, runtime='python', sha='HEAD', artifact_root=None):
+    """Read-only, source-bound unit render for a future production adapter.
+
+    Reads the exact committed template at a resolved immutable commit and
+    verifies its Git blob before rendering. For ``node:<sha>`` it also checks
+    the packaged artifact against its manifest; ``artifact_root`` selects the
+    identity tree, while the rendered ExecStart keeps the existing canonical
+    ``~/.local/opt/crq-<sha>`` pointer path. It does not implement a production
+    adapter, a capability check or an enablement path, and it performs no host
+    mutation.
+    """
+    if unit not in UNIT_COMMANDS:
+        raise ValueError('unknown runtime unit')
+    command = unit_command(unit, runtime)
+    commit = git(root, 'rev-parse', sha + '^{commit}')
+    if not re.fullmatch(r'[0-9a-f]{40}', commit):
+        raise ValueError('source commit must resolve to a full SHA')
+    source_dir = 'apps/crq-python/ops/systemd/'
+    sources = git(root, 'ls-tree', '-r', '--name-only', commit, source_dir).splitlines()
+    source_path = source_dir + unit
+    if source_path not in sources:
+        raise ValueError('unit template is absent from the pinned commit')
+    blob = git(root, 'rev-parse', f'{commit}:{source_path}')
+    raw = run_bytes(['git', '-C', str(root), 'cat-file', 'blob', blob])
+    expected = hashlib.sha1(b'blob ' + str(len(raw)).encode() + b'\0' + raw).hexdigest()
+    if expected != blob:
+        raise ValueError('template bytes do not match the pinned Git blob')
+    text = raw.decode('utf-8')
+    validate_unit_template(unit, text)
+    if len([line for line in text.splitlines() if line.startswith('ExecStart=')]) != 1:
+        raise ValueError('unit must have exactly one ExecStart: ' + unit)
+    runner = str(host_path(str(root)) / 'apps/crq-python')
+    rendered = render_service_text(unit, text, runner, command)
+    encoded = rendered.encode()
+    artifact = None
+    if runtime != 'python':
+        artifact_root = (Path(artifact_root) if artifact_root is not None
+                         else Path.home() / '.local/opt' / ('crq-' + runtime[5:]))
+        artifact = artifact_identity(artifact_root, runtime)
+    exec_start = next((line[len('ExecStart='):].rstrip('\n')
+                       for line in rendered.splitlines()
+                       if line.startswith('ExecStart=')), None)
+    return {
+        'unit': unit,
+        'runtime': runtime,
+        'source_sha': commit,
+        'template_path': source_path,
+        'template_blob_oid': blob,
+        'template_sha256': digest(raw),
+        'exec_start': exec_start,
+        'bytes': encoded,
+        'sha256': digest(encoded),
+        'artifact': artifact,
+    }
+
+
 def render_units(root, output, sha='HEAD', runtimes=None):
     # Read both the inventory and exact bytes from one immutable commit, as
     # verify_target does. Dirty/deleted/extra worktree units are not deploy inputs.
@@ -399,26 +583,14 @@ def render_units(root, output, sha='HEAD', runtimes=None):
         raise ValueError('runtime unit absent from target')
     commands = {}
     for unit, runtime in runtimes.items():
-        if runtime == 'python':
-            continue
-        if not isinstance(runtime, str) or not re.fullmatch(r'node:[0-9a-f]{40}', runtime):
-            raise ValueError('runtime must be python or node:<full SHA>')
-        artifact = host_path(str(Path.home() / '.local/opt' / ('crq-' + runtime[5:])))
-        commands[unit] = '/usr/bin/env node ' + str(artifact / 'dist/queue-runner/crq.js') + ' ' + UNIT_COMMANDS[unit]
+        command = unit_command(unit, runtime)
+        if command is not None:
+            commands[unit] = command
     rendered = []
     runner = str(host_path(str(root)) / 'apps/crq-python')
     for source, text in templates:
-        text = text.replace('@CRQ_ROOT@', runner)
-        if '@CRQ_ROOT@' in text:
-            raise ValueError('unexpanded runner root')
-        if source.name in commands:
-            lines = text.splitlines(keepends=True)
-            matches = [i for i, line in enumerate(lines) if line.startswith('ExecStart=')]
-            if len(matches) != 1:
-                raise ValueError('unit must have exactly one ExecStart: ' + source.name)
-            lines[matches[0]] = 'ExecStart=' + commands[source.name] + '\n'
-            text = ''.join(lines)
-        rendered.append((source, text))
+        rendered.append((source, render_service_text(
+            source.name, text, runner, commands.get(source.name))))
     output.mkdir(parents=True, exist_ok=True)
     paths = []
     for source, text in rendered:
