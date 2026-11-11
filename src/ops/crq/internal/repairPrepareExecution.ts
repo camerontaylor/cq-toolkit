@@ -38,6 +38,12 @@
  * preparation under `tick.lock`, which re-reads state and reconciles
  * idempotently.
  *
+ * A lock that rejects on exit, after the callback has returned, keeps the
+ * callback's own result and adds `lockExit: 'unconfirmed'`: the recorded steps
+ * and writes still stand, and only the lock's release is in doubt. Only a lock
+ * that rejects before entering the scope is reported as `lock-unavailable`
+ * with no read and no write.
+ *
  * This module imports no subprocess, filesystem, clock or environment seam.
  */
 import { JsonObject } from '../../../policy/crq/jsonValue.js';
@@ -188,7 +194,17 @@ export interface RepairPreparationProducerDiagnostic {
 }
 
 export type RepairPreparationExecutionResult =
-  | { readonly ok: true; readonly value: ExecutedRepairPreparation }
+  | {
+      readonly ok: true;
+      readonly value: ExecutedRepairPreparation;
+      /**
+       * Present only when the injected lock rejected after the callback
+       * returned. `value` still describes what ran inside the section, but the
+       * lock's own exit is unconfirmed, so exclusive ownership after the
+       * section is not established.
+       */
+      readonly lockExit?: 'unconfirmed';
+    }
   | {
       readonly ok: false;
       /** The read gates refused; no mutation was attempted. */
@@ -197,6 +213,7 @@ export type RepairPreparationExecutionResult =
       readonly readGates: RepairPreparationReadGates;
       readonly effects: readonly [];
       readonly remainingGates: readonly RemainingPreparationGate[];
+      readonly lockExit?: 'unconfirmed';
     }
   | {
       readonly ok: false;
@@ -207,6 +224,7 @@ export type RepairPreparationExecutionResult =
       readonly steps: readonly [];
       readonly remainingGates: readonly RemainingPreparationGate[];
       readonly recovery: 're-run-preparation';
+      readonly lockExit?: 'unconfirmed';
     }
   | {
       readonly ok: false;
@@ -224,6 +242,7 @@ export type RepairPreparationExecutionResult =
       readonly readGates: RepairPreparationReadGates;
       readonly steps: readonly [];
       readonly remainingGates: readonly RemainingPreparationGate[];
+      readonly lockExit?: 'unconfirmed';
     }
   | {
       readonly ok: false;
@@ -236,6 +255,7 @@ export type RepairPreparationExecutionResult =
       readonly readGates: RepairPreparationReadGates;
       readonly remainingGates: readonly RemainingPreparationGate[];
       readonly recovery: 're-run-preparation';
+      readonly lockExit?: 'unconfirmed';
     };
 
 interface PlannedPhases {
@@ -500,13 +520,25 @@ export async function executeRepairPreparation(
   effects: RepairPreparationEffects,
 ): Promise<RepairPreparationExecutionResult> {
   let lockEntered = false;
+  let callbackFailed = false;
+  let executed: RepairPreparationExecutionResult | undefined;
   try {
-    return await effects.withTickLock(() => {
+    return await effects.withTickLock(async () => {
       lockEntered = true;
-      return runPreparation(produce, effects);
+      try {
+        const result = await runPreparation(produce, effects);
+        executed = result;
+        return result;
+      } catch (error) {
+        callbackFailed = true;
+        throw error;
+      }
     });
   } catch (error) {
-    if (lockEntered) throw error;
+    if (lockEntered) {
+      if (callbackFailed || executed === undefined) throw error;
+      return markLockExitUnconfirmed(executed);
+    }
     return {
       ok: false,
       kind: 'lock-unavailable',
@@ -515,5 +547,25 @@ export async function executeRepairPreparation(
       remainingGates: ALL_GATES,
       recovery: 're-run-preparation',
     };
+  }
+}
+
+/**
+ * Attach the lock-exit evidence to a result the callback already returned.
+ * `lock-unavailable` cannot reach here: it is only produced when the scope was
+ * never entered, so it has no callback result to annotate.
+ */
+function markLockExitUnconfirmed(
+  result: RepairPreparationExecutionResult,
+): RepairPreparationExecutionResult {
+  if (result.ok) return { ...result, lockExit: 'unconfirmed' };
+  switch (result.kind) {
+    case 'refused':
+    case 'plan-failed':
+    case 'plan-inconsistent':
+    case 'effect-failed':
+      return { ...result, lockExit: 'unconfirmed' };
+    case 'lock-unavailable':
+      return result;
   }
 }

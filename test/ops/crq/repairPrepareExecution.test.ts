@@ -852,4 +852,91 @@ describe('executeRepairPreparation internal diagnostics', () => {
     });
     expect(trace.entries).toEqual([]);
   });
+
+  test('a lock exit failure after a completed run keeps the executed evidence', async () => {
+    const name = 'new-canonical-old-owner';
+    const plan = await planFor(name);
+    const stores = storesFor(caseNamed(name));
+    const trace = noEffects();
+    const seams = attemptEffects(trace, stores, undefined, handoffAt);
+    const effects: RepairPreparationEffects = {
+      ...seams.effects,
+      async withTickLock<T>(fn: () => Promise<T>): Promise<T> {
+        await fn();
+        throw new Error('synthetic lock release failure');
+      },
+    };
+    const result = await executeRepairPreparation(async () => ({ ok: true, value: plan }), effects);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.lockExit).toBe('unconfirmed');
+    expect(result.value).toMatchObject({
+      status: 'preparation-executed',
+      remainingGates: CALLER_GATES,
+      effects: [
+        { kind: 'write-job' },
+        { kind: 'handoff', result: 'written' },
+        { kind: 'write-queue' },
+      ],
+    });
+    if (plan.proposal === undefined) throw new Error('expected a proposed job');
+    expect(stores.jobs.has(plan.proposal.jobId)).toBe(true);
+    expect(stores.queue).not.toBe('');
+    const written = trace.entries
+      .filter((entry) => entry['kind'] === 'write')
+      .map((entry) => entry['target'])
+      .sort();
+    expect(written).toEqual(['job', 'outbox', 'queue', 'triage']);
+  });
+
+  test('a lock exit failure after a failed port keeps the step evidence', async () => {
+    const name = 'new-canonical-old-owner';
+    const plan = await planFor(name);
+    const stores = storesFor(caseNamed(name));
+    const trace = noEffects();
+    const seams = attemptEffects(trace, stores, 'queue', handoffAt);
+    const effects: RepairPreparationEffects = {
+      ...seams.effects,
+      async withTickLock<T>(fn: () => Promise<T>): Promise<T> {
+        await fn();
+        throw new Error('synthetic lock release failure');
+      },
+    };
+    const result = await executeRepairPreparation(async () => ({ ok: true, value: plan }), effects);
+    expect(result).toMatchObject({
+      ok: false,
+      kind: 'effect-failed',
+      step: 'write-queue',
+      lockExit: 'unconfirmed',
+      readGates: 'attempted-under-tick-lock',
+      steps: [
+        { step: 'write-job', outcome: 'completed' },
+        { step: 'handoff', outcome: 'completed' },
+        { step: 'write-queue', outcome: 'unconfirmed' },
+      ],
+      remainingGates: ALL_GATES,
+      recovery: 're-run-preparation',
+    });
+    if (plan.proposal === undefined) throw new Error('expected a proposed job');
+    expect(stores.jobs.has(plan.proposal.jobId)).toBe(true);
+    expect(trace.entries.filter((entry) => entry['target'] === 'queue')).toEqual([
+      { kind: 'write', target: 'queue', outcome: 'error' },
+    ]);
+  });
+
+  test('a lock that enters without awaiting its callback never claims unavailability', async () => {
+    const stores = storesFor(caseNamed('new-canonical-old-owner'));
+    const trace = noEffects();
+    const seams = attemptEffects(trace, stores, undefined, handoffAt);
+    const effects: RepairPreparationEffects = {
+      ...seams.effects,
+      async withTickLock<T>(fn: () => Promise<T>): Promise<T> {
+        fn().catch(() => {});
+        throw new Error('lock contract violation');
+      },
+    };
+    await expect(
+      executeRepairPreparation(async () => ({ ok: false, refusal: 'old-job-unreadable' }), effects),
+    ).rejects.toThrow('lock contract violation');
+  });
 });
