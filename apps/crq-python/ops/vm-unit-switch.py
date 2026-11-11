@@ -2931,10 +2931,8 @@ def _partial_observe_ok(case, phase, boundary, prepared, problems):
         ok = False
     recovery = phase.get("recovery") or {}
     repeat = phase.get("repeat") or {}
-    baseline = _partial_fence_ok(recovery.get("cli"),
-                                 label + ".recovery", problems)
-    repeat_baseline = _partial_fence_ok(repeat.get("cli"),
-                                        label + ".repeat", problems)
+    baseline = _partial_fence_ok(recovery, label + ".recovery", problems)
+    repeat_baseline = _partial_fence_ok(repeat, label + ".repeat", problems)
     if baseline is None or repeat_baseline is None:
         ok = False
     else:
@@ -3241,7 +3239,7 @@ def _partial_checks(phases, restarts=None, reboots=None):
             and item.get("outcome") == "pending" for item in records)
         baseline_ok = True
         for key in ("recovery", "repeat"):
-            cli = (observe.get(key) or {}).get("cli")
+            cli = observe.get(key)
             if _partial_fence_ok(cli, "partial-" + case + "." + key,
                                  problems) is None:
                 baseline_ok = False

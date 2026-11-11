@@ -522,6 +522,7 @@ def partial_restore_boundary(args):
         "before_recovery": drained,
         "drained_record": drained_record,
         "after": after,
+        "cli": recovery_cli,
         "switch_cli": kill_cli,
         "recovery_cli": recovery_cli,
         "record": record,

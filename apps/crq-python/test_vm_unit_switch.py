@@ -2420,10 +2420,10 @@ class PartialHarnessCheckTests(unittest.TestCase):
                 "before": observe_before, "record": record,
                 "record_after": dict(record),
                 "record_after_repeat": dict(record),
-                "recovery": {"cli": self._fence(len(self.completions),
-                                                self.completions)},
-                "repeat": {"cli": self._fence(len(self.completions),
-                                              self.completions)},
+                "recovery": self._fence(len(self.completions),
+                                        self.completions),
+                "repeat": self._fence(len(self.completions),
+                                      self.completions),
                 "new_completions": [new], "preserved": self.preserved,
                 "source": self.source,
             }
@@ -2514,8 +2514,8 @@ class PartialHarnessCheckTests(unittest.TestCase):
         observe["after_recovery"]["repair_completions"].append(prior)
         observe["after_repeat"]["repair_completions"].append(prior)
         entries = observe["before"]["repair_completions"]
-        observe["recovery"]["cli"] = self._fence(len(entries), entries)
-        observe["repeat"]["cli"] = self._fence(len(entries), entries)
+        observe["recovery"] = self._fence(len(entries), entries)
+        observe["repeat"] = self._fence(len(entries), entries)
         checks, problems = harness._partial_checks(phases_value, restarts,
                                                    reboots)
         self.assertEqual(problems, [])
