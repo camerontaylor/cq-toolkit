@@ -3,6 +3,7 @@ import {
   compactUtc,
   parseIso,
   parseUtc,
+  parseUtcUnchecked,
   UtcParseError,
   utcFromMillis,
 } from '../../../src/policy/crq/utc.js';
@@ -122,4 +123,25 @@ test('accepts arbitrary single separators but refuses a missing time', () => {
   }
   expect(parseUtc('2026-11-08T')).toBeNull();
   expect(parseUtc('2026-11-08')?.iso).toBe('2026-11-08T00:00:00.000000Z');
+});
+
+describe('parseUtcUnchecked — parse-only companion', () => {
+  test('keeps a valid UTC instant', () => {
+    expect(parseUtcUnchecked('2026-11-08T00:00:00Z')).toBe(
+      parseUtc('2026-11-08T00:00:00Z')?.epochMicros,
+    );
+  });
+
+  test('exposes the instant that parseUtc collapses to null on overflow', () => {
+    expect(parseUtc('9999-12-31T23:00:00-05:00')).toBeNull();
+    expect(parseUtcUnchecked('9999-12-31T23:00:00-05:00')).not.toBeNull();
+    expect(parseUtc('0001-01-01T00:00:00+01:00')).toBeNull();
+    expect(parseUtcUnchecked('0001-01-01T00:00:00+01:00')).not.toBeNull();
+  });
+
+  test('still returns null for malformed or empty input', () => {
+    expect(parseUtcUnchecked('junk')).toBeNull();
+    expect(parseUtcUnchecked('')).toBeNull();
+    expect(parseUtcUnchecked(123)).toBeNull();
+  });
 });

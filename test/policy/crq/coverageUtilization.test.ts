@@ -216,3 +216,48 @@ describe('numeric boundary contract', () => {
     expect(() => digest(false)).toThrow('max_starts_per_hour must be positive');
   });
 });
+
+function observationLedger(pending: readonly unknown[]): Record<string, unknown> {
+  const observations: Record<string, unknown> = {};
+  pending.forEach((value, index) => {
+    observations[`2026-11-09T11:${String(index).padStart(2, '0')}:00Z`] = {
+      started: false,
+      pending: value,
+      candidate_exists: true,
+      blocked_reason: null,
+    };
+  });
+  return { schema_version: 1, paths: {}, runs: {}, observations };
+}
+
+function pendingDigest(pending: readonly unknown[]): string {
+  return compact(
+    utilizationDigest({ starts: [] }, observationLedger(pending), {
+      now: '2026-11-09T12:00:00Z',
+      maxStartsPerHour: 5,
+    }),
+  );
+}
+
+describe('plain bigint observations', () => {
+  test('an exact bigint stays exact instead of refusing', () => {
+    expect(pendingDigest([9007199254740993n])).toContain(
+      '"idle_while_pending_24h":9007199254740993,',
+    );
+  });
+
+  test('a bigint followed by a float converts once, like PyNumber_Add', () => {
+    expect(pendingDigest([10n ** 30n, 0.5])).toContain('"idle_while_pending_24h":1e+30,');
+  });
+
+  test('a huge bigint with a float raises Python OverflowError', () => {
+    try {
+      pendingDigest([10n ** 400n, 0.5]);
+      throw new Error('expected OverflowError');
+    } catch (error) {
+      expect(error).toBeInstanceOf(CoverageUtilizationError);
+      expect((error as CoverageUtilizationError).pythonError).toBe('OverflowError');
+      expect((error as CoverageUtilizationError).message).toBe('int too large to convert to float');
+    }
+  });
+});

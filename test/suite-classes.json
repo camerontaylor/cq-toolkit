@@ -314,7 +314,6 @@
   "test/ops/analyze/renderAnalysisReport.sidecarSchema.test.ts": "pure",
   "test/ops/analyze/run.test.ts": "pure",
   "test/ops/analyze/standaloneSlice.test.ts": "process",
-  "test/ops/crq/a1Fixtures.currency.test.ts": "process",
   "test/ops/crq/repairPrepare.test.ts": "pure",
   "test/ops/dev/cycle-checkoutBoundary.test.ts": "process",
   "test/ops/fix/runFix.atomic-report.test.ts": "process",

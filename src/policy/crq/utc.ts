@@ -54,15 +54,25 @@ const MS_PER_DAY = 86_400_000;
  * return null, never local time.
  */
 export function parseUtc(value: unknown): UtcInstant | null {
+  const micros = parseUtcUnchecked(value);
+  if (micros === null) return null;
+  const { year } = civilFromDays(Number(floorDiv(micros, MICROS_PER_DAY)));
+  // Python datetime.astimezone() raises OverflowError outside years 1..9999,
+  // which parse_utc catches and reports as None.
+  if (year < 1 || year > 9999) return null;
+  return new UtcInstant(micros);
+}
+
+/**
+ * Parse-only companion to {@link parseUtc}: returns the UTC microsecond count
+ * for a valid ISO-like string even when `astimezone(UTC)` would overflow the
+ * datetime range. `parseUtc` deliberately collapses that overflow to null;
+ * callers that must distinguish overflow from malformed input use this.
+ */
+export function parseUtcUnchecked(value: unknown): bigint | null {
   if (typeof value !== 'string' || value.length === 0) return null;
   try {
-    const micros = parseIsoLike(value.replaceAll('Z', '+00:00'));
-    if (micros === null) return null;
-    const { year } = civilFromDays(Number(floorDiv(micros, MICROS_PER_DAY)));
-    // Python datetime.astimezone() raises OverflowError outside years 1..9999,
-    // which parse_utc catches and reports as None.
-    if (year < 1 || year > 9999) return null;
-    return new UtcInstant(micros);
+    return parseIsoLike(value.replaceAll('Z', '+00:00'));
   } catch {
     return null;
   }

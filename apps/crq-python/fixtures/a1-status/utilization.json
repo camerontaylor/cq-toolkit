@@ -875,6 +875,738 @@
       }
     },
     {
+      "name": "compensated-float-idle-sum",
+      "source": "coverage.utilization_digest",
+      "input": {
+        "queue": {
+          "starts": []
+        },
+        "ledger": {
+          "schema_version": 1,
+          "paths": {},
+          "runs": {},
+          "observations": {
+            "2026-11-09T11:00:00Z": {
+              "started": false,
+              "pending": 0.1,
+              "candidate_exists": true,
+              "blocked_reason": null
+            },
+            "2026-11-09T11:01:00Z": {
+              "started": false,
+              "pending": 0.1,
+              "candidate_exists": true,
+              "blocked_reason": null
+            },
+            "2026-11-09T11:02:00Z": {
+              "started": false,
+              "pending": 0.1,
+              "candidate_exists": true,
+              "blocked_reason": null
+            },
+            "2026-11-09T11:03:00Z": {
+              "started": false,
+              "pending": 0.1,
+              "candidate_exists": true,
+              "blocked_reason": null
+            },
+            "2026-11-09T11:04:00Z": {
+              "started": false,
+              "pending": 0.1,
+              "candidate_exists": true,
+              "blocked_reason": null
+            },
+            "2026-11-09T11:05:00Z": {
+              "started": false,
+              "pending": 0.1,
+              "candidate_exists": true,
+              "blocked_reason": null
+            },
+            "2026-11-09T11:06:00Z": {
+              "started": false,
+              "pending": 0.1,
+              "candidate_exists": true,
+              "blocked_reason": null
+            },
+            "2026-11-09T11:07:00Z": {
+              "started": false,
+              "pending": 0.1,
+              "candidate_exists": true,
+              "blocked_reason": null
+            },
+            "2026-11-09T11:08:00Z": {
+              "started": false,
+              "pending": 0.1,
+              "candidate_exists": true,
+              "blocked_reason": null
+            },
+            "2026-11-09T11:09:00Z": {
+              "started": false,
+              "pending": 0.1,
+              "candidate_exists": true,
+              "blocked_reason": null
+            }
+          }
+        },
+        "now": "2026-11-09T12:00:00Z",
+        "max_starts_per_hour": 5
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "starts_24h": 0,
+          "nominal_cap_24h": 120,
+          "nominal_utilization": 0.0,
+          "cooldown_minutes": 0,
+          "observed_ticks_24h": 10,
+          "available_start_opportunities_24h": 10,
+          "idle_while_pending_24h": 1.0,
+          "idle_with_coverage_candidate_24h": 10,
+          "coverage_reviewed_paths": 0
+        }
+      }
+    },
+    {
+      "name": "compensated-cancellation-idle-sum",
+      "source": "coverage.utilization_digest",
+      "input": {
+        "queue": {
+          "starts": []
+        },
+        "ledger": {
+          "schema_version": 1,
+          "paths": {},
+          "runs": {},
+          "observations": {
+            "2026-11-09T11:00:00Z": {
+              "started": false,
+              "pending": 1e+16,
+              "candidate_exists": true,
+              "blocked_reason": null
+            },
+            "2026-11-09T11:10:00Z": {
+              "started": false,
+              "pending": 1.0,
+              "candidate_exists": true,
+              "blocked_reason": null
+            },
+            "2026-11-09T11:20:00Z": {
+              "started": false,
+              "pending": -1e+16,
+              "candidate_exists": true,
+              "blocked_reason": null
+            }
+          }
+        },
+        "now": "2026-11-09T12:00:00Z",
+        "max_starts_per_hour": 5
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "starts_24h": 0,
+          "nominal_cap_24h": 120,
+          "nominal_utilization": 0.0,
+          "cooldown_minutes": 0,
+          "observed_ticks_24h": 3,
+          "available_start_opportunities_24h": 3,
+          "idle_while_pending_24h": 1.0,
+          "idle_with_coverage_candidate_24h": 3,
+          "coverage_reviewed_paths": 0
+        }
+      }
+    },
+    {
+      "name": "mixed-large-int-float-idle-sum",
+      "source": "coverage.utilization_digest",
+      "input": {
+        "queue": {
+          "starts": []
+        },
+        "ledger": {
+          "schema_version": 1,
+          "paths": {},
+          "runs": {},
+          "observations": {
+            "2026-11-09T11:00:00Z": {
+              "started": false,
+              "pending": 1000000000000000000000000000000,
+              "candidate_exists": true,
+              "blocked_reason": null
+            },
+            "2026-11-09T11:10:00Z": {
+              "started": false,
+              "pending": 0.5,
+              "candidate_exists": true,
+              "blocked_reason": null
+            }
+          }
+        },
+        "now": "2026-11-09T12:00:00Z",
+        "max_starts_per_hour": 5
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "starts_24h": 0,
+          "nominal_cap_24h": 120,
+          "nominal_utilization": 0.0,
+          "cooldown_minutes": 0,
+          "observed_ticks_24h": 2,
+          "available_start_opportunities_24h": 2,
+          "idle_while_pending_24h": 1e+30,
+          "idle_with_coverage_candidate_24h": 2,
+          "coverage_reviewed_paths": 0
+        }
+      }
+    },
+    {
+      "name": "mixed-float-large-int-idle-sum",
+      "source": "coverage.utilization_digest",
+      "input": {
+        "queue": {
+          "starts": []
+        },
+        "ledger": {
+          "schema_version": 1,
+          "paths": {},
+          "runs": {},
+          "observations": {
+            "2026-11-09T11:00:00Z": {
+              "started": false,
+              "pending": 0.5,
+              "candidate_exists": true,
+              "blocked_reason": null
+            },
+            "2026-11-09T11:10:00Z": {
+              "started": false,
+              "pending": 1000000000000000000000000000000,
+              "candidate_exists": true,
+              "blocked_reason": null
+            }
+          }
+        },
+        "now": "2026-11-09T12:00:00Z",
+        "max_starts_per_hour": 5
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "starts_24h": 0,
+          "nominal_cap_24h": 120,
+          "nominal_utilization": 0.0,
+          "cooldown_minutes": 0,
+          "observed_ticks_24h": 2,
+          "available_start_opportunities_24h": 2,
+          "idle_while_pending_24h": 1e+30,
+          "idle_with_coverage_candidate_24h": 2,
+          "coverage_reviewed_paths": 0
+        }
+      }
+    },
+    {
+      "name": "huge-int-float-idle-overflow",
+      "source": "coverage.utilization_digest",
+      "input": {
+        "queue": {
+          "starts": []
+        },
+        "ledger": {
+          "schema_version": 1,
+          "paths": {},
+          "runs": {},
+          "observations": {
+            "2026-11-09T11:00:00Z": {
+              "started": false,
+              "pending": 10000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000,
+              "candidate_exists": true,
+              "blocked_reason": null
+            },
+            "2026-11-09T11:10:00Z": {
+              "started": false,
+              "pending": 0.5,
+              "candidate_exists": true,
+              "blocked_reason": null
+            }
+          }
+        },
+        "now": "2026-11-09T12:00:00Z",
+        "max_starts_per_hour": 5
+      },
+      "expect": {
+        "ok": false,
+        "error": "OverflowError",
+        "message": "int too large to convert to float"
+      }
+    },
+    {
+      "name": "float-huge-int-idle-overflow",
+      "source": "coverage.utilization_digest",
+      "input": {
+        "queue": {
+          "starts": []
+        },
+        "ledger": {
+          "schema_version": 1,
+          "paths": {},
+          "runs": {},
+          "observations": {
+            "2026-11-09T11:00:00Z": {
+              "started": false,
+              "pending": 0.5,
+              "candidate_exists": true,
+              "blocked_reason": null
+            },
+            "2026-11-09T11:10:00Z": {
+              "started": false,
+              "pending": 10000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000,
+              "candidate_exists": true,
+              "blocked_reason": null
+            }
+          }
+        },
+        "now": "2026-11-09T12:00:00Z",
+        "max_starts_per_hour": 5
+      },
+      "expect": {
+        "ok": false,
+        "error": "OverflowError",
+        "message": "int too large to convert to float"
+      }
+    },
+    {
+      "name": "bool-int-idle-sum-stays-int",
+      "source": "coverage.utilization_digest",
+      "input": {
+        "queue": {
+          "starts": []
+        },
+        "ledger": {
+          "schema_version": 1,
+          "paths": {},
+          "runs": {},
+          "observations": {
+            "2026-11-09T11:00:00Z": {
+              "started": false,
+              "pending": true,
+              "candidate_exists": true,
+              "blocked_reason": null
+            },
+            "2026-11-09T11:10:00Z": {
+              "started": false,
+              "pending": 2,
+              "candidate_exists": true,
+              "blocked_reason": null
+            }
+          }
+        },
+        "now": "2026-11-09T12:00:00Z",
+        "max_starts_per_hour": 5
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "starts_24h": 0,
+          "nominal_cap_24h": 120,
+          "nominal_utilization": 0.0,
+          "cooldown_minutes": 0,
+          "observed_ticks_24h": 2,
+          "available_start_opportunities_24h": 2,
+          "idle_while_pending_24h": 3,
+          "idle_with_coverage_candidate_24h": 2,
+          "coverage_reviewed_paths": 0
+        }
+      }
+    },
+    {
+      "name": "float-bool-idle-sum",
+      "source": "coverage.utilization_digest",
+      "input": {
+        "queue": {
+          "starts": []
+        },
+        "ledger": {
+          "schema_version": 1,
+          "paths": {},
+          "runs": {},
+          "observations": {
+            "2026-11-09T11:00:00Z": {
+              "started": false,
+              "pending": 0.5,
+              "candidate_exists": false,
+              "blocked_reason": null
+            },
+            "2026-11-09T11:10:00Z": {
+              "started": false,
+              "pending": false,
+              "candidate_exists": true,
+              "blocked_reason": null
+            }
+          }
+        },
+        "now": "2026-11-09T12:00:00Z",
+        "max_starts_per_hour": 5
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "starts_24h": 0,
+          "nominal_cap_24h": 120,
+          "nominal_utilization": 0.0,
+          "cooldown_minutes": 0,
+          "observed_ticks_24h": 2,
+          "available_start_opportunities_24h": 2,
+          "idle_while_pending_24h": 0.5,
+          "idle_with_coverage_candidate_24h": 1,
+          "coverage_reviewed_paths": 0
+        }
+      }
+    },
+    {
+      "name": "utc-conversion-overflow-high",
+      "source": "coverage.utilization_digest",
+      "input": {
+        "queue": {
+          "starts": []
+        },
+        "ledger": {
+          "schema_version": 1,
+          "paths": {},
+          "runs": {},
+          "observations": {}
+        },
+        "now": "9999-12-31T23:00:00-05:00",
+        "max_starts_per_hour": 5
+      },
+      "expect": {
+        "ok": false,
+        "error": "OverflowError",
+        "message": "date value out of range"
+      }
+    },
+    {
+      "name": "utc-conversion-overflow-low",
+      "source": "coverage.utilization_digest",
+      "input": {
+        "queue": {
+          "starts": []
+        },
+        "ledger": {
+          "schema_version": 1,
+          "paths": {},
+          "runs": {},
+          "observations": {}
+        },
+        "now": "0001-01-01T00:00:00+01:00",
+        "max_starts_per_hour": 5
+      },
+      "expect": {
+        "ok": false,
+        "error": "OverflowError",
+        "message": "date value out of range"
+      }
+    },
+    {
+      "name": "utc-conversion-valid-high",
+      "source": "coverage.utilization_digest",
+      "input": {
+        "queue": {
+          "starts": []
+        },
+        "ledger": {
+          "schema_version": 1,
+          "paths": {},
+          "runs": {},
+          "observations": {}
+        },
+        "now": "9999-12-31T23:00:00Z",
+        "max_starts_per_hour": 5
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "starts_24h": 0,
+          "nominal_cap_24h": 120,
+          "nominal_utilization": 0.0,
+          "cooldown_minutes": 0,
+          "observed_ticks_24h": 0,
+          "available_start_opportunities_24h": 0,
+          "idle_while_pending_24h": null,
+          "idle_with_coverage_candidate_24h": null,
+          "coverage_reviewed_paths": 0
+        }
+      }
+    },
+    {
+      "name": "cutoff-underflow-low",
+      "source": "coverage.utilization_digest",
+      "input": {
+        "queue": {
+          "starts": []
+        },
+        "ledger": {
+          "schema_version": 1,
+          "paths": {},
+          "runs": {},
+          "observations": {}
+        },
+        "now": "0001-01-01T00:00:00Z",
+        "max_starts_per_hour": 5
+      },
+      "expect": {
+        "ok": false,
+        "error": "OverflowError",
+        "message": "date value out of range"
+      }
+    },
+    {
+      "name": "cutoff-valid-boundary",
+      "source": "coverage.utilization_digest",
+      "input": {
+        "queue": {
+          "starts": [
+            "0001-01-01T00:00:00Z",
+            "0001-01-02T00:00:00Z"
+          ]
+        },
+        "ledger": {
+          "schema_version": 1,
+          "paths": {},
+          "runs": {},
+          "observations": {}
+        },
+        "now": "0001-01-02T00:00:00Z",
+        "max_starts_per_hour": 5
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "starts_24h": 1,
+          "nominal_cap_24h": 120,
+          "nominal_utilization": 0.008333333333333333,
+          "cooldown_minutes": 0,
+          "observed_ticks_24h": 0,
+          "available_start_opportunities_24h": 0,
+          "idle_while_pending_24h": null,
+          "idle_with_coverage_candidate_24h": null,
+          "coverage_reviewed_paths": 0
+        }
+      }
+    },
+    {
+      "name": "start-timestamp-overflow",
+      "source": "coverage.utilization_digest",
+      "input": {
+        "queue": {
+          "starts": [
+            "9999-12-31T23:00:00-05:00"
+          ]
+        },
+        "ledger": {
+          "schema_version": 1,
+          "paths": {},
+          "runs": {},
+          "observations": {}
+        },
+        "now": "2026-11-09T12:00:00Z",
+        "max_starts_per_hour": 5
+      },
+      "expect": {
+        "ok": false,
+        "error": "OverflowError",
+        "message": "date value out of range"
+      }
+    },
+    {
+      "name": "observation-timestamp-overflow",
+      "source": "coverage.utilization_digest",
+      "input": {
+        "queue": {
+          "starts": []
+        },
+        "ledger": {
+          "schema_version": 1,
+          "paths": {},
+          "runs": {},
+          "observations": {
+            "9999-12-31T23:00:00-05:00": {
+              "started": false,
+              "pending": true,
+              "candidate_exists": true,
+              "blocked_reason": null
+            }
+          }
+        },
+        "now": "2026-11-09T12:00:00Z",
+        "max_starts_per_hour": 5
+      },
+      "expect": {
+        "ok": false,
+        "error": "OverflowError",
+        "message": "date value out of range"
+      }
+    },
+    {
+      "name": "observation-timestamp-valid-high",
+      "source": "coverage.utilization_digest",
+      "input": {
+        "queue": {
+          "starts": []
+        },
+        "ledger": {
+          "schema_version": 1,
+          "paths": {},
+          "runs": {},
+          "observations": {
+            "9999-12-31T23:00:00Z": {
+              "started": false,
+              "pending": true,
+              "candidate_exists": true,
+              "blocked_reason": null
+            }
+          }
+        },
+        "now": "9999-12-31T23:00:00Z",
+        "max_starts_per_hour": 5
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "starts_24h": 0,
+          "nominal_cap_24h": 120,
+          "nominal_utilization": 0.0,
+          "cooldown_minutes": 0,
+          "observed_ticks_24h": 1,
+          "available_start_opportunities_24h": 1,
+          "idle_while_pending_24h": 1,
+          "idle_with_coverage_candidate_24h": 1,
+          "coverage_reviewed_paths": 0
+        }
+      }
+    },
+    {
+      "name": "cooldown-utc-overflow",
+      "source": "coverage.utilization_digest",
+      "input": {
+        "queue": {
+          "starts": [],
+          "cooldown_until": "9999-12-31T23:00:00-05:00"
+        },
+        "ledger": {
+          "schema_version": 1,
+          "paths": {},
+          "runs": {},
+          "observations": {}
+        },
+        "now": "2026-11-09T12:00:00Z",
+        "max_starts_per_hour": 5
+      },
+      "expect": {
+        "ok": false,
+        "error": "OverflowError",
+        "message": "date value out of range"
+      }
+    },
+    {
+      "name": "missing-blocked-reason-with-invalid-timestamp",
+      "source": "coverage.utilization_digest",
+      "input": {
+        "queue": {
+          "starts": []
+        },
+        "ledger": {
+          "schema_version": 1,
+          "paths": {},
+          "runs": {},
+          "observations": {
+            "2026-11-09T11:00:00Z": {
+              "started": false,
+              "pending": true,
+              "candidate_exists": true
+            },
+            "junk": {
+              "started": false,
+              "pending": true,
+              "candidate_exists": true,
+              "blocked_reason": null
+            }
+          }
+        },
+        "now": "2026-11-09T12:00:00Z",
+        "max_starts_per_hour": 5
+      },
+      "expect": {
+        "ok": false,
+        "error": "ValueError",
+        "message": "Invalid isoformat string: 'junk'"
+      }
+    },
+    {
+      "name": "invalid-pending-with-invalid-cooldown",
+      "source": "coverage.utilization_digest",
+      "input": {
+        "queue": {
+          "starts": [],
+          "cooldown_until": "junk"
+        },
+        "ledger": {
+          "schema_version": 1,
+          "paths": {},
+          "runs": {},
+          "observations": {
+            "2026-11-09T11:00:00Z": {
+              "started": false,
+              "pending": "x",
+              "candidate_exists": true,
+              "blocked_reason": null
+            }
+          }
+        },
+        "now": "2026-11-09T12:00:00Z",
+        "max_starts_per_hour": 5
+      },
+      "expect": {
+        "ok": false,
+        "error": "ValueError",
+        "message": "Invalid isoformat string: 'junk'"
+      }
+    },
+    {
+      "name": "invalid-candidate-before-invalid-pending",
+      "source": "coverage.utilization_digest",
+      "input": {
+        "queue": {
+          "starts": []
+        },
+        "ledger": {
+          "schema_version": 1,
+          "paths": {},
+          "runs": {},
+          "observations": {
+            "2026-11-09T11:00:00Z": {
+              "started": false,
+              "pending": true,
+              "candidate_exists": "x",
+              "blocked_reason": null
+            },
+            "2026-11-09T11:10:00Z": {
+              "started": false,
+              "pending": "x",
+              "candidate_exists": true,
+              "blocked_reason": null
+            }
+          }
+        },
+        "now": "2026-11-09T12:00:00Z",
+        "max_starts_per_hour": 5
+      },
+      "expect": {
+        "ok": false,
+        "error": "TypeError",
+        "message": "unsupported operand type(s) for +: 'int' and 'str'"
+      }
+    },
+    {
       "name": "naive-now-refused",
       "source": "coverage.utilization_digest",
       "input": {

@@ -26,10 +26,11 @@
  *   `ValueError`, not UTC.
  */
 import { JsonNumber, JsonObject } from './jsonValue.js';
-import { civilFromDays, parseUtc } from './utc.js';
+import { civilFromDays, daysFromCivil, parseUtcUnchecked } from './utc.js';
 
 const DAY_MICROS = 86_400n * 1_000_000n;
 const MICROS_PER_SECOND = 1_000_000n;
+const MIN_DATETIME_MICROS = BigInt(daysFromCivil(1, 1, 1)) * DAY_MICROS;
 const INT64_MAX = (1n << 63n) - 1n;
 const INT64_MIN = -(1n << 63n);
 const INT32_MAX = 2_147_483_647;
@@ -90,7 +91,7 @@ type NumericOperand =
 
 type PythonSum =
   | { readonly kind: 'int'; readonly value: bigint }
-  | { readonly kind: 'float'; readonly value: number };
+  | { readonly kind: 'compensated'; readonly hi: number; readonly lo: number };
 
 /**
  * `coverage.utilization_digest`.
@@ -110,6 +111,9 @@ export function utilizationDigest(
 
   const now = coverageTime(options.now);
   const cutoff = now - DAY_MICROS;
+  if (cutoff < MIN_DATETIME_MICROS) {
+    throw new CoverageUtilizationError('date value out of range', 'OverflowError');
+  }
   const starts = queueGet(queue, 'starts', []);
   let starts24h = 0;
   for (const value of pythonIterable(starts)) {
@@ -118,29 +122,34 @@ export function utilizationDigest(
   }
 
   const observations = dictGet(ledger, 'observations');
-  let observed = 0;
-  let available = 0;
-  let idleWhilePending: PythonSum = { kind: 'int', value: 0n };
-  let idleWithCandidate: PythonSum = { kind: 'int', value: 0n };
+  const windowed: unknown[] = [];
   for (const [key, value] of dictEntries(observations)) {
     const at = coverageTime(key);
-    if (!(cutoff < at && at <= now)) continue;
-    observed += 1;
-    const blocked = dictGet(value, 'blocked_reason');
-    if (pyTruthy(blocked)) continue;
-    available += 1;
-    const started = dictGet(value, 'started');
-    if (pyTruthy(started)) continue;
-    idleWhilePending = pythonAdd(idleWhilePending, dictGet(value, 'pending'));
-    idleWithCandidate = pythonAdd(idleWithCandidate, dictGet(value, 'candidate_exists'));
+    if (cutoff < at && at <= now) windowed.push(value);
   }
+  const availableRows = windowed.filter((value) => !pyTruthy(dictGet(value, 'blocked_reason')));
+  const idleRows = availableRows.filter((value) => !pyTruthy(dictGet(value, 'started')));
+  const observed = windowed.length;
+  const available = availableRows.length;
 
   const cap24 = multiplyBy24(cap);
+  const nominalUtilization = JsonNumber.float(divideStarts(starts24h, cap24.operand));
   const cooldown = cooldownMinutes(queue, now);
+  let idleWhilePending: PythonSum = { kind: 'int', value: 0n };
+  let idleWithCandidate: PythonSum = { kind: 'int', value: 0n };
+  if (observed > 0) {
+    for (const value of idleRows) {
+      idleWhilePending = pythonAdd(idleWhilePending, dictGet(value, 'pending'));
+    }
+    for (const value of idleRows) {
+      idleWithCandidate = pythonAdd(idleWithCandidate, dictGet(value, 'candidate_exists'));
+    }
+  }
+
   return {
     starts_24h: starts24h,
     nominal_cap_24h: cap24.value,
-    nominal_utilization: JsonNumber.float(divideStarts(starts24h, cap24.operand)),
+    nominal_utilization: nominalUtilization,
     cooldown_minutes: cooldown,
     observed_ticks_24h: observed,
     available_start_opportunities_24h: available,
@@ -318,8 +327,8 @@ function coverageTime(value: unknown): bigint {
 }
 
 function coverageTimeFromString(value: string): bigint {
-  const instant = parseUtc(value);
-  if (instant === null) {
+  const micros = parseUtcUnchecked(value);
+  if (micros === null) {
     throw new CoverageUtilizationError(
       `Invalid isoformat string: '${value.replaceAll('Z', '+00:00')}'`,
     );
@@ -330,7 +339,13 @@ function coverageTimeFromString(value: string): bigint {
   if (DATE_ONLY.test(value) || DATE_ONLY_WITH_ZONE.test(value) || !HAS_ZONE_SUFFIX.test(value)) {
     throw new CoverageUtilizationError('timestamps must have a timezone');
   }
-  return instant.epochMicros;
+  // `fromisoformat` parsed a valid local datetime; `astimezone(UTC)` overflows
+  // when the offset carries it outside years 1..9999.
+  const { year } = civilFromDays(Number(floorDivBig(micros, DAY_MICROS)));
+  if (year < 1 || year > 9999) {
+    throw new CoverageUtilizationError('date value out of range', 'OverflowError');
+  }
+  return micros;
 }
 
 const DATE_ONLY = /^(?:\d{4}-\d{2}-\d{2}|\d{4}\d{2}\d{2}|\d{4}-W\d{2}(?:-\d)?|\d{4}W\d{2}\d?)$/u;
@@ -480,6 +495,9 @@ function pythonAdd(total: PythonSum, value: unknown): PythonSum {
     if (typeof value === 'boolean') {
       return { kind: 'int', value: total.value + (value ? 1n : 0n) };
     }
+    if (typeof value === 'bigint') {
+      return { kind: 'int', value: total.value + value };
+    }
     if (typeof value === 'number') {
       if (Number.isInteger(value)) {
         if (!Number.isSafeInteger(value)) {
@@ -490,23 +508,25 @@ function pythonAdd(total: PythonSum, value: unknown): PythonSum {
         }
         return { kind: 'int', value: total.value + BigInt(value) };
       }
-      return { kind: 'float', value: Number(total.value) + value };
+      return compensatedFromInt(total.value, value);
     }
     if (value instanceof JsonNumber) {
       return value.kind === 'int'
         ? { kind: 'int', value: total.value + (value.integer as bigint) }
-        : { kind: 'float', value: Number(total.value) + (value.float as number) };
+        : compensatedFromInt(total.value, value.float as number);
     }
     throw new CoverageUtilizationError(
       `unsupported operand type(s) for +: 'int' and '${pythonTypeName(value)}'`,
       'TypeError',
     );
   }
-  if (typeof value === 'boolean') return { kind: 'float', value: total.value + (value ? 1 : 0) };
-  if (typeof value === 'number') return { kind: 'float', value: total.value + value };
+  if (typeof value === 'boolean') return compensatedAdd(total, value ? 1 : 0);
+  if (typeof value === 'bigint') return compensatedAdd(total, pythonIntToDouble(value));
+  if (typeof value === 'number') return compensatedAdd(total, value);
   if (value instanceof JsonNumber) {
-    const addend = value.kind === 'int' ? Number(value.integer) : (value.float as number);
-    return { kind: 'float', value: total.value + addend };
+    const addend =
+      value.kind === 'int' ? pythonIntToDouble(value.integer as bigint) : (value.float as number);
+    return compensatedAdd(total, addend);
   }
   throw new CoverageUtilizationError(
     `unsupported operand type(s) for +: 'float' and '${pythonTypeName(value)}'`,
@@ -514,11 +534,44 @@ function pythonAdd(total: PythonSum, value: unknown): PythonSum {
   );
 }
 
+/**
+ * CPython `sum()` switches to a compensated (Neumaier) float accumulator as
+ * soon as the running result is a float; see `Python/bltinmodule.c`.
+ */
+function compensatedFromInt(total: bigint, value: number): PythonSum {
+  return { kind: 'compensated', hi: pythonIntToDouble(total) + value, lo: 0 };
+}
+
+function compensatedAdd(
+  total: { readonly hi: number; readonly lo: number },
+  value: number,
+): PythonSum {
+  const next = total.hi + value;
+  const lo =
+    Math.abs(total.hi) >= Math.abs(value)
+      ? total.lo + (total.hi - next + value)
+      : total.lo + (value - next + total.hi);
+  return { kind: 'compensated', hi: next, lo };
+}
+
+function compensatedToDouble(total: { readonly hi: number; readonly lo: number }): number {
+  if (total.lo !== 0 && Number.isFinite(total.lo)) return total.hi + total.lo;
+  return total.hi;
+}
+
+function pythonIntToDouble(value: bigint): number {
+  const result = Number(value);
+  if (!Number.isFinite(result)) {
+    throw new CoverageUtilizationError('int too large to convert to float', 'OverflowError');
+  }
+  return result;
+}
+
 function encodeSum(sum: PythonSum): number | JsonNumber {
   if (sum.kind === 'int') {
     return Number.isSafeInteger(Number(sum.value)) ? Number(sum.value) : JsonNumber.int(sum.value);
   }
-  return JsonNumber.float(sum.value);
+  return JsonNumber.float(compensatedToDouble(sum));
 }
 
 function pyTruthy(value: unknown): boolean {

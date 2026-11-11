@@ -1140,6 +1140,211 @@ def utilization_family() -> Dict[str, Any]:
             },
         )
     )
+    cases.append(
+        case(
+            "compensated-float-idle-sum",
+            ledger={
+                "schema_version": 1,
+                "paths": {},
+                "runs": {},
+                "observations": {
+                    f"2026-11-09T11:{minute:02d}:00Z": row(pending=0.1)
+                    for minute in range(10)
+                },
+            },
+        )
+    )
+    cases.append(
+        case(
+            "compensated-cancellation-idle-sum",
+            ledger={
+                "schema_version": 1,
+                "paths": {},
+                "runs": {},
+                "observations": {
+                    "2026-11-09T11:00:00Z": row(pending=1e16),
+                    "2026-11-09T11:10:00Z": row(pending=1.0),
+                    "2026-11-09T11:20:00Z": row(pending=-1e16),
+                },
+            },
+        )
+    )
+    cases.append(
+        case(
+            "mixed-large-int-float-idle-sum",
+            ledger={
+                "schema_version": 1,
+                "paths": {},
+                "runs": {},
+                "observations": {
+                    "2026-11-09T11:00:00Z": row(pending=10**30),
+                    "2026-11-09T11:10:00Z": row(pending=0.5),
+                },
+            },
+        )
+    )
+    cases.append(
+        case(
+            "mixed-float-large-int-idle-sum",
+            ledger={
+                "schema_version": 1,
+                "paths": {},
+                "runs": {},
+                "observations": {
+                    "2026-11-09T11:00:00Z": row(pending=0.5),
+                    "2026-11-09T11:10:00Z": row(pending=10**30),
+                },
+            },
+        )
+    )
+    cases.append(
+        case(
+            "huge-int-float-idle-overflow",
+            ledger={
+                "schema_version": 1,
+                "paths": {},
+                "runs": {},
+                "observations": {
+                    "2026-11-09T11:00:00Z": row(pending=10**400),
+                    "2026-11-09T11:10:00Z": row(pending=0.5),
+                },
+            },
+        )
+    )
+    cases.append(
+        case(
+            "float-huge-int-idle-overflow",
+            ledger={
+                "schema_version": 1,
+                "paths": {},
+                "runs": {},
+                "observations": {
+                    "2026-11-09T11:00:00Z": row(pending=0.5),
+                    "2026-11-09T11:10:00Z": row(pending=10**400),
+                },
+            },
+        )
+    )
+    cases.append(
+        case(
+            "bool-int-idle-sum-stays-int",
+            ledger={
+                "schema_version": 1,
+                "paths": {},
+                "runs": {},
+                "observations": {
+                    "2026-11-09T11:00:00Z": row(pending=True),
+                    "2026-11-09T11:10:00Z": row(pending=2),
+                },
+            },
+        )
+    )
+    cases.append(
+        case(
+            "float-bool-idle-sum",
+            ledger={
+                "schema_version": 1,
+                "paths": {},
+                "runs": {},
+                "observations": {
+                    "2026-11-09T11:00:00Z": row(pending=0.5, candidate_exists=False),
+                    "2026-11-09T11:10:00Z": row(pending=False, candidate_exists=True),
+                },
+            },
+        )
+    )
+    cases.append(case("utc-conversion-overflow-high", now="9999-12-31T23:00:00-05:00"))
+    cases.append(case("utc-conversion-overflow-low", now="0001-01-01T00:00:00+01:00"))
+    cases.append(case("utc-conversion-valid-high", now="9999-12-31T23:00:00Z"))
+    cases.append(case("cutoff-underflow-low", now="0001-01-01T00:00:00Z"))
+    cases.append(
+        case(
+            "cutoff-valid-boundary",
+            now="0001-01-02T00:00:00Z",
+            queue={
+                "starts": ["0001-01-01T00:00:00Z", "0001-01-02T00:00:00Z"],
+            },
+        )
+    )
+    cases.append(
+        case(
+            "start-timestamp-overflow",
+            queue={"starts": ["9999-12-31T23:00:00-05:00"]},
+        )
+    )
+    cases.append(
+        case(
+            "observation-timestamp-overflow",
+            ledger={
+                "schema_version": 1,
+                "paths": {},
+                "runs": {},
+                "observations": {"9999-12-31T23:00:00-05:00": row()},
+            },
+        )
+    )
+    cases.append(
+        case(
+            "observation-timestamp-valid-high",
+            now="9999-12-31T23:00:00Z",
+            ledger={
+                "schema_version": 1,
+                "paths": {},
+                "runs": {},
+                "observations": {"9999-12-31T23:00:00Z": row()},
+            },
+        )
+    )
+    cases.append(
+        case(
+            "cooldown-utc-overflow",
+            queue={"starts": [], "cooldown_until": "9999-12-31T23:00:00-05:00"},
+        )
+    )
+    cases.append(
+        case(
+            "missing-blocked-reason-with-invalid-timestamp",
+            ledger={
+                "schema_version": 1,
+                "paths": {},
+                "runs": {},
+                "observations": {
+                    "2026-11-09T11:00:00Z": {
+                        "started": False,
+                        "pending": True,
+                        "candidate_exists": True,
+                    },
+                    "junk": row(),
+                },
+            },
+        )
+    )
+    cases.append(
+        case(
+            "invalid-pending-with-invalid-cooldown",
+            queue={"starts": [], "cooldown_until": "junk"},
+            ledger={
+                "schema_version": 1,
+                "paths": {},
+                "runs": {},
+                "observations": {"2026-11-09T11:00:00Z": row(pending="x")},
+            },
+        )
+    )
+    cases.append(
+        case(
+            "invalid-candidate-before-invalid-pending",
+            ledger={
+                "schema_version": 1,
+                "paths": {},
+                "runs": {},
+                "observations": {
+                    "2026-11-09T11:00:00Z": row(pending=True, candidate_exists="x"),
+                    "2026-11-09T11:10:00Z": row(pending="x", candidate_exists=True),
+                },
+            },
+        )
+    )
     cases.append(case("naive-now-refused", now="2026-11-09T12:00:00"))
     cases.append(case("arbitrary-separator-is-zoned", now="2026-11-09X12:00:00Z"))
     cases.append(case("naive-arbitrary-separator-refused", now="2026-11-09X12:00:00"))
