@@ -2185,13 +2185,20 @@ class PartialHarnessCheckTests(unittest.TestCase):
         self.python_sha = _sha(self.expected["service"])
         self.node_sha = _sha(self.expected_node["service"])
         self.tick_sha = _sha(harness.expected_unit(PYTHON))
-        self.record_paths = ["/home/probe/records/history.json"]
+        self.history_path = ("/home/probe/records/"
+                             "controller-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json")
+        self.record_paths = [self.history_path]
         self.state = {"queue.json": "c" * 64, "heartbeat.json": "d" * 64}
         self.history = HISTORY
+        self.history_summary = {"path": self.history_path,
+                                "sha256": self.history, "bytes": 123}
         self.tick = {
-            "state": self.state, "history": {"sha256": self.history},
-            "records": [{"path": self.record_paths[0]}],
-            "files": {SERVICE: {"sha256": self.tick_sha}},
+            "state": self.state, "history": self.history_summary,
+            "records": [self.history_summary],
+            "files": {SERVICE: {"sha256": self.tick_sha},
+                      self.history_path: {"type": "file",
+                                          "sha256": self.history,
+                                          "size": 123}},
         }
         self.preserved = {"state": self.state,
                           "history_sha256": self.history, "record_count": 1}
@@ -2214,20 +2221,74 @@ class PartialHarnessCheckTests(unittest.TestCase):
                 "boot_id": "11111111-1111-1111-1111-111111111111"}
 
     @staticmethod
-    def _file(text):
-        return {"type": "file", "mode": 0o644, "uid": 1000, "gid": 1000,
+    def _file(key, text, mode=0o644):
+        return {"path": harness.PARTIAL_FILE_PATHS[key], "type": "file",
+                "mode": mode, "uid": 1000, "gid": 1000,
                 "sha256": _sha(text), "size": len(text.encode())}
 
     @staticmethod
     def _inventory_file(text):
-        return {**PartialHarnessCheckTests._file(text),
+        return {"type": "file", "mode": 0o644, "uid": 1000, "gid": 1000,
+                "sha256": _sha(text), "size": len(text.encode()),
                 "xattrs": [],
                 "bytes_b64": base64.b64encode(text.encode()).decode()}
 
     @staticmethod
-    def _link(target):
+    def _link(key, target):
+        return {"path": harness.PARTIAL_FILE_PATHS[key], "type": "symlink",
+                "mode": 0o777, "uid": 1000, "gid": 1000, "target": target}
+
+    @staticmethod
+    def _inventory_link(target):
         return {"type": "symlink", "mode": 0o777, "uid": 1000, "gid": 1000,
                 "target": target, "xattrs": []}
+
+    @staticmethod
+    def _missing(key):
+        return {"path": harness.PARTIAL_FILE_PATHS[key], "type": "missing"}
+
+    @staticmethod
+    def _completions_text(entries):
+        return "".join(json.dumps(entry, sort_keys=True) + "\n"
+                       for entry in entries)
+
+    def _files(self, service, entries):
+        service_text = (self.expected_node if service == "node"
+                        else self.expected)["service"]
+        if service == "masked":
+            files = {"service": self._link("service", "/dev/null")}
+        else:
+            files = {"service": self._file("service", service_text)}
+        files.update({
+            "timer": self._file("timer", self.expected["timer"]),
+            "timer_wants": self._link("timer_wants", "../crq-repair.timer"),
+            "path": self._file("path", self.expected["path"]),
+            "path_wants": self._link("path_wants", "../crq-repair.path"),
+            "dropin": self._file("dropin", self.expected["dropin"]),
+            "staged": self._missing("staged"),
+            "trigger": self._missing("trigger"),
+            "completions": self._file(
+                "completions", self._completions_text(entries), mode=0o664),
+            "caller": self._file("caller", harness.PARTIAL_CALLER_TEXT),
+            "blocker": self._file("blocker", harness.PARTIAL_BLOCKER_TEXT),
+        })
+        return files
+
+    def _metadata(self, service, entries):
+        service_meta = (self._inventory_link("/dev/null")
+                        if service == "masked" else self._inventory_file(
+                            (self.expected_node if service == "node"
+                             else self.expected)["service"]))
+        return {
+            "service": service_meta,
+            "timer": self._inventory_file(self.expected["timer"]),
+            "timer_wants": self._inventory_link("../crq-repair.timer"),
+            "path": self._inventory_file(self.expected["path"]),
+            "path_wants": self._inventory_link("../crq-repair.path"),
+            "dropin": self._inventory_file(self.expected["dropin"]),
+            "staged": {"type": "missing"},
+            "trigger": {"type": "missing"},
+        }
 
     @staticmethod
     def _manager(invocation, pid="100"):
@@ -2255,15 +2316,6 @@ class PartialHarnessCheckTests(unittest.TestCase):
                 "sha256": hashlib.sha256(raw).hexdigest(),
                 "bytes": len(raw)}
 
-    def _base_files(self):
-        return {"timer": self._file(self.expected["timer"]),
-                "timer_wants": self._link("../crq-repair.timer"),
-                "path": self._file(self.expected["path"]),
-                "path_wants": self._link("../crq-repair.path"),
-                "dropin": self._file(self.expected["dropin"]),
-                "staged": {"type": "missing"},
-                "trigger": {"type": "missing"}}
-
     def _units(self, service_load="loaded", service_active="inactive",
                timer_active="active", path_active="inactive"):
         return {
@@ -2282,11 +2334,11 @@ class PartialHarnessCheckTests(unittest.TestCase):
                 "FragmentPath": harness.REPAIR_PATHS["path"]},
         }
 
-    def _snapshot(self, boot, manager, files, units, completions):
+    def _snapshot(self, boot, manager, files, units, completions, metadata):
         return {"boot_id": boot, "manager": manager,
                 "repair_files": files, "repair_units": units,
                 "repair_completions": list(completions), "jobs": [],
-                "partial_metadata": {}, "tick": copy.deepcopy(self.tick)}
+                "partial_metadata": metadata, "tick": copy.deepcopy(self.tick)}
 
     def _fence(self, count, completions):
         return {"rc": 3, "timeout": False,
@@ -2298,11 +2350,19 @@ class PartialHarnessCheckTests(unittest.TestCase):
                         "queue_drain": {"drained": True, "blocked": []},
                         "jobs": [],
                         "jobs_observation": {
-                            "command": {"rc": 0, "timeout": False,
+                            "command": {"argv": harness.LIST_JOBS_ARGV,
+                                        "rc": 0, "timeout": False,
                                         "stdout": "", "stderr": ""},
                             "lines": []},
+                        "service_stop": {
+                            "argv": ["systemctl", "--user", "stop",
+                                     harness.REPAIR_UNIT],
+                            "rc": 0, "timeout": False,
+                            "stdout": "", "stderr": ""},
                         "masked": {"LoadState": "masked"},
-                        "direct_start": {"rc": 1,
+                        "direct_start": {"argv": ["systemctl", "--user",
+                                                  "start", harness.REPAIR_UNIT],
+                                         "rc": 1, "timeout": False,
                                          "stdout": "",
                                          "stderr": "Unit is masked."},
                         "owned": {"pids": [], "main_pid": 0},
@@ -2325,11 +2385,13 @@ class PartialHarnessCheckTests(unittest.TestCase):
         boot_b = "22222222-2222-2222-2222-222222222222"
         manager_a = self._manager("a" * 32, "100")
         manager_b = self._manager("b" * 32, "101")
-        files = self._base_files()
-        files["service"] = self._file(self.expected["service"])
+        files = self._files("python", self.completions)
         prepare = {
             "prepared": {"state": self.state, "history_sha256": HISTORY,
                          "record_paths": self.record_paths,
+                         "initial_snapshot": {
+                             "history": self.history_summary,
+                             "records": [self.history_summary]},
                          "runner_source": {"sha256": RUNNER_SHA,
                                            "crq_sha256": "e" * 64,
                                            "bytes": len(RUNNER_BYTES)}},
@@ -2347,8 +2409,8 @@ class PartialHarnessCheckTests(unittest.TestCase):
             "timer": self._inventory_file(self.expected["timer"]),
             "path": self._inventory_file(self.expected["path"]),
             "dropin": self._inventory_file(self.expected["dropin"]),
-            "timer_wants": self._link("../crq-repair.timer"),
-            "path_wants": self._link("../crq-repair.path"),
+            "timer_wants": self._inventory_link("../crq-repair.timer"),
+            "path_wants": self._inventory_link("../crq-repair.path"),
         }
         install = {
             "inventory": {
@@ -2378,38 +2440,46 @@ class PartialHarnessCheckTests(unittest.TestCase):
             kind = harness.PARTIAL_CASES[case]["kind"]
             hook = harness.PARTIAL_CASES[case]["hook"]
             record = self._record(case, family)
-            before_files = copy.deepcopy(files)
+            before_service = "masked" if family == "restore" else "python"
+            before_files = self._files(before_service, self.completions)
+            before_metadata = self._metadata(before_service, self.completions)
             before_units = self._units()
             if family == "restore":
-                before_files["service"] = self._link("/dev/null")
                 before_units = self._units(
                     service_load="masked", timer_active="inactive")
             before = self._snapshot(boot_a, manager_a, before_files,
-                                    before_units, self.completions)
+                                    before_units, self.completions,
+                                    before_metadata)
             new = self._completion(len(self.completions) + 1,
                                    NODE if family == "activation" else PYTHON)
-            after_files = copy.deepcopy(before_files)
-            after_files["service"] = self._file(
-                self.expected_node["service"] if family == "activation"
-                else self.expected["service"])
+            after_service = "node" if family == "activation" else "python"
             after_units = self._units()
             if family == "activation" and hook == "start-after-service":
                 after_units = self._units(timer_active="inactive")
             if family == "restore":
-                after_files["service"] = self._file(self.expected["service"])
-            after_completions = list(self.completions) + [new]
+                after_units = self._units(timer_active="inactive")
+            after_completions = (list(self.completions) + [new]
+                                 if family == "activation"
+                                 else list(self.completions))
+            after_files = self._files(after_service, after_completions)
+            after_metadata = self._metadata(after_service, after_completions)
             after = self._snapshot(boot_a, manager_a, after_files,
-                                   after_units, after_completions)
+                                   after_units, after_completions,
+                                   after_metadata)
             boundary = {
                 "case": case, "hook": hook, "before": before, "after": after,
                 "cli": {"rc": -9, "timeout": False}, "record": record,
-                "completion_delta": [new], "preserved": self.preserved,
+                "hook_marker": {"phase": hook, "pid": 4242,
+                                "at": 1.0},
+                "completion_delta": ([new] if family == "activation" else []),
+                "preserved": self.preserved,
                 "source": self.source,
             }
             if family == "restore":
                 boundary["drained_record"] = self._drained_record(case)
             phases["partial-" + case] = boundary
-            self.completions = after_completions
+            if family == "activation":
+                self.completions = after_completions
             post_boot = boot_a if kind == "manager" else boot_b
             post_manager = manager_b if kind == "manager" else manager_b
             observe_before = copy.deepcopy(after)
@@ -2424,11 +2494,15 @@ class PartialHarnessCheckTests(unittest.TestCase):
                                         self.completions),
                 "repeat": self._fence(len(self.completions),
                                       self.completions),
-                "new_completions": [new], "preserved": self.preserved,
+                "new_completions": ([new] if family == "activation" else []),
+                "preserved": self.preserved,
                 "source": self.source,
             }
             fenced = copy.deepcopy(observe_before)
-            fenced["repair_files"]["service"] = self._link("/dev/null")
+            fenced["repair_files"] = self._files(
+                "masked", self.completions)
+            fenced["partial_metadata"] = self._metadata(
+                "masked", self.completions)
             fenced["repair_units"] = self._units(
                 service_load="masked", timer_active="inactive")
             fenced["repair_completions"] = list(self.completions)
@@ -2458,9 +2532,7 @@ class PartialHarnessCheckTests(unittest.TestCase):
                     "ssh_ready": {}, "manager_ready": {},
                     "qemu_identity_verified": True,
                 }
-        final_files = {"service": self._file(self.expected["service"]),
-                       "staged": {"type": "missing"},
-                       "trigger": {"type": "missing"}}
+        final_files = self._files("python", self.completions)
         inspect = {
             "files": final_files, "units": self._units(),
             "case_records": {case: phases["partial-" + case + "-observe"]
@@ -2498,6 +2570,8 @@ class PartialHarnessCheckTests(unittest.TestCase):
         after = broken["partial-" + case]["after"]
         after["repair_completions"].append(
             PartialHarnessCheckTests._completion(99, NODE))
+        after["repair_files"] = self._files(
+            "node", after["repair_completions"])
         broken["partial-" + case]["completion_delta"].append(
             PartialHarnessCheckTests._completion(99, NODE))
         _, problems = harness._partial_checks(broken, restarts, reboots)
@@ -2509,10 +2583,18 @@ class PartialHarnessCheckTests(unittest.TestCase):
         phase = phases_value["partial-" + case]
         prior = PartialHarnessCheckTests._completion(98, PYTHON)
         phase["after"]["repair_completions"].append(prior)
+        phase["after"]["repair_files"] = self._files(
+            "node", phase["after"]["repair_completions"])
         observe = phases_value["partial-" + case + "-observe"]
         observe["before"]["repair_completions"].append(prior)
+        observe["before"]["repair_files"] = self._files(
+            "node", observe["before"]["repair_completions"])
         observe["after_recovery"]["repair_completions"].append(prior)
+        observe["after_recovery"]["repair_files"] = self._files(
+            "masked", observe["after_recovery"]["repair_completions"])
         observe["after_repeat"]["repair_completions"].append(prior)
+        observe["after_repeat"]["repair_files"] = self._files(
+            "masked", observe["after_repeat"]["repair_completions"])
         entries = observe["before"]["repair_completions"]
         observe["recovery"] = self._fence(len(entries), entries)
         observe["repeat"] = self._fence(len(entries), entries)
@@ -2548,4 +2630,94 @@ class PartialHarnessCheckTests(unittest.TestCase):
             problems = []
             harness._verify_partial_raw({}, root, problems, phases_value)
             self.assertTrue(any("record set is not one" in item
+                                for item in problems))
+
+    def test_partial_rejects_contradictory_recovery_commands(self):
+        cases = (
+            ("jobs stdout", lambda drain: drain["jobs_observation"][
+                "command"].__setitem__(
+                    "stdout", "211 crq-repair.service start waiting\n"),
+             "list-jobs"),
+            ("jobs argv", lambda drain: drain["jobs_observation"][
+                "command"].__setitem__("argv", ["true"]),
+             "list-jobs"),
+            ("jobs rc", lambda drain: drain["jobs_observation"][
+                "command"].__setitem__("rc", False),
+             "list-jobs"),
+            ("stop argv", lambda drain: drain["service_stop"].__setitem__(
+                "argv", ["true"]),
+             "service stop"),
+            ("direct argv", lambda drain: drain["direct_start"].__setitem__(
+                "argv", ["true"]),
+             "direct start"),
+        )
+        for label, mutate, expected in cases:
+            phases_value, restarts, reboots = self.evidence()
+            drain = phases_value["partial-activation-service-restart-observe"][
+                "recovery"]["json"]["drain"]
+            mutate(drain)
+            _, problems = harness._partial_checks(
+                phases_value, restarts, reboots)
+            self.assertTrue(any(expected in item for item in problems), label)
+
+    def test_partial_rejects_paired_file_and_metadata_omissions(self):
+        keys = ("timer", "timer_wants", "path", "path_wants", "dropin",
+                "trigger")
+        phases_value, restarts, reboots = self.evidence()
+        case = "activation-service-restart"
+        boundary = phases_value["partial-" + case]
+        observe = phases_value["partial-" + case + "-observe"]
+        for key in keys:
+            boundary["before"]["repair_files"].pop(key)
+            boundary["after"]["repair_files"].pop(key)
+            observe["before"]["repair_files"].pop(key)
+        _, problems = harness._partial_checks(phases_value, restarts, reboots)
+        self.assertTrue(any("file map is not the exact owned set" in item
+                            for item in problems))
+
+        phases_value, restarts, reboots = self.evidence()
+        boundary = phases_value["partial-" + case]
+        observe = phases_value["partial-" + case + "-observe"]
+        for key in ("timer", "timer_wants", "path", "path_wants", "dropin",
+                    "trigger"):
+            boundary["before"]["partial_metadata"].pop(key)
+            boundary["after"]["partial_metadata"].pop(key)
+            observe["before"]["partial_metadata"].pop(key)
+        _, problems = harness._partial_checks(phases_value, restarts, reboots)
+        self.assertTrue(any("metadata map is not the exact owned set" in item
+                            for item in problems))
+
+        phases_value, restarts, reboots = self.evidence()
+        boundary = phases_value["partial-" + case]
+        boundary["after"]["repair_files"]["timer"]["uid"] = 0
+        _, problems = harness._partial_checks(phases_value, restarts, reboots)
+        self.assertTrue(any("timer file state is not the exact" in item
+                            for item in problems))
+
+    def test_partial_rejects_unbound_completion_baseline(self):
+        for mutation, expected in (
+                (lambda baseline: baseline.__setitem__("sequences", []),
+                 "sequences"),
+                (lambda baseline: baseline.__setitem__("max_sequence", 999999),
+                 "maximum")):
+            phases_value, restarts, reboots = self.evidence()
+            recovery = phases_value[
+                "partial-activation-service-restart-observe"]["recovery"]
+            mutation(recovery["json"]["drain"]["completion_baseline"])
+            _, problems = harness._partial_checks(
+                phases_value, restarts, reboots)
+            self.assertTrue(any(expected in item for item in problems))
+
+    def test_partial_raw_rejects_retained_tick_history_mutation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            records = root / "records"
+            records.mkdir()
+            raw = records / pathlib.PurePosixPath(self.history_path).name
+            raw.write_text("{}")
+            phases_value, _, _ = self.evidence()
+            problems = []
+            harness._verify_partial_raw({}, root, problems, phases_value)
+            self.assertTrue(any("partial tick" in item
+                                or "record digest" in item
                                 for item in problems))

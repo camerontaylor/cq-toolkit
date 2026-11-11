@@ -1435,6 +1435,35 @@ REPAIR_STAGED = UNIT_DIR + "/." + REPAIR_UNIT + ".staged"
 REPAIR_TRIGGER = FIXTURE_DIR + "/repair-path-trigger"
 REPAIR_PAUSE_MARKER = FIXTURE_DIR + "/activators-pause.json"
 PARTIAL_COMPLETIONS = FIXTURE_DIR + "/completions-crq-repair.jsonl"
+PARTIAL_FILE_KEYS = ("service", "timer", "timer_wants", "path", "path_wants",
+                     "dropin", "staged", "trigger", "completions", "caller",
+                     "blocker")
+PARTIAL_METADATA_KEYS = ("service", "timer", "timer_wants", "path",
+                         "path_wants", "dropin", "staged", "trigger")
+PARTIAL_FILE_PATHS = {
+    **REPAIR_PATHS,
+    "staged": REPAIR_STAGED,
+    "trigger": REPAIR_TRIGGER,
+    "completions": PARTIAL_COMPLETIONS,
+    "caller": UNIT_DIR + "/crq-probe-caller.service",
+    "blocker": UNIT_DIR + "/crq-probe-blocker.service",
+}
+PARTIAL_CALLER_TEXT = (
+    "[Unit]\n"
+    "Description=CRQ proof dependency caller\n"
+    "Requires=crq-repair.service\n"
+    "After=crq-repair.service\n"
+    "\n"
+    "[Service]\n"
+    "Type=oneshot\n"
+    "ExecStart=/bin/true\n")
+PARTIAL_BLOCKER_TEXT = (
+    "[Unit]\n"
+    "Description=CRQ proof queued-job blocker\n"
+    "\n"
+    "[Service]\n"
+    "Type=oneshot\n"
+    "ExecStart=/bin/sleep 10\n")
 
 
 def _repair_adapter():
@@ -1447,14 +1476,22 @@ def _repair_adapter():
         guest_only=True)
 
 
+_REPAIR_EXPECTED_CACHE = {}
+
+
 def _repair_expected(runtime):
+    cached = _REPAIR_EXPECTED_CACHE.get(runtime)
+    if cached is not None:
+        return dict(cached)
     adapter = _repair_adapter()
-    return {
+    expected = {
         "service": adapter.render_unit(runtime),
         "timer": adapter.render_timer(),
         "path": adapter.render_path(),
         "dropin": adapter.render_dropin(),
     }
+    _REPAIR_EXPECTED_CACHE[runtime] = dict(expected)
+    return expected
 
 
 def _stat_file(state, text, label, problems):
@@ -2619,16 +2656,168 @@ def _partial_cli_sigkill(cli, label, problems):
     return ok
 
 
-def _partial_file_map(files):
-    keys = ("service", "timer", "timer_wants", "path", "path_wants",
-            "dropin", "staged", "trigger")
-    return {key: (files or {}).get(key) for key in keys}
+def _partial_expected_file(key, service, entries):
+    expected = _repair_expected(
+        NODE_RUNTIME if service == "node" else PYTHON_RUNTIME)
+    if key == "service":
+        if service == "masked":
+            return {"kind": "link", "target": "/dev/null"}
+        return {"kind": "file", "text": expected["service"]}
+    if key == "timer":
+        return {"kind": "file", "text": expected["timer"]}
+    if key == "timer_wants":
+        return {"kind": "link", "target": "../" + REPAIR_TIMER}
+    if key == "path":
+        return {"kind": "file", "text": expected["path"]}
+    if key == "path_wants":
+        return {"kind": "link", "target": "../" + REPAIR_PATH}
+    if key == "dropin":
+        return {"kind": "file", "text": expected["dropin"]}
+    if key in ("staged", "trigger"):
+        return {"kind": "missing"}
+    if key == "completions":
+        return {"kind": "completions"}
+    if key == "caller":
+        return {"kind": "file", "text": PARTIAL_CALLER_TEXT}
+    if key == "blocker":
+        return {"kind": "file", "text": PARTIAL_BLOCKER_TEXT}
+    raise KeyError(key)
 
 
-def _partial_metadata_map(metadata):
-    keys = ("service", "timer", "timer_wants", "path", "path_wants",
-            "dropin", "staged", "trigger")
-    return {key: (metadata or {}).get(key) for key in keys}
+def _partial_expected_text(key, entries):
+    if key == "completions":
+        if not isinstance(entries, list):
+            return None
+        return "".join(json.dumps(entry, sort_keys=True) + "\n"
+                       for entry in entries)
+    return _partial_expected_file(
+        key, "python", entries).get("text")
+
+
+def _partial_file_state_ok(state, key, service, entries, label, problems):
+    expected = _partial_expected_file(key, service, entries)
+    path = PARTIAL_FILE_PATHS[key]
+    if not isinstance(state, dict):
+        problems.append(label + " " + key + " file state is absent")
+        return False
+    if state.get("path") != path:
+        problems.append(label + " " + key + " file path is not exact")
+        return False
+    kind = expected["kind"]
+    if kind == "missing":
+        ok = state.get("type") == "missing" and set(state) == {"path", "type"}
+    elif kind == "link":
+        ok = (state.get("type") == "symlink"
+              and state.get("target") == expected["target"]
+              and state.get("mode") == 0o777
+              and state.get("uid") == 1000 and state.get("gid") == 1000
+              and set(state) == {"path", "type", "target", "mode", "uid",
+                                 "gid"})
+    else:
+        text = (_partial_expected_text(key, entries)
+                if kind == "completions" else expected["text"])
+        if not isinstance(text, str):
+            problems.append(label + " " + key + " expected bytes are unknown")
+            return False
+        mode = 0o664 if key == "completions" else 0o644
+        ok = (state.get("type") == "file"
+              and state.get("mode") == mode
+              and state.get("uid") == 1000 and state.get("gid") == 1000
+              and state.get("sha256") == _sha(text)
+              and state.get("size") == len(text.encode())
+              and set(state) == {"path", "type", "mode", "uid", "gid",
+                                 "sha256", "size"})
+    if not ok:
+        problems.append(label + " " + key
+                        + " file state is not the exact expected shape: "
+                        + json.dumps(state)[:300])
+    return ok
+
+
+def _partial_metadata_state_ok(metadata, files, key, service, entries,
+                               label, problems):
+    expected = _partial_expected_file(key, service, entries)
+    state = (metadata or {}).get(key)
+    file_state = (files or {}).get(key) or {}
+    if not isinstance(state, dict):
+        problems.append(label + " " + key + " metadata is absent")
+        return False
+    kind = expected["kind"]
+    if kind == "missing":
+        ok = (state.get("type") == "missing"
+              and set(state) == {"type"}
+              and file_state.get("type") == "missing")
+    elif kind == "link":
+        ok = (state.get("type") == "symlink"
+              and state.get("target") == expected["target"]
+              and state.get("mode") == 0o777
+              and state.get("uid") == 1000 and state.get("gid") == 1000
+              and isinstance(state.get("xattrs"), list)
+              and set(state) == {"type", "target", "mode", "uid", "gid",
+                                 "xattrs"}
+              and file_state.get("type") == "symlink"
+              and file_state.get("target") == state.get("target")
+              and file_state.get("mode") == state.get("mode")
+              and file_state.get("uid") == state.get("uid")
+              and file_state.get("gid") == state.get("gid"))
+    else:
+        text = (_partial_expected_text(key, entries)
+                if kind == "completions" else expected["text"])
+        try:
+            data = base64.b64decode(
+                (state.get("bytes_b64") or "").encode("ascii"), validate=True)
+        except (ValueError, UnicodeEncodeError):
+            data = b""
+        ok = (state.get("type") == "file"
+              and state.get("mode") == 0o644
+              and state.get("uid") == 1000 and state.get("gid") == 1000
+              and isinstance(state.get("xattrs"), list)
+              and set(state) == {"type", "mode", "uid", "gid", "xattrs",
+                                 "bytes_b64", "sha256", "size"}
+              and isinstance(text, str) and data == text.encode()
+              and state.get("sha256") == _sha(text)
+              and state.get("size") == len(text.encode())
+              and file_state.get("type") == "file"
+              and file_state.get("sha256") == state.get("sha256")
+              and file_state.get("size") == state.get("size")
+              and file_state.get("mode") == state.get("mode")
+              and file_state.get("uid") == state.get("uid")
+              and file_state.get("gid") == state.get("gid"))
+    if not ok:
+        problems.append(label + " " + key
+                        + " metadata does not bind the file bytes or shape: "
+                        + json.dumps(state)[:300])
+    return ok
+
+
+def _partial_file_observations(files, metadata, service, entries, label,
+                               problems):
+    ok = True
+    if not isinstance(files, dict) or set(files) != set(PARTIAL_FILE_KEYS):
+        problems.append(label + " file map is not the exact owned set")
+        ok = False
+        files = files if isinstance(files, dict) else {}
+    for key in PARTIAL_FILE_KEYS:
+        if key not in files:
+            problems.append(label + " " + key + " file state is absent")
+            ok = False
+            continue
+        ok = _partial_file_state_ok(files[key], key, service, entries,
+                                    label, problems) and ok
+    if metadata is not None:
+        if not isinstance(metadata, dict) \
+                or set(metadata) != set(PARTIAL_METADATA_KEYS):
+            problems.append(label + " metadata map is not the exact owned set")
+            ok = False
+            metadata = metadata if isinstance(metadata, dict) else {}
+        for key in PARTIAL_METADATA_KEYS:
+            if key not in metadata:
+                problems.append(label + " " + key + " metadata is absent")
+                ok = False
+                continue
+            ok = _partial_metadata_state_ok(
+                metadata, files, key, service, entries, label, problems) and ok
+    return ok
 
 
 def _partial_tick_ok(tick, prepared, initial, label, problems):
@@ -2702,18 +2891,28 @@ def _partial_fence_ok(cli, label, problems):
     if not isinstance(queue, dict) or queue.get("drained") is not True:
         problems.append(label + " queue drain is not a bounded success")
     observation = drain.get("jobs_observation")
-    if not isinstance(observation, dict) \
-            or observation.get("lines") != [] \
-            or (observation.get("command") or {}).get("rc") != 0 \
-            or (observation.get("command") or {}).get("timeout") is not False:
-        problems.append(label + " job observation is not a bounded absence")
+    if not _job_observation_ok(observation, label + " job observation",
+                               problems, []):
+        problems.append(label + " job observation is not the exact bounded "
+                        "list-jobs absence")
     if drain.get("jobs") != []:
         problems.append(label + " retained a systemd job at the fence")
     if (drain.get("masked") or {}).get("LoadState") != "masked":
         problems.append(label + " did not reload the durable mask")
+    service_stop = drain.get("service_stop") or {}
+    if not _command_ok(service_stop, label + " service stop",
+                       problems, allowed=(0, 5)) \
+            or service_stop.get("argv") != ["systemctl", "--user", "stop",
+                                            REPAIR_UNIT]:
+        problems.append(label + " service stop is not the exact command")
     direct = drain.get("direct_start") or {}
-    if direct.get("rc") == 0 or "masked" not in (
-            (direct.get("stdout") or "") + (direct.get("stderr") or "")).lower():
+    if not _command_ok(direct, label + " direct start",
+                       problems, allowed=(1,)) \
+            or direct.get("argv") != ["systemctl", "--user", "start",
+                                      REPAIR_UNIT] \
+            or "masked" not in (
+                (direct.get("stdout") or "")
+                + (direct.get("stderr") or "")).lower():
         problems.append(label + " direct start was not refused as masked")
     owned = drain.get("owned") or {}
     if owned.get("pids") != [] or owned.get("main_pid") != 0:
@@ -2745,6 +2944,9 @@ def _partial_fence_ok(cli, label, problems):
         problems.append(label + " completion baseline invocations are invalid")
     if type(baseline.get("max_sequence")) is not int:
         problems.append(label + " completion baseline max sequence is invalid")
+    if type(count) is int and type(baseline.get("max_sequence")) is int \
+            and count and baseline["max_sequence"] < 1:
+        problems.append(label + " completion baseline maximum is not positive")
     return baseline
 
 
@@ -2762,6 +2964,59 @@ def _partial_fenced_state_ok(snapshot_value, label, problems):
           in ("inactive", "failed"))
     if not ok:
         problems.append(label + " did not retain the settled fence state")
+    return ok
+
+
+def _partial_completion_baseline_ok(baseline, entries, before_entries, label,
+                                    problems):
+    if not isinstance(baseline, dict):
+        problems.append(label + " completion baseline is absent")
+        return False
+    if not isinstance(entries, list) or not isinstance(before_entries, list):
+        problems.append(label + " settled completion inventory is not a list")
+        return False
+    ok = True
+    for index, entry in enumerate(entries):
+        if not _completion_shape_ok(entry, label + ".entries[" + str(index)
+                                    + "]", problems):
+            ok = False
+            continue
+        boot = entry.get("boot_id")
+        if not isinstance(boot, str) or not boot:
+            problems.append(label + " completion has no boot identity")
+            ok = False
+    if before_entries and entries[:len(before_entries)] != before_entries:
+        problems.append(label + " settled completion log is not append-only "
+                        "from the pre-fence inventory")
+        ok = False
+    sequences = [entry.get("sequence") for entry in entries]
+    invocations = [entry.get("invocation") for entry in entries]
+    count = len(entries)
+    maximum = max(sequences, default=0)
+    if type(baseline.get("count")) is not int or baseline["count"] != count:
+        problems.append(label + " completion baseline count is not the "
+                        "settled inventory count")
+        ok = False
+    if baseline.get("sequences") != sequences:
+        problems.append(label + " completion baseline sequences are not the "
+                        "ordered settled inventory")
+        ok = False
+    if baseline.get("invocations") != invocations:
+        problems.append(label + " completion baseline invocations are not the "
+                        "settled inventory")
+        ok = False
+    if type(baseline.get("max_sequence")) is not int \
+            or baseline["max_sequence"] != maximum:
+        problems.append(label + " completion baseline maximum is not the "
+                        "settled inventory maximum")
+        ok = False
+    if sequences != sorted(sequences) or len(sequences) != len(set(sequences)):
+        problems.append(label + " settled completion sequences are not "
+                        "strictly ordered")
+        ok = False
+    if len(invocations) != len(set(invocations)):
+        problems.append(label + " settled completion invocations are not unique")
+        ok = False
     return ok
 
 
@@ -2806,12 +3061,26 @@ def _partial_boundary_ok(case, phase, prepared, problems):
     if phase.get("hook") != spec["hook"] or phase.get("case") != case:
         problems.append(label + " does not name the exact case and hook")
         ok = False
+    marker = phase.get("hook_marker") or {}
+    if marker.get("phase") != spec["hook"] \
+            or type(marker.get("pid")) is not int or marker.get("pid") <= 0 \
+            or type(marker.get("at")) not in (int, float):
+        problems.append(label + " hook marker does not name the exact phase")
+        ok = False
     before = phase.get("before") or {}
     after = phase.get("after") or {}
     units_before = before.get("repair_units") or {}
     units_after = after.get("repair_units") or {}
     files_before = before.get("repair_files") or {}
     files_after = after.get("repair_files") or {}
+    before_service = "masked" if spec["family"] == "restore" else "python"
+    after_service = "node" if spec["family"] == "activation" else "python"
+    ok = _partial_file_observations(
+        files_before, before.get("partial_metadata"), before_service,
+        before.get("repair_completions"), label + ".before", problems) and ok
+    ok = _partial_file_observations(
+        files_after, after.get("partial_metadata"), after_service,
+        after.get("repair_completions"), label + ".after", problems) and ok
     if spec["family"] == "activation":
         expected_service = _repair_adapter().render_unit(NODE_RUNTIME)
         if (files_after.get("service") or {}).get("sha256") \
@@ -2821,21 +3090,18 @@ def _partial_boundary_ok(case, phase, prepared, problems):
     if (units_after.get(REPAIR_UNIT) or {}).get("LoadState") != "loaded":
         problems.append(label + " released service is not loaded")
         ok = False
-    before_files = _partial_file_map(files_before)
-    after_files = _partial_file_map(files_after)
     for key in ("timer", "timer_wants", "path", "path_wants", "dropin",
-                "trigger"):
-        if after_files.get(key) != before_files.get(key):
+                "staged", "trigger", "caller", "blocker"):
+        if files_after.get(key) != files_before.get(key):
             problems.append(label + " changed the " + key + " file state")
             ok = False
-    if (after_files.get("staged") or {}).get("type") != "missing":
+    if (files_after.get("staged") or {}).get("type") != "missing":
         problems.append(label + " retains a staged target")
         ok = False
-    before_meta = _partial_metadata_map(before.get("partial_metadata"))
-    after_meta = _partial_metadata_map(after.get("partial_metadata"))
     for key in ("timer", "timer_wants", "path", "path_wants", "dropin",
                 "staged", "trigger"):
-        if after_meta.get(key) != before_meta.get(key):
+        if (after.get("partial_metadata") or {}).get(key) != (
+                before.get("partial_metadata") or {}).get(key):
             problems.append(label + " changed the " + key + " metadata")
             ok = False
     if spec["family"] == "activation":
@@ -2873,8 +3139,17 @@ def _partial_boundary_ok(case, phase, prepared, problems):
         if (files_after.get("service") or {}).get("sha256") != _sha(expected_prior):
             problems.append(label + " did not restore the prior service bytes")
             ok = False
-        if (units_after.get(REPAIR_TIMER) or {}).get("ActiveState") != "active":
-            problems.append(label + " did not restore the active timer")
+        if (units_after.get(REPAIR_UNIT) or {}).get("ActiveState") != "inactive":
+            problems.append(label + " activated the service before the hook")
+            ok = False
+        if (units_after.get(REPAIR_UNIT) or {}).get("MainPID") not in ("0", ""):
+            problems.append(label + " retained a service pid at the hook")
+            ok = False
+        if after.get("jobs") != []:
+            problems.append(label + " retained a job after the restore hook")
+            ok = False
+        if (units_after.get(REPAIR_TIMER) or {}).get("ActiveState") != "inactive":
+            problems.append(label + " restored the active timer before the hook")
             ok = False
         if (units_after.get(REPAIR_PATH) or {}).get("ActiveState") != "inactive":
             problems.append(label + " activated the inactive path")
@@ -2884,8 +3159,12 @@ def _partial_boundary_ok(case, phase, prepared, problems):
                 or (phase.get("record") or {}).get("sha256") == drained.get("sha256"):
             problems.append(label + " did not advance drained to restore pending")
             ok = False
-        ok = _partial_completion_prefix_ok(
-            before, after, PYTHON_RUNTIME, label, problems) and ok
+        if after.get("repair_completions") != before.get("repair_completions"):
+            problems.append(label + " released service work before activation")
+            ok = False
+        if phase.get("completion_delta") != []:
+            problems.append(label + " retained a pre-activation completion delta")
+            ok = False
     if not _partial_tick_ok(phase.get("after", {}).get("tick"), prepared,
                             (phase.get("before") or {}).get("tick"), label,
                             problems):
@@ -2910,12 +3189,17 @@ def _partial_observe_ok(case, phase, boundary, prepared, problems):
         ok = False
     before = phase.get("before") or {}
     boundary_after = (boundary or {}).get("after") or {}
-    if _partial_file_map(before.get("repair_files")) \
-            != _partial_file_map(boundary_after.get("repair_files")):
+    before_service = (
+        "node" if spec["family"] == "activation" else "python")
+    ok = _partial_file_observations(
+        before.get("repair_files"), before.get("partial_metadata"),
+        before_service, before.get("repair_completions"),
+        label + ".before", problems) and ok
+    if before.get("repair_files") != boundary_after.get("repair_files"):
         problems.append(label + " file states changed across the event")
         ok = False
-    if _partial_metadata_map(before.get("partial_metadata")) \
-            != _partial_metadata_map(boundary_after.get("partial_metadata")):
+    if before.get("partial_metadata") \
+            != boundary_after.get("partial_metadata"):
         problems.append(label + " file metadata changed across the event")
         ok = False
     ok = _partial_activation_policy(before, label, problems) and ok
@@ -2942,17 +3226,30 @@ def _partial_observe_ok(case, phase, boundary, prepared, problems):
         after_recovery = phase.get("after_recovery") or {}
         after_repeat = phase.get("after_repeat") or {}
         entries = after_recovery.get("repair_completions") or []
-        if baseline.get("count") != len(entries):
-            problems.append(label + " produced a completion after the fence")
+        if not _partial_completion_baseline_ok(
+                baseline, entries, before_entries, label + ".recovery",
+                problems):
             ok = False
-        if baseline.get("invocations") != [item.get("invocation")
-                                           for item in entries]:
-            problems.append(label + " completion log is not the baseline prefix")
+        repeat_entries = after_repeat.get("repair_completions") or []
+        if not _partial_completion_baseline_ok(
+                repeat_baseline, repeat_entries, before_entries,
+                label + ".repeat", problems):
             ok = False
-        if len(after_repeat.get("repair_completions") or []) \
-                != repeat_baseline.get("count"):
+        if repeat_baseline != baseline:
+            problems.append(label + " repeat baseline changed the settled "
+                            "completion inventory")
+            ok = False
+        if repeat_entries != entries:
             problems.append(label + " repeat produced a completion after the fence")
             ok = False
+        ok = _partial_file_observations(
+            after_recovery.get("repair_files"),
+            after_recovery.get("partial_metadata"), "masked", entries,
+            label + ".after_recovery", problems) and ok
+        ok = _partial_file_observations(
+            after_repeat.get("repair_files"),
+            after_repeat.get("partial_metadata"), "masked", repeat_entries,
+            label + ".after_repeat", problems) and ok
         if not _partial_fenced_state_ok(after_recovery,
                                         label + ".recovery", problems):
             ok = False
@@ -3163,6 +3460,9 @@ def _partial_checks(phases, restarts=None, reboots=None):
                            "partial install path", problems))
         install_files = install.get("files") or {}
         install_units = install.get("units") or {}
+        ok = _partial_file_observations(
+            install_files, None, "python",
+            install.get("repair_completions"), "partial install", problems) and ok
         ok = ok and (
             _stat_file(install_files.get("service"), expected["service"],
                        "partial install service", problems)
@@ -3247,8 +3547,11 @@ def _partial_checks(phases, restarts=None, reboots=None):
         released = NODE_RUNTIME if PARTIAL_CASES[case]["family"] == "activation" \
             else PYTHON_RUNTIME
         delta = boundary.get("completion_delta") or []
-        completed_ok = completed_ok and bool(delta) \
-            and all(item.get("runtime") == released for item in delta)
+        if PARTIAL_CASES[case]["family"] == "activation":
+            completed_ok = completed_ok and bool(delta) \
+                and all(item.get("runtime") == released for item in delta)
+        else:
+            completed_ok = completed_ok and delta == []
 
     inspect = phases.get("partial-inspect") or {}
     final_ok = False
@@ -3256,8 +3559,12 @@ def _partial_checks(phases, restarts=None, reboots=None):
         expected = _repair_expected(PYTHON_RUNTIME)
         files = inspect.get("files") or {}
         units = inspect.get("units") or {}
+        final_ok = _partial_file_observations(
+            files, None, "python", inspect.get("completions"),
+            "final partial", problems)
         final_ok = (
-            _stat_file(files.get("service"), expected["service"],
+            final_ok
+            and _stat_file(files.get("service"), expected["service"],
                        "final partial service", problems)
             and (files.get("staged") or {}).get("type") == "missing"
             and (files.get("trigger") or {}).get("type") == "missing"
@@ -4078,6 +4385,43 @@ def _verify_partial_raw(report, raw_root, problems, phases):
                       problems)
 
     inspect = phases.get("partial-inspect") or {}
+    initial = prepared.get("initial_snapshot") or {}
+    tick = inspect.get("tick") or {}
+    history = tick.get("history")
+    if not isinstance(history, dict) or history != initial.get("history"):
+        problems.append("partial tick history is not the prepared history")
+    else:
+        _retained_record_problem(history, raw_root, "records",
+                                 "partial-inspect.tick.history", problems)
+    records = tick.get("records")
+    if not isinstance(records, list) \
+            or records != (initial.get("records") or []):
+        problems.append("partial tick record inventory is not the prepared "
+                        "record inventory")
+    else:
+        for index, summary in enumerate(records):
+            _retained_record_problem(
+                summary, raw_root, "records",
+                "partial-inspect.tick.records[" + str(index) + "]", problems)
+    if isinstance(history, dict):
+        path = history.get("path")
+        if not isinstance(path, str) \
+                or path != prepared.get("history_path"):
+            problems.append("partial tick history path is not the prepared path")
+        else:
+            raw_history = raw_root / path.replace(
+                "/home/%s/" % vm.GUEST_USER, "")
+            if raw_history.is_symlink() or not raw_history.is_file():
+                problems.append("partial tick history raw file is missing")
+            elif history.get("bytes") is not None \
+                    and raw_history.stat().st_size != history.get("bytes"):
+                problems.append("partial tick history raw size does not match")
+            file_state = (tick.get("files") or {}).get(path) or {}
+            if file_state.get("type") != "file" \
+                    or file_state.get("sha256") != history.get("sha256") \
+                    or file_state.get("size") != history.get("bytes"):
+                problems.append("partial tick history file observation does "
+                                "not bind the retained record")
     case_records = inspect.get("case_records") or {}
     for case in PARTIAL_ORDER:
         record_dir = PARTIAL_CASES[case]["record_dir"]

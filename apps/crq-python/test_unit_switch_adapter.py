@@ -823,7 +823,19 @@ class PartialReleaseHookTests(unittest.TestCase):
     def test_restore_hooks_fire_after_exact_effects_in_order(self):
         self.fake.active[adapter_mod.REPAIR_TIMER] = True
         phases = []
-        self.repair._maybe_kill = phases.append
+        observed = {}
+
+        def maybe_kill(phase):
+            phases.append(phase)
+            if phase == "restore-activation-after-service":
+                observed["timer"] = self.fake.active[
+                    adapter_mod.REPAIR_TIMER]
+                observed["path"] = self.fake.active[adapter_mod.REPAIR_PATH]
+                observed["service"] = self.fake.active[
+                    adapter_mod.REPAIR_UNIT]
+                observed["bytes"] = self.paths["service"].read_text()
+
+        self.repair._maybe_kill = maybe_kill
         snapshot = self._snapshot()
         self.repair.stop_and_drain(adapter_mod.REPAIR_UNIT)
         self.repair.install(adapter_mod.REPAIR_UNIT, NODE)
@@ -839,9 +851,15 @@ class PartialReleaseHookTests(unittest.TestCase):
         self.assertEqual(
             [name for name in phases
              if name.startswith("restore-activation-after-")],
-            ["restore-activation-after-timer",
+            ["restore-activation-after-service",
+             "restore-activation-after-timer",
              "restore-activation-after-path",
-             "restore-activation-after-service"])
+             ])
+        self.assertEqual(observed["timer"], False)
+        self.assertEqual(observed["path"], False)
+        self.assertEqual(observed["service"], False)
+        self.assertEqual(observed["bytes"],
+                         self.repair.render_unit("python"))
         self.assertEqual(
             self.paths["service"].read_text(),
             self.repair.render_unit("python"))
@@ -861,6 +879,18 @@ class PartialReleaseHookTests(unittest.TestCase):
             with mock.patch.object(adapter_mod.os, "kill") as killed:
                 self.repair._maybe_kill("start-after-service")
         killed.assert_called_once_with(os.getpid(), adapter_mod.signal.SIGKILL)
+
+    def test_hook_marker_names_the_actual_restore_phase(self):
+        marker = pathlib.Path(self.temp.name) / "hook.json"
+        self.repair.guest_only = True
+        with mock.patch.dict(os.environ, {
+                "CRQ_PROOF_KILL_ON": "restore-activation-after-service",
+                "CRQ_PROOF_HOOK_MARKER": str(marker)}):
+            with mock.patch.object(adapter_mod.os, "kill"):
+                self.repair._maybe_kill(
+                    "restore-activation-after-service")
+        self.assertEqual(json.loads(marker.read_text())["phase"],
+                         "restore-activation-after-service")
 
     def test_fence_settled_completion_baseline_is_recorded(self):
         self.fake.active[adapter_mod.REPAIR_TIMER] = True

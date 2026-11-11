@@ -95,6 +95,7 @@ for _regime in PERSISTENCE:
         "prior_runtime": PYTHON_RUNTIME,
     }
 PARTIAL_ORDER = tuple(PARTIAL_CASES)
+HOOK_MARKER = FIXTURE / "partial-hook.json"
 
 
 def phase_names():
@@ -191,7 +192,7 @@ def partial_reset_repair():
     for path in (REPAIR_SERVICE, REPAIR_TIMER_PATH, REPAIR_PATH_PATH,
                  REPAIR_DROPIN, REPAIR_TIMER_WANTS, REPAIR_PATH_WANTS,
                  CALLER_PATH, BLOCKER_PATH, REPAIR_STAGED, REPAIR_TRIGGER,
-                 REPAIR_PAUSE_MARKER):
+                 REPAIR_PAUSE_MARKER, HOOK_MARKER):
         if path.is_symlink() or path.exists():
             path.unlink()
     for rogue in (UNIT_DIR / "crq-repair.socket",
@@ -266,7 +267,36 @@ def require_fence(cli, label, expected_count=None):
     queue = drain.get("queue_drain")
     require(isinstance(queue, dict) and queue.get("drained") is True,
             label + " queue drain is not a successful bounded observation")
+    observation = drain.get("jobs_observation")
+    command = observation.get("command") if isinstance(observation, dict) else None
+    require(isinstance(command, dict)
+            and command.get("argv") == ["systemctl", "--user", "list-jobs",
+                                       "--no-legend", "--no-pager"]
+            and type(command.get("rc")) is int and command.get("rc") == 0
+            and command.get("timeout") is False
+            and isinstance(command.get("stdout"), str)
+            and observation.get("lines") == []
+            and [line for line in command["stdout"].splitlines()
+                 if line.strip()] == [],
+            label + " list-jobs evidence is not an exact empty observation")
     require(drain.get("jobs") == [], label + " retained a systemd job")
+    stop = drain.get("service_stop") or {}
+    require(isinstance(stop, dict)
+            and stop.get("argv") == ["systemctl", "--user", "stop",
+                                     REPAIR_UNIT]
+            and type(stop.get("rc")) is int and stop.get("rc") in (0, 5)
+            and stop.get("timeout") is False,
+            label + " service stop evidence is not the exact command")
+    direct = drain.get("direct_start") or {}
+    direct_text = ((direct.get("stdout") or "")
+                   + (direct.get("stderr") or "")).lower()
+    require(isinstance(direct, dict)
+            and direct.get("argv") == ["systemctl", "--user", "start",
+                                       REPAIR_UNIT]
+            and type(direct.get("rc")) is int and direct.get("rc") != 0
+            and direct.get("timeout") is False
+            and "masked" in direct_text,
+            label + " direct start evidence is not the exact masked refusal")
     owned = drain.get("owned") or {}
     require(owned.get("pids") == [] and owned.get("main_pid") == 0,
             label + " retained an owned process")
@@ -323,6 +353,23 @@ def wait_completions(minimum, label):
         require(time.time() < deadline,
                 label + " produced no released-runtime completion in the bound")
         time.sleep(0.2)
+
+
+def _hook_marker(expected, label):
+    require(HOOK_MARKER.is_file() and not HOOK_MARKER.is_symlink(),
+            label + " retained no hook marker")
+    try:
+        marker = json.loads(HOOK_MARKER.read_text())
+    except ValueError as exc:
+        raise RuntimeError(label + " hook marker is not JSON") from exc
+    require(marker.get("phase") == expected,
+            label + " hook marker names another phase: "
+            + json.dumps(marker.get("phase")))
+    require(type(marker.get("pid")) is int and marker["pid"] > 0,
+            label + " hook marker has no live process identity")
+    require(type(marker.get("at")) in (int, float),
+            label + " hook marker has no timestamp")
+    return marker
 
 
 def partial_prepare(args):
@@ -394,11 +441,14 @@ def partial_activation_boundary(args):
             == "active", "activation boundary timer is not active")
     require((before["repair_units"].get(REPAIR_PATH_UNIT) or {}).get("ActiveState")
             == "inactive", "activation boundary path is not inactive")
+    HOOK_MARKER.unlink(missing_ok=True)
     cli = partial_cli("switch", directory, ["--runtime", spec["runtime"]],
-                      {"CRQ_PROOF_KILL_ON": spec["hook"]})
+                      {"CRQ_PROOF_KILL_ON": spec["hook"],
+                       "CRQ_PROOF_HOOK_MARKER": str(HOOK_MARKER)})
     require(cli.get("rc") == -9,
             "activation boundary was not killed by exact SIGKILL: "
             + json.dumps(cli.get("rc")))
+    hook_marker = _hook_marker(spec["hook"], "activation " + case)
     if spec["hook"] != "start-after-service":
         wait_completions(len(before["repair_completions"]) + 1,
                          "activation " + case)
@@ -456,6 +506,7 @@ def partial_activation_boundary(args):
         "before": before,
         "after": after,
         "cli": cli,
+        "hook_marker": hook_marker,
         "record": record,
         "completion_delta": released,
         "preserved": check_preserved({"phase": "partial-" + case}),
@@ -479,12 +530,13 @@ def partial_restore_boundary(args):
         drained["records"], "drained", spec["runtime"], spec["prior_runtime"],
         case + " precondition")
     record_path = drained_record["path"]
+    HOOK_MARKER.unlink(missing_ok=True)
     recovery_cli = partial_cli("recover", directory, ["--record", record_path],
-                               {"CRQ_PROOF_KILL_ON": spec["hook"]})
+                               {"CRQ_PROOF_KILL_ON": spec["hook"],
+                                "CRQ_PROOF_HOOK_MARKER": str(HOOK_MARKER)})
     require(recovery_cli.get("rc") == -9,
             "restore boundary was not killed by exact SIGKILL")
-    wait_completions(len(drained["repair_completions"]) + 1,
-                     "restore " + case)
+    hook_marker = _hook_marker(spec["hook"], "restore " + case)
     after = partial_snapshot(directory)
     record = require_pending_record(after["records"],
                                     "restore_activation_pending",
@@ -498,10 +550,15 @@ def partial_restore_boundary(args):
             "restore boundary service bytes are not the prior runtime")
     require((after["repair_units"].get(REPAIR_UNIT) or {}).get("LoadState")
             == "loaded", "restore boundary service is not loaded")
+    require((after["repair_units"].get(REPAIR_UNIT) or {}).get("ActiveState")
+            == "inactive", "restore boundary service is already active")
+    require((after["repair_units"].get(REPAIR_UNIT) or {}).get("MainPID")
+            in ("0", ""), "restore boundary retained a service pid")
+    require(after["jobs"] == [], "restore boundary retained a job")
     require(owned_files(after["repair_files"])["staged"].get("type") == "missing",
             "restore boundary retains a staged target")
     require((after["repair_units"].get(REPAIR_TIMER) or {}).get("ActiveState")
-            == "active", "restore boundary timer is not active")
+            == "inactive", "restore boundary timer is already restored")
     require((after["repair_units"].get(REPAIR_PATH_UNIT) or {}).get("ActiveState")
             == "inactive", "restore boundary path is not inactive")
     new = after["repair_completions"][len(drained["repair_completions"]):]
@@ -510,7 +567,7 @@ def partial_restore_boundary(args):
     require(all(item.get("runtime") in (PYTHON_RUNTIME, NODE_RUNTIME)
                 for item in new),
             "restore boundary produced an unknown-runtime completion")
-    require(len(released) >= 1, "restore boundary produced no completion")
+    require(new == [], "restore boundary released service work before activation")
     return require_source({
         "phase": "partial-" + case,
         "case": case,
@@ -523,6 +580,7 @@ def partial_restore_boundary(args):
         "drained_record": drained_record,
         "after": after,
         "cli": recovery_cli,
+        "hook_marker": hook_marker,
         "switch_cli": kill_cli,
         "recovery_cli": recovery_cli,
         "record": record,
@@ -628,6 +686,7 @@ def partial_restore_observe(args):
         len((boundary.get("after") or {}).get("repair_completions") or []):]
     require(all(item.get("runtime") == spec["prior_runtime"] for item in new),
             "restore observe saw a non-prior runtime completion")
+    require(new == [], "restore observe saw work before service activation")
     recovery = partial_cli("recover", directory, ["--record", record["path"]])
     baseline = require_fence(recovery, case + " recovery")
     after_recovery = partial_snapshot(directory)

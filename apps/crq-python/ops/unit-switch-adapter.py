@@ -944,6 +944,7 @@ class GuestFixtureAdapter:
                            "service_stop": service_stop,
                            "jobs_observation": self.last_jobs_observation,
                            "direct_start": {"rc": refusal.get("rc"),
+                                            "argv": refusal.get("argv"),
                                             "stdout": refusal.get("stdout"),
                                             "stderr": refusal.get("stderr"),
                                             "timeout": refusal.get("timeout",
@@ -1258,6 +1259,10 @@ class GuestFixtureAdapter:
         self._compare_state(paths["service"], service_state)
         if self._runtime_from_unit(paths["service"]) != snapshot["runtime"]:
             self.refuse("restored service runtime does not match the snapshot")
+        # Approved partial restore boundary: the prior service file has been
+        # released and loaded, but neither activator has been restored and the
+        # service has not been activated yet.
+        self._maybe_kill("restore-activation-after-service")
         expected = snapshot["activators"]
         observed_activators = {}
         for name in self._activator_names():
@@ -1294,7 +1299,6 @@ class GuestFixtureAdapter:
         if service["ActiveState"] != expected["service_active"]:
             self.refuse("restored service active state does not match the snapshot")
         restore_order.append("service")
-        self._maybe_kill("restore-activation-after-service")
         return {**observed_activators, "service": service,
                 "restore_order": restore_order}
 
@@ -1302,8 +1306,20 @@ class GuestFixtureAdapter:
         """Proof-only interruption hook; never reachable for a production caller."""
         if not self.guest_only:
             return
-        if os.environ.get("CRQ_PROOF_KILL_ON") == phase:
-            os.kill(os.getpid(), signal.SIGKILL)
+        if os.environ.get("CRQ_PROOF_KILL_ON") != phase:
+            return
+        marker = os.environ.get("CRQ_PROOF_HOOK_MARKER")
+        if marker:
+            marker_path = pathlib.Path(marker)
+            if not marker_path.is_absolute():
+                self.refuse("hook marker must be an absolute path")
+            try:
+                marker_path.write_text(json.dumps(
+                    {"phase": phase, "pid": os.getpid(), "at": time.time()},
+                    sort_keys=True) + "\n")
+            except OSError as exc:
+                self.refuse("hook marker is not writable: " + str(exc)[:160])
+        os.kill(os.getpid(), signal.SIGKILL)
 
     def _maybe_pause(self, phase):
         """Bounded guest-only pause after the durable mask reload."""
