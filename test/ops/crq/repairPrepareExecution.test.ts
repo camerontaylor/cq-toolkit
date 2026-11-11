@@ -726,6 +726,7 @@ describe('executeRepairPreparation internal diagnostics', () => {
     expect(result).toMatchObject({
       ok: false,
       kind: 'plan-failed',
+      diagnostic: { category: 'producer-exception', thrown: 'error', class: 'Error' },
       readGates: 'attempted-under-tick-lock',
       steps: [],
       remainingGates: ALL_GATES,
@@ -735,6 +736,82 @@ describe('executeRepairPreparation internal diagnostics', () => {
       { kind: 'lock', phase: 'enter', target: 'tick.lock' },
       { kind: 'lock', phase: 'exit', target: 'tick.lock' },
     ]);
+  });
+
+  describe('producer diagnostic', () => {
+    const secret = 'sk-live-DO-NOT-ECHO-7f3a9c';
+
+    async function failWith(value: unknown) {
+      const seams = attemptEffects(
+        new MemoryEffects(),
+        storesFor(caseNamed('new-canonical-old-owner')),
+        undefined,
+        handoffAt,
+      );
+      return executeRepairPreparation(async () => {
+        throw value;
+      }, seams.effects);
+    }
+
+    test('carries a bounded class and never the message or stack', async () => {
+      const result = await failWith(new TypeError(`decode failed for ${secret}`));
+      expect(result).toMatchObject({
+        kind: 'plan-failed',
+        diagnostic: { category: 'producer-exception', thrown: 'error', class: 'TypeError' },
+      });
+      const text = JSON.stringify(result);
+      expect(text).not.toContain(secret);
+      expect(text).not.toContain('decode failed');
+      expect(text).not.toMatch(/"(message|stack)"\s*:/);
+    });
+
+    test('classifies a whitelisted CRQ policy error by name only', async () => {
+      const error = new RangeError('timestamp out of range');
+      error.name = 'LedgerTimestampError';
+      const result = await failWith(error);
+      expect(result).toMatchObject({
+        kind: 'plan-failed',
+        diagnostic: { thrown: 'error', class: 'LedgerTimestampError' },
+      });
+    });
+
+    test('collapses an unlisted constructor name to unknown', async () => {
+      class Custom extends Error {
+        override name = 'UserControlledName';
+      }
+      const result = await failWith(new Custom(secret));
+      expect(result).toMatchObject({
+        kind: 'plan-failed',
+        diagnostic: { thrown: 'error', class: 'unknown' },
+      });
+      expect(JSON.stringify(result)).not.toContain('UserControlledName');
+    });
+
+    test('reports a non-error throw as non-error without inspecting it', async () => {
+      const hostile = {
+        get name(): string {
+          throw new Error(`getter must not run: ${secret}`);
+        },
+        get message(): string {
+          throw new Error(`getter must not run: ${secret}`);
+        },
+      };
+      const result = await failWith(hostile);
+      expect(result).toMatchObject({
+        kind: 'plan-failed',
+        diagnostic: { category: 'producer-exception', thrown: 'non-error', class: 'unknown' },
+      });
+      expect(JSON.stringify(result)).not.toContain(secret);
+    });
+
+    test('reports a thrown string as non-error', async () => {
+      const result = await failWith(secret);
+      expect(result).toMatchObject({
+        kind: 'plan-failed',
+        diagnostic: { thrown: 'non-error', class: 'unknown' },
+      });
+      expect(JSON.stringify(result)).not.toContain(secret);
+    });
   });
 
   test('a defect inside the lock scope propagates instead of a false lock result', async () => {

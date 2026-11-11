@@ -7,9 +7,12 @@
  * caller-owned follow-up. This module ports the write half of
  * `repair_tick.prepare_current_job`:
  *
- *   write the prepared job -> canonical handoff -> write the queue
+ *   prepared job (when new) -> canonical handoff (always, when canonical)
+ *   -> queue (when new)
  *
- * It is deliberately not a blind serialization of `plan.mutations`. Python
+ * Idempotent plans and the already-handed-off snapshot therefore execute a
+ * handoff-only sequence with no job or queue write. It is deliberately not a
+ * blind serialization of `plan.mutations`. Python
  * calls `finding_inbox(c).handoff(...)` whenever the historical job carries a
  * canonical finding id, including the already-handed-off snapshot and the
  * idempotent path where no job or queue write occurs. A read-gate snapshot is
@@ -145,6 +148,45 @@ export type RepairPlanInconsistency =
 /** How far the read-gate producer ran inside the caller's lock. */
 export type RepairPreparationReadGates = 'not-attempted' | 'attempted-under-tick-lock';
 
+/**
+ * Error class names that may classify a gate-producer throw. The builtin names
+ * plus the typed CRQ policy errors a gate read can raise; any other class name
+ * collapses to `unknown`, so an arbitrary constructor name is never echoed.
+ */
+const KNOWN_PRODUCER_ERROR_CLASSES = [
+  'Error',
+  'TypeError',
+  'RangeError',
+  'SyntaxError',
+  'AggregateError',
+  'UtcParseError',
+  'UsageSlotsError',
+  'StatusSummaryError',
+  'StateValuePathError',
+  'LedgerIntegrityError',
+  'LedgerTimestampError',
+  'LedgerJsonDecodeError',
+  'LedgerUnicodeDecodeError',
+] as const;
+
+export type RepairPreparationProducerErrorClass =
+  | (typeof KNOWN_PRODUCER_ERROR_CLASSES)[number]
+  | 'unknown';
+
+/**
+ * A bounded, redacted reason for a producer throw. Internal evidence for the
+ * caller only: never persisted, and it carries no message, stack, source or
+ * instruction text. `thrown` says whether the value was an `Error` in this
+ * realm; a non-error value is never inspected and always classifies as
+ * `unknown`. A whitelisted class name is the most an operator gets, which is
+ * enough to tell a decode or ledger error from an ordinary one.
+ */
+export interface RepairPreparationProducerDiagnostic {
+  readonly category: 'producer-exception';
+  readonly thrown: 'error' | 'non-error';
+  readonly class: RepairPreparationProducerErrorClass;
+}
+
 export type RepairPreparationExecutionResult =
   | { readonly ok: true; readonly value: ExecutedRepairPreparation }
   | {
@@ -160,6 +202,7 @@ export type RepairPreparationExecutionResult =
       readonly ok: false;
       /** The gate producer threw before returning a plan. */
       readonly kind: 'plan-failed';
+      readonly diagnostic: RepairPreparationProducerDiagnostic;
       readonly readGates: RepairPreparationReadGates;
       readonly steps: readonly [];
       readonly remainingGates: readonly RemainingPreparationGate[];
@@ -293,6 +336,26 @@ function plannedPhases(plan: VerifiedRepairPreparation): PlannedPhases | RepairP
   };
 }
 
+function producerDiagnostic(error: unknown): RepairPreparationProducerDiagnostic {
+  const category = 'producer-exception' as const;
+  if (!(error instanceof Error)) {
+    return { category, thrown: 'non-error', class: 'unknown' };
+  }
+  let name: unknown;
+  try {
+    name = error.name;
+  } catch {
+    return { category, thrown: 'error', class: 'unknown' };
+  }
+  const known =
+    typeof name === 'string' && (KNOWN_PRODUCER_ERROR_CLASSES as readonly string[]).includes(name);
+  return {
+    category,
+    thrown: 'error',
+    class: known ? (name as RepairPreparationProducerErrorClass) : 'unknown',
+  };
+}
+
 function failed(
   step: RepairPreparationStep,
   steps: RepairPreparationStepEvidence[],
@@ -319,10 +382,11 @@ async function runPreparation(
   let produced: PrepareRepairGatesResult;
   try {
     produced = await produce();
-  } catch {
+  } catch (error) {
     return {
       ok: false,
       kind: 'plan-failed',
+      diagnostic: producerDiagnostic(error),
       readGates: 'attempted-under-tick-lock',
       steps: [],
       remainingGates: ALL_GATES,
