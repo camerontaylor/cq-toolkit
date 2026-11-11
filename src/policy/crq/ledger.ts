@@ -704,6 +704,59 @@ function validateImportResult(payload: JsonObject): void {
   }
 }
 
+function ledgerNumberEqual(left: JsonNumber, right: JsonNumber): boolean {
+  if (left.kind === 'int' && right.kind === 'int') return left.integer === right.integer;
+  if (left.kind === 'float' && right.kind === 'float') {
+    const a = left.float;
+    const b = right.float;
+    return a !== null && b !== null && !Number.isNaN(a) && !Number.isNaN(b) && a === b;
+  }
+  const integer = left.kind === 'int' ? left.integer : right.integer;
+  const float = left.kind === 'float' ? left.float : right.float;
+  if (integer === null || float === null || !Number.isFinite(float) || !Number.isInteger(float)) {
+    return false;
+  }
+  return BigInt(float) === integer;
+}
+
+/**
+ * Python `==` for JSON-shaped ledger values, used where Python compares
+ * parsed records rather than canonical bytes.
+ *
+ * Numbers compare by value, so `1 == 1.0`; booleans compare to their integer
+ * value, so `True == 1`; mappings ignore key order while sequences keep it.
+ * `review_ledger.loads` rejects duplicate keys, so object entries are unique.
+ */
+export function ledgerValueEqual(left: JsonValue, right: JsonValue): boolean {
+  if (typeof left === 'boolean' || typeof right === 'boolean') {
+    const leftNumber = typeof left === 'boolean' ? JsonNumber.int(left ? 1 : 0) : left;
+    const rightNumber = typeof right === 'boolean' ? JsonNumber.int(right ? 1 : 0) : right;
+    if (leftNumber instanceof JsonNumber && rightNumber instanceof JsonNumber) {
+      return ledgerNumberEqual(leftNumber, rightNumber);
+    }
+    return typeof left === 'boolean' && typeof right === 'boolean' && left === right;
+  }
+  if (left instanceof JsonNumber || right instanceof JsonNumber) {
+    if (!(left instanceof JsonNumber) || !(right instanceof JsonNumber)) return false;
+    return ledgerNumberEqual(left, right);
+  }
+  if (Array.isArray(left) || Array.isArray(right)) {
+    if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) {
+      return false;
+    }
+    return left.every((value, index) => ledgerValueEqual(value, right[index] as JsonValue));
+  }
+  if (left instanceof JsonObject || right instanceof JsonObject) {
+    if (!(left instanceof JsonObject) || !(right instanceof JsonObject)) return false;
+    if (left.entries.length !== right.entries.length) return false;
+    return left.entries.every(([key, value]) => {
+      if (!right.has(key)) return false;
+      return ledgerValueEqual(value, right.get(key) as JsonValue);
+    });
+  }
+  return left === right;
+}
+
 /** `review_ledger.creditable`: the only completion authority for a review. */
 export function ledgerCreditable(value: JsonValue): boolean {
   if (!(value instanceof JsonObject) || value.get('event_type') !== 'review') return false;
