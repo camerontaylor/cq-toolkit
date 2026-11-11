@@ -537,6 +537,85 @@ describe('Python numeric lexemes through the file boundary', () => {
     expect(compact(parseOutput(result.stdout))).toContain('"outcomes_24h":{"completed":4,');
   });
 
+  test('an equal large int/float share one Python key while 2^53+1 stays distinct', async () => {
+    const roots = await makeRoots();
+    await writeState(roots, {
+      queue: new JsonObject([['items', []]]),
+      config: DEFAULT_CONFIG,
+      events: [],
+    });
+    const at = '2026-11-09T11:00:00Z';
+    // Python key identity: 9007199254740992 == 9007199254740992.0, but
+    // 9007199254740993 == 9007199254740993.0 is False (the float rounds to 2^53),
+    // so the last float overwrites the 2^53 key while the int stays separate.
+    const lines = [
+      `{"event":"review_finished","at":"${at}","run":9007199254740992,"outcome":"completed"}`,
+      `{"event":"review_finished","at":"${at}","run":9007199254740992.0,"outcome":"error"}`,
+      `{"event":"review_finished","at":"${at}","run":9007199254740993,"outcome":"interrupted"}`,
+      `{"event":"review_finished","at":"${at}","run":9007199254740993.0,"outcome":"completed"}`,
+    ];
+    await writeFile(join(roots.stateRoot, 'events.jsonl'), `${lines.join('\n')}\n`);
+    const result = await runCli(['summary-core'], roots, FIXED_NOW);
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr).toBe('');
+    expect(compact(parseOutput(result.stdout))).toContain(
+      '"outcomes_24h":{"completed":1,"interrupted":1,"error":0}',
+    );
+  });
+
+  test('safe numeric, bool, string and non-integral run ids follow Python key semantics', async () => {
+    const roots = await makeRoots();
+    await writeState(roots, {
+      queue: new JsonObject([['items', []]]),
+      config: DEFAULT_CONFIG,
+      events: [],
+    });
+    const at = '2026-11-09T11:00:00Z';
+    // 1/1.0/true share one key (latest completed); "1" is separate; 0, false
+    // and 0.0 are falsy, so Python keys each as anonymous; "0" is separate;
+    // 0.5 repeats one key; 1e400 is +inf in both parsers (latest error).
+    const lines = [
+      `{"event":"review_finished","at":"${at}","run":1,"outcome":"completed"}`,
+      `{"event":"review_finished","at":"${at}","run":1.0,"outcome":"error"}`,
+      `{"event":"review_finished","at":"${at}","run":true,"outcome":"completed"}`,
+      `{"event":"review_finished","at":"${at}","run":"1","outcome":"interrupted"}`,
+      `{"event":"review_finished","at":"${at}","run":0,"outcome":"completed"}`,
+      `{"event":"review_finished","at":"${at}","run":false,"outcome":"interrupted"}`,
+      `{"event":"review_finished","at":"${at}","run":0.0,"outcome":"completed"}`,
+      `{"event":"review_finished","at":"${at}","run":"0","outcome":"completed"}`,
+      `{"event":"review_finished","at":"${at}","run":0.5,"outcome":"completed"}`,
+      `{"event":"review_finished","at":"${at}","run":0.5,"outcome":"error"}`,
+      `{"event":"review_finished","at":"${at}","run":0.25,"outcome":"completed"}`,
+      `{"event":"review_finished","at":"${at}","run":1e400,"outcome":"completed"}`,
+      `{"event":"review_finished","at":"${at}","run":1e400,"outcome":"error"}`,
+    ];
+    await writeFile(join(roots.stateRoot, 'events.jsonl'), `${lines.join('\n')}\n`);
+    const result = await runCli(['summary-core'], roots, FIXED_NOW);
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr).toBe('');
+    expect(compact(parseOutput(result.stdout))).toContain(
+      '"outcomes_24h":{"completed":5,"interrupted":2,"error":2}',
+    );
+  });
+
+  test('a truthy unhashable run id fails like Python TypeError', async () => {
+    const roots = await makeRoots();
+    await writeState(roots, {
+      queue: new JsonObject([['items', []]]),
+      config: DEFAULT_CONFIG,
+      events: [],
+    });
+    const at = '2026-11-09T11:00:00Z';
+    await writeFile(
+      join(roots.stateRoot, 'events.jsonl'),
+      `{"event":"review_finished","at":"${at}","run":[1],"outcome":"completed"}\n`,
+    );
+    const result = await runCli(['summary-core'], roots, FIXED_NOW);
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout).toBe('');
+    expect(result.stderr).toMatch(/^summary-failed: TypeError: unhashable run id \(list\)/u);
+  });
+
   test('an aging deadline is a Python float, never an integer', async () => {
     const roots = await makeRoots();
     const queue = parseJsonValue(
