@@ -29,9 +29,11 @@ import {
   type OutboxFiles,
 } from '../../../src/ops/review/internal/crq/outbox.js';
 import {
+  arrayField,
   effectsFrom,
   loadFindingDeliveryVectors,
   numberField,
+  objectField,
   optionalArrayField,
   requireObject,
   rowsFrom,
@@ -216,6 +218,12 @@ const vectors = loadFindingDeliveryVectors().filter(
   (entry) => entry.family === 'ingest' || entry.family === 'recover',
 );
 
+function requiredCase(name: string): FindingDeliveryCase {
+  const found = vectors.find((entry) => entry.name === name);
+  if (found === undefined) throw new Error(`missing vector ${name}`);
+  return found;
+}
+
 describe('finding inbox effect vectors', () => {
   test('every oracle ingest and recover case is present', () => {
     const families = new Set(vectors.map((entry) => entry.family));
@@ -294,6 +302,56 @@ describe('finding inbox effect vectors', () => {
       const writes = files.effects.filter((effect) => effect.get('kind') === 'write');
       expect(writes.length, entry.name).toBe(1);
     }
+  });
+
+  test('operation evidence names the written, existing, applied and pending ids', async () => {
+    const fresh = requiredCase('ingest-fresh');
+    const replay = requiredCase('ingest-replay');
+    const applied = requiredCase('recover-already-applied');
+    const mismatch = requiredCase('recover-predecessor-mismatch');
+    const reverse = requiredCase('recover-reverse-order-chain');
+
+    const findingId = stringField(
+      requireObject(
+        arrayField(
+          objectField(requireObject(fresh.input.get('review'), 'review'), 'payload'),
+          'findings',
+        )[0],
+        'finding',
+      ),
+      'id',
+    );
+    const freshRun = await runCase(fresh);
+    expect(freshRun.evidence).toEqual({ written: [findingId], existing: [] });
+    const replayRun = await runCase(replay);
+    expect(replayRun.evidence).toEqual({ written: [], existing: [findingId] });
+
+    const appliedIds = optionalArrayField(applied.input, 'events').map((value) =>
+      stringField(requireObject(value, 'event'), 'id'),
+    );
+    const appliedRun = await runCase(applied);
+    expect(appliedRun.evidence).toEqual({
+      written: [],
+      alreadyApplied: [appliedIds[0]],
+      pending: [],
+    });
+
+    const mismatchRun = await runCase(mismatch);
+    expect(mismatchRun.evidence).toEqual({
+      written: [],
+      alreadyApplied: [],
+      pending: optionalArrayField(mismatch.input, 'events'),
+    });
+
+    const reverseIds = optionalArrayField(reverse.input, 'events').map((value) =>
+      stringField(requireObject(value, 'event'), 'id'),
+    );
+    const reverseRun = await runCase(reverse);
+    expect(reverseRun.evidence).toEqual({
+      written: [reverseIds[1], reverseIds[0]],
+      alreadyApplied: [],
+      pending: [],
+    });
   });
 
   test('the public surface exposes only ingest and recover', () => {
