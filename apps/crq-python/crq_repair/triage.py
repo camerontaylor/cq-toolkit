@@ -14,6 +14,19 @@ CONTRACT_PATH = 'docs/current-contract-and-backlog.md'
 CONTRACT_MAX_CHARS = 24000
 
 
+def error_reason(exc, limit=300):
+    """One bounded line naming a failure cause, never the scanned content."""
+    return ' '.join(str(exc).split())[:limit] or type(exc).__name__
+
+
+class ContextScanError(RuntimeError):
+    """The judge could not read its scan policy; defer without losing plans."""
+
+    def __init__(self, cause):
+        self.reason = error_reason(cause)
+        super().__init__(self.reason)
+
+
 def source_excerpt(content, path, body, primary=False):
     """Spend the existing 8k allowance on cited lines before a file prefix."""
     citations = re.findall(re.escape(path) + r':(\d+)', body)
@@ -237,10 +250,22 @@ def phase(inbox, repo, tip, judge, transport, at, *, maximum=6, seconds=600, dry
             if remaining <= 0:
                 stopped = 'deadline'; break
             report = judge(row, packed, remaining)
-        except (subprocess.TimeoutExpired, OSError, RuntimeError):
-            # Includes a judge-side secret scan that could not read its policy; defer
-            # before the model runs so deterministic plans are still persisted.
-            stopped = 'deferred'; break
+        except subprocess.TimeoutExpired:
+            stopped = 'deferred'
+            stopped_report = {'stop': 'deferred', 'errorClass': 'timeout'}
+            break
+        except ContextScanError as exc:
+            # A judge-side secret scan that could not read its policy still defers
+            # before the model runs, so deterministic plans are persisted; name the
+            # cause so operators can tell it apart from a judge timeout.
+            stopped = 'deferred'
+            stopped_report = {'stop': 'deferred', 'errorClass': 'context-scan', 'reason': exc.reason}
+            break
+        except (OSError, RuntimeError) as exc:
+            # Other judge failures defer too, but keep their sanitized cause.
+            stopped = 'deferred'
+            stopped_report = {'stop': 'deferred', 'errorClass': 'judge-error', 'reason': error_reason(exc)}
+            break
         if report.get('stop') != 'ok':
             if report.get('stop') == 'error' and report.get('errorClass') == 'output-invalid':
                 row['_triage_model'] = report.get('model', 'judge')

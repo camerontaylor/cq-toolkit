@@ -8,7 +8,7 @@ from crq_repair import atomic
 from crq_repair.bounded import drain_job
 import finding_delivery as delivery
 import review_ledger as ledger
-from crq_repair.triage import context, phase
+from crq_repair.triage import ContextScanError, context, phase
 from test_finding_delivery import FindingTest, AT
 from test_review_ledger import rehash
 
@@ -532,15 +532,40 @@ class PhaseTest(FindingTest):
         judge = mock.Mock(side_effect=subprocess.TimeoutExpired('judge', 1))
         result = phase(self.inbox, self.f.repo, self.t, judge, None, AT)
         self.assertEqual(result['stopped'], 'deferred')
+        self.assertEqual(result['stop_report'], {'stop': 'deferred', 'errorClass': 'timeout'})
         self.assertEqual(result['unjudged'], 1)
 
-    def test_judge_secret_scan_failure_defers_without_losing_row(self):
-        judge = mock.Mock(side_effect=RuntimeError('git show … denylist unreadable'))
+    def test_judge_context_scan_failure_reports_reason_and_keeps_row(self):
+        judge = mock.Mock(side_effect=ContextScanError('denylist parse failed (fail closed)\nsecond line'))
         result = phase(self.inbox, self.f.repo, self.t, judge, None, AT)
         self.assertEqual(result['stopped'], 'deferred')
+        self.assertEqual(result['stop_report'], {'stop': 'deferred', 'errorClass': 'context-scan',
+                                                 'reason': 'denylist parse failed (fail closed) second line'})
         self.assertEqual(result['unjudged'], 1)
         path = self.inbox.root / 'triage' / (self.fid + '.json')
         self.assertEqual(ledger.loads(path.read_bytes())['status'], 'untriaged')
+
+    def test_context_scan_deferral_keeps_deterministic_plans(self):
+        import copy
+        path = self.inbox.root / 'triage' / (self.fid + '.json')
+        duplicate_id = 'd' * 64
+        duplicate = copy.deepcopy(ledger.loads(path.read_bytes()))
+        duplicate['finding']['id'] = duplicate_id
+        ledger.atomic(path.parent / (duplicate_id + '.json'), ledger.canonical(duplicate))
+        judge = mock.Mock(side_effect=ContextScanError('denylist parse failed (fail closed)'))
+        result = phase(self.inbox, self.f.repo, self.t, judge, None, AT)
+        self.assertEqual(result['stopped'], 'deferred')
+        self.assertEqual(result['counts'], {'duplicate': 1})
+        statuses = {fid: ledger.loads((self.inbox.root / 'triage' / (fid + '.json')).read_bytes())['status']
+                    for fid in (self.fid, duplicate_id)}
+        self.assertEqual(sorted(statuses.values()), ['duplicate', 'untriaged'])
+
+    def test_unclassified_judge_failure_reports_sanitized_cause(self):
+        judge = mock.Mock(side_effect=RuntimeError('dispatch unavailable\nretry later'))
+        result = phase(self.inbox, self.f.repo, self.t, judge, None, AT)
+        self.assertEqual(result['stopped'], 'deferred')
+        self.assertEqual(result['stop_report'], {'stop': 'deferred', 'errorClass': 'judge-error',
+                                                 'reason': 'dispatch unavailable retry later'})
 
     def test_info_confirmed_finding_is_not_delivered(self):
         path = self.inbox.root / 'triage' / (self.fid + '.json')
@@ -616,6 +641,16 @@ class PhaseTest(FindingTest):
             self.assertNotIn(marker, output.read_text())
             context['region'] = [{'text': 'ordinary source line'}]
             self.assertTrue(service.triage_context_safe(crq, context, output))
+
+    def test_context_scan_policy_failure_becomes_typed_deferral(self):
+        path = Path(__file__).parent / 'crq_repair.py'
+        spec = importlib.util.spec_from_file_location('triage_scan_failure_test', path)
+        service = importlib.util.module_from_spec(spec); spec.loader.exec_module(service)
+        c = SimpleNamespace(secret_scan_diff=mock.Mock(side_effect=RuntimeError('denylist parse failed (fail closed)')))
+        context = {'finding': {'path': 'src/a.py'}, 'region': [{'text': 'ordinary source line'}]}
+        with self.assertRaises(ContextScanError) as caught:
+            service.triage_context_scan(c, context, self.root / 'scan.json')
+        self.assertEqual(caught.exception.reason, 'denylist parse failed (fail closed)')
 
     def test_duplicate_with_different_severity_remains_independently_judgeable(self):
         import copy
