@@ -3,7 +3,7 @@
  *
  * Reuses the existing denylist rule engine and gitleaks defaults scanner; the
  * only ported Python detail is `crq.ALLOWLIST_PATHS`. The adapter parses the
- * patch line by line with Python's line semantics, scans added/removed
+ * patch on LF line boundaries (stripping CRLF terminators), scans added/removed
  * content, and returns counts only. It never returns matched text, a secret,
  * a remote scan or a persisted report.
  */
@@ -17,7 +17,6 @@ import type {
   RepairScanReport,
   RepairScanResult,
 } from '../../ops/crq/internal/repairPrepareGates.js';
-import { pythonSplitlines } from '../../policy/crq/repairGates.js';
 
 /** `crq.ALLOWLIST_PATHS`, verbatim. */
 const ALLOWLIST_PATHS: readonly RegExp[] = [
@@ -38,12 +37,21 @@ interface PatchLine {
   readonly content: string;
 }
 
-/** Parse the patch with Python `splitlines`; only added/removed content counts. */
+/**
+ * Parse the patch on LF only; only added/removed content counts.
+ *
+ * A trailing CR is a CRLF terminator, but any other line-break byte stays in
+ * the payload. Python `splitlines` would turn text after a lone CR into a
+ * separate unprefixed line that this parser must not drop, because an
+ * instruction such as `fix it\rpk-...` would otherwise hide a denylisted
+ * value from the scan.
+ */
 function patchLines(patch: string): PatchLine[] {
   let path: string | undefined;
   let inHeader = false;
   const lines: PatchLine[] = [];
-  for (const line of pythonSplitlines(patch)) {
+  for (const rawLine of patch.split('\n')) {
+    const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine;
     if (line.startsWith('diff --git')) {
       const match = /^diff --git a\/(.*) b\/(.*)$/.exec(line);
       path = match?.[2];

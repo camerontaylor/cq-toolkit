@@ -15,7 +15,10 @@ import { describe, expect, test } from 'vitest';
 import { makeRepairScan } from '../../../src/adapters/crq/repairScan.js';
 import type { GitleaksEffects } from '../../../src/ops/dev/denylist.js';
 import { JsonObject, parseJsonValue, type JsonValue } from '../../../src/policy/crq/jsonValue.js';
-import { fullSourceScanPatch } from '../../../src/policy/crq/repairGates.js';
+import {
+  fullSourceScanPatch,
+  fixInstructionsScanPatch,
+} from '../../../src/policy/crq/repairGates.js';
 
 const SOURCE = 'a'.repeat(40);
 const SECRET = 'SECRET';
@@ -157,6 +160,19 @@ describe('repair scan adapter allowlist and denylist', () => {
       head: SOURCE,
     });
     expect(result.report.denylistHits).toBe(1);
+  });
+
+  test('a lone CR does not hide instruction text from the scan', async () => {
+    const patch = fixInstructionsScanPatch(`fix it\r${SECRET}`);
+    const result = await scan.scanDiff({
+      patch,
+      name: 'scan.json',
+      base: null,
+      head: SOURCE,
+    });
+    expect(result.report.denylistHits).toBe(1);
+    expect(result.clean).toBe(false);
+    expect(JSON.stringify(result)).not.toContain(SECRET);
   });
 });
 
