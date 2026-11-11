@@ -521,6 +521,11 @@ function pythonAdd(total: PythonSum, value: unknown): PythonSum {
     // CPython's int fast path uses Py_ssize_t. Once it overflows it restores
     // the exact int and continues on the generic PyNumber_Add path, which no
     // longer switches to compensated summation when a float appears later.
+    // `PyLong_AsLongAndOverflow` also exits when the operand itself does not
+    // fit, even if the resulting total would be in range.
+    if (operand.value < INT64_MIN || operand.value > INT64_MAX) {
+      return { kind: 'generic', value: next };
+    }
     return next >= INT64_MIN && next <= INT64_MAX
       ? { kind: 'int', value: next }
       : { kind: 'generic', value: next };

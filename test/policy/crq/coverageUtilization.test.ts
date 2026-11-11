@@ -153,7 +153,7 @@ const a1 = casesOf(loadDocument(A1, 'utilization'), 'utilization');
 
 test('oracle selections are non-empty', () => {
   expect(groupP).toHaveLength(4);
-  expect(a1).toHaveLength(68);
+  expect(a1).toHaveLength(69);
 });
 
 describe.each(groupP.map((vector) => [vector.name, vector] as const))(
@@ -324,6 +324,19 @@ describe('generic sum after int fast-path overflow', () => {
         2n ** 63n,
         JsonNumber.float(0),
         JsonNumber.float(-(2 ** 63)),
+        JsonNumber.float(1e16),
+        JsonNumber.float(1),
+        JsonNumber.float(-1e16),
+      ]),
+    ).toContain('"idle_while_pending_24h":0.0,');
+  });
+
+  test('an out-of-range operand exits even when the total stays in range', () => {
+    expect(
+      pendingDigest([
+        -1n,
+        2n ** 63n,
+        -(2n ** 63n) + 1n,
         JsonNumber.float(1e16),
         JsonNumber.float(1),
         JsonNumber.float(-1e16),

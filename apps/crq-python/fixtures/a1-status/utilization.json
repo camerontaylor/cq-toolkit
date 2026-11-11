@@ -1366,6 +1366,74 @@
       }
     },
     {
+      "name": "generic-sum-after-operand-overflow",
+      "source": "coverage.utilization_digest",
+      "input": {
+        "queue": {
+          "starts": []
+        },
+        "ledger": {
+          "schema_version": 1,
+          "paths": {},
+          "runs": {},
+          "observations": {
+            "2026-11-09T11:00:00Z": {
+              "started": false,
+              "pending": -1,
+              "candidate_exists": true,
+              "blocked_reason": null
+            },
+            "2026-11-09T11:10:00Z": {
+              "started": false,
+              "pending": 9223372036854775808,
+              "candidate_exists": true,
+              "blocked_reason": null
+            },
+            "2026-11-09T11:20:00Z": {
+              "started": false,
+              "pending": -9223372036854775807,
+              "candidate_exists": true,
+              "blocked_reason": null
+            },
+            "2026-11-09T11:30:00Z": {
+              "started": false,
+              "pending": 1e+16,
+              "candidate_exists": true,
+              "blocked_reason": null
+            },
+            "2026-11-09T11:40:00Z": {
+              "started": false,
+              "pending": 1.0,
+              "candidate_exists": true,
+              "blocked_reason": null
+            },
+            "2026-11-09T11:50:00Z": {
+              "started": false,
+              "pending": -1e+16,
+              "candidate_exists": true,
+              "blocked_reason": null
+            }
+          }
+        },
+        "now": "2026-11-09T12:00:00Z",
+        "max_starts_per_hour": 5
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "starts_24h": 0,
+          "nominal_cap_24h": 120,
+          "nominal_utilization": 0.0,
+          "cooldown_minutes": 0,
+          "observed_ticks_24h": 6,
+          "available_start_opportunities_24h": 6,
+          "idle_while_pending_24h": 0.0,
+          "idle_with_coverage_candidate_24h": 6,
+          "coverage_reviewed_paths": 0
+        }
+      }
+    },
+    {
       "name": "mixed-large-int-float-idle-sum",
       "source": "coverage.utilization_digest",
       "input": {

@@ -1240,6 +1240,24 @@ def utilization_family() -> Dict[str, Any]:
     )
     cases.append(
         case(
+            "generic-sum-after-operand-overflow",
+            ledger={
+                "schema_version": 1,
+                "paths": {},
+                "runs": {},
+                "observations": {
+                    "2026-11-09T11:00:00Z": row(pending=-1),
+                    "2026-11-09T11:10:00Z": row(pending=2**63),
+                    "2026-11-09T11:20:00Z": row(pending=-(2**63) + 1),
+                    "2026-11-09T11:30:00Z": row(pending=1e16),
+                    "2026-11-09T11:40:00Z": row(pending=1.0),
+                    "2026-11-09T11:50:00Z": row(pending=-1e16),
+                },
+            },
+        )
+    )
+    cases.append(
+        case(
             "mixed-large-int-float-idle-sum",
             ledger={
                 "schema_version": 1,
