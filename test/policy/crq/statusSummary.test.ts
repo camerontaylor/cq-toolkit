@@ -531,6 +531,20 @@ describe.each(loadLosslessFamily(A1, 'passthrough-receipt'))(
   },
 );
 
+describe.each(loadLosslessFamily(A1, 'numeric-lineage'))('a1 numeric lineage/$name', (vector) => {
+  test('Python numeric dict-key lineage matches', () => {
+    const outcome = capture(() => runLosslessA1Vector(vector));
+    if (!vector.expect.ok || !outcome.ok) {
+      assertOutcome(vector, outcome);
+      return;
+    }
+    if (vector.expectBytes === undefined) {
+      throw new Error(`${vector.name}: missing expect.bytes`);
+    }
+    expect(pythonJsonText(outcome.value, COMPACT)).toBe(vector.expectBytes);
+  });
+});
+
 describe.each(loadLosslessFamily(A1, 'numeric'))('a1 numeric/$name', (vector) => {
   test('Python equality and ordering match the oracle', () => {
     assertOutcome(

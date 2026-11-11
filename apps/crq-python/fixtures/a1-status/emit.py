@@ -1846,6 +1846,98 @@ def passthrough_receipt_family() -> Dict[str, Any]:
     return _family("passthrough-receipt", cases, "real receipt bytes and numeric identity")
 
 
+# ------------------------------------------------------------ numeric lineage
+
+
+def numeric_lineage_family() -> Dict[str, Any]:
+    """Pure `merged_current` reuse lineage with Python numeric dict keys."""
+    paths = [{"path": "x.py", "disposition": "included"}]
+    capture = _capture_document(paths)
+    document = {
+        "version": 1,
+        "source": SUBJECT,
+        "capture": capture,
+        "outcome": "terminal-with-findings",
+        "counted": True,
+        "classification": {"counted": True, "outcome": "completed"},
+    }
+    reused = {**capture, "captured_at": "later", "base": "c" * 40}
+    reused["equivalence"] = review_receipt.current_equivalence(reused)
+    reused_capture = reused
+    cases = []
+
+    def item(item_id: Any, reused_from: Any = None, *, reused: bool = False) -> Dict[str, Any]:
+        value = {
+            "id": item_id,
+            "kind": "merged-current",
+            "state": "done",
+            "subject": SUBJECT,
+            "capture": reused_capture if reused else capture,
+        }
+        if reused_from is not None:
+            value["reused_from"] = reused_from
+        return value
+
+    def case(name: str, items: List[Dict[str, Any]]) -> Dict[str, Any]:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rid = _receipt(root, document)
+            queue = {
+                "items": [
+                    {"receipt_id": rid, **entry}
+                    for entry in items
+                ]
+            }
+            raw = (root / f"{rid}.json").read_bytes()
+            inputs = {
+                "queue": queue,
+                "receipt_bytes": {rid: base64.b64encode(raw).decode("ascii")},
+            }
+            return _capture(
+                name,
+                "status_summary.merged_current",
+                inputs,
+                lambda: status_summary.merged_current(queue, root),
+                reserialize=True,
+            )
+
+    cases.append(
+        case(
+            "numeric-int-id-and-reused-from",
+            [item(1), item("reused", 1, reused=True)],
+        )
+    )
+    cases.append(
+        case(
+            "numeric-int-float-equivalent-id",
+            [item(1), item("reused", 1.0, reused=True)],
+        )
+    )
+    cases.append(
+        case(
+            "numeric-bool-equivalent-id",
+            [item(True), item("reused", 1, reused=True)],
+        )
+    )
+    cases.append(
+        case(
+            "numeric-adjacent-bigint-lineage",
+            [
+                item(BIG),
+                item(NEIGHBOR, BIG, reused=True),
+                item("reused", NEIGHBOR, reused=True),
+            ],
+        )
+    )
+    cases.append(
+        case(
+            "numeric-unhashable-reused-from-is-unverified",
+            [item(1), item("reused", [1], reused=True)],
+        )
+    )
+    return _family("numeric-lineage", cases, "numeric reuse lineage dict-key parity")
+
+
 # --------------------------------------------------------------------- numeric
 
 
@@ -1901,6 +1993,7 @@ def documents() -> Dict[str, Dict[str, Any]]:
         "utilization": utilization_family(),
         "passthrough-summarize": passthrough_summarize_family(),
         "passthrough-receipt": passthrough_receipt_family(),
+        "numeric-lineage": numeric_lineage_family(),
         "numeric": numeric_family(),
     }
 

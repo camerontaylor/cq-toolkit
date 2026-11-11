@@ -415,14 +415,16 @@ export function mergedCurrent(queue: CrqRecord, readReceipt?: ReceiptReader): Me
       // Follow only retained queue lineage with matching receipt/state;
       // reject dangling/cyclic links and verify the original source binding.
       let origin: CrqRecord = item;
-      const visited = new Set<unknown>();
+      const visited = new Set<string>();
       let reusedFrom = get(origin, 'reused_from');
       while (pyTruthy(reusedFrom)) {
-        if (isRecord(reusedFrom) || Array.isArray(reusedFrom)) {
-          throw new StatusSummaryError('unhashable reused_from');
+        // Python uses `parent_id in visited`, so numeric keys compare by
+        // value (1 == 1.0 == True) while adjacent big ints stay distinct.
+        const lineageKey = dictKey(reusedFrom, 'reused_from');
+        if (visited.has(lineageKey)) {
+          throw new StatusSummaryError('receipt reuse lineage cycles');
         }
-        if (visited.has(reusedFrom)) throw new StatusSummaryError('receipt reuse lineage cycles');
-        visited.add(reusedFrom);
+        visited.add(lineageKey);
         const matches = items.filter((candidate) => pythonEqual(get(candidate, 'id'), reusedFrom));
         if (matches.length !== 1) {
           throw new StatusSummaryError('receipt reuse lineage missing or ambiguous');
@@ -909,21 +911,28 @@ function nullish(value: unknown): unknown {
 /**
  * Python dict-key identity for `finished[event.get("run")]`.
  *
+ * Shared with receipt reuse lineage, where Python's `visited` set uses the
+ * same hash/equality rules.
+ *
  * Python equates `int`, `float` and `bool` keys numerically (`1 == 1.0 == True`,
  * `2^53 == 9007199254740992.0`) and hashes them alike, while strings never
  * compare equal to numbers. Map every finite integral value to an exact BigInt
  * string first, so an int above 2^53 keeps its exact identity and an equal
  * float collapses onto it; non-integral floats keep their value tag. NaN is
  * outside the JSON parser domain (the parser refuses the literal), so it is a
- * fail-loud malformed run id rather than a silent collision. Truthy lists and
+ * fail-loud malformed key rather than a silent collision. Truthy lists and
  * objects are unhashable in Python and raise instead of becoming a key.
  */
 function runKey(value: unknown): string {
+  return dictKey(value, 'run id');
+}
+
+function dictKey(value: unknown, label: string): string {
   if (value instanceof JsonNumber) {
     if (value.kind === 'int') return integerRunKey(value.integer as bigint);
     const float = value.float as number;
     if (Number.isNaN(float)) {
-      throw new StatusSummaryError('NaN run id is outside the JSON parser domain');
+      throw new StatusSummaryError(`NaN ${label} is outside the JSON parser domain`);
     }
     if (!Number.isFinite(float)) return `float:${float === Infinity ? 'inf' : '-inf'}`;
     if (Number.isInteger(float)) return integerRunKey(BigInt(float));
@@ -933,14 +942,14 @@ function runKey(value: unknown): string {
   if (typeof value === 'bigint') return integerRunKey(value);
   if (typeof value === 'number') {
     if (Number.isNaN(value)) {
-      throw new StatusSummaryError('NaN run id is outside the JSON parser domain');
+      throw new StatusSummaryError(`NaN ${label} is outside the JSON parser domain`);
     }
     if (!Number.isFinite(value)) return `float:${value === Infinity ? 'inf' : '-inf'}`;
     if (Number.isInteger(value)) return integerRunKey(BigInt(value));
     return `float:${String(value)}`;
   }
   if (typeof value === 'string') return `string:${value}`;
-  throw new StatusSummaryError(`unhashable run id (${typeName(value)})`, 'TypeError');
+  throw new StatusSummaryError(`unhashable ${label} (${typeName(value)})`, 'TypeError');
 }
 
 function integerRunKey(value: bigint): string {

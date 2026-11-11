@@ -37,6 +37,7 @@ trailing newline; fixed timestamps only, so the bytes are host-independent.
 | `client-health.json` | `client_health.snapshot` | completed age (frozen clock), missing/empty completed_at, invalid and non-string refusals, non-object health and item refusals, pending/blocked counts |
 | `passthrough-summarize.json` | `status_summary.summarize` + publish core | lossless `pr`/`generation`/`order`/`title`/`subject.pr`, exact adjacent-bigint ordering, local-review float generation and aging deadline, discovery and usage numbers, plus the Python `bytes`/`core_bytes` reserialisation; `core_only` cases exercise the route's lossless config cap without claiming the pure projection sees the config float |
 | `passthrough-receipt.json` | `status_summary.merged_current`, `review_receipt` | real `write_receipt` bytes, float/bigint path counts, adjacent-bigint inequality, int-vs-float version equality, current-equivalence and path digests |
+| `numeric-lineage.json` | `status_summary.merged_current` | numeric `reused_from` dict-key parity: int, int/float, bool, adjacent bigints, and a truthy list remaining unverified |
 | `numeric.json` | Python `==`/`<`/`>` | int/float equality, adjacent bigints, booleans, `-0.0`, infinities, NaN and cross-type `TypeError` |
 
 ## #1420 additive fields
