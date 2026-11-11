@@ -215,12 +215,14 @@ function mdLine(text: string): string {
 }
 
 /**
- * The stopped run's public record: the open findings (severity and file, one
- * line each) and every attempt logged against them, markdown-safe. The
+ * The not-ready draft's public record: the open findings (severity and file,
+ * one line each) and every attempt logged against them, markdown-safe. The
  * attempts ARE the spec's "attempt logs" — finding id, tier/invocation,
  * wall time and the worker's own reason — rendered from the address report's
- * run-wide arrays. Stopped runs only: a ready PR carries no findings section,
- * because there is nothing open to list.
+ * run-wide arrays. The section names HOW the draft came to be: a structured
+ * stop (round cap, run budget, blocked re-review), #536's red final gates,
+ * or a CLEAN address run blocked only by readiness gaps. A READY PR carries
+ * no findings section; only the not-ready draft does.
  */
 export function renderFindingsSection(
   report: ReviewAddressReport,
