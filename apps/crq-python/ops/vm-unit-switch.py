@@ -3019,6 +3019,41 @@ def _partial_completion_baseline_ok(baseline, entries, before_entries, label,
     return ok
 
 
+def _partial_completion_snapshots(phases):
+    """Return every observed completion inventory in phase order."""
+    snapshots = []
+
+    def add(label, value):
+        entries = (value or {}).get("repair_completions")
+        if isinstance(entries, list):
+            snapshots.append((label, entries))
+
+    add("partial install", phases.get("partial-install"))
+    for case in PARTIAL_ORDER:
+        boundary = phases.get("partial-" + case) or {}
+        add("partial-" + case + ".before", boundary.get("before"))
+        add("partial-" + case + ".after", boundary.get("after"))
+        observe = phases.get("partial-" + case + "-observe") or {}
+        add("partial-" + case + "-observe.before", observe.get("before"))
+        add("partial-" + case + "-observe.after_recovery",
+            observe.get("after_recovery"))
+        add("partial-" + case + "-observe.after_repeat",
+            observe.get("after_repeat"))
+    return snapshots
+
+
+def _partial_completion_observed_prefix_ok(observed, final, label, problems):
+    """Require the final inventory to retain the observed entries as a prefix."""
+    if not isinstance(observed, list) or not isinstance(final, list):
+        problems.append(label + " completion inventory is not a list")
+        return False
+    if final[:len(observed)] != observed:
+        problems.append(label + " does not retain the observed completion "
+                        "entries as an unchanged prefix")
+        return False
+    return True
+
+
 def _partial_completion_prefix_ok(before, after, runtime, label, problems,
                                   exact=None):
     before_entries = (before or {}).get("repair_completions")
@@ -3194,7 +3229,12 @@ def _partial_observe_ok(case, phase, boundary, prepared, problems):
         before.get("repair_files"), before.get("partial_metadata"),
         before_service, before.get("repair_completions"),
         label + ".before", problems) and ok
-    if before.get("repair_files") != boundary_after.get("repair_files"):
+    before_files = dict(before.get("repair_files") or {})
+    boundary_files = dict(boundary_after.get("repair_files") or {})
+    # The completion log is append-only while the timer remains active.
+    before_files.pop("completions", None)
+    boundary_files.pop("completions", None)
+    if before_files != boundary_files:
         problems.append(label + " file states changed across the event")
         ok = False
     if before.get("partial_metadata") \
@@ -3599,6 +3639,11 @@ def _partial_checks(phases, restarts=None, reboots=None):
         if not completions or not _completion_list_ok(
                 completions, "final partial completion", problems):
             final_ok = False
+        for snapshot_label, observed in _partial_completion_snapshots(phases):
+            if not _partial_completion_observed_prefix_ok(
+                    observed, completions, "final " + snapshot_label,
+                    problems):
+                final_ok = False
         sequences = [item.get("sequence") for item in completions]
         if sequences != sorted(sequences) or len(sequences) != len(set(sequences)):
             problems.append("final partial sequences are not strictly ordered")
@@ -4463,12 +4508,21 @@ def _verify_partial_raw(report, raw_root, problems, phases):
                                 + " is not JSON")
     else:
         problems.append("final partial completion log is missing")
-    if completions and not _completion_list_ok(
-            completions, "final partial completion", problems):
-        pass
-    if inspect.get("completions") != completions:
-        problems.append("final partial completion log does not match the "
-                        "inspect phase")
+    inspected = inspect.get("completions")
+    _completion_list_ok(completions, "archived partial completion",
+                        problems, allow_empty=False)
+    _partial_completion_observed_prefix_ok(
+        inspected, completions, "archived partial completion", problems)
+    sequences = [item.get("sequence") for item in completions
+                 if isinstance(item, dict)]
+    invocations = [item.get("invocation") for item in completions
+                   if isinstance(item, dict)]
+    if sequences != sorted(sequences) or len(sequences) != len(set(sequences)):
+        problems.append("archived partial completion sequences are not "
+                        "strictly ordered")
+    if len(invocations) != len(set(invocations)):
+        problems.append("archived partial completion invocations are not "
+                        "unique")
 
     sources = [(phases.get(name) or {}).get("source")
                for name in PARTIAL_GUEST_PHASES]

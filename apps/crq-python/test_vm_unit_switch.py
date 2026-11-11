@@ -2600,7 +2600,9 @@ class PartialHarnessCheckTests(unittest.TestCase):
         observe["repeat"] = self._fence(len(entries), entries)
         checks, problems = harness._partial_checks(phases_value, restarts,
                                                    reboots)
-        self.assertEqual(problems, [])
+        # The synthetic mutation stops at this case: a real append-only log
+        # would carry the prior work into every later snapshot and the final
+        # inventory. This test pins the boundary predicate only.
         self.assertIs(checks["partial_" + case + "_boundary"], True)
 
     def test_partial_mode_constants_and_plan(self):
@@ -2707,6 +2709,60 @@ class PartialHarnessCheckTests(unittest.TestCase):
             _, problems = harness._partial_checks(
                 phases_value, restarts, reboots)
             self.assertTrue(any(expected in item for item in problems))
+
+    def test_partial_observe_ignores_completion_log_growth(self):
+        phases_value, restarts, reboots = self.evidence()
+        case = "activation-service-restart"
+        observe = phases_value["partial-" + case + "-observe"]
+        log = observe["before"]["repair_files"]["completions"]
+        log["sha256"] = "f" * 64
+        log["size"] += 1
+        checks, problems = harness._partial_checks(
+            phases_value, restarts, reboots)
+        self.assertFalse(any("file states changed across the event" in item
+                             for item in problems))
+        self.assertIs(checks["partial_" + case + "_observe"], True)
+
+    def test_partial_final_requires_observed_completion_prefix(self):
+        phases_value, restarts, reboots = self.evidence()
+        inspect = phases_value["partial-inspect"]
+        inspect["completions"] = inspect["completions"][1:]
+        checks, problems = harness._partial_checks(
+            phases_value, restarts, reboots)
+        self.assertTrue(any("unchanged prefix" in item
+                            for item in problems))
+        self.assertIs(checks["partial_final_python"], False)
+
+    def test_partial_raw_accepts_completion_append_after_inspect(self):
+        phases_value, _, _ = self.evidence()
+        inspect = phases_value["partial-inspect"]["completions"]
+        extra = self._completion(inspect[-1]["sequence"] + 1, PYTHON)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            path = root / harness.PARTIAL_COMPLETIONS.replace(
+                "/home/probe/", "")
+            path.parent.mkdir(parents=True)
+            path.write_text("".join(
+                json.dumps(entry) + "\n" for entry in inspect + [extra]))
+            problems = []
+            harness._verify_partial_raw({}, root, problems, phases_value)
+            self.assertFalse(any("archived partial completion" in item
+                                 for item in problems), problems)
+
+    def test_partial_raw_rejects_completion_truncation(self):
+        phases_value, _, _ = self.evidence()
+        inspect = phases_value["partial-inspect"]["completions"]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            path = root / harness.PARTIAL_COMPLETIONS.replace(
+                "/home/probe/", "")
+            path.parent.mkdir(parents=True)
+            path.write_text("".join(
+                json.dumps(entry) + "\n" for entry in inspect[:-1]))
+            problems = []
+            harness._verify_partial_raw({}, root, problems, phases_value)
+            self.assertTrue(any("unchanged prefix" in item
+                                for item in problems), problems)
 
     def test_partial_raw_rejects_retained_tick_history_mutation(self):
         with tempfile.TemporaryDirectory() as tmp:

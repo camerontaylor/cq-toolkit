@@ -216,7 +216,10 @@ actual phase before it dies. The retained record is pending at
 ``activation_pending`` or ``restore_activation_pending``. The host requires
 the exact eleven-entry owned file map and the exact eight-entry metadata map,
 with non-null type/mode/uid/gid/size/digest/target where applicable and
-file-to-metadata agreement, before comparing preserved bytes.
+file-to-metadata agreement, before comparing preserved bytes. The dynamic
+completion log is the one append-only member: Python and Node fixtures write
+equivalent records with different JSON whitespace, so the host checks its
+shape and binds its parsed entries rather than comparing its bytes.
 
 The activation release cases require the released service file and at least
 one released-runtime completion; ``start-after-service`` requires exactly one,
@@ -244,7 +247,10 @@ baseline and requires exactly one pending record per case, valid advancing
 completions, unchanged tick evidence and no staged or rogue unit entry. Raw
 verification also re-hashes the preserved historical tick journal, binds its
 path, size and digest to the prepared baseline, and requires the archived
-record to remain present.
+record to remain present. The final completion inventory must retain every
+earlier observed inventory as an unchanged prefix, and the archived log may
+append further valid entries after the final inspection while the reset timer
+remains active.
 
 Cross-boot completion identity is checked on unit, runtime, success, sequence,
 invocation and boot ID. A completion's first observation must not precede the
