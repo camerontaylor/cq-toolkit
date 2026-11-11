@@ -2684,16 +2684,6 @@ def _partial_expected_file(key, service, entries):
     raise KeyError(key)
 
 
-def _partial_expected_text(key, entries):
-    if key == "completions":
-        if not isinstance(entries, list):
-            return None
-        return "".join(json.dumps(entry, sort_keys=True) + "\n"
-                       for entry in entries)
-    return _partial_expected_file(
-        key, "python", entries).get("text")
-
-
 def _partial_file_state_ok(state, key, service, entries, label, problems):
     expected = _partial_expected_file(key, service, entries)
     path = PARTIAL_FILE_PATHS[key]
@@ -2771,8 +2761,7 @@ def _partial_metadata_state_ok(metadata, files, key, service, entries,
               and file_state.get("uid") == state.get("uid")
               and file_state.get("gid") == state.get("gid"))
     else:
-        text = (_partial_expected_text(key, entries)
-                if kind == "completions" else expected["text"])
+        text = expected["text"]
         try:
             data = base64.b64decode(
                 (state.get("bytes_b64") or "").encode("ascii"), validate=True)
