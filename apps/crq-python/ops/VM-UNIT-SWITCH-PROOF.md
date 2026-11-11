@@ -277,8 +277,9 @@ The retained-raw tests add same-ID waiting+running in both orders, identical
 duplicates, duplicate IDs across units, duplicate units, zero and leading-zero
 IDs, headers, trailing fields, non-string rows, and a legitimate blocker row
 with another ID and unit. The legitimate control passes; every ambiguous row
-fails closed. Removing the strict parser makes 23 of 103 host tests fail
-(11 canonical/unique, 6 queue, 6 fence); restoring it passes 103/103.
+fails closed. Removing the strict parser makes 24 of 104 host tests fail
+(11 canonical/unique, 6 queue, 6 fence, 1 snapshot); restoring it passes
+104/104.
 
 This is a host-only validator change. The guest adapter and guest driver are
 byte-identical to the current run. A ``verify`` with the new host script
