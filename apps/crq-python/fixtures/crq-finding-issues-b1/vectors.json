@@ -424,6 +424,263 @@
           }
         },
         {
+          "name": "float-sum-compensated",
+          "source": "finding_issues.title",
+          "input": {
+            "base": "aaaaaaaaaa1111",
+            "head": "bbbbbbbbbb2222",
+            "severity_counts": {
+              "critical": 1e+16,
+              "major": 1.0,
+              "minor": -1e+16
+            }
+          },
+          "expect": {
+            "ok": true,
+            "value": "crq: aaaaaaaaaa..bbbbbbbbbb \u2014 1.0 findings (1e+16 blocking)"
+          }
+        },
+        {
+          "name": "float-sum-point-one",
+          "source": "finding_issues.title",
+          "input": {
+            "base": "aaaaaaaaaa1111",
+            "head": "bbbbbbbbbb2222",
+            "severity_counts": {
+              "critical": 0.1,
+              "major": 0.2,
+              "minor": 0.3
+            }
+          },
+          "expect": {
+            "ok": true,
+            "value": "crq: aaaaaaaaaa..bbbbbbbbbb \u2014 0.6 findings (0.30000000000000004 blocking)"
+          }
+        },
+        {
+          "name": "float-sum-int64-overflow",
+          "source": "finding_issues.title",
+          "input": {
+            "base": "aaaaaaaaaa1111",
+            "head": "bbbbbbbbbb2222",
+            "severity_counts": {
+              "minor": 18446744073709551616,
+              "low": -18446744073709551616,
+              "high": 1e+16,
+              "x": 1.0,
+              "y": -1e+16
+            }
+          },
+          "expect": {
+            "ok": true,
+            "value": "crq: aaaaaaaaaa..bbbbbbbbbb \u2014 0.0 findings (0 blocking)"
+          }
+        },
+        {
+          "name": "float-sum-int64-boundary",
+          "source": "finding_issues.title",
+          "input": {
+            "base": "aaaaaaaaaa1111",
+            "head": "bbbbbbbbbb2222",
+            "severity_counts": {
+              "minor": 9223372036854775808,
+              "low": 1.0,
+              "high": -9223372036854775808
+            }
+          },
+          "expect": {
+            "ok": true,
+            "value": "crq: aaaaaaaaaa..bbbbbbbbbb \u2014 0.0 findings (0 blocking)"
+          }
+        },
+        {
+          "name": "float-sum-large-int",
+          "source": "finding_issues.title",
+          "input": {
+            "base": "aaaaaaaaaa1111",
+            "head": "bbbbbbbbbb2222",
+            "severity_counts": {
+              "minor": 1180591620717411303424,
+              "low": 1.0
+            }
+          },
+          "expect": {
+            "ok": true,
+            "value": "crq: aaaaaaaaaa..bbbbbbbbbb \u2014 1.1805916207174113e+21 findings (0 blocking)"
+          }
+        },
+        {
+          "name": "float-sum-bool",
+          "source": "finding_issues.title",
+          "input": {
+            "base": "aaaaaaaaaa1111",
+            "head": "bbbbbbbbbb2222",
+            "severity_counts": {
+              "minor": true,
+              "low": 1.5
+            }
+          },
+          "expect": {
+            "ok": true,
+            "value": "crq: aaaaaaaaaa..bbbbbbbbbb \u2014 2.5 findings (0 blocking)"
+          }
+        },
+        {
+          "name": "float-sum-negative-zero",
+          "source": "finding_issues.title",
+          "input": {
+            "base": "aaaaaaaaaa1111",
+            "head": "bbbbbbbbbb2222",
+            "severity_counts": {
+              "minor": -0.0
+            }
+          },
+          "expect": {
+            "ok": true,
+            "value": "crq: aaaaaaaaaa..bbbbbbbbbb \u2014 0.0 findings (0 blocking)"
+          }
+        },
+        {
+          "name": "float-sum-cancel",
+          "source": "finding_issues.title",
+          "input": {
+            "base": "aaaaaaaaaa1111",
+            "head": "bbbbbbbbbb2222",
+            "severity_counts": {
+              "minor": 1e+16,
+              "low": 1.0,
+              "high": -1e+16
+            }
+          },
+          "expect": {
+            "ok": true,
+            "value": "crq: aaaaaaaaaa..bbbbbbbbbb \u2014 1.0 findings (0 blocking)"
+          }
+        },
+        {
+          "name": "float-sum-int-first",
+          "source": "finding_issues.title",
+          "input": {
+            "base": "aaaaaaaaaa1111",
+            "head": "bbbbbbbbbb2222",
+            "severity_counts": {
+              "minor": 1,
+              "low": 1e+16,
+              "high": 1.0,
+              "x": -1e+16
+            }
+          },
+          "expect": {
+            "ok": true,
+            "value": "crq: aaaaaaaaaa..bbbbbbbbbb \u2014 1.0 findings (0 blocking)"
+          }
+        },
+        {
+          "name": "sum-string",
+          "source": "finding_issues.title",
+          "input": {
+            "base": "aaaaaaaaaa1111",
+            "head": "bbbbbbbbbb2222",
+            "severity_counts": {
+              "minor": "x"
+            }
+          },
+          "expect": {
+            "ok": false,
+            "error": "TypeError",
+            "message": "unsupported operand type(s) for +: 'int' and 'str'"
+          }
+        },
+        {
+          "name": "sum-list",
+          "source": "finding_issues.title",
+          "input": {
+            "base": "aaaaaaaaaa1111",
+            "head": "bbbbbbbbbb2222",
+            "severity_counts": {
+              "minor": [
+                1
+              ]
+            }
+          },
+          "expect": {
+            "ok": false,
+            "error": "TypeError",
+            "message": "unsupported operand type(s) for +: 'int' and 'list'"
+          }
+        },
+        {
+          "name": "sum-none",
+          "source": "finding_issues.title",
+          "input": {
+            "base": "aaaaaaaaaa1111",
+            "head": "bbbbbbbbbb2222",
+            "severity_counts": {
+              "minor": null
+            }
+          },
+          "expect": {
+            "ok": false,
+            "error": "TypeError",
+            "message": "unsupported operand type(s) for +: 'int' and 'NoneType'"
+          }
+        },
+        {
+          "name": "sum-dict",
+          "source": "finding_issues.title",
+          "input": {
+            "base": "aaaaaaaaaa1111",
+            "head": "bbbbbbbbbb2222",
+            "severity_counts": {
+              "minor": {
+                "a": 1
+              }
+            }
+          },
+          "expect": {
+            "ok": false,
+            "error": "TypeError",
+            "message": "unsupported operand type(s) for +: 'int' and 'dict'"
+          }
+        },
+        {
+          "name": "sum-string-after-float",
+          "source": "finding_issues.title",
+          "input": {
+            "base": "aaaaaaaaaa1111",
+            "head": "bbbbbbbbbb2222",
+            "severity_counts": {
+              "minor": 1.5,
+              "low": "x"
+            }
+          },
+          "expect": {
+            "ok": false,
+            "error": "TypeError",
+            "message": "unsupported operand type(s) for +: 'float' and 'str'"
+          }
+        },
+        {
+          "name": "sum-list-after-bigint",
+          "source": "finding_issues.title",
+          "input": {
+            "base": "aaaaaaaaaa1111",
+            "head": "bbbbbbbbbb2222",
+            "severity_counts": {
+              "minor": 18446744073709551616,
+              "low": -18446744073709551616,
+              "x": [
+                1
+              ]
+            }
+          },
+          "expect": {
+            "ok": false,
+            "error": "TypeError",
+            "message": "unsupported operand type(s) for +: 'int' and 'list'"
+          }
+        },
+        {
           "name": "critical-string-major-string",
           "source": "finding_issues.title",
           "input": {

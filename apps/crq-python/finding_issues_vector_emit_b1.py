@@ -224,6 +224,27 @@ def title_cases() -> List[Dict[str, Any]]:
     add("float-int-overflow", BASE, HEAD, {"major": 2 ** 1024, "minor": 1.5})
     add("string-count", BASE, HEAD, {"major": "x"})
     add("none-count", BASE, HEAD, {"major": None})
+    add("float-sum-compensated", BASE, HEAD,
+        {"critical": 1e16, "major": 1.0, "minor": -1e16})
+    add("float-sum-point-one", BASE, HEAD,
+        {"critical": 0.1, "major": 0.2, "minor": 0.3})
+    add("float-sum-int64-overflow", BASE, HEAD,
+        {"minor": 2 ** 64, "low": -(2 ** 64), "high": 1e16, "x": 1.0, "y": -1e16})
+    add("float-sum-int64-boundary", BASE, HEAD,
+        {"minor": 2 ** 63, "low": 1.0, "high": -(2 ** 63)})
+    add("float-sum-large-int", BASE, HEAD, {"minor": 2 ** 70, "low": 1.0})
+    add("float-sum-bool", BASE, HEAD, {"minor": True, "low": 1.5})
+    add("float-sum-negative-zero", BASE, HEAD, {"minor": -0.0})
+    add("float-sum-cancel", BASE, HEAD, {"minor": 1e16, "low": 1.0, "high": -1e16})
+    add("float-sum-int-first", BASE, HEAD,
+        {"minor": 1, "low": 1e16, "high": 1.0, "x": -1e16})
+    add("sum-string", BASE, HEAD, {"minor": "x"})
+    add("sum-list", BASE, HEAD, {"minor": [1]})
+    add("sum-none", BASE, HEAD, {"minor": None})
+    add("sum-dict", BASE, HEAD, {"minor": {"a": 1}})
+    add("sum-string-after-float", BASE, HEAD, {"minor": 1.5, "low": "x"})
+    add("sum-list-after-bigint", BASE, HEAD,
+        {"minor": 2 ** 64, "low": -(2 ** 64), "x": [1]})
     add("critical-string-major-string", BASE, HEAD, {"critical": "a", "major": "b"})
     add("critical-string-major-int", BASE, HEAD, {"critical": "a", "major": 1})
     add("critical-list-major-list", BASE, HEAD, {"critical": [1], "major": [2]})

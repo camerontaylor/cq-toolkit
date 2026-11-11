@@ -13,7 +13,8 @@
  *   and non-printable code points) is reproduced locally, because `body` and
  *   `title` interpolate metadata with Python `str()`;
  * - slicing, length and `rstrip("\n")` count code points, not UTF-16 units;
- * - numeric counts use Python `int`/`float` addition (`bool` is an `int`);
+ * - numeric counts use Python `+` for blocking and CPython `sum()`'s int fast
+ *   path / compensated float accumulator for the total (`bool` is an `int`);
  * - the issue-URL scan uses Python's Unicode `\s` set and `\d` decimal digits;
  * - `isinstance(number, int)` accepts a JSON boolean exactly as CPython does;
  * - `json.loads` on `gh` output keeps the last duplicate key and accepts the
@@ -24,6 +25,12 @@
  * this port requires a string `repo` and does not reproduce `subprocess`'s
  * non-string argv refusal. No other input is narrowed.
  */
+import {
+  CoverageUtilizationError,
+  encodeSum as encodePythonSum,
+  pythonAdd as pythonSumAdd,
+  type PythonSum,
+} from './coverageUtilization.js';
 import { JsonNumber, JsonObject, parseJsonValue, type JsonValue } from './jsonValue.js';
 import { ledgerPythonTypeName } from './ledger.js';
 import { pythonFloatRepr } from './pythonJson.js';
@@ -211,11 +218,14 @@ export function findingIssueTitle(
   // base, head, then `sum(severity_counts.values())`.
   const baseText = pythonPrefix(base);
   const headText = pythonPrefix(head);
-  let total: PyAddend = INT_ZERO;
-  for (const [, value] of counts.entries) total = pyAdd(total, pyAddend(value));
+  // `sum(values())` is not a left fold of `+` for floats: CPython keeps an int
+  // fast path and switches to a Neumaier-compensated accumulator on the float
+  // path, so order and promotion matter. Reuse the oracle-tested accumulator.
+  let total: PythonSum = { kind: 'int', value: 0n };
+  for (const [, value] of counts.entries) total = pySumStep(total, value);
   return (
     `crq: ${baseText}..${headText} — ` +
-    `${pyAddendTitle(total)} findings (${pyAddendTitle(blocking)} blocking)${suffix}`
+    `${pythonSumTitle(total)} findings (${pyAddendTitle(blocking)} blocking)${suffix}`
   );
 }
 
@@ -638,6 +648,29 @@ function pyAddendTitle(value: PyAddend): string {
     case 'other':
       return pythonString(value.value);
   }
+}
+
+/** One CPython `sum()` step, translated to this module's error classes. */
+function pySumStep(total: PythonSum, value: JsonValue): PythonSum {
+  try {
+    return pythonSumAdd(total, value);
+  } catch (error) {
+    if (error instanceof CoverageUtilizationError) {
+      if (error.pythonError === 'OverflowError') {
+        throw new FindingIssueOverflowError(error.message);
+      }
+      if (error.pythonError === 'TypeError') {
+        throw new FindingIssueTypeError(error.message);
+      }
+    }
+    throw error;
+  }
+}
+
+/** Python `str(sum(values()))` from the reused accumulator. */
+function pythonSumTitle(total: PythonSum): string {
+  const encoded = encodePythonSum(total);
+  return typeof encoded === 'number' ? String(encoded) : pyAddendTitle(pyAddend(encoded));
 }
 
 /** Python `str()` over the lossless JSON model. */
