@@ -16,9 +16,12 @@
  * {@link toPlainJson} materialises ordinary JavaScript values for zod.
  *
  * This is deliberately a JSON parser, not a JSON5/YAML reader: only the
- * RFC 8259 grammar is accepted; Python's non-finite constants are deliberately refused. Duplicate keys
- * are the caller's choice because Python's default `json.loads` keeps the last
- * value (and the first key position), while `review_ledger.loads` refuses them.
+ * RFC 8259 grammar is accepted. Python's non-finite constants are refused by
+ * default and exposed through the `parseConstant` hook, which lets
+ * `review_ledger.loads` reproduce Python's in-document refusal order.
+ * Duplicate keys are the caller's choice because Python's default
+ * `json.loads` keeps the last value (and the first key position), while
+ * `review_ledger.loads` refuses them.
  */
 
 /** A Python `int` or `float`, keeping the exact source lexeme. */
@@ -107,11 +110,34 @@ export interface ParseJsonOptions {
    * value. `error` (review_ledger.loads): reject a duplicate key.
    */
   duplicates?: 'last' | 'error';
+  /**
+   * Python `parse_float`: called as soon as a float literal is scanned, so a
+   * refusing callback wins over any later syntax error.
+   */
+  parseFloat?: (raw: string) => JsonValue;
+  /**
+   * Python `parse_constant`: called for `NaN`, `Infinity` and `-Infinity` as
+   * soon as the token is scanned.
+   */
+  parseConstant?: (raw: string) => JsonValue;
+  /**
+   * Python `object_pairs_hook`: called with the source-ordered pairs when an
+   * object closes. Supplying it disables the `duplicates` policy because the
+   * hook owns the key policy.
+   */
+  objectPairs?: (pairs: ReadonlyArray<readonly [string, JsonValue]>) => JsonValue;
+  /**
+   * Called when the source contains a raw surrogate code unit that is not an
+   * escaped high/low pair. Python keeps such code units as separate
+   * characters; JavaScript would otherwise merge an adjacent high/low pair
+   * into a scalar.
+   */
+  onRawSurrogate?: () => void;
 }
 
 /** Parse RFC 8259 JSON without losing int-vs-float or object key order. */
 export function parseJsonValue(text: string, options: ParseJsonOptions = {}): JsonValue {
-  return new Parser(text, options.duplicates ?? 'last').parse();
+  return new Parser(text, options).parse();
 }
 
 /** The Python `repr(float)` text, used by `JsonNumber.float` and the serialiser. */
@@ -127,7 +153,7 @@ class Parser {
 
   constructor(
     private readonly text: string,
-    private readonly duplicates: 'last' | 'error',
+    private readonly options: ParseJsonOptions,
   ) {}
 
   parse(): JsonValue {
@@ -153,9 +179,16 @@ class Parser {
         return this.parseKeyword('false', false);
       case 'n':
         return this.parseKeyword('null', null);
+      case 'N':
+        return this.parseNonFinite('NaN');
+      case 'I':
+        return this.parseNonFinite('Infinity');
       case undefined:
         return this.fail('expected a JSON value');
       default:
+        if (this.text.startsWith('-Infinity', this.index)) {
+          return this.parseNonFinite('-Infinity');
+        }
         if (
           character === '-' ||
           (character !== undefined && character >= '0' && character <= '9')
@@ -166,14 +199,13 @@ class Parser {
     }
   }
 
-  private parseObject(): JsonObject {
+  private parseObject(): JsonValue {
     this.index += 1; // {
     const entries: Array<[string, JsonValue]> = [];
-    const positions = new Map<string, number>();
     this.skipWhitespace();
     if (this.text[this.index] === '}') {
       this.index += 1;
-      return new JsonObject(entries);
+      return this.finishObject(entries);
     }
     for (;;) {
       this.skipWhitespace();
@@ -184,24 +216,42 @@ class Parser {
       this.index += 1;
       this.skipWhitespace();
       const value = this.parseValue();
-      const existing = positions.get(key);
-      if (existing === undefined) {
-        positions.set(key, entries.length);
-        entries.push([key, value]);
-      } else if (this.duplicates === 'error') {
-        this.fail(`duplicate key ${JSON.stringify(key)}`);
-      } else {
-        entries[existing] = [key, value];
-      }
+      entries.push([key, value]);
       this.skipWhitespace();
       const separator = this.text[this.index];
       if (separator === '}') {
         this.index += 1;
-        return new JsonObject(entries);
+        return this.finishObject(entries);
       }
       if (separator !== ',') this.fail("expected ',' or '}'");
       this.index += 1;
     }
+  }
+
+  private finishObject(entries: Array<[string, JsonValue]>): JsonValue {
+    if (this.options.objectPairs !== undefined) return this.options.objectPairs(entries);
+    if ((this.options.duplicates ?? 'last') === 'last') {
+      const merged: Array<[string, JsonValue]> = [];
+      const positions = new Map<string, number>();
+      for (const [key, value] of entries) {
+        const existing = positions.get(key);
+        if (existing === undefined) {
+          positions.set(key, merged.length);
+          merged.push([key, value]);
+        } else {
+          merged[existing] = [key, value];
+        }
+      }
+      return new JsonObject(merged);
+    }
+    // Python's object_pairs_hook runs when the object closes, so a syntax
+    // error after the repeated key but before `}` wins over the duplicate.
+    const seen = new Set<string>();
+    for (const [key] of entries) {
+      if (seen.has(key)) this.fail(`duplicate key ${JSON.stringify(key)}`);
+      seen.add(key);
+    }
+    return new JsonObject(entries);
   }
 
   private parseArray(): JsonValue[] {
@@ -234,12 +284,16 @@ class Parser {
       const character = this.text[this.index];
       if (character === undefined) this.fail('unterminated string');
       if (character === '"') {
-        result += this.text.slice(chunkStart, this.index);
+        const chunk = this.text.slice(chunkStart, this.index);
+        this.checkRawSurrogates(chunk);
+        result += chunk;
         this.index += 1;
         return result;
       }
       if (character === '\\') {
-        result += this.text.slice(chunkStart, this.index);
+        const chunk = this.text.slice(chunkStart, this.index);
+        this.checkRawSurrogates(chunk);
+        result += chunk;
         this.index += 1;
         result += this.parseEscape();
         chunkStart = this.index;
@@ -248,6 +302,26 @@ class Parser {
       const code = character.charCodeAt(0);
       if (code < 0x20) this.fail('unescaped control character in string');
       this.index += 1;
+    }
+  }
+
+  private checkRawSurrogates(chunk: string): void {
+    if (this.options.onRawSurrogate === undefined) return;
+    for (let index = 0; index < chunk.length; index += 1) {
+      const unit = chunk.charCodeAt(index);
+      if (unit >= 0xd800 && unit <= 0xdbff) {
+        const next = chunk.charCodeAt(index + 1);
+        if (next >= 0xdc00 && next <= 0xdfff) {
+          index += 1;
+          continue;
+        }
+        this.options.onRawSurrogate();
+        return;
+      }
+      if (unit >= 0xdc00 && unit <= 0xdfff) {
+        this.options.onRawSurrogate();
+        return;
+      }
     }
   }
 
@@ -275,7 +349,17 @@ class Parser {
         const digits = this.text.slice(this.index, this.index + 4);
         if (!/^[0-9a-fA-F]{4}$/.test(digits)) this.fail('invalid \\u escape');
         this.index += 4;
-        return String.fromCharCode(Number.parseInt(digits, 16));
+        const code = Number.parseInt(digits, 16);
+        if (code >= 0xd800 && code <= 0xdbff) {
+          const low = this.parseEscapedLowSurrogate();
+          if (low !== null) {
+            return String.fromCodePoint(0x10000 + ((code - 0xd800) << 10) + (low - 0xdc00));
+          }
+          this.options.onRawSurrogate?.();
+          return String.fromCharCode(code);
+        }
+        if (code >= 0xdc00 && code <= 0xdfff) this.options.onRawSurrogate?.();
+        return String.fromCharCode(code);
       }
       case undefined:
         return this.fail('invalid escape');
@@ -284,7 +368,18 @@ class Parser {
     }
   }
 
-  private parseNumber(): JsonNumber {
+  /** Python's json scanner joins an escaped high surrogate with an escaped low. */
+  private parseEscapedLowSurrogate(): number | null {
+    if (this.text[this.index] !== '\\' || this.text[this.index + 1] !== 'u') return null;
+    const digits = this.text.slice(this.index + 2, this.index + 6);
+    if (!/^[0-9a-fA-F]{4}$/.test(digits)) return null;
+    const code = Number.parseInt(digits, 16);
+    if (code < 0xdc00 || code > 0xdfff) return null;
+    this.index += 6;
+    return code;
+  }
+
+  private parseNumber(): JsonValue {
     const start = this.index;
     if (this.text[this.index] === '-') this.index += 1;
     if (this.text[this.index] === '0') {
@@ -304,14 +399,34 @@ class Parser {
     }
     let exponent = false;
     if (this.text[this.index] === 'e' || this.text[this.index] === 'E') {
-      exponent = true;
+      // Python leaves an exponent marker without digits unconsumed, so the
+      // preceding literal is still scanned and `parseFloat` still runs.
+      const exponentStart = this.index;
       this.index += 1;
       if (this.text[this.index] === '+' || this.text[this.index] === '-') this.index += 1;
-      if (!isDigit(this.text[this.index])) this.fail('expected an exponent digit');
-      while (isDigit(this.text[this.index])) this.index += 1;
+      if (isDigit(this.text[this.index])) {
+        exponent = true;
+        while (isDigit(this.text[this.index])) this.index += 1;
+      } else {
+        this.index = exponentStart;
+      }
     }
     const raw = this.text.slice(start, this.index);
-    return fractional || exponent ? JsonNumber.float(Number(raw), raw) : JsonNumber.int(raw);
+    if (fractional || exponent) {
+      return this.options.parseFloat === undefined
+        ? JsonNumber.float(Number(raw), raw)
+        : this.options.parseFloat(raw);
+    }
+    return JsonNumber.int(raw);
+  }
+
+  private parseNonFinite(token: string): JsonValue {
+    if (this.text.slice(this.index, this.index + token.length) !== token) {
+      return this.fail('expected a JSON value');
+    }
+    if (this.options.parseConstant === undefined) return this.fail('expected a JSON value');
+    this.index += token.length;
+    return this.options.parseConstant(token);
   }
 
   private parseKeyword<T extends boolean | null>(word: string, value: T): T {

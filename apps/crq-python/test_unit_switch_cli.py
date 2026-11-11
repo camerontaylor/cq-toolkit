@@ -194,6 +194,41 @@ class CliTests(unittest.TestCase):
         self.assertEqual(saved["outcome"], "completed")
         self.assertEqual(len(saved["completions"]), 2)
 
+    def test_switch_wires_the_controller_queue_drain_into_the_adapter(self):
+        with mock.patch.object(cli.adapter_mod, "GuestFixtureAdapter",
+                               FakeAdapter):
+            status, output = self._run([
+                "switch", "--root", str(self.root),
+                "--record-dir", str(self.records), "--runtime", NODE,
+                "--proof-fixture"])
+        self.assertEqual(status, 0, output)
+        adapter = FakeAdapter.instances[0]
+        queue_drain = adapter.kwargs.get("queue_drain")
+        self.assertTrue(callable(queue_drain))
+        self.assertEqual(queue_drain(), {"drained": True, "blocked": []})
+
+    def test_switch_queue_refusal_retains_structured_drain_evidence(self):
+        run_id = "a" * 32
+        state = self.root / "apps/crq-python/state"
+        (state / "queue.json").write_text(json.dumps({"items": [
+            {"id": "pr1", "state": "reviewing",
+             "run": {"run_id": run_id, "pid": 4242}}]}))
+        with mock.patch.object(cli.adapter_mod, "GuestFixtureAdapter",
+                               FakeAdapter), \
+                mock.patch.object(cli.dc, "_runner_liveness",
+                                  return_value=lambda *args: "alive"):
+            status, output = self._run([
+                "switch", "--root", str(self.root),
+                "--record-dir", str(self.records), "--runtime", NODE,
+                "--proof-fixture"])
+        self.assertEqual(status, 2, output)
+        payload = json.loads(output)
+        self.assertIn("queue-owned work", payload["refused"])
+        self.assertEqual(payload["drain"]["blocked"], [
+            {"item": "pr1", "state": "alive", "run": run_id}])
+        self.assertEqual(FakeAdapter.instances[0].calls, [])
+        self.assertEqual(list(self.records.glob("controller-*.json")), [])
+
     def test_switch_refuses_unsupported_unit_before_adapter(self):
         with mock.patch.object(cli.adapter_mod, "GuestFixtureAdapter", FakeAdapter):
             status, output = self._run([

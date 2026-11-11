@@ -24,32 +24,58 @@ Files:
 | ``ops/unit-switch-adapter.py`` | Guest-only adapter: durable ``/dev/null`` service replacement, target staged behind the mask until ``start`` releases it, exact path/type/bytes/mode/uid/gid snapshot and restoration, bounded job/cgroup drain, fake unit/runtime-bound completion provider. |
 | ``ops/unit-switch.py`` | Explicit ``switch``/``recover`` CLI; calls the real controller and requires ``--proof-fixture``. No default or production adapter. |
 | ``ops/unit-switch-fixture.py`` / ``.mjs`` | Harmless Python and Node fixtures emitting distinguishable runtime-bound completion records with real systemd invocation IDs. |
-| ``ops/vm-unit-switch-guest.py`` | In-guest driver: isolated git checkout, seeded queue/heartbeat, completed historical record, both directions, interruption, repeated recovery, the activation-fence probe, and the restart/reboot matrix at the ``drained``, ``restore_staged`` and ``activation_pending`` boundaries. |
-| ``ops/vm-unit-switch.py`` | Host harness reusing ``vm-feasibility.py`` lifecycle, uploading exact script bytes, restarting the real guest user manager or rebooting the guest OS between a boundary and its observation, retaining raw guest evidence and a report outside the worktree. |
+| ``ops/vm-unit-switch-guest.py`` | In-guest driver: exact runner-source extraction, isolated git checkout, seeded queue/heartbeat and runner metadata, completed historical record, drain refusals and harvest, both directions, interruption, repeated recovery, the activation-fence probe, and the restart/reboot matrix at the ``drained``, ``restore_staged`` and ``activation_pending`` boundaries. |
+| ``ops/vm-unit-switch.py`` | Host harness reusing ``vm-feasibility.py`` lifecycle, uploading exact script bytes and ``git archive HEAD apps/crq-python`` as the runner source, restarting the real guest user manager or rebooting the guest OS between a boundary and its observation, retaining raw guest evidence and a report outside the worktree. |
 
 ## Sequence
 
-1. ``prepare``: verify the ``crq-probe`` guest layout; create a throwaway git
-   checkout; seed ``queue.json`` and ``heartbeat.json``; install the harmless
-   Python fixture as ``crq-tick.service`` and its timer; seed a completed
-   historical ``controller-*.json`` record and retain its bytes.
-2. ``switch-node``: actual ``switch_unit`` from Python to a fake
+1. ``prepare``: verify the ``crq-probe`` guest layout; extract the uploaded
+   ``crq-runner-source.tar.gz`` (``git archive HEAD apps/crq-python``) into a
+   throwaway git checkout, requiring ``crq.py`` and ``author_quota.py``;
+   seed ``queue.json`` and ``heartbeat.json``; install the harmless Python
+   fixture as ``crq-tick.service`` and its timer; seed a completed historical
+   ``controller-*.json`` record and retain its bytes.
+2. ``drain-alive``: seed a real detached session-leader process and a genuine
+   ``review.pid`` entry for a runner-owned queued run, so
+   ``crq.run_liveness`` reports ``alive``. Invoke the actual switch CLI.
+   Require rc ``2`` and an explicit ``queue-owned work`` refusal before the
+   adapter preflight, snapshot or journal write; unchanged queue bytes, no new
+   journal record, no fixture completion, unchanged unit metadata and
+   activation, and both the owned and an unrelated detached guest process
+   still alive with unchanged ``/proc`` identity. The guest harness alone
+   cleans up the seeded processes.
+3. ``switch-node``: actual ``switch_unit`` from Python to a fake
    ``node:<sha>`` runtime. Require two advancing, distinct invocation-bound
    completions.
-3. ``switch-python``: actual ``switch_unit`` back to the Python runtime with the
+4. ``drain-ambiguous``: seed a recorded runner run with no pidfile, pid or
+   terminal artifact, so liveness is genuinely ``ambiguous``. Require the same
+   refusal and preservation as ``drain-alive``.
+5. ``switch-python``: actual ``switch_unit`` back to the Python runtime with the
    same completion requirement.
-4. ``interrupt``: start a Python-to-Node switch and SIGKILL the controller at
+6. ``drain-harvest``: seed a real detached process that has exited, with a
+   completed ``exit.json``, so liveness is ``harvest``. Require the drain to
+   accept it, both real switches (Python to Node and back) to proceed with
+   advancing completions, and the seeded queue bytes and unrelated detached
+   process to be preserved.
+7. ``interrupt``: start a Python-to-Node switch and SIGKILL the controller at
    the ``install`` boundary, after the journal reached ``drained`` and the
    durable mask was established. ``install`` stages the target without
    releasing the mask, so the pending record and mask must remain.
-5. ``recover-kill``: invoke the actual recovery CLI and SIGKILL it during the
+8. ``recover-drain-alive``: retain the ``interrupt`` ``drained`` record, then
+   seed live runner-owned queue work. Invoke the actual recovery CLI. Require
+   it to re-observe ownership independently and refuse with rc ``2`` before
+   snapshot validation, re-fencing, restore or journal rewrite; unchanged
+   record bytes and phase, unchanged durable mask and absent staged path,
+   unchanged service/timer activation, unchanged queue bytes, no completion,
+   and both seeded processes alive.
+9. ``recover-kill``: invoke the actual recovery CLI and SIGKILL it during the
    re-drain. Require the retained record bytes to remain unchanged.
-6. ``recover``: invoke recovery again. Require ``rolled_back`` and exact
+10. ``recover``: invoke recovery again. Require ``rolled_back`` and exact
    restoration of the prior Python service bytes, mode, ownership and timer
    activation/enablement.
-7. ``recover-repeat``: invoke recovery against the completed rollback again.
+11. ``recover-repeat``: invoke recovery against the completed rollback again.
    Require an explicit refusal and unchanged record bytes.
-8. ``rollback-fence``: start one more Python-to-Node switch and SIGKILL it at
+12. ``rollback-fence``: start one more Python-to-Node switch and SIGKILL it at
    ``install``. Invoke recovery and SIGKILL it at ``restore_staged``, after the
    prior Python service has been written to the staged path but before the
    controller journals ``restore_activation_pending``. Require the retained
@@ -58,9 +84,9 @@ Files:
    Python service, and no new completion. Complete recovery, require
    ``rolled_back`` with exact Python restoration and no staged path, then
    require repeated recovery to refuse without changing the record.
-9. ``inspect``: confirm the final Python unit, no mask, preserved queue,
+13. ``inspect``: confirm the final Python unit, no mask, preserved queue,
    heartbeat and historical record bytes.
-10. ``fence``: start one more Python-to-Node switch and SIGKILL the controller
+14. ``fence``: start one more Python-to-Node switch and SIGKILL the controller
    at the ``start`` boundary, after ``install`` staged the target and the
    controller durably journaled ``activation_pending`` but before ``start``
    releases the mask. Require the pending ``activation_pending`` record, the
@@ -71,40 +97,40 @@ Files:
 
 ## Restart/reboot matrix
 
-``run --mode matrix`` keeps steps 1-9, inserts the matrix below, and uses the
-final ``fence`` as step 20. The host process survives every guest boundary.
+``run --mode matrix`` keeps steps 1-13, inserts the matrix below, and uses the
+final ``fence`` as step 24. The host process survives every guest boundary.
 
-11. ``matrix-restart-drained``: Python-to-Node switch killed at ``install``;
+15. ``matrix-restart-drained``: Python-to-Node switch killed at ``install``;
     real ``systemctl restart user@$(id -u).service``; observe the retained
     ``drained`` record, ``/dev/null`` mask, missing staged target, inactive
     timer and no owned work; recovery rolls back to Python; repeated recovery
     refuses.
-12. ``matrix-restart-restore-staged``: Python-to-Node switch killed at
+16. ``matrix-restart-restore-staged``: Python-to-Node switch killed at
     ``install``, then recovery killed at ``restore_staged``; real user-manager
     restart; observe the ``drained`` record, mask, staged prior Python service
     and no completion; recovery rolls back; repeated recovery refuses.
-13. ``matrix-restart-ambiguity``: Python-to-Node switch killed at ``start``;
+17. ``matrix-restart-ambiguity``: Python-to-Node switch killed at ``start``;
     real user-manager restart; observe the ``activation_pending`` record, mask,
     staged Node target and no completion; two recoveries refuse with rc 3 and
     leave the record bytes unchanged.
-14. ``matrix-reset-python``: restore the fixture to Python without touching the
+18. ``matrix-reset-python``: restore the fixture to Python without touching the
     retained ambiguity record.
-15. ``matrix-switch-node``: actual completed Python-to-Node switch so the
+19. ``matrix-switch-node``: actual completed Python-to-Node switch so the
     reboot cases start from Node.
-16. ``matrix-reboot-drained``: Node-to-Python switch killed at ``install``;
+20. ``matrix-reboot-drained``: Node-to-Python switch killed at ``install``;
     real ``systemctl reboot``; observe a changed boot ID, a changed
     user-manager invocation, the retained ``drained`` record, mask and missing
     staged target; recovery rolls back to Node; repeated recovery refuses.
-17. ``matrix-reboot-restore-staged``: Node-to-Python switch killed at
+21. ``matrix-reboot-restore-staged``: Node-to-Python switch killed at
     ``install``, recovery killed at ``restore_staged``; real guest reboot;
     observe the ``drained`` record, mask, staged prior Node service and no
     completion; recovery rolls back; repeated recovery refuses.
-18. ``matrix-reboot-ambiguity``: Node-to-Python switch killed at ``start``;
+22. ``matrix-reboot-ambiguity``: Node-to-Python switch killed at ``start``;
     real guest reboot; observe the ``activation_pending`` record, mask, staged
     Python target and no completion; two recoveries refuse with rc 3.
-19. ``matrix-reset-python-final``: restore the fixture to Python without
+23. ``matrix-reset-python-final``: restore the fixture to Python without
     touching the second retained ambiguity record.
-20. ``fence``: the base activation fence from Python to Node.
+24. ``fence``: the base activation fence from Python to Node.
 
 The ambiguity cases keep their pending records in private directories
 (``records/ambiguity-manager-restart`` and ``records/ambiguity-guest-reboot``)
@@ -114,7 +140,57 @@ interoperability gap.
 
 ## Recorded evidence
 
-One base-mode run completed on Pluto (KVM, Ubuntu noble guest ``crq-probe``)
+### Current drain/harvest proof runs
+
+Both current runs completed on Pluto (KVM, Ubuntu noble guest ``crq-probe``)
+from source commit ``a5033cb2f6a5cab2c9cd0e45368ef2e9737a869c``. That commit
+is also the source of the uploaded ``crq-runner-source.tar.gz``
+(``905950`` bytes, SHA-256
+``9030c950d6a1009d62a464e0c1f87e1a9833dc5b2868d6c68bc9024256f7c37a``).
+The host script is
+``3f92755e14bc72a3a34fcd66b26c9c4e68ca23fcbfa5877b57f45091fa3ca77d`` and the
+guest script is
+``65a92e001f6cf7f5cbb7b60c0f28c21da42010e103d95041b4a85f9a58b13f0d``.
+
+- Base mode, run ``20261110T220347Z-4db17be7``: 26 of 26 checks true,
+  ``problems: []``. ``report.json`` SHA-256
+  ``f9fa3bd554bc36227267e5d5e8ff3fa69c42053bd586f632d37af457fc9395ec``;
+  ``raw-guest-evidence.tar.gz`` SHA-256
+  ``1169d21b816696e954324479a6493e6821c9e72e53bf35cad900fdc6dc4b838e``
+  (``1066512`` bytes).
+- Matrix mode, run ``20261110T220604Z-c9b62fa0``: 62 of 62 checks true,
+  ``problems: []``. ``report.json`` SHA-256
+  ``766d79964f216b6ef657d50bbe907d12f48fa8aba23913797c0a56c01b8cd5b6``;
+  ``raw-guest-evidence.tar.gz`` SHA-256
+  ``101439e280ede13cc1dfee5367a3bc70c6d2153c0257b0bb095a2183a91be8c6``
+  (``1133509`` bytes).
+
+A second ``verify`` of each retained report returned ``problems: []``,
+``host_matches_run: true``, ``guest_matches_run: true`` and
+``validator_only: false``, and recomputed every phase, the retained raw
+journal state, the uploaded scripts and the runner source archive. The
+drain-specific checks are ``runner_source_recorded``,
+``drain_alive_refused``, ``drain_ambiguous_refused``,
+``drain_harvest_proceeds`` and ``recovery_drain_refused``. Artifacts remain
+at ``~/crq-vm-feasibility/state/runs/20261110T220347Z-4db17be7/`` and
+``~/crq-vm-feasibility/state/runs/20261110T220604Z-c9b62fa0/`` on Pluto,
+outside the worktree.
+
+The tightened preservation checks were then re-run against both retained
+reports with host script
+``b8793ce76af86d2f88491d26452249d4dcddcf9f97ef553001e12572d64730a9``. That
+validator binds the snapshot to the expected guest unit, timer, enablement and
+staged paths, their installed types and metadata fields, requires the
+independent metadata and file views to agree on every shared field, binds the
+history record and expected record roots. Both
+still returned ``problems: []``, with ``guest_matches_run: true``,
+``host_matches_run: false`` and ``validator_only: true``: only the validator
+changed; the guest script, report and raw evidence are unchanged. This is a
+validator-only re-verification, not a fresh guest run.
+
+### Earlier base-mode run (historical)
+
+One earlier base-mode run completed on Pluto (KVM, Ubuntu noble guest ``crq-probe``)
 from source commit ``0f9111d70aa06b8f907e453109bb1b791e19f48c``:
 
 - run ``20261110T180943Z-f3acc725``
@@ -130,30 +206,30 @@ from source commit ``0f9111d70aa06b8f907e453109bb1b791e19f48c``:
 - guest script ``executed-guest-probe.py`` SHA-256
   ``70aa6e51a841bdcb08f5dc047ffc6d6329c8484cceef8a8cd24dcfcca508be0e``
 
-The report records all 21 checks true and ``problems: []``; a second
-``verify`` with the current verifier recomputed the checks and re-hashed the
-retained artifacts with ``problems: []``, including comparison of every phase
-with the retained raw guest phase JSON, the retained controller journals and
-the uploaded script bytes. Provenance verification requires the exact six
-uploaded controller and fixture scripts, nonempty matching local and remote
-digests, verified upload status, the recorded source commit and the report
-directory path. A host-validator-only change may re-run this check against the
-retained report when the guest scripts are byte-identical; that is a validator
-re-run, not a new guest run. The host checks also refuse a run when the
-executed ``vm-unit-switch.py`` or its imported ``vm-feasibility.py`` has
-uncommitted changes, so evidence cannot be attributed to HEAD when the host
-implementation differs from that commit. Each report retains both executed
-host modules under ``provenance.host_modules`` and verifies their artifact
-digests. Rollback restores the prior service into the staged path while the
-durable ``/dev/null`` mask remains in place; the controller journals
+The run report recorded all 21 contemporaneous checks true and
+``problems: []``, and its contemporaneous verifier re-hashed the retained
+artifacts. It predates the drain phases and the runner-source upload, so the
+current verifier does not re-validate it and it is not evidence for the
+drain/harvest slice. Provenance verification for the current verifier
+requires the exact six uploaded controller and fixture scripts, the
+``git archive HEAD apps/crq-python`` runner source, nonempty matching local
+and remote digests, verified upload status, the recorded source commit and
+the report directory path. A host-validator-only change may re-run a check
+against a retained report when the guest scripts are byte-identical; that is
+a validator re-run, not a new guest run. The host checks also refuse a run
+when the executed ``vm-unit-switch.py``, its imported ``vm-feasibility.py``
+or the runner source under ``apps/crq-python`` has uncommitted changes, so
+evidence cannot be attributed to HEAD when the exercised implementation
+differs from that commit. Each report retains both executed host modules
+under ``provenance.host_modules`` and verifies their artifact digests.
+Rollback restores the prior service into the staged path while the durable
+``/dev/null`` mask remains in place; the controller journals
 ``restore_activation_pending`` before ``restore_activation`` releases the
 staged service and restores its prior activation state. Artifacts stay at
 ``~/crq-vm-feasibility/state/runs/20261110T180943Z-f3acc725/`` on Pluto,
 outside the worktree. The earlier run ``20261110T173225Z-de36ec18`` remains on
-Pluto as history; it predates the rollback-fence phase and the current
-verifier's phase set, so the current verifier does not re-validate it. The
-earlier retained run ``20261110T170322Z-9e8c5133`` also remains and is not
-rewritten.
+Pluto as history; it predates the rollback-fence phase. The earlier retained
+run ``20261110T170322Z-9e8c5133`` also remains and is not rewritten.
 
 The run produced:
 
@@ -169,11 +245,14 @@ The run produced:
 | ``inspect`` | final Python service SHA-256 ``a8a0e280…``; timer SHA-256 ``3edf2fd6…``; five retained records; seeded queue, heartbeat and historical record bytes unchanged |
 | ``fence`` | CLI rc ``-9``; pending ``activation_pending`` record ``controller-6c698e3c…`` SHA-256 ``6cbcf082…``; service ``LoadState=masked`` through the ``/dev/null`` symlink; direct start rc ``1`` with ``Unit crq-tick.service is masked.``; staged Node target behind the mask; completions ``4`` before and ``4`` after; recovery rc ``3`` with identical record bytes |
 
-### Restart/reboot matrix run
+### Earlier restart/reboot matrix run (historical)
 
-The current matrix run completed on Pluto (KVM, Ubuntu noble guest
+One earlier matrix run completed on Pluto (KVM, Ubuntu noble guest
 ``crq-probe``) from source commit
-``c1aa549fc6fb52829cfb2e075c53dfffcd343292``:
+``c1aa549fc6fb52829cfb2e075c53dfffcd343292``. It predates the drain phases
+and the runner-source upload, so the current verifier does not re-validate
+it and it is historical evidence for the restart/reboot matrix, not the
+current drain/harvest slice:
 
 - run ``20261110T192818Z-f879a12d``
 - ``report.json`` SHA-256
@@ -188,20 +267,14 @@ The current matrix run completed on Pluto (KVM, Ubuntu noble guest
 - guest script ``executed-guest-probe.py`` SHA-256
   ``f850e0a92e489be82e95e52318f74464541573eb9adf84ba155fd8f12063b980``
 
-The report records all 57 checks true and ``problems: []``. A second
-``verify`` recomputed the checks and re-hashed the retained artifacts with
-``problems: []``, including every phase against the retained raw guest phase
-JSON, the final retained journal state in each record directory (the main
-directory plus both private ambiguity directories), the uploaded script
-bytes and the final service mask, staged target and inactive timer. The
-verifier binds the run to ``c1aa549fc…`` and reports
-``host_matches_run: true``, ``guest_matches_run: true`` and
-``validator_only: false``. Every observe phase records ``jobs: []``, no owned
-PIDs, matching completion counts and an inactive timer. The guest observe
-phase independently records the boot ID and user-manager invocation before
-and after each boundary; the host restart/reboot command records are report
-provenance, while the guest observation is the raw-verifiable identity
-evidence.
+The run report recorded all 57 contemporaneous checks true and
+``problems: []``, and its contemporaneous verifier recomputed every phase
+against the retained raw guest phase JSON. Every observe phase records
+``jobs: []``, no owned PIDs, matching completion counts and an inactive
+timer. The guest observe phase independently records the boot ID and
+user-manager invocation before and after each boundary; the host
+restart/reboot command records are report provenance, while the guest
+observation is the raw-verifiable identity evidence.
 
 | Case | Boundary | Identity | Retained state | Recovery |
 |---|---|---|---|---|
@@ -230,11 +303,35 @@ default one-minute timer accuracy outlasted the completion bound in an earlier
 attempt; the fixture now bounds it explicitly. This is fixture configuration,
 not a production template change.
 
+### Drain/harvest proof status
+
+The drain-alive, drain-ambiguous, drain-harvest and recover-drain-alive phases
+are covered by the current base and matrix runs above. A run is evidence for
+this slice only when the report's checks include
+``runner_source_recorded``, ``drain_alive_refused``,
+``drain_ambiguous_refused``, ``drain_harvest_proceeds`` and
+``recovery_drain_refused``, and a second ``verify`` against the retained
+report returns ``problems: []``. The host refuses to run when
+``apps/crq-python`` has uncommitted changes, because the uploaded runner
+source must be the exact implementation under test.
+
 ## Not proven
 
 - No production adapter, allowlist change, production journal interop or
   legacy-resolution mechanism.
 - No real Python or Node CRQ runtime completion; the fixture provider is fake.
+- Ownership coverage is limited to runner state the runner actually records:
+  a live pid with matching identity, an ambiguous record, or a completed
+  record whose process is dead. A runner-owned process that escaped both the
+  queue record and the journal is not represented and is explicitly
+  uncovered; the drain cannot prove its absence.
+- The refusal phases assert that the controller does not signal the seeded
+  owned or unrelated processes; they do not prove that no signal could ever
+  be sent, and they do not cover every possible detached-process topology.
+- The drain is a point-in-time observation at the controller gate and again
+  after the guest adapter's systemd fence. Work dispatched after an
+  observation and before the journal advances is not excluded; no lock,
+  atomic queue generation or dispatch barrier is claimed.
 - The matrix restarts the real guest user manager and reboots the real guest
   OS at the tested boundaries, but it is not power-loss proof, not a
   production host, and not a privileged-ownership, ACL or xattr proof.
@@ -262,6 +359,8 @@ python3 apps/crq-python/ops/vm-unit-switch.py \
 
 Use ``run --mode base`` for the earlier preactivation-only proof. The matrix
 requires the guest to reboot itself; run it only on a disposable guest.
+``apps/crq-python`` must be committed at ``--source-commit``; the harness
+uploads ``git archive HEAD apps/crq-python`` and refuses a dirty tree.
 
 Run the named tests locally:
 
