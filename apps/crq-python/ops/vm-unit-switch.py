@@ -336,7 +336,8 @@ def prepare_run(state, image, recorder, tools):
             "port": vm.free_port(), "started_at": vm.utc_now()}
 
 
-def upload_files(run, recorder, mode="base"):
+def upload_files(run, recorder, mode="base", commit=None):
+    source_commit_check(REPO, commit, mode)
     provenance = {}
     for name in uploads_for(mode):
         source = OPS / name
@@ -361,7 +362,7 @@ def upload_files(run, recorder, mode="base"):
     archive = pathlib.Path(run["path"]) / RUNNER_ARCHIVE
     result = subprocess.run(
         ["git", "-C", str(REPO), "archive", "--format=tar.gz",
-         "--output", str(archive), "HEAD", "apps/crq-python"],
+         "--output", str(archive), commit, "apps/crq-python"],
         capture_output=True, text=True)
     if result.returncode != 0:
         raise RuntimeError("could not build the committed runner source archive: "
@@ -385,7 +386,7 @@ def upload_files(run, recorder, mode="base"):
     provenance["runner_source"] = {
         "name": RUNNER_ARCHIVE, "sha256": local_sha,
         "remote_sha256": remote_sha, "bytes": len(data), "verified": True,
-        "source": "git-archive:HEAD:apps/crq-python"}
+        "source": "git-archive:%s:apps/crq-python" % commit}
     return provenance
 
 
@@ -4152,7 +4153,7 @@ def cmd_run(args):
         recorder = vm.Recorder(run_dir)
         boot = vm.boot(run, recorder, args.tools, vm.host_stamp())
         boot["ssh"] = vm.wait_ssh(run, recorder)
-        uploads = upload_files(run, recorder, args.mode)
+        uploads = upload_files(run, recorder, args.mode, commit)
         provenance["uploads"] = uploads
         provenance["guest_report"] = guest_artifact.name
         phases = {}
