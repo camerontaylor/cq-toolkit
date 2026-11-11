@@ -26,7 +26,7 @@
  *   `ValueError`, not UTC.
  */
 import { JsonNumber, JsonObject } from './jsonValue.js';
-import { civilFromDays, daysFromCivil, parseUtcUnchecked } from './utc.js';
+import { UtcParseError, civilFromDays, daysFromCivil, parseUtcDetailed } from './utc.js';
 
 const DAY_MICROS = 86_400n * 1_000_000n;
 const MICROS_PER_SECOND = 1_000_000n;
@@ -91,7 +91,8 @@ type NumericOperand =
 
 type PythonSum =
   | { readonly kind: 'int'; readonly value: bigint }
-  | { readonly kind: 'compensated'; readonly hi: number; readonly lo: number };
+  | { readonly kind: 'compensated'; readonly hi: number; readonly lo: number }
+  | { readonly kind: 'generic'; readonly value: bigint | number };
 
 /**
  * `coverage.utilization_digest`.
@@ -329,7 +330,15 @@ function coverageTime(value: unknown): bigint {
 }
 
 function coverageTimeFromString(value: string): bigint {
-  const micros = parseUtcUnchecked(value);
+  let micros: bigint | null;
+  try {
+    micros = parseUtcDetailed(value);
+  } catch (error) {
+    if (error instanceof UtcParseError) {
+      throw new CoverageUtilizationError(error.message);
+    }
+    throw error;
+  }
   if (micros === null) {
     throw new CoverageUtilizationError(
       `Invalid isoformat string: '${value.replaceAll('Z', '+00:00')}'`,
@@ -505,52 +514,76 @@ function pythonLen(value: unknown): number {
 }
 
 function pythonAdd(total: PythonSum, value: unknown): PythonSum {
+  const operand = sumOperand(value, sumTypeName(total));
   if (total.kind === 'int') {
-    if (typeof value === 'boolean') {
-      return { kind: 'int', value: total.value + (value ? 1n : 0n) };
-    }
-    if (typeof value === 'bigint') {
-      return { kind: 'int', value: total.value + value };
-    }
-    if (typeof value === 'number') {
-      if (Number.isInteger(value)) {
-        if (!Number.isSafeInteger(value)) {
-          throw new CoverageUtilizationError(
-            'unsafe integer observation value must be passed as a lossless JsonNumber or bigint',
-            'TypeError',
-          );
-        }
-        return { kind: 'int', value: total.value + BigInt(value) };
-      }
-      return compensatedFromInt(total.value, value);
-    }
-    if (value instanceof JsonNumber) {
-      return value.kind === 'int'
-        ? { kind: 'int', value: total.value + (value.integer as bigint) }
-        : compensatedFromInt(total.value, value.float as number);
-    }
-    throw new CoverageUtilizationError(
-      `unsupported operand type(s) for +: 'int' and '${pythonTypeName(value)}'`,
-      'TypeError',
+    if (operand.kind === 'float') return compensatedFromInt(total.value, operand.value);
+    const next = total.value + operand.value;
+    // CPython's int fast path uses Py_ssize_t. Once it overflows it restores
+    // the exact int and continues on the generic PyNumber_Add path, which no
+    // longer switches to compensated summation when a float appears later.
+    return next >= INT64_MIN && next <= INT64_MAX
+      ? { kind: 'int', value: next }
+      : { kind: 'generic', value: next };
+  }
+  if (total.kind === 'compensated') {
+    return compensatedAdd(
+      total,
+      operand.kind === 'int' ? pythonIntToDouble(operand.value) : operand.value,
     );
   }
-  if (typeof value === 'boolean') return compensatedAdd(total, value ? 1 : 0);
-  if (typeof value === 'bigint') return compensatedAdd(total, pythonIntToDouble(value));
-  if (typeof value === 'number') return compensatedAdd(total, value);
+  return genericAdd(total.value, operand);
+}
+
+function sumTypeName(total: PythonSum): 'int' | 'float' {
+  if (total.kind === 'int') return 'int';
+  if (total.kind === 'compensated') return 'float';
+  return typeof total.value === 'bigint' ? 'int' : 'float';
+}
+
+function sumOperand(value: unknown, leftType: 'int' | 'float'): NumericOperand {
+  if (typeof value === 'boolean') return { kind: 'int', value: value ? 1n : 0n };
+  if (typeof value === 'bigint') return { kind: 'int', value };
+  if (typeof value === 'number') {
+    if (Number.isInteger(value)) {
+      if (!Number.isSafeInteger(value)) {
+        throw new CoverageUtilizationError(
+          'unsafe integer observation value must be passed as a lossless JsonNumber or bigint',
+          'TypeError',
+        );
+      }
+      return { kind: 'int', value: BigInt(value) };
+    }
+    return { kind: 'float', value };
+  }
   if (value instanceof JsonNumber) {
-    const addend =
-      value.kind === 'int' ? pythonIntToDouble(value.integer as bigint) : (value.float as number);
-    return compensatedAdd(total, addend);
+    return value.kind === 'int'
+      ? { kind: 'int', value: value.integer as bigint }
+      : { kind: 'float', value: value.float as number };
   }
   throw new CoverageUtilizationError(
-    `unsupported operand type(s) for +: 'float' and '${pythonTypeName(value)}'`,
+    `unsupported operand type(s) for +: '${leftType}' and '${pythonTypeName(value)}'`,
     'TypeError',
   );
 }
 
+function genericAdd(total: bigint | number, operand: NumericOperand): PythonSum {
+  if (typeof total === 'bigint') {
+    return {
+      kind: 'generic',
+      value:
+        operand.kind === 'int' ? total + operand.value : pythonIntToDouble(total) + operand.value,
+    };
+  }
+  return {
+    kind: 'generic',
+    value: total + (operand.kind === 'int' ? pythonIntToDouble(operand.value) : operand.value),
+  };
+}
+
 /**
- * CPython `sum()` switches to a compensated (Neumaier) float accumulator as
- * soon as the running result is a float; see `Python/bltinmodule.c`.
+ * CPython `sum()` uses a compensated (Neumaier) float accumulator only on its
+ * float fast path; after the int fast path overflows, the generic
+ * `PyNumber_Add` loop performs ordinary additions. See `Python/bltinmodule.c`.
  */
 function compensatedFromInt(total: bigint, value: number): PythonSum {
   return { kind: 'compensated', hi: pythonIntToDouble(total) + value, lo: 0 };
@@ -582,10 +615,15 @@ function pythonIntToDouble(value: bigint): number {
 }
 
 function encodeSum(sum: PythonSum): number | JsonNumber {
-  if (sum.kind === 'int') {
-    return Number.isSafeInteger(Number(sum.value)) ? Number(sum.value) : JsonNumber.int(sum.value);
+  if (sum.kind === 'int') return encodeIntSum(sum.value);
+  if (sum.kind === 'generic') {
+    return typeof sum.value === 'bigint' ? encodeIntSum(sum.value) : JsonNumber.float(sum.value);
   }
   return JsonNumber.float(compensatedToDouble(sum));
+}
+
+function encodeIntSum(value: bigint): number | JsonNumber {
+  return Number.isSafeInteger(Number(value)) ? Number(value) : JsonNumber.int(value);
 }
 
 function pyTruthy(value: unknown): boolean {

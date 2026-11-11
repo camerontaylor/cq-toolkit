@@ -1017,6 +1017,17 @@ def utilization_family() -> Dict[str, Any]:
     )
     cases.append(
         case(
+            "fractional-zero-offset-is-utc",
+            now="2026-11-09T12:00:00+00:00:00.5",
+            queue={"starts": ["2026-11-08T12:00:00Z"]},
+        )
+    )
+    cases.append(case("invalid-month-message", now="2026-13-01T00:00:00Z"))
+    cases.append(case("invalid-day-message", now="2026-02-30T00:00:00Z"))
+    cases.append(case("invalid-hour-message", now="2026-01-01T25:00:00Z"))
+    cases.append(case("invalid-year-message", now="0000-01-01T00:00:00Z"))
+    cases.append(
+        case(
             "bool-now-is-epoch-second",
             now=True,
             queue={
@@ -1188,6 +1199,41 @@ def utilization_family() -> Dict[str, Any]:
                     "2026-11-09T11:00:00Z": row(pending=1e16),
                     "2026-11-09T11:10:00Z": row(pending=1.0),
                     "2026-11-09T11:20:00Z": row(pending=-1e16),
+                },
+            },
+        )
+    )
+    cases.append(
+        case(
+            "generic-sum-after-int-overflow",
+            ledger={
+                "schema_version": 1,
+                "paths": {},
+                "runs": {},
+                "observations": {
+                    "2026-11-09T11:00:00Z": row(pending=2**64),
+                    "2026-11-09T11:10:00Z": row(pending=-(2**64)),
+                    "2026-11-09T11:20:00Z": row(pending=1e16),
+                    "2026-11-09T11:30:00Z": row(pending=1.0),
+                    "2026-11-09T11:40:00Z": row(pending=-1e16),
+                },
+            },
+        )
+    )
+    cases.append(
+        case(
+            "generic-sum-after-int-overflow-float-second",
+            ledger={
+                "schema_version": 1,
+                "paths": {},
+                "runs": {},
+                "observations": {
+                    "2026-11-09T11:00:00Z": row(pending=2**63),
+                    "2026-11-09T11:10:00Z": row(pending=0.0),
+                    "2026-11-09T11:20:00Z": row(pending=-(2**63) * 1.0),
+                    "2026-11-09T11:30:00Z": row(pending=1e16),
+                    "2026-11-09T11:40:00Z": row(pending=1.0),
+                    "2026-11-09T11:50:00Z": row(pending=-1e16),
                 },
             },
         )

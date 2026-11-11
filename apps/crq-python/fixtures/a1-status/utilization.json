@@ -457,6 +457,127 @@
       }
     },
     {
+      "name": "fractional-zero-offset-is-utc",
+      "source": "coverage.utilization_digest",
+      "input": {
+        "queue": {
+          "starts": [
+            "2026-11-08T12:00:00Z"
+          ]
+        },
+        "ledger": {
+          "schema_version": 1,
+          "paths": {},
+          "runs": {},
+          "observations": {}
+        },
+        "now": "2026-11-09T12:00:00+00:00:00.5",
+        "max_starts_per_hour": 5
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "starts_24h": 0,
+          "nominal_cap_24h": 120,
+          "nominal_utilization": 0.0,
+          "cooldown_minutes": 0,
+          "observed_ticks_24h": 0,
+          "available_start_opportunities_24h": 0,
+          "idle_while_pending_24h": null,
+          "idle_with_coverage_candidate_24h": null,
+          "coverage_reviewed_paths": 0
+        }
+      }
+    },
+    {
+      "name": "invalid-month-message",
+      "source": "coverage.utilization_digest",
+      "input": {
+        "queue": {
+          "starts": []
+        },
+        "ledger": {
+          "schema_version": 1,
+          "paths": {},
+          "runs": {},
+          "observations": {}
+        },
+        "now": "2026-13-01T00:00:00Z",
+        "max_starts_per_hour": 5
+      },
+      "expect": {
+        "ok": false,
+        "error": "ValueError",
+        "message": "month must be in 1..12, not 13"
+      }
+    },
+    {
+      "name": "invalid-day-message",
+      "source": "coverage.utilization_digest",
+      "input": {
+        "queue": {
+          "starts": []
+        },
+        "ledger": {
+          "schema_version": 1,
+          "paths": {},
+          "runs": {},
+          "observations": {}
+        },
+        "now": "2026-02-30T00:00:00Z",
+        "max_starts_per_hour": 5
+      },
+      "expect": {
+        "ok": false,
+        "error": "ValueError",
+        "message": "day 30 must be in range 1..28 for month 2 in year 2026"
+      }
+    },
+    {
+      "name": "invalid-hour-message",
+      "source": "coverage.utilization_digest",
+      "input": {
+        "queue": {
+          "starts": []
+        },
+        "ledger": {
+          "schema_version": 1,
+          "paths": {},
+          "runs": {},
+          "observations": {}
+        },
+        "now": "2026-01-01T25:00:00Z",
+        "max_starts_per_hour": 5
+      },
+      "expect": {
+        "ok": false,
+        "error": "ValueError",
+        "message": "hour must be in 0..23, not 25"
+      }
+    },
+    {
+      "name": "invalid-year-message",
+      "source": "coverage.utilization_digest",
+      "input": {
+        "queue": {
+          "starts": []
+        },
+        "ledger": {
+          "schema_version": 1,
+          "paths": {},
+          "runs": {},
+          "observations": {}
+        },
+        "now": "0000-01-01T00:00:00Z",
+        "max_starts_per_hour": 5
+      },
+      "expect": {
+        "ok": false,
+        "error": "ValueError",
+        "message": "year must be in 1..9999, not 0"
+      }
+    },
+    {
       "name": "bool-now-is-epoch-second",
       "source": "coverage.utilization_digest",
       "input": {
@@ -1110,6 +1231,136 @@
           "available_start_opportunities_24h": 3,
           "idle_while_pending_24h": 1.0,
           "idle_with_coverage_candidate_24h": 3,
+          "coverage_reviewed_paths": 0
+        }
+      }
+    },
+    {
+      "name": "generic-sum-after-int-overflow",
+      "source": "coverage.utilization_digest",
+      "input": {
+        "queue": {
+          "starts": []
+        },
+        "ledger": {
+          "schema_version": 1,
+          "paths": {},
+          "runs": {},
+          "observations": {
+            "2026-11-09T11:00:00Z": {
+              "started": false,
+              "pending": 18446744073709551616,
+              "candidate_exists": true,
+              "blocked_reason": null
+            },
+            "2026-11-09T11:10:00Z": {
+              "started": false,
+              "pending": -18446744073709551616,
+              "candidate_exists": true,
+              "blocked_reason": null
+            },
+            "2026-11-09T11:20:00Z": {
+              "started": false,
+              "pending": 1e+16,
+              "candidate_exists": true,
+              "blocked_reason": null
+            },
+            "2026-11-09T11:30:00Z": {
+              "started": false,
+              "pending": 1.0,
+              "candidate_exists": true,
+              "blocked_reason": null
+            },
+            "2026-11-09T11:40:00Z": {
+              "started": false,
+              "pending": -1e+16,
+              "candidate_exists": true,
+              "blocked_reason": null
+            }
+          }
+        },
+        "now": "2026-11-09T12:00:00Z",
+        "max_starts_per_hour": 5
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "starts_24h": 0,
+          "nominal_cap_24h": 120,
+          "nominal_utilization": 0.0,
+          "cooldown_minutes": 0,
+          "observed_ticks_24h": 5,
+          "available_start_opportunities_24h": 5,
+          "idle_while_pending_24h": 0.0,
+          "idle_with_coverage_candidate_24h": 5,
+          "coverage_reviewed_paths": 0
+        }
+      }
+    },
+    {
+      "name": "generic-sum-after-int-overflow-float-second",
+      "source": "coverage.utilization_digest",
+      "input": {
+        "queue": {
+          "starts": []
+        },
+        "ledger": {
+          "schema_version": 1,
+          "paths": {},
+          "runs": {},
+          "observations": {
+            "2026-11-09T11:00:00Z": {
+              "started": false,
+              "pending": 9223372036854775808,
+              "candidate_exists": true,
+              "blocked_reason": null
+            },
+            "2026-11-09T11:10:00Z": {
+              "started": false,
+              "pending": 0.0,
+              "candidate_exists": true,
+              "blocked_reason": null
+            },
+            "2026-11-09T11:20:00Z": {
+              "started": false,
+              "pending": -9.223372036854776e+18,
+              "candidate_exists": true,
+              "blocked_reason": null
+            },
+            "2026-11-09T11:30:00Z": {
+              "started": false,
+              "pending": 1e+16,
+              "candidate_exists": true,
+              "blocked_reason": null
+            },
+            "2026-11-09T11:40:00Z": {
+              "started": false,
+              "pending": 1.0,
+              "candidate_exists": true,
+              "blocked_reason": null
+            },
+            "2026-11-09T11:50:00Z": {
+              "started": false,
+              "pending": -1e+16,
+              "candidate_exists": true,
+              "blocked_reason": null
+            }
+          }
+        },
+        "now": "2026-11-09T12:00:00Z",
+        "max_starts_per_hour": 5
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "starts_24h": 0,
+          "nominal_cap_24h": 120,
+          "nominal_utilization": 0.0,
+          "cooldown_minutes": 0,
+          "observed_ticks_24h": 6,
+          "available_start_opportunities_24h": 6,
+          "idle_while_pending_24h": 0.0,
+          "idle_with_coverage_candidate_24h": 6,
           "coverage_reviewed_paths": 0
         }
       }

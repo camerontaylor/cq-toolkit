@@ -151,6 +151,11 @@ const groupP = casesOf(loadDocument(GROUP_P, 'coverage'), 'coverage').filter(
 );
 const a1 = casesOf(loadDocument(A1, 'utilization'), 'utilization');
 
+test('oracle selections are non-empty', () => {
+  expect(groupP).toHaveLength(4);
+  expect(a1).toHaveLength(68);
+});
+
 describe.each(groupP.map((vector) => [vector.name, vector] as const))(
   'group-P coverage.utilization_digest/$name',
   (_name, vector) => {
@@ -296,6 +301,62 @@ describe('plain bigint observations', () => {
       expect(error).toBeInstanceOf(CoverageUtilizationError);
       expect((error as CoverageUtilizationError).pythonError).toBe('OverflowError');
       expect((error as CoverageUtilizationError).message).toBe('int too large to convert to float');
+    }
+  });
+});
+
+describe('generic sum after int fast-path overflow', () => {
+  test('a later float stays on ordinary PyNumber_Add', () => {
+    expect(
+      pendingDigest([
+        2n ** 64n,
+        -(2n ** 64n),
+        JsonNumber.float(1e16),
+        JsonNumber.float(1),
+        JsonNumber.float(-1e16),
+      ]),
+    ).toContain('"idle_while_pending_24h":0.0,');
+  });
+
+  test('the fallback survives a float before the cancellation', () => {
+    expect(
+      pendingDigest([
+        2n ** 63n,
+        JsonNumber.float(0),
+        JsonNumber.float(-(2 ** 63)),
+        JsonNumber.float(1e16),
+        JsonNumber.float(1),
+        JsonNumber.float(-1e16),
+      ]),
+    ).toContain('"idle_while_pending_24h":0.0,');
+  });
+});
+
+describe('UTC component validation', () => {
+  test('a zero-second fractional offset is UTC', () => {
+    const value = utilizationDigest({ starts: ['2026-11-08T12:00:00Z'] }, emptyLedger(), {
+      now: '2026-11-09T12:00:00+00:00:00.5',
+      maxStartsPerHour: 5,
+    });
+    expect(compact(value)).toContain('"starts_24h":0,');
+  });
+
+  test('calendar and clock errors keep Python messages', () => {
+    const cases: ReadonlyArray<readonly [string, string]> = [
+      ['2026-13-01T00:00:00Z', 'month must be in 1..12, not 13'],
+      ['2026-02-30T00:00:00Z', 'day 30 must be in range 1..28 for month 2 in year 2026'],
+      ['2026-01-01T25:00:00Z', 'hour must be in 0..23, not 25'],
+      ['0000-01-01T00:00:00Z', 'year must be in 1..9999, not 0'],
+    ];
+    for (const [now, message] of cases) {
+      try {
+        utilizationDigest(emptyQueue(), emptyLedger(), { now, maxStartsPerHour: 5 });
+        throw new Error(`expected ValueError for ${now}`);
+      } catch (error) {
+        expect(error).toBeInstanceOf(CoverageUtilizationError);
+        expect((error as CoverageUtilizationError).pythonError).toBe('ValueError');
+        expect((error as CoverageUtilizationError).message).toBe(message);
+      }
     }
   });
 });
