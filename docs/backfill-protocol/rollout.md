@@ -167,8 +167,13 @@ status and the needs-human list (finding ID, canonical ID, path, title,
 severity, target and event ID). Status previews retain at most 32 needs-human
 entries and report `needs_human_count` and `needs_human_omitted`; durable rows
 and inventory reports retain the full list. The additive `owner_decisions` and
-`operator_attention` lists split this status by failure class; legacy classless
-rows count as owner decisions. Malformed rows do not stop status publication:
+`operator_attention` lists split this status by failure class. Only an explicit
+typed `owner-decision` counts as an owner decision; rows with an absent,
+unrecognized or non-string class are operator attention, reported in the
+additive `unknown_failure_class` list with `unknown_failure_class_count`, an
+`unknown_failure_class_note` caveat, and `unknown_failure_class_omitted` in
+bounded reports; their rows appear only in the unknown list and their count is
+included in `operator_attention_count`. Malformed rows do not stop status publication:
 `error_count`, a bounded `errors` list and `errors_omitted` expose
 them, and `counts_complete: false` marks counts as partial (valid rows only).
 The needs-human count is also partial in that case. Inventory remains strict
