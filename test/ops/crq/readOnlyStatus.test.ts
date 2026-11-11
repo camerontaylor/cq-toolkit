@@ -28,7 +28,7 @@ import {
   toPlainJson,
   type JsonValue,
 } from '../../../src/policy/crq/jsonValue.js';
-import { pythonJsonText, receiptJsonBytes } from '../../../src/policy/crq/pythonJson.js';
+import { pythonJsonText, receiptJsonBytes, sha256Hex } from '../../../src/policy/crq/pythonJson.js';
 import { parseCrqState } from '../../../src/policy/crq/state.js';
 
 const A1 = new URL('../../../apps/crq-python/fixtures/a1-status/', import.meta.url);
@@ -137,6 +137,15 @@ async function writeState(roots: StatusStateRoots, state: StateWrite): Promise<v
 
 function eventsText(events: readonly JsonValue[]): string {
   return events.length === 0 ? '' : `${events.map((event) => compact(event)).join('\n')}\n`;
+}
+
+/** An otherwise valid JSON string carrying one byte Python's UTF-8 decoder refuses. */
+function invalidUtf8Bytes(prefix: string, suffix: string): Uint8Array {
+  return Buffer.concat([
+    Buffer.from(prefix, 'utf8'),
+    Buffer.from([0xff]),
+    Buffer.from(suffix, 'utf8'),
+  ]);
 }
 
 async function runCli(
@@ -364,6 +373,90 @@ describe('CLI contract', () => {
   });
 });
 
+describe('corrupt text state is refused, never replacement-decoded', () => {
+  test('invalid UTF-8 in queue.json fails summary and health as queue-invalid', async () => {
+    const roots = await makeRoots();
+    await writeFile(
+      join(roots.stateRoot, 'queue.json'),
+      invalidUtf8Bytes('{"items":[],"note":"', '"}'),
+    );
+    for (const command of ['summary-core', 'health'] as const) {
+      const result = await runCli([command], roots, FIXED_NOW);
+      expect(result.exitCode, command).toBe(1);
+      expect(result.stdout, command).toBe('');
+      expect(result.stderr, command).toMatch(/^queue-invalid: queue\.json unavailable:/u);
+      expect(result.stderr, command).toMatch(/not valid for encoding utf-8/u);
+    }
+  });
+
+  test('invalid UTF-8 in config.json fails as config-invalid', async () => {
+    const roots = await makeRoots();
+    await writeState(roots, {
+      queue: new JsonObject([['items', []]]),
+      config: DEFAULT_CONFIG,
+      events: [],
+    });
+    await writeFile(
+      join(roots.runnerRoot, 'config.json'),
+      invalidUtf8Bytes('{"repo":"', '","max_starts_per_hour":5}'),
+    );
+    const result = await runCli(['summary-core'], roots, FIXED_NOW);
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout).toBe('');
+    expect(result.stderr).toMatch(/^config-invalid: config\.json unavailable:/u);
+    expect(result.stderr).toMatch(/not valid for encoding utf-8/u);
+  });
+
+  test('invalid UTF-8 in events.jsonl fails as events-invalid', async () => {
+    const roots = await makeRoots();
+    await writeState(roots, {
+      queue: new JsonObject([['items', []]]),
+      config: DEFAULT_CONFIG,
+      events: [],
+    });
+    await writeFile(
+      join(roots.stateRoot, 'events.jsonl'),
+      invalidUtf8Bytes('{"event":"review_finished","note":"', '"}\n'),
+    );
+    const result = await runCli(['summary-core'], roots, FIXED_NOW);
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout).toBe('');
+    expect(result.stderr).toMatch(/^events-invalid: events\.jsonl unavailable:/u);
+    expect(result.stderr).toMatch(/not valid for encoding utf-8/u);
+  });
+
+  test('invalid UTF-8 in receipt bytes stays per-item unverified, like Python ValueError', async () => {
+    const roots = await makeRoots();
+    const bytes = invalidUtf8Bytes('{"capture":"', '"}');
+    const receiptId = sha256Hex(bytes);
+    const queue = new JsonObject([
+      [
+        'items',
+        [
+          new JsonObject([
+            ['id', 'corrupt-receipt'],
+            ['kind', 'merged-current'],
+            ['state', 'done'],
+            ['receipt_id', receiptId],
+          ]),
+        ],
+      ],
+    ]);
+    await writeState(roots, {
+      queue,
+      config: DEFAULT_CONFIG,
+      events: [],
+      receipts: new Map([[receiptId, bytes]]),
+    });
+    const result = await runCli(['summary-core'], roots, FIXED_NOW);
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr).toBe('');
+    const output = parseOutput(result.stdout);
+    const merged = requireObject(output.get('merged_current'), 'merged_current');
+    expect(compact(requireObject(merged.get('receipts'), 'receipts'))).toContain('"unverified":1');
+  });
+});
+
 describe('Python numeric lexemes through the file boundary', () => {
   test('an integral usage limit is kept and an integral float falls back', async () => {
     for (const [limit, expected] of [
@@ -420,6 +513,28 @@ describe('Python numeric lexemes through the file boundary', () => {
     expect(compact(parseOutput(result.stdout))).toContain(
       '"starts_cap":9007199254740993,"in_flight"',
     );
+  });
+
+  test('adjacent run ids above 2^53 stay distinct, like Python int dict keys', async () => {
+    const roots = await makeRoots();
+    await writeState(roots, {
+      queue: new JsonObject([['items', []]]),
+      config: DEFAULT_CONFIG,
+      events: [],
+    });
+    const at = '2026-11-09T11:00:00Z';
+    // 9007199254740992 and 9007199254740993 both round to the same double.
+    const lines = [
+      `{"event":"review_finished","at":"${at}","run":9007199254740992,"outcome":"completed"}`,
+      `{"event":"review_finished","at":"${at}","run":9007199254740993,"outcome":"completed"}`,
+      `{"event":"review_finished","at":"${at}","run":-9007199254740992,"outcome":"completed"}`,
+      `{"event":"review_finished","at":"${at}","run":-9007199254740993,"outcome":"completed"}`,
+    ];
+    await writeFile(join(roots.stateRoot, 'events.jsonl'), `${lines.join('\n')}\n`);
+    const result = await runCli(['summary-core'], roots, FIXED_NOW);
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr).toBe('');
+    expect(compact(parseOutput(result.stdout))).toContain('"outcomes_24h":{"completed":4,');
   });
 
   test('an aging deadline is a Python float, never an integer', async () => {

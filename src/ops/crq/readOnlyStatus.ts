@@ -290,7 +290,7 @@ async function loadEvents(effects: ReadOnlyStatusEffects): Promise<unknown[]> {
   const events: unknown[] = [];
   for (const { line, terminated, number } of pythonTextLines(text)) {
     try {
-      events.push(toPlainJson(parseJsonValue(line, { duplicates: 'last' })));
+      events.push(eventValue(parseJsonValue(line, { duplicates: 'last' })));
     } catch (error) {
       // `status_summary.read_events`: a complete corrupt record is fatal; an
       // unterminated final fragment is ignored.
@@ -303,6 +303,31 @@ async function loadEvents(effects: ReadOnlyStatusEffects): Promise<unknown[]> {
     }
   }
   return events;
+}
+
+const MAX_SAFE_INTEGER = BigInt(Number.MAX_SAFE_INTEGER);
+const MIN_SAFE_INTEGER = BigInt(Number.MIN_SAFE_INTEGER);
+
+/**
+ * Python's `finished[event.get("run")]` uses the int itself as a dict key, so
+ * two run ids above 2^53 stay distinct. `toPlainJson` would round both to the
+ * same double and silently collapse them into one outcome; keep only the
+ * top-level `run` integer lossless as a BigInt, while every other field keeps
+ * its materialised value so timestamp and outcome handling are unchanged.
+ */
+function eventValue(parsed: JsonValue): unknown {
+  const plain = toPlainJson(parsed);
+  if (!(parsed instanceof JsonObject) || !isRecord(plain)) return plain;
+  const run = parsed.get('run');
+  if (
+    run instanceof JsonNumber &&
+    run.kind === 'int' &&
+    run.integer !== null &&
+    (run.integer > MAX_SAFE_INTEGER || run.integer < MIN_SAFE_INTEGER)
+  ) {
+    return { ...plain, run: run.integer };
+  }
+  return plain;
 }
 
 interface TextLine {
