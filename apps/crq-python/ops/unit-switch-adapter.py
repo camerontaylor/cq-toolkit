@@ -899,7 +899,9 @@ class GuestFixtureAdapter:
                            "jobs_observation": self.last_jobs_observation,
                            "direct_start": {"rc": refusal.get("rc"),
                                             "stdout": refusal.get("stdout"),
-                                            "stderr": refusal.get("stderr")},
+                                            "stderr": refusal.get("stderr"),
+                                            "timeout": refusal.get("timeout",
+                                                                   False)},
                            "queue_drain": queue,
                            **drained}
         if queue is not None and not queue["drained"]:
