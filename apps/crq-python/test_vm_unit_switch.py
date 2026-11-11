@@ -2733,6 +2733,26 @@ class PartialHarnessCheckTests(unittest.TestCase):
                              for item in problems))
         self.assertIs(checks["partial_" + case + "_observe"], True)
 
+    def test_partial_observe_rejects_wrong_runtime_recovery_suffix(self):
+        phases_value, restarts, reboots = self.evidence()
+        case = "restore-service-restart"
+        observe = phases_value["partial-" + case + "-observe"]
+        entries = observe["after_recovery"]["repair_completions"]
+        extra = self._completion(entries[-1]["sequence"] + 1, NODE)
+        for key in ("after_recovery", "after_repeat"):
+            observe[key]["repair_completions"].append(extra)
+        for key in ("recovery", "repeat"):
+            baseline = observe[key]["json"]["drain"]["completion_baseline"]
+            baseline["count"] += 1
+            baseline["sequences"].append(extra["sequence"])
+            baseline["invocations"].append(extra["invocation"])
+            baseline["max_sequence"] = extra["sequence"]
+        checks, problems = harness._partial_checks(
+            phases_value, restarts, reboots)
+        self.assertTrue(any("case runtime" in item for item in problems),
+                        problems)
+        self.assertIs(checks["partial_" + case + "_observe"], False)
+
     def test_partial_final_requires_observed_completion_prefix(self):
         phases_value, restarts, reboots = self.evidence()
         inspect = phases_value["partial-inspect"]
@@ -2820,6 +2840,26 @@ class PartialHarnessCheckTests(unittest.TestCase):
             harness._verify_partial_raw({}, root, problems, phases_value)
             self.assertTrue(any("unchanged prefix" in item
                                 for item in problems), problems)
+
+    def test_partial_raw_rejects_rogue_unit_entries(self):
+        phases_value, _, _ = self.evidence()
+        raw_unit = pathlib.Path(harness.UNIT_DIR.replace(
+            "/home/%s/" % harness.vm.GUEST_USER, ""))
+        for relative, expected in (
+                ("crq-repair.socket", "rogue repair socket"),
+                ("crq-repair.service.d/20-rogue.conf",
+                 "rogue repair drop-in"),
+                ("default.target.wants/crq-repair.timer",
+                 "rogue timer enablement")):
+            with tempfile.TemporaryDirectory() as tmp:
+                root = pathlib.Path(tmp)
+                target = root / raw_unit / relative
+                target.parent.mkdir(parents=True)
+                target.write_text("rogue\n")
+                problems = []
+                harness._verify_partial_raw({}, root, problems, phases_value)
+                self.assertTrue(any(expected in item for item in problems),
+                                problems)
 
     def _guest_restore_observe(self, new_entries, after_entries,
                                baseline_entries=None):

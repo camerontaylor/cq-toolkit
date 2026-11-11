@@ -2966,8 +2966,8 @@ def _partial_fenced_state_ok(snapshot_value, label, problems):
     return ok
 
 
-def _partial_completion_baseline_ok(baseline, entries, before_entries, label,
-                                    problems):
+def _partial_completion_baseline_ok(baseline, entries, before_entries, runtime,
+                                    label, problems):
     if not isinstance(baseline, dict):
         problems.append(label + " completion baseline is absent")
         return False
@@ -2980,6 +2980,10 @@ def _partial_completion_baseline_ok(baseline, entries, before_entries, label,
                                     + "]", problems):
             ok = False
             continue
+        if index >= len(before_entries) and entry.get("runtime") != runtime:
+            problems.append(label + ".entries[" + str(index)
+                            + "] is not the case runtime")
+            ok = False
         boot = entry.get("boot_id")
         if not isinstance(boot, str) or not boot:
             problems.append(label + " completion has no boot identity")
@@ -3303,12 +3307,12 @@ def _partial_observe_ok(case, phase, boundary, prepared, problems):
         after_repeat = phase.get("after_repeat") or {}
         entries = after_recovery.get("repair_completions") or []
         if not _partial_completion_baseline_ok(
-                baseline, entries, before_entries, label + ".recovery",
-                problems):
+                baseline, entries, before_entries, runtime,
+                label + ".recovery", problems):
             ok = False
         repeat_entries = after_repeat.get("repair_completions") or []
         if not _partial_completion_baseline_ok(
-                repeat_baseline, repeat_entries, before_entries,
+                repeat_baseline, repeat_entries, before_entries, runtime,
                 label + ".repeat", problems):
             ok = False
         if repeat_baseline != baseline:
@@ -4461,13 +4465,21 @@ def _verify_partial_raw(report, raw_root, problems, phases):
     _raw_link_problem(raw_root / raw_unit / "default.target.wants"
                       / REPAIR_PATH, "../" + REPAIR_PATH,
                       "final partial path wants", problems)
-    for missing in (raw_root / raw_unit / ".crq-repair.service.staged",
-                    raw_root / FIXTURE_DIR.replace("/home/%s/" % vm.GUEST_USER,
-                                                   "") / "repair-path-trigger",
-                    raw_root / FIXTURE_DIR.replace("/home/%s/" % vm.GUEST_USER,
-                                                   "") / "activators-pause.json"):
+    for missing, label in (
+            (raw_root / raw_unit / ".crq-repair.service.staged",
+             "the staged repair target"),
+            (raw_root / raw_unit / "crq-repair.socket",
+             "a rogue repair socket"),
+            (raw_root / raw_unit / "crq-repair.service.d"
+             / "20-rogue.conf", "a rogue repair drop-in"),
+            (raw_root / raw_unit / "default.target.wants" / REPAIR_TIMER,
+             "rogue timer enablement"),
+            (raw_root / FIXTURE_DIR.replace("/home/%s/" % vm.GUEST_USER, "")
+             / "repair-path-trigger", "the path trigger"),
+            (raw_root / FIXTURE_DIR.replace("/home/%s/" % vm.GUEST_USER, "")
+             / "activators-pause.json", "the activators pause marker")):
         if missing.exists() or missing.is_symlink():
-            problems.append("final partial evidence retains " + missing.name)
+            problems.append("final partial evidence retains " + label)
     _raw_file_problem(raw_root / raw_unit / "crq-tick.service",
                       expected_unit(PYTHON_RUNTIME), "final partial tick service",
                       problems)
