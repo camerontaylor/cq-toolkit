@@ -99,6 +99,38 @@ class ReportTest(unittest.TestCase):
             self.assertEqual(limited["unknown_failure_class"], [r for r in result["unknown_failure_class"]][:1])
             self.assertEqual(limited["unknown_failure_class_omitted"], 1)
 
+    def test_non_string_failure_class_is_unknown_and_never_blocks_publication(self):
+        """Regression for the critic P2: an unhashable JSON failure_class (list,
+        object, boolean, number) must land in the unknown bucket without raising,
+        under strict=True and strict=False alike, and must never count as an
+        owner decision."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            rows = root / "triage"
+            rows.mkdir()
+
+            def write(fid, klass):
+                row = {"status": "needs-human", "canonical_id": "canonical", "target": "old",
+                       "target_current": "new", "mapped_path": "moved.py", "previous_event_id": "event",
+                       "failure_class": klass,
+                       "finding": {"id": fid, "path": "old.py", "title": "Problem", "severity": "major"}}
+                ledger.atomic(rows / (fid + ".json"), ledger.canonical(row))
+
+            values = [["x"], {"kind": "weird"}, True, 3, None]
+            for index, klass in enumerate(values):
+                write(f"odd-{index}", klass)
+            for strict, limit in ((True, None), (False, 32), (False, 2)):
+                result = reporting.finding_triage(root, strict=strict, limit=limit)
+                self.assertEqual(result["owner_decisions_count"], 0, (strict, limit))
+                self.assertEqual(result["operator_attention_count"], 5, (strict, limit))
+                self.assertEqual(result["unknown_failure_class_count"], 5, (strict, limit))
+            whole = reporting.finding_triage(root)
+            self.assertEqual([r["failure_class"] for r in whole["unknown_failure_class"]], values)
+            bounded = reporting.finding_triage(root, strict=False, limit=2)
+            self.assertEqual(len(bounded["unknown_failure_class"]), 2)
+            self.assertEqual(bounded["unknown_failure_class_omitted"], 3)
+            self.assertEqual(bounded["needs_human_omitted"], 3)
+
     def test_corrupt_triage_is_not_reported_as_zero(self):
         with tempfile.TemporaryDirectory() as td:
             rows = Path(td) / "triage"

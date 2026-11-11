@@ -53,13 +53,16 @@ def finding_triage(root, *, strict=True, limit=None):
             # evidence or an exhausted attempt is never an owner decision, and a
             # legacy row written before typed classes existed proves nothing
             # either way. Only the explicit typed owner-decision class routes
-            # there; absent or unrecognized classes stay operator attention
-            # under an honest unknown bucket. Never inferred from reason prose.
+            # there; absent, unrecognized or non-string classes stay operator
+            # attention under an honest unknown bucket. Never inferred from
+            # reason prose; malformed JSON values are data, not owner authority.
+            is_unknown = not (isinstance(failure_class, str)
+                              and failure_class in FAILURE_CLASSES)
             if failure_class == "owner-decision":
                 owner_count += 1
                 if limit is None or len(owner_decisions) < limit:
                     owner_decisions.append({**detail, "failure_class": failure_class})
-            elif failure_class in FAILURE_CLASSES:
+            elif not is_unknown:
                 operator_count += 1
                 if limit is None or len(operator_attention) < limit:
                     operator_attention.append({**detail, "failure_class": failure_class})
@@ -78,8 +81,10 @@ def finding_triage(root, *, strict=True, limit=None):
                       unknown_failure_class_count=unknown_failure_count)
         if unknown_failure_count:
             result["unknown_failure_class_note"] = (
-                "rows written before typed failure classes existed; treated as "
-                "operator attention, not owner decisions (D7)")
+                "rows with an absent or unrecognized failure_class (including "
+                "non-string legacy values); treated as operator attention, not "
+                "owner decisions (D7); unknown_failure_class_count is a subset "
+                "of operator_attention_count")
     if context_failure_count:
         result["context_failures"] = context_failures
         result["context_failures_count"] = context_failure_count
