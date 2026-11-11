@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import copy
 import importlib.util
 import json
 import os
@@ -39,6 +40,7 @@ UPLOADS = (
     "unit-switch-fixture.mjs",
     "vm-unit-switch-guest.py",
 )
+PARTIAL_GUEST = "vm-unit-switch-guest-partial.py"
 RUNNER_ARCHIVE = "crq-runner-source.tar.gz"
 HOST_MODULES = (
     "vm-unit-switch.py",
@@ -100,13 +102,60 @@ ACTIVATOR_GUEST_PHASES = (
     "activators-interrupt", "activators-recover", "activators-repeat",
     "activators-inspect")
 
+# Partial release and restore interruption cases. Every case keeps its own
+# private record directory so one unresolved intent cannot block another; that
+# is test isolation, not a resolution mechanism.
+PARTIAL_CASES = {}
+for _regime in ("restart", "reboot"):
+    for _hook in ("service", "timer", "path"):
+        PARTIAL_CASES["activation-%s-%s" % (_hook, _regime)] = {
+            "family": "activation",
+            "kind": "manager" if _regime == "restart" else "reboot",
+            "hook": "start-after-" + _hook,
+            "regime": _regime,
+            "record_dir": "records-partial-activation-%s-%s" % (_hook, _regime),
+        }
+    PARTIAL_CASES["restore-service-%s" % _regime] = {
+        "family": "restore",
+        "kind": "manager" if _regime == "restart" else "reboot",
+        "hook": "restore-activation-after-service",
+        "regime": _regime,
+        "record_dir": "records-partial-restore-service-%s" % _regime,
+    }
+PARTIAL_ORDER = tuple(PARTIAL_CASES)
+PARTIAL_GUEST_PHASES = (
+    ("prepare", "partial-install")
+    + tuple(
+        name for regime in ("restart", "reboot") for name in (
+            "partial-activation-service-%s" % regime,
+            "partial-activation-service-%s-observe" % regime,
+            "partial-activation-timer-%s" % regime,
+            "partial-activation-timer-%s-observe" % regime,
+            "partial-activation-path-%s" % regime,
+            "partial-activation-path-%s-observe" % regime,
+            "partial-restore-service-%s" % regime,
+            "partial-restore-service-%s-observe" % regime))
+    + ("partial-inspect",))
+
 
 def phase_names(mode="base"):
     if mode == "matrix":
         return MATRIX_GUEST_PHASES
     if mode == "activators":
         return ACTIVATOR_GUEST_PHASES
+    if mode == "partial":
+        return PARTIAL_GUEST_PHASES
     return GUEST_PHASES
+
+
+def uploads_for(mode="base"):
+    if mode == "partial":
+        return UPLOADS + (PARTIAL_GUEST,)
+    return UPLOADS
+
+
+def guest_script_for(mode="base"):
+    return PARTIAL_GUEST if mode == "partial" else "vm-unit-switch-guest.py"
 
 
 HEX40 = re.compile(r"[0-9a-f]{40}\Z")
@@ -168,6 +217,36 @@ ACTIVATOR_LIMITATIONS = [
     "proof that no work can start in a production dispatch race.",
     "Path-topology manager restart and guest reboot are not exercised in this "
     "slice. The existing restart/reboot matrix covers the tick topology only.",
+    "No production run_liveness provider, queue-runner runtime, adapter, "
+    "journal location or shared lock identity is exercised or enabled.",
+    "Production journal interoperability, legacy resolution and the actual "
+    "deployed record location remain unresolved and are not tested here.",
+    "A guest run is not power-loss, ACL, xattr or privileged-ownership proof.",
+]
+PARTIAL_LIMITATIONS = [
+    "Two declared harmless guest topologies are installed: crq-tick.service "
+    "with a timer, and crq-repair.service with a timer, a path activator and "
+    "one declared blocker drop-in. No production template is rendered.",
+    "The partial mode interrupts the actual controller at three release effect "
+    "points and one restore effect point, then performs a real guest user "
+    "manager restart or guest OS reboot before invoker recovery. It is not "
+    "power-loss proof and the guest is not a production host.",
+    "The path release is the declared enabled-but-inactive release step, not a "
+    "new path-active activation shape. The after-path boundary is bound by the "
+    "exact hook, the committed source digests and the observed post-kill state.",
+    "Enabled timer and path units may reactivate across a real restart or "
+    "reboot through systemd, linger or default-target. The host records the "
+    "actual activation states and permits only source-bound transitions; it "
+    "does not assert activation states unchanged and does not disable "
+    "activators.",
+    "Completion counts are captured at the controller/adapter fence-settled "
+    "baseline. Bounded completions before that fence are reported append-only "
+    "and truthfully; no later work or rollback credit is claimed.",
+    "The queue and drain gates are point-in-time observations. The settled "
+    "fence is a successful bounded quiescence observation, not proof that no "
+    "work can start in a production dispatch race.",
+    "Python and Node fixtures are fake unit-scoped completion sources. No real "
+    "CRQ runtime completion exists and no CQ enablement is implied.",
     "No production run_liveness provider, queue-runner runtime, adapter, "
     "journal location or shared lock identity is exercised or enabled.",
     "Production journal interoperability, legacy resolution and the actual "
@@ -257,9 +336,9 @@ def prepare_run(state, image, recorder, tools):
             "port": vm.free_port(), "started_at": vm.utc_now()}
 
 
-def upload_files(run, recorder):
+def upload_files(run, recorder, mode="base"):
     provenance = {}
-    for name in UPLOADS:
+    for name in uploads_for(mode):
         source = OPS / name
         data = source.read_bytes()
         local_sha = sha256_bytes(data)
@@ -310,9 +389,11 @@ def upload_files(run, recorder):
     return provenance
 
 
-def guest_phase(run, phase, recorder, extra=None, artifact=None):
-    command = ("python3 /home/%s/proof-bin/vm-unit-switch-guest.py %s"
-               % (vm.GUEST_USER, phase))
+def guest_phase(run, phase, recorder, extra=None, artifact=None,
+                guest_script=None):
+    command = ("python3 /home/%s/proof-bin/%s %s"
+               % (vm.GUEST_USER, guest_script or "vm-unit-switch-guest.py",
+                  phase))
     if extra:
         command += " " + " ".join(extra)
     result = vm.guest_ssh(run, command, recorder, timeout=600, max_output=None)
@@ -333,14 +414,16 @@ def guest_phase(run, phase, recorder, extra=None, artifact=None):
     return payload
 
 
-def host_identity(run, recorder, label):
+def host_identity(run, recorder, label, guest_script=None):
     return guest_phase(run, "host-identity", recorder,
-                       ["--label", label], artifact=label)
+                       ["--label", label], artifact=label,
+                       guest_script=guest_script)
 
 
-def restart_user_manager(run, recorder, boot, label):
+def restart_user_manager(run, recorder, boot, label, guest_script=None):
     """Restart the real guest user manager; daemon-reload is not a restart."""
-    before = host_identity(run, recorder, "identity-before-" + label)
+    before = host_identity(run, recorder, "identity-before-" + label,
+                           guest_script)
     started = vm.utc_now()
     result = vm.guest_ssh(
         run, "sudo -n systemctl restart user@$(id -u).service",
@@ -348,7 +431,8 @@ def restart_user_manager(run, recorder, boot, label):
     if result["rc"] != 0:
         raise RuntimeError("user manager restart failed: " + result["stderr"])
     ready = vm.wait_manager_ready(run, recorder)
-    after = host_identity(run, recorder, "identity-after-" + label)
+    after = host_identity(run, recorder, "identity-after-" + label,
+                          guest_script)
     run_dir = pathlib.Path(run["path"])
     verified = vm.process_matches(boot["pid"], boot["starttime"],
                                   str(run_dir / "overlay.qcow2"))
@@ -367,9 +451,10 @@ def restart_user_manager(run, recorder, boot, label):
             "qemu_identity_verified": verified}
 
 
-def reboot_guest_os(run, recorder, boot, label):
+def reboot_guest_os(run, recorder, boot, label, guest_script=None):
     """Reboot the guest OS and reconnect from the surviving host harness."""
-    before = host_identity(run, recorder, "identity-before-" + label)
+    before = host_identity(run, recorder, "identity-before-" + label,
+                           guest_script)
     issued = vm.guest_ssh(run, "sudo -n systemctl reboot", recorder,
                           timeout=20)
     deadline = time.time() + 300
@@ -391,7 +476,8 @@ def reboot_guest_os(run, recorder, boot, label):
         raise RuntimeError("guest boot ID did not change after reboot")
     ssh_ready = vm.wait_ssh(run, recorder, timeout=300)
     manager_ready = vm.wait_manager_ready(run, recorder)
-    after = host_identity(run, recorder, "identity-after-" + label)
+    after = host_identity(run, recorder, "identity-after-" + label,
+                          guest_script)
     run_dir = pathlib.Path(run["path"])
     verified = vm.process_matches(boot["pid"], boot["starttime"],
                                   str(run_dir / "overlay.qcow2"))
@@ -423,13 +509,22 @@ def fetch_raw(run, recorder, mode="base"):
             ".config/systemd/user/timers.target.wants/crq-repair.timer "
             ".config/systemd/user/default.target.wants/crq-repair.path "
             ".config/systemd/user/crq-repair.service.d/10-fence-proof.conf ")
-    remote = ("cd /home/%s && tar -czf - fixture records proof-bin "
-              "checkout/apps/crq-python/state%s "
-              ".config/systemd/user/crq-tick.service "
-              ".config/systemd/user/.crq-tick.service.staged "
-              ".config/systemd/user/crq-tick.timer "
-              ".config/systemd/user/timers.target.wants/crq-tick.timer "
-              "| base64 -w0" % (vm.GUEST_USER, extra))
+    elif mode == "partial":
+        # The partial final state is a plain Python unit file; the whole unit
+        # directory is retained so a staged or rogue entry cannot hide.
+        extra = " records-partial-* .config/systemd/user "
+    if mode == "partial":
+        remote = ("cd /home/%s && tar -czf - fixture records proof-bin "
+                  "checkout/apps/crq-python/state%s | base64 -w0"
+                  % (vm.GUEST_USER, extra))
+    else:
+        remote = ("cd /home/%s && tar -czf - fixture records proof-bin "
+                  "checkout/apps/crq-python/state%s "
+                  ".config/systemd/user/crq-tick.service "
+                  ".config/systemd/user/.crq-tick.service.staged "
+                  ".config/systemd/user/crq-tick.timer "
+                  ".config/systemd/user/timers.target.wants/crq-tick.timer "
+                  "| base64 -w0" % (vm.GUEST_USER, extra))
     result = vm.guest_ssh(run, remote, recorder, timeout=120, max_output=None)
     if result["rc"] != 0:
         raise RuntimeError("raw guest evidence fetch failed: " + result["stderr"])
@@ -1339,6 +1434,7 @@ REPAIR_PATHS = {
 REPAIR_STAGED = UNIT_DIR + "/." + REPAIR_UNIT + ".staged"
 REPAIR_TRIGGER = FIXTURE_DIR + "/repair-path-trigger"
 REPAIR_PAUSE_MARKER = FIXTURE_DIR + "/activators-pause.json"
+PARTIAL_COMPLETIONS = FIXTURE_DIR + "/completions-crq-repair.jsonl"
 
 
 def _repair_adapter():
@@ -2481,9 +2577,781 @@ def _activator_checks(phases):
     return checks, problems
 
 
+PARTIAL_RECORD_PHASE = {
+    "activation": "activation_pending",
+    "restore": "restore_activation_pending",
+}
+
+
+def _partial_record_ok(summary, case, expected_phase, label, problems):
+    if not _sha_present(summary):
+        problems.append(label + " has no retained record summary")
+        return False
+    ok = True
+    if summary.get("outcome") != "pending":
+        problems.append(label + " record is not pending")
+        ok = False
+    if summary.get("phase") != expected_phase:
+        problems.append(label + " record is not at " + expected_phase)
+        ok = False
+    if summary.get("runtime") != NODE_RUNTIME \
+            or summary.get("prior_runtime") != PYTHON_RUNTIME:
+        problems.append(label + " record runtime identity is not the case shape")
+        ok = False
+    if "completions" in summary:
+        problems.append(label + " record wrongly carries completions")
+        ok = False
+    expected_parent = "/home/%s/%s" % (
+        vm.GUEST_USER, PARTIAL_CASES[case]["record_dir"])
+    path = summary.get("path")
+    if not isinstance(path, str) \
+            or str(pathlib.PurePosixPath(path).parent) != expected_parent:
+        problems.append(label + " record path is not the case directory")
+        ok = False
+    return ok
+
+
+def _partial_cli_sigkill(cli, label, problems):
+    ok = (isinstance(cli, dict) and cli.get("rc") == -9
+          and cli.get("timeout") is False)
+    if not ok:
+        problems.append(label + " was not killed by exact SIGKILL")
+    return ok
+
+
+def _partial_file_map(files):
+    keys = ("service", "timer", "timer_wants", "path", "path_wants",
+            "dropin", "staged", "trigger")
+    return {key: (files or {}).get(key) for key in keys}
+
+
+def _partial_metadata_map(metadata):
+    keys = ("service", "timer", "timer_wants", "path", "path_wants",
+            "dropin", "staged", "trigger")
+    return {key: (metadata or {}).get(key) for key in keys}
+
+
+def _partial_tick_ok(tick, prepared, initial, label, problems):
+    tick = tick or {}
+    files = tick.get("files") or {}
+    ok = (tick.get("state") == (prepared or {}).get("state")
+          and (tick.get("history") or {}).get("sha256")
+          == (prepared or {}).get("history_sha256")
+          and [entry.get("path") for entry in (tick.get("records") or [])]
+          == (prepared or {}).get("record_paths")
+          and (files.get(SERVICE_PATH) or {}).get("sha256")
+          == _sha(expected_unit(PYTHON_RUNTIME)))
+    if not ok:
+        problems.append(label + " changed the preserved tick evidence")
+    return ok
+
+
+def _partial_activation_policy(snapshot_value, label, problems):
+    units = (snapshot_value or {}).get("repair_units") or {}
+    timer = units.get(REPAIR_TIMER) or {}
+    path = units.get(REPAIR_PATH) or {}
+    service = units.get(REPAIR_UNIT) or {}
+    ok = True
+    if timer.get("UnitFileState") != "enabled" \
+            or path.get("UnitFileState") != "enabled":
+        problems.append(label + " lost a source-bound enabled activator")
+        ok = False
+    if timer.get("ActiveState") in ("active", "activating") \
+            and timer.get("UnitFileState") != "enabled":
+        problems.append(label + " activated a non-enabled timer")
+        ok = False
+    if path.get("ActiveState") in ("active", "activating") \
+            and path.get("UnitFileState") != "enabled":
+        problems.append(label + " activated a non-enabled path")
+        ok = False
+    if service.get("ActiveState") in ("active", "activating"):
+        explained = (
+            (timer.get("UnitFileState") == "enabled"
+             and timer.get("ActiveState") in ("active", "activating"))
+            or (path.get("UnitFileState") == "enabled"
+                and path.get("ActiveState") in ("active", "activating")))
+        if not explained:
+            problems.append(label + " active service has no enabled activator")
+            ok = False
+    if service.get("LoadState") != "loaded" \
+            or service.get("FragmentPath") != REPAIR_PATHS["service"]:
+        problems.append(label + " service is not loaded from the exact path")
+        ok = False
+    return ok
+
+
+def _partial_fence_ok(cli, label, problems):
+    if not isinstance(cli, dict) or cli.get("rc") != 3 \
+            or cli.get("timeout") is not False:
+        problems.append(label + " did not return the actual rc-3 refusal")
+        return None
+    payload = cli.get("json")
+    if not isinstance(payload, dict):
+        problems.append(label + " retained no parsed CLI result")
+        return None
+    required = payload.get("recovery_required") or {}
+    if not isinstance(required, dict) or "activation may have occurred" \
+            not in (required.get("reason") or ""):
+        problems.append(label + " did not retain the activation-ambiguity branch")
+        return None
+    drain = payload.get("drain")
+    if not isinstance(drain, dict):
+        problems.append(label + " retained no drain evidence")
+        return None
+    queue = drain.get("queue_drain")
+    if not isinstance(queue, dict) or queue.get("drained") is not True:
+        problems.append(label + " queue drain is not a bounded success")
+    observation = drain.get("jobs_observation")
+    if not isinstance(observation, dict) \
+            or observation.get("lines") != [] \
+            or (observation.get("command") or {}).get("rc") != 0 \
+            or (observation.get("command") or {}).get("timeout") is not False:
+        problems.append(label + " job observation is not a bounded absence")
+    if drain.get("jobs") != []:
+        problems.append(label + " retained a systemd job at the fence")
+    if (drain.get("masked") or {}).get("LoadState") != "masked":
+        problems.append(label + " did not reload the durable mask")
+    direct = drain.get("direct_start") or {}
+    if direct.get("rc") == 0 or "masked" not in (
+            (direct.get("stdout") or "") + (direct.get("stderr") or "")).lower():
+        problems.append(label + " direct start was not refused as masked")
+    owned = drain.get("owned") or {}
+    if owned.get("pids") != [] or owned.get("main_pid") != 0:
+        problems.append(label + " retained an owned process at the fence")
+    if (drain.get("state") or {}).get("ActiveState") != "inactive":
+        problems.append(label + " service did not settle inactive")
+    activators = drain.get("activators") or {}
+    if set(activators) != {REPAIR_TIMER, REPAIR_PATH} or not all(
+            (item or {}).get("ActiveState") in ("inactive", "failed")
+            for item in activators.values()):
+        problems.append(label + " activators did not settle inactive")
+    baseline = drain.get("completion_baseline")
+    if not isinstance(baseline, dict):
+        problems.append(label + " retained no completion baseline")
+        return None
+    count = baseline.get("count")
+    sequences = baseline.get("sequences")
+    invocations = baseline.get("invocations")
+    if type(count) is not int or count < 0:
+        problems.append(label + " completion baseline count is invalid")
+    if not isinstance(sequences, list) \
+            or not all(type(item) is int for item in sequences) \
+            or sequences != sorted(sequences) \
+            or len(sequences) != len(set(sequences)):
+        problems.append(label + " completion baseline sequences are invalid")
+    if not isinstance(invocations, list) or len(invocations) != count \
+            or not all(isinstance(item, str) and HEX32.fullmatch(item)
+                       for item in invocations):
+        problems.append(label + " completion baseline invocations are invalid")
+    if type(baseline.get("max_sequence")) is not int:
+        problems.append(label + " completion baseline max sequence is invalid")
+    return baseline
+
+
+def _partial_fenced_state_ok(snapshot_value, label, problems):
+    files = (snapshot_value or {}).get("repair_files") or {}
+    units = (snapshot_value or {}).get("repair_units") or {}
+    service = files.get("service") or {}
+    ok = (service.get("type") == "symlink"
+          and service.get("target") == "/dev/null"
+          and (files.get("staged") or {}).get("type") == "missing"
+          and (units.get(REPAIR_UNIT) or {}).get("LoadState") == "masked"
+          and (units.get(REPAIR_TIMER) or {}).get("ActiveState")
+          in ("inactive", "failed")
+          and (units.get(REPAIR_PATH) or {}).get("ActiveState")
+          in ("inactive", "failed"))
+    if not ok:
+        problems.append(label + " did not retain the settled fence state")
+    return ok
+
+
+def _partial_completion_prefix_ok(before, after, runtime, label, problems,
+                                  exact=None):
+    before_entries = (before or {}).get("repair_completions")
+    after_entries = (after or {}).get("repair_completions")
+    if not isinstance(before_entries, list) or not isinstance(after_entries, list):
+        problems.append(label + " completion inventory is not a list")
+        return False
+    ok = True
+    if after_entries[:len(before_entries)] != before_entries:
+        problems.append(label + " completion log is not append-only")
+        ok = False
+    new = after_entries[len(before_entries):]
+    if not all(isinstance(item, dict) and item.get("runtime") == runtime
+               for item in new):
+        problems.append(label + " produced a non-case-runtime completion")
+        ok = False
+    if exact is not None and len(new) != exact:
+        problems.append(label + " completion delta is not exactly " + str(exact))
+        ok = False
+    if exact is None and not new:
+        problems.append(label + " produced no released-runtime completion")
+        ok = False
+    return ok
+
+
+def _partial_boundary_ok(case, phase, prepared, problems):
+    spec = PARTIAL_CASES[case]
+    label = "partial-" + case
+    if not _ok_phase(phase, label, problems):
+        return False
+    ok = True
+    ok = _partial_cli_sigkill(phase.get("cli"), label + " switch", problems) and ok
+    ok = _partial_record_ok(phase.get("record"), case,
+                            PARTIAL_RECORD_PHASE[spec["family"]],
+                            label + ".record", problems) and ok
+    if phase.get("hook") != spec["hook"] or phase.get("case") != case:
+        problems.append(label + " does not name the exact case and hook")
+        ok = False
+    before = phase.get("before") or {}
+    after = phase.get("after") or {}
+    units_before = before.get("repair_units") or {}
+    units_after = after.get("repair_units") or {}
+    files_before = before.get("repair_files") or {}
+    files_after = after.get("repair_files") or {}
+    if spec["family"] == "activation":
+        expected_service = _repair_adapter().render_unit(NODE_RUNTIME)
+        if (files_after.get("service") or {}).get("sha256") \
+                != _sha(expected_service):
+            problems.append(label + " service bytes are not the released runtime")
+            ok = False
+    if (units_after.get(REPAIR_UNIT) or {}).get("LoadState") != "loaded":
+        problems.append(label + " released service is not loaded")
+        ok = False
+    before_files = _partial_file_map(files_before)
+    after_files = _partial_file_map(files_after)
+    for key in ("timer", "timer_wants", "path", "path_wants", "dropin",
+                "trigger"):
+        if after_files.get(key) != before_files.get(key):
+            problems.append(label + " changed the " + key + " file state")
+            ok = False
+    if (after_files.get("staged") or {}).get("type") != "missing":
+        problems.append(label + " retains a staged target")
+        ok = False
+    before_meta = _partial_metadata_map(before.get("partial_metadata"))
+    after_meta = _partial_metadata_map(after.get("partial_metadata"))
+    for key in ("timer", "timer_wants", "path", "path_wants", "dropin",
+                "staged", "trigger"):
+        if after_meta.get(key) != before_meta.get(key):
+            problems.append(label + " changed the " + key + " metadata")
+            ok = False
+    if spec["family"] == "activation":
+        if (units_before.get(REPAIR_TIMER) or {}).get("ActiveState") != "active":
+            problems.append(label + " pre-boundary timer is not active")
+            ok = False
+        if (units_before.get(REPAIR_PATH) or {}).get("ActiveState") != "inactive":
+            problems.append(label + " pre-boundary path is not inactive")
+            ok = False
+    timer_state = (units_after.get(REPAIR_TIMER) or {}).get("ActiveState")
+    path_state = (units_after.get(REPAIR_PATH) or {}).get("ActiveState")
+    if spec["family"] == "activation" and spec["hook"] == "start-after-service":
+        if timer_state != "inactive":
+            problems.append(label + " released the timer before the hook")
+            ok = False
+        if after.get("jobs") != []:
+            problems.append(label + " retained a job after the service hook")
+            ok = False
+        if (units_after.get(REPAIR_UNIT) or {}).get("MainPID") not in ("0", ""):
+            problems.append(label + " retained a service pid at the hook")
+            ok = False
+        ok = _partial_completion_prefix_ok(
+            before, after, NODE_RUNTIME, label, problems, exact=1) and ok
+    elif spec["family"] == "activation":
+        if timer_state != "active":
+            problems.append(label + " timer was not released at the hook")
+            ok = False
+        ok = _partial_completion_prefix_ok(
+            before, after, NODE_RUNTIME, label, problems) and ok
+    if path_state != "inactive":
+        problems.append(label + " path is not inactive at the release point")
+        ok = False
+    if spec["family"] == "restore":
+        expected_prior = _repair_adapter().render_unit(PYTHON_RUNTIME)
+        if (files_after.get("service") or {}).get("sha256") != _sha(expected_prior):
+            problems.append(label + " did not restore the prior service bytes")
+            ok = False
+        if (units_after.get(REPAIR_TIMER) or {}).get("ActiveState") != "active":
+            problems.append(label + " did not restore the active timer")
+            ok = False
+        if (units_after.get(REPAIR_PATH) or {}).get("ActiveState") != "inactive":
+            problems.append(label + " activated the inactive path")
+            ok = False
+        drained = phase.get("drained_record") or {}
+        if drained.get("phase") != "drained" \
+                or (phase.get("record") or {}).get("sha256") == drained.get("sha256"):
+            problems.append(label + " did not advance drained to restore pending")
+            ok = False
+        ok = _partial_completion_prefix_ok(
+            before, after, PYTHON_RUNTIME, label, problems) and ok
+    if not _partial_tick_ok(phase.get("after", {}).get("tick"), prepared,
+                            (phase.get("before") or {}).get("tick"), label,
+                            problems):
+        ok = False
+    return ok
+
+
+def _partial_observe_ok(case, phase, boundary, prepared, problems):
+    spec = PARTIAL_CASES[case]
+    label = "partial-" + case + "-observe"
+    if not _ok_phase(phase, label, problems):
+        return False
+    ok = True
+    expected_phase = PARTIAL_RECORD_PHASE[spec["family"]]
+    record = phase.get("record") or {}
+    boundary_record = (boundary or {}).get("record") or {}
+    if not _partial_record_ok(record, case, expected_phase,
+                              label + ".record", problems):
+        ok = False
+    if record.get("sha256") != boundary_record.get("sha256"):
+        problems.append(label + " record bytes changed across the event")
+        ok = False
+    before = phase.get("before") or {}
+    boundary_after = (boundary or {}).get("after") or {}
+    if _partial_file_map(before.get("repair_files")) \
+            != _partial_file_map(boundary_after.get("repair_files")):
+        problems.append(label + " file states changed across the event")
+        ok = False
+    if _partial_metadata_map(before.get("partial_metadata")) \
+            != _partial_metadata_map(boundary_after.get("partial_metadata")):
+        problems.append(label + " file metadata changed across the event")
+        ok = False
+    ok = _partial_activation_policy(before, label, problems) and ok
+    runtime = NODE_RUNTIME if spec["family"] == "activation" else PYTHON_RUNTIME
+    before_entries = boundary_after.get("repair_completions") or []
+    after_entries = before.get("repair_completions") or []
+    if after_entries[:len(before_entries)] != before_entries:
+        problems.append(label + " completion log is not append-only")
+        ok = False
+    new = after_entries[len(before_entries):]
+    if not all(item.get("runtime") == runtime for item in new):
+        problems.append(label + " saw a non-case-runtime completion")
+        ok = False
+    recovery = phase.get("recovery") or {}
+    repeat = phase.get("repeat") or {}
+    baseline = _partial_fence_ok(recovery.get("cli"),
+                                 label + ".recovery", problems)
+    repeat_baseline = _partial_fence_ok(repeat.get("cli"),
+                                        label + ".repeat", problems)
+    if baseline is None or repeat_baseline is None:
+        ok = False
+    else:
+        if repeat_baseline.get("count") != baseline.get("count"):
+            problems.append(label + " repeat baseline count changed")
+            ok = False
+        after_recovery = phase.get("after_recovery") or {}
+        after_repeat = phase.get("after_repeat") or {}
+        entries = after_recovery.get("repair_completions") or []
+        if baseline.get("count") != len(entries):
+            problems.append(label + " produced a completion after the fence")
+            ok = False
+        if baseline.get("invocations") != [item.get("invocation")
+                                           for item in entries]:
+            problems.append(label + " completion log is not the baseline prefix")
+            ok = False
+        if len(after_repeat.get("repair_completions") or []) \
+                != repeat_baseline.get("count"):
+            problems.append(label + " repeat produced a completion after the fence")
+            ok = False
+        if not _partial_fenced_state_ok(after_recovery,
+                                        label + ".recovery", problems):
+            ok = False
+        if not _partial_fenced_state_ok(after_repeat,
+                                        label + ".repeat", problems):
+            ok = False
+        for key in ("record_after", "record_after_repeat"):
+            if (phase.get(key) or {}).get("sha256") != record.get("sha256"):
+                problems.append(label + " " + key + " changed the record bytes")
+                ok = False
+        if spec["family"] == "restore":
+            if (after_recovery.get("repair_files") or {}).get(
+                    "service", {}).get("type") != "symlink":
+                problems.append(label + " restored the prior service again")
+                ok = False
+    if not _partial_tick_ok(before.get("tick"), prepared,
+                            before.get("tick"), label, problems):
+        ok = False
+    return ok
+
+
+def _partial_identity_ok(case, boundary, observe, restarts, reboots, problems):
+    spec = PARTIAL_CASES[case]
+    label = "partial-" + case
+    boundary_before = (boundary or {}).get("before") or {}
+    boundary_after = (boundary or {}).get("after") or {}
+    observe_before = (observe or {}).get("before") or {}
+    boot = boundary_before.get("boot_id")
+    manager = boundary_before.get("manager")
+    observe_boot = observe_before.get("boot_id")
+    observe_manager = observe_before.get("manager")
+    ok = True
+    if not isinstance(boot, str) or not boot \
+            or not isinstance(observe_boot, str) or not observe_boot \
+            or not isinstance(manager, dict) or not isinstance(observe_manager, dict):
+        problems.append(label + " identity evidence is incomplete")
+        return False
+    if boundary_after.get("boot_id") != boot:
+        problems.append(label + " boundary boot identity changed early")
+        ok = False
+    host = (restarts if spec["kind"] == "manager" else reboots).get(case) or {}
+    if spec["kind"] == "manager":
+        command = " ".join((host.get("command") or {}).get("argv") or [])
+        host_ok = (host.get("kind") == "user_manager_restart"
+                   and _host_identity_ok(host, "manager")
+                   and host.get("qemu_identity_verified") is True
+                   and "restart" in command and "user@" in command
+                   and "daemon-reload" not in command)
+    else:
+        issued = " ".join((host.get("issued") or {}).get("argv") or [])
+        host_ok = (host.get("kind") == "guest_reboot"
+                   and _host_identity_ok(host, "reboot")
+                   and host.get("qemu_identity_verified") is True
+                   and "reboot" in issued
+                   and isinstance(host.get("ssh_ready"), dict)
+                   and isinstance(host.get("manager_ready"), dict))
+    if not host_ok:
+        problems.append(label + " host restart/reboot evidence is not the "
+                        "expected real event")
+        ok = False
+    if (host.get("before") or {}).get("boot_id") != boot \
+            or (host.get("after") or {}).get("boot_id") != observe_boot:
+        problems.append(label + " host identity does not bind the boundary "
+                        "and observe boots")
+        ok = False
+    if (manager.get("invocation_id")
+            == (observe_manager or {}).get("invocation_id")):
+        problems.append(label + " manager invocation did not change")
+        ok = False
+    if spec["kind"] == "manager" and observe_boot != boot:
+        problems.append(label + " manager restart changed the boot ID")
+        ok = False
+    if spec["kind"] == "reboot" and observe_boot == boot:
+        problems.append(label + " reboot did not change the boot ID")
+        ok = False
+    return ok
+
+
+def _partial_completion_identity(phases, problems):
+    observed = {}
+    boot_first = {}
+    for index, name in enumerate(PARTIAL_GUEST_PHASES):
+        phase = phases.get(name) or {}
+        snapshots = [phase.get("snapshot")] + [
+            phase.get(key) for key in
+            ("before", "after", "before_recovery", "after_recovery",
+             "after_repeat")]
+        snapshots.append(phase)
+        snapshots.append(phase.get("before"))
+        for snapshot_value in snapshots:
+            if not isinstance(snapshot_value, dict):
+                continue
+            boot = snapshot_value.get("boot_id")
+            if isinstance(boot, str) and boot:
+                boot_first.setdefault(boot, index)
+            entries = snapshot_value.get("repair_completions")
+            if entries is None:
+                entries = snapshot_value.get("completions")
+            if not isinstance(entries, list):
+                continue
+            for entry in entries:
+                if not _completion_shape_ok(entry, name + " completion",
+                                            problems):
+                    continue
+                invocation = entry["invocation"]
+                if invocation in observed:
+                    if observed[invocation][0] != entry:
+                        problems.append("completion " + invocation
+                                        + " was rewritten")
+                else:
+                    observed[invocation] = (copy.deepcopy(entry), index)
+    ok = True
+    for invocation, (entry, first_index) in observed.items():
+        boot = entry.get("boot_id")
+        if not isinstance(boot, str) or boot not in boot_first:
+            problems.append("completion " + invocation
+                            + " has an unsupported boot identity")
+            ok = False
+            continue
+        if boot_first[boot] > first_index:
+            problems.append("completion " + invocation
+                            + " precedes its boot's first observation")
+            ok = False
+    sequences = sorted(entry["sequence"] for entry, _ in observed.values())
+    if len(sequences) != len(set(sequences)):
+        problems.append("completion sequences are not unique")
+        ok = False
+    return ok
+
+
+def _partial_checks(phases, restarts=None, reboots=None):
+    checks = {}
+    problems = []
+    restarts = restarts or {}
+    reboots = reboots or {}
+    if set(phases) != set(PARTIAL_GUEST_PHASES):
+        problems.append("partial phases do not match the proof phase set")
+        checks["partial_phase_set"] = False
+        return checks, problems
+    prepare = phases.get("prepare") or {}
+    if not _ok_phase(prepare, "prepare", problems):
+        return checks, problems
+    snapshot = prepare.get("snapshot") or {}
+    prepared = prepare.get("prepared") or {}
+    if not isinstance(prepared, dict) or not prepared.get("state") \
+            or not prepared.get("history_sha256"):
+        problems.append("prepare has no preserved state or history digest")
+        checks["partial_prepared_baseline"] = False
+        return checks, problems
+    checks["partial_guest_isolation"] = (
+        snapshot.get("hostname") == "crq-probe"
+        and snapshot.get("user") == 1000
+        and snapshot.get("boot_id") is not None)
+    files = snapshot.get("files") or {}
+    units = snapshot.get("units") or {}
+    checks["partial_tick_baseline"] = (
+        (files.get(SERVICE_PATH) or {}).get("sha256")
+        == _sha(expected_unit(PYTHON_RUNTIME))
+        and (units.get("crq-tick.timer") or {}).get("UnitFileState")
+        == "enabled"
+        and bool((snapshot.get("history") or {}).get("sha256")))
+    runner_source = prepared.get("runner_source") or {}
+    checks["partial_runner_source"] = (
+        isinstance(runner_source.get("sha256"), str)
+        and HEX64.fullmatch(runner_source["sha256"]) is not None
+        and isinstance(runner_source.get("crq_sha256"), str)
+        and HEX64.fullmatch(runner_source["crq_sha256"]) is not None
+        and type(runner_source.get("bytes")) is int
+        and runner_source["bytes"] > 0)
+
+    install = phases.get("partial-install") or {}
+    if not _ok_phase(install, "partial-install", problems):
+        checks["partial_install"] = False
+    else:
+        inventory = install.get("inventory") or {}
+        paths = inventory.get("paths") or {}
+        expected = _repair_expected(PYTHON_RUNTIME)
+        ok = (inventory.get("unit") == REPAIR_UNIT
+              and inventory.get("topology") == "repair"
+              and _inventory_file(paths.get("service"), expected["service"],
+                                  "partial install service", problems)
+              and _inventory_file(paths.get("timer"), expected["timer"],
+                                  "partial install timer", problems)
+              and _inventory_file(paths.get("path"), expected["path"],
+                                  "partial install path", problems)
+              and _inventory_file(paths.get("dropin"), expected["dropin"],
+                                  "partial install drop-in", problems)
+              and _inventory_link(paths.get("timer_wants"),
+                                  "../" + REPAIR_TIMER,
+                                  "partial install timer wants", problems)
+              and _inventory_link(paths.get("path_wants"),
+                                  "../" + REPAIR_PATH,
+                                  "partial install path wants", problems)
+              and inventory.get("activators") == {
+                  "timer_active": "active",
+                  "timer_unit_file_state": "enabled",
+                  "service_active": "inactive",
+                  "path_active": "inactive",
+                  "path_unit_file_state": "enabled"}
+              and _unit_ok(inventory.get("units") or {}, "service",
+                           REPAIR_PATHS["service"], ("inactive",), "static",
+                           "partial install service", problems)
+              and _unit_ok(inventory.get("units") or {}, "timer",
+                           REPAIR_PATHS["timer"], ("active",), "enabled",
+                           "partial install timer", problems)
+              and _unit_ok(inventory.get("units") or {}, "path",
+                           REPAIR_PATHS["path"], ("inactive",), "enabled",
+                           "partial install path", problems))
+        install_files = install.get("files") or {}
+        install_units = install.get("units") or {}
+        ok = ok and (
+            _stat_file(install_files.get("service"), expected["service"],
+                       "partial install service", problems)
+            and _stat_file(install_files.get("timer"), expected["timer"],
+                           "partial install timer", problems)
+            and _stat_file(install_files.get("path"), expected["path"],
+                           "partial install path", problems)
+            and _stat_file(install_files.get("dropin"), expected["dropin"],
+                           "partial install drop-in", problems)
+            and _stat_link(install_files.get("timer_wants"),
+                           "../" + REPAIR_TIMER,
+                           "partial install timer wants", problems)
+            and _stat_link(install_files.get("path_wants"),
+                           "../" + REPAIR_PATH,
+                           "partial install path wants", problems)
+            and (install_files.get("staged") or {}).get("type") == "missing"
+            and (install_files.get("trigger") or {}).get("type") == "missing"
+            and _unit_ok(install_units, REPAIR_UNIT, REPAIR_PATHS["service"],
+                         ("inactive",), "static", "partial install service",
+                         problems)
+            and _unit_ok(install_units, REPAIR_TIMER, REPAIR_PATHS["timer"],
+                         ("active",), "enabled", "partial install timer",
+                         problems)
+            and _unit_ok(install_units, REPAIR_PATH, REPAIR_PATHS["path"],
+                         ("inactive",), "enabled", "partial install path",
+                         problems))
+        expected_dirs = {"/home/%s/%s" % (vm.GUEST_USER,
+                                          PARTIAL_CASES[case]["record_dir"])
+                         for case in PARTIAL_ORDER}
+        if set(install.get("case_dirs") or []) != expected_dirs:
+            problems.append("partial install case directories are not exact")
+            ok = False
+        completions = install.get("repair_completions") or []
+        if not completions or not all(
+                item.get("runtime") == PYTHON_RUNTIME
+                for item in completions):
+            problems.append("partial install completion baseline is not Python")
+            ok = False
+        if not _partial_tick_ok(install.get("tick"), prepared,
+                                snapshot, "partial install tick", problems):
+            ok = False
+        if not _preserved_ok(install.get("preserved"), prepared,
+                             "partial install", problems):
+            ok = False
+        checks["partial_install"] = ok
+
+    boundary_ok = True
+    observe_ok = True
+    identity_ok = True
+    quiescence_ok = True
+    completed_ok = True
+    retained_ok = True
+    for case in PARTIAL_ORDER:
+        boundary = phases.get("partial-" + case) or {}
+        observe = phases.get("partial-" + case + "-observe") or {}
+        this_boundary = _partial_boundary_ok(case, boundary, prepared,
+                                             problems)
+        this_observe = _partial_observe_ok(case, observe, boundary, prepared,
+                                           problems)
+        this_identity = _partial_identity_ok(case, boundary, observe,
+                                             restarts, reboots, problems)
+        checks["partial_" + case + "_boundary"] = this_boundary
+        checks["partial_" + case + "_observe"] = this_observe
+        checks["partial_" + case + "_identity"] = this_identity
+        boundary_ok = boundary_ok and this_boundary
+        observe_ok = observe_ok and this_observe
+        identity_ok = identity_ok and this_identity
+        expected_phase = PARTIAL_RECORD_PHASE[PARTIAL_CASES[case]["family"]]
+        records = [observe.get("record"), observe.get("record_after"),
+                   observe.get("record_after_repeat")]
+        retained_ok = retained_ok and all(
+            _sha_present(item) and item.get("sha256") == records[0].get("sha256")
+            and item.get("phase") == expected_phase
+            and item.get("outcome") == "pending" for item in records)
+        baseline_ok = True
+        for key in ("recovery", "repeat"):
+            cli = (observe.get(key) or {}).get("cli")
+            if _partial_fence_ok(cli, "partial-" + case + "." + key,
+                                 problems) is None:
+                baseline_ok = False
+        quiescence_ok = quiescence_ok and baseline_ok
+        released = NODE_RUNTIME if PARTIAL_CASES[case]["family"] == "activation" \
+            else PYTHON_RUNTIME
+        delta = boundary.get("completion_delta") or []
+        completed_ok = completed_ok and bool(delta) \
+            and all(item.get("runtime") == released for item in delta)
+
+    inspect = phases.get("partial-inspect") or {}
+    final_ok = False
+    if _ok_phase(inspect, "partial-inspect", problems):
+        expected = _repair_expected(PYTHON_RUNTIME)
+        files = inspect.get("files") or {}
+        units = inspect.get("units") or {}
+        final_ok = (
+            _stat_file(files.get("service"), expected["service"],
+                       "final partial service", problems)
+            and (files.get("staged") or {}).get("type") == "missing"
+            and (files.get("trigger") or {}).get("type") == "missing"
+            and _unit_ok(units, REPAIR_UNIT, REPAIR_PATHS["service"],
+                         ("inactive",), "static", "final partial service",
+                         problems)
+            and _unit_ok(units, REPAIR_TIMER, REPAIR_PATHS["timer"],
+                         ("active",), "enabled", "final partial timer",
+                         problems)
+            and _unit_ok(units, REPAIR_PATH, REPAIR_PATHS["path"],
+                         ("inactive",), "enabled", "final partial path",
+                         problems)
+            and _partial_tick_ok(inspect.get("tick"), prepared, snapshot,
+                                 "final partial tick", problems)
+            and _preserved_ok(inspect.get("preserved"), prepared,
+                              "final partial", problems))
+        case_records = inspect.get("case_records") or {}
+        if set(case_records) != set(PARTIAL_ORDER):
+            problems.append("final partial case records are not the exact set")
+            final_ok = False
+        for case, summary in case_records.items():
+            if not _partial_record_ok(
+                    summary, case,
+                    PARTIAL_RECORD_PHASE[PARTIAL_CASES[case]["family"]],
+                    "final " + case, problems):
+                final_ok = False
+            if summary.get("sha256") != (
+                    (phases.get("partial-" + case + "-observe") or {})
+                    .get("record") or {}).get("sha256"):
+                problems.append("final " + case + " record bytes changed")
+                final_ok = False
+        completions = inspect.get("completions") or []
+        if not completions or not _completion_list_ok(
+                completions, "final partial completion", problems):
+            final_ok = False
+        sequences = [item.get("sequence") for item in completions]
+        if sequences != sorted(sequences) or len(sequences) != len(set(sequences)):
+            problems.append("final partial sequences are not strictly ordered")
+            final_ok = False
+        if len({item.get("invocation") for item in completions}) != len(completions):
+            problems.append("final partial invocations are not unique")
+            final_ok = False
+    checks["partial_final_python"] = final_ok
+    checks["partial_release_boundaries"] = boundary_ok and (
+        set(PARTIAL_CASES) == {case for case in PARTIAL_ORDER}
+        and sum(1 for case in PARTIAL_ORDER
+                if PARTIAL_CASES[case]["family"] == "activation") == 6
+        and sum(1 for case in PARTIAL_ORDER
+                if PARTIAL_CASES[case]["family"] == "restore") == 2
+        and len({PARTIAL_CASES[case]["record_dir"]
+                 for case in PARTIAL_ORDER}) == len(PARTIAL_ORDER))
+    checks["partial_observe_boundaries"] = observe_ok
+    checks["partial_identity"] = identity_ok
+    checks["partial_quiescence"] = quiescence_ok
+    checks["partial_completed_work_not_credited"] = completed_ok and retained_ok
+    checks["partial_ambiguity_retained"] = retained_ok
+    checks["partial_completion_identity"] = _partial_completion_identity(
+        phases, problems)
+    checks["partial_preserved_state"] = all(
+        _preserved_ok((phases.get("partial-" + case) or {}).get("preserved"),
+                      prepared, "partial-" + case, problems)
+        and _preserved_ok(
+            (phases.get("partial-" + case + "-observe") or {}).get("preserved"),
+            prepared, "partial-" + case + "-observe", problems)
+        for case in PARTIAL_ORDER)
+    sources = [(phases.get(name) or {}).get("source")
+               for name in PARTIAL_GUEST_PHASES]
+    source_ok = all(isinstance(item, dict) for item in sources) and all(
+        item == sources[0] for item in sources)
+    if not source_ok:
+        problems.append("partial source manifests are not identical")
+    else:
+        expected_source = {
+            "adapter": vm.sha256_file(OPS / "unit-switch-adapter.py"),
+            "controller": vm.sha256_file(OPS / "deploy-controller.py"),
+            "cli": vm.sha256_file(OPS / "unit-switch.py"),
+            "guest": vm.sha256_file(OPS / PARTIAL_GUEST),
+            "runner_source": runner_source.get("sha256"),
+        }
+        if sources[0] != expected_source:
+            problems.append("partial source manifest does not bind the "
+                            "executed files")
+            source_ok = False
+    checks["partial_source_bound"] = source_ok
+    for key, value in checks.items():
+        if value is not True:
+            problems.append(key + " is not satisfied")
+    return checks, problems
+
+
 def build_checks(phases, restarts=None, reboots=None, mode="base"):
     if mode == "activators":
         return _activator_checks(phases)
+    if mode == "partial":
+        return _partial_checks(phases, restarts or {}, reboots or {})
     checks = {}
     problems = []
     prepare = phases.get("prepare") or {}
@@ -2743,6 +3611,18 @@ def run_steps(mode="base"):
         return [("phase", name, {}) for name in GUEST_PHASES]
     if mode == "activators":
         return [("phase", name, {}) for name in ACTIVATOR_GUEST_PHASES]
+    if mode == "partial":
+        steps = [("phase", "prepare", {}), ("phase", "partial-install", {})]
+        for case in PARTIAL_ORDER:
+            steps.append(("phase", "partial-" + case, {"case": case}))
+            if PARTIAL_CASES[case]["kind"] == "manager":
+                steps.append(("restart_manager", case, {}))
+            else:
+                steps.append(("reboot", case, {}))
+            steps.append(("phase", "partial-" + case + "-observe",
+                          {"case": case}))
+        steps.append(("phase", "partial-inspect", {}))
+        return steps
     steps = [("phase", name, {}) for name in GUEST_PHASES[:-1]]
     for case in ("matrix-restart-drained", "matrix-restart-restore-staged",
                  "matrix-restart-ambiguity"):
@@ -2786,19 +3666,20 @@ def build_report(run, boot, phases, restarts, reboots, stamps, image,
         "checks": checks,
         "problems": problems,
         "limitations": (ACTIVATOR_LIMITATIONS if mode == "activators"
+                        else PARTIAL_LIMITATIONS if mode == "partial"
                         else MATRIX_LIMITATIONS if mode == "matrix"
                         else LIMITATIONS),
     }
 
 
-def source_commit_check(repo, commit):
+def source_commit_check(repo, commit, mode="base"):
     if not isinstance(commit, str) or len(commit) != 40:
         raise ValueError("source commit must be a full 40-character SHA")
     head = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
                           capture_output=True, text=True, check=True).stdout.strip()
     if head != commit:
         raise ValueError("source commit is not the worktree HEAD")
-    for label, names in (("uploaded proof scripts", UPLOADS),
+    for label, names in (("uploaded proof scripts", uploads_for(mode)),
                          ("host proof modules", HOST_MODULES)):
         status = subprocess.run(
             ["git", "-C", str(repo), "status", "--porcelain", "--"] +
@@ -2818,7 +3699,7 @@ def source_commit_check(repo, commit):
 def cmd_run(args):
     state = pathlib.Path(args.state_dir).expanduser().resolve()
     state.mkdir(parents=True, exist_ok=True)
-    commit = source_commit_check(REPO, args.source_commit)
+    commit = source_commit_check(REPO, args.source_commit, args.mode)
     recorder = vm.Recorder(state)
     stamps = {"start": vm.host_stamp()}
     image = vm.fetch_image(state, recorder)
@@ -2827,7 +3708,8 @@ def cmd_run(args):
     try:
         run_dir = pathlib.Path(run["path"])
         host_source = pathlib.Path(__file__).resolve()
-        guest_source = OPS / "vm-unit-switch-guest.py"
+        guest_name = guest_script_for(args.mode)
+        guest_source = OPS / guest_name
         host_artifact = run_dir / "executed-host-script.py"
         guest_artifact = run_dir / "executed-guest-probe.py"
         shutil.copy2(host_source, host_artifact)
@@ -2852,7 +3734,7 @@ def cmd_run(args):
         recorder = vm.Recorder(run_dir)
         boot = vm.boot(run, recorder, args.tools, vm.host_stamp())
         boot["ssh"] = vm.wait_ssh(run, recorder)
-        uploads = upload_files(run, recorder)
+        uploads = upload_files(run, recorder, args.mode)
         provenance["uploads"] = uploads
         provenance["guest_report"] = guest_artifact.name
         phases = {}
@@ -2870,15 +3752,21 @@ def cmd_run(args):
                     extra = ["--record", phases["interrupt"]["record_path"]]
                 if options.get("case"):
                     case = options["case"]
-                    extra += ["--boundary", case,
-                              "--kind", MATRIX_CASES[case]["kind"]]
+                    if args.mode == "partial":
+                        extra += ["--case", case]
+                    else:
+                        extra += ["--boundary", case,
+                                  "--kind", MATRIX_CASES[case]["kind"]]
                 if options.get("after"):
                     extra += ["--after", options["after"]]
-                phases[name] = guest_phase(run, name, recorder, extra)
+                phases[name] = guest_phase(run, name, recorder, extra,
+                                           guest_script=guest_name)
             elif kind == "restart_manager":
-                restarts[name] = restart_user_manager(run, recorder, boot, name)
+                restarts[name] = restart_user_manager(
+                    run, recorder, boot, name, guest_script=guest_name)
             elif kind == "reboot":
-                reboots[name] = reboot_guest_os(run, recorder, boot, name)
+                reboots[name] = reboot_guest_os(
+                    run, recorder, boot, name, guest_script=guest_name)
         raw = fetch_raw(run, recorder, args.mode)
         stamps["finish"] = vm.host_stamp()
         report = build_report(run, boot, phases, restarts, reboots, stamps,
@@ -2949,7 +3837,7 @@ def _phase_cli(phase, label, problems):
     return cli
 
 
-def _upload_provenance_problems(report, raw_root, phases):
+def _upload_provenance_problems(report, raw_root, phases, mode="base"):
     problems = []
     provenance = report.get("provenance")
     uploads = provenance.get("uploads") if isinstance(provenance, dict) else None
@@ -2960,10 +3848,11 @@ def _upload_provenance_problems(report, raw_root, phases):
     retained = ({entry.name for entry in proof_bin.iterdir()
                  if entry.is_file() and not entry.is_symlink()}
                 if proof_bin.is_dir() else set())
-    if retained != set(UPLOADS) | {RUNNER_ARCHIVE}:
+    expected_uploads = uploads_for(mode)
+    if retained != set(expected_uploads) | {RUNNER_ARCHIVE}:
         problems.append("raw upload set does not match the expected "
                         "controller and fixture scripts")
-    for name in UPLOADS:
+    for name in expected_uploads:
         entry = uploads.get(name)
         raw_path = proof_bin / name
         if raw_path.is_symlink() or not raw_path.is_file():
@@ -3159,6 +4048,117 @@ def _verify_activators_raw(report, raw_root, problems, phases):
     return problems
 
 
+def _verify_partial_raw(report, raw_root, problems, phases):
+    prepared = (phases.get("prepare") or {}).get("prepared") or {}
+    raw_unit = UNIT_DIR.replace("/home/%s/" % vm.GUEST_USER, "")
+    expected = _repair_expected(PYTHON_RUNTIME)
+    for name, text in (
+            ("crq-repair.service", expected["service"]),
+            ("crq-repair.timer", expected["timer"]),
+            ("crq-repair.path", expected["path"]),
+            ("crq-repair.service.d/10-fence-proof.conf", expected["dropin"])):
+        _raw_file_problem(raw_root / raw_unit / name, text,
+                          "final partial " + name, problems)
+    _raw_link_problem(raw_root / raw_unit / "timers.target.wants"
+                      / REPAIR_TIMER, "../" + REPAIR_TIMER,
+                      "final partial timer wants", problems)
+    _raw_link_problem(raw_root / raw_unit / "default.target.wants"
+                      / REPAIR_PATH, "../" + REPAIR_PATH,
+                      "final partial path wants", problems)
+    for missing in (raw_root / raw_unit / ".crq-repair.service.staged",
+                    raw_root / FIXTURE_DIR.replace("/home/%s/" % vm.GUEST_USER,
+                                                   "") / "repair-path-trigger",
+                    raw_root / FIXTURE_DIR.replace("/home/%s/" % vm.GUEST_USER,
+                                                   "") / "activators-pause.json"):
+        if missing.exists() or missing.is_symlink():
+            problems.append("final partial evidence retains " + missing.name)
+    _raw_file_problem(raw_root / raw_unit / "crq-tick.service",
+                      expected_unit(PYTHON_RUNTIME), "final partial tick service",
+                      problems)
+
+    inspect = phases.get("partial-inspect") or {}
+    case_records = inspect.get("case_records") or {}
+    for case in PARTIAL_ORDER:
+        record_dir = PARTIAL_CASES[case]["record_dir"]
+        raw_dir = raw_root / record_dir
+        entries = (sorted(entry for entry in raw_dir.iterdir()
+                          if entry.is_file() and not entry.is_symlink())
+                   if raw_dir.is_dir() else [])
+        if len(entries) != 1:
+            problems.append("final partial record set is not one for " + case)
+            continue
+        try:
+            record = json.loads(entries[0].read_text())
+        except (OSError, ValueError):
+            problems.append("final partial record is unreadable: " + case)
+            continue
+        expected_phase = PARTIAL_RECORD_PHASE[
+            PARTIAL_CASES[case]["family"]]
+        if record.get("phase") != expected_phase \
+                or record.get("outcome") != "pending":
+            problems.append("final partial record is not pending at "
+                            + expected_phase + ": " + case)
+        observe = phases.get("partial-" + case + "-observe") or {}
+        for key in ("record", "record_after", "record_after_repeat"):
+            _retained_record_problem(observe.get(key), raw_root, record_dir,
+                                     "partial-" + case + "." + key, problems)
+        _retained_record_problem(case_records.get(case), raw_root, record_dir,
+                                 "partial-inspect." + case, problems)
+
+    raw_completions = raw_root / PARTIAL_COMPLETIONS.replace(
+        "/home/%s/" % vm.GUEST_USER, "")
+    completions = []
+    if raw_completions.is_file() and not raw_completions.is_symlink():
+        for number, line in enumerate(raw_completions.read_text().splitlines(), 1):
+            if not line.strip():
+                continue
+            try:
+                completions.append(json.loads(line))
+            except ValueError:
+                problems.append("final partial completion line " + str(number)
+                                + " is not JSON")
+    else:
+        problems.append("final partial completion log is missing")
+    if completions and not _completion_list_ok(
+            completions, "final partial completion", problems):
+        pass
+    if inspect.get("completions") != completions:
+        problems.append("final partial completion log does not match the "
+                        "inspect phase")
+
+    sources = [(phases.get(name) or {}).get("source")
+               for name in PARTIAL_GUEST_PHASES]
+    source = sources[0] if sources and all(item == sources[0]
+                                           for item in sources) else None
+    if not isinstance(source, dict):
+        problems.append("partial source manifest is not consistent")
+    else:
+        raw_proof = raw_root / "proof-bin"
+        for key, name in (("adapter", "unit-switch-adapter.py"),
+                          ("controller", "deploy-controller.py"),
+                          ("cli", "unit-switch.py"),
+                          ("guest", PARTIAL_GUEST)):
+            raw_path = raw_proof / name
+            if raw_path.is_symlink() or not raw_path.is_file():
+                problems.append("partial raw source is missing: " + name)
+            elif vm.sha256_file(raw_path) != source.get(key):
+                problems.append("partial raw source digest does not match: "
+                                + name)
+        raw_runner = raw_proof / RUNNER_ARCHIVE
+        if raw_runner.is_symlink() or not raw_runner.is_file():
+            problems.append("partial raw runner source is missing")
+        elif vm.sha256_file(raw_runner) != source.get("runner_source"):
+            problems.append("partial raw runner source digest does not match")
+    for name, expected_sha in (prepared.get("state") or {}).items():
+        path = raw_root / "checkout/apps/crq-python/state" / name
+        if path.is_symlink() or not path.is_file():
+            problems.append("partial raw preserved state is missing: " + name)
+        elif expected_sha and vm.sha256_file(path) != expected_sha:
+            problems.append("partial raw preserved state does not match: " + name)
+    problems.extend(_upload_provenance_problems(report, raw_root, phases, "partial"))
+    return problems
+
+
 def verify_raw_evidence(report, raw_root, mode="base"):
     """Compare a report with the retained raw phases, uploads and journals."""
     problems = []
@@ -3184,6 +4184,8 @@ def verify_raw_evidence(report, raw_root, mode="base"):
                             + " does not match retained raw guest evidence")
     if mode == "activators":
         return _verify_activators_raw(report, raw_root, problems, phases)
+    if mode == "partial":
+        return _verify_partial_raw(report, raw_root, problems, phases)
 
     # Only final journal states can be compared with the retained record set.
     # Earlier phase summaries are historical; their raw phase JSON is the
@@ -3344,7 +4346,7 @@ def _artifact_path(run_dir, name):
     return path
 
 
-def validate_provenance(report, run_dir):
+def validate_provenance(report, run_dir, mode="base"):
     """Require complete, nonempty and source-bound report provenance."""
     problems = []
     raw_path = None
@@ -3425,10 +4427,10 @@ def validate_provenance(report, run_dir):
     if not isinstance(uploads, dict):
         problems.append("upload provenance is not an object")
     else:
-        if set(uploads) != set(UPLOADS) | {"runner_source"}:
+        if set(uploads) != set(uploads_for(mode)) | {"runner_source"}:
             problems.append("upload provenance set does not match the expected "
                             "controller and fixture scripts")
-        for name in UPLOADS:
+        for name in uploads_for(mode):
             entry = uploads.get(name)
             if not isinstance(entry, dict):
                 problems.append("upload provenance is missing: " + name)
@@ -3498,7 +4500,7 @@ def cmd_verify(args):
     if report.get("schema_version") != SCHEMA_VERSION or report.get("kind") != KIND:
         problems.append("report schema or kind is not this proof")
     mode = report.get("mode", "base")
-    if mode not in ("base", "matrix", "activators"):
+    if mode not in ("base", "matrix", "activators", "partial"):
         problems.append("report mode is not this proof mode")
         mode = "base"
     phases = report.get("phases")
@@ -3520,7 +4522,7 @@ def cmd_verify(args):
             or not re.fullmatch(r"[0-9a-f]{40}", report["source_commit"]):
         problems.append("report has no source commit binding")
     run_dir = pathlib.Path(args.report).resolve().parent
-    provenance_problems, raw_path = validate_provenance(report, run_dir)
+    provenance_problems, raw_path = validate_provenance(report, run_dir, mode)
     problems.extend(provenance_problems)
     if raw_path is not None:
         try:
@@ -3532,7 +4534,7 @@ def cmd_verify(args):
             problems.append("raw guest evidence is unreadable: " + str(exc)[:200])
     current_host = sha256_bytes(pathlib.Path(__file__).resolve().read_bytes())
     current_guest = sha256_bytes(
-        (OPS / "vm-unit-switch-guest.py").read_bytes())
+        (OPS / guest_script_for(mode)).read_bytes())
     provenance = report.get("provenance") or {}
     retained_host = (provenance.get("host_script") or {}).get("sha256")
     retained_guest = (provenance.get("guest_script") or {}).get("sha256")
@@ -3578,7 +4580,8 @@ def build_parser():
     sub = parser.add_subparsers(dest="command", required=True)
     run = sub.add_parser("run")
     run.add_argument("--source-commit", required=True)
-    run.add_argument("--mode", choices=("base", "matrix", "activators"),
+    run.add_argument("--mode",
+                     choices=("base", "matrix", "activators", "partial"),
                      default="base")
     run.add_argument("--keep", action="store_true")
     verify = sub.add_parser("verify")

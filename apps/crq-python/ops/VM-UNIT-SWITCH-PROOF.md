@@ -13,10 +13,10 @@ The vehicle exercises the *actual* controller seam
 (``deploy-controller.switch_unit`` and ``recover_unit``) against two declared
 harmless guest topologies in a disposable guest: ``crq-tick.service`` with a
 timer (the base and matrix modes), and ``crq-repair.service`` with a timer, a
-path activator and one declared blocker drop-in (the activators mode). It does
-not modify the controller's unit allowlist, add a journal, lock, pointer
-store, ledger, approval mechanism or resolution file, and it does not touch a
-production host, checkout, credential or provider.
+path activator and one declared blocker drop-in (the activators and partial
+modes). It does not modify the controller's unit allowlist, add a journal,
+lock, pointer store, ledger, approval mechanism or resolution file, and it
+does not touch a production host, checkout, credential or provider.
 
 Files:
 
@@ -26,6 +26,7 @@ Files:
 | ``ops/unit-switch.py`` | Explicit ``switch``/``recover`` CLI; calls the real controller and requires ``--proof-fixture``. No default or production adapter. |
 | ``ops/unit-switch-fixture.py`` / ``.mjs`` | Harmless Python and Node fixtures emitting distinguishable runtime-bound completion records with real systemd invocation IDs. |
 | ``ops/vm-unit-switch-guest.py`` | In-guest driver: exact runner-source extraction, isolated git checkout, seeded queue/heartbeat and runner metadata, completed historical record, drain refusals and harvest, both directions, interruption, repeated recovery, the activation-fence probe, the restart/reboot matrix at the ``drained``, ``restore_staged`` and ``activation_pending`` boundaries, and the second topology with an allowlisted timer/path/drop-in inventory, positive controls and refusal matrix. |
+| ``ops/vm-unit-switch-guest-partial.py`` | Separate in-guest driver for the partial-release mode. Imports the base driver without modifying it, installs the repair topology once, interrupts the actual controller at the three ``start`` effect points and the ``restore_activation`` service effect point, each under a real user-manager restart and a real guest OS reboot, then observes the retained pending record, exact file metadata, actual activation states and the actual rc-3 ambiguity branch before two recovery repetitions. |
 | ``ops/vm-unit-switch.py`` | Host harness reusing ``vm-feasibility.py`` lifecycle, uploading exact script bytes and ``git archive HEAD apps/crq-python`` as the runner source, restarting the real guest user manager or rebooting the guest OS between a boundary and its observation, retaining raw guest evidence and a report outside the worktree, and recomputing the exact repair topology bytes, paths, metadata, unit states and record snapshots. |
 
 ## Sequence
@@ -194,6 +195,52 @@ links and socket units outside the exact declared paths remain a production
 inventory gap. Path-topology manager restart and guest reboot are deferred to
 a later slice; the existing restart/reboot matrix covers the tick topology
 only.
+
+## Partial release/restore mode
+
+``run --mode partial`` returns to the repair topology and interrupts the actual
+controller at partial effect points, then performs the real persistence event
+before observing. It uses the separate partial guest driver, so the base,
+matrix and activators guest script stays byte-identical.
+
+The eight cases share the same install baseline but each keeps a private
+record directory: six activation cases (``start-after-service``,
+``start-after-timer`` and ``start-after-path``, each followed by a real user
+manager restart or a real guest OS reboot) and two restore cases
+(``restore-activation-after-service``, followed by the same two events).
+
+For each case the boundary phase runs the actual CLI with
+``CRQ_PROOF_KILL_ON`` set to the exact effect point and requires exact SIGKILL
+(``rc == -9``). The retained record is pending at ``activation_pending`` or
+``restore_activation_pending``; the service is the released or restored
+runtime; the timer, path, wants links, drop-in, staged target and trigger have
+their expected bytes and metadata; and the completion delta is the released
+runtime only. ``start-after-service`` requires exactly one completion, a
+verified inactive timer and no queued job. Timer and path release require at
+least one completion; the observed delta is recorded rather than assumed.
+
+After the real event the observe phase requires the same record bytes, the same
+owned file bytes and metadata, and only source-bound activation transitions:
+both activators remain enabled, and an active service must be explained by an
+enabled active timer or path. The actual recovery CLI is then invoked twice.
+Each invocation must return rc ``3`` with the controller's own
+``activation may have occurred`` ambiguity branch, a drained queue, an empty
+job observation, no owned process, inactive activators, the durable mask, a
+bounded completion baseline and an unchanged pending record. No completion
+after that fence is credited. The final phase restores the Python baseline and
+requires exactly one pending record per case, valid advancing completions,
+unchanged tick evidence and no staged or rogue unit entry.
+
+Cross-boot completion identity is checked on unit, runtime, success, sequence,
+invocation and boot ID. A completion's first observation must not precede the
+first observation of its boot ID; an unsupported boot identity fails closed.
+The host validator derives checks from the retained phases and raw evidence; it
+does not trust cached booleans.
+
+This remains fixture-only. It is not real runtime completion, C2/full Phase 1.5
+acceptance, power-loss proof, exhaustive production activator discovery, or
+evidence that production release is safe. The restore proof covers the service
+effect point only; timer/path restore effect points are not claimed.
 
 ## Recorded evidence
 
