@@ -269,16 +269,16 @@ effect point only; timer/path restore effect points are not claimed.
 
 One fresh partial run completed on Pluto (KVM, Ubuntu noble guest
 ``crq-probe``) from source commit
-``783bf4ff6869232d7d93e6a5fb5d76abb975be76``:
+``83a2395c49ebff51b51b7ec3cb7692f6098029ba``:
 
-- report ``~/crq-vm-feasibility/state/runs/20261111T060527Z-44eaf59b/report.json``
+- report ``~/crq-vm-feasibility/state/runs/20261111T062013Z-f29ae3ef/report.json``
 - all 38 checks true; ``problems: []``
-- ``raw-guest-evidence.tar.gz`` 1,352,520 bytes, SHA-256
-  ``7c076c49706ba7265080887f4c8beae6c7a5c55536557f9502b32fda362bbfe8``
+- ``raw-guest-evidence.tar.gz`` 1,354,513 bytes, SHA-256
+  ``077fee4bc4906d0fdd79b862891e60016b8d9a1c3605b96672c94f73fe6b21d7``
 - report SHA-256
-  ``d432be48716e24383eedbde682454e5ae73d317ecb460a897e783a6698412113``
+  ``5860ece165af4fe3baf5980d8332a1a56b1185681b11b035ee8876ebf91ce4b5``
 - host script SHA-256
-  ``44916fa4a8b8fe799aaa0bf1a7b46172377330d42dc51213425d298218b3c62d``
+  ``99e86d88619ff92da493d32c59d33829cd30764e8b54bba7c2dc31382ee3e400``
 - partial guest script SHA-256
   ``116e1e7dee4e45490c018c97af067e7a46cbd35bd2eafd5457043854c72306fc``
 
@@ -293,14 +293,14 @@ the service is activated:
 
 | Case | Hook | Pending record (prefix) | Released delta |
 |---|---|---|---|
-| ``activation-service-restart`` | ``start-after-service`` | ``b3e8cc4c204c`` | one Node |
-| ``activation-timer-restart`` | ``start-after-timer`` | ``30dcc7edbdbf`` | one Node |
-| ``activation-path-restart`` | ``start-after-path`` | ``e0fe833c3e37`` | one Node |
-| ``restore-service-restart`` | ``restore-activation-after-service`` | ``3b7eb52c648d`` | none |
-| ``activation-service-reboot`` | ``start-after-service`` | ``a059ecd7bfbd`` | one Node |
-| ``activation-timer-reboot`` | ``start-after-timer`` | ``9677a2bad2d5`` | one Node |
-| ``activation-path-reboot`` | ``start-after-path`` | ``3ed05260c8fe`` | one Node |
-| ``restore-service-reboot`` | ``restore-activation-after-service`` | ``f841ae55ca0c`` | none |
+| ``activation-service-restart`` | ``start-after-service`` | ``b90380911df2`` | one Node |
+| ``activation-timer-restart`` | ``start-after-timer`` | ``8e66c0b02bb3`` | one Node |
+| ``activation-path-restart`` | ``start-after-path`` | ``c84c6323cd89`` | one Node |
+| ``restore-service-restart`` | ``restore-activation-after-service`` | ``d872f48259cf`` | none |
+| ``activation-service-reboot`` | ``start-after-service`` | ``b28d2fa92963`` | one Node |
+| ``activation-timer-reboot`` | ``start-after-timer`` | ``18591ccfb6a2`` | one Node |
+| ``activation-path-reboot`` | ``start-after-path`` | ``d809846077ab`` | one Node |
+| ``restore-service-reboot`` | ``restore-activation-after-service`` | ``daa27eb3bce2`` | none |
 
 Every observe phase retained the same record bytes and returned the actual
 rc-3 ``activation may have occurred`` refusal twice, with the fence-settled
@@ -311,6 +311,23 @@ evidence: it failed closed because the dynamic completion log mixes Python's
 spaced JSON with Node's compact JSON, so reconstructing its bytes from parsed
 entries was not sound. The current host checks that log by shape and binds its
 parsed entries through the completion baseline instead.
+
+### Earlier reviewed partial proof run (preserved)
+
+The successful run ``20261111T060527Z-44eaf59b`` from source
+``783bf4ff6869232d7d93e6a5fb5d76abb975be76`` remains preserved unchanged:
+38/38, report SHA-256
+``d432be48716e24383eedbde682454e5ae73d317ecb460a897e783a6698412113``,
+raw tar 1,352,520 bytes with SHA-256
+``7c076c49706ba7265080887f4c8beae6c7a5c55536557f9502b32fda362bbfe8``,
+host script
+``44916fa4a8b8fe799aaa0bf1a7b46172377330d42dc51213425d298218b3c62d``
+and guest script
+``116e1e7dee4e45490c018c97af067e7a46cbd35bd2eafd5457043854c72306fc``.
+It predates the append-only completion-log and final-inventory prefix checks
+and is not current evidence. Under the current host it re-verifies with
+``problems: []``, ``host_matches_run: false``, ``guest_matches_run: true``
+and ``validator_only: true``.
 
 ### Superseded partial proof run (preserved)
 
