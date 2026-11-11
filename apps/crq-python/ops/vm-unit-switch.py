@@ -1545,6 +1545,11 @@ def _completion_shape_ok(item, label, problems):
     return ok
 
 
+def _completion_fields(item):
+    return {key: item.get(key) for key in
+            ("unit", "runtime", "success", "sequence", "invocation")}
+
+
 def _completion_list_ok(items, label, problems, runtime=None,
                         allow_empty=True):
     if not isinstance(items, list) or (not allow_empty and not items):
@@ -1708,10 +1713,23 @@ def _fence_completion_ok(fence, during, record, problems):
     record_invocations = {item.get("invocation")
                           for item in record_completions}
     after_invocations = {item.get("invocation") for item in after or []}
+    after_by_invocation = {}
+    for item in after or []:
+        after_by_invocation.setdefault(item.get("invocation"), []).append(item)
+    record_entries_match = all(
+        len(after_by_invocation.get(item.get("invocation"), [])) == 1
+        and _completion_fields(
+            after_by_invocation[item["invocation"]][0])
+        == _completion_fields(item)
+        for item in record_completions)
+    if not record_entries_match:
+        problems.append("fence journal completions do not match the retained "
+                        "after entries")
     baseline = max((item.get("sequence", 0) for item in before or []),
                    default=0)
     ok = (
         ok
+        and record_entries_match
         and len(record_invocations) == 2
         and all(item.get("invocation") in after_invocations
                 and item.get("invocation") not in before_invocations

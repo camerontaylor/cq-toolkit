@@ -1985,7 +1985,7 @@ class ActivatorEvidenceTests(unittest.TestCase):
                   "completions": copy.deepcopy(before),
                   "completion_count": 2, "external_completion_delta": 0}
         fence = {"completions_before": before, "completions_after": after}
-        record = {"completions": after[2:]}
+        record = {"completions": copy.deepcopy(after[2:])}
         return fence, during, record
 
     def test_fence_completion_delta_is_derived_not_cached(self):
@@ -1999,6 +1999,12 @@ class ActivatorEvidenceTests(unittest.TestCase):
         self.assertFalse(harness._fence_completion_ok(fence, during, record, []))
         fence, during, record = self._fence()
         during["external_completion_delta"] = True
+        self.assertFalse(harness._fence_completion_ok(fence, during, record, []))
+        fence, during, record = self._fence()
+        fence["completions_after"][2]["runtime"] = PYTHON
+        self.assertFalse(harness._fence_completion_ok(fence, during, record, []))
+        fence, during, record = self._fence()
+        fence["completions_after"][3]["sequence"] = 99
         self.assertFalse(harness._fence_completion_ok(fence, during, record, []))
 
     def test_refusal_requires_present_paired_record_inventories(self):

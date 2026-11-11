@@ -734,10 +734,11 @@ class GuestFixtureAdapter:
         """Reject an activation shape that cannot yield two completions.
 
         The repair fixture release starts the service once and releases each
-        activator whose snapshot state is active. If neither timer nor path is
-        active, the controller's second completion can never advance. Refuse
-        that shape before the controller journals or mutates anything; an
-        enabled-but-inactive activator is not silently started.
+        activator whose snapshot state is active. Only the timer is an
+        autonomous second completion source; an active path still needs a
+        trigger event and cannot advance the second completion by itself.
+        Refuse an inactive timer before the controller journals or mutates
+        anything; an enabled-but-inactive activator is not silently started.
         """
         if self._topology()["kind"] != "repair":
             return
@@ -747,11 +748,14 @@ class GuestFixtureAdapter:
                for state in states.values()):
             self.refuse(label + " repair activator state is not restorable: "
                         + json.dumps(states, sort_keys=True))
-        if not any(state == "active" for state in states.values()):
-            self.refuse(label + " repair switch requires at least one active "
-                        "timer or path activator; both are inactive, so the "
-                        "release cannot produce the controller's second "
-                        "completion")
+        if states["timer"] != "active":
+            if states["path"] == "active":
+                self.refuse(label + " repair switch requires an active timer; "
+                            "an active path alone cannot produce the "
+                            "controller's second completion")
+            self.refuse(label + " repair switch requires an active timer; "
+                        "both timer and path are inactive, so the release "
+                        "cannot produce the controller's second completion")
 
     # -- seam: preflight -------------------------------------------------
     def preflight(self, unit, runtime):

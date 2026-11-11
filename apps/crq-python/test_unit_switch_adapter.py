@@ -401,7 +401,7 @@ class AdapterTests(unittest.TestCase):
         repair, paths = self._repair_adapter()
         service = paths["service"]
         before = service.read_bytes()
-        with self.assertRaisesRegex(RuntimeError, "at least one active"):
+        with self.assertRaisesRegex(RuntimeError, "active timer"):
             repair.preflight(adapter_mod.REPAIR_UNIT, "python")
         self.assertEqual(repair.last_inventory["activators"]["timer_active"],
                          "inactive")
@@ -421,8 +421,24 @@ class AdapterTests(unittest.TestCase):
 
     def test_repair_snapshot_refuses_both_inactive_activators(self):
         repair, _paths = self._repair_adapter()
-        with self.assertRaisesRegex(RuntimeError, "at least one active"):
+        with self.assertRaisesRegex(RuntimeError, "active timer"):
             repair.snapshot(adapter_mod.REPAIR_UNIT)
+
+    def test_repair_preflight_refuses_path_only_before_mutation(self):
+        repair, paths = self._repair_adapter()
+        self.repair_fake.active[adapter_mod.REPAIR_PATH] = True
+        service = paths["service"]
+        before = service.read_bytes()
+        with self.assertRaisesRegex(RuntimeError, "active path alone"):
+            repair.preflight(adapter_mod.REPAIR_UNIT, "python")
+        self.assertEqual(repair.last_inventory["activators"]["timer_active"],
+                         "inactive")
+        self.assertEqual(repair.last_inventory["activators"]["path_active"],
+                         "active")
+        self.assertEqual(service.read_bytes(), before)
+        self.assertFalse(service.is_symlink())
+        self.assertFalse((self.fixture_dir
+                          / adapter_mod.REPAIR_COMPLETIONS_NAME).exists())
 
     def test_repair_inventory_refuses_rogue_unit_before_mutation(self):
         repair, paths = self._repair_adapter()
@@ -729,7 +745,7 @@ class RepairSwitchControllerTests(ControllerFixture):
     def test_both_inactive_activators_refuse_before_journal_or_mutation(self):
         service = self.paths["service"]
         before = service.read_bytes()
-        with self.assertRaisesRegex(controller.Refused, "at least one active"):
+        with self.assertRaisesRegex(controller.Refused, "active timer"):
             controller.switch_unit(self.effects, self.repair,
                                    adapter_mod.REPAIR_UNIT, NODE)
         self.assertEqual(self._records(), [])
@@ -737,6 +753,19 @@ class RepairSwitchControllerTests(ControllerFixture):
         self.assertFalse(service.is_symlink())
         self.assertFalse((self.paths["service"].with_name(
             ".crq-repair.service.staged")).exists())
+        self.assertFalse((self.base / "repair-fixture"
+                          / adapter_mod.REPAIR_COMPLETIONS_NAME).exists())
+
+    def test_path_only_activator_refuses_before_journal_or_mutation(self):
+        self.repair_fake.active[adapter_mod.REPAIR_PATH] = True
+        service = self.paths["service"]
+        before = service.read_bytes()
+        with self.assertRaisesRegex(controller.Refused, "active path alone"):
+            controller.switch_unit(self.effects, self.repair,
+                                   adapter_mod.REPAIR_UNIT, NODE)
+        self.assertEqual(self._records(), [])
+        self.assertEqual(service.read_bytes(), before)
+        self.assertFalse(service.is_symlink())
         self.assertFalse((self.base / "repair-fixture"
                           / adapter_mod.REPAIR_COMPLETIONS_NAME).exists())
 
