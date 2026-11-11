@@ -214,9 +214,11 @@ One fresh activators run completed on Pluto (KVM, Ubuntu noble guest
 - guest script SHA-256
   ``5c9b68542a90fce42e994d3092f6106c1dfc6e1a92ba975fdb9c84649c53a9dc``
 
-Two independent ``verify`` invocations against the retained report both
-returned ``problems: []`` with ``host_matches_run: true``,
-``guest_matches_run: true`` and ``validator_only: false``.
+At the run's original host script, two independent ``verify`` invocations
+against the retained report both returned ``problems: []`` with
+``host_matches_run: true``, ``guest_matches_run: true`` and
+``validator_only: false``. The later host-only strict-parser recheck is
+described below.
 
 The queue positive control recorded the exact waiting job
 ``52 crq-repair.service start waiting``; its raw list-jobs command is the exact
@@ -257,6 +259,38 @@ path-only tests fail; narrowing it back to any-active fails the path-only
 tests; removing the raw stdout binding makes the queued and fence
 contradiction tests fail; removing the exact completion comparison makes the
 contradictory after-entry test fail.
+
+### R4 strict job-observation audit (host-only)
+
+The host now treats a successful list-jobs observation as one complete
+canonical set, not a set of lines to filter. ``_job_identity`` accepts exactly
+four whitespace-separated columns with a positive canonical job ID (no zero or
+leading zero), a systemd unit name, a known job type and ``waiting`` or
+``running``. ``_job_rows`` rejects any malformed, header or trailing row, a
+repeated job ID (identical or contradictory) and a repeated unit. The queue
+seed, post-stop, during-fence, drain and snapshot consumers all use that
+predicate. Queue and fence compare the exact waiting identity across the seed
+and during views (``during_rows.count(queue_job) == 1``) instead of ``any()``
+membership; post-stop absence is checked on the parsed unit, not a substring.
+
+The retained-raw tests add same-ID waiting+running in both orders, identical
+duplicates, duplicate IDs across units, duplicate units, zero and leading-zero
+IDs, headers, trailing fields, non-string rows, and a legitimate blocker row
+with another ID and unit. The legitimate control passes; every ambiguous row
+fails closed. Removing the strict parser makes 23 of 103 host tests fail
+(11 canonical/unique, 6 queue, 6 fence); restoring it passes 103/103.
+
+This is a host-only validator change. The guest adapter and guest driver are
+byte-identical to the current run. A ``verify`` with the new host script
+``368de4fb34befe34cb95a61e7c1be833cd5897462e5bcffa46a597a709eda97e``
+against the retained report returned ``problems: []``,
+``host_matches_run: false``, ``guest_matches_run: true`` and
+``validator_only: true``; it recomputed the 19 checks from the unchanged raw
+evidence. This is a validator-only recheck, not a fresh guest run.
+
+The preserved 26-check base and 62-check matrix runs also recomputed 26/26 and
+62/62 true checks with empty raw-evidence problems under the same strict host.
+They remain historical evidence, not fresh runs.
 
 ### Earlier R2 activators run (preserved)
 
