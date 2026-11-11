@@ -244,6 +244,52 @@ effect point only; timer/path restore effect points are not claimed.
 
 ## Recorded evidence
 
+### Partial proof run (current)
+
+One fresh partial run completed on Pluto (KVM, Ubuntu noble guest
+``crq-probe``) from source commit
+``13c1ee720e76880674d612ef2de993ef27620af8``:
+
+- report ``~/crq-vm-feasibility/state/runs/20261111T051806Z-5cb0e706/report.json``
+- all 38 checks true; ``problems: []``
+- ``raw-guest-evidence.tar.gz`` 1,350,273 bytes, SHA-256
+  ``298cd043191f89983e6a96f207be78b676864a77af187b62ac26eabcbb6e952a``
+- report SHA-256
+  ``93e82f9e137587d89f21ed55a9b6f52931369187d3128b50e2e86725daf7a5ed``
+- host script SHA-256
+  ``c4895e389ec8686187d4636464340e37a2ef0b853d05dc7efae07a3f6fb937a7``
+- partial guest script SHA-256
+  ``ca58ea871678d6fc1dfc209efac918f7213de98f7efddd4de6db0a994c382037``
+
+Two consecutive ``verify`` runs on that report returned ``problems: []`` with
+``host_matches_run: true``, ``guest_matches_run: true`` and
+``validator_only: false``. Each case boundary retained exact SIGKILL
+(``rc == -9``), a pending record, and exactly one released-runtime completion:
+
+| Case | Hook | Pending record (prefix) | Released delta |
+|---|---|---|---|
+| ``activation-service-restart`` | ``start-after-service`` | ``736086e90d6d`` | one Node |
+| ``activation-timer-restart`` | ``start-after-timer`` | ``5efd62c33b69`` | one Node |
+| ``activation-path-restart`` | ``start-after-path`` | ``ab82819a1ed6`` | one Node |
+| ``restore-service-restart`` | ``restore-activation-after-service`` | ``21f27348bb3b`` | one Python |
+| ``activation-service-reboot`` | ``start-after-service`` | ``8e8e31226acc`` | one Node |
+| ``activation-timer-reboot`` | ``start-after-timer`` | ``b9cc9376875f`` | one Node |
+| ``activation-path-reboot`` | ``start-after-path`` | ``24729ac81278`` | one Node |
+| ``restore-service-reboot`` | ``restore-activation-after-service`` | ``bfd3d7da02b8`` | one Python |
+
+Every observe phase retained the same record bytes and returned the actual
+rc-3 ``activation may have occurred`` refusal twice, with the fence-settled
+completion baseline unchanged. The final phase restored the Python repair
+baseline and retained one pending record per case.
+
+The earlier activators reports ``20261111T032335Z-7d2896be`` and
+``20261111T033408Z-be40a3a5`` also recomputed with ``problems: []`` and
+``guest_matches_run: true`` under the new host; both are validator-only because
+the host script changed. Older base/matrix reports were generated from an
+earlier guest script; the matrix verifier correctly refuses them as not
+reproducible from the current guest rather than treating them as current
+evidence.
+
 ### Activators proof run (current)
 
 One fresh activators run completed on Pluto (KVM, Ubuntu noble guest
@@ -609,6 +655,10 @@ python3 apps/crq-python/ops/vm-unit-switch.py \
   --state-dir "$state" \
   --tools ~/crq-vm-feasibility/tools \
   run --source-commit "$commit" --mode activators
+python3 apps/crq-python/ops/vm-unit-switch.py \
+  --state-dir "$state" \
+  --tools ~/crq-vm-feasibility/tools \
+  run --source-commit "$commit" --mode partial
 python3 apps/crq-python/ops/vm-unit-switch.py \
   --state-dir "$state" \
   --tools ~/crq-vm-feasibility/tools \
