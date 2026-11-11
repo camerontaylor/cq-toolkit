@@ -2713,15 +2713,25 @@ def _partial_file_state_ok(state, key, service, entries, label, problems):
               and state.get("uid") == 1000 and state.get("gid") == 1000
               and set(state) == {"path", "type", "target", "mode", "uid",
                                  "gid"})
+    elif kind == "completions":
+        # Python and Node fixtures serialize equivalent completion records with
+        # different whitespace, so the dynamic log is checked by shape here;
+        # its parsed entries are bound by the dedicated completion baseline.
+        ok = (state.get("type") == "file"
+              and state.get("mode") == 0o664
+              and state.get("uid") == 1000 and state.get("gid") == 1000
+              and isinstance(state.get("sha256"), str)
+              and HEX64.fullmatch(state["sha256"]) is not None
+              and type(state.get("size")) is int and state["size"] > 0
+              and set(state) == {"path", "type", "mode", "uid", "gid",
+                                 "sha256", "size"})
     else:
-        text = (_partial_expected_text(key, entries)
-                if kind == "completions" else expected["text"])
+        text = expected["text"]
         if not isinstance(text, str):
             problems.append(label + " " + key + " expected bytes are unknown")
             return False
-        mode = 0o664 if key == "completions" else 0o644
         ok = (state.get("type") == "file"
-              and state.get("mode") == mode
+              and state.get("mode") == 0o644
               and state.get("uid") == 1000 and state.get("gid") == 1000
               and state.get("sha256") == _sha(text)
               and state.get("size") == len(text.encode())
