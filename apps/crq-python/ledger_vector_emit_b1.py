@@ -556,11 +556,77 @@ def independence_vectors() -> Dict[str, Any]:
     transition = _job_state(attempt=1, reason="transition")
     operated = _job_state(operator="owner")
 
+    def payload_deleted(value: Dict[str, Any], field: str) -> Dict[str, Any]:
+        changed = copy.deepcopy(value)
+        del changed["payload"][field]
+        return changed
+
+    def payload_set(value: Dict[str, Any], field: str, replacement: Any) -> Dict[str, Any]:
+        changed = copy.deepcopy(value)
+        changed["payload"][field] = replacement
+        return changed
+
+    def payload_replaced(value: Dict[str, Any], replacement: Any) -> Dict[str, Any]:
+        changed = copy.deepcopy(value)
+        changed["payload"] = replacement
+        return changed
+
+    def top_deleted(value: Dict[str, Any], field: str) -> Dict[str, Any]:
+        changed = copy.deepcopy(value)
+        del changed[field]
+        return changed
+
+    def top_set(value: Dict[str, Any], field: str, replacement: Any) -> Dict[str, Any]:
+        changed = copy.deepcopy(value)
+        changed[field] = replacement
+        return changed
+
+    def job_with(**changes: Any) -> Dict[str, Any]:
+        """A valid enrollment with changed fields and a matching source key."""
+        value = _job_state()
+        value["payload"].update(changes)
+        payload = value["payload"]
+        value["source_key"] = "job:" + payload["job_id"] + ":" + ledger.digest(payload)
+        return value
+
+    import_rule = _import()
     import_cases = [
         ("unverified", unverified), ("rejected", rejected),
         ("credited-not-independent", linked),
         ("review-id-present-not-independent",
          _regenerated(unverified, lambda v: v["payload"].__setitem__("review_id", "f" * 64))),
+        # Python's tuple membership compares, never hashes: list/dict/number
+        # results are non-matches, while missing keys remain KeyError.
+        ("matrix-result-null", payload_set(import_rule, "result", None)),
+        ("matrix-result-false", payload_set(import_rule, "result", False)),
+        ("matrix-result-true", payload_set(import_rule, "result", True)),
+        ("matrix-result-zero", payload_set(import_rule, "result", 0)),
+        ("matrix-result-one", payload_set(import_rule, "result", 1)),
+        ("matrix-result-list", payload_set(import_rule, "result", [])),
+        ("matrix-result-dict", payload_set(import_rule, "result", {})),
+        ("matrix-result-other-string", payload_set(import_rule, "result", "other")),
+        ("matrix-result-rejected", payload_set(import_rule, "result", "rejected")),
+        ("matrix-result-missing", payload_deleted(import_rule, "result")),
+        ("matrix-review-id-missing", payload_deleted(import_rule, "review_id")),
+        ("matrix-review-id-false", payload_set(import_rule, "review_id", False)),
+        ("matrix-review-id-zero", payload_set(import_rule, "review_id", 0)),
+        ("matrix-review-id-list", payload_set(import_rule, "review_id", [])),
+        ("matrix-review-id-dict", payload_set(import_rule, "review_id", {})),
+        ("matrix-duplicate-id-missing", payload_deleted(import_rule, "duplicate_id")),
+        ("matrix-duplicate-id-false", payload_set(import_rule, "duplicate_id", False)),
+        ("matrix-duplicate-id-zero", payload_set(import_rule, "duplicate_id", 0)),
+        ("matrix-duplicate-id-list", payload_set(import_rule, "duplicate_id", [])),
+        ("matrix-event-type-missing", top_deleted(import_rule, "event_type")),
+        ("matrix-event-type-null", top_set(import_rule, "event_type", None)),
+        ("matrix-event-type-list", top_set(import_rule, "event_type", [])),
+        ("matrix-event-type-other-result-missing",
+         payload_deleted(top_set(import_rule, "event_type", "other"), "result")),
+        ("matrix-payload-missing", top_deleted(import_rule, "payload")),
+        ("matrix-payload-null", payload_replaced(import_rule, None)),
+        ("matrix-payload-list", payload_replaced(import_rule, [])),
+        ("matrix-payload-string", payload_replaced(import_rule, "x")),
+        ("matrix-payload-number", payload_replaced(import_rule, 1)),
+        ("matrix-payload-bool", payload_replaced(import_rule, True)),
     ]
     enrollment_cases = [
         ("initial-enrollment", enrollment),
@@ -568,6 +634,61 @@ def independence_vectors() -> Dict[str, Any]:
         ("operator-not-initial", operated),
         ("reason-not-inventory", _job_state(reason="other")),
         ("next-eligible-not-initial", _job_state(next_eligible_at=AT)),
+        ("matrix-reason-missing", payload_deleted(enrollment, "reason")),
+        ("matrix-reason-other", payload_set(enrollment, "reason", "other")),
+        ("matrix-reason-null", payload_set(enrollment, "reason", None)),
+        ("matrix-reason-list", payload_set(enrollment, "reason", [])),
+        ("matrix-reason-other-state-missing",
+         payload_deleted(payload_set(enrollment, "reason", "other"), "state")),
+        ("matrix-state-missing", payload_deleted(enrollment, "state")),
+        ("matrix-state-other", payload_set(enrollment, "state", "other")),
+        ("matrix-state-null", payload_set(enrollment, "state", None)),
+        ("matrix-state-list", payload_set(enrollment, "state", [])),
+        ("matrix-attempt-missing", payload_deleted(enrollment, "attempt")),
+        ("matrix-attempt-false", job_with(attempt=False)),
+        ("matrix-attempt-true", payload_set(enrollment, "attempt", True)),
+        ("matrix-attempt-one", payload_set(enrollment, "attempt", 1)),
+        ("matrix-attempt-float-zero", payload_set(enrollment, "attempt", 0.0)),
+        ("matrix-attempt-null", payload_set(enrollment, "attempt", None)),
+        ("matrix-attempt-string", payload_set(enrollment, "attempt", "0")),
+        ("matrix-attempt-list", payload_set(enrollment, "attempt", [])),
+        ("matrix-attempt-dict", payload_set(enrollment, "attempt", {})),
+        ("matrix-failures-missing", payload_deleted(enrollment, "failures")),
+        ("matrix-failures-false", job_with(failures=False)),
+        ("matrix-generation-false", job_with(generation=False)),
+        ("matrix-next-eligible-missing", payload_deleted(enrollment, "next_eligible_at")),
+        ("matrix-next-eligible-false", payload_set(enrollment, "next_eligible_at", False)),
+        ("matrix-next-eligible-zero", payload_set(enrollment, "next_eligible_at", 0)),
+        ("matrix-next-eligible-string", payload_set(enrollment, "next_eligible_at", "x")),
+        ("matrix-next-eligible-list", payload_set(enrollment, "next_eligible_at", [])),
+        ("matrix-operator-present", payload_set(enrollment, "operator", "owner")),
+        ("matrix-operator-null", payload_set(enrollment, "operator", None)),
+        ("matrix-operator-present-source-key-missing",
+         top_deleted(payload_set(enrollment, "operator", "owner"), "source_key")),
+        ("matrix-source-key-missing", top_deleted(enrollment, "source_key")),
+        ("matrix-source-key-null", top_set(enrollment, "source_key", None)),
+        ("matrix-source-key-false", top_set(enrollment, "source_key", False)),
+        ("matrix-source-key-number", top_set(enrollment, "source_key", 1)),
+        ("matrix-source-key-list", top_set(enrollment, "source_key", [])),
+        ("matrix-source-key-dict", top_set(enrollment, "source_key", {})),
+        ("matrix-source-key-wrong", top_set(enrollment, "source_key", "job:wrong")),
+        ("matrix-job-id-missing", payload_deleted(enrollment, "job_id")),
+        ("matrix-job-id-null", payload_set(enrollment, "job_id", None)),
+        ("matrix-job-id-bool", payload_set(enrollment, "job_id", True)),
+        ("matrix-job-id-number", payload_set(enrollment, "job_id", 1)),
+        ("matrix-job-id-list", payload_set(enrollment, "job_id", [])),
+        ("matrix-job-id-dict", payload_set(enrollment, "job_id", {})),
+        ("matrix-event-type-missing", top_deleted(enrollment, "event_type")),
+        ("matrix-event-type-null", top_set(enrollment, "event_type", None)),
+        ("matrix-event-type-list", top_set(enrollment, "event_type", [])),
+        ("matrix-event-type-other-payload-missing",
+         top_deleted(top_set(enrollment, "event_type", "other"), "payload")),
+        ("matrix-payload-missing", top_deleted(enrollment, "payload")),
+        ("matrix-payload-null", payload_replaced(enrollment, None)),
+        ("matrix-payload-list", payload_replaced(enrollment, [])),
+        ("matrix-payload-string", payload_replaced(enrollment, "x")),
+        ("matrix-payload-number", payload_replaced(enrollment, 1)),
+        ("matrix-payload-bool", payload_replaced(enrollment, True)),
     ]
     duplicate = _job_state(subject_id="other")
     batch_cases = (
@@ -579,10 +700,12 @@ def independence_vectors() -> Dict[str, Any]:
     )
 
     cases: List[Dict[str, Any]] = []
-    cases += [_capture(name, "review_ledger.independent_import", {"value": value},
+    cases += [_capture("import-" + name if name.startswith("matrix-") else name,
+                       "review_ledger.independent_import", {"value": value},
                        lambda value=value: ledger.independent_import(value))
               for name, value in import_cases]
-    cases += [_capture(name, "review_ledger.initial_inventory_enrollment", {"value": value},
+    cases += [_capture("enroll-" + name if name.startswith("matrix-") else name,
+                       "review_ledger.initial_inventory_enrollment", {"value": value},
                        lambda value=value: ledger.initial_inventory_enrollment(value))
               for name, value in enrollment_cases]
     cases += [_capture(name, "review_ledger.independent_batch",

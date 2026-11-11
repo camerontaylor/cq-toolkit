@@ -94,9 +94,19 @@ MATRIX_GUEST_PHASES = GUEST_PHASES[:-1] + (
     "matrix-reboot-ambiguity", "matrix-reboot-ambiguity-observe",
     "matrix-reset-python-final", "fence")
 
+ACTIVATOR_GUEST_PHASES = (
+    "prepare", "activators-install", "activators-positive",
+    "activators-unknown", "activators-fence", "activators-switch-back",
+    "activators-interrupt", "activators-recover", "activators-repeat",
+    "activators-inspect")
+
 
 def phase_names(mode="base"):
-    return MATRIX_GUEST_PHASES if mode == "matrix" else GUEST_PHASES
+    if mode == "matrix":
+        return MATRIX_GUEST_PHASES
+    if mode == "activators":
+        return ACTIVATOR_GUEST_PHASES
+    return GUEST_PHASES
 
 
 HEX40 = re.compile(r"[0-9a-f]{40}\Z")
@@ -138,6 +148,31 @@ MATRIX_LIMITATIONS = [
     "Production journal interoperability, legacy resolution and the actual "
     "deployed record location remain unresolved and are not tested here.",
     "A guest run is not ACL, xattr or privileged-ownership proof.",
+]
+ACTIVATOR_LIMITATIONS = [
+    "Two declared harmless guest topologies are installed: crq-tick.service "
+    "with a timer, and crq-repair.service with a timer, a path activator and "
+    "one declared blocker drop-in. No production template is rendered.",
+    "The inventory is an allowlisted guest topology, not exhaustive production "
+    "activator discovery. Other-name dependency units, default-target links and "
+    "socket units outside the exact declared paths remain a production "
+    "inventory gap.",
+    "Python and Node fixtures are fake unit-scoped completion sources. No real "
+    "CRQ runtime completion exists and no CQ enablement is implied.",
+    "The drain proof covers recorded runs with genuine runner metadata only. "
+    "A process whose ownership is not represented by queue run metadata and a "
+    "runner pidfile is not claimed as detected; the dispatch race remains "
+    "explicitly uncovered.",
+    "The queue and drain gates are point-in-time observations. The guest "
+    "observes cancellation after the adapter's stop settlement, but it is not "
+    "proof that no work can start in a production dispatch race.",
+    "Path-topology manager restart and guest reboot are not exercised in this "
+    "slice. The existing restart/reboot matrix covers the tick topology only.",
+    "No production run_liveness provider, queue-runner runtime, adapter, "
+    "journal location or shared lock identity is exercised or enabled.",
+    "Production journal interoperability, legacy resolution and the actual "
+    "deployed record location remain unresolved and are not tested here.",
+    "A guest run is not power-loss, ACL, xattr or privileged-ownership proof.",
 ]
 
 
@@ -376,15 +411,25 @@ def reboot_guest_os(run, recorder, boot, label):
             "qemu_identity_verified": verified}
 
 
-def fetch_raw(run, recorder):
+def fetch_raw(run, recorder, mode="base"):
     run_dir = pathlib.Path(run["path"])
+    extra = ""
+    if mode == "activators":
+        extra = (
+            " records-activators "
+            ".config/systemd/user/crq-repair.service "
+            ".config/systemd/user/crq-repair.timer "
+            ".config/systemd/user/crq-repair.path "
+            ".config/systemd/user/timers.target.wants/crq-repair.timer "
+            ".config/systemd/user/default.target.wants/crq-repair.path "
+            ".config/systemd/user/crq-repair.service.d/10-fence-proof.conf ")
     remote = ("cd /home/%s && tar -czf - fixture records proof-bin "
-              "checkout/apps/crq-python/state "
+              "checkout/apps/crq-python/state%s "
               ".config/systemd/user/crq-tick.service "
               ".config/systemd/user/.crq-tick.service.staged "
               ".config/systemd/user/crq-tick.timer "
               ".config/systemd/user/timers.target.wants/crq-tick.timer "
-              "| base64 -w0" % vm.GUEST_USER)
+              "| base64 -w0" % (vm.GUEST_USER, extra))
     result = vm.guest_ssh(run, remote, recorder, timeout=120, max_output=None)
     if result["rc"] != 0:
         raise RuntimeError("raw guest evidence fetch failed: " + result["stderr"])
@@ -1058,7 +1103,9 @@ def _snapshot_preservation_ok(snapshot, service_sha=None):
         return False
     if not _views_agree(metadata, files):
         return False
-    if not isinstance(jobs, list) or not _record_list_ok(records):
+    if (not isinstance(jobs, list)
+            or _job_rows(jobs, "snapshot jobs", []) is None
+            or not _record_list_ok(records)):
         return False
     if not _all_records_ok(all_records):
         return False
@@ -1101,12 +1148,12 @@ def _queue_restored_ok(queue, before_key, after_key=None):
             and queue[before_key] != queue["restored_sha256"])
 
 
-def _count_ok(value, *, positive=False):
+def _count_value_ok(value, *, positive=False):
     return (type(value) is int and value >= 0
             and (value > 0 if positive else True))
 
 
-def _record_summary_ok(value):
+def _record_pending_ok(value):
     return (_sha_present(value)
             and type(value.get("bytes")) is int and value["bytes"] > 0
             and isinstance(value.get("path"), str) and bool(value["path"])
@@ -1140,7 +1187,7 @@ def _drain_refusal_ok(phase, kind):
         and _queue_restored_ok(queue, "before_sha256", "after_sha256")
         and _path_list_ok(phase.get("records_before"))
         and phase.get("records_before") == phase.get("records_after")
-        and _count_ok(phase.get("completions_before"))
+        and _count_value_ok(phase.get("completions_before"))
         and phase.get("completions_before") == phase.get("completions_after")
         and _snapshot_preserved(before, after, service_sha)
         and (("owned" in (phase.get("processes") or {})
@@ -1244,8 +1291,8 @@ def _recovery_drain_refusal_ok(phase, service_path, baseline_queue):
         and _liveness_ok(phase, "alive")
         and isinstance(phase.get("record_path"), str)
         and _record_path_ok(phase["record_path"])
-        and _record_summary_ok(before)
-        and _record_summary_ok(after)
+        and _record_pending_ok(before)
+        and _record_pending_ok(after)
         and before["path"] == phase["record_path"]
         and after["path"] == phase["record_path"]
         and before.get("sha256") == after.get("sha256")
@@ -1257,7 +1304,7 @@ def _recovery_drain_refusal_ok(phase, service_path, baseline_queue):
         and queue["before_sha256"] == queue["after_sha256"]
         and queue["restored_sha256"] == baseline_queue
         and queue["restored_sha256"] != queue["before_sha256"]
-        and _count_ok(phase.get("completions_before"), positive=True)
+        and _count_value_ok(phase.get("completions_before"), positive=True)
         and phase.get("completions_before") == phase.get("completions_after")
         and service_before.get("LoadState") == "masked"
         and service_after.get("LoadState") == "masked"
@@ -1277,7 +1324,1166 @@ def _recovery_drain_refusal_ok(phase, service_path, baseline_queue):
     )
 
 
+REPAIR_UNIT = "crq-repair.service"
+REPAIR_TIMER = "crq-repair.timer"
+REPAIR_PATH = "crq-repair.path"
+REPAIR_RECORDS_DIR = "/home/%s/records-activators" % vm.GUEST_USER
+REPAIR_PATHS = {
+    "service": UNIT_DIR + "/" + REPAIR_UNIT,
+    "timer": UNIT_DIR + "/" + REPAIR_TIMER,
+    "timer_wants": UNIT_DIR + "/timers.target.wants/" + REPAIR_TIMER,
+    "path": UNIT_DIR + "/" + REPAIR_PATH,
+    "path_wants": UNIT_DIR + "/default.target.wants/" + REPAIR_PATH,
+    "dropin": UNIT_DIR + "/" + REPAIR_UNIT + ".d/10-fence-proof.conf",
+}
+REPAIR_STAGED = UNIT_DIR + "/." + REPAIR_UNIT + ".staged"
+REPAIR_TRIGGER = FIXTURE_DIR + "/repair-path-trigger"
+REPAIR_PAUSE_MARKER = FIXTURE_DIR + "/activators-pause.json"
+
+
+def _repair_adapter():
+    module = _load("crq_proof_adapter_checks",
+                   OPS / "unit-switch-adapter.py")
+    return module.GuestFixtureAdapter(
+        unit_dir=pathlib.Path(UNIT_DIR), fixture_dir=pathlib.Path(FIXTURE_DIR),
+        unit=REPAIR_UNIT,
+        proof_root=pathlib.Path("/home/%s/proof-bin" % vm.GUEST_USER),
+        guest_only=True)
+
+
+def _repair_expected(runtime):
+    adapter = _repair_adapter()
+    return {
+        "service": adapter.render_unit(runtime),
+        "timer": adapter.render_timer(),
+        "path": adapter.render_path(),
+        "dropin": adapter.render_dropin(),
+    }
+
+
+def _stat_file(state, text, label, problems):
+    ok = (isinstance(state, dict) and state.get("type") == "file"
+          and state.get("mode") == 0o644
+          and state.get("uid") == 1000 and state.get("gid") == 1000
+          and state.get("sha256") == _sha(text)
+          and state.get("size") == len(text.encode()))
+    if not ok:
+        problems.append(label + " does not match the rendered file: "
+                        + json.dumps(state)[:240])
+    return ok
+
+
+def _stat_link(state, target, label, problems):
+    ok = (isinstance(state, dict) and state.get("type") == "symlink"
+          and state.get("target") == target
+          and state.get("mode") == 0o777
+          and state.get("uid") == 1000 and state.get("gid") == 1000)
+    if not ok:
+        problems.append(label + " does not match the expected symlink: "
+                        + json.dumps(state)[:240])
+    return ok
+
+
+def _inventory_file(state, text, label, problems):
+    if not _stat_file(state, text, label, problems):
+        return False
+    if not isinstance(state, dict) or state.get("xattrs") != []:
+        problems.append(label + " carries unexpected extended attributes")
+        return False
+    try:
+        decoded = base64.b64decode(
+            (state.get("bytes_b64") or "").encode("ascii"), validate=True)
+    except (ValueError, TypeError):
+        decoded = b""
+    if decoded != text.encode():
+        problems.append(label + " retained bytes do not match the rendered file")
+        return False
+    return True
+
+
+def _inventory_link(state, target, label, problems):
+    if not _stat_link(state, target, label, problems):
+        return False
+    if not isinstance(state, dict) or state.get("xattrs") != []:
+        problems.append(label + " carries unexpected extended attributes")
+        return False
+    return True
+
+
+def _unit_ok(units, name, fragment, active, enabled, label, problems):
+    state = units.get(name) if isinstance(units, dict) else None
+    ok = (isinstance(state, dict)
+          and state.get("LoadState") == "loaded"
+          and state.get("FragmentPath") == fragment
+          and state.get("ActiveState") in active
+          and state.get("UnitFileState") == enabled)
+    if not ok:
+        problems.append(label + " unit state is not the expected shape: "
+                        + json.dumps(state)[:300])
+    return ok
+
+
+def _command_ok(result, label, problems, allowed=(0,)):
+    ok = (isinstance(result, dict)
+          and result.get("timeout") is False
+          and type(result.get("rc")) is int
+          and result["rc"] in allowed
+          and isinstance(result.get("stdout"), str)
+          and isinstance(result.get("stderr"), str))
+    if not ok:
+        problems.append(label + " command evidence is not a successful "
+                        "typed observation: " + json.dumps(result)[:300])
+    return ok
+
+
+def _count_ok(value, label, problems):
+    ok = type(value) is int and value >= 0
+    if not ok:
+        problems.append(label + " count is not a non-boolean non-negative "
+                        "integer: " + json.dumps(value)[:120])
+    return ok
+
+
+JOB_TYPES = frozenset({
+    "start", "verify", "stop", "reload", "restart", "try-restart",
+    "reload-or-restart", "try-reload-or-restart", "isolate", "kill", "clean",
+    "freeze", "thaw", "nop"})
+JOB_STATES = frozenset({"waiting", "running"})
+JOB_UNIT_RE = re.compile(
+    r"[A-Za-z0-9][A-Za-z0-9:_.@\\-]*\."
+    r"(?:service|socket|target|timer|path|mount|automount|swap|slice|"
+    r"scope|device)\Z")
+JOB_LINE_RE = re.compile(
+    r"[ \t]*(\d+)[ \t]+(\S+)[ \t]+(\S+)[ \t]+(\S+)[ \t]*\Z")
+
+
+def _job_identity(line):
+    """Parse one canonical ``list-jobs`` row, or return ``None``.
+
+    The proof fixture is deliberately strict: four columns, a positive
+    canonical job ID, a systemd unit name and known job type/state. A header,
+    trailing field, non-string, unknown token or malformed ID is not ignored.
+    """
+    if not isinstance(line, str):
+        return None
+    match = JOB_LINE_RE.fullmatch(line)
+    if match is None:
+        return None
+    job_id_text = match.group(1)
+    job_id = int(job_id_text)
+    if job_id <= 0 or job_id > 0xFFFFFFFF or str(job_id) != job_id_text:
+        return None
+    unit, job_type, state = match.group(2), match.group(3), match.group(4)
+    if (JOB_UNIT_RE.fullmatch(unit) is None
+            or job_type not in JOB_TYPES or state not in JOB_STATES):
+        return None
+    return {"job_id": job_id, "unit": unit,
+            "type": job_type, "state": state}
+
+
+def _job_rows(lines, label, problems):
+    """Return parsed rows only when the complete observation is unambiguous."""
+    if not isinstance(lines, list):
+        problems.append(label + " job lines are absent or not a list: "
+                        + json.dumps(lines)[:300])
+        return None
+    rows = []
+    job_ids = set()
+    units = set()
+    ok = True
+    for index, line in enumerate(lines):
+        identity = _job_identity(line)
+        if identity is None:
+            problems.append(label + "[" + str(index) + "] is not a canonical "
+                            "list-jobs row: " + json.dumps(line)[:160])
+            ok = False
+            continue
+        if identity["job_id"] in job_ids:
+            problems.append(label + " repeats job ID "
+                            + str(identity["job_id"])
+                            + " with a second row; job identity is ambiguous")
+            ok = False
+        if identity["unit"] in units:
+            problems.append(label + " repeats unit " + identity["unit"]
+                            + " with a second job; job identity is ambiguous")
+            ok = False
+        job_ids.add(identity["job_id"])
+        units.add(identity["unit"])
+        rows.append(identity)
+    return rows if ok else None
+
+
+def _job_lines_ok(lines, label, problems):
+    return _job_rows(lines, label, problems) is not None
+
+
+LIST_JOBS_ARGV = ["systemctl", "--user", "list-jobs", "--no-legend",
+                  "--no-pager"]
+
+
+def _job_observation_lines(observation):
+    """Derive job lines from the retained raw command stdout, never a copy."""
+    if not isinstance(observation, dict):
+        return None
+    command = observation.get("command")
+    if not isinstance(command, dict):
+        return None
+    stdout = command.get("stdout")
+    if not isinstance(stdout, str):
+        return None
+    return stdout.splitlines()
+
+
+def _job_observation_ok(observation, label, problems, lines=None):
+    command = observation.get("command") if isinstance(observation, dict) else None
+    argv = command.get("argv") if isinstance(command, dict) else None
+    derived = _job_observation_lines(observation)
+    retained = observation.get("lines") if isinstance(observation, dict) else None
+    ok = (isinstance(observation, dict)
+          and _command_ok(command, label, problems)
+          and argv == LIST_JOBS_ARGV
+          and derived is not None
+          and _job_lines_ok(derived, label, problems)
+          and retained == derived
+          and (lines is None or lines == derived))
+    if not ok:
+        problems.append(label + " list-jobs observation is incomplete or "
+                        "does not bind its retained lines to the exact "
+                        "list-jobs command output")
+    return ok
+
+
+def _record_summary_ok(item, label, problems):
+    path = item.get("path") if isinstance(item, dict) else None
+    name = pathlib.PurePosixPath(path).name if isinstance(path, str) else ""
+    ok = (isinstance(item, dict)
+          and isinstance(path, str)
+          and path.startswith(REPAIR_RECORDS_DIR + "/")
+          and re.fullmatch(r"controller-[0-9a-f]{32}\.json", name) is not None
+          and isinstance(item.get("sha256"), str)
+          and HEX64.fullmatch(item["sha256"]) is not None
+          and type(item.get("bytes")) is int and item["bytes"] > 0)
+    if ok and "transaction_id" in item:
+        ok = (isinstance(item["transaction_id"], str)
+              and HEX32.fullmatch(item["transaction_id"]) is not None)
+    if ok and "schema_version" in item:
+        ok = type(item["schema_version"]) is int
+    if ok and "unit" in item:
+        ok = item["unit"] == REPAIR_UNIT
+    if not ok:
+        problems.append(label + " record inventory entry is not a typed "
+                        "controller record summary: "
+                        + json.dumps(item)[:300])
+    return ok
+
+
+def _record_inventory_ok(items, label, problems):
+    if not isinstance(items, list):
+        problems.append(label + " record inventory is absent or not a list")
+        return False
+    return all(_record_summary_ok(item, label + "[" + str(index) + "]",
+                                  problems)
+               for index, item in enumerate(items))
+
+
+def _completion_shape_ok(item, label, problems):
+    ok = (isinstance(item, dict) and item.get("unit") == REPAIR_UNIT
+          and item.get("runtime") in (PYTHON_RUNTIME, NODE_RUNTIME)
+          and item.get("success") is True
+          and type(item.get("sequence")) is int and item["sequence"] > 0
+          and isinstance(item.get("invocation"), str)
+          and HEX32.fullmatch(item["invocation"]) is not None)
+    if not ok:
+        problems.append(label + " is not a typed unit/runtime completion: "
+                        + json.dumps(item)[:240])
+    return ok
+
+
+def _completion_fields(item):
+    return {key: item.get(key) for key in
+            ("unit", "runtime", "success", "sequence", "invocation")}
+
+
+def _completion_list_ok(items, label, problems, runtime=None,
+                        allow_empty=True):
+    if not isinstance(items, list) or (not allow_empty and not items):
+        problems.append(label + " completion inventory is absent, empty or "
+                        "not a list")
+        return False
+    ok = True
+    for index, item in enumerate(items):
+        entry_label = label + "[" + str(index) + "]"
+        shape_ok = _completion_shape_ok(item, entry_label, problems)
+        runtime_ok = (runtime is None
+                      or (isinstance(item, dict)
+                          and item.get("runtime") == runtime))
+        if shape_ok and not runtime_ok:
+            problems.append(entry_label + " has the wrong runtime: "
+                            + json.dumps(item.get("runtime"))[:120])
+        ok = shape_ok and runtime_ok and ok
+    return ok
+
+
+def _completion_ok(item, runtime, label, problems):
+    ok = (_completion_shape_ok(item, label, problems)
+          and item.get("runtime") == runtime)
+    if not ok and isinstance(item, dict) and item.get("runtime") != runtime:
+        problems.append(label + " is not valid unit/runtime evidence: "
+                        + json.dumps(item)[:240])
+    return ok
+
+
+def _completions_ok(items, runtime, label, problems):
+    return (isinstance(items, list) and bool(items)
+            and all(_completion_ok(item, runtime, label + "[" + str(index) + "]",
+                                   problems)
+                    for index, item in enumerate(items)))
+
+
+def _positive_queue_ok(queue, problems):
+    blocker = queue.get("blocker") or {}
+    job = queue.get("job")
+    jobs = queue.get("jobs")
+    jobs_after = queue.get("jobs_after")
+    before_count = queue.get("before_count")
+    after_count = queue.get("after_count")
+    identity = _job_identity(job)
+    queue_rows = _job_rows(jobs, "queue job lines", problems)
+    after_rows = _job_rows(jobs_after, "queue post-stop job lines", problems)
+    ok = (
+        _command_ok(queue.get("blocker_command"), "queue blocker start",
+                    problems)
+        and _command_ok(queue.get("target_command"), "queue target start",
+                        problems)
+        and _command_ok(queue.get("stop"), "queue target stop", problems)
+        and _command_ok(queue.get("blocker_stop"), "queue blocker stop",
+                        problems)
+        and _job_observation_ok(queue.get("job_observation"),
+                                "queue job observation", problems, jobs)
+        and _job_observation_ok(queue.get("jobs_after_observation"),
+                                "queue post-stop observation", problems,
+                                jobs_after)
+        and queue_rows is not None
+        and after_rows is not None
+        and identity is not None
+        and identity["unit"] == REPAIR_UNIT
+        and identity["type"] == "start"
+        and identity["state"] == "waiting"
+        and isinstance(job, str) and job in jobs
+        and identity in queue_rows
+        and not any(row["unit"] == REPAIR_UNIT for row in after_rows)
+        and _count_ok(before_count, "queue before", problems)
+        and _count_ok(after_count, "queue after", problems)
+        and before_count == after_count
+        and blocker.get("ActiveState") in ("activating", "active")
+        and blocker.get("MainPID") not in (None, "", "0")
+        and isinstance(blocker.get("InvocationID"), str)
+        and HEX32.fullmatch(blocker["InvocationID"]) is not None)
+    if not ok:
+        problems.append("queued-job positive control does not prove a "
+                        "settled cancellation of the exact waiting job")
+    return ok
+
+
+def _fence_job_ok(queue_seed, during, problems):
+    queue_job = _job_identity(queue_seed.get("job"))
+    queue_jobs = queue_seed.get("jobs")
+    during_jobs = during.get("jobs")
+    queue_blocker = queue_seed.get("blocker") or {}
+    during_blocker = during.get("blocker") or {}
+    queue_rows = _job_rows(queue_jobs, "fence queue job lines", problems)
+    during_rows = _job_rows(during_jobs, "fence during job lines", problems)
+    ok = (
+        _command_ok(queue_seed.get("blocker_command"),
+                    "fence queue blocker start", problems)
+        and _command_ok(queue_seed.get("target_command"),
+                        "fence queue target start", problems)
+        and _job_observation_ok(queue_seed.get("job_observation"),
+                                "fence queue job observation", problems,
+                                queue_jobs)
+        and _job_observation_ok(during.get("jobs_observation"),
+                                "fence during job observation", problems,
+                                during_jobs)
+        and queue_rows is not None
+        and during_rows is not None
+        and queue_job is not None
+        and queue_job["unit"] == REPAIR_UNIT
+        and queue_job["type"] == "start"
+        and queue_job["state"] == "waiting"
+        and queue_seed.get("job") in queue_jobs
+        and queue_job in queue_rows
+        and during_rows.count(queue_job) == 1
+        and queue_blocker.get("ActiveState") in ("activating", "active")
+        and during_blocker.get("ActiveState") in ("activating", "active")
+        and queue_blocker.get("MainPID") not in (None, "", "0")
+        and queue_blocker.get("MainPID") == during_blocker.get("MainPID")
+        and isinstance(queue_blocker.get("InvocationID"), str)
+        and HEX32.fullmatch(queue_blocker["InvocationID"]) is not None
+        and queue_blocker.get("InvocationID")
+        == during_blocker.get("InvocationID"))
+    if not ok:
+        problems.append("fence did not retain the same waiting job identity "
+                        "and blocker through mask and reload")
+    return ok
+
+
+def _fence_completion_ok(fence, during, record, problems):
+    before = fence.get("completions_before")
+    after = fence.get("completions_after")
+    during_before = during.get("completions_before_external")
+    during_now = during.get("completions")
+    inventories = (before, after, during_before, during_now)
+    if not all(isinstance(items, list) for items in inventories) \
+            or not all(isinstance(item, dict) for items in inventories
+                       for item in items):
+        problems.append("fence completion inventory is malformed")
+        return False
+    ok = (
+        _completion_list_ok(before, "fence baseline completion", problems,
+                            PYTHON_RUNTIME)
+        and _completion_list_ok(after, "fence final completion", problems)
+        and _completion_list_ok(during_before,
+                                "fence pre-release completion", problems,
+                                PYTHON_RUNTIME)
+        and _completion_list_ok(during_now, "fence during completion",
+                                problems, PYTHON_RUNTIME)
+        and before == during_before
+        and during_now == during_before
+        and _count_ok(during.get("completion_count"),
+                      "fence during completion count", problems)
+        and _count_ok(during.get("external_completion_delta"),
+                      "fence external completion delta", problems)
+        and during["completion_count"] == len(during_now)
+        and during["external_completion_delta"] == (
+            len(during_now) - len(during_before))
+        and during["external_completion_delta"] == 0)
+    record_completions = record.get("completions")
+    if not isinstance(record_completions, list):
+        problems.append("fence record completions are absent or not a list")
+        ok = False
+        record_completions = []
+    else:
+        ok = (len(record_completions) == 2
+              and all(_completion_ok(item, NODE_RUNTIME,
+                                     "fence record completion", problems)
+                      for item in record_completions)
+              and ok)
+    before_invocations = {item.get("invocation") for item in before or []}
+    during_invocations = {item.get("invocation") for item in during_now or []}
+    record_invocations = {item.get("invocation")
+                          for item in record_completions}
+    after_invocations = {item.get("invocation") for item in after or []}
+    after_by_invocation = {}
+    for item in after or []:
+        after_by_invocation.setdefault(item.get("invocation"), []).append(item)
+    record_entries_match = all(
+        len(after_by_invocation.get(item.get("invocation"), [])) == 1
+        and _completion_fields(
+            after_by_invocation[item["invocation"]][0])
+        == _completion_fields(item)
+        for item in record_completions)
+    if not record_entries_match:
+        problems.append("fence journal completions do not match the retained "
+                        "after entries")
+    baseline = max((item.get("sequence", 0) for item in before or []),
+                   default=0)
+    ok = (
+        ok
+        and record_entries_match
+        and len(record_invocations) == 2
+        and all(item.get("invocation") in after_invocations
+                and item.get("invocation") not in before_invocations
+                and item.get("invocation") not in during_invocations
+                and type(item.get("sequence")) is int
+                and item["sequence"] > baseline
+                for item in record_completions)
+        and after_invocations == before_invocations | record_invocations
+        and len(after or []) == len(before or []) + 2)
+    if not ok:
+        problems.append("fence completion delta is not derived from the "
+                        "retained baseline and during inventories")
+    return ok
+
+
+def _fence_records_ok(fence, problems):
+    before = fence.get("records_before")
+    after = fence.get("records_after")
+    ok = (_record_inventory_ok(before, "fence before records", problems)
+          and _record_inventory_ok(after, "fence after records", problems))
+    if (not isinstance(before, list) or not isinstance(after, list)
+            or not all(isinstance(item, dict) for item in before + after)):
+        return False
+    before_by_path = {item.get("path"): item for item in before}
+    after_by_path = {item.get("path"): item for item in after}
+    new_paths = set(after_by_path) - set(before_by_path)
+    record = fence.get("record") or {}
+    ok = (ok
+          and len(after) == len(before) + 1
+          and all(path in after_by_path
+                  and after_by_path[path] == item
+                  for path, item in before_by_path.items())
+          and len(new_paths) == 1
+          and record.get("path") in new_paths
+          and record == after_by_path.get(record.get("path")))
+    if not ok:
+        problems.append("fence journal inventory is not an exact retained "
+                        "one-record extension")
+    return ok
+
+
+def _refusal_case_ok(name, case, baseline, unknown, problems):
+    expected_cases = {
+        "rogue-unit": ("outside the allowlisted", "socket"),
+        "unknown-link": ("outside the allowlisted", "crq-repair.timer"),
+        "unknown-dropin": ("outside the allowlisted", "unexpected drop-in"),
+        "unsafe-metadata": ("group- or world-writable",),
+    }
+    tokens = expected_cases.get(name)
+    if tokens is None:
+        problems.append("unknown refusal case: " + str(name))
+        return False
+    command = case.get("command")
+    text = ((command.get("stdout") if isinstance(command, dict) else "")
+            + (command.get("stderr") if isinstance(command, dict) else "")
+            ).lower()
+    baseline_files = baseline.get("files") or {}
+    records_before = case.get("records_before")
+    records_after = case.get("records_after")
+    baseline_records = baseline.get("records")
+    after_records = (unknown.get("after") or {}).get("records")
+    units_after = case.get("units_after") or {}
+    mutated = case.get("mutated_files") or {}
+    ok = (
+        _command_ok(command, "refusal " + name, problems, allowed=(2,))
+        and all(token in text for token in tokens)
+        and _record_inventory_ok(records_before,
+                                 "refusal " + name + " before records",
+                                 problems)
+        and _record_inventory_ok(records_after,
+                                 "refusal " + name + " after records",
+                                 problems)
+        and _record_inventory_ok(baseline_records,
+                                 "refusal baseline records", problems)
+        and _record_inventory_ok(after_records,
+                                 "refusal final records", problems)
+        and records_before == records_after
+        and records_before == baseline_records
+        and records_after == after_records
+        and _count_ok(case.get("completions_after"),
+                      "refusal " + name + " completion count", problems)
+        and _count_ok(unknown.get("completions"),
+                      "refusal baseline completion count", problems)
+        and case.get("completions_after") == unknown.get("completions")
+        and _unit_ok(units_after, REPAIR_UNIT, REPAIR_PATHS["service"],
+                     ("inactive", "failed"), "static",
+                     "refusal " + name + " service", problems)
+        and _unit_ok(units_after, REPAIR_TIMER, REPAIR_PATHS["timer"],
+                     ("inactive", "failed"), "enabled",
+                     "refusal " + name + " timer", problems)
+        and _unit_ok(units_after, REPAIR_PATH, REPAIR_PATHS["path"],
+                     ("inactive", "failed"), "enabled",
+                     "refusal " + name + " path", problems))
+    if name == "unsafe-metadata":
+        ok = ok and (mutated.get("dropin") or {}).get("mode") == 0o666
+    else:
+        ok = ok and mutated == baseline_files
+    if not ok:
+        problems.append("refusal case " + name
+                        + " did not match the expected evidence")
+    return ok
+
+
+def _stable_tick(snapshot):
+    keys = ("hostname", "user", "boot_id", "manager", "units", "files",
+            "metadata", "state", "history", "records", "completions")
+    return {key: (snapshot or {}).get(key) for key in keys}
+
+
+def _tick_ok(tick, prepared, initial, label, problems):
+    tick = tick or {}
+    files = tick.get("files") or {}
+    ok = (_stable_tick(tick) == _stable_tick(initial or {})
+          and tick.get("state") == (prepared or {}).get("state")
+          and (tick.get("history") or {}).get("sha256")
+          == (prepared or {}).get("history_sha256")
+          and [entry.get("path") for entry in (tick.get("records") or [])]
+          == (prepared or {}).get("record_paths")
+          and (files.get(UNIT_DIR + "/crq-tick.service") or {}).get("sha256")
+          == _sha(expected_unit(PYTHON_RUNTIME)))
+    if not ok:
+        problems.append(label + " changed the original tick topology")
+    return ok
+
+
+def _preserved_ok(value, prepared, label, problems):
+    value = value or {}
+    ok = (value.get("state") == (prepared or {}).get("state")
+          and value.get("history_sha256")
+          == (prepared or {}).get("history_sha256")
+          and type(value.get("record_count")) is int
+          and value["record_count"] >= len((prepared or {}).get("record_paths")
+                                           or []))
+    if not ok:
+        problems.append(label + " did not preserve queue/heartbeat/history")
+    return ok
+
+
+def _activator_checks(phases):
+    checks = {}
+    problems = []
+    prepare = phases.get("prepare") or {}
+    if not _ok_phase(prepare, "prepare", problems):
+        return checks, problems
+    snapshot = prepare.get("snapshot") or {}
+    prepared = prepare.get("prepared") or {}
+    if not isinstance(prepared, dict) or not prepared.get("state") \
+            or not prepared.get("history_sha256"):
+        problems.append("prepare evidence has no preserved state or history digest")
+        checks["activator_prepared_baseline"] = False
+        return checks, problems
+    files = snapshot.get("files") or {}
+    units = snapshot.get("units") or {}
+    checks["activator_guest_isolation"] = (
+        snapshot.get("hostname") == "crq-probe"
+        and snapshot.get("user") == 1000
+        and snapshot.get("boot_id") is not None)
+    checks["activator_tick_baseline"] = (
+        (files.get(UNIT_DIR + "/crq-tick.service") or {}).get("sha256")
+        == _sha(expected_unit(PYTHON_RUNTIME))
+        and (units.get("crq-tick.timer") or {}).get("UnitFileState")
+        == "enabled"
+        and (units.get("crq-tick.timer") or {}).get("ActiveState")
+        == "inactive"
+        and bool((snapshot.get("history") or {}).get("sha256")))
+    runner_source = prepared.get("runner_source") or {}
+    checks["activator_runner_source"] = (
+        isinstance(runner_source.get("sha256"), str)
+        and HEX64.fullmatch(runner_source["sha256"]) is not None
+        and isinstance(runner_source.get("crq_sha256"), str)
+        and HEX64.fullmatch(runner_source["crq_sha256"]) is not None
+        and type(runner_source.get("bytes")) is int
+        and runner_source["bytes"] > 0)
+
+    install = phases.get("activators-install") or {}
+    if not _ok_phase(install, "activators-install", problems):
+        checks["activator_install_inventory"] = False
+        checks["activator_install_files"] = False
+    else:
+        inventory = install.get("inventory") or {}
+        paths = inventory.get("paths") or {}
+        locations = inventory.get("locations") or {}
+        inventory_units = inventory.get("units") or {}
+        activators = inventory.get("activators") or {}
+        expected = _repair_expected(PYTHON_RUNTIME)
+        checks["activator_install_inventory"] = (
+            inventory.get("unit") == REPAIR_UNIT
+            and inventory.get("topology") == "repair"
+            and set(paths) == set(REPAIR_PATHS)
+            and locations == REPAIR_PATHS
+            and _inventory_file(paths.get("service"), expected["service"],
+                                "install inventory service", problems)
+            and _inventory_file(paths.get("timer"), expected["timer"],
+                                "install inventory timer", problems)
+            and _inventory_file(paths.get("path"), expected["path"],
+                                "install inventory path", problems)
+            and _inventory_file(paths.get("dropin"), expected["dropin"],
+                                "install inventory drop-in", problems)
+            and _inventory_link(paths.get("timer_wants"),
+                                "../" + REPAIR_TIMER,
+                                "install inventory timer wants", problems)
+            and _inventory_link(paths.get("path_wants"),
+                                "../" + REPAIR_PATH,
+                                "install inventory path wants", problems)
+            and activators == {
+                "timer_active": "inactive",
+                "timer_unit_file_state": "enabled",
+                "service_active": "inactive",
+                "path_active": "inactive",
+                "path_unit_file_state": "enabled"}
+            and _unit_ok(inventory_units, "service",
+                         REPAIR_PATHS["service"], ("inactive",), "static",
+                         "install inventory service", problems)
+            and _unit_ok(inventory_units, "timer",
+                         REPAIR_PATHS["timer"], ("inactive",), "enabled",
+                         "install inventory timer", problems)
+            and _unit_ok(inventory_units, "path",
+                         REPAIR_PATHS["path"], ("inactive",), "enabled",
+                         "install inventory path", problems))
+        install_files = install.get("files") or {}
+        install_units = install.get("units") or {}
+        checks["activator_install_files"] = (
+            _stat_file(install_files.get("service"), expected["service"],
+                       "install service", problems)
+            and _stat_file(install_files.get("timer"), expected["timer"],
+                           "install timer", problems)
+            and _stat_file(install_files.get("path"), expected["path"],
+                           "install path", problems)
+            and _stat_file(install_files.get("dropin"), expected["dropin"],
+                           "install drop-in", problems)
+            and _stat_link(install_files.get("timer_wants"),
+                           "../" + REPAIR_TIMER, "install timer wants", problems)
+            and _stat_link(install_files.get("path_wants"),
+                           "../" + REPAIR_PATH, "install path wants", problems)
+            and (install_files.get("staged") or {}).get("type") == "missing"
+            and (install_files.get("trigger") or {}).get("type") == "missing"
+            and (install_files.get("completions") or {}).get("type") == "missing"
+            and (install_files.get("caller") or {}).get("type") == "file"
+            and (install_files.get("blocker") or {}).get("type") == "file"
+            and _unit_ok(install_units, REPAIR_UNIT,
+                         REPAIR_PATHS["service"], ("inactive",), "static",
+                         "install service", problems)
+            and _unit_ok(install_units, REPAIR_TIMER,
+                         REPAIR_PATHS["timer"], ("inactive",), "enabled",
+                         "install timer", problems)
+            and _unit_ok(install_units, REPAIR_PATH,
+                         REPAIR_PATHS["path"], ("inactive",), "enabled",
+                         "install path", problems)
+            and _unit_ok(install_units, "crq-probe-caller.service",
+                         UNIT_DIR + "/crq-probe-caller.service",
+                         ("inactive",), "static", "install caller", problems)
+            and _unit_ok(install_units, "crq-probe-blocker.service",
+                         UNIT_DIR + "/crq-probe-blocker.service",
+                         ("inactive",), "static", "install blocker", problems)
+            and install.get("completions") == []
+            and _tick_ok(install.get("tick"), prepared, snapshot,
+                         "install tick snapshot", problems)
+            and _preserved_ok(install.get("preserved"), prepared,
+                              "install", problems))
+        unrelated = install.get("unrelated") or {}
+        checks["activator_install_unrelated"] = (
+            type(unrelated.get("pid")) is int and unrelated["pid"] > 0
+            and isinstance(unrelated.get("starttime"), str)
+            and "activator-unrelated" in (unrelated.get("cmdline") or []))
+
+    positive = phases.get("activators-positive") or {}
+    if not _ok_phase(positive, "activators-positive", problems):
+        checks["activator_positive_controls"] = False
+    else:
+        controls = positive.get("controls") or {}
+        timer = controls.get("timer") or {}
+        path = controls.get("path") or {}
+        direct = controls.get("direct") or {}
+        dependency = controls.get("dependency") or {}
+        queue = controls.get("queue") or {}
+        checks["activator_positive_timer"] = (
+            _command_ok(timer.get("command"), "timer positive start",
+                        problems)
+            and _command_ok(timer.get("stop"), "timer positive stop",
+                            problems)
+            and (timer.get("state") or {}).get("ActiveState") == "active"
+            and (timer.get("state") or {}).get("UnitFileState") == "enabled"
+            and _completions_ok(timer.get("new"), PYTHON_RUNTIME,
+                                "timer positive completion", problems)
+            and _count_ok(timer.get("before_count"),
+                          "timer positive before", problems)
+            and _count_ok(timer.get("after_count"),
+                          "timer positive after", problems)
+            and timer["after_count"] > timer["before_count"])
+        checks["activator_positive_path"] = (
+            _command_ok(path.get("command"), "path positive start", problems)
+            and _command_ok(path.get("stop"), "path positive stop", problems)
+            and (path.get("state") or {}).get("ActiveState") == "active"
+            and (path.get("state") or {}).get("UnitFileState") == "enabled"
+            and _completions_ok(path.get("new"), PYTHON_RUNTIME,
+                                "path positive completion", problems)
+            and _count_ok(path.get("before_count"),
+                          "path positive before", problems)
+            and _count_ok(path.get("after_count"),
+                          "path positive after", problems)
+            and path["after_count"] > path["before_count"])
+        checks["activator_positive_direct"] = (
+            _command_ok(direct.get("command"), "direct positive start",
+                        problems)
+            and _command_ok(direct.get("stop"), "direct positive stop",
+                            problems)
+            and (direct.get("state") or {}).get("Result") == "success"
+            and (direct.get("state") or {}).get("UnitFileState") == "static"
+            and _completions_ok(direct.get("new"), PYTHON_RUNTIME,
+                                "direct positive completion", problems)
+            and _count_ok(direct.get("before_count"),
+                          "direct positive before", problems)
+            and _count_ok(direct.get("after_count"),
+                          "direct positive after", problems)
+            and direct["after_count"] > direct["before_count"])
+        checks["activator_positive_dependency"] = (
+            _command_ok(dependency.get("command"),
+                        "dependency positive start", problems)
+            and _command_ok(dependency.get("stop"),
+                            "dependency positive stop", problems)
+            and (dependency.get("state") or {}).get("UnitFileState") == "static"
+            and _completions_ok(dependency.get("new"), PYTHON_RUNTIME,
+                                "dependency positive completion", problems)
+            and _count_ok(dependency.get("before_count"),
+                          "dependency positive before", problems)
+            and _count_ok(dependency.get("after_count"),
+                          "dependency positive after", problems)
+            and dependency["after_count"] > dependency["before_count"])
+        checks["activator_positive_queue"] = _positive_queue_ok(queue, problems)
+        pre_switch = positive.get("pre_switch") or {}
+        pre_units = pre_switch.get("repair_units") or {}
+        pre_files = pre_switch.get("repair_files") or {}
+        expected = _repair_expected(PYTHON_RUNTIME)
+        checks["activator_positive_pre_switch"] = (
+            _stat_file(pre_files.get("service"), expected["service"],
+                       "pre-switch service", problems)
+            and _stat_file(pre_files.get("timer"), expected["timer"],
+                           "pre-switch timer", problems)
+            and _stat_file(pre_files.get("path"), expected["path"],
+                           "pre-switch path", problems)
+            and _stat_file(pre_files.get("dropin"), expected["dropin"],
+                           "pre-switch drop-in", problems)
+            and _stat_link(pre_files.get("timer_wants"), "../" + REPAIR_TIMER,
+                           "pre-switch timer wants", problems)
+            and _stat_link(pre_files.get("path_wants"), "../" + REPAIR_PATH,
+                           "pre-switch path wants", problems)
+            and (pre_files.get("staged") or {}).get("type") == "missing"
+            and _unit_ok(pre_units, REPAIR_TIMER, REPAIR_PATHS["timer"],
+                         ("active",), "enabled", "pre-switch timer", problems)
+            and _unit_ok(pre_units, REPAIR_PATH, REPAIR_PATHS["path"],
+                         ("inactive",), "enabled", "pre-switch path", problems)
+            and _unit_ok(pre_units, REPAIR_UNIT, REPAIR_PATHS["service"],
+                         ("inactive",), "static", "pre-switch service", problems)
+            and _completions_ok(pre_switch.get("repair_completions"),
+                                PYTHON_RUNTIME, "pre-switch completion",
+                                problems)
+            and _preserved_ok(positive.get("preserved"), prepared,
+                              "positive controls", problems))
+
+    unknown = phases.get("activators-unknown") or {}
+    if not _ok_phase(unknown, "activators-unknown", problems):
+        checks["activator_refusals"] = False
+    else:
+        baseline = unknown.get("baseline") or {}
+        after = unknown.get("after") or {}
+        baseline_files = baseline.get("files") or {}
+        after_files = after.get("files") or {}
+        expected = _repair_expected(PYTHON_RUNTIME)
+        baseline_ok = (
+            _stat_file(baseline_files.get("service"), expected["service"],
+                       "refusal baseline service", problems)
+            and _stat_file(baseline_files.get("timer"), expected["timer"],
+                           "refusal baseline timer", problems)
+            and _stat_file(baseline_files.get("path"), expected["path"],
+                           "refusal baseline path", problems)
+            and _stat_file(baseline_files.get("dropin"), expected["dropin"],
+                           "refusal baseline drop-in", problems)
+            and _stat_link(baseline_files.get("timer_wants"),
+                           "../" + REPAIR_TIMER, "refusal baseline timer wants",
+                           problems)
+            and _stat_link(baseline_files.get("path_wants"),
+                           "../" + REPAIR_PATH, "refusal baseline path wants",
+                           problems)
+            and (baseline_files.get("staged") or {}).get("type") == "missing"
+            and (baseline_files.get("trigger") or {}).get("type") == "missing"
+            and baseline_files == after_files
+            and _record_inventory_ok(baseline.get("records"),
+                                     "refusal baseline records", problems)
+            and _record_inventory_ok(after.get("records"),
+                                     "refusal final records", problems)
+            and baseline.get("records") == after.get("records")
+            and baseline.get("tick") == after.get("tick")
+            and _tick_ok(after.get("tick"), prepared, snapshot,
+                         "refusal tick snapshot", problems))
+        cases = unknown.get("cases") or {}
+        expected_cases = ("rogue-unit", "unknown-link", "unknown-dropin",
+                          "unsafe-metadata")
+        case_ok = True
+        for name in expected_cases:
+            case = cases.get(name) or {}
+            this_ok = _refusal_case_ok(name, case, baseline, unknown,
+                                       problems)
+            case_ok = case_ok and this_ok
+        checks["activator_refusals"] = bool(baseline_ok and case_ok)
+
+    fence = phases.get("activators-fence") or {}
+    if not _ok_phase(fence, "activators-fence", problems):
+        checks["activator_fence"] = False
+    else:
+        cli = fence.get("cli") or {}
+        payload = cli.get("json") or {}
+        record = fence.get("record") or {}
+        cli_record = payload.get("record") or {}
+        drain = payload.get("drain") or {}
+        during = cli.get("during") or {}
+        before = fence.get("before") or {}
+        after = fence.get("after") or {}
+        before_files = before.get("repair_files") or {}
+        after_files = after.get("repair_files") or {}
+        before_units = before.get("repair_units") or {}
+        after_units = after.get("repair_units") or {}
+        expected_before = _repair_expected(PYTHON_RUNTIME)
+        expected_after = _repair_expected(NODE_RUNTIME)
+        queue_seed = fence.get("queue_seed") or {}
+        direct = drain.get("direct_start") or {}
+        direct_text = ((direct.get("stdout") or "")
+                       + (direct.get("stderr") or "")).lower()
+        blocker_stop = fence.get("blocker_stop") or {}
+        drain_jobs_observation = drain.get("jobs_observation") or {}
+        external_direct = during.get("direct") or {}
+        external_direct_text = ((external_direct.get("stdout") or "")
+                                + (external_direct.get("stderr") or "")).lower()
+        external_dependency = during.get("dependency") or {}
+        external_dependency_text = (
+            (external_dependency.get("stdout") or "")
+            + (external_dependency.get("stderr") or "")).lower()
+        checks["activator_fence"] = (
+            cli.get("rc") == 0
+            and cli.get("pause_reached") is True
+            and cli.get("timeout") is False
+            and record.get("outcome") == "completed"
+            and record.get("phase") == "activation_pending"
+            and record.get("unit") == REPAIR_UNIT
+            and record.get("runtime") == NODE_RUNTIME
+            and record.get("prior_runtime") == PYTHON_RUNTIME
+            and _fence_completion_ok(fence, during, record, problems)
+            and cli_record.get("transaction_id") == record.get("transaction_id")
+            and cli_record.get("snapshot_runtime") == PYTHON_RUNTIME
+            and set(cli_record.get("snapshot_paths") or []) == set(REPAIR_PATHS.values())
+            and _fence_records_ok(fence, problems)
+            and _stat_file(before_files.get("service"), expected_before["service"],
+                           "fence before service", problems)
+            and _stat_file(before_files.get("timer"), expected_before["timer"],
+                           "fence before timer", problems)
+            and _stat_file(before_files.get("path"), expected_before["path"],
+                           "fence before path", problems)
+            and _stat_file(before_files.get("dropin"), expected_before["dropin"],
+                           "fence before drop-in", problems)
+            and _stat_link(before_files.get("timer_wants"), "../" + REPAIR_TIMER,
+                           "fence before timer wants", problems)
+            and _stat_link(before_files.get("path_wants"), "../" + REPAIR_PATH,
+                           "fence before path wants", problems)
+            and (before_files.get("staged") or {}).get("type") == "missing"
+            and _unit_ok(before_units, REPAIR_TIMER, REPAIR_PATHS["timer"],
+                         ("active",), "enabled", "fence before timer", problems)
+            and _unit_ok(before_units, REPAIR_PATH, REPAIR_PATHS["path"],
+                         ("inactive",), "enabled", "fence before path", problems)
+            and _stat_file(after_files.get("service"), expected_after["service"],
+                           "fence after service", problems)
+            and _stat_file(after_files.get("timer"), expected_after["timer"],
+                           "fence after timer", problems)
+            and _stat_file(after_files.get("path"), expected_after["path"],
+                           "fence after path", problems)
+            and _stat_file(after_files.get("dropin"), expected_after["dropin"],
+                           "fence after drop-in", problems)
+            and _stat_link(after_files.get("timer_wants"), "../" + REPAIR_TIMER,
+                           "fence after timer wants", problems)
+            and _stat_link(after_files.get("path_wants"), "../" + REPAIR_PATH,
+                           "fence after path wants", problems)
+            and (after_files.get("staged") or {}).get("type") == "missing"
+            and _unit_ok(after_units, REPAIR_TIMER, REPAIR_PATHS["timer"],
+                         ("active",), "enabled", "fence after timer", problems)
+            and _unit_ok(after_units, REPAIR_PATH, REPAIR_PATHS["path"],
+                         ("inactive",), "enabled", "fence after path", problems)
+            and _unit_ok(after_units, REPAIR_UNIT, REPAIR_PATHS["service"],
+                         ("inactive", "active", "activating"), "static",
+                         "fence after service", problems)
+            and _fence_job_ok(queue_seed, during, problems)
+            and drain.get("jobs") == []
+            and _job_observation_ok(drain_jobs_observation,
+                                    "fence drain job observation", problems, [])
+            and _command_ok(drain.get("service_stop"),
+                            "fence service stop", problems, allowed=(0, 5))
+            and _command_ok(blocker_stop, "fence blocker stop", problems)
+            and (drain.get("state") or {}).get("ActiveState") == "inactive"
+            and (drain.get("owned") or {}).get("pids") == []
+            and (drain.get("owned") or {}).get("main_pid") == 0
+            and (drain.get("activators") or {}).get(REPAIR_TIMER, {}).get(
+                "ActiveState") in ("inactive", "failed")
+            and (drain.get("activators") or {}).get(REPAIR_PATH, {}).get(
+                "ActiveState") in ("inactive", "failed")
+            and _command_ok(direct, "fence direct start", problems,
+                            allowed=(1,))
+            and "masked" in direct_text
+            and (drain.get("queue_drain") or {}).get("drained") is True
+            and _command_ok(external_direct, "fence external direct start",
+                            problems, allowed=(1,))
+            and "masked" in external_direct_text
+            and _command_ok(external_dependency,
+                            "fence external dependency start", problems,
+                            allowed=(1,))
+            and ("masked" in external_dependency_text
+                 or "required" in external_dependency_text
+                 or "dependency" in external_dependency_text)
+            and (during.get("path_state") or {}).get("ActiveState")
+            == "inactive"
+            and (during.get("marker") or {}).get("phase") == "after-mask-reload"
+            and _preserved_ok(fence.get("preserved"), prepared, "fence",
+                              problems))
+
+    switch_back = phases.get("activators-switch-back") or {}
+    if not _ok_phase(switch_back, "activators-switch-back", problems):
+        checks["activator_switch_back"] = False
+    else:
+        cli = switch_back.get("cli") or {}
+        record = switch_back.get("record") or {}
+        before = switch_back.get("before") or {}
+        after = switch_back.get("after") or {}
+        expected = _repair_expected(PYTHON_RUNTIME)
+        records_before = switch_back.get("records_before") or []
+        records_after = switch_back.get("records_after") or []
+        completions = record.get("completions") or []
+        baseline = max((item.get("sequence", 0)
+                        for item in (before.get("repair_completions") or [])),
+                       default=0)
+        checks["activator_switch_back"] = (
+            cli.get("rc") == 0
+            and record.get("outcome") == "completed"
+            and record.get("runtime") == PYTHON_RUNTIME
+            and record.get("prior_runtime") == NODE_RUNTIME
+            and record.get("unit") == REPAIR_UNIT
+            and len(completions) == 2
+            and all(_completion_ok(item, PYTHON_RUNTIME,
+                                   "switch-back completion", problems)
+                    for item in completions)
+            and all(item.get("sequence", 0) > baseline
+                    for item in completions)
+            and len(records_after) == len(records_before) + 1
+            and _stat_file((after.get("repair_files") or {}).get("service"),
+                           expected["service"], "switch-back service", problems)
+            and _unit_ok(after.get("repair_units") or {}, REPAIR_TIMER,
+                         REPAIR_PATHS["timer"], ("active",), "enabled",
+                         "switch-back timer", problems)
+            and _unit_ok(after.get("repair_units") or {}, REPAIR_PATH,
+                         REPAIR_PATHS["path"], ("inactive",), "enabled",
+                         "switch-back path", problems)
+            and _stat_link((after.get("repair_files") or {}).get("timer_wants"),
+                           "../" + REPAIR_TIMER, "switch-back timer wants",
+                           problems)
+            and _stat_link((after.get("repair_files") or {}).get("path_wants"),
+                           "../" + REPAIR_PATH, "switch-back path wants",
+                           problems)
+            and _preserved_ok(switch_back.get("preserved"), prepared,
+                              "switch back", problems))
+
+    interrupt = phases.get("activators-interrupt") or {}
+    if not _ok_phase(interrupt, "activators-interrupt", problems):
+        checks["activator_interrupt"] = False
+    else:
+        cli = interrupt.get("cli") or {}
+        record = interrupt.get("record") or {}
+        after = interrupt.get("after") or {}
+        after_files = after.get("repair_files") or {}
+        before = interrupt.get("before") or {}
+        checks["activator_interrupt"] = (
+            cli.get("rc") not in (0, None)
+            and record.get("outcome") == "pending"
+            and record.get("phase") == "drained"
+            and record.get("runtime") == NODE_RUNTIME
+            and record.get("prior_runtime") == PYTHON_RUNTIME
+            and (after_files.get("service") or {}).get("type") == "symlink"
+            and (after_files.get("service") or {}).get("target") == "/dev/null"
+            and (after_files.get("staged") or {}).get("type") == "missing"
+            and _unit_ok(after.get("repair_units") or {}, REPAIR_TIMER,
+                         REPAIR_PATHS["timer"], ("inactive", "failed"),
+                         "enabled", "interrupt timer", problems)
+            and _unit_ok(after.get("repair_units") or {}, REPAIR_PATH,
+                         REPAIR_PATHS["path"], ("inactive", "failed"),
+                         "enabled", "interrupt path", problems)
+            and len(after.get("repair_completions") or [])
+            == len(before.get("repair_completions") or [])
+            and _preserved_ok(interrupt.get("preserved"), prepared,
+                              "interrupt", problems))
+
+    recover = phases.get("activators-recover") or {}
+    if not _ok_phase(recover, "activators-recover", problems):
+        checks["activator_recover"] = False
+    else:
+        cli = recover.get("cli") or {}
+        record_before = recover.get("record_before") or {}
+        record_after = recover.get("record_after") or {}
+        after = recover.get("after") or {}
+        expected = _repair_expected(PYTHON_RUNTIME)
+        after_files = after.get("repair_files") or {}
+        checks["activator_recover"] = (
+            cli.get("rc") == 0
+            and record_before.get("outcome") == "pending"
+            and record_before.get("phase") == "drained"
+            and record_after.get("outcome") == "rolled_back"
+            and record_after.get("phase") == "restore_activation_pending"
+            and record_before.get("path") == record_after.get("path")
+            and record_before.get("sha256") != record_after.get("sha256")
+            and _stat_file(after_files.get("service"), expected["service"],
+                           "recover service", problems)
+            and (after_files.get("staged") or {}).get("type") == "missing"
+            and _stat_file(after_files.get("timer"), expected["timer"],
+                           "recover timer", problems)
+            and _stat_file(after_files.get("path"), expected["path"],
+                           "recover path", problems)
+            and _stat_file(after_files.get("dropin"), expected["dropin"],
+                           "recover drop-in", problems)
+            and _stat_link(after_files.get("timer_wants"), "../" + REPAIR_TIMER,
+                           "recover timer wants", problems)
+            and _stat_link(after_files.get("path_wants"), "../" + REPAIR_PATH,
+                           "recover path wants", problems)
+            and _unit_ok(after.get("repair_units") or {}, REPAIR_TIMER,
+                         REPAIR_PATHS["timer"], ("active",), "enabled",
+                         "recover timer", problems)
+            and _unit_ok(after.get("repair_units") or {}, REPAIR_PATH,
+                         REPAIR_PATHS["path"], ("inactive",), "enabled",
+                         "recover path", problems)
+            and _preserved_ok(recover.get("preserved"), prepared, "recover",
+                              problems))
+
+    repeat = phases.get("activators-repeat") or {}
+    if not _ok_phase(repeat, "activators-repeat", problems):
+        checks["activator_repeat"] = False
+    else:
+        record_before = repeat.get("record_before") or {}
+        record_after = repeat.get("record_after") or {}
+        checks["activator_repeat"] = (
+            (repeat.get("cli") or {}).get("rc") == 2
+            and record_before.get("sha256") == record_after.get("sha256")
+            and record_after.get("outcome") == "rolled_back")
+
+    inspect = phases.get("activators-inspect") or {}
+    if not _ok_phase(inspect, "activators-inspect", problems):
+        checks["activator_inspect"] = False
+    else:
+        repair = inspect.get("repair") or {}
+        tick = inspect.get("tick") or {}
+        repair_files = repair.get("repair_files") or {}
+        expected = _repair_expected(PYTHON_RUNTIME)
+        checks["activator_inspect"] = (
+            _stat_file(repair_files.get("service"), expected["service"],
+                       "inspect service", problems)
+            and _stat_file(repair_files.get("timer"), expected["timer"],
+                           "inspect timer", problems)
+            and _stat_file(repair_files.get("path"), expected["path"],
+                           "inspect path", problems)
+            and _stat_file(repair_files.get("dropin"), expected["dropin"],
+                           "inspect drop-in", problems)
+            and _stat_link(repair_files.get("timer_wants"),
+                           "../" + REPAIR_TIMER, "inspect timer wants",
+                           problems)
+            and _stat_link(repair_files.get("path_wants"),
+                           "../" + REPAIR_PATH, "inspect path wants", problems)
+            and (repair_files.get("staged") or {}).get("type") == "missing"
+            and (repair_files.get("trigger") or {}).get("type") == "missing"
+            and _unit_ok(repair.get("repair_units") or {}, REPAIR_TIMER,
+                         REPAIR_PATHS["timer"], ("active",), "enabled",
+                         "inspect timer", problems)
+            and _unit_ok(repair.get("repair_units") or {}, REPAIR_PATH,
+                         REPAIR_PATHS["path"], ("inactive",), "enabled",
+                         "inspect path", problems)
+            and len(repair.get("records") or []) == 3
+            and _tick_ok(tick, prepared, snapshot, "inspect tick snapshot",
+                         problems)
+            and (inspect.get("unrelated") or {}).get(
+                "alive_before_cleanup") is True
+            and (inspect.get("unrelated") or {}).get(
+                "alive_after_cleanup") is False
+            and _preserved_ok(inspect.get("preserved"), prepared, "inspect",
+                              problems))
+
+    for key, value in checks.items():
+        if value is not True:
+            problems.append(key + " is not satisfied")
+    return checks, problems
+
+
 def build_checks(phases, restarts=None, reboots=None, mode="base"):
+    if mode == "activators":
+        return _activator_checks(phases)
     checks = {}
     problems = []
     prepare = phases.get("prepare") or {}
@@ -1535,6 +2741,8 @@ def build_checks(phases, restarts=None, reboots=None, mode="base"):
 def run_steps(mode="base"):
     if mode == "base":
         return [("phase", name, {}) for name in GUEST_PHASES]
+    if mode == "activators":
+        return [("phase", name, {}) for name in ACTIVATOR_GUEST_PHASES]
     steps = [("phase", name, {}) for name in GUEST_PHASES[:-1]]
     for case in ("matrix-restart-drained", "matrix-restart-restore-staged",
                  "matrix-restart-ambiguity"):
@@ -1577,7 +2785,8 @@ def build_report(run, boot, phases, restarts, reboots, stamps, image,
         "reboots": reboots,
         "checks": checks,
         "problems": problems,
-        "limitations": (MATRIX_LIMITATIONS if mode == "matrix"
+        "limitations": (ACTIVATOR_LIMITATIONS if mode == "activators"
+                        else MATRIX_LIMITATIONS if mode == "matrix"
                         else LIMITATIONS),
     }
 
@@ -1670,7 +2879,7 @@ def cmd_run(args):
                 restarts[name] = restart_user_manager(run, recorder, boot, name)
             elif kind == "reboot":
                 reboots[name] = reboot_guest_os(run, recorder, boot, name)
-        raw = fetch_raw(run, recorder)
+        raw = fetch_raw(run, recorder, args.mode)
         stamps["finish"] = vm.host_stamp()
         report = build_report(run, boot, phases, restarts, reboots, stamps,
                               image, provenance, raw, args.mode)
@@ -1740,6 +2949,216 @@ def _phase_cli(phase, label, problems):
     return cli
 
 
+def _upload_provenance_problems(report, raw_root, phases):
+    problems = []
+    provenance = report.get("provenance")
+    uploads = provenance.get("uploads") if isinstance(provenance, dict) else None
+    if not isinstance(uploads, dict):
+        problems.append("upload provenance is not an object")
+        return problems
+    proof_bin = raw_root / "proof-bin"
+    retained = ({entry.name for entry in proof_bin.iterdir()
+                 if entry.is_file() and not entry.is_symlink()}
+                if proof_bin.is_dir() else set())
+    if retained != set(UPLOADS) | {RUNNER_ARCHIVE}:
+        problems.append("raw upload set does not match the expected "
+                        "controller and fixture scripts")
+    for name in UPLOADS:
+        entry = uploads.get(name)
+        raw_path = proof_bin / name
+        if raw_path.is_symlink() or not raw_path.is_file():
+            problems.append("raw upload is missing: " + name)
+        elif not isinstance(entry, dict) \
+                or not _sha256_text(entry.get("sha256")):
+            continue
+        else:
+            if type(entry.get("bytes")) is not int or entry["bytes"] < 0:
+                problems.append("raw upload size is invalid: " + name)
+            elif raw_path.stat().st_size != entry["bytes"]:
+                problems.append("raw upload size does not match: " + name)
+            if vm.sha256_file(raw_path) != entry["sha256"]:
+                problems.append("raw upload digest does not match: " + name)
+    runner = uploads.get("runner_source")
+    raw_runner = proof_bin / RUNNER_ARCHIVE
+    if not isinstance(runner, dict) or not _sha256_text(runner.get("sha256")):
+        problems.append("runner source provenance is missing")
+    else:
+        if raw_runner.is_symlink() or not raw_runner.is_file():
+            problems.append("raw runner source archive is missing")
+        elif type(runner.get("bytes")) is not int or runner["bytes"] < 1:
+            problems.append("runner source size is invalid")
+        elif raw_runner.stat().st_size != runner["bytes"]:
+            problems.append("runner source size does not match")
+        elif vm.sha256_file(raw_runner) != runner["sha256"]:
+            problems.append("runner source digest does not match")
+        prepared = ((phases.get("prepare") or {}).get("prepared") or {})
+        guest_runner = prepared.get("runner_source") or {}
+        if guest_runner.get("sha256") != runner.get("sha256"):
+            problems.append("guest runner source digest does not match "
+                            "the uploaded archive")
+    return problems
+
+
+def _raw_file_problem(path, text, label, problems):
+    path = pathlib.Path(path)
+    if path.is_symlink() or not path.is_file():
+        problems.append(label + " raw file is missing")
+        return False
+    if vm.sha256_file(path) != _sha(text):
+        problems.append(label + " raw bytes do not match the rendered file")
+        return False
+    return True
+
+
+def _raw_link_problem(path, target, label, problems):
+    path = pathlib.Path(path)
+    if not path.is_symlink():
+        problems.append(label + " raw link is missing")
+        return False
+    if os.readlink(path) != target:
+        problems.append(label + " raw link target does not match")
+        return False
+    return True
+
+
+def _record_snapshot_problems(record, runtime, label, problems):
+    snapshot = record.get("snapshot") or {}
+    paths = snapshot.get("paths") or {}
+    activators = snapshot.get("activators") or {}
+    if snapshot.get("schema_version") != 1 \
+            or snapshot.get("unit") != REPAIR_UNIT \
+            or snapshot.get("runtime") != runtime:
+        problems.append(label + " snapshot identity is not the expected shape")
+    if set(paths) != set(REPAIR_PATHS.values()):
+        problems.append(label + " snapshot does not name the six owned paths")
+    expected = _repair_expected(runtime)
+    for key in ("service", "timer", "path", "dropin"):
+        _inventory_file(paths.get(REPAIR_PATHS[key]), expected[key],
+                        label + " snapshot " + key, problems)
+    _inventory_link(paths.get(REPAIR_PATHS["timer_wants"]),
+                    "../" + REPAIR_TIMER,
+                    label + " snapshot timer wants", problems)
+    _inventory_link(paths.get(REPAIR_PATHS["path_wants"]),
+                    "../" + REPAIR_PATH,
+                    label + " snapshot path wants", problems)
+    if activators != {
+            "timer_active": "active",
+            "timer_unit_file_state": "enabled",
+            "service_active": "inactive",
+            "path_active": "inactive",
+            "path_unit_file_state": "enabled"}:
+        problems.append(label + " snapshot activator observation is not the "
+                        "expected pre-switch shape")
+
+
+def _verify_activators_raw(report, raw_root, problems, phases):
+    prepared = (phases.get("prepare") or {}).get("prepared") or {}
+    raw_repair = UNIT_DIR.replace("/home/%s/" % vm.GUEST_USER, "")
+    expected = _repair_expected(PYTHON_RUNTIME)
+    for name, text in (
+            ("crq-repair.service", expected["service"]),
+            ("crq-repair.timer", expected["timer"]),
+            ("crq-repair.path", expected["path"]),
+            ("crq-repair.service.d/10-fence-proof.conf", expected["dropin"])):
+        _raw_file_problem(raw_root / raw_repair / name, text,
+                          "final " + name, problems)
+    _raw_link_problem(raw_root / raw_repair / "timers.target.wants"
+                      / REPAIR_TIMER, "../" + REPAIR_TIMER,
+                      "final timer wants", problems)
+    _raw_link_problem(raw_root / raw_repair / "default.target.wants"
+                      / REPAIR_PATH, "../" + REPAIR_PATH,
+                      "final path wants", problems)
+    for relative in (".crq-repair.service.staged",):
+        path = raw_root / raw_repair / relative
+        if path.exists() or path.is_symlink():
+            problems.append("final evidence retains the staged repair target")
+    for missing in (raw_root / FIXTURE_DIR.replace("/home/%s/" % vm.GUEST_USER, "")
+                    / "repair-path-trigger",
+                    raw_root / FIXTURE_DIR.replace("/home/%s/" % vm.GUEST_USER, "")
+                    / "activators-pause.json"):
+        if missing.exists() or missing.is_symlink():
+            problems.append("final evidence retains " + missing.name)
+    _raw_file_problem(raw_root / raw_repair / "crq-tick.service",
+                      expected_unit(PYTHON_RUNTIME), "final tick service",
+                      problems)
+    tick_staged = raw_root / raw_repair / ".crq-tick.service.staged"
+    if tick_staged.exists() or tick_staged.is_symlink():
+        problems.append("final evidence retains the staged tick target")
+
+    raw_records = raw_root / REPAIR_RECORDS_DIR.replace(
+        "/home/%s/" % vm.GUEST_USER, "")
+    record_paths = (sorted(entry for entry in raw_records.iterdir()
+                           if entry.is_file() and not entry.is_symlink())
+                    if raw_records.is_dir() else [])
+    if len(record_paths) != 3:
+        problems.append("final activator record set is not three records")
+    records = []
+    for path in record_paths:
+        try:
+            records.append(json.loads(path.read_text()))
+        except (OSError, ValueError):
+            problems.append("final activator record is unreadable: " + path.name)
+    completed = [record for record in records
+                 if record.get("outcome") == "completed"]
+    rolled = [record for record in records
+              if record.get("outcome") == "rolled_back"]
+    node_records = [record for record in completed
+                    if record.get("runtime") == NODE_RUNTIME]
+    python_records = [record for record in completed
+                      if record.get("runtime") == PYTHON_RUNTIME]
+    if len(node_records) != 1 or len(python_records) != 1 or len(rolled) != 1:
+        problems.append("final activator record outcomes are not the expected "
+                        "completed Node, completed Python and rolled-back set")
+    for label, record in (("fence record", node_records[0] if node_records else {}),
+                          ("switch-back record", python_records[0] if python_records else {}),
+                          ("recover record", rolled[0] if rolled else {})):
+        if not record:
+            continue
+        _record_snapshot_problems(record, PYTHON_RUNTIME
+                                  if label != "switch-back record"
+                                  else NODE_RUNTIME, label, problems)
+    for label, record in (("fence record", node_records[0] if node_records else {}),
+                          ("switch-back record", python_records[0] if python_records else {})):
+        if not record:
+            continue
+        completions = record.get("completions") or []
+        if len(completions) != 2:
+            problems.append(label + " does not retain two completions")
+            continue
+        runtime = record.get("runtime")
+        for index, item in enumerate(completions):
+            _completion_ok(item, runtime, label + " completion[" + str(index) + "]",
+                           problems)
+        if completions[0].get("sequence", 0) >= completions[1].get("sequence", 0):
+            problems.append(label + " completion sequences do not advance")
+        if completions[0].get("invocation") == completions[1].get("invocation"):
+            problems.append(label + " completions share an invocation")
+
+    for label, summary in (
+            ("activators-fence.record",
+             (phases.get("activators-fence") or {}).get("record")),
+            ("activators-switch-back.record",
+             (phases.get("activators-switch-back") or {}).get("record")),
+            ("activators-recover.record_after",
+             (phases.get("activators-recover") or {}).get("record_after")),
+            ("activators-repeat.record_after",
+             (phases.get("activators-repeat") or {}).get("record_after"))):
+        _retained_record_problem(summary, raw_root, "records-activators",
+                                 label, problems)
+    inspect = phases.get("activators-inspect") or {}
+    tick = inspect.get("tick") or {}
+    for index, summary in enumerate(tick.get("records") or []):
+        _retained_record_problem(summary, raw_root, "records",
+                                 "activators-inspect.tick.records[%d]" % index,
+                                 problems)
+    for name, expected_sha in ((prepared.get("state") or {}).items()):
+        path = raw_root / "checkout/apps/crq-python/state" / name
+        if expected_sha and vm.sha256_file(path) != expected_sha:
+            problems.append("raw preserved state does not match: " + name)
+    problems.extend(_upload_provenance_problems(report, raw_root, phases))
+    return problems
+
+
 def verify_raw_evidence(report, raw_root, mode="base"):
     """Compare a report with the retained raw phases, uploads and journals."""
     problems = []
@@ -1763,6 +3182,8 @@ def verify_raw_evidence(report, raw_root, mode="base"):
         if retained != phases.get(name):
             problems.append("phase " + name
                             + " does not match retained raw guest evidence")
+    if mode == "activators":
+        return _verify_activators_raw(report, raw_root, problems, phases)
 
     # Only final journal states can be compared with the retained record set.
     # Earlier phase summaries are historical; their raw phase JSON is the
@@ -1900,51 +3321,7 @@ def verify_raw_evidence(report, raw_root, mode="base"):
     elif vm.sha256_file(staged) != _sha(expected_unit(NODE_RUNTIME)):
         problems.append("staged target bytes do not match the requested runtime")
 
-    provenance = report.get("provenance")
-    uploads = provenance.get("uploads") if isinstance(provenance, dict) else None
-    if not isinstance(uploads, dict):
-        problems.append("upload provenance is not an object")
-    else:
-        proof_bin = raw_root / "proof-bin"
-        retained = ({entry.name for entry in proof_bin.iterdir()
-                     if entry.is_file() and not entry.is_symlink()}
-                    if proof_bin.is_dir() else set())
-        if retained != set(UPLOADS) | {RUNNER_ARCHIVE}:
-            problems.append("raw upload set does not match the expected "
-                            "controller and fixture scripts")
-        for name in UPLOADS:
-            entry = uploads.get(name)
-            raw_path = proof_bin / name
-            if raw_path.is_symlink() or not raw_path.is_file():
-                problems.append("raw upload is missing: " + name)
-            elif not isinstance(entry, dict) \
-                    or not _sha256_text(entry.get("sha256")):
-                continue
-            else:
-                if type(entry.get("bytes")) is not int or entry["bytes"] < 0:
-                    problems.append("raw upload size is invalid: " + name)
-                elif raw_path.stat().st_size != entry["bytes"]:
-                    problems.append("raw upload size does not match: " + name)
-                if vm.sha256_file(raw_path) != entry["sha256"]:
-                    problems.append("raw upload digest does not match: " + name)
-        runner = uploads.get("runner_source")
-        raw_runner = proof_bin / RUNNER_ARCHIVE
-        if not isinstance(runner, dict) or not _sha256_text(runner.get("sha256")):
-            problems.append("runner source provenance is missing")
-        else:
-            if raw_runner.is_symlink() or not raw_runner.is_file():
-                problems.append("raw runner source archive is missing")
-            elif type(runner.get("bytes")) is not int or runner["bytes"] < 1:
-                problems.append("runner source size is invalid")
-            elif raw_runner.stat().st_size != runner["bytes"]:
-                problems.append("runner source size does not match")
-            elif vm.sha256_file(raw_runner) != runner["sha256"]:
-                problems.append("runner source digest does not match")
-            prepared = ((phases.get("prepare") or {}).get("prepared") or {})
-            guest_runner = prepared.get("runner_source") or {}
-            if guest_runner.get("sha256") != runner.get("sha256"):
-                problems.append("guest runner source digest does not match "
-                                "the uploaded archive")
+    problems.extend(_upload_provenance_problems(report, raw_root, phases))
     return problems
 
 
@@ -2121,7 +3498,7 @@ def cmd_verify(args):
     if report.get("schema_version") != SCHEMA_VERSION or report.get("kind") != KIND:
         problems.append("report schema or kind is not this proof")
     mode = report.get("mode", "base")
-    if mode not in ("base", "matrix"):
+    if mode not in ("base", "matrix", "activators"):
         problems.append("report mode is not this proof mode")
         mode = "base"
     phases = report.get("phases")
@@ -2162,9 +3539,9 @@ def cmd_verify(args):
     host_matches = isinstance(retained_host, str) and current_host == retained_host
     guest_matches = (isinstance(retained_guest, str)
                      and current_guest == retained_guest)
-    if mode == "matrix" and not guest_matches:
-        problems.append("guest proof script differs from the retained matrix run; "
-                        "a fresh matrix run is required")
+    if mode in ("matrix", "activators") and not guest_matches:
+        problems.append("guest proof script differs from the retained "
+                        + mode + " run; a fresh " + mode + " run is required")
     validator = {
         "host_script_sha256": current_host,
         "guest_script_sha256": current_guest,
@@ -2201,7 +3578,8 @@ def build_parser():
     sub = parser.add_subparsers(dest="command", required=True)
     run = sub.add_parser("run")
     run.add_argument("--source-commit", required=True)
-    run.add_argument("--mode", choices=("base", "matrix"), default="base")
+    run.add_argument("--mode", choices=("base", "matrix", "activators"),
+                     default="base")
     run.add_argument("--keep", action="store_true")
     verify = sub.add_parser("verify")
     verify.add_argument("report", type=pathlib.Path)

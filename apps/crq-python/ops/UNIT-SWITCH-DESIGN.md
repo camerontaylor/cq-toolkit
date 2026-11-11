@@ -7,13 +7,17 @@ adapter. The recovery snapshot's structure and host operations still need an
 independent design review and disposable-VM proof.
 
 A bounded proof vehicle now exercises the actual ``switch_unit``/``recover_unit``
-seam against one harmless fixture in a disposable KVM guest; run
+seam against two declared harmless fixtures in a disposable KVM guest. The
+original tick topology run
 ``20261110T173225Z-de36ec18`` passed both directions, preactivation
 interruption, interrupted recovery, repeat-recovery refusal and the
-activation-fence probe. It is
+activation-fence probe. The second ``crq-repair`` topology adds a timer, a path
+activator and one declared blocker drop-in, and is exercised by a dedicated
+``activators`` mode with its own allowlisted inventory, positive controls,
+refusal matrix, queued-job fence and interrupt/recovery path. It is
 fixture-only evidence, not production enablement: production journal
-interoperability, a real runtime-bound completion provider, and the
-manager-restart/reboot matrix remain open. See
+interoperability, a real runtime-bound completion provider, exhaustive
+activator discovery, and path-topology manager-restart/reboot remain open. See
 [VM-UNIT-SWITCH-PROOF.md](VM-UNIT-SWITCH-PROOF.md).
 
 ## Probe evidence and its limits
@@ -99,9 +103,14 @@ The installed templates provide tick, slot, backfill and watchdog timers;
 repair and publisher each have both timer and path activators. The host adapter
 must discover and account for direct starts, dependencies and any other
 activation sources, queued jobs, service cgroups and owned work outside them.
-The exact inventory and the proof that it is complete remain open. Release of
-each activator and the service must be controlled and crash-tested; the seam's
-single `start` call is not evidence that production release is safe.
+The exact inventory and the proof that it is complete remain open. The
+``activators`` proof mode covers one exact allowlisted timer/path/drop-in
+topology and its independent active/enabled release, but it is not exhaustive
+production discovery: other-name dependency units, default-target links and
+socket units outside the declared paths remain untested, and path-topology
+manager restart/reboot is deferred. Release of each activator and the service
+must be controlled and crash-tested; the seam's single `start` call is not
+evidence that production release is safe.
 
 Checkout deploy/rollback and unit switch/recovery now share one symmetric
 unfinished-transaction guard in the supplied journal directory. It classifies

@@ -66,6 +66,36 @@ DRAIN_ITEM_IDS = {
     "harvest": "drain-harvest",
 }
 
+# Second harmless fixture topology for the activation-inventory fence proof.
+# It is a declared guest topology, not exhaustive production activator
+# discovery.
+REPAIR_UNIT = "crq-repair.service"
+REPAIR_TIMER = "crq-repair.timer"
+REPAIR_PATH_UNIT = "crq-repair.path"
+REPAIR_COMPLETIONS = FIXTURE / "completions-crq-repair.jsonl"
+REPAIR_SERVICE = UNIT_DIR / REPAIR_UNIT
+REPAIR_TIMER_PATH = UNIT_DIR / REPAIR_TIMER
+REPAIR_PATH_PATH = UNIT_DIR / REPAIR_PATH_UNIT
+REPAIR_TIMER_WANTS = UNIT_DIR / "timers.target.wants" / REPAIR_TIMER
+REPAIR_PATH_WANTS = UNIT_DIR / "default.target.wants" / REPAIR_PATH_UNIT
+REPAIR_DROPIN_DIR = UNIT_DIR / (REPAIR_UNIT + ".d")
+REPAIR_DROPIN = REPAIR_DROPIN_DIR / "10-fence-proof.conf"
+REPAIR_STAGED = UNIT_DIR / ("." + REPAIR_UNIT + ".staged")
+REPAIR_TRIGGER = FIXTURE / "repair-path-trigger"
+REPAIR_RECORDS = HOME / "records-activators"
+REPAIR_PAUSE_MARKER = FIXTURE / "activators-pause.json"
+CALLER_UNIT = "crq-probe-caller.service"
+BLOCKER_UNIT = "crq-probe-blocker.service"
+CALLER_PATH = UNIT_DIR / CALLER_UNIT
+BLOCKER_PATH = UNIT_DIR / BLOCKER_UNIT
+ACTIVATOR_UNITS = (REPAIR_UNIT, REPAIR_TIMER, REPAIR_PATH_UNIT,
+                   CALLER_UNIT, BLOCKER_UNIT)
+ACTIVATOR_PHASES = ("activators-install", "activators-positive",
+                    "activators-unknown", "activators-fence",
+                    "activators-switch-back", "activators-interrupt",
+                    "activators-recover", "activators-repeat",
+                    "activators-inspect")
+
 # The restart/reboot matrix deliberately keeps activation-pending ambiguity in
 # a separate private record directory per case. An unresolved intent blocks new
 # switches only in the supplied directory, so this is test isolation of
@@ -357,7 +387,7 @@ def env():
     return values
 
 
-def run(argv, timeout=120, extra_env=None):
+def run(argv, timeout=120, extra_env=None, max_output=12000):
     values = env()
     if extra_env:
         values.update(extra_env)
@@ -365,12 +395,12 @@ def run(argv, timeout=120, extra_env=None):
         result = subprocess.run(argv, capture_output=True, text=True,
                                 timeout=timeout, env=values)
         return {"argv": [str(item) for item in argv], "rc": result.returncode,
-                "stdout": result.stdout[-12000:],
-                "stderr": result.stderr[-12000:], "timeout": False}
+                "stdout": result.stdout[-max_output:],
+                "stderr": result.stderr[-max_output:], "timeout": False}
     except subprocess.TimeoutExpired as exc:
         return {"argv": [str(item) for item in argv], "rc": None,
-                "stdout": _text_output(exc.stdout)[-12000:],
-                "stderr": _text_output(exc.stderr)[-12000:], "timeout": True}
+                "stdout": _text_output(exc.stdout)[-max_output:],
+                "stderr": _text_output(exc.stderr)[-max_output:], "timeout": True}
 
 
 def _text_output(value):
@@ -398,12 +428,20 @@ def show(unit, props):
     return values
 
 
-def jobs():
+def jobs_observation():
     result = run(["systemctl", "--user", "list-jobs", "--no-legend",
                   "--no-pager"], timeout=30)
+    lines = [line for line in (result.get("stdout") or "").splitlines()
+             if line.strip()]
+    return {"command": result, "lines": lines}
+
+
+def jobs():
+    observation = jobs_observation()
+    result = observation["command"]
     require(not result["timeout"] and result["rc"] == 0,
             "list-jobs failed; job absence is unknown")
-    return [line for line in result["stdout"].splitlines() if line.strip()]
+    return observation["lines"]
 
 
 def file_state(path):
@@ -455,7 +493,7 @@ def records():
 
 
 def record_dirs():
-    return [RECORDS, *CASE_RECORDS.values()]
+    return [RECORDS, *CASE_RECORDS.values(), REPAIR_RECORDS]
 
 
 def record_summary(path):
@@ -1657,6 +1695,934 @@ def reset_fixture_phase(args):
             "preserved": check_preserved(args.phase)}
 
 
+# ------------------------------------------------------------------ activators
+# A second declared guest topology. This proves the allowlisted inventory and
+# the service/timer/path/drop-in fence shape. It is not exhaustive production
+# activator discovery: other-name dependency units, default-target links and
+# socket units outside these exact paths remain a production inventory gap.
+
+def read_completions(path):
+    path = pathlib.Path(path)
+    if not path.exists():
+        return []
+    entries = []
+    for number, line in enumerate(path.read_text().splitlines(), 1):
+        if not line.strip():
+            continue
+        try:
+            entries.append(json.loads(line))
+        except ValueError as exc:
+            raise RuntimeError(
+                "completion log line %d is not JSON" % number) from exc
+    return entries
+
+
+def repair_adapter():
+    return load_adapter().GuestFixtureAdapter(
+        unit_dir=UNIT_DIR, fixture_dir=FIXTURE, unit=REPAIR_UNIT,
+        proof_root=PROOF_BIN, guest_only=True)
+
+
+def repair_files():
+    return {
+        "service": file_state(REPAIR_SERVICE),
+        "timer": file_state(REPAIR_TIMER_PATH),
+        "timer_wants": file_state(REPAIR_TIMER_WANTS),
+        "path": file_state(REPAIR_PATH_PATH),
+        "path_wants": file_state(REPAIR_PATH_WANTS),
+        "dropin": file_state(REPAIR_DROPIN),
+        "staged": file_state(REPAIR_STAGED),
+        "trigger": file_state(REPAIR_TRIGGER),
+        "completions": file_state(REPAIR_COMPLETIONS),
+        "caller": file_state(CALLER_PATH),
+        "blocker": file_state(BLOCKER_PATH),
+    }
+
+
+def repair_units():
+    common = ["LoadState", "ActiveState", "SubState", "UnitFileState",
+              "FragmentPath"]
+    service = common + ["MainPID", "ControlGroup", "InvocationID", "Result"]
+    return {
+        name: show(name, service if name.endswith(".service") else common)
+        for name in ACTIVATOR_UNITS
+    }
+
+
+def repair_snapshot():
+    data = snapshot(REPAIR_RECORDS)
+    data["repair_units"] = repair_units()
+    data["repair_files"] = repair_files()
+    data["repair_completions"] = read_completions(REPAIR_COMPLETIONS)
+    data["tick"] = snapshot()
+    return data
+
+
+def stable_snapshot(data):
+    keys = ("hostname", "user", "boot_id", "manager", "units", "files",
+            "metadata", "state", "history", "records", "completions")
+    return {key: data.get(key) for key in keys}
+
+
+def repair_clean():
+    for name in ACTIVATOR_UNITS:
+        systemctl("stop", name)
+        systemctl("reset-failed", name)
+    REPAIR_TRIGGER.unlink(missing_ok=True)
+    REPAIR_PAUSE_MARKER.unlink(missing_ok=True)
+
+
+def settle_service():
+    """Leave the service inactive with a fresh inactive timestamp.
+
+    ``OnUnitInactiveSec`` counts from the service's last inactive entry, so a
+    timer started while the service has been inactive for longer than the
+    interval fires immediately. A real start followed by a stop forces the
+    fresh inactive transition; the completed fixture run is part of the
+    baseline the switch-back takes afterwards.
+    """
+    systemctl("stop", REPAIR_TIMER)
+    systemctl("stop", REPAIR_UNIT)
+    systemctl("stop", BLOCKER_UNIT)
+    systemctl("reset-failed", REPAIR_UNIT)
+    started = systemctl("start", REPAIR_UNIT, timeout=60)
+    require(not started["timeout"] and started["rc"] == 0,
+            "failed to create a fresh inactive transition")
+    systemctl("stop", REPAIR_UNIT)
+    systemctl("reset-failed", REPAIR_UNIT)
+    systemctl("stop", BLOCKER_UNIT)
+    systemctl("reset-failed", BLOCKER_UNIT)
+    started = systemctl("start", REPAIR_TIMER)
+    require(started["rc"] == 0, "failed to start timer after settling")
+    require(show(REPAIR_UNIT, ["ActiveState"])["ActiveState"] == "inactive",
+            "service did not settle to inactive")
+
+
+def wait_until(predicate, timeout, label):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        value = predicate()
+        if value:
+            return value
+        time.sleep(0.1)
+    raise RuntimeError(label + " did not settle within the bound")
+
+
+def wait_job(unit_name, timeout=15):
+    deadline = time.time() + timeout
+    last = None
+    while time.time() < deadline:
+        observation = jobs_observation()
+        result = observation["command"]
+        require(not result["timeout"] and result["rc"] == 0,
+                "list-jobs failed; job identity is unknown")
+        last = observation["lines"]
+        for line in last:
+            if unit_name in line:
+                return line, observation
+        time.sleep(0.1)
+    raise RuntimeError("no job for " + unit_name + " within the bound: "
+                       + json.dumps(last)[:300])
+
+
+def wait_job_absent(unit_name, timeout=15):
+    deadline = time.time() + timeout
+    last = None
+    while time.time() < deadline:
+        observation = jobs_observation()
+        result = observation["command"]
+        require(not result["timeout"] and result["rc"] == 0,
+                "list-jobs failed; job absence is unknown")
+        last = observation["lines"]
+        if not any(unit_name in line for line in last):
+            return observation
+        time.sleep(0.1)
+    raise RuntimeError("job for " + unit_name + " survived the bound: "
+                       + json.dumps(last)[:300])
+
+
+def wait_completion(path, previous, timeout=30):
+    deadline = time.time() + timeout
+    entries = read_completions(path)
+    while time.time() < deadline:
+        entries = read_completions(path)
+        new = entries[previous:]
+        if new:
+            return new, entries
+        time.sleep(0.1)
+    raise RuntimeError("no completion within the bound: "
+                       + json.dumps({"previous": previous,
+                                     "observed": len(entries)})[:300])
+
+
+def blocker_running():
+    state = show(BLOCKER_UNIT, ["ActiveState", "SubState", "MainPID",
+                                "InvocationID"])
+    if state["ActiveState"] in ("activating", "active") \
+            and state.get("MainPID") not in (None, "", "0"):
+        return state
+    return None
+
+
+def write_repair_fixture():
+    adapter = repair_adapter()
+    UNIT_DIR.mkdir(parents=True, exist_ok=True)
+    REPAIR_TIMER_WANTS.parent.mkdir(parents=True, exist_ok=True)
+    REPAIR_PATH_WANTS.parent.mkdir(parents=True, exist_ok=True)
+    REPAIR_RECORDS.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(REPAIR_RECORDS, 0o700)
+    for path in (REPAIR_SERVICE, REPAIR_TIMER_PATH, REPAIR_PATH_PATH,
+                 REPAIR_DROPIN, REPAIR_TIMER_WANTS, REPAIR_PATH_WANTS,
+                 CALLER_PATH, BLOCKER_PATH, REPAIR_STAGED, REPAIR_TRIGGER):
+        if path.is_symlink() or path.exists():
+            path.unlink()
+    _write(REPAIR_SERVICE, adapter.render_unit(PYTHON_RUNTIME), 0o644)
+    _write(REPAIR_TIMER_PATH, adapter.render_timer(), 0o644)
+    _write(REPAIR_PATH_PATH, adapter.render_path(), 0o644)
+    _write(REPAIR_DROPIN, adapter.render_dropin(), 0o644)
+    _write(CALLER_PATH, (
+        "[Unit]\n"
+        "Description=CRQ proof dependency caller\n"
+        "Requires=crq-repair.service\n"
+        "After=crq-repair.service\n"
+        "\n"
+        "[Service]\n"
+        "Type=oneshot\n"
+        "ExecStart=/bin/true\n"), 0o644)
+    _write(BLOCKER_PATH, (
+        "[Unit]\n"
+        "Description=CRQ proof queued-job blocker\n"
+        "\n"
+        "[Service]\n"
+        "Type=oneshot\n"
+        "ExecStart=/bin/sleep 10\n"), 0o644)
+    REPAIR_TIMER_WANTS.symlink_to("../" + REPAIR_TIMER)
+    REPAIR_PATH_WANTS.symlink_to("../" + REPAIR_PATH_UNIT)
+    REPAIR_COMPLETIONS.unlink(missing_ok=True)
+    pathlib.Path(str(REPAIR_COMPLETIONS) + ".lock").unlink(missing_ok=True)
+    shutil.rmtree(str(REPAIR_COMPLETIONS) + ".lockdir", ignore_errors=True)
+    result = systemctl("daemon-reload")
+    require(result["rc"] == 0, "daemon-reload after repair install failed")
+    repair_clean()
+    return adapter
+
+
+def cli_argv(command, extra=None):
+    argv = [sys.executable, str(PROOF_BIN / "unit-switch.py"), command,
+            "--root", str(CHECKOUT), "--record-dir", str(REPAIR_RECORDS),
+            "--unit", REPAIR_UNIT, "--fixture-dir", str(FIXTURE),
+            "--proof-root", str(PROOF_BIN), "--proof-fixture"]
+    if extra:
+        argv.extend(extra)
+    return argv
+
+
+def cli_activators(command, extra=None, extra_env=None, timeout=180):
+    result = run(cli_argv(command, extra), timeout=timeout, extra_env=extra_env,
+                 max_output=60000)
+    parsed = None
+    if (result.get("stdout") or "").strip():
+        try:
+            parsed = json.loads(result["stdout"])
+        except ValueError:
+            parsed = None
+    result["json"] = parsed
+    return result
+
+
+def terminate_process(proc):
+    if proc.poll() is not None:
+        return
+    proc.terminate()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=5)
+
+
+def cli_paused(extra, callback, timeout=180):
+    REPAIR_PAUSE_MARKER.unlink(missing_ok=True)
+    values = env()
+    values["CRQ_PROOF_PAUSE_ON"] = "after-mask-reload"
+    values["CRQ_PROOF_PAUSE_MARKER"] = str(REPAIR_PAUSE_MARKER)
+    proc = subprocess.Popen(cli_argv("switch", extra), stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, text=True, env=values,
+                            start_new_session=True)
+    deadline = time.time() + 60
+    while time.time() < deadline:
+        if REPAIR_PAUSE_MARKER.exists() or proc.poll() is not None:
+            break
+        time.sleep(0.05)
+    if not REPAIR_PAUSE_MARKER.exists():
+        terminate_process(proc)
+        out, err = proc.communicate()
+        return {"argv": cli_argv("switch", extra), "rc": proc.returncode,
+                "stdout": out[-60000:], "stderr": err[-60000:],
+                "timeout": False, "pause_reached": False, "during": None,
+                "json": None}
+    during = callback()
+    timed_out = False
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        terminate_process(proc)
+        out, err = proc.communicate()
+    parsed = None
+    if (out or "").strip():
+        try:
+            parsed = json.loads(out)
+        except ValueError:
+            parsed = None
+    return {"argv": cli_argv("switch", extra), "rc": proc.returncode,
+            "stdout": out[-60000:], "stderr": err[-60000:],
+            "timeout": timed_out, "pause_reached": True, "during": during,
+            "json": parsed}
+
+
+def activators_install(args):
+    require(os.uname().nodename == "crq-probe",
+            "proof driver only runs on the disposable crq-probe guest")
+    for path in (REPAIR_SERVICE, REPAIR_TIMER_PATH, REPAIR_PATH_PATH,
+                 REPAIR_TIMER_WANTS, REPAIR_PATH_WANTS, REPAIR_DROPIN,
+                 REPAIR_STAGED, REPAIR_TRIGGER, CALLER_PATH, BLOCKER_PATH):
+        if path.is_symlink() or path.exists():
+            path.unlink()
+    shutil.rmtree(REPAIR_DROPIN_DIR, ignore_errors=True)
+    shutil.rmtree(REPAIR_RECORDS, ignore_errors=True)
+    adapter = write_repair_fixture()
+    inventory = adapter.inventory()
+    require(inventory["topology"] == "repair",
+            "repair inventory did not report the repair topology")
+    require(inventory["activators"]["timer_active"] == "inactive",
+            "repair timer started unexpectedly at install")
+    require(inventory["activators"]["path_active"] == "inactive",
+            "repair path started unexpectedly at install")
+    require(inventory["activators"]["service_active"] == "inactive",
+            "repair service started unexpectedly at install")
+    unrelated, unrelated_state = spawn_detached("activator-unrelated")
+    unrelated_path = FIXTURE / "activators-unrelated.json"
+    _write(unrelated_path, json.dumps({
+        "pid": unrelated.pid, "starttime": unrelated_state.get("starttime"),
+        "cmdline": unrelated_state.get("cmdline")}, sort_keys=True) + "\n", 0o600)
+    return {"phase": "activators-install", "inventory": inventory,
+            "files": repair_files(), "units": repair_units(),
+            "completions": read_completions(REPAIR_COMPLETIONS),
+            "records": [record_summary(path)
+                        for path in records_in(REPAIR_RECORDS)],
+            "tick": snapshot(),
+            "state": state_hashes(),
+            "unrelated": {"pid": unrelated.pid,
+                          "starttime": unrelated_state.get("starttime"),
+                          "cmdline": unrelated_state.get("cmdline")},
+            "preserved": check_preserved({"phase": "activators-install"})}
+
+
+def activators_positive(args):
+    repair_clean()
+    require(show(REPAIR_UNIT, ["ActiveState"])["ActiveState"] == "inactive",
+            "direct control requires an inactive service")
+    require(show(REPAIR_TIMER, ["UnitFileState"])["UnitFileState"] == "enabled",
+            "timer control requires an enabled timer")
+    require(show(REPAIR_PATH_UNIT, ["UnitFileState"])["UnitFileState"]
+            == "enabled", "path control requires an enabled path unit")
+    controls = {}
+
+    before = read_completions(REPAIR_COMPLETIONS)
+    blocker = systemctl("start", "--no-block", BLOCKER_UNIT)
+    require(blocker["rc"] == 0, "queue blocker failed to start")
+    blocker_state = wait_until(blocker_running, 15, "queue blocker")
+    target = systemctl("start", "--no-block", REPAIR_UNIT)
+    require(target["rc"] == 0, "queued target failed to queue")
+    job_line, job_observation = wait_job(REPAIR_UNIT, timeout=15)
+    require("start" in job_line, "queued target job is not a start job")
+    require(REPAIR_UNIT in job_line, "queued target job names another unit")
+    queued_entries = read_completions(REPAIR_COMPLETIONS)
+    require(len(queued_entries) == len(before),
+            "queued target completed before cancellation")
+    stopped = systemctl("stop", REPAIR_UNIT)
+    require(not stopped["timeout"] and stopped["rc"] == 0,
+            "queued target stop did not complete")
+    jobs_after_observation = wait_job_absent(REPAIR_UNIT, timeout=15)
+    after_entries = read_completions(REPAIR_COMPLETIONS)
+    require(len(after_entries) == len(before),
+            "queued target completed after cancellation")
+    blocker_stop = systemctl("stop", BLOCKER_UNIT)
+    require(not blocker_stop["timeout"] and blocker_stop["rc"] == 0,
+            "queue blocker stop did not complete")
+    systemctl("reset-failed", BLOCKER_UNIT)
+    controls["queue"] = {
+        "blocker_command": blocker, "blocker": blocker_state,
+        "target_command": target, "job": job_line,
+        "job_observation": job_observation,
+        "jobs": job_observation["lines"],
+        "stop": stopped, "jobs_after": jobs_after_observation["lines"],
+        "jobs_after_observation": jobs_after_observation,
+        "blocker_stop": blocker_stop, "before_count": len(before),
+        "after_count": len(after_entries), "bounded_wait_seconds": 15}
+
+    # Run the service once before the timer control: OnUnitInactiveSec counts
+    # from a real inactive transition, and a never-activated oneshot has no
+    # such timestamp to elapse from.
+    before = read_completions(REPAIR_COMPLETIONS)
+    started = systemctl("start", REPAIR_UNIT, timeout=60)
+    require(started["rc"] == 0, "direct positive control failed to start")
+    service_state = show(REPAIR_UNIT, ["ActiveState", "SubState",
+                                       "UnitFileState", "Result"])
+    new, entries = wait_completion(REPAIR_COMPLETIONS, len(before), timeout=30)
+    stopped = systemctl("stop", REPAIR_UNIT)
+    systemctl("reset-failed", REPAIR_UNIT)
+    controls["direct"] = {
+        "command": started, "state": service_state, "stop": stopped,
+        "before_count": len(before), "after_count": len(entries),
+        "new": new, "bounded_wait_seconds": 30}
+
+    before = read_completions(REPAIR_COMPLETIONS)
+    started = systemctl("start", REPAIR_TIMER)
+    require(started["rc"] == 0, "timer positive control failed to start")
+    timer_state = show(REPAIR_TIMER, ["ActiveState", "UnitFileState"])
+    require(timer_state["ActiveState"] == "active",
+            "timer positive control is not active")
+    new, entries = wait_completion(REPAIR_COMPLETIONS, len(before), timeout=30)
+    stopped = systemctl("stop", REPAIR_TIMER)
+    systemctl("reset-failed", REPAIR_TIMER)
+    systemctl("stop", REPAIR_UNIT)
+    systemctl("stop", BLOCKER_UNIT)
+    require(show(REPAIR_TIMER, ["ActiveState"])["ActiveState"]
+            in ("inactive", "failed"), "timer control did not stop")
+    controls["timer"] = {
+        "command": started, "state": timer_state, "stop": stopped,
+        "before_count": len(before), "after_count": len(entries),
+        "new": new, "bounded_wait_seconds": 30}
+
+    before = read_completions(REPAIR_COMPLETIONS)
+    started = systemctl("start", REPAIR_PATH_UNIT)
+    require(started["rc"] == 0, "path positive control failed to start")
+    path_state = show(REPAIR_PATH_UNIT, ["ActiveState", "UnitFileState"])
+    require(path_state["ActiveState"] == "active",
+            "path positive control is not active")
+    REPAIR_TRIGGER.write_text("proof\n")
+    new, entries = wait_completion(REPAIR_COMPLETIONS, len(before), timeout=30)
+    REPAIR_TRIGGER.unlink(missing_ok=True)
+    stopped = systemctl("stop", REPAIR_PATH_UNIT)
+    systemctl("reset-failed", REPAIR_PATH_UNIT)
+    systemctl("stop", REPAIR_UNIT)
+    systemctl("stop", BLOCKER_UNIT)
+    require(show(REPAIR_PATH_UNIT, ["ActiveState"])["ActiveState"]
+            in ("inactive", "failed"), "path control did not stop")
+    controls["path"] = {
+        "command": started, "state": path_state, "stop": stopped,
+        "before_count": len(before), "after_count": len(entries),
+        "new": new, "bounded_wait_seconds": 30}
+
+    before = read_completions(REPAIR_COMPLETIONS)
+    started = systemctl("start", CALLER_UNIT, timeout=60)
+    require(started["rc"] == 0, "dependency positive control failed to start")
+    caller_state = show(CALLER_UNIT, ["ActiveState", "UnitFileState"])
+    new, entries = wait_completion(REPAIR_COMPLETIONS, len(before), timeout=30)
+    stopped = systemctl("stop", CALLER_UNIT)
+    systemctl("reset-failed", CALLER_UNIT)
+    systemctl("stop", REPAIR_UNIT)
+    systemctl("reset-failed", REPAIR_UNIT)
+    controls["dependency"] = {
+        "command": started, "state": caller_state, "stop": stopped,
+        "before_count": len(before), "after_count": len(entries),
+        "new": new, "bounded_wait_seconds": 30}
+
+    systemctl("stop", REPAIR_UNIT)
+    systemctl("reset-failed", REPAIR_UNIT)
+    timer = systemctl("start", REPAIR_TIMER)
+    require(timer["rc"] == 0, "failed to restore timer before the fence")
+    require(show(REPAIR_TIMER, ["ActiveState"])["ActiveState"] == "active",
+            "timer is not active before the fence")
+    path_final = show(REPAIR_PATH_UNIT, ["ActiveState", "UnitFileState"])
+    require(path_final["ActiveState"] == "inactive",
+            "path is not inactive before the fence")
+    require(path_final["UnitFileState"] == "enabled",
+            "path is not enabled before the fence")
+    return {"phase": "activators-positive", "controls": controls,
+            "pre_switch": repair_snapshot(),
+            "preserved": check_preserved({"phase": "activators-positive"})}
+
+
+def activators_unknown(args):
+    repair_clean()
+    baseline_files = repair_files()
+    baseline_tick = stable_snapshot(snapshot())
+    baseline_records = [record_summary(path)
+                        for path in records_in(REPAIR_RECORDS)]
+    baseline_completions = read_completions(REPAIR_COMPLETIONS)
+    cases = {}
+
+    def run_case(name, mutate, cleanup, tokens):
+        mutate()
+        mutated_files = repair_files()
+        records_before = [record_summary(path)
+                          for path in records_in(REPAIR_RECORDS)]
+        result = cli_activators("switch", ["--runtime", NODE_RUNTIME])
+        text = ((result.get("stdout") or "")
+                + (result.get("stderr") or "")).lower()
+        records_after = [record_summary(path)
+                         for path in records_in(REPAIR_RECORDS)]
+        completions_after = read_completions(REPAIR_COMPLETIONS)
+        units_after = repair_units()
+        cleanup()
+        require(result["rc"] == 2, name + " refusal did not exit 2")
+        require(all(token in text for token in tokens),
+                name + " refusal text does not name the inventory defect")
+        require([item["sha256"] for item in records_before]
+                == [item["sha256"] for item in records_after],
+                name + " wrote a controller record before refusing")
+        require(len(completions_after) == len(baseline_completions),
+                name + " completed fixture work before refusing")
+        cases[name] = {
+            "command": result, "mutated_files": mutated_files,
+            "records_before": records_before,
+            "records_after": records_after,
+            "completions_after": len(completions_after),
+            "units_after": units_after}
+
+    rogue = UNIT_DIR / "crq-repair.socket"
+    run_case("rogue-unit",
+             lambda: _write(rogue,
+                            "[Socket]\nListenStream=%t/crq-repair-proof.sock\n"),
+             lambda: rogue.unlink(missing_ok=True),
+             ("outside the allowlisted", "socket"))
+
+    rogue_link = UNIT_DIR / "default.target.wants" / REPAIR_TIMER
+    run_case("unknown-link",
+             lambda: rogue_link.symlink_to("../" + REPAIR_TIMER),
+             lambda: rogue_link.unlink(missing_ok=True),
+             ("outside the allowlisted", "crq-repair.timer"))
+
+    rogue_dropin = REPAIR_DROPIN_DIR / "20-rogue.conf"
+    run_case("unknown-dropin",
+             lambda: _write(rogue_dropin, "[Unit]\nDescription=rogue\n"),
+             lambda: rogue_dropin.unlink(missing_ok=True),
+             ("outside the allowlisted", "unexpected drop-in"))
+
+    original_mode = REPAIR_DROPIN.stat().st_mode & 0o7777
+    run_case("unsafe-metadata",
+             lambda: os.chmod(REPAIR_DROPIN, 0o666),
+             lambda: os.chmod(REPAIR_DROPIN, original_mode),
+             ("group- or world-writable",))
+
+    after_files = repair_files()
+    after_tick = stable_snapshot(snapshot())
+    after_records = [record_summary(path)
+                     for path in records_in(REPAIR_RECORDS)]
+    require(after_files == baseline_files,
+            "refusal cases changed a fixture path")
+    require(after_records == baseline_records,
+            "refusal cases changed the controller journal inventory")
+    require(after_tick == baseline_tick,
+            "refusal cases changed the original tick topology")
+    return {"phase": "activators-unknown", "cases": cases,
+            "baseline": {"files": baseline_files, "tick": baseline_tick,
+                         "records": baseline_records},
+            "after": {"files": after_files, "tick": after_tick,
+                      "records": after_records},
+            "completions": len(baseline_completions)}
+
+
+def activators_fence(args):
+    repair_clean()
+    require(show(REPAIR_TIMER, ["UnitFileState"])["UnitFileState"] == "enabled",
+            "timer is not enabled before the fence")
+    require(show(REPAIR_PATH_UNIT, ["UnitFileState"])["UnitFileState"]
+            == "enabled", "path is not enabled before the fence")
+    blocker = systemctl("start", "--no-block", BLOCKER_UNIT)
+    require(blocker["rc"] == 0, "failed to start queue blocker")
+    blocker_state = wait_until(blocker_running, 15, "queue blocker")
+    target = systemctl("start", "--no-block", REPAIR_UNIT)
+    require(target["rc"] == 0, "failed to queue the target before the fence")
+    job_line, job_observation = wait_job(REPAIR_UNIT, timeout=15)
+    require("start" in job_line and REPAIR_UNIT in job_line,
+            "queued target job is not the expected start job")
+    started = systemctl("start", REPAIR_TIMER)
+    require(started["rc"] == 0, "failed to start timer before the fence")
+    require(show(REPAIR_TIMER, ["ActiveState"])["ActiveState"] == "active",
+            "timer is not active before the fence")
+    before = repair_snapshot()
+    completions_before = read_completions(REPAIR_COMPLETIONS)
+    records_before = [record_summary(path)
+                      for path in records_in(REPAIR_RECORDS)]
+    queue_seed = {
+        "blocker": blocker_state, "blocker_command": blocker,
+        "target_command": target, "job": job_line,
+        "job_observation": job_observation,
+        "jobs": job_observation["lines"]}
+
+    def during():
+        completions_before_external = read_completions(REPAIR_COMPLETIONS)
+        direct = systemctl("start", REPAIR_UNIT)
+        dependency = systemctl("start", CALLER_UNIT)
+        REPAIR_TRIGGER.write_text("proof\n")
+        path_state = show(REPAIR_PATH_UNIT, ["ActiveState", "UnitFileState"])
+        blocker_now = show(BLOCKER_UNIT, ["ActiveState", "SubState", "MainPID",
+                                          "InvocationID"])
+        jobs_now = jobs_observation()
+        completions_now = read_completions(REPAIR_COMPLETIONS)
+        marker = json.loads(REPAIR_PAUSE_MARKER.read_text())
+        trigger_state = file_state(REPAIR_TRIGGER)
+        return {"direct": direct, "dependency": dependency,
+                "path_state": path_state, "blocker": blocker_now,
+                "jobs": jobs_now["lines"], "jobs_observation": jobs_now,
+                "completions_before_external": completions_before_external,
+                "completions": completions_now,
+                "completion_count": len(completions_now),
+                "external_completion_delta":
+                    len(completions_now) - len(completions_before_external),
+                "marker": marker, "trigger": trigger_state}
+
+    cli = cli_paused(["--runtime", NODE_RUNTIME], during)
+    REPAIR_TRIGGER.unlink(missing_ok=True)
+    REPAIR_PAUSE_MARKER.unlink(missing_ok=True)
+    blocker_stop = systemctl("stop", BLOCKER_UNIT)
+    require(not blocker_stop["timeout"] and blocker_stop["rc"] == 0,
+            "fence blocker stop did not complete")
+    systemctl("reset-failed", BLOCKER_UNIT)
+    systemctl("stop", REPAIR_UNIT)
+    systemctl("reset-failed", REPAIR_UNIT)
+    after = repair_snapshot()
+    completions_after = read_completions(REPAIR_COMPLETIONS)
+    records_after = [record_summary(path)
+                     for path in records_in(REPAIR_RECORDS)]
+    require(cli["rc"] == 0, "paused switch did not complete")
+    require(cli["pause_reached"] is True, "paused switch did not reach the pause")
+    payload = cli.get("json") or {}
+    record = payload.get("record") or {}
+    drain = payload.get("drain") or {}
+    require(record.get("outcome") == "completed",
+            "paused switch record is not completed")
+    require(record.get("runtime") == NODE_RUNTIME,
+            "paused switch record names another runtime")
+    require(record.get("prior_runtime") == PYTHON_RUNTIME,
+            "paused switch record names another prior runtime")
+    completions = record.get("completions") or []
+    require(len(completions) == 2,
+            "paused switch record does not retain two completions")
+    require(len({item.get("invocation") for item in completions}) == 2,
+            "paused switch completions share an invocation")
+    baseline = max((item.get("sequence", 0) for item in completions_before),
+                   default=0)
+    require(all(type(item.get("sequence")) is int
+                and item["sequence"] > baseline for item in completions),
+            "paused switch completions do not advance past the baseline")
+    after_by_invocation = {item.get("invocation"): item
+                           for item in completions_after}
+    baseline_invocations = {item.get("invocation")
+                            for item in completions_before}
+    during_invocations = {item.get("invocation")
+                          for item in (cli["during"] or {}).get(
+                              "completions", [])}
+    for item in completions:
+        require(item.get("invocation") in after_by_invocation,
+                "paused switch completion is absent from the final log")
+        require(item.get("invocation") not in baseline_invocations,
+                "paused switch completion was attributed to pre-switch work")
+        require(item.get("invocation") not in during_invocations,
+                "paused switch completion was attributed to pre-release work")
+    require(len(records_after) == len(records_before) + 1,
+            "paused switch did not retain exactly one new record")
+    new_paths = ({item["path"] for item in records_after}
+                 - {item["path"] for item in records_before})
+    require(len(new_paths) == 1,
+            "paused switch record set difference is not one record")
+    record_after = [item for item in records_after
+                    if item["path"] in new_paths][0]
+    require(record_after.get("transaction_id") == record.get("transaction_id"),
+            "paused switch record summary is not the retained record")
+    require(record_after.get("outcome") == "completed",
+            "paused switch record on disk is not completed")
+    require(isinstance(drain, dict) and drain.get("jobs") == [],
+            "paused switch drain retains a service or activator job")
+    require(drain.get("state", {}).get("ActiveState") == "inactive",
+            "paused switch drain did not settle the service")
+    require(drain.get("owned", {}).get("pids") == [],
+            "paused switch drain retains owned pids")
+    require(drain.get("owned", {}).get("main_pid") == 0,
+            "paused switch drain retains a main pid")
+    activators = drain.get("activators") or {}
+    for unit in (REPAIR_TIMER, REPAIR_PATH_UNIT):
+        require(activators.get(unit, {}).get("ActiveState")
+                in ("inactive", "failed"),
+                "paused switch drain leaves " + unit + " active")
+    direct = drain.get("direct_start") or {}
+    direct_text = ((direct.get("stdout") or "")
+                   + (direct.get("stderr") or "")).lower()
+    require(direct.get("rc") not in (0, None) and "masked" in direct_text,
+            "paused switch did not refuse a direct start while masked")
+    require((drain.get("queue_drain") or {}).get("drained") is True,
+            "paused switch queue drain is not established")
+    external = cli["during"] or {}
+    direct_text = ((external.get("direct", {}).get("stdout") or "")
+                   + (external.get("direct", {}).get("stderr") or "")).lower()
+    require(external.get("direct", {}).get("rc") not in (0, None)
+            and "masked" in direct_text,
+            "external direct start was not refused by the durable mask")
+    dependency_text = ((external.get("dependency", {}).get("stdout") or "")
+                       + (external.get("dependency", {}).get("stderr")
+                          or "")).lower()
+    require(external.get("dependency", {}).get("rc") not in (0, None),
+            "external dependency start unexpectedly succeeded")
+    require("masked" in dependency_text or "required" in dependency_text
+            or "dependency" in dependency_text,
+            "external dependency start failed for an unknown reason")
+    require(external.get("path_state", {}).get("ActiveState") == "inactive",
+            "external path activation was not fenced")
+    require(external.get("external_completion_delta") == 0,
+            "external activation produced a completion before release")
+    require(any(REPAIR_UNIT in line for line in external.get("jobs", [])),
+            "queued target job was not retained through mask and reload")
+    require(external.get("marker", {}).get("phase") == "after-mask-reload",
+            "pause marker does not record the expected phase")
+    require(after["repair_files"]["service"]["type"] == "file",
+            "released service is not a regular file")
+    expected_service = repair_adapter().render_unit(NODE_RUNTIME)
+    require(after["repair_files"]["service"]["sha256"]
+            == sha256_bytes(expected_service.encode()),
+            "released service bytes do not match the requested runtime")
+    require(after["repair_files"]["staged"]["type"] == "missing",
+            "released switch retains a staged target")
+    require(after["repair_units"][REPAIR_TIMER]["ActiveState"] == "active",
+            "timer was not released after the switch")
+    require(after["repair_units"][REPAIR_PATH_UNIT]["ActiveState"]
+            == "inactive", "path was activated after the switch")
+    require(after["repair_units"][REPAIR_PATH_UNIT]["UnitFileState"]
+            == "enabled", "path enablement was lost after the switch")
+    require(after["repair_units"][REPAIR_UNIT]["LoadState"] == "loaded",
+            "released service did not load")
+    for key in ("timer", "timer_wants", "path", "path_wants", "dropin"):
+        require(after["repair_files"][key] == before["repair_files"][key],
+                "switch changed the " + key + " path")
+    require(before["repair_units"][REPAIR_TIMER]["ActiveState"] == "active",
+            "pre-switch timer was not active")
+    require(before["repair_units"][REPAIR_PATH_UNIT]["ActiveState"]
+            == "inactive", "pre-switch path was not inactive")
+    return {"phase": "activators-fence", "queue_seed": queue_seed,
+            "before": before, "after": after,
+            "completions_before": completions_before,
+            "completions_after": completions_after,
+            "records_before": records_before, "records_after": records_after,
+            "record": record_after, "cli": cli,
+            "blocker_stop": blocker_stop,
+            "preserved": check_preserved({"phase": "activators-fence"})}
+
+
+def activators_switch_back(args):
+    settle_service()
+    require(show(REPAIR_TIMER, ["ActiveState"])["ActiveState"] == "active",
+            "timer is not active before the switch back")
+    require(show(REPAIR_PATH_UNIT, ["ActiveState"])["ActiveState"]
+            == "inactive", "path is not inactive before the switch back")
+    records_before = [record_summary(path)
+                      for path in records_in(REPAIR_RECORDS)]
+    before = repair_snapshot()
+    cli = cli_activators("switch", ["--runtime", PYTHON_RUNTIME])
+    after = repair_snapshot()
+    records_after = [record_summary(path)
+                     for path in records_in(REPAIR_RECORDS)]
+    require(cli["rc"] == 0, "switch back did not complete")
+    payload = cli.get("json") or {}
+    record = payload.get("record") or {}
+    require(record.get("outcome") == "completed",
+            "switch back record is not completed")
+    require(record.get("runtime") == PYTHON_RUNTIME,
+            "switch back record names another runtime")
+    require(record.get("prior_runtime") == NODE_RUNTIME,
+            "switch back record names another prior runtime")
+    completions = record.get("completions") or []
+    require(len(completions) == 2,
+            "switch back record does not retain two completions")
+    baseline = max((item.get("sequence", 0)
+                    for item in before["repair_completions"]), default=0)
+    require(all(type(item.get("sequence")) is int
+                and item["sequence"] > baseline for item in completions),
+            "switch back completions do not advance past the baseline")
+    expected_service = repair_adapter().render_unit(PYTHON_RUNTIME)
+    require(after["repair_files"]["service"]["sha256"]
+            == sha256_bytes(expected_service.encode()),
+            "switch back service bytes do not match the requested runtime")
+    require(after["repair_units"][REPAIR_TIMER]["ActiveState"] == "active",
+            "timer was not released after the switch back")
+    require(after["repair_units"][REPAIR_PATH_UNIT]["ActiveState"]
+            == "inactive", "path was activated after the switch back")
+    new_paths = ({item["path"] for item in records_after}
+                 - {item["path"] for item in records_before})
+    require(len(new_paths) == 1,
+            "switch back record set difference is not one record")
+    record_summary_value = [item for item in records_after
+                            if item["path"] in new_paths][0]
+    return {"phase": "activators-switch-back", "before": before,
+            "after": after, "cli": cli,
+            "records_before": records_before, "records_after": records_after,
+            "record": record_summary_value,
+            "preserved": check_preserved({"phase": "activators-switch-back"})}
+
+
+def activators_interrupt(args):
+    require(show(REPAIR_TIMER, ["ActiveState"])["ActiveState"] == "active",
+            "timer is not active before the interrupt")
+    require(show(REPAIR_PATH_UNIT, ["ActiveState"])["ActiveState"]
+            == "inactive", "path is not inactive before the interrupt")
+    before = repair_snapshot()
+    records_before = [record_summary(path)
+                      for path in records_in(REPAIR_RECORDS)]
+    cli = cli_activators("switch", ["--runtime", NODE_RUNTIME],
+                         extra_env={"CRQ_PROOF_KILL_ON": "install"})
+    after = repair_snapshot()
+    records_after = [record_summary(path)
+                     for path in records_in(REPAIR_RECORDS)]
+    require(cli["rc"] not in (0, None), "interrupt did not kill the switch")
+    require(len(records_after) == len(records_before) + 1,
+            "interrupt did not retain exactly one new record")
+    pending = [item for item in records_after
+               if item.get("outcome") == "pending"]
+    require(len(pending) == 1, "interrupt record is not uniquely pending")
+    record = pending[0]
+    require(record.get("phase") == "drained",
+            "interrupt record is not at the drained boundary")
+    require(record.get("runtime") == NODE_RUNTIME,
+            "interrupt record names another runtime")
+    require(record.get("prior_runtime") == PYTHON_RUNTIME,
+            "interrupt record names another prior runtime")
+    require(after["repair_files"]["service"]["type"] == "symlink"
+            and after["repair_files"]["service"].get("target") == "/dev/null",
+            "interrupt did not leave the durable service mask")
+    require(after["repair_files"]["staged"]["type"] == "missing",
+            "interrupt left a staged target")
+    for unit in (REPAIR_TIMER, REPAIR_PATH_UNIT):
+        require(after["repair_units"][unit]["ActiveState"]
+                in ("inactive", "failed"),
+                "interrupt left " + unit + " active")
+    require(len(after["repair_completions"])
+            == len(before["repair_completions"]),
+            "interrupt produced a completion")
+    return {"phase": "activators-interrupt", "before": before,
+            "after": after, "cli": cli,
+            "records_before": records_before, "records_after": records_after,
+            "record": record, "record_path": record["path"],
+            "preserved": check_preserved({"phase": "activators-interrupt"})}
+
+
+def activators_recover(args):
+    pending = [record_summary(path)
+               for path in records_in(REPAIR_RECORDS)
+               if record_summary(path).get("outcome") == "pending"]
+    require(len(pending) == 1, "recovery requires one pending record")
+    path = pending[0]["path"]
+    before = repair_snapshot()
+    record_before = record_summary(path)
+    cli = cli_activators("recover", ["--record", path])
+    record_after = record_summary(path)
+    after = repair_snapshot()
+    require(cli["rc"] == 0, "recovery did not complete")
+    require(record_after.get("outcome") == "rolled_back",
+            "recovered record is not rolled back")
+    require(record_after.get("phase") == "restore_activation_pending",
+            "recovered record is not at the restore activation boundary")
+    require(record_before.get("sha256") != record_after.get("sha256"),
+            "recovery did not advance the retained record")
+    expected_service = repair_adapter().render_unit(PYTHON_RUNTIME)
+    require(after["repair_files"]["service"]["sha256"]
+            == sha256_bytes(expected_service.encode()),
+            "recovery did not restore the prior service bytes")
+    require(after["repair_files"]["staged"]["type"] == "missing",
+            "recovery left a staged target")
+    require(after["repair_units"][REPAIR_TIMER]["ActiveState"] == "active",
+            "recovery did not restore the active timer")
+    require(after["repair_units"][REPAIR_PATH_UNIT]["ActiveState"]
+            == "inactive", "recovery activated the inactive path")
+    require(after["repair_units"][REPAIR_PATH_UNIT]["UnitFileState"]
+            == "enabled", "recovery lost the path enablement")
+    for key in ("timer", "timer_wants", "path", "path_wants", "dropin"):
+        require(after["repair_files"][key] == before["repair_files"][key],
+                "recovery changed the " + key + " path")
+    return {"phase": "activators-recover", "before": before,
+            "after": after, "record_before": record_before,
+            "record_after": record_after, "cli": cli,
+            "preserved": check_preserved({"phase": "activators-recover"})}
+
+
+def activators_repeat(args):
+    rolled = [record_summary(path) for path in records_in(REPAIR_RECORDS)
+              if record_summary(path).get("outcome") == "rolled_back"]
+    require(len(rolled) == 1, "repeat requires one rolled-back record")
+    path = rolled[0]["path"]
+    before = record_summary(path)
+    cli = cli_activators("recover", ["--record", path])
+    after = record_summary(path)
+    require(cli["rc"] == 2, "repeated recovery did not refuse")
+    require(before.get("sha256") == after.get("sha256"),
+            "repeated recovery changed the retained record")
+    return {"phase": "activators-repeat", "record_before": before,
+            "record_after": after, "cli": cli}
+
+
+def activators_inspect(args):
+    repair = repair_snapshot()
+    tick = snapshot()
+    expected_service = repair_adapter().render_unit(PYTHON_RUNTIME)
+    require(repair["repair_files"]["service"]["sha256"]
+            == sha256_bytes(expected_service.encode()),
+            "final repair service bytes do not match the prior runtime")
+    require(repair["repair_units"][REPAIR_TIMER]["ActiveState"] == "active",
+            "final repair timer is not active")
+    require(repair["repair_units"][REPAIR_PATH_UNIT]["ActiveState"]
+            == "inactive", "final repair path is not inactive")
+    require(repair["repair_units"][REPAIR_PATH_UNIT]["UnitFileState"]
+            == "enabled", "final repair path is not enabled")
+    require(repair["repair_files"]["staged"]["type"] == "missing",
+            "final repair state retains a staged target")
+    require(repair["repair_files"]["trigger"]["type"] == "missing",
+            "final repair state retains the path trigger")
+    require(not REPAIR_PAUSE_MARKER.exists(),
+            "final repair state retains the pause marker")
+    for rogue in (UNIT_DIR / "crq-repair.socket",
+                  REPAIR_DROPIN_DIR / "20-rogue.conf",
+                  UNIT_DIR / "default.target.wants" / REPAIR_TIMER):
+        require(not rogue.exists() and not rogue.is_symlink(),
+                "final repair state retains a rogue inventory entry: "
+                + str(rogue))
+    saved = baseline()
+    require(tick["state"] == saved["state"],
+            "final tick state changed the preserved queue/heartbeat bytes")
+    require(tick["history"]["sha256"] == saved["history_sha256"],
+            "final tick state changed the historical record")
+    require([item["path"] for item in tick["records"]]
+            == saved["record_paths"],
+            "final tick state changed the original record set")
+    require(tick["units"][TIMER]["ActiveState"] == "inactive",
+            "final tick timer is not inactive")
+    require(tick["units"][TIMER]["UnitFileState"] == "enabled",
+            "final tick timer is not enabled")
+    unrelated_path = FIXTURE / "activators-unrelated.json"
+    require(unrelated_path.is_file(), "unrelated process identity is missing")
+    unrelated = json.loads(unrelated_path.read_text())
+    state = process_state(unrelated["pid"])
+    require(state["alive"], "the switch signalled the unrelated process")
+    require(state.get("starttime") == unrelated.get("starttime"),
+            "the unrelated process identity changed")
+    try:
+        os.killpg(unrelated["pid"], 15)
+    except ProcessLookupError:
+        pass
+    deadline = time.time() + 5
+    while time.time() < deadline and process_state(unrelated["pid"])["alive"]:
+        time.sleep(0.1)
+    require(not process_state(unrelated["pid"])["alive"],
+            "harness cleanup did not stop the unrelated process")
+    unrelated_path.unlink(missing_ok=True)
+    return {"phase": "activators-inspect", "repair": repair, "tick": tick,
+            "unrelated": {"pid": unrelated["pid"],
+                          "starttime": unrelated.get("starttime"),
+                          "alive_before_cleanup": True,
+                          "alive_after_cleanup": False},
+            "preserved": check_preserved({"phase": "activators-inspect"})}
+
+
 def main(argv=None):
     phases = ("prepare", "drain-alive", "switch-node", "drain-ambiguous",
               "switch-python", "drain-harvest", "interrupt",
@@ -1665,7 +2631,8 @@ def main(argv=None):
               "host-identity", "matrix-switch-node",
               "matrix-reset-python", "matrix-reset-python-final",
               *MATRIX_CASES.keys(),
-              *(name + "-observe" for name in MATRIX_CASES))
+              *(name + "-observe" for name in MATRIX_CASES),
+              *ACTIVATOR_PHASES)
     parser = argparse.ArgumentParser()
     parser.add_argument("phase", choices=phases)
     parser.add_argument("--record")
@@ -1712,6 +2679,24 @@ def main(argv=None):
         elif args.phase.endswith("-observe") \
                 and args.phase[:-len("-observe")] in MATRIX_CASES:
             payload = matrix_observe_phase(args)
+        elif args.phase == "activators-install":
+            payload = activators_install(args)
+        elif args.phase == "activators-positive":
+            payload = activators_positive(args)
+        elif args.phase == "activators-unknown":
+            payload = activators_unknown(args)
+        elif args.phase == "activators-fence":
+            payload = activators_fence(args)
+        elif args.phase == "activators-switch-back":
+            payload = activators_switch_back(args)
+        elif args.phase == "activators-interrupt":
+            payload = activators_interrupt(args)
+        elif args.phase == "activators-recover":
+            payload = activators_recover(args)
+        elif args.phase == "activators-repeat":
+            payload = activators_repeat(args)
+        elif args.phase == "activators-inspect":
+            payload = activators_inspect(args)
         else:
             payload = {"snapshot": snapshot()}
         PHASE_DIR.mkdir(parents=True, exist_ok=True)
