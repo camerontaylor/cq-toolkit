@@ -45,6 +45,13 @@ describe('followUpCommand and renderFindingsSection', () => {
     const section = renderFindingsSection(report);
     expect(section.startsWith(DEV_FINDINGS_SECTION_MARKER)).toBe(true);
     expect(section).toContain('<!-- /cq:dev-findings -->');
+    // A no-stop report WITHOUT a selection is the clean-run framing: the
+    // gates were green and the draft exists for readiness gaps — never the
+    // round cap's "stopped" text.
+    expect(section).toContain('## Open findings after a clean address run (readiness gaps)');
+    expect(section).toContain('review.address finished clean');
+    expect(section).toContain('readiness gaps');
+    expect(section).not.toContain('round cap');
     // mdLine: pipes escape even inside code spans; mdSafe rewrites backticks
     // to typographic apostrophes and strips angle brackets.
     expect(section).toContain('`c001\\|x`');
@@ -66,5 +73,20 @@ describe('followUpCommand and renderFindingsSection', () => {
     const section = renderFindingsSection(addressReport(state, [], []));
     expect(section).toContain('(no attempts were dispatched)');
     expect(section).toContain('(none)');
+  });
+
+  test('a structured stop keeps its own framing: the round cap never reads as a clean run', () => {
+    const state = {
+      branch: 'feature/x',
+      head: 'a'.repeat(40),
+      base: 'b'.repeat(40),
+    } as WorkState;
+    const section = renderFindingsSection({
+      ...addressReport(state, [], []),
+      stop: 'round-cap' as const,
+    });
+    expect(section).toContain('## Open findings at the review round cap — author evidence');
+    expect(section).toContain('stopped at its round cap');
+    expect(section).not.toContain('clean address run');
   });
 });
