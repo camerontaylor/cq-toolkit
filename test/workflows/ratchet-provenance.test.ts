@@ -480,6 +480,206 @@ describe('ratchet.yml is the baseline guard only', () => {
   );
 });
 
+/**
+ * The guard run-block (the `run: |` body of the monotonic step), extracted
+ * from a ratchet.yml copy and dedented by its 10-space indent — the exact
+ * shell the CI step executes, exercised below against OpResult shapes.
+ */
+function guardRunBlock(text: string): string {
+  // The verdict/outputs lines only: start after the op invocation (which
+  // runs the real CLI in tests) and stop before the final jq pass/fail
+  // check (which the test asserts separately from the recorded verdict).
+  const start = text.indexOf('          verdict=error');
+  expect(start, 'verdict block present').toBeGreaterThanOrEqual(0);
+  const end = text.indexOf("          printf 'verdict=", start);
+  expect(end, 'verdict write present').toBeGreaterThanOrEqual(0);
+  const lines: string[] = [];
+  for (const line of text.slice(start).split('\n')) {
+    if (line.trim() !== '' && !line.startsWith('          ')) break;
+    lines.push(line.startsWith('          ') ? line.slice(10) : '');
+    if (line.startsWith("          printf 'verdict=")) break;
+  }
+  return lines.join('\n');
+}
+
+/** Run one guard snippet under the step's `set` discipline; capture outputs. */
+function runGuard(
+  snippet: string,
+  opJson: string,
+): { status: number | null; outputs: string; jqGateStatus: number | null } {
+  const output = join(tmpdir(), `ratchet-guard-${Math.random().toString(36).slice(2)}`);
+  writeFileSync(output, '');
+  // The snippet goes through a temp script file: a shell-embedded literal
+  // would mangle the JSON's double quotes and braces, and env-var capture
+  // via `printf '%s' "$opJson"` would double-expand inside the -c string.
+  const script = [
+    `opJson=${JSON.stringify(opJson)}`,
+    'out=$(printf \'%s\' "$opJson")',
+    snippet,
+    'true',
+  ].join('\n');
+  const scriptPath = join(tmpdir(), `ratchet-guard-${Math.random().toString(36).slice(2)}.sh`);
+  writeFileSync(scriptPath, script);
+  const result = spawnSync('bash', [scriptPath], {
+    encoding: 'utf8',
+    env: { ...process.env, GITHUB_OUTPUT: output },
+  });
+  // The final jq pass/fail check, exactly as the step ends with: a
+  // non-passing op result must exit nonzero there.
+  const jqGate = spawnSync(
+    'bash',
+    [
+      '-c',
+      'printf \'%s\' "$1" | jq -e \'.status == "ok" and .value.ok == true\' >/dev/null',
+      'jq',
+      opJson,
+    ],
+    { encoding: 'utf8' },
+  );
+  return {
+    status: result.status,
+    outputs: existsSync(output) ? readFileSync(output, 'utf8') : '',
+    jqGateStatus: jqGate.status,
+  };
+}
+
+describe('ratchet.yml guard verdict mapping (PR #1535 review F1/F2)', () => {
+  const OK_TRUE = JSON.stringify({
+    status: 'ok',
+    value: { ok: true, violations: [], filesChecked: 1 },
+  });
+  const cases = [
+    [
+      'loosened value',
+      JSON.stringify({
+        status: 'ok',
+        value: {
+          ok: false,
+          violations: [{ path: 'baselines/x.json', why: 'loosened' }],
+          filesChecked: 1,
+        },
+      }),
+    ],
+    [
+      'direction changed',
+      JSON.stringify({
+        status: 'ok',
+        value: {
+          ok: false,
+          violations: [{ path: 'baselines/x.json', why: 'direction changed' }],
+          filesChecked: 1,
+        },
+      }),
+    ],
+    [
+      'unit changed',
+      JSON.stringify({
+        status: 'ok',
+        value: {
+          ok: false,
+          violations: [{ path: 'baselines/x.json', why: 'unit changed' }],
+          filesChecked: 1,
+        },
+      }),
+    ],
+    [
+      'deleted without replacement',
+      JSON.stringify({
+        status: 'ok',
+        value: {
+          ok: false,
+          violations: [{ path: 'baselines/x.json', why: 'deleted without replacement' }],
+          filesChecked: 1,
+        },
+      }),
+    ],
+    [
+      'unparsable baseline diff',
+      JSON.stringify({
+        status: 'ok',
+        value: {
+          ok: false,
+          violations: [{ path: 'baselines/x.json', why: 'unparsable baseline diff' }],
+          filesChecked: 1,
+        },
+      }),
+    ],
+    ['op failed', JSON.stringify({ status: 'failed', error: 'crash' })],
+    ['needs-human', JSON.stringify({ status: 'needs-human', reason: 'x' })],
+    ['indeterminate', JSON.stringify({ status: 'indeterminate', detail: 'x' })],
+    ['budget-exhausted', JSON.stringify({ status: 'budget-exhausted' })],
+    ['not JSON', 'garbage'],
+  ] as const;
+
+  it.each(bothCopies('ratchet.yml'))(
+    '%s: clean op passes and records verdict=passed',
+    (_label, text) => {
+      const run = runGuard(guardRunBlock(text), OK_TRUE);
+      expect(run.status, run.outputs).toBe(0);
+      expect(run.outputs).toBe('verdict=passed\n');
+    },
+  );
+
+  it.each(
+    cases.flatMap(([name, json]) =>
+      bothCopies('ratchet.yml').map(([l, t]) => [`${l}: ${name}`, t, json] as const),
+    ),
+  )('%s records the honest verdict (jq verdict + step gate)', (_label, text, json) => {
+    // The 'not JSON' case cannot be parsed; classify by the shape check
+    // itself (the same jq program the step runs for its verdict).
+    const rejected =
+      spawnSync('jq', ['-e', '.status == "ok" and .value.ok == false'], {
+        input: json,
+        encoding: 'utf8',
+      }).status === 0;
+    const run = runGuard(guardRunBlock(text), json);
+    // The verdict line mirrors the op's own verdict even on a failing
+    // step; the trailing jq gate reproduces the step's pass/fail.
+    expect(run.outputs).toBe(rejected ? 'verdict=loosened\n' : 'verdict=error\n');
+    expect(run.jqGateStatus, 'jq gate fails on every non-passing op').not.toBe(0);
+  });
+
+  it.each(bothCopies('ratchet.yml'))(
+    '%s: propose-drop fires only on the loosened verdict (never drop)',
+    (_label, text) => {
+      const jobs = jobBlocks(code(text));
+      const guard = jobs.get('ratchet');
+      const propose = jobs.get('propose-drop');
+      expect(guard, 'ratchet job').toBeDefined();
+      expect(propose, 'propose-drop job').toBeDefined();
+      expect(guard).toMatch(/verdict: \$\{\{ steps\.monotonic\.outputs\.verdict \}\}/);
+      expect(guard).toMatch(/drop: \$\{\{ steps\.monotonic\.outcome == 'failure' \}\}/);
+      expect(propose).toMatch(
+        /if: github\.base_ref == 'main' && needs\.ratchet\.outputs\.verdict == 'loosened'/,
+      );
+      expect(propose).not.toMatch(/outputs\.drop/);
+      // The issue body claims only a REJECTED diff: every ok:false verdict
+      // (loosened, direction/unit changed, unreplaced delete, unparsable)
+      // reaches it, so it must not name a cause the op did not report.
+      expect(propose).toContain(
+        'Ratchet baseline monotonicity guard rejected the baseline diff on PR #${PR_NUMBER}.',
+      );
+      expect(propose).not.toMatch(/guard failed[^\n]*loosened/);
+    },
+  );
+
+  it.each(bothCopies('ratchet.yml'))(
+    '%s: issue lookup walks the issues connection to exhaustion',
+    (_label, text) => {
+      const jobs = jobBlocks(code(text));
+      const propose = jobs.get('propose-drop');
+      expect(propose).toBeDefined();
+      // The exact-title scan must use the paginated issues connection
+      // (gh api --paginate), not gh issue list (no --paginate flag; the
+      // search API caps at 1,000 results).
+      expect(propose).toMatch(
+        /gh api 'repos\/\$\{GH_REPO\}\/issues\?state=open&per_page=100' --paginate --jq '\[\.\[\] \| select\(\.pull_request == null and \.title == "ratchet"\)\]\[0\]\.number \/\/ empty'/,
+      );
+      expect(propose).not.toMatch(/gh issue list/);
+    },
+  );
+});
+
 describe('trusted recompute lockfile guard', () => {
   it.each([false, true])('skips only when the PR changes the lockfile (%s)', (changed) => {
     const root = mkdtempSync(join(tmpdir(), 'recompute-lockfile-'));

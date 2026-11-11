@@ -28,10 +28,12 @@ jobs:
     timeout-minutes: 10
     outputs:
       # One output per failure cause (5a9fc790): a tool failure (a crashing
-      # CLI, a missing jq, an op-level error) is NOT a baseline loosening and
-      # must not be reported as one. Only the guard's own verdict
-      # (.value.ok == false) sets loosened.
-      loosened: ${{ steps.monotonic.outputs.verdict == 'loosened' }}
+      # CLI, a missing jq, an op-level error) is NOT a baseline rejection and
+      # must not be reported as one. The verdict is three-way (F2 on PR
+      # #1535): 'passed' when the op judged the diff clean, 'loosened' only
+      # when it rejected the diff, 'error' when the op itself failed or the
+      # output is not valid JSON.
+      verdict: ${{ steps.monotonic.outputs.verdict }}
       drop: ${{ steps.monotonic.outcome == 'failure' }}
     steps:
       - name: Check out the repo (full history — the guard needs the base diff)
@@ -70,12 +72,15 @@ jobs:
           # fails), then judges baseline files alone.
           out="$(node dist/cli.js ratchet.monotonicGuard --repo=. --base="origin/${PR_BASE}" --head=HEAD)"
           printf '%s\n' "$out"
-          # The exact verdict reaches the job outputs through GITHUB_OUTPUT:
-          # 'loosened' only when the op judged the diff and found a
-          # loosening; 'error' when the op itself failed or the output is
-          # not valid JSON. jq still decides the step's pass/fail.
+          # The exact verdict reaches the job outputs through GITHUB_OUTPUT.
+          # 'loosened' covers every ok:false rejection — loosened values,
+          # direction/unit changes, unreplaced deletes, unparsable diffs —
+          # so the issue body can speak of a REJECTED diff without naming a
+          # cause the op did not report (F1 on PR #1535).
           verdict=error
-          if printf '%s' "$out" | jq -e '.status == "ok" and .value.ok == false' >/dev/null 2>&1; then
+          if printf '%s' "$out" | jq -e '.status == "ok" and .value.ok == true' >/dev/null 2>&1; then
+            verdict=passed
+          elif printf '%s' "$out" | jq -e '.status == "ok" and .value.ok == false' >/dev/null 2>&1; then
             verdict=loosened
           fi
           printf 'verdict=%s\n' "$verdict" >> "$GITHUB_OUTPUT"
@@ -85,7 +90,7 @@ jobs:
     # Fork tokens may be read-only; reporting remains advisory.
     continue-on-error: true
     needs: ratchet
-    if: github.base_ref == 'main' && needs.ratchet.outputs.loosened == 'true'
+    if: github.base_ref == 'main' && needs.ratchet.outputs.verdict == 'loosened'
     runs-on: ubuntu-latest
     permissions:
       issues: write
@@ -98,11 +103,17 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
-          # Paginate (--limit 1000), never the 30-issue default page (b8b49449):
-          # a fixed limit can still miss the exact-title issue once enough
-          # other issues exist; 1000 is gh's own page size ceiling.
-          issue="$(gh issue list --state open --search 'ratchet in:title' --limit 1000 --json number,title --jq '[.[] | select(.title == "ratchet")][0].number // empty')"
-          body="Ratchet baseline monotonicity guard failed on PR #${PR_NUMBER}: a committed baseline was loosened, or deleted without a replacement. Evidence: ${RUN_URL}"
+          # gh issue list has no --paginate flag (this gh), so walk the
+          # issues connection to exhaustion through `gh api --paginate`
+          # — not the 1,000-result-capped search API — so the exact-title
+          # issue cannot hide behind a page boundary (b8b49449; F3 on PR
+          # #1535).
+          issue="$(gh api 'repos/${GH_REPO}/issues?state=open&per_page=100' --paginate --jq '[.[] | select(.pull_request == null and .title == "ratchet")][0].number // empty')"
+          # Every ok:false verdict is a REJECTION — loosened values, deleted
+          # baselines, direction/unit changes, unparsable diffs — so the
+          # body claims only that; the run URL carries the specific
+          # violation lines (F1 on PR #1535).
+          body="Ratchet baseline monotonicity guard rejected the baseline diff on PR #${PR_NUMBER}. Evidence: ${RUN_URL}"
           if [ -n "$issue" ]; then
             gh issue edit "$issue" --body "$body"
           else
