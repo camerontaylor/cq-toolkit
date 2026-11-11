@@ -3518,6 +3518,19 @@
       "inbox_jobs": {}
     },
     {
+      "name": "canonical-backfill-falsy",
+      "queue_json": "{\n  \"items\": [\n    {\n      \"id\": \"backfill-finding-1\",\n      \"pr\": 1,\n      \"repair_runs\": {\n        \"a\": {\n          \"pin\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\n          \"canonical_finding_id\": \"\",\n          \"jobs\": [\n            \"crq-historical-F1\"\n          ]\n        }\n      }\n    }\n  ]\n}\n",
+      "canonical": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "pin": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "ok": true,
+      "basis": "canonical-finding",
+      "count": 0,
+      "inbox_reads": [
+        "crq-historical-F1"
+      ],
+      "inbox_jobs": {}
+    },
+    {
       "name": "canonical-unreadable-inbox",
       "queue_json": "{\n  \"items\": [\n    {\n      \"id\": \"pr1-merged\",\n      \"pr\": 1,\n      \"repair_runs\": {\n        \"a\": {\n          \"pin\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\n          \"jobs\": [\n            \"crq-historical-F1\"\n          ]\n        }\n      }\n    }\n  ]\n}\n",
       "canonical": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",

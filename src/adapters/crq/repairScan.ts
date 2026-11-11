@@ -126,7 +126,25 @@ async function gitleaksVerdict(input: {
     }
     const hits = components[0]?.hits;
     if (!Array.isArray(hits)) return { gitleaks: 'error', gitleaksHits: 0 };
-    const gitleaksHits = hits.reduce((sum, hit) => sum + hit.lines.length, 0);
+    let gitleaksHits = 0;
+    for (const hit of hits) {
+      if (hit === null || typeof hit !== 'object') {
+        return { gitleaks: 'error', gitleaksHits: 0 };
+      }
+      const record = hit as { readonly ruleId?: unknown; readonly lines?: unknown };
+      if (typeof record.ruleId !== 'string' || record.ruleId === '') {
+        return { gitleaks: 'error', gitleaksHits: 0 };
+      }
+      if (!Array.isArray(record.lines) || record.lines.length === 0) {
+        return { gitleaks: 'error', gitleaksHits: 0 };
+      }
+      for (const line of record.lines) {
+        if (typeof line !== 'number' || !Number.isSafeInteger(line) || line < 1) {
+          return { gitleaks: 'error', gitleaksHits: 0 };
+        }
+      }
+      gitleaksHits += record.lines.length;
+    }
     return { gitleaks: gitleaksHits > 0 ? 'hits' : 'clean', gitleaksHits };
   } catch {
     return { gitleaks: 'error', gitleaksHits: 0 };
@@ -135,8 +153,9 @@ async function gitleaksVerdict(input: {
 
 /**
  * Build the scanner. `gitleaksAvailable` is an injected availability probe;
- * an absent probe means the caller owns the binary check. An unavailable or
- * failing gitleaks is never reported clean.
+ * an absent probe means the caller owns the binary check. A failing gitleaks
+ * is never reported clean; an unavailable gitleaks reports `not-run` with
+ * `clean` decided by the denylist alone (the caller classifies it as skipped).
  */
 export function makeRepairScan(input: {
   readonly rules: readonly DenylistRule[];

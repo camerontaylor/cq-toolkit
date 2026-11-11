@@ -163,7 +163,7 @@ describe('repair scan adapter allowlist and denylist', () => {
 describe('repair scan adapter gitleaks classification', () => {
   const cleanPatch = fullSourceScanPatch('src/lock.ts', 'nothing\n');
 
-  test('not-run is never clean', async () => {
+  test('not-run stays clean and reports not-run', async () => {
     const scan = makeRepairScan({
       rules: [],
       gitleaksEffects: fakeGitleaks({}),
@@ -194,6 +194,48 @@ describe('repair scan adapter gitleaks classification', () => {
     expect(result.report.gitleaks).toBe('clean');
     expect(result.report.gitleaksHits).toBe(0);
     expect(result.clean).toBe(true);
+  });
+
+  test('exit 0 with mapped findings is hits, never clean', async () => {
+    const scan = makeRepairScan({
+      rules: [],
+      gitleaksEffects: fakeGitleaks({
+        exitCode: 0,
+        report: [{ File: 'component-0.txt', StartLine: 1, RuleID: 'gitleaks-test' }],
+      }),
+      gitleaksAvailable: () => true,
+    });
+    const result = await scan.scanDiff({
+      patch: cleanPatch,
+      name: 'scan.json',
+      base: null,
+      head: SOURCE,
+    });
+    expect(result.report.gitleaks).toBe('hits');
+    expect(result.report.gitleaksHits).toBe(1);
+    expect(result.clean).toBe(false);
+  });
+
+  test('exit 0 with an unmappable report row is an error, not clean', async () => {
+    const scan = makeRepairScan({
+      rules: [],
+      gitleaksEffects: fakeGitleaks({
+        exitCode: 0,
+        report: [{ File: 'elsewhere.txt', StartLine: 1, RuleID: 'gitleaks-test' }],
+      }),
+      gitleaksAvailable: () => true,
+    });
+    const result = await scan.scanDiff({
+      patch: cleanPatch,
+      name: 'scan.json',
+      base: null,
+      head: SOURCE,
+    });
+    expect(result.report.gitleaks).toBe('error');
+    expect(result.report.gitleaksHits).toBe(0);
+    expect(result.clean).toBe(false);
+    expect(JSON.stringify(result)).not.toContain('elsewhere.txt');
+    expect(JSON.stringify(result)).not.toContain('gitleaks-test');
   });
 
   test('gitleaks findings are dirty and redacted', async () => {

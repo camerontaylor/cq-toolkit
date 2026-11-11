@@ -191,6 +191,43 @@ describe('round derivation against the Python oracle', () => {
     });
     expect(missingResult).toEqual({ ok: true, value: { basis: 'pr-pin', count: 1 } });
   });
+
+  test('a rejected inbox read is round-history-unreadable', async () => {
+    const pin = 'a'.repeat(40);
+    const queue = new JsonObject([
+      [
+        'items',
+        [
+          new JsonObject([
+            ['id', 'item'],
+            [
+              'repair_runs',
+              new JsonObject([
+                [
+                  'a',
+                  new JsonObject([
+                    ['pin', pin],
+                    ['canonical_finding_id', CANONICAL],
+                    ['jobs', [OLD]],
+                  ]),
+                ],
+              ]),
+            ],
+          ]),
+        ],
+      ],
+    ]);
+    const result = await deriveRoundCount({
+      queue,
+      canonicalFindingId: CANONICAL,
+      pin,
+      item: asObject(asArray(queue.get('items'))[0]),
+      readInboxJob: async () => {
+        throw new Error('synthetic inbox failure');
+      },
+    });
+    expect(result).toEqual({ ok: false, refusal: 'round-history-unreadable' });
+  });
 });
 
 describe('canonical delivery validator against the Python oracle', () => {
@@ -248,4 +285,54 @@ describe('canonical handoff precondition against the Python oracle', () => {
       expect(result.refusal).toBe(expected);
     });
   }
+
+  test('loaded job identity and source binding are checked before handoff', () => {
+    const source = 'a'.repeat(40);
+    const rowText = '{"receipt":{"repair_task":"crq-historical-F1"}}';
+    const job = (updates: ReadonlyArray<readonly [string, JsonValue]>): JsonObject => {
+      const base: Array<readonly [string, JsonValue]> = [
+        ['job', PREPARED],
+        ['canonical_finding_id', CANONICAL],
+        ['origin_job', OLD],
+        ['source_sha', source],
+        ['repair_base', source],
+      ];
+      return new JsonObject([...new Map([...base, ...updates]).entries()]);
+    };
+    const check = (candidate: JsonObject, sourceSha = source) =>
+      canonicalHandoffRefusal({
+        rowText,
+        job: candidate,
+        findingId: CANONICAL,
+        previousTask: OLD,
+        preparedJobId: PREPARED,
+        sourceSha,
+      });
+
+    expect(check(job([]))).toEqual({ ok: true, alreadyHandedOff: false });
+    expect(check(job([['job', 'crq-foreign-F1']]))).toEqual({
+      ok: false,
+      refusal: 'canonical-handoff-mismatch',
+    });
+    expect(check(job([['origin_job', 'crq-other-F1']]))).toEqual({
+      ok: false,
+      refusal: 'canonical-handoff-mismatch',
+    });
+    expect(check(job([['canonical_finding_id', 'e'.repeat(64)]]))).toEqual({
+      ok: false,
+      refusal: 'canonical-handoff-mismatch',
+    });
+    expect(check(job([['source_sha', 'b'.repeat(40)]]))).toEqual({
+      ok: false,
+      refusal: 'canonical-handoff-mismatch',
+    });
+    expect(check(job([['repair_base', 'b'.repeat(40)]]))).toEqual({
+      ok: false,
+      refusal: 'canonical-handoff-mismatch',
+    });
+    expect(check(job([]), 'b'.repeat(40))).toEqual({
+      ok: false,
+      refusal: 'canonical-handoff-mismatch',
+    });
+  });
 });

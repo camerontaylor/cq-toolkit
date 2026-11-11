@@ -167,6 +167,19 @@ function refusal(value: RepairRefusal): { readonly ok: false; readonly refusal: 
   return { ok: false, refusal: value };
 }
 
+async function stateRead<T>(
+  read: () => Promise<T>,
+  failure: RepairRefusal,
+): Promise<
+  { readonly ok: true; readonly value: T } | { readonly ok: false; readonly refusal: RepairRefusal }
+> {
+  try {
+    return { ok: true, value: await read() };
+  } catch {
+    return { ok: false, refusal: failure };
+  }
+}
+
 function parseObject(text: string): JsonObject | undefined {
   try {
     const value = parseJsonValue(text);
@@ -202,8 +215,13 @@ function isScanResult(value: unknown): value is RepairScanResult {
 /** Classify a validated scanner result without ever treating not-run as clean. */
 function scanVerdict(result: RepairScanResult): RepairScanEvidence['verdict'] | 'inconsistent' {
   const { report } = result;
-  const hasHits = report.denylistHits > 0 || report.gitleaks === 'hits';
   if (report.gitleaks === 'error') return 'error';
+  const countConsistent =
+    report.gitleaks === 'hits' ? report.gitleaksHits > 0 : report.gitleaksHits === 0;
+  if (!countConsistent || (report.denylistHits > 0 && report.denylistRules === 0)) {
+    return 'inconsistent';
+  }
+  const hasHits = report.denylistHits > 0 || report.gitleaksHits > 0;
   if (result.clean === hasHits) return 'inconsistent';
   if (result.clean && report.gitleaks === 'not-run') return 'skipped';
   return result.clean ? 'clean' : 'dirty';
@@ -331,17 +349,27 @@ export async function prepareRepairGates(
         },
       };
     }
-    const preparedJobText = await effects.state.readPreparedJob(verified.value.jobId);
+    const preparedRead = await stateRead(
+      () => effects.state.readPreparedJob(verified.value.jobId),
+      'prepared-job-unreadable',
+    );
+    if (!preparedRead.ok) return preparedRead;
+    const preparedJobText = preparedRead.value;
     if (preparedJobText === undefined) return refusal('prepared-job-unreadable');
     const preparedJob = parseObject(preparedJobText);
     if (preparedJob === undefined) return refusal('prepared-job-unreadable');
-    const rowText = await effects.state.readTriageRow(canonicalId);
+    const rowRead = await stateRead(
+      () => effects.state.readTriageRow(canonicalId),
+      'canonical-handoff-unavailable',
+    );
+    if (!rowRead.ok) return rowRead;
     const handoff = canonicalHandoffRefusal({
-      rowText,
+      rowText: rowRead.value,
       job: preparedJob,
       findingId: canonicalId,
       previousTask: input.oldJobId,
       preparedJobId: verified.value.jobId,
+      sourceSha: input.sourceSha,
     });
     if (!handoff.ok) return handoff;
     const plan: RepairHandoffPlan = {
@@ -419,13 +447,18 @@ export async function prepareRepairGates(
 
   let handoff: RepairHandoffPlan | undefined;
   if (canonicalId !== undefined) {
-    const rowText = await effects.state.readTriageRow(canonicalId);
+    const rowRead = await stateRead(
+      () => effects.state.readTriageRow(canonicalId),
+      'canonical-handoff-unavailable',
+    );
+    if (!rowRead.ok) return rowRead;
     const result = canonicalHandoffRefusal({
-      rowText,
+      rowText: rowRead.value,
       job: proposal.job,
       findingId: canonicalId,
       previousTask: input.oldJobId,
       preparedJobId: proposal.jobId,
+      sourceSha: input.sourceSha,
     });
     if (!result.ok) return result;
     handoff = {

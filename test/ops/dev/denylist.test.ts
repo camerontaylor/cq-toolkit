@@ -326,8 +326,55 @@ describe('makeGitleaksDefaultsScanner', () => {
       { RuleID: 'x', File: '/somewhere/unknown.txt', StartLine: 3 },
     ]);
     await expect(makeGitleaksDefaultsScanner(effects)(components)).rejects.toThrow(
-      /no mappable rows/,
+      /unmappable File/,
     );
+  });
+
+  test('exit 0 with a non-empty unmappable report is a fault too', async () => {
+    const effects = gitleaksEffects(0, [
+      { RuleID: 'x', File: '/somewhere/unknown.txt', StartLine: 3 },
+    ]);
+    await expect(makeGitleaksDefaultsScanner(effects)(components)).rejects.toThrow(
+      /unmappable File/,
+    );
+  });
+
+  test('a non-object report row is a fault, not a skipped finding', async () => {
+    const effects = gitleaksEffects(0, [null]);
+    await expect(makeGitleaksDefaultsScanner(effects)(components)).rejects.toThrow(
+      /non-object row/,
+    );
+  });
+
+  test('a malformed component filename is a fault', async () => {
+    const effects = gitleaksEffects(0, [
+      { RuleID: 'x', File: '/tmp/component-.txt', StartLine: 1 },
+    ]);
+    await expect(makeGitleaksDefaultsScanner(effects)(components)).rejects.toThrow(
+      /unmappable File/,
+    );
+  });
+
+  test('a report row without a mappable StartLine is a fault', async () => {
+    const effects = gitleaksEffects(0, [{ RuleID: 'x', File: '/tmp/component-0.txt' }]);
+    await expect(makeGitleaksDefaultsScanner(effects)(components)).rejects.toThrow(
+      /unmappable StartLine/,
+    );
+  });
+
+  test('a report row without a mappable RuleID is a fault', async () => {
+    const effects = gitleaksEffects(0, [{ File: '/tmp/component-0.txt', StartLine: 1 }]);
+    await expect(makeGitleaksDefaultsScanner(effects)(components)).rejects.toThrow(
+      /unmappable RuleID/,
+    );
+  });
+
+  test('exit 0 with mapped findings reports hits, never clean', async () => {
+    const effects = gitleaksEffects(0, [
+      { RuleID: 'x', File: '/tmp/component-0.txt', StartLine: 1 },
+    ]);
+    const scan = await makeGitleaksDefaultsScanner(effects)(components);
+    expect(scan[0]?.hits).toEqual([{ ruleId: 'x', lines: [1] }]);
   });
 
   test('exit 1 with an unreadable report is a fault (a claim without evidence cannot gate)', async () => {

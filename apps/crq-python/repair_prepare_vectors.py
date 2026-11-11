@@ -151,7 +151,7 @@ def _expected_inbox_reads(queue, canonical, pin, root):
                         value = json.loads(old_path.read_text()).get("canonical_finding_id") or value
                     except (OSError, ValueError):
                         return reads
-                elif not value and str(item.get("id", "")).startswith("backfill-finding-"):
+                elif value is None and str(item.get("id", "")).startswith("backfill-finding-"):
                     return reads
                 if value == canonical:
                     break
@@ -1006,6 +1006,11 @@ def _round_cases():
     run("canonical-backfill-missing", {"items": [
         {"id": "backfill-finding-1", "pr": 1, "repair_runs": {
             "a": {"pin": SOURCE, "jobs": [OLD]},
+        }},
+    ]}, CANONICAL, no_inbox)
+    run("canonical-backfill-falsy", {"items": [
+        {"id": "backfill-finding-1", "pr": 1, "repair_runs": {
+            "a": {"pin": SOURCE, "canonical_finding_id": "", "jobs": [OLD]},
         }},
     ]}, CANONICAL, no_inbox)
     run("canonical-unreadable-inbox", {"items": [

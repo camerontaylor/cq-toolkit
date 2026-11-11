@@ -246,13 +246,18 @@ export async function deriveRoundCount(input: {
       }
       for (const oldId of jobs ?? []) {
         if (typeof oldId !== 'string') return refusal('round-history-unreadable');
-        const text = await input.readInboxJob(oldId);
+        let text: string | undefined;
+        try {
+          text = await input.readInboxJob(oldId);
+        } catch {
+          return refusal('round-history-unreadable');
+        }
         if (text !== undefined) {
           const parsed = parseInboxJob(text);
           if (parsed === undefined) return refusal('round-history-unreadable');
           const fromInbox = parsed.get('canonical_finding_id');
           if (pythonTruthy(fromInbox)) canonical = fromInbox;
-        } else if (!pythonTruthy(canonical)) {
+        } else if (canonical === undefined || canonical === null) {
           const itemId = item.get('id');
           if (typeof itemId === 'string' && itemId.startsWith('backfill-finding-')) {
             return refusal('round-history-unreadable');
@@ -279,12 +284,17 @@ export function canonicalHandoffRefusal(input: {
   readonly findingId: string;
   readonly previousTask: string;
   readonly preparedJobId: string;
+  readonly sourceSha?: string;
 }):
   | { readonly ok: true; readonly alreadyHandedOff: boolean }
   | { readonly ok: false; readonly refusal: RepairRefusal } {
   if (
+    input.job.get('job') !== input.preparedJobId ||
     input.job.get('canonical_finding_id') !== input.findingId ||
-    input.job.get('origin_job') !== input.previousTask
+    input.job.get('origin_job') !== input.previousTask ||
+    (input.sourceSha !== undefined &&
+      (input.job.get('source_sha') !== input.sourceSha ||
+        input.job.get('repair_base') !== input.sourceSha))
   ) {
     return refusal('canonical-handoff-mismatch');
   }

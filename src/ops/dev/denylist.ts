@@ -377,10 +377,12 @@ export const GITLEAKS_TIMEOUT_MS = 10 * 60 * 1000;
  * are written one-per-file into a scratch dir OUTSIDE the worktree, gitleaks
  * runs over them (`detect --no-git`, JSON report, redacted), and findings
  * map back to components with absolute line numbers. The scratch dir is
- * removed afterwards. Exit 0 = clean; exit 1 = findings (the report is the
- * evidence); ANY other exit is a run FAULT (thrown — the caller refuses the
- * upload, never uploads unscanned). An exit 1 with an unreadable report is
- * also a fault: a claimed finding without readable evidence cannot gate.
+ * removed afterwards. Exit 0 = clean unless the report contains findings;
+ * exit 1 = findings (the report is the evidence); ANY other exit is a run
+ * FAULT (thrown — the caller refuses the upload, never uploads unscanned).
+ * An exit 1 with an unreadable report is also a fault: a claimed finding
+ * without readable evidence cannot gate. A report row that cannot be mapped
+ * back to its component is a fault at every exit code, including 0.
  */
 export function makeGitleaksDefaultsScanner(effects: GitleaksEffects): DiffSecretScanner {
   return async (components, options): Promise<ComponentScan[]> => {
@@ -432,31 +434,49 @@ export function makeGitleaksDefaultsScanner(effects: GitleaksEffects): DiffSecre
       const perComponent = new Map<string, Map<string, number[]>>();
       // (the mapping loop below fills this; the exit-1 verdict check follows it)
       for (const entry of report) {
-        if (entry === null || typeof entry !== 'object') continue;
+        if (entry === null || typeof entry !== 'object') {
+          throw new Error('gitleaks report contained a non-object row — the upload is refused');
+        }
         const record = entry as { File?: unknown; StartLine?: unknown; RuleID?: unknown };
         const file = typeof record.File === 'string' ? basename(record.File) : undefined;
-        if (file === undefined || !file.startsWith('component-') || !file.endsWith('.txt'))
-          continue;
-        const index = Number(file.slice('component-'.length, -'.txt'.length));
+        if (file === undefined || !file.startsWith('component-') || !file.endsWith('.txt')) {
+          throw new Error('gitleaks report contained an unmappable File — the upload is refused');
+        }
+        const indexText = file.slice('component-'.length, -'.txt'.length);
+        if (!/^(?:0|[1-9][0-9]*)$/.test(indexText)) {
+          throw new Error('gitleaks report contained an unmappable File — the upload is refused');
+        }
+        const index = Number(indexText);
         const component = components[index];
-        if (component === undefined) continue;
-        const line = typeof record.StartLine === 'number' ? record.StartLine : 0;
-        const ruleId =
-          typeof record.RuleID === 'string' && record.RuleID !== ''
-            ? record.RuleID
-            : 'gitleaks:unknown';
+        if (component === undefined) {
+          throw new Error(
+            'gitleaks report row mapped outside the component set — the upload is refused',
+          );
+        }
+        if (
+          typeof record.StartLine !== 'number' ||
+          !Number.isSafeInteger(record.StartLine) ||
+          record.StartLine < 1
+        ) {
+          throw new Error(
+            'gitleaks report row had an unmappable StartLine — the upload is refused',
+          );
+        }
+        if (typeof record.RuleID !== 'string' || record.RuleID === '') {
+          throw new Error('gitleaks report row had an unmappable RuleID — the upload is refused');
+        }
+        const line = record.StartLine;
+        const ruleId = record.RuleID;
         const byRule = perComponent.get(component.component) ?? new Map<string, number[]>();
         const lines = byRule.get(ruleId) ?? [];
         if (!lines.includes(line)) lines.push(line);
         byRule.set(ruleId, lines);
         perComponent.set(component.component, byRule);
       }
-      // EXIT 1 MEANS FINDINGS EXIST: a readable-but-empty report, or rows
-      // that all failed to map to a component, can never pass as a clean
-      // scan — the scanner's failing verdict without mapped evidence is a
-      // fault, and the upload is refused.
-      const mappedHits = [...perComponent.values()].reduce((sum, byRule) => sum + byRule.size, 0);
-      if (result.exitCode === 1 && mappedHits === 0) {
+      // EXIT 1 MEANS FINDINGS EXIST: a readable-but-empty report can never
+      // pass as a clean scan — the scanner's failing verdict without mapped
+      // evidence is a fault, and the upload is refused.
+      if (result.exitCode === 1 && report.length === 0) {
         throw new Error(
           'gitleaks reported findings (exit 1) but the report yielded no mappable rows — refusing the upload without evidence',
         );

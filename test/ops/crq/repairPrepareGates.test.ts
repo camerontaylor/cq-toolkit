@@ -16,6 +16,7 @@ import {
   type RepairScan,
   type RepairScanEvidence,
   type RepairScanReport,
+  type RepairScanResult,
 } from '../../../src/ops/crq/internal/repairPrepareGates.js';
 import {
   JsonNumber,
@@ -24,6 +25,7 @@ import {
   type JsonValue,
 } from '../../../src/policy/crq/jsonValue.js';
 import { atomicJsonText } from '../../../src/policy/crq/pythonJson.js';
+import type { RepairRefusal } from '../../../src/policy/crq/repairBinding.js';
 
 const OLD_RUN = 'old-run';
 const REMAINING = [
@@ -176,7 +178,11 @@ function triageRow(repairTask: string): string {
   );
 }
 
-function fakeState(row: JsonObject, phase: 'first' | 'second'): FakeState {
+function fakeState(
+  row: JsonObject,
+  phase: 'first' | 'second',
+  throwOn?: 'inbox' | 'prepared' | 'triage',
+): FakeState {
   const input = asObject(row.get('input'));
   const inboxJobs = asObject(row.get('inbox_jobs'));
   const tsRefusal = row.get('ts_refusal');
@@ -190,11 +196,13 @@ function fakeState(row: JsonObject, phase: 'first' | 'second'): FakeState {
     preparedReads,
     async readInboxJob(jobId: string): Promise<string | undefined> {
       inboxReads.push(jobId);
+      if (throwOn === 'inbox') throw new Error('synthetic inbox failure');
       const text = inboxJobs.get(jobId);
       return typeof text === 'string' ? text : undefined;
     },
     async readTriageRow(findingId: string): Promise<string | undefined> {
       triageReads.push(findingId);
+      if (throwOn === 'triage') throw new Error('synthetic triage failure');
       if (phase === 'first') {
         if (tsRefusal === 'canonical-handoff-unavailable') return '{';
         if (tsRefusal === 'canonical-handoff-mismatch') return triageRow('crq-other-F1');
@@ -206,6 +214,7 @@ function fakeState(row: JsonObject, phase: 'first' | 'second'): FakeState {
     },
     async readPreparedJob(jobId: string): Promise<string | undefined> {
       preparedReads.push(jobId);
+      if (throwOn === 'prepared') throw new Error('synthetic prepared failure');
       if (phase !== 'second') return undefined;
       const bytes = row.get('prepared_job_bytes');
       return typeof bytes === 'string' ? bytes : undefined;
@@ -251,6 +260,52 @@ function oldRecord(queueBytes: string): JsonObject {
   const queue = asObject(parseJsonValue(queueBytes));
   const item = asObject(asArray(queue.get('items'))[0]);
   return asObject(asObject(item.get('repair_runs')).get(OLD_RUN));
+}
+
+function gateRow(name: string): JsonObject {
+  const row = asArray(fixture.get('gate_cases'))
+    .map(asObject)
+    .find((entry) => entry.get('name') === name);
+  if (row === undefined) throw new Error(`missing gate case ${name}`);
+  return row;
+}
+
+function fixedScan(result: unknown): FakeScan {
+  const calls: FakeScan['calls'] = [];
+  return {
+    calls,
+    async scanDiff(request) {
+      calls.push({
+        patch: request.patch,
+        name: request.name,
+        base: request.base,
+        head: request.head,
+      });
+      return result as RepairScanResult;
+    },
+  };
+}
+
+function preparedWith(
+  row: JsonObject,
+  updates: ReadonlyArray<readonly [string, JsonValue]>,
+): string {
+  const original = asObject(parseJsonValue(asString(row.get('prepared_job_bytes'))));
+  const replacement = new Map(updates);
+  return atomicJsonText(
+    new JsonObject(original.entries.map(([key, value]) => [key, replacement.get(key) ?? value])),
+  );
+}
+
+function preparedOverride(row: JsonObject, text: string): FakeState {
+  const state = fakeState(row, 'second');
+  return {
+    ...state,
+    async readPreparedJob(jobId: string): Promise<string | undefined> {
+      state.preparedReads.push(jobId);
+      return text;
+    },
+  };
 }
 
 describe('prepareRepairGates against the Python oracle', () => {
@@ -417,6 +472,232 @@ describe('prepareRepairGates against the Python oracle', () => {
       );
       expect(secondState.preparedReads).toEqual([jobId]);
       expect(secondState.triageReads).toEqual([canonical]);
+    });
+  }
+});
+
+describe('scanner result matrix fails closed', () => {
+  const row = gateRow('scan-clean-source-only');
+  const input = inputOf(row);
+  const report = (overrides: Record<string, unknown> = {}): unknown => ({
+    denylistRules: 0,
+    denylistHits: 0,
+    gitleaks: 'clean',
+    gitleaksHits: 0,
+    ...overrides,
+  });
+  const cases: ReadonlyArray<{
+    readonly name: string;
+    readonly result: unknown;
+    readonly refusal: RepairRefusal | undefined;
+  }> = [
+    {
+      name: 'positive gitleaks count with clean status',
+      result: { clean: true, report: report({ gitleaksHits: 1 }) },
+      refusal: 'secret-scan-unavailable',
+    },
+    {
+      name: 'positive gitleaks count with not-run status',
+      result: { clean: true, report: report({ gitleaks: 'not-run', gitleaksHits: 1 }) },
+      refusal: 'secret-scan-unavailable',
+    },
+    {
+      name: 'positive gitleaks count with clean=false and clean status',
+      result: { clean: false, report: report({ gitleaksHits: 1 }) },
+      refusal: 'secret-scan-unavailable',
+    },
+    {
+      name: 'hits status with zero count',
+      result: { clean: false, report: report({ gitleaks: 'hits', gitleaksHits: 0 }) },
+      refusal: 'secret-scan-unavailable',
+    },
+    {
+      name: 'denylist hit with zero rules',
+      result: { clean: false, report: report({ denylistHits: 1 }) },
+      refusal: 'secret-scan-unavailable',
+    },
+    {
+      name: 'clean true with a denylist hit',
+      result: { clean: true, report: report({ denylistRules: 1, denylistHits: 1 }) },
+      refusal: 'secret-scan-unavailable',
+    },
+    {
+      name: 'clean false with no hits',
+      result: { clean: false, report: report() },
+      refusal: 'secret-scan-unavailable',
+    },
+    {
+      name: 'negative gitleaks count',
+      result: { clean: false, report: report({ gitleaksHits: -1 }) },
+      refusal: 'secret-scan-unavailable',
+    },
+    {
+      name: 'non-integer gitleaks count',
+      result: { clean: false, report: report({ gitleaksHits: 1.5 }) },
+      refusal: 'secret-scan-unavailable',
+    },
+    {
+      name: 'string clean flag',
+      result: { clean: 'true', report: report() },
+      refusal: 'secret-scan-unavailable',
+    },
+    {
+      name: 'missing gitleaks count',
+      result: {
+        clean: false,
+        report: { denylistRules: 0, denylistHits: 0, gitleaks: 'clean' },
+      },
+      refusal: 'secret-scan-unavailable',
+    },
+    {
+      name: 'non-object report',
+      result: { clean: true, report: null },
+      refusal: 'secret-scan-unavailable',
+    },
+    {
+      name: 'gitleaks error',
+      result: { clean: false, report: report({ gitleaks: 'error' }) },
+      refusal: 'secret-scan-unavailable',
+    },
+    {
+      name: 'valid denylist dirty',
+      result: { clean: false, report: report({ denylistRules: 1, denylistHits: 1 }) },
+      refusal: 'source-secret-scan-failed',
+    },
+    {
+      name: 'valid gitleaks dirty',
+      result: { clean: false, report: report({ gitleaks: 'hits', gitleaksHits: 1 }) },
+      refusal: 'source-secret-scan-failed',
+    },
+    {
+      name: 'valid clean',
+      result: { clean: true, report: report() },
+      refusal: undefined,
+    },
+    {
+      name: 'valid not-run skipped',
+      result: { clean: true, report: report({ gitleaks: 'not-run' }) },
+      refusal: undefined,
+    },
+  ];
+
+  for (const entry of cases) {
+    test(entry.name, async () => {
+      const scan = fixedScan(entry.result);
+      const result = await prepareRepairGates(input, {
+        git: fakeGit(row),
+        state: fakeState(row, 'first'),
+        scan,
+      });
+      if (entry.refusal === undefined) {
+        expect(result.ok).toBe(true);
+      } else {
+        expect(result).toEqual({ ok: false, refusal: entry.refusal });
+      }
+      expect(scan.calls).toHaveLength(1);
+    });
+  }
+});
+
+describe('state read failures become typed refusals', () => {
+  const row = gateRow('canonical-handoff-old-owner');
+  const input = inputOf(row);
+  const canonical = asString(
+    asObject(parseJsonValue(input.oldJobJson)).get('canonical_finding_id'),
+  );
+  const cleanResult = {
+    clean: true,
+    report: { denylistRules: 0, denylistHits: 0, gitleaks: 'clean', gitleaksHits: 0 },
+  };
+
+  async function firstPreparation(): Promise<{
+    readonly jobId: string;
+    readonly queueBytes: string;
+  }> {
+    const result = await prepareRepairGates(input, {
+      git: fakeGit(row),
+      state: fakeState(row, 'first'),
+      scan: fakeScan(row),
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error('first preparation refused');
+    const queueBytes = result.value.queue?.bytes;
+    if (queueBytes === undefined) throw new Error('first preparation had no queue bytes');
+    return { jobId: result.value.proposal.jobId, queueBytes };
+  }
+
+  test('readInboxJob rejection is round-history-unreadable', async () => {
+    const state = fakeState(row, 'first', 'inbox');
+    const scan = fixedScan(cleanResult);
+    const result = await prepareRepairGates(input, { git: fakeGit(row), state, scan });
+    expect(result).toEqual({ ok: false, refusal: 'round-history-unreadable' });
+    expect(state.inboxReads).toEqual(['crq-previous-F1']);
+    expect(scan.calls).toEqual([]);
+  });
+
+  test('readPreparedJob rejection is prepared-job-unreadable', async () => {
+    const first = await firstPreparation();
+    const state = fakeState(row, 'second', 'prepared');
+    const result = await prepareRepairGates(
+      { ...input, queueJson: first.queueBytes },
+      { git: fakeGit(row), state, scan: fixedScan(cleanResult) },
+    );
+    expect(result).toEqual({ ok: false, refusal: 'prepared-job-unreadable' });
+    expect(state.preparedReads).toEqual([first.jobId]);
+    expect(state.triageReads).toEqual([]);
+  });
+
+  test('idempotent readTriageRow rejection is canonical-handoff-unavailable', async () => {
+    const first = await firstPreparation();
+    const state = fakeState(row, 'second', 'triage');
+    const result = await prepareRepairGates(
+      { ...input, queueJson: first.queueBytes },
+      { git: fakeGit(row), state, scan: fixedScan(cleanResult) },
+    );
+    expect(result).toEqual({ ok: false, refusal: 'canonical-handoff-unavailable' });
+    expect(state.preparedReads).toEqual([first.jobId]);
+    expect(state.triageReads).toEqual([canonical]);
+  });
+
+  test('new-path readTriageRow rejection is canonical-handoff-unavailable', async () => {
+    const state = fakeState(row, 'first', 'triage');
+    const scan = fakeScan(row);
+    const result = await prepareRepairGates(input, { git: fakeGit(row), state, scan });
+    expect(result).toEqual({ ok: false, refusal: 'canonical-handoff-unavailable' });
+    expect(state.inboxReads).toEqual(['crq-previous-F1']);
+    expect(state.triageReads).toEqual([canonical]);
+  });
+
+  const mismatches: ReadonlyArray<{
+    readonly name: string;
+    readonly updates: ReadonlyArray<readonly [string, JsonValue]>;
+  }> = [
+    { name: 'prepared job id mismatch', updates: [['job', 'crq-foreign-F1']] },
+    { name: 'prepared origin mismatch', updates: [['origin_job', 'crq-other-F1']] },
+    {
+      name: 'prepared canonical mismatch',
+      updates: [['canonical_finding_id', 'e'.repeat(64)]],
+    },
+    {
+      name: 'prepared source mismatch',
+      updates: [
+        ['source_sha', 'b'.repeat(40)],
+        ['repair_base', 'b'.repeat(40)],
+      ],
+    },
+  ];
+
+  for (const mismatch of mismatches) {
+    test(mismatch.name, async () => {
+      const first = await firstPreparation();
+      const state = preparedOverride(row, preparedWith(row, mismatch.updates));
+      const result = await prepareRepairGates(
+        { ...input, queueJson: first.queueBytes },
+        { git: fakeGit(row), state, scan: fixedScan(cleanResult) },
+      );
+      expect(result).toEqual({ ok: false, refusal: 'canonical-handoff-mismatch' });
+      expect(state.preparedReads).toEqual([first.jobId]);
+      expect(state.triageReads).toEqual([canonical]);
     });
   }
 });
