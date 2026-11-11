@@ -201,14 +201,14 @@ only.
 
 One fresh activators run completed on Pluto (KVM, Ubuntu noble guest
 ``crq-probe``) from source commit
-``f7853e5f51cf168151f7cb8ee97b0ac99b03b2f2``:
+``8e4b302d958f02387d0d2be96f4d65d6bf399598``:
 
-- report ``~/crq-vm-feasibility/state/runs/20261111T020349Z-85d22f20/report.json``
+- report ``~/crq-vm-feasibility/state/runs/20261111T021704Z-110a85ab/report.json``
 - all 19 checks true; ``problems: []``
-- ``raw-guest-evidence.tar.gz`` 1,164,189 bytes, SHA-256
-  ``d31d6118594026f95d4f9b87271569fedb2148e05214632ec4059bee7a50de3d``
+- ``raw-guest-evidence.tar.gz`` 1,165,031 bytes, SHA-256
+  ``76475f1641bfd061d6a52737e2ec42c74dceede8f854c59c45bc88749c896e15``
 - report SHA-256
-  ``8316929b312633209d149a12e9169bccd4105a9c56b8a9f5e49cda850cb8b7c0``
+  ``e7aec082cd1d5997d805bf793479c6bb47ccb8b8e3a35ec3bebed1ed0b2efbea``
 - host script SHA-256
   ``46ffd8cc948419e6aea83ed28be41316d20d11a862f614873f600de0fb6d5fec``
 - guest script SHA-256
