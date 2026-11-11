@@ -887,8 +887,35 @@ function nullish(value: unknown): unknown {
   return value === undefined ? null : value;
 }
 
+/**
+ * Python dict-key identity for `finished[event.get("run")]`.
+ *
+ * Python equates `int`, `float` and `bool` keys numerically (`1 == 1.0 == True`,
+ * `2^53 == 9007199254740992.0`) and hashes them alike, while strings never
+ * compare equal to numbers. Map every finite integral value to an exact BigInt
+ * string first, so an int above 2^53 keeps its exact identity and an equal
+ * float collapses onto it; non-integral floats keep their value tag. NaN is
+ * outside the JSON parser domain (the parser refuses the literal), so it is a
+ * fail-loud malformed run id rather than a silent collision. Truthy lists and
+ * objects are unhashable in Python and raise instead of becoming a key.
+ */
 function runKey(value: unknown): string {
-  return `${typeof value}:${String(value)}`;
+  if (typeof value === 'boolean') return integerRunKey(value ? 1n : 0n);
+  if (typeof value === 'bigint') return integerRunKey(value);
+  if (typeof value === 'number') {
+    if (Number.isNaN(value)) {
+      throw new StatusSummaryError('NaN run id is outside the JSON parser domain');
+    }
+    if (!Number.isFinite(value)) return `float:${value === Infinity ? 'inf' : '-inf'}`;
+    if (Number.isInteger(value)) return integerRunKey(BigInt(value));
+    return `float:${String(value)}`;
+  }
+  if (typeof value === 'string') return `string:${value}`;
+  throw new StatusSummaryError(`unhashable run id (${typeName(value)})`, 'TypeError');
+}
+
+function integerRunKey(value: bigint): string {
+  return `int:${value.toString()}`;
 }
 
 function typeName(value: unknown): string {
