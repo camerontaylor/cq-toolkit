@@ -682,11 +682,18 @@ def partial_restore_observe(args):
     require(before["partial_metadata"]
             == (boundary.get("after") or {}).get("partial_metadata"),
             "restore observe file metadata changed across the boundary")
-    new = before["repair_completions"][
-        len((boundary.get("after") or {}).get("repair_completions") or []):]
-    require(all(item.get("runtime") == spec["prior_runtime"] for item in new),
-            "restore observe saw a non-prior runtime completion")
-    require(new == [], "restore observe saw work before service activation")
+    boundary_entries = (
+        (boundary.get("after") or {}).get("repair_completions") or [])
+    require(before["repair_completions"][:len(boundary_entries)]
+            == boundary_entries,
+            "restore observe completion log is not append-only")
+    new = before["repair_completions"][len(boundary_entries):]
+    for index, item in enumerate(new):
+        require(isinstance(item, dict),
+                "restore observe completion " + str(index)
+                + " is not an object")
+        require(item.get("runtime") == spec["prior_runtime"],
+                "restore observe saw a non-prior runtime completion")
     recovery = partial_cli("recover", directory, ["--record", record["path"]])
     baseline = require_fence(recovery, case + " recovery")
     after_recovery = partial_snapshot(directory)

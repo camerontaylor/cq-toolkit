@@ -3249,7 +3249,12 @@ def _partial_observe_ok(case, phase, boundary, prepared, problems):
         problems.append(label + " completion log is not append-only")
         ok = False
     new = after_entries[len(before_entries):]
-    if not all(item.get("runtime") == runtime for item in new):
+    for index, item in enumerate(new):
+        if not _completion_shape_ok(
+                item, label + ".new[" + str(index) + "]", problems):
+            ok = False
+    if not all(isinstance(item, dict) and item.get("runtime") == runtime
+               for item in new):
         problems.append(label + " saw a non-case-runtime completion")
         ok = False
     recovery = phase.get("recovery") or {}
