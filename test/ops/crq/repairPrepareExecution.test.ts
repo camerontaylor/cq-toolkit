@@ -737,6 +737,19 @@ describe('executeRepairPreparation internal diagnostics', () => {
     ]);
   });
 
+  test('a defect inside the lock scope propagates instead of a false lock result', async () => {
+    const stores = storesFor(caseNamed('new-canonical-old-owner'));
+    const seams = attemptEffects(new MemoryEffects(), stores, undefined, handoffAt);
+    const broken = {
+      get mutations(): never {
+        throw new Error('internal defect');
+      },
+    } as unknown as VerifiedRepairPreparation;
+    await expect(
+      executeRepairPreparation(async () => ({ ok: true, value: broken }), seams.effects),
+    ).rejects.toThrow('internal defect');
+  });
+
   test('an unavailable tick lock reports no read and no write', async () => {
     const stores = storesFor(caseNamed('new-canonical-old-owner'));
     const trace = new MemoryEffects();

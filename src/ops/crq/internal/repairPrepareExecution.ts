@@ -426,14 +426,23 @@ async function runPreparation(
  * Await the gate producer and execute its verified plan inside the caller's
  * existing `tick.lock`. A plan produced outside this scope is stale by
  * construction, which is why there is no plan-only entry point.
+ *
+ * Only a lock that rejects before entering the scope is reported as
+ * `lock-unavailable`. A throw from inside the scope is an internal defect and
+ * propagates: it is never disguised as a lock, plan or effect result.
  */
 export async function executeRepairPreparation(
   produce: () => Promise<PrepareRepairGatesResult>,
   effects: RepairPreparationEffects,
 ): Promise<RepairPreparationExecutionResult> {
+  let lockEntered = false;
   try {
-    return await effects.withTickLock(() => runPreparation(produce, effects));
-  } catch {
+    return await effects.withTickLock(() => {
+      lockEntered = true;
+      return runPreparation(produce, effects);
+    });
+  } catch (error) {
+    if (lockEntered) throw error;
     return {
       ok: false,
       kind: 'lock-unavailable',
