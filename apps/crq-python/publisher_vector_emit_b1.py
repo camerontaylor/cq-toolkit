@@ -408,7 +408,9 @@ def _publish_case(name: str, *, ledger_values: Sequence[Dict[str, Any]] = (),
                   failures: int = 0, accept_then_fail: bool = False,
                   concurrent: Sequence[Dict[str, Any]] = (),
                   drop_on_fetch: Sequence[str] = (),
-                  refused_artifacts: Sequence[str] = ()) -> Dict[str, Any]:
+                  refused_artifacts: Sequence[str] = (),
+                  refusals: tuple[type[BaseException], ...] = (ledger.IntegrityError,),
+                  ) -> Dict[str, Any]:
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
         repo = root / "publisher.git"
@@ -428,7 +430,7 @@ def _publish_case(name: str, *, ledger_values: Sequence[Dict[str, Any]] = (),
         try:
             outcome: Dict[str, Any] = {"ok": True}
             remote.publish(outbox)
-        except ledger.IntegrityError as exc:  # the vector records the oracle's refusal
+        except refusals as exc:  # the vector records the oracle's refusal
             outcome = {"ok": False, "error": type(exc).__name__, "message": str(exc)}
         value = {
             "fetch_calls": remote.fetch_calls,
@@ -498,6 +500,26 @@ def publish_vectors() -> Dict[str, Any]:
     ack_before_oversize = _id_before(oversized, "fixture:ack-before-oversize")
     ack_before_midstream = _job_event(job_id="fixture:ack-before-midstream")
 
+    def malformed_jobs(position: str) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """Three retained jobs sorted by id, with one missing payload.reason.
+
+        The two well-formed records are already on the remote, so Python
+        acknowledges the prefix before the malformed record and stops before
+        acknowledging anything after it.
+        """
+        records = sorted(
+            [_job_event(job_id="fixture:malformed-" + suffix) for suffix in "abc"],
+            key=lambda value: value["id"],
+        )
+        index = {"first": 0, "middle": 1, "last": 2}[position]
+        del records[index]["payload"]["reason"]
+        remote = [value for offset, value in enumerate(records) if offset != index]
+        return remote, records
+
+    malformed_first, first_records = malformed_jobs("first")
+    malformed_middle, middle_records = malformed_jobs("middle")
+    malformed_last, last_records = malformed_jobs("last")
+
     return _family("publish", [
         _publish_case("idle-outbox", ledger_values=[idle]),
         _publish_case("initial-remote-acks", ledger_values=[already], pending=[already]),
@@ -529,6 +551,12 @@ def publish_vectors() -> Dict[str, Any]:
                       ledger_values=[ack_before_midstream],
                       pending=[ack_before_midstream, mid_review, mid_import],
                       refused_artifacts=[ARTIFACT_BAD["sha256"]]),
+        _publish_case("malformed-first-retained-job", ledger_values=malformed_first,
+                      direct=first_records, refusals=(KeyError,)),
+        _publish_case("malformed-middle-retained-job", ledger_values=malformed_middle,
+                      direct=middle_records, refusals=(KeyError,)),
+        _publish_case("malformed-last-retained-job", ledger_values=malformed_last,
+                      direct=last_records, refusals=(KeyError,)),
         _publish_case("three-push-failures", pending=[failing], failures=3),
     ])
 

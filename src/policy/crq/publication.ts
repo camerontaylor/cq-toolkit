@@ -26,11 +26,13 @@
 import { JsonObject, type JsonValue } from './jsonValue.js';
 import {
   LedgerIntegrityError,
+  LedgerKeyError,
   independentImport,
   initialInventoryEnrollment,
   ledgerCanonicalBytes,
   ledgerValidateSequence,
 } from './ledger.js';
+import { PythonJsonError } from './pythonJson.js';
 
 export const PUBLICATION_BATCH_RECORDS = 64;
 export const PUBLICATION_BATCH_BYTES = 4 * 1024 * 1024;
@@ -40,16 +42,20 @@ export const PUBLICATION_ATTEMPTS = 3;
 /**
  * A planning refusal raised after Python would already have acknowledged
  * remote-held records encountered earlier in causal order. The carried acks
- * are the exact prefix Python wrote before its refusal; the publisher writes
- * that prefix and then rethrows. A missing/forked causal dependency is raised
- * before any acknowledgement and therefore never produces this error.
+ * are the exact prefix Python wrote before its refusal, including when a
+ * malformed retained record raises `KeyError` while Python inspects its
+ * payload; the publisher writes that prefix and then rethrows. A
+ * missing/forked causal dependency is raised before any acknowledgement and
+ * therefore never produces this error.
  */
 export class PublicationPlanError extends LedgerIntegrityError {
   readonly acks: readonly JsonValue[];
+  override readonly pythonError: string;
 
-  constructor(message: string, acks: readonly JsonValue[]) {
+  constructor(message: string, acks: readonly JsonValue[], pythonError: string = 'IntegrityError') {
     super(message);
     this.acks = [...acks];
+    this.pythonError = pythonError;
   }
 }
 
@@ -84,21 +90,27 @@ function record(value: JsonValue): JsonObject {
   return value;
 }
 
+function required(value: JsonObject, key: string): JsonValue {
+  const field = value.get(key);
+  if (field === undefined) throw new LedgerKeyError(key);
+  return field;
+}
+
 function payloadOf(value: JsonValue): JsonObject {
-  const payload = record(value).get('payload');
+  const payload = required(record(value), 'payload');
   if (!(payload instanceof JsonObject))
     throw new LedgerIntegrityError('record payload is not an object');
   return payload;
 }
 
 function idOf(value: JsonValue): string {
-  const id = record(value).get('id');
+  const id = required(record(value), 'id');
   if (typeof id !== 'string') throw new LedgerIntegrityError('record id is not a string');
   return id;
 }
 
 function eventType(value: JsonValue): string {
-  const kind = record(value).get('event_type');
+  const kind = required(record(value), 'event_type');
   if (typeof kind !== 'string') throw new LedgerIntegrityError('record event_type is not a string');
   return kind;
 }
@@ -111,8 +123,16 @@ function eventType(value: JsonValue): string {
 function dependencies(value: JsonValue): readonly (string | null)[] {
   const payload = payloadOf(value);
   const field = (name: string): string | null => {
-    const raw = payload.get(name);
-    return typeof raw === 'string' ? raw : raw === null || raw === undefined ? null : String(raw);
+    const raw = required(payload, name);
+    if (raw === null) return null;
+    if (typeof raw === 'string') return raw;
+    // Python tests `dependency in available`, a set of string ids. A hashable
+    // non-string never matches; an unhashable list/object raises before any
+    // acknowledgement. The sentinel cannot collide with a record id.
+    if (raw instanceof JsonObject || Array.isArray(raw)) {
+      throw new LedgerIntegrityError('causal dependency is not hashable');
+    }
+    return NO_DEPENDENCY;
   };
   switch (eventType(value)) {
     case 'finding-event':
@@ -123,6 +143,8 @@ function dependencies(value: JsonValue): readonly (string | null)[] {
       return [];
   }
 }
+
+const NO_DEPENDENCY = '\u0000no-matching-dependency';
 
 /**
  * Causal order for pending records. Python repeatedly appends every record
@@ -169,7 +191,7 @@ export function planPublication(input: PublicationPlanInput): PublicationPlan {
   const seenJobs = new Set<string>();
   for (const value of input.ledgerValues) {
     if (eventType(value) === 'job-state') {
-      const jobId = payloadOf(value).get('job_id');
+      const jobId = required(payloadOf(value), 'job_id');
       if (typeof jobId === 'string') seenJobs.add(jobId);
     }
   }
@@ -196,11 +218,11 @@ export function planPublication(input: PublicationPlanInput): PublicationPlan {
       }
       let kind: string | null = independentImport(value) ? 'import' : null;
       if (initialInventoryEnrollment(value)) {
-        const jobId = payloadOf(value).get('job_id');
+        const jobId = required(payloadOf(value), 'job_id');
         if (typeof jobId === 'string' && !seenJobs.has(jobId)) kind = 'enrollment';
       }
       if (eventType(value) === 'job-state') {
-        const jobId = payloadOf(value).get('job_id');
+        const jobId = required(payloadOf(value), 'job_id');
         if (typeof jobId === 'string') seenJobs.add(jobId);
       }
       const last = batches.at(-1);
@@ -218,7 +240,10 @@ export function planPublication(input: PublicationPlanInput): PublicationPlan {
       }
     } catch (error) {
       if (error instanceof LedgerIntegrityError) {
-        throw new PublicationPlanError(error.message, acks);
+        throw new PublicationPlanError(error.message, acks, error.pythonError);
+      }
+      if (error instanceof PythonJsonError) {
+        throw new PublicationPlanError(error.message, acks, error.pythonError);
       }
       throw error;
     }

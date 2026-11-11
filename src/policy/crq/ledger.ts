@@ -41,12 +41,27 @@ const MAX_INTERVAL_LINE = 1_000_000n;
 
 /** `review_ledger.IntegrityError`: publication must stop and be reconciled. */
 export class LedgerIntegrityError extends Error {
-  override readonly name = 'LedgerIntegrityError';
+  override readonly name: string = 'LedgerIntegrityError';
   /** The Python exception class the vector differential compares. */
-  readonly pythonError = 'IntegrityError';
+  readonly pythonError: string = 'IntegrityError';
 
   constructor(message: string) {
     super(message);
+  }
+}
+
+/**
+ * `KeyError` from a missing mapping key in a retained record that was never
+ * schema-validated. `review_ledger.publish` walks retained records directly,
+ * so a malformed record can refuse after earlier acknowledgements were
+ * written; keeping the Python class lets that prefix survive the port.
+ */
+export class LedgerKeyError extends LedgerIntegrityError {
+  override readonly name = 'LedgerKeyError';
+  override readonly pythonError = 'KeyError';
+
+  constructor(key: string) {
+    super(`'${key}'`);
   }
 }
 
@@ -866,39 +881,49 @@ export function ledgerValidateSequence(values: readonly JsonValue[]): Map<string
 
 /** `review_ledger.independent_import`: a non-crediting import outcome. */
 export function independentImport(value: JsonValue): boolean {
-  if (!(value instanceof JsonObject) || value.get('event_type') !== 'import-result') return false;
+  if (!(value instanceof JsonObject)) return false;
   const payload = value.get('payload');
   if (!(payload instanceof JsonObject)) return false;
-  const result = payload.get('result');
-  return (
-    (result === 'unverified' || result === 'rejected') &&
-    payload.get('review_id') === null &&
-    payload.get('duplicate_id') === null
-  );
+  if (requiredKey(value, 'event_type') !== 'import-result') return false;
+  const result = requiredKey(payload, 'result');
+  if (result instanceof JsonObject || Array.isArray(result)) {
+    throw new LedgerIntegrityError('import result is not hashable');
+  }
+  if (result !== 'unverified' && result !== 'rejected') return false;
+  if (requiredKey(payload, 'review_id') !== null) return false;
+  return requiredKey(payload, 'duplicate_id') === null;
 }
 
 /** `review_ledger.initial_inventory_enrollment`: a first, distinct enrollment. */
 export function initialInventoryEnrollment(value: JsonValue): boolean {
-  if (!(value instanceof JsonObject) || value.get('event_type') !== 'job-state') return false;
+  if (!(value instanceof JsonObject)) return false;
   const payload = value.get('payload');
   if (!(payload instanceof JsonObject)) return false;
-  const jobId = payload.get('job_id');
-  return (
-    payload.get('reason') === 'inventory enqueue' &&
-    payload.get('state') === 'pending' &&
-    integerValue(payload, 'attempt') === 0n &&
-    integerValue(payload, 'failures') === 0n &&
-    integerValue(payload, 'generation') === 0n &&
-    payload.get('next_eligible_at') === null &&
-    !payload.has('operator') &&
-    typeof jobId === 'string' &&
-    value.get('source_key') === `job:${jobId}:${digestOf(payload)}`
-  );
+  if (requiredKey(value, 'event_type') !== 'job-state') return false;
+  // Python's `and` chain short-circuits, so each key is read only after the
+  // previous field matched. A malformed later field must refuse at this
+  // record, before the planner can acknowledge a record that follows it.
+  if (requiredKey(payload, 'reason') !== 'inventory enqueue') return false;
+  if (requiredKey(payload, 'state') !== 'pending') return false;
+  if (!ledgerValueEqual(requiredKey(payload, 'attempt'), ZERO)) return false;
+  if (!ledgerValueEqual(requiredKey(payload, 'failures'), ZERO)) return false;
+  if (!ledgerValueEqual(requiredKey(payload, 'generation'), ZERO)) return false;
+  if (requiredKey(payload, 'next_eligible_at') !== null) return false;
+  if (payload.has('operator')) return false;
+  const sourceKey = requiredKey(value, 'source_key');
+  const jobId = requiredKey(payload, 'job_id');
+  if (typeof jobId !== 'string') {
+    throw new LedgerIntegrityError('record payload.job_id is not a string');
+  }
+  return sourceKey === `job:${jobId}:${digestOf(payload)}`;
 }
 
-function integerValue(object: JsonObject, key: string): bigint | null {
+const ZERO = JsonNumber.int(0);
+
+function requiredKey(object: JsonObject, key: string): JsonValue {
   const value = object.get(key);
-  return value instanceof JsonNumber && value.kind === 'int' ? (value.integer ?? null) : null;
+  if (value === undefined) throw new LedgerKeyError(key);
+  return value;
 }
 
 /**

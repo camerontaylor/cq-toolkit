@@ -4340,6 +4340,374 @@
           }
         },
         {
+          "name": "malformed-first-retained-job",
+          "source": "review_ledger.GitLedger.publish",
+          "input": {
+            "ledger": [
+              {
+                "schema": "cq.review-ledger/v1",
+                "event_type": "job-state",
+                "source_key": "job:fixture:malformed-c:56a9f42972135b7073cf1f7b40bf64c506c9a13c05577142e208fe3e05c16dc7",
+                "occurred_at": "2026-10-30T00:00:00Z",
+                "payload": {
+                  "family": "fixture",
+                  "subject_id": "subject",
+                  "job_id": "fixture:malformed-c",
+                  "generation": 0,
+                  "attempt": 0,
+                  "state": "pending",
+                  "failures": 0,
+                  "next_eligible_at": null,
+                  "reason": "fixture transition"
+                },
+                "id": "90b57ece70bff3fcdca96c5f1e707f409270944eb2a0c6b032803d01e4b5e7dc"
+              },
+              {
+                "schema": "cq.review-ledger/v1",
+                "event_type": "job-state",
+                "source_key": "job:fixture:malformed-a:6d5e2be6491b5d67675d9b974769972cd666207914bb0687e8925842ae240c84",
+                "occurred_at": "2026-10-30T00:00:00Z",
+                "payload": {
+                  "family": "fixture",
+                  "subject_id": "subject",
+                  "job_id": "fixture:malformed-a",
+                  "generation": 0,
+                  "attempt": 0,
+                  "state": "pending",
+                  "failures": 0,
+                  "next_eligible_at": null,
+                  "reason": "fixture transition"
+                },
+                "id": "ed5a050249749048a303d962b07cec6d89ef02b3be7c5d5884ce3f2441c290d8"
+              }
+            ],
+            "pending": [],
+            "direct": [
+              {
+                "schema": "cq.review-ledger/v1",
+                "event_type": "job-state",
+                "source_key": "job:fixture:malformed-b:907c984601a4e94219f105d4b64a32dca8db78786155af432c808a2a02b295f7",
+                "occurred_at": "2026-10-30T00:00:00Z",
+                "payload": {
+                  "family": "fixture",
+                  "subject_id": "subject",
+                  "job_id": "fixture:malformed-b",
+                  "generation": 0,
+                  "attempt": 0,
+                  "state": "pending",
+                  "failures": 0,
+                  "next_eligible_at": null
+                },
+                "id": "7bbbdc28896c4c030032f063326a305579f3af8a3e63596805992025fbffa79d"
+              },
+              {
+                "schema": "cq.review-ledger/v1",
+                "event_type": "job-state",
+                "source_key": "job:fixture:malformed-c:56a9f42972135b7073cf1f7b40bf64c506c9a13c05577142e208fe3e05c16dc7",
+                "occurred_at": "2026-10-30T00:00:00Z",
+                "payload": {
+                  "family": "fixture",
+                  "subject_id": "subject",
+                  "job_id": "fixture:malformed-c",
+                  "generation": 0,
+                  "attempt": 0,
+                  "state": "pending",
+                  "failures": 0,
+                  "next_eligible_at": null,
+                  "reason": "fixture transition"
+                },
+                "id": "90b57ece70bff3fcdca96c5f1e707f409270944eb2a0c6b032803d01e4b5e7dc"
+              },
+              {
+                "schema": "cq.review-ledger/v1",
+                "event_type": "job-state",
+                "source_key": "job:fixture:malformed-a:6d5e2be6491b5d67675d9b974769972cd666207914bb0687e8925842ae240c84",
+                "occurred_at": "2026-10-30T00:00:00Z",
+                "payload": {
+                  "family": "fixture",
+                  "subject_id": "subject",
+                  "job_id": "fixture:malformed-a",
+                  "generation": 0,
+                  "attempt": 0,
+                  "state": "pending",
+                  "failures": 0,
+                  "next_eligible_at": null,
+                  "reason": "fixture transition"
+                },
+                "id": "ed5a050249749048a303d962b07cec6d89ef02b3be7c5d5884ce3f2441c290d8"
+              }
+            ],
+            "acked": [],
+            "failures": 0,
+            "accept_then_fail": false,
+            "concurrent": [],
+            "drop_on_fetch": [],
+            "refused_artifacts": []
+          },
+          "expect": {
+            "ok": false,
+            "error": "KeyError",
+            "message": "'reason'",
+            "value": {
+              "fetch_calls": 1,
+              "push_calls": 0,
+              "batches": [],
+              "acks": [],
+              "pending": [
+                "7bbbdc28896c4c030032f063326a305579f3af8a3e63596805992025fbffa79d",
+                "90b57ece70bff3fcdca96c5f1e707f409270944eb2a0c6b032803d01e4b5e7dc",
+                "ed5a050249749048a303d962b07cec6d89ef02b3be7c5d5884ce3f2441c290d8"
+              ]
+            }
+          }
+        },
+        {
+          "name": "malformed-middle-retained-job",
+          "source": "review_ledger.GitLedger.publish",
+          "input": {
+            "ledger": [
+              {
+                "schema": "cq.review-ledger/v1",
+                "event_type": "job-state",
+                "source_key": "job:fixture:malformed-b:907c984601a4e94219f105d4b64a32dca8db78786155af432c808a2a02b295f7",
+                "occurred_at": "2026-10-30T00:00:00Z",
+                "payload": {
+                  "family": "fixture",
+                  "subject_id": "subject",
+                  "job_id": "fixture:malformed-b",
+                  "generation": 0,
+                  "attempt": 0,
+                  "state": "pending",
+                  "failures": 0,
+                  "next_eligible_at": null,
+                  "reason": "fixture transition"
+                },
+                "id": "7bbbdc28896c4c030032f063326a305579f3af8a3e63596805992025fbffa79d"
+              },
+              {
+                "schema": "cq.review-ledger/v1",
+                "event_type": "job-state",
+                "source_key": "job:fixture:malformed-a:6d5e2be6491b5d67675d9b974769972cd666207914bb0687e8925842ae240c84",
+                "occurred_at": "2026-10-30T00:00:00Z",
+                "payload": {
+                  "family": "fixture",
+                  "subject_id": "subject",
+                  "job_id": "fixture:malformed-a",
+                  "generation": 0,
+                  "attempt": 0,
+                  "state": "pending",
+                  "failures": 0,
+                  "next_eligible_at": null,
+                  "reason": "fixture transition"
+                },
+                "id": "ed5a050249749048a303d962b07cec6d89ef02b3be7c5d5884ce3f2441c290d8"
+              }
+            ],
+            "pending": [],
+            "direct": [
+              {
+                "schema": "cq.review-ledger/v1",
+                "event_type": "job-state",
+                "source_key": "job:fixture:malformed-b:907c984601a4e94219f105d4b64a32dca8db78786155af432c808a2a02b295f7",
+                "occurred_at": "2026-10-30T00:00:00Z",
+                "payload": {
+                  "family": "fixture",
+                  "subject_id": "subject",
+                  "job_id": "fixture:malformed-b",
+                  "generation": 0,
+                  "attempt": 0,
+                  "state": "pending",
+                  "failures": 0,
+                  "next_eligible_at": null,
+                  "reason": "fixture transition"
+                },
+                "id": "7bbbdc28896c4c030032f063326a305579f3af8a3e63596805992025fbffa79d"
+              },
+              {
+                "schema": "cq.review-ledger/v1",
+                "event_type": "job-state",
+                "source_key": "job:fixture:malformed-c:56a9f42972135b7073cf1f7b40bf64c506c9a13c05577142e208fe3e05c16dc7",
+                "occurred_at": "2026-10-30T00:00:00Z",
+                "payload": {
+                  "family": "fixture",
+                  "subject_id": "subject",
+                  "job_id": "fixture:malformed-c",
+                  "generation": 0,
+                  "attempt": 0,
+                  "state": "pending",
+                  "failures": 0,
+                  "next_eligible_at": null
+                },
+                "id": "90b57ece70bff3fcdca96c5f1e707f409270944eb2a0c6b032803d01e4b5e7dc"
+              },
+              {
+                "schema": "cq.review-ledger/v1",
+                "event_type": "job-state",
+                "source_key": "job:fixture:malformed-a:6d5e2be6491b5d67675d9b974769972cd666207914bb0687e8925842ae240c84",
+                "occurred_at": "2026-10-30T00:00:00Z",
+                "payload": {
+                  "family": "fixture",
+                  "subject_id": "subject",
+                  "job_id": "fixture:malformed-a",
+                  "generation": 0,
+                  "attempt": 0,
+                  "state": "pending",
+                  "failures": 0,
+                  "next_eligible_at": null,
+                  "reason": "fixture transition"
+                },
+                "id": "ed5a050249749048a303d962b07cec6d89ef02b3be7c5d5884ce3f2441c290d8"
+              }
+            ],
+            "acked": [],
+            "failures": 0,
+            "accept_then_fail": false,
+            "concurrent": [],
+            "drop_on_fetch": [],
+            "refused_artifacts": []
+          },
+          "expect": {
+            "ok": false,
+            "error": "KeyError",
+            "message": "'reason'",
+            "value": {
+              "fetch_calls": 1,
+              "push_calls": 0,
+              "batches": [],
+              "acks": [
+                "7bbbdc28896c4c030032f063326a305579f3af8a3e63596805992025fbffa79d"
+              ],
+              "pending": [
+                "90b57ece70bff3fcdca96c5f1e707f409270944eb2a0c6b032803d01e4b5e7dc",
+                "ed5a050249749048a303d962b07cec6d89ef02b3be7c5d5884ce3f2441c290d8"
+              ]
+            }
+          }
+        },
+        {
+          "name": "malformed-last-retained-job",
+          "source": "review_ledger.GitLedger.publish",
+          "input": {
+            "ledger": [
+              {
+                "schema": "cq.review-ledger/v1",
+                "event_type": "job-state",
+                "source_key": "job:fixture:malformed-b:907c984601a4e94219f105d4b64a32dca8db78786155af432c808a2a02b295f7",
+                "occurred_at": "2026-10-30T00:00:00Z",
+                "payload": {
+                  "family": "fixture",
+                  "subject_id": "subject",
+                  "job_id": "fixture:malformed-b",
+                  "generation": 0,
+                  "attempt": 0,
+                  "state": "pending",
+                  "failures": 0,
+                  "next_eligible_at": null,
+                  "reason": "fixture transition"
+                },
+                "id": "7bbbdc28896c4c030032f063326a305579f3af8a3e63596805992025fbffa79d"
+              },
+              {
+                "schema": "cq.review-ledger/v1",
+                "event_type": "job-state",
+                "source_key": "job:fixture:malformed-c:56a9f42972135b7073cf1f7b40bf64c506c9a13c05577142e208fe3e05c16dc7",
+                "occurred_at": "2026-10-30T00:00:00Z",
+                "payload": {
+                  "family": "fixture",
+                  "subject_id": "subject",
+                  "job_id": "fixture:malformed-c",
+                  "generation": 0,
+                  "attempt": 0,
+                  "state": "pending",
+                  "failures": 0,
+                  "next_eligible_at": null,
+                  "reason": "fixture transition"
+                },
+                "id": "90b57ece70bff3fcdca96c5f1e707f409270944eb2a0c6b032803d01e4b5e7dc"
+              }
+            ],
+            "pending": [],
+            "direct": [
+              {
+                "schema": "cq.review-ledger/v1",
+                "event_type": "job-state",
+                "source_key": "job:fixture:malformed-b:907c984601a4e94219f105d4b64a32dca8db78786155af432c808a2a02b295f7",
+                "occurred_at": "2026-10-30T00:00:00Z",
+                "payload": {
+                  "family": "fixture",
+                  "subject_id": "subject",
+                  "job_id": "fixture:malformed-b",
+                  "generation": 0,
+                  "attempt": 0,
+                  "state": "pending",
+                  "failures": 0,
+                  "next_eligible_at": null,
+                  "reason": "fixture transition"
+                },
+                "id": "7bbbdc28896c4c030032f063326a305579f3af8a3e63596805992025fbffa79d"
+              },
+              {
+                "schema": "cq.review-ledger/v1",
+                "event_type": "job-state",
+                "source_key": "job:fixture:malformed-c:56a9f42972135b7073cf1f7b40bf64c506c9a13c05577142e208fe3e05c16dc7",
+                "occurred_at": "2026-10-30T00:00:00Z",
+                "payload": {
+                  "family": "fixture",
+                  "subject_id": "subject",
+                  "job_id": "fixture:malformed-c",
+                  "generation": 0,
+                  "attempt": 0,
+                  "state": "pending",
+                  "failures": 0,
+                  "next_eligible_at": null,
+                  "reason": "fixture transition"
+                },
+                "id": "90b57ece70bff3fcdca96c5f1e707f409270944eb2a0c6b032803d01e4b5e7dc"
+              },
+              {
+                "schema": "cq.review-ledger/v1",
+                "event_type": "job-state",
+                "source_key": "job:fixture:malformed-a:6d5e2be6491b5d67675d9b974769972cd666207914bb0687e8925842ae240c84",
+                "occurred_at": "2026-10-30T00:00:00Z",
+                "payload": {
+                  "family": "fixture",
+                  "subject_id": "subject",
+                  "job_id": "fixture:malformed-a",
+                  "generation": 0,
+                  "attempt": 0,
+                  "state": "pending",
+                  "failures": 0,
+                  "next_eligible_at": null
+                },
+                "id": "ed5a050249749048a303d962b07cec6d89ef02b3be7c5d5884ce3f2441c290d8"
+              }
+            ],
+            "acked": [],
+            "failures": 0,
+            "accept_then_fail": false,
+            "concurrent": [],
+            "drop_on_fetch": [],
+            "refused_artifacts": []
+          },
+          "expect": {
+            "ok": false,
+            "error": "KeyError",
+            "message": "'reason'",
+            "value": {
+              "fetch_calls": 1,
+              "push_calls": 0,
+              "batches": [],
+              "acks": [
+                "7bbbdc28896c4c030032f063326a305579f3af8a3e63596805992025fbffa79d",
+                "90b57ece70bff3fcdca96c5f1e707f409270944eb2a0c6b032803d01e4b5e7dc"
+              ],
+              "pending": [
+                "ed5a050249749048a303d962b07cec6d89ef02b3be7c5d5884ce3f2441c290d8"
+              ]
+            }
+          }
+        },
+        {
           "name": "three-push-failures",
           "source": "review_ledger.GitLedger.publish",
           "input": {

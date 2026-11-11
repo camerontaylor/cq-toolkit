@@ -37,6 +37,9 @@ REQUIRED_PUBLISH_CASES = {
     "midstream-artifact-failure",
     "partial-ack-before-oversize",
     "partial-ack-before-midstream-artifact",
+    "malformed-first-retained-job",
+    "malformed-middle-retained-job",
+    "malformed-last-retained-job",
     "three-push-failures",
 }
 
@@ -84,7 +87,7 @@ class PublisherVectorTest(unittest.TestCase):
             for case in family["cases"]:
                 self.assertTrue(case["source"].startswith("review_ledger."), case["source"])
                 if not case["expect"]["ok"]:
-                    self.assertEqual(case["expect"]["error"], "IntegrityError")
+                    self.assertIn(case["expect"]["error"], {"IntegrityError", "KeyError"})
                     self.assertTrue(case["expect"]["message"])
                     if family["family"] == "publish":
                         self.assertIn("value", case["expect"])
@@ -165,6 +168,27 @@ class PublisherVectorTest(unittest.TestCase):
         self.assertEqual(len(result["batches"]), 1)
         self.assertEqual(len(result["pending"]), 1)
         self.assertEqual(case["expect"]["message"], "missing or corrupt retained artifact")
+
+    def test_malformed_retained_job_keeps_only_the_prefix_python_acked(self):
+        value = document()
+        cases = {case["name"]: case for case in _family(value, "publish")["cases"]}
+        for name, expected_acks in (
+            ("malformed-first-retained-job", 0),
+            ("malformed-middle-retained-job", 1),
+            ("malformed-last-retained-job", 2),
+        ):
+            case = cases[name]
+            records = sorted(case["input"]["direct"], key=lambda record: record["id"])
+            malformed = next(record for record in records
+                             if "reason" not in record["payload"])
+            result = case["expect"]["value"]
+            self.assertEqual(case["expect"]["error"], "KeyError")
+            self.assertEqual(case["expect"]["message"], "'reason'")
+            self.assertEqual(result["acks"], [record["id"] for record in records
+                                              if record is not malformed][:expected_acks])
+            self.assertEqual(result["batches"], [])
+            self.assertEqual(result["push_calls"], 0)
+            self.assertIn(malformed["id"], result["pending"])
 
     def test_semantic_replay_is_python_equal_but_not_canonical(self):
         value = document()

@@ -22,6 +22,7 @@ import {
   type PublicationRemote,
   type PublicationSnapshot,
 } from '../../../src/ops/review/internal/crq/publisher.js';
+import { PublicationPlanError } from '../../../src/policy/crq/publication.js';
 import {
   arrayAt,
   artifactSha,
@@ -319,6 +320,38 @@ describe('publisher replay against the Python oracle', () => {
       }
     });
   }
+});
+
+test('a malformed retained job writes only the acknowledgements before it', async () => {
+  const caseEntry = publishCases.find((entry) => entry.name === 'malformed-middle-retained-job');
+  if (caseEntry === undefined) throw new Error('missing malformed retained-job vector');
+  const input = inputOf(caseEntry);
+  const files = new MemoryFiles();
+  const artifacts = new MemoryArtifacts();
+  const outbox = new Outbox(files, artifacts);
+  for (const value of input.direct) {
+    files.pending.set(recordId(value), ledgerCanonicalBytes(value));
+  }
+  const remote = new MemoryRemote(input.ledger, input);
+  const effects = new Effects(artifacts);
+
+  let error: unknown;
+  try {
+    await publish(remote, outbox, effects);
+  } catch (caught) {
+    error = caught;
+  }
+  expect(error).toBeInstanceOf(PublicationPlanError);
+  if (!(error instanceof PublicationPlanError)) throw new Error('expected a plan refusal');
+  expect(error.pythonError).toBe('KeyError');
+  expect(error.message).toBe("'reason'");
+  const expected = expectedValue(caseEntry);
+  expect(error.acks.map(recordId)).toEqual(idsAt(expected, 'acks'));
+  expect(files.ackOrder).toEqual(idsAt(expected, 'acks'));
+  expect(files.ack.size).toBe(idsAt(expected, 'acks').length);
+  expect((await outbox.pending()).map(recordId)).toEqual(idsAt(expected, 'pending'));
+  expect(remote.pushCalls).toBe(0);
+  expect(remote.batches).toEqual([]);
 });
 
 function expectedLockCount(caseEntry: PublisherVectorCase): number {

@@ -50,6 +50,12 @@ const PLANNING_REFUSAL = new Set([
   'invalid-fetch',
 ]);
 
+const MALFORMED_RETAINED = new Set([
+  'malformed-first-retained-job',
+  'malformed-middle-retained-job',
+  'malformed-last-retained-job',
+]);
+
 const vectors = loadPublisherVectors();
 const publishCases = vectors.filter((entry) => entry.family === 'publish');
 
@@ -156,6 +162,40 @@ describe('publication plan against the Python oracle', () => {
     expect(caught.acks.map(recordId)).toEqual([recordId(ack)]);
     expect(caught.message).toBe('ledger record exceeds validation bound');
   });
+
+  for (const caseEntry of publishCases) {
+    if (!MALFORMED_RETAINED.has(caseEntry.name)) continue;
+    test(`${caseEntry.name}: refuses at the malformed record after only its prefix`, () => {
+      const pending = [...arrayAt(caseEntry.input, 'direct')].sort((left, right) => {
+        const leftId = recordId(left);
+        const rightId = recordId(right);
+        return leftId < rightId ? -1 : leftId > rightId ? 1 : 0;
+      });
+      let caught: unknown;
+      try {
+        planPublication({
+          ledgerValues: arrayAt(caseEntry.input, 'ledger'),
+          pending,
+        });
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBeInstanceOf(PublicationPlanError);
+      if (!(caught instanceof PublicationPlanError)) {
+        throw new Error('expected a malformed-retained refusal');
+      }
+      expect(caught.pythonError).toBe('KeyError');
+      expect(caught.message).toBe("'reason'");
+      expect(caught.acks.map(recordId)).toEqual(idsAt(expectedValue(caseEntry), 'acks'));
+      const malformed = pending.find(
+        (value) =>
+          requireObject(value, 'job').get('payload') instanceof JsonObject &&
+          !requireObject(requireObject(value, 'job').get('payload'), 'payload').has('reason'),
+      );
+      if (malformed === undefined) throw new Error('missing malformed retained record');
+      expect(caught.acks.map(recordId)).not.toContain(recordId(malformed));
+    });
+  }
 
   test('the 1 MiB bound counts canonical UTF-8 bytes, not UTF-16 units', () => {
     const caseEntry = publishCases.find((entry) => entry.name === 'record-over-limit-utf8');
