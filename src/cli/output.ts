@@ -55,7 +55,7 @@ export function writeResultJson(io: CliIo, value: unknown): void {
  * stdout artifact is a JSON.stringify of the result; stringify-throwing
  * values (BigInt, circular) are caught by the caller's stringify probe,
  * while this walk catches the SILENTLY lossy ones — Map/Set/Date/RegExp/
- * class instances stringify as `{}` or strings, function members, symbol-keyed or non-enumerable (hidden) members
+ * class instances stringify as `{}` or strings, -0 as `0`, function members, symbol-keyed or non-enumerable (hidden) members
  * vanish, undefined array elements become null — where the emitted artifact
  * would disagree with the value the run produced. One normalization is
  * accepted, matching JSON semantics: an undefined-valued member of a nested
@@ -71,6 +71,13 @@ export function assertJsonLossless(value: unknown): void {
       return;
     case 'number':
       if (!Number.isFinite(value)) throw new Error(`non-finite number ${String(value)}`);
+      // -0 is FINITE so the probe above passes it, yet JSON.stringify writes
+      // it as `0`: the artifact would lose the sign and a re-read would
+      // rebuild 0 instead of the -0 the run produced (Math.round(-0.4) and
+      // 0 * -1 produce it). Reject rather than bless a silent divergence.
+      if (Object.is(value, -0)) {
+        throw new Error("negative zero — JSON.stringify writes it as '0'");
+      }
       return;
     case 'object': {
       if (value === null) return;

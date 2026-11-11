@@ -66,6 +66,15 @@ describe('lossless parity pin: the CLI walk and the kernel walk reject the same 
         expr: "(() => { const o = { x: 1 }; Object.defineProperty(o, 'hidden', { value: 3, enumerable: false }); return o; })()",
         pattern: "non-enumerable own member 'hidden'",
       },
+      // -0 is finite, so the stringify probe passes it, but JSON.stringify
+      // writes it as `0` — the artifact/journal would silently drop the sign
+      // (review finding 1ed17a53, ceres backfill). Both walks must reject it
+      // identically or the two dispatch paths would disagree about -0.
+      {
+        name: 'lossnegzero',
+        expr: '{ x: Math.round(-0.4) }',
+        pattern: "negative zero — JSON.stringify writes it as '0'",
+      },
     ];
     const tmp = await makeTmpOpsRoot('cq-i1-parity-');
     await mkdir(join(tmp, 'parityfam'), { recursive: true });
