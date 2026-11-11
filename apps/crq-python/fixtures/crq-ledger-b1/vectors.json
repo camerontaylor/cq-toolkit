@@ -6079,6 +6079,969 @@
           }
         },
         {
+          "name": "import-matrix-result-null",
+          "source": "review_ledger.independent_import",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "import-result",
+              "source_key": "import:1",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": {
+                "source": {
+                  "repo": "camerontaylor/cq-toolkit",
+                  "producer": "fixture",
+                  "type": "author-cli",
+                  "id": "1",
+                  "authenticated": false
+                },
+                "source_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "result": null,
+                "reason": "No authenticated scope",
+                "review_id": null,
+                "duplicate_id": null,
+                "artifacts": [
+                  {
+                    "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                    "location": "/fixtures/artifacts/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                  }
+                ]
+              },
+              "id": "dd9ad852c01e9cc9dde76328f6b2b72968f7634314bfbc67fa872376ca0f9912"
+            }
+          },
+          "expect": {
+            "ok": true,
+            "value": false
+          }
+        },
+        {
+          "name": "import-matrix-result-false",
+          "source": "review_ledger.independent_import",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "import-result",
+              "source_key": "import:1",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": {
+                "source": {
+                  "repo": "camerontaylor/cq-toolkit",
+                  "producer": "fixture",
+                  "type": "author-cli",
+                  "id": "1",
+                  "authenticated": false
+                },
+                "source_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "result": false,
+                "reason": "No authenticated scope",
+                "review_id": null,
+                "duplicate_id": null,
+                "artifacts": [
+                  {
+                    "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                    "location": "/fixtures/artifacts/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                  }
+                ]
+              },
+              "id": "dd9ad852c01e9cc9dde76328f6b2b72968f7634314bfbc67fa872376ca0f9912"
+            }
+          },
+          "expect": {
+            "ok": true,
+            "value": false
+          }
+        },
+        {
+          "name": "import-matrix-result-true",
+          "source": "review_ledger.independent_import",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "import-result",
+              "source_key": "import:1",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": {
+                "source": {
+                  "repo": "camerontaylor/cq-toolkit",
+                  "producer": "fixture",
+                  "type": "author-cli",
+                  "id": "1",
+                  "authenticated": false
+                },
+                "source_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "result": true,
+                "reason": "No authenticated scope",
+                "review_id": null,
+                "duplicate_id": null,
+                "artifacts": [
+                  {
+                    "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                    "location": "/fixtures/artifacts/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                  }
+                ]
+              },
+              "id": "dd9ad852c01e9cc9dde76328f6b2b72968f7634314bfbc67fa872376ca0f9912"
+            }
+          },
+          "expect": {
+            "ok": true,
+            "value": false
+          }
+        },
+        {
+          "name": "import-matrix-result-zero",
+          "source": "review_ledger.independent_import",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "import-result",
+              "source_key": "import:1",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": {
+                "source": {
+                  "repo": "camerontaylor/cq-toolkit",
+                  "producer": "fixture",
+                  "type": "author-cli",
+                  "id": "1",
+                  "authenticated": false
+                },
+                "source_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "result": 0,
+                "reason": "No authenticated scope",
+                "review_id": null,
+                "duplicate_id": null,
+                "artifacts": [
+                  {
+                    "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                    "location": "/fixtures/artifacts/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                  }
+                ]
+              },
+              "id": "dd9ad852c01e9cc9dde76328f6b2b72968f7634314bfbc67fa872376ca0f9912"
+            }
+          },
+          "expect": {
+            "ok": true,
+            "value": false
+          }
+        },
+        {
+          "name": "import-matrix-result-one",
+          "source": "review_ledger.independent_import",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "import-result",
+              "source_key": "import:1",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": {
+                "source": {
+                  "repo": "camerontaylor/cq-toolkit",
+                  "producer": "fixture",
+                  "type": "author-cli",
+                  "id": "1",
+                  "authenticated": false
+                },
+                "source_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "result": 1,
+                "reason": "No authenticated scope",
+                "review_id": null,
+                "duplicate_id": null,
+                "artifacts": [
+                  {
+                    "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                    "location": "/fixtures/artifacts/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                  }
+                ]
+              },
+              "id": "dd9ad852c01e9cc9dde76328f6b2b72968f7634314bfbc67fa872376ca0f9912"
+            }
+          },
+          "expect": {
+            "ok": true,
+            "value": false
+          }
+        },
+        {
+          "name": "import-matrix-result-list",
+          "source": "review_ledger.independent_import",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "import-result",
+              "source_key": "import:1",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": {
+                "source": {
+                  "repo": "camerontaylor/cq-toolkit",
+                  "producer": "fixture",
+                  "type": "author-cli",
+                  "id": "1",
+                  "authenticated": false
+                },
+                "source_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "result": [],
+                "reason": "No authenticated scope",
+                "review_id": null,
+                "duplicate_id": null,
+                "artifacts": [
+                  {
+                    "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                    "location": "/fixtures/artifacts/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                  }
+                ]
+              },
+              "id": "dd9ad852c01e9cc9dde76328f6b2b72968f7634314bfbc67fa872376ca0f9912"
+            }
+          },
+          "expect": {
+            "ok": true,
+            "value": false
+          }
+        },
+        {
+          "name": "import-matrix-result-dict",
+          "source": "review_ledger.independent_import",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "import-result",
+              "source_key": "import:1",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": {
+                "source": {
+                  "repo": "camerontaylor/cq-toolkit",
+                  "producer": "fixture",
+                  "type": "author-cli",
+                  "id": "1",
+                  "authenticated": false
+                },
+                "source_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "result": {},
+                "reason": "No authenticated scope",
+                "review_id": null,
+                "duplicate_id": null,
+                "artifacts": [
+                  {
+                    "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                    "location": "/fixtures/artifacts/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                  }
+                ]
+              },
+              "id": "dd9ad852c01e9cc9dde76328f6b2b72968f7634314bfbc67fa872376ca0f9912"
+            }
+          },
+          "expect": {
+            "ok": true,
+            "value": false
+          }
+        },
+        {
+          "name": "import-matrix-result-other-string",
+          "source": "review_ledger.independent_import",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "import-result",
+              "source_key": "import:1",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": {
+                "source": {
+                  "repo": "camerontaylor/cq-toolkit",
+                  "producer": "fixture",
+                  "type": "author-cli",
+                  "id": "1",
+                  "authenticated": false
+                },
+                "source_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "result": "other",
+                "reason": "No authenticated scope",
+                "review_id": null,
+                "duplicate_id": null,
+                "artifacts": [
+                  {
+                    "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                    "location": "/fixtures/artifacts/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                  }
+                ]
+              },
+              "id": "dd9ad852c01e9cc9dde76328f6b2b72968f7634314bfbc67fa872376ca0f9912"
+            }
+          },
+          "expect": {
+            "ok": true,
+            "value": false
+          }
+        },
+        {
+          "name": "import-matrix-result-rejected",
+          "source": "review_ledger.independent_import",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "import-result",
+              "source_key": "import:1",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": {
+                "source": {
+                  "repo": "camerontaylor/cq-toolkit",
+                  "producer": "fixture",
+                  "type": "author-cli",
+                  "id": "1",
+                  "authenticated": false
+                },
+                "source_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "result": "rejected",
+                "reason": "No authenticated scope",
+                "review_id": null,
+                "duplicate_id": null,
+                "artifacts": [
+                  {
+                    "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                    "location": "/fixtures/artifacts/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                  }
+                ]
+              },
+              "id": "dd9ad852c01e9cc9dde76328f6b2b72968f7634314bfbc67fa872376ca0f9912"
+            }
+          },
+          "expect": {
+            "ok": true,
+            "value": true
+          }
+        },
+        {
+          "name": "import-matrix-result-missing",
+          "source": "review_ledger.independent_import",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "import-result",
+              "source_key": "import:1",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": {
+                "source": {
+                  "repo": "camerontaylor/cq-toolkit",
+                  "producer": "fixture",
+                  "type": "author-cli",
+                  "id": "1",
+                  "authenticated": false
+                },
+                "source_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "reason": "No authenticated scope",
+                "review_id": null,
+                "duplicate_id": null,
+                "artifacts": [
+                  {
+                    "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                    "location": "/fixtures/artifacts/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                  }
+                ]
+              },
+              "id": "dd9ad852c01e9cc9dde76328f6b2b72968f7634314bfbc67fa872376ca0f9912"
+            }
+          },
+          "expect": {
+            "ok": false,
+            "error": "KeyError",
+            "message": "'result'"
+          }
+        },
+        {
+          "name": "import-matrix-review-id-missing",
+          "source": "review_ledger.independent_import",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "import-result",
+              "source_key": "import:1",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": {
+                "source": {
+                  "repo": "camerontaylor/cq-toolkit",
+                  "producer": "fixture",
+                  "type": "author-cli",
+                  "id": "1",
+                  "authenticated": false
+                },
+                "source_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "result": "unverified",
+                "reason": "No authenticated scope",
+                "duplicate_id": null,
+                "artifacts": [
+                  {
+                    "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                    "location": "/fixtures/artifacts/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                  }
+                ]
+              },
+              "id": "dd9ad852c01e9cc9dde76328f6b2b72968f7634314bfbc67fa872376ca0f9912"
+            }
+          },
+          "expect": {
+            "ok": false,
+            "error": "KeyError",
+            "message": "'review_id'"
+          }
+        },
+        {
+          "name": "import-matrix-review-id-false",
+          "source": "review_ledger.independent_import",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "import-result",
+              "source_key": "import:1",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": {
+                "source": {
+                  "repo": "camerontaylor/cq-toolkit",
+                  "producer": "fixture",
+                  "type": "author-cli",
+                  "id": "1",
+                  "authenticated": false
+                },
+                "source_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "result": "unverified",
+                "reason": "No authenticated scope",
+                "review_id": false,
+                "duplicate_id": null,
+                "artifacts": [
+                  {
+                    "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                    "location": "/fixtures/artifacts/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                  }
+                ]
+              },
+              "id": "dd9ad852c01e9cc9dde76328f6b2b72968f7634314bfbc67fa872376ca0f9912"
+            }
+          },
+          "expect": {
+            "ok": true,
+            "value": false
+          }
+        },
+        {
+          "name": "import-matrix-review-id-zero",
+          "source": "review_ledger.independent_import",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "import-result",
+              "source_key": "import:1",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": {
+                "source": {
+                  "repo": "camerontaylor/cq-toolkit",
+                  "producer": "fixture",
+                  "type": "author-cli",
+                  "id": "1",
+                  "authenticated": false
+                },
+                "source_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "result": "unverified",
+                "reason": "No authenticated scope",
+                "review_id": 0,
+                "duplicate_id": null,
+                "artifacts": [
+                  {
+                    "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                    "location": "/fixtures/artifacts/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                  }
+                ]
+              },
+              "id": "dd9ad852c01e9cc9dde76328f6b2b72968f7634314bfbc67fa872376ca0f9912"
+            }
+          },
+          "expect": {
+            "ok": true,
+            "value": false
+          }
+        },
+        {
+          "name": "import-matrix-review-id-list",
+          "source": "review_ledger.independent_import",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "import-result",
+              "source_key": "import:1",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": {
+                "source": {
+                  "repo": "camerontaylor/cq-toolkit",
+                  "producer": "fixture",
+                  "type": "author-cli",
+                  "id": "1",
+                  "authenticated": false
+                },
+                "source_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "result": "unverified",
+                "reason": "No authenticated scope",
+                "review_id": [],
+                "duplicate_id": null,
+                "artifacts": [
+                  {
+                    "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                    "location": "/fixtures/artifacts/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                  }
+                ]
+              },
+              "id": "dd9ad852c01e9cc9dde76328f6b2b72968f7634314bfbc67fa872376ca0f9912"
+            }
+          },
+          "expect": {
+            "ok": true,
+            "value": false
+          }
+        },
+        {
+          "name": "import-matrix-review-id-dict",
+          "source": "review_ledger.independent_import",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "import-result",
+              "source_key": "import:1",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": {
+                "source": {
+                  "repo": "camerontaylor/cq-toolkit",
+                  "producer": "fixture",
+                  "type": "author-cli",
+                  "id": "1",
+                  "authenticated": false
+                },
+                "source_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "result": "unverified",
+                "reason": "No authenticated scope",
+                "review_id": {},
+                "duplicate_id": null,
+                "artifacts": [
+                  {
+                    "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                    "location": "/fixtures/artifacts/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                  }
+                ]
+              },
+              "id": "dd9ad852c01e9cc9dde76328f6b2b72968f7634314bfbc67fa872376ca0f9912"
+            }
+          },
+          "expect": {
+            "ok": true,
+            "value": false
+          }
+        },
+        {
+          "name": "import-matrix-duplicate-id-missing",
+          "source": "review_ledger.independent_import",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "import-result",
+              "source_key": "import:1",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": {
+                "source": {
+                  "repo": "camerontaylor/cq-toolkit",
+                  "producer": "fixture",
+                  "type": "author-cli",
+                  "id": "1",
+                  "authenticated": false
+                },
+                "source_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "result": "unverified",
+                "reason": "No authenticated scope",
+                "review_id": null,
+                "artifacts": [
+                  {
+                    "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                    "location": "/fixtures/artifacts/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                  }
+                ]
+              },
+              "id": "dd9ad852c01e9cc9dde76328f6b2b72968f7634314bfbc67fa872376ca0f9912"
+            }
+          },
+          "expect": {
+            "ok": false,
+            "error": "KeyError",
+            "message": "'duplicate_id'"
+          }
+        },
+        {
+          "name": "import-matrix-duplicate-id-false",
+          "source": "review_ledger.independent_import",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "import-result",
+              "source_key": "import:1",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": {
+                "source": {
+                  "repo": "camerontaylor/cq-toolkit",
+                  "producer": "fixture",
+                  "type": "author-cli",
+                  "id": "1",
+                  "authenticated": false
+                },
+                "source_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "result": "unverified",
+                "reason": "No authenticated scope",
+                "review_id": null,
+                "duplicate_id": false,
+                "artifacts": [
+                  {
+                    "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                    "location": "/fixtures/artifacts/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                  }
+                ]
+              },
+              "id": "dd9ad852c01e9cc9dde76328f6b2b72968f7634314bfbc67fa872376ca0f9912"
+            }
+          },
+          "expect": {
+            "ok": true,
+            "value": false
+          }
+        },
+        {
+          "name": "import-matrix-duplicate-id-zero",
+          "source": "review_ledger.independent_import",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "import-result",
+              "source_key": "import:1",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": {
+                "source": {
+                  "repo": "camerontaylor/cq-toolkit",
+                  "producer": "fixture",
+                  "type": "author-cli",
+                  "id": "1",
+                  "authenticated": false
+                },
+                "source_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "result": "unverified",
+                "reason": "No authenticated scope",
+                "review_id": null,
+                "duplicate_id": 0,
+                "artifacts": [
+                  {
+                    "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                    "location": "/fixtures/artifacts/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                  }
+                ]
+              },
+              "id": "dd9ad852c01e9cc9dde76328f6b2b72968f7634314bfbc67fa872376ca0f9912"
+            }
+          },
+          "expect": {
+            "ok": true,
+            "value": false
+          }
+        },
+        {
+          "name": "import-matrix-duplicate-id-list",
+          "source": "review_ledger.independent_import",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "import-result",
+              "source_key": "import:1",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": {
+                "source": {
+                  "repo": "camerontaylor/cq-toolkit",
+                  "producer": "fixture",
+                  "type": "author-cli",
+                  "id": "1",
+                  "authenticated": false
+                },
+                "source_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "result": "unverified",
+                "reason": "No authenticated scope",
+                "review_id": null,
+                "duplicate_id": [],
+                "artifacts": [
+                  {
+                    "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                    "location": "/fixtures/artifacts/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                  }
+                ]
+              },
+              "id": "dd9ad852c01e9cc9dde76328f6b2b72968f7634314bfbc67fa872376ca0f9912"
+            }
+          },
+          "expect": {
+            "ok": true,
+            "value": false
+          }
+        },
+        {
+          "name": "import-matrix-event-type-missing",
+          "source": "review_ledger.independent_import",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "source_key": "import:1",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": {
+                "source": {
+                  "repo": "camerontaylor/cq-toolkit",
+                  "producer": "fixture",
+                  "type": "author-cli",
+                  "id": "1",
+                  "authenticated": false
+                },
+                "source_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "result": "unverified",
+                "reason": "No authenticated scope",
+                "review_id": null,
+                "duplicate_id": null,
+                "artifacts": [
+                  {
+                    "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                    "location": "/fixtures/artifacts/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                  }
+                ]
+              },
+              "id": "dd9ad852c01e9cc9dde76328f6b2b72968f7634314bfbc67fa872376ca0f9912"
+            }
+          },
+          "expect": {
+            "ok": false,
+            "error": "KeyError",
+            "message": "'event_type'"
+          }
+        },
+        {
+          "name": "import-matrix-event-type-null",
+          "source": "review_ledger.independent_import",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": null,
+              "source_key": "import:1",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": {
+                "source": {
+                  "repo": "camerontaylor/cq-toolkit",
+                  "producer": "fixture",
+                  "type": "author-cli",
+                  "id": "1",
+                  "authenticated": false
+                },
+                "source_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "result": "unverified",
+                "reason": "No authenticated scope",
+                "review_id": null,
+                "duplicate_id": null,
+                "artifacts": [
+                  {
+                    "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                    "location": "/fixtures/artifacts/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                  }
+                ]
+              },
+              "id": "dd9ad852c01e9cc9dde76328f6b2b72968f7634314bfbc67fa872376ca0f9912"
+            }
+          },
+          "expect": {
+            "ok": true,
+            "value": false
+          }
+        },
+        {
+          "name": "import-matrix-event-type-list",
+          "source": "review_ledger.independent_import",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": [],
+              "source_key": "import:1",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": {
+                "source": {
+                  "repo": "camerontaylor/cq-toolkit",
+                  "producer": "fixture",
+                  "type": "author-cli",
+                  "id": "1",
+                  "authenticated": false
+                },
+                "source_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "result": "unverified",
+                "reason": "No authenticated scope",
+                "review_id": null,
+                "duplicate_id": null,
+                "artifacts": [
+                  {
+                    "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                    "location": "/fixtures/artifacts/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                  }
+                ]
+              },
+              "id": "dd9ad852c01e9cc9dde76328f6b2b72968f7634314bfbc67fa872376ca0f9912"
+            }
+          },
+          "expect": {
+            "ok": true,
+            "value": false
+          }
+        },
+        {
+          "name": "import-matrix-event-type-other-result-missing",
+          "source": "review_ledger.independent_import",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "other",
+              "source_key": "import:1",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": {
+                "source": {
+                  "repo": "camerontaylor/cq-toolkit",
+                  "producer": "fixture",
+                  "type": "author-cli",
+                  "id": "1",
+                  "authenticated": false
+                },
+                "source_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "reason": "No authenticated scope",
+                "review_id": null,
+                "duplicate_id": null,
+                "artifacts": [
+                  {
+                    "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                    "location": "/fixtures/artifacts/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                  }
+                ]
+              },
+              "id": "dd9ad852c01e9cc9dde76328f6b2b72968f7634314bfbc67fa872376ca0f9912"
+            }
+          },
+          "expect": {
+            "ok": true,
+            "value": false
+          }
+        },
+        {
+          "name": "import-matrix-payload-missing",
+          "source": "review_ledger.independent_import",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "import-result",
+              "source_key": "import:1",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "id": "dd9ad852c01e9cc9dde76328f6b2b72968f7634314bfbc67fa872376ca0f9912"
+            }
+          },
+          "expect": {
+            "ok": false,
+            "error": "KeyError",
+            "message": "'payload'"
+          }
+        },
+        {
+          "name": "import-matrix-payload-null",
+          "source": "review_ledger.independent_import",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "import-result",
+              "source_key": "import:1",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": null,
+              "id": "dd9ad852c01e9cc9dde76328f6b2b72968f7634314bfbc67fa872376ca0f9912"
+            }
+          },
+          "expect": {
+            "ok": false,
+            "error": "TypeError",
+            "message": "'NoneType' object is not subscriptable"
+          }
+        },
+        {
+          "name": "import-matrix-payload-list",
+          "source": "review_ledger.independent_import",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "import-result",
+              "source_key": "import:1",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": [],
+              "id": "dd9ad852c01e9cc9dde76328f6b2b72968f7634314bfbc67fa872376ca0f9912"
+            }
+          },
+          "expect": {
+            "ok": false,
+            "error": "TypeError",
+            "message": "list indices must be integers or slices, not str"
+          }
+        },
+        {
+          "name": "import-matrix-payload-string",
+          "source": "review_ledger.independent_import",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "import-result",
+              "source_key": "import:1",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": "x",
+              "id": "dd9ad852c01e9cc9dde76328f6b2b72968f7634314bfbc67fa872376ca0f9912"
+            }
+          },
+          "expect": {
+            "ok": false,
+            "error": "TypeError",
+            "message": "string indices must be integers, not 'str'"
+          }
+        },
+        {
+          "name": "import-matrix-payload-number",
+          "source": "review_ledger.independent_import",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "import-result",
+              "source_key": "import:1",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": 1,
+              "id": "dd9ad852c01e9cc9dde76328f6b2b72968f7634314bfbc67fa872376ca0f9912"
+            }
+          },
+          "expect": {
+            "ok": false,
+            "error": "TypeError",
+            "message": "'int' object is not subscriptable"
+          }
+        },
+        {
+          "name": "import-matrix-payload-bool",
+          "source": "review_ledger.independent_import",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "import-result",
+              "source_key": "import:1",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": true,
+              "id": "dd9ad852c01e9cc9dde76328f6b2b72968f7634314bfbc67fa872376ca0f9912"
+            }
+          },
+          "expect": {
+            "ok": false,
+            "error": "TypeError",
+            "message": "'bool' object is not subscriptable"
+          }
+        },
+        {
           "name": "initial-enrollment",
           "source": "review_ledger.initial_inventory_enrollment",
           "input": {
@@ -6217,6 +7180,1404 @@
           "expect": {
             "ok": true,
             "value": false
+          }
+        },
+        {
+          "name": "enroll-matrix-reason-missing",
+          "source": "review_ledger.initial_inventory_enrollment",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "job-state",
+              "source_key": "job:fixture:0:94b7901f68af69aca5c22847747ebc7a73d3c54665cfaac33cad74af3425f59a",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": {
+                "family": "fixture",
+                "subject_id": "subject",
+                "job_id": "fixture:0",
+                "generation": 0,
+                "attempt": 0,
+                "state": "pending",
+                "failures": 0,
+                "next_eligible_at": null
+              },
+              "id": "795948736be23ada03be8814b02fabf980124862ad0e1a6a745c625d91202e77"
+            }
+          },
+          "expect": {
+            "ok": false,
+            "error": "KeyError",
+            "message": "'reason'"
+          }
+        },
+        {
+          "name": "enroll-matrix-reason-other",
+          "source": "review_ledger.initial_inventory_enrollment",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "job-state",
+              "source_key": "job:fixture:0:94b7901f68af69aca5c22847747ebc7a73d3c54665cfaac33cad74af3425f59a",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": {
+                "family": "fixture",
+                "subject_id": "subject",
+                "job_id": "fixture:0",
+                "generation": 0,
+                "attempt": 0,
+                "state": "pending",
+                "failures": 0,
+                "next_eligible_at": null,
+                "reason": "other"
+              },
+              "id": "795948736be23ada03be8814b02fabf980124862ad0e1a6a745c625d91202e77"
+            }
+          },
+          "expect": {
+            "ok": true,
+            "value": false
+          }
+        },
+        {
+          "name": "enroll-matrix-reason-null",
+          "source": "review_ledger.initial_inventory_enrollment",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "job-state",
+              "source_key": "job:fixture:0:94b7901f68af69aca5c22847747ebc7a73d3c54665cfaac33cad74af3425f59a",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": {
+                "family": "fixture",
+                "subject_id": "subject",
+                "job_id": "fixture:0",
+                "generation": 0,
+                "attempt": 0,
+                "state": "pending",
+                "failures": 0,
+                "next_eligible_at": null,
+                "reason": null
+              },
+              "id": "795948736be23ada03be8814b02fabf980124862ad0e1a6a745c625d91202e77"
+            }
+          },
+          "expect": {
+            "ok": true,
+            "value": false
+          }
+        },
+        {
+          "name": "enroll-matrix-reason-list",
+          "source": "review_ledger.initial_inventory_enrollment",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "job-state",
+              "source_key": "job:fixture:0:94b7901f68af69aca5c22847747ebc7a73d3c54665cfaac33cad74af3425f59a",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": {
+                "family": "fixture",
+                "subject_id": "subject",
+                "job_id": "fixture:0",
+                "generation": 0,
+                "attempt": 0,
+                "state": "pending",
+                "failures": 0,
+                "next_eligible_at": null,
+                "reason": []
+              },
+              "id": "795948736be23ada03be8814b02fabf980124862ad0e1a6a745c625d91202e77"
+            }
+          },
+          "expect": {
+            "ok": true,
+            "value": false
+          }
+        },
+        {
+          "name": "enroll-matrix-reason-other-state-missing",
+          "source": "review_ledger.initial_inventory_enrollment",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "job-state",
+              "source_key": "job:fixture:0:94b7901f68af69aca5c22847747ebc7a73d3c54665cfaac33cad74af3425f59a",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": {
+                "family": "fixture",
+                "subject_id": "subject",
+                "job_id": "fixture:0",
+                "generation": 0,
+                "attempt": 0,
+                "failures": 0,
+                "next_eligible_at": null,
+                "reason": "other"
+              },
+              "id": "795948736be23ada03be8814b02fabf980124862ad0e1a6a745c625d91202e77"
+            }
+          },
+          "expect": {
+            "ok": true,
+            "value": false
+          }
+        },
+        {
+          "name": "enroll-matrix-state-missing",
+          "source": "review_ledger.initial_inventory_enrollment",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "job-state",
+              "source_key": "job:fixture:0:94b7901f68af69aca5c22847747ebc7a73d3c54665cfaac33cad74af3425f59a",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": {
+                "family": "fixture",
+                "subject_id": "subject",
+                "job_id": "fixture:0",
+                "generation": 0,
+                "attempt": 0,
+                "failures": 0,
+                "next_eligible_at": null,
+                "reason": "inventory enqueue"
+              },
+              "id": "795948736be23ada03be8814b02fabf980124862ad0e1a6a745c625d91202e77"
+            }
+          },
+          "expect": {
+            "ok": false,
+            "error": "KeyError",
+            "message": "'state'"
+          }
+        },
+        {
+          "name": "enroll-matrix-state-other",
+          "source": "review_ledger.initial_inventory_enrollment",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "job-state",
+              "source_key": "job:fixture:0:94b7901f68af69aca5c22847747ebc7a73d3c54665cfaac33cad74af3425f59a",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": {
+                "family": "fixture",
+                "subject_id": "subject",
+                "job_id": "fixture:0",
+                "generation": 0,
+                "attempt": 0,
+                "state": "other",
+                "failures": 0,
+                "next_eligible_at": null,
+                "reason": "inventory enqueue"
+              },
+              "id": "795948736be23ada03be8814b02fabf980124862ad0e1a6a745c625d91202e77"
+            }
+          },
+          "expect": {
+            "ok": true,
+            "value": false
+          }
+        },
+        {
+          "name": "enroll-matrix-state-null",
+          "source": "review_ledger.initial_inventory_enrollment",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "job-state",
+              "source_key": "job:fixture:0:94b7901f68af69aca5c22847747ebc7a73d3c54665cfaac33cad74af3425f59a",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": {
+                "family": "fixture",
+                "subject_id": "subject",
+                "job_id": "fixture:0",
+                "generation": 0,
+                "attempt": 0,
+                "state": null,
+                "failures": 0,
+                "next_eligible_at": null,
+                "reason": "inventory enqueue"
+              },
+              "id": "795948736be23ada03be8814b02fabf980124862ad0e1a6a745c625d91202e77"
+            }
+          },
+          "expect": {
+            "ok": true,
+            "value": false
+          }
+        },
+        {
+          "name": "enroll-matrix-state-list",
+          "source": "review_ledger.initial_inventory_enrollment",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "job-state",
+              "source_key": "job:fixture:0:94b7901f68af69aca5c22847747ebc7a73d3c54665cfaac33cad74af3425f59a",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": {
+                "family": "fixture",
+                "subject_id": "subject",
+                "job_id": "fixture:0",
+                "generation": 0,
+                "attempt": 0,
+                "state": [],
+                "failures": 0,
+                "next_eligible_at": null,
+                "reason": "inventory enqueue"
+              },
+              "id": "795948736be23ada03be8814b02fabf980124862ad0e1a6a745c625d91202e77"
+            }
+          },
+          "expect": {
+            "ok": true,
+            "value": false
+          }
+        },
+        {
+          "name": "enroll-matrix-attempt-missing",
+          "source": "review_ledger.initial_inventory_enrollment",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "job-state",
+              "source_key": "job:fixture:0:94b7901f68af69aca5c22847747ebc7a73d3c54665cfaac33cad74af3425f59a",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": {
+                "family": "fixture",
+                "subject_id": "subject",
+                "job_id": "fixture:0",
+                "generation": 0,
+                "state": "pending",
+                "failures": 0,
+                "next_eligible_at": null,
+                "reason": "inventory enqueue"
+              },
+              "id": "795948736be23ada03be8814b02fabf980124862ad0e1a6a745c625d91202e77"
+            }
+          },
+          "expect": {
+            "ok": false,
+            "error": "KeyError",
+            "message": "'attempt'"
+          }
+        },
+        {
+          "name": "enroll-matrix-attempt-false",
+          "source": "review_ledger.initial_inventory_enrollment",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "job-state",
+              "source_key": "job:fixture:0:352b113912f84ed038d30d9bcc875f6e6d71deaf0065f82aa1b9bdeabd234953",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": {
+                "family": "fixture",
+                "subject_id": "subject",
+                "job_id": "fixture:0",
+                "generation": 0,
+                "attempt": false,
+                "state": "pending",
+                "failures": 0,
+                "next_eligible_at": null,
+                "reason": "inventory enqueue"
+              },
+              "id": "795948736be23ada03be8814b02fabf980124862ad0e1a6a745c625d91202e77"
+            }
+          },
+          "expect": {
+            "ok": true,
+            "value": true
+          }
+        },
+        {
+          "name": "enroll-matrix-attempt-true",
+          "source": "review_ledger.initial_inventory_enrollment",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "job-state",
+              "source_key": "job:fixture:0:94b7901f68af69aca5c22847747ebc7a73d3c54665cfaac33cad74af3425f59a",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": {
+                "family": "fixture",
+                "subject_id": "subject",
+                "job_id": "fixture:0",
+                "generation": 0,
+                "attempt": true,
+                "state": "pending",
+                "failures": 0,
+                "next_eligible_at": null,
+                "reason": "inventory enqueue"
+              },
+              "id": "795948736be23ada03be8814b02fabf980124862ad0e1a6a745c625d91202e77"
+            }
+          },
+          "expect": {
+            "ok": true,
+            "value": false
+          }
+        },
+        {
+          "name": "enroll-matrix-attempt-one",
+          "source": "review_ledger.initial_inventory_enrollment",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "job-state",
+              "source_key": "job:fixture:0:94b7901f68af69aca5c22847747ebc7a73d3c54665cfaac33cad74af3425f59a",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": {
+                "family": "fixture",
+                "subject_id": "subject",
+                "job_id": "fixture:0",
+                "generation": 0,
+                "attempt": 1,
+                "state": "pending",
+                "failures": 0,
+                "next_eligible_at": null,
+                "reason": "inventory enqueue"
+              },
+              "id": "795948736be23ada03be8814b02fabf980124862ad0e1a6a745c625d91202e77"
+            }
+          },
+          "expect": {
+            "ok": true,
+            "value": false
+          }
+        },
+        {
+          "name": "enroll-matrix-attempt-float-zero",
+          "source": "review_ledger.initial_inventory_enrollment",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "job-state",
+              "source_key": "job:fixture:0:94b7901f68af69aca5c22847747ebc7a73d3c54665cfaac33cad74af3425f59a",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": {
+                "family": "fixture",
+                "subject_id": "subject",
+                "job_id": "fixture:0",
+                "generation": 0,
+                "attempt": 0.0,
+                "state": "pending",
+                "failures": 0,
+                "next_eligible_at": null,
+                "reason": "inventory enqueue"
+              },
+              "id": "795948736be23ada03be8814b02fabf980124862ad0e1a6a745c625d91202e77"
+            }
+          },
+          "expect": {
+            "ok": false,
+            "error": "IntegrityError",
+            "message": "unsupported canonical JSON value"
+          }
+        },
+        {
+          "name": "enroll-matrix-attempt-null",
+          "source": "review_ledger.initial_inventory_enrollment",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "job-state",
+              "source_key": "job:fixture:0:94b7901f68af69aca5c22847747ebc7a73d3c54665cfaac33cad74af3425f59a",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": {
+                "family": "fixture",
+                "subject_id": "subject",
+                "job_id": "fixture:0",
+                "generation": 0,
+                "attempt": null,
+                "state": "pending",
+                "failures": 0,
+                "next_eligible_at": null,
+                "reason": "inventory enqueue"
+              },
+              "id": "795948736be23ada03be8814b02fabf980124862ad0e1a6a745c625d91202e77"
+            }
+          },
+          "expect": {
+            "ok": true,
+            "value": false
+          }
+        },
+        {
+          "name": "enroll-matrix-attempt-string",
+          "source": "review_ledger.initial_inventory_enrollment",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "job-state",
+              "source_key": "job:fixture:0:94b7901f68af69aca5c22847747ebc7a73d3c54665cfaac33cad74af3425f59a",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": {
+                "family": "fixture",
+                "subject_id": "subject",
+                "job_id": "fixture:0",
+                "generation": 0,
+                "attempt": "0",
+                "state": "pending",
+                "failures": 0,
+                "next_eligible_at": null,
+                "reason": "inventory enqueue"
+              },
+              "id": "795948736be23ada03be8814b02fabf980124862ad0e1a6a745c625d91202e77"
+            }
+          },
+          "expect": {
+            "ok": true,
+            "value": false
+          }
+        },
+        {
+          "name": "enroll-matrix-attempt-list",
+          "source": "review_ledger.initial_inventory_enrollment",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "job-state",
+              "source_key": "job:fixture:0:94b7901f68af69aca5c22847747ebc7a73d3c54665cfaac33cad74af3425f59a",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": {
+                "family": "fixture",
+                "subject_id": "subject",
+                "job_id": "fixture:0",
+                "generation": 0,
+                "attempt": [],
+                "state": "pending",
+                "failures": 0,
+                "next_eligible_at": null,
+                "reason": "inventory enqueue"
+              },
+              "id": "795948736be23ada03be8814b02fabf980124862ad0e1a6a745c625d91202e77"
+            }
+          },
+          "expect": {
+            "ok": true,
+            "value": false
+          }
+        },
+        {
+          "name": "enroll-matrix-attempt-dict",
+          "source": "review_ledger.initial_inventory_enrollment",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "job-state",
+              "source_key": "job:fixture:0:94b7901f68af69aca5c22847747ebc7a73d3c54665cfaac33cad74af3425f59a",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": {
+                "family": "fixture",
+                "subject_id": "subject",
+                "job_id": "fixture:0",
+                "generation": 0,
+                "attempt": {},
+                "state": "pending",
+                "failures": 0,
+                "next_eligible_at": null,
+                "reason": "inventory enqueue"
+              },
+              "id": "795948736be23ada03be8814b02fabf980124862ad0e1a6a745c625d91202e77"
+            }
+          },
+          "expect": {
+            "ok": true,
+            "value": false
+          }
+        },
+        {
+          "name": "enroll-matrix-failures-missing",
+          "source": "review_ledger.initial_inventory_enrollment",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "job-state",
+              "source_key": "job:fixture:0:94b7901f68af69aca5c22847747ebc7a73d3c54665cfaac33cad74af3425f59a",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": {
+                "family": "fixture",
+                "subject_id": "subject",
+                "job_id": "fixture:0",
+                "generation": 0,
+                "attempt": 0,
+                "state": "pending",
+                "next_eligible_at": null,
+                "reason": "inventory enqueue"
+              },
+              "id": "795948736be23ada03be8814b02fabf980124862ad0e1a6a745c625d91202e77"
+            }
+          },
+          "expect": {
+            "ok": false,
+            "error": "KeyError",
+            "message": "'failures'"
+          }
+        },
+        {
+          "name": "enroll-matrix-failures-false",
+          "source": "review_ledger.initial_inventory_enrollment",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "job-state",
+              "source_key": "job:fixture:0:2a073294815483c0a0391989cb81469bdcdcc0e7dadc543e05e85f5f19303d1a",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": {
+                "family": "fixture",
+                "subject_id": "subject",
+                "job_id": "fixture:0",
+                "generation": 0,
+                "attempt": 0,
+                "state": "pending",
+                "failures": false,
+                "next_eligible_at": null,
+                "reason": "inventory enqueue"
+              },
+              "id": "795948736be23ada03be8814b02fabf980124862ad0e1a6a745c625d91202e77"
+            }
+          },
+          "expect": {
+            "ok": true,
+            "value": true
+          }
+        },
+        {
+          "name": "enroll-matrix-generation-false",
+          "source": "review_ledger.initial_inventory_enrollment",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "job-state",
+              "source_key": "job:fixture:0:d3f82afd261658716dd92a55a20ff5aff6077b47547bb9b0af843821e84fa209",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": {
+                "family": "fixture",
+                "subject_id": "subject",
+                "job_id": "fixture:0",
+                "generation": false,
+                "attempt": 0,
+                "state": "pending",
+                "failures": 0,
+                "next_eligible_at": null,
+                "reason": "inventory enqueue"
+              },
+              "id": "795948736be23ada03be8814b02fabf980124862ad0e1a6a745c625d91202e77"
+            }
+          },
+          "expect": {
+            "ok": true,
+            "value": true
+          }
+        },
+        {
+          "name": "enroll-matrix-next-eligible-missing",
+          "source": "review_ledger.initial_inventory_enrollment",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "job-state",
+              "source_key": "job:fixture:0:94b7901f68af69aca5c22847747ebc7a73d3c54665cfaac33cad74af3425f59a",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": {
+                "family": "fixture",
+                "subject_id": "subject",
+                "job_id": "fixture:0",
+                "generation": 0,
+                "attempt": 0,
+                "state": "pending",
+                "failures": 0,
+                "reason": "inventory enqueue"
+              },
+              "id": "795948736be23ada03be8814b02fabf980124862ad0e1a6a745c625d91202e77"
+            }
+          },
+          "expect": {
+            "ok": false,
+            "error": "KeyError",
+            "message": "'next_eligible_at'"
+          }
+        },
+        {
+          "name": "enroll-matrix-next-eligible-false",
+          "source": "review_ledger.initial_inventory_enrollment",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "job-state",
+              "source_key": "job:fixture:0:94b7901f68af69aca5c22847747ebc7a73d3c54665cfaac33cad74af3425f59a",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": {
+                "family": "fixture",
+                "subject_id": "subject",
+                "job_id": "fixture:0",
+                "generation": 0,
+                "attempt": 0,
+                "state": "pending",
+                "failures": 0,
+                "next_eligible_at": false,
+                "reason": "inventory enqueue"
+              },
+              "id": "795948736be23ada03be8814b02fabf980124862ad0e1a6a745c625d91202e77"
+            }
+          },
+          "expect": {
+            "ok": true,
+            "value": false
+          }
+        },
+        {
+          "name": "enroll-matrix-next-eligible-zero",
+          "source": "review_ledger.initial_inventory_enrollment",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "job-state",
+              "source_key": "job:fixture:0:94b7901f68af69aca5c22847747ebc7a73d3c54665cfaac33cad74af3425f59a",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": {
+                "family": "fixture",
+                "subject_id": "subject",
+                "job_id": "fixture:0",
+                "generation": 0,
+                "attempt": 0,
+                "state": "pending",
+                "failures": 0,
+                "next_eligible_at": 0,
+                "reason": "inventory enqueue"
+              },
+              "id": "795948736be23ada03be8814b02fabf980124862ad0e1a6a745c625d91202e77"
+            }
+          },
+          "expect": {
+            "ok": true,
+            "value": false
+          }
+        },
+        {
+          "name": "enroll-matrix-next-eligible-string",
+          "source": "review_ledger.initial_inventory_enrollment",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "job-state",
+              "source_key": "job:fixture:0:94b7901f68af69aca5c22847747ebc7a73d3c54665cfaac33cad74af3425f59a",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": {
+                "family": "fixture",
+                "subject_id": "subject",
+                "job_id": "fixture:0",
+                "generation": 0,
+                "attempt": 0,
+                "state": "pending",
+                "failures": 0,
+                "next_eligible_at": "x",
+                "reason": "inventory enqueue"
+              },
+              "id": "795948736be23ada03be8814b02fabf980124862ad0e1a6a745c625d91202e77"
+            }
+          },
+          "expect": {
+            "ok": true,
+            "value": false
+          }
+        },
+        {
+          "name": "enroll-matrix-next-eligible-list",
+          "source": "review_ledger.initial_inventory_enrollment",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "job-state",
+              "source_key": "job:fixture:0:94b7901f68af69aca5c22847747ebc7a73d3c54665cfaac33cad74af3425f59a",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": {
+                "family": "fixture",
+                "subject_id": "subject",
+                "job_id": "fixture:0",
+                "generation": 0,
+                "attempt": 0,
+                "state": "pending",
+                "failures": 0,
+                "next_eligible_at": [],
+                "reason": "inventory enqueue"
+              },
+              "id": "795948736be23ada03be8814b02fabf980124862ad0e1a6a745c625d91202e77"
+            }
+          },
+          "expect": {
+            "ok": true,
+            "value": false
+          }
+        },
+        {
+          "name": "enroll-matrix-operator-present",
+          "source": "review_ledger.initial_inventory_enrollment",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "job-state",
+              "source_key": "job:fixture:0:94b7901f68af69aca5c22847747ebc7a73d3c54665cfaac33cad74af3425f59a",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": {
+                "family": "fixture",
+                "subject_id": "subject",
+                "job_id": "fixture:0",
+                "generation": 0,
+                "attempt": 0,
+                "state": "pending",
+                "failures": 0,
+                "next_eligible_at": null,
+                "reason": "inventory enqueue",
+                "operator": "owner"
+              },
+              "id": "795948736be23ada03be8814b02fabf980124862ad0e1a6a745c625d91202e77"
+            }
+          },
+          "expect": {
+            "ok": true,
+            "value": false
+          }
+        },
+        {
+          "name": "enroll-matrix-operator-null",
+          "source": "review_ledger.initial_inventory_enrollment",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "job-state",
+              "source_key": "job:fixture:0:94b7901f68af69aca5c22847747ebc7a73d3c54665cfaac33cad74af3425f59a",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": {
+                "family": "fixture",
+                "subject_id": "subject",
+                "job_id": "fixture:0",
+                "generation": 0,
+                "attempt": 0,
+                "state": "pending",
+                "failures": 0,
+                "next_eligible_at": null,
+                "reason": "inventory enqueue",
+                "operator": null
+              },
+              "id": "795948736be23ada03be8814b02fabf980124862ad0e1a6a745c625d91202e77"
+            }
+          },
+          "expect": {
+            "ok": true,
+            "value": false
+          }
+        },
+        {
+          "name": "enroll-matrix-operator-present-source-key-missing",
+          "source": "review_ledger.initial_inventory_enrollment",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "job-state",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": {
+                "family": "fixture",
+                "subject_id": "subject",
+                "job_id": "fixture:0",
+                "generation": 0,
+                "attempt": 0,
+                "state": "pending",
+                "failures": 0,
+                "next_eligible_at": null,
+                "reason": "inventory enqueue",
+                "operator": "owner"
+              },
+              "id": "795948736be23ada03be8814b02fabf980124862ad0e1a6a745c625d91202e77"
+            }
+          },
+          "expect": {
+            "ok": true,
+            "value": false
+          }
+        },
+        {
+          "name": "enroll-matrix-source-key-missing",
+          "source": "review_ledger.initial_inventory_enrollment",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "job-state",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": {
+                "family": "fixture",
+                "subject_id": "subject",
+                "job_id": "fixture:0",
+                "generation": 0,
+                "attempt": 0,
+                "state": "pending",
+                "failures": 0,
+                "next_eligible_at": null,
+                "reason": "inventory enqueue"
+              },
+              "id": "795948736be23ada03be8814b02fabf980124862ad0e1a6a745c625d91202e77"
+            }
+          },
+          "expect": {
+            "ok": false,
+            "error": "KeyError",
+            "message": "'source_key'"
+          }
+        },
+        {
+          "name": "enroll-matrix-source-key-null",
+          "source": "review_ledger.initial_inventory_enrollment",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "job-state",
+              "source_key": null,
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": {
+                "family": "fixture",
+                "subject_id": "subject",
+                "job_id": "fixture:0",
+                "generation": 0,
+                "attempt": 0,
+                "state": "pending",
+                "failures": 0,
+                "next_eligible_at": null,
+                "reason": "inventory enqueue"
+              },
+              "id": "795948736be23ada03be8814b02fabf980124862ad0e1a6a745c625d91202e77"
+            }
+          },
+          "expect": {
+            "ok": true,
+            "value": false
+          }
+        },
+        {
+          "name": "enroll-matrix-source-key-false",
+          "source": "review_ledger.initial_inventory_enrollment",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "job-state",
+              "source_key": false,
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": {
+                "family": "fixture",
+                "subject_id": "subject",
+                "job_id": "fixture:0",
+                "generation": 0,
+                "attempt": 0,
+                "state": "pending",
+                "failures": 0,
+                "next_eligible_at": null,
+                "reason": "inventory enqueue"
+              },
+              "id": "795948736be23ada03be8814b02fabf980124862ad0e1a6a745c625d91202e77"
+            }
+          },
+          "expect": {
+            "ok": true,
+            "value": false
+          }
+        },
+        {
+          "name": "enroll-matrix-source-key-number",
+          "source": "review_ledger.initial_inventory_enrollment",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "job-state",
+              "source_key": 1,
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": {
+                "family": "fixture",
+                "subject_id": "subject",
+                "job_id": "fixture:0",
+                "generation": 0,
+                "attempt": 0,
+                "state": "pending",
+                "failures": 0,
+                "next_eligible_at": null,
+                "reason": "inventory enqueue"
+              },
+              "id": "795948736be23ada03be8814b02fabf980124862ad0e1a6a745c625d91202e77"
+            }
+          },
+          "expect": {
+            "ok": true,
+            "value": false
+          }
+        },
+        {
+          "name": "enroll-matrix-source-key-list",
+          "source": "review_ledger.initial_inventory_enrollment",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "job-state",
+              "source_key": [],
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": {
+                "family": "fixture",
+                "subject_id": "subject",
+                "job_id": "fixture:0",
+                "generation": 0,
+                "attempt": 0,
+                "state": "pending",
+                "failures": 0,
+                "next_eligible_at": null,
+                "reason": "inventory enqueue"
+              },
+              "id": "795948736be23ada03be8814b02fabf980124862ad0e1a6a745c625d91202e77"
+            }
+          },
+          "expect": {
+            "ok": true,
+            "value": false
+          }
+        },
+        {
+          "name": "enroll-matrix-source-key-dict",
+          "source": "review_ledger.initial_inventory_enrollment",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "job-state",
+              "source_key": {},
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": {
+                "family": "fixture",
+                "subject_id": "subject",
+                "job_id": "fixture:0",
+                "generation": 0,
+                "attempt": 0,
+                "state": "pending",
+                "failures": 0,
+                "next_eligible_at": null,
+                "reason": "inventory enqueue"
+              },
+              "id": "795948736be23ada03be8814b02fabf980124862ad0e1a6a745c625d91202e77"
+            }
+          },
+          "expect": {
+            "ok": true,
+            "value": false
+          }
+        },
+        {
+          "name": "enroll-matrix-source-key-wrong",
+          "source": "review_ledger.initial_inventory_enrollment",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "job-state",
+              "source_key": "job:wrong",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": {
+                "family": "fixture",
+                "subject_id": "subject",
+                "job_id": "fixture:0",
+                "generation": 0,
+                "attempt": 0,
+                "state": "pending",
+                "failures": 0,
+                "next_eligible_at": null,
+                "reason": "inventory enqueue"
+              },
+              "id": "795948736be23ada03be8814b02fabf980124862ad0e1a6a745c625d91202e77"
+            }
+          },
+          "expect": {
+            "ok": true,
+            "value": false
+          }
+        },
+        {
+          "name": "enroll-matrix-job-id-missing",
+          "source": "review_ledger.initial_inventory_enrollment",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "job-state",
+              "source_key": "job:fixture:0:94b7901f68af69aca5c22847747ebc7a73d3c54665cfaac33cad74af3425f59a",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": {
+                "family": "fixture",
+                "subject_id": "subject",
+                "generation": 0,
+                "attempt": 0,
+                "state": "pending",
+                "failures": 0,
+                "next_eligible_at": null,
+                "reason": "inventory enqueue"
+              },
+              "id": "795948736be23ada03be8814b02fabf980124862ad0e1a6a745c625d91202e77"
+            }
+          },
+          "expect": {
+            "ok": false,
+            "error": "KeyError",
+            "message": "'job_id'"
+          }
+        },
+        {
+          "name": "enroll-matrix-job-id-null",
+          "source": "review_ledger.initial_inventory_enrollment",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "job-state",
+              "source_key": "job:fixture:0:94b7901f68af69aca5c22847747ebc7a73d3c54665cfaac33cad74af3425f59a",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": {
+                "family": "fixture",
+                "subject_id": "subject",
+                "job_id": null,
+                "generation": 0,
+                "attempt": 0,
+                "state": "pending",
+                "failures": 0,
+                "next_eligible_at": null,
+                "reason": "inventory enqueue"
+              },
+              "id": "795948736be23ada03be8814b02fabf980124862ad0e1a6a745c625d91202e77"
+            }
+          },
+          "expect": {
+            "ok": false,
+            "error": "TypeError",
+            "message": "can only concatenate str (not \"NoneType\") to str"
+          }
+        },
+        {
+          "name": "enroll-matrix-job-id-bool",
+          "source": "review_ledger.initial_inventory_enrollment",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "job-state",
+              "source_key": "job:fixture:0:94b7901f68af69aca5c22847747ebc7a73d3c54665cfaac33cad74af3425f59a",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": {
+                "family": "fixture",
+                "subject_id": "subject",
+                "job_id": true,
+                "generation": 0,
+                "attempt": 0,
+                "state": "pending",
+                "failures": 0,
+                "next_eligible_at": null,
+                "reason": "inventory enqueue"
+              },
+              "id": "795948736be23ada03be8814b02fabf980124862ad0e1a6a745c625d91202e77"
+            }
+          },
+          "expect": {
+            "ok": false,
+            "error": "TypeError",
+            "message": "can only concatenate str (not \"bool\") to str"
+          }
+        },
+        {
+          "name": "enroll-matrix-job-id-number",
+          "source": "review_ledger.initial_inventory_enrollment",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "job-state",
+              "source_key": "job:fixture:0:94b7901f68af69aca5c22847747ebc7a73d3c54665cfaac33cad74af3425f59a",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": {
+                "family": "fixture",
+                "subject_id": "subject",
+                "job_id": 1,
+                "generation": 0,
+                "attempt": 0,
+                "state": "pending",
+                "failures": 0,
+                "next_eligible_at": null,
+                "reason": "inventory enqueue"
+              },
+              "id": "795948736be23ada03be8814b02fabf980124862ad0e1a6a745c625d91202e77"
+            }
+          },
+          "expect": {
+            "ok": false,
+            "error": "TypeError",
+            "message": "can only concatenate str (not \"int\") to str"
+          }
+        },
+        {
+          "name": "enroll-matrix-job-id-list",
+          "source": "review_ledger.initial_inventory_enrollment",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "job-state",
+              "source_key": "job:fixture:0:94b7901f68af69aca5c22847747ebc7a73d3c54665cfaac33cad74af3425f59a",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": {
+                "family": "fixture",
+                "subject_id": "subject",
+                "job_id": [],
+                "generation": 0,
+                "attempt": 0,
+                "state": "pending",
+                "failures": 0,
+                "next_eligible_at": null,
+                "reason": "inventory enqueue"
+              },
+              "id": "795948736be23ada03be8814b02fabf980124862ad0e1a6a745c625d91202e77"
+            }
+          },
+          "expect": {
+            "ok": false,
+            "error": "TypeError",
+            "message": "can only concatenate str (not \"list\") to str"
+          }
+        },
+        {
+          "name": "enroll-matrix-job-id-dict",
+          "source": "review_ledger.initial_inventory_enrollment",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "job-state",
+              "source_key": "job:fixture:0:94b7901f68af69aca5c22847747ebc7a73d3c54665cfaac33cad74af3425f59a",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": {
+                "family": "fixture",
+                "subject_id": "subject",
+                "job_id": {},
+                "generation": 0,
+                "attempt": 0,
+                "state": "pending",
+                "failures": 0,
+                "next_eligible_at": null,
+                "reason": "inventory enqueue"
+              },
+              "id": "795948736be23ada03be8814b02fabf980124862ad0e1a6a745c625d91202e77"
+            }
+          },
+          "expect": {
+            "ok": false,
+            "error": "TypeError",
+            "message": "can only concatenate str (not \"dict\") to str"
+          }
+        },
+        {
+          "name": "enroll-matrix-event-type-missing",
+          "source": "review_ledger.initial_inventory_enrollment",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "source_key": "job:fixture:0:94b7901f68af69aca5c22847747ebc7a73d3c54665cfaac33cad74af3425f59a",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": {
+                "family": "fixture",
+                "subject_id": "subject",
+                "job_id": "fixture:0",
+                "generation": 0,
+                "attempt": 0,
+                "state": "pending",
+                "failures": 0,
+                "next_eligible_at": null,
+                "reason": "inventory enqueue"
+              },
+              "id": "795948736be23ada03be8814b02fabf980124862ad0e1a6a745c625d91202e77"
+            }
+          },
+          "expect": {
+            "ok": false,
+            "error": "KeyError",
+            "message": "'event_type'"
+          }
+        },
+        {
+          "name": "enroll-matrix-event-type-null",
+          "source": "review_ledger.initial_inventory_enrollment",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": null,
+              "source_key": "job:fixture:0:94b7901f68af69aca5c22847747ebc7a73d3c54665cfaac33cad74af3425f59a",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": {
+                "family": "fixture",
+                "subject_id": "subject",
+                "job_id": "fixture:0",
+                "generation": 0,
+                "attempt": 0,
+                "state": "pending",
+                "failures": 0,
+                "next_eligible_at": null,
+                "reason": "inventory enqueue"
+              },
+              "id": "795948736be23ada03be8814b02fabf980124862ad0e1a6a745c625d91202e77"
+            }
+          },
+          "expect": {
+            "ok": true,
+            "value": false
+          }
+        },
+        {
+          "name": "enroll-matrix-event-type-list",
+          "source": "review_ledger.initial_inventory_enrollment",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": [],
+              "source_key": "job:fixture:0:94b7901f68af69aca5c22847747ebc7a73d3c54665cfaac33cad74af3425f59a",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": {
+                "family": "fixture",
+                "subject_id": "subject",
+                "job_id": "fixture:0",
+                "generation": 0,
+                "attempt": 0,
+                "state": "pending",
+                "failures": 0,
+                "next_eligible_at": null,
+                "reason": "inventory enqueue"
+              },
+              "id": "795948736be23ada03be8814b02fabf980124862ad0e1a6a745c625d91202e77"
+            }
+          },
+          "expect": {
+            "ok": true,
+            "value": false
+          }
+        },
+        {
+          "name": "enroll-matrix-event-type-other-payload-missing",
+          "source": "review_ledger.initial_inventory_enrollment",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "other",
+              "source_key": "job:fixture:0:94b7901f68af69aca5c22847747ebc7a73d3c54665cfaac33cad74af3425f59a",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "id": "795948736be23ada03be8814b02fabf980124862ad0e1a6a745c625d91202e77"
+            }
+          },
+          "expect": {
+            "ok": false,
+            "error": "KeyError",
+            "message": "'payload'"
+          }
+        },
+        {
+          "name": "enroll-matrix-payload-missing",
+          "source": "review_ledger.initial_inventory_enrollment",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "job-state",
+              "source_key": "job:fixture:0:94b7901f68af69aca5c22847747ebc7a73d3c54665cfaac33cad74af3425f59a",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "id": "795948736be23ada03be8814b02fabf980124862ad0e1a6a745c625d91202e77"
+            }
+          },
+          "expect": {
+            "ok": false,
+            "error": "KeyError",
+            "message": "'payload'"
+          }
+        },
+        {
+          "name": "enroll-matrix-payload-null",
+          "source": "review_ledger.initial_inventory_enrollment",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "job-state",
+              "source_key": "job:fixture:0:94b7901f68af69aca5c22847747ebc7a73d3c54665cfaac33cad74af3425f59a",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": null,
+              "id": "795948736be23ada03be8814b02fabf980124862ad0e1a6a745c625d91202e77"
+            }
+          },
+          "expect": {
+            "ok": false,
+            "error": "TypeError",
+            "message": "'NoneType' object is not subscriptable"
+          }
+        },
+        {
+          "name": "enroll-matrix-payload-list",
+          "source": "review_ledger.initial_inventory_enrollment",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "job-state",
+              "source_key": "job:fixture:0:94b7901f68af69aca5c22847747ebc7a73d3c54665cfaac33cad74af3425f59a",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": [],
+              "id": "795948736be23ada03be8814b02fabf980124862ad0e1a6a745c625d91202e77"
+            }
+          },
+          "expect": {
+            "ok": false,
+            "error": "TypeError",
+            "message": "list indices must be integers or slices, not str"
+          }
+        },
+        {
+          "name": "enroll-matrix-payload-string",
+          "source": "review_ledger.initial_inventory_enrollment",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "job-state",
+              "source_key": "job:fixture:0:94b7901f68af69aca5c22847747ebc7a73d3c54665cfaac33cad74af3425f59a",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": "x",
+              "id": "795948736be23ada03be8814b02fabf980124862ad0e1a6a745c625d91202e77"
+            }
+          },
+          "expect": {
+            "ok": false,
+            "error": "TypeError",
+            "message": "string indices must be integers, not 'str'"
+          }
+        },
+        {
+          "name": "enroll-matrix-payload-number",
+          "source": "review_ledger.initial_inventory_enrollment",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "job-state",
+              "source_key": "job:fixture:0:94b7901f68af69aca5c22847747ebc7a73d3c54665cfaac33cad74af3425f59a",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": 1,
+              "id": "795948736be23ada03be8814b02fabf980124862ad0e1a6a745c625d91202e77"
+            }
+          },
+          "expect": {
+            "ok": false,
+            "error": "TypeError",
+            "message": "'int' object is not subscriptable"
+          }
+        },
+        {
+          "name": "enroll-matrix-payload-bool",
+          "source": "review_ledger.initial_inventory_enrollment",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "job-state",
+              "source_key": "job:fixture:0:94b7901f68af69aca5c22847747ebc7a73d3c54665cfaac33cad74af3425f59a",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": true,
+              "id": "795948736be23ada03be8814b02fabf980124862ad0e1a6a745c625d91202e77"
+            }
+          },
+          "expect": {
+            "ok": false,
+            "error": "TypeError",
+            "message": "'bool' object is not subscriptable"
           }
         },
         {

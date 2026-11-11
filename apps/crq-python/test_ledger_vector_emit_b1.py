@@ -49,7 +49,7 @@ class LedgerVectorTest(unittest.TestCase):
                 else:
                     self.assertIn(case["expect"]["error"],
                                   ("IntegrityError", "ValueError", "JSONDecodeError",
-                                   "UnicodeDecodeError"))
+                                   "UnicodeDecodeError", "KeyError", "TypeError"))
         self.assertNotIn("/home/", emitter.render())
         self.assertNotIn("/tmp/", emitter.render())
         self.assertNotIn(os.environ.get("HOME", "\0"), emitter.render())
