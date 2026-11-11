@@ -89,7 +89,8 @@ type NumericOperand =
   | { readonly kind: 'int'; readonly value: bigint }
   | { readonly kind: 'float'; readonly value: number };
 
-type PythonSum =
+/** CPython `sum()` accumulator state; exported so other ports reuse it. */
+export type PythonSum =
   | { readonly kind: 'int'; readonly value: bigint }
   | { readonly kind: 'compensated'; readonly hi: number; readonly lo: number }
   | { readonly kind: 'generic'; readonly value: bigint | number };
@@ -513,7 +514,8 @@ function pythonLen(value: unknown): number {
   );
 }
 
-function pythonAdd(total: PythonSum, value: unknown): PythonSum {
+/** One CPython `sum()` step, including its int fast path and compensation. */
+export function pythonAdd(total: PythonSum, value: unknown): PythonSum {
   const operand = sumOperand(value, sumTypeName(total));
   if (total.kind === 'int') {
     if (operand.kind === 'float') return compensatedFromInt(total.value, operand.value);
@@ -619,7 +621,8 @@ function pythonIntToDouble(value: bigint): number {
   return result;
 }
 
-function encodeSum(sum: PythonSum): number | JsonNumber {
+/** Encode a `sum()` result as Python would serialize it. */
+export function encodeSum(sum: PythonSum): number | JsonNumber {
   if (sum.kind === 'int') return encodeIntSum(sum.value);
   if (sum.kind === 'generic') {
     return typeof sum.value === 'bigint' ? encodeIntSum(sum.value) : JsonNumber.float(sum.value);
