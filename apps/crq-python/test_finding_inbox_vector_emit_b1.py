@@ -199,6 +199,7 @@ class FindingInboxVectorTest(unittest.TestCase):
                     self.assertLessEqual(writes, 4)
 
     def test_handoff_effect_lock_stack_and_writes(self):
+        """Assert nested lock stacks and the exact handoff write counts."""
         document = json.loads(emitter.render())
         handoff = next(
             family for family in document["families"] if family["family"] == "handoff"

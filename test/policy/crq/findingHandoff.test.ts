@@ -36,6 +36,7 @@ type PlanOutcome =
   | { readonly ok: true; readonly value: FindingHandoffPlan }
   | { readonly ok: false; readonly error: string; readonly message: string };
 
+/** Map a ledger error to the Python exception class name. */
 function pythonErrorClass(error: unknown): string {
   if (error instanceof LedgerKeyError) return error.pythonError;
   if (error instanceof LedgerTypeError) return error.pythonError;
@@ -44,6 +45,7 @@ function pythonErrorClass(error: unknown): string {
   return error instanceof Error ? error.name : 'UnknownError';
 }
 
+/** Run the planner and capture a Python-shaped refusal. */
 function outcomePlan(action: () => FindingHandoffPlan): PlanOutcome {
   try {
     return { ok: true, value: action() };
@@ -56,18 +58,21 @@ function outcomePlan(action: () => FindingHandoffPlan): PlanOutcome {
   }
 }
 
+/** Return a named handoff vector or fail the test. */
 function caseOrThrow(name: string): FindingDeliveryCase {
   const entry = cases.find((candidate) => candidate.name === name);
   if (entry === undefined) throw new Error(`handoff vector missing: ${name}`);
   return entry;
 }
 
+/** Parse a canonical fixture row into a JsonObject. */
 function rowFrom(entry: FindingDeliveryCase, key: string): JsonObject {
   const value = ledgerLoads(stringField(entry.input, key));
   if (!(value instanceof JsonObject)) throw new Error(`${entry.name}: row is not an object`);
   return value;
 }
 
+/** Replay one fixture case at the given row snapshot. */
 function planFor(
   entry: FindingDeliveryCase,
   rowKey: string,
@@ -84,6 +89,7 @@ function planFor(
   );
 }
 
+/** Assert the fixture's ok or error expectation. */
 function assertExpectation(entry: FindingDeliveryCase, result: PlanOutcome): void {
   if (entry.expect.get('ok') !== true) {
     const expectedError = stringField(entry.expect, 'error');
@@ -100,24 +106,28 @@ function assertExpectation(entry: FindingDeliveryCase, result: PlanOutcome): voi
   if (!result.ok) throw new Error(`${entry.name}: unexpected refusal`);
 }
 
+/** Compare a value's canonical UTF-8 bytes with the oracle text. */
 function expectCanonical(value: JsonValue, expected: string, what: string): void {
   expect(Buffer.from(ledgerCanonicalBytes(value)), what).toEqual(Buffer.from(expected, 'utf8'));
 }
 
 type WritePlan = Extract<FindingHandoffPlan, { readonly kind: 'write' }>;
 
+/** Require a successful plan outcome or fail loudly. */
 function requirePlan(result: PlanOutcome, name: string): FindingHandoffPlan {
   expect(result.ok, `${name}: expected a plan`).toBe(true);
   if (!result.ok) throw new Error(`${name}: expected a plan`);
   return result.value;
 }
 
+/** Require the write discriminant before any byte assertion. */
 function requireWrite(plan: FindingHandoffPlan, name: string): WritePlan {
   expect(plan.kind, `${name}: expected write`).toBe('write');
   if (plan.kind !== 'write') throw new Error(`${name}: expected write plan`);
   return plan;
 }
 
+/** Require the idempotent none discriminant. */
 function requireNone(plan: FindingHandoffPlan, name: string): void {
   expect(plan.kind, `${name}: expected none`).toBe('none');
   if (plan.kind !== 'none') throw new Error(`${name}: expected none plan`);

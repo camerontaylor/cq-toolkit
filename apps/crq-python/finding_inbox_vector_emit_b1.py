@@ -234,6 +234,7 @@ def _temp_case(
 
 
 def _write_handoff_row(root: Path, finding_id: str, row: Dict[str, Any]) -> None:
+    """Write one handoff fixture row through the canonical ledger writer."""
     ledger.atomic(root / "triage" / (finding_id + ".json"), ledger.canonical(row))
 
 
@@ -1165,6 +1166,7 @@ def recover_vectors() -> Dict[str, Any]:
 
 
 def handoff_vectors() -> Dict[str, Any]:
+    """Real ``Inbox.handoff`` effects plus pure construction cases."""
     finding = _normalized()
     fid = finding["id"]
     review = _review([finding])
@@ -1183,6 +1185,7 @@ def handoff_vectors() -> Dict[str, Any]:
         failure_class: str = "evidence",
         **overrides: Any,
     ) -> Dict[str, Any]:
+        """Build a delivered row with an optional receipt task and failure class."""
         value: Dict[str, Any] = {
             "review_id": review["id"],
             "finding": finding,
@@ -1199,6 +1202,8 @@ def handoff_vectors() -> Dict[str, Any]:
     def write_setup(row_value: Dict[str, Any]) -> Callable[
         [Path, delivery.Inbox, ledger.Outbox], None
     ]:
+        """Seed one handoff row before the real effect case runs."""
+
         def setup(root: Path, inbox: delivery.Inbox, outbox: ledger.Outbox) -> None:
             _write_handoff_row(root, fid, row_value)
 
@@ -1263,6 +1268,7 @@ def handoff_vectors() -> Dict[str, Any]:
     row_before = row()
 
     def setup_recovered(root: Path, inbox: delivery.Inbox, outbox: ledger.Outbox) -> None:
+        """Seed a successful handoff, then restore the pre-operation row."""
         _write_handoff_row(root, fid, row_before)
         path = root / "triage" / (fid + ".json")
         before = path.read_bytes()
@@ -1281,6 +1287,7 @@ def handoff_vectors() -> Dict[str, Any]:
     )
 
     def setup_missing(root: Path, inbox: delivery.Inbox, outbox: ledger.Outbox) -> None:
+        """Leave the finding row absent for the missing-row case."""
         return None
 
     cases.append(
@@ -1332,6 +1339,7 @@ def handoff_vectors() -> Dict[str, Any]:
         expected_error: Optional[str] = None,
         expected_message: Optional[str] = None,
     ) -> Dict[str, Any]:
+        """Capture one pure construction case from the real helper."""
         inputs: Dict[str, Any] = {
             "mode": "construct",
             "finding_id": fid,
