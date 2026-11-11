@@ -3054,6 +3054,35 @@ def _partial_completion_observed_prefix_ok(observed, final, label, problems):
     return True
 
 
+def _partial_completion_suffix_ok(observed, final, runtime, boot, label,
+                                  problems):
+    """Bind archived completions appended after the final inspection."""
+    if not isinstance(observed, list) or not isinstance(final, list):
+        return False
+    if final[:len(observed)] != observed:
+        return False
+    suffix = final[len(observed):]
+    if not suffix:
+        return True
+    if runtime not in (PYTHON_RUNTIME, NODE_RUNTIME) or _boot_id(boot) is None:
+        problems.append(label + " completion suffix has no final runtime/boot "
+                        "identity")
+        return False
+    ok = True
+    for index, item in enumerate(suffix, len(observed)):
+        entry_label = label + "[" + str(index) + "]"
+        if not _completion_shape_ok(item, entry_label, problems):
+            ok = False
+            continue
+        if item.get("runtime") != runtime:
+            problems.append(entry_label + " does not use the final runtime")
+            ok = False
+        if item.get("boot_id") != boot:
+            problems.append(entry_label + " does not bind the final boot")
+            ok = False
+    return ok
+
+
 def _partial_completion_prefix_ok(before, after, runtime, label, problems,
                                   exact=None):
     before_entries = (before or {}).get("repair_completions")
@@ -3648,11 +3677,17 @@ def _partial_checks(phases, restarts=None, reboots=None):
         if not completions or not _completion_list_ok(
                 completions, "final partial completion", problems):
             final_ok = False
-        for snapshot_label, observed in _partial_completion_snapshots(phases):
+        snapshots = _partial_completion_snapshots(phases)
+        for snapshot_label, observed in snapshots:
             if not _partial_completion_observed_prefix_ok(
                     observed, completions, "final " + snapshot_label,
                     problems):
                 final_ok = False
+        if snapshots and not _partial_completion_suffix_ok(
+                snapshots[-1][1], completions, PYTHON_RUNTIME,
+                (inspect.get("tick") or {}).get("boot_id"),
+                "final " + snapshots[-1][0], problems):
+            final_ok = False
         sequences = [item.get("sequence") for item in completions]
         if sequences != sorted(sequences) or len(sequences) != len(set(sequences)):
             problems.append("final partial sequences are not strictly ordered")
@@ -4522,6 +4557,10 @@ def _verify_partial_raw(report, raw_root, problems, phases):
                         problems, allow_empty=False)
     _partial_completion_observed_prefix_ok(
         inspected, completions, "archived partial completion", problems)
+    _partial_completion_suffix_ok(
+        inspected, completions, PYTHON_RUNTIME,
+        (inspect.get("tick") or {}).get("boot_id"),
+        "archived partial completion", problems)
     sequences = [item.get("sequence") for item in completions
                  if isinstance(item, dict)]
     invocations = [item.get("invocation") for item in completions

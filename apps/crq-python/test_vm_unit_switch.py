@@ -2197,6 +2197,7 @@ class PartialHarnessCheckTests(unittest.TestCase):
         self.tick = {
             "state": self.state, "history": self.history_summary,
             "records": [self.history_summary],
+            "boot_id": "11111111-1111-1111-1111-111111111111",
             "files": {SERVICE: {"sha256": self.tick_sha},
                       self.history_path: {"type": "file",
                                           "sha256": self.history,
@@ -2742,6 +2743,28 @@ class PartialHarnessCheckTests(unittest.TestCase):
                             for item in problems))
         self.assertIs(checks["partial_final_python"], False)
 
+    def test_partial_final_binds_unobserved_completion_suffix(self):
+        phases_value, restarts, reboots = self.evidence()
+        inspect = phases_value["partial-inspect"]
+        for mutation, expected in (
+                (lambda entry: entry.__setitem__("runtime", NODE),
+                 "does not use the final runtime"),
+                (lambda entry: entry.pop("boot_id"),
+                 "does not bind the final boot"),
+                (lambda entry: entry.__setitem__("boot_id", "2" * 64),
+                 "does not bind the final boot")):
+            mutated = copy.deepcopy(phases_value)
+            final = mutated["partial-inspect"]
+            extra = self._completion(
+                final["completions"][-1]["sequence"] + 1, PYTHON)
+            mutation(extra)
+            final["completions"].append(extra)
+            checks, problems = harness._partial_checks(
+                mutated, restarts, reboots)
+            self.assertTrue(any(expected in item for item in problems),
+                            problems)
+            self.assertIs(checks["partial_final_python"], False)
+
     def test_partial_raw_accepts_completion_append_after_inspect(self):
         phases_value, _, _ = self.evidence()
         inspect = phases_value["partial-inspect"]["completions"]
@@ -2757,6 +2780,31 @@ class PartialHarnessCheckTests(unittest.TestCase):
             harness._verify_partial_raw({}, root, problems, phases_value)
             self.assertFalse(any("archived partial completion" in item
                                  for item in problems), problems)
+
+    def test_partial_raw_binds_completion_append_to_final_runtime_and_boot(self):
+        phases_value, _, _ = self.evidence()
+        inspect = phases_value["partial-inspect"]["completions"]
+        for mutation, expected in (
+                (lambda entry: entry.__setitem__("runtime", NODE),
+                 "does not use the final runtime"),
+                (lambda entry: entry.pop("boot_id"),
+                 "does not bind the final boot"),
+                (lambda entry: entry.__setitem__("boot_id", "2" * 64),
+                 "does not bind the final boot")):
+            extra = self._completion(inspect[-1]["sequence"] + 1, PYTHON)
+            mutation(extra)
+            with tempfile.TemporaryDirectory() as tmp:
+                root = pathlib.Path(tmp)
+                path = root / harness.PARTIAL_COMPLETIONS.replace(
+                    "/home/probe/", "")
+                path.parent.mkdir(parents=True)
+                path.write_text("".join(
+                    json.dumps(entry) + "\n"
+                    for entry in inspect + [extra]))
+                problems = []
+                harness._verify_partial_raw({}, root, problems, phases_value)
+                self.assertTrue(any(expected in item for item in problems),
+                                problems)
 
     def test_partial_raw_rejects_completion_truncation(self):
         phases_value, _, _ = self.evidence()
