@@ -71,17 +71,21 @@ jobs:
           # renames), applies the shared one-decimal coverage re-basis, pairs
           # every deleted baseline with an added one (an unreplaced delete
           # fails), then judges baseline files alone.
-          out="$(node dist/cli.js ratchet.monotonicGuard --repo=. --base="origin/${PR_BASE}" --head=HEAD)"
+          out="$(node dist/cli.js ratchet.monotonicGuard --repo=. --base="origin/${PR_BASE}" --head=HEAD)" || op_rc=$?
           printf '%s\n' "$out"
           # The exact verdict reaches the job outputs through GITHUB_OUTPUT.
           # 'loosened' covers every ok:false rejection — loosened values,
           # direction/unit changes, unreplaced deletes, unparsable diffs —
           # so the issue body can speak of a REJECTED diff without naming a
-          # cause the op did not report (F1 on PR #1535).
+          # cause the op did not report (F1 on PR #1535). A nonzero CLI exit
+          # (failed / needs-human / indeterminate / budget-exhausted) or
+          # unparsable output lands on 'error' — captured through the `||
+          # op_rc=$?` guard because set -e would otherwise abort before the
+          # verdict is written (r2 review F3 on PR #1535).
           verdict=error
-          if printf '%s' "$out" | jq -e '.status == "ok" and .value.ok == true' >/dev/null 2>&1; then
+          if [ "${op_rc:-0}" -eq 0 ] && printf '%s' "$out" | jq -e '.status == "ok" and .value.ok == true' >/dev/null 2>&1; then
             verdict=passed
-          elif printf '%s' "$out" | jq -e '.status == "ok" and .value.ok == false' >/dev/null 2>&1; then
+          elif [ "${op_rc:-0}" -eq 0 ] && printf '%s' "$out" | jq -e '.status == "ok" and .value.ok == false' >/dev/null 2>&1; then
             verdict=loosened
           fi
           printf 'verdict=%s\n' "$verdict" >> "$GITHUB_OUTPUT"
@@ -104,12 +108,16 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
-          # gh issue list has no --paginate flag (this gh), so walk the
-          # issues connection to exhaustion through `gh api --paginate`
-          # — not the 1,000-result-capped search API — so the exact-title
-          # issue cannot hide behind a page boundary (b8b49449; F3 on PR
-          # #1535).
-          issue="$(gh api 'repos/${GH_REPO}/issues?state=open&per_page=100' --paginate --jq '[.[] | select(.pull_request == null and .title == "ratchet")][0].number // empty')"
+          # Walk the issues connection to exhaustion (gh issue list has no
+          # --paginate flag; the search API caps at 1,000 results), so the
+          # exact-title issue cannot hide behind a page boundary (b8b49449;
+          # F3 on PR #1535). The endpoint is double-quoted so ${GH_REPO}
+          # expands — single quotes pass it literally and gh 404s (r2 review
+          # F1 on PR #1535). jq emits one line per exact-title match per
+          # page, so head -n1 collapses duplicate titles across pages to a
+          # single first match (r2 review F2 on PR #1535); an API error
+          # aborts the step without writing an issue.
+          issue="$(gh api "repos/${GH_REPO}/issues?state=open&per_page=100" --paginate --jq '.[] | select(.pull_request == null and .title == "ratchet") | .number' | head -n1)"
           # Every ok:false verdict is a REJECTION — loosened values, deleted
           # baselines, direction/unit changes, unparsable diffs — so the
           # body claims only that; the run URL carries the specific
