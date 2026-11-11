@@ -43,6 +43,7 @@ ALLOWED_ERRORS = (
     "TypeError",
     "AttributeError",
     "ValueError",
+    "FileNotFoundError",
     "JSONDecodeError",
     "UnicodeDecodeError",
 )
@@ -60,6 +61,7 @@ def _case(
     message: Optional[str] = None,
     after: Optional[List[Dict[str, Any]]] = None,
     effects: Optional[List[Dict[str, Any]]] = None,
+    outbox: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     expect: Dict[str, Any] = {"ok": error is None}
     if error is None:
@@ -73,6 +75,8 @@ def _case(
         expect["after"] = after
     if effects is not None:
         expect["effects"] = effects
+    if outbox is not None:
+        expect["outbox"] = outbox
     return {"name": name, "source": source, "input": inputs, "expect": expect}
 
 
@@ -226,6 +230,143 @@ def _temp_case(
             value=value,
             after=after,
             effects=recorded if effects else None,
+        )
+
+
+def _write_handoff_row(root: Path, finding_id: str, row: Dict[str, Any]) -> None:
+    """Write one handoff fixture row through the canonical ledger writer."""
+    ledger.atomic(root / "triage" / (finding_id + ".json"), ledger.canonical(row))
+
+
+def _construct_handoff(
+    finding_id: str,
+    row: Dict[str, Any],
+    job: Dict[str, Any],
+    at: str,
+    already_handed_off: bool = False,
+) -> Dict[str, Any]:
+    """The production receipt/event literal in its Python evaluation order.
+
+    This is the pure construction slice of ``Inbox.handoff``. It deliberately
+    omits the earlier identity and ``current == job["job"]`` guards, because
+    the caller supplies that decision. The receipt literal therefore evaluates
+    ``ledger.digest(job)`` before ``job["job"]``.
+    """
+    if already_handed_off:
+        return {"kind": "none"}
+    acknowledgement = ledger.digest(job)
+    job_id = job["job"]
+    receipt = {"acknowledgement": acknowledgement, "repair_task": job_id}
+    value = ledger.event(
+        "finding-event",
+        "prepared-delivery:" + finding_id + ":" + job_id,
+        at,
+        {
+            "finding_id": finding_id,
+            "review_id": row["review_id"],
+            "previous_event_id": row["previous_event_id"],
+            "action": "delivered",
+            "evidence": receipt,
+            "actor": "crq-repair-preparation",
+        },
+    )
+    updated = copy.deepcopy(row)
+    updated.update(status="delivered", previous_event_id=value["id"], receipt=receipt)
+    return {
+        "kind": "write",
+        "receipt_canonical": ledger.canonical(receipt).decode("utf-8"),
+        "event_canonical": ledger.canonical(value).decode("utf-8"),
+        "row_canonical": ledger.canonical(updated).decode("utf-8"),
+    }
+
+
+def _handoff_effect_case(
+    name: str,
+    *,
+    finding_id: str,
+    previous_task: str,
+    job: Dict[str, Any],
+    setup: Callable[
+        [Path, delivery.Inbox, ledger.Outbox], Optional[Dict[str, Any]]
+    ],
+    expected_error: Optional[str] = None,
+    expected_message: Optional[str] = None,
+    already_handed_off: bool = False,
+    gate: bool = False,
+) -> Dict[str, Any]:
+    """Drive the real ``Inbox.handoff`` and capture its exact effects."""
+    inputs: Dict[str, Any] = {
+        "mode": "effect",
+        "finding_id": finding_id,
+        "previous_task": previous_task,
+        "prepared_job_id": job["job"],
+        "job": job,
+        "at": AT,
+        "already_handed_off": already_handed_off,
+    }
+    if gate:
+        inputs["gate"] = "canonicalHandoffRefusal"
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td) / "findings"
+        root.mkdir(parents=True, exist_ok=True)
+        outbox = ledger.Outbox(Path(td) / "outbox", ledger.ArtifactStore(Path(td) / "artifacts"))
+        inbox = delivery.Inbox(root, outbox)
+        setup(root, inbox, outbox)
+        path = root / "triage" / (finding_id + ".json")
+        if path.exists():
+            row = ledger.loads(path.read_bytes())
+            inputs["row"] = row
+            inputs["row_canonical"] = ledger.canonical(row).decode("utf-8")
+        else:
+            inputs["row"] = None
+            inputs["row_canonical"] = None
+        inputs["retained"] = outbox.retained()
+        recorded: List[Dict[str, Any]] = []
+        caught: Optional[BaseException] = None
+        with _record() as recorded:
+            try:
+                inbox.handoff(finding_id, previous_task, job, AT)
+            except Exception as exc:
+                caught = exc
+        after = _rows(root)
+        if path.exists():
+            row_after = ledger.loads(path.read_bytes())
+            inputs["row_after"] = row_after
+            inputs["row_after_canonical"] = ledger.canonical(row_after).decode("utf-8")
+        else:
+            inputs["row_after"] = None
+            inputs["row_after_canonical"] = None
+        outbox_ids = [value["id"] for value in outbox.retained()]
+        if caught is not None:
+            if expected_error is None:
+                raise caught
+            if type(caught).__name__ != expected_error:
+                raise AssertionError(
+                    f"{name}: expected {expected_error}, got {type(caught).__name__}: {caught}"
+                ) from caught
+            if expected_message is not None and str(caught) != expected_message:
+                raise AssertionError(
+                    f"{name}: expected message {expected_message!r}, got {str(caught)!r}"
+                ) from caught
+            return _case(
+                name,
+                "finding_delivery.Inbox.handoff",
+                inputs,
+                error=expected_error,
+                message=expected_message,
+                after=after,
+                effects=recorded,
+                outbox=outbox_ids,
+            )
+        if expected_error is not None:
+            raise AssertionError(f"{name}: expected {expected_error}, operation succeeded")
+        return _case(
+            name,
+            "finding_delivery.Inbox.handoff",
+            inputs,
+            after=after,
+            effects=recorded,
+            outbox=outbox_ids,
         )
 
 
@@ -1024,6 +1165,278 @@ def recover_vectors() -> Dict[str, Any]:
     return {"family": "recover", "cases": cases}
 
 
+def handoff_vectors() -> Dict[str, Any]:
+    """Real ``Inbox.handoff`` effects plus pure construction cases."""
+    finding = _normalized()
+    fid = finding["id"]
+    review = _review([finding])
+    job = {
+        "job": "prepared-task",
+        "canonical_finding_id": fid,
+        "origin_job": "old-task",
+        "source_sha": SHA,
+        "repair_base": SHA,
+        "revalidation": {"fix_instructions": "Keep both sources."},
+    }
+    cases: List[Dict[str, Any]] = []
+
+    def row(
+        receipt_task: str = "old-task",
+        failure_class: str = "evidence",
+        **overrides: Any,
+    ) -> Dict[str, Any]:
+        """Build a delivered row with an optional receipt task and failure class."""
+        value: Dict[str, Any] = {
+            "review_id": review["id"],
+            "finding": finding,
+            "target": SHA,
+            "canonical_id": fid,
+            "previous_event_id": None,
+            "status": "delivered",
+            "receipt": {"acknowledgement": "a" * 64, "repair_task": receipt_task},
+            "failure_class": failure_class,
+        }
+        value.update(overrides)
+        return value
+
+    def write_setup(row_value: Dict[str, Any]) -> Callable[
+        [Path, delivery.Inbox, ledger.Outbox], None
+    ]:
+        """Seed one handoff row before the real effect case runs."""
+
+        def setup(root: Path, inbox: delivery.Inbox, outbox: ledger.Outbox) -> None:
+            _write_handoff_row(root, fid, row_value)
+
+        return setup
+
+    cases.append(
+        _handoff_effect_case(
+            "handoff-written",
+            finding_id=fid,
+            previous_task="old-task",
+            job=job,
+            setup=write_setup(row()),
+        )
+    )
+    cases.append(
+        _handoff_effect_case(
+            "handoff-already-handed-off",
+            finding_id=fid,
+            previous_task="old-task",
+            job=job,
+            setup=write_setup(row(receipt_task="prepared-task")),
+            already_handed_off=True,
+        )
+    )
+    cases.append(
+        _handoff_effect_case(
+            "handoff-stale-owner",
+            finding_id=fid,
+            previous_task="old-task",
+            job=job,
+            setup=write_setup(row(receipt_task="third-task")),
+            expected_error="IntegrityError",
+            expected_message="prepared retry no longer owns canonical finding",
+            gate=True,
+        )
+    )
+    cases.append(
+        _handoff_effect_case(
+            "handoff-identity-finding-mismatch",
+            finding_id=fid,
+            previous_task="old-task",
+            job={**job, "canonical_finding_id": "other"},
+            setup=write_setup(row()),
+            expected_error="IntegrityError",
+            expected_message="prepared retry source identity mismatch",
+            gate=True,
+        )
+    )
+    cases.append(
+        _handoff_effect_case(
+            "handoff-identity-origin-mismatch",
+            finding_id=fid,
+            previous_task="old-task",
+            job={**job, "origin_job": "other"},
+            setup=write_setup(row()),
+            expected_error="IntegrityError",
+            expected_message="prepared retry source identity mismatch",
+            gate=True,
+        )
+    )
+
+    row_before = row()
+
+    def setup_recovered(root: Path, inbox: delivery.Inbox, outbox: ledger.Outbox) -> None:
+        """Seed a successful handoff, then restore the pre-operation row."""
+        _write_handoff_row(root, fid, row_before)
+        path = root / "triage" / (fid + ".json")
+        before = path.read_bytes()
+        inbox.handoff(fid, "old-task", job, AT)
+        ledger.atomic(path, before)
+
+    cases.append(
+        _handoff_effect_case(
+            "handoff-recovered-after-crash",
+            finding_id=fid,
+            previous_task="old-task",
+            job=job,
+            setup=setup_recovered,
+            already_handed_off=True,
+        )
+    )
+
+    def setup_missing(root: Path, inbox: delivery.Inbox, outbox: ledger.Outbox) -> None:
+        """Leave the finding row absent for the missing-row case."""
+        return None
+
+    cases.append(
+        _handoff_effect_case(
+            "handoff-missing-row",
+            finding_id=fid,
+            previous_task="old-task",
+            job=job,
+            setup=setup_missing,
+            expected_error="FileNotFoundError",
+            gate=True,
+        )
+    )
+    cases.append(
+        _handoff_effect_case(
+            "handoff-receipt-not-object",
+            finding_id=fid,
+            previous_task="old-task",
+            job=job,
+            setup=write_setup(row(receipt=None)),
+            expected_error="AttributeError",
+            expected_message="'NoneType' object has no attribute 'get'",
+            gate=True,
+        )
+    )
+    missing_receipt = {key: value for key, value in row().items() if key != "receipt"}
+    cases.append(
+        _handoff_effect_case(
+            "handoff-receipt-missing",
+            finding_id=fid,
+            previous_task="old-task",
+            job=job,
+            setup=write_setup(missing_receipt),
+            expected_error="IntegrityError",
+            expected_message="prepared retry no longer owns canonical finding",
+            gate=True,
+        )
+    )
+
+    construct_row = row()
+
+    def construct_case(
+        name: str,
+        job_value: Dict[str, Any],
+        *,
+        at: str = AT,
+        row_value: Dict[str, Any] = construct_row,
+        already_handed_off: bool = False,
+        expected_error: Optional[str] = None,
+        expected_message: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Capture one pure construction case from the real helper."""
+        inputs: Dict[str, Any] = {
+            "mode": "construct",
+            "finding_id": fid,
+            "previous_task": "old-task",
+            "job": job_value,
+            "at": at,
+            "row": row_value,
+            "row_canonical": ledger.canonical(row_value).decode("utf-8"),
+            "already_handed_off": already_handed_off,
+        }
+        return _capture(
+            name,
+            "finding_delivery.Inbox.handoff.construct",
+            inputs,
+            lambda: _construct_handoff(
+                fid, row_value, job_value, at, already_handed_off
+            ),
+            expected_error=expected_error,
+            expected_message=expected_message,
+        )
+
+    missing_job = {key: value for key, value in job.items() if key != "job"}
+    missing_job_float = {
+        **missing_job,
+        "revalidation": {"fix_instructions": "Keep both sources.", "score": 1.5},
+    }
+    non_string_job = {**job, "job": 7}
+    non_string_job_float = {
+        **job,
+        "job": 7,
+        "revalidation": {"fix_instructions": "Keep both sources.", "score": 1.5},
+    }
+    missing_review_id = {
+        key: value for key, value in construct_row.items() if key != "review_id"
+    }
+
+    cases.append(construct_case("handoff-construct-written", job))
+    cases.append(
+        construct_case(
+            "handoff-construct-idempotent-no-construction",
+            missing_job_float,
+            already_handed_off=True,
+        )
+    )
+    cases.append(
+        construct_case(
+            "handoff-construct-missing-job-float",
+            missing_job_float,
+            expected_error="IntegrityError",
+            expected_message="unsupported canonical JSON value",
+        )
+    )
+    cases.append(
+        construct_case(
+            "handoff-construct-non-string-job-float",
+            non_string_job_float,
+            expected_error="IntegrityError",
+            expected_message="unsupported canonical JSON value",
+        )
+    )
+    cases.append(
+        construct_case(
+            "handoff-construct-missing-job",
+            missing_job,
+            expected_error="KeyError",
+            expected_message="'job'",
+        )
+    )
+    cases.append(
+        construct_case(
+            "handoff-construct-non-string-job",
+            non_string_job,
+            expected_error="TypeError",
+            expected_message='can only concatenate str (not "int") to str',
+        )
+    )
+    cases.append(
+        construct_case(
+            "handoff-construct-invalid-timestamp",
+            job,
+            at="now",
+            expected_error="IntegrityError",
+            expected_message="expected exact UTC timestamp",
+        )
+    )
+    cases.append(
+        construct_case(
+            "handoff-construct-missing-review-id",
+            job,
+            row_value=missing_review_id,
+            expected_error="KeyError",
+            expected_message="'review_id'",
+        )
+    )
+    return {"family": "handoff", "cases": cases}
+
+
 def document() -> Dict[str, Any]:
     return {
         "schema": SCHEMA,
@@ -1034,6 +1447,7 @@ def document() -> Dict[str, Any]:
             transition_vectors(),
             ingest_vectors(),
             recover_vectors(),
+            handoff_vectors(),
         ],
     }
 
