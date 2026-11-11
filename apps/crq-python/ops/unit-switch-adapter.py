@@ -42,7 +42,40 @@ import time
 UNIT = "crq-tick.service"
 TIMER = "crq-tick.timer"
 WANTS = "timers.target.wants/crq-tick.timer"
-SUPPORTED_UNITS = {UNIT: {"timer": TIMER, "wants": WANTS}}
+REPAIR_UNIT = "crq-repair.service"
+REPAIR_TIMER = "crq-repair.timer"
+REPAIR_PATH = "crq-repair.path"
+REPAIR_TIMER_WANTS = "timers.target.wants/crq-repair.timer"
+REPAIR_PATH_WANTS = "default.target.wants/crq-repair.path"
+REPAIR_DROPIN = "crq-repair.service.d/10-fence-proof.conf"
+BLOCKER_UNIT = "crq-probe-blocker.service"
+REPAIR_COMPLETIONS_NAME = "completions-crq-repair.jsonl"
+# The inventory is an allowlisted guest topology, not exhaustive production
+# activator discovery. Other-name dependency units, default-target links and
+# socket units outside these exact paths remain a production inventory gap.
+TOPOLOGIES = {
+    UNIT: {
+        "kind": "tick",
+        "service": UNIT,
+        "timer": TIMER,
+        "path": None,
+        "timer_wants": WANTS,
+        "path_wants": None,
+        "dropin": None,
+        "activators": ("timer",),
+    },
+    REPAIR_UNIT: {
+        "kind": "repair",
+        "service": REPAIR_UNIT,
+        "timer": REPAIR_TIMER,
+        "path": REPAIR_PATH,
+        "timer_wants": REPAIR_TIMER_WANTS,
+        "path_wants": REPAIR_PATH_WANTS,
+        "dropin": REPAIR_DROPIN,
+        "activators": ("timer", "path"),
+    },
+}
+SUPPORTED_UNITS = TOPOLOGIES
 SCHEMA_VERSION = 1
 RUNTIME_RE = re.compile(r"python|node:[0-9a-f]{40}\Z")
 INVOCATION_RE = re.compile(r"[0-9a-f]{32}\Z")
@@ -50,6 +83,7 @@ MAX_UNIT_BYTES = 64 * 1024
 MAX_COMPLETION_BYTES = 256 * 1024
 DRAIN_TIMEOUT = 15.0
 COMPLETION_TIMEOUT = 45.0
+PAUSE_SECONDS = 20.0
 ACTIVE_STATES = {"active", "inactive", "activating", "deactivating", "failed"}
 UNIT_FILE_STATES = {"enabled", "disabled", "static", "masked", "alias",
                     "indirect", "generated", "transient", "bad"}
@@ -81,7 +115,8 @@ class GuestFixtureAdapter:
                  proof_root=None, runner=None, error_type=RuntimeError,
                  guest_only=True, completion_timeout=COMPLETION_TIMEOUT,
                  drain_timeout=DRAIN_TIMEOUT, sleep=time.sleep,
-                 clock=time.monotonic, queue_drain=None):
+                 clock=time.monotonic, queue_drain=None,
+                 pause_seconds=PAUSE_SECONDS):
         self.unit = unit
         self.unit_dir = pathlib.Path(unit_dir)
         self.fixture_dir = pathlib.Path(fixture_dir)
@@ -92,15 +127,18 @@ class GuestFixtureAdapter:
         self.guest_only = guest_only
         self.completion_timeout = completion_timeout
         self.drain_timeout = drain_timeout
+        self.pause_seconds = pause_seconds
         self.sleep = sleep
         self.clock = clock
         self.queue_drain = queue_drain
         self.commands = []
         self._snapshot = None
         self._returned = []
+        self.last_inventory = None
         self.last_drain = None
         self.last_install = None
         self.last_restore = None
+        self.last_jobs_observation = None
 
     # -- refusal and process helpers ------------------------------------
     def refuse(self, message):
@@ -159,6 +197,7 @@ class GuestFixtureAdapter:
         return values
 
     def _jobs(self):
+        self.last_jobs_observation = None
         result = self.run_command(["systemctl", "--user", "list-jobs",
                                    "--no-legend", "--no-pager"], timeout=30)
         if result.get("timeout") or result.get("rc") != 0:
@@ -166,7 +205,10 @@ class GuestFixtureAdapter:
         stdout = result.get("stdout")
         if not isinstance(stdout, str):
             self.refuse("systemctl list-jobs returned no text")
-        return [line for line in stdout.splitlines() if line.strip()]
+        self.last_jobs_observation = {
+            "command": result,
+            "lines": [line for line in stdout.splitlines() if line.strip()]}
+        return self.last_jobs_observation["lines"]
 
     def _jobs_for(self, names):
         return [line for line in self._jobs()
@@ -197,12 +239,40 @@ class GuestFixtureAdapter:
         return {"main_pid": 0, "pids": pids, "cgroup": cgroup}
 
     # -- filesystem observations ----------------------------------------
+    def _topology(self):
+        try:
+            return TOPOLOGIES[self.unit]
+        except KeyError:
+            self.refuse("unit is not supported by this proof adapter: "
+                        + str(self.unit))
+
     def _unit_paths(self):
-        return {
-            "service": self.unit_dir / self.unit,
-            "timer": self.unit_dir / SUPPORTED_UNITS[self.unit]["timer"],
-            "wants": self.unit_dir / SUPPORTED_UNITS[self.unit]["wants"],
-        }
+        topology = self._topology()
+        paths = {"service": self.unit_dir / topology["service"],
+                 "timer": self.unit_dir / topology["timer"]}
+        if topology["kind"] == "tick":
+            paths["wants"] = self.unit_dir / topology["timer_wants"]
+        else:
+            paths["timer_wants"] = self.unit_dir / topology["timer_wants"]
+            paths["path"] = self.unit_dir / topology["path"]
+            paths["path_wants"] = self.unit_dir / topology["path_wants"]
+            paths["dropin"] = self.unit_dir / topology["dropin"]
+        return paths
+
+    def _timer_wants_key(self):
+        return "wants" if self._topology()["kind"] == "tick" else "timer_wants"
+
+    def _activator_names(self):
+        return self._topology()["activators"]
+
+    def _activator_unit(self, name):
+        return self._topology()[name]
+
+    def _activator_keys(self):
+        if self._topology()["kind"] == "tick":
+            return {"timer_active", "timer_unit_file_state", "service_active"}
+        return {"timer_active", "timer_unit_file_state", "path_active",
+                "path_unit_file_state", "service_active"}
 
     def _staged_service_path(self, service):
         service = pathlib.Path(service)
@@ -400,6 +470,97 @@ class GuestFixtureAdapter:
         except ValueError:
             self.refuse("snapshot path parent escapes the unit directory")
 
+    def _installed_entries(self):
+        """Discover installed entries for this unit's allowlisted prefix.
+
+        This is deliberately an allowlisted guest topology, not exhaustive
+        production activator discovery. Anything found outside the exact
+        declared paths refuses before any mutation.
+        """
+        topology = self._topology()
+        paths = self._unit_paths()
+        prefix = self.unit.split(".")[0]
+        allowed = {str(path) for path in paths.values()}
+        dropin_dir = (self.unit_dir / (self.unit + ".d")
+                      if topology["dropin"] else None)
+        unexpected = {}
+        for path in sorted(self.unit_dir.glob(prefix + "*")):
+            name = str(path)
+            if name in allowed:
+                continue
+            if (dropin_dir is not None and path == dropin_dir
+                    and path.is_dir() and not path.is_symlink()):
+                continue
+            unexpected[name] = "unexpected installed entry"
+        for wants in sorted(self.unit_dir.glob("*.wants")):
+            if wants.is_symlink() or not wants.is_dir():
+                continue
+            for path in sorted(wants.glob(prefix + "*")):
+                name = str(path)
+                if name not in allowed:
+                    unexpected[name] = "unexpected enablement link"
+        if dropin_dir is not None and (dropin_dir.exists()
+                                       or dropin_dir.is_symlink()):
+            if dropin_dir.is_symlink() or not dropin_dir.is_dir():
+                unexpected[str(dropin_dir)] = "unsupported drop-in directory"
+            else:
+                for path in sorted(dropin_dir.iterdir()):
+                    if str(path) not in allowed:
+                        unexpected[str(path)] = "unexpected drop-in"
+        if unexpected:
+            self.refuse("installed activator inventory is outside the "
+                        "allowlisted guest topology: "
+                        + json.dumps(unexpected, sort_keys=True)[:500])
+
+    def inventory(self):
+        """Read-only inventory of the exact allowlisted guest topology."""
+        self._validate_layout()
+        self._check_guest()
+        self._installed_entries()
+        paths = self._unit_paths()
+        topology = self._topology()
+        states = {}
+        locations = {}
+        for key, path in paths.items():
+            state = self._path_state(path)
+            self._validate_state_shape(path, state)
+            states[key] = state
+            locations[key] = str(path)
+        if states["service"]["type"] != "file":
+            self.refuse("prior installed service is not a regular file")
+        if states["timer"]["type"] != "file":
+            self.refuse("prior installed timer is not a regular file")
+        wants_key = self._timer_wants_key()
+        if states[wants_key]["type"] not in ("symlink", "missing"):
+            self.refuse("timer enablement is not a symlink or absent")
+        if topology["kind"] == "repair":
+            if states["path"]["type"] != "file":
+                self.refuse("prior installed path unit is not a regular file")
+            if states["path_wants"]["type"] not in ("symlink", "missing"):
+                self.refuse("path enablement is not a symlink or absent")
+            if states["dropin"]["type"] != "file":
+                self.refuse("declared blocker drop-in is not a regular file")
+        units = {}
+        roles = ["service", *self._activator_names()]
+        for role in roles:
+            unit = self._topology()[role]
+            units[role] = self._show(
+                unit, ["LoadState", "ActiveState", "UnitFileState",
+                       "FragmentPath"])
+        inventory = {"unit": self.unit, "topology": topology["kind"],
+                     "paths": states, "locations": locations, "units": units,
+                     "activators": {
+                         "timer_active": units["timer"]["ActiveState"],
+                         "timer_unit_file_state": units["timer"]["UnitFileState"],
+                         "service_active": units["service"]["ActiveState"],
+                     }}
+        if topology["kind"] == "repair":
+            inventory["activators"]["path_active"] = units["path"]["ActiveState"]
+            inventory["activators"]["path_unit_file_state"] = (
+                units["path"]["UnitFileState"])
+        self.last_inventory = inventory
+        return inventory
+
     def validate_snapshot(self, unit, snapshot):
         self._validate_layout()
         self._check_guest()
@@ -420,24 +581,40 @@ class GuestFixtureAdapter:
         for path, state in paths.items():
             self._validate_path_allowed(path)
             self._validate_state_shape(pathlib.Path(path), state)
-        service = paths[str(self._unit_paths()["service"])]
-        timer = paths[str(self._unit_paths()["timer"])]
-        wants = paths[str(self._unit_paths()["wants"])]
+        owned = self._unit_paths()
+        service = paths[str(owned["service"])]
+        timer = paths[str(owned["timer"])]
+        wants = paths[str(owned[self._timer_wants_key()])]
         if service["type"] != "file" or timer["type"] != "file":
             self.refuse("proof snapshot requires regular service and timer files")
         if wants["type"] not in ("symlink", "missing"):
             self.refuse("proof snapshot wants path has an unsupported type")
+        if self._topology()["kind"] == "repair":
+            if paths[str(owned["path"])]["type"] != "file":
+                self.refuse("proof snapshot requires a regular path unit")
+            if paths[str(owned["path_wants"])]["type"] not in ("symlink", "missing"):
+                self.refuse("proof snapshot path enablement is unsupported")
+            if paths[str(owned["dropin"])]["type"] != "file":
+                self.refuse("proof snapshot requires the declared drop-in")
         activators = snapshot["activators"]
-        if not isinstance(activators, dict) or set(activators) != {
-                "timer_active", "timer_unit_file_state", "service_active"}:
+        if not isinstance(activators, dict) \
+                or set(activators) != self._activator_keys():
             self.refuse("snapshot activator observation is incomplete")
         if activators["timer_active"] not in ACTIVE_STATES \
                 or activators["service_active"] not in ACTIVE_STATES \
                 or activators["timer_unit_file_state"] not in UNIT_FILE_STATES:
             self.refuse("snapshot activator observation is unknown")
+        if self._topology()["kind"] == "repair":
+            if activators["path_active"] not in ACTIVE_STATES \
+                    or activators["path_unit_file_state"] not in UNIT_FILE_STATES:
+                self.refuse("snapshot path activator observation is unknown")
         if activators["timer_active"] not in ("active", "inactive") \
                 or activators["service_active"] not in ("active", "inactive"):
             self.refuse("snapshot activator state is not restorable")
+        if self._topology()["kind"] == "repair" \
+                and activators["path_active"] not in ("active", "inactive"):
+            self.refuse("snapshot path activator state is not restorable")
+        self._require_repair_activation_supported(activators, "snapshot")
         self._snapshot = snapshot
 
     def _snapshot_required(self):
@@ -488,6 +665,8 @@ class GuestFixtureAdapter:
         return runtime
 
     def completions_path(self):
+        if self._topology()["kind"] == "repair":
+            return self.fixture_dir / REPAIR_COMPLETIONS_NAME
         return self.fixture_dir / "completions.jsonl"
 
     def render_unit(self, runtime):
@@ -510,19 +689,73 @@ class GuestFixtureAdapter:
                 "TimeoutStartSec=30\n")
 
     def render_timer(self):
+        timer = self._topology()["timer"]
+        interval = "5s" if self._topology()["kind"] == "repair" else "1s"
         return ("[Unit]\n"
-                "Description=CRQ proof timer under " + TIMER + "\n"
+                "Description=CRQ proof timer under " + timer + "\n"
                 "\n"
                 "[Timer]\n"
-                "OnUnitInactiveSec=1s\n"
+                "OnUnitInactiveSec=" + interval + "\n"
                 "AccuracySec=1s\n"
                 "Unit=" + self.unit + "\n"
                 "\n"
                 "[Install]\n"
                 "WantedBy=timers.target\n")
 
+    def render_path(self):
+        if self._topology()["kind"] != "repair":
+            self.refuse("path rendering is only defined for the repair topology")
+        trigger = self.fixture_dir / "repair-path-trigger"
+        return ("[Unit]\n"
+                "Description=CRQ proof path activator under "
+                + self._topology()["path"] + "\n"
+                "\n"
+                "[Path]\n"
+                "PathExists=" + str(trigger) + "\n"
+                "Unit=" + self.unit + "\n"
+                "\n"
+                "[Install]\n"
+                "WantedBy=default.target\n")
+
+    def render_dropin(self):
+        if self._topology()["kind"] != "repair":
+            self.refuse("drop-in rendering is only defined for the repair topology")
+        return ("[Unit]\n"
+                "Requires=" + BLOCKER_UNIT + "\n"
+                "After=" + BLOCKER_UNIT + "\n")
+
     def _render_wants_target(self):
-        return "../" + TIMER
+        return "../" + self._topology()["timer"]
+
+    def _render_path_wants_target(self):
+        return "../" + self._topology()["path"]
+
+    def _require_repair_activation_supported(self, activators, label):
+        """Reject an activation shape that cannot yield two completions.
+
+        The repair fixture release starts the service once and releases each
+        activator whose snapshot state is active. Only the timer is an
+        autonomous second completion source; an active path still needs a
+        trigger event and cannot advance the second completion by itself.
+        Refuse an inactive timer before the controller journals or mutates
+        anything; an enabled-but-inactive activator is not silently started.
+        """
+        if self._topology()["kind"] != "repair":
+            return
+        states = {name: activators.get(name + "_active")
+                  for name in ("timer", "path")}
+        if any(state not in ("active", "inactive")
+               for state in states.values()):
+            self.refuse(label + " repair activator state is not restorable: "
+                        + json.dumps(states, sort_keys=True))
+        if states["timer"] != "active":
+            if states["path"] == "active":
+                self.refuse(label + " repair switch requires an active timer; "
+                            "an active path alone cannot produce the "
+                            "controller's second completion")
+            self.refuse(label + " repair switch requires an active timer; "
+                        "both timer and path are inactive, so the release "
+                        "cannot produce the controller's second completion")
 
     # -- seam: preflight -------------------------------------------------
     def preflight(self, unit, runtime):
@@ -533,17 +766,9 @@ class GuestFixtureAdapter:
         if not valid_runtime(runtime):
             self.refuse("invalid requested runtime")
         paths = self._unit_paths()
-        service = self._path_state(paths["service"])
-        if service["type"] != "file":
-            self.refuse("prior installed service is not a regular file")
-        timer = self._path_state(paths["timer"])
-        if timer["type"] != "file":
-            self.refuse("prior installed timer is not a regular file")
-        wants = self._path_state(paths["wants"])
-        if wants["type"] not in ("symlink", "missing"):
-            self.refuse("prior timer enablement is not a symlink or absent")
-        if service["xattrs"] or timer["xattrs"] or wants.get("xattrs"):
-            self.refuse("prior installed unit metadata is unsupported")
+        inventory = self.inventory()
+        self._require_repair_activation_supported(inventory["activators"],
+                                                  "preflight")
         fixture = self.proof_root / ("unit-switch-fixture.py"
                                      if runtime == "python"
                                      else "unit-switch-fixture.mjs")
@@ -557,7 +782,7 @@ class GuestFixtureAdapter:
         version = self.run_command([found, "--version"], timeout=30)
         self._ok(version, interpreter + " version observation")
         prior = self._runtime_from_unit(paths["service"])
-        return {"runtime": prior}
+        return {"runtime": prior, "inventory": inventory}
 
     # -- seam: snapshot and validation ----------------------------------
     def snapshot(self, unit):
@@ -566,23 +791,16 @@ class GuestFixtureAdapter:
         self._validate_layout()
         self._check_guest()
         paths = self._unit_paths()
-        observations = {
-            "service": self._show(self.unit,
-                                  ["ActiveState", "LoadState", "FragmentPath"]),
-            "timer": self._show(TIMER,
-                                ["ActiveState", "UnitFileState", "LoadState"]),
-        }
+        inventory = self.inventory()
+        self._require_repair_activation_supported(inventory["activators"],
+                                                  "snapshot")
         snapshot = {
             "schema_version": SCHEMA_VERSION,
             "unit": unit,
             "runtime": self._runtime_from_unit(paths["service"]),
-            "paths": {str(path): self._path_state(path)
-                      for path in paths.values()},
-            "activators": {
-                "timer_active": observations["timer"]["ActiveState"],
-                "timer_unit_file_state": observations["timer"]["UnitFileState"],
-                "service_active": observations["service"]["ActiveState"],
-            },
+            "paths": {str(path): inventory["paths"][key]
+                      for key, path in paths.items()},
+            "activators": dict(inventory["activators"]),
         }
         self._snapshot = snapshot
         return snapshot
@@ -606,19 +824,27 @@ class GuestFixtureAdapter:
     def _wait_drain(self):
         deadline = self.clock() + self.drain_timeout
         attempts = 0
+        activator_units = [self._topology()[name]
+                           for name in self._activator_names()]
         while True:
             attempts += 1
-            jobs = self._jobs_for([self.unit, TIMER])
+            jobs = self._jobs_for([self.unit, *activator_units])
             owned = self._cgroup_pids(self.unit)
             state = self._show(self.unit, ["ActiveState", "SubState", "LoadState"])
+            activators = {unit: self._show(unit, ["ActiveState", "LoadState"])
+                          for unit in activator_units}
             if (not jobs and not owned["pids"] and owned["main_pid"] == 0
-                    and state["ActiveState"] == "inactive"):
+                    and state["ActiveState"] == "inactive"
+                    and all(item["ActiveState"] in ("inactive", "failed")
+                            for item in activators.values())):
                 return {"jobs": jobs, "owned": owned, "state": state,
-                        "attempts": attempts}
+                        "activators": activators, "attempts": attempts}
             if self.clock() >= deadline:
                 self.refuse("drain did not establish absence within the bound: "
                             + json.dumps({"jobs": jobs, "owned": owned,
-                                          "state": state}, sort_keys=True)[:500])
+                                          "state": state,
+                                          "activators": activators},
+                                         sort_keys=True)[:500])
             self.sleep(0.25)
 
     def _observe_queue_drain(self):
@@ -650,13 +876,20 @@ class GuestFixtureAdapter:
         self._maybe_kill("drain")
         paths = self._unit_paths()
         before = self._usable_current_service(paths["service"])
-        result = self.systemctl("stop", TIMER, timeout=60)
-        if result.get("timeout") or result.get("rc") not in (0, 5):
-            self.refuse("timer stop did not complete")
-        self.systemctl("reset-failed", TIMER)
-        timer = self._show(TIMER, ["ActiveState", "LoadState"])
-        if timer["ActiveState"] not in ("inactive", "failed"):
-            self.refuse("timer activator is still active during fence")
+        stopped = {}
+        for name in self._activator_names():
+            unit_name = self._topology()[name]
+            result = self.systemctl("stop", unit_name, timeout=60)
+            if result.get("timeout") or result.get("rc") not in (0, 5):
+                self.refuse(name + " stop did not complete: "
+                            + ((result.get("stderr") or result.get("stdout")
+                                or "").strip()[:200]
+                               or "rc " + str(result.get("rc"))))
+            self.systemctl("reset-failed", unit_name)
+            observed = self._show(unit_name, ["ActiveState", "LoadState"])
+            if observed["ActiveState"] not in ("inactive", "failed"):
+                self.refuse(name + " activator is still active during fence")
+            stopped[name] = observed
         if not (paths["service"].is_symlink()
                 and os.readlink(paths["service"]) == "/dev/null"):
             temporary = paths["service"].with_name(
@@ -670,13 +903,22 @@ class GuestFixtureAdapter:
         if masked["LoadState"] != "masked" \
                 or masked["FragmentPath"] != str(paths["service"]):
             self.refuse("durable service replacement did not reach masked state")
+        # Guest-only observation window after the durable mask is reloaded and
+        # before the service is stopped. The harness drives external direct,
+        # dependency and path activations here.
+        self._maybe_pause("after-mask-reload")
         refusal = self.systemctl("start", self.unit, timeout=60)
         if refusal.get("rc") == 0:
             self.refuse("masked service still accepted a direct start")
         text = ((refusal.get("stdout") or "") + (refusal.get("stderr") or "")).lower()
         if "masked" not in text:
             self.refuse("direct start failed for an unknown reason while fenced")
-        self.systemctl("stop", self.unit)
+        service_stop = self.systemctl("stop", self.unit, timeout=60)
+        if service_stop.get("timeout") or service_stop.get("rc") not in (0, 5):
+            self.refuse("service stop did not complete during fence: "
+                        + ((service_stop.get("stderr")
+                            or service_stop.get("stdout") or "").strip()[:200]
+                           or "rc " + str(service_stop.get("rc"))))
         self.systemctl("reset-failed", self.unit)
         drained = self._wait_drain()
         # Combine the systemd job/cgroup drain with the controller's recorded
@@ -684,9 +926,14 @@ class GuestFixtureAdapter:
         # detached runner child; neither observation alone is sufficient.
         queue = self._observe_queue_drain()
         self.last_drain = {"before": before, "masked": masked,
+                           "stopped": stopped,
+                           "service_stop": service_stop,
+                           "jobs_observation": self.last_jobs_observation,
                            "direct_start": {"rc": refusal.get("rc"),
                                             "stdout": refusal.get("stdout"),
-                                            "stderr": refusal.get("stderr")},
+                                            "stderr": refusal.get("stderr"),
+                                            "timeout": refusal.get("timeout",
+                                                                   False)},
                            "queue_drain": queue,
                            **drained}
         if queue is not None and not queue["drained"]:
@@ -747,7 +994,8 @@ class GuestFixtureAdapter:
         if fenced["type"] != "symlink" or fenced["target"] != "/dev/null":
             self.refuse("install requires the durable /dev/null service fence")
         snapshot = self._snapshot
-        for key in ("timer", "wants"):
+        owned_keys = [key for key in paths if key != "service"]
+        for key in owned_keys:
             path = paths[key]
             if self._path_state(path) != snapshot["paths"][str(path)]:
                 self.refuse("activator path changed during the fenced interval: "
@@ -771,7 +1019,7 @@ class GuestFixtureAdapter:
         if current["LoadState"] != "masked" \
                 or current["FragmentPath"] != str(paths["service"]):
             self.refuse("staged install changed the masked service state")
-        for key in ("timer", "wants"):
+        for key in owned_keys:
             path = paths[key]
             if self._path_state(path) != snapshot["paths"][str(path)]:
                 self.refuse("install changed an activator path: " + key)
@@ -818,12 +1066,38 @@ class GuestFixtureAdapter:
             self.refuse("released unit metadata does not match the staged target")
         self._ok(self.systemctl("start", self.unit, timeout=60),
                  "fixture service release")
-        self._ok(self.systemctl("start", TIMER, timeout=60),
-                 "timer activator release")
-        timer = self._show(TIMER, ["ActiveState", "LoadState"])
-        if timer["ActiveState"] != "active" or timer["LoadState"] != "loaded":
-            self.refuse("timer activator did not become active")
-        return {"service_start": True, "timer": timer}
+        snapshot = self._snapshot_required()
+        if self._topology()["kind"] == "tick":
+            # Existing tick proof behavior, unchanged: release the timer.
+            self._ok(self.systemctl("start", TIMER, timeout=60),
+                     "timer activator release")
+            timer = self._show(TIMER, ["ActiveState", "LoadState"])
+            if timer["ActiveState"] != "active" or timer["LoadState"] != "loaded":
+                self.refuse("timer activator did not become active")
+            return {"service_start": True, "timer": timer}
+        # Repair topology: the release policy is explicit and independent of
+        # enablement. An activator active before the switch is released. An
+        # inactive activator stays inactive even when enabled.
+        released = {}
+        for name in self._activator_names():
+            unit_name = self._topology()[name]
+            desired = snapshot["activators"][name + "_active"]
+            if desired == "active":
+                self._ok(self.systemctl("start", unit_name, timeout=60),
+                         name + " activator release")
+            elif desired == "inactive":
+                self.systemctl("stop", unit_name)
+                self.systemctl("reset-failed", unit_name)
+            else:
+                self.refuse(name + " activator desired state is unsupported")
+            observed = self._show(unit_name, ["ActiveState", "LoadState"])
+            expected_states = (("active",) if desired == "active"
+                               else ("inactive", "failed"))
+            if observed["ActiveState"] not in expected_states:
+                self.refuse(name + " activator release state does not match "
+                            "the snapshot policy")
+            released[name] = observed
+        return {"service_start": True, "released": released}
 
     def completion(self, unit, runtime, previous):
         if unit != self.unit or not valid_runtime(runtime) \
@@ -905,17 +1179,20 @@ class GuestFixtureAdapter:
         staged = self._staged_service_path(paths["service"])
         staged.unlink(missing_ok=True)
         self._fsync_dir(paths["service"].parent)
-        self.systemctl("stop", TIMER)
-        self.systemctl("reset-failed", TIMER)
+        for name in self._activator_names():
+            unit_name = self._topology()[name]
+            self.systemctl("stop", unit_name)
+            self.systemctl("reset-failed", unit_name)
         fenced = self._usable_current_service(paths["service"])
         if fenced["type"] != "symlink" or fenced["target"] != "/dev/null":
             self.refuse("restore requires the durable /dev/null service fence")
-        for key in ("timer", "wants"):
+        owned_keys = [key for key in paths if key != "service"]
+        for key in owned_keys:
             path = paths[key]
             self._restore_path(path, snapshot["paths"][str(path)])
         self._restore_path(staged, snapshot["paths"][str(paths["service"])])
         self._ok(self.systemctl("daemon-reload"), "daemon reload after restore")
-        for key in ("timer", "wants"):
+        for key in owned_keys:
             path = paths[key]
             self._compare_state(path, snapshot["paths"][str(path)])
         self._compare_state(staged, snapshot["paths"][str(paths["service"])])
@@ -956,13 +1233,28 @@ class GuestFixtureAdapter:
         if self._runtime_from_unit(paths["service"]) != snapshot["runtime"]:
             self.refuse("restored service runtime does not match the snapshot")
         expected = snapshot["activators"]
-        if expected["timer_active"] == "active":
-            self._ok(self.systemctl("start", TIMER), "restore timer activation")
-        elif expected["timer_active"] == "inactive":
-            self.systemctl("stop", TIMER)
-            self.systemctl("reset-failed", TIMER)
-        else:
-            self.refuse("snapshot timer active state is unsupported")
+        observed_activators = {}
+        for name in self._activator_names():
+            unit_name = self._topology()[name]
+            desired_active = expected[name + "_active"]
+            desired_enabled = expected[name + "_unit_file_state"]
+            if desired_active == "active":
+                self._ok(self.systemctl("start", unit_name),
+                         "restore " + name + " activation")
+            elif desired_active == "inactive":
+                self.systemctl("stop", unit_name)
+                self.systemctl("reset-failed", unit_name)
+            else:
+                self.refuse("snapshot " + name + " active state is unsupported")
+            observed = self._show(unit_name, ["ActiveState", "UnitFileState",
+                                              "LoadState"])
+            if observed["ActiveState"] != desired_active:
+                self.refuse("restored " + name
+                            + " active state does not match the snapshot")
+            if observed["UnitFileState"] != desired_enabled:
+                self.refuse("restored " + name
+                            + " enablement does not match the snapshot")
+            observed_activators[name] = observed
         if expected["service_active"] == "active":
             self._ok(self.systemctl("start", self.unit), "restore service activation")
         elif expected["service_active"] == "inactive":
@@ -970,15 +1262,10 @@ class GuestFixtureAdapter:
             self.systemctl("reset-failed", self.unit)
         else:
             self.refuse("snapshot service active state is unsupported")
-        timer = self._show(TIMER, ["ActiveState", "UnitFileState", "LoadState"])
         service = self._show(self.unit, ["ActiveState", "LoadState"])
-        if timer["ActiveState"] != expected["timer_active"]:
-            self.refuse("restored timer active state does not match the snapshot")
-        if timer["UnitFileState"] != expected["timer_unit_file_state"]:
-            self.refuse("restored timer enablement does not match the snapshot")
         if service["ActiveState"] != expected["service_active"]:
             self.refuse("restored service active state does not match the snapshot")
-        return {"timer": timer, "service": service}
+        return {**observed_activators, "service": service}
 
     def _maybe_kill(self, phase):
         """Proof-only interruption hook; never reachable for a production caller."""
@@ -986,6 +1273,28 @@ class GuestFixtureAdapter:
             return
         if os.environ.get("CRQ_PROOF_KILL_ON") == phase:
             os.kill(os.getpid(), signal.SIGKILL)
+
+    def _maybe_pause(self, phase):
+        """Bounded guest-only pause after the durable mask reload."""
+        if not self.guest_only:
+            return
+        if os.environ.get("CRQ_PROOF_PAUSE_ON") != phase:
+            return
+        marker = os.environ.get("CRQ_PROOF_PAUSE_MARKER")
+        if not marker:
+            self.refuse("pause marker is required for the proof pause")
+        marker_path = pathlib.Path(marker)
+        if not marker_path.is_absolute():
+            self.refuse("pause marker must be an absolute path")
+        marker_path.write_text(json.dumps(
+            {"phase": phase, "pid": os.getpid(), "at": time.time()},
+            sort_keys=True) + "\n")
+        seconds = max(0.0, min(float(self.pause_seconds), 30.0))
+        deadline = self.clock() + seconds
+        # The loop is bounded and does not swallow signals. The harness owns
+        # cleanup of the marker and the process.
+        while self.clock() < deadline:
+            self.sleep(min(0.1, max(0.0, deadline - self.clock())))
 
 
 def main(argv=None):
