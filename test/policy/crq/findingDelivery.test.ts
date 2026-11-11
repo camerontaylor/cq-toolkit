@@ -101,7 +101,14 @@ function transition(entry: FindingDeliveryCase): ReturnType<typeof outcome> {
 describe('finding delivery vectors', () => {
   test('the fixture has the expected families and no duplicate case names', () => {
     const families = [...new Set(cases.map((entry) => entry.family))];
-    expect(families).toEqual(['occurrence', 'normalize', 'transition', 'ingest', 'recover']);
+    expect(families).toEqual([
+      'occurrence',
+      'normalize',
+      'transition',
+      'ingest',
+      'recover',
+      'handoff',
+    ]);
     expect(new Set(cases.map((entry) => `${entry.family}/${entry.name}`)).size).toBe(cases.length);
   });
 

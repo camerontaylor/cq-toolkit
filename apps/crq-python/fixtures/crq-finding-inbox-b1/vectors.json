@@ -3939,6 +3939,1425 @@
           }
         }
       ]
+    },
+    {
+      "family": "handoff",
+      "cases": [
+        {
+          "name": "handoff-written",
+          "source": "finding_delivery.Inbox.handoff",
+          "input": {
+            "mode": "effect",
+            "finding_id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a",
+            "previous_task": "old-task",
+            "prepared_job_id": "prepared-task",
+            "job": {
+              "job": "prepared-task",
+              "canonical_finding_id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a",
+              "origin_job": "old-task",
+              "source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "repair_base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "revalidation": {
+                "fix_instructions": "Keep both sources."
+              }
+            },
+            "at": "2026-10-30T00:00:00Z",
+            "already_handed_off": false,
+            "row": {
+              "canonical_id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a",
+              "failure_class": "evidence",
+              "finding": {
+                "anchor_status": "verified",
+                "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "body": "details \u0001 with control",
+                "id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a",
+                "intervals": [
+                  [
+                    1,
+                    1
+                  ]
+                ],
+                "path": "src/a.ts",
+                "severity": "major",
+                "source_id": null,
+                "status": "untriaged",
+                "title": "\u6807\u9898 \ud83d\ude00"
+              },
+              "previous_event_id": null,
+              "receipt": {
+                "acknowledgement": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "repair_task": "old-task"
+              },
+              "review_id": "63b4041c83691f6a15ac5a2c49e2f54b74de313be387211ef37c575b9ed41877",
+              "status": "delivered",
+              "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            "row_canonical": "{\"canonical_id\":\"7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a\",\"failure_class\":\"evidence\",\"finding\":{\"anchor_status\":\"verified\",\"blob\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"body\":\"details \\u0001 with control\",\"id\":\"7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a\",\"intervals\":[[1,1]],\"path\":\"src/a.ts\",\"severity\":\"major\",\"source_id\":null,\"status\":\"untriaged\",\"title\":\"\u6807\u9898 \ud83d\ude00\"},\"previous_event_id\":null,\"receipt\":{\"acknowledgement\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"repair_task\":\"old-task\"},\"review_id\":\"63b4041c83691f6a15ac5a2c49e2f54b74de313be387211ef37c575b9ed41877\",\"status\":\"delivered\",\"target\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}",
+            "retained": [],
+            "row_after": {
+              "canonical_id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a",
+              "failure_class": "evidence",
+              "finding": {
+                "anchor_status": "verified",
+                "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "body": "details \u0001 with control",
+                "id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a",
+                "intervals": [
+                  [
+                    1,
+                    1
+                  ]
+                ],
+                "path": "src/a.ts",
+                "severity": "major",
+                "source_id": null,
+                "status": "untriaged",
+                "title": "\u6807\u9898 \ud83d\ude00"
+              },
+              "previous_event_id": "f34b69a04dd491a8eafc8fb6f0eff0c53a024f443b1e7e1d649bcf374066ed0c",
+              "receipt": {
+                "acknowledgement": "b5fce31c5e3422883bfbe6328369631240d08587bcbef7c8476b1adb4e7ff20d",
+                "repair_task": "prepared-task"
+              },
+              "review_id": "63b4041c83691f6a15ac5a2c49e2f54b74de313be387211ef37c575b9ed41877",
+              "status": "delivered",
+              "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            "row_after_canonical": "{\"canonical_id\":\"7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a\",\"failure_class\":\"evidence\",\"finding\":{\"anchor_status\":\"verified\",\"blob\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"body\":\"details \\u0001 with control\",\"id\":\"7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a\",\"intervals\":[[1,1]],\"path\":\"src/a.ts\",\"severity\":\"major\",\"source_id\":null,\"status\":\"untriaged\",\"title\":\"\u6807\u9898 \ud83d\ude00\"},\"previous_event_id\":\"f34b69a04dd491a8eafc8fb6f0eff0c53a024f443b1e7e1d649bcf374066ed0c\",\"receipt\":{\"acknowledgement\":\"b5fce31c5e3422883bfbe6328369631240d08587bcbef7c8476b1adb4e7ff20d\",\"repair_task\":\"prepared-task\"},\"review_id\":\"63b4041c83691f6a15ac5a2c49e2f54b74de313be387211ef37c575b9ed41877\",\"status\":\"delivered\",\"target\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}"
+          },
+          "expect": {
+            "ok": true,
+            "after": [
+              {
+                "id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a",
+                "canonical": "{\"canonical_id\":\"7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a\",\"failure_class\":\"evidence\",\"finding\":{\"anchor_status\":\"verified\",\"blob\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"body\":\"details \\u0001 with control\",\"id\":\"7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a\",\"intervals\":[[1,1]],\"path\":\"src/a.ts\",\"severity\":\"major\",\"source_id\":null,\"status\":\"untriaged\",\"title\":\"\u6807\u9898 \ud83d\ude00\"},\"previous_event_id\":\"f34b69a04dd491a8eafc8fb6f0eff0c53a024f443b1e7e1d649bcf374066ed0c\",\"receipt\":{\"acknowledgement\":\"b5fce31c5e3422883bfbe6328369631240d08587bcbef7c8476b1adb4e7ff20d\",\"repair_task\":\"prepared-task\"},\"review_id\":\"63b4041c83691f6a15ac5a2c49e2f54b74de313be387211ef37c575b9ed41877\",\"status\":\"delivered\",\"target\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}",
+                "sha256": "b8689e52aff07dde244282a4ce750d3bbfea97b89c7fd640aed21fb3dbb49f16"
+              }
+            ],
+            "effects": [
+              {
+                "kind": "lock",
+                "phase": "enter",
+                "target": "findings.lock"
+              },
+              {
+                "kind": "lock",
+                "phase": "exit",
+                "target": "findings.lock"
+              },
+              {
+                "kind": "lock",
+                "phase": "enter",
+                "target": "findings.lock"
+              },
+              {
+                "kind": "read",
+                "sha256": "569d2407b519e537097a57b1f0bfedc32d864af472e9150f8159e0c830f9b53e"
+              },
+              {
+                "kind": "lock",
+                "phase": "enter",
+                "target": "outbox.lock"
+              },
+              {
+                "kind": "write",
+                "target": "f34b69a04dd491a8eafc8fb6f0eff0c53a024f443b1e7e1d649bcf374066ed0c",
+                "sha256": "c6d5c082221c4534b95771125770ca4f6bde8a5f680e011c2d38dc08f28c6d72",
+                "canonical": "{\"event_type\":\"finding-event\",\"id\":\"f34b69a04dd491a8eafc8fb6f0eff0c53a024f443b1e7e1d649bcf374066ed0c\",\"occurred_at\":\"2026-10-30T00:00:00Z\",\"payload\":{\"action\":\"delivered\",\"actor\":\"crq-repair-preparation\",\"evidence\":{\"acknowledgement\":\"b5fce31c5e3422883bfbe6328369631240d08587bcbef7c8476b1adb4e7ff20d\",\"repair_task\":\"prepared-task\"},\"finding_id\":\"7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a\",\"previous_event_id\":null,\"review_id\":\"63b4041c83691f6a15ac5a2c49e2f54b74de313be387211ef37c575b9ed41877\"},\"schema\":\"cq.review-ledger/v1\",\"source_key\":\"prepared-delivery:7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a:prepared-task\"}"
+              },
+              {
+                "kind": "lock",
+                "phase": "exit",
+                "target": "outbox.lock"
+              },
+              {
+                "kind": "write",
+                "target": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a",
+                "sha256": "b8689e52aff07dde244282a4ce750d3bbfea97b89c7fd640aed21fb3dbb49f16",
+                "canonical": "{\"canonical_id\":\"7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a\",\"failure_class\":\"evidence\",\"finding\":{\"anchor_status\":\"verified\",\"blob\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"body\":\"details \\u0001 with control\",\"id\":\"7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a\",\"intervals\":[[1,1]],\"path\":\"src/a.ts\",\"severity\":\"major\",\"source_id\":null,\"status\":\"untriaged\",\"title\":\"\u6807\u9898 \ud83d\ude00\"},\"previous_event_id\":\"f34b69a04dd491a8eafc8fb6f0eff0c53a024f443b1e7e1d649bcf374066ed0c\",\"receipt\":{\"acknowledgement\":\"b5fce31c5e3422883bfbe6328369631240d08587bcbef7c8476b1adb4e7ff20d\",\"repair_task\":\"prepared-task\"},\"review_id\":\"63b4041c83691f6a15ac5a2c49e2f54b74de313be387211ef37c575b9ed41877\",\"status\":\"delivered\",\"target\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}"
+              },
+              {
+                "kind": "lock",
+                "phase": "exit",
+                "target": "findings.lock"
+              }
+            ],
+            "outbox": [
+              "f34b69a04dd491a8eafc8fb6f0eff0c53a024f443b1e7e1d649bcf374066ed0c"
+            ]
+          }
+        },
+        {
+          "name": "handoff-already-handed-off",
+          "source": "finding_delivery.Inbox.handoff",
+          "input": {
+            "mode": "effect",
+            "finding_id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a",
+            "previous_task": "old-task",
+            "prepared_job_id": "prepared-task",
+            "job": {
+              "job": "prepared-task",
+              "canonical_finding_id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a",
+              "origin_job": "old-task",
+              "source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "repair_base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "revalidation": {
+                "fix_instructions": "Keep both sources."
+              }
+            },
+            "at": "2026-10-30T00:00:00Z",
+            "already_handed_off": true,
+            "row": {
+              "canonical_id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a",
+              "failure_class": "evidence",
+              "finding": {
+                "anchor_status": "verified",
+                "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "body": "details \u0001 with control",
+                "id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a",
+                "intervals": [
+                  [
+                    1,
+                    1
+                  ]
+                ],
+                "path": "src/a.ts",
+                "severity": "major",
+                "source_id": null,
+                "status": "untriaged",
+                "title": "\u6807\u9898 \ud83d\ude00"
+              },
+              "previous_event_id": null,
+              "receipt": {
+                "acknowledgement": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "repair_task": "prepared-task"
+              },
+              "review_id": "63b4041c83691f6a15ac5a2c49e2f54b74de313be387211ef37c575b9ed41877",
+              "status": "delivered",
+              "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            "row_canonical": "{\"canonical_id\":\"7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a\",\"failure_class\":\"evidence\",\"finding\":{\"anchor_status\":\"verified\",\"blob\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"body\":\"details \\u0001 with control\",\"id\":\"7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a\",\"intervals\":[[1,1]],\"path\":\"src/a.ts\",\"severity\":\"major\",\"source_id\":null,\"status\":\"untriaged\",\"title\":\"\u6807\u9898 \ud83d\ude00\"},\"previous_event_id\":null,\"receipt\":{\"acknowledgement\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"repair_task\":\"prepared-task\"},\"review_id\":\"63b4041c83691f6a15ac5a2c49e2f54b74de313be387211ef37c575b9ed41877\",\"status\":\"delivered\",\"target\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}",
+            "retained": [],
+            "row_after": {
+              "canonical_id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a",
+              "failure_class": "evidence",
+              "finding": {
+                "anchor_status": "verified",
+                "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "body": "details \u0001 with control",
+                "id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a",
+                "intervals": [
+                  [
+                    1,
+                    1
+                  ]
+                ],
+                "path": "src/a.ts",
+                "severity": "major",
+                "source_id": null,
+                "status": "untriaged",
+                "title": "\u6807\u9898 \ud83d\ude00"
+              },
+              "previous_event_id": null,
+              "receipt": {
+                "acknowledgement": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "repair_task": "prepared-task"
+              },
+              "review_id": "63b4041c83691f6a15ac5a2c49e2f54b74de313be387211ef37c575b9ed41877",
+              "status": "delivered",
+              "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            "row_after_canonical": "{\"canonical_id\":\"7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a\",\"failure_class\":\"evidence\",\"finding\":{\"anchor_status\":\"verified\",\"blob\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"body\":\"details \\u0001 with control\",\"id\":\"7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a\",\"intervals\":[[1,1]],\"path\":\"src/a.ts\",\"severity\":\"major\",\"source_id\":null,\"status\":\"untriaged\",\"title\":\"\u6807\u9898 \ud83d\ude00\"},\"previous_event_id\":null,\"receipt\":{\"acknowledgement\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"repair_task\":\"prepared-task\"},\"review_id\":\"63b4041c83691f6a15ac5a2c49e2f54b74de313be387211ef37c575b9ed41877\",\"status\":\"delivered\",\"target\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}"
+          },
+          "expect": {
+            "ok": true,
+            "after": [
+              {
+                "id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a",
+                "canonical": "{\"canonical_id\":\"7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a\",\"failure_class\":\"evidence\",\"finding\":{\"anchor_status\":\"verified\",\"blob\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"body\":\"details \\u0001 with control\",\"id\":\"7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a\",\"intervals\":[[1,1]],\"path\":\"src/a.ts\",\"severity\":\"major\",\"source_id\":null,\"status\":\"untriaged\",\"title\":\"\u6807\u9898 \ud83d\ude00\"},\"previous_event_id\":null,\"receipt\":{\"acknowledgement\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"repair_task\":\"prepared-task\"},\"review_id\":\"63b4041c83691f6a15ac5a2c49e2f54b74de313be387211ef37c575b9ed41877\",\"status\":\"delivered\",\"target\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}",
+                "sha256": "bbf83b45041ecae366b3fe9c6b69a42c682a758f53e7c23ded28d658734c0d0a"
+              }
+            ],
+            "effects": [
+              {
+                "kind": "lock",
+                "phase": "enter",
+                "target": "findings.lock"
+              },
+              {
+                "kind": "lock",
+                "phase": "exit",
+                "target": "findings.lock"
+              },
+              {
+                "kind": "lock",
+                "phase": "enter",
+                "target": "findings.lock"
+              },
+              {
+                "kind": "read",
+                "sha256": "bbf83b45041ecae366b3fe9c6b69a42c682a758f53e7c23ded28d658734c0d0a"
+              },
+              {
+                "kind": "lock",
+                "phase": "exit",
+                "target": "findings.lock"
+              }
+            ],
+            "outbox": []
+          }
+        },
+        {
+          "name": "handoff-stale-owner",
+          "source": "finding_delivery.Inbox.handoff",
+          "input": {
+            "mode": "effect",
+            "finding_id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a",
+            "previous_task": "old-task",
+            "prepared_job_id": "prepared-task",
+            "job": {
+              "job": "prepared-task",
+              "canonical_finding_id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a",
+              "origin_job": "old-task",
+              "source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "repair_base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "revalidation": {
+                "fix_instructions": "Keep both sources."
+              }
+            },
+            "at": "2026-10-30T00:00:00Z",
+            "already_handed_off": false,
+            "gate": "canonicalHandoffRefusal",
+            "row": {
+              "canonical_id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a",
+              "failure_class": "evidence",
+              "finding": {
+                "anchor_status": "verified",
+                "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "body": "details \u0001 with control",
+                "id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a",
+                "intervals": [
+                  [
+                    1,
+                    1
+                  ]
+                ],
+                "path": "src/a.ts",
+                "severity": "major",
+                "source_id": null,
+                "status": "untriaged",
+                "title": "\u6807\u9898 \ud83d\ude00"
+              },
+              "previous_event_id": null,
+              "receipt": {
+                "acknowledgement": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "repair_task": "third-task"
+              },
+              "review_id": "63b4041c83691f6a15ac5a2c49e2f54b74de313be387211ef37c575b9ed41877",
+              "status": "delivered",
+              "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            "row_canonical": "{\"canonical_id\":\"7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a\",\"failure_class\":\"evidence\",\"finding\":{\"anchor_status\":\"verified\",\"blob\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"body\":\"details \\u0001 with control\",\"id\":\"7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a\",\"intervals\":[[1,1]],\"path\":\"src/a.ts\",\"severity\":\"major\",\"source_id\":null,\"status\":\"untriaged\",\"title\":\"\u6807\u9898 \ud83d\ude00\"},\"previous_event_id\":null,\"receipt\":{\"acknowledgement\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"repair_task\":\"third-task\"},\"review_id\":\"63b4041c83691f6a15ac5a2c49e2f54b74de313be387211ef37c575b9ed41877\",\"status\":\"delivered\",\"target\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}",
+            "retained": [],
+            "row_after": {
+              "canonical_id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a",
+              "failure_class": "evidence",
+              "finding": {
+                "anchor_status": "verified",
+                "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "body": "details \u0001 with control",
+                "id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a",
+                "intervals": [
+                  [
+                    1,
+                    1
+                  ]
+                ],
+                "path": "src/a.ts",
+                "severity": "major",
+                "source_id": null,
+                "status": "untriaged",
+                "title": "\u6807\u9898 \ud83d\ude00"
+              },
+              "previous_event_id": null,
+              "receipt": {
+                "acknowledgement": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "repair_task": "third-task"
+              },
+              "review_id": "63b4041c83691f6a15ac5a2c49e2f54b74de313be387211ef37c575b9ed41877",
+              "status": "delivered",
+              "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            "row_after_canonical": "{\"canonical_id\":\"7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a\",\"failure_class\":\"evidence\",\"finding\":{\"anchor_status\":\"verified\",\"blob\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"body\":\"details \\u0001 with control\",\"id\":\"7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a\",\"intervals\":[[1,1]],\"path\":\"src/a.ts\",\"severity\":\"major\",\"source_id\":null,\"status\":\"untriaged\",\"title\":\"\u6807\u9898 \ud83d\ude00\"},\"previous_event_id\":null,\"receipt\":{\"acknowledgement\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"repair_task\":\"third-task\"},\"review_id\":\"63b4041c83691f6a15ac5a2c49e2f54b74de313be387211ef37c575b9ed41877\",\"status\":\"delivered\",\"target\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}"
+          },
+          "expect": {
+            "ok": false,
+            "error": "IntegrityError",
+            "message": "prepared retry no longer owns canonical finding",
+            "after": [
+              {
+                "id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a",
+                "canonical": "{\"canonical_id\":\"7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a\",\"failure_class\":\"evidence\",\"finding\":{\"anchor_status\":\"verified\",\"blob\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"body\":\"details \\u0001 with control\",\"id\":\"7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a\",\"intervals\":[[1,1]],\"path\":\"src/a.ts\",\"severity\":\"major\",\"source_id\":null,\"status\":\"untriaged\",\"title\":\"\u6807\u9898 \ud83d\ude00\"},\"previous_event_id\":null,\"receipt\":{\"acknowledgement\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"repair_task\":\"third-task\"},\"review_id\":\"63b4041c83691f6a15ac5a2c49e2f54b74de313be387211ef37c575b9ed41877\",\"status\":\"delivered\",\"target\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}",
+                "sha256": "7210ed9c490f3e4e8862685aa1f7edbce6325b9e1402163eda2be6d68f38d45c"
+              }
+            ],
+            "effects": [
+              {
+                "kind": "lock",
+                "phase": "enter",
+                "target": "findings.lock"
+              },
+              {
+                "kind": "lock",
+                "phase": "exit",
+                "target": "findings.lock"
+              },
+              {
+                "kind": "lock",
+                "phase": "enter",
+                "target": "findings.lock"
+              },
+              {
+                "kind": "read",
+                "sha256": "7210ed9c490f3e4e8862685aa1f7edbce6325b9e1402163eda2be6d68f38d45c"
+              },
+              {
+                "kind": "lock",
+                "phase": "exit",
+                "target": "findings.lock"
+              }
+            ],
+            "outbox": []
+          }
+        },
+        {
+          "name": "handoff-identity-finding-mismatch",
+          "source": "finding_delivery.Inbox.handoff",
+          "input": {
+            "mode": "effect",
+            "finding_id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a",
+            "previous_task": "old-task",
+            "prepared_job_id": "prepared-task",
+            "job": {
+              "job": "prepared-task",
+              "canonical_finding_id": "other",
+              "origin_job": "old-task",
+              "source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "repair_base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "revalidation": {
+                "fix_instructions": "Keep both sources."
+              }
+            },
+            "at": "2026-10-30T00:00:00Z",
+            "already_handed_off": false,
+            "gate": "canonicalHandoffRefusal",
+            "row": {
+              "canonical_id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a",
+              "failure_class": "evidence",
+              "finding": {
+                "anchor_status": "verified",
+                "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "body": "details \u0001 with control",
+                "id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a",
+                "intervals": [
+                  [
+                    1,
+                    1
+                  ]
+                ],
+                "path": "src/a.ts",
+                "severity": "major",
+                "source_id": null,
+                "status": "untriaged",
+                "title": "\u6807\u9898 \ud83d\ude00"
+              },
+              "previous_event_id": null,
+              "receipt": {
+                "acknowledgement": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "repair_task": "old-task"
+              },
+              "review_id": "63b4041c83691f6a15ac5a2c49e2f54b74de313be387211ef37c575b9ed41877",
+              "status": "delivered",
+              "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            "row_canonical": "{\"canonical_id\":\"7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a\",\"failure_class\":\"evidence\",\"finding\":{\"anchor_status\":\"verified\",\"blob\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"body\":\"details \\u0001 with control\",\"id\":\"7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a\",\"intervals\":[[1,1]],\"path\":\"src/a.ts\",\"severity\":\"major\",\"source_id\":null,\"status\":\"untriaged\",\"title\":\"\u6807\u9898 \ud83d\ude00\"},\"previous_event_id\":null,\"receipt\":{\"acknowledgement\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"repair_task\":\"old-task\"},\"review_id\":\"63b4041c83691f6a15ac5a2c49e2f54b74de313be387211ef37c575b9ed41877\",\"status\":\"delivered\",\"target\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}",
+            "retained": [],
+            "row_after": {
+              "canonical_id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a",
+              "failure_class": "evidence",
+              "finding": {
+                "anchor_status": "verified",
+                "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "body": "details \u0001 with control",
+                "id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a",
+                "intervals": [
+                  [
+                    1,
+                    1
+                  ]
+                ],
+                "path": "src/a.ts",
+                "severity": "major",
+                "source_id": null,
+                "status": "untriaged",
+                "title": "\u6807\u9898 \ud83d\ude00"
+              },
+              "previous_event_id": null,
+              "receipt": {
+                "acknowledgement": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "repair_task": "old-task"
+              },
+              "review_id": "63b4041c83691f6a15ac5a2c49e2f54b74de313be387211ef37c575b9ed41877",
+              "status": "delivered",
+              "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            "row_after_canonical": "{\"canonical_id\":\"7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a\",\"failure_class\":\"evidence\",\"finding\":{\"anchor_status\":\"verified\",\"blob\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"body\":\"details \\u0001 with control\",\"id\":\"7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a\",\"intervals\":[[1,1]],\"path\":\"src/a.ts\",\"severity\":\"major\",\"source_id\":null,\"status\":\"untriaged\",\"title\":\"\u6807\u9898 \ud83d\ude00\"},\"previous_event_id\":null,\"receipt\":{\"acknowledgement\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"repair_task\":\"old-task\"},\"review_id\":\"63b4041c83691f6a15ac5a2c49e2f54b74de313be387211ef37c575b9ed41877\",\"status\":\"delivered\",\"target\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}"
+          },
+          "expect": {
+            "ok": false,
+            "error": "IntegrityError",
+            "message": "prepared retry source identity mismatch",
+            "after": [
+              {
+                "id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a",
+                "canonical": "{\"canonical_id\":\"7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a\",\"failure_class\":\"evidence\",\"finding\":{\"anchor_status\":\"verified\",\"blob\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"body\":\"details \\u0001 with control\",\"id\":\"7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a\",\"intervals\":[[1,1]],\"path\":\"src/a.ts\",\"severity\":\"major\",\"source_id\":null,\"status\":\"untriaged\",\"title\":\"\u6807\u9898 \ud83d\ude00\"},\"previous_event_id\":null,\"receipt\":{\"acknowledgement\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"repair_task\":\"old-task\"},\"review_id\":\"63b4041c83691f6a15ac5a2c49e2f54b74de313be387211ef37c575b9ed41877\",\"status\":\"delivered\",\"target\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}",
+                "sha256": "569d2407b519e537097a57b1f0bfedc32d864af472e9150f8159e0c830f9b53e"
+              }
+            ],
+            "effects": [],
+            "outbox": []
+          }
+        },
+        {
+          "name": "handoff-identity-origin-mismatch",
+          "source": "finding_delivery.Inbox.handoff",
+          "input": {
+            "mode": "effect",
+            "finding_id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a",
+            "previous_task": "old-task",
+            "prepared_job_id": "prepared-task",
+            "job": {
+              "job": "prepared-task",
+              "canonical_finding_id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a",
+              "origin_job": "other",
+              "source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "repair_base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "revalidation": {
+                "fix_instructions": "Keep both sources."
+              }
+            },
+            "at": "2026-10-30T00:00:00Z",
+            "already_handed_off": false,
+            "gate": "canonicalHandoffRefusal",
+            "row": {
+              "canonical_id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a",
+              "failure_class": "evidence",
+              "finding": {
+                "anchor_status": "verified",
+                "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "body": "details \u0001 with control",
+                "id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a",
+                "intervals": [
+                  [
+                    1,
+                    1
+                  ]
+                ],
+                "path": "src/a.ts",
+                "severity": "major",
+                "source_id": null,
+                "status": "untriaged",
+                "title": "\u6807\u9898 \ud83d\ude00"
+              },
+              "previous_event_id": null,
+              "receipt": {
+                "acknowledgement": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "repair_task": "old-task"
+              },
+              "review_id": "63b4041c83691f6a15ac5a2c49e2f54b74de313be387211ef37c575b9ed41877",
+              "status": "delivered",
+              "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            "row_canonical": "{\"canonical_id\":\"7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a\",\"failure_class\":\"evidence\",\"finding\":{\"anchor_status\":\"verified\",\"blob\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"body\":\"details \\u0001 with control\",\"id\":\"7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a\",\"intervals\":[[1,1]],\"path\":\"src/a.ts\",\"severity\":\"major\",\"source_id\":null,\"status\":\"untriaged\",\"title\":\"\u6807\u9898 \ud83d\ude00\"},\"previous_event_id\":null,\"receipt\":{\"acknowledgement\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"repair_task\":\"old-task\"},\"review_id\":\"63b4041c83691f6a15ac5a2c49e2f54b74de313be387211ef37c575b9ed41877\",\"status\":\"delivered\",\"target\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}",
+            "retained": [],
+            "row_after": {
+              "canonical_id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a",
+              "failure_class": "evidence",
+              "finding": {
+                "anchor_status": "verified",
+                "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "body": "details \u0001 with control",
+                "id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a",
+                "intervals": [
+                  [
+                    1,
+                    1
+                  ]
+                ],
+                "path": "src/a.ts",
+                "severity": "major",
+                "source_id": null,
+                "status": "untriaged",
+                "title": "\u6807\u9898 \ud83d\ude00"
+              },
+              "previous_event_id": null,
+              "receipt": {
+                "acknowledgement": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "repair_task": "old-task"
+              },
+              "review_id": "63b4041c83691f6a15ac5a2c49e2f54b74de313be387211ef37c575b9ed41877",
+              "status": "delivered",
+              "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            "row_after_canonical": "{\"canonical_id\":\"7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a\",\"failure_class\":\"evidence\",\"finding\":{\"anchor_status\":\"verified\",\"blob\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"body\":\"details \\u0001 with control\",\"id\":\"7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a\",\"intervals\":[[1,1]],\"path\":\"src/a.ts\",\"severity\":\"major\",\"source_id\":null,\"status\":\"untriaged\",\"title\":\"\u6807\u9898 \ud83d\ude00\"},\"previous_event_id\":null,\"receipt\":{\"acknowledgement\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"repair_task\":\"old-task\"},\"review_id\":\"63b4041c83691f6a15ac5a2c49e2f54b74de313be387211ef37c575b9ed41877\",\"status\":\"delivered\",\"target\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}"
+          },
+          "expect": {
+            "ok": false,
+            "error": "IntegrityError",
+            "message": "prepared retry source identity mismatch",
+            "after": [
+              {
+                "id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a",
+                "canonical": "{\"canonical_id\":\"7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a\",\"failure_class\":\"evidence\",\"finding\":{\"anchor_status\":\"verified\",\"blob\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"body\":\"details \\u0001 with control\",\"id\":\"7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a\",\"intervals\":[[1,1]],\"path\":\"src/a.ts\",\"severity\":\"major\",\"source_id\":null,\"status\":\"untriaged\",\"title\":\"\u6807\u9898 \ud83d\ude00\"},\"previous_event_id\":null,\"receipt\":{\"acknowledgement\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"repair_task\":\"old-task\"},\"review_id\":\"63b4041c83691f6a15ac5a2c49e2f54b74de313be387211ef37c575b9ed41877\",\"status\":\"delivered\",\"target\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}",
+                "sha256": "569d2407b519e537097a57b1f0bfedc32d864af472e9150f8159e0c830f9b53e"
+              }
+            ],
+            "effects": [],
+            "outbox": []
+          }
+        },
+        {
+          "name": "handoff-recovered-after-crash",
+          "source": "finding_delivery.Inbox.handoff",
+          "input": {
+            "mode": "effect",
+            "finding_id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a",
+            "previous_task": "old-task",
+            "prepared_job_id": "prepared-task",
+            "job": {
+              "job": "prepared-task",
+              "canonical_finding_id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a",
+              "origin_job": "old-task",
+              "source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "repair_base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "revalidation": {
+                "fix_instructions": "Keep both sources."
+              }
+            },
+            "at": "2026-10-30T00:00:00Z",
+            "already_handed_off": true,
+            "row": {
+              "canonical_id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a",
+              "failure_class": "evidence",
+              "finding": {
+                "anchor_status": "verified",
+                "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "body": "details \u0001 with control",
+                "id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a",
+                "intervals": [
+                  [
+                    1,
+                    1
+                  ]
+                ],
+                "path": "src/a.ts",
+                "severity": "major",
+                "source_id": null,
+                "status": "untriaged",
+                "title": "\u6807\u9898 \ud83d\ude00"
+              },
+              "previous_event_id": null,
+              "receipt": {
+                "acknowledgement": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "repair_task": "old-task"
+              },
+              "review_id": "63b4041c83691f6a15ac5a2c49e2f54b74de313be387211ef37c575b9ed41877",
+              "status": "delivered",
+              "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            "row_canonical": "{\"canonical_id\":\"7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a\",\"failure_class\":\"evidence\",\"finding\":{\"anchor_status\":\"verified\",\"blob\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"body\":\"details \\u0001 with control\",\"id\":\"7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a\",\"intervals\":[[1,1]],\"path\":\"src/a.ts\",\"severity\":\"major\",\"source_id\":null,\"status\":\"untriaged\",\"title\":\"\u6807\u9898 \ud83d\ude00\"},\"previous_event_id\":null,\"receipt\":{\"acknowledgement\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"repair_task\":\"old-task\"},\"review_id\":\"63b4041c83691f6a15ac5a2c49e2f54b74de313be387211ef37c575b9ed41877\",\"status\":\"delivered\",\"target\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}",
+            "retained": [
+              {
+                "event_type": "finding-event",
+                "id": "f34b69a04dd491a8eafc8fb6f0eff0c53a024f443b1e7e1d649bcf374066ed0c",
+                "occurred_at": "2026-10-30T00:00:00Z",
+                "payload": {
+                  "action": "delivered",
+                  "actor": "crq-repair-preparation",
+                  "evidence": {
+                    "acknowledgement": "b5fce31c5e3422883bfbe6328369631240d08587bcbef7c8476b1adb4e7ff20d",
+                    "repair_task": "prepared-task"
+                  },
+                  "finding_id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a",
+                  "previous_event_id": null,
+                  "review_id": "63b4041c83691f6a15ac5a2c49e2f54b74de313be387211ef37c575b9ed41877"
+                },
+                "schema": "cq.review-ledger/v1",
+                "source_key": "prepared-delivery:7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a:prepared-task"
+              }
+            ],
+            "row_after": {
+              "canonical_id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a",
+              "failure_class": null,
+              "finding": {
+                "anchor_status": "verified",
+                "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "body": "details \u0001 with control",
+                "id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a",
+                "intervals": [
+                  [
+                    1,
+                    1
+                  ]
+                ],
+                "path": "src/a.ts",
+                "severity": "major",
+                "source_id": null,
+                "status": "untriaged",
+                "title": "\u6807\u9898 \ud83d\ude00"
+              },
+              "previous_event_id": "f34b69a04dd491a8eafc8fb6f0eff0c53a024f443b1e7e1d649bcf374066ed0c",
+              "receipt": {
+                "acknowledgement": "b5fce31c5e3422883bfbe6328369631240d08587bcbef7c8476b1adb4e7ff20d",
+                "repair_task": "prepared-task"
+              },
+              "review_id": "63b4041c83691f6a15ac5a2c49e2f54b74de313be387211ef37c575b9ed41877",
+              "status": "delivered",
+              "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            "row_after_canonical": "{\"canonical_id\":\"7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a\",\"failure_class\":null,\"finding\":{\"anchor_status\":\"verified\",\"blob\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"body\":\"details \\u0001 with control\",\"id\":\"7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a\",\"intervals\":[[1,1]],\"path\":\"src/a.ts\",\"severity\":\"major\",\"source_id\":null,\"status\":\"untriaged\",\"title\":\"\u6807\u9898 \ud83d\ude00\"},\"previous_event_id\":\"f34b69a04dd491a8eafc8fb6f0eff0c53a024f443b1e7e1d649bcf374066ed0c\",\"receipt\":{\"acknowledgement\":\"b5fce31c5e3422883bfbe6328369631240d08587bcbef7c8476b1adb4e7ff20d\",\"repair_task\":\"prepared-task\"},\"review_id\":\"63b4041c83691f6a15ac5a2c49e2f54b74de313be387211ef37c575b9ed41877\",\"status\":\"delivered\",\"target\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}"
+          },
+          "expect": {
+            "ok": true,
+            "after": [
+              {
+                "id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a",
+                "canonical": "{\"canonical_id\":\"7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a\",\"failure_class\":null,\"finding\":{\"anchor_status\":\"verified\",\"blob\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"body\":\"details \\u0001 with control\",\"id\":\"7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a\",\"intervals\":[[1,1]],\"path\":\"src/a.ts\",\"severity\":\"major\",\"source_id\":null,\"status\":\"untriaged\",\"title\":\"\u6807\u9898 \ud83d\ude00\"},\"previous_event_id\":\"f34b69a04dd491a8eafc8fb6f0eff0c53a024f443b1e7e1d649bcf374066ed0c\",\"receipt\":{\"acknowledgement\":\"b5fce31c5e3422883bfbe6328369631240d08587bcbef7c8476b1adb4e7ff20d\",\"repair_task\":\"prepared-task\"},\"review_id\":\"63b4041c83691f6a15ac5a2c49e2f54b74de313be387211ef37c575b9ed41877\",\"status\":\"delivered\",\"target\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}",
+                "sha256": "5db396c4db3c06df42bc99e2572623b72a235b774ba779744663bab5c8e412ac"
+              }
+            ],
+            "effects": [
+              {
+                "kind": "lock",
+                "phase": "enter",
+                "target": "findings.lock"
+              },
+              {
+                "kind": "read",
+                "sha256": "569d2407b519e537097a57b1f0bfedc32d864af472e9150f8159e0c830f9b53e"
+              },
+              {
+                "kind": "write",
+                "target": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a",
+                "sha256": "5db396c4db3c06df42bc99e2572623b72a235b774ba779744663bab5c8e412ac",
+                "canonical": "{\"canonical_id\":\"7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a\",\"failure_class\":null,\"finding\":{\"anchor_status\":\"verified\",\"blob\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"body\":\"details \\u0001 with control\",\"id\":\"7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a\",\"intervals\":[[1,1]],\"path\":\"src/a.ts\",\"severity\":\"major\",\"source_id\":null,\"status\":\"untriaged\",\"title\":\"\u6807\u9898 \ud83d\ude00\"},\"previous_event_id\":\"f34b69a04dd491a8eafc8fb6f0eff0c53a024f443b1e7e1d649bcf374066ed0c\",\"receipt\":{\"acknowledgement\":\"b5fce31c5e3422883bfbe6328369631240d08587bcbef7c8476b1adb4e7ff20d\",\"repair_task\":\"prepared-task\"},\"review_id\":\"63b4041c83691f6a15ac5a2c49e2f54b74de313be387211ef37c575b9ed41877\",\"status\":\"delivered\",\"target\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}"
+              },
+              {
+                "kind": "lock",
+                "phase": "exit",
+                "target": "findings.lock"
+              },
+              {
+                "kind": "lock",
+                "phase": "enter",
+                "target": "findings.lock"
+              },
+              {
+                "kind": "read",
+                "sha256": "5db396c4db3c06df42bc99e2572623b72a235b774ba779744663bab5c8e412ac"
+              },
+              {
+                "kind": "lock",
+                "phase": "exit",
+                "target": "findings.lock"
+              }
+            ],
+            "outbox": [
+              "f34b69a04dd491a8eafc8fb6f0eff0c53a024f443b1e7e1d649bcf374066ed0c"
+            ]
+          }
+        },
+        {
+          "name": "handoff-missing-row",
+          "source": "finding_delivery.Inbox.handoff",
+          "input": {
+            "mode": "effect",
+            "finding_id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a",
+            "previous_task": "old-task",
+            "prepared_job_id": "prepared-task",
+            "job": {
+              "job": "prepared-task",
+              "canonical_finding_id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a",
+              "origin_job": "old-task",
+              "source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "repair_base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "revalidation": {
+                "fix_instructions": "Keep both sources."
+              }
+            },
+            "at": "2026-10-30T00:00:00Z",
+            "already_handed_off": false,
+            "gate": "canonicalHandoffRefusal",
+            "row": null,
+            "row_canonical": null,
+            "retained": [],
+            "row_after": null,
+            "row_after_canonical": null
+          },
+          "expect": {
+            "ok": false,
+            "error": "FileNotFoundError",
+            "after": [],
+            "effects": [
+              {
+                "kind": "lock",
+                "phase": "enter",
+                "target": "findings.lock"
+              },
+              {
+                "kind": "lock",
+                "phase": "exit",
+                "target": "findings.lock"
+              },
+              {
+                "kind": "lock",
+                "phase": "enter",
+                "target": "findings.lock"
+              },
+              {
+                "kind": "lock",
+                "phase": "exit",
+                "target": "findings.lock"
+              }
+            ],
+            "outbox": []
+          }
+        },
+        {
+          "name": "handoff-receipt-not-object",
+          "source": "finding_delivery.Inbox.handoff",
+          "input": {
+            "mode": "effect",
+            "finding_id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a",
+            "previous_task": "old-task",
+            "prepared_job_id": "prepared-task",
+            "job": {
+              "job": "prepared-task",
+              "canonical_finding_id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a",
+              "origin_job": "old-task",
+              "source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "repair_base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "revalidation": {
+                "fix_instructions": "Keep both sources."
+              }
+            },
+            "at": "2026-10-30T00:00:00Z",
+            "already_handed_off": false,
+            "gate": "canonicalHandoffRefusal",
+            "row": {
+              "canonical_id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a",
+              "failure_class": "evidence",
+              "finding": {
+                "anchor_status": "verified",
+                "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "body": "details \u0001 with control",
+                "id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a",
+                "intervals": [
+                  [
+                    1,
+                    1
+                  ]
+                ],
+                "path": "src/a.ts",
+                "severity": "major",
+                "source_id": null,
+                "status": "untriaged",
+                "title": "\u6807\u9898 \ud83d\ude00"
+              },
+              "previous_event_id": null,
+              "receipt": null,
+              "review_id": "63b4041c83691f6a15ac5a2c49e2f54b74de313be387211ef37c575b9ed41877",
+              "status": "delivered",
+              "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            "row_canonical": "{\"canonical_id\":\"7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a\",\"failure_class\":\"evidence\",\"finding\":{\"anchor_status\":\"verified\",\"blob\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"body\":\"details \\u0001 with control\",\"id\":\"7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a\",\"intervals\":[[1,1]],\"path\":\"src/a.ts\",\"severity\":\"major\",\"source_id\":null,\"status\":\"untriaged\",\"title\":\"\u6807\u9898 \ud83d\ude00\"},\"previous_event_id\":null,\"receipt\":null,\"review_id\":\"63b4041c83691f6a15ac5a2c49e2f54b74de313be387211ef37c575b9ed41877\",\"status\":\"delivered\",\"target\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}",
+            "retained": [],
+            "row_after": {
+              "canonical_id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a",
+              "failure_class": "evidence",
+              "finding": {
+                "anchor_status": "verified",
+                "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "body": "details \u0001 with control",
+                "id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a",
+                "intervals": [
+                  [
+                    1,
+                    1
+                  ]
+                ],
+                "path": "src/a.ts",
+                "severity": "major",
+                "source_id": null,
+                "status": "untriaged",
+                "title": "\u6807\u9898 \ud83d\ude00"
+              },
+              "previous_event_id": null,
+              "receipt": null,
+              "review_id": "63b4041c83691f6a15ac5a2c49e2f54b74de313be387211ef37c575b9ed41877",
+              "status": "delivered",
+              "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            "row_after_canonical": "{\"canonical_id\":\"7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a\",\"failure_class\":\"evidence\",\"finding\":{\"anchor_status\":\"verified\",\"blob\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"body\":\"details \\u0001 with control\",\"id\":\"7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a\",\"intervals\":[[1,1]],\"path\":\"src/a.ts\",\"severity\":\"major\",\"source_id\":null,\"status\":\"untriaged\",\"title\":\"\u6807\u9898 \ud83d\ude00\"},\"previous_event_id\":null,\"receipt\":null,\"review_id\":\"63b4041c83691f6a15ac5a2c49e2f54b74de313be387211ef37c575b9ed41877\",\"status\":\"delivered\",\"target\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}"
+          },
+          "expect": {
+            "ok": false,
+            "error": "AttributeError",
+            "message": "'NoneType' object has no attribute 'get'",
+            "after": [
+              {
+                "id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a",
+                "canonical": "{\"canonical_id\":\"7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a\",\"failure_class\":\"evidence\",\"finding\":{\"anchor_status\":\"verified\",\"blob\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"body\":\"details \\u0001 with control\",\"id\":\"7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a\",\"intervals\":[[1,1]],\"path\":\"src/a.ts\",\"severity\":\"major\",\"source_id\":null,\"status\":\"untriaged\",\"title\":\"\u6807\u9898 \ud83d\ude00\"},\"previous_event_id\":null,\"receipt\":null,\"review_id\":\"63b4041c83691f6a15ac5a2c49e2f54b74de313be387211ef37c575b9ed41877\",\"status\":\"delivered\",\"target\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}",
+                "sha256": "c55e2b43c26fe0c00f6339b20cfcd59bf7e66139c13d612011f41d292997d3ee"
+              }
+            ],
+            "effects": [
+              {
+                "kind": "lock",
+                "phase": "enter",
+                "target": "findings.lock"
+              },
+              {
+                "kind": "lock",
+                "phase": "exit",
+                "target": "findings.lock"
+              },
+              {
+                "kind": "lock",
+                "phase": "enter",
+                "target": "findings.lock"
+              },
+              {
+                "kind": "read",
+                "sha256": "c55e2b43c26fe0c00f6339b20cfcd59bf7e66139c13d612011f41d292997d3ee"
+              },
+              {
+                "kind": "lock",
+                "phase": "exit",
+                "target": "findings.lock"
+              }
+            ],
+            "outbox": []
+          }
+        },
+        {
+          "name": "handoff-receipt-missing",
+          "source": "finding_delivery.Inbox.handoff",
+          "input": {
+            "mode": "effect",
+            "finding_id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a",
+            "previous_task": "old-task",
+            "prepared_job_id": "prepared-task",
+            "job": {
+              "job": "prepared-task",
+              "canonical_finding_id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a",
+              "origin_job": "old-task",
+              "source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "repair_base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "revalidation": {
+                "fix_instructions": "Keep both sources."
+              }
+            },
+            "at": "2026-10-30T00:00:00Z",
+            "already_handed_off": false,
+            "gate": "canonicalHandoffRefusal",
+            "row": {
+              "canonical_id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a",
+              "failure_class": "evidence",
+              "finding": {
+                "anchor_status": "verified",
+                "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "body": "details \u0001 with control",
+                "id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a",
+                "intervals": [
+                  [
+                    1,
+                    1
+                  ]
+                ],
+                "path": "src/a.ts",
+                "severity": "major",
+                "source_id": null,
+                "status": "untriaged",
+                "title": "\u6807\u9898 \ud83d\ude00"
+              },
+              "previous_event_id": null,
+              "review_id": "63b4041c83691f6a15ac5a2c49e2f54b74de313be387211ef37c575b9ed41877",
+              "status": "delivered",
+              "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            "row_canonical": "{\"canonical_id\":\"7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a\",\"failure_class\":\"evidence\",\"finding\":{\"anchor_status\":\"verified\",\"blob\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"body\":\"details \\u0001 with control\",\"id\":\"7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a\",\"intervals\":[[1,1]],\"path\":\"src/a.ts\",\"severity\":\"major\",\"source_id\":null,\"status\":\"untriaged\",\"title\":\"\u6807\u9898 \ud83d\ude00\"},\"previous_event_id\":null,\"review_id\":\"63b4041c83691f6a15ac5a2c49e2f54b74de313be387211ef37c575b9ed41877\",\"status\":\"delivered\",\"target\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}",
+            "retained": [],
+            "row_after": {
+              "canonical_id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a",
+              "failure_class": "evidence",
+              "finding": {
+                "anchor_status": "verified",
+                "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "body": "details \u0001 with control",
+                "id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a",
+                "intervals": [
+                  [
+                    1,
+                    1
+                  ]
+                ],
+                "path": "src/a.ts",
+                "severity": "major",
+                "source_id": null,
+                "status": "untriaged",
+                "title": "\u6807\u9898 \ud83d\ude00"
+              },
+              "previous_event_id": null,
+              "review_id": "63b4041c83691f6a15ac5a2c49e2f54b74de313be387211ef37c575b9ed41877",
+              "status": "delivered",
+              "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            "row_after_canonical": "{\"canonical_id\":\"7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a\",\"failure_class\":\"evidence\",\"finding\":{\"anchor_status\":\"verified\",\"blob\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"body\":\"details \\u0001 with control\",\"id\":\"7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a\",\"intervals\":[[1,1]],\"path\":\"src/a.ts\",\"severity\":\"major\",\"source_id\":null,\"status\":\"untriaged\",\"title\":\"\u6807\u9898 \ud83d\ude00\"},\"previous_event_id\":null,\"review_id\":\"63b4041c83691f6a15ac5a2c49e2f54b74de313be387211ef37c575b9ed41877\",\"status\":\"delivered\",\"target\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}"
+          },
+          "expect": {
+            "ok": false,
+            "error": "IntegrityError",
+            "message": "prepared retry no longer owns canonical finding",
+            "after": [
+              {
+                "id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a",
+                "canonical": "{\"canonical_id\":\"7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a\",\"failure_class\":\"evidence\",\"finding\":{\"anchor_status\":\"verified\",\"blob\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"body\":\"details \\u0001 with control\",\"id\":\"7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a\",\"intervals\":[[1,1]],\"path\":\"src/a.ts\",\"severity\":\"major\",\"source_id\":null,\"status\":\"untriaged\",\"title\":\"\u6807\u9898 \ud83d\ude00\"},\"previous_event_id\":null,\"review_id\":\"63b4041c83691f6a15ac5a2c49e2f54b74de313be387211ef37c575b9ed41877\",\"status\":\"delivered\",\"target\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}",
+                "sha256": "f00cf5601ff6e234f29e2c1f691927016abdbf037bac118fa7b7fc437395e737"
+              }
+            ],
+            "effects": [
+              {
+                "kind": "lock",
+                "phase": "enter",
+                "target": "findings.lock"
+              },
+              {
+                "kind": "lock",
+                "phase": "exit",
+                "target": "findings.lock"
+              },
+              {
+                "kind": "lock",
+                "phase": "enter",
+                "target": "findings.lock"
+              },
+              {
+                "kind": "read",
+                "sha256": "f00cf5601ff6e234f29e2c1f691927016abdbf037bac118fa7b7fc437395e737"
+              },
+              {
+                "kind": "lock",
+                "phase": "exit",
+                "target": "findings.lock"
+              }
+            ],
+            "outbox": []
+          }
+        },
+        {
+          "name": "handoff-construct-idempotent-no-construction",
+          "source": "finding_delivery.Inbox.handoff.construct",
+          "input": {
+            "mode": "construct",
+            "finding_id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a",
+            "previous_task": "old-task",
+            "job": {
+              "canonical_finding_id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a",
+              "origin_job": "old-task",
+              "source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "repair_base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "revalidation": {
+                "fix_instructions": "Keep both sources.",
+                "score": 1.5
+              }
+            },
+            "at": "2026-10-30T00:00:00Z",
+            "row": {
+              "review_id": "63b4041c83691f6a15ac5a2c49e2f54b74de313be387211ef37c575b9ed41877",
+              "finding": {
+                "severity": "major",
+                "path": "src/a.ts",
+                "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "intervals": [
+                  [
+                    1,
+                    1
+                  ]
+                ],
+                "title": "\u6807\u9898 \ud83d\ude00",
+                "body": "details \u0001 with control",
+                "source_id": null,
+                "status": "untriaged",
+                "anchor_status": "verified",
+                "id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a"
+              },
+              "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "canonical_id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a",
+              "previous_event_id": null,
+              "status": "delivered",
+              "receipt": {
+                "acknowledgement": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "repair_task": "old-task"
+              },
+              "failure_class": "evidence"
+            },
+            "row_canonical": "{\"canonical_id\":\"7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a\",\"failure_class\":\"evidence\",\"finding\":{\"anchor_status\":\"verified\",\"blob\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"body\":\"details \\u0001 with control\",\"id\":\"7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a\",\"intervals\":[[1,1]],\"path\":\"src/a.ts\",\"severity\":\"major\",\"source_id\":null,\"status\":\"untriaged\",\"title\":\"\u6807\u9898 \ud83d\ude00\"},\"previous_event_id\":null,\"receipt\":{\"acknowledgement\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"repair_task\":\"old-task\"},\"review_id\":\"63b4041c83691f6a15ac5a2c49e2f54b74de313be387211ef37c575b9ed41877\",\"status\":\"delivered\",\"target\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}",
+            "already_handed_off": true
+          },
+          "expect": {
+            "ok": true,
+            "value": {
+              "kind": "none"
+            }
+          }
+        },
+        {
+          "name": "handoff-construct-missing-job-float",
+          "source": "finding_delivery.Inbox.handoff.construct",
+          "input": {
+            "mode": "construct",
+            "finding_id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a",
+            "previous_task": "old-task",
+            "job": {
+              "canonical_finding_id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a",
+              "origin_job": "old-task",
+              "source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "repair_base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "revalidation": {
+                "fix_instructions": "Keep both sources.",
+                "score": 1.5
+              }
+            },
+            "at": "2026-10-30T00:00:00Z",
+            "row": {
+              "review_id": "63b4041c83691f6a15ac5a2c49e2f54b74de313be387211ef37c575b9ed41877",
+              "finding": {
+                "severity": "major",
+                "path": "src/a.ts",
+                "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "intervals": [
+                  [
+                    1,
+                    1
+                  ]
+                ],
+                "title": "\u6807\u9898 \ud83d\ude00",
+                "body": "details \u0001 with control",
+                "source_id": null,
+                "status": "untriaged",
+                "anchor_status": "verified",
+                "id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a"
+              },
+              "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "canonical_id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a",
+              "previous_event_id": null,
+              "status": "delivered",
+              "receipt": {
+                "acknowledgement": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "repair_task": "old-task"
+              },
+              "failure_class": "evidence"
+            },
+            "row_canonical": "{\"canonical_id\":\"7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a\",\"failure_class\":\"evidence\",\"finding\":{\"anchor_status\":\"verified\",\"blob\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"body\":\"details \\u0001 with control\",\"id\":\"7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a\",\"intervals\":[[1,1]],\"path\":\"src/a.ts\",\"severity\":\"major\",\"source_id\":null,\"status\":\"untriaged\",\"title\":\"\u6807\u9898 \ud83d\ude00\"},\"previous_event_id\":null,\"receipt\":{\"acknowledgement\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"repair_task\":\"old-task\"},\"review_id\":\"63b4041c83691f6a15ac5a2c49e2f54b74de313be387211ef37c575b9ed41877\",\"status\":\"delivered\",\"target\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}",
+            "already_handed_off": false
+          },
+          "expect": {
+            "ok": false,
+            "error": "IntegrityError",
+            "message": "unsupported canonical JSON value"
+          }
+        },
+        {
+          "name": "handoff-construct-non-string-job-float",
+          "source": "finding_delivery.Inbox.handoff.construct",
+          "input": {
+            "mode": "construct",
+            "finding_id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a",
+            "previous_task": "old-task",
+            "job": {
+              "job": 7,
+              "canonical_finding_id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a",
+              "origin_job": "old-task",
+              "source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "repair_base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "revalidation": {
+                "fix_instructions": "Keep both sources.",
+                "score": 1.5
+              }
+            },
+            "at": "2026-10-30T00:00:00Z",
+            "row": {
+              "review_id": "63b4041c83691f6a15ac5a2c49e2f54b74de313be387211ef37c575b9ed41877",
+              "finding": {
+                "severity": "major",
+                "path": "src/a.ts",
+                "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "intervals": [
+                  [
+                    1,
+                    1
+                  ]
+                ],
+                "title": "\u6807\u9898 \ud83d\ude00",
+                "body": "details \u0001 with control",
+                "source_id": null,
+                "status": "untriaged",
+                "anchor_status": "verified",
+                "id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a"
+              },
+              "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "canonical_id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a",
+              "previous_event_id": null,
+              "status": "delivered",
+              "receipt": {
+                "acknowledgement": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "repair_task": "old-task"
+              },
+              "failure_class": "evidence"
+            },
+            "row_canonical": "{\"canonical_id\":\"7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a\",\"failure_class\":\"evidence\",\"finding\":{\"anchor_status\":\"verified\",\"blob\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"body\":\"details \\u0001 with control\",\"id\":\"7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a\",\"intervals\":[[1,1]],\"path\":\"src/a.ts\",\"severity\":\"major\",\"source_id\":null,\"status\":\"untriaged\",\"title\":\"\u6807\u9898 \ud83d\ude00\"},\"previous_event_id\":null,\"receipt\":{\"acknowledgement\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"repair_task\":\"old-task\"},\"review_id\":\"63b4041c83691f6a15ac5a2c49e2f54b74de313be387211ef37c575b9ed41877\",\"status\":\"delivered\",\"target\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}",
+            "already_handed_off": false
+          },
+          "expect": {
+            "ok": false,
+            "error": "IntegrityError",
+            "message": "unsupported canonical JSON value"
+          }
+        },
+        {
+          "name": "handoff-construct-missing-job",
+          "source": "finding_delivery.Inbox.handoff.construct",
+          "input": {
+            "mode": "construct",
+            "finding_id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a",
+            "previous_task": "old-task",
+            "job": {
+              "canonical_finding_id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a",
+              "origin_job": "old-task",
+              "source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "repair_base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "revalidation": {
+                "fix_instructions": "Keep both sources."
+              }
+            },
+            "at": "2026-10-30T00:00:00Z",
+            "row": {
+              "review_id": "63b4041c83691f6a15ac5a2c49e2f54b74de313be387211ef37c575b9ed41877",
+              "finding": {
+                "severity": "major",
+                "path": "src/a.ts",
+                "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "intervals": [
+                  [
+                    1,
+                    1
+                  ]
+                ],
+                "title": "\u6807\u9898 \ud83d\ude00",
+                "body": "details \u0001 with control",
+                "source_id": null,
+                "status": "untriaged",
+                "anchor_status": "verified",
+                "id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a"
+              },
+              "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "canonical_id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a",
+              "previous_event_id": null,
+              "status": "delivered",
+              "receipt": {
+                "acknowledgement": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "repair_task": "old-task"
+              },
+              "failure_class": "evidence"
+            },
+            "row_canonical": "{\"canonical_id\":\"7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a\",\"failure_class\":\"evidence\",\"finding\":{\"anchor_status\":\"verified\",\"blob\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"body\":\"details \\u0001 with control\",\"id\":\"7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a\",\"intervals\":[[1,1]],\"path\":\"src/a.ts\",\"severity\":\"major\",\"source_id\":null,\"status\":\"untriaged\",\"title\":\"\u6807\u9898 \ud83d\ude00\"},\"previous_event_id\":null,\"receipt\":{\"acknowledgement\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"repair_task\":\"old-task\"},\"review_id\":\"63b4041c83691f6a15ac5a2c49e2f54b74de313be387211ef37c575b9ed41877\",\"status\":\"delivered\",\"target\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}",
+            "already_handed_off": false
+          },
+          "expect": {
+            "ok": false,
+            "error": "KeyError",
+            "message": "'job'"
+          }
+        },
+        {
+          "name": "handoff-construct-non-string-job",
+          "source": "finding_delivery.Inbox.handoff.construct",
+          "input": {
+            "mode": "construct",
+            "finding_id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a",
+            "previous_task": "old-task",
+            "job": {
+              "job": 7,
+              "canonical_finding_id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a",
+              "origin_job": "old-task",
+              "source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "repair_base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "revalidation": {
+                "fix_instructions": "Keep both sources."
+              }
+            },
+            "at": "2026-10-30T00:00:00Z",
+            "row": {
+              "review_id": "63b4041c83691f6a15ac5a2c49e2f54b74de313be387211ef37c575b9ed41877",
+              "finding": {
+                "severity": "major",
+                "path": "src/a.ts",
+                "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "intervals": [
+                  [
+                    1,
+                    1
+                  ]
+                ],
+                "title": "\u6807\u9898 \ud83d\ude00",
+                "body": "details \u0001 with control",
+                "source_id": null,
+                "status": "untriaged",
+                "anchor_status": "verified",
+                "id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a"
+              },
+              "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "canonical_id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a",
+              "previous_event_id": null,
+              "status": "delivered",
+              "receipt": {
+                "acknowledgement": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "repair_task": "old-task"
+              },
+              "failure_class": "evidence"
+            },
+            "row_canonical": "{\"canonical_id\":\"7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a\",\"failure_class\":\"evidence\",\"finding\":{\"anchor_status\":\"verified\",\"blob\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"body\":\"details \\u0001 with control\",\"id\":\"7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a\",\"intervals\":[[1,1]],\"path\":\"src/a.ts\",\"severity\":\"major\",\"source_id\":null,\"status\":\"untriaged\",\"title\":\"\u6807\u9898 \ud83d\ude00\"},\"previous_event_id\":null,\"receipt\":{\"acknowledgement\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"repair_task\":\"old-task\"},\"review_id\":\"63b4041c83691f6a15ac5a2c49e2f54b74de313be387211ef37c575b9ed41877\",\"status\":\"delivered\",\"target\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}",
+            "already_handed_off": false
+          },
+          "expect": {
+            "ok": false,
+            "error": "TypeError",
+            "message": "can only concatenate str (not \"int\") to str"
+          }
+        },
+        {
+          "name": "handoff-construct-invalid-timestamp",
+          "source": "finding_delivery.Inbox.handoff.construct",
+          "input": {
+            "mode": "construct",
+            "finding_id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a",
+            "previous_task": "old-task",
+            "job": {
+              "job": "prepared-task",
+              "canonical_finding_id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a",
+              "origin_job": "old-task",
+              "source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "repair_base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "revalidation": {
+                "fix_instructions": "Keep both sources."
+              }
+            },
+            "at": "now",
+            "row": {
+              "review_id": "63b4041c83691f6a15ac5a2c49e2f54b74de313be387211ef37c575b9ed41877",
+              "finding": {
+                "severity": "major",
+                "path": "src/a.ts",
+                "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "intervals": [
+                  [
+                    1,
+                    1
+                  ]
+                ],
+                "title": "\u6807\u9898 \ud83d\ude00",
+                "body": "details \u0001 with control",
+                "source_id": null,
+                "status": "untriaged",
+                "anchor_status": "verified",
+                "id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a"
+              },
+              "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "canonical_id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a",
+              "previous_event_id": null,
+              "status": "delivered",
+              "receipt": {
+                "acknowledgement": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "repair_task": "old-task"
+              },
+              "failure_class": "evidence"
+            },
+            "row_canonical": "{\"canonical_id\":\"7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a\",\"failure_class\":\"evidence\",\"finding\":{\"anchor_status\":\"verified\",\"blob\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"body\":\"details \\u0001 with control\",\"id\":\"7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a\",\"intervals\":[[1,1]],\"path\":\"src/a.ts\",\"severity\":\"major\",\"source_id\":null,\"status\":\"untriaged\",\"title\":\"\u6807\u9898 \ud83d\ude00\"},\"previous_event_id\":null,\"receipt\":{\"acknowledgement\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"repair_task\":\"old-task\"},\"review_id\":\"63b4041c83691f6a15ac5a2c49e2f54b74de313be387211ef37c575b9ed41877\",\"status\":\"delivered\",\"target\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}",
+            "already_handed_off": false
+          },
+          "expect": {
+            "ok": false,
+            "error": "IntegrityError",
+            "message": "expected exact UTC timestamp"
+          }
+        },
+        {
+          "name": "handoff-construct-missing-review-id",
+          "source": "finding_delivery.Inbox.handoff.construct",
+          "input": {
+            "mode": "construct",
+            "finding_id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a",
+            "previous_task": "old-task",
+            "job": {
+              "job": "prepared-task",
+              "canonical_finding_id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a",
+              "origin_job": "old-task",
+              "source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "repair_base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "revalidation": {
+                "fix_instructions": "Keep both sources."
+              }
+            },
+            "at": "2026-10-30T00:00:00Z",
+            "row": {
+              "finding": {
+                "severity": "major",
+                "path": "src/a.ts",
+                "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "intervals": [
+                  [
+                    1,
+                    1
+                  ]
+                ],
+                "title": "\u6807\u9898 \ud83d\ude00",
+                "body": "details \u0001 with control",
+                "source_id": null,
+                "status": "untriaged",
+                "anchor_status": "verified",
+                "id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a"
+              },
+              "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "canonical_id": "7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a",
+              "previous_event_id": null,
+              "status": "delivered",
+              "receipt": {
+                "acknowledgement": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "repair_task": "old-task"
+              },
+              "failure_class": "evidence"
+            },
+            "row_canonical": "{\"canonical_id\":\"7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a\",\"failure_class\":\"evidence\",\"finding\":{\"anchor_status\":\"verified\",\"blob\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"body\":\"details \\u0001 with control\",\"id\":\"7a8ea0313d3450a8f500ee8cc1f18de262f4c28f65a0ef004a63d298d1d3199a\",\"intervals\":[[1,1]],\"path\":\"src/a.ts\",\"severity\":\"major\",\"source_id\":null,\"status\":\"untriaged\",\"title\":\"\u6807\u9898 \ud83d\ude00\"},\"previous_event_id\":null,\"receipt\":{\"acknowledgement\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"repair_task\":\"old-task\"},\"status\":\"delivered\",\"target\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}",
+            "already_handed_off": false
+          },
+          "expect": {
+            "ok": false,
+            "error": "KeyError",
+            "message": "'review_id'"
+          }
+        }
+      ]
     }
   ]
 }

@@ -83,6 +83,24 @@ REQUIRED = {
         "recover-row-duplicate-key",
         "recover-row-float",
     },
+    "handoff": {
+        "handoff-written",
+        "handoff-already-handed-off",
+        "handoff-stale-owner",
+        "handoff-identity-finding-mismatch",
+        "handoff-identity-origin-mismatch",
+        "handoff-recovered-after-crash",
+        "handoff-missing-row",
+        "handoff-receipt-not-object",
+        "handoff-receipt-missing",
+        "handoff-construct-idempotent-no-construction",
+        "handoff-construct-missing-job-float",
+        "handoff-construct-non-string-job-float",
+        "handoff-construct-missing-job",
+        "handoff-construct-non-string-job",
+        "handoff-construct-invalid-timestamp",
+        "handoff-construct-missing-review-id",
+    },
 }
 
 
@@ -115,7 +133,15 @@ class FindingInboxVectorTest(unittest.TestCase):
             for case in family["cases"]:
                 self.assertTrue(case["source"].startswith("finding_delivery."), case["source"])
                 if case["expect"]["ok"]:
-                    if family["family"] in ("ingest", "recover"):
+                    if (
+                        family["family"] == "handoff"
+                        and case["input"].get("mode") == "effect"
+                    ):
+                        self.assertIn("after", case["expect"])
+                        self.assertIn("effects", case["expect"])
+                        self.assertIn("outbox", case["expect"])
+                        self.assertNotIn("value", case["expect"])
+                    elif family["family"] in ("ingest", "recover"):
                         self.assertIn("after", case["expect"])
                         self.assertIn("effects", case["expect"])
                         self.assertNotIn("value", case["expect"])
@@ -170,6 +196,43 @@ class FindingInboxVectorTest(unittest.TestCase):
                     self.assertLessEqual(writes, 8)
                 else:
                     self.assertLessEqual(writes, 4)
+
+    def test_handoff_effect_lock_stack_and_writes(self):
+        document = json.loads(emitter.render())
+        handoff = next(
+            family for family in document["families"] if family["family"] == "handoff"
+        )
+        for case in handoff["cases"]:
+            if case["input"].get("mode") != "effect":
+                continue
+            stack = []
+            writes = []
+            for effect in case["expect"]["effects"]:
+                if effect["kind"] == "lock":
+                    if effect["phase"] == "enter":
+                        stack.append(effect["target"])
+                    else:
+                        self.assertEqual(stack.pop(), effect["target"], case["name"])
+                elif effect["kind"] == "write":
+                    self.assertTrue(stack, case["name"])
+                    writes.append((effect["target"], tuple(stack)))
+            self.assertEqual(stack, [], case["name"])
+            name = case["name"]
+            if name == "handoff-written":
+                self.assertEqual(len(writes), 2, name)
+                pending = [write for write in writes if write[1] == ("findings.lock", "outbox.lock")]
+                rows = [write for write in writes if write[1] == ("findings.lock",)]
+                self.assertEqual(len(pending), 1, name)
+                self.assertEqual(len(rows), 1, name)
+                self.assertEqual(pending[0][0], case["expect"]["outbox"][0], name)
+                self.assertEqual(rows[0][0], case["expect"]["after"][0]["id"], name)
+            elif name == "handoff-recovered-after-crash":
+                self.assertEqual(len(writes), 1, name)
+                self.assertEqual(writes[0][1], ("findings.lock",), name)
+                self.assertEqual(writes[0][0], case["expect"]["after"][0]["id"], name)
+                self.assertEqual(len(case["expect"]["outbox"]), 1, name)
+            else:
+                self.assertEqual(writes, [], name)
 
 
 if __name__ == "__main__":
