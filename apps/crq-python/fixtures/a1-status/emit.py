@@ -31,6 +31,7 @@ CRQ = HERE.parent.parent
 sys.path.insert(0, str(CRQ))
 
 import client_health  # noqa: E402
+import coverage  # noqa: E402
 import queue_time  # noqa: E402
 import review_receipt  # noqa: E402
 import status_summary  # noqa: E402
@@ -879,6 +880,572 @@ def client_health_family() -> Dict[str, Any]:
     return _family("client-health", cases, "advisory runner health snapshot")
 
 
+# --------------------------------------------------------------- utilization
+
+
+def utilization_family() -> Dict[str, Any]:
+    """`coverage.utilization_digest` edges the shared group-P family skips."""
+    cases = []
+
+    def case(
+        name: str,
+        *,
+        queue: Dict[str, Any] | None = None,
+        ledger: Dict[str, Any] | None = None,
+        now: Any = "2026-11-09T12:00:00Z",
+        cap: Any = 5,
+    ) -> Dict[str, Any]:
+        queue = {"starts": []} if queue is None else queue
+        ledger = coverage.new_ledger() if ledger is None else ledger
+        inputs = {
+            "queue": queue,
+            "ledger": ledger,
+            "now": now,
+            "max_starts_per_hour": cap,
+        }
+        return _capture(
+            name,
+            "coverage.utilization_digest",
+            inputs,
+            lambda: coverage.utilization_digest(
+                queue, ledger, now=now, max_starts_per_hour=cap
+            ),
+        )
+
+    def row(**overrides: Any) -> Dict[str, Any]:
+        value = {
+            "started": False,
+            "pending": True,
+            "candidate_exists": True,
+            "blocked_reason": None,
+        }
+        value.update(overrides)
+        return value
+
+    cases.append(
+        case(
+            "float-cap-keeps-float-tag",
+            queue={"starts": [], "cooldown_until": "2026-11-09T12:15:00Z"},
+            cap=5.0,
+        )
+    )
+    cases.append(case("bool-cap-is-python-int", cap=True))
+    cases.append(
+        case(
+            "huge-int-cap-stays-exact",
+            queue={"starts": ["2026-11-09T11:00:00Z"]},
+            cap=10**400,
+        )
+    )
+    cases.append(
+        case(
+            "max-double-int-cap-stays-exact",
+            queue={"starts": ["2026-11-09T11:00:00Z"]},
+            cap=2**1024 - 2**971,
+        )
+    )
+    cases.append(
+        case(
+            "huge-float-cap-overflows-to-infinity",
+            queue={"starts": ["2026-11-09T11:00:00Z"]},
+            cap=1e308,
+        )
+    )
+    cases.append(
+        case(
+            "tiny-float-cap-overflows-utilization",
+            queue={"starts": ["2026-11-09T11:00:00Z"]},
+            cap=1e-323,
+        )
+    )
+    cases.append(case("nan-cap-propagates", cap=float("nan")))
+    cases.append(case("false-cap-refused", cap=False))
+    cases.append(case("string-cap-type-error", cap="5"))
+    cases.append(case("none-cap-type-error", cap=None))
+    cases.append(
+        case(
+            "cutoff-and-now-boundaries",
+            queue={
+                "starts": ["2026-11-08T12:00:00Z", "2026-11-09T12:00:00Z"],
+            },
+            ledger={
+                "schema_version": 1,
+                "paths": {},
+                "runs": {},
+                "observations": {
+                    "2026-11-08T12:00:00Z": row(),
+                    "2026-11-09T12:00:00Z": row(candidate_exists=False),
+                },
+            },
+        )
+    )
+    cases.append(
+        case(
+            "numeric-now-rounds-half-even",
+            now=1.0000005,
+            queue={
+                "starts": [
+                    "1970-01-01T00:00:01Z",
+                    "1970-01-01T00:00:01.000001Z",
+                    "1970-01-01T00:00:01.000002Z",
+                ],
+            },
+            ledger={
+                "schema_version": 1,
+                "paths": {},
+                "runs": {},
+                "observations": {
+                    "1970-01-01T00:00:01.000001Z": row(),
+                    "1970-01-01T00:00:01.000002Z": row(),
+                },
+            },
+        )
+    )
+    cases.append(
+        case(
+            "float-start-half-even-tie",
+            now="1970-01-01T00:00:00.000002Z",
+            queue={"starts": [0.0000025]},
+        )
+    )
+    cases.append(
+        case(
+            "float-start-half-even-cutoff-tie",
+            now="1970-01-02T00:00:00.000002Z",
+            queue={"starts": [0.0000025]},
+        )
+    )
+    cases.append(
+        case(
+            "fractional-zero-offset-is-applied",
+            now="2026-11-09T12:00:00+00:00:00.5",
+            queue={"starts": ["2026-11-08T12:00:00Z"]},
+        )
+    )
+    cases.append(case("invalid-month-message", now="2026-13-01T00:00:00Z"))
+    cases.append(case("invalid-day-message", now="2026-02-30T00:00:00Z"))
+    cases.append(case("invalid-hour-message", now="2026-01-01T25:00:00Z"))
+    cases.append(case("invalid-year-message", now="0000-01-01T00:00:00Z"))
+    cases.append(
+        case(
+            "bool-now-is-epoch-second",
+            now=True,
+            queue={
+                "starts": [
+                    "1970-01-01T00:00:00Z",
+                    "1970-01-01T00:00:01Z",
+                    "1970-01-01T00:00:01.000001Z",
+                ],
+            },
+        )
+    )
+    cases.append(
+        case(
+            "cooldown-exactly-now-is-int-zero",
+            queue={"starts": [], "cooldown_until": "2026-11-09T12:00:00Z"},
+        )
+    )
+    cases.append(
+        case(
+            "cooldown-subsecond-is-positive-float",
+            queue={
+                "starts": [],
+                "cooldown_until": "2026-11-09T12:00:00.000001Z",
+            },
+        )
+    )
+    cases.append(
+        case(
+            "cooldown-microseconds-use-timedelta-rounding",
+            queue={
+                "starts": [],
+                "cooldown_until": "2026-11-09T12:00:14.380204Z",
+            },
+        )
+    )
+    cases.append(
+        case(
+            "cooldown-over-one-day",
+            queue={
+                "starts": [],
+                "cooldown_until": "2026-11-10T13:00:00Z",
+            },
+        )
+    )
+    cases.append(
+        case(
+            "large-cooldown-total-seconds",
+            queue={
+                "starts": [],
+                "cooldown_until": "2400-01-01T00:00:00.000001Z",
+            },
+        )
+    )
+    cases.append(
+        case("empty-cooldown-string-is-falsy", queue={"starts": [], "cooldown_until": ""})
+    )
+    cases.append(
+        case(
+            "nonempty-list-cooldown-invalid",
+            queue={"starts": [], "cooldown_until": ["x"]},
+        )
+    )
+    cases.append(
+        case(
+            "non-bmp-inputs",
+            ledger={
+                "schema_version": 1,
+                "paths": {"src/😀.py": {"review_count": 1, "last_reviewed_at": None}},
+                "runs": {},
+                "observations": {
+                    "2026-11-09T11:00:00Z": row(blocked_reason="paused 😀"),
+                    "2026-11-09T11:10:00Z": row(blocked_reason=""),
+                },
+            },
+        )
+    )
+    cases.append(case("missing-observations-key", ledger={"paths": {}}))
+    cases.append(case("missing-paths-key", ledger={"observations": {}}))
+    cases.append(
+        case(
+            "missing-blocked-reason",
+            ledger={
+                "schema_version": 1,
+                "paths": {},
+                "runs": {},
+                "observations": {
+                    "2026-11-09T11:00:00Z": {
+                        "started": False,
+                        "pending": True,
+                        "candidate_exists": True,
+                    }
+                },
+            },
+        )
+    )
+    cases.append(
+        case(
+            "pending-string-sum-type-error",
+            ledger={
+                "schema_version": 1,
+                "paths": {},
+                "runs": {},
+                "observations": {"2026-11-09T11:00:00Z": row(pending="x")},
+            },
+        )
+    )
+    cases.append(
+        case(
+            "float-idle-sums-keep-float-tag",
+            ledger={
+                "schema_version": 1,
+                "paths": {},
+                "runs": {},
+                "observations": {
+                    "2026-11-09T11:00:00Z": row(pending=1.0, candidate_exists=2.0),
+                },
+            },
+        )
+    )
+    cases.append(
+        case(
+            "mixed-bool-and-float-idle-sum",
+            ledger={
+                "schema_version": 1,
+                "paths": {},
+                "runs": {},
+                "observations": {
+                    "2026-11-09T11:00:00Z": row(pending=True),
+                    "2026-11-09T11:10:00Z": row(pending=2.0, candidate_exists=False),
+                },
+            },
+        )
+    )
+    cases.append(
+        case(
+            "huge-int-idle-sum-stays-exact",
+            ledger={
+                "schema_version": 1,
+                "paths": {},
+                "runs": {},
+                "observations": {
+                    "2026-11-09T11:00:00Z": row(pending=10**30),
+                },
+            },
+        )
+    )
+    cases.append(
+        case(
+            "compensated-float-idle-sum",
+            ledger={
+                "schema_version": 1,
+                "paths": {},
+                "runs": {},
+                "observations": {
+                    f"2026-11-09T11:{minute:02d}:00Z": row(pending=0.1)
+                    for minute in range(10)
+                },
+            },
+        )
+    )
+    cases.append(
+        case(
+            "compensated-cancellation-idle-sum",
+            ledger={
+                "schema_version": 1,
+                "paths": {},
+                "runs": {},
+                "observations": {
+                    "2026-11-09T11:00:00Z": row(pending=1e16),
+                    "2026-11-09T11:10:00Z": row(pending=1.0),
+                    "2026-11-09T11:20:00Z": row(pending=-1e16),
+                },
+            },
+        )
+    )
+    cases.append(
+        case(
+            "generic-sum-after-int-overflow",
+            ledger={
+                "schema_version": 1,
+                "paths": {},
+                "runs": {},
+                "observations": {
+                    "2026-11-09T11:00:00Z": row(pending=2**64),
+                    "2026-11-09T11:10:00Z": row(pending=-(2**64)),
+                    "2026-11-09T11:20:00Z": row(pending=1e16),
+                    "2026-11-09T11:30:00Z": row(pending=1.0),
+                    "2026-11-09T11:40:00Z": row(pending=-1e16),
+                },
+            },
+        )
+    )
+    cases.append(
+        case(
+            "generic-sum-after-int-overflow-float-second",
+            ledger={
+                "schema_version": 1,
+                "paths": {},
+                "runs": {},
+                "observations": {
+                    "2026-11-09T11:00:00Z": row(pending=2**63),
+                    "2026-11-09T11:10:00Z": row(pending=0.0),
+                    "2026-11-09T11:20:00Z": row(pending=-(2**63) * 1.0),
+                    "2026-11-09T11:30:00Z": row(pending=1e16),
+                    "2026-11-09T11:40:00Z": row(pending=1.0),
+                    "2026-11-09T11:50:00Z": row(pending=-1e16),
+                },
+            },
+        )
+    )
+    cases.append(
+        case(
+            "generic-sum-after-operand-overflow",
+            ledger={
+                "schema_version": 1,
+                "paths": {},
+                "runs": {},
+                "observations": {
+                    "2026-11-09T11:00:00Z": row(pending=-1),
+                    "2026-11-09T11:10:00Z": row(pending=2**63),
+                    "2026-11-09T11:20:00Z": row(pending=-(2**63) + 1),
+                    "2026-11-09T11:30:00Z": row(pending=1e16),
+                    "2026-11-09T11:40:00Z": row(pending=1.0),
+                    "2026-11-09T11:50:00Z": row(pending=-1e16),
+                },
+            },
+        )
+    )
+    cases.append(
+        case(
+            "mixed-large-int-float-idle-sum",
+            ledger={
+                "schema_version": 1,
+                "paths": {},
+                "runs": {},
+                "observations": {
+                    "2026-11-09T11:00:00Z": row(pending=10**30),
+                    "2026-11-09T11:10:00Z": row(pending=0.5),
+                },
+            },
+        )
+    )
+    cases.append(
+        case(
+            "mixed-float-large-int-idle-sum",
+            ledger={
+                "schema_version": 1,
+                "paths": {},
+                "runs": {},
+                "observations": {
+                    "2026-11-09T11:00:00Z": row(pending=0.5),
+                    "2026-11-09T11:10:00Z": row(pending=10**30),
+                },
+            },
+        )
+    )
+    cases.append(
+        case(
+            "huge-int-float-idle-overflow",
+            ledger={
+                "schema_version": 1,
+                "paths": {},
+                "runs": {},
+                "observations": {
+                    "2026-11-09T11:00:00Z": row(pending=10**400),
+                    "2026-11-09T11:10:00Z": row(pending=0.5),
+                },
+            },
+        )
+    )
+    cases.append(
+        case(
+            "float-huge-int-idle-overflow",
+            ledger={
+                "schema_version": 1,
+                "paths": {},
+                "runs": {},
+                "observations": {
+                    "2026-11-09T11:00:00Z": row(pending=0.5),
+                    "2026-11-09T11:10:00Z": row(pending=10**400),
+                },
+            },
+        )
+    )
+    cases.append(
+        case(
+            "bool-int-idle-sum-stays-int",
+            ledger={
+                "schema_version": 1,
+                "paths": {},
+                "runs": {},
+                "observations": {
+                    "2026-11-09T11:00:00Z": row(pending=True),
+                    "2026-11-09T11:10:00Z": row(pending=2),
+                },
+            },
+        )
+    )
+    cases.append(
+        case(
+            "float-bool-idle-sum",
+            ledger={
+                "schema_version": 1,
+                "paths": {},
+                "runs": {},
+                "observations": {
+                    "2026-11-09T11:00:00Z": row(pending=0.5, candidate_exists=False),
+                    "2026-11-09T11:10:00Z": row(pending=False, candidate_exists=True),
+                },
+            },
+        )
+    )
+    cases.append(case("utc-conversion-overflow-high", now="9999-12-31T23:00:00-05:00"))
+    cases.append(case("utc-conversion-overflow-low", now="0001-01-01T00:00:00+01:00"))
+    cases.append(case("utc-conversion-valid-high", now="9999-12-31T23:00:00Z"))
+    cases.append(case("cutoff-underflow-low", now="0001-01-01T00:00:00Z"))
+    cases.append(
+        case(
+            "cutoff-valid-boundary",
+            now="0001-01-02T00:00:00Z",
+            queue={
+                "starts": ["0001-01-01T00:00:00Z", "0001-01-02T00:00:00Z"],
+            },
+        )
+    )
+    cases.append(
+        case(
+            "start-timestamp-overflow",
+            queue={"starts": ["9999-12-31T23:00:00-05:00"]},
+        )
+    )
+    cases.append(
+        case(
+            "observation-timestamp-overflow",
+            ledger={
+                "schema_version": 1,
+                "paths": {},
+                "runs": {},
+                "observations": {"9999-12-31T23:00:00-05:00": row()},
+            },
+        )
+    )
+    cases.append(
+        case(
+            "observation-timestamp-valid-high",
+            now="9999-12-31T23:00:00Z",
+            ledger={
+                "schema_version": 1,
+                "paths": {},
+                "runs": {},
+                "observations": {"9999-12-31T23:00:00Z": row()},
+            },
+        )
+    )
+    cases.append(
+        case(
+            "cooldown-utc-overflow",
+            queue={"starts": [], "cooldown_until": "9999-12-31T23:00:00-05:00"},
+        )
+    )
+    cases.append(
+        case(
+            "missing-blocked-reason-with-invalid-timestamp",
+            ledger={
+                "schema_version": 1,
+                "paths": {},
+                "runs": {},
+                "observations": {
+                    "2026-11-09T11:00:00Z": {
+                        "started": False,
+                        "pending": True,
+                        "candidate_exists": True,
+                    },
+                    "junk": row(),
+                },
+            },
+        )
+    )
+    cases.append(
+        case(
+            "invalid-pending-with-invalid-cooldown",
+            queue={"starts": [], "cooldown_until": "junk"},
+            ledger={
+                "schema_version": 1,
+                "paths": {},
+                "runs": {},
+                "observations": {"2026-11-09T11:00:00Z": row(pending="x")},
+            },
+        )
+    )
+    cases.append(
+        case(
+            "invalid-candidate-before-invalid-pending",
+            ledger={
+                "schema_version": 1,
+                "paths": {},
+                "runs": {},
+                "observations": {
+                    "2026-11-09T11:00:00Z": row(pending=True, candidate_exists="x"),
+                    "2026-11-09T11:10:00Z": row(pending="x", candidate_exists=True),
+                },
+            },
+        )
+    )
+    cases.append(case("naive-now-refused", now="2026-11-09T12:00:00"))
+    cases.append(case("arbitrary-separator-is-zoned", now="2026-11-09X12:00:00Z"))
+    cases.append(case("naive-arbitrary-separator-refused", now="2026-11-09X12:00:00"))
+    cases.append(case("date-only-with-offset-is-naive", now="2026-11-09+00:00"))
+    cases.append(case("week-date-with-zone-is-naive", now="2026-W45-1Z"))
+    cases.append(case("malformed-now-refused", now="junk"))
+    cases.append(case("date-only-with-zone-is-naive", now="2026-11-09Z"))
+    cases.append(case("infinity-now-overflow", now=float("inf")))
+    cases.append(case("nan-now-value-error", now=float("nan")))
+    cases.append(case("year-out-of-range", now=1e15))
+    cases.append(case("platform-time-error", now=1e18))
+    return _family("utilization", cases, "coverage utilization digest edges")
+
+
 def _family(family: str, cases: List[Dict[str, Any]], note: str) -> Dict[str, Any]:
     return {"schema": SCHEMA, "family": family, "note": note, "cases": cases}
 
@@ -888,6 +1455,7 @@ def documents() -> Dict[str, Dict[str, Any]]:
         "summarize": summarize_family(),
         "merged-current": merged_current_family(),
         "client-health": client_health_family(),
+        "utilization": utilization_family(),
     }
 
 
