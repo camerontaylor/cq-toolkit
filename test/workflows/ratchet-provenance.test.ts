@@ -527,4 +527,53 @@ describe('trusted recompute lockfile guard', () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  it('reaches the recompute when the base and the PR share no history', () => {
+    const root = mkdtempSync(join(tmpdir(), 'recompute-lockfile-unrelated-'));
+    const git = (...args: string[]) => {
+      const result = spawnSync('git', ['-C', join(root, 'trust'), ...args], { encoding: 'utf8' });
+      expect(result.status, result.stderr).toBe(0);
+      return result.stdout.trim();
+    };
+    try {
+      spawnSync('git', ['init', join(root, 'trust')]);
+      git('config', 'user.email', 'test@example.invalid');
+      git('config', 'user.name', 'Test');
+      writeFileSync(join(root, 'trust/pnpm-lock.yaml'), 'base');
+      git('add', '.');
+      git('commit', '-m', 'base');
+      git('update-ref', 'refs/cq-transfer/base', 'HEAD');
+      // An orphan branch: no merge-base exists, so the guard's comparison is
+      // empty. The old guard aborted the step right here (merge-base exits 1
+      // under set -e); it must fall through to the recompute instead.
+      git('checkout', '--orphan', 'pr');
+      writeFileSync(join(root, 'trust/pnpm-lock.yaml'), 'head');
+      git('add', '.');
+      git('commit', '-m', 'head');
+      const workflow = template('cq-verify.yml');
+      const guard = workflow
+        .slice(
+          workflow.indexOf('          # Lockfile guard:'),
+          workflow.indexOf('          # End lockfile guard.'),
+        )
+        .replace(/^ {10}/gm, '');
+      const output = join(root, 'output');
+      writeFileSync(output, '');
+      const result = spawnSync('bash', ['-eu', '-c', guard + '\necho recompute'], {
+        cwd: root,
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          KIND: 'pr',
+          SUBJECT: git('rev-parse', 'HEAD'),
+          GITHUB_OUTPUT: output,
+        },
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout.includes('recompute')).toBe(true);
+      expect(readFileSync(output, 'utf8')).toBe('');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });

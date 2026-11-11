@@ -266,8 +266,19 @@ jobs:
         run: |
           set -euo pipefail
           # Lockfile guard: trusted dependencies cannot typecheck a different graph.
-          comparison="$(git -C trust merge-base refs/cq-transfer/base "$SUBJECT")"
-          if [ "$KIND" = pr ] && ! git -C trust diff --quiet "$comparison" "$SUBJECT" -- pnpm-lock.yaml; then
+          # Only a PR subject can share the base's history; computing the merge-base
+          # unconditionally would abort this step for an unrelated history (merge-base
+          # exits 1 under `set -e`, and `git diff --quiet` with an empty revision is
+          # a usage error that `!` would invert into a false "lockfile changed" skip).
+          if [ "$KIND" != pr ]; then
+            comparison=''
+          elif comparison="$(git -C trust merge-base refs/cq-transfer/base "$SUBJECT" 2>/dev/null)" && [ -n "$comparison" ]; then
+            :
+          else
+            comparison=''
+          fi
+          if [ "$KIND" = pr ] && [ -n "$comparison" ] \
+            && ! git -C trust diff --quiet "$comparison" "$SUBJECT" -- pnpm-lock.yaml; then
             echo 'typecheck_skip_reason=PR changes pnpm-lock.yaml; trusted typecheck recompute skipped because installed dependencies belong to the trust ref' >> "$GITHUB_OUTPUT"
             echo 'typecheck_count=' >> "$GITHUB_OUTPUT"
             exit 0
