@@ -26,16 +26,36 @@ class ReportTest(unittest.TestCase):
             for status in ("untriaged", "confirmed", "delivered", "fixed"):
                 write(status, status)
             result = reporting.finding_triage(root)
-            self.assertEqual(result['owner_decisions_count'], 1)
-            self.assertEqual(result['operator_attention_count'], 0)
-            self.assertEqual(result['owner_decisions'][0]['failure_class'], 'owner-decision')
+            self.assertEqual(result['owner_decisions_count'], 0)
+            self.assertEqual(result['operator_attention_count'], 1)
+            self.assertEqual(result['unknown_failure_class_count'], 1)
+            self.assertEqual(result['unknown_failure_class'][0]['failure_class'], None)
+            self.assertIn('unknown_failure_class_note', result)
+            self.assertEqual(result['owner_decisions'], [])
+            self.assertEqual(result['operator_attention'], [])
             row_path = rows / 'a.json'
             classified = ledger.loads(row_path.read_bytes())
             classified['failure_class'] = 'exhausted'
             ledger.atomic(row_path, ledger.canonical(classified))
             split = reporting.finding_triage(root)
             self.assertEqual(split['owner_decisions_count'], 0)
+            self.assertEqual(split['operator_attention_count'], 1)
             self.assertEqual(split['operator_attention'][0]['failure_class'], 'exhausted')
+            self.assertEqual(split['unknown_failure_class_count'], 0)
+            classified['failure_class'] = 'owner-decision'
+            ledger.atomic(row_path, ledger.canonical(classified))
+            owned = reporting.finding_triage(root)
+            self.assertEqual(owned['owner_decisions_count'], 1)
+            self.assertEqual(owned['owner_decisions'][0]['failure_class'], 'owner-decision')
+            self.assertEqual(owned['operator_attention_count'], 0)
+            classified['failure_class'] = 'not-a-class'
+            ledger.atomic(row_path, ledger.canonical(classified))
+            foreign = reporting.finding_triage(root)
+            self.assertEqual(foreign['owner_decisions_count'], 0)
+            self.assertEqual(foreign['owner_decisions'], [])
+            self.assertEqual(foreign['operator_attention_count'], 1)
+            self.assertEqual(foreign['unknown_failure_class_count'], 1)
+            self.assertEqual(foreign['unknown_failure_class'][0]['failure_class'], 'not-a-class')
             classified.pop('failure_class')
             ledger.atomic(row_path, ledger.canonical(classified))
             self.assertEqual(result["counts"], {"needs-human": 1, "duplicate": 1, "needs-retriage": 1,
@@ -48,6 +68,36 @@ class ReportTest(unittest.TestCase):
             self.assertEqual(report["finding_delivery_backlog"], result["counts"])
             write("a", "fixed")
             self.assertEqual(reporting.finding_triage(root)["needs_human"], [])
+
+    def test_legacy_row_without_failure_class_is_never_an_owner_decision(self):
+        """D7 fail-before regression: a needs-human row written before typed
+        failure classes existed (d41 repair_outcome rows carry none) must not
+        be reported as an owner decision, with or without a limit."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            rows = root / "triage"
+            rows.mkdir()
+
+            def write(fid):
+                row = {"status": "needs-human", "canonical_id": "canonical", "target": "old",
+                       "target_current": "new", "mapped_path": "moved.py", "previous_event_id": "event",
+                       "finding": {"id": fid, "path": "old.py", "title": "Problem", "severity": "major"}}
+                ledger.atomic(rows / (fid + ".json"), ledger.canonical(row))
+
+            write("legacy-a")
+            write("legacy-b")
+            result = reporting.finding_triage(root)
+            self.assertEqual(result["counts"], {"needs-human": 2})
+            self.assertEqual(result["owner_decisions_count"], 0)
+            self.assertEqual(result["operator_attention_count"], 2)
+            self.assertEqual(result["unknown_failure_class_count"], 2)
+            self.assertEqual([r["failure_class"] for r in result["unknown_failure_class"]], [None, None])
+            self.assertIn("unknown_failure_class_note", result)
+            limited = reporting.finding_triage(root, strict=False, limit=1)
+            self.assertEqual(limited["owner_decisions_count"], 0)
+            self.assertEqual(limited["operator_attention_count"], 2)
+            self.assertEqual(limited["unknown_failure_class"], [r for r in result["unknown_failure_class"]][:1])
+            self.assertEqual(limited["unknown_failure_class_omitted"], 1)
 
     def test_corrupt_triage_is_not_reported_as_zero(self):
         with tempfile.TemporaryDirectory() as td:
