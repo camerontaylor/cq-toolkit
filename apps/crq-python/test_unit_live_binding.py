@@ -324,15 +324,26 @@ class DiscoveryTests(PortFixture):
             "systemctl", "--user", "--no-pager", "list-unit-files",
             "--no-legend", "--plain", "crq-tick*"])
 
-    def test_foreign_dependency_reference_is_unsupported(self):
+    def test_undeclared_units_of_another_crq_group_are_supported(self):
         declared = self.declare()
-        self.write("other.service",
-                   "[Unit]\nDescription=Other\nWants=crq-slot.service\n")
+        self.write("crq-publisher.timer",
+                   "[Timer]\nUnit=crq-publisher.service\n")
+        self.write("crq-publisher.path",
+                   "[Path]\nWants=crq-publisher.service\n")
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], True)
+        self.assertEqual(evidence["supported"], True)
+        self.assertEqual(evidence["foreign"], [])
+
+    def test_declared_foreign_dependency_reference_is_unsupported(self):
+        declared = self.declare()
+        declared.append(self.write("crq-tick.path",
+                                   "[Path]\nWants=crq-slot.service\n"))
         evidence = self.discover(declared)
         self.assertEqual(evidence["complete"], True)
         self.assertEqual(evidence["supported"], False)
         self.assertIn("crq-slot.service", " ".join(evidence["foreign"]))
-        self.assertIn("other.service", evidence["error"])
+        self.assertIn("crq-tick.path", evidence["error"])
 
     def test_dropin_directory_is_unsupported(self):
         declared = self.declare()
@@ -424,8 +435,10 @@ class DiscoveryTests(PortFixture):
 
     def test_foreign_unit_directives_are_unsupported(self):
         declared = self.declare()
-        self.write("foreign.timer", "[Timer]\nUnit=crq-slot.service\n")
-        self.write("foreign.service", "[Unit]\nPartOf=crq-slot.service\n")
+        self.write("crq-tick.timer",
+                   "[Timer]\nOnCalendar=*:0/12\nUnit=crq-slot.service\n")
+        self.write("crq-tick.service",
+                   "[Service]\nExecStart=/bin/true\nPartOf=crq-slot.service\n")
         evidence = self.discover(declared)
         self.assertEqual(evidence["complete"], True)
         self.assertEqual(evidence["supported"], False)
