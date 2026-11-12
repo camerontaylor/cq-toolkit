@@ -308,4 +308,212 @@ describe('dev.cycle known usage', () => {
       unpricedCount: 3,
     });
   });
+
+  it('does not meter rejection usage with a negative field, leaving the token budget intact', async () => {
+    const ledger = createKnownUsageLedger();
+    const original = Object.assign(new Error('driver rejected after partial spend'), {
+      usage: { input: -100, output: 0, cacheRead: 0, cacheWrite: 0 },
+    });
+    const driver = {
+      run: async (): Promise<WorkerResult> => Promise.reject(original),
+    };
+    const factory: DriverFactory = {
+      resolve: (request) => ({ driver, lane: 'ai-sdk', modelSpec: request.modelSpec }),
+    };
+    let spent = 0;
+    const resolved = meterDrivers(
+      factory,
+      (tokens) => {
+        spent += tokens;
+      },
+      {
+        start: () => {},
+        settle: (id, observation) => ledger.record(id, observation),
+      },
+    ).resolve({ role: 'reviewer', modelSpec: { provider: 'mock', model: 'm' } });
+
+    await expect(resolved.driver.run(invocation)).rejects.toBe(original);
+    // A negative reading must not shrink spentTokens: the remaining allowance
+    // (runMaxTokens - spent) is unchanged, never enlarged.
+    expect(spent).toBe(0);
+    expect(ledger.snapshot()).toEqual({ knownCount: 0, unknownCount: 1, unpricedCount: 1 });
+  });
+
+  it.each([[1.5], [Number.MAX_SAFE_INTEGER + 1], [Number.NaN], [Number.POSITIVE_INFINITY]])(
+    'does not meter rejection usage with non-safe-integer input %s',
+    async (input) => {
+      const ledger = createKnownUsageLedger();
+      const original = Object.assign(new Error('driver rejected'), {
+        usage: { input, output: 2, cacheRead: 1, cacheWrite: 0 },
+      });
+      const driver = {
+        run: async (): Promise<WorkerResult> => Promise.reject(original),
+      };
+      const factory: DriverFactory = {
+        resolve: (request) => ({ driver, lane: 'ai-sdk', modelSpec: request.modelSpec }),
+      };
+      let spent = 0;
+      const resolved = meterDrivers(
+        factory,
+        (tokens) => {
+          spent += tokens;
+        },
+        {
+          start: () => {},
+          settle: (id, observation) => ledger.record(id, observation),
+        },
+      ).resolve({ role: 'reviewer', modelSpec: { provider: 'mock', model: 'm' } });
+
+      await expect(resolved.driver.run(invocation)).rejects.toBe(original);
+      expect(spent).toBe(0);
+      expect(ledger.snapshot()).toEqual({ knownCount: 0, unknownCount: 1, unpricedCount: 1 });
+    },
+  );
+
+  it('does not meter rejection usage with a missing field or invalid optional reasoning', async () => {
+    const cases: unknown[] = [
+      { input: 5, output: 2, cacheRead: 1 },
+      { input: 5, output: 2, cacheRead: 1, cacheWrite: 0, reasoning: -1 },
+      { input: 5, output: 2, cacheRead: 1, cacheWrite: 0, reasoning: 0.5 },
+      { input: 5, output: 2, cacheRead: 1, cacheWrite: 0, reasoning: Number.NaN },
+    ];
+    for (const [index, usageValue] of cases.entries()) {
+      const ledger = createKnownUsageLedger();
+      const original = Object.assign(new Error(`driver rejected ${String(index)}`), {
+        usage: usageValue,
+      });
+      const driver = {
+        run: async (): Promise<WorkerResult> => Promise.reject(original),
+      };
+      const factory: DriverFactory = {
+        resolve: (request) => ({ driver, lane: 'ai-sdk', modelSpec: request.modelSpec }),
+      };
+      let spent = 0;
+      const resolved = meterDrivers(
+        factory,
+        (tokens) => {
+          spent += tokens;
+        },
+        {
+          start: () => {},
+          settle: (id, observation) => ledger.record(id, observation),
+        },
+      ).resolve({ role: 'reviewer', modelSpec: { provider: 'mock', model: 'm' } });
+
+      await expect(resolved.driver.run(invocation)).rejects.toBe(original);
+      expect(spent).toBe(0);
+      expect(ledger.snapshot()).toEqual({ knownCount: 0, unknownCount: 1, unpricedCount: 1 });
+    }
+  });
+
+  it('voids a mixed rejection report entirely instead of charging its valid fields', async () => {
+    const ledger = createKnownUsageLedger();
+    const original = Object.assign(new Error('driver rejected with mixed usage'), {
+      usage: { input: 5000, output: -100, cacheRead: 0, cacheWrite: 0 },
+    });
+    const driver = {
+      run: async (): Promise<WorkerResult> => Promise.reject(original),
+    };
+    const factory: DriverFactory = {
+      resolve: (request) => ({ driver, lane: 'ai-sdk', modelSpec: request.modelSpec }),
+    };
+    let spent = 0;
+    const resolved = meterDrivers(
+      factory,
+      (tokens) => {
+        spent += tokens;
+      },
+      {
+        start: () => {},
+        settle: (id, observation) => ledger.record(id, observation),
+      },
+    ).resolve({ role: 'reviewer', modelSpec: { provider: 'mock', model: 'm' } });
+
+    await expect(resolved.driver.run(invocation)).rejects.toBe(original);
+    // One corrupt field voids the whole attachment: 5000 is not charged in
+    // part, matching the success path's all-or-nothing normalization.
+    expect(spent).toBe(0);
+    expect(ledger.snapshot()).toEqual({ knownCount: 0, unknownCount: 1, unpricedCount: 1 });
+  });
+
+  it('keeps a later malformed rejection from enlarging the remaining allowance', async () => {
+    const ledger = createKnownUsageLedger();
+    const runMaxTokens = 10_000;
+    let spent = 0;
+    const remaining = (): number => runMaxTokens - spent;
+    let attempt = 0;
+    const errors = [
+      Object.assign(new Error('first partial spend'), {
+        usage: { input: 5, output: 2, cacheRead: 1, cacheWrite: 0 },
+      }),
+      Object.assign(new Error('second malformed spend'), {
+        usage: { input: -100, output: 0, cacheRead: 0, cacheWrite: 0 },
+      }),
+    ];
+    const driver = {
+      run: async (): Promise<WorkerResult> => Promise.reject(errors[attempt++]!),
+    };
+    const factory: DriverFactory = {
+      resolve: (request) => ({ driver, lane: 'ai-sdk', modelSpec: request.modelSpec }),
+    };
+    const resolved = meterDrivers(
+      factory,
+      (tokens) => {
+        spent += tokens;
+      },
+      {
+        start: () => {},
+        settle: (id, observation) => ledger.record(id, observation),
+      },
+    ).resolve({ role: 'reviewer', modelSpec: { provider: 'mock', model: 'm' } });
+
+    await expect(resolved.driver.run(invocation)).rejects.toBe(errors[0]);
+    expect(spent).toBe(8);
+    expect(remaining()).toBe(9992);
+    await expect(resolved.driver.run(invocation)).rejects.toBe(errors[1]);
+    // The malformed rejection changes nothing: the allowance after it is not
+    // larger than before it.
+    expect(spent).toBe(8);
+    expect(remaining()).toBe(9992);
+    expect(ledger.snapshot()).toEqual({ knownCount: 0, unknownCount: 2, unpricedCount: 2 });
+  });
+
+  it('still meters fully valid rejection usage with and without optional reasoning', async () => {
+    const cases = [
+      { usageValue: { input: 5, output: 2, cacheRead: 1, cacheWrite: 0 }, expected: 8 },
+      {
+        usageValue: { input: 5000, output: 100, cacheRead: 10, cacheWrite: 5, reasoning: 20 },
+        expected: 5135,
+      },
+    ];
+    for (const [index, { usageValue, expected }] of cases.entries()) {
+      const ledger = createKnownUsageLedger();
+      const original = Object.assign(new Error(`driver rejected ${String(index)}`), {
+        usage: usageValue,
+      });
+      const driver = {
+        run: async (): Promise<WorkerResult> => Promise.reject(original),
+      };
+      const factory: DriverFactory = {
+        resolve: (request) => ({ driver, lane: 'ai-sdk', modelSpec: request.modelSpec }),
+      };
+      let spent = 0;
+      const resolved = meterDrivers(
+        factory,
+        (tokens) => {
+          spent += tokens;
+        },
+        {
+          start: () => {},
+          settle: (id, observation) => ledger.record(id, observation),
+        },
+      ).resolve({ role: 'reviewer', modelSpec: { provider: 'mock', model: 'm' } });
+
+      await expect(resolved.driver.run(invocation)).rejects.toBe(original);
+      expect(spent).toBe(expected);
+      // Seam v3 is preserved: the numeric debit counts, but without an
+      // explicit measured declaration the summary stays unknown.
+      expect(ledger.snapshot()).toEqual({ knownCount: 0, unknownCount: 1, unpricedCount: 1 });
+    }
+  });
 });
