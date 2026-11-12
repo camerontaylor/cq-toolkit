@@ -175,7 +175,9 @@ describe('the publication gate (issue #1193): scan BEFORE any push, fail closed'
         text: 'const added = "new line enters the forge";',
         path: 'src/keep.ts',
       },
+      { component: 'path src/keep.ts', text: 'src/keep.ts', path: 'src/keep.ts' },
       { component: 'docs/new.md', text: 'brand new file content', path: 'docs/new.md' },
+      { component: 'path docs/new.md', text: 'docs/new.md', path: 'docs/new.md' },
       {
         // The resolution commit's MESSAGE rides the same scan verdict
         // (review P2 ntJt) — one component, no path (path-scoped rules

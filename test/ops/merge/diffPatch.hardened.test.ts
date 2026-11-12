@@ -265,3 +265,49 @@ describe('diffPatch pins core.quotePath=true over hostile repo config (review P2
     }
   });
 });
+
+describe('diffPatch pins --submodule=short over repo config (review P2 uVsr)', () => {
+  test('diff.submodule=log cannot replace the unified header and hide an added gitlink pathname', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'diffpatch-submodule-'));
+    try {
+      const origin = join(dir, 'origin.git');
+      await run('git', ['init', '--bare', '--initial-branch=main', origin]);
+      const clone = join(dir, 'repo');
+      await run('git', ['clone', '--quiet', origin, clone]);
+      await run('git', ['-C', clone, 'config', 'user.email', 'test@localhost']);
+      await run('git', ['-C', clone, 'config', 'user.name', 'test']);
+      // THE HOSTILE CONFIG: `log` summaries in place of unified headers, and
+      // submodule differences suppressed unless the flag overrides them.
+      await run('git', ['-C', clone, 'config', 'diff.submodule', 'log']);
+      await run('git', ['-C', clone, 'config', 'diff.ignoreSubmodules', 'all']);
+      await writeFile(join(clone, 'base.txt'), 'base\n');
+      await run('git', ['-C', clone, 'add', '-A']);
+      await run('git', ['-C', clone, 'commit', '--quiet', '-m', 'base']);
+      const base = (await run('git', ['-C', clone, 'rev-parse', 'HEAD'])).stdout.trim();
+      // An ADDED gitlink whose pathname is credential-shaped: with `log`
+      // the whole diff is `Submodule GH_FOR_FA ...` and the scan sees no path.
+      await run('git', [
+        '-C',
+        clone,
+        'update-index',
+        '--add',
+        '--cacheinfo',
+        '160000',
+        base,
+        'GH_FOR_FA',
+      ]);
+      await run('git', ['-C', clone, 'commit', '--quiet', '-m', 'add gitlink']);
+      const resolution = (await run('git', ['-C', clone, 'rev-parse', 'HEAD'])).stdout.trim();
+
+      const effects = realMergeEffects({ repoRoot: clone });
+      const patch = await effects.diffPatch(base, resolution);
+      expect(patch.code).toBe(0);
+      expect(patch.stdout).not.toContain('(new submodule)');
+      expect(patch.stdout).toContain('+++ b/GH_FOR_FA');
+      const components = addedLineComponents(patch.stdout, 'probe');
+      expect(components.map((component) => component.component)).toContain('path GH_FOR_FA');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});

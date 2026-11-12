@@ -46,4 +46,9 @@ export const HARDENED_DIFF_FLAGS: readonly string[] = [
   // would bypass the scan (the pathname is published even with push
   // recursion off).
   '--ignore-submodules=none',
+  // review P2 uVsr: diff.submodule=log replaces the unified header with a
+  // one-line `Submodule <path> ...` summary, so an added gitlink's pathname
+  // never reaches addedLineComponents. `short` keeps `+++ b/<path>` and the
+  // `Subproject commit` line that carries them.
+  '--submodule=short',
 ];
