@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Unwired, fail-closed production per-unit systemd adapter.
+"""Fail-closed production per-unit systemd adapter.
 
 This module implements the exact seam that ``deploy-controller.switch_unit`` and
-``recover_unit`` inject. It is deliberately unwired: no CLI constructs it, and
-it contains no live systemd binding, production factory or default host path.
-Every host observation and command goes through an injected port.
+``recover_unit`` inject. ``unit-switch-factory.py`` composes it and the
+controller CLI reaches that composition for ``switch --unit --runtime``. It
+contains no live systemd binding or default host path. Every host observation
+and command goes through an injected port.
 
 The adapter reuses ``prepare-host.render_service`` for source-bound rendering and
 derives its declared unit inventory from the pinned template tree. It does not
@@ -96,19 +97,29 @@ class CompletionPort(Protocol):
 
 
 class DeclaredCapabilities:
-    """Conservative static capability policy, not a runtime probe.
+    """Conservative capability declaration, not a runtime probe.
 
     The Python checkout is the current production runtime, so its declared
     unit commands are accepted only after the rendered script path is checked.
-    No machine-readable Node artifact capability declaration exists. Node
-    therefore has no declared commands and every Node preflight refuses.
+    Node commands come from the verified artifact's inventoried capability
+    declaration, supplied by the factory after the whole-tree identity check.
+    An artifact without a declaration declares no commands, so Node preflight
+    refuses.
     """
+
+    def __init__(self, node_commands=()):
+        if isinstance(node_commands, str) or not isinstance(
+                node_commands, (list, tuple, set, frozenset)):
+            raise TypeError("node commands must be an iterable of strings")
+        if not all(isinstance(command, str) for command in node_commands):
+            raise TypeError("node commands must be strings")
+        self._node_commands = frozenset(node_commands)
 
     def commands(self, runtime: str) -> frozenset[str] | None:
         if runtime == "python":
             return frozenset(_prepare_host().UNIT_COMMANDS.values())
         if isinstance(runtime, str) and RUNTIME_RE.fullmatch(runtime):
-            return frozenset()
+            return self._node_commands
         return None
 
 

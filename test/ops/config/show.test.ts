@@ -1,7 +1,12 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { readCqEnv } from '../../../src/config/env.js';
+import { runWithCqEnv } from '../../../src/config/run-env.js';
 import { registry } from '../../../src/ops/config/registry.js';
-import { buildConfigShowReport, type ConfigShowReport } from '../../../src/ops/config/show.js';
+import {
+  buildConfigShowReport,
+  makeConfigShow,
+  type ConfigShowReport,
+} from '../../../src/ops/config/show.js';
 
 // The runner may export unrelated CQ_* names; start every test from a clean slate.
 beforeEach(() => {
@@ -68,6 +73,33 @@ describe('config op', () => {
     const clean = await registry[0]!.importer({ cqEnv: readCqEnv({}) });
     vi.stubEnv('CQ_SANBOX', 'off');
     expect(await clean({ strict: true })).toMatchObject({ status: 'ok' });
+  });
+
+  test('the run snapshot wins over ambient drift; the live fallback is the control', async () => {
+    vi.stubEnv('CQ_SANDBOX', 'off');
+    const snapshot = readCqEnv(process.env);
+    // Ambient mutation AFTER the entry snapshot: a bound op must not see it.
+    vi.stubEnv('CQ_SANDBOX', 'required');
+    const bound = (await runWithCqEnv(snapshot, () => makeConfigShow()({}))) as {
+      value: ConfigShowReport;
+    };
+    expect(bound.value.keys.find((key) => key.name === 'CQ_SANDBOX')).toMatchObject({
+      value: 'off',
+      source: 'env',
+    });
+    // Negative control: with no run context the same drift IS the live value, so
+    // the assertion above binds to the snapshot rather than to a frozen env.
+    const live = (await makeConfigShow()({})) as { value: ConfigShowReport };
+    expect(live.value.keys.find((key) => key.name === 'CQ_SANDBOX')).toMatchObject({
+      value: 'required',
+      source: 'env',
+    });
+    // The explicit raw-environment injection seam still replaces both.
+    const injected = buildConfigShowReport({ CQ_SANDBOX: 'off' });
+    expect(injected.keys.find((key) => key.name === 'CQ_SANDBOX')).toMatchObject({
+      value: 'off',
+      source: 'env',
+    });
   });
 
   test('strict fails on warnings', async () => {

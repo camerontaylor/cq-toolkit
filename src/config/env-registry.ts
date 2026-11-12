@@ -146,14 +146,6 @@ export const CQ_ENV_ENTRIES: readonly CqEnvEntry[] = [
     'Operator-ledger signers allowed to approve.',
   ),
   entry(
-    'CQ_AUTHOR_REPO',
-    'config',
-    text,
-    'neutral',
-    false,
-    'Repository path the review-transport author side works in.',
-  ),
-  entry(
     'CQ_REVIEW_NOTIFY_HOST',
     'config',
     text,
@@ -167,15 +159,7 @@ export const CQ_ENV_ENTRIES: readonly CqEnvEntry[] = [
     text,
     'neutral',
     false,
-    'Snapshot scanner command for the review transport and review.submit (an explicit scanner input wins).',
-  ),
-  entry(
-    'CQ_AUTHOR_SSH_ALIAS',
-    'config',
-    text,
-    'neutral',
-    false,
-    'SSH alias of the author host for the review transport.',
+    'Snapshot scanner command for unpublished review.submit and managed dev.review/review.run commits; required on author hosts for unpublished work (an explicit scanner input wins). Published heads advertised by origin use reachable objects.',
   ),
   entry(
     'CQ_AUTOMATION_TOKEN',

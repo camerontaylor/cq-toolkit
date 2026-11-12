@@ -129,9 +129,10 @@ export interface ObservationWriter {
    */
   readonly failure: unknown;
   /**
-   * Snapshot of the validated events this writer accepted. Durable in both
-   * modes; without a journalDir this is the ONLY copy (persistence
-   * unavailable), so T30/T31 can build report rows from it.
+   * Snapshot of the validated events this writer accepted, available in both
+   * modes. Durable mode lists only events whose bytes and datasync succeeded;
+   * without a journalDir this is the ONLY copy (persistence unavailable), so
+   * T30/T31 can build report rows from it.
    */
   events(): ObservationEvent[];
   /**

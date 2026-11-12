@@ -158,7 +158,6 @@ export async function runAgentReviewer(
   };
   try {
     const work = async (): Promise<AgentReviewResult> => {
-      ensureActive();
       if (
         !Number.isFinite(input.maxTokens) ||
         input.maxTokens <= 0 ||
@@ -166,6 +165,7 @@ export async function runAgentReviewer(
         input.wallMs <= 0
       )
         return { status: 'budget-exhausted' };
+      ensureActive();
       const originals = input.components ?? [
         { component: 'diff', path: 'review.diff', text: input.diff },
       ];
