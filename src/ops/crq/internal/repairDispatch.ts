@@ -264,6 +264,14 @@ export type RepairArtifactHarvest =
       readonly failureClass: FixFindingFailureClass;
       readonly detail: string;
       readonly report: FixFindingReport;
+    }
+  | {
+      /**
+       * The bridge's own invocation guard refused before the repair op ran.
+       * This is not a worker verdict and carries no fabricated report.
+       */
+      readonly status: 'guard-refused';
+      readonly refusal: RepairDispatchRefusal;
     };
 
 export interface RepairArtifactRead {
@@ -1100,6 +1108,32 @@ export async function harvestRepairRunArtifact(
   });
   if (!exact.ok) return refusal(exact.refusal);
 
+  const artifactJson = JSON.stringify(exact.result);
+  if (isInvocationGuardResult(exact.result)) {
+    const artifact = parseArtifact(artifactJson);
+    if (artifact === undefined) return refusal('fixfinding-result-envelope-invalid');
+    const guardRefusal = guardRefusalOf(exact.result);
+    if (guardRefusal === undefined) return refusal('attempt-inconsistent');
+    return {
+      ok: true,
+      value: {
+        selectedJobId: dispatch.binding.job,
+        artifactJson,
+        artifact,
+        harvest: { status: 'guard-refused', refusal: guardRefusal },
+        binding: 'not-ok',
+        source: await reobservePreparedSource(
+          {
+            sourceSha: dispatch.binding.sourceSha,
+            sourceBlobSha: dispatch.binding.sourceBlobSha,
+            path: dispatch.path,
+          },
+          effects.git,
+        ),
+      },
+    };
+  }
+
   const content = await readDispatchContentForJob(
     dispatch.binding.job,
     dispatch.requestContext,
@@ -1113,7 +1147,7 @@ export async function harvestRepairRunArtifact(
     {
       expectedBinding: dispatch.binding,
       path: dispatch.path,
-      artifactJson: JSON.stringify(exact.result),
+      artifactJson,
     },
     effects,
   );

@@ -639,6 +639,34 @@ describe('repair dispatch bridge', () => {
       }
     }
     expect(scripted.invocations).toHaveLength(0);
+
+    prepared = preparedJobText;
+    if (!run.ok && run.run !== undefined) {
+      const exact = await harvestRepairRunArtifact(plan.value, run.run.runId, mutable);
+      expect(exact.ok).toBe(true);
+      if (exact.ok) {
+        expect(exact.value.harvest.status).toBe('guard-refused');
+        expect(exact.value.artifactJson).toContain('repair-dispatch-guard:prepared-job-changed');
+        expect(exact.value.binding).toBe('not-ok');
+      }
+    }
+
+    // Sequential retry: the guard artifact must not make this resume
+    // eligible. With unverified scans it must fail fresh-attempt validation
+    // before any model invocation.
+    const retryScripted = scriptedFindingOp([completeWorker(FIXED)]);
+    const retry = await planRepairDispatch(
+      {
+        context: context({
+          scans: { source: { verdict: 'unverified', reason: 'scan not rerun' } },
+        }),
+        attempt: { journalDir, resume: true },
+      },
+      mutable,
+    );
+    expect(retry.ok).toBe(false);
+    if (!retry.ok) expect(retry.refusal).toBe('scan-unverified');
+    expect(retryScripted.invocations).toHaveLength(0);
   });
 
   test('a new non-ok terminal after a retained-ok plan refuses at invocation, not by spending', async () => {
@@ -898,6 +926,8 @@ describe('repair dispatch bridge', () => {
     );
     expect(guidanceFailed.ok).toBe(false);
     if (!guidanceFailed.ok) expect(guidanceFailed.refusal).toBe('scan-failed');
+    const guidanceRetry = scriptedFindingOp([completeWorker(FIXED)]);
+    expect(guidanceRetry.invocations).toHaveLength(0);
 
     const retainedJournal = await tempJournal();
     const retained = await freshRun({
