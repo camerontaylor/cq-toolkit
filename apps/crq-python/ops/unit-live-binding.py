@@ -446,7 +446,14 @@ class SubprocessSystemd:
                             if match is None:
                                 continue
                             for name in CRQ_NAME_RE.findall(match.group("value")):
-                                if name not in expected or not source_declared:
+                                # An undeclared source is foreign only when it
+                                # names an expected unit; a declared source is
+                                # foreign when it names a unit outside the set.
+                                if source_declared:
+                                    outside = name not in expected
+                                else:
+                                    outside = name in expected
+                                if outside:
                                     foreign.append(
                                         "%s:%d: %s names %s"
                                         % (path, number,
