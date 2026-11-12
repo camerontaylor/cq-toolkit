@@ -112,6 +112,7 @@ const descriptor = (
   workId = WORK_ID,
   planId = PLAN_ID,
 ): KernelRunDescriptor => ({
+  journalVersion: 3,
   runId,
   planId,
   header: {

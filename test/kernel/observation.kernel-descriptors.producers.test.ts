@@ -1,13 +1,12 @@
-// T04 producer-realistic probes (kernel-run-descriptors): the gap reproduced
-// from the ACTUAL producer, not fixtures. The runner's run-started writer
-// emits v1 (ungoverned, no journalVersion) or v2 (governed, journalVersion 2
-// + seq + governance/ungoverned); it never emits a v3 header today (types.ts:
-// "the v3 header writer arrives with T04"). These probes run real runPlan
-// invocations, read the real journal bytes back, pin the header facts that DO
-// exist (runId/at/planId, and for v2 seq/governance), pin the facts that do
-// NOT (correlation/provenance/availability), and show the current v3-only
-// readKernelRunDescriptors returns no descriptor for either real run — the
-// exact gap the T36 fold reports as "T04 kernel v3 descriptors unavailable".
+// T04 producer-realistic probes (kernel-run-descriptors): the descriptor
+// reader against the ACTUAL producer. The runner's run-started writer emits
+// v1 (ungoverned, no journalVersion) or v2 (governed, journalVersion 2 +
+// seq + governance/ungoverned); it never emits a v3 header today (types.ts:
+// "the v3 header writer arrives with T04"). The T04 reader (ruling
+// 2026-11-12) yields a truthful, version-discriminated descriptor for each
+// real header — verbatim bytes, no invented correlation/provenance — while
+// the fold's composition workId join stays UNKNOWN for those runs with a
+// version-accurate reason (the join is never forged from runId alone).
 //
 // Determinism: no fixed clock needed — assertions are on structural fields,
 // never timestamps. Temp dirs under os.tmpdir, removed afterwards. No
@@ -17,10 +16,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import { openRunLog } from '../../src/kernel/journal.js';
-import { readKernelRunDescriptors } from '../../src/kernel/observation.js';
+import { foldObservations, readKernelRunDescriptors } from '../../src/kernel/observation.js';
 import { createGovernor } from '../../src/kernel/governor.js';
 import { runPlan } from '../../src/kernel/runner.js';
-import type { RunStartedJournalEvent, RunStartedV3JournalEvent } from '../../src/kernel/types.js';
+import type { RunStartedJournalEvent } from '../../src/kernel/types.js';
 import {
   ACQUISITION_STEP_MS,
   entry,
@@ -30,8 +29,15 @@ import {
   settleFixtureWork,
   viewWith,
 } from './runner-governed.helpers.js';
+import {
+  CR_ID,
+  WORK_ID,
+  header as observationHeader,
+  linked,
+  writeStream,
+} from './observation.helpers.js';
 
-describe('T04 producer probes: actual runPlan journal headers vs the descriptor reader', () => {
+describe('T04 producer probes: actual runPlan headers through the descriptor reader', () => {
   let dir: string;
 
   beforeEach(async () => {
@@ -44,7 +50,7 @@ describe('T04 producer probes: actual runPlan journal headers vs the descriptor 
   }, ACQUISITION_STEP_MS + 5_000);
 
   test(
-    'an actual UNGOVERNED run writes a v1 header the v3-only reader skips',
+    'an actual UNGOVERNED run yields a truthful v1 descriptor (verbatim, nothing invented)',
     async () => {
       const registry = viewWith(entry('ok', okOp));
       const report = await runPlan(
@@ -67,15 +73,18 @@ describe('T04 producer probes: actual runPlan journal headers vs the descriptor 
       expect('correlation' in v1).toBe(false);
       expect('provenance' in v1).toBe(false);
       expect('availability' in v1).toBe(false);
-      // The CURRENT reader skips it: zero descriptors for a real run — the
-      // kernelRuns gap, reproduced from producer bytes.
-      expect(await readKernelRunDescriptors(dir, [report.runId])).toEqual([]);
+      // The T04 reader returns the run's actual header VERBATIM.
+      const descriptors = await readKernelRunDescriptors(dir, [report.runId]);
+      expect(descriptors).toHaveLength(1);
+      expect(descriptors[0]).toMatchObject({ journalVersion: 1, runId: report.runId });
+      expect(descriptors[0]?.planId).toBe('plan-t04-v1');
+      expect(descriptors[0]?.header).toEqual(v1);
     },
     journalEnclosure(1),
   );
 
   test(
-    'an actual GOVERNED run writes a v2 header the v3-only reader skips',
+    'an actual GOVERNED run yields a truthful v2 descriptor (verbatim, nothing invented)',
     async () => {
       const governor = createGovernor({ maxUsd: 5 });
       const registry = viewWith(entry('ok', okOp));
@@ -101,12 +110,53 @@ describe('T04 producer probes: actual runPlan journal headers vs the descriptor 
       expect('correlation' in v2).toBe(false);
       expect('provenance' in v2).toBe(false);
       expect('availability' in v2).toBe(false);
-      // And the v3-only schema must refuse the real bytes outright: a
-      // descriptor reader cannot validate a real v2 header AS v3.
-      const asV3 = { ...v2, journalVersion: 3 } as unknown as RunStartedV3JournalEvent;
-      expect('correlation' in asV3).toBe(false);
-      // The CURRENT reader skips the real run here too.
-      expect(await readKernelRunDescriptors(dir, [report.runId])).toEqual([]);
+      // The T04 reader returns the run's actual header VERBATIM.
+      const descriptors = await readKernelRunDescriptors(dir, [report.runId]);
+      expect(descriptors).toHaveLength(1);
+      expect(descriptors[0]).toMatchObject({ journalVersion: 2, runId: report.runId });
+      expect(descriptors[0]?.header).toEqual(v2);
+    },
+    journalEnclosure(1),
+  );
+
+  test(
+    'a legacy descriptor never resolves the fold workId join: unknown with the version named',
+    async () => {
+      const governor = createGovernor({ maxUsd: 5 });
+      const registry = viewWith(entry('ok', okOp));
+      const report = await runPlan(
+        independentPlan('plan-t04-fold', 1, 'ok'),
+        { concurrency: 1, stopOnError: false, journalDir: dir },
+        registry,
+        { governor, allowAdvisory: true },
+      );
+      const descriptors = await readKernelRunDescriptors(dir, [report.runId]);
+      expect(descriptors.map((descriptor) => descriptor.journalVersion)).toEqual([2]);
+      // A real composition stream links the run; the descriptor exists and
+      // even matches runId+planId, but its v2 header carries no
+      // correlation.workId — the join must stay UNKNOWN, never forged.
+      await writeStream(
+        dir,
+        [
+          observationHeader(),
+          linked(report.runId, 1, {
+            payload: { kernelRunId: report.runId, planId: 'plan-t04-fold', round: 1 },
+          }),
+        ],
+        CR_ID,
+        WORK_ID,
+      );
+      const { readObservations } = await import('../../src/kernel/observation.js');
+      const folded = foldObservations(await readObservations(dir), descriptors);
+      const links = folded[0]?.kernelRunLinks ?? [];
+      expect(links).toHaveLength(1);
+      expect(links[0]?.state).toBe('unknown');
+      if (links[0]?.state === 'unknown') {
+        expect(links[0].reason).toContain('journalVersion 2');
+        expect(links[0].reason).toContain('correlation.workId');
+        // The reason names the ACTUAL run — no generic vagueness.
+        expect(links[0].reason).toContain(report.runId);
+      }
     },
     journalEnclosure(1),
   );
