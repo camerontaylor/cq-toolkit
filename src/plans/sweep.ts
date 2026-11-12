@@ -222,7 +222,8 @@ export function sweepPlannerInput(config: SweepPlanConfig): PlanSweepInput {
  * buildSweepPlan: the `unitJobOverlay`'s explicit stagePathAllowlist WINS —
  * a caller who wants a different scope overrides the default (the test-fix
  * plan does NOT: its overlay is propose-only, so its units keep THIS default
- * scope and `proposeOnly` is what stops anything from committing). Non-target
+ * scope and `proposeOnly` is what stops a staged path from reaching the unit
+ * branch). Non-target
  * changed paths (`selectionEvidence`) are included so a deletion-only root
  * package keeps a scope pin instead of an empty, fail-open allowlist.
  */
@@ -381,7 +382,8 @@ export function buildSweepPlan(
     // jZ59w: the default per-unit scope applies unless the overlay
     // explicitly carries one. The test-fix plan carries NONE (its overlay is
     // propose-only), so its units keep this default package scope and
-    // `proposeOnly` is what stops a staged path from committing. ABSENT
+    // `proposeOnly` is what stops a staged path from reaching the unit
+    // branch. ABSENT
     // (never undefined-valued — the registry schema's exactOptional keys
     // reject undefined).
     // Object.hasOwn (r2 major): a package named 'toString'/'constructor'/

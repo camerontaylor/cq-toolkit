@@ -37,8 +37,15 @@ export type TestFixPlanConfig = Omit<SweepPlanConfig, 'fixers'> & { fixers?: str
  * `stagePathAllowlist`, so each unit job keeps the DEFAULT package scope from
  * `unitStagePathAllowlist` (package path plus the unit's files) — wider than
  * the test files — while `proposeOnly` keeps ANY staged path from being
- * probed, committed or pushed (every non-empty staged set escalates to
- * needs-human review). A caller passing `fixers` here gets it REPLACED, never
+ * probed, committed to the unit branch, or pushed (every non-empty staged
+ * set escalates to needs-human review). One nuance for `taskLoop` jobs: a
+ * refused attempt can still be recorded by the loop as a LOCAL failed-attempt
+ * commit on its own `refs/heads/<runPrefix>/failed/...` branch (never the
+ * unit branch, and pushed only when `pushFailed` and the bindings'
+ * `publishFailedAttempts` both allow it), after which the worktree is
+ * restored. The retained proposal in that case is the failed-attempt ref,
+ * not a commit on the unit branch. A caller passing `fixers` here gets it
+ * REPLACED, never
  * merged: the plan's identity is the test-only restriction. The phase-A
  * report must agree EVERYWHERE: a report whose units OR whose embedded
  * unit-job inputs carry a fixer outside the test-only set is a
