@@ -1,0 +1,1299 @@
+{
+  "name": "publish-full",
+  "description": "status_summary.publish over a real temp state tree",
+  "cases": [
+    {
+      "name": "full-publish-no-cache-no-gh",
+      "source": "status_summary.publish",
+      "input": {
+        "queue": {
+          "last_tick": "2026-11-09T11:55:00Z",
+          "items": [
+            {
+              "id": "open",
+              "kind": "open",
+              "state": "pending",
+              "repo": "owner/repo",
+              "pr": 7,
+              "order": 1
+            },
+            {
+              "id": "nocache",
+              "kind": "open",
+              "state": "pending",
+              "repo": "owner/repo",
+              "pr": 9,
+              "order": 2
+            },
+            {
+              "id": "badpr",
+              "kind": "open",
+              "state": "pending",
+              "repo": "owner/repo",
+              "pr": -1,
+              "order": 3
+            }
+          ],
+          "starts": [
+            "2026-11-09T11:00:00Z",
+            "2026-11-09T11:10:00Z"
+          ]
+        },
+        "config": {
+          "repo": "owner/repo",
+          "max_starts_per_hour": 8,
+          "schedule_id": "tick"
+        },
+        "schedule": {
+          "status": "unknown"
+        },
+        "previous": null,
+        "systemd": "patched-empty"
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "backfill_reserved_slots": 1,
+          "completed_24h_by_work": {
+            "open": 0,
+            "recent_merge": 0,
+            "backfill": 0,
+            "other": 0
+          },
+          "pending_items": [
+            {
+              "repo": "owner/repo",
+              "pr": 7,
+              "title": null,
+              "kind": "open",
+              "band": "interactive",
+              "generation": null,
+              "aging_deadline": null,
+              "reason": null,
+              "approximate_position": 1
+            },
+            {
+              "repo": "owner/repo",
+              "pr": 9,
+              "title": null,
+              "kind": "open",
+              "band": "interactive",
+              "generation": null,
+              "aging_deadline": null,
+              "reason": null,
+              "approximate_position": 2
+            },
+            {
+              "repo": "owner/repo",
+              "pr": -1,
+              "title": null,
+              "kind": "open",
+              "band": "interactive",
+              "generation": null,
+              "aging_deadline": null,
+              "reason": null,
+              "approximate_position": 3
+            }
+          ],
+          "merged_current": {
+            "natural_discovery": {},
+            "discovery": {},
+            "watermark": null,
+            "receipts": {
+              "pending": 0,
+              "reviewing": 0,
+              "blocked": 0,
+              "unverified": 0,
+              "proven_terminal": 0,
+              "no_current_code": 0,
+              "partial_scope": 0,
+              "unsupported": 0
+            },
+            "path_exclusions": {},
+            "captured_targets": [],
+            "additional_captured_targets": 0,
+            "coverage_at_today_target": "unverified",
+            "legacy_done_is_review_proof": false
+          },
+          "last_tick": "2026-11-09T11:55:00Z",
+          "status_as_of": "2026-11-09T12:00:00Z",
+          "paused": false,
+          "cooldown_until": null,
+          "starts_60m": 2,
+          "starts_cap": 8,
+          "in_flight": 0,
+          "outcomes_24h": {
+            "completed": 0,
+            "interrupted": 0,
+            "error": 0
+          },
+          "other_outcomes_24h": 0,
+          "backlog": {
+            "open": 3,
+            "delta": 0,
+            "merged": 0,
+            "coverage": 0,
+            "merged-current": 0,
+            "backfill": 0
+          },
+          "repos": {},
+          "schema_version": 2,
+          "generated_at": "2026-11-09T12:00:00Z",
+          "systemd_timers": {
+            "crq-tick.timer": {
+              "active": null,
+              "active_state": null,
+              "load_state": null,
+              "last_trigger": null,
+              "next_elapse": null,
+              "error": "systemctl user show unavailable"
+            },
+            "crq-watchdog.timer": {
+              "active": null,
+              "active_state": null,
+              "load_state": null,
+              "last_trigger": null,
+              "next_elapse": null,
+              "error": "systemctl user show unavailable"
+            },
+            "crq-slot.timer": {
+              "active": null,
+              "active_state": null,
+              "load_state": null,
+              "last_trigger": null,
+              "next_elapse": null,
+              "error": "systemctl user show unavailable"
+            },
+            "crq-backfill.timer": {
+              "active": null,
+              "active_state": null,
+              "load_state": null,
+              "last_trigger": null,
+              "next_elapse": null,
+              "error": "systemctl user show unavailable"
+            },
+            "crq-repair.timer": {
+              "active": null,
+              "active_state": null,
+              "load_state": null,
+              "last_trigger": null,
+              "next_elapse": null,
+              "error": "systemctl user show unavailable"
+            }
+          },
+          "systemd_services": {},
+          "repair": {
+            "verdicts": {
+              "fixed@A0": 0,
+              "fixed@A1": 0,
+              "fixed@A2": 0,
+              "not-fixed": 0,
+              "stale": 0,
+              "judged-valid": 0,
+              "judged-invalid": 0,
+              "failed": 0
+            },
+            "inbox": 0,
+            "oldest_age_minutes": 0,
+            "jobs_in_flight": 0,
+            "rate_limit_deferred": 0,
+            "orphaned": 0,
+            "fix_prs": [],
+            "source_publication_errors": []
+          },
+          "finding_triage": {
+            "counts": {
+              "delivered": 1,
+              "needs-human": 1
+            },
+            "needs_human": [
+              {
+                "id": "i",
+                "canonical_id": "c",
+                "path": "a.py",
+                "title": "Needs",
+                "severity": "minor",
+                "target": "tip",
+                "event_id": null
+              }
+            ],
+            "owner_decisions": [
+              {
+                "id": "i",
+                "canonical_id": "c",
+                "path": "a.py",
+                "title": "Needs",
+                "severity": "minor",
+                "target": "tip",
+                "event_id": null,
+                "failure_class": "owner-decision"
+              }
+            ],
+            "operator_attention": [],
+            "owner_decisions_count": 1,
+            "operator_attention_count": 0,
+            "unknown_failure_class": [],
+            "unknown_failure_class_count": 0,
+            "context_failures": [
+              {
+                "id": "j",
+                "canonical_id": "d",
+                "path": "a.py",
+                "title": "Fine",
+                "severity": "major",
+                "target": "tip",
+                "event_id": null,
+                "status": "delivered",
+                "context_error": {
+                  "code": 5
+                }
+              }
+            ],
+            "context_failures_count": 1,
+            "context_failures_omitted": 0,
+            "counts_complete": true,
+            "error_count": 0,
+            "errors": [],
+            "errors_omitted": 0,
+            "needs_human_count": 1,
+            "needs_human_omitted": 0,
+            "unknown_failure_class_omitted": 0
+          },
+          "utilization": {
+            "starts_24h": 2,
+            "nominal_cap_24h": 192,
+            "nominal_utilization": 0.010416666666666666,
+            "cooldown_minutes": 0,
+            "observed_ticks_24h": 0,
+            "available_start_opportunities_24h": 0,
+            "idle_while_pending_24h": null,
+            "idle_with_coverage_candidate_24h": null,
+            "coverage_reviewed_paths": 0
+          },
+          "schedule": {
+            "id": "tick",
+            "state": "unknown",
+            "error": "schedule probe unavailable"
+          }
+        },
+        "bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[{\"repo\":\"owner/repo\",\"pr\":7,\"title\":null,\"kind\":\"open\",\"band\":\"interactive\",\"generation\":null,\"aging_deadline\":null,\"reason\":null,\"approximate_position\":1},{\"repo\":\"owner/repo\",\"pr\":9,\"title\":null,\"kind\":\"open\",\"band\":\"interactive\",\"generation\":null,\"aging_deadline\":null,\"reason\":null,\"approximate_position\":2},{\"repo\":\"owner/repo\",\"pr\":-1,\"title\":null,\"kind\":\"open\",\"band\":\"interactive\",\"generation\":null,\"aging_deadline\":null,\"reason\":null,\"approximate_position\":3}],\"merged_current\":{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":\"2026-11-09T11:55:00Z\",\"status_as_of\":\"2026-11-09T12:00:00Z\",\"paused\":false,\"cooldown_until\":null,\"starts_60m\":2,\"starts_cap\":8,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":3,\"delta\":0,\"merged\":0,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{},\"schema_version\":2,\"generated_at\":\"2026-11-09T12:00:00Z\",\"systemd_timers\":{\"crq-tick.timer\":{\"active\":null,\"active_state\":null,\"load_state\":null,\"last_trigger\":null,\"next_elapse\":null,\"error\":\"systemctl user show unavailable\"},\"crq-watchdog.timer\":{\"active\":null,\"active_state\":null,\"load_state\":null,\"last_trigger\":null,\"next_elapse\":null,\"error\":\"systemctl user show unavailable\"},\"crq-slot.timer\":{\"active\":null,\"active_state\":null,\"load_state\":null,\"last_trigger\":null,\"next_elapse\":null,\"error\":\"systemctl user show unavailable\"},\"crq-backfill.timer\":{\"active\":null,\"active_state\":null,\"load_state\":null,\"last_trigger\":null,\"next_elapse\":null,\"error\":\"systemctl user show unavailable\"},\"crq-repair.timer\":{\"active\":null,\"active_state\":null,\"load_state\":null,\"last_trigger\":null,\"next_elapse\":null,\"error\":\"systemctl user show unavailable\"}},\"systemd_services\":{},\"repair\":{\"verdicts\":{\"fixed@A0\":0,\"fixed@A1\":0,\"fixed@A2\":0,\"not-fixed\":0,\"stale\":0,\"judged-valid\":0,\"judged-invalid\":0,\"failed\":0},\"inbox\":0,\"oldest_age_minutes\":0,\"jobs_in_flight\":0,\"rate_limit_deferred\":0,\"orphaned\":0,\"fix_prs\":[],\"source_publication_errors\":[]},\"finding_triage\":{\"counts\":{\"delivered\":1,\"needs-human\":1},\"needs_human\":[{\"id\":\"i\",\"canonical_id\":\"c\",\"path\":\"a.py\",\"title\":\"Needs\",\"severity\":\"minor\",\"target\":\"tip\",\"event_id\":null}],\"owner_decisions\":[{\"id\":\"i\",\"canonical_id\":\"c\",\"path\":\"a.py\",\"title\":\"Needs\",\"severity\":\"minor\",\"target\":\"tip\",\"event_id\":null,\"failure_class\":\"owner-decision\"}],\"operator_attention\":[],\"owner_decisions_count\":1,\"operator_attention_count\":0,\"unknown_failure_class\":[],\"unknown_failure_class_count\":0,\"context_failures\":[{\"id\":\"j\",\"canonical_id\":\"d\",\"path\":\"a.py\",\"title\":\"Fine\",\"severity\":\"major\",\"target\":\"tip\",\"event_id\":null,\"status\":\"delivered\",\"context_error\":{\"code\":5}}],\"context_failures_count\":1,\"context_failures_omitted\":0,\"counts_complete\":true,\"error_count\":0,\"errors\":[],\"errors_omitted\":0,\"needs_human_count\":1,\"needs_human_omitted\":0,\"unknown_failure_class_omitted\":0},\"utilization\":{\"starts_24h\":2,\"nominal_cap_24h\":192,\"nominal_utilization\":0.010416666666666666,\"cooldown_minutes\":0,\"observed_ticks_24h\":0,\"available_start_opportunities_24h\":0,\"idle_while_pending_24h\":null,\"idle_with_coverage_candidate_24h\":null,\"coverage_reviewed_paths\":0},\"schedule\":{\"id\":\"tick\",\"state\":\"unknown\",\"error\":\"schedule probe unavailable\"}}"
+      }
+    },
+    {
+      "name": "title-cache-and-gh-lookup",
+      "source": "status_summary.publish",
+      "input": {
+        "queue": {
+          "last_tick": "2026-11-09T11:55:00Z",
+          "items": [
+            {
+              "id": "open",
+              "kind": "open",
+              "state": "pending",
+              "repo": "owner/repo",
+              "pr": 7,
+              "order": 1
+            },
+            {
+              "id": "nocache",
+              "kind": "open",
+              "state": "pending",
+              "repo": "owner/repo",
+              "pr": 9,
+              "order": 2
+            },
+            {
+              "id": "badpr",
+              "kind": "open",
+              "state": "pending",
+              "repo": "owner/repo",
+              "pr": -1,
+              "order": 3
+            }
+          ],
+          "starts": [
+            "2026-11-09T11:00:00Z",
+            "2026-11-09T11:10:00Z"
+          ]
+        },
+        "config": {
+          "repo": "owner/repo",
+          "max_starts_per_hour": 8,
+          "schedule_id": "tick"
+        },
+        "schedule": {
+          "status": "active"
+        },
+        "previous": "{\"pending_items\": [{\"repo\": \"owner/repo\", \"pr\": 7, \"title\": \"cached title\"}, {\"repo\": \"owner/repo\", \"pr\": 9, \"title\": null}]}",
+        "systemd": "patched-empty"
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "backfill_reserved_slots": 1,
+          "completed_24h_by_work": {
+            "open": 0,
+            "recent_merge": 0,
+            "backfill": 0,
+            "other": 0
+          },
+          "pending_items": [
+            {
+              "repo": "owner/repo",
+              "pr": 7,
+              "title": "cached title",
+              "kind": "open",
+              "band": "interactive",
+              "generation": null,
+              "aging_deadline": null,
+              "reason": null,
+              "approximate_position": 1
+            },
+            {
+              "repo": "owner/repo",
+              "pr": 9,
+              "title": "Fresh Title",
+              "kind": "open",
+              "band": "interactive",
+              "generation": null,
+              "aging_deadline": null,
+              "reason": null,
+              "approximate_position": 2
+            },
+            {
+              "repo": "owner/repo",
+              "pr": -1,
+              "title": null,
+              "kind": "open",
+              "band": "interactive",
+              "generation": null,
+              "aging_deadline": null,
+              "reason": null,
+              "approximate_position": 3
+            }
+          ],
+          "merged_current": {
+            "natural_discovery": {},
+            "discovery": {},
+            "watermark": null,
+            "receipts": {
+              "pending": 0,
+              "reviewing": 0,
+              "blocked": 0,
+              "unverified": 0,
+              "proven_terminal": 0,
+              "no_current_code": 0,
+              "partial_scope": 0,
+              "unsupported": 0
+            },
+            "path_exclusions": {},
+            "captured_targets": [],
+            "additional_captured_targets": 0,
+            "coverage_at_today_target": "unverified",
+            "legacy_done_is_review_proof": false
+          },
+          "last_tick": "2026-11-09T11:55:00Z",
+          "status_as_of": "2026-11-09T12:00:00Z",
+          "paused": false,
+          "cooldown_until": null,
+          "starts_60m": 2,
+          "starts_cap": 8,
+          "in_flight": 0,
+          "outcomes_24h": {
+            "completed": 0,
+            "interrupted": 0,
+            "error": 0
+          },
+          "other_outcomes_24h": 0,
+          "backlog": {
+            "open": 3,
+            "delta": 0,
+            "merged": 0,
+            "coverage": 0,
+            "merged-current": 0,
+            "backfill": 0
+          },
+          "repos": {},
+          "schema_version": 2,
+          "generated_at": "2026-11-09T12:00:00Z",
+          "systemd_timers": {
+            "crq-tick.timer": {
+              "active": null,
+              "active_state": null,
+              "load_state": null,
+              "last_trigger": null,
+              "next_elapse": null,
+              "error": "systemctl user show unavailable"
+            },
+            "crq-watchdog.timer": {
+              "active": null,
+              "active_state": null,
+              "load_state": null,
+              "last_trigger": null,
+              "next_elapse": null,
+              "error": "systemctl user show unavailable"
+            },
+            "crq-slot.timer": {
+              "active": null,
+              "active_state": null,
+              "load_state": null,
+              "last_trigger": null,
+              "next_elapse": null,
+              "error": "systemctl user show unavailable"
+            },
+            "crq-backfill.timer": {
+              "active": null,
+              "active_state": null,
+              "load_state": null,
+              "last_trigger": null,
+              "next_elapse": null,
+              "error": "systemctl user show unavailable"
+            },
+            "crq-repair.timer": {
+              "active": null,
+              "active_state": null,
+              "load_state": null,
+              "last_trigger": null,
+              "next_elapse": null,
+              "error": "systemctl user show unavailable"
+            }
+          },
+          "systemd_services": {},
+          "repair": {
+            "verdicts": {
+              "fixed@A0": 0,
+              "fixed@A1": 0,
+              "fixed@A2": 0,
+              "not-fixed": 0,
+              "stale": 0,
+              "judged-valid": 0,
+              "judged-invalid": 0,
+              "failed": 0
+            },
+            "inbox": 0,
+            "oldest_age_minutes": 0,
+            "jobs_in_flight": 0,
+            "rate_limit_deferred": 0,
+            "orphaned": 0,
+            "fix_prs": [],
+            "source_publication_errors": []
+          },
+          "finding_triage": {
+            "counts": {
+              "delivered": 1,
+              "needs-human": 1
+            },
+            "needs_human": [
+              {
+                "id": "i",
+                "canonical_id": "c",
+                "path": "a.py",
+                "title": "Needs",
+                "severity": "minor",
+                "target": "tip",
+                "event_id": null
+              }
+            ],
+            "owner_decisions": [
+              {
+                "id": "i",
+                "canonical_id": "c",
+                "path": "a.py",
+                "title": "Needs",
+                "severity": "minor",
+                "target": "tip",
+                "event_id": null,
+                "failure_class": "owner-decision"
+              }
+            ],
+            "operator_attention": [],
+            "owner_decisions_count": 1,
+            "operator_attention_count": 0,
+            "unknown_failure_class": [],
+            "unknown_failure_class_count": 0,
+            "context_failures": [
+              {
+                "id": "j",
+                "canonical_id": "d",
+                "path": "a.py",
+                "title": "Fine",
+                "severity": "major",
+                "target": "tip",
+                "event_id": null,
+                "status": "delivered",
+                "context_error": {
+                  "code": 5
+                }
+              }
+            ],
+            "context_failures_count": 1,
+            "context_failures_omitted": 0,
+            "counts_complete": true,
+            "error_count": 0,
+            "errors": [],
+            "errors_omitted": 0,
+            "needs_human_count": 1,
+            "needs_human_omitted": 0,
+            "unknown_failure_class_omitted": 0
+          },
+          "utilization": {
+            "starts_24h": 2,
+            "nominal_cap_24h": 192,
+            "nominal_utilization": 0.010416666666666666,
+            "cooldown_minutes": 0,
+            "observed_ticks_24h": 0,
+            "available_start_opportunities_24h": 0,
+            "idle_while_pending_24h": null,
+            "idle_with_coverage_candidate_24h": null,
+            "coverage_reviewed_paths": 0
+          },
+          "schedule": {
+            "id": "tick",
+            "state": "active"
+          }
+        },
+        "bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[{\"repo\":\"owner/repo\",\"pr\":7,\"title\":\"cached title\",\"kind\":\"open\",\"band\":\"interactive\",\"generation\":null,\"aging_deadline\":null,\"reason\":null,\"approximate_position\":1},{\"repo\":\"owner/repo\",\"pr\":9,\"title\":\"Fresh Title\",\"kind\":\"open\",\"band\":\"interactive\",\"generation\":null,\"aging_deadline\":null,\"reason\":null,\"approximate_position\":2},{\"repo\":\"owner/repo\",\"pr\":-1,\"title\":null,\"kind\":\"open\",\"band\":\"interactive\",\"generation\":null,\"aging_deadline\":null,\"reason\":null,\"approximate_position\":3}],\"merged_current\":{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":\"2026-11-09T11:55:00Z\",\"status_as_of\":\"2026-11-09T12:00:00Z\",\"paused\":false,\"cooldown_until\":null,\"starts_60m\":2,\"starts_cap\":8,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":3,\"delta\":0,\"merged\":0,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{},\"schema_version\":2,\"generated_at\":\"2026-11-09T12:00:00Z\",\"systemd_timers\":{\"crq-tick.timer\":{\"active\":null,\"active_state\":null,\"load_state\":null,\"last_trigger\":null,\"next_elapse\":null,\"error\":\"systemctl user show unavailable\"},\"crq-watchdog.timer\":{\"active\":null,\"active_state\":null,\"load_state\":null,\"last_trigger\":null,\"next_elapse\":null,\"error\":\"systemctl user show unavailable\"},\"crq-slot.timer\":{\"active\":null,\"active_state\":null,\"load_state\":null,\"last_trigger\":null,\"next_elapse\":null,\"error\":\"systemctl user show unavailable\"},\"crq-backfill.timer\":{\"active\":null,\"active_state\":null,\"load_state\":null,\"last_trigger\":null,\"next_elapse\":null,\"error\":\"systemctl user show unavailable\"},\"crq-repair.timer\":{\"active\":null,\"active_state\":null,\"load_state\":null,\"last_trigger\":null,\"next_elapse\":null,\"error\":\"systemctl user show unavailable\"}},\"systemd_services\":{},\"repair\":{\"verdicts\":{\"fixed@A0\":0,\"fixed@A1\":0,\"fixed@A2\":0,\"not-fixed\":0,\"stale\":0,\"judged-valid\":0,\"judged-invalid\":0,\"failed\":0},\"inbox\":0,\"oldest_age_minutes\":0,\"jobs_in_flight\":0,\"rate_limit_deferred\":0,\"orphaned\":0,\"fix_prs\":[],\"source_publication_errors\":[]},\"finding_triage\":{\"counts\":{\"delivered\":1,\"needs-human\":1},\"needs_human\":[{\"id\":\"i\",\"canonical_id\":\"c\",\"path\":\"a.py\",\"title\":\"Needs\",\"severity\":\"minor\",\"target\":\"tip\",\"event_id\":null}],\"owner_decisions\":[{\"id\":\"i\",\"canonical_id\":\"c\",\"path\":\"a.py\",\"title\":\"Needs\",\"severity\":\"minor\",\"target\":\"tip\",\"event_id\":null,\"failure_class\":\"owner-decision\"}],\"operator_attention\":[],\"owner_decisions_count\":1,\"operator_attention_count\":0,\"unknown_failure_class\":[],\"unknown_failure_class_count\":0,\"context_failures\":[{\"id\":\"j\",\"canonical_id\":\"d\",\"path\":\"a.py\",\"title\":\"Fine\",\"severity\":\"major\",\"target\":\"tip\",\"event_id\":null,\"status\":\"delivered\",\"context_error\":{\"code\":5}}],\"context_failures_count\":1,\"context_failures_omitted\":0,\"counts_complete\":true,\"error_count\":0,\"errors\":[],\"errors_omitted\":0,\"needs_human_count\":1,\"needs_human_omitted\":0,\"unknown_failure_class_omitted\":0},\"utilization\":{\"starts_24h\":2,\"nominal_cap_24h\":192,\"nominal_utilization\":0.010416666666666666,\"cooldown_minutes\":0,\"observed_ticks_24h\":0,\"available_start_opportunities_24h\":0,\"idle_while_pending_24h\":null,\"idle_with_coverage_candidate_24h\":null,\"coverage_reviewed_paths\":0},\"schedule\":{\"id\":\"tick\",\"state\":\"active\"}}"
+      }
+    },
+    {
+      "name": "corrupt-previous-summary-voids-cache",
+      "source": "status_summary.publish",
+      "input": {
+        "queue": {
+          "last_tick": "2026-11-09T11:55:00Z",
+          "items": [
+            {
+              "id": "open",
+              "kind": "open",
+              "state": "pending",
+              "repo": "owner/repo",
+              "pr": 7,
+              "order": 1
+            },
+            {
+              "id": "nocache",
+              "kind": "open",
+              "state": "pending",
+              "repo": "owner/repo",
+              "pr": 9,
+              "order": 2
+            },
+            {
+              "id": "badpr",
+              "kind": "open",
+              "state": "pending",
+              "repo": "owner/repo",
+              "pr": -1,
+              "order": 3
+            }
+          ],
+          "starts": [
+            "2026-11-09T11:00:00Z",
+            "2026-11-09T11:10:00Z"
+          ]
+        },
+        "config": {
+          "repo": "owner/repo",
+          "max_starts_per_hour": 8,
+          "schedule_id": "tick"
+        },
+        "schedule": {
+          "status": "active"
+        },
+        "previous": "{broken",
+        "systemd": "patched-empty"
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "backfill_reserved_slots": 1,
+          "completed_24h_by_work": {
+            "open": 0,
+            "recent_merge": 0,
+            "backfill": 0,
+            "other": 0
+          },
+          "pending_items": [
+            {
+              "repo": "owner/repo",
+              "pr": 7,
+              "title": null,
+              "kind": "open",
+              "band": "interactive",
+              "generation": null,
+              "aging_deadline": null,
+              "reason": null,
+              "approximate_position": 1
+            },
+            {
+              "repo": "owner/repo",
+              "pr": 9,
+              "title": null,
+              "kind": "open",
+              "band": "interactive",
+              "generation": null,
+              "aging_deadline": null,
+              "reason": null,
+              "approximate_position": 2
+            },
+            {
+              "repo": "owner/repo",
+              "pr": -1,
+              "title": null,
+              "kind": "open",
+              "band": "interactive",
+              "generation": null,
+              "aging_deadline": null,
+              "reason": null,
+              "approximate_position": 3
+            }
+          ],
+          "merged_current": {
+            "natural_discovery": {},
+            "discovery": {},
+            "watermark": null,
+            "receipts": {
+              "pending": 0,
+              "reviewing": 0,
+              "blocked": 0,
+              "unverified": 0,
+              "proven_terminal": 0,
+              "no_current_code": 0,
+              "partial_scope": 0,
+              "unsupported": 0
+            },
+            "path_exclusions": {},
+            "captured_targets": [],
+            "additional_captured_targets": 0,
+            "coverage_at_today_target": "unverified",
+            "legacy_done_is_review_proof": false
+          },
+          "last_tick": "2026-11-09T11:55:00Z",
+          "status_as_of": "2026-11-09T12:00:00Z",
+          "paused": false,
+          "cooldown_until": null,
+          "starts_60m": 2,
+          "starts_cap": 8,
+          "in_flight": 0,
+          "outcomes_24h": {
+            "completed": 0,
+            "interrupted": 0,
+            "error": 0
+          },
+          "other_outcomes_24h": 0,
+          "backlog": {
+            "open": 3,
+            "delta": 0,
+            "merged": 0,
+            "coverage": 0,
+            "merged-current": 0,
+            "backfill": 0
+          },
+          "repos": {},
+          "schema_version": 2,
+          "generated_at": "2026-11-09T12:00:00Z",
+          "systemd_timers": {
+            "crq-tick.timer": {
+              "active": null,
+              "active_state": null,
+              "load_state": null,
+              "last_trigger": null,
+              "next_elapse": null,
+              "error": "systemctl user show unavailable"
+            },
+            "crq-watchdog.timer": {
+              "active": null,
+              "active_state": null,
+              "load_state": null,
+              "last_trigger": null,
+              "next_elapse": null,
+              "error": "systemctl user show unavailable"
+            },
+            "crq-slot.timer": {
+              "active": null,
+              "active_state": null,
+              "load_state": null,
+              "last_trigger": null,
+              "next_elapse": null,
+              "error": "systemctl user show unavailable"
+            },
+            "crq-backfill.timer": {
+              "active": null,
+              "active_state": null,
+              "load_state": null,
+              "last_trigger": null,
+              "next_elapse": null,
+              "error": "systemctl user show unavailable"
+            },
+            "crq-repair.timer": {
+              "active": null,
+              "active_state": null,
+              "load_state": null,
+              "last_trigger": null,
+              "next_elapse": null,
+              "error": "systemctl user show unavailable"
+            }
+          },
+          "systemd_services": {},
+          "repair": {
+            "verdicts": {
+              "fixed@A0": 0,
+              "fixed@A1": 0,
+              "fixed@A2": 0,
+              "not-fixed": 0,
+              "stale": 0,
+              "judged-valid": 0,
+              "judged-invalid": 0,
+              "failed": 0
+            },
+            "inbox": 0,
+            "oldest_age_minutes": 0,
+            "jobs_in_flight": 0,
+            "rate_limit_deferred": 0,
+            "orphaned": 0,
+            "fix_prs": [],
+            "source_publication_errors": []
+          },
+          "finding_triage": {
+            "counts": {
+              "delivered": 1,
+              "needs-human": 1
+            },
+            "needs_human": [
+              {
+                "id": "i",
+                "canonical_id": "c",
+                "path": "a.py",
+                "title": "Needs",
+                "severity": "minor",
+                "target": "tip",
+                "event_id": null
+              }
+            ],
+            "owner_decisions": [
+              {
+                "id": "i",
+                "canonical_id": "c",
+                "path": "a.py",
+                "title": "Needs",
+                "severity": "minor",
+                "target": "tip",
+                "event_id": null,
+                "failure_class": "owner-decision"
+              }
+            ],
+            "operator_attention": [],
+            "owner_decisions_count": 1,
+            "operator_attention_count": 0,
+            "unknown_failure_class": [],
+            "unknown_failure_class_count": 0,
+            "context_failures": [
+              {
+                "id": "j",
+                "canonical_id": "d",
+                "path": "a.py",
+                "title": "Fine",
+                "severity": "major",
+                "target": "tip",
+                "event_id": null,
+                "status": "delivered",
+                "context_error": {
+                  "code": 5
+                }
+              }
+            ],
+            "context_failures_count": 1,
+            "context_failures_omitted": 0,
+            "counts_complete": true,
+            "error_count": 0,
+            "errors": [],
+            "errors_omitted": 0,
+            "needs_human_count": 1,
+            "needs_human_omitted": 0,
+            "unknown_failure_class_omitted": 0
+          },
+          "utilization": {
+            "starts_24h": 2,
+            "nominal_cap_24h": 192,
+            "nominal_utilization": 0.010416666666666666,
+            "cooldown_minutes": 0,
+            "observed_ticks_24h": 0,
+            "available_start_opportunities_24h": 0,
+            "idle_while_pending_24h": null,
+            "idle_with_coverage_candidate_24h": null,
+            "coverage_reviewed_paths": 0
+          },
+          "schedule": {
+            "id": "tick",
+            "state": "active"
+          }
+        },
+        "bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[{\"repo\":\"owner/repo\",\"pr\":7,\"title\":null,\"kind\":\"open\",\"band\":\"interactive\",\"generation\":null,\"aging_deadline\":null,\"reason\":null,\"approximate_position\":1},{\"repo\":\"owner/repo\",\"pr\":9,\"title\":null,\"kind\":\"open\",\"band\":\"interactive\",\"generation\":null,\"aging_deadline\":null,\"reason\":null,\"approximate_position\":2},{\"repo\":\"owner/repo\",\"pr\":-1,\"title\":null,\"kind\":\"open\",\"band\":\"interactive\",\"generation\":null,\"aging_deadline\":null,\"reason\":null,\"approximate_position\":3}],\"merged_current\":{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":\"2026-11-09T11:55:00Z\",\"status_as_of\":\"2026-11-09T12:00:00Z\",\"paused\":false,\"cooldown_until\":null,\"starts_60m\":2,\"starts_cap\":8,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":3,\"delta\":0,\"merged\":0,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{},\"schema_version\":2,\"generated_at\":\"2026-11-09T12:00:00Z\",\"systemd_timers\":{\"crq-tick.timer\":{\"active\":null,\"active_state\":null,\"load_state\":null,\"last_trigger\":null,\"next_elapse\":null,\"error\":\"systemctl user show unavailable\"},\"crq-watchdog.timer\":{\"active\":null,\"active_state\":null,\"load_state\":null,\"last_trigger\":null,\"next_elapse\":null,\"error\":\"systemctl user show unavailable\"},\"crq-slot.timer\":{\"active\":null,\"active_state\":null,\"load_state\":null,\"last_trigger\":null,\"next_elapse\":null,\"error\":\"systemctl user show unavailable\"},\"crq-backfill.timer\":{\"active\":null,\"active_state\":null,\"load_state\":null,\"last_trigger\":null,\"next_elapse\":null,\"error\":\"systemctl user show unavailable\"},\"crq-repair.timer\":{\"active\":null,\"active_state\":null,\"load_state\":null,\"last_trigger\":null,\"next_elapse\":null,\"error\":\"systemctl user show unavailable\"}},\"systemd_services\":{},\"repair\":{\"verdicts\":{\"fixed@A0\":0,\"fixed@A1\":0,\"fixed@A2\":0,\"not-fixed\":0,\"stale\":0,\"judged-valid\":0,\"judged-invalid\":0,\"failed\":0},\"inbox\":0,\"oldest_age_minutes\":0,\"jobs_in_flight\":0,\"rate_limit_deferred\":0,\"orphaned\":0,\"fix_prs\":[],\"source_publication_errors\":[]},\"finding_triage\":{\"counts\":{\"delivered\":1,\"needs-human\":1},\"needs_human\":[{\"id\":\"i\",\"canonical_id\":\"c\",\"path\":\"a.py\",\"title\":\"Needs\",\"severity\":\"minor\",\"target\":\"tip\",\"event_id\":null}],\"owner_decisions\":[{\"id\":\"i\",\"canonical_id\":\"c\",\"path\":\"a.py\",\"title\":\"Needs\",\"severity\":\"minor\",\"target\":\"tip\",\"event_id\":null,\"failure_class\":\"owner-decision\"}],\"operator_attention\":[],\"owner_decisions_count\":1,\"operator_attention_count\":0,\"unknown_failure_class\":[],\"unknown_failure_class_count\":0,\"context_failures\":[{\"id\":\"j\",\"canonical_id\":\"d\",\"path\":\"a.py\",\"title\":\"Fine\",\"severity\":\"major\",\"target\":\"tip\",\"event_id\":null,\"status\":\"delivered\",\"context_error\":{\"code\":5}}],\"context_failures_count\":1,\"context_failures_omitted\":0,\"counts_complete\":true,\"error_count\":0,\"errors\":[],\"errors_omitted\":0,\"needs_human_count\":1,\"needs_human_omitted\":0,\"unknown_failure_class_omitted\":0},\"utilization\":{\"starts_24h\":2,\"nominal_cap_24h\":192,\"nominal_utilization\":0.010416666666666666,\"cooldown_minutes\":0,\"observed_ticks_24h\":0,\"available_start_opportunities_24h\":0,\"idle_while_pending_24h\":null,\"idle_with_coverage_candidate_24h\":null,\"coverage_reviewed_paths\":0},\"schedule\":{\"id\":\"tick\",\"state\":\"active\"}}"
+      }
+    },
+    {
+      "name": "previous-row-missing-repo-voids-cache",
+      "source": "status_summary.publish",
+      "input": {
+        "queue": {
+          "last_tick": "2026-11-09T11:55:00Z",
+          "items": [
+            {
+              "id": "open",
+              "kind": "open",
+              "state": "pending",
+              "repo": "owner/repo",
+              "pr": 7,
+              "order": 1
+            },
+            {
+              "id": "nocache",
+              "kind": "open",
+              "state": "pending",
+              "repo": "owner/repo",
+              "pr": 9,
+              "order": 2
+            },
+            {
+              "id": "badpr",
+              "kind": "open",
+              "state": "pending",
+              "repo": "owner/repo",
+              "pr": -1,
+              "order": 3
+            }
+          ],
+          "starts": [
+            "2026-11-09T11:00:00Z",
+            "2026-11-09T11:10:00Z"
+          ]
+        },
+        "config": {
+          "repo": "owner/repo",
+          "max_starts_per_hour": 8,
+          "schedule_id": "tick"
+        },
+        "schedule": {
+          "status": "active"
+        },
+        "previous": "{\"pending_items\": [{\"repo\": \"owner/repo\", \"pr\": 7, \"title\": \"first\"}, {\"title\": \"missing both\"}]}",
+        "systemd": "patched-empty"
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "backfill_reserved_slots": 1,
+          "completed_24h_by_work": {
+            "open": 0,
+            "recent_merge": 0,
+            "backfill": 0,
+            "other": 0
+          },
+          "pending_items": [
+            {
+              "repo": "owner/repo",
+              "pr": 7,
+              "title": null,
+              "kind": "open",
+              "band": "interactive",
+              "generation": null,
+              "aging_deadline": null,
+              "reason": null,
+              "approximate_position": 1
+            },
+            {
+              "repo": "owner/repo",
+              "pr": 9,
+              "title": null,
+              "kind": "open",
+              "band": "interactive",
+              "generation": null,
+              "aging_deadline": null,
+              "reason": null,
+              "approximate_position": 2
+            },
+            {
+              "repo": "owner/repo",
+              "pr": -1,
+              "title": null,
+              "kind": "open",
+              "band": "interactive",
+              "generation": null,
+              "aging_deadline": null,
+              "reason": null,
+              "approximate_position": 3
+            }
+          ],
+          "merged_current": {
+            "natural_discovery": {},
+            "discovery": {},
+            "watermark": null,
+            "receipts": {
+              "pending": 0,
+              "reviewing": 0,
+              "blocked": 0,
+              "unverified": 0,
+              "proven_terminal": 0,
+              "no_current_code": 0,
+              "partial_scope": 0,
+              "unsupported": 0
+            },
+            "path_exclusions": {},
+            "captured_targets": [],
+            "additional_captured_targets": 0,
+            "coverage_at_today_target": "unverified",
+            "legacy_done_is_review_proof": false
+          },
+          "last_tick": "2026-11-09T11:55:00Z",
+          "status_as_of": "2026-11-09T12:00:00Z",
+          "paused": false,
+          "cooldown_until": null,
+          "starts_60m": 2,
+          "starts_cap": 8,
+          "in_flight": 0,
+          "outcomes_24h": {
+            "completed": 0,
+            "interrupted": 0,
+            "error": 0
+          },
+          "other_outcomes_24h": 0,
+          "backlog": {
+            "open": 3,
+            "delta": 0,
+            "merged": 0,
+            "coverage": 0,
+            "merged-current": 0,
+            "backfill": 0
+          },
+          "repos": {},
+          "schema_version": 2,
+          "generated_at": "2026-11-09T12:00:00Z",
+          "systemd_timers": {
+            "crq-tick.timer": {
+              "active": null,
+              "active_state": null,
+              "load_state": null,
+              "last_trigger": null,
+              "next_elapse": null,
+              "error": "systemctl user show unavailable"
+            },
+            "crq-watchdog.timer": {
+              "active": null,
+              "active_state": null,
+              "load_state": null,
+              "last_trigger": null,
+              "next_elapse": null,
+              "error": "systemctl user show unavailable"
+            },
+            "crq-slot.timer": {
+              "active": null,
+              "active_state": null,
+              "load_state": null,
+              "last_trigger": null,
+              "next_elapse": null,
+              "error": "systemctl user show unavailable"
+            },
+            "crq-backfill.timer": {
+              "active": null,
+              "active_state": null,
+              "load_state": null,
+              "last_trigger": null,
+              "next_elapse": null,
+              "error": "systemctl user show unavailable"
+            },
+            "crq-repair.timer": {
+              "active": null,
+              "active_state": null,
+              "load_state": null,
+              "last_trigger": null,
+              "next_elapse": null,
+              "error": "systemctl user show unavailable"
+            }
+          },
+          "systemd_services": {},
+          "repair": {
+            "verdicts": {
+              "fixed@A0": 0,
+              "fixed@A1": 0,
+              "fixed@A2": 0,
+              "not-fixed": 0,
+              "stale": 0,
+              "judged-valid": 0,
+              "judged-invalid": 0,
+              "failed": 0
+            },
+            "inbox": 0,
+            "oldest_age_minutes": 0,
+            "jobs_in_flight": 0,
+            "rate_limit_deferred": 0,
+            "orphaned": 0,
+            "fix_prs": [],
+            "source_publication_errors": []
+          },
+          "finding_triage": {
+            "counts": {
+              "delivered": 1,
+              "needs-human": 1
+            },
+            "needs_human": [
+              {
+                "id": "i",
+                "canonical_id": "c",
+                "path": "a.py",
+                "title": "Needs",
+                "severity": "minor",
+                "target": "tip",
+                "event_id": null
+              }
+            ],
+            "owner_decisions": [
+              {
+                "id": "i",
+                "canonical_id": "c",
+                "path": "a.py",
+                "title": "Needs",
+                "severity": "minor",
+                "target": "tip",
+                "event_id": null,
+                "failure_class": "owner-decision"
+              }
+            ],
+            "operator_attention": [],
+            "owner_decisions_count": 1,
+            "operator_attention_count": 0,
+            "unknown_failure_class": [],
+            "unknown_failure_class_count": 0,
+            "context_failures": [
+              {
+                "id": "j",
+                "canonical_id": "d",
+                "path": "a.py",
+                "title": "Fine",
+                "severity": "major",
+                "target": "tip",
+                "event_id": null,
+                "status": "delivered",
+                "context_error": {
+                  "code": 5
+                }
+              }
+            ],
+            "context_failures_count": 1,
+            "context_failures_omitted": 0,
+            "counts_complete": true,
+            "error_count": 0,
+            "errors": [],
+            "errors_omitted": 0,
+            "needs_human_count": 1,
+            "needs_human_omitted": 0,
+            "unknown_failure_class_omitted": 0
+          },
+          "utilization": {
+            "starts_24h": 2,
+            "nominal_cap_24h": 192,
+            "nominal_utilization": 0.010416666666666666,
+            "cooldown_minutes": 0,
+            "observed_ticks_24h": 0,
+            "available_start_opportunities_24h": 0,
+            "idle_while_pending_24h": null,
+            "idle_with_coverage_candidate_24h": null,
+            "coverage_reviewed_paths": 0
+          },
+          "schedule": {
+            "id": "tick",
+            "state": "active"
+          }
+        },
+        "bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[{\"repo\":\"owner/repo\",\"pr\":7,\"title\":null,\"kind\":\"open\",\"band\":\"interactive\",\"generation\":null,\"aging_deadline\":null,\"reason\":null,\"approximate_position\":1},{\"repo\":\"owner/repo\",\"pr\":9,\"title\":null,\"kind\":\"open\",\"band\":\"interactive\",\"generation\":null,\"aging_deadline\":null,\"reason\":null,\"approximate_position\":2},{\"repo\":\"owner/repo\",\"pr\":-1,\"title\":null,\"kind\":\"open\",\"band\":\"interactive\",\"generation\":null,\"aging_deadline\":null,\"reason\":null,\"approximate_position\":3}],\"merged_current\":{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":\"2026-11-09T11:55:00Z\",\"status_as_of\":\"2026-11-09T12:00:00Z\",\"paused\":false,\"cooldown_until\":null,\"starts_60m\":2,\"starts_cap\":8,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":3,\"delta\":0,\"merged\":0,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{},\"schema_version\":2,\"generated_at\":\"2026-11-09T12:00:00Z\",\"systemd_timers\":{\"crq-tick.timer\":{\"active\":null,\"active_state\":null,\"load_state\":null,\"last_trigger\":null,\"next_elapse\":null,\"error\":\"systemctl user show unavailable\"},\"crq-watchdog.timer\":{\"active\":null,\"active_state\":null,\"load_state\":null,\"last_trigger\":null,\"next_elapse\":null,\"error\":\"systemctl user show unavailable\"},\"crq-slot.timer\":{\"active\":null,\"active_state\":null,\"load_state\":null,\"last_trigger\":null,\"next_elapse\":null,\"error\":\"systemctl user show unavailable\"},\"crq-backfill.timer\":{\"active\":null,\"active_state\":null,\"load_state\":null,\"last_trigger\":null,\"next_elapse\":null,\"error\":\"systemctl user show unavailable\"},\"crq-repair.timer\":{\"active\":null,\"active_state\":null,\"load_state\":null,\"last_trigger\":null,\"next_elapse\":null,\"error\":\"systemctl user show unavailable\"}},\"systemd_services\":{},\"repair\":{\"verdicts\":{\"fixed@A0\":0,\"fixed@A1\":0,\"fixed@A2\":0,\"not-fixed\":0,\"stale\":0,\"judged-valid\":0,\"judged-invalid\":0,\"failed\":0},\"inbox\":0,\"oldest_age_minutes\":0,\"jobs_in_flight\":0,\"rate_limit_deferred\":0,\"orphaned\":0,\"fix_prs\":[],\"source_publication_errors\":[]},\"finding_triage\":{\"counts\":{\"delivered\":1,\"needs-human\":1},\"needs_human\":[{\"id\":\"i\",\"canonical_id\":\"c\",\"path\":\"a.py\",\"title\":\"Needs\",\"severity\":\"minor\",\"target\":\"tip\",\"event_id\":null}],\"owner_decisions\":[{\"id\":\"i\",\"canonical_id\":\"c\",\"path\":\"a.py\",\"title\":\"Needs\",\"severity\":\"minor\",\"target\":\"tip\",\"event_id\":null,\"failure_class\":\"owner-decision\"}],\"operator_attention\":[],\"owner_decisions_count\":1,\"operator_attention_count\":0,\"unknown_failure_class\":[],\"unknown_failure_class_count\":0,\"context_failures\":[{\"id\":\"j\",\"canonical_id\":\"d\",\"path\":\"a.py\",\"title\":\"Fine\",\"severity\":\"major\",\"target\":\"tip\",\"event_id\":null,\"status\":\"delivered\",\"context_error\":{\"code\":5}}],\"context_failures_count\":1,\"context_failures_omitted\":0,\"counts_complete\":true,\"error_count\":0,\"errors\":[],\"errors_omitted\":0,\"needs_human_count\":1,\"needs_human_omitted\":0,\"unknown_failure_class_omitted\":0},\"utilization\":{\"starts_24h\":2,\"nominal_cap_24h\":192,\"nominal_utilization\":0.010416666666666666,\"cooldown_minutes\":0,\"observed_ticks_24h\":0,\"available_start_opportunities_24h\":0,\"idle_while_pending_24h\":null,\"idle_with_coverage_candidate_24h\":null,\"coverage_reviewed_paths\":0},\"schedule\":{\"id\":\"tick\",\"state\":\"active\"}}"
+      }
+    },
+    {
+      "name": "empty-triage-and-empty-queue",
+      "source": "status_summary.publish",
+      "input": {
+        "queue": {
+          "last_tick": "2026-11-09T11:55:00Z",
+          "items": [],
+          "starts": []
+        },
+        "config": {
+          "repo": "owner/repo",
+          "max_starts_per_hour": 8
+        },
+        "schedule": {},
+        "previous": null,
+        "systemd": "patched-empty"
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "backfill_reserved_slots": 1,
+          "completed_24h_by_work": {
+            "open": 0,
+            "recent_merge": 0,
+            "backfill": 0,
+            "other": 0
+          },
+          "pending_items": [],
+          "merged_current": {
+            "natural_discovery": {},
+            "discovery": {},
+            "watermark": null,
+            "receipts": {
+              "pending": 0,
+              "reviewing": 0,
+              "blocked": 0,
+              "unverified": 0,
+              "proven_terminal": 0,
+              "no_current_code": 0,
+              "partial_scope": 0,
+              "unsupported": 0
+            },
+            "path_exclusions": {},
+            "captured_targets": [],
+            "additional_captured_targets": 0,
+            "coverage_at_today_target": "unverified",
+            "legacy_done_is_review_proof": false
+          },
+          "last_tick": "2026-11-09T11:55:00Z",
+          "status_as_of": "2026-11-09T12:00:00Z",
+          "paused": false,
+          "cooldown_until": null,
+          "starts_60m": 0,
+          "starts_cap": 8,
+          "in_flight": 0,
+          "outcomes_24h": {
+            "completed": 0,
+            "interrupted": 0,
+            "error": 0
+          },
+          "other_outcomes_24h": 0,
+          "backlog": {
+            "open": 0,
+            "delta": 0,
+            "merged": 0,
+            "coverage": 0,
+            "merged-current": 0,
+            "backfill": 0
+          },
+          "repos": {},
+          "schema_version": 2,
+          "generated_at": "2026-11-09T12:00:00Z",
+          "systemd_timers": {
+            "crq-tick.timer": {
+              "active": null,
+              "active_state": null,
+              "load_state": null,
+              "last_trigger": null,
+              "next_elapse": null,
+              "error": "systemctl user show unavailable"
+            },
+            "crq-watchdog.timer": {
+              "active": null,
+              "active_state": null,
+              "load_state": null,
+              "last_trigger": null,
+              "next_elapse": null,
+              "error": "systemctl user show unavailable"
+            },
+            "crq-slot.timer": {
+              "active": null,
+              "active_state": null,
+              "load_state": null,
+              "last_trigger": null,
+              "next_elapse": null,
+              "error": "systemctl user show unavailable"
+            },
+            "crq-backfill.timer": {
+              "active": null,
+              "active_state": null,
+              "load_state": null,
+              "last_trigger": null,
+              "next_elapse": null,
+              "error": "systemctl user show unavailable"
+            },
+            "crq-repair.timer": {
+              "active": null,
+              "active_state": null,
+              "load_state": null,
+              "last_trigger": null,
+              "next_elapse": null,
+              "error": "systemctl user show unavailable"
+            }
+          },
+          "systemd_services": {},
+          "repair": {
+            "verdicts": {
+              "fixed@A0": 0,
+              "fixed@A1": 0,
+              "fixed@A2": 0,
+              "not-fixed": 0,
+              "stale": 0,
+              "judged-valid": 0,
+              "judged-invalid": 0,
+              "failed": 0
+            },
+            "inbox": 0,
+            "oldest_age_minutes": 0,
+            "jobs_in_flight": 0,
+            "rate_limit_deferred": 0,
+            "orphaned": 0,
+            "fix_prs": [],
+            "source_publication_errors": []
+          },
+          "finding_triage": {
+            "counts": {},
+            "needs_human": [],
+            "counts_complete": true,
+            "error_count": 0,
+            "errors": [],
+            "errors_omitted": 0,
+            "needs_human_count": 0,
+            "needs_human_omitted": 0,
+            "unknown_failure_class_omitted": 0
+          },
+          "utilization": {
+            "starts_24h": 0,
+            "nominal_cap_24h": 192,
+            "nominal_utilization": 0.0,
+            "cooldown_minutes": 0,
+            "observed_ticks_24h": 0,
+            "available_start_opportunities_24h": 0,
+            "idle_while_pending_24h": null,
+            "idle_with_coverage_candidate_24h": null,
+            "coverage_reviewed_paths": 0
+          },
+          "schedule": {
+            "id": "crq-tick.timer",
+            "state": "systemd"
+          }
+        },
+        "bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[],\"merged_current\":{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":\"2026-11-09T11:55:00Z\",\"status_as_of\":\"2026-11-09T12:00:00Z\",\"paused\":false,\"cooldown_until\":null,\"starts_60m\":0,\"starts_cap\":8,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":0,\"delta\":0,\"merged\":0,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{},\"schema_version\":2,\"generated_at\":\"2026-11-09T12:00:00Z\",\"systemd_timers\":{\"crq-tick.timer\":{\"active\":null,\"active_state\":null,\"load_state\":null,\"last_trigger\":null,\"next_elapse\":null,\"error\":\"systemctl user show unavailable\"},\"crq-watchdog.timer\":{\"active\":null,\"active_state\":null,\"load_state\":null,\"last_trigger\":null,\"next_elapse\":null,\"error\":\"systemctl user show unavailable\"},\"crq-slot.timer\":{\"active\":null,\"active_state\":null,\"load_state\":null,\"last_trigger\":null,\"next_elapse\":null,\"error\":\"systemctl user show unavailable\"},\"crq-backfill.timer\":{\"active\":null,\"active_state\":null,\"load_state\":null,\"last_trigger\":null,\"next_elapse\":null,\"error\":\"systemctl user show unavailable\"},\"crq-repair.timer\":{\"active\":null,\"active_state\":null,\"load_state\":null,\"last_trigger\":null,\"next_elapse\":null,\"error\":\"systemctl user show unavailable\"}},\"systemd_services\":{},\"repair\":{\"verdicts\":{\"fixed@A0\":0,\"fixed@A1\":0,\"fixed@A2\":0,\"not-fixed\":0,\"stale\":0,\"judged-valid\":0,\"judged-invalid\":0,\"failed\":0},\"inbox\":0,\"oldest_age_minutes\":0,\"jobs_in_flight\":0,\"rate_limit_deferred\":0,\"orphaned\":0,\"fix_prs\":[],\"source_publication_errors\":[]},\"finding_triage\":{\"counts\":{},\"needs_human\":[],\"counts_complete\":true,\"error_count\":0,\"errors\":[],\"errors_omitted\":0,\"needs_human_count\":0,\"needs_human_omitted\":0,\"unknown_failure_class_omitted\":0},\"utilization\":{\"starts_24h\":0,\"nominal_cap_24h\":192,\"nominal_utilization\":0.0,\"cooldown_minutes\":0,\"observed_ticks_24h\":0,\"available_start_opportunities_24h\":0,\"idle_while_pending_24h\":null,\"idle_with_coverage_candidate_24h\":null,\"coverage_reviewed_paths\":0},\"schedule\":{\"id\":\"crq-tick.timer\",\"state\":\"systemd\"}}"
+      }
+    },
+    {
+      "name": "no-completed-tick-refused",
+      "source": "status_summary.publish",
+      "input": {
+        "queue": {
+          "last_tick": null,
+          "items": [],
+          "starts": []
+        },
+        "config": {
+          "repo": "owner/repo",
+          "max_starts_per_hour": 8,
+          "schedule_id": "tick"
+        },
+        "schedule": {},
+        "previous": null,
+        "systemd": "patched-empty"
+      },
+      "expect": {
+        "ok": false,
+        "error": "ValueError",
+        "message": "no completed tick to publish"
+      }
+    }
+  ]
+}

@@ -1,0 +1,673 @@
+{
+  "name": "repair-digest",
+  "description": "repair_tick.digest over a real temp state tree",
+  "cases": [
+    {
+      "name": "verdicts-and-fix-prs",
+      "source": "repair_tick.digest",
+      "input": {
+        "queue": {
+          "items": [
+            {
+              "id": "i",
+              "kind": "open",
+              "state": "pending",
+              "repair_runs": {
+                "r0": {
+                  "fix_pr": 42,
+                  "verdicts": [
+                    {
+                      "job": "crq-consumed-F1",
+                      "verdict": "FIXED",
+                      "attempts": [
+                        {
+                          "rung": "A1"
+                        }
+                      ],
+                      "judge": {
+                        "verdict": "valid"
+                      }
+                    }
+                  ]
+                },
+                "r1": {
+                  "source_publication_error": "boom",
+                  "verdicts": [
+                    {
+                      "job": "j2",
+                      "verdict": "NOT-FIXED",
+                      "attempts": [
+                        {
+                          "rung": "A0"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                "r2": {
+                  "verdicts": [
+                    {
+                      "job": "j3",
+                      "verdict": "STALE",
+                      "attempts": [
+                        {
+                          "rung": "A2"
+                        }
+                      ],
+                      "judge": {
+                        "verdict": "invalid"
+                      }
+                    }
+                  ]
+                },
+                "r3": {
+                  "verdicts": [
+                    {
+                      "job": "j4",
+                      "verdict": "UNKNOWN",
+                      "attempts": [
+                        {
+                          "rung": "A0"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              }
+            }
+          ],
+          "last_tick": "x"
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "verdicts": {
+            "fixed@A0": 0,
+            "fixed@A1": 1,
+            "fixed@A2": 0,
+            "not-fixed": 1,
+            "stale": 1,
+            "judged-valid": 1,
+            "judged-invalid": 1,
+            "failed": 1
+          },
+          "inbox": 0,
+          "oldest_age_minutes": 0,
+          "jobs_in_flight": 0,
+          "rate_limit_deferred": 0,
+          "orphaned": 10,
+          "fix_prs": [
+            42
+          ],
+          "source_publication_errors": [
+            {
+              "item": "i",
+              "run": "r1",
+              "error": "boom"
+            }
+          ]
+        },
+        "bytes": "{\"verdicts\":{\"fixed@A0\":0,\"fixed@A1\":1,\"fixed@A2\":0,\"not-fixed\":1,\"stale\":1,\"judged-valid\":1,\"judged-invalid\":1,\"failed\":1},\"inbox\":0,\"oldest_age_minutes\":0,\"jobs_in_flight\":0,\"rate_limit_deferred\":0,\"orphaned\":10,\"fix_prs\":[42],\"source_publication_errors\":[{\"item\":\"i\",\"run\":\"r1\",\"error\":\"boom\"}]}"
+      }
+    },
+    {
+      "name": "drainable-pending-running-deferred",
+      "source": "repair_tick.digest",
+      "input": {
+        "queue": {
+          "items": [
+            {
+              "id": "i",
+              "kind": "open",
+              "state": "pending",
+              "repair_runs": {
+                "r0": {
+                  "state": "queued",
+                  "jobs": [
+                    "crq-abc-F1",
+                    "crq-ghi-F1",
+                    "crq-run-F1",
+                    "crq-retry-F1"
+                  ]
+                }
+              }
+            }
+          ]
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "verdicts": {
+            "fixed@A0": 0,
+            "fixed@A1": 0,
+            "fixed@A2": 0,
+            "not-fixed": 0,
+            "stale": 0,
+            "judged-valid": 0,
+            "judged-invalid": 0,
+            "failed": 0
+          },
+          "inbox": 4,
+          "oldest_age_minutes": 3760.0,
+          "jobs_in_flight": 1,
+          "rate_limit_deferred": 2,
+          "orphaned": 7,
+          "fix_prs": [],
+          "source_publication_errors": []
+        },
+        "bytes": "{\"verdicts\":{\"fixed@A0\":0,\"fixed@A1\":0,\"fixed@A2\":0,\"not-fixed\":0,\"stale\":0,\"judged-valid\":0,\"judged-invalid\":0,\"failed\":0},\"inbox\":4,\"oldest_age_minutes\":3760.0,\"jobs_in_flight\":1,\"rate_limit_deferred\":2,\"orphaned\":7,\"fix_prs\":[],\"source_publication_errors\":[]}"
+      }
+    },
+    {
+      "name": "retry-after-falsy-is-skipped",
+      "source": "repair_tick.digest",
+      "input": {
+        "queue": {
+          "items": [
+            {
+              "id": "i",
+              "kind": "open",
+              "state": "pending",
+              "repair_runs": {
+                "r0": {
+                  "state": "queued",
+                  "jobs": [
+                    "crq-retry0-F1"
+                  ]
+                }
+              }
+            }
+          ]
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "verdicts": {
+            "fixed@A0": 0,
+            "fixed@A1": 0,
+            "fixed@A2": 0,
+            "not-fixed": 0,
+            "stale": 0,
+            "judged-valid": 0,
+            "judged-invalid": 0,
+            "failed": 0
+          },
+          "inbox": 0,
+          "oldest_age_minutes": 0,
+          "jobs_in_flight": 0,
+          "rate_limit_deferred": 0,
+          "orphaned": 10,
+          "fix_prs": [],
+          "source_publication_errors": []
+        },
+        "bytes": "{\"verdicts\":{\"fixed@A0\":0,\"fixed@A1\":0,\"fixed@A2\":0,\"not-fixed\":0,\"stale\":0,\"judged-valid\":0,\"judged-invalid\":0,\"failed\":0},\"inbox\":0,\"oldest_age_minutes\":0,\"jobs_in_flight\":0,\"rate_limit_deferred\":0,\"orphaned\":10,\"fix_prs\":[],\"source_publication_errors\":[]}"
+      }
+    },
+    {
+      "name": "undrainable-consumed-orphaned",
+      "source": "repair_tick.digest",
+      "input": {
+        "queue": {
+          "items": [
+            {
+              "id": "i",
+              "kind": "open",
+              "state": "pending",
+              "repair_runs": {
+                "r0": {
+                  "state": "queued",
+                  "jobs": [
+                    "crq-abc-F1"
+                  ]
+                },
+                "r1": {
+                  "state": "terminal",
+                  "jobs": [
+                    "crq-consumed-F1"
+                  ],
+                  "verdicts": [
+                    {
+                      "job": "crq-consumed-F1",
+                      "verdict": "FIXED",
+                      "attempts": [
+                        {
+                          "rung": "A0"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              }
+            }
+          ]
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "verdicts": {
+            "fixed@A0": 1,
+            "fixed@A1": 0,
+            "fixed@A2": 0,
+            "not-fixed": 0,
+            "stale": 0,
+            "judged-valid": 0,
+            "judged-invalid": 0,
+            "failed": 0
+          },
+          "inbox": 1,
+          "oldest_age_minutes": 3760.0,
+          "jobs_in_flight": 0,
+          "rate_limit_deferred": 0,
+          "orphaned": 9,
+          "fix_prs": [],
+          "source_publication_errors": []
+        },
+        "bytes": "{\"verdicts\":{\"fixed@A0\":1,\"fixed@A1\":0,\"fixed@A2\":0,\"not-fixed\":0,\"stale\":0,\"judged-valid\":0,\"judged-invalid\":0,\"failed\":0},\"inbox\":1,\"oldest_age_minutes\":3760.0,\"jobs_in_flight\":0,\"rate_limit_deferred\":0,\"orphaned\":9,\"fix_prs\":[],\"source_publication_errors\":[]}"
+      }
+    },
+    {
+      "name": "symlinked-job-is-still-inbox",
+      "source": "repair_tick.digest",
+      "input": {
+        "queue": {
+          "items": [
+            {
+              "id": "i",
+              "kind": "open",
+              "state": "pending",
+              "repair_runs": {
+                "r0": {
+                  "state": "queued",
+                  "jobs": [
+                    "crq-sym-F1"
+                  ]
+                }
+              }
+            }
+          ]
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "verdicts": {
+            "fixed@A0": 0,
+            "fixed@A1": 0,
+            "fixed@A2": 0,
+            "not-fixed": 0,
+            "stale": 0,
+            "judged-valid": 0,
+            "judged-invalid": 0,
+            "failed": 0
+          },
+          "inbox": 1,
+          "oldest_age_minutes": 3759.0,
+          "jobs_in_flight": 0,
+          "rate_limit_deferred": 0,
+          "orphaned": 11,
+          "fix_prs": [],
+          "source_publication_errors": []
+        },
+        "bytes": "{\"verdicts\":{\"fixed@A0\":0,\"fixed@A1\":0,\"fixed@A2\":0,\"not-fixed\":0,\"stale\":0,\"judged-valid\":0,\"judged-invalid\":0,\"failed\":0},\"inbox\":1,\"oldest_age_minutes\":3759.0,\"jobs_in_flight\":0,\"rate_limit_deferred\":0,\"orphaned\":11,\"fix_prs\":[],\"source_publication_errors\":[]}"
+      }
+    },
+    {
+      "name": "future-mtime-clamps-to-zero-age",
+      "source": "repair_tick.digest",
+      "input": {
+        "queue": {
+          "items": [
+            {
+              "id": "i",
+              "kind": "open",
+              "state": "pending",
+              "repair_runs": {
+                "r0": {
+                  "state": "queued",
+                  "jobs": [
+                    "crq-future-F1"
+                  ]
+                }
+              }
+            }
+          ]
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "verdicts": {
+            "fixed@A0": 0,
+            "fixed@A1": 0,
+            "fixed@A2": 0,
+            "not-fixed": 0,
+            "stale": 0,
+            "judged-valid": 0,
+            "judged-invalid": 0,
+            "failed": 0
+          },
+          "inbox": 1,
+          "oldest_age_minutes": 0,
+          "jobs_in_flight": 0,
+          "rate_limit_deferred": 0,
+          "orphaned": 10,
+          "fix_prs": [],
+          "source_publication_errors": []
+        },
+        "bytes": "{\"verdicts\":{\"fixed@A0\":0,\"fixed@A1\":0,\"fixed@A2\":0,\"not-fixed\":0,\"stale\":0,\"judged-valid\":0,\"judged-invalid\":0,\"failed\":0},\"inbox\":1,\"oldest_age_minutes\":0,\"jobs_in_flight\":0,\"rate_limit_deferred\":0,\"orphaned\":10,\"fix_prs\":[],\"source_publication_errors\":[]}"
+      }
+    },
+    {
+      "name": "bad-job-id-never-drains",
+      "source": "repair_tick.digest",
+      "input": {
+        "queue": {
+          "items": [
+            {
+              "id": "i",
+              "kind": "open",
+              "state": "pending",
+              "repair_runs": {
+                "r0": {
+                  "state": "queued",
+                  "jobs": [
+                    "retired-crq-signer-7f440274a8+-F1",
+                    "crq-ghi-F1"
+                  ]
+                }
+              }
+            }
+          ]
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "verdicts": {
+            "fixed@A0": 0,
+            "fixed@A1": 0,
+            "fixed@A2": 0,
+            "not-fixed": 0,
+            "stale": 0,
+            "judged-valid": 0,
+            "judged-invalid": 0,
+            "failed": 0
+          },
+          "inbox": 1,
+          "oldest_age_minutes": 3740.0,
+          "jobs_in_flight": 0,
+          "rate_limit_deferred": 0,
+          "orphaned": 10,
+          "fix_prs": [],
+          "source_publication_errors": []
+        },
+        "bytes": "{\"verdicts\":{\"fixed@A0\":0,\"fixed@A1\":0,\"fixed@A2\":0,\"not-fixed\":0,\"stale\":0,\"judged-valid\":0,\"judged-invalid\":0,\"failed\":0},\"inbox\":1,\"oldest_age_minutes\":3740.0,\"jobs_in_flight\":0,\"rate_limit_deferred\":0,\"orphaned\":10,\"fix_prs\":[],\"source_publication_errors\":[]}"
+      }
+    },
+    {
+      "name": "empty-queue-and-empty-inbox",
+      "source": "repair_tick.digest",
+      "input": {
+        "queue": {
+          "items": []
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "verdicts": {
+            "fixed@A0": 0,
+            "fixed@A1": 0,
+            "fixed@A2": 0,
+            "not-fixed": 0,
+            "stale": 0,
+            "judged-valid": 0,
+            "judged-invalid": 0,
+            "failed": 0
+          },
+          "inbox": 0,
+          "oldest_age_minutes": 0,
+          "jobs_in_flight": 0,
+          "rate_limit_deferred": 0,
+          "orphaned": 11,
+          "fix_prs": [],
+          "source_publication_errors": []
+        },
+        "bytes": "{\"verdicts\":{\"fixed@A0\":0,\"fixed@A1\":0,\"fixed@A2\":0,\"not-fixed\":0,\"stale\":0,\"judged-valid\":0,\"judged-invalid\":0,\"failed\":0},\"inbox\":0,\"oldest_age_minutes\":0,\"jobs_in_flight\":0,\"rate_limit_deferred\":0,\"orphaned\":11,\"fix_prs\":[],\"source_publication_errors\":[]}"
+      }
+    },
+    {
+      "name": "corrupt-inbox-job-refuses",
+      "source": "repair_tick.digest",
+      "input": {
+        "queue": {
+          "items": [
+            {
+              "id": "i",
+              "kind": "open",
+              "state": "pending",
+              "repair_runs": {
+                "r0": {
+                  "state": "queued",
+                  "jobs": [
+                    "crq-bad-F1"
+                  ]
+                }
+              }
+            }
+          ]
+        }
+      },
+      "expect": {
+        "ok": false,
+        "error": "JSONDecodeError",
+        "message": "Expecting value: line 1 column 1 (char 0)"
+      }
+    },
+    {
+      "name": "corrupt-result-refuses",
+      "source": "repair_tick.digest",
+      "input": {
+        "queue": {
+          "items": [
+            {
+              "id": "i",
+              "kind": "open",
+              "state": "pending",
+              "repair_runs": {
+                "r0": {
+                  "state": "queued",
+                  "jobs": [
+                    "crq-abc-F1"
+                  ]
+                }
+              }
+            }
+          ]
+        }
+      },
+      "expect": {
+        "ok": false,
+        "error": "JSONDecodeError",
+        "message": "Expecting value: line 1 column 1 (char 0)"
+      }
+    },
+    {
+      "name": "missing-attempts-keyerror",
+      "source": "repair_tick.digest",
+      "input": {
+        "queue": {
+          "items": [
+            {
+              "id": "i",
+              "kind": "open",
+              "state": "pending",
+              "repair_runs": {
+                "r0": {
+                  "verdicts": [
+                    {
+                      "job": "j",
+                      "verdict": "FIXED"
+                    }
+                  ]
+                }
+              }
+            }
+          ]
+        }
+      },
+      "expect": {
+        "ok": false,
+        "error": "KeyError",
+        "message": "'attempts'"
+      }
+    },
+    {
+      "name": "empty-attempts-indexerror",
+      "source": "repair_tick.digest",
+      "input": {
+        "queue": {
+          "items": [
+            {
+              "id": "i",
+              "kind": "open",
+              "state": "pending",
+              "repair_runs": {
+                "r0": {
+                  "verdicts": [
+                    {
+                      "job": "j",
+                      "verdict": "FIXED",
+                      "attempts": []
+                    }
+                  ]
+                }
+              }
+            }
+          ]
+        }
+      },
+      "expect": {
+        "ok": false,
+        "error": "IndexError",
+        "message": "list index out of range"
+      }
+    },
+    {
+      "name": "missing-rung-keyerror",
+      "source": "repair_tick.digest",
+      "input": {
+        "queue": {
+          "items": [
+            {
+              "id": "i",
+              "kind": "open",
+              "state": "pending",
+              "repair_runs": {
+                "r0": {
+                  "verdicts": [
+                    {
+                      "job": "j",
+                      "verdict": "FIXED",
+                      "attempts": [
+                        {}
+                      ]
+                    }
+                  ]
+                }
+              }
+            }
+          ]
+        }
+      },
+      "expect": {
+        "ok": false,
+        "error": "KeyError",
+        "message": "'rung'"
+      }
+    },
+    {
+      "name": "judge-string-attributeerror",
+      "source": "repair_tick.digest",
+      "input": {
+        "queue": {
+          "items": [
+            {
+              "id": "i",
+              "kind": "open",
+              "state": "pending",
+              "repair_runs": {
+                "r0": {
+                  "verdicts": [
+                    {
+                      "job": "j",
+                      "verdict": "STALE",
+                      "judge": "s"
+                    }
+                  ]
+                }
+              }
+            }
+          ]
+        }
+      },
+      "expect": {
+        "ok": false,
+        "error": "AttributeError",
+        "message": "'str' object has no attribute 'get'"
+      }
+    },
+    {
+      "name": "verdict-string-typeerror",
+      "source": "repair_tick.digest",
+      "input": {
+        "queue": {
+          "items": [
+            {
+              "id": "i",
+              "kind": "open",
+              "state": "pending",
+              "repair_runs": {
+                "r0": {
+                  "verdicts": "s"
+                }
+              }
+            }
+          ]
+        }
+      },
+      "expect": {
+        "ok": false,
+        "error": "TypeError",
+        "message": "string indices must be integers, not 'str'"
+      }
+    },
+    {
+      "name": "repair-runs-list-attributeerror",
+      "source": "repair_tick.digest",
+      "input": {
+        "queue": {
+          "items": [
+            {
+              "id": "i",
+              "kind": "open",
+              "state": "pending",
+              "repair_runs": [
+                1
+              ]
+            }
+          ]
+        }
+      },
+      "expect": {
+        "ok": false,
+        "error": "AttributeError",
+        "message": "'list' object has no attribute 'items'"
+      }
+    }
+  ]
+}
