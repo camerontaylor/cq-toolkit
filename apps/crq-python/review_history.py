@@ -86,6 +86,8 @@ def _ancestry(git, prior_head, head):
         return "ancestral", ahead
     if ahead > 0 and behind > 0:
         return "unrelated", None
+    if ahead == 0 and behind > 0:
+        return "unrelated", None
     return "unknown", None
 
 
@@ -144,8 +146,12 @@ def _entries_for(q, *, repo, target, task, branch, predecessor, head, head_tree,
             continue
         explicit = predecessor is not None and by_item.get(item.get("id")) == predecessor
         # Legacy items predate the recorded target; they are reachable only
-        # through an explicit predecessor link, never a broad association.
-        if item.get("target") != target and not (explicit and item.get("target") is None):
+        # through an explicit predecessor link, never a broad association,
+        # including when both the item and the query happen to have no target.
+        if item.get("target") is None:
+            if not explicit:
+                continue
+        elif item.get("target") != target:
             continue
         prior_head = inputs.get("head_commit")
         # An explicit link is itself the continuity claim: it must not depend on

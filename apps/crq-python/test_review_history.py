@@ -63,7 +63,9 @@ class HistoryGitMixin:
         return run
 
     def project(self, q, **kw):
-        value = history.project(q, repo=REPO, target="main", head_commit=kw.pop("head", self.head),
+        target = kw.pop("target", "main")
+        value = history.project(q, repo=REPO, target=target,
+                                head_commit=kw.pop("head", self.head),
                                 head_tree=kw.pop("head_tree", self.changed_tree),
                                 git=kw.pop("git", self.hist_git()), **kw)
         operation.validate("history", value)
@@ -199,9 +201,12 @@ class ExampleTests(HistoryGitMixin, SnapshotGitFixture, unittest.TestCase):
     def test_a10_shallow_clone_with_both_endpoints_is_unknown(self):
         with tempfile.TemporaryDirectory() as tmp:
             clone = Path(tmp) / "shallow"
-            self.git("update-ref", "refs/heads/main", self.head)
+            self.git("update-ref", "refs/heads/shallow-base", self.base)
+            self.git("update-ref", "refs/heads/shallow-head", self.head)
+            self.git("symbolic-ref", "HEAD", "refs/heads/shallow-head")
             self.git("clone", "-q", "--depth", "1", "file://" + str(self.repo), str(clone))
-            self.git("-C", str(clone), "fetch", "-q", "--depth", "1", "origin", self.base)
+            self.git("-C", str(clone), "fetch", "-q", "--depth", "1", "origin",
+                     "shallow-base:refs/remotes/origin/shallow-base")
             self.assertEqual(
                 self.git("-C", str(clone), "rev-parse", "--is-shallow-repository"), "true")
             for rev in (self.base, self.head):
@@ -214,6 +219,27 @@ class ExampleTests(HistoryGitMixin, SnapshotGitFixture, unittest.TestCase):
         self.assertIsNone(result["predecessor"]["ancestry"])
         self.assertEqual(result["entries"][0]["relationship"], "possible")
         self.assertIn("Possible earlier review", result["cue"])
+
+    def test_targetless_legacy_items_need_an_explicit_link(self):
+        prior = [item(f"lr-legacy-{index}", facts(base=self.base, base_tree=self.base_tree,
+                                                  head=self.base, head_tree=self.base_tree),
+                      task="T", target=None) for index in range(2)]
+        current = item("lr-current", facts(base=self.base, base_tree=self.base_tree,
+                                           head=self.head, head_tree=self.changed_tree),
+                       task="T", target=None)
+        result = self.project(queue(*prior, current), target=None, task="T",
+                              exclude_item=current["id"])
+        self.assertEqual(result["relation"], "none")
+        self.assertEqual(result["entries"], [])
+        self.assertFalse(result["repeat"])
+
+    def test_reverse_ancestry_is_server_verified_unrelated(self):
+        child = item("lr-child", facts(base=self.base, base_tree=self.base_tree,
+                                       head=self.head, head_tree=self.changed_tree), task="T")
+        result = self.project(queue(child), task="T", head=self.base, head_tree=self.base_tree)
+        self.assertEqual(result["entries"][0]["relationship"], "unrelated")
+        self.assertEqual(result["entries"][0]["ancestry"], "server")
+        self.assertFalse(result["repeat"])
 
     def test_observed_client_ancestry_is_labelled_client(self):
         missing = "e" * 40
