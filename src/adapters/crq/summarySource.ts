@@ -32,7 +32,16 @@
 import { execFile } from 'node:child_process';
 import { access, mkdir, readFile, readdir, stat } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import type { RepairInboxEntry, RepairInboxState } from '../../policy/crq/publishEffects.js';
+import {
+  PublishEffectsError,
+  drainableStemsFromQueue,
+  type RepairInboxEntry,
+  type RepairInboxState,
+  type TriageRowFile,
+} from '../../policy/crq/publishEffects.js';
+import { referencedReceiptIds } from '../../policy/crq/statusSummary.js';
+import type { CrqRecord } from '../../policy/crq/receiptIdentity.js';
+import { ghIntegerPr } from '../../policy/crq/summaryPublish.js';
 import {
   publishSummary,
   summaryTargetPath,
@@ -101,6 +110,19 @@ async function readOptionalBytes(path: string): Promise<Uint8Array | null> {
   }
 }
 
+/**
+ * The Python OS-error subclass for one errno (producer `type(exc).__name__`):
+ * ENOENT raises FileNotFoundError and EACCES/EPERM raise PermissionError
+ * (both OSError subclasses), anything else stays the OSError base. Verified
+ * against CPython 3 on this host.
+ */
+function osErrorKind(error: unknown): 'FileNotFoundError' | 'PermissionError' | 'OSError' {
+  const code = (error as NodeJS.ErrnoException)?.code;
+  if (code === 'ENOENT') return 'FileNotFoundError';
+  if (code === 'EACCES' || code === 'EPERM') return 'PermissionError';
+  return 'OSError';
+}
+
 async function fileExists(path: string): Promise<boolean> {
   try {
     await access(path);
@@ -114,10 +136,21 @@ async function fileExists(path: string): Promise<boolean> {
  * `repair_tick.digest`'s inbox seam over real files: one entry per
  * `inbox/*.json` in sorted filename order (the digest is order-independent),
  * the job's exact bytes and `st_mtime` seconds, and result/progress state
- * through the stem. A job unreadable at scan time raises here, exactly where
- * Python's `read_text()` would raise inside the digest.
+ * through the stem.
+ *
+ * Python reads content inline ONLY for stems the digest will consume (a
+ * consumed stem's content is not re-read; a drainable stem's job text is
+ * parsed and its result read only when that file exists). An unreferenced
+ * stem is existence-only: `result.json` existence orphans it, progress is
+ * never consulted, and its own content is never opened (audit iO_c). A
+ * referenced job whose read fails is captured as the Python OS-error subtype
+ * (`PermissionError`/`FileNotFoundError`/`OSError`) and raised from the
+ * digest exactly where Python's `read_text()` would raise inside it.
  */
-export async function fileRepairInboxState(stateRoot: string): Promise<RepairInboxState> {
+export async function fileRepairInboxState(
+  stateRoot: string,
+  selectedStems: ReadonlySet<string> = new Set(),
+): Promise<RepairInboxState> {
   const inboxDir = join(stateRoot, 'repair', 'inbox');
   let names: readonly string[];
   try {
@@ -135,47 +168,95 @@ export async function fileRepairInboxState(stateRoot: string): Promise<RepairInb
     throw error;
   }
   const entries: RepairInboxEntry[] = [];
-  for (const name of names.filter((candidate) => candidate.endsWith('.json')).sort()) {
-    const path = join(inboxDir, name);
-    const bytes = await readFile(path);
-    const info = await stat(path);
-    entries.push({
-      stem: name.slice(0, -'.json'.length),
-      jobBytes: new Uint8Array(bytes),
-      // `Path.stat().st_mtime` seconds; `mtimeMs` keeps sub-second precision.
-      mtime: info.mtimeMs / 1000,
-    });
-  }
-  const jobDir = (stem: string): string => join(stateRoot, 'repair', stem);
-  // The digest seams are synchronous: result bytes and existence are read
-  // eagerly per entry (Python reads them inline inside the same loop), so
-  // the adapter captures them up front instead of promising later I/O.
   const results = new Map<string, Uint8Array | null>();
   const progress = new Set<string>();
-  for (const entry of entries) {
-    results.set(entry.stem, await readOptionalBytes(join(jobDir(entry.stem), 'result.json')));
-    if (await fileExists(join(jobDir(entry.stem), 'progress.json'))) progress.add(entry.stem);
+  for (const name of names.filter((candidate) => candidate.endsWith('.json')).sort()) {
+    const stem = name.slice(0, -'.json'.length);
+    const path = join(inboxDir, name);
+    let mtime = 0;
+    let jobBytes: Uint8Array | null = null;
+    let jobError: PublishEffectsError | undefined;
+    if (selectedStems.has(stem)) {
+      // Referenced stem: Python opens the job inline, so we do too. A read
+      // failure is captured with its OS-error subtype and re-raised by the
+      // digest's job-content gate; the entry still carries mtime.
+      try {
+        const [bytes, info] = await Promise.all([readFile(path), stat(path)]);
+        jobBytes = new Uint8Array(bytes);
+        mtime = info.mtimeMs / 1000;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+          // The producer's glob yield vanished before read_text: that is a
+          // FileNotFoundError out of the digest, not a missing-job fallback.
+          throw new PublishEffectsError(
+            `[Errno 2] No such file or directory: 'state/repair/inbox/${stem}.json'`,
+            'FileNotFoundError',
+          );
+        }
+        jobError = new PublishEffectsError(`state/repair/inbox/${stem}.json`, osErrorKind(error));
+        try {
+          mtime = (await stat(path)).mtimeMs / 1000;
+        } catch {
+          mtime = 0;
+        }
+      }
+    } else {
+      // Unreferenced stem: stat only. A vanished glob yield contributes
+      // nothing (Python's glob list is materialised before the loop, and a
+      // file absent at stat time cannot reach the orphan arm either).
+      try {
+        mtime = (await stat(path)).mtimeMs / 1000;
+      } catch {
+        continue;
+      }
+    }
+    entries.push({ stem, jobBytes, mtime, ...(jobError === undefined ? {} : { jobError }) });
+    // Result/progress captures follow the same referenced-only rule: for a
+    // referenced stem the digest reads result content when it exists, so an
+    // unreadable existing result raises with its subtype; for an
+    // unreferenced stem only existence is consulted (progress never is).
+    const resultPath = join(stateRoot, 'repair', stem, 'result.json');
+    const progressPath = join(stateRoot, 'repair', stem, 'progress.json');
+    if (selectedStems.has(stem)) {
+      try {
+        results.set(stem, await readOptionalBytes(resultPath));
+      } catch (error) {
+        throw new PublishEffectsError(`state/repair/${stem}/result.json`, osErrorKind(error));
+      }
+    } else {
+      let exists = false;
+      try {
+        exists = (await stat(resultPath)).isFile();
+      } catch {
+        exists = false;
+      }
+      // Existence is modelled as present-but-unread bytes: the digest's
+      // orphan arm tests only hasResult truthiness for unreferenced stems.
+      results.set(stem, exists ? new Uint8Array(0) : null);
+    }
+    if (selectedStems.has(stem) && (await fileExists(progressPath))) progress.add(stem);
   }
   return {
     entries,
     readResult: (stem: string) => results.get(stem) ?? null,
-    hasResult: (stem: string) => results.get(stem) !== undefined && results.get(stem) !== null,
+    hasResult: (stem: string) => (results.get(stem) ?? null) !== null,
     hasProgress: (stem: string) => progress.has(stem),
   };
 }
 
-/** The sorted `triage/*.json` rows as exact bytes; absent dir yields none.
+/**
+ * The sorted `triage/*.json` rows as exact bytes; absent dir yields none.
  *
- * Per-row read failures stay in the seam as a null-bytes row: Python's
+ * Per-row read failures stay in the seam as a null-bytes row carrying the
+ * captured Python OS-error subtype: Python's
  * `finding_triage(strict=False, limit=32)` catches each row's OSError inside
- * the row loop, records `{file, error}` and continues with the remaining
- * rows, so one unreadable file must not abort the whole summary. The
- * composer's `findingTriage` already refuses null-bytes rows per row into
- * that same errors shape (`row.bytes === null` -> TriageRowError 'OSError').
+ * the row loop, records `{file, error: type(exc).__name__}` (PermissionError
+ * on chmod-denied, FileNotFoundError on vanished, OSError otherwise) and
+ * continues with the remaining rows, so one unreadable file must not abort
+ * the whole summary. The composer's `findingTriage` records the captured
+ * subtype per row and keeps the rest of the report.
  */
-export async function fileTriageRows(
-  stateRoot: string,
-): Promise<readonly { readonly name: string; readonly bytes: Uint8Array | null }[]> {
+export async function fileTriageRows(stateRoot: string): Promise<readonly TriageRowFile[]> {
   const triageDir = join(stateRoot, 'backfill', 'findings', 'triage');
   let names: readonly string[];
   try {
@@ -184,14 +265,19 @@ export async function fileTriageRows(
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
     throw error;
   }
-  const rows: { name: string; bytes: Uint8Array | null }[] = [];
+  const rows: TriageRowFile[] = [];
   for (const name of names.filter((candidate) => candidate.endsWith('.json')).sort()) {
     try {
       rows.push({ name, bytes: new Uint8Array(await readFile(join(triageDir, name))) });
-    } catch {
-      // Per-row OSError -> null bytes; the composer records it as a row error
-      // and keeps the rest of the report, like Python's strict=False path.
-      rows.push({ name, bytes: null });
+    } catch (error) {
+      // Per-row OSError -> null bytes + the exact subtype; the composer
+      // records it as a row error and keeps the rest of the report, like
+      // Python's strict=False path.
+      rows.push({
+        name,
+        bytes: null,
+        readError: new PublishEffectsError(name, osErrorKind(error)),
+      });
     }
   }
   return rows;
@@ -199,6 +285,12 @@ export async function fileTriageRows(
 
 /** Receipt ids are validated before any read; a mismatched id reads as absent. */
 const RECEIPT_ID = /^[0-9a-f]{64}$/;
+
+/**
+ * The composer's `merged_current` re-validates every id before reading; the
+ * adapter never constructs receipt paths from unvalidated input.
+ */
+void RECEIPT_ID;
 
 /**
  * Assemble every composer seam from one state root, one command port and
@@ -215,25 +307,38 @@ export async function summaryStateEffects(
   runCommand: RunCommand,
   pendingPulls: readonly { readonly repo: unknown; readonly pr: unknown }[] = [],
   now: () => number = () => Date.now() / 1000,
+  queue: unknown = null,
 ): Promise<SummaryPublishEffects> {
   const previousBytes = await readPreviousSummaryBytes(roots);
   const ghTitles = new Map<string, string | null>();
   await Promise.all(
     pendingPulls.map(async (row) => {
+      // `type(pr) is int and pr > 0`: the producer's gh gate. A lossless
+      // JsonNumber int IS a Python int (audit gYDE), so the adapter must
+      // normalize it through the same gate the composer applies, or a
+      // lossless queue never gets its title preloaded and the composer
+      // throws 'gh result not preloaded' where Python calls gh.
+      const ghPr = ghIntegerPr(row.pr);
       const repo = row.repo;
-      const pr = row.pr;
       if (typeof repo !== 'string' || repo === '') return;
-      if (typeof pr !== 'number' || !Number.isInteger(pr) || pr <= 0) return;
-      const query = `repos/${repo}/pulls/${pr}`;
+      if (ghPr === null) return;
+      const query = `repos/${repo}/pulls/${ghPr}`;
       if (ghTitles.has(query)) return;
       ghTitles.set(query, await runCommand(['gh', 'api', query, '--jq', '.title'], 3));
     }),
   );
+  // Selection first: which receipts and inbox jobs the producer would open
+  // for this queue. Best-effort never-throw walk (the composer raises the
+  // producer's exact refusals itself); content is then read for referenced
+  // entries only, so an unreferenced chmod-000 receipt/inbox job cannot
+  // abort assembly where Python would not even open the file.
+  const selectedStems = drainableStemsFromQueue(queue);
+  const receiptIds = referencedReceiptIds((queue ?? null) as CrqRecord);
   const [inbox, triageRows, probe, receipts] = await Promise.all([
-    fileRepairInboxState(roots.stateRoot),
+    fileRepairInboxState(roots.stateRoot, selectedStems),
     fileTriageRows(roots.stateRoot),
     probeSystemd(runCommand),
-    preloadReceipts(roots.stateRoot),
+    preloadReceipts(roots.stateRoot, receiptIds),
   ]);
   return {
     root: roots.stateRoot,
@@ -256,26 +361,31 @@ export async function summaryStateEffects(
 }
 
 /**
- * Receipt bytes by id, pre-loaded like the status route: the composer reads
- * them repeatedly, and one snapshot keeps the digest consistent. Only valid
- * ids are ever consulted; a mismatched id is a trust-boundary refusal that
- * reads as absent, never a path error.
+ * Receipt bytes by id, read on demand for ids the queue actually references:
+ * Python's `merged_current` opens `(receipt_root, receipt_id + ".json")`
+ * only when a terminal item needs verification, and contains that read
+ * failure into `unverified` per row, so an unreferenced receipt file must
+ * never be touched (audit iO_W: a chmod-000 unreferenced receipt must not
+ * abort assembly) and a referenced one must read as unverified when its
+ * read fails (any OSError reads as unavailable at this trust boundary).
+ * A mismatched id remains a refusal that reads as absent, never a path
+ * error.
  */
-async function preloadReceipts(stateRoot: string): Promise<ReadonlyMap<string, Uint8Array | null>> {
+async function preloadReceipts(
+  stateRoot: string,
+  receiptIds: ReadonlySet<string>,
+): Promise<ReadonlyMap<string, Uint8Array | null>> {
   const receiptsDir = join(stateRoot, 'receipts');
   const cache = new Map<string, Uint8Array | null>();
-  let names: readonly string[];
-  try {
-    names = await readdir(receiptsDir);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return cache;
-    throw error;
-  }
-  for (const name of names) {
-    if (!name.endsWith('.json')) continue;
-    const id = name.slice(0, -'.json'.length);
-    if (!RECEIPT_ID.test(id)) continue;
-    cache.set(id, await readOptionalBytes(join(receiptsDir, name)));
+  for (const id of receiptIds) {
+    try {
+      cache.set(id, new Uint8Array(await readFile(join(receiptsDir, `${id}.json`))));
+    } catch {
+      // Any read failure reads as unavailable: the composer's merged_current
+      // contains referenced-receipt failures into `unverified` (the producer
+      // catches OSError alongside its binding refusals).
+      cache.set(id, null);
+    }
   }
   return cache;
 }

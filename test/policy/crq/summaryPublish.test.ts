@@ -17,7 +17,24 @@
  * the replay exercises the exact core the route hands the composer.
  */
 import { readFileSync } from 'node:fs';
-import { describe, expect, expectTypeOf, it } from 'vitest';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterAll, describe, expect, expectTypeOf, it } from 'vitest';
+
+const summaryDirs: string[] = [];
+
+async function tempRoot(): Promise<{ root: string; state: string; xdg: string }> {
+  const root = await mkdtemp(join(tmpdir(), 'crq-summary-publish-'));
+  summaryDirs.push(root);
+  const state = join(root, 'state');
+  const xdg = join(root, 'xdg');
+  return { root, state, xdg };
+}
+
+afterAll(async () => {
+  for (const dir of summaryDirs) await rm(dir, { recursive: true, force: true });
+});
 
 import {
   JsonObject,
@@ -38,6 +55,7 @@ import {
   summaryTargetPath,
 } from '../../../src/policy/crq/summaryPublish.js';
 import type { SummaryPublishEffects } from '../../../src/policy/crq/summaryPublish.js';
+import { summaryStateEffects } from '../../../src/adapters/crq/summarySource.js';
 import { mergedCurrent, summarize } from '../../../src/policy/crq/statusSummary.js';
 import type { CrqRecord } from '../../../src/policy/crq/receiptIdentity.js';
 
@@ -468,6 +486,118 @@ describe('publish-full oracle replay through publishSummary', () => {
     // The published bytes keep the lossless route's exact lexemes: the
     // float-lexeme pr serialises as `7.0`, not `7`.
     expect(result.text).toContain('"pr":7.0');
+  });
+
+  it('the adapter preloads gh for a lossless JsonNumber pr (gYDE normalization)', async () => {
+    // Audit 6 (gYDE reopened at c00f2109): the adapter gated its gh preload
+    // on typeof pr === 'number', so a lossless JsonNumber.int(9) row was
+    // never preloaded and publishSummary threw 'gh result not preloaded'
+    // where Python's `type(pr) is int` calls gh. The adapter now applies the
+    // composer's exported gate, so both boundaries normalize identically.
+    const root = await tempRoot();
+    const calls: string[] = [];
+    const effects = await summaryStateEffects(
+      { stateRoot: root.state, xdgStateHome: root.xdg, home: root.root },
+      async (argv) => {
+        // systemctl is probed unconditionally at assembly; only gh rows are
+        // recorded here.
+        if (argv[0] === 'gh') calls.push(argv.join(' '));
+        return argv[0] === 'gh' ? 'Lossless title' : null;
+      },
+      [{ repo: 'r', pr: JsonNumber.int(9) }],
+      () => 1_700_000,
+    );
+    expect(calls).toEqual(['gh api repos/r/pulls/9 --jq .title']);
+    expect(effects.ghTitle('r', 9)).toBe('Lossless title');
+    // And the composer consumes it: the lossless row enriches like Python.
+    const core = {
+      last_tick: 'x',
+      pending_items: [{ repo: 'r', pr: JsonNumber.int(9), title: null }],
+      starts_cap: 8,
+      generated_at: 'g',
+    };
+    const queue = { items: [], starts: [], last_tick: 'x' } as unknown as CrqRecord;
+    const result = publishSummary(core, queue, {}, {}, effects);
+    expect(result.text).toContain('"title":"Lossless title"');
+  });
+
+  it('a falsy title with no cache hit publishes null, not the falsy original', () => {
+    // Audit igxo (reproduced at c00f2109): Python's unconditional
+    // `item["title"] = item["title"] or titles.get((repo, pr))` overwrites a
+    // falsy title with the cache miss (None) even with no previous summary,
+    // so the published bytes carry null. The port only assigned on a hit,
+    // leaking the empty string into the bytes.
+    const core = {
+      last_tick: 'x',
+      pending_items: [{ repo: 'r', pr: null, title: '' }],
+      starts_cap: 8,
+      generated_at: 'g',
+    };
+    const queue = { items: [], starts: [], last_tick: 'x' } as unknown as CrqRecord;
+    const result = publishSummary(
+      core,
+      queue,
+      {},
+      {},
+      {
+        root: '/state',
+        xdgStateHome: '/xdg',
+        now: 0,
+        previousBytes: null,
+        inbox: {
+          entries: [],
+          readResult: () => null,
+          hasResult: () => false,
+          hasProgress: () => false,
+        },
+        triageRows: [],
+        systemd: { error: 'x' },
+        systemdClock: { realtime: 0, monotonic: 0 },
+        ghTitle: () => {
+          throw new Error('gh must not fire for a null pr');
+        },
+        readReceipt: () => null,
+      },
+    );
+    expect(result.text).toContain('"title":null');
+    expect(result.text).not.toContain('"title":""');
+  });
+
+  it('preserves integer-like context_error key order byte-exactly', () => {
+    // Audit igxr (reproduced at c00f2109): Python dicts keep insertion order
+    // for integer-like string keys (json.loads preserves the raw lexeme
+    // order), but a plain JS object re-enumerates them numerically, so the
+    // old toPlain hop reordered {"2","1"} into {"1","2"}. The row must keep
+    // its lossless JsonObject view through the exact-byte serializer.
+    const row = new TextEncoder().encode(
+      '{"status":"delivered","canonical_id":"c","target":"tip","finding":{"id":"i","title":"T","severity":"minor"},"context_error":{"2":"first","1":"second"}}',
+    );
+    const core = { last_tick: 'x', pending_items: [], starts_cap: 8, generated_at: 'g' };
+    const queue = { items: [], starts: [], last_tick: 'x' } as unknown as CrqRecord;
+    const result = publishSummary(
+      core,
+      queue,
+      {},
+      {},
+      {
+        root: '/state',
+        xdgStateHome: '/xdg',
+        now: 0,
+        previousBytes: null,
+        inbox: {
+          entries: [],
+          readResult: () => null,
+          hasResult: () => false,
+          hasProgress: () => false,
+        },
+        triageRows: [{ name: 'a.json', bytes: row }],
+        systemd: { error: 'x' },
+        systemdClock: { realtime: 0, monotonic: 0 },
+        ghTitle: () => null,
+        readReceipt: () => null,
+      },
+    );
+    expect(result.text).toContain('"context_error":{"2":"first","1":"second"}');
   });
 
   it('preserves an explicitly null schedule_id; defaults only an absent key', () => {

@@ -16,6 +16,7 @@ import {
 } from '../../../src/adapters/crq/summarySource.js';
 import { summarize, mergedCurrent } from '../../../src/policy/crq/statusSummary.js';
 import { JsonNumber } from '../../../src/policy/crq/jsonValue.js';
+import { repairDigest } from '../../../src/policy/crq/publishEffects.js';
 import type { CrqRecord } from '../../../src/policy/crq/receiptIdentity.js';
 
 const execFileP = promisify(execFile);
@@ -324,6 +325,123 @@ describe('summary publish route over real files', () => {
     expect(await readPreviousSummaryBytes(roots)).toEqual(payload);
   });
 
+  it('an unreferenced chmod-000 receipt never aborts assembly; a referenced one reads as unverified', async () => {
+    // Audit iO_W (reproduced at c00f2109): Python's merged_current opens
+    // `(receipt_root, receipt_id + ".json")` only for terminal items it must
+    // verify and contains read failures per row into `unverified`; an
+    // unreferenced receipt file is never opened. The adapter preloaded every
+    // valid-id receipt eagerly, so an unreadable unreferenced receipt aborted
+    // the whole publish route where the producer succeeds.
+    const root = await tempRoot();
+    await mkdir(join(root.state, 'receipts'), { recursive: true });
+    // Valid-shape ids: b is referenced by the queue, a is not.
+    const referencedId = 'b'.repeat(64);
+    const unreferencedId = 'a'.repeat(64);
+    await writeFile(join(root.state, 'receipts', `${unreferencedId}.json`), '{}');
+    await writeFile(
+      join(root.state, 'receipts', `${referencedId}.json`),
+      new TextEncoder().encode(
+        JSON.stringify({
+          source: 's',
+          capture: { capture: { paths: [], target: 't', equivalence: {} } },
+          outcome: 'done',
+        }),
+      ),
+    );
+    await chmod(join(root.state, 'receipts', `${unreferencedId}.json`), 0o000);
+    await chmod(join(root.state, 'receipts', `${referencedId}.json`), 0o000);
+    try {
+      const queue = {
+        items: [
+          {
+            kind: 'review-receipt',
+            id: 'i1',
+            state: 'done',
+            receipt_id: referencedId,
+            subject: 's',
+            capture: { capture: { paths: [], target: 't', equivalence: {} } },
+          },
+        ],
+      };
+      const effects = await summaryStateEffects(
+        { stateRoot: root.state, xdgStateHome: root.xdg, home: root.root },
+        async () => null,
+        [],
+        () => 1_700_000,
+        queue,
+      );
+      // Assembly survived the unreferenced chmod-000 receipt.
+      expect(effects.systemd.error).toBeDefined();
+      // The referenced receipt was read (or read as unavailable); merged_current
+      // contains the binding/verification refusal into unverified either way.
+      const bytes = effects.readReceipt(referencedId);
+      expect(bytes === null || bytes instanceof Uint8Array).toBe(true);
+    } finally {
+      await chmod(join(root.state, 'receipts', `${unreferencedId}.json`), 0o644);
+      await chmod(join(root.state, 'receipts', `${referencedId}.json`), 0o644);
+    }
+  });
+
+  it('an unreadable orphan inbox job counts as orphaned without reading it; a referenced unreadable job refuses with its subtype', async () => {
+    // Audit iO_c (reproduced at c00f2109): Python's repair_tick.digest with an
+    // empty queue succeeds on a chmod-000 orphan inbox job (orphaned:1) because
+    // the orphan arm tests only result.json existence; the adapter's eager
+    // content read aborted assembly instead. And when a DRAINABLE job is
+    // unreadable, the digest refuses with the OS-error subtype (audit 5),
+    // exactly where Python's read_text() raises inside the digest.
+    const root = await tempRoot();
+    const orphan = join(root.state, 'repair', 'inbox', 'crq-orph-F1.json');
+    await writeFile(orphan, '{}');
+    await chmod(orphan, 0o000);
+    const effects = await summaryStateEffects(
+      { stateRoot: root.state, xdgStateHome: root.xdg, home: root.root },
+      async () => null,
+      [],
+      () => 1_700_000,
+      { items: [] },
+    );
+    const orphanEntry = effects.inbox.entries.find((entry) => entry.stem === 'crq-orph-F1');
+    expect(orphanEntry).toBeDefined();
+    expect(orphanEntry?.jobBytes).toBeNull(); // never read
+    expect(effects.inbox.hasResult('crq-orph-F1')).toBe(false);
+    try {
+      // Referenced drainable stem whose content is unreadable: the digest
+      // refuses with the captured subtype.
+      const drainable = join(root.state, 'repair', 'inbox', 'crq-dead-F1.json');
+      await writeFile(drainable, '{}');
+      await chmod(drainable, 0o000);
+      const effects2 = await summaryStateEffects(
+        { stateRoot: root.state, xdgStateHome: root.xdg, home: root.root },
+        async () => null,
+        [],
+        () => 1_700_000,
+        { items: [{ id: 'i', repair_runs: { r: { state: 'queued', jobs: ['crq-dead-F1'] } } }] },
+      );
+      expect(() =>
+        repairDigest(
+          {
+            items: [{ id: 'i', repair_runs: { r: { state: 'queued', jobs: ['crq-dead-F1'] } } }],
+          } as never,
+          effects2.inbox,
+          1_700_000,
+        ),
+      ).toThrow();
+      try {
+        repairDigest(
+          {
+            items: [{ id: 'i', repair_runs: { r: { state: 'queued', jobs: ['crq-dead-F1'] } } }],
+          } as never,
+          effects2.inbox,
+          1_700_000,
+        );
+      } catch (error) {
+        expect((error as { pythonError?: string }).pythonError).toBe('PermissionError');
+      }
+    } finally {
+      await chmod(orphan, 0o644);
+    }
+  });
+
   it('binds the repair inbox seam to real files', async () => {
     const root = await tempRoot();
     const jobDir = join(root.state, 'repair', 'job-1');
@@ -334,11 +452,18 @@ describe('summary publish route over real files', () => {
     const pendingMtime = Date.now() / 1000 - 600;
     await writeFile(join(root.state, 'repair', 'inbox', 'pending.json'), '{}');
     await writeFile(join(root.state, 'repair', 'inbox', 'orphan.json'), '{}');
-    const inbox = await fileRepairInboxState(root.state);
+    // Selection models the digest's referenced stems: only job-1 is
+    // consumed/drainable, so only its content is opened (Python reads job
+    // content inline for referenced stems only; pending/orphan contribute
+    // mtime/existence and are never opened here).
+    const inbox = await fileRepairInboxState(root.state, new Set(['job-1']));
     const stems = inbox.entries.map((entry) => entry.stem).sort();
     expect(stems).toEqual(['job-1', 'orphan', 'pending']);
     const jobEntry = inbox.entries.find((entry) => entry.stem === 'job-1');
     expect(jobEntry?.jobBytes).toEqual(job);
+    // Unselected stems carry no content: the digest would never read them.
+    expect(inbox.entries.find((entry) => entry.stem === 'orphan')?.jobBytes).toBeNull();
+    expect(inbox.entries.find((entry) => entry.stem === 'pending')?.jobBytes).toBeNull();
     expect(inbox.hasProgress('job-1')).toBe(true);
     expect(inbox.hasResult('job-1')).toBe(false);
     expect(inbox.readResult('job-1')).toBeNull();
@@ -380,6 +505,30 @@ describe('summary publish route over real files', () => {
       expect(rows.map((row) => row.name)).toEqual(['a.json', 'b.json']);
       expect(rows[0]?.bytes).toEqual(good);
       expect(rows[1]?.bytes).toBeNull();
+    } finally {
+      await chmod(join(triageDir, 'b.json'), 0o644);
+    }
+  });
+
+  it('the adapter records the exact OS-error subtype for a chmod-denied triage row', async () => {
+    // Audit 5 (NEW at c00f2109): Python records error: type(exc).__name__, so
+    // a chmod-000 row is PermissionError (and a vanished one would be
+    // FileNotFoundError), not the generic OSError. Verified against CPython 3
+    // on this host. The byte contract needs the subtype, not just null bytes.
+    const root = await tempRoot();
+    const triageDir = join(root.state, 'backfill', 'findings', 'triage');
+    await mkdir(triageDir, { recursive: true });
+    const rowA = new TextEncoder().encode(
+      '{"status":"delivered","canonical_id":"c","target":"tip","finding":{"id":"i","title":"T","severity":"minor"}}',
+    );
+    await writeFile(join(triageDir, 'a.json'), rowA);
+    await writeFile(join(triageDir, 'b.json'), '{}');
+    await chmod(join(triageDir, 'b.json'), 0o000);
+    try {
+      const rows = await fileTriageRows(root.state);
+      expect(rows[1]?.bytes).toBeNull();
+      expect(rows[1]?.readError).toBeDefined();
+      expect(rows[1]?.readError?.pythonError).toBe('PermissionError');
     } finally {
       await chmod(join(triageDir, 'b.json'), 0o644);
     }

@@ -36,11 +36,13 @@ import { compareCodePoints } from './pythonJson.js';
 /** Python exception classes these projections can surface. */
 export type PublishEffectsPythonError =
   | 'AttributeError'
+  | 'FileNotFoundError'
   | 'IndexError'
   | 'JSONDecodeError'
   | 'KeyError'
   | 'OSError'
   | 'OverflowError'
+  | 'PermissionError'
   | 'TypeError'
   | 'ValueError';
 
@@ -61,6 +63,14 @@ export interface TriageRowFile {
   readonly name: string;
   /** The exact row bytes; absent or unreadable bytes become a row error. */
   readonly bytes: Uint8Array | null;
+  /**
+   * The adapter's read failure for these bytes, with the Python OS-error
+   * subtype (`type(exc).__name__`) the strict=False path records. When set,
+   * the composer rethrows it per row so `{file, error}` carries
+   * `PermissionError`/`FileNotFoundError`/`OSError` exactly; when unset,
+   * null bytes mean the constructed-row OSError default.
+   */
+  readonly readError?: PublishEffectsError;
 }
 
 export interface RepairInboxEntry {
@@ -73,6 +83,14 @@ export interface RepairInboxEntry {
   readonly jobBytes: Uint8Array | null;
   /** `path.stat().st_mtime` seconds. */
   readonly mtime: number;
+  /**
+   * The adapter's job-read failure, when the glob-yielded file exists but
+   * cannot be read: the Python OS-error class and message the digest must
+   * propagate if (and only if) this stem's content is consumed. Unreferenced
+   * stems never reach it, so an unreadable orphan stays digest-visible only
+   * through `result.json` existence, exactly like the producer.
+   */
+  readonly jobError?: PublishEffectsError;
 }
 
 export interface RepairInboxState {
@@ -312,7 +330,11 @@ export function repairDigest(
     }
     // Python `json.loads(path.read_text())`: a missing job file is impossible
     // for a glob yield, and an unreadable one must have raised in the seam
-    // before reaching here, so null bytes refuse as the glob/parse gap.
+    // before reaching here, so null bytes refuse as the glob/parse gap. The
+    // captured adapter failure carries the exact OS-error subtype; it is only
+    // consulted for consumed/drainable stems, so an unreadable orphan never
+    // aborts the digest (Python never opens the orphan's content either).
+    if (entry.jobError !== undefined) throw entry.jobError;
     if (entry.jobBytes === null) {
       throw new PublishEffectsError(
         `[Errno 2] No such file or directory: 'state/repair/inbox/${entry.stem}.json'`,
@@ -372,44 +394,65 @@ export function findingTriage(rows: readonly TriageRowFile[]): Record<string, un
   const LIMIT = 32;
   for (const row of rows) {
     try {
+      // The adapter's captured read failure carries the Python OS-error
+      // subtype; rethrow it so the row lands in `errors` exactly as the
+      // producer's strict=False path records it (type(exc).__name__).
+      if (row.readError !== undefined) throw row.readError;
       if (row.bytes === null) throw new TriageRowError('OSError');
       const document = triageLoads(row.bytes);
       const status = subscriptString(document, 'status');
       const finding = subscriptMapping(document, 'finding');
-      for (const value of [
-        status,
-        subscriptValue(document, 'canonical_id'),
-        subscriptValue(document, 'target'),
-        subscriptValue(finding, 'id'),
-        subscriptValue(finding, 'title'),
-        subscriptValue(finding, 'severity'),
-      ]) {
+      // Python validates `for value in (status, row["canonical_id"],
+      // row["target"], finding["id"], finding["title"], finding["severity"]):
+      // if not isinstance(value, str) or not value: raise ValueError`. The
+      // subscripts raise first: a missing row key is KeyError('<key>') and a
+      // non-mapping `finding` already refused above, so only the KeyError and
+      // ValueError arms are reachable here, in exactly that evaluation order.
+      const requiredString = (value: unknown, key: string): string => {
+        if (value === undefined) throw new TriageRowError('KeyError', `'${key}'`);
         if (typeof value !== 'string' || value.length === 0) {
           throw new TriageRowError('ValueError', 'invalid finding row');
         }
-      }
-      const detail: Record<string, unknown> = {
-        id: finding.get('id') as string,
-        canonical_id: document.get('canonical_id') as string,
-        path: pyTruthy(document.get('mapped_path'))
-          ? plainOf(document.get('mapped_path') as JsonValue)
-          : finding.has('path')
-            ? plainOf(finding.get('path') as JsonValue)
-            : null,
-        title: finding.get('title') as string,
-        severity: finding.get('severity') as string,
-        target: Object.prototype.hasOwnProperty.call(document.plain, 'target_current')
-          ? document.get('target_current')
-          : document.get('target'),
-        event_id: document.get('previous_event_id') ?? null,
+        return value;
       };
-      const plainDetail = unwrapValues(detail);
-      counts.set(status, (counts.get(status) ?? 0) + 1);
+      const statusValue = requiredString(status, 'status');
+      const canonicalId = requiredString(document.get('canonical_id'), 'canonical_id');
+      const target = requiredString(document.get('target'), 'target');
+      const findingId = requiredString(finding.get('id'), 'id');
+      const findingTitle = requiredString(finding.get('title'), 'title');
+      const findingSeverity = requiredString(finding.get('severity'), 'severity');
+      // Row fields keep their lossless view form (JsonObject views stay
+      // views): the publisher's compact writer is the exact-byte serializer,
+      // and a plain-object hop would reorder integer-like string keys that
+      // JS objects must enumerate numerically but Python dicts keep in
+      // insertion order (audit igxr: context_error {"2","1"}).
+      const detail: Record<string, unknown> = {
+        id: findingId,
+        canonical_id: canonicalId,
+        path: pyTruthy(document.get('mapped_path'))
+          ? viewOf(document.get('mapped_path'))
+          : finding.has('path')
+            ? viewOf(finding.get('path'))
+            : null,
+        title: findingTitle,
+        severity: findingSeverity,
+        target: viewOf(
+          Object.prototype.hasOwnProperty.call(document.plain, 'target_current')
+            ? document.get('target_current')
+            : target,
+        ),
+        event_id: viewOf(document.get('previous_event_id') ?? null),
+      };
+      counts.set(statusValue, (counts.get(statusValue) ?? 0) + 1);
       const contextError = document.get('context_error');
       if (isMapping(contextError)) {
         contextFailureCount += 1;
         if (contextFailures.length < LIMIT) {
-          contextFailures.push({ ...plainDetail, status, context_error: contextError.toPlain() });
+          contextFailures.push({
+            ...detail,
+            status: statusValue,
+            context_error: viewOf(contextError),
+          });
         }
       }
       if (status === 'needs-human') {
@@ -419,32 +462,36 @@ export function findingTriage(rows: readonly TriageRowFile[]): Record<string, un
         if (failureClass === 'owner-decision') {
           ownerCount += 1;
           if (ownerDecisions.length < LIMIT) {
-            ownerDecisions.push({ ...plainDetail, failure_class: failureClass });
+            ownerDecisions.push({ ...detail, failure_class: viewOf(failureClass) });
           }
         } else if (!isUnknown) {
           operatorCount += 1;
           if (operatorAttention.length < LIMIT) {
-            operatorAttention.push({ ...plainDetail, failure_class: failureClass });
+            operatorAttention.push({ ...detail, failure_class: viewOf(failureClass) });
           }
         } else {
           unknownFailureCount += 1;
           if (unknownFailure.length < LIMIT) {
             // Python's `row.get("failure_class")` is None for an absent key;
             // a JSON null, never a missing key. Non-string values (including
-            // objects and lists) stay data and must serialise, so views are
-            // unwrapped to plain JSON here.
-            unknownFailure.push({ ...plainDetail, failure_class: unwrap(failureClass ?? null) });
+            // objects and lists) stay data and must serialise losslessly.
+            unknownFailure.push({ ...detail, failure_class: viewOf(failureClass ?? null) });
           }
           operatorCount += 1;
         }
-        if (needsHuman.length < LIMIT) needsHuman.push(plainDetail);
+        if (needsHuman.length < LIMIT) needsHuman.push(detail);
       }
     } catch (error) {
       errorCount += 1;
       if (errors.length < LIMIT) {
         errors.push({
           file: row.name,
-          error: error instanceof TriageRowError ? error.pythonError : 'ValueError',
+          error:
+            error instanceof TriageRowError
+              ? error.pythonError
+              : error instanceof PublishEffectsError
+                ? error.pythonError
+                : 'ValueError',
         });
       }
       continue;
@@ -828,6 +875,15 @@ class TriageMapping {
     return out;
   }
 
+  /**
+   * Serializer-native projection: nested mappings stay JsonObject views so
+   * `pythonJsonText` serialises the exact source key order (a plain object
+   * hop would reorder integer-like string keys; audit igxr).
+   */
+  toView(): JsonObject {
+    return this.source;
+  }
+
   has(key: string): boolean {
     return this.source.has(key);
   }
@@ -858,39 +914,21 @@ function plainOf(value: JsonValue): unknown {
   return value;
 }
 
-/** Unwrap a runtime value (mapping views, arrays of views) to plain JSON. */
-function unwrap(value: unknown): unknown {
-  if (value instanceof TriageMapping) return value.toPlain();
-  if (Array.isArray(value)) return value.map(unwrap);
-  return value;
-}
-
 function pyValue(value: JsonValue): unknown {
   return plainOf(value);
 }
 
-/** Unwrap TriageMapping views from an output row so JSON can serialise it. */
-function unwrapValues(record: Record<string, unknown>): Record<string, unknown> {
-  // Own-property writes: `detail` keys come from attacker-controlled triage
-  // JSON, so a `__proto__` key must never become a prototype assignment.
-  const out: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(record)) {
-    const resolved =
-      value instanceof TriageMapping
-        ? value.toPlain()
-        : Array.isArray(value)
-          ? (value as unknown[]).map((item: unknown) =>
-              item instanceof TriageMapping ? item.toPlain() : item,
-            )
-          : value;
-    Object.defineProperty(out, key, {
-      value: resolved,
-      enumerable: true,
-      writable: true,
-      configurable: true,
-    });
-  }
-  return out;
+/**
+ * Row fields keep the lossless source view: a TriageMapping stays its
+ * JsonObject view so the publisher's exact-byte serializer preserves Python
+ * insertion order for integer-like keys (a plain-object hop would reorder
+ * them; audit igxr). Scalars and arrays pass through; array items that are
+ * mappings stay views too.
+ */
+function viewOf(value: unknown): unknown {
+  if (value instanceof TriageMapping) return value.toView();
+  if (Array.isArray(value)) return value.map(viewOf);
+  return value;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -916,14 +954,6 @@ function subscriptMapping(container: TriageMapping, key: string): TriageMapping 
   }
   if (!isMapping(value)) {
     throw new TriageRowError('TypeError', subscriptMessage(value, 'value'));
-  }
-  return value;
-}
-
-function subscriptValue(container: TriageMapping, key: string): unknown {
-  const value = container.get(key);
-  if (value === undefined) {
-    throw new TriageRowError('KeyError', `'${key}'`);
   }
   return value;
 }
@@ -1022,6 +1052,41 @@ function plainOf2(value: unknown): unknown {
 
 function jobKey(job: unknown): string {
   return typeof job === 'string' ? job : JSON.stringify(job) + ':' + typeof job;
+}
+
+/**
+ * The inbox stems whose content the digest will read: jobs listed in a
+ * 'queued' run (any item kind) whose id passes the drain grammar. Best-effort
+ * and never throwing: any queue defect here is raised by `repairDigest`
+ * itself, with the producer's exact class and message, before its inbox
+ * loop; this selector only tells the filesystem layer which files the
+ * producer would open, so unreadable orphans are never touched (audit iO_c).
+ */
+export function drainableStemsFromQueue(queue: unknown): ReadonlySet<string> {
+  const selected = new Set<string>();
+  try {
+    for (const item of queueItems(queue)) {
+      for (const record of repairRuns(item).values()) {
+        if (recordGet(record, 'state') !== 'queued') continue;
+        const jobs = recordGet(record, 'jobs');
+        if (jobs === undefined) continue;
+        const jobElements: readonly unknown[] = Array.isArray(jobs)
+          ? jobs
+          : typeof jobs === 'string'
+            ? [...jobs]
+            : jobs instanceof TriageMapping
+              ? [...jobs.entriesOfSource().map(([key]) => key)]
+              : [];
+        for (const job of jobElements) {
+          if (typeof job === 'string' && JOB_ID.test(job)) selected.add(job);
+        }
+      }
+    }
+  } catch {
+    // The digest raises the producer's refusal; no selection is safer.
+    return new Set<string>();
+  }
+  return selected;
 }
 
 /**

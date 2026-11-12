@@ -35,7 +35,7 @@
  * the compact separators and one trailing newline (the atomic writer's
  * exact bytes); never `JSON.stringify`.
  */
-import { JsonNumber } from './jsonValue.js';
+import { JsonNumber, JsonObject, parseJsonValue, type JsonValue } from './jsonValue.js';
 import {
   PublishEffectsError,
   findingTriage,
@@ -153,12 +153,13 @@ export function publishSummary(
     }
     const repo = item['repo'];
     const pr = item['pr'];
-    if (!pyTruthy(item['title'])) {
-      const cached = cacheLookup(titles, repo, pr);
-      if (cached !== undefined) {
-        item['title'] = cached;
-      }
-    }
+    // Python `item["title"] = item["title"] or titles.get((repo, pr))`
+    // assigns unconditionally: a cache miss is None (a JSON null in the
+    // bytes), never the falsy original value. Audit igxo: an empty title
+    // with no cache hit must publish null, not "".
+    item['title'] = pyTruthy(item['title'])
+      ? item['title']
+      : (cacheLookup(titles, repo, pr) ?? null);
     const ghPr = ghIntegerPr(pr);
     if (!pyTruthy(item['title']) && pyTruthy(repo) && ghPr !== null) {
       // `type(pr) is int`: JSON integers only (a lossless JsonNumber int is
@@ -255,50 +256,47 @@ function titleCache(previousBytes: Uint8Array | null): Map<string, Map<CacheKey,
   try {
     document = parsePlainPrevious(previousBytes);
   } catch (error) {
-    // OSError (unreadable/absent) and ValueError (json decode) void the cache.
+    // The producer's comprehension reads the previous INSIDE its try: OSError
+    // (unreadable/absent) and ValueError (json decode) void the cache.
     if (isPublishRefusal(error)) {
       const refusal = error as SummaryPublishError;
       if (refusal.pythonError === 'OSError' || refusal.pythonError === 'ValueError') return cache;
     }
     throw error;
   }
-  if (!isRecord(document)) {
+  if (!(document instanceof JsonObject)) {
     // AttributeError escapes the producer's except clause (probed: a list or
     // scalar previous summary crashes publish).
     throw new SummaryPublishError(
-      `'${pythonTypeName(document)}' object has no attribute 'get'`,
+      `'${jsonTypeName(document)}' object has no attribute 'get'`,
       'AttributeError',
     );
   }
-  const rows = document['pending_items'];
-  if (rows === undefined || rows === null) return cache;
-  if (!Array.isArray(rows)) {
-    // `for i in <non-list>`: NoneType/str/int iterate element-wise and the
-    // row subscripts then fail with TypeError -> caught, cache voided.
-    return cache;
-  }
+  // `.get("pending_items", [])`: absent -> default []; explicit None and
+  // every non-list reach `for i in ...`, whose element subscripts raise
+  // TypeError -> caught -> the whole cache voids (an empty cache here).
+  const rowsValue = document.has('pending_items') ? document.get('pending_items') : undefined;
+  if (rowsValue === undefined || rowsValue === null) return cache;
+  if (!Array.isArray(rowsValue)) return cache;
   try {
-    for (const row of rows) {
-      if (!isRecord(row)) {
-        // `i["repo"]` on a str/list element raises TypeError -> voided.
-        throw new SummaryPublishError(
-          typeof row === 'string'
-            ? "string indices must be integers, not 'str'"
-            : Array.isArray(row)
-              ? 'list indices must be integers or slices, not str'
-              : `'${pythonTypeName(row)}' object is not subscriptable`,
-          'TypeError',
-        );
+    for (const rowValue of rowsValue) {
+      if (!(rowValue instanceof JsonObject)) {
+        // `i["repo"]` on a scalar/list element raises TypeError -> voided.
+        throw new SummaryPublishError(subscriptMessageJson(rowValue), 'TypeError');
       }
-      if (!('repo' in row) || !('pr' in row)) {
+      if (!rowValue.has('repo') || !rowValue.has('pr')) {
         throw new SummaryPublishError("'repo'", 'KeyError');
       }
-      const repo = row['repo'];
-      const pr = row['pr'];
+      const repo = pyView(rowValue.get('repo') as JsonValue);
+      const pr = pyView(rowValue.get('pr') as JsonValue);
+      const title = rowValue.get('title');
       cacheLookupKey(repo, pr);
       cache.set(
         cacheBucket(repo),
-        cacheBucketMap(cache, repo).set(cacheKey2(pr), row['title'] ?? null),
+        cacheBucketMap(cache, repo).set(
+          cacheKey2(pr),
+          title === null || title === undefined ? null : pyView(title),
+        ),
       );
     }
   } catch (error) {
@@ -324,6 +322,17 @@ function cacheBucket(repo: unknown): string {
       return `h:int:${repo}`;
     }
     return `h:${String(repo)}:${typeof repo}`;
+  }
+  if (repo instanceof JsonNumber) {
+    // A lossless int IS a Python int: hash to the same bucket its plain
+    // parsed form would take (small ints share the interned slot; biggers
+    // share the digit-string slot). A float lexeme hashes like its value.
+    if (repo.kind === 'int') {
+      const value = repo.integer as bigint;
+      if (value >= -5n && value <= 256n) return `h:int:${value}`;
+      return `h:${value}:number`;
+    }
+    return `h:${String(repo.float)}:number`;
   }
   // Unhashable repo keys void the cache at build time (TypeError caught).
   throw new SummaryPublishError(
@@ -363,14 +372,44 @@ function cacheKey2(pr: unknown): CacheKey {
   throw new SummaryPublishError('unhashable type', 'TypeError');
 }
 
+/** A lossless cache entry: views stay serialisable, scalars pass through. */
+function pyView(value: JsonValue): unknown {
+  if (value instanceof JsonObject || value instanceof JsonNumber) return value;
+  if (Array.isArray(value)) return value.map(pyView);
+  return value;
+}
+
+function jsonTypeName(value: unknown): string {
+  if (value === null || value === undefined) return 'NoneType';
+  if (typeof value === 'boolean') return 'bool';
+  if (value instanceof JsonNumber) return value.kind === 'int' ? 'int' : 'float';
+  if (typeof value === 'number') return Number.isInteger(value) ? 'int' : 'float';
+  if (typeof value === 'string') return 'str';
+  if (Array.isArray(value)) return 'list';
+  return 'dict';
+}
+
+/** The exact TypeError message `i["repo"]` raises for a non-dict row. */
+function subscriptMessageJson(value: unknown): string {
+  if (value === null || value === undefined) return `'NoneType' object is not subscriptable`;
+  if (typeof value === 'number' || typeof value === 'boolean' || value instanceof JsonNumber) {
+    return `'${jsonTypeName(value)}' object is not subscriptable`;
+  }
+  if (Array.isArray(value)) return 'list indices must be integers or slices, not str';
+  if (typeof value === 'string') return "string indices must be integers, not 'str'";
+  return `'${jsonTypeName(value)}' object is not subscriptable`;
+}
+
 function cacheLookupKey(repo: unknown, pr: unknown): void {
   cacheBucket(repo);
   cacheKey2(pr);
 }
 
 /** `type(pr) is int and pr > 0`: a plain JSON integer or a lossless int
- * JsonNumber; floats, bools and everything else return null (no gh lookup). */
-function ghIntegerPr(pr: unknown): number | null {
+ * JsonNumber; floats, bools and everything else return null (no gh lookup).
+ * Exported: the adapter pre-resolves gh for exactly the rows this gate lets
+ * through, so a lossless queue is preloaded where Python would call gh. */
+export function ghIntegerPr(pr: unknown): number | null {
   if (typeof pr === 'number' && Number.isInteger(pr) && pr > 0) return pr;
   if (pr instanceof JsonNumber && pr.kind === 'int') {
     const value = pr.integer as bigint;
@@ -421,7 +460,13 @@ function parsePlainPrevious(bytes: Uint8Array): unknown {
     );
   }
   try {
-    return JSON.parse(text) as unknown;
+    // Lossless parse (int-vs-float lexemes, object insertion order kept in
+    // JsonObject views): the cache walk applies the producer's exact clause
+    // to the document as json.loads would see it, and cached non-string
+    // titles serialise byte-exactly. A JSON.parse hop would round every
+    // lexeme and reorder integer-like keys before the TypeError/KeyError
+    // walk could even classify the row.
+    return parseJsonValue(text, { duplicates: 'last' });
   } catch (error) {
     throw new SummaryPublishError(
       error instanceof Error ? error.message : String(error),
