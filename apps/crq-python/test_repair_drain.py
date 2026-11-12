@@ -335,6 +335,23 @@ class RepairDrainTest(unittest.TestCase):
             repair_tick.reconcile_fix_prs(c, self.queue)
             self.assertEqual(mark.call_count, 1)
 
+    def test_closed_fix_pr_is_terminal_and_never_polled_again(self):
+        item = self.queue['items'][0]
+        record = item['repair_runs']['run1']
+        record.update(fix_pr={'number': 99, 'url': 'https://github.com/example/repo/pull/99'},
+                      verdicts=[{'job': 'crq-run1-F1', 'verdict': 'FIXED', 'reason': 'verified'}])
+        c = SimpleNamespace(STATE=self.root / 'state', iso=lambda: 'now',
+                            pr_info=mock.Mock(return_value={'state': 'CLOSED'}),
+                            git=lambda *args: self.tip, is_ancestor=lambda *args: True)
+        repair_tick.reconcile_fix_prs(c, self.queue)
+        self.assertEqual(record['fix_closed'], 'now')
+        self.assertEqual(c.pr_info.call_count, 1)
+        self.assertEqual(record['fix_pr']['state'], 'CLOSED')
+        repair_tick.reconcile_fix_prs(c, self.queue)
+        repair_tick.reconcile_fix_prs(c, self.queue)
+        self.assertEqual(c.pr_info.call_count, 1)
+        self.assertNotIn('fix_merged', record)
+
     def test_source_failure_is_retained_without_aborting_reconciliation(self):
         item = self.queue['items'][0]
         record = item['repair_runs']['run1']

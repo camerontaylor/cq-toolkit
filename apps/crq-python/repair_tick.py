@@ -963,7 +963,7 @@ def reconcile_fix_prs(c, q):
             continue
         for run, record in item.get('repair_runs', {}).items():
             pr = record.get('fix_pr')
-            if not pr or record.get('fix_merged'):
+            if not pr or record.get('fix_merged') or record.get('fix_closed'):
                 continue
             try:
                 info = c.pr_info(pr['number'])
@@ -971,6 +971,11 @@ def reconcile_fix_prs(c, q):
                 # Shared forge exhaustion must not abort queue persistence.
                 continue
             pr['state'] = info['state']
+            if info['state'] == 'CLOSED':
+                # Terminal marker: an abandoned fix PR must not cost one forge
+                # call per tick forever.
+                record['fix_closed'] = c.iso()
+                continue
             if info['state'] == 'MERGED':
                 merge = (info.get('mergeCommit') or {}).get('oid')
                 if not merge or not c.is_ancestor(merge, c.git('rev-parse', DEFAULT_REF)):
