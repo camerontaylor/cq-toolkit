@@ -4,10 +4,12 @@ import { describe, expect, test } from 'vitest';
 import {
   UnsafeMergeArgsError,
   headRefFor,
+  mergeWorktreeBranchFor,
   realMergeEffects,
   safeArgs,
   safeRunner,
 } from '../../../src/adapters/forge-github/mergeEffects.js';
+import { HARDENED_DIFF_FLAGS } from '../../../src/shared/gitHarden.js';
 import { OK, sha } from './executeMerges.helpers.js';
 
 // ---------------------------------------------------------------------------
@@ -263,28 +265,33 @@ describe('safeArgs — the I3 guard, one test per forbidden shape', () => {
     ).toThrow(UnsafeMergeArgsError);
   });
 
-  test('round-193: the base-ref read shape passes; broader gh pr view shapes are refused', () => {
-    expect(safeArgs(['pr', 'view', '7', '--json', 'baseRefName'])).toEqual([
+  test('round-193 + round-1193-r3: the base-ref read shape passes (tip OID added); broader gh pr view shapes are refused', () => {
+    expect(safeArgs(['pr', 'view', '7', '--json', 'baseRefName,baseRefOid'])).toEqual([
       'pr',
       'view',
       '7',
       '--json',
-      'baseRefName',
+      'baseRefName,baseRefOid',
     ]);
-    // A different json field, a multi-field list, a missing pr number, a
-    // trailing flag, and a non-numeric pr are all unknown — the read stays
-    // exactly one shape.
+    // A different json field, a field list without the OID, a missing pr
+    // number, a trailing flag, and a non-numeric pr are all unknown — the
+    // read stays exactly one shape.
     expect(() => safeArgs(['pr', 'view', '7', '--json', 'headRefName'])).toThrow(
       /refused: unknown argv shape/,
     );
     expect(() => safeArgs(['pr', 'view', '7', '--json', 'baseRefName,headRefName'])).toThrow(
       UnsafeMergeArgsError,
     );
-    expect(() => safeArgs(['pr', 'view', '--json', 'baseRefName'])).toThrow(UnsafeMergeArgsError);
-    expect(() => safeArgs(['pr', 'view', '7', '--json', 'baseRefName', '--jq', '.'])).toThrow(
+    expect(() => safeArgs(['pr', 'view', '7', '--json', 'baseRefName'])).toThrow(
       UnsafeMergeArgsError,
     );
-    expect(() => safeArgs(['pr', 'view', 'abc', '--json', 'baseRefName'])).toThrow(
+    expect(() => safeArgs(['pr', 'view', '--json', 'baseRefName,baseRefOid'])).toThrow(
+      UnsafeMergeArgsError,
+    );
+    expect(() =>
+      safeArgs(['pr', 'view', '7', '--json', 'baseRefName,baseRefOid', '--jq', '.']),
+    ).toThrow(UnsafeMergeArgsError);
+    expect(() => safeArgs(['pr', 'view', 'abc', '--json', 'baseRefName,baseRefOid'])).toThrow(
       UnsafeMergeArgsError,
     );
   });
@@ -357,17 +364,39 @@ describe('safeArgs — the I3 guard, one test per forbidden shape', () => {
     ]);
   });
 
-  test('realMergeEffects.readBaseRef reads exactly `gh pr view <n> --json baseRefName` (injected runner)', async () => {
+  test('realMergeEffects.readBaseRef reads exactly `gh pr view <n> --json baseRefName,baseRefOid` (injected runner)', async () => {
     const ghCalls: string[][] = [];
     const effects = realMergeEffects({
       repoRoot: '/repo',
       run: async (args: string[]) => {
         ghCalls.push(args);
-        return { code: 0, stdout: '{"baseRefName":"main"}\n', stderr: '' };
+        return {
+          code: 0,
+          stdout:
+            '{"baseRefName":"main","baseRefOid":"1111222233334444555566667777888899990000"}\n',
+          stderr: '',
+        };
       },
     });
-    expect(await effects.readBaseRef(7)).toEqual({ ok: true, baseRefName: 'main' });
-    expect(ghCalls).toEqual([['pr', 'view', '7', '--json', 'baseRefName']]);
+    const tip = '1111222233334444555566667777888899990000';
+    expect(await effects.readBaseRef(7)).toEqual({
+      ok: true,
+      baseRefName: 'main',
+      baseTipSha: tip,
+    });
+    expect(ghCalls).toEqual([['pr', 'view', '7', '--json', 'baseRefName,baseRefOid']]);
+
+    // An OID that is not full 40-hex is OMITTED (the gate refuses a
+    // merge parent it cannot verify), never guessed.
+    const shortOid = realMergeEffects({
+      repoRoot: '/repo',
+      run: async () => ({
+        code: 0,
+        stdout: '{"baseRefName":"main","baseRefOid":"abc123"}\n',
+        stderr: '',
+      }),
+    });
+    expect(await shortOid.readBaseRef(7)).toEqual({ ok: true, baseRefName: 'main' });
 
     // A nonzero exit, unparseable JSON, and a missing/empty field all fail
     // closed as { ok: false } — never a guessed base.
@@ -452,5 +481,231 @@ describe('safeArgs — the I3 guard, one test per forbidden shape', () => {
 
   test('headRefFor is the PR-number truth ref', () => {
     expect(headRefFor(7)).toBe('refs/pull/7/head');
+  });
+
+  test('mergeWorktreeBranchFor is the prepared worktree branch the resolver gates on (#1193)', () => {
+    expect(mergeWorktreeBranchFor(7)).toBe('refs/heads/cq-merge/pr-7');
+  });
+});
+
+describe('safeArgs round-1193: the read-only diff shape (the resolver pre-push scan)', () => {
+  const from = sha('a');
+  const to = sha('b');
+  // The hardened flag list is load-bearing (review P1, PR #1628): the
+  // pinned set is the shape, asserted verbatim so the gate cannot drift
+  // off it.
+  const FLAGS = [...HARDENED_DIFF_FLAGS, '--unified=0'];
+  const legal = (): string[] => ['-C', '/repo', 'diff', ...FLAGS, from, to];
+
+  test('the EXACT shape passes — the hardened flags verbatim, then two full 40-hex shas', () => {
+    expect(safeArgs(legal())).toEqual(['-C', '/repo', 'diff', ...FLAGS, from, to]);
+    // The hardening is present, by name (review P1, PR #1628).
+    expect(legal()).toContain('--no-ext-diff');
+    expect(legal()).toContain('--no-textconv');
+  });
+
+  test('every deviation is an unknown shape — shas must be FULL hex, flags fixed, arity exact', () => {
+    const base = ['diff', ...FLAGS] as string[];
+    // A short sha or a revision expression can never ride the shape.
+    expect(() => safeArgs([...base, 'abc123', to])).toThrow(UnsafeMergeArgsError);
+    expect(() => safeArgs([...base, `${from}..${to}`, to])).toThrow(UnsafeMergeArgsError);
+    expect(() => safeArgs([...base, from, 'refs/heads/feat'])).toThrow(UnsafeMergeArgsError);
+    // Flag drift: reordered, dropped, or extra.
+    const reordered = ['diff', FLAGS[1] as string, FLAGS[0] as string, ...FLAGS.slice(2), from, to];
+    expect(() => safeArgs(reordered)).toThrow(UnsafeMergeArgsError);
+    expect(() => safeArgs(['diff', ...FLAGS.slice(1), from, to])).toThrow(UnsafeMergeArgsError);
+    expect(() => safeArgs([...base, '--stat', from, to])).toThrow(UnsafeMergeArgsError);
+    // The historical pre-hardening argv (--no-color + --unified=0 only) is
+    // refused — the old shape must not keep passing beside the new one.
+    expect(() => safeArgs(['diff', '--no-color', '--unified=0', from, to])).toThrow(
+      UnsafeMergeArgsError,
+    );
+    // Arity drift.
+    expect(() => safeArgs(['diff', ...FLAGS, from])).toThrow(UnsafeMergeArgsError);
+    expect(() => safeArgs(['diff'])).toThrow(UnsafeMergeArgsError);
+    // A mutation vocabulary is still refused: diff is READ-ONLY by shape,
+    // and no flag can turn it otherwise.
+    expect(() => safeArgs([...base, '--output=/tmp/x', from, to])).toThrow(UnsafeMergeArgsError);
+  });
+
+  test('realMergeEffects.diffPatch routes the exact hardened argv at the repo root (injected runner — zero processes, no fs)', async () => {
+    const gitCalls: string[][] = [];
+    const effects = realMergeEffects({
+      repoRoot: '/repo',
+      gitRun: async (args: string[]) => {
+        gitCalls.push(args);
+        return { code: 0, stdout: 'diff --git a/x b/x\n', stderr: '' };
+      },
+    });
+    const result = await effects.diffPatch(from, to);
+    expect(result).toEqual({ code: 0, stdout: 'diff --git a/x b/x\n', stderr: '' });
+    expect(gitCalls).toEqual([['-C', '/repo', 'diff', ...FLAGS, from, to]]);
+  });
+});
+
+describe('safeArgs round-1193-r2: the topology read shape (rev-list --parents)', () => {
+  const resolved = sha('c');
+
+  test('the EXACT shape passes — --parents -n 1 plus one full 40-hex sha', () => {
+    expect(safeArgs(['-C', '/repo', 'rev-list', '--parents', '-n', '1', resolved])).toEqual([
+      '-C',
+      '/repo',
+      'rev-list',
+      '--parents',
+      '-n',
+      '1',
+      resolved,
+    ]);
+  });
+
+  test('every deviation is an unknown shape', () => {
+    expect(() => safeArgs(['rev-list', '--parents', '-n', '1', 'abc123'])).toThrow(
+      UnsafeMergeArgsError,
+    );
+    expect(() => safeArgs(['rev-list', '-n', '1', resolved])).toThrow(UnsafeMergeArgsError);
+    expect(() => safeArgs(['rev-list', '--parents', resolved])).toThrow(UnsafeMergeArgsError);
+    expect(() => safeArgs(['rev-list', '--parents', '-n', '2', resolved])).toThrow(
+      UnsafeMergeArgsError,
+    );
+    expect(() => safeArgs(['rev-list', '--parents', '-n', '1', resolved, 'HEAD'])).toThrow(
+      UnsafeMergeArgsError,
+    );
+    expect(() => safeArgs(['rev-list', '--parents', '-n', '1'])).toThrow(UnsafeMergeArgsError);
+  });
+
+  test('realMergeEffects.commitParents routes the exact argv and excludes the queried sha (injected runner)', async () => {
+    const gitCalls: string[][] = [];
+    const effects = realMergeEffects({
+      repoRoot: '/repo',
+      gitRun: async (args: string[]) => {
+        gitCalls.push(args);
+        return { code: 0, stdout: `${resolved} ${sha('a')} ${sha('b')}\n`, stderr: '' };
+      },
+    });
+    const answer = await effects.commitParents(resolved);
+    expect(answer).toEqual({ ok: true, parents: [sha('a'), sha('b')] });
+    expect(gitCalls).toEqual([['-C', '/repo', 'rev-list', '--parents', '-n', '1', resolved]]);
+    const missing = realMergeEffects({
+      repoRoot: '/repo',
+      gitRun: async () => ({ code: 128, stdout: '', stderr: 'bad object' }),
+    });
+    expect(await missing.commitParents(resolved)).toEqual({ ok: false });
+  });
+});
+
+describe('safeArgs round-1193-r3: the ancestry read shape (merge-base --is-ancestor)', () => {
+  const parent = sha('a');
+  const tip = sha('b');
+
+  test('the EXACT shape passes — --is-ancestor plus two full 40-hex shas', () => {
+    expect(safeArgs(['-C', '/repo', 'merge-base', '--is-ancestor', parent, tip])).toEqual([
+      '-C',
+      '/repo',
+      'merge-base',
+      '--is-ancestor',
+      parent,
+      tip,
+    ]);
+  });
+
+  test('every deviation is an unknown shape', () => {
+    expect(() => safeArgs(['merge-base', parent, tip])).toThrow(UnsafeMergeArgsError);
+    expect(() => safeArgs(['merge-base', '--is-ancestor', 'abc123', tip])).toThrow(
+      UnsafeMergeArgsError,
+    );
+    expect(() => safeArgs(['merge-base', '--is-ancestor', parent, 'refs/heads/main'])).toThrow(
+      UnsafeMergeArgsError,
+    );
+    expect(() => safeArgs(['merge-base', '--is-ancestor', parent])).toThrow(UnsafeMergeArgsError);
+    expect(() => safeArgs(['merge-base', '--is-ancestor', '--all', parent, tip])).toThrow(
+      UnsafeMergeArgsError,
+    );
+  });
+
+  test('realMergeEffects.isAncestor routes the exact argv (injected runner — zero processes)', async () => {
+    const gitCalls: string[][] = [];
+    const effects = realMergeEffects({
+      repoRoot: '/repo',
+      gitRun: async (args: string[]) => {
+        gitCalls.push(args);
+        return { code: 0, stdout: '', stderr: '' };
+      },
+    });
+    const answer = await effects.isAncestor(parent, tip);
+    expect(answer).toEqual({ code: 0, stdout: '', stderr: '' });
+    expect(gitCalls).toEqual([['-C', '/repo', 'merge-base', '--is-ancestor', parent, tip]]);
+    // Exit 1 is a NOT-ancestor ANSWER, not a fault.
+    const no = realMergeEffects({
+      repoRoot: '/repo',
+      gitRun: async () => ({ code: 1, stdout: '', stderr: '' }),
+    });
+    expect((await no.isAncestor(parent, tip)).code).toBe(1);
+  });
+});
+
+describe('safeArgs round-1193-r4: the message read and object-presence shapes (P2 ntJt/ntJj)', () => {
+  const resolved = sha('c');
+
+  test('the EXACT log shape passes — -1 --format=%B plus one full 40-hex sha', () => {
+    expect(safeArgs(['-C', '/repo', 'log', '-1', '--format=%B', resolved])).toEqual([
+      '-C',
+      '/repo',
+      'log',
+      '-1',
+      '--format=%B',
+      resolved,
+    ]);
+    // Message-shaping drift (patches, ranges, extra commits) is refused.
+    expect(() => safeArgs(['log', '-1', '--format=%b', resolved])).toThrow(UnsafeMergeArgsError);
+    expect(() => safeArgs(['log', '-p', '--format=%B', resolved])).toThrow(UnsafeMergeArgsError);
+    expect(() => safeArgs(['log', '-1', '--format=%B', 'abc123'])).toThrow(UnsafeMergeArgsError);
+    expect(() => safeArgs(['log', '--format=%B', resolved])).toThrow(UnsafeMergeArgsError);
+  });
+
+  test('the EXACT cat-file shape passes — -e plus one full 40-hex sha', () => {
+    expect(safeArgs(['-C', '/repo', 'cat-file', '-e', resolved])).toEqual([
+      '-C',
+      '/repo',
+      'cat-file',
+      '-e',
+      resolved,
+    ]);
+    // Type/flag drift is refused.
+    expect(() => safeArgs(['cat-file', '-e', resolved, 'commit'])).toThrow(UnsafeMergeArgsError);
+    expect(() => safeArgs(['cat-file', '-t', resolved])).toThrow(UnsafeMergeArgsError);
+    expect(() => safeArgs(['cat-file', '-e', 'abc123'])).toThrow(UnsafeMergeArgsError);
+  });
+
+  test('the gate base fetch rides the existing colon-less fetch shape (safeArgs admits it)', () => {
+    expect(safeArgs(['-C', '/repo', 'fetch', 'origin', 'main'])).toEqual([
+      '-C',
+      '/repo',
+      'fetch',
+      'origin',
+      'main',
+    ]);
+  });
+
+  test('realMergeEffects routes the new argv shapes (injected runners — zero processes)', async () => {
+    const gitCalls: string[][] = [];
+    const effects = realMergeEffects({
+      repoRoot: '/repo',
+      gitRun: async (args: string[]) => {
+        gitCalls.push(args);
+        return { code: 0, stdout: 'resolve\n', stderr: '' };
+      },
+    });
+    expect(await effects.readCommitMessage(resolved)).toEqual({
+      code: 0,
+      stdout: 'resolve\n',
+      stderr: '',
+    });
+    await effects.objectExists(resolved);
+    await effects.fetchBaseBranch('main');
+    expect(gitCalls).toEqual([
+      ['-C', '/repo', 'log', '-1', '--format=%B', resolved],
+      ['-C', '/repo', 'cat-file', '-e', resolved],
+      ['-C', '/repo', 'fetch', 'origin', 'main'],
+    ]);
   });
 });
