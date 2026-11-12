@@ -1977,7 +1977,8 @@ def main(argv=None) -> int:
             except (live.LiveBindingRefused, live.factory.FactoryRefused,
                     live.completion.CompletionError) as exc:
                 raise Refused(str(exc)[:400]) from exc
-            switch_unit(effects, adapter, args.unit, args.runtime)
+            record = switch_unit(effects, adapter, args.unit, args.runtime)
+            print(json.dumps(record, indent=2, sort_keys=True))
         elif args.operation == "switch":
             if not args.sha or not args.tag:
                 raise Refused("checkout switch requires --sha and --tag")

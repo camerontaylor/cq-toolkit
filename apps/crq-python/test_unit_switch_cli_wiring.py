@@ -19,7 +19,7 @@ from pathlib import Path
 from unittest import mock
 
 from test_deploy_controller_fixtures import OPS, dc
-from test_unit_switch_factory import FactoryFixture, NODE_RUNTIME, UNIT
+from test_unit_switch_factory import BOOT, FactoryFixture, NODE_RUNTIME, UNIT
 
 
 def _load(name, path):
@@ -138,18 +138,44 @@ class ControllerUnitSwitchWiringTests(FactoryFixture):
 
     def test_cli_completes_a_real_prior_node_to_python_switch(self):
         observed = self.write_lock(0o600)
-        code, _stdout, stderr = self.run_cli(systemd=self.systemd)
+        code, stdout, stderr = self.run_cli(systemd=self.systemd)
         self.assertEqual(code, 0, stderr)
+        self.assertEqual(stderr, "")
+        artifact = json.loads(stdout)
         records = self.records()
         self.assertEqual(len(records), 1)
-        self.assertEqual(records[0]["operation"], "unit_switch")
-        self.assertEqual(records[0]["outcome"], "completed")
-        self.assertEqual(records[0]["unit"], UNIT)
-        self.assertEqual(records[0]["runtime"], "python")
-        self.assertEqual(records[0]["prior_runtime"], NODE_RUNTIME)
-        self.assertEqual(len(records[0]["completions"]), 2)
+        self.assertEqual(artifact, records[0],
+                         "stdout must be exactly the persisted record")
+        self.assertEqual(artifact["schema_version"], 1)
+        self.assertRegex(artifact["transaction_id"], r"^[0-9a-f]{32}$")
+        self.assertIsInstance(artifact["at"], str)
+        self.assertEqual(artifact["operation"], "unit_switch")
+        self.assertEqual(artifact["outcome"], "completed")
+        self.assertEqual(artifact["phase"], "activation_pending")
+        self.assertEqual(artifact["unit"], UNIT)
+        self.assertEqual(artifact["runtime"], "python")
+        self.assertEqual(artifact["prior_runtime"], NODE_RUNTIME)
+        self.assertIsInstance(artifact["state"], dict)
+        self.assertEqual(artifact["snapshot"]["unit"], UNIT)
+        self.assertEqual(artifact["snapshot"]["runtime"], NODE_RUNTIME)
+        expected = self.python_service(UNIT)
+        completions = artifact["completions"]
+        self.assertEqual(len(completions), 2)
+        self.assertLess(completions[0]["sequence"],
+                        completions[1]["sequence"])
+        self.assertGreater(completions[0]["sequence"], 900)
+        for evidence in completions:
+            self.assertEqual(evidence["unit"], UNIT)
+            self.assertEqual(evidence["runtime"], "python")
+            self.assertTrue(evidence["success"])
+            self.assertEqual(evidence["service_sha256"], expected["sha256"])
+            self.assertEqual(evidence["source_sha"], self.before)
+            self.assertEqual(evidence["template_blob_oid"],
+                             expected["template_blob_oid"])
+            self.assertEqual(evidence["witness"], "manager")
+            self.assertEqual(evidence["boot_id"], BOOT)
         self.assertEqual((self.unit_dir / UNIT).read_bytes(),
-                         self.python_service(UNIT)["bytes"])
+                         expected["bytes"])
         current = self.lock.stat()
         self.assertEqual((current.st_dev, current.st_ino),
                          (observed.st_dev, observed.st_ino),
