@@ -22,6 +22,10 @@
  * narrowed to the fields Python derives, so the later E2 dispatch slice can
  * compose `planRepairDispatch` from real values instead of a fixture.
  *
+ * The worktree path is rendered exactly as Python renders it, including `..`
+ * segments and slash-bearing ids; the prepared job/item values are
+ * server-generated, and this module never creates or inspects that path.
+ *
  * WHAT IS DELIBERATELY NOT DERIVED: `harness` and `promptOverride`. Python's
  * CQ harness constant is a different shape from the typed op's
  * `HarnessConfig`, and there is no Python prompt override. Both stay caller
