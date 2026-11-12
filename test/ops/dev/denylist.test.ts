@@ -635,11 +635,13 @@ describe('addedLineComponents — one component per changed path of ADDED lines'
   test('added lines per path, in diff order; removed and context lines are skipped', () => {
     expect(addedLineComponents(PATCH, 'gate')).toEqual([
       { component: 'src/keep.ts', text: 'const added = "enters the forge";', path: 'src/keep.ts' },
+      { component: 'path src/keep.ts', text: 'src/keep.ts', path: 'src/keep.ts' },
       {
         component: 'docs/new.md',
         text: 'first line\nsecond line',
         path: 'docs/new.md',
       },
+      { component: 'path docs/new.md', text: 'docs/new.md', path: 'docs/new.md' },
     ]);
   });
 
@@ -664,7 +666,30 @@ describe('addedLineComponents — one component per changed path of ADDED lines'
     ].join('\n');
     expect(addedLineComponents(patch, 'gate')).toEqual([
       { component: 'docs/my file.md', text: 'added with crlf', path: 'docs/my file.md' },
+      { component: 'path docs/my file.md', text: 'docs/my file.md', path: 'docs/my file.md' },
     ]);
+  });
+
+  test('an EMPTY added file is still a component: the path is published and scanned', () => {
+    const patch = [
+      'diff --git a/ghp_abcdefghijklmnopqrs b/ghp_abcdefghijklmnopqrs',
+      'new file mode 100644',
+      '--- /dev/null',
+      '+++ b/ghp_abcdefghijklmnopqrs',
+    ].join('\n');
+    const components = addedLineComponents(patch, 'gate');
+    expect(components).toEqual([
+      { component: 'ghp_abcdefghijklmnopqrs', text: '', path: 'ghp_abcdefghijklmnopqrs' },
+      {
+        component: 'path ghp_abcdefghijklmnopqrs',
+        text: 'ghp_abcdefghijklmnopqrs',
+        path: 'ghp_abcdefghijklmnopqrs',
+      },
+    ]);
+    const scans = scanComponents(components, [
+      { id: 'github-pat', description: 'd', regex: 'ghp_[A-Za-z0-9]{16,}' },
+    ]);
+    expect(scans[1]?.hits).toEqual([{ ruleId: 'github-pat', lines: [1] }]);
   });
 
   test('an empty patch yields zero components (nothing to scan is clean)', () => {
@@ -700,6 +725,7 @@ describe('addedLineComponents — git C-quoted pathnames (core.quotePath, review
         text: 'const token = "sk-live-quoted";',
         path: 'config/sécret.txt',
       },
+      { component: 'path config/sécret.txt', text: 'config/sécret.txt', path: 'config/sécret.txt' },
     ]);
     // The end-to-end point of the decode: a rule scoped to ^config/ —
     // which MISSES the raw quoted string — fires on the decoded path.
@@ -708,6 +734,10 @@ describe('addedLineComponents — git C-quoted pathnames (core.quotePath, review
       {
         component: 'config/sécret.txt',
         hits: [{ ruleId: 'config-token', lines: [1] }],
+      },
+      {
+        component: 'path config/sécret.txt',
+        hits: [],
       },
     ]);
   });
@@ -723,6 +753,11 @@ describe('addedLineComponents — git C-quoted pathnames (core.quotePath, review
     ].join('\n');
     expect(addedLineComponents(patch, 'gate')).toEqual([
       { component: 'config/weird\\name.md', text: 'body', path: 'config/weird\\name.md' },
+      {
+        component: 'path config/weird\\name.md',
+        text: 'config/weird\\name.md',
+        path: 'config/weird\\name.md',
+      },
     ]);
   });
 
@@ -765,6 +800,11 @@ describe('addedLineComponents — literal UTF-8 inside quoted paths (quotePath=f
       {
         component: 'config/café"note.txt',
         text: 'const token = "sk-live-cafe";',
+        path: 'config/café"note.txt',
+      },
+      {
+        component: 'path config/café"note.txt',
+        text: 'config/café"note.txt',
         path: 'config/café"note.txt',
       },
     ]);

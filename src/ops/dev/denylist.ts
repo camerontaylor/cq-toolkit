@@ -462,6 +462,14 @@ export function addedLineComponents(patch: string, source: string): ScanComponen
       if (line.startsWith('+++ ') || line.startsWith('--- ')) {
         const candidate = decodeGitQuotedPath(line.slice(4).replace(/\t.*$/, ''), source);
         path = candidate === '/dev/null' ? undefined : candidate.replace(/^[ab]\//, '');
+        // Register the ADDED side even with no '+' lines (review major
+        // sULl, PR #1641): an empty file whose NAME is credential-shaped
+        // is published by the push, and the name is the only text there
+        // is to scan. Registered on the +++ side only, so deletions stay
+        // unpublished.
+        if (line.startsWith('+++ ') && path !== undefined && !added.has(path)) {
+          added.set(path, []);
+        }
       }
       continue;
     }
@@ -478,11 +486,18 @@ export function addedLineComponents(patch: string, source: string): ScanComponen
     lines.push(line.slice(1));
     added.set(path, lines);
   }
-  return [...added.entries()].map(([file, lines]) => ({
-    component: file,
-    text: lines.join('\n'),
-    path: file,
-  }));
+  return [...added.entries()].flatMap(([file, lines]) => [
+    {
+      component: file,
+      text: lines.join('\n'),
+      path: file,
+    },
+    // The PATH is published content too: a credential-shaped filename must
+    // be scanned even when the file has no added lines (review major
+    // sULl). A separate component keeps the content line numbers exact
+    // and names the filename in the hit evidence as `path <file>`.
+    { component: `path ${file}`, text: file, path: file },
+  ]);
 }
 
 /** A reusable scanner over the component set (the injected seam). */

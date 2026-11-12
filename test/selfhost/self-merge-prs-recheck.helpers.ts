@@ -365,6 +365,10 @@ export class RecordingMergeEffects implements MergeEffects {
     return { code: 0, stdout: 'resolve\n', stderr: '' };
   }
 
+  async readCommitEncoding(): Promise<GhResult> {
+    return { code: 0, stdout: '', stderr: '' };
+  }
+
   async objectExists(): Promise<GhResult> {
     return { code: 0, stdout: '', stderr: '' };
   }

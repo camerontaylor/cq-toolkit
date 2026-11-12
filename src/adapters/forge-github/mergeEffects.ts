@@ -206,33 +206,36 @@ export function safeArgs(args: readonly string[], opts: SafeArgsOpts = {}): read
     }
     case 'push': {
       const tail = rest.slice(1);
-      // EXACTLY ONE FLAG, FIRST (review P1 p522, PR #1641): the push must
-      // lead with --no-follow-tags — repo/user `push.followTags` would
-      // otherwise publish annotated tags alongside the explicit refspec,
-      // and a credential in a tag annotation bypasses every gate scan.
-      // The flag-less historical shape is refused like any other
-      // undocumented one, and no SECOND flag can ride (the round-3 rule
-      // stands: any further `-`-prefixed token is refused on sight —
-      // `--force` cannot follow the hardened prefix).
-      if (tail[0] !== '--no-follow-tags') {
+      // EXACTLY TWO FLAGS, FIRST (review P1 p522 + P2 rw4S, PR #1641):
+      // the push must lead with --no-follow-tags AND
+      // --recurse-submodules=no. --no-follow-tags stops `push.followTags`
+      // publishing annotated tags alongside the explicit refspec;
+      // --recurse-submodules=no stops `push.recurseSubmodules=only` from
+      // exiting 0 with the superproject UNPUSHED and stops on-demand
+      // recursion publishing unscanned submodule commits. The flag-less
+      // historical shape is refused like any other undocumented one, and
+      // no THIRD flag can ride (the round-3 rule stands: any further
+      // `-`-prefixed token is refused on sight — `--force` cannot follow
+      // the hardened prefix).
+      if (tail[0] !== '--no-follow-tags' || tail[1] !== '--recurse-submodules=no') {
         throw new UnsafeMergeArgsError(
           args,
-          `the push shape must lead with --no-follow-tags (push.followTags would publish unscanned annotated tags) — refused ${JSON.stringify(tail[0] ?? '')}`,
+          `the push shape must lead with --no-follow-tags and --recurse-submodules=no (followTags would publish unscanned tags; recurseSubmodules=only can exit 0 WITHOUT pushing the branch) — refused ${JSON.stringify(tail.slice(0, 2))}`,
         );
       }
-      for (const arg of tail.slice(1)) {
+      for (const arg of tail.slice(2)) {
         if (arg.startsWith('-')) {
           throw new UnsafeMergeArgsError(
             args,
-            `flags beyond --no-follow-tags are not part of the documented push shape — refused ${JSON.stringify(arg)}`,
+            `flags beyond --no-follow-tags and --recurse-submodules=no are not part of the documented push shape — refused ${JSON.stringify(arg)}`,
           );
         }
       }
-      // tail[1] is the REMOTE; the rest are the refspecs. Fewer than
-      // three tokens means NO explicit refspec (round 1): push.default
+      // tail[2] is the REMOTE; the rest are the refspecs. Fewer than
+      // four tokens means NO explicit refspec (round 1): push.default
       // would choose the destination — possibly the protected branch.
-      if (tail.length < 3) throw unknown();
-      for (const refspec of tail.slice(2)) {
+      if (tail.length < 4) throw unknown();
+      for (const refspec of tail.slice(3)) {
         if (refspec.startsWith('+')) {
           // Force-marker bypass, closed (round 2): a '+'-marked PUSH
           // refspec is a force-push — I3 forbids force outright, whatever
@@ -295,16 +298,24 @@ export function safeArgs(args: readonly string[], opts: SafeArgsOpts = {}): read
       // hide an ASCII token from the UTF-8 decoder), one
       // validateRef-derived sha.
       const tail = rest.slice(1);
+      // Two shapes, both exact: the message read
+      // (`log -1 --encoding=UTF-8 --format=%B <40hex>`) and the
+      // declared-encoding read (`log -1 --format=%e <40hex>`, review P1
+      // sMLw — a non-UTF-8 commit encoding must be refused, not recoded).
       if (
-        tail.length !== 4 ||
-        tail[0] !== '-1' ||
-        tail[1] !== '--encoding=UTF-8' ||
-        tail[2] !== '--format=%B' ||
-        !/^[0-9a-f]{40}$/i.test(tail[3] ?? '')
+        (tail.length === 4 &&
+          tail[0] === '-1' &&
+          tail[1] === '--encoding=UTF-8' &&
+          tail[2] === '--format=%B' &&
+          /^[0-9a-f]{40}$/i.test(tail[3] ?? '')) ||
+        (tail.length === 3 &&
+          tail[0] === '-1' &&
+          tail[1] === '--format=%e' &&
+          /^[0-9a-f]{40}$/i.test(tail[2] ?? ''))
       ) {
-        throw unknown();
+        return args;
       }
-      return args;
+      throw unknown();
     }
     case 'cat-file': {
       // The object-presence read (review P2 ntJj, PR #1628): before the
@@ -530,6 +541,16 @@ export interface MergeEffects {
    * errors.
    */
   readCommitMessage(sha: string): Promise<GhResult>;
+  /**
+   * The commit's DECLARED message encoding header (`git log -1 --format=%e
+   * <sha>`, review P1 sMLw, PR #1641): empty when the commit stores UTF-8.
+   * --encoding only RE-CODES a message; a commit created under
+   * i18n.commitEncoding=UTF-16LE carries that header and its stored bytes
+   * may not survive a UTF-8 re-code (the pinned message read can come
+   * back empty), so the gate must refuse any declared non-UTF-8 encoding
+   * rather than trust the recoded text.
+   */
+  readCommitEncoding(sha: string): Promise<GhResult>;
   /**
    * Whether one full 40-hex object exists LOCALLY (`git cat-file -e
    * <sha>`, review P2 ntJj): the ancestry read needs the forge's base tip
@@ -808,6 +829,12 @@ export function realMergeEffects(opts: RealMergeEffectsOpts): MergeEffects {
   const readCommitMessage = (sha: string): Promise<GhResult> =>
     git(['-C', repoRoot, 'log', '-1', '--encoding=UTF-8', '--format=%B', sha]);
 
+  // The encoding-header read (review P1 sMLw): the declared encoding, raw
+  // header value (empty when the commit stores UTF-8). The gate refuses
+  // non-UTF-8 declarations instead of trusting a re-code.
+  const readCommitEncoding = (sha: string): Promise<GhResult> =>
+    git(['-C', repoRoot, 'log', '-1', '--format=%e', sha]);
+
   // The object-presence read (review P2 ntJj): exit 0 = local, anything
   // else = absent-or-unreadable (the caller fetches and re-checks).
   const objectExists = (sha: string): Promise<GhResult> =>
@@ -883,12 +910,14 @@ export function realMergeEffects(opts: RealMergeEffectsOpts): MergeEffects {
     gh(['pr', 'edit', String(pr), '--base', newBase]);
 
   // The publication/executor push (review P1 p522, PR #1641): the argv is
-  // pinned by safeArgs to lead with --no-follow-tags — repo/user
-  // `push.followTags` would otherwise publish ANNOTATED TAGS alongside the
-  // explicit branch refspec, and a credential in a tag annotation bypasses
-  // every scan this family runs.
+  // pinned by safeArgs to lead with --no-follow-tags AND
+  // --recurse-submodules=no. --no-follow-tags stops `push.followTags`
+  // publishing ANNOTATED TAGS; --recurse-submodules=no stops
+  // `push.recurseSubmodules=only` from exiting 0 with the superproject
+  // UNPUSHED (review P2 rw4S) and stops on-demand recursion publishing
+  // unscanned submodule commits (CodeRabbit sULU).
   const pushRef = (ref: string, fromPath: string): Promise<GhResult> =>
-    git(['-C', fromPath, 'push', '--no-follow-tags', 'origin', ref]);
+    git(['-C', fromPath, 'push', '--no-follow-tags', '--recurse-submodules=no', 'origin', ref]);
 
   // The read-only patch read (issue #1193): the argv shape is pinned by
   // safeArgs to HARDENED_DIFF_FLAGS + --unified=0 plus two 40-hex shas —
@@ -925,6 +954,7 @@ export function realMergeEffects(opts: RealMergeEffectsOpts): MergeEffects {
     commitParents,
     isAncestor,
     readCommitMessage,
+    readCommitEncoding,
     objectExists,
     fetchBaseBranch,
   };

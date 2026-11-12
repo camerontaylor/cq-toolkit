@@ -1017,6 +1017,33 @@ export function makeResolveConflictOp(
           // → 'failed' as well (a scan bound exists so no line is ever
           // SKIPPED — truncation would hide a secret placed past it).
           let message: GhResult;
+          // Gate rung 5b: a commit's DECLARED message encoding (review P1
+          // sMLw). `--encoding` only RE-CODES a message; a commit created
+          // under i18n.commitEncoding=UTF-16LE stores that header and may
+          // re-code to nothing, so refuse any non-UTF-8 declaration rather
+          // than trust the recoded text.
+          let declaredEncoding: GhResult;
+          try {
+            declaredEncoding = await effects.readCommitEncoding(resolution.sha);
+          } catch (err) {
+            return {
+              status: 'failed',
+              error: `resolveConflict: reading the resolution commit's declared encoding ${resolution.sha} for pr ${input.pr} threw: ${errorMessage(err)}${sessionSuffix(result)}`,
+            };
+          }
+          if (declaredEncoding.code !== 0) {
+            return {
+              status: 'failed',
+              error: `resolveConflict: the resolution commit's declared encoding ${resolution.sha} for pr ${input.pr} is unreadable (exit ${declaredEncoding.code})${stderrSuffix(declaredEncoding.stderr)} — refusing to publish an unscannable commit message${sessionSuffix(result)}`,
+            };
+          }
+          const declared = declaredEncoding.stdout.trim();
+          if (declared !== '' && !/^utf-?8$/i.test(declared)) {
+            return {
+              status: 'needs-human',
+              reason: `the resolution commit ${resolution.sha} for pr ${input.pr} declares commit-message encoding ${JSON.stringify(declared)}; only UTF-8 commit messages are scannable — the branch was NOT pushed; recreate the commit with UTF-8 (i18n.commitEncoding)${sessionSuffix(result)}`,
+            };
+          }
           try {
             message = await effects.readCommitMessage(resolution.sha);
           } catch (err) {
@@ -1080,6 +1107,16 @@ export function makeResolveConflictOp(
           // sha-moved check (that check's attribution limit — a moved
           // sha never proved the AGENT moved it — is gone with the
           // self-reported push).
+          // Cancellation (review P2 sML8): the governed signal only
+          // reached driver.run, which has already finished; check it once
+          // more immediately before the side effect and publish NOTHING
+          // when the run was cancelled during the gate's reads.
+          if (currentJobContext()?.signal.aborted === true) {
+            return {
+              status: 'indeterminate',
+              detail: `resolveConflict: publication of pr ${input.pr} was not started — the governed run was cancelled after the scan; resolution ${resolution.sha} is committed locally and NOT pushed`,
+            };
+          }
           // The destination is the head branch's BARE form: the input
           // schema admits the refs/heads/<name> spelling (a conservative
           // refname), and a prefix-blind concatenation would publish

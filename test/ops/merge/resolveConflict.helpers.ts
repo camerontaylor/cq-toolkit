@@ -248,6 +248,10 @@ export class FakeMergeEffects implements MergeEffects {
     };
   }
 
+  async readCommitEncoding(): Promise<GhResult> {
+    return { code: 0, stdout: '', stderr: '' };
+  }
+
   async objectExists(sha: string): Promise<GhResult> {
     this.calls.push(`objectExists:${sha}`);
     return { code: this.objectMissing ? 128 : 0, stdout: '', stderr: '' };

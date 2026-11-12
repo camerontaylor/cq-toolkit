@@ -515,6 +515,7 @@ describe('the publication gate message scan and locality fetch (review P2 ntJt/n
       );
       const effects: MergeEffects = {
         ...f.effects,
+        readCommitEncoding: async () => ({ code: 0, stdout: '', stderr: '' }),
         readCommitMessage: async () => ({ code: 1, stdout: '', stderr: 'fatal: bad object' }),
       };
       const op = fixtureOp(effects, driver);
@@ -639,6 +640,50 @@ describe('the publication gate vs refs/replace substitutions (review P1 p528)', 
       }
       expect(f.pushes).toEqual([]);
       expect(lastComponents()).toBeDefined();
+    } finally {
+      await rm(f.root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('the publication gate vs commit-encoding headers (review P1 sMLw)', () => {
+  test('a commit created under i18n.commitEncoding=UTF-16LE declares a non-UTF-8 encoding — the gate refuses without pushing', async () => {
+    const f = await publicationFixture();
+    try {
+      const fakeToken = ['ghp', 'commitencoding123'].join('_');
+      const driver = new GitWorkerDriver(
+        { origin: f.origin, repoRoot: f.repoRoot },
+        async (worktree) => {
+          await writeFile(join(worktree, 'base.txt'), 'baseline\nresolved cleanly\n');
+          // The encoding header is written INTO the commit object, so the
+          // gate must read it (log --format=%e), not trust a re-code.
+          await gitIn(worktree, 'config', 'i18n.commitEncoding', 'UTF-16LE');
+          await gitIn(worktree, 'add', '-A');
+          await gitIn(
+            worktree,
+            'commit',
+            '--quiet',
+            '-m',
+            `resolve: rotate GITHUB_TOKEN=${fakeToken} now`,
+          );
+        },
+      );
+      const op = makeResolveConflictOp({
+        effects: f.effects,
+        drivers: {
+          resolve: (): ResolvedDriver => ({ driver, lane: 'ai-sdk', modelSpec: MODEL_SPEC }),
+        },
+        loadPrompt: fakeLoadPrompt,
+        scan: tokenScanner,
+      });
+      const result = await run(f, op);
+      expect(result.status, JSON.stringify(result, null, 2)).toBe('needs-human');
+      if (result.status === 'needs-human') {
+        expect(result.reason).toContain('declares commit-message encoding');
+        expect(result.reason).toContain('NOT pushed');
+        expect(result.reason).not.toContain(fakeToken);
+      }
+      expect(f.pushes).toEqual([]);
     } finally {
       await rm(f.root, { recursive: true, force: true });
     }
