@@ -244,7 +244,11 @@ import { invalidToolInput, toolFailureKind } from '../../harness/failures.js';
 import type { ToolFailureKind } from '../../harness/failures.js';
 import { boundedErrorText, describeError } from '../error-text.js';
 import { DispatchError, SessionBoundError } from '../errors.js';
-import { boundWorkspacePath, resumedRecordOrThrow } from '../common/workspace.js';
+import {
+  assertSessionsDirOutsideWorkspace,
+  boundWorkspacePath,
+  resumedRecordOrThrow,
+} from '../common/workspace.js';
 import {
   compileOutputSchema,
   uncompilableSchemaVerdict,
@@ -689,8 +693,15 @@ export class AiSdkDriver implements Driver {
     // --- I6 isolation / §2.4 workspace table: a fresh record — created in
     // the bound workspace when one is set, else in a fresh temp workspace —
     // or a real resume, which must record the SAME realpath when a workspace
-    // is bound (else a pre-dispatch config throw).
-    const store = new SessionStore(this.sessionsDir ?? defaultSessionsDir());
+    // is bound (else a pre-dispatch config throw). Annex A: the session
+    // binding file must live OUTSIDE the model-editable tree — a sessions
+    // dir at or under the bound workspace is refused BEFORE any session
+    // state exists (explicit and default dirs alike).
+    const sessionsDir = this.sessionsDir ?? defaultSessionsDir();
+    if (boundWorkspace !== undefined) {
+      assertSessionsDirOutsideWorkspace(sessionsDir, boundWorkspace, 'ai-sdk driver');
+    }
+    const store = new SessionStore(sessionsDir);
     const record =
       sessionRef === undefined
         ? await store.create(
