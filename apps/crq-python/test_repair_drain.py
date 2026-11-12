@@ -348,10 +348,24 @@ class RepairDrainTest(unittest.TestCase):
         self.assertNotIn('fix_merged', record)
         errors = repair_tick.digest(self.root, self.queue)['source_publication_errors']
         self.assertEqual(errors, [{'item': item['id'], 'run': 'run1', 'error': 'forge exhausted'}])
-        with mock.patch.object(repair_tick, 'publish_source_resolution'):
+        with mock.patch.object(repair_tick, 'publish_source_resolution', return_value=False):
             repair_tick.reconcile_fix_prs(c, self.queue)
         self.assertEqual(record['fix_merged'], 'now')
         self.assertNotIn('source_publication_error', record)
+
+    def test_pending_source_resolution_defers_fix_merged_until_retry(self):
+        item = self.queue['items'][0]
+        record = item['repair_runs']['run1']
+        record.update(fix_pr={'number': 99}, verdicts=[])
+        c = SimpleNamespace(iso=lambda: 'now', git=lambda *args: self.tip,
+                            is_ancestor=lambda *args: True,
+                            pr_info=lambda n: {'state': 'MERGED', 'mergeCommit': {'oid': self.tip}})
+        with mock.patch.object(repair_tick, 'publish_source_resolution', return_value=True):
+            repair_tick.reconcile_fix_prs(c, self.queue)
+        self.assertNotIn('fix_merged', record)
+        with mock.patch.object(repair_tick, 'publish_source_resolution', return_value=False):
+            repair_tick.reconcile_fix_prs(c, self.queue)
+        self.assertEqual(record['fix_merged'], 'now')
 
     def test_unverifiable_head_mismatch_cannot_mark_prepared_finding_fixed(self):
         record = self.queue['items'][0]['repair_runs']['run1']
@@ -420,7 +434,8 @@ class RepairDrainTest(unittest.TestCase):
                 item['repair_runs'] = {'run1': record}
                 c.pr_info = lambda n: {'state': 'MERGED', 'headRefOid': actual, 'mergeCommit': {'oid': actual}}
                 with mock.patch.object(repair_tick, 'mark_finding_outcome') as mark, \
-                     mock.patch.object(repair_tick, 'publish_source_resolution') as source:
+                     mock.patch.object(repair_tick, 'publish_source_resolution',
+                                       return_value=False) as source:
                     repair_tick.reconcile_fix_prs(c, self.queue)
                 self.assertEqual(mark.call_count, 2 if allowed else 0)
                 self.assertEqual(source.call_count, 1 if allowed else 0)
@@ -587,8 +602,8 @@ class RepairDrainTest(unittest.TestCase):
                                                            {'data': {'resolveReviewThread': {'thread': {'isResolved': True}}}}]))
         repair_tick.publish_source_resolution(c, record, self.tip)
         self.assertEqual(json.loads(journal.read_text()), {'head': self.tip})
-        self.assertIn('pulls/1/comments', c.gh_json.call_args_list[2].args[1])
-        repair_tick.publish_source_resolution(c, record, self.tip)
+        self.assertIn('pulls/1/comments', c.gh_json.call_args_list[2].args[0][1])
+        self.assertFalse(repair_tick.publish_source_resolution(c, record, self.tip))
         self.assertEqual(json.loads(journal.read_text())['source_resolutions'], [job_id])
 
     def test_enqueue_preserves_explicit_source_ids_and_published_ordinal(self):
@@ -644,7 +659,7 @@ class RepairDrainTest(unittest.TestCase):
                             pr_info=mock.Mock(return_value={'state': 'OPEN'}))
         repair_tick.finalize_publication(c, self.queue, item, 'run1', record, publication)
         self.assertEqual(record['fix_pr']['number'], item['pr'])
-        with mock.patch.object(repair_tick, 'mark_finding_outcome') as mark, mock.patch.object(repair_tick, 'publish_source_resolution'):
+        with mock.patch.object(repair_tick, 'mark_finding_outcome') as mark, mock.patch.object(repair_tick, 'publish_source_resolution', return_value=False):
             repair_tick.reconcile_fix_prs(c, self.queue)
             mark.assert_not_called()
             c.pr_info.return_value = {'state': 'MERGED', 'headRefOid': self.tip, 'mergeCommit': {'oid': self.tip}}
