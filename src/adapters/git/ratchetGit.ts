@@ -813,6 +813,9 @@ export async function gitLsRemoteRef(
   ref: string,
   token: string,
 ): Promise<string | null> {
+  // `ls-remote` arguments are GLOB patterns: an unvalidated `ref` like `ma*`
+  // would let one match pin an oid for a branch that need not exist.
+  assertRev(ref, 'ls-remote');
   const { env, secrets } = gitRemoteEnv(url, token);
   const res = await execGitWithEnv(
     repo,
