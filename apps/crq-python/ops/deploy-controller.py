@@ -82,6 +82,45 @@ def _load_helper(path: Path, expected_sha256: str | None = None):
     return module, digest
 
 
+def _load_live_binding(path: Path | None = None):
+    """Load the unwired live binding only when a production unit switch runs.
+
+    The module imports this controller under a private name for its injected
+    port types. ``production_adapter`` recovers the loaded controller module
+    from the supplied ``Effects`` object, so refusal identity stays at this
+    seam. Nothing here creates a lock, a store, a capability flag or a gate.
+
+    The production call site passes no path and gets one cached module for the
+    binding beside this file. An explicit path is a distinct cache entry, so a
+    caller cannot be handed a stale module for a path it did not ask to load;
+    an unreadable, missing or unresolvable binding refuses as this seam.
+    """
+    if path is None:
+        path = Path(__file__).with_name("unit-live-binding.py")
+        name = "crq_unit_live_binding_cli"
+    else:
+        path = Path(path)
+        name = "crq_unit_live_binding_cli_" + hashlib.sha256(
+            str(path).encode("utf-8", "surrogateescape")).hexdigest()[:16]
+    module = sys.modules.get(name)
+    if module is not None:
+        return module
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise Refused("live unit binding is unavailable: " + str(path)[:200])
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    try:
+        spec.loader.exec_module(module)
+    except (OSError, ImportError, SyntaxError) as exc:
+        sys.modules.pop(name, None)
+        raise Refused("live unit binding is unavailable: " + str(exc)[:200]) from exc
+    except BaseException:
+        sys.modules.pop(name, None)
+        raise
+    return module
+
+
 LOCK_NAME = "controller.lock"
 JOURNAL_SCHEMA = 1
 
@@ -1930,7 +1969,16 @@ def main(argv=None) -> int:
         if args.operation == "switch" and (args.unit or args.runtime):
             if not args.unit or not args.runtime or args.sha or args.tag:
                 raise Refused("unit switch requires --unit and --runtime only")
-            switch_unit(effects, None, args.unit, args.runtime)
+            overlay, _raw = helper_module.load_overlay(args.overlay)
+            live = _load_live_binding()
+            try:
+                adapter, _selection = live.production_adapter(
+                    effects, overlay, unit=args.unit, runtime=args.runtime)
+            except (live.LiveBindingRefused, live.factory.FactoryRefused,
+                    live.completion.CompletionError) as exc:
+                raise Refused(str(exc)[:400]) from exc
+            record = switch_unit(effects, adapter, args.unit, args.runtime)
+            print(json.dumps(record, indent=2, sort_keys=True))
         elif args.operation == "switch":
             if not args.sha or not args.tag:
                 raise Refused("checkout switch requires --sha and --tag")
