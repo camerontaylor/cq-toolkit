@@ -53,11 +53,21 @@ def _present(git, rev):
         return False
 
 
+def _shallow(git):
+    """True/False when Git can answer; None when the check itself is unavailable."""
+    try:
+        return git("rev-parse", "--is-shallow-repository").strip() == b"true"
+    except GitUnavailable:
+        return None
+
+
 def _ancestry(git, prior_head, head):
     """('ancestral'|'same'|'unrelated'|'unknown', commits_ahead).
 
-    Both commits must be present for the server to make a claim. A server-side
-    non-ancestor is unrelated; a missing object stays unknown.
+    Both commits must be present and the repository must have complete history
+    before the server makes a claim. A shallow clone can contain both endpoints
+    with the connecting commits absent, so it stays unknown; a missing object or
+    an unavailable query is unknown too.
     """
     if not prior_head or not head:
         return "unknown", None
@@ -65,14 +75,18 @@ def _ancestry(git, prior_head, head):
         return "unknown", None
     if prior_head == head:
         return "same", 0
+    if _shallow(git) is not False:
+        return "unknown", None
     try:
-        git("merge-base", "--is-ancestor", prior_head, head)
-    except GitUnavailable:
-        return "unrelated", None
-    try:
-        return "ancestral", int(git("rev-list", "--count", prior_head + ".." + head))
+        ahead = int(git("rev-list", "--count", prior_head + ".." + head))
+        behind = int(git("rev-list", "--count", head + ".." + prior_head))
     except (GitUnavailable, ValueError):
-        return "ancestral", None
+        return "unknown", None
+    if behind == 0 and ahead > 0:
+        return "ancestral", ahead
+    if ahead > 0 and behind > 0:
+        return "unrelated", None
+    return "unknown", None
 
 
 def _delta(git, prior_tree, head_tree):
@@ -128,16 +142,17 @@ def _entries_for(q, *, repo, target, task, branch, predecessor, head, head_tree,
         inputs = _identity(item)
         if not _same_repo(inputs.get("repo"), repo):
             continue
+        explicit = predecessor is not None and by_item.get(item.get("id")) == predecessor
         # Legacy items predate the recorded target; they are reachable only
         # through an explicit predecessor link, never a broad association.
-        if not target or item.get("target") != target:
+        if item.get("target") != target and not (explicit and item.get("target") is None):
             continue
         prior_head = inputs.get("head_commit")
-        same_task = task is not None and item.get("task") == task
-        same_branch = (branch is not None and branch != target
-                       and item.get("branch") == branch)
-        if predecessor is not None and by_item.get(item.get("id")) == predecessor:
-            same_task = same_task or item.get("task") is not None
+        # An explicit link is itself the continuity claim: it must not depend on
+        # metadata that legacy items may not carry.
+        same_task = explicit or (task is not None and item.get("task") == task)
+        same_branch = explicit or (branch is not None and branch != target
+                                   and item.get("branch") == branch)
         if not (same_task or same_branch):
             continue
         relation, distance = _ancestry(git, prior_head, head)
@@ -225,14 +240,20 @@ def project(q, *, repo, target, head_commit=None, head_tree=None, task=None,
                 and not any(row["item"] == item_id for row in linked)):
             for item in q.get("items") or []:
                 if item.get("id") == item_id and item.get("kind") == operation.KIND:
+                    inputs = _identity(item)
+                    if not _same_repo(inputs.get("repo"), repo):
+                        break
+                    # A predecessor with a recorded target must match the
+                    # requested target; only legacy target-less items pass.
+                    if item.get("target") is not None and item.get("target") != target:
+                        break
                     relation, distance = _ancestry(git, _head(item), head_commit)
                     linked.append(dict(
                         item=item_id, request_id=predecessor,
                         generation=item.get("generation", 1), state=item.get("state"),
                         created_at=item.get("created_at"), head_commit=_head(item),
                         head_tree=_tree(item), task=item.get("task"),
-                        branch=item.get("branch"), same_task=item.get("task") == task,
-                        same_branch=False,
+                        branch=item.get("branch"), same_task=True, same_branch=True,
                         relationship=("ancestral" if relation in ("ancestral", "same")
                                       else "possible" if relation == "unknown" else "unrelated"),
                         ancestry="server" if relation in ("ancestral", "same", "unrelated") else None,
@@ -267,6 +288,7 @@ def project(q, *, repo, target, head_commit=None, head_tree=None, task=None,
             headline = possible
     summary = _summary(q, linked)
     repeat = bool(headline is not None and headline["relationship"] == "ancestral"
+                  and headline["commits_ahead"] != 0
                   and (headline["same_task"]
                        or (headline["same_branch"] and headline["branch"] != target)))
     relation = ("none" if headline is None else

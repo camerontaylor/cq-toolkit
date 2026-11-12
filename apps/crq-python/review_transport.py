@@ -179,7 +179,7 @@ def handle(raw, runner, *, principal, policy):
                                         runner, original=True, clone=clone, classes=classes)
             stored = profile(runner.CONFIG, inputs["base_commit"])
             facts = resolve(runner, inputs, stored)
-            history = history_projection(
+            repeat_history = history_projection(
                 q, runner, repo=inputs["repo"], target=inputs["target"],
                 head_commit=inputs["head_commit"], head_tree=inputs["head_tree"],
                 task=req.get("task"), branch=req.get("branch"),
@@ -188,9 +188,18 @@ def handle(raw, runner, *, principal, policy):
             result = admission.admit(q, request_id=req["request_id"], inputs=inputs,
                                      resolved=facts, profile=stored, at=runner.iso(),
                                      repeat=req.get("repeat", False), supersedes=req.get("supersedes"),
-                                     ancestry_repeat=history["repeat"],
+                                     ancestry_repeat=repeat_history["repeat"],
                                      notify=review_notify.destination(req.get("notify"), runner.CONFIG), verify_receipt=lambda item: retained(runner, item))
             binding = q["review_requests"][req["request_id"]]
+            # Admission may reuse/join an item with this exact head. The response
+            # cue describes the queue without that matched item: exact reuse is
+            # not a repeat and must not claim it will wait behind first reviews.
+            history = history_projection(
+                q, runner, repo=inputs["repo"], target=inputs["target"],
+                head_commit=inputs["head_commit"], head_tree=inputs["head_tree"],
+                task=req.get("task"), branch=req.get("branch"),
+                predecessor=req.get("predecessor"), observed=req.get("observed"),
+                exclude_item=binding["item"])
             binding["principal"] = principal
             for key in ("task", "branch", "predecessor", "observed"):
                 if key in req:

@@ -2,6 +2,7 @@
 import json
 from pathlib import Path
 from types import SimpleNamespace
+import tempfile
 import unittest
 
 import author_snapshot
@@ -49,6 +50,14 @@ class HistoryGitMixin:
         def run(*args):
             try:
                 return author_snapshot.git(self.repo, *args)
+            except author_snapshot.AuthorRefused as exc:
+                raise history.GitUnavailable(str(exc)) from exc
+        return run
+
+    def git_at(self, repo):
+        def run(*args):
+            try:
+                return author_snapshot.git(repo, *args)
             except author_snapshot.AuthorRefused as exc:
                 raise history.GitUnavailable(str(exc)) from exc
         return run
@@ -157,6 +166,67 @@ class ExampleTests(HistoryGitMixin, SnapshotGitFixture, unittest.TestCase):
         self.assertIn("history index unavailable", value["reason"])
         self.assertIsNone(value["summary"])
         self.assertFalse(value["repeat"])
+
+    def test_explicit_predecessor_outside_repository_is_ignored(self):
+        foreign = item("lr-foreign", {**facts(base=self.base, base_tree=self.base_tree,
+                                              head=self.base, head_tree=self.base_tree),
+                                      "repo": "other/repo"}, task="T")
+        result = self.project(queue(foreign), task="T", predecessor="req-0")
+        self.assertEqual(result["relation"], "none")
+        self.assertEqual(result["entries"], [])
+        self.assertFalse(result["repeat"])
+
+    def test_explicit_predecessor_for_other_target_is_ignored(self):
+        other_target = item("lr-release", facts(base=self.base, base_tree=self.base_tree,
+                                                head=self.base, head_tree=self.base_tree),
+                            task="T", target="release")
+        result = self.project(queue(other_target), task="T", predecessor="req-0")
+        self.assertEqual(result["relation"], "none")
+        self.assertEqual(result["entries"], [])
+        self.assertFalse(result["repeat"])
+
+    def test_explicit_legacy_predecessor_keeps_link_scope(self):
+        legacy = item("lr-legacy", facts(base=self.base, base_tree=self.base_tree,
+                                         head=self.base, head_tree=self.base_tree),
+                      task=None, target=None)
+        result = self.project(queue(legacy), task="T", predecessor="req-0")
+        self.assertEqual(result["relation"], "ancestral")
+        self.assertTrue(result["repeat"])
+        self.assertEqual(result["entries"][0]["request_id"], "req-0")
+        self.assertTrue(result["entries"][0]["same_task"])
+        self.assertTrue(result["entries"][0]["same_branch"])
+
+    def test_a10_shallow_clone_with_both_endpoints_is_unknown(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            clone = Path(tmp) / "shallow"
+            self.git("update-ref", "refs/heads/main", self.head)
+            self.git("clone", "-q", "--depth", "1", "file://" + str(self.repo), str(clone))
+            self.git("-C", str(clone), "fetch", "-q", "--depth", "1", "origin", self.base)
+            self.assertEqual(
+                self.git("-C", str(clone), "rev-parse", "--is-shallow-repository"), "true")
+            for rev in (self.base, self.head):
+                self.git("-C", str(clone), "cat-file", "-e", rev + "^{commit}")
+            q = queue(item("lr-shallow", facts(base=self.base, base_tree=self.base_tree,
+                                               head=self.base, head_tree=self.base_tree), task="T"))
+            result = self.project(q, task="T", git=self.git_at(clone))
+        self.assertEqual(result["relation"], "possible")
+        self.assertFalse(result["repeat"])
+        self.assertIsNone(result["predecessor"]["ancestry"])
+        self.assertEqual(result["entries"][0]["relationship"], "possible")
+        self.assertIn("Possible earlier review", result["cue"])
+
+    def test_observed_client_ancestry_is_labelled_client(self):
+        missing = "e" * 40
+        observed_item = item("lr-observed", facts(base=self.base, base_tree=self.base_tree,
+                                                  head=missing, head_tree=self.base_tree),
+                             task=None, target=None)
+        result = self.project(queue(observed_item), task="T", predecessor="req-0",
+                              observed={"ancestor": True, "commits_ahead": 2})
+        self.assertEqual(result["relation"], "ancestral")
+        self.assertTrue(result["repeat"])
+        self.assertEqual(result["predecessor"]["ancestry"], "client")
+        self.assertEqual(result["delta"]["commits_ahead"], 2)
+        self.assertIn("client-verified", result["cue"])
 
     def test_pagination_is_bounded_and_ordered(self):
         rows = [item(f"lr-{i}", facts(base=self.base, base_tree=self.base_tree,

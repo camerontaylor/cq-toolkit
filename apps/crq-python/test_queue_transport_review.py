@@ -637,3 +637,25 @@ class ReviewTransportTests(SnapshotTransportFixture, unittest.TestCase):
         self.assertEqual(result["action"], "reused")
         self.assertEqual(result["history"]["status"], "degraded")
         self.assertIn("index unavailable", result["history"]["reason"])
+
+    def test_exact_reuse_gets_no_repeat_or_wait_behind_cue(self):
+        self.assertEqual(self.call_review(self.review)["action"], "created")
+        item = self.saved["items"][0]
+        item["receipt_id"] = review_receipt.write_receipt(self.state / "receipts", dict(
+            v=1, kind="local-review-full-diff", identity=item["identity"],
+            identity_inputs=item["identity_inputs"], profile=item["profile"],
+            run_id="fixture-run", outcome="clean", scope_adequate=True,
+            findings=[], report="clean", observed={}, independent_acceptance=False))
+        item.update(state="done", scope_adequate=True)
+        reuse = dict(self.review, request_id="local-reuse")
+        reuse.pop("snapshot")
+        result = self.call_review(reuse)
+        self.assertEqual(result["action"], "reused")
+        self.assertEqual(result["history"]["status"], "ok")
+        self.assertNotIn("cue", result["history"])
+        page = self.call_review(dict(v=1, op="review-history", request_id="local-reuse",
+                                     limit=20, cursor=0))
+        self.assertEqual(page["relation"], "none")
+        self.assertFalse(page["repeat"])
+        self.assertEqual(page["entries"], [])
+        self.assertIsNone(page["cue"])
