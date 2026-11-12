@@ -53,7 +53,8 @@ M8a bundle. Each rclone call runs with a five-minute timeout.
 
 Exit codes follow invariant I1: 0 when the bundle is archived, 2 for a CLI
 argument error (a missing or invalid `--bundle`, `--target` or `--host`, where
-the result also carries `usage: true`), and 1 for every other failure, so an
+the result also carries `usage: true`; an invalid `--bundle` includes a path
+that does not name a directory), and 1 for every other failure, so an
 operator can tell a misconfigured invocation from an archive or transport
 failure.
 

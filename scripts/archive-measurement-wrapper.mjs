@@ -101,7 +101,10 @@ async function readBundle(bundleDir) {
   try {
     const root = await realpath(resolve(bundleDir));
     if (!(await lstat(root)).isDirectory())
-      return { state: 'rejected', reason: 'the bundle is not a directory' };
+      // A bundle path that names a file (or anything non-directory) is a
+      // misconfigured invocation, not an archive failure: mark it as a usage
+      // error so the CLI exits 2 (I1) instead of 1.
+      return { state: 'rejected', usage: true, reason: 'the bundle is not a directory' };
     // lstat first: opening a FIFO O_RDONLY blocks forever. Then confirm the
     // opened descriptor is the same regular file, as M8a does for sources.
     const manifestPath = join(root, 'manifest.json');
