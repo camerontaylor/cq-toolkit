@@ -13,9 +13,7 @@ op input. `secret` values are never printed.
 | Name | Kind | Trust | Blank | Status | Secret | Description |
 | --- | --- | --- | --- | --- | --- | --- |
 | `CQ_APPROVAL_SIGNERS` | config | yes | conservative | live | no | Operator-ledger signers allowed to approve. |
-| `CQ_AUTHOR_REPO` | config | no | neutral | live | no | Repository path the review-transport author side works in. |
 | `CQ_AUTHOR_SNAPSHOT_SCANNER` | config | no | neutral | live | no | Snapshot scanner command for unpublished review.submit and managed dev.review/review.run commits; required on author hosts for unpublished work (an explicit scanner input wins). Published heads advertised by origin use reachable objects. |
-| `CQ_AUTHOR_SSH_ALIAS` | config | no | neutral | live | no | SSH alias of the author host for the review transport. |
 | `CQ_AUTOMATION_TOKEN` | config | yes | conservative | live | yes | Automation credential mapped to GH_TOKEN for gh (no ambient fallback). |
 | `CQ_DIST_PREPARED` | test | no | neutral | live | no | Set to 1 by the repo test runners when dist is already fresh (read by test/global-setup.ts). |
 | `CQ_GH_BIN` | config | no | neutral | live | no | Path or name of the gh binary (default gh). |

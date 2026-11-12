@@ -29,18 +29,22 @@ cannot substitute another authenticated identity. It also sets `IdentitiesOnly=y
 to exclude unrelated agent keys. Configure the alias with only the author key as
 its `IdentityFile`; do not inherit additional `IdentityFile` entries. The exact SSH original command must be `author-v1`; spool commands are refused.
 
-Configure the worker's `CQ_AUTHOR_SSH_ALIAS` for this separate identity. The CLI
-uses the normal dotted-command flag grammar:
+**Historical client (retired by S2b-ii).** The former worker configured
+`CQ_AUTHOR_SSH_ALIAS` for this separate identity and used the normal
+dotted-command flag grammar:
 
 ```sh
 cq dev.review --action=enroll --requestId=branch-cycle-1 --base=<40hex> --head=<40hex> --target=origin/main --cycle=1 --json
 ```
 
-Use `--action=status` with the same complete binding to observe the lease, and
-`--action=fallback` to request the server's one-shot permission after its policy
-deadline. This P4 command returns **admission**, not a completed review cycle;
-it does not replace the review ledger/readiness orchestration. The chosen agent
-may start only when a fallback response explicitly says `dispatch:true`.
+That client no longer exists. Historically, `--action=status` with the same
+complete binding observed the lease, and `--action=fallback` requested the
+server's one-shot permission after its policy deadline. The P4 command returned
+**admission**, not a completed review cycle; it did not replace the review
+ledger/readiness orchestration. The chosen agent could start only when a
+fallback response explicitly said `dispatch:true`. The server endpoint and
+response contract remain documented here for deployed compatibility; do not
+provision new clients.
 SSH connection/initial handshake setup is limited to one 15-second attempt; the
 client allows 45 seconds for that setup plus the server's 30-second operation
 alarm. Configure a direct alias without interactive authentication or proxy
