@@ -86,6 +86,9 @@ const PATTERN_REPRESENTATIVES: Readonly<Record<string, readonly string[]>> = {
     '.pnpmfile.cjs',
   ],
   '\\.snap$': ['src/__snapshots__/a.snap'],
+  // Vitest file-snapshot outputs carry arbitrary extensions: the directory,
+  // not the extension, is the snapshot signal (issue #1188).
+  '(?:^|\\/)__snapshots__\\/': ['src/__snapshots__/out.txt'],
 };
 
 describe('worker gate pattern liveness (reverse direction)', () => {

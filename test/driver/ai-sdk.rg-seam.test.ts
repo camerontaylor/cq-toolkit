@@ -1,7 +1,7 @@
 // The rg capability seam (the former ai-sdk.test.ts rg describes): the
 // injected resolveRg resolver, the policy regressions on the probe decision,
 // and the probe evidence carried on every post-probe verdict.
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
@@ -19,6 +19,11 @@ import type { AiSdkDriverOptions } from '../../src/driver/ai-sdk/index.js';
 describe('rg capability seam (injected resolveRg)', () => {
   test('rg ok: grep/glob stay on the surface; result records probe ok with no advisory', async () => {
     const root = await mkdtemp(join(tmpdir(), 'aidrv-rg-ok-'));
+    // The session binding file lives OUTSIDE the model-editable workspace
+    // (Annex A, issue #1197): sessions stay at the scratch root, the bound
+    // workspace is the child. Cleanup (rm root) is unchanged.
+    const workspace = join(root, 'workspace');
+    await mkdir(workspace);
     try {
       let probes = 0;
       const driver = new AiSdkDriver({
@@ -32,7 +37,7 @@ describe('rg capability seam (injected resolveRg)', () => {
       });
       const result = await driver.run(
         invocation({
-          workspace: { path: root },
+          workspace: { path: workspace },
           toolPolicy: { allow: ['read', 'grep', 'glob'], mode: 'allowlist' },
           sandboxPolicy: { level: 'read-only' },
         }),
@@ -53,6 +58,8 @@ describe('rg capability seam (injected resolveRg)', () => {
 
   test('rg absent: grep/glob WITHHELD, capability records absent, advisory carries the not-found line', async () => {
     const root = await mkdtemp(join(tmpdir(), 'aidrv-rg-absent-'));
+    const workspace = join(root, 'workspace');
+    await mkdir(workspace);
     try {
       const driver = new AiSdkDriver({
         providers: { mock: (modelId) => modelFor(undefined, modelId) },
@@ -62,7 +69,7 @@ describe('rg capability seam (injected resolveRg)', () => {
       });
       const result = await driver.run(
         invocation({
-          workspace: { path: root },
+          workspace: { path: workspace },
           toolPolicy: { allow: ['read', 'grep', 'glob'], mode: 'allowlist' },
           sandboxPolicy: { level: 'read-only' },
         }),
@@ -80,6 +87,8 @@ describe('rg capability seam (injected resolveRg)', () => {
 
   test('rg old: capability carries found; advisory names the minimum', async () => {
     const root = await mkdtemp(join(tmpdir(), 'aidrv-rg-old-'));
+    const workspace = join(root, 'workspace');
+    await mkdir(workspace);
     try {
       const driver = new AiSdkDriver({
         providers: { mock: (modelId) => modelFor(undefined, modelId) },
@@ -89,7 +98,7 @@ describe('rg capability seam (injected resolveRg)', () => {
       });
       const result = await driver.run(
         invocation({
-          workspace: { path: root },
+          workspace: { path: workspace },
           toolPolicy: { allow: ['read', 'grep', 'glob'], mode: 'allowlist' },
           sandboxPolicy: { level: 'read-only' },
         }),
@@ -110,6 +119,8 @@ describe('rg capability seam (injected resolveRg)', () => {
 
   test('a policy that does not request grep never probes and records nothing', async () => {
     const root = await mkdtemp(join(tmpdir(), 'aidrv-rg-silent-'));
+    const workspace = join(root, 'workspace');
+    await mkdir(workspace);
     try {
       let probes = 0;
       const driver = new AiSdkDriver({
@@ -123,7 +134,7 @@ describe('rg capability seam (injected resolveRg)', () => {
       });
       const result = await driver.run(
         invocation({
-          workspace: { path: root },
+          workspace: { path: workspace },
           toolPolicy: { allow: ['read'], mode: 'allowlist' },
           sandboxPolicy: { level: 'read-only' },
         }),
@@ -161,6 +172,8 @@ describe('rg policy seam regressions (probe decision from candidates)', () => {
     sandbox: 'none' | 'workspace-write' | 'read-only',
   ): Promise<{ result: WorkerResult; probes: number }> => {
     const root = await mkdtemp(join(tmpdir(), 'aidrv-rg-seam-'));
+    const workspace = join(root, 'workspace');
+    await mkdir(workspace);
     try {
       let probes = 0;
       const driver = new AiSdkDriver({
@@ -173,7 +186,11 @@ describe('rg policy seam regressions (probe decision from candidates)', () => {
         },
       });
       const result = await driver.run(
-        invocation({ workspace: { path: root }, toolPolicy, sandboxPolicy: { level: sandbox } }),
+        invocation({
+          workspace: { path: workspace },
+          toolPolicy,
+          sandboxPolicy: { level: sandbox },
+        }),
       );
       return { result, probes };
     } finally {
@@ -221,6 +238,8 @@ describe('rg probe evidence on EVERY post-probe verdict', () => {
     resolveRg: NonNullable<AiSdkDriverOptions['resolveRg']>,
   ) => {
     const root = await mkdtemp(join(tmpdir(), 'aidrv-rg-verdict-'));
+    const workspace = join(root, 'workspace');
+    await mkdir(workspace);
     try {
       const driver = new AiSdkDriver({
         providers: { mock: () => model },
@@ -230,7 +249,7 @@ describe('rg probe evidence on EVERY post-probe verdict', () => {
       });
       return await driver.run(
         invocation({
-          workspace: { path: root },
+          workspace: { path: workspace },
           toolPolicy: { allow: ['read', 'grep', 'glob'], mode: 'allowlist' },
           sandboxPolicy: { level: 'read-only' },
           outputSchema: {

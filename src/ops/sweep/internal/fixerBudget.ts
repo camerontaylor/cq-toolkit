@@ -91,15 +91,21 @@ export function startFixerDeadline(
   }
   const deadline = new AbortController();
   let fired = false;
+  // Whether the governed signal had ALREADY aborted when the deadline fired — a snapshot taken
+  // at that instant, so a governed abort landing afterwards cannot rewrite which trip came first
+  // (the run settles late on the composed signal, and its later state says nothing about order).
+  let governedFirst = false;
   const timer = setTimeout(() => {
     fired = true;
+    governedFirst = governed?.aborted === true;
     deadline.abort(new Error(`sweep fixer budget: wallClockMs ${String(wallClockMs)} elapsed`));
   }, wallClockMs);
   timer.unref();
   return {
     signal: governed === undefined ? deadline.signal : AbortSignal.any([governed, deadline.signal]),
-    // A governed cancellation that landed first stays a cancellation.
-    expired: () => fired && governed?.aborted !== true,
+    // A governed cancellation that landed first stays a cancellation; one that landed after the
+    // deadline fired does not erase the budget trip.
+    expired: () => fired && !governedFirst,
     dispose: () => clearTimeout(timer),
   };
 }

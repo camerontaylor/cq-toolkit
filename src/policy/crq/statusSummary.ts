@@ -514,6 +514,35 @@ export function mergedCurrent(queue: CrqRecord, readReceipt?: ReceiptReader): Me
 }
 
 /**
+ * The receipt ids `merged_current` would open: one per non-pending/reviewing/
+ * blocked review-receipt item (Python subscript `item["receipt_id"]` inside
+ * its per-row try). Best-effort and never throwing: the digest itself raises
+ * the producer's refusal for a defective queue; this selector only tells the
+ * filesystem layer which receipt files the producer would touch, so
+ * unreferenced receipt files are never opened (audit iO_W).
+ */
+export function referencedReceiptIds(queue: CrqRecord): ReadonlySet<string> {
+  const ids = new Set<string>();
+  try {
+    const items = requireArray(get(queue, 'items'), 'queue.items');
+    for (const item of items) {
+      if (!isRecord(item)) continue;
+      if (get(item, 'kind') !== MERGED_CURRENT_KIND) continue;
+      const state = get(item, 'state');
+      if (state === 'pending' || state === 'reviewing' || state === 'blocked') continue;
+      const receiptId = get(item, 'receipt_id');
+      if (typeof receiptId === 'string' && /^[0-9a-f]{64}$/.test(receiptId)) {
+        ids.add(receiptId);
+      }
+    }
+  } catch {
+    // mergedCurrent raises the producer's refusal; no selection is safer.
+    return new Set<string>();
+  }
+  return ids;
+}
+
+/**
  * `status_summary.repos_summary`: additive per-repo counts for non-primary
  * repos (`docs/multi-repo.md`).
  */

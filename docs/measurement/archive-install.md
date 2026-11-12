@@ -31,13 +31,14 @@ M8a bundle. Each rclone call runs with a five-minute timeout.
    `--immutable`, `--no-update-modtime`, `--exclude /manifest.json`, two
    transfers and two checkers. `sync` and every `--delete*` flag are absent by
    construction.
-4. `rclone check <bundleDir> <dest> --one-way --exclude /manifest.json
+4. `rclone check <bundleDir> <dest> --one-way --download --exclude /manifest.json
 --copy-links` verifies the payload while the remote still has no manifest:
    rclone can skip a file with a NOTICE and still exit 0, so a mismatch here
    returns `state: "local"` with the reason "remote copy incomplete" and the
    commit marker is never written. `--copy-links` makes `check` follow a
    local symlink instead of skipping it on both sides, so one the walk missed
-   is still caught.
+   is still caught. `--download` compares file bytes even when the remote
+   cannot supply a comparable hash; the marker check uses it for the same reason.
 5. `rclone copy <bundleDir> <dest> --immutable --include /manifest.json` writes
    the commit marker with the payload copy's flag set (`--transfers 2`,
    `--checkers 2`, `--low-level-retries 4`, `--no-update-modtime`): the
@@ -45,7 +46,7 @@ M8a bundle. Each rclone call runs with a five-minute timeout.
    an interrupted push never looks like a whole bundle. The copy is
    directory-scoped because single-file `copyto` skips `--immutable`
    (rclone issue #4921).
-6. `rclone check <bundleDir> <dest> --one-way --include /manifest.json
+6. `rclone check <bundleDir> <dest> --one-way --download --include /manifest.json
 --copy-links` confirms the marker itself (`check` cannot compare single
    files, so the tree comparison is filtered to the manifest path); a failure
    returns `state: "local"` with the reason "the archived commit marker could

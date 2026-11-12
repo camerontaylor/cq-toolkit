@@ -33,6 +33,7 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { DevEffects } from '../dev/effects.js';
 import { faultText, guardDevOp } from '../dev/effects.js';
+import { cqConfigFaultText, readCqConfigText } from '../../shared/readCqConfigText.js';
 import type {
   DevCheckGate,
   DevCheckRecord,
@@ -46,8 +47,9 @@ import type { DeferredQueueClient } from '../review/internal/queueProtocol.js';
 import { CLEAN_TREE, git, gitStdout } from '../dev/internal/workState.js';
 import { parseCqConfig } from '../analyze/cqConfig.js';
 import { resolveCqConfigDefaults } from '../analyze/cqConfigDefaults.js';
-import { composeSection, mdSafe } from './assemblePrs.js';
+import { composeSection, mdSafe, scanPublicationForUpload } from './assemblePrs.js';
 import type { PrEffects } from './assemblePrs.js';
+import type { DiffSecretScanner } from '../dev/denylist.js';
 import { PrOpenInputSchema } from './registry.js';
 
 /** Input of the `pr.open` op (plain JSON; the registry schema mirrors it). */
@@ -271,15 +273,33 @@ export function renderDispositionsComment(ledger: DevLedgerFile): string {
  * Build the `pr.open` op over the dev effects (git reads, the ledger, the
  * clock) and the gh effects (search/create/edit/comment). Per call:
  * readiness → clean tree → remote head → adopt-or-create → dispositions.
+ *
+ * The `publicationScanner` is MANDATORY (the assemblePrs/runReport fail-closed
+ * precedent): every forge publication — the created title+body, the adopted
+ * composed body, and the dispositions comment — is scanned before upload. A
+ * missing scanner refuses before any forge write; a scan hit or scanner fault
+ * fails with the scanner's reason naming the boundary.
  */
 export function makePrOpen(
   dev: DevEffects,
   gh: PrEffects,
+  publicationScanner?: DiffSecretScanner,
   queueClient?: DeferredQueueClient,
 ): Op<PrOpenInput, PrOpenReport> {
   return guardDevOp('pr.open', PrOpenInputSchema, async (input) => {
+    if (publicationScanner === undefined) {
+      return {
+        status: 'failed',
+        error: 'pr.open: refusing publication because no PR payload denylist scanner is configured',
+      };
+    }
     const target = input.target ?? DEFAULT_DEV_TARGET;
-    const configText = await readFile(join(input.repoRoot, 'cq.json'), 'utf8').catch(() => null);
+    // Only an ABSENT cq.json means "no config"; any other read fault refuses
+    // under needs-human instead of silently applying the default policy.
+    const configRead = await readCqConfigText(input.repoRoot);
+    if (configRead.outcome === 'fault')
+      return { status: 'needs-human', reason: `pr.open: ${cqConfigFaultText(configRead.error)}` };
+    const configText = configRead.outcome === 'text' ? configRead.text : null;
     let policy: { reviewers: readonly string[]; blockingSeverities: readonly string[] } | undefined;
     if (configText !== null) {
       const parsed = parseCqConfig(configText, input.repoRoot);
@@ -419,8 +439,25 @@ export function makePrOpen(
         }
         ({ number, url } = existing);
         created = false;
-        await gh.editPrBody(number, composeSection(await gh.getPrBody(number), section));
+        const composed = composeSection(await gh.getPrBody(number), section);
+        try {
+          await scanPublicationForUpload(publicationScanner, undefined, composed);
+        } catch (err) {
+          return {
+            status: 'failed',
+            error: `pr.open: publication refused by the denylist gate at editPrBody — ${faultText(err)}`,
+          };
+        }
+        await gh.editPrBody(number, composed);
       } else {
+        try {
+          await scanPublicationForUpload(publicationScanner, title, section);
+        } catch (err) {
+          return {
+            status: 'failed',
+            error: `pr.open: publication refused by the denylist gate at createPr — ${faultText(err)}`,
+          };
+        }
         ({ number, url } = await gh.createPr({
           head: branch,
           base: target,
@@ -451,8 +488,17 @@ export function makePrOpen(
     // section carries them too and is refreshed in place on every re-run,
     // so the evidence never accumulates duplicate comments.
     if (created && ledger.records.some((entry) => entry.kind === 'disposition')) {
+      const comment = renderDispositionsComment(ledger);
       try {
-        await gh.comment(number, renderDispositionsComment(ledger));
+        await scanPublicationForUpload(publicationScanner, undefined, comment);
+      } catch (err) {
+        return {
+          status: 'failed',
+          error: `pr.open: PR #${String(number)} is open with the dispositions in its body, but the creation comment was refused by the denylist gate at comment — ${faultText(err)}`,
+        };
+      }
+      try {
+        await gh.comment(number, comment);
       } catch (err) {
         return {
           status: 'failed',

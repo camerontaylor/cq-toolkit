@@ -19,6 +19,7 @@ import {
   factoryOf,
   failedError,
   fakeLoadPrompt,
+  scanClean,
 } from './resolveConflict.helpers.js';
 
 // ---------------------------------------------------------------------------
@@ -35,6 +36,7 @@ describe('resolveConflict op', () => {
       effects,
       drivers: factoryOf(driver),
       loadPrompt: fakeLoadPrompt,
+      scan: scanClean,
     });
 
     const result = await op(baseInput());
@@ -53,6 +55,7 @@ describe('resolveConflict op', () => {
       effects,
       drivers: factoryOf(driver),
       loadPrompt: fakeLoadPrompt,
+      scan: scanClean,
     });
 
     const result = await op(baseInput());
@@ -68,6 +71,7 @@ describe('resolveConflict op', () => {
       effects,
       drivers: factoryOf(driver),
       loadPrompt: fakeLoadPrompt,
+      scan: scanClean,
     });
 
     const result = await op(baseInput());
@@ -92,6 +96,7 @@ describe('resolveConflict op', () => {
       effects,
       drivers: factory,
       loadPrompt: fakeLoadPrompt,
+      scan: scanClean,
     });
 
     const result = await op(lateBoundInput());
@@ -111,6 +116,7 @@ describe('resolveConflict op', () => {
       effects,
       drivers: factoryOf(driver),
       loadPrompt: fakeLoadPrompt,
+      scan: scanClean,
     });
 
     // headBranch 'main' with the default protectedBranch 'main' — a
@@ -119,7 +125,7 @@ describe('resolveConflict op', () => {
     const result = await op({ ...baseInput(), headBranch: 'main' });
     expect(result.status).toBe('failed');
     expect(failedError(result)).toBe(
-      'headBranch equals the protected branch — refusing to dispatch a push-capable agent',
+      'headBranch equals the protected branch — refusing to resolve a conflict whose publication destination is the protected branch',
     );
     expect(effects.calls).toEqual([]);
     expect(driver.invocations).toHaveLength(0);
@@ -131,13 +137,13 @@ describe('resolveConflict op', () => {
     const fullRef = await op({ ...baseInput(), headBranch: 'refs/heads/main' });
     expect(fullRef.status).toBe('failed');
     expect(failedError(fullRef)).toBe(
-      'headBranch equals the protected branch — refusing to dispatch a push-capable agent',
+      'headBranch equals the protected branch — refusing to resolve a conflict whose publication destination is the protected branch',
     );
     // git also expands the short `heads/main` destination to refs/heads/main.
     const shortRef = await op({ ...baseInput(), headBranch: 'heads/main' });
     expect(shortRef.status).toBe('failed');
     expect(failedError(shortRef)).toBe(
-      'headBranch equals the protected branch — refusing to dispatch a push-capable agent',
+      'headBranch equals the protected branch — refusing to resolve a conflict whose publication destination is the protected branch',
     );
     // The prefixed form of a DIFFERENT branch is untouched by the
     // normalization: it is not the protected branch and dispatch proceeds.
@@ -151,6 +157,7 @@ describe('resolveConflict op', () => {
       effects: new FakeMergeEffects(),
       drivers: factoryOf(driver),
       loadPrompt: fakeLoadPrompt,
+      scan: scanClean,
     });
 
     const result = await op(baseInput());
@@ -175,6 +182,7 @@ describe('resolveConflict op', () => {
       effects: new FakeMergeEffects(),
       drivers: factoryOf(driver),
       loadPrompt: fakeLoadPrompt,
+      scan: scanClean,
     });
     const reported: Array<{ usage?: unknown; costUSD?: number }> = [];
     const outcome = await runLadder(
@@ -196,6 +204,7 @@ describe('resolveConflict op', () => {
       effects: new FakeMergeEffects(),
       drivers: factoryOf(driver),
       loadPrompt: fakeLoadPrompt,
+      scan: scanClean,
     });
     const outcome = await runLadder(
       async () => {
@@ -227,6 +236,7 @@ describe('resolveConflict op', () => {
       drivers: factoryOf(driver),
       loadPrompt: fakeLoadPrompt,
       parse: () => ({ decision: 'acted', summary: 'read by the injected parser' }),
+      scan: scanClean,
     });
 
     await expect(op(baseInput())).resolves.toEqual({

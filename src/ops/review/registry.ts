@@ -58,6 +58,7 @@
 // referenced-module rule.)
 import { z } from 'zod';
 import {
+  HistoryInputSchema,
   ReferenceSchema,
   StatusInputSchema,
   SubmitInputSchema,
@@ -82,11 +83,22 @@ import { FindingSchema } from './findings.js';
 import {
   QueueEnqueueInputSchema,
   QueueRetryInputSchema,
-  QueueDrainInputSchema,
-  QueueReferenceSchema,
   QueueHealthReferenceSchema,
-  QueueReportInputSchema,
 } from './internal/queueProtocol.js';
+
+// ---------------------------------------------------------------------------
+// QUEUE SNAPSHOT WIRING — the two `review.*` queue importers below (retry,
+// queueHealth) pass the host's resolved
+// CQ_* snapshot into `makeQueueOps` so every alias read is entry-time
+// (ADR-0009 resolve once): the ops are constructed with the run's snapshot,
+// and a later ambient env change cannot alter queue configuration. The
+// explicit `undefined` keeps the transport unbound while the default-parameter
+// rule applies the run's snapshot when the wiring carries none (library
+// behavior preserved). Among the other importers, the five driver-factory
+// sites (addressMany, address, run, fixItem, fixFinding) also forward
+// `wiring.cqEnv` into `createDriverFactory` (driver PR #1568); the rest do
+// NOT pass snapshots — their ops read `currentCqEnv()` themselves.
+// ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
 // Adapter helpers — the one fold every library op rides (module doc)
@@ -661,14 +673,18 @@ export const registry: OpRegistryEntry[] = [
   {
     name: 'review.addressMany',
     inputSchema: ReviewAddressManyInputSchema,
-    importer: async (wiring) =>
-      (await import('./addressMany.js')).makeReviewAddressMany({
-        drivers: createDriverFactory(
-          wiring?.onDeprecatedAlias !== undefined
+    importer: async (wiring) => {
+      const managed = await import('../dev/managedReview.js');
+      return (await import('./addressMany.js')).makeReviewAddressMany({
+        managedSubmit: managed.makeConfiguredManagedReviewSubmit(wiring?.cqEnv),
+        drivers: createDriverFactory({
+          ...(wiring?.onDeprecatedAlias !== undefined
             ? { onDeprecatedAlias: wiring.onDeprecatedAlias }
-            : {},
-        ),
-      }) as Op<unknown, unknown>,
+            : {}),
+          ...(wiring?.cqEnv !== undefined ? { cqEnv: wiring.cqEnv } : {}),
+        }),
+      }) as Op<unknown, unknown>;
+    },
   },
   {
     name: 'review.submit',
@@ -695,67 +711,66 @@ export const registry: OpRegistryEntry[] = [
     inputSchema: ReferenceSchema,
     importer: async () => (await import('./cancel.js')).makeCancel() as Op<unknown, unknown>,
   },
+  {
+    name: 'review.history',
+    inputSchema: HistoryInputSchema,
+    importer: async () => (await import('./history.js')).makeHistory() as Op<unknown, unknown>,
+  },
   // ./queue.js owns queue-v1; ./internal/queueEvidence.js is isolated from findings v1.
   {
     name: 'review.retry',
     inputSchema: QueueRetryInputSchema,
-    importer: async () => (await import('./queue.js')).makeQueueOps().retry as Op<unknown, unknown>,
-  },
-  {
-    name: 'review.drain',
-    inputSchema: QueueDrainInputSchema,
-    importer: async () => (await import('./queue.js')).makeQueueOps().drain as Op<unknown, unknown>,
-  },
-  {
-    name: 'review.enqueue',
-    inputSchema: QueueEnqueueInputSchema,
-    importer: async () =>
-      (await import('./queue.js')).makeQueueOps().enqueue as Op<unknown, unknown>,
+    importer: async (wiring) =>
+      (await import('./queue.js')).makeQueueOps(undefined, wiring?.cqEnv).retry as Op<
+        unknown,
+        unknown
+      >,
   },
   {
     name: 'review.queueHealth',
     inputSchema: QueueHealthReferenceSchema,
-    importer: async () =>
-      (await import('./queue.js')).makeQueueOps().queueHealth as Op<unknown, unknown>,
-  },
-  {
-    name: 'review.queueStatus',
-    inputSchema: QueueReferenceSchema,
-    importer: async () =>
-      (await import('./queue.js')).makeQueueOps().queueStatus as Op<unknown, unknown>,
-  },
-  {
-    name: 'review.report',
-    inputSchema: QueueReportInputSchema,
-    importer: async () =>
-      (await import('./queue.js')).makeQueueOps().report as Op<unknown, unknown>,
+    importer: async (wiring) =>
+      (await import('./queue.js')).makeQueueOps(undefined, wiring?.cqEnv).queueHealth as Op<
+        unknown,
+        unknown
+      >,
   },
   {
     name: 'review.address',
     inputSchema: ReviewAddressInputSchema,
     importer: async (wiring) => {
-      const { makeReviewAddress } = await import('./address.js');
-      return makeReviewAddress({
-        drivers: createDriverFactory(
-          wiring?.onDeprecatedAlias !== undefined
+      const managed = await import('../dev/managedReview.js');
+      return (await import('./address.js')).makeReviewAddress({
+        managedSubmit: managed.makeConfiguredManagedReviewSubmit(wiring?.cqEnv),
+        drivers: createDriverFactory({
+          ...(wiring?.onDeprecatedAlias !== undefined
             ? { onDeprecatedAlias: wiring.onDeprecatedAlias }
-            : {},
-        ),
+            : {}),
+          ...(wiring?.cqEnv !== undefined ? { cqEnv: wiring.cqEnv } : {}),
+        }),
       }) as Op<unknown, unknown>;
     },
   },
   {
     name: 'review.run',
     inputSchema: ReviewRunInputSchema,
+    // S2b-i: the op's CodeRabbit leg rides the managed queue route
+    // (review-v1 on the queue identity) via run.ts's `managedSubmit` dep.
+    // The binding is inert at construction (closures only — no spawn, no
+    // env read), so resolving the entry still touches nothing. `gh` resolves
+    // the forge repo itself from the input repoRoot; the server re-derives
+    // every hashed fact and refuses a mismatch (plan D2).
     importer: (wiring) =>
-      import('./run.js').then(
-        (m) =>
+      Promise.all([import('./run.js'), import('../dev/managedReview.js')]).then(
+        ([m, managed]) =>
           m.makeReviewRun({
-            drivers: createDriverFactory(
-              wiring?.onDeprecatedAlias !== undefined
+            drivers: createDriverFactory({
+              ...(wiring?.onDeprecatedAlias !== undefined
                 ? { onDeprecatedAlias: wiring.onDeprecatedAlias }
-                : {},
-            ),
+                : {}),
+              ...(wiring?.cqEnv !== undefined ? { cqEnv: wiring.cqEnv } : {}),
+            }),
+            managedSubmit: managed.makeConfiguredManagedReviewSubmit(wiring?.cqEnv),
           }) as Op<unknown, unknown>,
       ),
   },
@@ -787,14 +802,15 @@ export const registry: OpRegistryEntry[] = [
     // lane through the factory.
     importer: async (wiring) =>
       (await import('./fixReviewItem.js')).makeFixReviewItem({
-        drivers: createDriverFactory(
+        drivers: createDriverFactory({
           // Dispatch wiring (PR #238 review P2): the host's alias-notice
           // sink rides the factory config; absent (every library caller),
           // the library default — one stderr line — is unchanged.
-          wiring?.onDeprecatedAlias !== undefined
+          ...(wiring?.onDeprecatedAlias !== undefined
             ? { onDeprecatedAlias: wiring.onDeprecatedAlias }
-            : {},
-        ),
+            : {}),
+          ...(wiring?.cqEnv !== undefined ? { cqEnv: wiring.cqEnv } : {}),
+        }),
       }) as Op<unknown, unknown>,
   },
   {
@@ -807,11 +823,12 @@ export const registry: OpRegistryEntry[] = [
     // it never spawns git (crq verifies the binding around the call).
     importer: async (wiring) =>
       (await import('./fixFinding.js')).makeFixFinding({
-        drivers: createDriverFactory(
-          wiring?.onDeprecatedAlias !== undefined
+        drivers: createDriverFactory({
+          ...(wiring?.onDeprecatedAlias !== undefined
             ? { onDeprecatedAlias: wiring.onDeprecatedAlias }
-            : {},
-        ),
+            : {}),
+          ...(wiring?.cqEnv !== undefined ? { cqEnv: wiring.cqEnv } : {}),
+        }),
       }) as Op<unknown, unknown>,
   },
   {

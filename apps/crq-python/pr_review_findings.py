@@ -200,8 +200,89 @@ def _lines(finding: Dict[str, Any]) -> str:
     return f"lines {finding['start']}-{finding['end']}"
 
 
+def _fence_state(lines):
+    """The open fence run after scanning lines with the module's own rules.
+
+    Openers are FENCE_OPEN over the RAW line (spaces-only indent, so a
+    tab-indented delimiter never opens). Closers use the neutralise rule:
+    `line.strip()`, so a tab-prefixed closer of the same character with at
+    least the opener's length does close, exactly as in `_neutralise`.
+    """
+    fence = None
+    for line in lines:
+        opened = FENCE_OPEN.match(line)
+        if fence is None:
+            if opened:
+                fence = opened.group(1)
+            continue
+        stripped = line.strip()
+        indent = len(line) - len(line.lstrip(" "))
+        if indent <= 3 and stripped and set(stripped) == {fence[0]} and len(stripped) >= len(fence):
+            fence = None
+    return fence
+
+
+def _body_cap(body: str, limit: int) -> str:
+    """Cut `body` to `limit`, closing any open fence, so the WHOLE result
+    (prefix + closure + trailer) stays within `limit`.
+
+    Shortening the prefix can re-open an earlier (longer) fence, so one
+    reservation is not enough; iterate: reserve the currently-scanned
+    closure from the budget, rescan, until the scan is stable (the
+    reservation already fits). Each round either stabilises or strictly
+    shrinks the budget toward the trailer-length floor, so it terminates;
+    a stable round satisfies prefix+closure+trailer == limit exactly.
+    """
+    trailer = "\n\n… (truncated; full text in the crq run artifacts)\n"
+    budget = limit
+    best: Optional[Tuple[int, str]] = None
+    while True:
+        prefix = body[:budget]
+        fence = _fence_state(prefix.split("\n"))
+        closure = "" if fence is None else "\n" + fence
+        total = len(prefix) + len(closure) + len(trailer)
+        if total <= limit and (best is None or len(prefix) > best[0]):
+            best = (len(prefix), prefix + closure + trailer)
+        reserved = limit - len(closure) - len(trailer)
+        if reserved >= budget:
+            return prefix + closure + trailer
+        if reserved <= 0:
+            break
+        budget = reserved
+    # Degenerate contents (a fence opener longer than any budget can
+    # carry its closure): re-emit with the prefix cut BEFORE the first
+    # fence opener line, so nothing opens and the output stays closed.
+    # 59900/60000-tilde summaries land here (iteration oscillates or the
+    # best emission leaves an open fence) and keep the marker + prose head
+    # instead of losing everything to an unterminated run.
+    floor = limit - len(trailer)
+    offset = 0
+    for line in body.split("\n"):
+        if offset > floor:
+            break
+        if FENCE_OPEN.match(line):
+            prefix = body[:offset]
+            if prefix:
+                return prefix.rstrip("\n") + trailer
+            return trailer.lstrip("\n")
+        offset += len(line) + 1
+    if best is not None:
+        return best[1]
+    return body[:floor] + trailer
+
+
 def _clip(text: str, limit: int) -> str:
-    return text if len(text) <= limit else text[:limit].rstrip() + "\n\n… (truncated; full text in the crq run artifacts)"
+    if len(text) <= limit:
+        return text
+    cut = text[:limit].rstrip()
+    # A clip can sever a code fence; close it so the trailer renders as
+    # prose (same policy in the TypeScript port). The closure is the full
+    # opener run, matching what _neutralise appends, so a 4-backtick or
+    # 5-tilde fence is genuinely closed.
+    fence = _fence_state(cut.split("\n"))
+    if fence is not None:
+        cut += "\n" + fence
+    return cut + "\n\n… (truncated; full text in the crq run artifacts)"
 
 
 def build_review(meta: Dict[str, Any], findings: List[Dict[str, Any]],
@@ -242,7 +323,7 @@ def build_review(meta: Dict[str, Any], findings: List[Dict[str, Any]],
             lines += [f"{heading}{' (' + where + ')' if where else ''}", "", _clip(text, MAX_COMMENT), ""]
     body = "\n".join(lines).rstrip() + "\n"
     if len(body) > MAX_BODY:
-        body = body[:MAX_BODY] + "\n\n… (truncated; full text in the crq run artifacts)\n"
+        body = _body_cap(body, MAX_BODY)
     review: Dict[str, Any] = {"event": "COMMENT", "body": body, "comments": comments}
     if hunks is not None:
         review["commit_id"] = head

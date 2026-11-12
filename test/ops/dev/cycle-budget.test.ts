@@ -10,6 +10,7 @@ import type { ReviewRunInput } from '../../../src/ops/review/run.js';
 import type { PrOpenInput } from '../../../src/ops/pr/open.js';
 import type { ReviewAddressInput } from '../../../src/ops/review/address.js';
 import { makeTestRepo, repoEffects, seed, type TestRepo } from './repo.js';
+import { stubScanner } from './fakes.js';
 import {
   addressReport,
   bindCycleRepo,
@@ -187,6 +188,7 @@ describe('dev.cycle', () => {
             address({ ...input, wallMs: 1000, journalDir: `${repo.root}/.cq/test-journal` }),
           open: openFake(opens),
           gh: ghFake().gh,
+          publicationScanner: stubScanner(),
           git: async (args) => {
             if (args.includes('push')) pushes++;
             return { code: 0, stdout: `${state.head}\trefs/heads/feature/x\n`, stderr: '' };

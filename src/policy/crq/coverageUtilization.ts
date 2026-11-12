@@ -227,6 +227,8 @@ function divideStarts(starts: number, denominator: NumericOperand): number {
 
 /** `n / d` for a nonnegative Python int numerator and positive int denominator. */
 function intRatioToDouble(numerator: bigint, denominator: bigint): number {
+  // Python's `0 / n` yields the positive float zero (`0.0`); a positive
+  // `+0` keeps `pythonFloatRepr` on the `0.0` spelling (never `-0.0`).
   if (numerator === 0n) return 0;
   const exponent = floorLog2Ratio(numerator, denominator);
   if (exponent < -1022) {

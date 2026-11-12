@@ -112,9 +112,9 @@ def _review(*, source: str = "run-1", path: str = "src/a.ts", findings: List[Dic
         "scope_digest": ledger.digest(rows),
         "paths": [{"path": path, "blob": SHA, "mode": "100644", "disposition": "included",
                    "reason": "verified", "baseline": {}}],
-        "requested_scope": rows,
-        "input_scope": rows,
-        "reviewed_scope": rows,
+        "requested_scope": copy.deepcopy(rows),
+        "input_scope": copy.deepcopy(rows),
+        "reviewed_scope": copy.deepcopy(rows),
         "completion": {"terminal": True, "skipped": False, "scope_verified": True,
                        "exit_code": 0, "errors": []},
         "outcome": "completed",
@@ -798,18 +798,18 @@ def main() -> int:
     options = parser.parse_args()
     text = render()
     if options.stdout:
-        print(text, end="")
+        sys.stdout.buffer.write(text.encode("utf-8"))
         return 0
     if options.check:
-        existing = FIXTURE.read_text(encoding="utf-8") if FIXTURE.exists() else ""
-        if existing != text:
+        existing = FIXTURE.read_bytes() if FIXTURE.exists() else b""
+        if existing != text.encode("utf-8"):
             print(f"{FIXTURE} is stale; run python3 ledger_vector_emit_b1.py --write",
                   file=sys.stderr)
             return 1
         return 0
     if options.write:
         FIXTURE.parent.mkdir(parents=True, exist_ok=True)
-        FIXTURE.write_text(text, encoding="utf-8")
+        FIXTURE.write_bytes(text.encode("utf-8"))
         print(f"wrote {FIXTURE}", file=sys.stderr)
         return 0
     parser.print_help()

@@ -298,7 +298,7 @@ export async function tsconfigGraphPaths(
     if (text === null) continue;
     let config: unknown;
     try {
-      config = JSON.parse(stripJsonc(text));
+      config = JSON.parse(stripJsonc(text.replace(/^\uFEFF/, '')));
     } catch {
       continue; // unparsable: the path counts, its edges cannot be read
     }

@@ -191,7 +191,7 @@ function isFixFindingReport(value: unknown): value is FixFindingReport {
  * through a permissive cast; a missing value or an op-invalid report is an
  * envelope failure.
  */
-function validatedFixFindingArtifact(
+export function validatedFixFindingArtifact(
   parsed: OpResultArtifact<unknown>,
   lossless: JsonValue,
 ): ValidatedFixFindingArtifact | undefined {
@@ -219,6 +219,29 @@ function validatedFixFindingArtifact(
       return { status: 'indeterminate', detail: parsed.detail, report: parsed.report };
     }
   }
+}
+
+/**
+ * The bounded typed accessor for a `review.fixFinding` artifact. It applies
+ * the canonical kernel envelope schema and the op-specific report guard
+ * exactly once, then exposes the typed artifact. Callers that need the
+ * artifact status/failure class (harvest) use this instead of re-parsing or
+ * inferring from prose.
+ */
+export type ParsedFixFindingArtifact =
+  | { readonly ok: true; readonly value: ValidatedFixFindingArtifact }
+  | { readonly ok: false; readonly refusal: RepairRefusal };
+
+export function parseFixFindingArtifactText(artifactJson: string): ParsedFixFindingArtifact {
+  const artifact = parseValue(artifactJson);
+  if (artifact === undefined) return { ok: false, refusal: 'result-not-object' };
+  const parsed = OpResultArtifactSchema.safeParse(toPlainJson(artifact));
+  if (!parsed.success) return { ok: false, refusal: 'fixfinding-result-envelope-invalid' };
+  const validated = validatedFixFindingArtifact(parsed.data, artifact);
+  if (validated === undefined) {
+    return { ok: false, refusal: 'fixfinding-result-envelope-invalid' };
+  }
+  return { ok: true, value: validated };
 }
 
 /**
@@ -591,15 +614,11 @@ export async function verifyPreparedHarvest(
     };
   }
 
-  const artifact = parseValue(input.artifactJson);
-  if (artifact === undefined) return refusal('result-not-object');
-  const parsed = OpResultArtifactSchema.safeParse(toPlainJson(artifact));
-  if (!parsed.success) return refusal('fixfinding-result-envelope-invalid');
-  const validated = validatedFixFindingArtifact(parsed.data, artifact);
-  if (validated === undefined) return refusal('fixfinding-result-envelope-invalid');
+  const parsedArtifact = parseFixFindingArtifactText(input.artifactJson);
+  if (!parsedArtifact.ok) return refusal(parsedArtifact.refusal);
   const bindingRefusal = typedFixFindingResultRefusal({
     prepared: input.prepared,
-    artifact: validated,
+    artifact: parsedArtifact.value,
   });
   if (bindingRefusal !== undefined) return refusal(bindingRefusal);
   const source = await reobservePreparedSourceStrict(

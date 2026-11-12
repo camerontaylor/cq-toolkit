@@ -236,6 +236,87 @@ class RepairDrainTest(unittest.TestCase):
             repair_tick.mark_finding_outcome(c, job, {'verdict': 'FIXED'})
             inbox.assert_not_called()
 
+    def test_legacy_fixed_evidence_journal_replay_and_staleness(self):
+        job_id = 'crq-run1-F2'
+        item = self.queue['items'][0]
+        record = item['repair_runs']['run1']
+        publication = {'head': self.pin, 'commits': [self.pin], 'branch': 'fix',
+                       'target': self.pin, 'open_pr': False}
+        record.update(state='published', jobs=[job_id], publication=copy.deepcopy(publication),
+                      fix_pr={'number': 99}, verdicts=[{'job': job_id, 'verdict': 'FIXED', 'reason': 'fixed'}])
+        journal = self.root / 'state/repair' / job_id / 'publication.json'
+        atomic(journal, publication)
+        info = {'number': 99, 'state': 'MERGED', 'headRefOid': self.tip, 'mergeCommit': {'oid': self.tip}}
+        c = SimpleNamespace(ROOT=self.root, STATE=self.root / 'state', iso=lambda: 'now',
+                            git=self.git, pr_info=mock.Mock(return_value=info),
+                            ensure_commit=mock.Mock(return_value=True),
+                            is_ancestor=lambda a, b: subprocess.run(['git', '-C', str(self.clone),
+                                'merge-base', '--is-ancestor', a, b]).returncode == 0,
+                            save_queue=mock.Mock())
+        job = json.loads(bounded.job_path(self.root, job_id).read_text())
+        paths = ['src/kept.ts', 'src/moved.ts']
+        sources = {p: {'published': repair_tick.repair_source_entry(c, self.pin, p),
+                       'actual': repair_tick.repair_source_entry(c, self.tip, p),
+                       'current': repair_tick.repair_source_entry(c, self.tip, p)} for p in paths}
+        evidence = json.loads(json.dumps({'job': job_id, 'item': item['id'], 'run': 'run1',
+            'finding_sha256': bounded.identity(job['finding']), 'pr': 99, 'published_head': self.pin,
+            'actual_head': self.tip, 'merge_commit': self.tip, 'source_sha': self.tip, 'sources': sources,
+            'verdict': 'fixed', 'reviewer': 'reviewer', 'reason': 'verified corrected source'}))
+        for key in ('job', 'item', 'run', 'finding_sha256', 'pr', 'published_head', 'actual_head',
+                    'merge_commit', 'source_sha', 'sources', 'verdict', 'reviewer', 'reason'):
+            bad = copy.deepcopy(evidence)
+            bad[key] = None
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                repair_tick.record_fixed_publication_evidence(c, self.queue, job_id, bad)
+        with self.assertRaisesRegex(ValueError, 'source changed'):
+            repair_tick.merge_head_evidence(c, record, self.tip)
+        c.ensure_commit.return_value = False
+        with self.assertRaisesRegex(ValueError, 'head unavailable'):
+            repair_tick.record_fixed_publication_evidence(c, self.queue, job_id, evidence)
+        c.ensure_commit.return_value = True
+        repair_tick.record_fixed_publication_evidence(c, self.queue, job_id, evidence)
+        old_publication = copy.deepcopy(record['publication'])
+        replacement = {**evidence, 'reason': 'reviewed replacement'}
+        c.save_queue.side_effect = OSError('crash before queue save')
+        with self.assertRaisesRegex(OSError, 'crash'):
+            repair_tick.record_fixed_publication_evidence(c, self.queue, job_id, replacement)
+        c.save_queue.side_effect = None
+        record['publication'] = copy.deepcopy(old_publication)  # restart from old persisted queue
+        saved = json.loads(journal.read_text())
+        stale = {**replacement, 'source_sha': self.pin}
+        atomic(journal, {**saved, 'fixed_revalidation': stale})
+        with mock.patch.object(repair_tick, 'mark_finding_outcome') as mark, \
+             mock.patch.object(repair_tick, 'publish_source_resolution') as publish:
+            repair_tick.reconcile_fix_prs(c, self.queue)
+            mark.assert_not_called()
+            publish.assert_not_called()
+            self.assertIn('binding changed', record['source_publication_error'])
+        atomic(journal, saved)
+        evidence = replacement
+        changed_info = {**info, 'headRefOid': self.pin}
+        c.pr_info.return_value = changed_info
+        with mock.patch.object(repair_tick, 'mark_finding_outcome') as mark, \
+             mock.patch.object(repair_tick, 'publish_source_resolution') as publish:
+            repair_tick.reconcile_fix_prs(c, self.queue)
+            mark.assert_not_called()
+            publish.assert_not_called()
+            self.assertNotIn('fix_merged', record)
+        c.pr_info.return_value = info
+        record['publication']['source_resolutions'] = ['unexpected']
+        with self.assertRaisesRegex(ValueError, 'resolutions contradict'):
+            repair_tick.publication_journal(c, record)
+        record['publication'] = copy.deepcopy(old_publication)  # restart from old persisted queue
+        with mock.patch.object(repair_tick, 'mark_finding_outcome') as mark, \
+             mock.patch.object(repair_tick, 'publish_source_resolution', side_effect=[RuntimeError('offline'), None]) as publish:
+            repair_tick.reconcile_fix_prs(c, self.queue)
+            self.assertNotIn('fix_merged', record)
+            repair_tick.reconcile_fix_prs(c, self.queue)
+            repair_tick.reconcile_fix_prs(c, self.queue)
+            self.assertEqual(publish.call_count, 2)
+            self.assertEqual(record['fix_merged'], 'now')
+            self.assertEqual(mark.call_count, 2)
+        self.assertEqual(json.loads(journal.read_text())['fixed_revalidation'], evidence)
+
     def test_merge_reconciliation_marks_threadless_ledger_only_after_merge(self):
         job_id = 'crq-run1-F1'
         item = self.queue['items'][0]
