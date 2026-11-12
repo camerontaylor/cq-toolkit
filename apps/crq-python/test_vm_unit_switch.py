@@ -715,7 +715,9 @@ class HarnessCheckTests(unittest.TestCase):
                 self.assertFalse(checks["drain_alive_refused"])
                 self.assertTrue(problems)
 
-    def test_drain_refusal_binds_queue_digests_to_baseline_state(self):
+    def test_drain_refusal_binds_queue_digests_to_prepared_baseline(self):
+        # The verifier binds to the prepared baseline, never the post-seed
+        # before-snapshot: the guest seeds the queue before before_cli = snapshot().
         for name, check in (("drain-alive", "drain_alive_refused"),
                             ("drain-ambiguous", "drain_ambiguous_refused")):
             for label, digest in (("baseline-mismatch", "9" * 64),
@@ -728,6 +730,14 @@ class HarnessCheckTests(unittest.TestCase):
                     checks, problems = harness.build_checks(value)
                     self.assertFalse(checks[check])
                     self.assertTrue(problems)
+            with self.subTest(phase=name, case="seeded-before-snapshot"):
+                value = phases()
+                # In a real guest run both snapshots see the seeded digest;
+                # the baseline binding must not depend on either of them.
+                for key in ("before", "after"):
+                    value[name][key]["state"]["queue.json"] = "8" * 64
+                checks, _ = harness.build_checks(value)
+                self.assertTrue(checks[check])
 
     def test_harvest_and_recovery_reject_absent_preservation_fields(self):
         for label, mutate in (

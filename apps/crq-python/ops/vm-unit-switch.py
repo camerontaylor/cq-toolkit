@@ -1258,7 +1258,7 @@ def _record_pending_ok(value):
             and value.get("phase") == "drained")
 
 
-def _drain_refusal_ok(phase, kind):
+def _drain_refusal_ok(phase, kind, baseline_queue):
     cli = phase.get("cli") or {}
     queue = phase.get("queue") or {}
     before = phase.get("before") or {}
@@ -1270,10 +1270,10 @@ def _drain_refusal_ok(phase, kind):
     runtime = phase.get("current_runtime")
     service_sha = (_sha(expected_unit(runtime))
                    if runtime in (NODE_RUNTIME, PYTHON_RUNTIME) else None)
-    baseline_queue = (before.get("state") or {}).get("queue.json")
     return (
         cli.get("rc") == 2
         and service_sha is not None
+        and _sha256_text(baseline_queue)
         and "queue-owned work" in (phase.get("refused") or "")
         and _blocked_observation_ok(observation)
         and _blocked_observation_ok(drain)
@@ -3820,7 +3820,7 @@ def build_checks(phases, restarts=None, reboots=None, mode="base"):
             checks[name.replace("-", "_") + "_refused"] = False
             continue
         checks[name.replace("-", "_") + "_refused"] = _drain_refusal_ok(
-            phase, kind)
+            phase, kind, (prepared.get("state") or {}).get("queue.json"))
 
     harvest = phases.get("drain-harvest") or {}
     if not _ok_phase(harvest, "drain-harvest", problems):
