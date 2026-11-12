@@ -311,11 +311,12 @@ export function neutraliseMentions(text: string): string {
       const stripped = line.slice(0, end);
       let indent = 0;
       while (indent < line.length && line[indent] === ' ') indent += 1;
+      const rest = stripped.slice(indent);
       if (
         indent <= 3 &&
-        stripped.length > 0 &&
-        [...stripped].every((character) => character === fence?.[0]) &&
-        stripped.length >= fence.length
+        rest.length > 0 &&
+        [...rest].every((character) => character === fence?.[0]) &&
+        rest.length >= fence.length
       ) {
         fence = null;
       }
