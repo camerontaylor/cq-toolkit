@@ -61,7 +61,8 @@ def status(q, request_id):
 
 
 def admit(q, *, request_id, inputs, resolved, profile, at, repeat=False,
-          supersedes=None, notify=None, verify_receipt=lambda item: True):
+          supersedes=None, notify=None, ancestry_repeat=False,
+          verify_receipt=lambda item: True):
     key = key_digest(inputs, repeat=repeat)
     old = retry(q, request_id, key)
     if old is not None:
@@ -92,8 +93,10 @@ def admit(q, *, request_id, inputs, resolved, profile, at, repeat=False,
     if item is None:
         item = dict(id=f"lr-{identity[:12]}-g{generation}", kind=operation.KIND,
                     repo=resolved["repo"], identity=identity,
+                    target=inputs.get("target"),
                     identity_inputs=copy.deepcopy(resolved), profile=copy.deepcopy(profile),
                     generation=generation, repeat_requested=repeat,
+                    ancestry_repeat=bool(ancestry_repeat),
                     observers=[], notify=[], state="pending", pr=None,
                     created_at=at, order=max((i.get("order", 0) for i in q.get("items", [])), default=0) + 1,
                     cycles=[], attempts=[], failures=0, depends_on=[])

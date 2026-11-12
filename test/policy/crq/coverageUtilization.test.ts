@@ -94,7 +94,9 @@ function casesOf(document: JsonObject, family: string): Case[] {
         ok,
         ...(ok ? { value: valueAt(expected, 'value') } : {}),
         ...(ok ? {} : { error: stringAt(expected, 'error') }),
-        ...(ok ? {} : { message: stringAt(expected, 'message') }),
+        // `platform-time-error` records the OSError class only: the message
+        // is the host libc errno text, so the fixture omits it.
+        ...(expected.has('message') ? { message: stringAt(expected, 'message') } : {}),
       },
     };
   });
@@ -139,7 +141,9 @@ function assertCase(vector: Case): void {
     return;
   }
   expect(outcome.error, vector.name).toBe(vector.expect.error);
-  expect(outcome.message, vector.name).toBe(vector.expect.message);
+  if (vector.expect.message !== undefined) {
+    expect(outcome.message, vector.name).toBe(vector.expect.message);
+  }
 }
 
 function compact(value: unknown): string {
@@ -153,7 +157,7 @@ const a1 = casesOf(loadDocument(A1, 'utilization'), 'utilization');
 
 test('oracle selections are non-empty', () => {
   expect(groupP).toHaveLength(4);
-  expect(a1).toHaveLength(68);
+  expect(a1).toHaveLength(69);
 });
 
 describe.each(groupP.map((vector) => [vector.name, vector] as const))(

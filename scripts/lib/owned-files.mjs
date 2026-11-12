@@ -12,11 +12,13 @@ const inside = (path) => {
 /** A missing path is a deletion only when HEAD still tracks that exact file. */
 function deletedAtHead(path) {
   const rel = relative(ROOT, path).split(sep).join('/');
-  const result = spawnSync('git', ['ls-tree', '--name-only', 'HEAD', '--', rel], {
+  // -z keeps git from quoting unusual path bytes, so the output compares
+  // byte-for-byte with rel instead of being C-quoted.
+  const result = spawnSync('git', ['ls-tree', '-z', '--name-only', 'HEAD', '--', rel], {
     cwd: ROOT,
     encoding: 'utf8',
   });
-  return result.status === 0 && result.stdout.split('\n').includes(rel);
+  return result.status === 0 && result.stdout.split('\0').includes(rel);
 }
 
 /** Validate the whole list before either tool can mutate any file. */

@@ -112,6 +112,7 @@ import { planMergeOrder } from './planMergeOrder.js';
 import type { PlanMergeResult, PlannedPr } from './planMergeOrder.js';
 import { makeResolveConflictOp, MergeConflictInputSchema } from './resolveConflict.js';
 import type { ConflictResolutionValue, ResolveConflictInput } from './resolveConflict.js';
+import type { DiffSecretScanner } from '../dev/denylist.js';
 
 /**
  * The default in-flight cap for the resolve stage (two independent
@@ -654,6 +655,16 @@ export interface MakeRunMergePrsOpDeps {
    * Default: input.sessionsDir, else the factory's own default.
    */
   sessionsDir?: string;
+  /**
+   * resolveConflict passthrough (issue #1193) — the pre-push denylist
+   * scanner the composed resolve op gates its publication with. Default:
+   * the resolve op's own shipped default (makeRepoDiffScanner over the
+   * input's repoRoot — fail-closed: a repo without a readable patterns
+   * file refuses publication, it never skips the scan). SDK callers
+   * compose more nets here (the dev lane's composeScanners pattern);
+   * JSON dispatch carries no scanner and gets the default.
+   */
+  scan?: DiffSecretScanner;
 }
 
 /**
@@ -719,9 +730,14 @@ export function makeRunMergePrsOp(
               ...(deps?.onDeprecatedAlias !== undefined
                 ? { onDeprecatedAlias: deps.onDeprecatedAlias }
                 : {}),
+              // The entry snapshot already threaded to the resolve op; the
+              // default factory's session-logs and CQ_SESSIONS_DIR reads
+              // bind to it too.
+              ...(deps?.cqEnv !== undefined ? { cqEnv: deps.cqEnv } : {}),
             }),
           }),
       ...(deps?.harnessConfig !== undefined ? { harnessConfig: deps.harnessConfig } : {}),
+      ...(deps?.scan !== undefined ? { scan: deps.scan } : {}),
     });
     // The nested resolve calls see the RESOLVED protected branch, never the raw input.
     const outcome = await runMergePrs(

@@ -9,17 +9,17 @@ import { createHash } from 'node:crypto';
 import type { DiffSecretScanner, ScanComponentInput } from '../../../src/ops/dev/denylist.js';
 import type { Op } from '../../../src/kernel/types.js';
 import type { CommandResult } from '../../../src/ops/dev/effects.js';
+import type { DevFinding } from '../../../src/ops/dev/record.js';
+import type { ManagedReviewSubmit } from '../../../src/ops/dev/managedReview.js';
 import {
   makeDevReview,
   type DevCycleInput,
   type DevReviewReport,
 } from '../../../src/ops/dev/review.js';
-import type { AuthorTransport } from '../../../src/ops/dev/review-transport.js';
 import {
   ReviewCoverageV2Schema,
   type ReviewCoverageV2,
 } from '../../../src/ops/review/internal/reviewCoverageV2.js';
-import { makeFakeEffects, stubScanner } from './fakes.js';
 import type { CommandHandler } from './repo.js';
 
 /** The cycle branch of the composed op. */
@@ -27,16 +27,48 @@ export const cycleReview = (
   effects: Parameters<typeof makeDevReview>[0]['effects'],
   scanSecrets: DiffSecretScanner,
   patternsFile?: string,
+  managedSubmit?: ManagedReviewSubmit,
 ) =>
   makeDevReview({
     effects,
     scanSecrets,
     ...(patternsFile === undefined ? {} : { patternsFile }),
+    ...(managedSubmit === undefined ? {} : { managedSubmit }),
   }) as Op<DevCycleInput, DevReviewReport>;
 
-/** The admission branch: the composed op with the given transport (effects never touched). */
-export const admissionReview = (transport: AuthorTransport) =>
-  makeDevReview({ transport, effects: makeFakeEffects(), scanSecrets: stubScanner() });
+/**
+ * S2b-i: a scripted managed queue leg. The tests script the submit outcome
+ * directly (the submit-wait-fetch leg itself is covered in managedReview.test.ts
+ * over a fake transport); these fixtures carry the same finding shapes the
+ * CLI stream parser emitted, so cycle assertions are unchanged.
+ */
+export const managedTerminal = (
+  findings: Omit<DevFinding, 'id'>[] = [
+    { severity: 'major', fileName: 'src/a.ts', excerpt: 'fix this' },
+    { severity: 'minor', excerpt: 'nit' },
+  ],
+  receiptId = 'r'.repeat(64),
+): ManagedReviewSubmit =>
+  (async () => ({
+    status: 'completed',
+    value: { receiptId, completion: { kind: 'terminal' }, findings, advisories: [] },
+  })) as ManagedReviewSubmit;
+
+export const managedBlocked = (
+  reason: string,
+  findings: Omit<DevFinding, 'id'>[] = [],
+  receiptId = 'b'.repeat(64),
+): ManagedReviewSubmit =>
+  (async () => ({
+    status: 'completed',
+    value: { receiptId, completion: { kind: 'blocked', reason }, findings, advisories: [] },
+  })) as ManagedReviewSubmit;
+
+export const managedRefused = (reason: string, transient?: true): ManagedReviewSubmit =>
+  (async () =>
+    transient === true
+      ? { status: 'refused', reason, transient: true as const }
+      : { status: 'refused', reason }) as ManagedReviewSubmit;
 
 const NDJSON_OK = [
   JSON.stringify({ type: 'status', status: 'scanning' }),
@@ -125,29 +157,3 @@ export function capturingScanner(): DiffSecretScanner & { seen: ScanComponentInp
 
 export const reviewerCalls = (effects: { calls: { command: string; args: readonly string[] }[] }) =>
   effects.calls.filter((call) => call.command === 'coderabbit');
-
-export const admissionInput = {
-  action: 'enroll',
-  requestId: 'worker-1',
-  base: 'a'.repeat(40),
-  head: 'b'.repeat(40),
-  target: 'origin/merge-queue',
-  cycle: 1,
-} as const;
-export const admissionBinding = {
-  request_id: admissionInput.requestId,
-  base: admissionInput.base,
-  head: admissionInput.head,
-  target: admissionInput.target,
-  cycle: admissionInput.cycle,
-};
-export const waitingDecision = {
-  v: 1,
-  request_id: admissionInput.requestId,
-  binding: admissionBinding,
-  issuer: 'waiting',
-  reviewer: null,
-  deadline_at: '2026-10-17T00:25:00Z',
-  decided_at: null,
-  dispatch: false,
-};

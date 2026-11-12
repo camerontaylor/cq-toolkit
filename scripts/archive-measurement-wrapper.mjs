@@ -1,7 +1,7 @@
 // Measurement archive transport — measurement slice M8b. Transport only: a
 // validated M8a bundle (every entry a regular file or directory, no symlinks)
 // is checked against the configured session archive, copied to
-// <target>/<host>/measurement/<runId>, verified with `rclone check --one-way`,
+// <target>/<host>/measurement/<runId>, verified with `rclone check --one-way --download`,
 // and only then given manifest.json as the commit marker, which is confirmed
 // by a final filtered check. The copy is append-only (`copy` with
 // `--immutable`, never `sync`/`--delete`); the bundle is read-only and the
@@ -250,14 +250,16 @@ export async function runMeasurementArchive(input = {}) {
   // Verify the payload while the commit marker is still absent from the
   // remote: the manifest may only appear once everything else is confirmed
   // there. rclone can skip a file with a NOTICE and still exit 0, so confirm
-  // what actually arrived. --copy-links is defence in depth: check follows a
-  // local symlink instead of skipping it on both sides, so one the walk
+  // what actually arrived. --download compares file contents even when a
+  // remote cannot supply a comparable hash. --copy-links is defence in depth:
+  // check follows a local symlink instead of skipping it on both sides, so one the walk
   // missed surfaces as a missing remote file instead of a clean report.
   const payload = await run(RCLONE, [
     'check',
     bundle.root,
     destination,
     '--one-way',
+    '--download',
     '--exclude',
     '/manifest.json',
     '--copy-links',
@@ -303,12 +305,13 @@ export async function runMeasurementArchive(input = {}) {
     };
   }
   // Confirm the marker itself landed. check cannot compare single files, so
-  // the tree comparison is filtered down to the manifest path.
+  // the byte comparison is filtered down to the manifest path.
   const verified = await run(RCLONE, [
     'check',
     bundle.root,
     destination,
     '--one-way',
+    '--download',
     '--include',
     '/manifest.json',
     '--copy-links',

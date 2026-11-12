@@ -205,7 +205,7 @@ async function captureRoot(root, bundleDir) {
   if (!expected.length) return [];
   let rootPath;
   try {
-    rootPath = await realpath(resolve(root.path ?? ''));
+    rootPath = await realpath(resolve(root.path));
   } catch (error) {
     return expected.map((path) => ({
       root: root.name,
@@ -252,6 +252,8 @@ export async function buildMeasurementBundle(input) {
   for (const root of input.roots ?? []) {
     if (typeof root.name !== 'string' || !SAFE_NAME.test(root.name) || names.has(root.name))
       throw new Error('measurement-bundle: invalid, duplicate or reserved root name');
+    if (typeof root.path !== 'string' || root.path.trim() === '')
+      throw new Error(`measurement-bundle: root ${root.name} requires an explicit path`);
     names.add(root.name);
   }
   await mkdir(dirname(bundleDir), { recursive: true, mode: 0o700 });
@@ -367,12 +369,21 @@ export async function restoreMeasurementBundle(bundleDir) {
     throw new Error(`measurement-bundle: unsupported bundleVersion ${manifest?.bundleVersion}`);
   const files = [];
   for (const entry of manifest.files ?? []) {
-    if (entry.state !== 'present' || typeof entry.pointer !== 'string') files.push({ ...entry });
+    if (entry.state !== 'present') files.push({ ...entry });
+    else if (typeof entry.pointer !== 'string')
+      files.push({
+        ...entry,
+        state: 'unavailable',
+        reason: 'manifest entry lacks a bundle pointer',
+      });
     else files.push({ ...entry, ...(await resolveStored(root, entry)) });
   }
   let sessionIndex = { ...manifest.sessionIndex };
   if (sessionIndex.state === 'present') {
-    const resolved = await resolveStored(root, sessionIndex);
+    const resolved =
+      typeof sessionIndex.pointer === 'string'
+        ? await resolveStored(root, sessionIndex)
+        : { state: 'unavailable', reason: 'manifest entry lacks a bundle pointer' };
     sessionIndex =
       resolved.state === 'present'
         ? { ...sessionIndex, ...resolved }

@@ -491,6 +491,14 @@ export const innerEffects = (forge: Forge) => {
     },
     retargetBase: () => Promise.resolve(ok),
     pushRef: () => Promise.resolve(ok),
+    diffPatch: () => Promise.resolve(ok),
+    commitParents: () => Promise.resolve({ ok: true, parents: [] }),
+    isAncestor: () => Promise.resolve(ok),
+    readCommitMessage: () => Promise.resolve(ok),
+    readCommitEncoding: () => Promise.resolve(ok),
+    readCommitIdentity: () => Promise.resolve(ok),
+    objectExists: () => Promise.resolve(ok),
+    fetchBaseBranch: () => Promise.resolve(ok),
   };
   return { effects, mergeCalls };
 };

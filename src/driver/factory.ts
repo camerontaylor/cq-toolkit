@@ -51,7 +51,7 @@ import { LANE_IDS, type LaneId, type ServedModelPolicy } from './served-model.js
 import type { Driver, ModelSpec, WorkerResult } from './types.js';
 import type { HarnessConfig } from '../harness/config.js';
 import { SessionStore } from '../harness/session.js';
-import { processEnv } from '../config/process-env.js';
+import { currentCqEnv } from '../config/run-env.js';
 import type { CqEnv } from '../config/env.js';
 
 // ---------------------------------------------------------------------------
@@ -225,25 +225,16 @@ const DEFAULT_PROVIDERS: readonly string[] = [
 const DEFAULT_LANE: LaneId = 'ai-sdk';
 
 /**
- * The shared durable default (item 1.1): the lanes' one `defaultSessionsDir()`
- * helper, read at resolve time so `CQ_SESSIONS_DIR` / XDG_STATE_HOME are
- * honored without reconstructing the factory.
- */
-const DEFAULT_SESSIONS_DIR = () => defaultSessionsDir();
-
-/**
  * The session-logs OFF probe (item 1.6): config `sessionLogs.enabled:
  * false` or the env override `CQ_SESSION_LOGS=off`. A supplied run snapshot
- * takes precedence; otherwise the environment is read on each resolve.
- * Anything else (absent, any other value) is ON: preservation is the
- * default (feature R1).
+ * takes precedence; otherwise the enclosing run's snapshot applies, and
+ * outside a run one fresh read per resolve is the live fallback. Anything
+ * else (absent, any other value) is ON: preservation is the default
+ * (feature R1).
  */
 function sessionLogsOff(config: DriverFactoryConfig): boolean {
   if (config.sessionLogs?.enabled === false) return true;
-  const env =
-    config.cqEnv === undefined
-      ? processEnv()['CQ_SESSION_LOGS']
-      : config.cqEnv.values['CQ_SESSION_LOGS'];
+  const env = (config.cqEnv ?? currentCqEnv()).values['CQ_SESSION_LOGS'];
   return typeof env === 'string' && env.trim().toLowerCase() === 'off';
 }
 
@@ -387,7 +378,12 @@ function laneForRole(
   return configured ?? DEFAULT_LANE;
 }
 
-/** The lane-config sessionsDir override, else the factory's, else the lanes' shared default. */
+/**
+ * The lane-config sessionsDir override, else the factory's, else the lanes'
+ * shared default. The default resolves `CQ_SESSIONS_DIR` from the supplied
+ * entry/run snapshot (or the enclosing run), so ambient drift after entry
+ * cannot move the store; XDG_STATE_HOME stays a live foreign read.
+ */
 function sessionsDirFor(lane: LaneId, config: DriverFactoryConfig): string {
   const laneDir =
     lane === 'claude-code'
@@ -404,7 +400,7 @@ function sessionsDirFor(lane: LaneId, config: DriverFactoryConfig): string {
     laneDir ??
     (logsDir !== undefined && logsDir.trim() !== '' ? logsDir : undefined) ??
     config.sessionsDir ??
-    DEFAULT_SESSIONS_DIR()
+    defaultSessionsDir(config.cqEnv)
   );
 }
 

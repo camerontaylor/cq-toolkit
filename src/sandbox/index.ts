@@ -2,6 +2,7 @@
 // environment; sandbox policy knobs are intentionally absent so a model-directed
 // child cannot reconfigure its own boundary.
 import { resolveSandboxConfig, SANDBOX_POLICY_ENV_NAMES } from './config.js';
+import { currentCqEnv } from '../config/run-env.js';
 import type { SandboxConfig } from './config.js';
 import type { CqEnv } from '../config/env.js';
 import {
@@ -11,7 +12,6 @@ import {
   credentialRefusal,
   isEnvName,
 } from '../config/parsers.js';
-import { processEnv } from '../config/process-env.js';
 
 const SAFE_ENV = new Set([
   'HOME',
@@ -167,19 +167,28 @@ export function harnessRunGate(
     sandboxConfig?: SandboxConfig;
   } = {},
 ): HarnessRunGate {
-  const env = options.env ?? processEnv();
-  if (options.sandboxConfig === undefined) {
-    const expressed =
-      options.cqEnv !== undefined
-        ? [...POLICY_ENV_NAMES].some((name) => options.cqEnv?.present.includes(name))
-        : [...POLICY_ENV_NAMES].some(
-            (name) => Object.prototype.hasOwnProperty.call(env, name) && env[name] !== undefined,
-          );
-    if (!expressed) return { enabled: true, envPassthrough: [] };
-  }
+  // The gate reads a SNAPSHOT, never the live ambient environment: the caller's
+  // snapshot when one was passed, else the run's registered snapshot, else a
+  // fresh read (outside a run). An ambient policy-knob change after entry
+  // therefore cannot widen or narrow a mid-run gate. An explicit `env` is a
+  // deliberate foreign-environment injection and overrides the snapshot;
+  // launcher PATH and the child env itself are not touched here.
+  const cqEnv = options.cqEnv ?? (options.env === undefined ? currentCqEnv() : undefined);
+  const expressed =
+    cqEnv !== undefined
+      ? [...POLICY_ENV_NAMES].some((name) => cqEnv.present.includes(name))
+      : [...POLICY_ENV_NAMES].some(
+          (name) =>
+            Object.prototype.hasOwnProperty.call(options.env, name) &&
+            options.env?.[name] !== undefined,
+        );
+  if (!expressed && options.sandboxConfig === undefined)
+    return { enabled: true, envPassthrough: [] };
   const config =
     options.sandboxConfig ??
-    resolveSandboxConfig(options.cqEnv !== undefined ? { cqEnv: options.cqEnv } : { env });
+    resolveSandboxConfig(
+      cqEnv !== undefined ? { cqEnv } : options.env !== undefined ? { env: options.env } : {},
+    );
   return {
     enabled: config.runTool === 'on',
     envPassthrough: config.envPassthrough,
