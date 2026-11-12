@@ -917,6 +917,7 @@ class RepairDrainTest(unittest.TestCase):
         report = {'stop': 'ok', 'verdict': 'valid', 'reason': 'current source confirms bug',
                   'current_path': 'src/kept.ts', 'current_lines': [[1, 1]], 'quoted_text': 'one'}
         with mock.patch.dict(sys.modules, {'crq': c}), \
+             mock.patch.object(service, 'blocked', return_value=False), \
              mock.patch.object(service, 'dispatch', return_value=report) as judge:
             first = service.recover_job(self.config, job_id)
             second = service.recover_job(self.config, job_id)
