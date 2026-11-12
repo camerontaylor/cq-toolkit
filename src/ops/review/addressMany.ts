@@ -95,7 +95,10 @@ const gitSubprocess = (): { timeout: number; env: NodeJS.ProcessEnv } => {
   // timeout below bounds anyway.
   if (env['GIT_SSH'] === undefined && env['GIT_SSH_COMMAND'] === undefined) {
     env['GIT_SSH_COMMAND'] = 'ssh -oBatchMode=yes';
-  } else if (env['GIT_SSH_COMMAND'] !== undefined && !/(^|[\s"'])-oBatchMode=yes([\s"']|$)/.test(env['GIT_SSH_COMMAND'])) {
+  } else if (
+    env['GIT_SSH_COMMAND'] !== undefined &&
+    !/(^|[\s"'])-oBatchMode=yes([\s"']|$)/.test(env['GIT_SSH_COMMAND'])
+  ) {
     env['GIT_SSH_COMMAND'] = `${env['GIT_SSH_COMMAND']} -oBatchMode=yes`;
   }
   return { timeout: 300_000, env };
