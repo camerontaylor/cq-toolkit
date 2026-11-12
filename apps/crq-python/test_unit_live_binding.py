@@ -323,6 +323,24 @@ class DiscoveryTests(PortFixture):
         self.assertEqual(evidence["supported"], False)
         self.assertIn("drop-in", " ".join(evidence["foreign"]))
 
+    def test_symlinked_dropin_directory_is_not_scanned_as_a_dropin(self):
+        declared = self.declare()
+        held = self.unit_dir / "held-dropin"
+        held.mkdir()
+        (held / "override.conf").write_text("[Service]\nNice=5\n")
+        (self.unit_dir / "crq-tick.service.d").symlink_to(held)
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], True)
+        self.assertNotIn("drop-in", " ".join(evidence["foreign"]))
+
+    def test_dangling_symlink_entry_is_not_a_dropin_directory(self):
+        declared = self.declare()
+        (self.unit_dir / "crq-tick.service.d").symlink_to("gone")
+        evidence = self.discover(declared)
+        self.assertNotIn("drop-in", " ".join(evidence["foreign"]))
+        self.assertEqual(evidence["complete"], False)
+        self.assertIn("cannot resolve a symlink", evidence["error"])
+
     def test_extra_prefix_entry_is_unsupported(self):
         declared = self.declare()
         self.write("crq-tick.socket", "[Socket]\n")
