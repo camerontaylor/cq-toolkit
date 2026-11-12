@@ -435,9 +435,16 @@ def process(config, job, wt):
                 else:
                     result['failure_class'] = 'evidence' if judged.get('stop') == 'ok' and judged.get('verdict') == 'unsure' else 'exhausted'
                 break
-            confirmed = (result.get('judge') or {}).get('verdict') == 'valid'
-            result.update(verdict='FAILED' if confirmed else 'NOT-FIXED',
-                          reason='judge-confirmed defect unresolved after A2; needs human' if confirmed else reason)
+            prior_verdict = (result.get('judge') or {}).get('verdict')
+            if prior_verdict == 'valid':
+                result.update(verdict='FAILED', reason='judge-confirmed defect unresolved after A2; needs human')
+            elif prior_verdict == 'unsure':
+                # The stored verdict judged an earlier rung; A2's unchanged claim
+                # was never judged, so it must not dismiss the finding.
+                result.update(verdict='FAILED', failure_class='evidence',
+                              reason='judge unsure and A2 unchanged; needs human')
+            else:
+                result.update(verdict='NOT-FIXED', reason=reason)
             break
         except Exception as exc:
             result.pop('dispatch_pending', None)
