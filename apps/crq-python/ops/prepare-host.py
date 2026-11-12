@@ -632,12 +632,15 @@ def live_render(root, overlay, raw):
         atomic_bytes(root / CONFIG, data)
 
 
-def prepare(root, overlay, raw, output):
+def prepare(root, overlay, raw, output, tag):
     root_check(root, overlay)
     inactive(root)
     with tick_lock(root):
         inactive(root)
         sha = git(root, 'rev-parse', 'HEAD')
+        # Validate against the SHA read under the lock so a concurrent switch
+        # cannot make prepare render from a commit the tag does not name.
+        verify_target(root, sha, tag)
         data = render(root, overlay, sha)
         with tempfile.TemporaryDirectory(prefix='crq-units-') as temporary:
             paths = render_units(root, Path(temporary), sha)
@@ -754,8 +757,7 @@ def main(argv=None):
         require_outside_git(args.units_output)
         if not outside(args.units_output, root):
             raise ValueError('rendered units must be outside checkout')
-        verify_target(root, git(root, 'rev-parse', 'HEAD'), args.tag)
-        prepare(root, overlay, raw, args.units_output)
+        prepare(root, overlay, raw, args.units_output, args.tag)
     elif args.operation == 'preview':
         root_check(root, overlay)
         require_outside_git(args.output)
