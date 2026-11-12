@@ -261,7 +261,11 @@ import {
   PreRequestCeiling,
   wrapWithPreRequestCeiling,
 } from './pre-request-ceiling.js';
-import type { StrictTokenCapability, WireReservation } from './pre-request-ceiling.js';
+import type {
+  PreRequestCeilingRefusal,
+  StrictTokenCapability,
+  WireReservation,
+} from './pre-request-ceiling.js';
 import type {
   Budget,
   Driver,
@@ -1451,8 +1455,18 @@ export class AiSdkDriver implements Driver {
       // settles a DIAGNOSTIC 'error' (V1Gf) — never hidden as budget-exhausted
       // (which ops would surface for a broken hook). The completed steps' usage
       // is kept (onStepFinish folded them); nothing was sent.
-      if (isPreRequestCeilingRefusal(err)) {
-        if (err.kind === 'budget') {
+      //
+      // The refusal is EXTRACTED from the throw's chain first: with
+      // `maxRetries: 1` the SDK retries a retryable first attempt and wraps the
+      // retry's failure in a `RetryError`, so the refusal is a wrapped error, not
+      // the caught value. Reading the caught value here would miss it and the
+      // run would fall through to the generic path, where
+      // `classifyRunFailure` finds no APICallError/TimeoutError in the wrapper
+      // and returns 'unknown' — settling a budget cap as `error` and dropping
+      // the harness diagnostic class.
+      const [refusal] = preRequestRefusalsIn(err);
+      if (refusal !== undefined) {
+        if (refusal.kind === 'budget') {
           return {
             usage: stepUsage,
             usageProvenance: usageEvidence ? 'measured' : 'unmeasured',
@@ -1473,7 +1487,7 @@ export class AiSdkDriver implements Driver {
           ...capabilityEvidence,
           stopReason: 'error',
           error: boundedErrorText(
-            `ai-sdk driver: strict token ceiling infrastructure failure (${err.reason}) — ${err.message}`,
+            `ai-sdk driver: strict token ceiling infrastructure failure (${refusal.reason}) — ${refusal.message}`,
           ),
           errorClass: 'harness',
           ...(signals !== undefined ? { providerSignals: signals } : {}),
@@ -2683,6 +2697,31 @@ function apiErrorsIn(err: unknown): APICallError[] {
   const walk = (value: unknown, depth: number): void => {
     if (depth > 8 || value === null || typeof value !== 'object') return;
     if (APICallError.isInstance(value)) found.push(value);
+    const record = value as { cause?: unknown; errors?: unknown };
+    if (Array.isArray(record.errors)) {
+      for (let index = record.errors.length - 1; index >= 0; index -= 1) {
+        walk(record.errors[index], depth + 1);
+      }
+    }
+    walk(record.cause, depth + 1);
+  };
+  walk(err, 0);
+  return found;
+}
+
+/**
+ * Every pre-request ceiling refusal reachable from a thrown value, walked the
+ * same way as {@link apiErrorsIn}: the value itself, then an `errors` array
+ * walked LAST-first (the SDK's RetryError keeps the final attempt last), then
+ * the `cause` chain. With `maxRetries: 1` a refused RETRY is thrown wrapped in
+ * a `RetryError`, so the refusal must be extracted before the driver decides
+ * between the budget and the harness-diagnostic verdicts. Depth-bounded.
+ */
+function preRequestRefusalsIn(err: unknown): PreRequestCeilingRefusal[] {
+  const found: PreRequestCeilingRefusal[] = [];
+  const walk = (value: unknown, depth: number): void => {
+    if (depth > 8 || value === null || typeof value !== 'object') return;
+    if (isPreRequestCeilingRefusal(value)) found.push(value);
     const record = value as { cause?: unknown; errors?: unknown };
     if (Array.isArray(record.errors)) {
       for (let index = record.errors.length - 1; index >= 0; index -= 1) {

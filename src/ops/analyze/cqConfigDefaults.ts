@@ -19,6 +19,36 @@ export function resolveCqConfigDefaults(config: CqConfig, flags: CqConfigFlags) 
   const c = config;
   const f = flags;
   const maxTokens = f.maxTokens ?? f.budgets?.run?.maxTokens ?? c.budgets?.run?.maxTokens;
+  const size = {
+    small: {
+      maxChangedLines:
+        f.review?.size?.small?.maxChangedLines ??
+        c.review?.size?.small?.maxChangedLines ??
+        REVIEW_SIZE_DEFAULTS.small.maxChangedLines,
+      maxFiles:
+        f.review?.size?.small?.maxFiles ??
+        c.review?.size?.small?.maxFiles ??
+        REVIEW_SIZE_DEFAULTS.small.maxFiles,
+    },
+    medium: {
+      maxChangedLines:
+        f.review?.size?.medium?.maxChangedLines ??
+        c.review?.size?.medium?.maxChangedLines ??
+        REVIEW_SIZE_DEFAULTS.medium.maxChangedLines,
+      maxFiles:
+        f.review?.size?.medium?.maxFiles ??
+        c.review?.size?.medium?.maxFiles ??
+        REVIEW_SIZE_DEFAULTS.medium.maxFiles,
+    },
+  };
+  // Each value can pass validation against the other tier's default and still invert once
+  // flags and config merge, so the resolved tiers are rejected rather than silently clamped.
+  for (const key of ['maxChangedLines', 'maxFiles'] as const) {
+    if (size.medium[key] < size.small[key])
+      throw new Error(
+        `review.size: effective medium ${key} (${String(size.medium[key])}) must not be below the effective small ${key} (${String(size.small[key])})`,
+      );
+  }
   return {
     harness: { logToolFailures: f.harness?.logToolFailures ?? c.harness?.logToolFailures ?? false },
     packages: f.packages ?? c.packages ?? [{ name: f.packageName, path: '.' }],
@@ -86,28 +116,7 @@ export function resolveCqConfigDefaults(config: CqConfig, flags: CqConfigFlags) 
           c.review?.session?.concurrency ??
           REVIEW_SESSION_DEFAULTS.concurrency,
       },
-      size: {
-        small: {
-          maxChangedLines:
-            f.review?.size?.small?.maxChangedLines ??
-            c.review?.size?.small?.maxChangedLines ??
-            REVIEW_SIZE_DEFAULTS.small.maxChangedLines,
-          maxFiles:
-            f.review?.size?.small?.maxFiles ??
-            c.review?.size?.small?.maxFiles ??
-            REVIEW_SIZE_DEFAULTS.small.maxFiles,
-        },
-        medium: {
-          maxChangedLines:
-            f.review?.size?.medium?.maxChangedLines ??
-            c.review?.size?.medium?.maxChangedLines ??
-            REVIEW_SIZE_DEFAULTS.medium.maxChangedLines,
-          maxFiles:
-            f.review?.size?.medium?.maxFiles ??
-            c.review?.size?.medium?.maxFiles ??
-            REVIEW_SIZE_DEFAULTS.medium.maxFiles,
-        },
-      },
+      size,
       exclude:
         f.review?.exclude ??
         c.review?.exclude ??

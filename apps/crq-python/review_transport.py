@@ -219,7 +219,7 @@ def handle(raw, runner, *, principal, policy):
                 item = next(i for i in q["items"] if i["id"] == result["item"])
                 try:
                     reused = local_review_runtime.prepare(runner, q, item, False) is None
-                except runner.NotReady:
+                except Exception:  # admission is persisted; the reuse probe is best-effort
                     reused = False
                 if reused:
                     result = {**admission.status(q, req["request_id"]), "action": "reused"}

@@ -16,6 +16,7 @@ import {
   factoryOf,
   firstInvocation,
   fakeLoadPrompt,
+  scanClean,
 } from './resolveConflict.helpers.js';
 
 // ---------------------------------------------------------------------------
@@ -30,6 +31,7 @@ describe('forward governed invocation correlation (M5b5)', () => {
       effects,
       drivers: factoryOf(driver),
       loadPrompt: fakeLoadPrompt,
+      scan: scanClean,
     });
 
     const outcome = await runLadder(
@@ -60,6 +62,7 @@ describe('forward governed invocation correlation (M5b5)', () => {
       effects: new FakeMergeEffects(),
       drivers: factoryOf(driver),
       loadPrompt: fakeLoadPrompt,
+      scan: scanClean,
     });
 
     // Ungoverned dispatch (no job context): the invocation carries NO
@@ -76,6 +79,7 @@ describe('forward governed invocation correlation (M5b5)', () => {
       effects: new FakeMergeEffects(),
       drivers: factoryOf(driver2),
       loadPrompt: fakeLoadPrompt,
+      scan: scanClean,
     });
     const outcome = await runLadder(
       () => op2(baseInput()),
@@ -97,6 +101,7 @@ describe('forward governed invocation correlation (M5b5)', () => {
       effects,
       drivers: factoryOf(driver),
       loadPrompt: fakeLoadPrompt,
+      scan: scanClean,
     });
 
     const outcome = await runLadder(
