@@ -216,7 +216,7 @@ def _prepared(**overrides):
     return job, evidence
 
 
-def _prepared_queue(job, evidence, **overrides):
+def _prepared_queue(job, evidence, *, item_id=ITEM, **overrides):
     record = {
         "jobs": [job["job"]],
         "pin": PIN,
@@ -232,7 +232,7 @@ def _prepared_queue(job, evidence, **overrides):
     return {
         "items": [
             {
-                "id": ITEM,
+                "id": item_id,
                 "pr": 1,
                 "kind": "merged",
                 "state": "repairing",
@@ -477,6 +477,11 @@ def build() -> dict:
     # Python's structural `==` on a schema-invalid non-string value: the two
     # documents are serialised and re-parsed independently by select_job.
     structural_job, structural_evidence = _prepared(origin_job={"id": ORIGIN})
+    # Python `==` is numeric across int/float and treats `bool` as `int`, so
+    # these pairs compare equal even though their JSON types differ. Every case
+    # below is written to disk and decided by the real select_job.
+    bool_list_job, bool_list_evidence = _prepared(origin_job=[False])
+    int_float_job, int_float_evidence = _prepared(origin_job=1)
 
     cases = [
         # Ordering: drain_order filters the *.json glob, JOB_ID, symlinks, then
@@ -749,6 +754,19 @@ def build() -> dict:
         ),
         # Explicit selection: exactly one named job, or a typed refusal.
         _select_case("select-prepared", job=prepared_job, queue=prepared_queue),
+        # Queue item ids come from JOB_ID strings in production. These pin
+        # Python's `==` on non-string ids: `i['id'] == job['item']` compares
+        # numerically, so 1 matches 1.0 and True matches 1.
+        _select_case(
+            "select-item-id-int-float",
+            job=prepared_job | {"item": 1},
+            queue=_prepared_queue(prepared_job, prepared_evidence, item_id=1.0),
+        ),
+        _select_case(
+            "select-item-id-bool-int",
+            job=prepared_job | {"item": True},
+            queue=_prepared_queue(prepared_job, prepared_evidence, item_id=1),
+        ),
         _select_case(
             "select-origin-job-structural-equality",
             job=structural_job,
@@ -757,6 +775,16 @@ def build() -> dict:
                 structural_evidence,
                 origin_job={"id": ORIGIN},
             ),
+        ),
+        _select_case(
+            "select-origin-job-bool-int-list",
+            job=bool_list_job,
+            queue=_prepared_queue(bool_list_job, bool_list_evidence, origin_job=[0]),
+        ),
+        _select_case(
+            "select-origin-job-int-float",
+            job=int_float_job,
+            queue=_prepared_queue(int_float_job, int_float_evidence, origin_job=1.0),
         ),
         _select_case(
             "select-revalidated-blob-missing",
@@ -787,6 +815,11 @@ def build() -> dict:
             "select-record-jobs-extra",
             job=prepared_job,
             queue=_prepared_queue(prepared_job, prepared_evidence, jobs=[PREPARED_JOB, "crq-other-F1"]),
+        ),
+        _select_case(
+            "select-record-state-not-queued",
+            job=prepared_job,
+            queue=_prepared_queue(prepared_job, prepared_evidence, state="repairing"),
         ),
         _select_case(
             "select-record-origin-mismatch",
