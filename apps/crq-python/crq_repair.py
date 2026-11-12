@@ -903,8 +903,9 @@ def recover_job(config, job_id):
     def judge(old, context, directory):
         if blocked(config['repair']):
             # The blackout can start during the tick-lock wait above; recover()
-            # treats this stop as a deferral with bounded retries, never a model call.
-            return {'stop': 'configuration', 'reason': 'GLM peak blackout; recovery judge deferred'}
+            # holds the attempt budget and defers the judgment, never a model call.
+            return {'stop': 'configuration', 'errorClass': 'blackout',
+                    'reason': 'GLM peak blackout; recovery judge deferred'}
         request = {'job': old['job'], 'run': old['run'], 'triage_context': context}
         return dispatch(config, config['repair']['roles']['judge_critical'], request,
                         config['clone'], directory / 'recovery-judge', judge=True)
