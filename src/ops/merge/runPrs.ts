@@ -719,6 +719,10 @@ export function makeRunMergePrsOp(
               ...(deps?.onDeprecatedAlias !== undefined
                 ? { onDeprecatedAlias: deps.onDeprecatedAlias }
                 : {}),
+              // The entry snapshot already threaded to the resolve op; the
+              // default factory's session-logs and CQ_SESSIONS_DIR reads
+              // bind to it too.
+              ...(deps?.cqEnv !== undefined ? { cqEnv: deps.cqEnv } : {}),
             }),
           }),
       ...(deps?.harnessConfig !== undefined ? { harnessConfig: deps.harnessConfig } : {}),

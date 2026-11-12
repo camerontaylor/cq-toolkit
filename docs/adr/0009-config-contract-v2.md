@@ -196,7 +196,6 @@ The rule `cq/no-process-env-accessor` bans importing or calling `processEnv()` (
 - `src/config/process-env.ts`
 - `src/driver/acp/binaries.ts`
 - `src/driver/claude-code/routing.ts`
-- `src/driver/factory.ts`
 - `src/driver/sessions-dir.ts`
 - `src/harness/surface.ts`
 - `src/ops/dev/review-transport.ts`

@@ -136,7 +136,6 @@
         "src/config/process-env.ts",
         "src/driver/acp/binaries.ts",
         "src/driver/claude-code/routing.ts",
-        "src/driver/factory.ts",
         "src/driver/sessions-dir.ts",
         "src/harness/surface.ts",
         "src/ops/dev/review-transport.ts",
