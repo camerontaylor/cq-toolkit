@@ -127,7 +127,10 @@ export const baseInput = (
  * every call; scriptable failures: a nonzero fetchRef and per-pr mergePr
  * failures (the union test's failed-merge surface). validateRef answers
  * the same sha EXCEPT for refs listed in driftRefs, which drift after
- * their first validate (the acted-verification surface).
+ * their first validate (the plan→run drift-stale surface), and EXCEPT for
+ * the merge family's worktree branches (`refs/heads/cq-merge/pr-<n>` —
+ * issue #1193), where the publication gate's single read answers
+ * `resolutionSha` (default MOVED off the baseline; null = unresolvable).
  */
 export class FakeMergeEffects implements MergeEffects {
   readonly calls: string[] = [];
@@ -146,11 +149,17 @@ export class FakeMergeEffects implements MergeEffects {
   /** Refs whose head MOVES between the baseline validate (call 1) and any
    * later validate — the plan→run drift-stale scripting hook. */
   readonly driftRefs = new Set<string>();
+  /** The sha the publication gate reads on a prepared worktree's branch
+   * (issue #1193); null = unresolvable. Default MOVED off the baseline. */
+  resolutionSha: string | null = 'c'.repeat(40);
   private validateCounts = new Map<string, number>();
   private mergeCallCounts = new Map<number, number>();
 
   async validateRef(ref: string): Promise<{ ok: boolean; sha?: string }> {
     this.calls.push(`validate:${ref}`);
+    if (ref.startsWith('refs/heads/cq-merge/')) {
+      return this.resolutionSha === null ? { ok: false } : { ok: true, sha: this.resolutionSha };
+    }
     const count = (this.validateCounts.get(ref) ?? 0) + 1;
     this.validateCounts.set(ref, count);
     if (this.driftRefs.has(ref) && count > 1) return { ok: true, sha: 'd'.repeat(40) };
@@ -198,6 +207,10 @@ export class FakeMergeEffects implements MergeEffects {
     return OK;
   }
 
+  async diffPatch(from: string, to: string): Promise<GhResult> {
+    this.calls.push(`diff:${from}..${to}`);
+    return OK;
+  }
   async pushRef(ref: string, fromPath: string): Promise<GhResult> {
     this.calls.push(`push:${ref}@${fromPath}`);
     return OK;

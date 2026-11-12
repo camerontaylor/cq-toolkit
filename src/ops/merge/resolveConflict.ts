@@ -1,12 +1,15 @@
 // resolveConflict — the merge family's conflict agent (goal F4, ws-f scope
 // item 4; UC §3 row 44): the WRITE-CAPABLE worker that resolves a PR's merge
-// conflict inside a prepared worktree and pushes the resolved branch. It is
-// the repo's FIRST driver-consuming op: the worker is reached only through
-// the frozen Driver seam (src/driver/types.js — run(OpInvocation,
-// RunOptions?) → WorkerResult), never through a vendor SDK, and the worker
-// itself arrives through a DriverFactory (ADR-0002 §2.5 — the op never
-// constructs a lane class; the factory binds role + provider → lane and
-// owns the served-model assertion). Every other I/O surface (git/gh via
+// conflict inside a prepared worktree and commits the resolution locally;
+// THE OP THEN PUBLISHES the resolved branch itself, behind a fail-closed
+// denylist scan (issue #1193 — the worker never pushes, so no upload path
+// exists that has not passed the scan). It is the repo's FIRST
+// driver-consuming op: the worker is reached only through the frozen Driver
+// seam (src/driver/types.js — run(OpInvocation, RunOptions?) →
+// WorkerResult), never through a vendor SDK, and the worker itself arrives
+// through a DriverFactory (ADR-0002 §2.5 — the op never constructs a lane
+// class; the factory binds role + provider → lane and owns the
+// served-model assertion). Every other I/O surface (git/gh via
 // MergeEffects, the prompt file, the output parser) arrives as an
 // injectable dep — the whole flow below is testable with zero real
 // processes, networks, or filesystems.
@@ -14,20 +17,27 @@
 // THE SANDBOX TRAP (UC row 44, I11-adjacent — read before touching the
 // invocation): the frozen SandboxPolicy carries an isolation LEVEL and no
 // network field, and a lane MAY map workspace-write onto an egress-blocking
-// sandbox — but this agent MUST push the resolved branch over the network,
-// so requesting workspace-write here would be wrong at the seam level.
+// sandbox — but this agent MUST fetch the base branch over the network
+// (`git fetch origin <baseBranch>` is the resolution flow's step 1), so
+// requesting workspace-write here would still be wrong at the seam level.
 // Level 'none' — "no isolation requested" — is the only honest request for
 // a network-needing op under this policy. It is not a grant of anarchy —
 // but neither is it confinement: there is NO OS-level confinement on this
 // seam. The worktree is bound as the invocation's workspace (the driver
 // binds cwd and harness confinement to it); the bounds that remain are
 // the allowlisted tool surface ({read, edit, bash}
-// in allowlist mode), the prompt's hard constraints (no force, no squash,
-// no rebase, no amend, no protected-branch destination), and the
-// wall-clock budget REQUEST (Budget.wallClockMs) — a request on the seam,
-// not an enforcement: its wiring is deferred (review-debt #137), so it is
-// not currently a bound on live paths. A future sandbox that does carry
-// network semantics must re-derive this.
+// in allowlist mode), the prompt's hard constraints (no push at all — the
+// publication is the op's; no force, no squash, no rebase, no amend, no
+// protected-branch destination), and the wall-clock budget REQUEST
+// (Budget.wallClockMs) — a request on the seam, not an enforcement: its
+// wiring is deferred (review-debt #137), so it is not currently a bound on
+// live paths. A future sandbox that does carry network semantics must
+// re-derive this. RESIDUAL RISK (recorded, not solved, by #1193): bash
+// remains in the worker's surface, so on a lane with ambient push
+// credentials and no egress confinement a misbehaving worker could still
+// push outside the gate — the gate removes the push from the worker's
+// CONTRACT and makes the op's own publication path scanned; OS-level
+// credential confinement stays the seam's deferred work.
 //
 // THE DECISION CONTRACT (the op's output vocabulary, UC row 44): the agent
 // ends with EXACTLY ONE JSON line {"decision":"acted|escalate","summary":
@@ -37,7 +47,9 @@
 // prose with no valid decision line is a CONTRACT VIOLATION → 'failed',
 // never a guessed success and never 'needs-human' — needs-human is
 // reserved for a DECIDED escalation, because callers treat it as "a human
-// owes a decision here", which garbled output does not establish.
+// owes a decision here", which garbled output does not establish. 'acted'
+// MEANS: the resolution is committed on the prepared worktree's branch and
+// nothing was pushed (the prompt defines it; the op verifies and publishes).
 //
 // THE FLOW (every worker/agent outcome lands in the frozen OpResult
 // taxonomy; the op never throws for one — only a true bug may):
@@ -48,11 +60,11 @@
 //      (the plan may bind the spec late; dispatch may not).
 //   b. fetchRef(headRefFor(pr)) then validateRef(headRefFor(pr)) — the
 //      fetch makes the head's truth local, the validate captures the
-//      PRE-dispatch BASELINE sha the acted verification (h) compares
-//      against. A nonzero fetch or a throwing validate → 'failed', fail
+//      PRE-dispatch BASELINE sha the publication gate (h) scans against.
+//      A nonzero fetch or a throwing validate → 'failed', fail
 //      closed before any worktree exists; an UNRESOLVABLE head (validate
-//      !ok) is unverifiable, not failed — the flow proceeds and the
-//      verification is skipped.
+//      !ok) is unverifiable, not failed — the flow proceeds and the gate
+//      later refuses publication (the change cannot be scoped).
 //   c. withPreparedWorktree (effects.js) owns prepare → fn →
 //      remove-in-finally; the op never calls worktreePrepare/Remove
 //      itself. A throw out of it (spawn-level worktree failure, or a
@@ -87,14 +99,43 @@
 //      MergeConflictContractError → 'failed' (fail closed — silence is
 //      never success).
 //   h. decision 'escalate' → 'needs-human' with the summary as the reason
-//      ('' → the default reason), short-circuiting BEFORE the verification.
-//      decision 'acted' is a SELF-REPORT, so it is verified: fetch and
-//      validate the head again — a moved sha → 'ok' {pr, decision:'acted',
-//      summary}; an unchanged sha or an unresolvable-after head →
-//      'indeterminate' (callers assume neither success nor failure); a
-//      fetch/validate THROW in the verification → 'failed' (totality).
-//      Escalation NEVER lands in a value, and an unverified acted is
-//      never 'ok'.
+//      ('' → the default reason), short-circuiting BEFORE the gate.
+//      Escalation NEVER lands in a value. decision 'acted' enters THE
+//      PUBLICATION GATE (issue #1193, contract item 17 — no upload path
+//      may publish unscanned content):
+//        1. an unresolvable pre-dispatch baseline → the resolved change
+//           cannot be scoped for the scan → 'needs-human', nothing
+//           pushed;
+//        2. the resolution commit is located on the prepared worktree's
+//           branch (mergeWorktreeBranchFor — a ref the op derives, never
+//           agent output): unresolvable → 'needs-human' (the commit
+//           claim is unsubstantiated), still the baseline sha →
+//           'indeterminate' (no commit was created — callers assume
+//           neither success nor failure, the old unverifiable-acted
+//           posture), a validating THROW → 'failed' (totality);
+//        3. effects.diffPatch reads the zero-context patch
+//           baseline..resolvedSha — EXACTLY the content the publication
+//           push adds beyond the head's current public state. Nonzero or
+//           throwing → 'failed' (the change is UNSCANNABLE — a partial
+//           patch is never scanned, and unscannable is never published);
+//        4. the patch's ADDED lines (what a push publishes; removed
+//           lines leave the forge) are scanned through the
+//           DiffSecretScanner seam (deps.scan; default
+//           makeRepoDiffScanner(repoRoot) — the repo's own
+//           policy/denylist/patterns.yml, lazily parsed, fail-closed).
+//           ANY hit → 'needs-human' naming the rule ids and files
+//           (matched content is never quoted); a scanner FAULT →
+//           'needs-human' (the human arranges the scanner). NOTHING is
+//           pushed on either path — refuse, not document;
+//        5. clean → the op publishes: effects.pushRef('<resolvedSha>:
+//           refs/heads/<headBranch>') from the worktree, through the
+//           I3-guarded seam (no force, no deletion, never the protected
+//           branch). Exit 0 IS the publication fact — git push exits 0
+//           only when the forge moved the ref, which replaces the old
+//           fetch-again-and-compare-sha self-report verification (the
+//           attribution limit — a moved sha never proved the AGENT moved
+//           it — is gone with the self-reported push). Nonzero →
+//           'failed' with stderr; a THROW → 'failed' (totality).
 //
 // STATUS MAPPING FOR THROWS (ADR-0002 §2.9, normative): a thrown
 // factory.resolve() or driver.run() under an already-aborted governed
@@ -119,10 +160,13 @@ import type { Op, OpResult } from '../../kernel/types.js';
 import type { GhResult } from '../../adapters/forge-github/gh.js';
 import {
   headRefFor,
+  mergeWorktreeBranchFor,
   realMergeEffects,
   withPreparedWorktree,
 } from '../../adapters/forge-github/mergeEffects.js';
 import type { MergeEffects } from '../../adapters/forge-github/mergeEffects.js';
+import { addedLineComponents, makeRepoDiffScanner } from '../dev/denylist.js';
+import type { ComponentScan, DiffSecretScanner } from '../dev/denylist.js';
 import type { CqEnv } from '../../config/env.js';
 import { bareBranch, stripRefsHeads } from '../../config/values.js';
 import { assertProtectedBranchMirror } from './trustMirrors.js';
@@ -363,8 +407,11 @@ export function renderConflictPrompt(template: string, vars: Record<string, stri
 // The op factory
 // ---------------------------------------------------------------------------
 
-/** The ok value: the resolved branch was pushed. Escalation NEVER lands in
- * a value — it IS needs-human. */
+/** The ok value: the resolved branch was pushed — by the OP, after the
+ * fail-closed pre-push scan (issue #1193); never by the worker. Escalation
+ * NEVER lands in a value — it IS needs-human, and so does every scan
+ * refusal (a scan hit or scanner fault stops publication before any
+ * push). */
 export interface ConflictResolutionValue {
   pr: number;
   decision: 'acted';
@@ -420,6 +467,19 @@ export interface ResolveConflictDeps {
   loadPrompt?: () => Promise<string>;
   /** Default: the real tolerant parser. */
   parse?: typeof parseMergeConflictDecision;
+  /**
+   * The PRE-PUSH denylist scanner (issue #1193): called with the resolved
+   * change's added-line components before ANY push; any hit or a thrown
+   * fault stops publication (needs-human, nothing pushed). Default:
+   * makeRepoDiffScanner(input.repoRoot) — the TARGET REPO's own
+   * policy/denylist/patterns.yml (the rules the repo runs on itself),
+   * lazily read+parsed on the scanner's first call, so a missing or
+   * malformed file faults the gate at publication time — a refused push,
+   * never an unscanned one. SDK callers compose more nets on this seam
+   * (composeScanners(gitleaksDefaults, repoRules) — the dev lane's
+   * pattern) without touching the op.
+   */
+  scan?: DiffSecretScanner;
 }
 
 /** The conflict prompt template, read beside this module. */
@@ -468,12 +528,12 @@ export function makeResolveConflictOp(
       };
     }
     // (a, cont.) STRUCTURAL, before ANY effect: the head branch must never
-    // BE the protected branch — dispatching a push-capable agent whose
+    // BE the protected branch — resolving a conflict whose PUBLICATION
     // destination IS the protected branch is refused outright (a
     // cross-field rule the schema cannot express). BOTH spellings count
     // (codex review): a bare name and its refs/heads/<name> form name the
-    // same ref, and the prompt's push refspec takes the headBranch
-    // verbatim — `HEAD:refs/heads/main` would target the protected branch
+    // same ref, and the gate's publication refspec builds on headBranch —
+    // `HEAD:refs/heads/main` would target the protected branch
     // through a bare-name-only comparison.
     if (
       bareBranch(input.headBranch) === resolvedProtected ||
@@ -481,7 +541,8 @@ export function makeResolveConflictOp(
     ) {
       return {
         status: 'failed',
-        error: 'headBranch equals the protected branch — refusing to dispatch a push-capable agent',
+        error:
+          'headBranch equals the protected branch — refusing to resolve a conflict whose publication destination is the protected branch',
       };
     }
 
@@ -719,58 +780,125 @@ export function makeResolveConflictOp(
                   : decision.summary,
             };
           }
-          // (h, cont.) ACTED IS A SELF-REPORT — verify the head actually
-          // moved before believing it: fetch the truth again, then
-          // validate. Unchanged sha or an unresolvable-after head →
-          // 'indeterminate' (the resolution may or may not have landed —
-          // callers assume neither success nor failure; never ok, never
-          // needs-human). An UNRESOLVABLE PRE baseline makes the check
-          // impossible → 'indeterminate' as well (unverifiable is never
-          // ok). A fetch/validate THROW here is a 'failed' outcome
-          // (totality).
-          //
-          // ATTRIBUTION LIMIT: the sha-moved check proves the head MOVED,
-          // not that the AGENT moved it — a concurrent push by the PR
-          // author inside the window reads as acted success. Downstream
-          // harm is bounded: pass 2 re-classifies whatever actually
-          // landed, and the forge-side merge gate re-checks mergeability
-          // before any server-side merge.
+          // (h, cont.) ACTED IS STILL A SELF-REPORT — of a LOCAL commit
+          // now, never of a push: the worker no longer publishes (issue
+          // #1193). The op verifies the claim, scans the resolved change,
+          // and ONLY THEN pushes. Fail-closed at every rung: any refusal
+          // below leaves the branch unpublished.
           if (baselineSha === undefined) {
-            // Unverifiable is never ok: without a pre-dispatch baseline
-            // the self-report cannot be checked at all.
+            // Gate rung 1: without a pre-dispatch baseline the resolved
+            // change cannot be SCOPED for the scan — an unscannable
+            // change is never published. A human decides (the resolution
+            // exists in the worktree; the caller may re-run after the
+            // head's truth is restored).
             return {
-              status: 'indeterminate',
-              detail:
-                'conflict agent reported acted but the head ref was unverifiable (pre-dispatch baseline unresolvable)',
+              status: 'needs-human',
+              reason: `conflict agent reported acted but the pre-dispatch head ${ref} was unresolvable — the resolved change cannot be scoped for the pre-push scan; NOTHING was pushed${sessionSuffix(result)}`,
             };
           }
-          let verifyFetch: GhResult;
+          // Gate rung 2: locate the resolution commit on the prepared
+          // worktree's branch — a ref the op derives from its own pr
+          // number (the branch `worktree add -B` put the worktree on,
+          // shared through the repo's common refs), NEVER from agent
+          // output.
+          const branchRef = mergeWorktreeBranchFor(input.pr);
+          let resolution: { ok: boolean; sha?: string };
           try {
-            verifyFetch = await effects.fetchRef(ref);
+            resolution = await effects.validateRef(branchRef);
           } catch (err) {
             return {
               status: 'failed',
-              error: `resolveConflict: verification fetch ${ref} for pr ${input.pr} threw: ${errorMessage(err)}${sessionSuffix(result)}`,
+              error: `resolveConflict: validating the resolution branch ${branchRef} for pr ${input.pr} threw: ${errorMessage(err)}${sessionSuffix(result)}`,
             };
           }
-          let moved: { ok: boolean; sha?: string };
+          if (!resolution.ok || resolution.sha === undefined) {
+            return {
+              status: 'needs-human',
+              reason: `conflict agent reported acted but no resolution commit is on ${branchRef} — there is nothing to publish; NOTHING was pushed${sessionSuffix(result)}`,
+            };
+          }
+          if (resolution.sha === baselineSha) {
+            // The branch still names the pre-dispatch head: the agent's
+            // commit claim is contradicted by the fact. Callers assume
+            // neither success nor failure (the old unverifiable-acted
+            // posture) — never ok.
+            return {
+              status: 'indeterminate',
+              detail: `conflict agent reported acted but ${branchRef} still names the pre-dispatch head (${baselineSha}) — no resolution commit was created; NOTHING was pushed${sessionSuffix(result)}`,
+            };
+          }
+          // Gate rung 3: read the resolved change — the zero-context
+          // patch of exactly what the publication push would add beyond
+          // the head's current public state. Nonzero or throwing → the
+          // change is UNSCANNABLE: a partial patch is never scanned, and
+          // unscannable is never published ('failed', mirroring the (b)
+          // truth-unavailable rows).
+          let patch: GhResult;
           try {
-            moved = await effects.validateRef(ref);
+            patch = await effects.diffPatch(baselineSha, resolution.sha);
           } catch (err) {
             return {
               status: 'failed',
-              error: `resolveConflict: verification validateRef ${ref} for pr ${input.pr} threw: ${errorMessage(err)}${sessionSuffix(result)}`,
+              error: `resolveConflict: reading the resolved change ${baselineSha}..${resolution.sha} for pr ${input.pr} threw: ${errorMessage(err)}${sessionSuffix(result)}`,
             };
           }
-          if (
-            verifyFetch.code !== 0 ||
-            !moved.ok ||
-            moved.sha === undefined ||
-            moved.sha === baselineSha
-          ) {
+          if (patch.code !== 0) {
             return {
-              status: 'indeterminate',
-              detail: `conflict agent reported acted but the head ref ${ref} did not move (baseline ${baselineSha})${sessionSuffix(result)}`,
+              status: 'failed',
+              error: `resolveConflict: the resolved change ${baselineSha}..${resolution.sha} for pr ${input.pr} is unreadable (exit ${patch.code})${stderrSuffix(patch.stderr)} — refusing to publish an unscannable change${sessionSuffix(result)}`,
+            };
+          }
+          // Gate rung 4: scan the patch's ADDED lines through the
+          // denylist seam. ANY hit refuses; so does a scanner FAULT (a
+          // gate that cannot run cannot clear — the human arranges the
+          // scanner). Matched content is never quoted (the denylist
+          // doctrine — inspect locally without printing secrets).
+          const scan = deps.scan ?? makeRepoDiffScanner(input.repoRoot);
+          let components: ComponentScan[];
+          try {
+            components = await scan(
+              addedLineComponents(patch.stdout, 'resolveConflict pre-push scan'),
+            );
+          } catch (err) {
+            return {
+              status: 'needs-human',
+              reason: `secret-scan fault before publishing pr ${input.pr} — NOTHING was pushed: ${errorMessage(err)}${sessionSuffix(result)}`,
+            };
+          }
+          const hits = components.filter((component) => component.hits.length > 0);
+          if (hits.length > 0) {
+            const ruleIds = [
+              ...new Set(hits.flatMap((component) => component.hits.map((hit) => hit.ruleId))),
+            ].join(', ');
+            const files = hits.map((component) => component.component).join(', ');
+            return {
+              status: 'needs-human',
+              reason: `the resolved change for pr ${input.pr} carries denylist hits (rules: ${ruleIds}; files: ${files}) — the branch was NOT pushed; scrub or review the findings before publishing${sessionSuffix(result)}`,
+            };
+          }
+          // Gate rung 5: the publication — the OP pushes the resolution
+          // commit to the head branch through the I3-guarded seam (no
+          // force, no deletion, never the protected branch — the guard
+          // refuses all three shapes regardless of this call site). Exit
+          // 0 IS the publication fact: git push exits 0 only when the
+          // forge moved the ref, which replaces the old fetch-again
+          // sha-moved check (that check's attribution limit — a moved
+          // sha never proved the AGENT moved it — is gone with the
+          // self-reported push).
+          const refspec = `${resolution.sha}:refs/heads/${input.headBranch}`;
+          let pushed: GhResult;
+          try {
+            pushed = await effects.pushRef(refspec, worktree);
+          } catch (err) {
+            return {
+              status: 'failed',
+              error: `resolveConflict: publishing pr ${input.pr} (${refspec}) threw: ${errorMessage(err)}${sessionSuffix(result)}`,
+            };
+          }
+          if (pushed.code !== 0) {
+            return {
+              status: 'failed',
+              error: `resolveConflict: the publication push of pr ${input.pr} to ${input.headBranch} failed (exit ${pushed.code})${stderrSuffix(pushed.stderr)} — the resolution is committed locally but unpublished${sessionSuffix(result)}`,
             };
           }
           return {

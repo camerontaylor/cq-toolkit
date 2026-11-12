@@ -5,7 +5,10 @@
 // Subject: 'resolveConflict op' outcome mapping + invocation shape — header group 5 (first half).
 // Fixtures and the full group header: ./resolveConflict.helpers.ts
 import { describe, expect, test } from 'vitest';
-import { headRefFor } from '../../../src/adapters/forge-github/mergeEffects.js';
+import {
+  headRefFor,
+  mergeWorktreeBranchFor,
+} from '../../../src/adapters/forge-github/mergeEffects.js';
 import {
   DEFAULT_RESOLVE_WALL_CLOCK_MS,
   makeResolveConflictOp,
@@ -22,6 +25,7 @@ import {
   firstInvocation,
   failedError,
   fakeLoadPrompt,
+  scanClean,
 } from './resolveConflict.helpers.js';
 
 // ---------------------------------------------------------------------------
@@ -39,6 +43,7 @@ describe('resolveConflict op', () => {
       effects,
       drivers: factory,
       loadPrompt: fakeLoadPrompt,
+      scan: scanClean,
     });
 
     const result = await op(baseInput());
@@ -53,16 +58,18 @@ describe('resolveConflict op', () => {
       },
     });
     // The exact sequence: fetch + baseline validate (truth first), prepare,
-    // the fn (dispatch +, after the acted parse, the verification
-    // re-fetch and re-validate), then remove-in-finally — prepare and
-    // remove each exactly once, remove after fn. NO session creation: the
-    // worktree rides the invocation as its workspace binding.
+    // the fn (dispatch + the publication gate: the worktree-branch read,
+    // the baseline..resolved patch read, and the op's own publication
+    // push — #1193), then remove-in-finally — prepare and remove each
+    // exactly once, remove after fn. NO session creation: the worktree
+    // rides the invocation as its workspace binding.
     expect(effects.calls).toEqual([
       `fetch:${headRefFor(44)}`,
       `validate:${headRefFor(44)}`,
       `prepare:44@${headRefFor(44)}`,
-      `fetch:${headRefFor(44)}`,
-      `validate:${headRefFor(44)}`,
+      `validate:${mergeWorktreeBranchFor(44)}`,
+      `diff:${String(effects.baselineSha)}..${String(effects.resolutionSha)}`,
+      `push:${String(effects.resolutionSha)}:refs/heads/feat/topic@/wt/pr-44`,
       'remove:/wt/pr-44',
     ]);
     expect(driver.invocations).toHaveLength(1);
@@ -85,11 +92,12 @@ describe('resolveConflict op', () => {
     expect(invocation.toolPolicy).toEqual({ allow: ['read', 'edit', 'bash'], mode: 'allowlist' });
     // THE SANDBOX TRAP (module doc): level 'none' is the ONLY correct
     // request — a workspace-write sandbox would block the network the
-    // push needs, and the frozen SandboxPolicy has no network field to
-    // request it with. There is no OS-level confinement on this seam: the
-    // workspace binding is driver-owned cwd/confinement data, and the
-    // bounds that remain are the allowlist above, the prompt's
-    // constraints, and the wall-clock budget.
+    // base FETCH needs (the worker no longer pushes; #1193), and the
+    // frozen SandboxPolicy has no network field to request it with. There
+    // is no OS-level confinement on this seam: the workspace binding is
+    // driver-owned cwd/confinement data, and the bounds that remain are
+    // the allowlist above, the prompt's constraints, and the wall-clock
+    // budget.
     expect(invocation.sandboxPolicy).toEqual({ level: 'none' });
     // Default wall clock (UC row 44's 20 minutes).
     expect(DEFAULT_RESOLVE_WALL_CLOCK_MS).toBe(1_200_000);
@@ -104,6 +112,7 @@ describe('resolveConflict op', () => {
       effects: new FakeMergeEffects(),
       drivers: factoryOf(driver),
       loadPrompt: fakeLoadPrompt,
+      scan: scanClean,
     });
 
     await op({ ...baseInput(), wallClockMs: 60_000 });
@@ -117,6 +126,7 @@ describe('resolveConflict op', () => {
       effects: new FakeMergeEffects(),
       drivers: factoryOf(withFiles),
       loadPrompt: fakeLoadPrompt,
+      scan: scanClean,
     });
     await opWith({ ...baseInput(), conflictFiles: ['src/a.ts', 'src/b.ts'] });
     expect(firstInvocation(withFiles).prompt).toContain('- src/a.ts\n- src/b.ts');
@@ -126,6 +136,7 @@ describe('resolveConflict op', () => {
       effects: new FakeMergeEffects(),
       drivers: factoryOf(without),
       loadPrompt: fakeLoadPrompt,
+      scan: scanClean,
     });
     await opWithout(baseInput());
     expect(firstInvocation(without).prompt).toContain('(not enumerated)');
@@ -158,6 +169,7 @@ describe('resolveConflict op', () => {
       effects: new FakeMergeEffects(),
       drivers: factoryOf(driver),
       loadPrompt: fakeLoadPrompt,
+      scan: scanClean,
     });
 
     await expect(op(baseInput())).resolves.toEqual({
@@ -172,6 +184,7 @@ describe('resolveConflict op', () => {
       effects: new FakeMergeEffects(),
       drivers: factoryOf(driver),
       loadPrompt: fakeLoadPrompt,
+      scan: scanClean,
     });
 
     const result = await op(baseInput());
@@ -185,6 +198,7 @@ describe('resolveConflict op', () => {
       effects: new FakeMergeEffects(),
       drivers: factoryOf(driver),
       loadPrompt: fakeLoadPrompt,
+      scan: scanClean,
     });
 
     const result = await op(baseInput());
@@ -198,6 +212,7 @@ describe('resolveConflict op', () => {
       effects: new FakeMergeEffects(),
       drivers: factoryOf(driver),
       loadPrompt: fakeLoadPrompt,
+      scan: scanClean,
     });
 
     await expect(op(baseInput())).resolves.toEqual({
@@ -212,6 +227,7 @@ describe('resolveConflict op', () => {
       effects: new FakeMergeEffects(),
       drivers: factoryOf(driver),
       loadPrompt: fakeLoadPrompt,
+      scan: scanClean,
     });
 
     await expect(op(baseInput())).resolves.toEqual({ status: 'budget-exhausted' });
@@ -230,6 +246,7 @@ describe('resolveConflict op', () => {
       effects: new FakeMergeEffects(),
       drivers: factoryOf(driver),
       loadPrompt: fakeLoadPrompt,
+      scan: scanClean,
     });
 
     const result = await op(baseInput());

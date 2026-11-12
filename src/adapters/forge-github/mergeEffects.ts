@@ -112,6 +112,13 @@ const isProtectedRef = (ref: string, protectedBranch: string): boolean =>
  *   gh pr edit <n> --base <base>              — the retarget
  *   gh pr view <n> --json baseRefName         — the base-ref read
  *       (review-debt #193; the read-only forge-metadata probe)
+ *   diff --no-color --unified=0 <sha> <sha>   — the READ-ONLY patch read
+ *       (issue #1193: the conflict resolver's pre-push denylist scan).
+ *       EXACT arity: the two fixed flags, then both endpoints as FULL
+ *       40-hex commit shas — the gate derives them from validateRef
+ *       answers, never from plan or agent input, so no refname or
+ *       revision expression can ride this shape (a short sha, a range,
+ *       or any flag is refused as an unknown shape).
  * opts.protectedBranch (default 'main') names the branch pushes may never
  * land on, under either spelling.
  */
@@ -124,7 +131,7 @@ export function safeArgs(args: readonly string[], opts: SafeArgsOpts = {}): read
   const unknown = (): UnsafeMergeArgsError =>
     new UnsafeMergeArgsError(
       args,
-      'refused: unknown argv shape — the merge family executes only its eight documented shapes (rev-parse, fetch, worktree add/list/remove, push, gh pr merge, gh pr edit, gh pr view)',
+      'refused: unknown argv shape — the merge family executes only its nine documented shapes (rev-parse, fetch, worktree add/list/remove, push, gh pr merge, gh pr edit, gh pr view, diff)',
     );
   const sub = rest[0];
   switch (sub) {
@@ -216,6 +223,24 @@ export function safeArgs(args: readonly string[], opts: SafeArgsOpts = {}): read
             `push with destination ${JSON.stringify(pushDestination(refspec))} — the protected branch ${JSON.stringify(protectedBranch)} is never pushed to`,
           );
         }
+      }
+      return args;
+    }
+    case 'diff': {
+      // The read-only patch read (issue #1193): EXACT shape — two fixed
+      // flags, then two full 40-hex shas, nothing else. Both endpoints are
+      // validateRef-derived shas, so this shape admits no refname, no
+      // range expression, and no flag injection; anything else is an
+      // undocumented shape like any other.
+      const tail = rest.slice(1);
+      if (
+        tail.length !== 4 ||
+        tail[0] !== '--no-color' ||
+        tail[1] !== '--unified=0' ||
+        !/^[0-9a-f]{40}$/i.test(tail[2] ?? '') ||
+        !/^[0-9a-f]{40}$/i.test(tail[3] ?? '')
+      ) {
+        throw unknown();
       }
       return args;
     }
@@ -356,9 +381,43 @@ export interface MergeEffects {
    * CONSUMER (round 1): NOT this executor — merge entries are server-side
    * and retargets ride retargetBase — but pushRef stays in the interface
    * as a frozen contract for the WS-I merge-prs wiring, its I3 guard
-   * pinned by the safeArgs push tests. */
+   * pinned by the safeArgs push tests. Issue #1193 makes the conflict
+   * RESOLVER the first op-level consumer: the publication push runs
+   * through this seam behind the scan gate, never from the worker. */
   pushRef(ref: string, fromPath: string): Promise<GhResult>;
+  /**
+   * The READ-ONLY zero-context unified patch between two FULL commit shas
+   * (issue #1193 — the resolver's pre-push scan input): `git -C <repoRoot>
+   * diff --no-color --unified=0 <from> <to>`, the patch on stdout.
+   * Resolves with the exit code (GhResult shape); nonzero means the patch
+   * is UNAVAILABLE and the caller must treat the change as unscannable —
+   * never scan a partial patch, never push unscanned. Both endpoints are
+   * validateRef-derived shas by contract (the safeArgs shape refuses
+   * everything else), so no refname or range expression can reach git.
+   */
+  diffPatch(from: string, to: string): Promise<GhResult>;
 }
+
+/**
+ * The merge family's per-pr worktree BRANCH LABEL (`worktree add -B`
+ * checks the prepared worktree out ON this branch, so after the conflict
+ * agent commits its resolution the branch — shared through the repo's
+ * common refs — names the resolution commit). {@link realMergeEffects}
+ * prepares with this label; {@link mergeWorktreeBranchFor} is its full-ref
+ * form for rev-parse and refspecs. One source for both, so they cannot
+ * drift (issue #1193).
+ */
+export const mergeWorktreeBranchLabel = (pr: number): string => `cq-merge/pr-${String(pr)}`;
+
+/**
+ * The full ref of the merge family's per-pr worktree branch (issue
+ * #1193): resolvable from the repo ROOT (the refs store is shared across
+ * linked worktrees), so the conflict resolver reads the resolved change
+ * and builds its publication refspec from a ref IT derived — never from
+ * agent output.
+ */
+export const mergeWorktreeBranchFor = (pr: number): string =>
+  `refs/heads/${mergeWorktreeBranchLabel(pr)}`;
 
 /**
  * THE WORKTREE LIFECYCLE HELPER (round 1, for F4's conflict resolver): the
@@ -456,6 +515,9 @@ export interface RealMergeEffectsOpts {
  *                   base-ref read — review-debt #193)
  *   - pushRef:      `git -C <fromPath> push origin <src:dst>` (an explicit
  *                   refspec — round 2: bare/symbolic forms are refused)
+ *   - diffPatch:    `git -C <repoRoot> diff --no-color --unified=0 <from>
+ *                   <to>` (both full 40-hex shas — the read-only patch
+ *                   read behind the resolver's pre-push scan, #1193)
  */
 export function realMergeEffects(opts: RealMergeEffectsOpts): MergeEffects {
   // Absolute everywhere (prWorktree doctrine): mkdir resolves from the
@@ -548,7 +610,7 @@ export function realMergeEffects(opts: RealMergeEffectsOpts): MergeEffects {
     return gitCommonDir;
   };
 
-  const worktreeLabel = (pr: number): string => `cq-merge/pr-${pr}`;
+  const worktreeLabel = mergeWorktreeBranchLabel;
 
   const worktreePrepare = async (pr: number, ref: string): Promise<{ path: string }> => {
     const path = join(await commonDir(), 'cq-merge-worktrees', `pr-${String(pr)}`);
@@ -598,6 +660,13 @@ export function realMergeEffects(opts: RealMergeEffectsOpts): MergeEffects {
   const pushRef = (ref: string, fromPath: string): Promise<GhResult> =>
     git(['-C', fromPath, 'push', 'origin', ref]);
 
+  // The read-only patch read (issue #1193): the argv shape is pinned by
+  // safeArgs to the two fixed flags plus two 40-hex shas — the guard is
+  // the only reason this call is safe for endpoint arguments the op
+  // computed itself.
+  const diffPatch = (from: string, to: string): Promise<GhResult> =>
+    git(['-C', repoRoot, 'diff', '--no-color', '--unified=0', from, to]);
+
   return {
     validateRef,
     fetchRef,
@@ -607,5 +676,6 @@ export function realMergeEffects(opts: RealMergeEffectsOpts): MergeEffects {
     mergePr,
     retargetBase,
     pushRef,
+    diffPatch,
   };
 }

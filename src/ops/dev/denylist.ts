@@ -329,6 +329,71 @@ export function scanComponents(
   }));
 }
 
+/**
+ * Parse a unified diff into ONE COMPONENT PER CHANGED PATH carrying that
+ * path's ADDED lines (issue #1193 — the conflict resolver's pre-push scan
+ * input). Added lines are what a git push PUBLISHES: the diff's '+' side
+ * is exactly the content the forge will newly hold, while removed lines
+ * leave the forge — so a resolution that DELETES a secret must not be
+ * refused for it. One component per path, `component` and `path` both the
+ * repo-relative name, so path-scoped rules apply exactly as they would
+ * after commit and hit evidence names the file.
+ *
+ * The patch is parsed on LF boundaries (a trailing CR is a CRLF
+ * terminator, any other byte stays in the payload); paths come from the
+ * `---`/`+++` header lines, a trailing TAB stripped (git appends one when
+ * a path contains spaces), `/dev/null` marking the absent side of an
+ * add/delete. FAULT-CLOSED: a body '+' line before any path is attributed
+ * throws naming `source` — a line the parser cannot attribute is
+ * UNSCANNABLE content, and unscannable content must fault, never pass
+ * silently. Lines the parser reads but carries no '+' (headers, context,
+ * removed lines, hunk prologue) are skipped by construction, not ignored
+ * evidence. Binary files carry no '+' lines and yield no component — a
+ * recorded residual risk of patch-based scanning, shared with the dev
+ * lane.
+ */
+export function addedLineComponents(patch: string, source: string): ScanComponentInput[] {
+  let path: string | undefined;
+  let inHeader = false;
+  const added = new Map<string, string[]>();
+  for (const rawLine of patch.split('\n')) {
+    const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine;
+    if (line.startsWith('diff --git')) {
+      path = undefined;
+      inHeader = true;
+      continue;
+    }
+    if (line.startsWith('@@')) {
+      inHeader = false;
+      continue;
+    }
+    if (inHeader) {
+      if (line.startsWith('+++ ') || line.startsWith('--- ')) {
+        const candidate = line.slice(4).replace(/\t.*$/, '');
+        path = candidate === '/dev/null' ? undefined : candidate.replace(/^[ab]\//, '');
+      }
+      continue;
+    }
+    if (path === undefined || line.length === 0) {
+      if (line.startsWith('+') && path === undefined) {
+        throw new Error(
+          `${source}: a '+' line has no attributed path — the patch is not parseable as unified diff`,
+        );
+      }
+      continue;
+    }
+    if (line[0] !== '+') continue;
+    const lines = added.get(path) ?? [];
+    lines.push(line.slice(1));
+    added.set(path, lines);
+  }
+  return [...added.entries()].map(([file, lines]) => ({
+    component: file,
+    text: lines.join('\n'),
+    path: file,
+  }));
+}
+
 /** A reusable scanner over the component set (the injected seam). */
 export interface DiffSecretScanner {
   (

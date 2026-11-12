@@ -491,6 +491,7 @@ export const innerEffects = (forge: Forge) => {
     },
     retargetBase: () => Promise.resolve(ok),
     pushRef: () => Promise.resolve(ok),
+    diffPatch: () => Promise.resolve(ok),
   };
   return { effects, mergeCalls };
 };

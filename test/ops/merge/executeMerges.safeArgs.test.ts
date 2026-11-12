@@ -4,6 +4,7 @@ import { describe, expect, test } from 'vitest';
 import {
   UnsafeMergeArgsError,
   headRefFor,
+  mergeWorktreeBranchFor,
   realMergeEffects,
   safeArgs,
   safeRunner,
@@ -452,5 +453,71 @@ describe('safeArgs — the I3 guard, one test per forbidden shape', () => {
 
   test('headRefFor is the PR-number truth ref', () => {
     expect(headRefFor(7)).toBe('refs/pull/7/head');
+  });
+
+  test('mergeWorktreeBranchFor is the prepared worktree branch the resolver gates on (#1193)', () => {
+    expect(mergeWorktreeBranchFor(7)).toBe('refs/heads/cq-merge/pr-7');
+  });
+});
+
+describe('safeArgs round-1193: the read-only diff shape (the resolver pre-push scan)', () => {
+  const from = sha('a');
+  const to = sha('b');
+
+  test('the EXACT shape passes — the two fixed flags, then two full 40-hex shas', () => {
+    expect(safeArgs(['-C', '/repo', 'diff', '--no-color', '--unified=0', from, to])).toEqual([
+      '-C',
+      '/repo',
+      'diff',
+      '--no-color',
+      '--unified=0',
+      from,
+      to,
+    ]);
+  });
+
+  test('every deviation is an unknown shape — shas must be FULL hex, flags fixed, arity exact', () => {
+    // A short sha or a revision expression can never ride the shape.
+    expect(() => safeArgs(['diff', '--no-color', '--unified=0', 'abc123', to])).toThrow(
+      UnsafeMergeArgsError,
+    );
+    expect(() => safeArgs(['diff', '--no-color', '--unified=0', `${from}..${to}`, to])).toThrow(
+      UnsafeMergeArgsError,
+    );
+    expect(() => safeArgs(['diff', '--no-color', '--unified=0', from, 'refs/heads/feat'])).toThrow(
+      UnsafeMergeArgsError,
+    );
+    // Flag drift, in either order or either count.
+    expect(() => safeArgs(['diff', '--unified=0', '--no-color', from, to])).toThrow(
+      UnsafeMergeArgsError,
+    );
+    expect(() => safeArgs(['diff', '--no-color', from, to])).toThrow(UnsafeMergeArgsError);
+    expect(() => safeArgs(['diff', '--no-color', '--unified=0', '--stat', from, to])).toThrow(
+      UnsafeMergeArgsError,
+    );
+    // Arity drift.
+    expect(() => safeArgs(['diff', '--no-color', '--unified=0', from])).toThrow(
+      UnsafeMergeArgsError,
+    );
+    expect(() => safeArgs(['diff'])).toThrow(UnsafeMergeArgsError);
+    // A mutation vocabulary is still refused: diff is READ-ONLY by shape,
+    // and no flag can turn it otherwise.
+    expect(() =>
+      safeArgs(['diff', '--no-color', '--unified=0', '--output=/tmp/x', from, to]),
+    ).toThrow(UnsafeMergeArgsError);
+  });
+
+  test('realMergeEffects.diffPatch routes the exact argv at the repo root (injected runner — zero processes, no fs)', async () => {
+    const gitCalls: string[][] = [];
+    const effects = realMergeEffects({
+      repoRoot: '/repo',
+      gitRun: async (args: string[]) => {
+        gitCalls.push(args);
+        return { code: 0, stdout: 'diff --git a/x b/x\n', stderr: '' };
+      },
+    });
+    const result = await effects.diffPatch(from, to);
+    expect(result).toEqual({ code: 0, stdout: 'diff --git a/x b/x\n', stderr: '' });
+    expect(gitCalls).toEqual([['-C', '/repo', 'diff', '--no-color', '--unified=0', from, to]]);
   });
 });

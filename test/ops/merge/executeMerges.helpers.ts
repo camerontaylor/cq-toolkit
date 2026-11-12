@@ -245,6 +245,10 @@ export class FakeMergeEffects implements MergeEffects {
     return OK;
   }
 
+  async diffPatch(from: string, to: string): Promise<GhResult> {
+    this.calls.push(`diff:${from}..${to}`);
+    return OK;
+  }
   async pushRef(ref: string, fromPath: string): Promise<GhResult> {
     this.calls.push(`push:${ref}@${fromPath}`);
     const pr = prOfRef(ref);

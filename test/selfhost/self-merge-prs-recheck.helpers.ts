@@ -348,6 +348,10 @@ export class RecordingMergeEffects implements MergeEffects {
   async pushRef(): Promise<GhResult> {
     return { code: 0, stdout: '', stderr: '' };
   }
+
+  async diffPatch(): Promise<GhResult> {
+    return { code: 0, stdout: '', stderr: '' };
+  }
 }
 
 /** A ledger with PR `pr`'s live tuple observed once at `atMs`. */

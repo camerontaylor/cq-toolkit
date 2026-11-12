@@ -9,6 +9,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, test } from 'vitest';
 import {
+  addedLineComponents,
   checkScannerFor,
   composeScanners,
   decodePolicyUtf8,
@@ -594,5 +595,75 @@ describe('makeRepoDiffScanner reads the policy as STRICT UTF-8 (fail closed)', (
     } finally {
       cleanup();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// addedLineComponents (issue #1193) — the publication gate's patch parser
+// ---------------------------------------------------------------------------
+
+describe('addedLineComponents — one component per changed path of ADDED lines', () => {
+  const PATCH = [
+    'diff --git a/src/keep.ts b/src/keep.ts',
+    '--- a/src/keep.ts',
+    '+++ b/src/keep.ts',
+    '@@ -2,3 +2,3 @@',
+    ' context line (not published)',
+    '-const removed = "leaves the forge";',
+    '+const added = "enters the forge";',
+    'diff --git a/docs/new.md b/docs/new.md',
+    '--- /dev/null',
+    '+++ b/docs/new.md',
+    '@@ -0,0 +1,2 @@',
+    '+first line',
+    '+second line',
+  ].join('\n');
+
+  test('added lines per path, in diff order; removed and context lines are skipped', () => {
+    expect(addedLineComponents(PATCH, 'gate')).toEqual([
+      { component: 'src/keep.ts', text: 'const added = "enters the forge";', path: 'src/keep.ts' },
+      {
+        component: 'docs/new.md',
+        text: 'first line\nsecond line',
+        path: 'docs/new.md',
+      },
+    ]);
+  });
+
+  test('a DELETED file (/dev/null on the + side) yields no component — deletions publish nothing', () => {
+    const patch = [
+      'diff --git a/src/gone.ts b/src/gone.ts',
+      '--- a/src/gone.ts',
+      '+++ /dev/null',
+      '@@ -1 +0,0 @@',
+      '-const secret = "was here";',
+    ].join('\n');
+    expect(addedLineComponents(patch, 'gate')).toEqual([]);
+  });
+
+  test('a path with spaces survives the git trailing TAB marker; CRLF terminators strip', () => {
+    const patch = [
+      'diff --git a/docs/my file.md b/docs/my file.md',
+      '--- a/docs/my file.md',
+      '+++ b/docs/my file.md\t',
+      '@@ -1 +1 @@',
+      '+added with crlf\r',
+    ].join('\n');
+    expect(addedLineComponents(patch, 'gate')).toEqual([
+      { component: 'docs/my file.md', text: 'added with crlf', path: 'docs/my file.md' },
+    ]);
+  });
+
+  test('an empty patch yields zero components (nothing to scan is clean)', () => {
+    expect(addedLineComponents('', 'gate')).toEqual([]);
+  });
+
+  test('FAULT-CLOSED: a body + line with no attributed path throws — unscannable never passes silently', () => {
+    const patch = ['@@ -1 +1 @@', '+orphan line'].join('\n');
+    expect(() => addedLineComponents(patch, 'gate')).toThrow(/no attributed path/);
+  });
+
+  test('a + line BEFORE any diff header throws the same way', () => {
+    expect(() => addedLineComponents('+early line', 'gate')).toThrow(/no attributed path/);
   });
 });
