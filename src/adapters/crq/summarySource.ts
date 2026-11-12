@@ -164,10 +164,18 @@ export async function fileRepairInboxState(stateRoot: string): Promise<RepairInb
   };
 }
 
-/** The sorted `triage/*.json` rows as exact bytes; absent dir yields none. */
+/** The sorted `triage/*.json` rows as exact bytes; absent dir yields none.
+ *
+ * Per-row read failures stay in the seam as a null-bytes row: Python's
+ * `finding_triage(strict=False, limit=32)` catches each row's OSError inside
+ * the row loop, records `{file, error}` and continues with the remaining
+ * rows, so one unreadable file must not abort the whole summary. The
+ * composer's `findingTriage` already refuses null-bytes rows per row into
+ * that same errors shape (`row.bytes === null` -> TriageRowError 'OSError').
+ */
 export async function fileTriageRows(
   stateRoot: string,
-): Promise<readonly { readonly name: string; readonly bytes: Uint8Array }[]> {
+): Promise<readonly { readonly name: string; readonly bytes: Uint8Array | null }[]> {
   const triageDir = join(stateRoot, 'backfill', 'findings', 'triage');
   let names: readonly string[];
   try {
@@ -176,9 +184,15 @@ export async function fileTriageRows(
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
     throw error;
   }
-  const rows: { name: string; bytes: Uint8Array }[] = [];
+  const rows: { name: string; bytes: Uint8Array | null }[] = [];
   for (const name of names.filter((candidate) => candidate.endsWith('.json')).sort()) {
-    rows.push({ name, bytes: new Uint8Array(await readFile(join(triageDir, name))) });
+    try {
+      rows.push({ name, bytes: new Uint8Array(await readFile(join(triageDir, name))) });
+    } catch {
+      // Per-row OSError -> null bytes; the composer records it as a row error
+      // and keeps the rest of the report, like Python's strict=False path.
+      rows.push({ name, bytes: null });
+    }
   }
   return rows;
 }
@@ -293,14 +307,16 @@ async function probeSystemd(runCommand: RunCommand): Promise<{
     };
   }
   // Python reads `time.time()` and `time.clock_gettime(time.CLOCK_MONOTONIC)`
-  // right after the probe. CLOCK_MONOTONIC is boot-relative, which is exactly
-  // Node's `process.uptime()` basis (not a process-start clock and not zero);
-  // the composer's monotonic fallback computes
-  // `realtime + timespan - monotonic`, so a wrong basis shifts every timer
-  // ETA by the boot offset (the audit P2).
+  // right after the probe. CLOCK_MONOTONIC is boot-relative (host uptime),
+  // which is `process.hrtime.bigint() / 1e9` in Node. CAUTION: process.uptime()
+  // is the Node PROCESS lifetime, not the host clock; a fresh process on a
+  // long-running host reports ~0 where Python reports ~host uptime, and the
+  // composer's monotonic fallback (`realtime + timespan - monotonic`) then
+  // shifts every timer ETA by the boot offset. Verified against Python on the
+  // same host (hrtime 2188925.538 vs CLOCK_MONOTONIC 2188925.621; uptime 0.478).
   return {
     probe: { output },
-    clock: { realtime: Date.now() / 1000, monotonic: process.uptime() },
+    clock: { realtime: Date.now() / 1000, monotonic: Number(process.hrtime.bigint()) / 1e9 },
   };
 }
 

@@ -1,6 +1,8 @@
 // Real-filesystem tests for the A1 summary publish route: the exact XDG
 // target path, the atomic writer's byte contract, and failure isolation.
 import { mkdtemp, mkdir, chmod, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
@@ -12,10 +14,11 @@ import {
   summaryPublishTarget,
   summaryStateEffects,
 } from '../../../src/adapters/crq/summarySource.js';
-import { systemdActivity } from '../../../src/policy/crq/publishEffects.js';
 import { summarize, mergedCurrent } from '../../../src/policy/crq/statusSummary.js';
 import { JsonNumber } from '../../../src/policy/crq/jsonValue.js';
 import type { CrqRecord } from '../../../src/policy/crq/receiptIdentity.js';
+
+const execFileP = promisify(execFile);
 
 const dirs: string[] = [];
 
@@ -209,12 +212,19 @@ describe('summary publish route over real files', () => {
     );
   });
 
-  it('captures a real monotonic clock with the probe (nonzero, boot-relative)', async () => {
-    // Audit P2: the composer's monotonic fallback computes
-    // `realtime + timespan - monotonic`; with the adapter's old hardcoded
-    // `monotonic: 0` every timer ETA was shifted by the boot offset. The
-    // captured pair must match Python's
-    // `time.time()` / `clock_gettime(CLOCK_MONOTONIC)` basis.
+  it('captures a host CLOCK_MONOTONIC-basis monotonic, not process lifetime', async () => {
+    // Audit P2 (domain-corrected by the Sol delta review): the composer's
+    // monotonic fallback computes `realtime + timespan - monotonic` and
+    // Python reads time.clock_gettime(CLOCK_MONOTONIC), the HOST boot-relative
+    // clock. Node's process.uptime() is the PROCESS lifetime: a fresh process
+    // on a long-running host reports ~0 where Python reports ~host uptime,
+    // shifting every timer ETA by the boot offset. The correct Node basis is
+    // process.hrtime.bigint()/1e9. The causal probe compares the adapter's
+    // captured monotonic against Python on the same host (allowed to run
+    // Python): they must agree to within a small skew. When Python is
+    // unavailable the fallback asserts the process-lifetime EXCLUSION: the
+    // captured value must NOT be near process.uptime() for a long-running
+    // host's fresh vitest worker (uptime ~seconds, monotonic ~boot age).
     const root = await tempRoot();
     const out = [
       'Id=crq-tick.timer',
@@ -225,29 +235,39 @@ describe('summary publish route over real files', () => {
       'NextElapseUSecMonotonic=1h 30min',
       '',
     ].join('\n');
-    const now = 1_794_471_730;
     const effects = await summaryStateEffects(
       { stateRoot: root.state, xdgStateHome: root.xdg, home: root.root },
       async () => out,
       [],
-      () => now,
+      () => 1_700_000,
     );
-    expect(effects.systemdClock.monotonic).toBeGreaterThan(0);
-    expect(effects.systemdClock.monotonic).toBeLessThanOrEqual(process.uptime() + 5);
-    expect(effects.systemdClock.realtime).toBeGreaterThan(now);
-    const activity = systemdActivity(effects.systemd, effects.systemdClock);
-    const tick = activity.timers['crq-tick.timer'];
-    expect(tick?.next_elapse).not.toBeNull();
-    // The ETA must equal realtime + 5400s - monotonic: within a few seconds
-    // of capture-time + 90min minus uptime, NOT capture-time + 90min (the
-    // shifted value). The adapter's clock is captured with Date.now(), so
-    // anchor on the captured realtime rather than the injected now(); the
-    // gap between the two is bounded by the test run itself.
-    const capturedRealtime = effects.systemdClock.realtime;
-    const expected = Math.floor(capturedRealtime + 5400 - process.uptime());
-    const text = tick?.next_elapse as string;
-    const actual = Math.floor(new Date(`${text.slice(0, 19)}Z`).getTime() / 1000);
-    expect(Math.abs(actual - expected)).toBeLessThanOrEqual(10);
+    const captured = effects.systemdClock.monotonic;
+    const hrtime = Number(process.hrtime.bigint()) / 1e9;
+    const uptime = process.uptime();
+    expect(captured).toBeGreaterThan(0);
+    // Captured hrtime is sampled inside the adapter; the test's own hrtime
+    // sample differs only by the microseconds between the two calls.
+    expect(Math.abs(captured - hrtime)).toBeLessThanOrEqual(60);
+    // Causal domain check: a fresh process (uptime << hrtime) proves the
+    // adapter is NOT reading process lifetime. On a host whose boot age is
+    // genuinely comparable to process age this reduces to a no-op, which is
+    // fine: the Python cross-check above is the authoritative probe there.
+    if (hrtime - uptime > 120) {
+      expect(captured).toBeGreaterThan(uptime + 60);
+    }
+    try {
+      const { stdout } = await execFileP('python3', [
+        '-c',
+        'import time; print(time.clock_gettime(time.CLOCK_MONOTONIC))',
+      ]);
+      const pythonMonotonic = Number.parseFloat(stdout.trim());
+      if (Number.isFinite(pythonMonotonic)) {
+        // Same host, same clock domain: must agree to within seconds.
+        expect(Math.abs(captured - pythonMonotonic)).toBeLessThanOrEqual(60);
+      }
+    } catch {
+      // No python3 on PATH: the hrtime agreement above is the check.
+    }
   });
 
   it('an ff-byte prior summary voids the cache instead of aborting assembly', async () => {
@@ -341,6 +361,28 @@ describe('summary publish route over real files', () => {
     expect(rows.map((row) => row.name)).toEqual(['a.json', 'b.json']);
     expect(rows[0]?.bytes).toEqual(rowA);
     expect(rows[1]?.bytes).toEqual(rowB);
+  });
+
+  it('an unreadable triage row becomes a null-bytes row, not an abort', async () => {
+    // Audit P2: Python's finding_triage(strict=False) catches each row's
+    // OSError, records {file, error} and continues; the adapter must surface
+    // the failure as a null-bytes row for the composer's existing per-row
+    // refusal, not abort assembly.
+    const root = await tempRoot();
+    const triageDir = join(root.state, 'backfill', 'findings', 'triage');
+    await mkdir(triageDir, { recursive: true });
+    const good = new TextEncoder().encode('{"status":"delivered"}');
+    await writeFile(join(triageDir, 'a.json'), good);
+    await writeFile(join(triageDir, 'b.json'), '{}');
+    await chmod(join(triageDir, 'b.json'), 0o000);
+    try {
+      const rows = await fileTriageRows(root.state);
+      expect(rows.map((row) => row.name)).toEqual(['a.json', 'b.json']);
+      expect(rows[0]?.bytes).toEqual(good);
+      expect(rows[1]?.bytes).toBeNull();
+    } finally {
+      await chmod(join(triageDir, 'b.json'), 0o644);
+    }
   });
 
   it('empty state tree reads as empty seams (absent inbox/triage dirs)', async () => {

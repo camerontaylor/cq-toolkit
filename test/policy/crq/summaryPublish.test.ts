@@ -470,6 +470,39 @@ describe('publish-full oracle replay through publishSummary', () => {
     expect(result.text).toContain('"pr":7.0');
   });
 
+  it('preserves an explicitly null schedule_id; defaults only an absent key', () => {
+    // Python `config.get("schedule_id", "crq-tick.timer")` defaults only an
+    // ABSENT key; an explicit null publishes `"id": null` (the fixture
+    // publish-sections.json pins that byte shape). Collapsing null to the
+    // default changed the configured schedule identity and the bytes.
+    const core = { last_tick: 'x', pending_items: [], starts_cap: 8, generated_at: 'g' };
+    const queue = { items: [], starts: [], last_tick: 'x' } as unknown as CrqRecord;
+    const baseEffects = {
+      root: '/state',
+      xdgStateHome: '/xdg',
+      now: 0,
+      previousBytes: null,
+      inbox: {
+        entries: [],
+        readResult: () => null,
+        hasResult: () => false,
+        hasProgress: () => false,
+      },
+      triageRows: [],
+      systemd: { error: 'x' },
+      systemdClock: { realtime: 0, monotonic: 0 },
+      ghTitle: () => null,
+      readReceipt: () => null,
+    };
+    const explicitNull = publishSummary(core, queue, { schedule_id: null }, {}, baseEffects);
+    const scheduleNull = (explicitNull.value['schedule'] as Record<string, unknown>)['id'];
+    expect(scheduleNull).toBeNull();
+    expect(explicitNull.text).toContain('"schedule":{"id":null');
+    const absent = publishSummary(core, queue, {}, {}, baseEffects);
+    const scheduleDefault = (absent.value['schedule'] as Record<string, unknown>)['id'];
+    expect(scheduleDefault).toBe('crq-tick.timer');
+  });
+
   it('keeps __proto__ triage keys as ordinary own keys', () => {
     // P2-13: plain `out[key] =` on a `__proto__` key silently set the
     // prototype (key lost = corrupted document) and the later serialiser

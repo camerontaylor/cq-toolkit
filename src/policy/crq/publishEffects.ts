@@ -262,14 +262,12 @@ export function repairDigest(
       if (recordGet(record, 'state') !== 'queued') continue;
       const jobs = recordGet(record, 'jobs');
       if (jobs === undefined) continue;
-      if (
-        !Array.isArray(jobs) &&
-        typeof jobs !== 'string' &&
-        !(jobs instanceof TriageMapping) &&
-        jobs !== null
-      ) {
-        // Python iterates `record.get('jobs', [])`: an int/float/None element
-        // source refuses as not iterable.
+      // Python iterates `record.get('jobs', [])`: only an ABSENT key defaults
+      // to no jobs. An explicit `"jobs": null` is a None source and refuses
+      // (`TypeError: 'NoneType' object is not iterable`), exactly like an
+      // int/float/string element source; excluding null here would let the
+      // empty-element fallback publish counters Python refuses.
+      if (!Array.isArray(jobs) && typeof jobs !== 'string' && !(jobs instanceof TriageMapping)) {
         throw new PublishEffectsError(
           jobs === null
             ? "'NoneType' object is not iterable"

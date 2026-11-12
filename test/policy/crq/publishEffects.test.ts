@@ -294,6 +294,41 @@ describe('repair digest oracle', () => {
     expect(() => repairDigest(queue, state, 2000)).toThrow(PublishEffectsError);
   });
 
+  test('an explicitly null jobs list refuses; an absent key defaults to none', () => {
+    // Python iterates `record.get('jobs', [])`: only an ABSENT key defaults
+    // to no jobs. An explicit `"jobs": null` is a None source and raises
+    // `TypeError: 'NoneType' object is not iterable`, refusing publication;
+    // treating null as empty would publish counters Python refuses.
+    const queuedRun = (jobs: unknown) => ({
+      items: [
+        {
+          id: 'i',
+          kind: 'open',
+          state: 'pending',
+          repair_runs: { r: { state: 'queued', ...(jobs === undefined ? {} : { jobs }) } },
+        },
+      ],
+    });
+    const emptyState: RepairInboxState = {
+      entries: [],
+      readResult: () => null,
+      hasResult: () => false,
+      hasProgress: () => false,
+    };
+    // Absent key: no jobs, no refusal, digest publishes.
+    const absent = repairDigest(queuedRun(undefined), emptyState, 2000);
+    expect(absent['inbox']).toBe(0);
+    // Explicit null: refusal with the producer's exact class.
+    try {
+      repairDigest(queuedRun(null), emptyState, 2000);
+      throw new Error('expected refusal');
+    } catch (error) {
+      expect(error).toBeInstanceOf(PublishEffectsError);
+      expect((error as PublishEffectsError).pythonError).toBe('TypeError');
+      expect((error as PublishEffectsError).message).toBe("'NoneType' object is not iterable");
+    }
+  });
+
   test('an unreadable job file must raise from the seam, never count as pending', () => {
     // Python `path.read_text()` propagates the read failure (PermissionError
     // on a 0600-shadowed file) and the digest publishes nothing. The seam

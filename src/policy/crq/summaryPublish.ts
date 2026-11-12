@@ -206,11 +206,11 @@ export function publishSummary(
     throw wrapPublish(error);
   }
   const probeStatus = isRecord(scheduleProbe) ? scheduleProbe['status'] : null;
+  // Python `config.get("schedule_id", "crq-tick.timer")` defaults only an
+  // ABSENT key: an explicit null is data and publishes as `"id": null` (the
+  // publish-sections fixture pins that byte shape).
   schedule = {
-    id:
-      config['schedule_id'] === undefined || config['schedule_id'] === null
-        ? 'crq-tick.timer'
-        : config['schedule_id'],
+    id: config['schedule_id'] === undefined ? 'crq-tick.timer' : config['schedule_id'],
     state: pyTruthy(probeStatus) ? probeStatus : 'systemd',
   };
   if (schedule['state'] === 'unknown') {
