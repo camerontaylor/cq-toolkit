@@ -234,6 +234,28 @@ class CliTests(ControllerFixture):
         self.assertEqual(result.returncode, 2)
         self.assertIn("--interval-seconds", result.stderr)
 
+    def test_usage_error_exits_2_with_subcommand_usage_artifact(self):
+        # I1: an argument failure writes the usage error object to stdout; the
+        # known operation is named, and narration stays on stderr.
+        result = self.run_cli("health", "--interval-seconds", "-1")
+        self.assertEqual(result.returncode, 2)
+        error = json.loads(result.stdout)["error"]
+        self.assertEqual(error["kind"], "usage")
+        self.assertEqual(error["subcommand"], "health")
+        self.assertEqual(error["message"], "health wait intervals must be nonnegative")
+        self.assertEqual(error["exitCode"], 2)
+        self.assertIn("usage: health wait intervals must be nonnegative",
+                      result.stderr)
+
+    def test_unparsed_usage_error_names_no_subcommand(self):
+        # parse_args failed before a namespace existed: no operation is known.
+        result = self.run_cli("health")
+        self.assertEqual(result.returncode, 2)
+        error = json.loads(result.stdout)["error"]
+        self.assertEqual(error["kind"], "usage")
+        self.assertEqual(error["subcommand"], "")
+        self.assertEqual(error["exitCode"], 2)
+
 
 class RecordDirResolutionTests(unittest.TestCase):
     """--record-dir spelling must survive into record_preflight() unchanged."""
