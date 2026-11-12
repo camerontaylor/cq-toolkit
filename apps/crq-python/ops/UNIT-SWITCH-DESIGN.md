@@ -153,6 +153,43 @@ avoids killing a path-triggered publisher run after the path is restarted.
 Injected capability and completion-sequence failures are converted to refusals
 in preflight, so a port exception cannot bypass the adapter's error type.
 
+## Offline factory composition
+
+`ops/unit-switch-factory.py` is the first internal composition of the merged
+pieces: it renders the selected target once through `render_service`, binds a
+`SystemdJournalCompletionPort` to that exact selected identity, and constructs
+`ProductionUnitAdapter` with `DeclaredCapabilities` and injected systemd,
+identity, journal-source and queue-drain ports. It is not a CLI and has no live
+systemd or journal binding.
+
+The lifecycle is the controller's, unchanged: preflight reads the completion
+baseline while the prior runtime is installed; the controller drains and masks;
+the adapter installs and starts the rendered target; completion evidence must
+name the selected source commit, template blob and service digest, and two
+distinct advancing successful invocations; otherwise the transaction refuses
+or requires recovery. Recovery restores the prior runtime's exact bytes. The
+provider retains the pre-install baseline across the controller's post-drain
+masked re-read, so a masked observation cannot lower it and a prior runtime
+invocation cannot be credited to the selected runtime.
+
+`test_unit_switch_factory.py` runs the real adapter, the real completion port
+and the real renderer through the actual `switch_unit`/`recover_unit` seams over
+real temporary unit files, with a structured systemd port and a journal source
+that returns systemd invocation and record fields. It covers a completed
+Node-to-Python switch with two advancing invocations, a pre-activation rollback
+followed by `recover_unit`, a reboot refusal, changed installed bytes, and
+fail-closed refusal of a Node target and the simple, long-schedule and
+unbounded oneshot topologies. It is not live-host evidence.
+
+The interface gap is explicit: the completion provider requires its selected
+identity at construction, and the adapter has no public typed accessor for the
+render it verified. The factory therefore performs the same read-only render
+before constructing the adapter, and the adapter re-renders at preflight and
+install. A minimal follow-up seam would expose the adapter's selected identity
+and let the provider bind or update that identity, plus cross-check returned
+evidence against the adapter's cached render. No such change is made here; no
+journal schema, store, lock, capability claim or CLI wiring is introduced.
+
 ## Proposed stable-manager sequence
 
 1. Under the existing controller lock, validate the unit and target, artifact
