@@ -3,7 +3,9 @@
 
 This module is the mechanical host side of the composition in
 ``unit-switch-factory.py``. It is deliberately not a CLI, not imported by
-``deploy-controller.py``, and not a production enablement path:
+``deploy-controller.py`` at import time, and not a production enablement path.
+The controller loads it lazily only for ``switch --unit --runtime`` so a
+checkout or release switch never depends on host observation:
 
 * ``SubprocessSystemd`` implements the adapter's injected ``SystemdPort`` with
   bounded, read-only commands. Its command runner can be injected for tests.
@@ -13,7 +15,8 @@ This module is the mechanical host side of the composition in
   private overlay validation and observes the existing controller lock inode.
   It never creates a lock or a second store.
 * ``production_adapter`` composes the real renderer, adapter, journal source
-  and queue drain. It does not call the controller and does not wire the CLI.
+  and queue drain. It does not call the controller; the controller CLI supplies
+  the already-loaded overlay and the bound effects record directory.
 
 Discovery is scoped and truthful. ``complete`` is true only when every
 required filesystem and manager observation succeeded. ``supported`` is true
@@ -724,6 +727,13 @@ def production_adapter(effects, overlay, *, unit, runtime, artifact_root=None,
     host surface.
     """
     layout = HostLayout.from_overlay(effects.root, overlay)
+    try:
+        if Path(effects.record_dir).resolve() != layout.record_dir.resolve():
+            raise LiveBindingRefused(
+                "record directory is not the overlay record directory")
+    except OSError as exc:
+        raise LiveBindingRefused(
+            "record directory is unavailable: " + str(exc)[:160]) from exc
     layout.validate()
     controller = _controller_module(effects)
     try:
