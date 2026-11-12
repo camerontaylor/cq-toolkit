@@ -43,7 +43,12 @@ def main(argv=None):
                 for line in completions.read_text().splitlines():
                     if line.strip():
                         records.append(json.loads(line))
-            sequence = max((item.get("sequence", 0) for item in records), default=0) + 1
+            for item in records:
+                prior = item.get("sequence")
+                if isinstance(prior, bool) or not isinstance(prior, int) or prior < 1:
+                    raise SystemExit(
+                        "existing completion record has an invalid sequence")
+            sequence = max((item["sequence"] for item in records), default=0) + 1
             record = {
                 "unit": args.unit,
                 "runtime": args.runtime,
